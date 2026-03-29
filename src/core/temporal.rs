@@ -1999,4 +1999,653 @@ mod sentry_tests {
         assert_eq!(parsed, interval);
         assert_eq!(consumed, 48, "Should consume exactly 48 bytes");
     }
+    #[test]
+    fn test_sentry_bitemporal_is_currently_valid_mutants() {
+        let ts1 = 1000.into();
+        let ts2 = 2000.into();
+
+        // Open
+        let interval_open = BiTemporalInterval::current(ts1);
+        assert!(
+            interval_open.is_currently_valid(),
+            "Should be currently valid"
+        );
+        assert!(
+            interval_open.is_currently_recorded(),
+            "Should be currently recorded"
+        );
+
+        // Closed
+        let valid_range = TimeRange::new(ts1, ts2).unwrap();
+        let interval_closed = BiTemporalInterval::new(valid_range, valid_range);
+        assert!(
+            !interval_closed.is_currently_valid(),
+            "Should not be currently valid"
+        );
+        assert!(
+            !interval_closed.is_currently_recorded(),
+            "Should not be currently recorded"
+        );
+
+        // Mixed
+        let interval_mixed = BiTemporalInterval::new(TimeRange::from(ts1), valid_range);
+        assert!(
+            interval_mixed.is_currently_valid(),
+            "Should be currently valid"
+        );
+        assert!(
+            !interval_mixed.is_currently_recorded(),
+            "Should not be currently recorded"
+        );
+    }
+
+    #[test]
+    fn test_sentry_bitemporal_is_visible_at_mutants() {
+        let vt_start = 1000.into();
+        let vt_end = 2000.into();
+        let tx_start = 3000.into();
+        let tx_end = 4000.into();
+
+        let interval = BiTemporalInterval::new(
+            TimeRange::new(vt_start, vt_end).unwrap(),
+            TimeRange::new(tx_start, tx_end).unwrap(),
+        );
+
+        let vt_in = 1500.into();
+        let vt_out = 2500.into();
+        let tx_in = 3500.into();
+        let tx_out = 4500.into();
+
+        // True only if BOTH are true
+        assert!(interval.is_visible_at(vt_in, tx_in));
+        assert!(!interval.is_visible_at(vt_out, tx_in));
+        assert!(!interval.is_visible_at(vt_in, tx_out));
+        assert!(!interval.is_visible_at(vt_out, tx_out));
+    }
+    #[test]
+    fn test_sentry_timerange_contains_mutants() {
+        let start = 1000.into();
+        let end = 2000.into();
+        let range = TimeRange::new(start, end).unwrap();
+
+        // Exact bounds check to catch >= mutated to <, and < mutated to ==, >, <=
+        assert!(range.contains(start), "Should contain start exactly");
+        assert!(range.contains(1500.into()), "Should contain middle");
+
+        let before_start = 999.into();
+        assert!(
+            !range.contains(before_start),
+            "Should not contain before start"
+        );
+
+        let exactly_end = 2000.into();
+        assert!(
+            !range.contains(exactly_end),
+            "Should not contain end exactly"
+        );
+
+        let after_end = 2001.into();
+        assert!(!range.contains(after_end), "Should not contain after end");
+    }
+
+    #[test]
+    fn test_sentry_timerange_contains_or_after_mutants() {
+        let start = 1000.into();
+        let range = TimeRange::from(start);
+
+        // >= mutated to <
+        assert!(
+            range.contains_or_after(start),
+            "Should be true at exact start"
+        );
+        assert!(
+            range.contains_or_after(2000.into()),
+            "Should be true after start"
+        );
+
+        let before_start = 999.into();
+        assert!(
+            !range.contains_or_after(before_start),
+            "Should be false before start"
+        );
+    }
+
+    #[test]
+    fn test_sentry_timerange_overlaps_mutants_comprehensive() {
+        let r_mid = TimeRange::new(100.into(), 200.into()).unwrap();
+
+        // || mutated to &&
+        // Touching at start (no overlap)
+        let r_before = TimeRange::new(50.into(), 100.into()).unwrap();
+        assert!(
+            !r_mid.overlaps(&r_before),
+            "Touching ranges should not overlap"
+        );
+        assert!(
+            !r_before.overlaps(&r_mid),
+            "Touching ranges should not overlap"
+        );
+
+        // Touching at end (no overlap)
+        let r_after = TimeRange::new(200.into(), 300.into()).unwrap();
+        assert!(
+            !r_mid.overlaps(&r_after),
+            "Touching ranges should not overlap"
+        );
+        assert!(
+            !r_after.overlaps(&r_mid),
+            "Touching ranges should not overlap"
+        );
+
+        // Overlap partial start
+        let r_overlap_start = TimeRange::new(50.into(), 150.into()).unwrap();
+        assert!(r_mid.overlaps(&r_overlap_start), "Should overlap");
+        assert!(r_overlap_start.overlaps(&r_mid), "Should overlap");
+
+        // Overlap partial end
+        let r_overlap_end = TimeRange::new(150.into(), 250.into()).unwrap();
+        assert!(r_mid.overlaps(&r_overlap_end), "Should overlap");
+        assert!(r_overlap_end.overlaps(&r_mid), "Should overlap");
+
+        // Exact same
+        assert!(r_mid.overlaps(&r_mid), "Should overlap self");
+
+        // Nested inside
+        let r_nested = TimeRange::new(120.into(), 180.into()).unwrap();
+        assert!(r_mid.overlaps(&r_nested), "Should overlap nested");
+        assert!(r_nested.overlaps(&r_mid), "Should overlap nested");
+
+        // Completely outside
+        let r_far_before = TimeRange::new(0.into(), 50.into()).unwrap();
+        assert!(!r_mid.overlaps(&r_far_before), "Should not overlap");
+        assert!(!r_far_before.overlaps(&r_mid), "Should not overlap");
+
+        let r_far_after = TimeRange::new(250.into(), 300.into()).unwrap();
+        assert!(!r_mid.overlaps(&r_far_after), "Should not overlap");
+        assert!(!r_far_after.overlaps(&r_mid), "Should not overlap");
+    }
+    #[test]
+    fn test_sentry_timerange_contains_range_mutants() {
+        let r_mid = TimeRange::new(100.into(), 200.into()).unwrap();
+
+        let r_before = TimeRange::new(50.into(), 100.into()).unwrap();
+        assert!(!r_mid.contains_range(&r_before), "Before");
+
+        let r_overlap_start = TimeRange::new(50.into(), 150.into()).unwrap();
+        assert!(!r_mid.contains_range(&r_overlap_start), "Overlap start");
+
+        let r_nested = TimeRange::new(120.into(), 180.into()).unwrap();
+        assert!(r_mid.contains_range(&r_nested), "Nested");
+
+        let r_same_start = TimeRange::new(100.into(), 150.into()).unwrap();
+        assert!(r_mid.contains_range(&r_same_start), "Same start");
+
+        let r_same_end = TimeRange::new(150.into(), 200.into()).unwrap();
+        assert!(r_mid.contains_range(&r_same_end), "Same end");
+
+        let r_exact = TimeRange::new(100.into(), 200.into()).unwrap();
+        assert!(r_mid.contains_range(&r_exact), "Exact");
+
+        let r_overlap_end = TimeRange::new(150.into(), 250.into()).unwrap();
+        assert!(!r_mid.contains_range(&r_overlap_end), "Overlap end");
+
+        let r_after = TimeRange::new(200.into(), 300.into()).unwrap();
+        assert!(!r_mid.contains_range(&r_after), "After");
+
+        let r_wider = TimeRange::new(50.into(), 250.into()).unwrap();
+        assert!(!r_mid.contains_range(&r_wider), "Wider");
+    }
+
+    #[test]
+    fn test_sentry_timerange_is_closed_mutants() {
+        let open = TimeRange::from(100.into());
+        assert!(!open.is_closed(), "Open range is not closed");
+
+        let closed = TimeRange::new(100.into(), 200.into()).unwrap();
+        assert!(closed.is_closed(), "Closed range is closed");
+
+        // Ensure TIMESTAMP_MAX exactly is tested for <=, >, == mutations
+        let exactly_max = TimeRange::new(100.into(), TIMESTAMP_MAX).unwrap();
+        assert!(!exactly_max.is_closed(), "TIMESTAMP_MAX end means open");
+    }
+
+    #[test]
+    fn test_sentry_timerange_is_current_mutants() {
+        let open = TimeRange::from(100.into());
+        assert!(open.is_current(), "Open range is current");
+
+        let closed = TimeRange::new(100.into(), 200.into()).unwrap();
+        assert!(!closed.is_current(), "Closed range is not current");
+    }
+
+    #[test]
+    fn test_sentry_timerange_is_empty_mutants() {
+        let start = 100.into();
+        let end = 200.into();
+        let open = TimeRange::from(start);
+        assert!(!open.is_empty(), "Open range is not empty");
+
+        let closed = TimeRange::new(start, end).unwrap();
+        assert!(!closed.is_empty(), "Closed non-empty range is not empty");
+
+        let empty = TimeRange::at(start);
+        assert!(empty.is_empty(), "Point range is empty");
+
+        let empty2 = TimeRange::new(end, end).unwrap();
+        assert!(empty2.is_empty(), "Start == End is empty");
+    }
+    #[test]
+    fn test_sentry_timerange_duration_micros_mutants() {
+        let start = 100.into();
+        let end = 500.into();
+        let range = TimeRange::new(start, end).unwrap();
+
+        let duration = range.duration_micros();
+        assert_eq!(
+            duration,
+            Some(400),
+            "Should match expected duration explicitly"
+        );
+
+        let open = TimeRange::from(start);
+        assert_eq!(
+            open.duration_micros(),
+            None,
+            "Should be None for open range"
+        );
+
+        let empty = TimeRange::at(start);
+        assert_eq!(
+            empty.duration_micros(),
+            Some(0),
+            "Should be Some(0) for empty range"
+        );
+    }
+
+    #[test]
+    fn test_sentry_bitemporal_is_valid_at_mutants() {
+        let vt_start = 1000.into();
+        let vt_end = 2000.into();
+        let tx_start = 3000.into();
+        let tx_end = 4000.into();
+
+        let interval = BiTemporalInterval::new(
+            TimeRange::new(vt_start, vt_end).unwrap(),
+            TimeRange::new(tx_start, tx_end).unwrap(),
+        );
+
+        // Exact matching
+        assert!(interval.is_valid_at(1500.into()), "Inside valid time");
+        assert!(interval.is_valid_at(1000.into()), "Start valid time");
+        assert!(
+            !interval.is_valid_at(2000.into()),
+            "End valid time (exclusive)"
+        );
+        assert!(!interval.is_valid_at(999.into()), "Before valid time");
+        assert!(!interval.is_valid_at(2001.into()), "After valid time");
+
+        // And is_recorded_at too
+        assert!(
+            interval.is_recorded_at(3500.into()),
+            "Inside transaction time"
+        );
+        assert!(interval.is_recorded_at(3000.into()), "Start tx time");
+        assert!(
+            !interval.is_recorded_at(4000.into()),
+            "End tx time (exclusive)"
+        );
+        assert!(!interval.is_recorded_at(2999.into()), "Before tx time");
+        assert!(!interval.is_recorded_at(4001.into()), "After tx time");
+    }
+
+    #[test]
+    fn test_sentry_timerange_serialize_mutants() {
+        // Specifically targeting mutants replacing vec![] or vec![0] or vec![1]
+        // by making sure we get exactly 24 bytes and the values are right.
+        let ts1 = HybridTimestamp::new(0x0102030405060708, 0x0A0B0C0D).unwrap();
+        let ts2 = HybridTimestamp::new(0x1112131415161718, 0x1A1B1C1D).unwrap();
+        let range = TimeRange::new(ts1, ts2).unwrap();
+
+        let bytes = range.serialize();
+        assert_eq!(bytes.len(), 24, "Should be exactly 24 bytes");
+
+        let mut expected = Vec::new();
+        ts1.serialize_into(&mut expected);
+        ts2.serialize_into(&mut expected);
+
+        assert_eq!(bytes, expected, "Should serialize ts1 and ts2 exactly");
+
+        let empty_range = TimeRange::at(ts1);
+        let empty_bytes = empty_range.serialize();
+        assert_eq!(empty_bytes.len(), 24, "Should still be exactly 24 bytes");
+    }
+
+    #[test]
+    fn test_sentry_bitemporal_serialize_mutants() {
+        let ts1 = HybridTimestamp::new(100, 1).unwrap();
+        let ts2 = HybridTimestamp::new(200, 2).unwrap();
+        let ts3 = HybridTimestamp::new(300, 3).unwrap();
+        let ts4 = HybridTimestamp::new(400, 4).unwrap();
+
+        let interval = BiTemporalInterval::new(
+            TimeRange::new(ts1, ts2).unwrap(),
+            TimeRange::new(ts3, ts4).unwrap(),
+        );
+
+        let bytes = interval.serialize();
+        assert_eq!(bytes.len(), 48, "Should be exactly 48 bytes");
+
+        let mut expected = Vec::new();
+        interval.valid_time().serialize_into(&mut expected);
+        interval.transaction_time().serialize_into(&mut expected);
+
+        assert_eq!(bytes, expected, "Should serialize vt and tx exactly");
+    }
+
+    #[test]
+    fn test_sentry_timerange_from_mutants() {
+        let ts = 1000.into();
+        let range = TimeRange::from(ts);
+
+        assert_eq!(range.start(), ts, "Start should match exactly");
+        assert_eq!(range.end(), TIMESTAMP_MAX, "End should match exactly");
+    }
+
+    #[test]
+    fn test_sentry_timerange_at_mutants() {
+        let ts = 1000.into();
+        let range = TimeRange::at(ts);
+
+        assert_eq!(range.start(), ts, "Start should match exactly");
+        assert_eq!(range.end(), ts, "End should match exactly");
+    }
+    #[test]
+    fn test_sentry_timerange_between_mutants() {
+        let start = 1000.into();
+        let end = 2000.into();
+        let range = TimeRange::between(start, end).unwrap();
+
+        assert_eq!(range.start(), start, "Start exactly matches");
+        assert_eq!(range.end(), end, "End exactly matches");
+    }
+
+    #[test]
+    fn test_sentry_timerange_close_at_mutants() {
+        let start = 1000.into();
+        let end = 2000.into();
+        let range = TimeRange::from(start);
+
+        let closed = range.close_at(end).unwrap();
+
+        assert_eq!(closed.start(), start, "Start exactly matches");
+        assert_eq!(closed.end(), end, "End exactly matches");
+
+        // Error on < start
+        let invalid_end = 999.into();
+        assert!(
+            range.close_at(invalid_end).is_err(),
+            "Cannot close before start"
+        );
+
+        // Error on > MAX_VALID_TIMESTAMP
+        let invalid_max = HybridTimestamp::new_unchecked(MAX_VALID_TIMESTAMP + 1, 0);
+        assert!(
+            range.close_at(invalid_max).is_err(),
+            "Cannot close after max valid"
+        );
+    }
+
+    #[test]
+    fn test_sentry_bitemporal_constructors_mutants() {
+        let ts1 = 1000.into();
+        let ts2 = 2000.into();
+
+        // with_valid_time
+        let int_with = BiTemporalInterval::with_valid_time(ts1, ts2);
+        assert_eq!(
+            int_with.valid_time().start(),
+            ts1,
+            "Valid start exactly matches"
+        );
+        assert_eq!(
+            int_with.valid_time().end(),
+            TIMESTAMP_MAX,
+            "Valid end exactly matches"
+        );
+        assert_eq!(
+            int_with.transaction_time().start(),
+            ts2,
+            "Tx start exactly matches"
+        );
+        assert_eq!(
+            int_with.transaction_time().end(),
+            TIMESTAMP_MAX,
+            "Tx end exactly matches"
+        );
+
+        // now
+        let int_now = BiTemporalInterval::now(ts1, ts2);
+        assert_eq!(
+            int_now.valid_time().start(),
+            ts1,
+            "Valid start exactly matches"
+        );
+        assert_eq!(
+            int_now.valid_time().end(),
+            TIMESTAMP_MAX,
+            "Valid end exactly matches"
+        );
+        assert_eq!(
+            int_now.transaction_time().start(),
+            ts2,
+            "Tx start exactly matches"
+        );
+        assert_eq!(
+            int_now.transaction_time().end(),
+            TIMESTAMP_MAX,
+            "Tx end exactly matches"
+        );
+
+        // current
+        let int_cur = BiTemporalInterval::current(ts1);
+        assert_eq!(
+            int_cur.valid_time().start(),
+            ts1,
+            "Valid start exactly matches"
+        );
+        assert_eq!(
+            int_cur.valid_time().end(),
+            TIMESTAMP_MAX,
+            "Valid end exactly matches"
+        );
+        assert_eq!(
+            int_cur.transaction_time().start(),
+            ts1,
+            "Tx start exactly matches"
+        );
+        assert_eq!(
+            int_cur.transaction_time().end(),
+            TIMESTAMP_MAX,
+            "Tx end exactly matches"
+        );
+    }
+
+    #[test]
+    fn test_sentry_bitemporal_close_mutants() {
+        let vt_start = 1000.into();
+        let tx_start = 3000.into();
+        let interval = BiTemporalInterval::now(vt_start, tx_start);
+
+        let vt_end = 2000.into();
+        let tx_end = 4000.into();
+
+        let closed_valid = interval.close_valid_time(vt_end).unwrap();
+        assert_eq!(
+            closed_valid.valid_time().end(),
+            vt_end,
+            "Valid time closed exactly"
+        );
+        assert_eq!(
+            closed_valid.transaction_time().end(),
+            TIMESTAMP_MAX,
+            "Tx time still open exactly"
+        );
+
+        let closed_tx = interval.close_transaction_time(tx_end).unwrap();
+        assert_eq!(
+            closed_tx.valid_time().end(),
+            TIMESTAMP_MAX,
+            "Valid time still open exactly"
+        );
+        assert_eq!(
+            closed_tx.transaction_time().end(),
+            tx_end,
+            "Tx time closed exactly"
+        );
+
+        let closed_both = interval.close_both(vt_end, tx_end).unwrap();
+        assert_eq!(
+            closed_both.valid_time().end(),
+            vt_end,
+            "Valid time closed exactly"
+        );
+        assert_eq!(
+            closed_both.transaction_time().end(),
+            tx_end,
+            "Tx time closed exactly"
+        );
+    }
+    #[test]
+    fn test_sentry_timerange_formatting_mutants() {
+        let ts1 = HybridTimestamp::new(100, 0).unwrap();
+        let ts2 = HybridTimestamp::new(200, 0).unwrap();
+
+        let range_closed = TimeRange::new(ts1, ts2).unwrap();
+        assert_eq!(
+            format!("{}", range_closed),
+            "[100.0, 200.0)",
+            "Closed range formatted exactly"
+        );
+
+        let range_open = TimeRange::from(ts1);
+        assert_eq!(
+            format!("{}", range_open),
+            "[100.0, current)",
+            "Open range formatted exactly"
+        );
+    }
+
+    #[test]
+    fn test_sentry_bitemporal_formatting_mutants() {
+        let ts1 = HybridTimestamp::new(100, 0).unwrap();
+        let ts2 = HybridTimestamp::new(200, 0).unwrap();
+        let ts3 = HybridTimestamp::new(300, 0).unwrap();
+        let ts4 = HybridTimestamp::new(400, 0).unwrap();
+
+        let interval = BiTemporalInterval::new(
+            TimeRange::new(ts1, ts2).unwrap(),
+            TimeRange::new(ts3, ts4).unwrap(),
+        );
+
+        let formatted = format!("{}", interval);
+        assert_eq!(
+            formatted, "BiTemporal[valid: [100.0, 200.0), tx: [300.0, 400.0)]",
+            "Interval formatted exactly"
+        );
+    }
+
+    #[test]
+    fn test_sentry_time_try_now_mutants() {
+        // try_now() shouldn't return Ok(Default::default())
+        let ts = time::try_now().unwrap();
+        assert!(ts.wallclock() > 0, "try_now() wallclock should be > 0");
+        assert_eq!(ts.logical(), 0, "try_now() logical should be 0");
+    }
+
+    #[test]
+    fn test_sentry_time_conversions_mutants() {
+        let ts_sec = time::from_secs(12345);
+        assert_eq!(
+            ts_sec.wallclock(),
+            12345 * 1_000_000,
+            "from_secs wallclock exactly matches"
+        );
+
+        let ts_ms = time::from_millis(12345);
+        assert_eq!(
+            ts_ms.wallclock(),
+            12345 * 1000,
+            "from_millis wallclock exactly matches"
+        );
+
+        let sec = time::to_secs(ts_sec);
+        assert_eq!(sec, 12345, "to_secs exactly matches");
+
+        let ms = time::to_millis(ts_ms);
+        assert_eq!(ms, 12345, "to_millis exactly matches");
+
+        // Zero tests to avoid replacing with 0
+        let zero_ts = time::from_secs(0);
+        assert_eq!(zero_ts.wallclock(), 0);
+        assert_eq!(time::to_secs(zero_ts), 0);
+        assert_eq!(time::to_millis(zero_ts), 0);
+
+        // One tests to avoid replacing with 1
+        let one_sec_ts = time::from_secs(1);
+        assert_eq!(time::to_secs(one_sec_ts), 1);
+
+        let one_ms_ts = time::from_millis(1);
+        assert_eq!(time::to_millis(one_ms_ts), 1);
+
+        // Math tests (* / % + -)
+        let large_sec = time::from_secs(10);
+        assert_eq!(large_sec.wallclock(), 10 * 1_000_000); // 10,000,000
+
+        let large_ms = time::from_millis(10);
+        assert_eq!(large_ms.wallclock(), 10 * 1000); // 10,000
+    }
+    #[test]
+    fn test_sentry_time_range_start_end_mutants() {
+        let ts1 = 100.into();
+        let ts2 = 200.into();
+        let range = TimeRange::new(ts1, ts2).unwrap();
+
+        assert_ne!(
+            range.start(),
+            HybridTimestamp::new_unchecked(0, 0),
+            "Start is not default"
+        );
+        assert_ne!(
+            range.end(),
+            HybridTimestamp::new_unchecked(0, 0),
+            "End is not default"
+        );
+        assert_eq!(range.start(), ts1, "Start matches");
+        assert_eq!(range.end(), ts2, "End matches");
+    }
+
+    #[test]
+    fn test_sentry_bitemporal_valid_tx_time_mutants() {
+        let ts1 = 100.into();
+        let ts2 = 200.into();
+        let ts3 = 300.into();
+        let ts4 = 400.into();
+        let vt = TimeRange::new(ts1, ts2).unwrap();
+        let tx = TimeRange::new(ts3, ts4).unwrap();
+
+        let interval = BiTemporalInterval::new(vt, tx);
+
+        assert_ne!(
+            interval.valid_time(),
+            TimeRange::at(HybridTimestamp::new_unchecked(0, 0)),
+            "VT is not default"
+        );
+        assert_ne!(
+            interval.transaction_time(),
+            TimeRange::at(HybridTimestamp::new_unchecked(0, 0)),
+            "TX is not default"
+        );
+        assert_eq!(interval.valid_time(), vt, "VT matches");
+        assert_eq!(interval.transaction_time(), tx, "TX matches");
+    }
 }
