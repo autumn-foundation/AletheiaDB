@@ -39,3 +39,6 @@
 **[DashMap Guard iterators and .cloned()]**
 **Learning:** In AletheiaDB, `CurrentIndexes` iterators (`iter_nodes`, `iter_edges`) yield `impl Deref<Target = Node>` representing DashMap guards, not simple references (`&T`). Thus, attempting to apply `.cloned()` fails to compile since it strictly requires `&T`.
 **Action:** Always use `.map(|n| n.clone())` instead of `.cloned()` when iterating over DashMap guards or opaque `impl Deref` types.
+**[VectorRerankIterator Vec Pre-allocation]**
+**Learning:** The `VectorRerankIterator` in `src/query/executor/iterators.rs` called `.collect::<Vec<_>>()` to create an intermediate vector of `(QueryRow, f32)` tuples from a `Vec<std::cmp::Reverse<ScoredRow>>` when initializing its sorted output iterator. This caused an unnecessary heap allocation of size `K` on every top-K vector query.
+**Action:** Store the `std::vec::IntoIter<std::cmp::Reverse<ScoredRow>>` directly in the struct, and lazily map the items to `QueryRow` with scores during the `.next()` method. This leverages the existing allocation from `BinaryHeap::into_sorted_vec()`.
