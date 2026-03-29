@@ -69,9 +69,8 @@ pub use migration::{
     MigrationStats, RoutingToken,
 };
 pub use network::{
-    CircuitBreaker, CircuitBreakerConfig, CircuitState, ConnectionPool, MigrationBatch,
-    MigrationResponse, MockShardClient, NetworkError, NetworkResult, PoolConfig, PoolStats,
-    ShardClient,
+    ConnectionPool, MigrationBatch, MigrationResponse, MockShardClient, NetworkError,
+    NetworkResult, PoolConfig, PoolStats, ShardClient,
 };
 pub use persistent_commit_log::{
     CommitLogConfig, CommitLogEntry, CommitLogError, CommitLogResult, CommitLogStats, EntryType,

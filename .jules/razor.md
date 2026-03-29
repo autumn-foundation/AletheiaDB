@@ -12,3 +12,7 @@
 **Bloat:** `StorageSnapshot` and `FieldHolder` traits.
 **Cut:** Deleted single-implementation traits `StorageSnapshot` (implemented only by `CurrentStorageSnapshot`) and `FieldHolder` (implemented only by `Event`, unused except in tests). Moved methods directly to structs.
 **Saved:** ~50 lines of boilerplate + cognitive load of unnecessary abstraction layers.
+## [Reduction]
+**Bloat:** Duplicated `CircuitBreaker` implementations in `src/storage/sharding/network.rs` and `src/index/vector/distributed.rs`.
+**Cut:** Unified the implementation into a shared `src/core/circuit_breaker.rs` module and removed the duplicates.
+**Saved:** ~400 lines of boilerplate + cognitive load of maintaining two identical circuit breaker implementations.

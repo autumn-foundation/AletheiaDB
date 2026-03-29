@@ -25,6 +25,7 @@
 //! The [`hlc`] module combines both: ensuring causal ordering for events while remaining tightly bound
 //! to the physical wall clock, bridging the gap between machines and human expectations.
 
+pub mod circuit_breaker;
 pub mod error;
 pub mod graph;
 pub mod hasher;

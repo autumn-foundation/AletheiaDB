@@ -57,6 +57,9 @@
 //! let results = index.search(&query, 10)?;
 //! ```
 
+pub use crate::core::circuit_breaker::{
+    CircuitBreaker as NodeCircuitBreaker, CircuitBreakerConfig, CircuitState,
+};
 use crate::core::error::{Error, Result, VectorError};
 use crate::core::hasher::IdentityHasher;
 use crate::core::id::NodeId;
@@ -66,9 +69,9 @@ use rayon::prelude::*;
 use std::collections::hash_map::DefaultHasher;
 use std::fmt;
 use std::hash::{BuildHasherDefault, Hash, Hasher};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 /// Maximum number of results that can be requested in a search.
 const MAX_K: usize = 100_000;
@@ -80,12 +83,6 @@ const FILTER_OVERFETCH_FACTOR: usize = 10;
 
 /// Default timeout for remote operations.
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
-
-/// Default failure threshold for circuit breaker.
-const DEFAULT_FAILURE_THRESHOLD: usize = 5;
-
-/// Default circuit breaker open duration.
-const DEFAULT_OPEN_DURATION: Duration = Duration::from_secs(30);
 
 /// Recommended imbalance threshold for rebalancing.
 /// Trigger rebalancing when the largest node has more than 2x the vectors of the smallest.
@@ -217,243 +214,6 @@ pub trait VectorNodeClient: Send + Sync + fmt::Debug {
 // ============================================================================
 // Circuit Breaker for Nodes
 // ============================================================================
-
-/// Circuit breaker state.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CircuitState {
-    /// Circuit is closed (normal operation).
-    Closed,
-    /// Circuit is open (rejecting requests).
-    Open,
-    /// Circuit is half-open (testing if service recovered).
-    HalfOpen,
-}
-
-/// Configuration for circuit breaker.
-///
-/// The `CircuitBreakerConfig` defines the thresholds and durations for the
-/// [`NodeCircuitBreaker`] to transition between `Closed`, `Open`, and `HalfOpen` states.
-/// It helps prevent cascading failures in a distributed setup when remote nodes are unresponsive.
-///
-/// # Examples
-///
-/// ```rust
-/// # #[cfg(feature = "nova")]
-/// # fn main() {
-/// use aletheiadb::index::vector::distributed::CircuitBreakerConfig;
-/// use std::time::Duration;
-///
-/// let config = CircuitBreakerConfig {
-///     failure_threshold: 5,
-///     open_duration: Duration::from_secs(30),
-///     success_threshold: 3,
-/// };
-/// # }
-/// # #[cfg(not(feature = "nova"))]
-/// # fn main() {}
-/// ```
-#[derive(Debug, Clone)]
-pub struct CircuitBreakerConfig {
-    /// Number of failures before opening circuit.
-    pub failure_threshold: usize,
-    /// Duration to keep circuit open.
-    pub open_duration: Duration,
-    /// Number of successes in half-open to close circuit.
-    pub success_threshold: usize,
-}
-
-impl Default for CircuitBreakerConfig {
-    fn default() -> Self {
-        Self {
-            failure_threshold: DEFAULT_FAILURE_THRESHOLD,
-            open_duration: DEFAULT_OPEN_DURATION,
-            success_threshold: 3,
-        }
-    }
-}
-
-/// Circuit breaker for a single node connection.
-///
-/// The `NodeCircuitBreaker` tracks failures and successes of requests to a remote node
-/// (typically represented by a [`VectorNodeClient`]). If failures exceed the configured
-/// threshold, it transitions to an `Open` state, failing fast. After a timeout, it transitions
-/// to a `HalfOpen` state to test if the node has recovered.
-///
-/// # Examples
-///
-/// ```rust
-/// # #[cfg(feature = "nova")]
-/// # fn main() {
-/// use aletheiadb::index::vector::distributed::{CircuitBreakerConfig, NodeCircuitBreaker, CircuitState};
-///
-/// let config = CircuitBreakerConfig::default();
-/// let breaker = NodeCircuitBreaker::new(config);
-///
-/// // Initially, the circuit is closed and allows requests
-/// assert_eq!(breaker.state(), CircuitState::Closed);
-/// assert!(breaker.should_allow());
-/// # }
-/// # #[cfg(not(feature = "nova"))]
-/// # fn main() {}
-/// ```
-#[derive(Debug)]
-pub struct NodeCircuitBreaker {
-    config: CircuitBreakerConfig,
-    state: RwLock<CircuitState>,
-    failure_count: AtomicUsize,
-    success_count: AtomicUsize,
-    opened_at: RwLock<Option<Instant>>,
-}
-
-impl NodeCircuitBreaker {
-    /// Create a new circuit breaker.
-    pub fn new(config: CircuitBreakerConfig) -> Self {
-        Self {
-            config,
-            state: RwLock::new(CircuitState::Closed),
-            failure_count: AtomicUsize::new(0),
-            success_count: AtomicUsize::new(0),
-            opened_at: RwLock::new(None),
-        }
-    }
-
-    /// Get the current state.
-    pub fn state(&self) -> CircuitState {
-        self.maybe_transition();
-        self.state
-            .read()
-            .map(|s| *s)
-            .unwrap_or(CircuitState::Closed)
-    }
-
-    /// Check if requests should be allowed.
-    pub fn should_allow(&self) -> bool {
-        self.maybe_transition();
-        let state = self
-            .state
-            .read()
-            .map(|s| *s)
-            .unwrap_or(CircuitState::Closed);
-        matches!(state, CircuitState::Closed | CircuitState::HalfOpen)
-    }
-
-    /// Record a successful request.
-    pub fn record_success(&self) {
-        let state = match self.state.read() {
-            Ok(s) => *s,
-            Err(_) => return,
-        };
-
-        match state {
-            CircuitState::Closed => {
-                self.failure_count.store(0, Ordering::SeqCst);
-            }
-            CircuitState::HalfOpen => {
-                let successes = self.success_count.fetch_add(1, Ordering::SeqCst) + 1;
-                if successes >= self.config.success_threshold {
-                    if let Ok(mut s) = self.state.write() {
-                        *s = CircuitState::Closed;
-                    }
-                    self.failure_count.store(0, Ordering::SeqCst);
-                    self.success_count.store(0, Ordering::SeqCst);
-                }
-            }
-            CircuitState::Open => {}
-        }
-    }
-
-    /// Record a failed request.
-    pub fn record_failure(&self) {
-        let state = match self.state.read() {
-            Ok(s) => *s,
-            Err(_) => return,
-        };
-
-        match state {
-            CircuitState::Closed => {
-                let failures = self.failure_count.fetch_add(1, Ordering::SeqCst) + 1;
-                if failures >= self.config.failure_threshold {
-                    if let Ok(mut s) = self.state.write() {
-                        *s = CircuitState::Open;
-                    }
-                    if let Ok(mut opened) = self.opened_at.write() {
-                        *opened = Some(Instant::now());
-                    }
-                }
-            }
-            CircuitState::HalfOpen => {
-                if let Ok(mut s) = self.state.write() {
-                    *s = CircuitState::Open;
-                }
-                if let Ok(mut opened) = self.opened_at.write() {
-                    *opened = Some(Instant::now());
-                }
-                self.success_count.store(0, Ordering::SeqCst);
-            }
-            CircuitState::Open => {
-                // Do not reset the timer when the circuit is already open.
-                // This allows it to transition to HalfOpen after the original duration.
-            }
-        }
-    }
-
-    /// Check and perform state transitions based on time.
-    ///
-    /// This method reads opened_at before acquiring the state write lock to
-    /// avoid holding locks across different fields simultaneously.
-    fn maybe_transition(&self) {
-        // Read opened_at first to avoid holding multiple locks
-        let should_transition = self
-            .opened_at
-            .read()
-            .ok()
-            .and_then(|opened| *opened)
-            .is_some_and(|opened_time| opened_time.elapsed() >= self.config.open_duration);
-
-        if !should_transition {
-            return;
-        }
-
-        // Now acquire state write lock and verify state is still Open
-        let mut state_guard = match self.state.write() {
-            Ok(s) => s,
-            Err(_) => return,
-        };
-
-        // Double-check state is still Open (could have changed)
-        if *state_guard == CircuitState::Open {
-            *state_guard = CircuitState::HalfOpen;
-            self.success_count.store(0, Ordering::SeqCst);
-        }
-    }
-
-    /// Get remaining time before circuit can close.
-    pub fn remaining_open_time(&self) -> Option<Duration> {
-        let state = self.state.read().ok()?;
-        if *state != CircuitState::Open {
-            return None;
-        }
-
-        if let Ok(opened) = self.opened_at.read()
-            && let Some(opened_time) = *opened
-        {
-            let elapsed = opened_time.elapsed();
-            if elapsed < self.config.open_duration {
-                return Some(self.config.open_duration - elapsed);
-            }
-        }
-        None
-    }
-
-    /// Reset the circuit breaker to closed state.
-    pub fn reset(&self) {
-        if let Ok(mut s) = self.state.write() {
-            *s = CircuitState::Closed;
-        }
-        self.failure_count.store(0, Ordering::SeqCst);
-        self.success_count.store(0, Ordering::SeqCst);
-    }
-}
 
 // ============================================================================
 // Node Connection
@@ -1774,6 +1534,7 @@ mod tests {
             failure_threshold: 3,
             open_duration: Duration::from_millis(100),
             success_threshold: 2,
+            ..Default::default()
         };
         let cb = NodeCircuitBreaker::new(config);
 
@@ -1794,6 +1555,7 @@ mod tests {
             failure_threshold: 1,
             open_duration: Duration::from_millis(10),
             success_threshold: 1,
+            ..Default::default()
         };
         let cb = NodeCircuitBreaker::new(config);
 
@@ -1811,6 +1573,7 @@ mod tests {
             failure_threshold: 1,
             open_duration: Duration::from_millis(10),
             success_threshold: 2,
+            ..Default::default()
         };
         let cb = NodeCircuitBreaker::new(config);
 
@@ -2271,6 +2034,7 @@ mod tests {
             failure_threshold: 1,
             open_duration: Duration::from_secs(60),
             success_threshold: 1,
+            ..Default::default()
         };
         let cb = NodeCircuitBreaker::new(config);
 
@@ -2301,6 +2065,7 @@ mod tests {
                 failure_threshold: 1,
                 open_duration: Duration::from_secs(60),
                 success_threshold: 1,
+                ..Default::default()
             },
         );
 
@@ -2417,6 +2182,7 @@ mod tests {
             failure_threshold: 10,
             open_duration: Duration::from_secs(60),
             success_threshold: 3,
+            ..Default::default()
         };
         let cb = Arc::new(NodeCircuitBreaker::new(config));
 
@@ -2449,6 +2215,7 @@ mod tests {
             failure_threshold: 5,
             open_duration: Duration::from_millis(10),
             success_threshold: 2,
+            ..Default::default()
         };
         let cb = Arc::new(NodeCircuitBreaker::new(config));
 
@@ -2499,6 +2266,7 @@ mod tests {
             failure_threshold: 3,
             open_duration: Duration::from_millis(50),
             success_threshold: 2,
+            ..Default::default()
         };
         let cb = Arc::new(NodeCircuitBreaker::new(config));
 
