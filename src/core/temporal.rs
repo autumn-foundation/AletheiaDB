@@ -1616,7 +1616,7 @@ mod sentry_tests {
 
         let bti = BiTemporalInterval::new(
             TimeRange::new(valid_start, valid_end).unwrap(),
-            TimeRange::new(tx_start, tx_end).unwrap()
+            TimeRange::new(tx_start, tx_end).unwrap(),
         );
 
         assert_eq!(bti.valid_time().start(), valid_start);
@@ -1632,14 +1632,29 @@ mod sentry_tests {
         assert_eq!(with_valid.transaction_time().start(), tx_start);
         assert!(with_valid.is_current());
 
-        assert!(with_valid.is_valid_at(crate::core::temporal::HybridTimestamp::new(100, 0).unwrap()));
-        assert!(!with_valid.is_valid_at(crate::core::temporal::HybridTimestamp::new(50, 0).unwrap()));
+        assert!(
+            with_valid.is_valid_at(crate::core::temporal::HybridTimestamp::new(100, 0).unwrap())
+        );
+        assert!(
+            !with_valid.is_valid_at(crate::core::temporal::HybridTimestamp::new(50, 0).unwrap())
+        );
 
-        assert!(with_valid.is_recorded_at(crate::core::temporal::HybridTimestamp::new(150, 0).unwrap()));
-        assert!(!with_valid.is_recorded_at(crate::core::temporal::HybridTimestamp::new(100, 0).unwrap()));
+        assert!(
+            with_valid.is_recorded_at(crate::core::temporal::HybridTimestamp::new(150, 0).unwrap())
+        );
+        assert!(
+            !with_valid
+                .is_recorded_at(crate::core::temporal::HybridTimestamp::new(100, 0).unwrap())
+        );
 
-        assert!(with_valid.is_visible_at(crate::core::temporal::HybridTimestamp::new(100, 0).unwrap(), crate::core::temporal::HybridTimestamp::new(150, 0).unwrap()));
-        assert!(!with_valid.is_visible_at(crate::core::temporal::HybridTimestamp::new(50, 0).unwrap(), crate::core::temporal::HybridTimestamp::new(150, 0).unwrap()));
+        assert!(with_valid.is_visible_at(
+            crate::core::temporal::HybridTimestamp::new(100, 0).unwrap(),
+            crate::core::temporal::HybridTimestamp::new(150, 0).unwrap()
+        ));
+        assert!(!with_valid.is_visible_at(
+            crate::core::temporal::HybridTimestamp::new(50, 0).unwrap(),
+            crate::core::temporal::HybridTimestamp::new(150, 0).unwrap()
+        ));
     }
 
     #[test]
@@ -1718,8 +1733,14 @@ mod sentry_tests {
         // We can test deserialization returns same value
         let (deserialized, size) = TimeRange::deserialize(&bytes).unwrap();
         assert_eq!(size, 24);
-        assert_eq!(deserialized.start(), crate::core::temporal::Timestamp::from(100));
-        assert_eq!(deserialized.end(), crate::core::temporal::Timestamp::from(200));
+        assert_eq!(
+            deserialized.start(),
+            crate::core::temporal::Timestamp::from(100)
+        );
+        assert_eq!(
+            deserialized.end(),
+            crate::core::temporal::Timestamp::from(200)
+        );
     }
 
     #[test]
@@ -1731,7 +1752,7 @@ mod sentry_tests {
 
         let bti = BiTemporalInterval::new(
             TimeRange::new(valid_start, valid_end).unwrap(),
-            TimeRange::new(tx_start, tx_end).unwrap()
+            TimeRange::new(tx_start, tx_end).unwrap(),
         );
         let bytes = bti.serialize();
         assert_eq!(bytes.len(), 48);
@@ -1740,7 +1761,6 @@ mod sentry_tests {
         assert_eq!(size, 48);
         assert_eq!(deserialized.valid_time().start(), valid_start);
     }
-
 
     #[test]
     fn test_bitemporal_methods() {
@@ -1751,7 +1771,7 @@ mod sentry_tests {
 
         let bti = BiTemporalInterval::new(
             TimeRange::new(valid_start, valid_end).unwrap(),
-            TimeRange::new(tx_start, tx_end).unwrap()
+            TimeRange::new(tx_start, tx_end).unwrap(),
         );
 
         assert_eq!(bti.valid_time().start(), valid_start);
@@ -1773,8 +1793,14 @@ mod sentry_tests {
         assert!(with_valid.is_recorded_at(HybridTimestamp::new(150, 0).unwrap()));
         assert!(!with_valid.is_recorded_at(HybridTimestamp::new(100, 0).unwrap()));
 
-        assert!(with_valid.is_visible_at(HybridTimestamp::new(100, 0).unwrap(), HybridTimestamp::new(150, 0).unwrap()));
-        assert!(!with_valid.is_visible_at(HybridTimestamp::new(50, 0).unwrap(), HybridTimestamp::new(150, 0).unwrap()));
+        assert!(with_valid.is_visible_at(
+            HybridTimestamp::new(100, 0).unwrap(),
+            HybridTimestamp::new(150, 0).unwrap()
+        ));
+        assert!(!with_valid.is_visible_at(
+            HybridTimestamp::new(50, 0).unwrap(),
+            HybridTimestamp::new(150, 0).unwrap()
+        ));
     }
 
     #[test]
@@ -1869,7 +1895,7 @@ mod sentry_tests {
 
         let bti = BiTemporalInterval::new(
             TimeRange::new(valid_start, valid_end).unwrap(),
-            TimeRange::new(tx_start, tx_end).unwrap()
+            TimeRange::new(tx_start, tx_end).unwrap(),
         );
         let bytes = bti.serialize();
         assert_eq!(bytes.len(), 48);
