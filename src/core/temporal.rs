@@ -1623,7 +1623,8 @@ mod sentry_tests {
     #[should_panic(expected = "exceeds MAX_VALID_TIMESTAMP")]
     fn test_elenchus_timerange_from_panics_on_overflow() {
         // ⚔️ Elenchus Test: Verify TimeRange::from panics if timestamp > MAX_VALID_TIMESTAMP (and != TIMESTAMP_MAX)
-        let invalid_ts = crate::core::hlc::HybridTimestamp::new_unchecked(MAX_VALID_TIMESTAMP + 1, 0);
+        let invalid_ts =
+            crate::core::hlc::HybridTimestamp::new_unchecked(MAX_VALID_TIMESTAMP + 1, 0);
         let _ = TimeRange::from(invalid_ts);
     }
 
@@ -1631,7 +1632,8 @@ mod sentry_tests {
     #[should_panic(expected = "exceeds MAX_VALID_TIMESTAMP")]
     fn test_elenchus_timerange_at_panics_on_overflow() {
         // ⚔️ Elenchus Test: Verify TimeRange::at panics if timestamp > MAX_VALID_TIMESTAMP (and != TIMESTAMP_MAX)
-        let invalid_ts = crate::core::hlc::HybridTimestamp::new_unchecked(MAX_VALID_TIMESTAMP + 1, 0);
+        let invalid_ts =
+            crate::core::hlc::HybridTimestamp::new_unchecked(MAX_VALID_TIMESTAMP + 1, 0);
         let _ = TimeRange::at(invalid_ts);
     }
 
