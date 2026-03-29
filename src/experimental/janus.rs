@@ -12,14 +12,21 @@
 //! - **Conflict of Interest**: Detecting nodes that link opposing factions.
 //!
 //! # Example
-//! ```rust,no_run
+//! ```rust
 //! use aletheiadb::AletheiaDB;
+//! use aletheiadb::properties;
 //! use aletheiadb::experimental::janus::JanusDetector;
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let db = AletheiaDB::new()?;
-//! let janus = JanusDetector::new(&db);
 //!
+//! // Setup a node with embedding
+//! let node_id = db.create_node(
+//!     "Document",
+//!     properties! { "embedding" => &vec![0.5f32; 128][..] }
+//! )?;
+//!
+//! let janus = JanusDetector::new(&db);
 //! let score = janus.analyze_node(node_id, "embedding")?;
 //!
 //! if score.is_bridge() {
@@ -36,6 +43,25 @@ use crate::core::error::Result;
 use crate::core::id::NodeId;
 
 /// The result of a Janus analysis.
+///
+/// This structure holds the computed metrics that evaluate whether a node connects
+/// separate communities in vector space. It compares the distance between two potential
+/// clusters of neighbors against how tightly packed those clusters are.
+///
+/// # Examples
+///
+/// ```rust
+/// use aletheiadb::experimental::janus::BridgeScore;
+///
+/// let score = BridgeScore {
+///     total_score: 1.5,
+///     inter_cluster_distance: 12.0,
+///     intra_cluster_spread: 8.0,
+///     neighbor_count: 5,
+/// };
+///
+/// assert!(score.is_bridge());
+/// ```
 #[derive(Debug, Clone)]
 pub struct BridgeScore {
     /// The calculated bridge score (0.0 to 1.0+).
@@ -51,6 +77,26 @@ pub struct BridgeScore {
 
 impl BridgeScore {
     /// Heuristic to determine if this is a significant bridge.
+    ///
+    /// This method evaluates the score metrics to decide if the node acts as a true bridge.
+    /// It returns `true` if the separation between clusters (`total_score` > 1.2) is
+    /// prominent compared to their internal variance, and there are enough neighbors
+    /// (`neighbor_count` >= 4) to make the clustering statistically meaningful.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::experimental::janus::BridgeScore;
+    ///
+    /// let weak_score = BridgeScore {
+    ///     total_score: 0.8,
+    ///     inter_cluster_distance: 4.0,
+    ///     intra_cluster_spread: 5.0,
+    ///     neighbor_count: 10,
+    /// };
+    ///
+    /// assert!(!weak_score.is_bridge());
+    /// ```
     pub fn is_bridge(&self) -> bool {
         // If clusters are separated by more distance than their internal spread,
         // it's a bridge.
@@ -59,20 +105,99 @@ impl BridgeScore {
 }
 
 /// The Janus Detector.
+///
+/// Identifies nodes that act as "bridges" or "diplomats" between distinct semantic clusters.
+/// A high [`BridgeScore`] indicates that a node's neighbors fall into two (or more)
+/// clearly separated groups in vector space, meaning the node connects different communities.
+///
+/// # Examples
+///
+/// ```rust
+/// use aletheiadb::AletheiaDB;
+/// use aletheiadb::experimental::janus::JanusDetector;
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let db = AletheiaDB::new()?;
+///
+/// // Create a detector for the database
+/// let janus = JanusDetector::new(&db);
+/// # Ok(())
+/// # }
+/// ```
 pub struct JanusDetector<'a> {
     db: &'a AletheiaDB,
 }
 
 impl<'a> JanusDetector<'a> {
     /// Create a new JanusDetector.
+    ///
+    /// Initializes the detector with a reference to the active database.
+    /// This allows the detector to fetch node neighbors and their vector properties
+    /// during analysis.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::AletheiaDB;
+    /// use aletheiadb::experimental::janus::JanusDetector;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let db = AletheiaDB::new()?;
+    /// let detector = JanusDetector::new(&db);
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn new(db: &'a AletheiaDB) -> Self {
         Self { db }
     }
 
     /// Analyze a node to see if it bridges semantic clusters.
     ///
-    /// This fetches the node's neighbors, retrieves their vectors,
-    /// and performs a local 2-Means clustering.
+    /// This fetches the node's neighbors, retrieves their vectors for the specified
+    /// `property`, and performs a local 2-Means clustering. It then computes a
+    /// [`BridgeScore`] based on the distance between the two clusters relative to
+    /// their internal spread.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the specified `node_id` does not exist in the database,
+    /// or if there is an issue reading the node's edges or properties.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::AletheiaDB;
+    /// use aletheiadb::properties;
+    /// use aletheiadb::experimental::janus::JanusDetector;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let db = AletheiaDB::new()?;
+    ///
+    /// // Create a node with a vector property
+    /// let vec_data = vec![0.5f32; 128];
+    /// let node_id = db.create_node(
+    ///     "Document",
+    ///     properties! { "embedding" => &vec_data[..] }
+    /// )?;
+    ///
+    /// let detector = JanusDetector::new(&db);
+    /// let score = detector.analyze_node(node_id, "embedding")?;
+    ///
+    /// println!("Node bridge score: {}", score.total_score);
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// ```compile_fail
+    /// use aletheiadb::AletheiaDB;
+    /// use aletheiadb::experimental::janus::JanusDetector;
+    ///
+    /// let db = AletheiaDB::new().unwrap();
+    /// let detector = JanusDetector::new(&db);
+    ///
+    /// // Fails: analyze_node requires a node ID, not a string
+    /// let score = detector.analyze_node("not_a_node", "embedding").unwrap();
+    /// ```
     pub fn analyze_node(&self, node_id: NodeId, property: &str) -> Result<BridgeScore> {
         // 1. Fetch Neighbors
         let edges = self.db.get_outgoing_edges(node_id);
