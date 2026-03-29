@@ -250,3 +250,7 @@ pub mod serendipity;
 #[cfg(feature = "nova")]
 /// Tremor: Semantic Earthquake Detector.
 pub mod tremor;
+
+#[cfg(feature = "nova")]
+/// Hyperspace: Multi-Dimensional Semantic Subspace Projection.
+pub mod hyperspace;
