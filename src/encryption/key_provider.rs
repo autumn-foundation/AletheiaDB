@@ -18,6 +18,14 @@ use crate::encryption::KeyProviderError;
 /// multiple storage components.
 pub trait KeyProvider: Send + Sync {
     /// Retrieve the 32-byte master encryption key.
+    ///
+    /// Implementations must handle decoding (e.g., from hex strings) to return
+    /// raw binary data. The key is securely erased from memory when the `Zeroizing`
+    /// container is dropped.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KeyProviderError`] if the key cannot be found or is in an invalid format.
     fn get_mek(&self) -> Result<Zeroizing<[u8; 32]>, KeyProviderError>;
 
     /// Human-readable provider name for logging/diagnostics.
@@ -74,12 +82,40 @@ fn hex_digit(b: u8) -> Option<u8> {
 ///
 /// Supports both hex-encoded (64 ASCII characters) and raw binary (32 bytes)
 /// key formats. Whitespace and trailing newlines are trimmed before parsing.
+///
+/// This provider is typically used in production deployments where the key is
+/// injected via a secure volume mount (e.g., Kubernetes Secrets).
+///
+/// # Examples
+///
+/// ```rust
+/// use std::path::PathBuf;
+/// use aletheiadb::encryption::{FileKeyProvider, KeyProvider};
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// # let dir = tempfile::tempdir()?;
+/// # let key_path = dir.path().join("master.key");
+/// # FileKeyProvider::generate_key_file(&key_path)?;
+/// let provider = FileKeyProvider::new(&key_path);
+///
+/// // Verify the key exists and is readable
+/// provider.health_check()?;
+///
+/// // Load the key into memory
+/// let mek = provider.get_mek()?;
+/// assert_eq!(mek.len(), 32);
+/// # Ok(())
+/// # }
+/// ```
 pub struct FileKeyProvider {
     path: PathBuf,
 }
 
 impl FileKeyProvider {
     /// Create a new file-based key provider.
+    ///
+    /// The path does not need to exist at the time of creation, but must be
+    /// readable when [`get_mek`](KeyProvider::get_mek) or [`health_check`](KeyProvider::health_check) is called.
     pub fn new(path: impl Into<PathBuf>) -> Self {
         Self { path: path.into() }
     }
@@ -88,6 +124,11 @@ impl FileKeyProvider {
     ///
     /// Creates parent directories if they don't exist. The key is written as
     /// 64 hex characters followed by a newline.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KeyProviderError`] if the directory cannot be created or the file
+    /// cannot be written.
     pub fn generate_key_file(path: &Path) -> Result<Zeroizing<[u8; 32]>, KeyProviderError> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -159,12 +200,37 @@ impl KeyProvider for FileKeyProvider {
 /// Reads the MEK from an environment variable.
 ///
 /// The variable must contain a 64-character hex-encoded key.
+///
+/// This provider is useful for cloud environments (like AWS Lambda) where
+/// securely mounting a file is difficult, but passing secrets via environment
+/// variables is supported.
+///
+/// # Examples
+///
+/// ```rust
+/// use aletheiadb::encryption::{EnvKeyProvider, KeyProvider};
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// # // Setup mock environment
+/// # unsafe { std::env::set_var("DB_MASTER_KEY", "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef") };
+/// let provider = EnvKeyProvider::new("DB_MASTER_KEY");
+///
+/// // The provider reads the environment variable when requested
+/// let mek = provider.get_mek()?;
+/// assert_eq!(mek.len(), 32);
+/// # unsafe { std::env::remove_var("DB_MASTER_KEY") };
+/// # Ok(())
+/// # }
+/// ```
 pub struct EnvKeyProvider {
     var_name: String,
 }
 
 impl EnvKeyProvider {
     /// Create a new environment-variable key provider.
+    ///
+    /// The variable name is stored, and the environment is only queried
+    /// when [`get_mek`](KeyProvider::get_mek) or [`health_check`](KeyProvider::health_check) is called.
     pub fn new(var_name: impl Into<String>) -> Self {
         Self {
             var_name: var_name.into(),

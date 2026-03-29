@@ -92,3 +92,6 @@
 ## 2025-03-05 - Experimental Feature Leaks II & Doctest Conditionals
 **Confusion:** Several experimental modules (`chronos`, `echo`, `sherlock`, and `temporal_narrative`) in `src/experimental/mod.rs` were missing their `#[cfg(feature = "nova")]` gating attributes. This allowed them to leak into the public API without the required feature flag enabled. Furthermore, the doctests for `sherlock` (in `mod.rs`) and `kairos` used an anonymous block (`# { ... }`) for feature gating, which generated `main function not found` or `expressions at the top level` warnings in `cargo test --doc`.
 **Clarification:** Added the missing `#[cfg(feature = "nova")]` attributes to the exposed experimental modules. Fixed the doctests to use conditional compilation on the `main` function and imports themselves (`# #[cfg(feature = "nova")] \n fn main() { ... }`), and added an empty fallback `main` function for when the feature is disabled.
+## 2024-05-24 - [Doc Tests for Environment Variables]
+**Confusion:** `std::env::set_var` and `std::env::remove_var` cause compiler errors `E0133` in doc-tests because they are unsafe in modern Rust due to multi-threading issues.
+**Clarification:** Wrap `std::env::set_var` and `std::env::remove_var` in `unsafe { ... }` blocks when writing executable `///` doc-tests for environment configurations.
