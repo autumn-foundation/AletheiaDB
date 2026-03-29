@@ -618,26 +618,29 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 use aletheiadb::{AletheiaDB, config::AletheiaDBConfig};
 use aletheiadb::storage::index_persistence::PersistenceConfig;
 
-// Enable index persistence for 6-30x faster startup
-let config = AletheiaDBConfig::builder()
-    .persistence(PersistenceConfig {
-        enabled: true,
-        data_dir: "data/my-database".into(),
-        load_on_startup: true,  // Load indexes on startup
-        use_mmap: true,         // Memory-map large indexes
-        ..Default::default()
-    })
-    .build();
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Enable index persistence for 6-30x faster startup
+    let config = AletheiaDBConfig::builder()
+        .persistence(PersistenceConfig {
+            enabled: true,
+            data_dir: "data/my-database".into(),
+            load_on_startup: true,  // Load indexes on startup
+            use_mmap: true,         // Memory-map large indexes
+            ..Default::default()
+        })
+        .build();
 
-let _db = AletheiaDB::with_unified_config(config);
+    let _db = AletheiaDB::with_unified_config(config)?;
 
-// Indexes automatically persist in background
-// On restart: 2-5s cold start vs 30-60s WAL replay (1M nodes)
-// Includes StringInterner persistence (interned label/property IDs survive restart)
-// Recovery path: CheckpointManager loads indexes, then replays WAL from manifest LSN + 1
+    // Indexes automatically persist in background
+    // On restart: 2-5s cold start vs 30-60s WAL replay (1M nodes)
+    // Includes StringInterner persistence (interned label/property IDs survive restart)
+    // Recovery path: CheckpointManager loads indexes, then replays WAL from manifest LSN + 1
 
-// Note: On first run, you may see "Missing required index file" warnings.
-// This is normal for a fresh database.
+    // Note: On first run, you may see "Missing required index file" warnings.
+    // This is normal for a fresh database.
+    Ok(())
+}
 ```
 
 See **[docs/guides/index-persistence-guide.md](docs/guides/index-persistence-guide.md)** for complete guide.
@@ -648,19 +651,23 @@ See **[docs/guides/index-persistence-guide.md](docs/guides/index-persistence-gui
 use aletheiadb::{AletheiaDB, config::AletheiaDBConfig, WalConfigBuilder};
 use aletheiadb::storage::wal::DurabilityMode;
 
-// Load from TOML file (requires file to exist)
-// let config = AletheiaDBConfig::from_toml_file("config/production.toml")?;
-// let db = AletheiaDB::with_unified_config(config);
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Load from TOML file (requires file to exist)
+    // let config = AletheiaDBConfig::from_toml_file("config/production.toml")?;
+    // let db = AletheiaDB::with_unified_config(config);
 
-// Programmatic configuration
-let config = AletheiaDBConfig::builder()
-    .wal(WalConfigBuilder::new()
-        .num_stripes(64).unwrap()  // High concurrency
-        .durability_mode(DurabilityMode::group_commit_default())
-        .build())
-    .build();
+    // Programmatic configuration
+    let config = AletheiaDBConfig::builder()
+        .wal(WalConfigBuilder::new()
+            .num_stripes(64).unwrap()  // High concurrency
+            .durability_mode(DurabilityMode::group_commit_default())
+            .build())
+        .build();
 
-let _db = AletheiaDB::with_unified_config(config)?;
+    let _db = AletheiaDB::with_unified_config(config)?;
+
+    Ok(())
+}
 ```
 
 See **[docs/CONFIGURATION.md](docs/CONFIGURATION.md)** for all configuration options and presets.
@@ -694,12 +701,12 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let db = AletheiaDB::new().unwrap();
 
     // Basic graph query
-    let results = db.execute_aql(
+    let _results = db.execute_aql(
         "MATCH (n:Person {name: 'Alice'})-[:KNOWS]->(friend:Person) RETURN friend"
     )?;
 
     // Bi-temporal query (point-in-time)
-    let results = db.execute_aql(
+    let _results = db.execute_aql(
         "AS OF 1705312800000000 MATCH (n:Person {name: 'Alice'}) RETURN n"
     )?;
 
@@ -742,18 +749,22 @@ use aletheiadb::storage::sharding::{
     ShardConfig, ShardDefinition, ShardCoordinator,
 };
 
-// Define shard topology
-let config = ShardConfig::new(vec![
-    ShardDefinition::new(0, "shard0:9000", vec!["Person", "User"]),
-    ShardDefinition::new(1, "shard1:9000", vec!["Place", "Location"]),
-    ShardDefinition::new(2, "shard2:9000", vec!["Event", "Activity"]),
-]);
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Define shard topology
+    let config = ShardConfig::new(vec![
+        ShardDefinition::new(0, "shard0:9000", vec!["Person", "User"]),
+        ShardDefinition::new(1, "shard1:9000", vec!["Place", "Location"]),
+        ShardDefinition::new(2, "shard2:9000", vec!["Event", "Activity"]),
+    ]);
 
-// Create coordinator
-let coordinator = ShardCoordinator::new(config);
+    // Create coordinator
+    let coordinator = ShardCoordinator::new(config);
 
-// Route queries to appropriate shards
-let _shard = coordinator.router().route_node("Person");
+    // Route queries to appropriate shards
+    let _shard = coordinator.router().route_node("Person");
+
+    Ok(())
+}
 ```
 
 See **[docs/guides/sharding-guide.md](docs/guides/sharding-guide.md)** for complete guide.
@@ -767,20 +778,24 @@ use aletheiadb::{AletheiaDB, config::AletheiaDBConfig};
 use aletheiadb::config::HistoricalConfigBuilder;
 use std::time::Duration;
 
-// Configure cold storage via the unified config builder
-let config = AletheiaDBConfig::builder()
-    .historical(
-        HistoricalConfigBuilder::new()
-            .enable_cold_storage(true)
-            .cold_storage_path("data/cold.redb")
-            .migration_age_threshold(Duration::from_secs(3600)) // 1 hour
-            .max_hot_versions(1000)
-            .build(),
-    )
-    .build();
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Configure cold storage via the unified config builder
+    let config = AletheiaDBConfig::builder()
+        .historical(
+            HistoricalConfigBuilder::new()
+                .enable_cold_storage(true)
+                .cold_storage_path("data/cold.redb")
+                .migration_age_threshold(Duration::from_secs(3600)) // 1 hour
+                .max_hot_versions(1000)
+                .build(),
+        )
+        .build();
 
-// Cold storage automatically initialized!
-let _db = AletheiaDB::with_unified_config(config)?;
+    // Cold storage automatically initialized!
+    let _db = AletheiaDB::with_unified_config(config)?;
+
+    Ok(())
+}
 ```
 
 See **[docs/guides/tiered-storage-guide.md](docs/guides/tiered-storage-guide.md)** for complete guide.
@@ -794,17 +809,24 @@ For complex operations involving multiple updates, use explicit transactions.
 ```rust
 use aletheiadb::prelude::*;
 
-// Explicit read transaction
-let result = db.read(|tx| {
-    tx.get_node(alice_id).map(|node| node.label.clone())
-})?;
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let db = AletheiaDB::new()?;
+    let alice_id = db.write(|tx| tx.create_node("Person", PropertyMap::new()))?;
 
-// Explicit write transaction with multiple operations
-db.write(|tx| {
-    let node1 = tx.create_node("Event", PropertyMap::new())?;
-    let node2 = tx.create_node("Event", PropertyMap::new())?;
-    tx.create_edge(node1, node2, "FOLLOWS", PropertyMap::new())
-})?;
+    // Explicit read transaction
+    let result = db.read(|tx| {
+        tx.get_node(alice_id).map(|node| node.label.clone())
+    })?;
+
+    // Explicit write transaction with multiple operations
+    db.write(|tx| {
+        let node1 = tx.create_node("Event", PropertyMap::new())?;
+        let node2 = tx.create_node("Event", PropertyMap::new())?;
+        tx.create_edge(node1, node2, "FOLLOWS", PropertyMap::new())
+    })?;
+
+    Ok(())
+}
 ```
 
 ### Embedding Generation (Optional)
