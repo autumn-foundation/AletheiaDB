@@ -29,6 +29,20 @@ mod sentry_tests {
     }
 
     #[test]
+    fn test_metric_wrapper_dimension_limit() {
+        let distance_fn = Arc::new(|_: &[f32], _: &[f32]| 0.0);
+
+        let wrapper = create_metric_wrapper(crate::core::vector::constants::MAX_VECTOR_DIMENSIONS + 1, distance_fn);
+
+        let aligned_vec = [0.0f32; 4];
+        let a_ptr = aligned_vec.as_ptr();
+        let b_ptr = aligned_vec.as_ptr();
+
+        let result = wrapper(a_ptr, b_ptr);
+        assert_eq!(result, f32::MAX);
+    }
+
+    #[test]
     fn test_is_retryable_error_matching() {
         assert!(is_retryable_usearch_error(
             "Error: No available threads to lock for search"

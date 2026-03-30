@@ -39,3 +39,7 @@
 **2026-03-24 - Fix AWS-LC vulnerabilities**
 **Threat:** `aws-lc-sys` and `rustls-webpki` had vulnerabilities resulting in possible logic bypass and certificate chain bypass.
 **Defense:** Updated vulnerable dependencies `aws-lc-sys` and `rustls-webpki` to secure versions using `cargo update` and verified via `cargo audit`.
+
+**2026-02-15 - FFI Boundary Dimension Overflow in `usearch` Integration**
+**Threat:** The `usearch` vector index integration in `src/index/vector/hnsw/mod.rs` accepted an unbounded `dims` parameter from the C++ FFI boundary and passed it directly to `std::slice::from_raw_parts`. A malicious or corrupted index could pass a massive dimension size, causing a severe out-of-bounds memory read (Undefined Behavior) and potential Denial of Service or information disclosure.
+**Defense:** Added a strict bounds check validating that `dims` is less than or equal to `crate::core::vector::constants::MAX_VECTOR_DIMENSIONS` before constructing the slice. If the limit is exceeded, the metric wrapper safely returns `f32::MAX` to discard the comparison and logs an error, preventing the UB.

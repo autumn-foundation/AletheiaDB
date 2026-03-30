@@ -121,6 +121,15 @@ where
             return f32::MAX;
         }
 
+        if dims > crate::core::vector::constants::MAX_VECTOR_DIMENSIONS {
+            eprintln!(
+                "usearch passed oversized dimensions to metric function ({} > {}) - returning max distance",
+                dims,
+                crate::core::vector::constants::MAX_VECTOR_DIMENSIONS
+            );
+            return f32::MAX;
+        }
+
         let slice_a = unsafe { std::slice::from_raw_parts(a, dims) };
         let slice_b = unsafe { std::slice::from_raw_parts(b, dims) };
 
