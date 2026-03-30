@@ -28,8 +28,13 @@
 //! degradation is worse than fail-fast behavior for background infrastructure.
 
 use std::collections::{BTreeSet, VecDeque};
-use std::sync::{Condvar, Mutex};
 use std::time::Duration;
+
+#[cfg(not(loom))]
+use std::sync::{Condvar, Mutex};
+
+#[cfg(loom)]
+use loom::sync::{Condvar, Mutex};
 
 use crate::core::error::{Error, StorageError};
 
@@ -217,12 +222,17 @@ impl GroupCommitCoordinator {
         let base_timeout =
             Duration::from_millis(self.config.max_delay_ms * self.config.timeout_multiplier as u64)
                 + Duration::from_millis(self.config.timeout_base_ms);
-        let timeout = base_timeout
+        let _timeout = base_timeout
             .max(Duration::from_millis(self.config.timeout_min_ms))
             .min(Duration::from_millis(self.config.timeout_max_ms));
 
         // Use a deadline to prevent spurious wakeups from resetting the timeout clock
-        let deadline = std::time::Instant::now() + timeout;
+        // Note: we can't easily mock time with loom without additional work, so we just use standard time
+        #[cfg(not(loom))]
+        let now = std::time::Instant::now();
+
+        #[cfg(not(loom))]
+        let deadline = now + _timeout;
 
         // RACE CONDITION SAFETY: If the epoch was already flushed between register_transaction()
         // and this wait (rare but possible on fast systems), this loop exits immediately since
@@ -231,43 +241,56 @@ impl GroupCommitCoordinator {
         // EPOCH SEMANTICS: flushed_epoch = N means "epoch N has been flushed".
         // Transaction at epoch E waits while flushed_epoch < E (i.e., E has not been flushed yet).
         while state.flushed_epoch < epoch {
-            let now = std::time::Instant::now();
-            let remaining = if now >= deadline {
-                Duration::from_secs(0)
-            } else {
-                deadline - now
-            };
+            #[cfg(not(loom))]
+            {
+                let now = std::time::Instant::now();
 
-            if remaining.as_nanos() == 0 {
-                return Err(Error::Storage(StorageError::WalError {
-                    reason: format!(
-                        "Group commit timeout waiting for epoch {} (current flushed: {})",
-                        epoch, state.flushed_epoch
-                    ),
-                }));
+                let remaining = if now >= deadline {
+                    Duration::from_secs(0)
+                } else {
+                    deadline - now
+                };
+
+                if remaining.as_nanos() == 0 {
+                    return Err(Error::Storage(StorageError::WalError {
+                        reason: format!(
+                            "Group commit timeout waiting for epoch {} (current flushed: {})",
+                            epoch, state.flushed_epoch
+                        ),
+                    }));
+                }
+
+                let (new_state, timeout_result) = self
+                    .flush_complete
+                    .wait_timeout(state, remaining)
+                    .map_err(|_| {
+                        Error::Storage(StorageError::LockPoisoned {
+                            resource: "group_commit_state".to_string(),
+                        })
+                    })?;
+
+                state = new_state;
+
+                // Check if we timed out (either by Condvar result OR by deadline)
+                let now = std::time::Instant::now();
+
+                if (timeout_result.timed_out() || now >= deadline) && state.flushed_epoch < epoch {
+                    return Err(Error::Storage(StorageError::WalError {
+                        reason: format!(
+                            "Group commit timeout waiting for epoch {} (current flushed: {})",
+                            epoch, state.flushed_epoch
+                        ),
+                    }));
+                }
             }
 
-            let (new_state, timeout_result) = self
-                .flush_complete
-                .wait_timeout(state, remaining)
-                .map_err(|_| {
+            #[cfg(loom)]
+            {
+                state = self.flush_complete.wait(state).map_err(|_| {
                     Error::Storage(StorageError::LockPoisoned {
                         resource: "group_commit_state".to_string(),
                     })
                 })?;
-
-            state = new_state;
-
-            // Check if we timed out (either by Condvar result OR by deadline)
-            if (timeout_result.timed_out() || std::time::Instant::now() >= deadline)
-                && state.flushed_epoch < epoch
-            {
-                return Err(Error::Storage(StorageError::WalError {
-                    reason: format!(
-                        "Group commit timeout waiting for epoch {} (current flushed: {})",
-                        epoch, state.flushed_epoch
-                    ),
-                }));
             }
         }
 
@@ -851,5 +874,67 @@ mod tests {
             "Wait took {:?}, expected < 150ms",
             elapsed
         );
+    }
+}
+
+#[cfg(all(test, loom))]
+mod loom_tests {
+    use super::*;
+    use loom::sync::Arc;
+    use loom::thread;
+
+    #[test]
+    fn test_group_commit_coordinator() {
+        loom::model(|| {
+            let coord = Arc::new(GroupCommitCoordinator::new(10, 10));
+
+            let coord1 = Arc::clone(&coord);
+            let t1 = thread::spawn(move || {
+                let (epoch, _) = coord1.register_transaction().unwrap();
+                // Wait for flush to complete. If a panic occurs, loom will catch it.
+                let _ = coord1.wait_for_flush(epoch);
+            });
+
+            let coord2 = Arc::clone(&coord);
+            let t2 = thread::spawn(move || {
+                // We must ensure the transaction is registered before we flush.
+                // If t2 runs to completion before t1 starts, t1 will block forever on wait_for_flush.
+                // We use a busy-wait loop with yield_now to simulate the flush thread waiting for work.
+                loop {
+                    let state = coord2.state.lock().unwrap();
+                    if state.batch_count > 0 {
+                        drop(state);
+                        let epoch = coord2.start_flush().unwrap();
+                        let _ = coord2.finish_flush(epoch, Ok(()));
+                        break;
+                    }
+                    drop(state);
+                    loom::thread::yield_now();
+                }
+            });
+
+            let _ = t1.join();
+            let _ = t2.join();
+        });
+    }
+
+    #[test]
+    fn test_group_commit_coordinator_concurrent_registers() {
+        loom::model(|| {
+            let coord = Arc::new(GroupCommitCoordinator::new(10, 10));
+
+            let coord1 = Arc::clone(&coord);
+            let t1 = thread::spawn(move || {
+                let _ = coord1.register_transaction();
+            });
+
+            let coord2 = Arc::clone(&coord);
+            let t2 = thread::spawn(move || {
+                let _ = coord2.register_transaction();
+            });
+
+            let _ = t1.join();
+            let _ = t2.join();
+        });
     }
 }
