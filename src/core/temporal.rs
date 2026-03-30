@@ -1606,6 +1606,267 @@ mod proptests {
 
 #[cfg(test)]
 mod sentry_tests {
+    #[test]
+    fn test_timerange_duration_micros_mutants() {
+        let t1 = HybridTimestamp::new_unchecked(100, 0);
+        let t2 = HybridTimestamp::new_unchecked(150, 0);
+
+        let r1 = TimeRange::new(t1, t2).unwrap();
+        assert_eq!(r1.duration_micros(), Some(50));
+
+        let r_max = TimeRange::from(t1);
+        assert_eq!(r_max.duration_micros(), None);
+
+        // Assert logic exactly isolates positive exact number
+        let t_same = HybridTimestamp::new_unchecked(100, 0);
+        let r_same = TimeRange::new(t1, t_same).unwrap();
+        assert_eq!(r_same.duration_micros(), Some(0)); // check zero
+    }
+    #[test]
+    fn test_timerange_contains_mutants_strict() {
+        let t1 = HybridTimestamp::new_unchecked(10, 0);
+        let t2 = HybridTimestamp::new_unchecked(20, 0);
+        let t_in = HybridTimestamp::new_unchecked(15, 0);
+
+        let r = TimeRange::new(t1, t2).unwrap();
+
+        assert!(r.contains(t_in));
+        assert!(r.contains(t1)); // start boundary inclusive
+        assert!(!r.contains(t2)); // end boundary exclusive
+        assert!(!r.contains(HybridTimestamp::new_unchecked(5, 0))); // before
+        assert!(!r.contains(HybridTimestamp::new_unchecked(25, 0))); // after
+
+        let r_empty = TimeRange::new(t1, t1).unwrap();
+        assert!(!r_empty.contains(t1));
+    }
+
+    #[test]
+    fn test_timerange_contains_or_after_mutants_strict() {
+        let t1 = HybridTimestamp::new_unchecked(10, 0);
+        let t2 = HybridTimestamp::new_unchecked(20, 0);
+        let t_in = HybridTimestamp::new_unchecked(15, 0);
+        let t_before = HybridTimestamp::new_unchecked(5, 0);
+        let t_after = HybridTimestamp::new_unchecked(25, 0);
+
+        let r = TimeRange::new(t1, t2).unwrap();
+
+        assert!(r.contains_or_after(t_in));
+        assert!(r.contains_or_after(t1)); // start boundary
+        assert!(r.contains_or_after(t2)); // end boundary
+        assert!(r.contains_or_after(t_after));
+        assert!(!r.contains_or_after(t_before));
+    }
+
+    #[test]
+    fn test_timerange_overlaps_mutants_strict() {
+        let t1 = HybridTimestamp::new_unchecked(10, 0);
+        let t2 = HybridTimestamp::new_unchecked(20, 0);
+        let t3 = HybridTimestamp::new_unchecked(30, 0);
+        let t4 = HybridTimestamp::new_unchecked(40, 0);
+
+        let r1 = TimeRange::new(t1, t3).unwrap();
+        let r2 = TimeRange::new(t2, t4).unwrap();
+        let r3 = TimeRange::new(t1, t2).unwrap();
+        let r4 = TimeRange::new(t3, t4).unwrap();
+
+        // overlaps
+        assert!(r1.overlaps(&r2));
+        assert!(r2.overlaps(&r1));
+
+        // touches at boundary (exclusive end)
+        assert!(!r3.overlaps(&r2));
+        assert!(!r2.overlaps(&r3));
+
+        // completely separate
+        assert!(!r3.overlaps(&r4));
+        assert!(!r4.overlaps(&r3));
+
+        // completely contained
+        let r_inner = TimeRange::new(
+            HybridTimestamp::new_unchecked(12, 0),
+            HybridTimestamp::new_unchecked(18, 0),
+        )
+        .unwrap();
+        assert!(r1.overlaps(&r_inner));
+        assert!(r_inner.overlaps(&r1));
+    }
+
+    #[test]
+    fn test_timerange_contains_range_replace_leq_with_gt_strict() {
+        let t1 = HybridTimestamp::new_unchecked(10, 0);
+        let t2 = HybridTimestamp::new_unchecked(20, 0);
+        let t3 = HybridTimestamp::new_unchecked(30, 0);
+        let t4 = HybridTimestamp::new_unchecked(40, 0);
+
+        let r_outer = TimeRange::new(t1, t4).unwrap();
+        let r_inner = TimeRange::new(t2, t3).unwrap();
+
+        assert!(r_outer.contains_range(&r_inner));
+        assert!(!r_inner.contains_range(&r_outer));
+
+        let r_overlap1 = TimeRange::new(t1, t3).unwrap();
+        let r_overlap2 = TimeRange::new(t2, t4).unwrap();
+
+        assert!(!r_overlap1.contains_range(&r_overlap2));
+        assert!(!r_overlap2.contains_range(&r_overlap1));
+    }
+
+    #[test]
+    fn test_timerange_overlaps_mutants_extra() {
+        let t1 = HybridTimestamp::new_unchecked(10, 0);
+        let t2 = HybridTimestamp::new_unchecked(20, 0);
+        let t3 = HybridTimestamp::new_unchecked(30, 0);
+
+        let r1 = TimeRange::new(t1, t2).unwrap();
+        let r2 = TimeRange::new(t2, t3).unwrap();
+
+        // Should not overlap when end exactly matches start of another
+        assert!(!r1.overlaps(&r2));
+        assert!(!r2.overlaps(&r1));
+
+        let r3 = TimeRange::new(t1, t1).unwrap(); // empty
+        let r4 = TimeRange::new(t1, t2).unwrap();
+
+        // Assert false due to empty handling
+        assert!(!r3.overlaps(&r4));
+        assert!(!r4.overlaps(&r3));
+    }
+
+    #[test]
+    fn test_timerange_from_at_mutants_strict() {
+        let t_max = HybridTimestamp::new_unchecked(crate::core::temporal::MAX_VALID_TIMESTAMP, 0);
+        let t_over =
+            HybridTimestamp::new_unchecked(crate::core::temporal::MAX_VALID_TIMESTAMP + 1, 0);
+
+        let r_max_from = TimeRange::from(t_max);
+        assert_eq!(r_max_from.start, t_max);
+
+        let r_max_at = TimeRange::at(t_max);
+        assert_eq!(r_max_at.start, t_max);
+        assert_eq!(r_max_at.end, t_max);
+
+        // Use catch_unwind since it panics
+        let res1 = std::panic::catch_unwind(|| TimeRange::from(t_over));
+        assert!(res1.is_err());
+
+        let res2 = std::panic::catch_unwind(|| TimeRange::at(t_over));
+        assert!(res2.is_err());
+    }
+
+    #[test]
+    fn test_timerange_close_at_mutants() {
+        let t1 = HybridTimestamp::new_unchecked(10, 0);
+        let t_max = HybridTimestamp::new_unchecked(crate::core::temporal::MAX_VALID_TIMESTAMP, 0);
+        let t_over =
+            HybridTimestamp::new_unchecked(crate::core::temporal::MAX_VALID_TIMESTAMP + 1, 0);
+        let t_before = HybridTimestamp::new_unchecked(5, 0);
+
+        let r = TimeRange::new(t1, TIMESTAMP_MAX).unwrap();
+
+        // Should error if end < start
+        let err1 = r.close_at(t_before);
+        assert!(err1.is_err());
+
+        // Should be OK if end == start (empty)
+        let ok1 = r.close_at(t1);
+        assert!(ok1.is_ok());
+        assert_eq!(ok1.unwrap().end, t1);
+
+        // Should error if > MAX_VALID_TIMESTAMP and != TIMESTAMP_MAX
+        let err2 = r.close_at(t_over);
+        assert!(err2.is_err());
+
+        // Should be ok if == MAX_VALID_TIMESTAMP
+        let ok2 = r.close_at(t_max);
+        assert!(ok2.is_ok());
+        assert_eq!(ok2.unwrap().end, t_max);
+
+        // Should be ok if == TIMESTAMP_MAX
+        let ok3 = r.close_at(TIMESTAMP_MAX);
+        assert!(ok3.is_ok());
+        assert_eq!(ok3.unwrap().end, TIMESTAMP_MAX);
+    }
+
+    #[test]
+    fn test_timerange_deserialize_mutants() {
+        let t1 = HybridTimestamp::new_unchecked(10, 0);
+        let t2 = HybridTimestamp::new_unchecked(20, 0);
+        let r = TimeRange::new(t1, t2).unwrap();
+
+        let bytes = r.serialize();
+        assert_eq!(bytes.len(), 24);
+
+        // Exact length check
+        let exact_bytes = &bytes[0..24];
+        let (de, sz) = TimeRange::deserialize(exact_bytes).unwrap();
+        assert_eq!(de.start, t1);
+        assert_eq!(de.end, t2);
+        assert_eq!(sz, 24);
+
+        // Shorter length check
+        let short_bytes = &bytes[0..23];
+        let err = TimeRange::deserialize(short_bytes);
+        assert!(err.is_err());
+
+        // Should also error on empty buffer
+        let empty_bytes: &[u8] = &[];
+        assert!(TimeRange::deserialize(empty_bytes).is_err());
+    }
+
+    #[test]
+    fn test_bitemporal_deserialize_mutants() {
+        let t1 = HybridTimestamp::new_unchecked(10, 0);
+        let b = BiTemporalInterval::current(t1);
+
+        let bytes = b.serialize();
+        assert_eq!(bytes.len(), 48);
+
+        // Exact length check
+        let exact_bytes = &bytes[0..48];
+        let (de, sz) = BiTemporalInterval::deserialize(exact_bytes).unwrap();
+        assert_eq!(de.valid_time.start, b.valid_time.start);
+        assert_eq!(de.transaction_time.start, b.transaction_time.start);
+        assert_eq!(sz, 48);
+
+        // Shorter length check
+        let short_bytes = &bytes[0..47];
+        let err = BiTemporalInterval::deserialize(short_bytes);
+        assert!(err.is_err());
+
+        // Should also error on empty buffer
+        let empty_bytes: &[u8] = &[];
+        assert!(BiTemporalInterval::deserialize(empty_bytes).is_err());
+    }
+
+    #[test]
+    fn test_time_to_iso8601_strict() {
+        let ts = HybridTimestamp::new_unchecked(1_700_000_000_123_456, 0);
+        let s = crate::core::temporal::time::to_iso8601(ts);
+
+        // Asserting specific exact substring components of the result format
+        #[cfg(not(windows))]
+        {
+            assert!(s.contains("1700000000")); // Secs since epoch
+            assert!(s.contains("123456000")); // Nanos component
+        }
+    }
+
+    #[test]
+    fn test_time_to_secs_millis_exact_math_strict() {
+        let ts = HybridTimestamp::new_unchecked(1_700_000_000_123_456, 0);
+        let secs = crate::core::temporal::time::to_secs(ts);
+        assert_eq!(secs, 1_700_000_000);
+        let millis = crate::core::temporal::time::to_millis(ts);
+        assert_eq!(millis, 1_700_000_000_123);
+    }
+
+    #[test]
+    fn test_time_from_secs_millis_exact_strict() {
+        let ts_sec = crate::core::temporal::time::from_secs(1_700_000_000);
+        assert_eq!(ts_sec.wallclock(), 1_700_000_000_000_000);
+        let ts_msec = crate::core::temporal::time::from_millis(1_700_000_000_123);
+        assert_eq!(ts_msec.wallclock(), 1_700_000_000_123_000);
+    }
     use super::*;
 
     #[test]
