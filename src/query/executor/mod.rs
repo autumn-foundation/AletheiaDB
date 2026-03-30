@@ -23,7 +23,7 @@ pub use iterators::TemporalNodeScanIterator;
 pub use iterators::{
     FilterIterator, LimitIterator, ProjectIterator, ProvenanceFilterIterator, VectorRerankIterator,
 };
-pub use results::{EntityId, EntityResult, QueryResults, QueryRow};
+pub use results::{EntityId, EntityResult, Path, QueryResult, QueryResults, QueryRow};
 
 /// Configuration for query execution.
 ///

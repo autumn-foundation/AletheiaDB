@@ -1258,7 +1258,7 @@ fn test_e2e_multi_hop_traversal() {
     // but the executor may only return terminal-depth nodes depending on the
     // TraversalDepth::Range semantics.  Assert at least 1 result.
     assert!(
-        rows.len() >= 1,
+        !rows.is_empty(),
         "expected at least 1 result from *1..2 traversal, got {}",
         rows.len()
     );
