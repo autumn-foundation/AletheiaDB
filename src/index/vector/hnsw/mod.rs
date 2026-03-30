@@ -911,7 +911,7 @@ impl VectorIndex for HnswIndex {
                             || index.remove(existing_key),
                             "Failed to remove existing vector",
                         )?;
-                    } else if index.size() >= index.capacity() {
+                    } else if index.size() + 128 >= index.capacity() {
                         let new_capacity = (index.capacity() * 2).max(1024);
                         self.retry_usearch(
                             || index.reserve(new_capacity),
@@ -964,7 +964,7 @@ impl VectorIndex for HnswIndex {
 
                     let index = self.inner.write();
 
-                    if index.size() >= index.capacity() {
+                    if index.size() + 128 >= index.capacity() {
                         let new_capacity = (index.capacity() * 2).max(1024);
                         self.retry_usearch(
                             || index.reserve(new_capacity),
