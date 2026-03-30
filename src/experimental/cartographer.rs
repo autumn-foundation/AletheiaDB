@@ -45,7 +45,7 @@
 //! // Use scan with label filter properly
 //! let regions = db.query()
 //!     .scan_label("Region")
-//!     .execute(&db)?;
+//!     .execute(db.as_ref())?;
 //!
 //! let count = regions.count();
 //! println!("Created {} regions", count);

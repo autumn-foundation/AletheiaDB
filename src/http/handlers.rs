@@ -378,7 +378,7 @@ async fn handle_find_node(
 
         let results = builder
             .limit(limit_val)
-            .execute(&db)
+            .execute(db.as_ref())
             .map_err(|e| e.to_string())?;
         let mut nodes = Vec::new();
         for row in results.flatten() {

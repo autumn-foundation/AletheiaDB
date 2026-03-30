@@ -983,7 +983,7 @@ impl AletheiaMcpServer {
 
             // Note: We fetch offset+limit rows then skip offset.
             // Offset is capped to prevent excessive memory use.
-            match builder.limit(limit + offset).execute(&self.db) {
+            match builder.limit(limit + offset).execute(self.db.as_ref()) {
                 Ok(results) => {
                     // Use iterator-based approach to avoid allocating full Vec
                     let mut nodes = Vec::with_capacity(limit);
@@ -1039,7 +1039,7 @@ impl AletheiaMcpServer {
         if let Some(label) = &req.label {
             // Use QueryBuilder to count by label efficiently without collecting all rows
             let builder = crate::query::QueryBuilder::new().scan_label(label);
-            match builder.execute(&self.db) {
+            match builder.execute(self.db.as_ref()) {
                 Ok(mut results) => {
                     // Efficiently count without allocating a Vec
                     match results.try_fold(0usize, |acc, row| row.map(|_| acc + 1)) {
@@ -1965,7 +1965,7 @@ impl AletheiaMcpServer {
             };
 
             // Execute and collect results
-            match builder.limit(limit).execute(&self.db) {
+            match builder.limit(limit).execute(self.db.as_ref()) {
                 Ok(results) => match results.collect_all() {
                     Ok(rows) => {
                         let hybrid_results = rows_to_results(rows);
@@ -1998,7 +1998,7 @@ impl AletheiaMcpServer {
 
             let builder = crate::query::QueryBuilder::new().find_similar(embedding, k);
 
-            match builder.limit(limit).execute(&self.db) {
+            match builder.limit(limit).execute(self.db.as_ref()) {
                 Ok(results) => match results.collect_all() {
                     Ok(rows) => {
                         let hybrid_results = rows_to_results(rows);
@@ -2016,7 +2016,7 @@ impl AletheiaMcpServer {
             // Label scan query
             let builder = crate::query::QueryBuilder::new().scan_label(label);
 
-            match builder.limit(limit).execute(&self.db) {
+            match builder.limit(limit).execute(self.db.as_ref()) {
                 Ok(results) => match results.collect_all() {
                     Ok(rows) => {
                         let hybrid_results = rows_to_results(rows);

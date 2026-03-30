@@ -55,7 +55,7 @@
 //! let results = db.query()
 //!     .start(alice_id)
 //!     .traverse("KNOWS")
-//!     .execute(&db)
+//!     .execute(db.as_ref())
 //!     .expect("Query failed");
 //! ```
 //!

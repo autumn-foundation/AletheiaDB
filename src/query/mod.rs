@@ -50,7 +50,7 @@
 //!     .traverse("KNOWS")              // Find people Alice knows
 //!     .traverse("WROTE")              // Find documents they wrote
 //!     .rank_by_similarity(&rust_embedding, 10) // Rank by content similarity
-//!     .execute(&db)?;
+//!     .execute(db.as_ref())?;
 //! # Ok(())
 //! # }
 //! ```
@@ -72,7 +72,7 @@
 //!     .as_of(time_2023, tx_time)      // Set temporal context
 //!     .start(node_id)
 //!     .traverse("KNOWS")              // Traversal respects history
-//!     .execute(&db)?;
+//!     .execute(db.as_ref())?;
 //! # Ok(())
 //! # }
 //! ```

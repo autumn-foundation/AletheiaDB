@@ -397,7 +397,7 @@ impl QueryBuilder<state::HasNodes> {
     /// let results = db.query()
     ///     .start(node_id)
     ///     .similar_to(bob_id, 10)
-    ///     .execute(&db)?;
+    ///     .execute(db.as_ref())?;
     /// # Ok(())
     /// # }
     /// ```
@@ -450,7 +450,7 @@ impl QueryBuilder<state::HasNodes> {
     ///         .property("custom_embedding")
     ///         .label_filter("Document")
     ///         .finish()
-    ///     .execute(&db)?;
+    ///     .execute(db.as_ref())?;
     /// # Ok(())
     /// # }
     /// ```
@@ -588,7 +588,7 @@ impl<S: QueryState> QueryBuilder<S> {
     ///     .as_of_valid_time(jan_15)
     ///     .start(alice_id)
     ///     .traverse("KNOWS")
-    ///     .execute(&db)?;
+    ///     .execute(db.as_ref())?;
     /// ```
     #[must_use]
     pub fn as_of_valid_time(mut self, valid_time: Timestamp) -> Self {
@@ -610,7 +610,7 @@ impl<S: QueryState> QueryBuilder<S> {
     /// let results = db.query()
     ///     .as_of_transaction_time(jan_15)
     ///     .start(alice_id)
-    ///     .execute(&db)?;
+    ///     .execute(db.as_ref())?;
     /// ```
     #[must_use]
     pub fn as_of_transaction_time(mut self, transaction_time: Timestamp) -> Self {
@@ -638,7 +638,7 @@ impl<S: QueryState> QueryBuilder<S> {
     ///     .valid_time_between(jan_1, mar_31)
     ///     .start(alice_id)
     ///     .traverse("KNOWS")
-    ///     .execute(&db)?;
+    ///     .execute(db.as_ref())?;
     /// ```
     #[must_use]
     pub fn valid_time_between(mut self, start: Timestamp, end: Timestamp) -> Self {
@@ -665,7 +665,7 @@ impl<S: QueryState> QueryBuilder<S> {
     /// let results = db.query()
     ///     .transaction_time_between(jan_1, mar_31)
     ///     .start(alice_id)
-    ///     .execute(&db)?;
+    ///     .execute(db.as_ref())?;
     /// ```
     #[must_use]
     pub fn transaction_time_between(mut self, start: Timestamp, end: Timestamp) -> Self {
@@ -778,6 +778,7 @@ impl<S: QueryState> QueryBuilder<S> {
     ///
     /// ```rust,no_run
     /// use aletheiadb::AletheiaDB;
+    /// use aletheiadb::query::traits::GraphView;
     /// use aletheiadb::core::NodeId;
     ///
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -787,7 +788,7 @@ impl<S: QueryState> QueryBuilder<S> {
     /// let results = db.query()
     ///     .start(alice_id)
     ///     .traverse("KNOWS")
-    ///     .execute(&db)?;
+    ///     .execute(db.as_ref())?;
     ///
     /// for row in results {
     ///     let row = row?;
@@ -798,7 +799,7 @@ impl<S: QueryState> QueryBuilder<S> {
     /// ```
     pub fn execute(
         self,
-        db: &crate::AletheiaDB,
+        db: &dyn crate::query::traits::GraphView,
     ) -> crate::core::error::Result<super::executor::QueryResults> {
         let query = self.build();
         db.execute_query(query)

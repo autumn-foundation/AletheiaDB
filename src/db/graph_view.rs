@@ -110,4 +110,8 @@ impl GraphView for AletheiaDB {
     ) -> Result<Vec<(NodeId, f32)>> {
         self.find_similar_as_of(embedding, k, timestamp)
     }
+
+    fn execute_query(&self, query: crate::query::Query) -> Result<crate::query::QueryResults> {
+        self.execute_query(query)
+    }
 }

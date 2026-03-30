@@ -9,6 +9,9 @@ use crate::core::temporal::Timestamp;
 /// query algorithms to operate on any source that provides graph access.
 /// It effectively decouples the query engine from the storage engine.
 pub trait GraphView {
+    /// Execute a query
+    fn execute_query(&self, query: crate::query::Query) -> Result<crate::query::QueryResults>;
+
     /// Get a node by ID.
     fn get_node(&self, id: NodeId) -> Result<Node>;
 

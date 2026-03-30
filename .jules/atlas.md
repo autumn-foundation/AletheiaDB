@@ -79,3 +79,8 @@
 **[Broke Storage-API Dependency Cycle]
 **Tangle:** The `storage` module had an implementation of `From<&crate::api::transaction::BufferedWrite> for WalOperation` in `src/storage/wal/entry.rs`, meaning the underlying storage engine depended structurally on the public API layer.
 **Blueprint:** Moved the `From` implementation to `src/api/transaction/write_buffer.rs`. Now, the `api` module is aware of how its `BufferedWrite` converts into a `WalOperation` to send down to `storage`, enforcing a unidirectional dependency graph from `api` -> `storage`.
+
+
+## 2026-06-03 - Breaking Query/DB Circular Dependency
+**Tangle:** The `query` module depended on the `db` module because `QueryBuilder::execute` accepted `&AletheiaDB` and tests instantiated it directly. Meanwhile, `db` depended on `query` to parse and execute queries, forming a circular dependency cycle.
+**Blueprint:** Added `execute_query` to the `GraphView` trait in `query::traits`. Implemented it for `AletheiaDB` in `db::graph_view`. Changed `QueryBuilder::execute` to accept `&dyn GraphView`. Extracted all tests instantiating `AletheiaDB` from `query::hybrid` and `query::semantic_pathfinding` into `db::tests`.
