@@ -26,8 +26,8 @@
 
 use aletheiadb::core::error::Result;
 use aletheiadb::core::id::NodeId;
-use aletheiadb::index::vector::hnsw::{HnswConfig, HnswIndex};
 use aletheiadb::index::vector::{DistanceMetric, VectorIndex};
+use aletheiadb::index::vector::{HnswConfig, HnswIndex};
 
 /// Test that add() accepts slices and doesn't require Vec allocation per call.
 ///

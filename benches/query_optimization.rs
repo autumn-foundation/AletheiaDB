@@ -13,7 +13,7 @@ mod common;
 
 use aletheiadb::PropertyMapBuilder;
 use aletheiadb::core::NodeId;
-use aletheiadb::index::vector::{DistanceMetric, hnsw::HnswConfig};
+use aletheiadb::index::vector::{DistanceMetric, HnswConfig};
 use aletheiadb::query::builder::QueryBuilder;
 use aletheiadb::query::planner::{QueryPlanner, Statistics};
 use aletheiadb::storage::CurrentStorage;

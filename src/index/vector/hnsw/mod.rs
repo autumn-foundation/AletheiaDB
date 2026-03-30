@@ -18,11 +18,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use usearch::{Index, IndexOptions, MetricKind, ScalarKind, ffi::Matches};
 
 /// HNSW configuration and builder.
-pub mod config;
+pub(crate) mod config;
 /// Persistence logic for HNSW index.
-pub mod persistence;
+pub(crate) mod persistence;
 /// Statistics for HNSW index.
-pub mod stats;
+pub(crate) mod stats;
 
 #[cfg(test)]
 mod tests;

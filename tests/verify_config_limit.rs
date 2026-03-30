@@ -1,7 +1,7 @@
 use aletheiadb::core::id::NodeId;
 use aletheiadb::index::vector::DistanceMetric;
-use aletheiadb::index::vector::hnsw::HnswConfig;
-use aletheiadb::index::vector::temporal::{
+use aletheiadb::index::vector::HnswConfig;
+use aletheiadb::index::vector::{
     RetentionPolicy, SnapshotStrategy, TemporalVectorConfig, TemporalVectorIndex,
 };
 

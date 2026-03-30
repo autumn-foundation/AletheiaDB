@@ -714,10 +714,10 @@ mod tests {
 }
 
 // HNSW implementation
-pub mod hnsw;
+pub(crate) mod hnsw;
 
 // Temporal vector index (Phase 3)
-pub mod temporal;
+pub(crate) mod temporal;
 
 // Re-export HNSW types for convenience
 pub use hnsw::{HnswConfig, HnswIndex, HnswIndexBuilder};
@@ -729,7 +729,7 @@ pub use temporal::{
 };
 
 // Sparse vector index (Phase 5)
-pub mod sparse;
+pub(crate) mod sparse;
 
 // Re-export sparse types for convenience
 pub use sparse::{
@@ -738,7 +738,7 @@ pub use sparse::{
 };
 
 // Sharded vector index (VS-103)
-pub mod sharded;
+pub(crate) mod sharded;
 
 // Re-export sharded types for convenience
 pub use sharded::{
@@ -747,7 +747,7 @@ pub use sharded::{
 };
 
 // Distributed vector index (VS-107)
-pub mod distributed;
+pub(crate) mod distributed;
 
 // Re-export distributed types for convenience
 pub use distributed::{

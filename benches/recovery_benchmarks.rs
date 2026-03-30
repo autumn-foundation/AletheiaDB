@@ -25,7 +25,7 @@ use aletheiadb::core::interning::GLOBAL_INTERNER;
 use aletheiadb::core::property::PropertyMapBuilder;
 use aletheiadb::core::temporal::time;
 use aletheiadb::index::vector::DistanceMetric;
-use aletheiadb::index::vector::hnsw::HnswConfig;
+use aletheiadb::index::vector::HnswConfig;
 use aletheiadb::storage::current::CurrentStorage;
 use aletheiadb::storage::historical::HistoricalStorage;
 use aletheiadb::storage::wal::WalOperation;

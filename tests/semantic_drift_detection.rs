@@ -6,10 +6,10 @@
 use aletheiadb::core::error::Result;
 use aletheiadb::core::id::NodeId;
 use aletheiadb::core::temporal::TimeRange;
-use aletheiadb::index::vector::temporal::{
+use aletheiadb::index::vector::{DistanceMetric, HnswConfig};
+use aletheiadb::index::vector::{
     DriftMetric, RetentionPolicy, SnapshotStrategy, TemporalVectorConfig, TemporalVectorIndex,
 };
-use aletheiadb::index::vector::{DistanceMetric, HnswConfig};
 
 /// Creates a normalized vector from raw values.
 fn normalize(v: &[f32]) -> Vec<f32> {

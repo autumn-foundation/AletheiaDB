@@ -1,6 +1,6 @@
 use aletheiadb::core::id::NodeId;
-use aletheiadb::index::vector::hnsw::{HnswConfig, HnswIndex};
 use aletheiadb::index::vector::{DistanceMetric, VectorIndex};
+use aletheiadb::index::vector::{HnswConfig, HnswIndex};
 use std::time::Instant;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

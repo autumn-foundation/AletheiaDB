@@ -5,7 +5,7 @@
 
 use aletheiadb::{
     AletheiaDB, DistanceMetric, Error, HnswConfig, PropertyMapBuilder, ReadOps, WriteOps,
-    index::vector::temporal::TemporalVectorConfig, storage::version::AnchorConfig,
+    index::vector::TemporalVectorConfig, storage::version::AnchorConfig,
 };
 
 #[test]

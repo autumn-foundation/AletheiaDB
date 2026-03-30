@@ -11,10 +11,10 @@ mod common;
 
 use aletheiadb::core::id::NodeId;
 use aletheiadb::core::temporal::TimeRange;
-use aletheiadb::index::vector::temporal::{
+use aletheiadb::index::vector::{DistanceMetric, HnswConfig, HnswIndex, VectorIndex};
+use aletheiadb::index::vector::{
     RetentionPolicy, SnapshotStrategy, TemporalVectorConfig, TemporalVectorIndex,
 };
-use aletheiadb::index::vector::{DistanceMetric, HnswConfig, HnswIndex, VectorIndex};
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use std::hint::black_box;
 use std::sync::Arc;

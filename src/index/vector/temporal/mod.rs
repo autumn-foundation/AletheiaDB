@@ -92,12 +92,12 @@ use crate::index::vector::{DistanceMetric, TemporalSearchResults, VectorIndex};
 
 // Submodules
 /// Configuration types for temporal vector indexing.
-pub mod config;
+pub(crate) mod config;
 /// Observers for reacting to storage events.
-pub mod observer;
+pub(crate) mod observer;
 pub(crate) mod snapshot;
 /// Statistics and monitoring types.
-pub mod stats;
+pub(crate) mod stats;
 
 // Re-exports
 pub use config::{DriftMetric, RetentionPolicy, SnapshotStrategy, TemporalVectorConfig};

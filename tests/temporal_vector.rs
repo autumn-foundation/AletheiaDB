@@ -10,10 +10,10 @@
 use aletheiadb::core::error::Result;
 use aletheiadb::core::id::NodeId;
 use aletheiadb::core::temporal::{TimeRange, time};
-use aletheiadb::index::vector::temporal::{
+use aletheiadb::index::vector::{DistanceMetric, HnswConfig};
+use aletheiadb::index::vector::{
     RetentionPolicy, SnapshotStrategy, TemporalVectorConfig, TemporalVectorIndex,
 };
-use aletheiadb::index::vector::{DistanceMetric, HnswConfig};
 use std::time::Duration;
 
 /// Helper to create a test temporal vector index with default config

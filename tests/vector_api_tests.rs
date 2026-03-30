@@ -3,10 +3,10 @@ use aletheiadb::Error;
 use aletheiadb::WriteOps;
 use aletheiadb::core::id::NodeId;
 use aletheiadb::core::property::PropertyMapBuilder;
-use aletheiadb::index::vector::temporal::{
+use aletheiadb::index::vector::{DistanceMetric, HnswConfig};
+use aletheiadb::index::vector::{
     DriftMetric, RetentionPolicy, SnapshotStrategy, TemporalVectorConfig,
 };
-use aletheiadb::index::vector::{DistanceMetric, HnswConfig};
 use std::sync::Arc;
 use std::thread;
 

@@ -736,10 +736,8 @@ fn populate_database(demo: &mut DemoData) -> Result<()> {
     // 1. Current index: for fast similarity searches (find_similar)
     // 2. Temporal index: for tracking semantic drift over time
     println!("\n  Setting up vector indexes...");
-    use aletheiadb::index::vector::temporal::{
-        RetentionPolicy, SnapshotStrategy, TemporalVectorConfig,
-    };
     use aletheiadb::index::vector::{DistanceMetric, HnswConfig};
+    use aletheiadb::index::vector::{RetentionPolicy, SnapshotStrategy, TemporalVectorConfig};
 
     let hnsw_config = HnswConfig::new(384, DistanceMetric::Cosine);
 

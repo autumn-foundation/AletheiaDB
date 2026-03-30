@@ -1,4 +1,4 @@
-use aletheiadb::index::vector::temporal::TemporalVectorConfig;
+use aletheiadb::index::vector::TemporalVectorConfig;
 use aletheiadb::{AletheiaDB, DistanceMetric, HnswConfig, properties};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

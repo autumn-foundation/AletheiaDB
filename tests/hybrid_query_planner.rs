@@ -1171,9 +1171,7 @@ fn test_direct_traverse_and_rank_with_different_label() {
 #[test]
 #[ignore = "Temporal + Vector query pattern not yet implemented in planner (Phase 3)"]
 fn test_temporal_vector_query() {
-    use aletheiadb::index::vector::temporal::{
-        RetentionPolicy, SnapshotStrategy, TemporalVectorConfig,
-    };
+    use aletheiadb::index::vector::{RetentionPolicy, SnapshotStrategy, TemporalVectorConfig};
 
     // Create database with temporal vector indexing
     let db = AletheiaDB::with_config(AnchorConfig {

@@ -14,10 +14,8 @@ use aletheiadb::core::id::NodeId;
 use aletheiadb::core::property::PropertyMapBuilder;
 use aletheiadb::core::vector::cosine_similarity;
 use aletheiadb::db::AletheiaDB;
-use aletheiadb::index::vector::temporal::{
-    RetentionPolicy, SnapshotStrategy, TemporalVectorConfig,
-};
 use aletheiadb::index::vector::{DistanceMetric, HnswConfig};
+use aletheiadb::index::vector::{RetentionPolicy, SnapshotStrategy, TemporalVectorConfig};
 use aletheiadb::query::hybrid::{find_similar_as_of, traverse_and_rank};
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use std::cmp::Ordering;
