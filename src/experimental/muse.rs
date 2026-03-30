@@ -52,6 +52,42 @@ impl<'a> Muse<'a> {
     /// * `nodes` - The source nodes to combine.
     /// * `property` - The vector property to use (optional, defaults to first available).
     /// * `limit` - Max number of nearby concepts to return for context.
+    /// # Examples
+    ///
+    /// ```rust
+    /// # #[cfg(feature = "nova")]
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// use aletheiadb::prelude::*;
+    /// use aletheiadb::index::vector::{DistanceMetric, HnswConfig};
+    /// use aletheiadb::experimental::muse::Muse;
+    ///
+    /// let db = AletheiaDB::new().unwrap();
+    /// db.enable_vector_index("vector", HnswConfig::new(3, DistanceMetric::Cosine)).unwrap();
+    ///
+    /// // Create concepts
+    /// let node1 = db.write(|tx| {
+    ///     tx.create_node("Concept", properties! {
+    ///         "vector" => vec![1.0, 0.0, 0.0]
+    ///     })
+    /// })?;
+    ///
+    /// let node2 = db.write(|tx| {
+    ///     tx.create_node("Concept", properties! {
+    ///         "vector" => vec![0.0, 1.0, 0.0]
+    ///     })
+    /// })?;
+    ///
+    /// let muse = Muse::new(&db);
+    /// if let Some(inspiration) = muse.inspire(&[node1, node2], Some("vector"), 5)? {
+    ///     assert_eq!(inspiration.centroid.len(), 3);
+    ///     // Since no other nodes exist in the void, novelty should be high
+    ///     assert!(inspiration.novelty_score > 0.0);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// # #[cfg(not(feature = "nova"))]
+    /// # fn main() {}
+    /// ```
     pub fn inspire(
         &self,
         nodes: &[NodeId],
