@@ -247,6 +247,7 @@ pub struct VectorResultIterator {
 }
 
 impl VectorResultIterator {
+    /// Create a new VectorResultIterator.
     pub fn new(results: Vec<(NodeId, f32)>, current: Arc<CurrentStorage>) -> Self {
         VectorResultIterator {
             results: results.into_iter(),
@@ -328,6 +329,7 @@ pub struct TemporalNodeIterator {
 }
 
 impl TemporalNodeIterator {
+    /// Create a new TemporalNodeIterator.
     pub fn new(
         node_ids: Vec<NodeId>,
         valid_time: Timestamp,
