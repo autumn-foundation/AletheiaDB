@@ -339,3 +339,10 @@
 **Finding:** The FNV-1a fallback tests for `IdentityHasher` (`test_identity_hasher_write_fallback_fnv` and `test_identity_hasher_write_fallback_fnv_dirty`) were tautological. They exactly mirrored the source implementation by reconstructing the FNV-1a multiplication and XOR sequence to generate their `expected` values. This meant they only asserted that "the code is the code" and provided no independent verification that the hashing logic was correct or consistent with standard FNV-1a.
 **Evidence:** The original tests explicitly copied the sequence `expected ^= 1; expected = expected.wrapping_mul(FNV_PRIME);` which exactly mirrors the `write` loop. Any mutation altering `FNV_PRIME` or the operation order would survive if the same change was incorrectly made to the test or if it was inherently flawed.
 **Recommendation:** Refactored the tests to use independently pre-computed integer constants as the `expected` values (the Oracle Problem solution). This ensures the implementation matches the ground truth rather than itself.
+
+**[ISO8601 Oracle Tautology]**
+**Module:** `src/core/temporal.rs`
+**Severity:** 🔴 Critical
+**Finding:** The tests `test_sentry_iso8601_format_content` and `test_sentry_iso8601_precision` violated test independence by dynamically reconstructing the `SystemTime` debug output using `secs.to_string()` and checking with `.contains()`. This is a classic "Mirror Test" tautology / Oracle Problem where the test only verifies that the implementation output matches a dynamic reconstruction, failing to protect against arithmetic mutations or formatting changes.
+**Evidence:** The original tests asserted `output.contains(&secs.to_string())` and `output.contains("123456000")` rather than verifying the exact hardcoded string output expected from `time::to_iso8601`.
+**Recommendation:** Refactored tests to use independently derived, hardcoded string values for expected assertions with strict `assert_eq!` (e.g., `"SystemTime { tv_sec: 1609459200, tv_nsec: 123456000 }"`), including explicit `#[cfg(windows)]` and `#[cfg(not(windows))]` branches to handle platform-specific debug formats without dynamic reconstruction.

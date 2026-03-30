@@ -1636,33 +1636,23 @@ mod sentry_tests {
     #[test]
     fn test_sentry_iso8601_format_content() {
         // 🛡️ Sentry Test: Verify time::to_iso8601 produces expected content.
-        // This targets arithmetic mutants (e.g., replacing / with %) that would produce
-        // wildly incorrect second values in the output string.
-
+        // Elenchus Verification: Explicitly use hardcoded Oracle strings instead of dynamically deriving them,
+        // which prevents the "Mirror Test" tautology.
         let secs = 1609459200; // 2021-01-01 00:00:00 UTC
         let ts = time::from_secs(secs);
         let output = time::to_iso8601(ts);
 
-        if cfg!(windows) {
-            // On Windows, SystemTime debug format is "SystemTime { intervals: <count> }"
-            // intervals are 100ns ticks since 1601-01-01
-            // 1609459200 seconds (Unix epoch to 2021) + 11644473600 seconds (1601 to 1970)
-            // = 13253932800 seconds total
-            // * 10,000,000 (ticks per second) = 132539328000000000
-            let expected = "132539328000000000";
-            assert!(
-                output.contains(expected),
-                "to_iso8601 output should contain expected intervals on Windows. Got: {}",
-                output
-            );
-        } else {
-            // On Unix-like systems, Debug format usually contains "tv_sec: <seconds>"
-            assert!(
-                output.contains(&secs.to_string()),
-                "to_iso8601 output should contain the seconds timestamp. Got: {}",
-                output
-            );
-        }
+        #[cfg(windows)]
+        assert_eq!(
+            output, "SystemTime { intervals: 132539328000000000 }",
+            "to_iso8601 output should be exact SystemTime intervals string on Windows."
+        );
+
+        #[cfg(not(windows))]
+        assert_eq!(
+            output, "SystemTime { tv_sec: 1609459200, tv_nsec: 0 }",
+            "to_iso8601 output should be exact SystemTime tv_sec string on Unix."
+        );
     }
 
     #[test]
@@ -1724,38 +1714,24 @@ mod sentry_tests {
     #[test]
     fn test_sentry_iso8601_precision() {
         // 🛡️ Sentry Test: Verify sub-second precision in ISO 8601 output.
-        // This targets mutants that break nanosecond calculation.
+        // Elenchus Verification: Explicitly use hardcoded Oracle strings to prevent tautology and assert exact string formats.
 
         let secs = 1609459200;
         let micros = 123456;
         let ts = HybridTimestamp::new_unchecked(secs * 1_000_000 + micros, 0);
         let output = time::to_iso8601(ts);
 
-        // Expected nanoseconds: 123456000
-        if cfg!(windows) {
-            // On Windows, SystemTime debug format is "SystemTime { intervals: <count> }"
-            // intervals are 100ns ticks since 1601-01-01.
-            // Base seconds (1601 to 1970) = 11644473600.
-            // Target seconds (1970 to 2021) = 1609459200.
-            // Total seconds = 13253932800.
-            // Total ticks from seconds = 13253932800 * 10_000_000 = 132539328000000000.
-            // Ticks from microseconds = 123456 * 10 = 1234560.
-            // Total ticks = 132539328001234560.
-            // We check for the fractional part contribution or the exact tick count.
-            // Since the output observed is "intervals: 132539328001234560", we check for that suffix.
-            assert!(
-                output.contains("1234560"),
-                "Output should contain the fractional ticks (1234560): {}",
-                output
-            );
-        } else {
-            // On Unix-like systems, Debug format usually contains "tv_nsec: 123456000".
-            assert!(
-                output.contains("123456000"),
-                "Output should contain nanoseconds (123456000): {}",
-                output
-            );
-        }
+        #[cfg(windows)]
+        assert_eq!(
+            output, "SystemTime { intervals: 132539328001234560 }",
+            "Output should exactly match the intervals on Windows."
+        );
+
+        #[cfg(not(windows))]
+        assert_eq!(
+            output, "SystemTime { tv_sec: 1609459200, tv_nsec: 123456000 }",
+            "Output should exactly match the tv_sec and tv_nsec on Unix."
+        );
     }
 
     #[test]
