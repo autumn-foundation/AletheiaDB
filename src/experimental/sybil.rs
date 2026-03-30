@@ -389,4 +389,37 @@ mod tests {
         let state_2 = sybil.simulate("val", &model, 2).unwrap();
         assert_eq!(state_2.get(&node_c).unwrap(), &[1.0]);
     }
+
+    #[test]
+    fn test_linear_propagation_no_state_adopts_avg() {
+        let alpha = 0.5;
+        let model = LinearPropagation::new(alpha);
+        let neighbors: Vec<(NodeId, &[f32])> = vec![
+            (NodeId::new(1).unwrap(), &[1.0, 1.0]),
+            (NodeId::new(2).unwrap(), &[3.0, 3.0]),
+        ];
+        let next = model.next_state(NodeId::new(0).unwrap(), None, &neighbors);
+        assert_eq!(next, Some(vec![2.0, 2.0]));
+    }
+
+    #[test]
+    fn test_linear_propagation_mismatched_dimensions() {
+        let alpha = 0.5;
+        let model = LinearPropagation::new(alpha);
+        let self_vec: &[f32] = &[0.0];
+        let neighbors: Vec<(NodeId, &[f32])> = vec![
+            (NodeId::new(1).unwrap(), &[1.0, 1.0]), // Dim 2 vs Dim 1
+        ];
+        let next = model.next_state(NodeId::new(0).unwrap(), Some(self_vec), &neighbors);
+        assert_eq!(next, Some(vec![0.0]));
+    }
+
+    #[test]
+    fn test_linear_propagation_empty_neighbors() {
+        let alpha = 0.5;
+        let model = LinearPropagation::new(alpha);
+        let self_vec: &[f32] = &[0.0];
+        let next = model.next_state(NodeId::new(0).unwrap(), Some(self_vec), &[]);
+        assert_eq!(next, Some(vec![0.0]));
+    }
 }

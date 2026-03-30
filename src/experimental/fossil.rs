@@ -278,4 +278,48 @@ mod tests {
         );
         assert!(result.fossil_index > 1.0, "Fossil index should be high");
     }
+
+    #[test]
+    fn test_fossil_detection_dimension_mismatch() {
+        let db = AletheiaDB::new().unwrap();
+        let mut node = NodeId::new(0).unwrap();
+        db.write(|tx| {
+            node = tx
+                .create_node(
+                    "Concept",
+                    PropertyMapBuilder::new()
+                        .insert_vector("vec", &[0.0, 0.0])
+                        .build(),
+                )
+                .unwrap();
+            Ok::<(), crate::core::error::Error>(())
+        })
+        .unwrap();
+
+        let start = time::now();
+        std::thread::sleep(Duration::from_millis(10));
+
+        db.write(|tx| {
+            tx.update_node(
+                node,
+                PropertyMapBuilder::new()
+                    .insert_vector("vec", &[0.0, 0.0, 0.0]) // Changed dimension
+                    .build(),
+            )
+            .unwrap();
+            Ok::<(), crate::core::error::Error>(())
+        })
+        .unwrap();
+
+        let end = time::now();
+        let window = TimeRange::new(start, end).unwrap();
+        let detector = FossilDetector::new(&db);
+
+        let result = detector.detect_fossil(node, window, "vec");
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "Dimension mismatch between start and end vectors"
+        );
+    }
 }

@@ -22,3 +22,10 @@
 ## Panic Risks in Query Iterators and Mock Clients
 **Learning:** `unwrap()` inside iterator implementations (like `VectorRerankIterator::next`) or trait implementations for mock clients (like `MockVectorNodeClient`) pose a significant availability risk, as a panic can crash the thread handling the query or the entire database process.
 **Action:** Always gracefully handle `None` on iterators (returning `None` or propagating errors) and map lock poisoning errors (`PoisonError`) to domain-specific errors (e.g. `VectorError`) to ensure the system degrades gracefully instead of crashing during simulated faults or unexpected states.
+
+**Experimental Features Missing Coverage**
+**Learning:** Experimental modules like `sybil`, `fossil`, and `temporal_diff` have partial coverage that miss fundamental components:
+- `sybil` lacked tests for `LinearPropagation` handling of default states, mismatched dimensions, and empty neighbor lists.
+- `fossil` lacked validation logic tests for the error paths of dimension mismatches.
+- `temporal_diff` completely missed covering `EntityChange::Edge` generation.
+**Action:** When working in the experimental/ folder, trace match statements over enums and ensure every branch (`Edge` vs `Node`, `None` vs `Some`) and early-return error paths are explicitly checked.

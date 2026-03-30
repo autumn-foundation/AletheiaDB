@@ -251,6 +251,7 @@ mod tests {
     use crate::api::transaction::WriteOps;
     use crate::core::property::PropertyMapBuilder;
     use crate::core::temporal::time;
+    use std::time::Duration;
 
     #[test]
     fn test_temporal_diff_lifecycle() {
@@ -417,5 +418,40 @@ mod tests {
             !diff_changed.is_empty(),
             "Diff with changed should not be empty"
         );
+    }
+
+    #[test]
+    fn test_temporal_diff_edge_changes() {
+        let db = AletheiaDB::new().unwrap();
+        let t0 = time::now();
+        std::thread::sleep(Duration::from_millis(10));
+        let n1 = db
+            .create_node("Node", PropertyMapBuilder::new().build())
+            .unwrap();
+        let n2 = db
+            .create_node("Node", PropertyMapBuilder::new().build())
+            .unwrap();
+        let props1 = PropertyMapBuilder::new().insert("weight", 1.0).build();
+        let edge_id = db.create_edge(n1, n2, "LINK", props1).unwrap();
+        let t1 = time::now();
+        std::thread::sleep(Duration::from_millis(10));
+        let props2 = PropertyMapBuilder::new().insert("weight", 2.0).build();
+        db.write(|tx| tx.update_edge(edge_id, props2)).unwrap();
+        let t2 = time::now();
+        std::thread::sleep(Duration::from_millis(10));
+        db.write(|tx| tx.delete_edge(edge_id)).unwrap();
+        let t3 = time::now();
+        let diff_engine = TemporalDiff::new(&db);
+
+        let diff1 = diff_engine.compute_diff(t0, t1, None).unwrap();
+        assert!(diff1.changes.iter().any(
+            |c| matches!(c, EntityChange::Edge { id, change: ChangeType::Added } if *id == edge_id)
+        ));
+
+        let diff2 = diff_engine.compute_diff(t1, t2, None).unwrap();
+        assert!(diff2.changes.iter().any(|c| matches!(c, EntityChange::Edge { id, change: ChangeType::Modified { .. } } if *id == edge_id)));
+
+        let diff3 = diff_engine.compute_diff(t2, t3, None).unwrap();
+        assert!(diff3.changes.iter().any(|c| matches!(c, EntityChange::Edge { id, change: ChangeType::Removed } if *id == edge_id)));
     }
 }
