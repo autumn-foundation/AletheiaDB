@@ -12,3 +12,13 @@
 **Bloat:** `StorageSnapshot` and `FieldHolder` traits.
 **Cut:** Deleted single-implementation traits `StorageSnapshot` (implemented only by `CurrentStorageSnapshot`) and `FieldHolder` (implemented only by `Event`, unused except in tests). Moved methods directly to structs.
 **Saved:** ~50 lines of boilerplate + cognitive load of unnecessary abstraction layers.
+
+## [Reduction]
+**Bloat:** `VectorNodeClient` trait (Single-implementation abstraction used only by `MockVectorNodeClient`).
+**Cut:** Deleted the `VectorNodeClient` trait. Refactored `DistributedVectorIndex` and `NodeConnection` to depend directly on the concrete `MockVectorNodeClient` struct, removing the `<C: VectorNodeClient>` generic parameter.
+**Saved:** ~30 lines of boilerplate trait definitions + removed unnecessary generic abstractions across the distributed index module.
+
+## [Reduction]
+**Bloat:** `GraphView` trait (Single-implementation abstraction used only by `AletheiaDB`).
+**Cut:** Deleted the `GraphView` trait and the `src/db/graph_view.rs` adapter module. Refactored the query engine (`hybrid.rs`, `semantic_pathfinding.rs`) to depend directly on `&AletheiaDB` instead of generic `<G: GraphView>` bounds.
+**Saved:** ~100 lines of boilerplate (trait definitions, adapter implementation) + removed unnecessary generic indirection in the query execution path.
