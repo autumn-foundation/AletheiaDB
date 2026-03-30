@@ -14,9 +14,8 @@
 use aletheiadb::{
     core::{PropertyMapBuilder, id::NodeId, interning::GLOBAL_INTERNER, temporal::time},
     storage::wal::{
-        WalOperation,
+        DurabilityMode, WalOperation,
         concurrent_system::{ConcurrentWalSystem, ConcurrentWalSystemConfig},
-        durability::DurabilityMode,
     },
 };
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};

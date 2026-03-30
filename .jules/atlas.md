@@ -79,3 +79,7 @@
 **[Broke Storage-API Dependency Cycle]
 **Tangle:** The `storage` module had an implementation of `From<&crate::api::transaction::BufferedWrite> for WalOperation` in `src/storage/wal/entry.rs`, meaning the underlying storage engine depended structurally on the public API layer.
 **Blueprint:** Moved the `From` implementation to `src/api/transaction/write_buffer.rs`. Now, the `api` module is aware of how its `BufferedWrite` converts into a `WalOperation` to send down to `storage`, enforcing a unidirectional dependency graph from `api` -> `storage`.
+
+## 2026-05-25 - Encapsulating Storage Submodules (index_persistence, sharding, wal)
+**Tangle:** The `src/storage/index_persistence/mod.rs`, `src/storage/sharding/mod.rs`, and `src/storage/wal.rs` modules exposed all of their internal implementation submodules publicly via `pub mod`. This creates a "Leaky Abstraction" smell where consumers of these systems can bypass the intended public API and depend on internal structs and logic.
+**Blueprint:** Refactored module declarations from `pub mod` to `pub(crate) mod` in these modules, strictly enforcing module boundaries. Tests and benchmarks were updated to use exported API types.

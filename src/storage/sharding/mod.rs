@@ -46,15 +46,15 @@
 
 pub mod config;
 pub mod coordinator;
-pub mod executor;
-pub mod migration;
-pub mod network;
+pub(crate) mod executor;
+pub(crate) mod migration;
+pub(crate) mod network;
 pub mod persistent_commit_log;
-pub mod rebalance;
-pub mod router;
-pub mod rpc_client;
-pub mod simulation;
-pub mod transaction;
+pub(crate) mod rebalance;
+pub(crate) mod router;
+pub(crate) mod rpc_client;
+pub(crate) mod simulation;
+pub(crate) mod transaction;
 pub mod types;
 
 // Re-export commonly used types

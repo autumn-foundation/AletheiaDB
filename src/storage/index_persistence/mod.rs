@@ -84,17 +84,17 @@ mod error;
 pub mod formats;
 pub mod graph;
 pub mod loader;
-pub mod manifest;
+pub(crate) mod manifest;
 /// Persistence operations implementation.
-pub mod operations;
-pub mod strings;
+pub(crate) mod operations;
+pub(crate) mod strings;
 pub mod temporal;
 pub mod temporal_adjacency;
 /// Persistence mutation tracking.
-pub mod tracker;
+pub(crate) mod tracker;
 pub mod vector;
 /// Background persistence worker thread.
-pub mod worker;
+pub(crate) mod worker;
 
 #[cfg(test)]
 mod dos_tests;

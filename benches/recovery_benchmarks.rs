@@ -29,7 +29,7 @@ use aletheiadb::index::vector::hnsw::HnswConfig;
 use aletheiadb::storage::current::CurrentStorage;
 use aletheiadb::storage::historical::HistoricalStorage;
 use aletheiadb::storage::wal::WalOperation;
-use aletheiadb::storage::wal::concurrent_system::{ConcurrentWalSystem, ConcurrentWalSystemConfig};
+use aletheiadb::storage::wal::{ConcurrentWalSystem, ConcurrentWalSystemConfig};
 use aletheiadb::storage::{CheckpointManager, UnifiedCheckpointConfig};
 use criterion::{Criterion, criterion_group, criterion_main};
 use std::hint::black_box;

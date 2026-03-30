@@ -102,7 +102,7 @@
 //! - **20-50% throughput improvement** for batch sizes > 10
 
 // Durability mode support
-pub mod durability;
+pub(crate) mod durability;
 pub mod group_commit;
 
 // Concurrent WAL modules
@@ -116,7 +116,7 @@ pub mod stripe;
 
 // New modules for data structures and serialization
 pub mod entry;
-pub mod serialization;
+pub(crate) mod serialization;
 
 // Re-export key types
 pub use durability::{DurabilityMode, WriteOptions};
@@ -126,4 +126,5 @@ pub use group_commit::GroupCommitCoordinator;
 pub use entry::{LSN, WalEntry, WalOperation};
 
 // Re-export serialization helpers (needed by concurrent.rs via super::)
+pub use concurrent_system::{ConcurrentWalSystem, ConcurrentWalSystemConfig};
 pub(crate) use serialization::estimate_entry_capacity;
