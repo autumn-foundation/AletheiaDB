@@ -36,3 +36,6 @@
 2025-02-15 - [Warden: Replace unsafe transmute_vec with bytemuck::cast_vec]
 **Threat:** `Vec::from_raw_parts` was used in `AdjacencyIndex::import_csr` to transmute types without proper capacity checks, which can lead to Undefined Behavior.
 **Defense:** Replaced the `unsafe` block and `transmute_vec` with `bytemuck::cast_vec` for safe zero-copy transmutation. Added `bytemuck::Pod` and `bytemuck::Zeroable` derivations to `NodeId`.
+2026-02-15 - [Warden: Sparse Vector Dimension Memory Exhaustion DoS]
+**Threat:** `deserialize_sparse_vector` only validated `nnz` (number of non-zero elements) against the `MAX_VECTOR_DIMENSIONS` limit, allowing malicious payloads to define an unbounded `dimension` (e.g., 2 billion) for sparse vectors. If the system later attempted to convert this sparse vector to a dense vector via `.to_dense()`, it would attempt to allocate `vec![0.0; dimension]`, causing an Out-Of-Memory (OOM) panic and enabling a Denial of Service.
+**Defense:** Added an explicit `validate_vector_dimensions(dimension as usize)?;` check directly after reading the dimension from the bytes, cleanly rejecting payloads before they bypass standard validations.

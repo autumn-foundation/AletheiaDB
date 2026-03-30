@@ -332,6 +332,11 @@ pub fn deserialize_sparse_vector(bytes: &[u8]) -> Result<(Arc<SparseVec>, usize)
     }
 
     let dimension = u32::from_le_bytes(bytes[1..5].try_into().unwrap());
+
+    // Validate dimension first to prevent DoS via memory exhaustion from massive sparse vectors
+    // that might bypass SparseVec::new validation via early exit.
+    validate_vector_dimensions(dimension as usize)?;
+
     let nnz = u32::from_le_bytes(bytes[5..9].try_into().unwrap()) as usize;
 
     // Validate nnz doesn't exceed dimension
