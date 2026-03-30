@@ -339,3 +339,24 @@
 **Finding:** The FNV-1a fallback tests for `IdentityHasher` (`test_identity_hasher_write_fallback_fnv` and `test_identity_hasher_write_fallback_fnv_dirty`) were tautological. They exactly mirrored the source implementation by reconstructing the FNV-1a multiplication and XOR sequence to generate their `expected` values. This meant they only asserted that "the code is the code" and provided no independent verification that the hashing logic was correct or consistent with standard FNV-1a.
 **Evidence:** The original tests explicitly copied the sequence `expected ^= 1; expected = expected.wrapping_mul(FNV_PRIME);` which exactly mirrors the `write` loop. Any mutation altering `FNV_PRIME` or the operation order would survive if the same change was incorrectly made to the test or if it was inherently flawed.
 **Recommendation:** Refactored the tests to use independently pre-computed integer constants as the `expected` values (the Oracle Problem solution). This ensures the implementation matches the ground truth rather than itself.
+
+**[IdentityHasher Tautological Fallback Tests]**
+**Module:** `src/core/hasher.rs`
+**Severity:** 🔴 Critical
+**Finding:** The FNV-1a fallback tests for `IdentityHasher` (`test_identity_hasher_write_fallback_fnv` and `test_identity_hasher_write_fallback_fnv_dirty`) were tautological. They exactly mirrored the source implementation by using a `reference_fnv1a` function that perfectly duplicated the logic under test. This provided no independent verification that the hashing logic was actually correct according to standard FNV-1a.
+**Evidence:** The original tests copied the same loop logic. Mutations in FNV_PRIME or operation ordering would easily survive.
+**Recommendation:** Refactored tests to use independently pre-computed integer constants as the expected values (The Oracle Problem solution), and removed the tautological `reference_fnv1a` implementation.
+
+**[BiTemporalInterval Close Method Tautology & Weak Assertions]**
+**Module:** `src/core/temporal.rs`
+**Severity:** 🔴 Critical
+**Finding:** Tests for `BiTemporalInterval::close_valid_time`, `close_transaction_time`, and `close_both` had incomplete assertions. Mutants that replaced these methods with returning `Ok(BiTemporalInterval { valid_time: self.valid_time, transaction_time: self.transaction_time })` (i.e. ignoring the closing end time parameter) survived the existing test suite!
+**Evidence:** In `test_bitemporal_close`, the code verified that `.end()` matches the expected value, but didn't check if the start times of the valid and transaction times were properly preserved across the copy/close operation.
+**Recommendation:** Strengthened `test_bitemporal_close` to explicitly check `.start()` and `.end()` for both dimensions on all the returned intervals.
+
+**[TimeRange::at Max Boundary Verification Gap]**
+**Module:** `src/core/temporal.rs`
+**Severity:** 🟡 Suspect
+**Finding:** The `TimeRange::at` method explicitly allowed `timestamp <= MAX_VALID_TIMESTAMP`, but no test actually verified the exact maximum bound behavior `TimeRange::at(MAX_VALID_TIMESTAMP)`. Mutating the validation logic from `>` to `>=` survived the test suite.
+**Evidence:** Mutant replacing `timestamp.wallclock() > MAX_VALID_TIMESTAMP` with `timestamp.wallclock() >= MAX_VALID_TIMESTAMP` in `TimeRange::at` survived, indicating missing edge case coverage.
+**Recommendation:** Added `test_time_range_at_max_valid_timestamp_boundary` to explicitly enforce correctness at `MAX_VALID_TIMESTAMP`.

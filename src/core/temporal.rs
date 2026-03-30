@@ -849,17 +849,23 @@ mod tests {
         assert!(!closed_valid.is_currently_valid());
         assert!(closed_valid.is_currently_recorded());
         assert_eq!(closed_valid.valid_time().end(), 1500.into());
+        assert_eq!(closed_valid.valid_time().start(), 1000.into());
+        assert_eq!(closed_valid.transaction_time().start(), 2000.into());
 
         let closed_tx = interval.close_transaction_time(2500.into()).unwrap();
         assert!(closed_tx.is_currently_valid());
         assert!(!closed_tx.is_currently_recorded());
         assert_eq!(closed_tx.transaction_time().end(), 2500.into());
+        assert_eq!(closed_tx.valid_time().start(), 1000.into());
+        assert_eq!(closed_tx.transaction_time().start(), 2000.into());
 
         let closed_both = interval.close_both(1500.into(), 2500.into()).unwrap();
         assert!(!closed_both.is_currently_valid());
         assert!(!closed_both.is_currently_recorded());
         assert_eq!(closed_both.valid_time().end(), 1500.into());
         assert_eq!(closed_both.transaction_time().end(), 2500.into());
+        assert_eq!(closed_both.valid_time().start(), 1000.into());
+        assert_eq!(closed_both.transaction_time().start(), 2000.into());
     }
 
     #[test]
@@ -1888,6 +1894,22 @@ mod sentry_tests {
 
         let range = TimeRange::new(100.into(), 200.into()).unwrap();
         assert!(!range.is_empty(), "Range [100, 200) should not be empty");
+    }
+
+    #[test]
+    fn test_time_range_at_is_point() {
+        let r = TimeRange::at(100.into());
+        assert_eq!(r.start(), 100.into());
+        assert_eq!(r.end(), 100.into());
+    }
+
+    #[test]
+    fn test_time_range_at_max_valid_timestamp_boundary() {
+        // This is exactly the boundary condition.
+        let timestamp: Timestamp = MAX_VALID_TIMESTAMP.into();
+        let r = TimeRange::at(timestamp);
+        assert_eq!(r.start(), timestamp);
+        assert_eq!(r.end(), timestamp);
     }
 
     #[test]
