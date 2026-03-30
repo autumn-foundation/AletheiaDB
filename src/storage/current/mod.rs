@@ -1851,6 +1851,23 @@ impl CurrentStorage {
         self.indexes.iter_edges().map(|e| e.clone()).collect()
     }
 
+    /// Get node IDs by label.
+    ///
+    /// Returns the IDs of all nodes with the given label.
+    /// This is more memory-efficient than `get_nodes_by_label` when only IDs are needed,
+    /// as it avoids cloning the full node data.
+    pub fn get_node_ids_by_label(&self, label: &str) -> Vec<NodeId> {
+        let label_id = match crate::core::interning::GLOBAL_INTERNER.get_id(label) {
+            Some(id) => id,
+            None => return Vec::new(),
+        };
+        self.indexes
+            .iter_nodes()
+            .filter(|n| n.label == label_id)
+            .map(|n| n.id)
+            .collect()
+    }
+
     /// Get nodes by label.
     ///
     /// Returns an iterator over all nodes with the given label.

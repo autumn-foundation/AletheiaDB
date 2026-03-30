@@ -1904,3 +1904,44 @@ fn test_find_nodes_by_property_float_value() {
     let results = storage.find_nodes_by_property("Sensor", "temp", &PropertyValue::Float(98.6));
     assert_eq!(results, vec![n1]);
 }
+
+#[test]
+fn test_get_node_ids_by_label() {
+    let storage = CurrentStorage::new();
+
+    let n1 = storage
+        .create_node(
+            "Person",
+            PropertyMapBuilder::new().insert("name", "Alice").build(),
+        )
+        .unwrap();
+
+    let n2 = storage
+        .create_node(
+            "Person",
+            PropertyMapBuilder::new().insert("name", "Bob").build(),
+        )
+        .unwrap();
+
+    let n3 = storage
+        .create_node(
+            "Company",
+            PropertyMapBuilder::new().insert("name", "Aletheia").build(),
+        )
+        .unwrap();
+
+    let mut person_ids = storage.get_node_ids_by_label("Person");
+    person_ids.sort();
+    let mut expected_person_ids = vec![n1, n2];
+    expected_person_ids.sort();
+
+    assert_eq!(person_ids.len(), 2);
+    assert_eq!(person_ids, expected_person_ids);
+
+    let company_ids = storage.get_node_ids_by_label("Company");
+    assert_eq!(company_ids.len(), 1);
+    assert_eq!(company_ids, vec![n3]);
+
+    let nonexistent_ids = storage.get_node_ids_by_label("Nonexistent");
+    assert_eq!(nonexistent_ids.len(), 0);
+}
