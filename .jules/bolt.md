@@ -24,3 +24,7 @@
 **Optimize query target_shards Pre-allocation with Cow**
 **Learning:** In hot paths like distributed query execution (`execute` in `src/storage/sharding/executor.rs`), cloning `Vec` inputs (`shards.clone()`) creates unnecessary heap allocations and memory copies.
 **Action:** Use `std::borrow::Cow` to wrap inputs that may either be borrowed directly or constructed on the fly. `Cow<'_, [T]>` enables passing slice references without cloning when available (`Cow::Borrowed(slice)`), while retaining the ability to fall back to an owned collection (`Cow::Owned(vec)`) seamlessly. This removes a heap allocation for every query execution specifying `target_shards`.
+
+**Remove ShardResult clone on distributed query execution**
+**Learning:** Found an unnecessary O(N) heap allocation and data payload copy on the hot path in `src/storage/sharding/executor.rs`. When collecting sequential query results, `results.clone()` was being passed into the final `QueryResult` instead of moving the owned `results` vector, simply because `results.len()` was needed later in the struct initialization.
+**Action:** Always pre-calculate derived values (like `.len()`) and bind them to variables before struct initialization to allow moving owned collections directly into the struct, avoiding massive memory copies.

@@ -405,6 +405,7 @@ impl<C: ShardClient> QueryExecutor<C> {
         let aggregated = self.aggregate_results(&query, &results)?;
 
         let total_results: usize = results.iter().map(|r| r.result_count).sum();
+        let shards_succeeded = results.len();
         let total_time = start.elapsed();
 
         self.queries_executed.fetch_add(1, Ordering::Relaxed);
@@ -412,10 +413,12 @@ impl<C: ShardClient> QueryExecutor<C> {
         Ok(QueryResult {
             query_id: query.id,
             data: aggregated,
-            shard_results: results.clone(),
+            // ⚡ Bolt Optimization: Avoid O(N) heap allocations by moving the owned `results`
+            // into `QueryResult` instead of cloning all shard result data payloads.
+            shard_results: results,
             total_time,
             shards_queried: target_shards.len(),
-            shards_succeeded: results.len(),
+            shards_succeeded,
             total_results,
         })
     }
