@@ -17,12 +17,13 @@
 //! use aletheiadb::experimental::fossil::FossilDetector;
 //! use aletheiadb::core::temporal::{TimeRange, time};
 //!
+//! # use aletheiadb::api::transaction::WriteOps;
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let db = AletheiaDB::new()?;
-//! # let node_id = db.create_node("Node", Default::default())?;
+//! # let node_id = db.write(|tx| tx.create_node("Node", Default::default()))?;
 //! let detector = FossilDetector::new(&db);
 //!
-//! let start = time::now() - 3600 * 1_000_000 * 24 * 7; // Last week
+//! let start = time::from_secs(time::now().wallclock() / 1_000_000 - 3600 * 24 * 7); // Last week
 //! let end = time::now(); // Now
 //! let window = TimeRange::new(start, end).unwrap();
 //!

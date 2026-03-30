@@ -16,10 +16,12 @@
 //! use aletheiadb::AletheiaDB;
 //! use aletheiadb::experimental::janus::JanusDetector;
 //!
+//! # use aletheiadb::api::transaction::WriteOps;
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let db = AletheiaDB::new()?;
 //! let janus = JanusDetector::new(&db);
 //!
+//! # let node_id = db.write(|tx| tx.create_node("Node", Default::default()))?;
 //! let score = janus.analyze_node(node_id, "embedding")?;
 //!
 //! if score.is_bridge() {

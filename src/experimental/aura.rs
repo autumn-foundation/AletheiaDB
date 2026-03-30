@@ -28,10 +28,11 @@
 //! use aletheiadb::experimental::aura::AuraEngine;
 //! use aletheiadb::core::id::NodeId;
 //!
+//! # use aletheiadb::api::transaction::WriteOps;
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let db = AletheiaDB::new()?;
 //! // ... setup temporal graph ...
-//! # let subject_node = NodeId::new(0).unwrap();
+//! # let subject_node = db.write(|tx| tx.create_node("Node", Default::default()))?;
 //!
 //! let engine = AuraEngine::new(&db);
 //! // Calculate the Aura using a half-life of 7 days

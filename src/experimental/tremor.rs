@@ -22,7 +22,7 @@
 //! let db = AletheiaDB::new()?;
 //! let tremor = TremorEngine::new(&db);
 //!
-//! let t1 = time::now() - 3600 * 1_000_000 * 24 * 7; // Last week
+//! let t1 = time::from_secs(time::now().wallclock() / 1_000_000 - 3600 * 24 * 7); // Last week
 //! let t2 = time::now(); // Now
 //!
 //! let score = tremor.detect_shift(t1, t2, "embedding")?;

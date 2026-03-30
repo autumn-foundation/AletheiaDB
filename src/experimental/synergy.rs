@@ -26,10 +26,12 @@
 //! use aletheiadb::experimental::synergy::Synergy;
 //! use aletheiadb::core::id::NodeId;
 //!
+//! # use aletheiadb::api::transaction::WriteOps;
+//! # use aletheiadb::core::property::PropertyMapBuilder;
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let db = AletheiaDB::new()?;
 //! // ... setup graph ...
-//! # let nodes = vec![];
+//! # let nodes = vec![db.write(|tx| tx.create_node("Node", PropertyMapBuilder::new().insert_vector("embedding", &[0.0f32]).build()))?];
 //!
 //! let synergy = Synergy::new(&db);
 //! let score = synergy.calculate_synergy(&nodes, "embedding")?;

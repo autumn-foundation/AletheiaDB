@@ -27,13 +27,15 @@
 //! use aletheiadb::AletheiaDB;
 //! use aletheiadb::experimental::chameleon::Chameleon;
 //!
+//! # use aletheiadb::api::transaction::WriteOps;
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let db = AletheiaDB::new()?;
 //! let chameleon = Chameleon::new(&db);
 //!
 //! // 1. Analyze Context
 //! // Find 2 distinct aspects of Node 123
-//! let aspects = chameleon.analyze_context(123.into(), "embedding", 2)?;
+//! # let node_id = db.write(|tx| tx.create_node("Node", Default::default()))?;
+//! let aspects = chameleon.analyze_context(node_id, "embedding", 2)?;
 //!
 //! for (i, aspect) in aspects.iter().enumerate() {
 //!     println!("Aspect {}: Weight {:.2}", i, aspect.weight);
@@ -42,7 +44,7 @@
 //!
 //! // 2. Faceted Search
 //! // Search for nodes similar to Aspect 0 (e.g., the 'Tech' aspect)
-//! let results = chameleon.facet_search(123.into(), "embedding", 0, 10)?;
+//! let results = chameleon.facet_search(node_id, "embedding", 0, 10)?;
 //!
 //! for (node, score) in results {
 //!     println!("Found similar node: {} (score: {})", node, score);

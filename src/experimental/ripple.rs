@@ -22,16 +22,17 @@
 //! use aletheiadb::experimental::ripple::{RippleDetector, RippleConfig};
 //! use aletheiadb::core::temporal::{TimeRange, time};
 //!
+//! # use aletheiadb::api::transaction::WriteOps;
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let db = AletheiaDB::new()?;
-//! # let source = db.create_node("Source", Default::default())?;
-//! # let target = db.create_node("Target", Default::default())?;
+//! # let source = db.write(|tx| tx.create_node("Source", Default::default()))?;
+//! # let target = db.write(|tx| tx.create_node("Target", Default::default()))?;
 //!
 //! let detector = RippleDetector::new(&db);
 //!
 //! // Look for causal ripples in the last hour, with 1-minute resolution
 //! let config = RippleConfig {
-//!     window: TimeRange::new(time::now() - 3600 * 1_000_000, time::now())?,
+//!     window: TimeRange::new(time::from_secs(time::now().wallclock() / 1_000_000 - 3600), time::now())?,
 //!     bin_size_us: 60 * 1_000_000, // 1 minute
 //!     max_lag_bins: 10,            // Check lag up to 10 minutes
 //!     min_correlation: 0.5,        // Minimum correlation to report
