@@ -52,9 +52,17 @@
 //! }
 //! ```
 
+/// The `CostModel` acts as the planner's accountant, assigning hypothetical execution
+/// weights (CPU, I/O, memory) to every potential graph operation.
 pub mod cost;
+/// Represents the stark reality of execution. While logical plans declare *what* to fetch,
+/// physical plans dictate exactly *how* (e.g., `NodeLookup` vs. `HnswSearch`).
 pub mod physical;
+/// The brain of the optimizer. These rules iteratively mutate the AST to push down filters
+/// and reorder joins, turning naive user queries into streamlined database requests.
 pub mod rules;
+/// Tracks real-world graph metadata (like average node degree and vector distributions)
+/// so the cost model can make accurate, data-driven decisions during query planning.
 pub mod stats;
 
 use std::sync::Arc;

@@ -75,6 +75,24 @@ pub struct NodeLookupIterator {
 }
 
 impl NodeLookupIterator {
+    /// Constructs an iterator to pinpoint specific nodes.
+    ///
+    /// The planner utilizes this exact iterator when a query guarantees O(1) direct access.
+    /// This happens when exact `NodeId`s are provided via `QueryBuilder::start_from()`.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// # use aletheiadb::query::executor::NodeLookupIterator;
+    /// # use aletheiadb::storage::current::CurrentStorage;
+    /// # use aletheiadb::core::id::NodeId;
+    /// # use std::sync::Arc;
+    /// # fn main() {
+    /// let storage = Arc::new(CurrentStorage::new());
+    /// let ids = vec![NodeId::new(42).unwrap()];
+    /// let iterator = NodeLookupIterator::new(ids, storage);
+    /// # }
+    /// ```
     pub fn new(node_ids: Vec<NodeId>, current: Arc<CurrentStorage>) -> Self {
         NodeLookupIterator {
             node_ids: node_ids.into_iter(),
@@ -212,6 +230,26 @@ pub struct VectorResultIterator {
 }
 
 impl VectorResultIterator {
+    /// Instantiates an iterator bridging semantic scores with actual graph nodes.
+    ///
+    /// When the underlying HNSW index discovers similar vectors, it only returns a raw array
+    /// of `(NodeId, f32)` pairs. This iterator marries those disconnected scores back
+    /// to their fully-formed `Node` representations within `CurrentStorage`.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// # use aletheiadb::query::executor::VectorResultIterator;
+    /// # use aletheiadb::storage::current::CurrentStorage;
+    /// # use aletheiadb::core::id::NodeId;
+    /// # use std::sync::Arc;
+    /// # fn main() {
+    /// let storage = Arc::new(CurrentStorage::new());
+    /// // Mock finding node 42 with an 85% cosine similarity
+    /// let scores = vec![(NodeId::new(42).unwrap(), 0.85)];
+    /// let iterator = VectorResultIterator::new(scores, storage);
+    /// # }
+    /// ```
     pub fn new(results: Vec<(NodeId, f32)>, current: Arc<CurrentStorage>) -> Self {
         VectorResultIterator {
             results: results.into_iter(),
@@ -252,6 +290,32 @@ pub struct TemporalNodeIterator {
 }
 
 impl TemporalNodeIterator {
+    /// Builds a time machine capable of reconstructing nodes as they existed.
+    ///
+    /// This iterator performs heavy lifting: it walks the historical delta chain backward
+    /// to find the exact state of each requested node at the intersection of `valid_time`
+    /// (when it happened) and `transaction_time` (when we knew about it).
+    ///
+    /// > ⚠️ **Warning:** This acquires the `HistoricalStorage` read lock **per node**.
+    /// > For large sets (100+), prefer `BatchTemporalNodeIterator` to prevent lock thrashing.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// # use aletheiadb::query::executor::TemporalNodeIterator;
+    /// # use aletheiadb::storage::historical::HistoricalStorage;
+    /// # use aletheiadb::core::id::NodeId;
+    /// # use aletheiadb::core::temporal::{Timestamp, time};
+    /// # use parking_lot::RwLock;
+    /// # use std::sync::Arc;
+    /// # fn main() {
+    /// let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
+    /// let ids = vec![NodeId::new(42).unwrap()];
+    /// let point_in_time = time::now();
+    ///
+    /// let iterator = TemporalNodeIterator::new(ids, point_in_time, point_in_time, historical);
+    /// # }
+    /// ```
     pub fn new(
         node_ids: Vec<NodeId>,
         valid_time: Timestamp,
@@ -656,6 +720,17 @@ pub struct TraversalIterator {
 }
 
 impl TraversalIterator {
+    /// Commences a Breadth-First Search (BFS) across the graph topology.
+    ///
+    /// This is the engine powering `.traverse("KNOWS")`. It consumes an `input` iterator
+    /// (the starting nodes) and explores outgoing, incoming, or both edge directions.
+    /// If `temporal_context` is present, it will strictly navigate the graph structure
+    /// as it existed at that precise moment in time, ignoring the modern reality.
+    ///
+    /// ## Deduplication
+    /// Deduplication is strictly local *per input node*. If Node A reaches Node C, and
+    /// Node B reaches Node C, `C` will be yielded twice. This is essential for accurately
+    /// reconstructing discrete traversal `Path`s.
     pub fn new(
         input: Box<dyn ResultIterator>,
         direction: Direction,
@@ -1437,6 +1512,33 @@ pub struct PropertyScanIterator {
 }
 
 impl PropertyScanIterator {
+    /// Initializes an optimized scan targeting specific property-value pairs.
+    ///
+    /// Unlike the exhaustive `NodeScanIterator` combined with a `FilterIterator` (which
+    /// drags every node into memory before discarding them), this leverages the storage
+    /// layer's internal hash maps via `CurrentStorage::find_nodes_by_property`.
+    /// This ensures we only pay the materialization cost for matching nodes.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// # use aletheiadb::query::executor::PropertyScanIterator;
+    /// # use aletheiadb::storage::current::CurrentStorage;
+    /// # use aletheiadb::query::ir::PredicateValue;
+    /// # use std::sync::Arc;
+    /// # fn main() {
+    /// let storage = Arc::new(CurrentStorage::new());
+    /// let target_age = PredicateValue::Int(30);
+    ///
+    /// // Finds all "Person" nodes where "age" == 30
+    /// let iter = PropertyScanIterator::new(
+    ///     "Person".to_string(),
+    ///     "age".to_string(),
+    ///     &target_age,
+    ///     storage
+    /// );
+    /// # }
+    /// ```
     pub fn new(
         label: String,
         key: String,
