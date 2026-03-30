@@ -1096,7 +1096,7 @@ impl Ord for ScoredRow {
 
 /// Iterator for vector reranking.
 pub struct VectorRerankIterator {
-    sorted: Option<std::vec::IntoIter<(QueryRow, f32)>>,
+    sorted: Option<std::vec::IntoIter<std::cmp::Reverse<ScoredRow>>>,
     input: Option<Box<dyn ResultIterator>>,
     embedding: Arc<[f32]>,
     k: usize,
@@ -1214,19 +1214,16 @@ impl ResultIterator for VectorRerankIterator {
             // [Smallest Reverse<ScoredRow>, ..., Largest Reverse<ScoredRow>]
             // Smallest Reverse<ScoredRow> corresponds to Largest ScoredRow (highest score).
             // So the result is [Highest Score, ..., Lowest Score], which is exactly what we want.
-            let sorted_rows: Vec<(QueryRow, f32)> = heap
-                .into_sorted_vec()
-                .into_iter()
-                .map(|Reverse(item)| (item.row, item.score))
-                .collect();
-
-            self.sorted = Some(sorted_rows.into_iter());
+            self.sorted = Some(heap.into_sorted_vec().into_iter());
         }
 
-        self.sorted.as_mut()?.next().map(|(mut row, score)| {
-            row.score = Some(score);
-            Ok(row)
-        })
+        self.sorted
+            .as_mut()?
+            .next()
+            .map(|std::cmp::Reverse(mut item)| {
+                item.row.score = Some(item.score);
+                Ok(item.row)
+            })
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
