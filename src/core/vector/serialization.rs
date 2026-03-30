@@ -720,6 +720,64 @@ mod tests {
     }
 
     #[test]
+    fn test_deserialize_vector_buffer_too_short() {
+        // 🛡️ Sentry: Ensure memory safety and prevent out-of-bounds panics
+        // during binary deserialization (buffer too short boundary tests).
+
+        let valid_vector = [1.0f32, 2.0, 3.0];
+        let bytes = serialize_vector(&valid_vector);
+
+        // Header truncation (need at least 5 bytes)
+        for i in 0..5 {
+            let truncated = &bytes[0..i];
+            let result = deserialize_vector(truncated);
+            assert!(result.is_err());
+            if let Err(e) = result {
+                assert!(e.to_string().contains("Buffer too short"));
+            }
+        }
+
+        // Payload truncation
+        for i in 5..bytes.len() {
+            let truncated = &bytes[0..i];
+            let result = deserialize_vector(truncated);
+            assert!(result.is_err());
+            if let Err(e) = result {
+                assert!(e.to_string().contains("Buffer too short"));
+            }
+        }
+    }
+
+    #[test]
+    fn test_deserialize_sparse_vector_buffer_too_short() {
+        // 🛡️ Sentry: Ensure memory safety and prevent out-of-bounds panics
+        // during binary deserialization (buffer too short boundary tests).
+
+        let valid_sparse = SparseVec::new(vec![0, 2], vec![1.0, 2.0], 5).unwrap();
+        let bytes = serialize_sparse_vector(&valid_sparse);
+
+        // Header truncation (need at least 9 bytes)
+        for i in 0..9 {
+            let truncated = &bytes[0..i];
+            let result = deserialize_sparse_vector(truncated);
+            assert!(result.is_err());
+            if let Err(e) = result {
+                assert!(e.to_string().contains("Buffer too short"));
+            }
+        }
+
+        // Payload truncation
+        for i in 9..bytes.len() {
+            let truncated = &bytes[0..i];
+            let result = deserialize_sparse_vector(truncated);
+            assert!(result.is_err());
+            if let Err(e) = result {
+                assert!(e.to_string().contains("Buffer too short"));
+            }
+        }
+    }
+
+    #[test]
     fn test_deserialize_sparse_vector_errors() {
         // Empty buffer
         let result = deserialize_sparse_vector(&[]);

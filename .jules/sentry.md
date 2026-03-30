@@ -26,3 +26,7 @@
 **[Temporal TimeRange Max Timestamp and Deserialize Mutants]**
 **Learning:** `cargo mutants` revealed missing test coverage for `MAX_VALID_TIMESTAMP` bounds checking in open ranges (`TimeRange::from` and `TimeRange::at`), empty range overlap edge cases (`TimeRange::overlaps` short-circuit behavior), and deserialization stringency (`BiTemporalInterval::deserialize` exact consumed length checking against buffer size `> 48`).
 **Action:** Added targeted unit tests checking `#[should_panic]` when `MAX_VALID_TIMESTAMP` is exceeded, explicitly testing overlap between empty point-ranges within larger non-empty ranges, and appending excess bytes to binary formats to verify exact parser length consumption limits.
+
+**[Vector Serialization Boundary Coverage]**
+**Learning:** In Rust, `try_into().unwrap()` is often mathematically infallible after explicit length checks, but relying on this without targeted 'buffer too short' tests creates a false sense of security. Binary deserialization must have boundary tests confirming exactly where short buffers are rejected to lock in the length check correctness.
+**Action:** Always write explicit boundary tests that truncate valid serialized output byte-by-byte for both header and payload sizes before calling deserialization functions.
