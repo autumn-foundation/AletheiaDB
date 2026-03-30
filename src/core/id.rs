@@ -1893,3 +1893,181 @@ mod tests_conversions {
         assert!(matches!(err2, StorageError::InvalidId { .. }));
     }
 }
+
+#[cfg(test)]
+mod sentinel_id_tests_exhaustive_final {
+    use super::*;
+    use std::str::FromStr;
+
+    #[test]
+    fn test_node_id_new_unchecked_exhaustive() {
+        let id = NodeId::new_unchecked(42);
+        assert_eq!(id.as_u64(), 42);
+        assert_ne!(id.as_u64(), 0);
+        assert_ne!(id.as_u64(), 1);
+        assert_eq!(format!("{}", id), "Node(42)");
+        assert_ne!(format!("{}", id), "");
+    }
+
+    #[test]
+    fn test_edge_id_new_unchecked_exhaustive() {
+        let id = EdgeId::new_unchecked(42);
+        assert_eq!(id.as_u64(), 42);
+        assert_ne!(id.as_u64(), 0);
+        assert_ne!(id.as_u64(), 1);
+        assert_eq!(format!("{}", id), "Edge(42)");
+        assert_ne!(format!("{}", id), "");
+    }
+
+    #[test]
+    fn test_version_id_new_unchecked_exhaustive() {
+        let id = VersionId::new_unchecked(42);
+        assert_eq!(id.as_u64(), 42);
+        assert_ne!(id.as_u64(), 0);
+        assert_ne!(id.as_u64(), 1);
+        assert_eq!(format!("{}", id), "Version(42)");
+        assert_ne!(format!("{}", id), "");
+    }
+
+    #[test]
+    fn test_entity_id_exhaustive() {
+        let n = NodeId::new_unchecked(42);
+        let e = EdgeId::new_unchecked(43);
+
+        let en: EntityId = n.into();
+        assert!(en.is_node());
+        assert!(!en.is_edge());
+        assert_eq!(en.as_node(), Some(n));
+        assert_ne!(en.as_node(), None);
+        assert_eq!(en.as_edge(), None);
+        assert_eq!(format!("{}", en), "Node(42)");
+        assert_ne!(format!("{}", en), "");
+
+        let ee: EntityId = e.into();
+        assert!(ee.is_edge());
+        assert!(!ee.is_node());
+        assert_eq!(ee.as_edge(), Some(e));
+        assert_ne!(ee.as_edge(), None);
+        assert_eq!(ee.as_node(), None);
+        assert_eq!(format!("{}", ee), "Edge(43)");
+        assert_ne!(format!("{}", ee), "");
+    }
+
+    #[test]
+    fn test_id_generator_default_val() {
+        let id_generator = IdGenerator::with_start(42);
+        assert_eq!(id_generator.current(), 42);
+    }
+
+    #[test]
+    fn test_id_generator_next_boundaries_val() {
+        let id_generator = IdGenerator::with_start(MAX_VALID_ID - 1);
+
+        assert_eq!(id_generator.next().unwrap(), MAX_VALID_ID - 1);
+        assert_eq!(id_generator.next().unwrap(), MAX_VALID_ID);
+        assert!(id_generator.next().is_err());
+
+        let id_generator2 = IdGenerator::with_start(42);
+        let next_val = id_generator2.next().unwrap();
+        assert_eq!(next_val, 42);
+        assert_ne!(next_val, 0);
+        assert_ne!(next_val, 1);
+
+        let curr = id_generator2.current();
+        assert_eq!(curr, 43);
+        assert_ne!(curr, 0);
+        assert_ne!(curr, 1);
+    }
+
+    #[test]
+    fn test_id_generator_current_approximate_exhaustive_val() {
+        let id_generator = IdGenerator::with_start(42);
+        assert_eq!(id_generator.current_approximate(), 42);
+        assert_ne!(id_generator.current_approximate(), 0);
+        assert_ne!(id_generator.current_approximate(), 1);
+    }
+
+    #[test]
+    fn test_id_generator_reset_to_exhaustive_val() {
+        let id_generator = IdGenerator::with_start(42);
+        id_generator.reset_to(50);
+        assert_eq!(id_generator.current(), 50);
+        assert_ne!(id_generator.current(), 0);
+        assert_ne!(id_generator.current(), 1);
+    }
+
+    #[test]
+    fn test_id_generator_ensure_at_least_exhaustive_val() {
+        let id_generator = IdGenerator::with_start(42);
+
+        id_generator.ensure_at_least(50);
+        assert_eq!(id_generator.current(), 50);
+
+        id_generator.ensure_at_least(40);
+        assert_eq!(id_generator.current(), 50);
+
+        id_generator.ensure_at_least(50);
+        assert_eq!(id_generator.current(), 50);
+    }
+
+    #[test]
+    fn test_tx_id_exhaustive() {
+        let tx = TxId::new(42);
+        assert_eq!(tx.as_u64(), 42);
+        assert_ne!(tx.as_u64(), 0);
+        assert_ne!(tx.as_u64(), 1);
+        assert_eq!(format!("{}", tx), "TxId(42)");
+        assert_ne!(format!("{}", tx), "");
+    }
+
+    #[test]
+    fn test_tx_id_generator_next_exhaustive_val() {
+        let id_generator = TxIdGenerator::new();
+        let tx1 = id_generator.next();
+        assert_eq!(tx1.as_u64(), 1);
+
+        let tx2 = id_generator.next();
+        assert_eq!(tx2.as_u64(), 2);
+
+        let curr = id_generator.current();
+        assert_eq!(curr.as_u64(), 2);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_tx_id_generator_overflow_exact_val() {
+        let id_generator = TxIdGenerator::new();
+        id_generator
+            .counter
+            .store(u64::MAX, std::sync::atomic::Ordering::SeqCst);
+
+        id_generator.next();
+    }
+
+    #[test]
+    fn test_try_from_from_str_exhaustive_val() {
+        let n = NodeId::try_from(42).unwrap();
+        assert_eq!(n.as_u64(), 42);
+
+        let n2 = NodeId::from_str("42").unwrap();
+        assert_eq!(n2.as_u64(), 42);
+
+        let e = EdgeId::try_from(42).unwrap();
+        assert_eq!(e.as_u64(), 42);
+
+        let e2 = EdgeId::from_str("42").unwrap();
+        assert_eq!(e2.as_u64(), 42);
+
+        let v = VersionId::try_from(42).unwrap();
+        assert_eq!(v.as_u64(), 42);
+
+        let v2 = VersionId::from_str("42").unwrap();
+        assert_eq!(v2.as_u64(), 42);
+
+        let tx = TxId::try_from(42).unwrap();
+        assert_eq!(tx.as_u64(), 42);
+
+        let tx2 = TxId::from_str("42").unwrap();
+        assert_eq!(tx2.as_u64(), 42);
+    }
+}
