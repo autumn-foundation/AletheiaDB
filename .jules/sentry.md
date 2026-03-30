@@ -22,3 +22,7 @@
 ## Panic Risks in Query Iterators and Mock Clients
 **Learning:** `unwrap()` inside iterator implementations (like `VectorRerankIterator::next`) or trait implementations for mock clients (like `MockVectorNodeClient`) pose a significant availability risk, as a panic can crash the thread handling the query or the entire database process.
 **Action:** Always gracefully handle `None` on iterators (returning `None` or propagating errors) and map lock poisoning errors (`PoisonError`) to domain-specific errors (e.g. `VectorError`) to ensure the system degrades gracefully instead of crashing during simulated faults or unexpected states.
+
+## Deserialization Buffer Truncation Guards
+**Learning:** `try_into().unwrap()` is used safely throughout the binary deserialization paths (`property.rs`, `serialization.rs`) because it is strictly preceded by `bytes.len() < required_len` guard checks. However, these guard checks lacked explicit boundary tests for every type tag (`TAG_INT`, `TAG_STRING`, `TAG_VECTOR`, etc.), meaning a future refactor could accidentally remove a length check and expose the application to out-of-bounds panics on malformed or truncated data.
+**Action:** Always write explicit "buffer too short" boundary tests for binary deserializers (covering both header truncation and payload truncation) to lock in the correctness of length checks and guarantee `unwrap()` safety.
