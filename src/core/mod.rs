@@ -35,6 +35,7 @@ pub mod interning;
 pub mod observer;
 pub mod property;
 pub mod temporal;
+pub mod transaction_visibility;
 pub mod vector;
 
 // Re-export commonly used types for convenience

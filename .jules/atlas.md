@@ -79,3 +79,6 @@
 **[Broke Storage-API Dependency Cycle]
 **Tangle:** The `storage` module had an implementation of `From<&crate::api::transaction::BufferedWrite> for WalOperation` in `src/storage/wal/entry.rs`, meaning the underlying storage engine depended structurally on the public API layer.
 **Blueprint:** Moved the `From` implementation to `src/api/transaction/write_buffer.rs`. Now, the `api` module is aware of how its `BufferedWrite` converts into a `WalOperation` to send down to `storage`, enforcing a unidirectional dependency graph from `api` -> `storage`.
+## 2026-05-25 - Breaking API Dependency from Storage/DB
+**Tangle:** `db` and `storage` modules were importing `TxVisibilityManager` and `TransactionSnapshot` from `api::transaction::visibility`. This created a reverse dependency where the core database and underlying storage engines were structurally dependent on the public API layer for fundamental MVCC mechanics.
+**Blueprint:** Moved `api/transaction/visibility.rs` down into the core layer as `core/transaction_visibility.rs`. Updated `db` and `api` to import these MVCC primitives from `core`, restoring a unidirectional dependency tree from `api` -> `db` -> `storage` -> `core`.

@@ -1,8 +1,8 @@
-use crate::api::transaction::TxVisibilityManager;
 use crate::config::AletheiaDBConfig;
 use crate::core::error::{Result, ResultExt};
 use crate::core::id::{IdGenerator, TxIdGenerator};
 use crate::core::temporal::time;
+use crate::core::transaction_visibility::TxVisibilityManager;
 use crate::core::version::AnchorConfig;
 use crate::db::AletheiaDB;
 use crate::index::temporal::TemporalIndexes;

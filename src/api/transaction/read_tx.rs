@@ -6,11 +6,12 @@
 //! - Snapshot-based reads for consistency
 //! - No commit overhead
 
-use super::{ReadOps, TransactionSnapshot, TxId, TxMetadata, TxState, TxVisibilityManager};
+use super::{ReadOps, TxId, TxMetadata, TxState};
 use crate::core::error::{Result, ResultExt, StorageError};
 use crate::core::graph::{Edge, Node};
 use crate::core::id::{EdgeId, NodeId};
 use crate::core::property::PropertyValue;
+use crate::core::transaction_visibility::{TransactionSnapshot, TxVisibilityManager};
 
 use crate::core::version::VersionMetadata;
 use crate::storage::current::CurrentStorage;

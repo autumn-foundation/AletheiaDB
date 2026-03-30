@@ -9,6 +9,7 @@ mod tombstone_tests {
     fn create_test_write_tx() -> (WriteTransaction, TempDir) {
         let current = Arc::new(CurrentStorage::new());
         let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
+        use crate::core::transaction_visibility::{TransactionSnapshot, TxVisibilityManager};
         let temporal_indexes = Arc::new(TemporalIndexes::new());
 
         let temp_dir = TempDir::new().unwrap();

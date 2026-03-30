@@ -9,10 +9,7 @@
 //! Write transactions buffer all changes in memory until commit.
 //! On commit, changes are validated and applied atomically.
 
-use super::{
-    ReadOps, TransactionSnapshot, TxId, TxMetadata, TxState, TxVisibilityManager, WriteBuffer,
-    WriteOps,
-};
+use super::{ReadOps, TxId, TxMetadata, TxState, WriteBuffer, WriteOps};
 use crate::core::error::{Result, ResultExt, StorageError, TransactionError};
 use crate::core::graph::{Edge, Node};
 use crate::core::hlc::{
@@ -23,6 +20,7 @@ use crate::core::id::{EdgeId, IdGenerator, NodeId, VersionId};
 use crate::core::interning::GLOBAL_INTERNER;
 use crate::core::property::{PropertyMap, PropertyMapBuilder};
 use crate::core::temporal::{Timestamp, time};
+use crate::core::transaction_visibility::{TransactionSnapshot, TxVisibilityManager};
 use crate::core::version::VersionMetadata;
 use crate::index::temporal::TemporalIndexes;
 use crate::storage::current::CurrentStorage;
