@@ -626,10 +626,13 @@ impl PersistentCommitLog {
         self.pending
             .read()
             .map(|p| {
-                p.values()
-                    .filter(|e| e.entry_type == EntryType::Commit)
-                    .cloned()
-                    .collect()
+                let mut result = Vec::with_capacity(p.len());
+                for value in p.values() {
+                    if value.entry_type == EntryType::Commit {
+                        result.push(value.clone());
+                    }
+                }
+                result
             })
             .unwrap_or_default()
     }
@@ -639,10 +642,13 @@ impl PersistentCommitLog {
         self.pending
             .read()
             .map(|p| {
-                p.values()
-                    .filter(|e| e.entry_type == EntryType::Abort)
-                    .cloned()
-                    .collect()
+                let mut result = Vec::with_capacity(p.len());
+                for value in p.values() {
+                    if value.entry_type == EntryType::Abort {
+                        result.push(value.clone());
+                    }
+                }
+                result
             })
             .unwrap_or_default()
     }
