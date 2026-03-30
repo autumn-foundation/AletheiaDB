@@ -543,9 +543,7 @@ impl FlushCoordinator {
         let current_id = self.current_segment_id.load(Ordering::Relaxed);
         let mut removed_count = 0;
 
-        // Collect segments to check
-        let mut segments_to_check: Vec<(u64, PathBuf)> = Vec::new();
-
+        // Remove old segments in a single pass without allocating an intermediate vector
         if let Ok(entries) = std::fs::read_dir(&self.config.wal_dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
@@ -555,30 +553,25 @@ impl FlushCoordinator {
                         .and_then(|s| s.to_string_lossy().parse::<u64>().ok())
                     && segment_id < current_id
                 {
-                    segments_to_check.push((segment_id, path));
-                }
-            }
-        }
+                    let should_remove =
+                        if let Some(metadata) = self.read_segment_metadata(segment_id) {
+                            // Remove if all entries in segment are before truncate point
+                            metadata.max_lsn.0 < truncate_lsn.0
+                        } else {
+                            // No metadata file - be conservative and don't remove
+                            false
+                        };
 
-        // Check each segment's metadata and remove if max_lsn < truncate_lsn
-        for (segment_id, path) in segments_to_check {
-            let should_remove = if let Some(metadata) = self.read_segment_metadata(segment_id) {
-                // Remove if all entries in segment are before truncate point
-                metadata.max_lsn.0 < truncate_lsn.0
-            } else {
-                // No metadata file - be conservative and don't remove
-                // (This could happen for old segments created before LSN tracking)
-                false
-            };
-
-            if should_remove {
-                // Remove segment file
-                if std::fs::remove_file(&path).is_ok() {
-                    removed_count += 1;
+                    if should_remove {
+                        // Remove segment file
+                        if std::fs::remove_file(&path).is_ok() {
+                            removed_count += 1;
+                        }
+                        // Remove metadata file
+                        let meta_path = self.segment_meta_path(segment_id);
+                        let _ = std::fs::remove_file(&meta_path);
+                    }
                 }
-                // Remove metadata file
-                let meta_path = self.segment_meta_path(segment_id);
-                let _ = std::fs::remove_file(&meta_path);
             }
         }
 
