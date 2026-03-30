@@ -1294,3 +1294,75 @@ fn test_bitemporal_deserialize_mutants() {
         "Should succeed on == 48"
     );
 }
+
+use aletheiadb::core::hlc::{ClockSkewDirection, HybridTimestamp};
+use aletheiadb::core::temporal::MAX_VALID_TIMESTAMP;
+
+#[test]
+fn test_clock_skew_direction_as_str_mutants() {
+    assert_eq!(ClockSkewDirection::Forward.as_str(), "Forward");
+    assert_ne!(ClockSkewDirection::Forward.as_str(), "");
+    assert_ne!(ClockSkewDirection::Forward.as_str(), "xyzzy");
+
+    assert_eq!(ClockSkewDirection::Backward.as_str(), "Backward");
+    assert_ne!(ClockSkewDirection::Backward.as_str(), "");
+    assert_ne!(ClockSkewDirection::Backward.as_str(), "xyzzy");
+}
+
+#[test]
+fn test_hybrid_timestamp_display_mutants() {
+    let ts = HybridTimestamp::new(1234, 5).unwrap();
+    let display = format!("{}", ts);
+    assert_eq!(display, "1234.5");
+    assert_ne!(display, format!("{}", HybridTimestamp::new(0, 0).unwrap()));
+}
+
+#[test]
+fn test_hybrid_timestamp_serialize_mutants() {
+    let ts = HybridTimestamp::new(1234, 5).unwrap();
+    let bytes = ts.serialize();
+    assert_ne!(bytes, vec![0u8; 0]);
+    assert_ne!(bytes, vec![0]);
+    assert_ne!(bytes, vec![1]);
+}
+
+#[test]
+fn test_clock_skew_math_mutants() {
+    use aletheiadb::core::hlc::evaluate_clock_skew;
+    // test boundaries of evaluate_clock_skew
+    let current = 1_000_000;
+
+    // Test < vs <= for backward drift
+    // MAX_BACKWARD_DRIFT_US is 5,000,000 (5s)
+    let drift = -5_000_000; // exactly max
+    let frontier = current - drift; // 6_000_000
+    let res = evaluate_clock_skew(current, frontier, None, false);
+    assert!(res.is_ok(), "Drift equal to max should be allowed");
+
+    // Test < vs <= for forward jump
+    let max_jump = 100;
+    let forward_drift = 100; // exactly max
+    let frontier_forward = current - forward_drift; // 999_900
+    let res = evaluate_clock_skew(current, frontier_forward, Some(max_jump), false);
+    assert!(res.is_ok(), "Jump equal to max should be allowed");
+}
+
+#[test]
+fn test_hybrid_timestamp_send_receive_exact_boundaries_mutants() {
+    let ts = HybridTimestamp::new(MAX_VALID_TIMESTAMP, 0).unwrap();
+
+    // test send bounds
+    let err = ts.send(MAX_VALID_TIMESTAMP + 1).unwrap_err();
+    assert!(matches!(
+        err,
+        aletheiadb::core::error::TemporalError::InvalidTimestamp { .. }
+    ));
+
+    // test receive bounds
+    let other = HybridTimestamp::new(MAX_VALID_TIMESTAMP, 0).unwrap();
+    let err2 = ts.receive(other, MAX_VALID_TIMESTAMP + 1).unwrap_err();
+    assert!(matches!(
+        err2,
+        aletheiadb::core::error::TemporalError::InvalidTimestamp { .. }
+    ));
+}
