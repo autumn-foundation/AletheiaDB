@@ -294,22 +294,6 @@ fn days_to_ymd(days: u64) -> (i32, u32, u32) {
     (y as i32, m, d)
 }
 
-/// Trait for types that can hold fields (compatible with libhoney's FieldHolder).
-///
-/// This trait is provided for API compatibility and may not be used directly in tests.
-#[allow(dead_code)]
-pub trait FieldHolder {
-    /// Add a single field.
-    fn add_field(&mut self, key: impl Into<String>, value: impl Into<Value>);
-
-    /// Add multiple fields from a serializable struct.
-    fn add<T: Serialize>(&mut self, value: &T) -> Result<(), super::error::Error>;
-}
-
-impl FieldHolder for Event {
-    fn add_field(&mut self, key: impl Into<String>, value: impl Into<Value>) {
-        Event::add_field(self, key, value);
-    }
 
     fn add<T: Serialize>(&mut self, value: &T) -> Result<(), super::error::Error> {
         Event::add(self, value)
@@ -721,29 +705,6 @@ mod tests {
     }
 
     // =====================================================
-    // FieldHolder Trait Tests
-    // =====================================================
-
-    #[test]
-    fn test_field_holder_trait() {
-        fn add_common_fields(holder: &mut impl FieldHolder) {
-            holder.add_field("service", "test-service");
-            holder.add_field("version", "1.0.0");
-        }
-
-        let mut event = Event::new();
-        add_common_fields(&mut event);
-
-        assert_eq!(
-            event.data.get("service"),
-            Some(&Value::String("test-service".to_string()))
-        );
-        assert_eq!(
-            event.data.get("version"),
-            Some(&Value::String("1.0.0".to_string()))
-        );
-    }
-
     // =====================================================
     // Edge Cases
     // =====================================================
