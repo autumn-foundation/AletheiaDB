@@ -1,0 +1,1 @@
+sed -i 's/let mmap = unsafe { Mmap::map(&file)? };/\/\/ SAFETY: The file is mapped read-only, and we verify its size and metadata to prevent out-of-bounds reads. We assume the file is not modified concurrently by other processes, which is standard for index loading.\n    let mmap = unsafe { Mmap::map(&file)? };/' src/storage/index_persistence/graph.rs

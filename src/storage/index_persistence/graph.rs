@@ -361,6 +361,9 @@ pub fn load_graph_index_mmap(path: &Path) -> Result<GraphIndexData> {
         });
     }
 
+    // SAFETY: We only read from the memory map, never write. The file is opened read-only.
+    // The mapping is valid for the lifetime of this function and is automatically unmapped
+    // when dropped. We have verified the file size above to prevent out-of-bounds reads.
     let mmap = unsafe { Mmap::map(&file)? };
 
     // Check minimum size (must have at least 4 bytes for CRC)
