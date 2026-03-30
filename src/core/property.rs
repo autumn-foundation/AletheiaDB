@@ -1559,7 +1559,9 @@ impl Default for PropertyMap {
 
 impl FromIterator<(PropertyKey, PropertyValue)> for PropertyMap {
     fn from_iter<I: IntoIterator<Item = (PropertyKey, PropertyValue)>>(iter: I) -> Self {
-        let mut map = HashMap::with_hasher(BuildHasherDefault::default());
+        let iter = iter.into_iter();
+        let (lower, _) = iter.size_hint();
+        let mut map = HashMap::with_capacity_and_hasher(lower, BuildHasherDefault::default());
         let mut size: usize = 4; // Count field
 
         for (key, value) in iter {
