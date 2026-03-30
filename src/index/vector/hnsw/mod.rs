@@ -106,6 +106,16 @@ pub(crate) fn create_metric_wrapper<F>(
 where
     F: Fn(&[f32], &[f32]) -> f32 + Send + Sync + 'static + ?Sized,
 {
+    // 🛡️ Havoc/Warden: Validate dims exactly ONCE at wrapper creation, not in the hot loop.
+    // If dims are invalid, we can't safely create slices. We shouldn't panic, but we
+    // should probably return a dummy function that just returns f32::MAX.
+    if dims == 0 || dims > crate::core::vector::constants::MAX_VECTOR_DIMENSIONS {
+        eprintln!(
+            "Attempted to create metric wrapper with invalid dimensions (got {}, max {})",
+            dims, crate::core::vector::constants::MAX_VECTOR_DIMENSIONS
+        );
+        return Box::new(|_, _| f32::MAX);
+    }
     Box::new(move |a: *const f32, b: *const f32| {
         if a.is_null() || b.is_null() {
             eprintln!("usearch passed null pointer to metric function - returning max distance");
@@ -117,6 +127,17 @@ where
             eprintln!(
                 "usearch passed unaligned pointer to metric function (expected alignment {}) - returning max distance",
                 std::mem::align_of::<f32>()
+            );
+            return f32::MAX;
+        }
+
+        // 🛡️ Warden: Strict bounds checking to prevent out-of-bounds reads if usearch or tests
+        // pass invalid dimensions to the FFI boundary.
+        if dims == 0 || dims > crate::core::vector::constants::MAX_VECTOR_DIMENSIONS {
+            eprintln!(
+                "usearch passed invalid dimensions to metric function (got {}, max {}) - returning max distance",
+                dims,
+                crate::core::vector::constants::MAX_VECTOR_DIMENSIONS
             );
             return f32::MAX;
         }

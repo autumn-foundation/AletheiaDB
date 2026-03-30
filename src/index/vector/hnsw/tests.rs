@@ -13,6 +13,23 @@ mod sentry_tests {
     use super::*;
 
     #[test]
+    fn test_metric_wrapper_length_mismatch_havoc() {
+        let distance_fn = std::sync::Arc::new(|a: &[f32], b: &[f32]| -> f32 {
+            a.iter().zip(b.iter()).map(|(x, y)| (x - y).abs()).sum()
+        });
+
+        // Wrap with a dimension that exceeds MAX_VECTOR_DIMENSIONS
+        let huge_dims = crate::core::vector::constants::MAX_VECTOR_DIMENSIONS + 1;
+        let wrapper = create_metric_wrapper(huge_dims, distance_fn);
+
+        let a = vec![1.0f32; 4];
+        let b = vec![2.0f32; 4];
+
+        // Trigger bounds check
+        let result = wrapper(a.as_ptr(), b.as_ptr());
+        assert_eq!(result, f32::MAX);
+    }
+    #[test]
     fn test_metric_wrapper_safe_on_unaligned() {
         let distance_fn = Arc::new(|_: &[f32], _: &[f32]| 0.0);
         let wrapper = create_metric_wrapper(4, distance_fn);

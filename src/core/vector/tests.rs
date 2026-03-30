@@ -1021,6 +1021,17 @@ fn test_dot_product_simd_boundary_cases() {
 // ========================================================================
 
 #[test]
+fn test_simd_unaligned_avx2_havoc() {
+    unsafe {
+        if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
+            let data = vec![1.0f32; 100];
+            let unaligned_a = &data[1..33];
+            let unaligned_b = &data[2..34];
+            let _ = super::simd::x86_ops::dot_product_avx2(unaligned_a, unaligned_b);
+        }
+    }
+}
+#[test]
 fn test_magnitude_3_4_triangle() {
     // Classic 3-4-5 right triangle
     let v = vec![3.0, 4.0];
@@ -2061,365 +2072,464 @@ mod proptests {
     }
 
     proptest! {
-        #[test]
-        fn prop_cosine_similarity_is_symmetric(
-            (a, b) in same_length_vectors(100)
-        ) {
-            let sim_ab = cosine_similarity(&a, &b).unwrap();
-            let sim_ba = cosine_similarity(&b, &a).unwrap();
-            prop_assert!((sim_ab - sim_ba).abs() < PROPTEST_TOLERANCE);
-        }
-
-        #[test]
-        fn prop_cosine_similarity_in_range(
-            (a, b) in same_length_vectors(100)
-        ) {
-            let sim = cosine_similarity(&a, &b).unwrap();
-            // Handle NaN case (can occur with extreme values)
-            if !sim.is_nan() {
-                // Result is clamped, so should always be in [-1, 1]
-                // Allow tiny tolerance for floating-point edge cases
-                let min = -1.0 - PROPTEST_TOLERANCE;
-                let max = 1.0 + PROPTEST_TOLERANCE;
-                prop_assert!((min..=max).contains(&sim),
-                    "Similarity {} out of range for {:?} and {:?}", sim, a, b);
+            #[test]
+            fn prop_cosine_similarity_is_symmetric(
+                (a, b) in same_length_vectors(100)
+            ) {
+                let sim_ab = cosine_similarity(&a, &b).unwrap();
+                let sim_ba = cosine_similarity(&b, &a).unwrap();
+                prop_assert!((sim_ab - sim_ba).abs() < PROPTEST_TOLERANCE);
             }
-        }
 
-        #[test]
-        fn prop_cosine_similarity_self_is_one(
-            a in prop::collection::vec(-100.0f32..100.0f32, 1..100usize)
-        ) {
-            // Skip zero vectors
-            let magnitude_sq: f32 = a.iter().map(|x| x * x).sum();
-            if magnitude_sq > 1e-10 {
-                let sim = cosine_similarity(&a, &a).unwrap();
-                prop_assert!((sim - 1.0).abs() < PROPTEST_TOLERANCE,
-                    "Self-similarity should be 1.0, got {} for {:?}", sim, a);
-            }
-        }
-
-        #[test]
-        fn prop_cosine_similarity_negation_flips_sign(
-            a in prop::collection::vec(-100.0f32..100.0f32, 1..100usize)
-        ) {
-            // Skip zero vectors
-            let magnitude_sq: f32 = a.iter().map(|x| x * x).sum();
-            if magnitude_sq > 1e-10 {
-                let neg_a: Vec<f32> = a.iter().map(|x| -x).collect();
-                let sim = cosine_similarity(&a, &neg_a).unwrap();
-                prop_assert!((sim + 1.0).abs() < PROPTEST_TOLERANCE,
-                    "Negation similarity should be -1.0, got {} for {:?}", sim, a);
-            }
-        }
-
-        #[test]
-        fn prop_cosine_similarity_scale_invariant(
-            (a, b) in same_length_vectors(50),
-            scale in 0.1f32..10.0f32
-        ) {
-            // Skip if either vector is near-zero
-            let mag_a: f32 = a.iter().map(|x| x * x).sum();
-            let mag_b: f32 = b.iter().map(|x| x * x).sum();
-            if mag_a > 1e-10 && mag_b > 1e-10 {
-                let sim1 = cosine_similarity(&a, &b).unwrap();
-
-                let scaled_a: Vec<f32> = a.iter().map(|x| x * scale).collect();
-                let sim2 = cosine_similarity(&scaled_a, &b).unwrap();
-
-                // Cosine similarity should be scale-invariant.
-                //
-                // Why 10x tolerance? Scaling introduces additional error sources:
-                // 1. The scaling multiplication itself: len extra multiply operations
-                // 2. Magnitude changes: scaled vectors have different magnitudes,
-                //    potentially causing different rounding in the sqrt and division
-                // 3. For scale factors near the edges (0.1 or 10.0), the magnitude
-                //    difference is up to 100x, affecting numerical stability
-                //
-                // Empirically, 10x base tolerance handles these cases while still
-                // catching genuine scale invariance violations.
-                if !sim1.is_nan() && !sim2.is_nan() {
-                    prop_assert!((sim1 - sim2).abs() < PROPTEST_TOLERANCE * 10.0,
-                        "Scale invariance failed: {} vs {} for scale {}", sim1, sim2, scale);
+            #[test]
+            fn prop_cosine_similarity_in_range(
+                (a, b) in same_length_vectors(100)
+            ) {
+                let sim = cosine_similarity(&a, &b).unwrap();
+                // Handle NaN case (can occur with extreme values)
+                if !sim.is_nan() {
+                    // Result is clamped, so should always be in [-1, 1]
+                    // Allow tiny tolerance for floating-point edge cases
+                    let min = -1.0 - PROPTEST_TOLERANCE;
+                    let max = 1.0 + PROPTEST_TOLERANCE;
+                    prop_assert!((min..=max).contains(&sim),
+                        "Similarity {} out of range for {:?} and {:?}", sim, a, b);
                 }
             }
-        }
 
-        // ====================================================================
-        // Euclidean Distance Property Tests
-        // ====================================================================
-
-        #[test]
-        fn prop_euclidean_distance_is_non_negative(
-            (a, b) in same_length_vectors(100)
-        ) {
-            let dist = euclidean_distance(&a, &b).unwrap();
-            prop_assert!(dist >= 0.0, "Distance should be non-negative, got {}", dist);
-        }
-
-        #[test]
-        fn prop_squared_euclidean_distance_is_non_negative(
-            (a, b) in same_length_vectors(100)
-        ) {
-            let dist_sq = squared_euclidean_distance(&a, &b).unwrap();
-            prop_assert!(dist_sq >= 0.0, "Squared distance should be non-negative, got {}", dist_sq);
-        }
-
-        #[test]
-        fn prop_euclidean_distance_is_symmetric(
-            (a, b) in same_length_vectors(100)
-        ) {
-            let dist_ab = euclidean_distance(&a, &b).unwrap();
-            let dist_ba = euclidean_distance(&b, &a).unwrap();
-            prop_assert!((dist_ab - dist_ba).abs() < PROPTEST_TOLERANCE,
-                "Euclidean distance should be symmetric: {} vs {}", dist_ab, dist_ba);
-        }
-
-        #[test]
-        fn prop_squared_euclidean_distance_is_symmetric(
-            (a, b) in same_length_vectors(100)
-        ) {
-            let dist_sq_ab = squared_euclidean_distance(&a, &b).unwrap();
-            let dist_sq_ba = squared_euclidean_distance(&b, &a).unwrap();
-            prop_assert!((dist_sq_ab - dist_sq_ba).abs() < PROPTEST_TOLERANCE,
-                "Squared Euclidean distance should be symmetric: {} vs {}", dist_sq_ab, dist_sq_ba);
-        }
-
-        #[test]
-        fn prop_euclidean_distance_self_is_zero(
-            a in prop::collection::vec(-100.0f32..100.0f32, 1..100usize)
-        ) {
-            let dist = euclidean_distance(&a, &a).unwrap();
-            prop_assert!(dist.abs() < PROPTEST_TOLERANCE,
-                "Distance to self should be 0, got {} for {:?}", dist, a);
-        }
-
-        #[test]
-        fn prop_squared_euclidean_distance_self_is_zero(
-            a in prop::collection::vec(-100.0f32..100.0f32, 1..100usize)
-        ) {
-            let dist_sq = squared_euclidean_distance(&a, &a).unwrap();
-            prop_assert!(dist_sq.abs() < PROPTEST_TOLERANCE,
-                "Squared distance to self should be 0, got {} for {:?}", dist_sq, a);
-        }
-
-        #[test]
-        fn prop_euclidean_squared_relationship(
-            (a, b) in same_length_vectors(100)
-        ) {
-            let dist = euclidean_distance(&a, &b).unwrap();
-            let dist_sq = squared_euclidean_distance(&a, &b).unwrap();
-            // dist² should equal dist_sq
-            // Use relative tolerance for larger values
-            let tolerance = PROPTEST_TOLERANCE * 100.0 + dist_sq * 1e-5;
-            prop_assert!((dist * dist - dist_sq).abs() < tolerance,
-                "euclidean² ({}) should equal squared_euclidean ({})", dist * dist, dist_sq);
-        }
-
-        #[test]
-        fn prop_euclidean_distance_triangle_inequality(
-            a in prop::collection::vec(-50.0f32..50.0f32, 1..50usize),
-            b in prop::collection::vec(-50.0f32..50.0f32, 1..50usize),
-            c in prop::collection::vec(-50.0f32..50.0f32, 1..50usize)
-        ) {
-            // Triangle inequality: d(a,c) <= d(a,b) + d(b,c)
-            // Only test if all vectors have same length
-            if a.len() == b.len() && b.len() == c.len() {
-                let d_ab = euclidean_distance(&a, &b).unwrap();
-                let d_bc = euclidean_distance(&b, &c).unwrap();
-                let d_ac = euclidean_distance(&a, &c).unwrap();
-
-                // Allow small tolerance for floating-point errors
-                let tolerance = PROPTEST_TOLERANCE * 100.0;
-                prop_assert!(d_ac <= d_ab + d_bc + tolerance,
-                    "Triangle inequality violated: d(a,c)={} > d(a,b)={} + d(b,c)={}",
-                    d_ac, d_ab, d_bc);
+            #[test]
+            fn prop_cosine_similarity_self_is_one(
+                a in prop::collection::vec(-100.0f32..100.0f32, 1..100usize)
+            ) {
+                // Skip zero vectors
+                let magnitude_sq: f32 = a.iter().map(|x| x * x).sum();
+                if magnitude_sq > 1e-10 {
+                    let sim = cosine_similarity(&a, &a).unwrap();
+                    prop_assert!((sim - 1.0).abs() < PROPTEST_TOLERANCE,
+                        "Self-similarity should be 1.0, got {} for {:?}", sim, a);
+                }
             }
-        }
 
-        // ====================================================================
-        // Dot Product Property Tests
-        // ====================================================================
+            #[test]
+            fn prop_cosine_similarity_negation_flips_sign(
+                a in prop::collection::vec(-100.0f32..100.0f32, 1..100usize)
+            ) {
+                // Skip zero vectors
+                let magnitude_sq: f32 = a.iter().map(|x| x * x).sum();
+                if magnitude_sq > 1e-10 {
+                    let neg_a: Vec<f32> = a.iter().map(|x| -x).collect();
+                    let sim = cosine_similarity(&a, &neg_a).unwrap();
+                    prop_assert!((sim + 1.0).abs() < PROPTEST_TOLERANCE,
+                        "Negation similarity should be -1.0, got {} for {:?}", sim, a);
+                }
+            }
 
-        #[test]
-        fn prop_dot_product_is_symmetric(
-            (a, b) in same_length_vectors(100)
-        ) {
-            let dot_ab = dot_product(&a, &b).unwrap();
-            let dot_ba = dot_product(&b, &a).unwrap();
-            prop_assert!((dot_ab - dot_ba).abs() < PROPTEST_TOLERANCE,
-                "Dot product should be symmetric: {} vs {}", dot_ab, dot_ba);
-        }
+            #[test]
+            fn prop_cosine_similarity_scale_invariant(
+                (a, b) in same_length_vectors(50),
+                scale in 0.1f32..10.0f32
+            ) {
+                // Skip if either vector is near-zero
+                let mag_a: f32 = a.iter().map(|x| x * x).sum();
+                let mag_b: f32 = b.iter().map(|x| x * x).sum();
+                if mag_a > 1e-10 && mag_b > 1e-10 {
+                    let sim1 = cosine_similarity(&a, &b).unwrap();
 
-        #[test]
-        fn prop_dot_product_self_equals_squared_magnitude(
-            a in prop::collection::vec(-100.0f32..100.0f32, 1..100usize)
-        ) {
-            let self_dot = dot_product(&a, &a).unwrap();
-            // Self dot product should equal sum of squares (squared magnitude)
-            let expected: f32 = a.iter().map(|x| x * x).sum();
+                    let scaled_a: Vec<f32> = a.iter().map(|x| x * scale).collect();
+                    let sim2 = cosine_similarity(&scaled_a, &b).unwrap();
 
-            // Use relative tolerance for larger values
-            let tolerance = PROPTEST_TOLERANCE * 100.0 + expected * 1e-5;
-            prop_assert!((self_dot - expected).abs() < tolerance,
-                "Self dot product should equal squared magnitude: {} vs {}", self_dot, expected);
-        }
+                    // Cosine similarity should be scale-invariant.
+                    //
+                    // Why 10x tolerance? Scaling introduces additional error sources:
+                    // 1. The scaling multiplication itself: len extra multiply operations
+                    // 2. Magnitude changes: scaled vectors have different magnitudes,
+                    //    potentially causing different rounding in the sqrt and division
+                    // 3. For scale factors near the edges (0.1 or 10.0), the magnitude
+                    //    difference is up to 100x, affecting numerical stability
+                    //
+                    // Empirically, 10x base tolerance handles these cases while still
+                    // catching genuine scale invariance violations.
+                    if !sim1.is_nan() && !sim2.is_nan() {
+                        prop_assert!((sim1 - sim2).abs() < PROPTEST_TOLERANCE * 10.0,
+                            "Scale invariance failed: {} vs {} for scale {}", sim1, sim2, scale);
+                    }
+                }
+            }
 
-        #[test]
-        fn prop_dot_product_with_zero_vector(
-            a in prop::collection::vec(-100.0f32..100.0f32, 1..100usize)
-        ) {
-            let zeros: Vec<f32> = vec![0.0; a.len()];
-            let result = dot_product(&a, &zeros).unwrap();
-            prop_assert!(result.abs() < PROPTEST_TOLERANCE,
-                "Dot product with zero vector should be 0, got {}", result);
-        }
+            // ====================================================================
+            // Euclidean Distance Property Tests
+            // ====================================================================
 
-        #[test]
-        fn prop_dot_product_bilinearity_scalar(
-            (a, b) in same_length_vectors(50),
-            scale in 0.1f32..10.0f32
-        ) {
-            // Scalar multiplication: dot(c*a, b) = c * dot(a, b)
-            let dot_ab = dot_product(&a, &b).unwrap();
-            let scaled_a: Vec<f32> = a.iter().map(|x| x * scale).collect();
-            let dot_scaled = dot_product(&scaled_a, &b).unwrap();
+            #[test]
+            fn prop_euclidean_distance_is_non_negative(
+                (a, b) in same_length_vectors(100)
+            ) {
+                let dist = euclidean_distance(&a, &b).unwrap();
+                prop_assert!(dist >= 0.0, "Distance should be non-negative, got {}", dist);
+            }
 
-            // Use tolerance based on intermediate value magnitudes.
-            //
-            // Key insight: when vectors have mixed +/- values, catastrophic
-            // cancellation occurs. Large intermediate values (e.g., 9000) can
-            // cancel to give small results (e.g., 16). The floating-point error
-            // is bounded by the intermediate magnitudes, not the final result.
-            //
-            // Example: sum of products might be [+9000, -8500, +500, -984, ...]
-            // giving final result of ~16, but error is proportional to ~9000.
-            //
-            // Solution: base tolerance on sum of absolute products, which
-            // represents the "scale" of computation regardless of cancellation.
-            let expected = scale * dot_ab;
-            let sum_abs_products: f32 = a.iter()
-                .zip(b.iter())
-                .map(|(x, y)| (x * y).abs())
-                .sum();
-            // Error is proportional to intermediate magnitudes * scale * f32 epsilon
-            // Use 1e-5 relative to intermediate values (conservative for f32)
-            let tolerance = PROPTEST_TOLERANCE * 100.0 + sum_abs_products * scale * 1e-5;
-            prop_assert!((dot_scaled - expected).abs() < tolerance,
-                "Scalar bilinearity failed: dot({}*a, b)={} vs {}*dot(a,b)={}",
-                scale, dot_scaled, scale, expected);
-        }
+            #[test]
+            fn prop_squared_euclidean_distance_is_non_negative(
+                (a, b) in same_length_vectors(100)
+            ) {
+                let dist_sq = squared_euclidean_distance(&a, &b).unwrap();
+                prop_assert!(dist_sq >= 0.0, "Squared distance should be non-negative, got {}", dist_sq);
+            }
 
-        // ====================================================================
-        // Normalization Property Tests
-        // ====================================================================
+            #[test]
+            fn prop_euclidean_distance_is_symmetric(
+                (a, b) in same_length_vectors(100)
+            ) {
+                let dist_ab = euclidean_distance(&a, &b).unwrap();
+                let dist_ba = euclidean_distance(&b, &a).unwrap();
+                prop_assert!((dist_ab - dist_ba).abs() < PROPTEST_TOLERANCE,
+                    "Euclidean distance should be symmetric: {} vs {}", dist_ab, dist_ba);
+            }
 
-        #[test]
-        fn prop_normalized_vector_has_unit_magnitude(
-            v in prop::collection::vec(-100.0f32..100.0f32, 1..100usize)
-        ) {
-            // Skip zero vectors using SIMD squared_magnitude
-            let sq_mag = squared_magnitude(&v);
-            if sq_mag > 1e-10 {
+            #[test]
+            fn prop_squared_euclidean_distance_is_symmetric(
+                (a, b) in same_length_vectors(100)
+            ) {
+                let dist_sq_ab = squared_euclidean_distance(&a, &b).unwrap();
+                let dist_sq_ba = squared_euclidean_distance(&b, &a).unwrap();
+                prop_assert!((dist_sq_ab - dist_sq_ba).abs() < PROPTEST_TOLERANCE,
+                    "Squared Euclidean distance should be symmetric: {} vs {}", dist_sq_ab, dist_sq_ba);
+            }
+
+            #[test]
+            fn prop_euclidean_distance_self_is_zero(
+                a in prop::collection::vec(-100.0f32..100.0f32, 1..100usize)
+            ) {
+                let dist = euclidean_distance(&a, &a).unwrap();
+                prop_assert!(dist.abs() < PROPTEST_TOLERANCE,
+                    "Distance to self should be 0, got {} for {:?}", dist, a);
+            }
+
+            #[test]
+            fn prop_squared_euclidean_distance_self_is_zero(
+                a in prop::collection::vec(-100.0f32..100.0f32, 1..100usize)
+            ) {
+                let dist_sq = squared_euclidean_distance(&a, &a).unwrap();
+                prop_assert!(dist_sq.abs() < PROPTEST_TOLERANCE,
+                    "Squared distance to self should be 0, got {} for {:?}", dist_sq, a);
+            }
+
+            #[test]
+            fn prop_euclidean_squared_relationship(
+                (a, b) in same_length_vectors(100)
+            ) {
+                let dist = euclidean_distance(&a, &b).unwrap();
+                let dist_sq = squared_euclidean_distance(&a, &b).unwrap();
+                // dist² should equal dist_sq
+                // Use relative tolerance for larger values
+                let tolerance = PROPTEST_TOLERANCE * 100.0 + dist_sq * 1e-5;
+                prop_assert!((dist * dist - dist_sq).abs() < tolerance,
+                    "euclidean² ({}) should equal squared_euclidean ({})", dist * dist, dist_sq);
+            }
+
+            #[test]
+            fn prop_euclidean_distance_triangle_inequality(
+                a in prop::collection::vec(-50.0f32..50.0f32, 1..50usize),
+                b in prop::collection::vec(-50.0f32..50.0f32, 1..50usize),
+                c in prop::collection::vec(-50.0f32..50.0f32, 1..50usize)
+            ) {
+                // Triangle inequality: d(a,c) <= d(a,b) + d(b,c)
+                // Only test if all vectors have same length
+                if a.len() == b.len() && b.len() == c.len() {
+                    let d_ab = euclidean_distance(&a, &b).unwrap();
+                    let d_bc = euclidean_distance(&b, &c).unwrap();
+                    let d_ac = euclidean_distance(&a, &c).unwrap();
+
+                    // Allow small tolerance for floating-point errors
+                    let tolerance = PROPTEST_TOLERANCE * 100.0;
+                    prop_assert!(d_ac <= d_ab + d_bc + tolerance,
+                        "Triangle inequality violated: d(a,c)={} > d(a,b)={} + d(b,c)={}",
+                        d_ac, d_ab, d_bc);
+                }
+            }
+
+            // ====================================================================
+            // Dot Product Property Tests
+            // ====================================================================
+
+            #[test]
+            fn prop_dot_product_is_symmetric(
+                (a, b) in same_length_vectors(100)
+            ) {
+                let dot_ab = dot_product(&a, &b).unwrap();
+                let dot_ba = dot_product(&b, &a).unwrap();
+                prop_assert!((dot_ab - dot_ba).abs() < PROPTEST_TOLERANCE,
+                    "Dot product should be symmetric: {} vs {}", dot_ab, dot_ba);
+            }
+
+            #[test]
+
+            #[test]
+            fn prop_havoc_simd_scale_in_place_avx2(
+                mut a in prop::collection::vec(proptest::num::f32::ANY, 0..1000usize),
+                scalar in proptest::num::f32::ANY
+            ) {
+                unsafe {
+                    if is_x86_feature_detected!("avx2") {
+                        super::simd::x86_ops::scale_in_place_avx2(&mut a, scalar);
+                    }
+                }
+            }
+
+            #[test]
+            fn prop_havoc_simd_squared_magnitude_avx2(
+                a in prop::collection::vec(proptest::num::f32::ANY, 0..1000usize)
+            ) {
+                unsafe {
+                    if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
+                        super::simd::x86_ops::squared_magnitude_avx2(&a);
+                    }
+                }
+            }
+
+            #[test]
+            fn prop_havoc_simd_dot_product_avx2(
+                a in prop::collection::vec(proptest::num::f32::ANY, 0..100usize),
+                b in prop::collection::vec(proptest::num::f32::ANY, 0..100usize)
+            ) {
+                unsafe {
+                    if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
+                        // Force a.len() == b.len() condition for test via taking min slice length to avoid standard assert panics if lengths mismatch, BUT:
+                        // Actually, let's test what happens if we pass random lengths that MIGHT not match, or simply test with ANY lengths.
+                        // Wait, dot_product_avx2 asserts a.len() == b.len(), which causes panic! That's correct behavior.
+
+                        // Let's pass equal lengths and try to trigger NaN or UB.
+                        let len = std::cmp::min(a.len(), b.len());
+                        let a_slice = &a[..len];
+                        let b_slice = &b[..len];
+                        let _ = super::simd::x86_ops::dot_product_avx2(a_slice, b_slice);
+                    }
+                }
+            }
+
+            #[test]
+            fn prop_havoc_simd_horizontal_sum_sse(
+                a in prop::collection::vec(proptest::num::f32::ANY, 0..100usize),
+                b in prop::collection::vec(proptest::num::f32::ANY, 0..100usize)
+            ) {
+                unsafe {
+                    if is_x86_feature_detected!("sse2") {
+                        let len = std::cmp::min(a.len(), b.len());
+                        let a_slice = &a[..len];
+                        let b_slice = &b[..len];
+                        let _ = super::simd::x86_ops::dot_and_magnitudes_sse2(a_slice, b_slice);
+                    }
+                }
+            }
+
+            #[test]
+            fn prop_havoc_simd_squared_diff_sum_avx2(
+                a in prop::collection::vec(proptest::num::f32::ANY, 0..100usize),
+                b in prop::collection::vec(proptest::num::f32::ANY, 0..100usize)
+            ) {
+                unsafe {
+                    if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
+                        let len = std::cmp::min(a.len(), b.len());
+                        let a_slice = &a[..len];
+                        let b_slice = &b[..len];
+                        let _ = super::simd::x86_ops::squared_diff_sum_avx2(a_slice, b_slice);
+                    }
+                }
+            }
+
+            #[test]
+            fn prop_havoc_simd_horizontal_sum_avx(
+                a in prop::collection::vec(proptest::num::f32::ANY, 0..100usize),
+                b in prop::collection::vec(proptest::num::f32::ANY, 0..100usize)
+            ) {
+                unsafe {
+                    if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
+                        let len = std::cmp::min(a.len(), b.len());
+                        let a_slice = &a[..len];
+                        let b_slice = &b[..len];
+                        let _ = super::simd::x86_ops::dot_and_magnitudes_avx2(a_slice, b_slice);
+                    }
+                }
+            }
+
+            #[test]
+            fn prop_havoc_simd_horizontal_sum_sse2_direct(
+                a in prop::collection::vec(proptest::num::f32::ANY, 0..100usize)
+            ) {
+                unsafe {
+                    if is_x86_feature_detected!("sse2") {
+                        super::simd::x86_ops::squared_magnitude_sse2(&a);
+                    }
+                }
+            }
+    fn prop_dot_product_self_equals_squared_magnitude(
+                a in prop::collection::vec(-100.0f32..100.0f32, 1..100usize)
+            ) {
+                let self_dot = dot_product(&a, &a).unwrap();
+                // Self dot product should equal sum of squares (squared magnitude)
+                let expected: f32 = a.iter().map(|x| x * x).sum();
+
+                // Use relative tolerance for larger values
+                let tolerance = PROPTEST_TOLERANCE * 100.0 + expected * 1e-5;
+                prop_assert!((self_dot - expected).abs() < tolerance,
+                    "Self dot product should equal squared magnitude: {} vs {}", self_dot, expected);
+            }
+
+            #[test]
+            fn prop_dot_product_with_zero_vector(
+                a in prop::collection::vec(-100.0f32..100.0f32, 1..100usize)
+            ) {
+                let zeros: Vec<f32> = vec![0.0; a.len()];
+                let result = dot_product(&a, &zeros).unwrap();
+                prop_assert!(result.abs() < PROPTEST_TOLERANCE,
+                    "Dot product with zero vector should be 0, got {}", result);
+            }
+
+            #[test]
+            fn prop_dot_product_bilinearity_scalar(
+                (a, b) in same_length_vectors(50),
+                scale in 0.1f32..10.0f32
+            ) {
+                // Scalar multiplication: dot(c*a, b) = c * dot(a, b)
+                let dot_ab = dot_product(&a, &b).unwrap();
+                let scaled_a: Vec<f32> = a.iter().map(|x| x * scale).collect();
+                let dot_scaled = dot_product(&scaled_a, &b).unwrap();
+
+                // Use tolerance based on intermediate value magnitudes.
+                //
+                // Key insight: when vectors have mixed +/- values, catastrophic
+                // cancellation occurs. Large intermediate values (e.g., 9000) can
+                // cancel to give small results (e.g., 16). The floating-point error
+                // is bounded by the intermediate magnitudes, not the final result.
+                //
+                // Example: sum of products might be [+9000, -8500, +500, -984, ...]
+                // giving final result of ~16, but error is proportional to ~9000.
+                //
+                // Solution: base tolerance on sum of absolute products, which
+                // represents the "scale" of computation regardless of cancellation.
+                let expected = scale * dot_ab;
+                let sum_abs_products: f32 = a.iter()
+                    .zip(b.iter())
+                    .map(|(x, y)| (x * y).abs())
+                    .sum();
+                // Error is proportional to intermediate magnitudes * scale * f32 epsilon
+                // Use 1e-5 relative to intermediate values (conservative for f32)
+                let tolerance = PROPTEST_TOLERANCE * 100.0 + sum_abs_products * scale * 1e-5;
+                prop_assert!((dot_scaled - expected).abs() < tolerance,
+                    "Scalar bilinearity failed: dot({}*a, b)={} vs {}*dot(a,b)={}",
+                    scale, dot_scaled, scale, expected);
+            }
+
+            // ====================================================================
+            // Normalization Property Tests
+            // ====================================================================
+
+            #[test]
+            fn prop_normalized_vector_has_unit_magnitude(
+                v in prop::collection::vec(-100.0f32..100.0f32, 1..100usize)
+            ) {
+                // Skip zero vectors using SIMD squared_magnitude
+                let sq_mag = squared_magnitude(&v);
+                if sq_mag > 1e-10 {
+                    let unit = normalize(&v);
+                    let mag = magnitude(&unit);
+                    prop_assert!((mag - 1.0).abs() < PROPTEST_TOLERANCE,
+                        "Normalized vector should have magnitude 1.0, got {} for {:?}", mag, v);
+                }
+            }
+
+            #[test]
+            fn prop_normalize_in_place_has_unit_magnitude(
+                v in prop::collection::vec(-100.0f32..100.0f32, 1..100usize)
+            ) {
+                // Skip zero vectors using SIMD squared_magnitude
+                let sq_mag = squared_magnitude(&v);
+                if sq_mag > 1e-10 {
+                    let mut v_copy = v.clone();
+                    normalize_in_place(&mut v_copy);
+                    let mag = magnitude(&v_copy);
+                    prop_assert!((mag - 1.0).abs() < PROPTEST_TOLERANCE,
+                        "In-place normalized vector should have magnitude 1.0, got {}", mag);
+                }
+            }
+
+            #[test]
+            fn prop_normalize_matches_normalize_in_place(
+                v in prop::collection::vec(-100.0f32..100.0f32, 1..100usize)
+            ) {
                 let unit = normalize(&v);
-                let mag = magnitude(&unit);
-                prop_assert!((mag - 1.0).abs() < PROPTEST_TOLERANCE,
-                    "Normalized vector should have magnitude 1.0, got {} for {:?}", mag, v);
-            }
-        }
-
-        #[test]
-        fn prop_normalize_in_place_has_unit_magnitude(
-            v in prop::collection::vec(-100.0f32..100.0f32, 1..100usize)
-        ) {
-            // Skip zero vectors using SIMD squared_magnitude
-            let sq_mag = squared_magnitude(&v);
-            if sq_mag > 1e-10 {
                 let mut v_copy = v.clone();
                 normalize_in_place(&mut v_copy);
-                let mag = magnitude(&v_copy);
-                prop_assert!((mag - 1.0).abs() < PROPTEST_TOLERANCE,
-                    "In-place normalized vector should have magnitude 1.0, got {}", mag);
+
+                for (a, b) in unit.iter().zip(v_copy.iter()) {
+                    prop_assert!((a - b).abs() < PROPTEST_TOLERANCE,
+                        "normalize and normalize_in_place should produce same result");
+                }
             }
-        }
 
-        #[test]
-        fn prop_normalize_matches_normalize_in_place(
-            v in prop::collection::vec(-100.0f32..100.0f32, 1..100usize)
-        ) {
-            let unit = normalize(&v);
-            let mut v_copy = v.clone();
-            normalize_in_place(&mut v_copy);
-
-            for (a, b) in unit.iter().zip(v_copy.iter()) {
-                prop_assert!((a - b).abs() < PROPTEST_TOLERANCE,
-                    "normalize and normalize_in_place should produce same result");
+            #[test]
+            fn prop_magnitude_is_non_negative(
+                v in prop::collection::vec(-100.0f32..100.0f32, 0..100usize)
+            ) {
+                let mag = magnitude(&v);
+                prop_assert!(mag >= 0.0, "Magnitude should be non-negative, got {}", mag);
             }
-        }
 
-        #[test]
-        fn prop_magnitude_is_non_negative(
-            v in prop::collection::vec(-100.0f32..100.0f32, 0..100usize)
-        ) {
-            let mag = magnitude(&v);
-            prop_assert!(mag >= 0.0, "Magnitude should be non-negative, got {}", mag);
-        }
+            #[test]
+            fn prop_squared_magnitude_is_non_negative(
+                v in prop::collection::vec(-100.0f32..100.0f32, 0..100usize)
+            ) {
+                let sq_mag = squared_magnitude(&v);
+                prop_assert!(sq_mag >= 0.0, "Squared magnitude should be non-negative, got {}", sq_mag);
+            }
 
-        #[test]
-        fn prop_squared_magnitude_is_non_negative(
-            v in prop::collection::vec(-100.0f32..100.0f32, 0..100usize)
-        ) {
-            let sq_mag = squared_magnitude(&v);
-            prop_assert!(sq_mag >= 0.0, "Squared magnitude should be non-negative, got {}", sq_mag);
-        }
+            #[test]
+            fn prop_magnitude_squared_relationship(
+                v in prop::collection::vec(-100.0f32..100.0f32, 1..100usize)
+            ) {
+                let mag = magnitude(&v);
+                let sq_mag = squared_magnitude(&v);
+                // magnitude² should equal squared_magnitude
+                // Use relative tolerance to avoid scale-dependent thresholds
+                let diff = (mag * mag - sq_mag).abs();
+                let relative_tolerance = 1e-5; // 0.001% relative error
+                let threshold = sq_mag.max(1.0) * relative_tolerance;
+                prop_assert!(diff < threshold,
+                    "magnitude² ({}) should equal squared_magnitude ({}), diff={}, threshold={}",
+                    mag * mag, sq_mag, diff, threshold);
+            }
 
-        #[test]
-        fn prop_magnitude_squared_relationship(
-            v in prop::collection::vec(-100.0f32..100.0f32, 1..100usize)
-        ) {
-            let mag = magnitude(&v);
-            let sq_mag = squared_magnitude(&v);
-            // magnitude² should equal squared_magnitude
-            // Use relative tolerance to avoid scale-dependent thresholds
-            let diff = (mag * mag - sq_mag).abs();
-            let relative_tolerance = 1e-5; // 0.001% relative error
-            let threshold = sq_mag.max(1.0) * relative_tolerance;
-            prop_assert!(diff < threshold,
-                "magnitude² ({}) should equal squared_magnitude ({}), diff={}, threshold={}",
-                mag * mag, sq_mag, diff, threshold);
-        }
+            #[test]
+            fn prop_normalize_preserves_direction(
+                v in prop::collection::vec(-100.0f32..100.0f32, 2..50usize)
+            ) {
+                // Skip zero or near-zero vectors using SIMD squared_magnitude
+                let sq_mag = squared_magnitude(&v);
+                if sq_mag > 1e-6 {
+                    let unit = normalize(&v);
+                    // Cosine similarity between original and normalized should be 1.0
+                    let sim = cosine_similarity(&v, &unit).unwrap();
+                    if !sim.is_nan() {
+                        prop_assert!((sim - 1.0).abs() < PROPTEST_TOLERANCE * 10.0,
+                            "Normalized vector should have same direction: sim = {}", sim);
+                    }
+                }
+            }
 
-        #[test]
-        fn prop_normalize_preserves_direction(
-            v in prop::collection::vec(-100.0f32..100.0f32, 2..50usize)
-        ) {
-            // Skip zero or near-zero vectors using SIMD squared_magnitude
-            let sq_mag = squared_magnitude(&v);
-            if sq_mag > 1e-6 {
-                let unit = normalize(&v);
-                // Cosine similarity between original and normalized should be 1.0
-                let sim = cosine_similarity(&v, &unit).unwrap();
-                if !sim.is_nan() {
-                    prop_assert!((sim - 1.0).abs() < PROPTEST_TOLERANCE * 10.0,
-                        "Normalized vector should have same direction: sim = {}", sim);
+            #[test]
+            fn prop_is_normalized_after_normalize(
+                v in prop::collection::vec(-100.0f32..100.0f32, 1..100usize)
+            ) {
+                // Skip zero vectors using SIMD squared_magnitude
+                let sq_mag = squared_magnitude(&v);
+                if sq_mag > 1e-10 {
+                    let unit = normalize(&v);
+                    // Use 1e-5 tolerance matching PROPTEST_TOLERANCE
+                    prop_assert!(is_normalized(&unit, PROPTEST_TOLERANCE),
+                        "Normalized vector should pass is_normalized check");
                 }
             }
         }
-
-        #[test]
-        fn prop_is_normalized_after_normalize(
-            v in prop::collection::vec(-100.0f32..100.0f32, 1..100usize)
-        ) {
-            // Skip zero vectors using SIMD squared_magnitude
-            let sq_mag = squared_magnitude(&v);
-            if sq_mag > 1e-10 {
-                let unit = normalize(&v);
-                // Use 1e-5 tolerance matching PROPTEST_TOLERANCE
-                prop_assert!(is_normalized(&unit, PROPTEST_TOLERANCE),
-                    "Normalized vector should pass is_normalized check");
-            }
-        }
-    }
 }
 
 // ========== New Error Handling Tests for Coverage ==========
