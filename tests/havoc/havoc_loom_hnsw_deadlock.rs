@@ -66,7 +66,7 @@ impl MockHnswIndex {
 
 #[test]
 #[should_panic]
-#[ignore] // Ignored because it crashes the test runner with SIGABRT
+
 fn test_deadlock_reproduction() {
     loom::model(|| {
         let index = Arc::new(MockHnswIndex::new());
