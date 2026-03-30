@@ -121,6 +121,30 @@ sequenceDiagram
 
 ## Architecture Layers
 
+### System Dependency Graph (ADR-0055)
+
+The dependency graph enforces strict layering, eliminating circular dependencies between `core`, `storage`, `api`, and `db`.
+
+```mermaid
+graph TD
+    subgraph "AletheiaDB Packages"
+        DB["db<br/>(AletheiaDB Orchestrator, VectorIndexBuilder)"]
+        API["api<br/>(Transaction API)"]
+        Storage["storage<br/>(Persistence Layer)"]
+        Core["core<br/>(Domain Primitives, id, error, version)"]
+    end
+
+    DB --> API
+    DB --> Core
+    API --> Storage
+    Storage --> Core
+
+    style DB fill:#e1f5fe,stroke:#01579b
+    style API fill:#e8f5e9,stroke:#1b5e20
+    style Storage fill:#fff3e0,stroke:#e65100
+    style Core fill:#f3e5f5,stroke:#4a148c
+```
+
 ### Layer 1: Core Types
 
 Foundational data structures used throughout:
@@ -419,7 +443,8 @@ aletheiadb/
 │   │   ├── temporal.rs     # BiTemporalInterval, TimeRange
 │   │   ├── property.rs     # PropertyValue, PropertyMap
 │   │   ├── graph.rs        # Node, Edge
-│   │   └── interning.rs    # InternedString, StringInterner
+│   │   ├── interning.rs    # InternedString, StringInterner
+│   │   └── error.rs        # Error types
 │   │
 │   ├── storage/            # Persistence layer
 │   │   ├── current.rs      # CurrentStorage
@@ -440,9 +465,6 @@ aletheiadb/
 │   │       ├── read_tx.rs  # ReadTransaction
 │   │       ├── write_tx.rs # WriteTransaction
 │   │       └── write_buffer.rs
-│   │
-│   └── utils/
-│       └── error.rs        # Error types
 │
 ├── benches/                # Criterion benchmarks
 ├── docs/
