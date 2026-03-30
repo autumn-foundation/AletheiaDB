@@ -1945,3 +1945,351 @@ mod sentry_tests {
         assert!(format!("{}", err).contains("Deserialized TimeRange invalid"));
     }
 }
+#[cfg(test)]
+mod sentinel_temporal_missing_mutants {
+    use crate::core::hlc::HybridTimestamp;
+    use crate::core::temporal::{BiTemporalInterval, TIMESTAMP_MAX, TimeRange};
+
+    #[test]
+    fn test_time_range_from_defaults() {
+        let ts = HybridTimestamp::new(100, 0).unwrap();
+        let range = TimeRange::from(ts);
+        assert_eq!(range.start(), ts);
+        assert_eq!(range.end(), TIMESTAMP_MAX);
+    }
+
+    #[test]
+    fn test_time_range_between_defaults() {
+        let start = HybridTimestamp::new(100, 0).unwrap();
+        let end = HybridTimestamp::new(200, 0).unwrap();
+        let range = TimeRange::between(start, end).unwrap();
+        assert_eq!(range.start(), start);
+        assert_eq!(range.end(), end);
+    }
+
+    #[test]
+    fn test_time_range_at_defaults() {
+        let ts = HybridTimestamp::new(100, 0).unwrap();
+        let range = TimeRange::at(ts);
+        assert_eq!(range.start(), ts);
+        assert_eq!(range.end(), ts);
+    }
+
+    #[test]
+    fn test_time_range_contains_mutants() {
+        let ts1 = HybridTimestamp::new(100, 0).unwrap();
+        let ts2 = HybridTimestamp::new(200, 0).unwrap();
+        let range = TimeRange::new(ts1, ts2).unwrap();
+
+        // contains
+        assert_eq!(range.contains(ts1), true); // >= self.start
+        assert_eq!(range.contains(HybridTimestamp::new(99, 0).unwrap()), false); // < self.start
+        assert_eq!(range.contains(ts2), false); // < self.end
+        assert_eq!(range.contains(HybridTimestamp::new(199, 0).unwrap()), true); // < self.end
+        assert_eq!(range.contains(HybridTimestamp::new(201, 0).unwrap()), false);
+    }
+
+    #[test]
+    fn test_time_range_contains_or_after_mutants() {
+        let ts1 = HybridTimestamp::new(100, 0).unwrap();
+        let ts2 = HybridTimestamp::new(200, 0).unwrap();
+        let range = TimeRange::new(ts1, ts2).unwrap();
+
+        assert_eq!(range.contains_or_after(ts1), true);
+        assert_eq!(
+            range.contains_or_after(HybridTimestamp::new(99, 0).unwrap()),
+            false
+        );
+        assert_eq!(range.contains_or_after(ts2), true);
+        assert_eq!(
+            range.contains_or_after(HybridTimestamp::new(201, 0).unwrap()),
+            true
+        );
+    }
+
+    #[test]
+    fn test_time_range_is_empty_mutants() {
+        let ts1 = HybridTimestamp::new(100, 0).unwrap();
+        let ts2 = HybridTimestamp::new(200, 0).unwrap();
+
+        let range_empty = TimeRange::at(ts1);
+        let range_non_empty = TimeRange::new(ts1, ts2).unwrap();
+
+        assert_eq!(range_empty.is_empty(), true);
+        assert_eq!(range_non_empty.is_empty(), false);
+    }
+
+    #[test]
+    fn test_time_range_overlaps_mutants() {
+        let ts1 = HybridTimestamp::new(100, 0).unwrap();
+        let ts2 = HybridTimestamp::new(200, 0).unwrap();
+        let range1 = TimeRange::new(ts1, ts2).unwrap();
+
+        // self.start < other.end && other.start < self.end
+        let ts3 = HybridTimestamp::new(50, 0).unwrap();
+        let ts4 = HybridTimestamp::new(150, 0).unwrap();
+        let range2 = TimeRange::new(ts3, ts4).unwrap(); // start < self.end, end > self.start
+        assert_eq!(range1.overlaps(&range2), true);
+
+        let ts5 = HybridTimestamp::new(200, 0).unwrap();
+        let ts6 = HybridTimestamp::new(300, 0).unwrap();
+        let range3 = TimeRange::new(ts5, ts6).unwrap(); // start == self.end
+        assert_eq!(range1.overlaps(&range3), false);
+
+        let ts7 = HybridTimestamp::new(50, 0).unwrap();
+        let ts8 = HybridTimestamp::new(100, 0).unwrap();
+        let range4 = TimeRange::new(ts7, ts8).unwrap(); // end == self.start
+        assert_eq!(range1.overlaps(&range4), false);
+    }
+
+    #[test]
+    fn test_time_range_contains_range_mutants() {
+        let ts1 = HybridTimestamp::new(100, 0).unwrap();
+        let ts2 = HybridTimestamp::new(200, 0).unwrap();
+        let range1 = TimeRange::new(ts1, ts2).unwrap();
+
+        // self.start <= other.start && other.end <= self.end
+        let range2 = TimeRange::new(ts1, ts2).unwrap();
+        assert_eq!(range1.contains_range(&range2), true);
+
+        let range3 = TimeRange::new(ts1, HybridTimestamp::new(199, 0).unwrap()).unwrap();
+        assert_eq!(range1.contains_range(&range3), true);
+
+        let range4 = TimeRange::new(HybridTimestamp::new(101, 0).unwrap(), ts2).unwrap();
+        assert_eq!(range1.contains_range(&range4), true);
+
+        let range5 = TimeRange::new(HybridTimestamp::new(99, 0).unwrap(), ts2).unwrap();
+        assert_eq!(range1.contains_range(&range5), false);
+
+        let range6 = TimeRange::new(ts1, HybridTimestamp::new(201, 0).unwrap()).unwrap();
+        assert_eq!(range1.contains_range(&range6), false);
+    }
+
+    #[test]
+    fn test_time_range_close_at_mutants() {
+        let ts1 = HybridTimestamp::new(100, 0).unwrap();
+        let ts2 = HybridTimestamp::new(200, 0).unwrap();
+        let range = TimeRange::new(ts1, TIMESTAMP_MAX).unwrap();
+
+        let closed = range.close_at(ts2).unwrap();
+        assert_eq!(closed.end(), ts2);
+
+        // test the < bounds check. close_at allows closing at start
+        let closed_at_start = range.close_at(ts1).unwrap();
+        assert_eq!(closed_at_start.end(), ts1);
+
+        assert!(
+            range
+                .close_at(HybridTimestamp::new(99, 0).unwrap())
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn test_duration_micros_mutants() {
+        let ts1 = HybridTimestamp::new(100_000_000, 0).unwrap();
+        let ts2 = HybridTimestamp::new(200_000_000, 0).unwrap();
+
+        let range1 = TimeRange::new(ts1, ts2).unwrap();
+        assert_eq!(range1.duration_micros(), Some(100_000_000));
+        assert_ne!(range1.duration_micros(), None);
+        assert_ne!(range1.duration_micros(), Some(0));
+        assert_ne!(range1.duration_micros(), Some(1));
+        assert_ne!(range1.duration_micros(), Some(-1));
+
+        let range2 = TimeRange::from(ts1);
+        assert_eq!(range2.duration_micros(), None);
+    }
+
+    #[test]
+    fn test_time_range_serialize_mutants() {
+        let ts1 = HybridTimestamp::new(100, 0).unwrap();
+        let ts2 = HybridTimestamp::new(200, 0).unwrap();
+
+        let range1 = TimeRange::new(ts1, ts2).unwrap();
+        let serialized1 = range1.serialize();
+        assert_eq!(serialized1.len(), 24);
+        assert_ne!(serialized1, vec![]);
+        assert_ne!(serialized1, vec![0]);
+        assert_ne!(serialized1, vec![1]);
+
+        let range2 = TimeRange::from(ts1);
+        let serialized2 = range2.serialize();
+        assert_eq!(serialized2.len(), 24);
+
+        let mut buf = vec![0u8; 24];
+        range1.serialize_into(&mut buf);
+        assert_eq!(buf.len(), 48);
+        // Ensure serialize_into actually modified the buffer
+        assert_ne!(buf, vec![0u8; 24]);
+    }
+
+    #[test]
+    fn test_time_range_deserialize_mutants() {
+        let ts1 = HybridTimestamp::new(100, 0).unwrap();
+        let ts2 = HybridTimestamp::new(200, 0).unwrap();
+
+        let range1 = TimeRange::new(ts1, ts2).unwrap();
+        let serialized1 = range1.serialize();
+
+        let (deserialized1, size1) = TimeRange::deserialize(&serialized1).unwrap();
+        assert_eq!(deserialized1, range1);
+        assert_eq!(size1, 24);
+
+        assert_ne!(
+            TimeRange::deserialize(&serialized1).unwrap(),
+            (TimeRange::at(HybridTimestamp::new(0, 0).unwrap()), 0)
+        );
+        assert_ne!(
+            TimeRange::deserialize(&serialized1).unwrap(),
+            (TimeRange::at(HybridTimestamp::new(0, 0).unwrap()), 1)
+        );
+
+        // Error cases
+        assert!(TimeRange::deserialize(&[0u8; 23]).is_err());
+        assert!(TimeRange::deserialize(&[]).is_err());
+    }
+
+    #[test]
+    fn test_time_range_display_mutants() {
+        let ts1 = HybridTimestamp::new(100, 0).unwrap();
+        let ts2 = HybridTimestamp::new(200, 0).unwrap();
+
+        let range1 = TimeRange::new(ts1, ts2).unwrap();
+        let display1 = format!("{}", range1);
+        assert_ne!(display1, "");
+        assert_ne!(
+            display1,
+            format!("{}", TimeRange::at(HybridTimestamp::new(0, 0).unwrap()))
+        );
+    }
+
+    #[test]
+    fn test_bitemporal_methods_mutants() {
+        let vt1 = HybridTimestamp::new(100, 0).unwrap();
+        let vt2 = HybridTimestamp::new(200, 0).unwrap();
+        let tt1 = HybridTimestamp::new(100, 0).unwrap();
+        let tt2 = HybridTimestamp::new(200, 0).unwrap();
+
+        let bti = BiTemporalInterval::new(TimeRange::from(vt1), TimeRange::from(tt1));
+        assert_eq!(bti.is_current(), true);
+
+        let bti_now = BiTemporalInterval::now(vt1, tt1);
+        assert_eq!(bti_now.valid_time().start(), vt1);
+        assert_eq!(bti_now.transaction_time().start(), tt1);
+
+        let bti_wvt = BiTemporalInterval::with_valid_time(vt1, tt1);
+        assert_eq!(bti_wvt.valid_time().start(), vt1);
+        assert_eq!(bti_wvt.transaction_time().start(), tt1);
+
+        assert_eq!(bti.valid_time().start(), vt1);
+        assert_eq!(bti.transaction_time().start(), tt1);
+
+        assert_eq!(bti.is_currently_valid(), true);
+        assert_eq!(bti.is_currently_recorded(), true);
+        assert_eq!(bti.is_current(), true);
+
+        let bti_closed = BiTemporalInterval::new(
+            TimeRange::new(vt1, vt2).unwrap(),
+            TimeRange::new(tt1, tt2).unwrap(),
+        );
+        assert_eq!(bti_closed.is_currently_valid(), false);
+        assert_eq!(bti_closed.is_currently_recorded(), false);
+        assert_eq!(bti_closed.is_current(), false);
+
+        assert_eq!(bti.is_valid_at(vt1), true);
+        assert_eq!(bti.is_valid_at(HybridTimestamp::new(99, 0).unwrap()), false);
+
+        assert_eq!(bti.is_recorded_at(tt1), true);
+        assert_eq!(
+            bti.is_recorded_at(HybridTimestamp::new(99, 0).unwrap()),
+            false
+        );
+
+        // is_visible_at
+        assert_eq!(bti.is_visible_at(vt1, tt1), true);
+        assert_eq!(
+            bti.is_visible_at(HybridTimestamp::new(99, 0).unwrap(), tt1),
+            false
+        );
+        assert_eq!(
+            bti.is_visible_at(vt1, HybridTimestamp::new(99, 0).unwrap()),
+            false
+        );
+
+        let bti_closed_vt = bti.close_valid_time(vt2).unwrap();
+        assert_eq!(bti_closed_vt.valid_time().end(), vt2);
+
+        let bti_closed_tt = bti.close_transaction_time(tt2).unwrap();
+        assert_eq!(bti_closed_tt.transaction_time().end(), tt2);
+    }
+    #[test]
+    fn test_bitemporal_interval_serialize_mutants() {
+        let vt1 = HybridTimestamp::new(100, 0).unwrap();
+        let vt2 = HybridTimestamp::new(200, 0).unwrap();
+        let tt1 = HybridTimestamp::new(100, 0).unwrap();
+        let tt2 = HybridTimestamp::new(200, 0).unwrap();
+
+        let bti = BiTemporalInterval::new(
+            TimeRange::new(vt1, vt2).unwrap(),
+            TimeRange::new(tt1, tt2).unwrap(),
+        );
+        let serialized = bti.serialize();
+        assert_eq!(serialized.len(), 48);
+        assert_ne!(serialized, vec![]);
+        assert_ne!(serialized, vec![0]);
+        assert_ne!(serialized, vec![1]);
+
+        let mut buf = vec![0u8; 48];
+        bti.serialize_into(&mut buf);
+        assert_eq!(buf.len(), 96);
+        assert_ne!(buf, vec![0u8; 96]);
+    }
+
+    #[test]
+    fn test_bitemporal_interval_deserialize_mutants() {
+        let vt1 = HybridTimestamp::new(100, 0).unwrap();
+        let vt2 = HybridTimestamp::new(200, 0).unwrap();
+        let tt1 = HybridTimestamp::new(100, 0).unwrap();
+        let tt2 = HybridTimestamp::new(200, 0).unwrap();
+
+        let bti = BiTemporalInterval::new(
+            TimeRange::new(vt1, vt2).unwrap(),
+            TimeRange::new(tt1, tt2).unwrap(),
+        );
+        let serialized = bti.serialize();
+
+        let (deserialized, size) = BiTemporalInterval::deserialize(&serialized).unwrap();
+        assert_eq!(deserialized, bti);
+        assert_eq!(size, 48);
+
+        // Error cases
+        assert!(BiTemporalInterval::deserialize(&[0u8; 47]).is_err());
+        assert!(BiTemporalInterval::deserialize(&[]).is_err());
+    }
+
+    #[test]
+    fn test_bitemporal_interval_display_mutants() {
+        let vt1 = HybridTimestamp::new(100, 0).unwrap();
+        let vt2 = HybridTimestamp::new(200, 0).unwrap();
+        let tt1 = HybridTimestamp::new(100, 0).unwrap();
+        let tt2 = HybridTimestamp::new(200, 0).unwrap();
+
+        let bti = BiTemporalInterval::new(
+            TimeRange::new(vt1, vt2).unwrap(),
+            TimeRange::new(tt1, tt2).unwrap(),
+        );
+        let display1 = format!("{}", bti);
+        assert_ne!(display1, "");
+        assert_ne!(
+            display1,
+            format!(
+                "{}",
+                BiTemporalInterval::now(
+                    HybridTimestamp::new(0, 0).unwrap(),
+                    HybridTimestamp::new(0, 0).unwrap()
+                )
+            )
+        );
+    }
+}
