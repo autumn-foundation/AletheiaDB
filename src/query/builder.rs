@@ -138,7 +138,9 @@ impl QueryBuilder<state::Initial> {
     #[must_use]
     pub fn new() -> Self {
         QueryBuilder {
-            ops: Vec::new(),
+            // ⚡ Bolt Optimization: Most queries have at least 2 operations (Start + something else)
+            // Pre-allocate a small capacity to avoid the first few reallocations which are statistically common.
+            ops: Vec::with_capacity(4),
             temporal_context: None,
             hints: QueryHints::default(),
             _phantom: PhantomData,
