@@ -1,0 +1,6 @@
+--- src/query/mod.rs
++++ src/query/mod.rs
+@@ -101,2 +100,0 @@
+-pub mod traits;
+@@ -116,2 +114,0 @@
+-pub use traits::GraphView;
