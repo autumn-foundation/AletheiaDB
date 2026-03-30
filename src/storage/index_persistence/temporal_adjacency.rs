@@ -108,7 +108,7 @@ pub fn load_temporal_adjacency_index(data_dir: &Path) -> Result<Arc<TemporalAdja
 /// Only outgoing edges are persisted to disk. The incoming index is automatically
 /// rebuilt during load by calling insert_edge(), which populates both directions.
 fn extract_outgoing_data(index: &TemporalAdjacencyIndex) -> Vec<NodeAdjacencyEntry> {
-    let mut outgoing_entries = Vec::new();
+    let mut outgoing_entries = Vec::with_capacity(index.outgoing.len());
 
     // Extract outgoing edges
     for item in index.outgoing.iter() {

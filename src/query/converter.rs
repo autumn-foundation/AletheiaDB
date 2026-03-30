@@ -17,7 +17,7 @@
 //!
 //! # Quick Start
 //!
-//! The simplest way to execute a AQL query is using the [`parse_query`] function:
+//! The simplest way to execute an AQL query is using the [`parse_query`] function:
 //!
 //! ```rust
 //! use aletheiadb::query::{parse_query, QueryPlanner};
@@ -25,7 +25,7 @@
 //! use aletheiadb::storage::CurrentStorage;
 //! use std::sync::Arc;
 //!
-//! // Parse and convert a AQL query
+//! // Parse and convert an AQL query
 //! let query = parse_query("MATCH (n:Person) WHERE n.age > 21 RETURN n LIMIT 10")
 //!     .expect("Failed to parse query");
 //!
@@ -382,9 +382,9 @@ impl AstConverter {
     /// }
     /// ```
     pub fn convert(&self, ast: &QueryAst) -> Result<Query> {
-        // OPTIMIZATION: Pre-allocate vector to avoid reallocations.
-        // Most queries produce at least a few operations (Scan, Return, etc.), so 8 is a conservative start.
-        let mut ops = Vec::with_capacity(8);
+        // Most queries produce a few operations (Scan, Filter, Return, etc.)
+        const INITIAL_OPS_CAPACITY: usize = 8;
+        let mut ops = Vec::with_capacity(INITIAL_OPS_CAPACITY);
         let hints = QueryHints::default();
 
         // 1. Convert temporal clause to context
@@ -825,16 +825,7 @@ impl AstConverter {
     fn expression_to_predicate_value(&self, expr: &Expression) -> Result<PredicateValue> {
         match expr {
             Expression::Literal(pv) => self.convert_property_value(pv),
-            Expression::Parameter(name) => {
-                if let Some(ParameterValue::Value(v)) = self.parameters.get(name) {
-                    Ok(v.clone())
-                } else {
-                    Err(Error::Query(QueryError::InvalidParameter {
-                        parameter: name.clone(),
-                        reason: "not found or has wrong type".to_string(),
-                    }))
-                }
-            }
+            Expression::Parameter(name) => self.resolve_value_param(name),
             _ => Err(Error::Query(QueryError::SyntaxError {
                 message: "Expected literal or parameter in comparison".to_string(),
             })),
@@ -849,16 +840,19 @@ impl AstConverter {
             PropertyValue::Int(i) => Ok(PredicateValue::Int(*i)),
             PropertyValue::Float(f) => Ok(PredicateValue::Float(*f)),
             PropertyValue::String(s) => Ok(PredicateValue::String(s.clone())),
-            PropertyValue::Parameter(name) => {
-                if let Some(ParameterValue::Value(v)) = self.parameters.get(name) {
-                    Ok(v.clone())
-                } else {
-                    Err(Error::Query(QueryError::InvalidParameter {
-                        parameter: name.clone(),
-                        reason: "not found or has wrong type".to_string(),
-                    }))
-                }
-            }
+            PropertyValue::Parameter(name) => self.resolve_value_param(name),
+        }
+    }
+
+    /// Resolve a named parameter to its predicate value.
+    fn resolve_value_param(&self, name: &str) -> Result<PredicateValue> {
+        if let Some(ParameterValue::Value(v)) = self.parameters.get(name) {
+            Ok(v.clone())
+        } else {
+            Err(Error::Query(QueryError::InvalidParameter {
+                parameter: name.to_string(),
+                reason: "not found or has wrong type".to_string(),
+            }))
         }
     }
 
@@ -972,14 +966,14 @@ impl Default for AstConverter {
     }
 }
 
-/// Parse a AQL query string and convert it to a Query.
+/// Parse an AQL query string and convert it to a Query.
 ///
-/// This is the simplest way to convert a AQL string into an executable query.
+/// This is the simplest way to convert an AQL string into an executable query.
 /// It combines parsing and conversion in a single step.
 ///
 /// # Arguments
 ///
-/// * `gql` - A AQL query string (e.g., `"MATCH (n:Person) RETURN n"`)
+/// * `aql` - An AQL query string (e.g., `"MATCH (n:Person) RETURN n"`)
 ///
 /// # Returns
 ///
@@ -1023,8 +1017,8 @@ impl Default for AstConverter {
 /// let result = parse_query("SIMILAR TO $embedding LIMIT 10");
 /// assert!(result.is_err());
 /// ```
-pub fn parse_query(gql: &str) -> Result<Query> {
-    let ast = super::parser::Parser::parse(gql).map_err(|e| {
+pub fn parse_query(aql: &str) -> Result<Query> {
+    let ast = super::parser::Parser::parse(aql).map_err(|e| {
         Error::Query(QueryError::SyntaxError {
             message: e.to_string(),
         })
@@ -1033,7 +1027,7 @@ pub fn parse_query(gql: &str) -> Result<Query> {
     converter.convert(&ast)
 }
 
-/// Parse a AQL query string with parameters and convert it to a Query.
+/// Parse an AQL query string with parameters and convert it to a Query.
 ///
 /// Use this function when your query contains parameter references (`$name`).
 /// Parameters allow dynamic values without string concatenation, which:
@@ -1044,7 +1038,7 @@ pub fn parse_query(gql: &str) -> Result<Query> {
 ///
 /// # Arguments
 ///
-/// * `gql` - A AQL query string with parameter references
+/// * `aql` - An AQL query string with parameter references
 /// * `params` - A map of parameter names to values
 ///
 /// # Returns
@@ -1089,10 +1083,10 @@ pub fn parse_query(gql: &str) -> Result<Query> {
 /// - A referenced parameter is not in the `params` map
 /// - A parameter has the wrong type for its context
 pub fn parse_query_with_params(
-    gql: &str,
+    aql: &str,
     params: HashMap<String, ParameterValue>,
 ) -> Result<Query> {
-    let ast = super::parser::Parser::parse(gql).map_err(|e| {
+    let ast = super::parser::Parser::parse(aql).map_err(|e| {
         Error::Query(QueryError::SyntaxError {
             message: e.to_string(),
         })
@@ -1572,10 +1566,10 @@ mod tests {
         use std::sync::Arc;
 
         // Complex query with multiple operations
-        let gql = "MATCH (n:Person)-[:KNOWS*1..3]->(m:Person) WHERE n.age > 21 AND m.active = true RETURN m LIMIT 100";
+        let aql = "MATCH (n:Person)-[:KNOWS*1..3]->(m:Person) WHERE n.age > 21 AND m.active = true RETURN m LIMIT 100";
 
         // Parse
-        let ast = Parser::parse(gql).unwrap();
+        let ast = Parser::parse(aql).unwrap();
 
         // Convert
         let converter = AstConverter::new();
@@ -1928,9 +1922,7 @@ mod sentry_tests {
 
             let found = query.ops.iter().any(|op| {
                 if let QueryOp::Filter(pred) = op {
-                    // Simple check for variant and value match.
-                    // Note: Predicate doesn't derive PartialEq, so we format debug strings
-                    format!("{:?}", pred) == format!("{:?}", expected)
+                    *pred == expected
                 } else {
                     false
                 }

@@ -593,6 +593,43 @@ mod tests {
             "Should return false when source mismatches even if target matches"
         );
     }
+
+    #[test]
+    fn test_edge_connects_exhaustive() {
+        // 🛡️ Sentry Test: Kill mutants replacing `==` with `!=` or returning `true`/`false` or mutating `&&` to `||` in `connects`.
+        let edge = Edge::new(
+            EdgeId::new(1).unwrap(),
+            GLOBAL_INTERNER.intern("KNOWS").unwrap(),
+            NodeId::new(10).unwrap(),
+            NodeId::new(20).unwrap(),
+            PropertyMapBuilder::new().build(),
+            VersionId::new(1).unwrap(),
+        );
+
+        // Match both
+        assert!(
+            edge.connects(NodeId::new(10).unwrap(), NodeId::new(20).unwrap()),
+            "Should return true for exact match"
+        );
+
+        // Mismatch both
+        assert!(
+            !edge.connects(NodeId::new(11).unwrap(), NodeId::new(21).unwrap()),
+            "Should return false for complete mismatch"
+        );
+
+        // Match source, mismatch target
+        assert!(
+            !edge.connects(NodeId::new(10).unwrap(), NodeId::new(21).unwrap()),
+            "Should return false when target mismatches"
+        );
+
+        // Mismatch source, match target
+        assert!(
+            !edge.connects(NodeId::new(11).unwrap(), NodeId::new(20).unwrap()),
+            "Should return false when source mismatches"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -694,35 +731,196 @@ mod sentry_tests {
     }
 
     #[test]
-    fn test_edge_connects_source_mismatch() {
-        // 🛡️ Sentry Test: Verify Edge::connects checks both source and target.
-        // This explicitly targets a mutant where the source check is omitted.
-        let source = NodeId::new(1).unwrap();
-        let target = NodeId::new(2).unwrap();
-        let other = NodeId::new(3).unwrap();
+    fn test_get_property_behavior() {
+        // 🛡️ Sentry Test: Kill mutants returning `None` or `Some(Default::default())` from `get_property`.
+        let label = GLOBAL_INTERNER.intern("Person").unwrap();
+        let mut props = PropertyMapBuilder::new();
+        props = props.insert("age", 42);
+        let node = Node::new(
+            NodeId::new(1).unwrap(),
+            label,
+            props.build(),
+            VersionId::new(1).unwrap(),
+        );
 
+        // Positive check: Must return the exact property value (not a default like 0 or None).
+        let age_prop = node
+            .get_property("age")
+            .expect("Should find 'age' property");
+        assert_eq!(
+            age_prop.as_int(),
+            Some(42),
+            "get_property must return the exact stored value"
+        );
+
+        // Negative check: Must return None for missing properties.
+        assert!(
+            node.get_property("missing").is_none(),
+            "get_property must return None for missing key"
+        );
+
+        let mut edge_props = PropertyMapBuilder::new();
+        edge_props = edge_props.insert("weight", 42.5);
         let edge = Edge::new(
             EdgeId::new(1).unwrap(),
-            GLOBAL_INTERNER.intern("KNOWS").unwrap(),
-            source,
-            target,
+            label,
+            NodeId::new(1).unwrap(),
+            NodeId::new(2).unwrap(),
+            edge_props.build(),
+            VersionId::new(1).unwrap(),
+        );
+
+        let weight_prop = edge
+            .get_property("weight")
+            .expect("Should find 'weight' property");
+        assert_eq!(
+            weight_prop.as_float(),
+            Some(42.5),
+            "Edge::get_property must return the exact stored value"
+        );
+        assert!(
+            edge.get_property("missing").is_none(),
+            "Edge::get_property must return None for missing key"
+        );
+    }
+
+    #[test]
+    fn test_has_label_behavior() {
+        // 🛡️ Sentry Test: Kill mutants replacing `==` with `!=` or returning `true`/`false` in `has_label`.
+        let label_a = GLOBAL_INTERNER.intern("TypeA").unwrap();
+        let label_b = GLOBAL_INTERNER.intern("TypeB").unwrap();
+
+        let node = Node::new(
+            NodeId::new(1).unwrap(),
+            label_a,
             PropertyMapBuilder::new().build(),
             VersionId::new(1).unwrap(),
         );
 
-        // Case 1: Source matches, Target matches (True)
-        assert!(edge.connects(source, target));
-
-        // Case 2: Source mismatch, Target matches (False) - crucial test case!
         assert!(
-            !edge.connects(other, target),
-            "Edge should not connect when source mismatches"
+            node.has_label(label_a),
+            "has_label must return true for exact match"
+        );
+        assert!(
+            !node.has_label(label_b),
+            "has_label must return false for mismatch"
         );
 
-        // Case 3: Source matches, Target mismatch (False)
-        assert!(!edge.connects(source, other));
+        let edge = Edge::new(
+            EdgeId::new(1).unwrap(),
+            label_a,
+            NodeId::new(1).unwrap(),
+            NodeId::new(2).unwrap(),
+            PropertyMapBuilder::new().build(),
+            VersionId::new(1).unwrap(),
+        );
 
-        // Case 4: Both mismatch (False)
-        assert!(!edge.connects(other, other));
+        assert!(
+            edge.has_label(label_a),
+            "Edge::has_label must return true for exact match"
+        );
+        assert!(
+            !edge.has_label(label_b),
+            "Edge::has_label must return false for mismatch"
+        );
+    }
+
+    #[test]
+    fn test_has_label_str_behavior() {
+        // 🛡️ Sentry Test: Kill mutants returning `true`/`false` in `has_label_str`.
+        let label = GLOBAL_INTERNER.intern("TargetLabel").unwrap();
+
+        let node = Node::new(
+            NodeId::new(1).unwrap(),
+            label,
+            PropertyMapBuilder::new().build(),
+            VersionId::new(1).unwrap(),
+        );
+
+        assert!(
+            node.has_label_str("TargetLabel"),
+            "has_label_str must return true for exact match"
+        );
+        assert!(
+            !node.has_label_str("OtherLabel"),
+            "has_label_str must return false for mismatch"
+        );
+
+        let edge = Edge::new(
+            EdgeId::new(1).unwrap(),
+            label,
+            NodeId::new(1).unwrap(),
+            NodeId::new(2).unwrap(),
+            PropertyMapBuilder::new().build(),
+            VersionId::new(1).unwrap(),
+        );
+
+        assert!(
+            edge.has_label_str("TargetLabel"),
+            "Edge::has_label_str must return true for exact match"
+        );
+        assert!(
+            !edge.has_label_str("OtherLabel"),
+            "Edge::has_label_str must return false for mismatch"
+        );
+    }
+
+    #[test]
+    fn test_matches_label_behavior() {
+        // 🛡️ Sentry Test: Kill mutants replacing `==` with `!=` or returning `true`/`false` in `matches_label`.
+        let label_id = GLOBAL_INTERNER.intern("MatchMe").unwrap();
+
+        // Direct test of the matches_label function
+        assert!(
+            super::matches_label(label_id, "MatchMe"),
+            "matches_label must return true for match"
+        );
+        assert!(
+            !super::matches_label(label_id, "DoNotMatch"),
+            "matches_label must return false for mismatch"
+        );
+    }
+
+    #[test]
+    fn test_debug_format_not_empty() {
+        // 🛡️ Sentry Test: Kill mutants replacing `fmt` body with `Ok(Default::default())`.
+        let label = GLOBAL_INTERNER.intern("DebugLabel").unwrap();
+        let node = Node::new(
+            NodeId::new(1).unwrap(),
+            label,
+            PropertyMapBuilder::new().build(),
+            VersionId::new(1).unwrap(),
+        );
+
+        let node_debug = format!("{:?}", node);
+        assert!(
+            !node_debug.is_empty(),
+            "Node debug format must not be empty"
+        );
+        // Ok(Default::default()) results in an empty string from format!("{:?}") or similar empty state
+        // We explicitly assert length > 0
+        assert!(
+            node_debug.len() > 10,
+            "Node debug format must contain structured data"
+        );
+
+        let edge = Edge::new(
+            EdgeId::new(1).unwrap(),
+            label,
+            NodeId::new(1).unwrap(),
+            NodeId::new(2).unwrap(),
+            PropertyMapBuilder::new().build(),
+            VersionId::new(1).unwrap(),
+        );
+
+        let edge_debug = format!("{:?}", edge);
+        assert!(
+            !edge_debug.is_empty(),
+            "Edge debug format must not be empty"
+        );
+        assert!(
+            edge_debug.len() > 10,
+            "Edge debug format must contain structured data"
+        );
     }
 }

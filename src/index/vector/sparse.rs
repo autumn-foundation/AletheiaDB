@@ -83,8 +83,8 @@ use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 /// This prevents DoS attacks via excessive memory allocation.
 const MAX_K: usize = 100_000;
 
-/// Magic bytes for sparse index files: "GSPS"
-const SPARSE_INDEX_MAGIC: [u8; 4] = [0x47, 0x53, 0x50, 0x53];
+/// Magic bytes for sparse index files: "ASPS" (AletheiaDB SParse Search).
+const SPARSE_INDEX_MAGIC: [u8; 4] = [0x41, 0x53, 0x50, 0x53];
 
 /// Current format version for sparse index persistence
 const SPARSE_INDEX_VERSION: u16 = 1;
@@ -630,7 +630,7 @@ impl SparseVectorIndex {
     /// Saves the index to a file.
     ///
     /// The file format is:
-    /// - 4 bytes: Magic bytes "GSPS"
+    /// - 4 bytes: Magic bytes "ASPS"
     /// - 2 bytes: Format version (little-endian u16)
     /// - N bytes: Bitcode-encoded index data
     /// - 4 bytes: CRC32 checksum of all preceding bytes
@@ -2091,7 +2091,7 @@ mod tests {
         let path = dir.path().join("too_small.gsp");
 
         // Write file that's too small
-        fs::write(&path, b"GSPS").unwrap();
+        fs::write(&path, b"ASPS").unwrap();
 
         let config = SparseIndexConfig::new(100);
         let result = SparseVectorIndex::load(&path, config);

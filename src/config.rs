@@ -719,6 +719,8 @@ pub struct AletheiaDBConfig {
     pub vector: VectorIndexConfig,
     /// Index persistence configuration
     pub persistence: PersistenceConfig,
+    /// Encryption at rest configuration
+    pub encryption: crate::encryption::config::EncryptionConfig,
 }
 
 /// Builder for unified database configuration.
@@ -759,6 +761,15 @@ impl AletheiaDBConfigBuilder {
     /// Set persistence configuration.
     pub fn persistence(mut self, persistence_config: PersistenceConfig) -> Self {
         self.config.persistence = persistence_config;
+        self
+    }
+
+    /// Set encryption at rest configuration.
+    pub fn encryption(
+        mut self,
+        encryption_config: crate::encryption::config::EncryptionConfig,
+    ) -> Self {
+        self.config.encryption = encryption_config;
         self
     }
 

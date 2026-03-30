@@ -59,6 +59,8 @@ pub mod api;
 pub mod config;
 pub mod core;
 pub mod db;
+/// Encryption at rest (ADR-0028).
+pub mod encryption;
 pub mod index;
 pub mod query;
 pub mod storage;
@@ -79,6 +81,9 @@ pub mod honeycomb;
 // Optional SQL:2011 temporal syntax support
 #[cfg(feature = "sql")]
 pub mod sql;
+// Optional Cypher query language support
+#[cfg(feature = "cypher")]
+pub mod cypher;
 // Optional HTTP server module
 #[cfg(feature = "http-server")]
 pub mod http;

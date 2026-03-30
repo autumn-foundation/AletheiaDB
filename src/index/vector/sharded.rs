@@ -75,10 +75,10 @@
 use crate::core::error::{Error, Result, VectorError};
 use crate::core::id::NodeId;
 use crate::core::vector::validate_vector;
-use crate::index::vector::{DistanceMetric, HnswConfig, HnswIndex, Quantization, VectorIndex};
+use crate::index::vector::{
+    DistanceMetric, HnswConfig, HnswIndex, Quantization, VectorIndex, merge_top_k_results,
+};
 use rayon::prelude::*;
-use std::cmp::Reverse;
-use std::collections::BinaryHeap;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::path::Path;
@@ -105,6 +105,27 @@ pub enum ShardingStrategy {
 }
 
 /// Statistics for the sharded index.
+///
+/// `ShardStats` details the distribution of vectors across all shards within a
+/// [`ShardedVectorIndex`]. It computes the `imbalance_ratio` which is critical
+/// for determining if a rebalance operation is necessary.
+///
+/// # Examples
+///
+/// ```rust
+/// # #[cfg(feature = "nova")]
+/// # fn main() {
+/// use aletheiadb::index::vector::sharded::ShardStats;
+///
+/// let stats = ShardStats {
+///     shard_sizes: vec![100, 150, 120, 90],
+///     total_vectors: 460,
+///     imbalance_ratio: 1.66,
+/// };
+/// # }
+/// # #[cfg(not(feature = "nova"))]
+/// # fn main() {}
+/// ```
 #[derive(Debug, Default, Clone)]
 pub struct ShardStats {
     /// Number of vectors in each shard.
@@ -116,6 +137,25 @@ pub struct ShardStats {
 }
 
 /// Configuration for rebalancing shards.
+///
+/// The `RebalanceConfig` sets thresholds and limits for the rebalancing process
+/// inside a [`ShardedVectorIndex`]. It determines when the index is considered
+/// unbalanced and how aggressively it should attempt to fix the distribution.
+///
+/// # Examples
+///
+/// ```rust
+/// # #[cfg(feature = "nova")]
+/// # fn main() {
+/// use aletheiadb::index::vector::sharded::RebalanceConfig;
+///
+/// let config = RebalanceConfig::new()
+///     .with_imbalance_threshold(1.5)
+///     .with_batch_size(2000);
+/// # }
+/// # #[cfg(not(feature = "nova"))]
+/// # fn main() {}
+/// ```
 #[derive(Debug, Clone)]
 pub struct RebalanceConfig {
     /// Trigger rebalancing when imbalance ratio exceeds this threshold.
@@ -153,6 +193,27 @@ impl RebalanceConfig {
 }
 
 /// Configuration for the sharded vector index.
+///
+/// `ShardedVectorConfig` dictates the architecture of a [`ShardedVectorIndex`],
+/// configuring the number of shards, the underlying `HnswConfig` for each shard,
+/// and the [`ShardingStrategy`] used to route vectors.
+///
+/// # Examples
+///
+/// ```rust
+/// # #[cfg(feature = "nova")]
+/// # fn main() {
+/// use aletheiadb::index::vector::sharded::{ShardedVectorConfig, ShardingStrategy};
+/// use aletheiadb::index::vector::{HnswConfig, DistanceMetric};
+///
+/// let hnsw_cfg = HnswConfig::new(384, DistanceMetric::Cosine);
+/// let config = ShardedVectorConfig::new(4)
+///     .with_strategy(ShardingStrategy::HashBased)
+///     .with_hnsw_config(hnsw_cfg);
+/// # }
+/// # #[cfg(not(feature = "nova"))]
+/// # fn main() {}
+/// ```
 #[derive(Debug, Clone)]
 pub struct ShardedVectorConfig {
     /// Number of shards.
@@ -206,11 +267,39 @@ impl Default for ShardedVectorConfig {
 /// This structure provides horizontal scalability by partitioning vectors
 /// across multiple shards and coordinating search operations.
 ///
+/// See [`ShardedVectorConfig`] for initialization options and [`ShardingStrategy`]
+/// for details on vector distribution.
+///
 /// # Fixed Shard Count
 ///
 /// The number of shards is fixed at construction time. This is because the
 /// routing algorithm (hash % num_shards) depends on a consistent shard count.
 /// Changing it would cause existing vectors to be routed to wrong shards.
+///
+/// # Examples
+///
+/// ```rust
+/// # #[cfg(feature = "nova")]
+/// # fn main() -> aletheiadb::core::error::Result<()> {
+/// use aletheiadb::index::vector::sharded::{ShardedVectorIndex, ShardedVectorConfig, ShardingStrategy};
+/// use aletheiadb::index::vector::{HnswConfig, DistanceMetric, VectorIndex};
+/// use aletheiadb::core::id::NodeId;
+///
+/// let config = ShardedVectorConfig::new(4)
+///     .with_hnsw_config(HnswConfig::new(384, DistanceMetric::Cosine));
+///
+/// let index = ShardedVectorIndex::new(config)?;
+///
+/// let node = NodeId::new(1).unwrap();
+/// let embedding = vec![0.1f32; 384];
+/// index.add(node, &embedding)?;
+///
+/// assert_eq!(index.len(), 1);
+/// # Ok(())
+/// # }
+/// # #[cfg(not(feature = "nova"))]
+/// # fn main() {}
+/// ```
 pub struct ShardedVectorIndex {
     /// Configuration for this index.
     config: ShardedVectorConfig,
@@ -469,72 +558,8 @@ impl ShardedVectorIndex {
     }
 
     /// Merge search results from multiple shards using a min-heap for efficiency.
-    ///
-    /// This is O(n log k) where n is total results and k is the desired count,
-    /// compared to O(n log n) for sorting all results.
     fn merge_results(shard_results: Vec<Vec<(NodeId, f32)>>, k: usize) -> Vec<(NodeId, f32)> {
-        if k == 0 {
-            return Vec::new();
-        }
-
-        // Use a min-heap to track the top-k results
-        // We store (Reverse(score), NodeId) so the smallest score is at the top
-        let mut heap: BinaryHeap<(Reverse<OrderedFloat>, NodeId)> =
-            BinaryHeap::with_capacity(k + 1);
-
-        for results in shard_results {
-            for (id, score) in results {
-                let ordered_score = OrderedFloat(score);
-
-                if heap.len() < k {
-                    heap.push((Reverse(ordered_score), id));
-                } else if let Some(&(Reverse(min_score), _)) = heap.peek()
-                    && ordered_score > min_score
-                {
-                    heap.pop();
-                    heap.push((Reverse(ordered_score), id));
-                }
-            }
-        }
-
-        // Extract results and sort by descending score
-        let mut results: Vec<(NodeId, f32)> = heap
-            .into_iter()
-            .map(|(Reverse(score), id)| (id, score.0))
-            .collect();
-
-        // Sort descending by score
-        results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-
-        results
-    }
-}
-
-/// Wrapper for f32 that implements Ord for use in BinaryHeap.
-///
-/// NaN values are treated as less than all other values for consistent ordering.
-#[derive(Debug, Clone, Copy, PartialEq)]
-struct OrderedFloat(f32);
-
-impl Eq for OrderedFloat {}
-
-impl PartialOrd for OrderedFloat {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for OrderedFloat {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.0.partial_cmp(&other.0).unwrap_or_else(|| {
-            // Handle NaN: treat NaN as less than everything
-            match (self.0.is_nan(), other.0.is_nan()) {
-                (true, true) => std::cmp::Ordering::Equal,
-                (true, false) => std::cmp::Ordering::Less,
-                (false, true) => std::cmp::Ordering::Greater,
-                (false, false) => unreachable!(),
-            }
-        })
+        merge_top_k_results(shard_results, k)
     }
 }
 
@@ -752,6 +777,7 @@ impl VectorIndex for ShardedVectorIndex {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::index::vector::OrderedFloat;
 
     // ============================================================
     // Configuration Tests

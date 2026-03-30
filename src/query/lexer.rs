@@ -343,7 +343,7 @@ impl<'a> Lexer<'a> {
     /// ```
     pub fn tokenize(input: &str) -> Result<Vec<Token>, LexerError> {
         let mut lexer = Lexer::new(input);
-        let mut tokens = Vec::new();
+        let mut tokens = Vec::with_capacity(input.len() / 4);
 
         loop {
             let token = lexer.next_token()?;
@@ -682,7 +682,7 @@ impl<'a> Lexer<'a> {
         let mut has_dot = false;
         let mut has_exp = false;
 
-        while let Some(&(pos, ch)) = self.chars.peek() {
+        while let Some(&(_, ch)) = self.chars.peek() {
             match ch {
                 '0'..='9' => {
                     self.advance();
@@ -715,7 +715,6 @@ impl<'a> Lexer<'a> {
                 }
                 _ => break,
             }
-            let _ = pos; // silence unused warning
         }
 
         let text = &self.input[start_pos..self.position + self.current_offset()];

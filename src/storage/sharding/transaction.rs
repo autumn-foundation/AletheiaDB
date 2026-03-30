@@ -14,6 +14,9 @@ use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+/// Default number of retries for distributed transaction operations.
+const DEFAULT_RETRIES: u32 = 3;
+
 /// Phase of the distributed transaction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TransactionPhase {
@@ -208,7 +211,7 @@ impl DistributedTransaction {
             participants: participant_map,
             start_time: Instant::now(),
             timeout,
-            retries_remaining: 3,
+            retries_remaining: DEFAULT_RETRIES,
             commit_decision_logged: false,
             commit_timestamp: None,
         }

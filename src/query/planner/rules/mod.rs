@@ -45,10 +45,6 @@ pub fn default_rules() -> Vec<Box<dyn OptimizationRule>> {
         Box::new(FilterScanFusion),
         Box::new(LimitPushdown),
         Box::new(OperationReordering),
-        // Future rules:
-        // Box::new(VectorSearchReordering),
-        // Box::new(TemporalBatching),
-        // Box::new(IndexSelection),
     ]
 }
 

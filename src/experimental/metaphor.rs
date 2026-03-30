@@ -26,6 +26,20 @@ use crate::core::vector::cosine_similarity;
 use std::collections::{HashMap, HashSet};
 
 /// A single mapping in the alignment.
+///
+/// # Examples
+///
+/// ```rust
+/// use aletheiadb::experimental::metaphor::Mapping;
+/// use aletheiadb::core::id::NodeId;
+///
+/// let mapping = Mapping {
+///     source: NodeId::new(1).unwrap(),
+///     target: NodeId::new(2).unwrap(),
+///     score: 0.95,
+/// };
+/// assert_eq!(mapping.score, 0.95);
+/// ```
 #[derive(Debug, Clone, PartialEq)]
 pub struct Mapping {
     /// The node in the source subgraph.
@@ -37,6 +51,25 @@ pub struct Mapping {
 }
 
 /// The result of an alignment operation.
+///
+/// # Examples
+///
+/// ```rust
+/// use aletheiadb::experimental::metaphor::{Alignment, Mapping};
+/// use aletheiadb::core::id::NodeId;
+///
+/// let alignment = Alignment {
+///     mappings: vec![
+///         Mapping {
+///             source: NodeId::new(1).unwrap(),
+///             target: NodeId::new(2).unwrap(),
+///             score: 0.95,
+///         }
+///     ],
+///     global_score: 0.95,
+/// };
+/// assert_eq!(alignment.global_score, 0.95);
+/// ```
 #[derive(Debug, Clone)]
 pub struct Alignment {
     /// The list of mappings found.
@@ -46,6 +79,37 @@ pub struct Alignment {
 }
 
 /// The Metaphor Engine.
+///
+/// # Examples
+///
+/// ```rust
+/// # #[cfg(feature = "nova")]
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// use aletheiadb::AletheiaDB;
+/// use aletheiadb::experimental::metaphor::Metaphor;
+/// use aletheiadb::core::property::PropertyMapBuilder;
+/// use aletheiadb::index::vector::{HnswConfig, DistanceMetric};
+///
+/// let db = AletheiaDB::new()?;
+/// db.enable_vector_index("vec", HnswConfig::new(2, DistanceMetric::Cosine))?;
+///
+/// let props_a = PropertyMapBuilder::new().insert_vector("vec", &[1.0, 0.0]).build();
+/// let node_a = db.create_node("ConceptA", props_a)?;
+///
+/// let props_x = PropertyMapBuilder::new().insert_vector("vec", &[1.0, 0.0]).build();
+/// let node_x = db.create_node("ConceptX", props_x)?;
+///
+/// let metaphor = Metaphor::new(&db);
+/// let alignment = metaphor.align(&[node_a], &[node_x], "vec", 0.5)?;
+///
+/// assert_eq!(alignment.mappings.len(), 1);
+/// assert_eq!(alignment.mappings[0].source, node_a);
+/// assert_eq!(alignment.mappings[0].target, node_x);
+/// # Ok(())
+/// # }
+/// # #[cfg(not(feature = "nova"))]
+/// # fn main() {}
+/// ```
 pub struct Metaphor<'a> {
     #[allow(dead_code)]
     db: &'a AletheiaDB,

@@ -57,6 +57,13 @@ use super::lexer::{Lexer, LexerError, Token};
 /// Maximum recursion depth for parsing expressions to prevent stack overflow.
 const MAX_RECURSION_DEPTH: usize = 100;
 
+/// Default result limit for vector similarity searches (SIMILAR TO, FIND SIMILAR).
+const DEFAULT_VECTOR_SEARCH_LIMIT: usize = 10;
+
+/// Maximum depth for unbounded variable-length traversals (`*n..`).
+/// Uses half of `usize::MAX` to avoid overflow in range arithmetic.
+const UNBOUNDED_MAX_DEPTH: usize = usize::MAX / 2;
+
 /// Error type for parser errors.
 ///
 /// This error provides detailed information about what went wrong during parsing,
@@ -379,7 +386,7 @@ impl Parser {
             self.advance();
             self.parse_usize()?
         } else {
-            10 // default limit
+            DEFAULT_VECTOR_SEARCH_LIMIT
         };
 
         Ok(SourceClause::VectorSearch {
@@ -403,7 +410,7 @@ impl Parser {
             self.advance();
             self.parse_usize()?
         } else {
-            10 // default limit
+            DEFAULT_VECTOR_SEARCH_LIMIT
         };
 
         Ok(SourceClause::FindSimilar { node_ref, limit })
@@ -729,7 +736,7 @@ impl Parser {
             // Since we can't express min with Variable, use a large max
             Ok(DepthSpec::Range {
                 min,
-                max: usize::MAX / 2, // Use half max to avoid overflow issues
+                max: UNBOUNDED_MAX_DEPTH,
             })
         }
     }
@@ -930,12 +937,7 @@ impl Parser {
     }
 
     fn parse_not_predicate(&mut self, depth: usize) -> Result<PredicateExpr, ParseError> {
-        if depth > MAX_RECURSION_DEPTH {
-            return Err(self.error(
-                format!("Recursion limit exceeded (max {})", MAX_RECURSION_DEPTH),
-                None,
-            ));
-        }
+        self.check_recursion_depth(depth)?;
 
         if self.check(&Token::Not) {
             self.advance();
@@ -980,12 +982,7 @@ impl Parser {
     }
 
     fn parse_grouped_predicate(&mut self, depth: usize) -> Result<PredicateExpr, ParseError> {
-        if depth > MAX_RECURSION_DEPTH {
-            return Err(self.error(
-                format!("Recursion limit exceeded (max {})", MAX_RECURSION_DEPTH),
-                None,
-            ));
-        }
+        self.check_recursion_depth(depth)?;
 
         self.advance();
         let pred = self.parse_predicate(depth + 1)?;
@@ -1011,69 +1008,39 @@ impl Parser {
         };
         self.expect(&Token::Null)?;
 
-        if let Expression::Property(prop) = expr {
-            Ok(if is_not {
-                PredicateExpr::IsNotNull(prop)
-            } else {
-                PredicateExpr::IsNull(prop)
-            })
+        let prop = self.require_property_expr(expr, "IS NULL")?;
+        Ok(if is_not {
+            PredicateExpr::IsNotNull(prop)
         } else {
-            Err(self.error(
-                "IS NULL requires property access".to_string(),
-                Some("property".to_string()),
-            ))
-        }
+            PredicateExpr::IsNull(prop)
+        })
     }
 
     fn parse_string_predicate(&mut self, expr: Expression) -> Result<PredicateExpr, ParseError> {
         if self.check(&Token::Contains) {
             self.advance();
             let substring = self.parse_string()?;
-            if let Expression::Property(prop) = expr {
-                return Ok(PredicateExpr::Contains {
-                    property: prop,
-                    substring,
-                });
-            } else {
-                return Err(self.error(
-                    "CONTAINS requires a property expression".to_string(),
-                    Some("property.name CONTAINS 'value'".to_string()),
-                ));
-            }
+            let property = self.require_property_expr(expr, "CONTAINS")?;
+            return Ok(PredicateExpr::Contains {
+                property,
+                substring,
+            });
         }
 
         if self.check(&Token::Starts) {
             self.advance();
             self.expect(&Token::With)?;
             let prefix = self.parse_string()?;
-            if let Expression::Property(prop) = expr {
-                return Ok(PredicateExpr::StartsWith {
-                    property: prop,
-                    prefix,
-                });
-            } else {
-                return Err(self.error(
-                    "STARTS WITH requires a property expression".to_string(),
-                    Some("property.name STARTS WITH 'value'".to_string()),
-                ));
-            }
+            let property = self.require_property_expr(expr, "STARTS WITH")?;
+            return Ok(PredicateExpr::StartsWith { property, prefix });
         }
 
         if self.check(&Token::Ends) {
             self.advance();
             self.expect(&Token::With)?;
             let suffix = self.parse_string()?;
-            if let Expression::Property(prop) = expr {
-                return Ok(PredicateExpr::EndsWith {
-                    property: prop,
-                    suffix,
-                });
-            } else {
-                return Err(self.error(
-                    "ENDS WITH requires a property expression".to_string(),
-                    Some("property.name ENDS WITH 'value'".to_string()),
-                ));
-            }
+            let property = self.require_property_expr(expr, "ENDS WITH")?;
+            return Ok(PredicateExpr::EndsWith { property, suffix });
         }
 
         Err(self.error("Expected string predicate".to_string(), None))
@@ -1093,17 +1060,8 @@ impl Parser {
             }
         }
         self.expect(&Token::RightBracket)?;
-        if let Expression::Property(prop) = expr {
-            Ok(PredicateExpr::In {
-                property: prop,
-                values,
-            })
-        } else {
-            Err(self.error(
-                "IN requires a property expression".to_string(),
-                Some("property.name IN [...]".to_string()),
-            ))
-        }
+        let property = self.require_property_expr(expr, "IN")?;
+        Ok(PredicateExpr::In { property, values })
     }
 
     fn parse_comparison_predicate(
@@ -1362,6 +1320,34 @@ impl Parser {
 
     fn is_at_end(&self) -> bool {
         matches!(self.current(), Some(Token::Eof) | None)
+    }
+
+    fn check_recursion_depth(&self, depth: usize) -> Result<(), ParseError> {
+        if depth > MAX_RECURSION_DEPTH {
+            return Err(self.error(
+                format!("Recursion limit exceeded (max {MAX_RECURSION_DEPTH})"),
+                None,
+            ));
+        }
+        Ok(())
+    }
+
+    /// Extracts a [`PropertyAccess`] from an expression, returning a parse error
+    /// if the expression is not a property reference. Used by predicates that
+    /// require a property on the left-hand side (IS NULL, CONTAINS, IN, etc.).
+    fn require_property_expr(
+        &self,
+        expr: Expression,
+        context: &str,
+    ) -> Result<PropertyAccess, ParseError> {
+        if let Expression::Property(prop) = expr {
+            Ok(prop)
+        } else {
+            Err(self.error(
+                format!("{context} requires a property expression"),
+                Some(format!("property.name {context} ...")),
+            ))
+        }
     }
 
     fn expect(&mut self, expected: &Token) -> Result<(), ParseError> {

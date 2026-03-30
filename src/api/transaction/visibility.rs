@@ -147,8 +147,7 @@ impl EpochRange {
 
     /// Get the number of transactions represented by this epoch.
     fn transaction_count(&self) -> u64 {
-        debug_assert!(self.start_tx <= self.end_tx, "start_tx must be <= end_tx");
-        // Use saturating_sub to prevent underflow in case of invalid data
+        // Invariant guaranteed by EpochRange::new() constructor
         self.end_tx.as_u64().saturating_sub(self.start_tx.as_u64()) + 1
     }
 
@@ -176,6 +175,9 @@ pub struct CompressionStats {
     /// Estimated memory saved compared to uncompressed
     pub memory_saved_bytes: usize,
 }
+
+/// Realistic per-entry overhead for BTreeMap (tree nodes, alignment, pointers).
+const BTREEMAP_ENTRY_OVERHEAD_BYTES: usize = 40;
 
 /// Compressed commit log using epoch-based compression (Issue #237).
 ///
@@ -403,8 +405,7 @@ impl CompressedCommitLog {
     fn memory_usage(&self) -> usize {
         let epoch_size = self.epochs.len() * std::mem::size_of::<EpochRange>();
         // BTreeMap has significant overhead: internal tree nodes, alignment, etc.
-        // Realistic estimate is 40-48 bytes per entry (not just key+value size)
-        let exception_size = self.exceptions.len() * 40; // More realistic BTreeMap estimate
+        let exception_size = self.exceptions.len() * BTREEMAP_ENTRY_OVERHEAD_BYTES;
         let vec_overhead = std::mem::size_of::<Vec<EpochRange>>();
         let btree_overhead = std::mem::size_of::<BTreeMap<TxId, Timestamp>>();
 
@@ -415,8 +416,7 @@ impl CompressedCommitLog {
     fn get_stats(&self) -> CompressionStats {
         let total_txs = self.total_transaction_count();
         let memory = self.memory_usage();
-        // More realistic uncompressed estimate: BTreeMap with 40 bytes per entry
-        let uncompressed_memory = total_txs * 40;
+        let uncompressed_memory = total_txs * BTREEMAP_ENTRY_OVERHEAD_BYTES;
 
         CompressionStats {
             total_transactions: total_txs,
@@ -1183,9 +1183,7 @@ mod tests {
         // Trigger compression
         manager.compress_commit_log();
 
-        // Check compression stats
         let stats = manager.get_compression_stats();
-        println!("Compression stats: {:#?}", stats);
         assert_eq!(stats.epoch_count, 1, "Should compress into 1 epoch");
         assert_eq!(stats.exception_count, 0, "Should have no exceptions");
 

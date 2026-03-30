@@ -37,6 +37,21 @@ use crate::query::plan::{BinaryOp, LogicalOp, LogicalPlan, ScanOp, UnaryOp};
 
 use super::{OptimizationRule, Statistics};
 
+/// Default cardinality estimate for node scans without statistics.
+const DEFAULT_NODE_SCAN_CARDINALITY: usize = 1000;
+
+/// Default cardinality estimate for edge scans without statistics.
+const DEFAULT_EDGE_SCAN_CARDINALITY: usize = 1000;
+
+/// Default cardinality estimate for property-indexed scans (~10% of full scan).
+const DEFAULT_PROPERTY_SCAN_CARDINALITY: usize = 100;
+
+/// Default selectivity estimate for filter predicates (10%).
+const DEFAULT_FILTER_SELECTIVITY: f64 = 0.1;
+
+/// Default selectivity for join operations (10% of cross product).
+const DEFAULT_JOIN_SELECTIVITY: f64 = 0.1;
+
 // Selectivity estimates for different predicate types
 // (0.0 = filters everything, 1.0 = filters nothing)
 /// Selectivity for `IS NULL` checks (0.1). Assumes nulls are relatively rare.
@@ -368,135 +383,42 @@ impl OperationReordering {
         match op {
             LogicalOp::Scan(scan) => match scan {
                 ScanOp::NodeLookup(ids) => ids.len(),
-                ScanOp::NodeScan { estimated_rows, .. } => estimated_rows.unwrap_or(1000),
+                ScanOp::NodeScan { estimated_rows, .. } => {
+                    estimated_rows.unwrap_or(DEFAULT_NODE_SCAN_CARDINALITY)
+                }
                 ScanOp::VectorSearch { k, .. } => *k,
                 ScanOp::TemporalNodeLookup { node_ids, .. } => node_ids.len(),
                 ScanOp::TemporalVectorSearch { k, .. } => *k,
                 ScanOp::SimilarToNode { k, .. } => *k,
-                ScanOp::PropertyScan { .. } => 100, // ~10% selectivity estimate
+                ScanOp::PropertyScan { .. } => DEFAULT_PROPERTY_SCAN_CARDINALITY,
+                ScanOp::EdgeScan { estimated_rows, .. } => {
+                    estimated_rows.unwrap_or(DEFAULT_EDGE_SCAN_CARDINALITY)
+                }
             },
             LogicalOp::Unary {
                 op: UnaryOp::Filter(_),
                 input,
-            } => {
-                // Assume 10% selectivity by default
-                (self.estimate_cardinality(input) as f64 * 0.1) as usize
-            }
+            } => (self.estimate_cardinality(input) as f64 * DEFAULT_FILTER_SELECTIVITY) as usize,
             LogicalOp::Unary {
                 op: UnaryOp::Limit(n),
                 ..
             } => *n,
             LogicalOp::Unary { input, .. } => self.estimate_cardinality(input),
             LogicalOp::Binary { left, right, .. } => {
-                // For joins, assume 10% of cross product
                 let left_card = self.estimate_cardinality(left);
                 let right_card = self.estimate_cardinality(right);
-                (left_card as f64 * right_card as f64 * 0.1) as usize
+                (left_card as f64 * right_card as f64 * DEFAULT_JOIN_SELECTIVITY) as usize
             }
             LogicalOp::Empty => 0,
         }
     }
 
     /// Check if two filter chains are equal (same filters in same order).
-    fn filters_equal(&self, a: &LogicalOp, b: &LogicalOp) -> bool {
-        match (a, b) {
-            (
-                LogicalOp::Unary {
-                    op: UnaryOp::Filter(pred_a),
-                    input: input_a,
-                },
-                LogicalOp::Unary {
-                    op: UnaryOp::Filter(pred_b),
-                    input: input_b,
-                },
-            ) => {
-                // Check if predicates are equal (simple comparison)
-                self.predicates_equal(pred_a, pred_b) && self.filters_equal(input_a, input_b)
-            }
-            // If not both filters, just check if they're the same type
-            _ => std::mem::discriminant(a) == std::mem::discriminant(b),
-        }
-    }
-
-    /// Structural predicate equality check.
     ///
-    /// Performs deep structural comparison of predicates to determine if they
-    /// are semantically equivalent. This is used to detect if filter reordering
-    /// actually changed the plan structure.
-    fn predicates_equal(&self, a: &Predicate, b: &Predicate) -> bool {
-        match (a, b) {
-            (Predicate::Eq { key: k1, value: v1 }, Predicate::Eq { key: k2, value: v2 }) => {
-                k1 == k2 && v1 == v2
-            }
-            (Predicate::Ne { key: k1, value: v1 }, Predicate::Ne { key: k2, value: v2 }) => {
-                k1 == k2 && v1 == v2
-            }
-            (Predicate::Gt { key: k1, value: v1 }, Predicate::Gt { key: k2, value: v2 }) => {
-                k1 == k2 && v1 == v2
-            }
-            (Predicate::Gte { key: k1, value: v1 }, Predicate::Gte { key: k2, value: v2 }) => {
-                k1 == k2 && v1 == v2
-            }
-            (Predicate::Lt { key: k1, value: v1 }, Predicate::Lt { key: k2, value: v2 }) => {
-                k1 == k2 && v1 == v2
-            }
-            (Predicate::Lte { key: k1, value: v1 }, Predicate::Lte { key: k2, value: v2 }) => {
-                k1 == k2 && v1 == v2
-            }
-            (
-                Predicate::In {
-                    key: k1,
-                    values: vs1,
-                },
-                Predicate::In {
-                    key: k2,
-                    values: vs2,
-                },
-            ) => k1 == k2 && vs1 == vs2,
-            (
-                Predicate::Contains {
-                    key: k1,
-                    substring: s1,
-                },
-                Predicate::Contains {
-                    key: k2,
-                    substring: s2,
-                },
-            ) => k1 == k2 && s1 == s2,
-            (
-                Predicate::StartsWith {
-                    key: k1,
-                    prefix: p1,
-                },
-                Predicate::StartsWith {
-                    key: k2,
-                    prefix: p2,
-                },
-            ) => k1 == k2 && p1 == p2,
-            (
-                Predicate::EndsWith {
-                    key: k1,
-                    suffix: s1,
-                },
-                Predicate::EndsWith {
-                    key: k2,
-                    suffix: s2,
-                },
-            ) => k1 == k2 && s1 == s2,
-            (Predicate::Exists(k1), Predicate::Exists(k2)) => k1 == k2,
-            (Predicate::NotExists(k1), Predicate::NotExists(k2)) => k1 == k2,
-            (Predicate::And(v1), Predicate::And(v2)) | (Predicate::Or(v1), Predicate::Or(v2)) => {
-                v1.len() == v2.len()
-                    && v1
-                        .iter()
-                        .zip(v2.iter())
-                        .all(|(p1, p2)| self.predicates_equal(p1, p2))
-            }
-            (Predicate::Not(p1), Predicate::Not(p2)) => self.predicates_equal(p1, p2),
-            (Predicate::True, Predicate::True) => true,
-            (Predicate::False, Predicate::False) => true,
-            _ => false,
-        }
+    /// `LogicalOp` and `Predicate` both derive `PartialEq`, so a direct `==`
+    /// comparison is sufficient.
+    fn filters_equal(&self, a: &LogicalOp, b: &LogicalOp) -> bool {
+        a == b
     }
 }
 
@@ -960,40 +882,34 @@ mod tests {
 
     #[test]
     fn test_predicates_equal_basic() {
-        let rule = OperationReordering;
-
-        // Same predicates should be equal
+        // Same predicates should be equal (Predicate derives PartialEq)
         let p1 = Predicate::eq("name", "Alice");
         let p2 = Predicate::eq("name", "Alice");
-        assert!(rule.predicates_equal(&p1, &p2));
+        assert_eq!(p1, p2);
 
         // Different values should not be equal
         let p3 = Predicate::eq("name", "Bob");
-        assert!(!rule.predicates_equal(&p1, &p3));
+        assert_ne!(p1, p3);
 
         // Different keys should not be equal
         let p4 = Predicate::eq("age", "Alice");
-        assert!(!rule.predicates_equal(&p1, &p4));
+        assert_ne!(p1, p4);
     }
 
     #[test]
     fn test_predicates_equal_different_types() {
-        let rule = OperationReordering;
-
         // Different predicate types should not be equal
         let p1 = Predicate::eq("name", "Alice");
         let p2 = Predicate::ne("name", "Alice");
-        assert!(!rule.predicates_equal(&p1, &p2));
+        assert_ne!(p1, p2);
 
         let p3 = Predicate::gt("age", 30i64);
         let p4 = Predicate::lt("age", 30i64);
-        assert!(!rule.predicates_equal(&p3, &p4));
+        assert_ne!(p3, p4);
     }
 
     #[test]
     fn test_predicates_equal_and_or() {
-        let rule = OperationReordering;
-
         // Same AND predicates
         let p1 = Predicate::And(vec![
             Predicate::eq("name", "Alice"),
@@ -1003,54 +919,50 @@ mod tests {
             Predicate::eq("name", "Alice"),
             Predicate::gt("age", 30i64),
         ]);
-        assert!(rule.predicates_equal(&p1, &p2));
+        assert_eq!(p1, p2);
 
         // Different order in AND should not be equal (structural comparison)
         let p3 = Predicate::And(vec![
             Predicate::gt("age", 30i64),
             Predicate::eq("name", "Alice"),
         ]);
-        assert!(!rule.predicates_equal(&p1, &p3));
+        assert_ne!(p1, p3);
 
         // Different length AND
         let p4 = Predicate::And(vec![Predicate::eq("name", "Alice")]);
-        assert!(!rule.predicates_equal(&p1, &p4));
+        assert_ne!(p1, p4);
 
         // AND vs OR
         let p5 = Predicate::Or(vec![
             Predicate::eq("name", "Alice"),
             Predicate::gt("age", 30i64),
         ]);
-        assert!(!rule.predicates_equal(&p1, &p5));
+        assert_ne!(p1, p5);
     }
 
     #[test]
     fn test_predicates_equal_not() {
-        let rule = OperationReordering;
-
         // Same NOT predicates
         let p1 = Predicate::Not(Box::new(Predicate::eq("active", true)));
         let p2 = Predicate::Not(Box::new(Predicate::eq("active", true)));
-        assert!(rule.predicates_equal(&p1, &p2));
+        assert_eq!(p1, p2);
 
         // Different inner predicates
         let p3 = Predicate::Not(Box::new(Predicate::eq("active", false)));
-        assert!(!rule.predicates_equal(&p1, &p3));
+        assert_ne!(p1, p3);
     }
 
     #[test]
     fn test_predicates_equal_all_variants() {
-        let rule = OperationReordering;
-
-        // Test all variants for coverage
-        assert!(rule.predicates_equal(&Predicate::True, &Predicate::True));
-        assert!(rule.predicates_equal(&Predicate::False, &Predicate::False));
-        assert!(!rule.predicates_equal(&Predicate::True, &Predicate::False));
+        // Test all variants for coverage (Predicate derives PartialEq)
+        assert_eq!(Predicate::True, Predicate::True);
+        assert_eq!(Predicate::False, Predicate::False);
+        assert_ne!(Predicate::True, Predicate::False);
 
         // String predicates
         let c1 = Predicate::contains("text", "hello");
         let c2 = Predicate::contains("text", "hello");
-        assert!(rule.predicates_equal(&c1, &c2));
+        assert_eq!(c1, c2);
 
         let s1 = Predicate::StartsWith {
             key: "text".to_string(),
@@ -1060,7 +972,7 @@ mod tests {
             key: "text".to_string(),
             prefix: "hello".to_string(),
         };
-        assert!(rule.predicates_equal(&s1, &s2));
+        assert_eq!(s1, s2);
 
         let e1 = Predicate::EndsWith {
             key: "text".to_string(),
@@ -1070,7 +982,7 @@ mod tests {
             key: "text".to_string(),
             suffix: "world".to_string(),
         };
-        assert!(rule.predicates_equal(&e1, &e2));
+        assert_eq!(e1, e2);
 
         // In predicate
         let i1 = Predicate::In {
@@ -1087,16 +999,16 @@ mod tests {
                 crate::query::ir::PredicateValue::Int(2),
             ],
         };
-        assert!(rule.predicates_equal(&i1, &i2));
+        assert_eq!(i1, i2);
 
         // Exists predicates
         let ex1 = Predicate::exists("prop");
         let ex2 = Predicate::exists("prop");
-        assert!(rule.predicates_equal(&ex1, &ex2));
+        assert_eq!(ex1, ex2);
 
         let nex1 = Predicate::NotExists("prop".to_string());
         let nex2 = Predicate::NotExists("prop".to_string());
-        assert!(rule.predicates_equal(&nex1, &nex2));
+        assert_eq!(nex1, nex2);
     }
 
     #[test]
@@ -1116,161 +1028,161 @@ mod tests {
 
     #[test]
     fn test_predicates_equal_exhaustive_mismatches() {
-        let rule = OperationReordering;
+        // Predicate derives PartialEq, so we use assert_ne! directly.
 
         // Eq mismatches
-        assert!(!rule.predicates_equal(&Predicate::eq("a", 1), &Predicate::eq("b", 1)));
-        assert!(!rule.predicates_equal(&Predicate::eq("a", 1), &Predicate::eq("a", 2)));
+        assert_ne!(Predicate::eq("a", 1), Predicate::eq("b", 1));
+        assert_ne!(Predicate::eq("a", 1), Predicate::eq("a", 2));
 
         // Ne mismatches
-        assert!(!rule.predicates_equal(&Predicate::ne("a", 1), &Predicate::ne("b", 1)));
-        assert!(!rule.predicates_equal(&Predicate::ne("a", 1), &Predicate::ne("a", 2)));
+        assert_ne!(Predicate::ne("a", 1), Predicate::ne("b", 1));
+        assert_ne!(Predicate::ne("a", 1), Predicate::ne("a", 2));
 
         // Gt mismatches
-        assert!(!rule.predicates_equal(&Predicate::gt("a", 1), &Predicate::gt("b", 1)));
-        assert!(!rule.predicates_equal(&Predicate::gt("a", 1), &Predicate::gt("a", 2)));
+        assert_ne!(Predicate::gt("a", 1), Predicate::gt("b", 1));
+        assert_ne!(Predicate::gt("a", 1), Predicate::gt("a", 2));
 
         // Gte mismatches
-        assert!(!rule.predicates_equal(
-            &Predicate::Gte {
+        assert_ne!(
+            Predicate::Gte {
                 key: "a".to_string(),
                 value: crate::query::ir::PredicateValue::Int(1)
             },
-            &Predicate::Gte {
+            Predicate::Gte {
                 key: "b".to_string(),
                 value: crate::query::ir::PredicateValue::Int(1)
             }
-        ));
-        assert!(!rule.predicates_equal(
-            &Predicate::Gte {
+        );
+        assert_ne!(
+            Predicate::Gte {
                 key: "a".to_string(),
                 value: crate::query::ir::PredicateValue::Int(1)
             },
-            &Predicate::Gte {
+            Predicate::Gte {
                 key: "a".to_string(),
                 value: crate::query::ir::PredicateValue::Int(2)
             }
-        ));
+        );
 
         // Lt mismatches
-        assert!(!rule.predicates_equal(&Predicate::lt("a", 1), &Predicate::lt("b", 1)));
-        assert!(!rule.predicates_equal(&Predicate::lt("a", 1), &Predicate::lt("a", 2)));
+        assert_ne!(Predicate::lt("a", 1), Predicate::lt("b", 1));
+        assert_ne!(Predicate::lt("a", 1), Predicate::lt("a", 2));
 
         // Lte mismatches
-        assert!(!rule.predicates_equal(
-            &Predicate::Lte {
+        assert_ne!(
+            Predicate::Lte {
                 key: "a".to_string(),
                 value: crate::query::ir::PredicateValue::Int(1)
             },
-            &Predicate::Lte {
+            Predicate::Lte {
                 key: "b".to_string(),
                 value: crate::query::ir::PredicateValue::Int(1)
             }
-        ));
-        assert!(!rule.predicates_equal(
-            &Predicate::Lte {
+        );
+        assert_ne!(
+            Predicate::Lte {
                 key: "a".to_string(),
                 value: crate::query::ir::PredicateValue::Int(1)
             },
-            &Predicate::Lte {
+            Predicate::Lte {
                 key: "a".to_string(),
                 value: crate::query::ir::PredicateValue::Int(2)
             }
-        ));
+        );
 
         // In mismatches
-        assert!(!rule.predicates_equal(
-            &Predicate::In {
+        assert_ne!(
+            Predicate::In {
                 key: "a".to_string(),
                 values: vec![crate::query::ir::PredicateValue::Int(1)]
             },
-            &Predicate::In {
+            Predicate::In {
                 key: "b".to_string(),
                 values: vec![crate::query::ir::PredicateValue::Int(1)]
             }
-        ));
-        assert!(!rule.predicates_equal(
-            &Predicate::In {
+        );
+        assert_ne!(
+            Predicate::In {
                 key: "a".to_string(),
                 values: vec![crate::query::ir::PredicateValue::Int(1)]
             },
-            &Predicate::In {
+            Predicate::In {
                 key: "a".to_string(),
                 values: vec![crate::query::ir::PredicateValue::Int(2)]
             }
-        ));
+        );
 
         // Contains mismatches
-        assert!(!rule.predicates_equal(
-            &Predicate::contains("a", "abc"),
-            &Predicate::contains("b", "abc")
-        ));
-        assert!(!rule.predicates_equal(
-            &Predicate::contains("a", "abc"),
-            &Predicate::contains("a", "xyz")
-        ));
+        assert_ne!(
+            Predicate::contains("a", "abc"),
+            Predicate::contains("b", "abc")
+        );
+        assert_ne!(
+            Predicate::contains("a", "abc"),
+            Predicate::contains("a", "xyz")
+        );
 
         // StartsWith mismatches
-        assert!(!rule.predicates_equal(
-            &Predicate::StartsWith {
+        assert_ne!(
+            Predicate::StartsWith {
                 key: "a".to_string(),
                 prefix: "abc".to_string()
             },
-            &Predicate::StartsWith {
+            Predicate::StartsWith {
                 key: "b".to_string(),
                 prefix: "abc".to_string()
             }
-        ));
-        assert!(!rule.predicates_equal(
-            &Predicate::StartsWith {
+        );
+        assert_ne!(
+            Predicate::StartsWith {
                 key: "a".to_string(),
                 prefix: "abc".to_string()
             },
-            &Predicate::StartsWith {
+            Predicate::StartsWith {
                 key: "a".to_string(),
                 prefix: "xyz".to_string()
             }
-        ));
+        );
 
         // EndsWith mismatches
-        assert!(!rule.predicates_equal(
-            &Predicate::EndsWith {
+        assert_ne!(
+            Predicate::EndsWith {
                 key: "a".to_string(),
                 suffix: "abc".to_string()
             },
-            &Predicate::EndsWith {
+            Predicate::EndsWith {
                 key: "b".to_string(),
                 suffix: "abc".to_string()
             }
-        ));
-        assert!(!rule.predicates_equal(
-            &Predicate::EndsWith {
+        );
+        assert_ne!(
+            Predicate::EndsWith {
                 key: "a".to_string(),
                 suffix: "abc".to_string()
             },
-            &Predicate::EndsWith {
+            Predicate::EndsWith {
                 key: "a".to_string(),
                 suffix: "xyz".to_string()
             }
-        ));
+        );
 
         // Exists mismatches
-        assert!(!rule.predicates_equal(&Predicate::exists("a"), &Predicate::exists("b")));
+        assert_ne!(Predicate::exists("a"), Predicate::exists("b"));
 
         // NotExists mismatches
-        assert!(!rule.predicates_equal(
-            &Predicate::NotExists("a".to_string()),
-            &Predicate::NotExists("b".to_string())
-        ));
+        assert_ne!(
+            Predicate::NotExists("a".to_string()),
+            Predicate::NotExists("b".to_string())
+        );
 
         // And / Or structural mismatches (different sizes)
-        assert!(!rule.predicates_equal(
-            &Predicate::And(vec![Predicate::eq("a", 1)]),
-            &Predicate::And(vec![Predicate::eq("a", 1), Predicate::eq("b", 2)])
-        ));
-        assert!(!rule.predicates_equal(
-            &Predicate::Or(vec![Predicate::eq("a", 1)]),
-            &Predicate::Or(vec![Predicate::eq("a", 1), Predicate::eq("b", 2)])
-        ));
+        assert_ne!(
+            Predicate::And(vec![Predicate::eq("a", 1)]),
+            Predicate::And(vec![Predicate::eq("a", 1), Predicate::eq("b", 2)])
+        );
+        assert_ne!(
+            Predicate::Or(vec![Predicate::eq("a", 1)]),
+            Predicate::Or(vec![Predicate::eq("a", 1), Predicate::eq("b", 2)])
+        );
     }
 }

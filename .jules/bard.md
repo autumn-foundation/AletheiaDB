@@ -89,3 +89,6 @@
 ## 2025-03-05 - The Spark and Details Format
 **Confusion:** Basic documentation comments like "Creates a new ID" don't help tired developers understand *why* strong types exist or *when* checkpoints trigger.
 **Clarification:** Added `# The Spark` and `# The Details` narrative structures to `NodeId`, `EdgeId`, `VersionId`, and `CheckpointManager` methods to explain the context of use, plus concrete `# Examples`.
+## 2025-03-05 - Experimental Feature Leaks II & Doctest Conditionals
+**Confusion:** Several experimental modules (`chronos`, `echo`, `sherlock`, and `temporal_narrative`) in `src/experimental/mod.rs` were missing their `#[cfg(feature = "nova")]` gating attributes. This allowed them to leak into the public API without the required feature flag enabled. Furthermore, the doctests for `sherlock` (in `mod.rs`) and `kairos` used an anonymous block (`# { ... }`) for feature gating, which generated `main function not found` or `expressions at the top level` warnings in `cargo test --doc`.
+**Clarification:** Added the missing `#[cfg(feature = "nova")]` attributes to the exposed experimental modules. Fixed the doctests to use conditional compilation on the `main` function and imports themselves (`# #[cfg(feature = "nova")] \n fn main() { ... }`), and added an empty fallback `main` function for when the feature is disabled.

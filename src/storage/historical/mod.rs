@@ -170,57 +170,31 @@ pub struct HistoricalStorage {
     retention_policy: RetentionPolicy,
     /// Maximum depth for version reconstruction (DoS protection)
     max_reconstruction_depth: usize,
+    // All FastHashMap fields below use IdentityHasher to avoid SipHash overhead
+    // on integer keys (NodeId, EdgeId, VersionId are all newtypes over u64).
     /// All node versions, indexed by version ID.
-    /// Uses `FastHashMap` (IdentityHasher) to avoid SipHash overhead on integer keys.
     node_versions: FastHashMap<VersionId, NodeVersion>,
     /// All edge versions, indexed by version ID.
-    /// Uses `FastHashMap` (IdentityHasher) to avoid SipHash overhead on integer keys.
     edge_versions: FastHashMap<VersionId, EdgeVersion>,
     /// Head version ID for each node (most recent).
-    /// Uses `FastHashMap` (IdentityHasher) to avoid SipHash overhead on integer keys.
     node_version_heads: FastHashMap<NodeId, VersionId>,
     /// Head version ID for each edge (most recent).
-    /// Uses `FastHashMap` (IdentityHasher) to avoid SipHash overhead on integer keys.
     edge_version_heads: FastHashMap<EdgeId, VersionId>,
     /// Cached version counts per node (for O(1) capacity checks).
-    /// Uses `FastHashMap` (IdentityHasher) to avoid SipHash overhead on integer keys.
     node_version_counts: FastHashMap<NodeId, usize>,
     /// Cached version counts per edge (for O(1) capacity checks).
-    /// Uses `FastHashMap` (IdentityHasher) to avoid SipHash overhead on integer keys.
     edge_version_counts: FastHashMap<EdgeId, usize>,
-    /// Versions since last anchor per node (for O(1) anchor interval checks)
-    ///
-    /// Issue #208: Cache the count of versions since the last anchor to avoid
-    /// walking the version chain on every add operation. This improves write
-    /// performance from O(anchor_interval) to O(1).
-    /// Uses `FastHashMap` (IdentityHasher) to avoid SipHash overhead on integer keys.
+    /// Versions since last anchor per node (for O(1) anchor interval checks).
+    /// Avoids walking the version chain on every add operation.
     node_versions_since_anchor: FastHashMap<NodeId, usize>,
-    /// Versions since last anchor per edge (for O(1) anchor interval checks)
-    ///
-    /// Issue #208: Cache the count of versions since the last anchor to avoid
-    /// walking the version chain on every add operation. This improves write
-    /// performance from O(anchor_interval) to O(1).
-    /// Uses `FastHashMap` (IdentityHasher) to avoid SipHash overhead on integer keys.
+    /// Versions since last anchor per edge (for O(1) anchor interval checks).
+    /// Avoids walking the version chain on every add operation.
     edge_versions_since_anchor: FastHashMap<EdgeId, usize>,
-    /// Cached count of node anchor versions for O(1) stats() (Issue #212)
-    ///
-    /// This counter is incremented when node anchors are added and enables
-    /// constant-time stats retrieval instead of O(versions) iteration.
+    /// Cached anchor/delta counts for O(1) stats() retrieval.
+    /// Maintained incrementally as versions are added/migrated.
     cached_node_anchor_count: usize,
-    /// Cached count of node delta versions for O(1) stats() (Issue #212)
-    ///
-    /// This counter is incremented when node deltas are added and enables
-    /// constant-time stats retrieval instead of O(versions) iteration.
     cached_node_delta_count: usize,
-    /// Cached count of edge anchor versions for O(1) stats() (Issue #212)
-    ///
-    /// This counter is incremented when edge anchors are added and enables
-    /// constant-time stats retrieval instead of O(versions) iteration.
     cached_edge_anchor_count: usize,
-    /// Cached count of edge delta versions for O(1) stats() (Issue #212)
-    ///
-    /// This counter is incremented when edge deltas are added and enables
-    /// constant-time stats retrieval instead of O(versions) iteration.
     cached_edge_delta_count: usize,
     /// TinyLFU cache for reconstructed node properties (reduces lock contention)
     node_property_cache: Arc<Cache<VersionId, Arc<PropertyMap>>>,
@@ -975,7 +949,7 @@ impl HistoricalStorage {
     /// chain exceeds `MAX_RECONSTRUCTION_DEPTH` (100). This protects against
     /// stack overflow from corrupted version chains or cycles.
     pub fn reconstruct_node_properties(&self, version_id: VersionId) -> Result<PropertyMap> {
-        self.reconstruct_node_properties_with_depth(version_id, 0)
+        self.reconstruct_node_properties_with_depth(version_id)
     }
 
     /// Get a node version from hot or cold storage.
@@ -1224,46 +1198,23 @@ impl HistoricalStorage {
         Ok(properties)
     }
 
-    /// Internal helper for node property reconstruction with depth tracking.
+    /// Internal node property reconstruction with dual-cache lookup.
     ///
-    /// Note (Issue #211): The iterative implementation only caches the final
-    /// reconstructed PropertyMap, not intermediate versions. This reduces memory
-    /// allocations at the cost of slightly lower cache hit rates compared to
-    /// the previous recursive approach.
-    ///
-    /// The depth parameter is kept for API compatibility but unused in the
-    /// iterative implementation.
-    fn reconstruct_node_properties_with_depth(
-        &self,
-        version_id: VersionId,
-        _depth: usize, // Kept for API compatibility but unused in iterative implementation
-    ) -> Result<PropertyMap> {
-        // Dual-cache lookup strategy (Improvement #1 & #2: Issue #338)
-        //
-        // 1. Check regular cache first (holds all versions: anchors + deltas)
-        // 2. If not found, check dedicated anchor cache (holds only anchors)
-        //
-        // Anchors are stored in BOTH caches during pre-population for redundancy:
-        // - Regular cache provides fast access when anchor is still in LRU window
-        // - Anchor cache acts as fallback when regular cache evicts due to delta pressure
-        //
-        // This fallback only triggers after regular cache eviction, providing
-        // guaranteed O(1) anchor access even under heavy cache pressure.
+    /// Checks primary cache, then anchor cache fallback, then reconstructs
+    /// iteratively from the delta chain.
+    fn reconstruct_node_properties_with_depth(&self, version_id: VersionId) -> Result<PropertyMap> {
         if let Some(cached) = self.node_property_cache.get(&version_id) {
             self.primary_cache_hits.fetch_add(1, Ordering::Relaxed);
             return Ok(cached.as_ref().clone());
         }
 
-        // Fallback to dedicated anchor cache (survives delta cache pressure)
+        // Anchor cache fallback: survives primary cache eviction under delta pressure
         if let Some(cached) = self.node_anchor_cache.get(&version_id) {
             self.anchor_cache_hits.fetch_add(1, Ordering::Relaxed);
-            // Re-populate main cache to make this anchor "hot" again
-            // This prevents repeatedly falling back to anchor cache for frequently accessed anchors
             self.node_property_cache.insert(version_id, cached.clone());
             return Ok(cached.as_ref().clone());
         }
 
-        // Cache miss - reconstruct properties using iterative helper
         self.full_reconstructions.fetch_add(1, Ordering::Relaxed);
 
         let properties = self.reconstruct_node_properties_iterative(version_id)?;
@@ -1284,49 +1235,26 @@ impl HistoricalStorage {
     /// chain exceeds `MAX_RECONSTRUCTION_DEPTH` (100). This protects against
     /// stack overflow from corrupted version chains or cycles.
     pub fn reconstruct_edge_properties(&self, version_id: VersionId) -> Result<PropertyMap> {
-        self.reconstruct_edge_properties_with_depth(version_id, 0)
+        self.reconstruct_edge_properties_with_depth(version_id)
     }
 
-    /// Internal helper for edge property reconstruction with depth tracking.
+    /// Internal edge property reconstruction with dual-cache lookup.
     ///
-    /// Note (Issue #211): The iterative implementation only caches the final
-    /// reconstructed PropertyMap, not intermediate versions. This reduces memory
-    /// allocations at the cost of slightly lower cache hit rates compared to
-    /// the previous recursive approach.
-    ///
-    /// The depth parameter is kept for API compatibility but unused in the
-    /// iterative implementation.
-    fn reconstruct_edge_properties_with_depth(
-        &self,
-        version_id: VersionId,
-        _depth: usize, // Kept for API compatibility but unused in iterative implementation
-    ) -> Result<PropertyMap> {
-        // Dual-cache lookup strategy (Improvement #1 & #2: Issue #338)
-        //
-        // 1. Check regular cache first (holds all versions: anchors + deltas)
-        // 2. If not found, check dedicated anchor cache (holds only anchors)
-        //
-        // Anchors are stored in BOTH caches during pre-population for redundancy:
-        // - Regular cache provides fast access when anchor is still in LRU window
-        // - Anchor cache acts as fallback when regular cache evicts due to delta pressure
-        //
-        // This fallback only triggers after regular cache eviction, providing
-        // guaranteed O(1) anchor access even under heavy cache pressure.
+    /// Checks primary cache, then anchor cache fallback, then reconstructs
+    /// iteratively from the delta chain.
+    fn reconstruct_edge_properties_with_depth(&self, version_id: VersionId) -> Result<PropertyMap> {
         if let Some(cached) = self.edge_property_cache.get(&version_id) {
             self.primary_cache_hits.fetch_add(1, Ordering::Relaxed);
             return Ok(cached.as_ref().clone());
         }
 
-        // Fallback to dedicated anchor cache (survives delta cache pressure)
+        // Anchor cache fallback: survives primary cache eviction under delta pressure
         if let Some(cached) = self.edge_anchor_cache.get(&version_id) {
             self.anchor_cache_hits.fetch_add(1, Ordering::Relaxed);
-            // Re-populate main cache to make this anchor "hot" again
-            // This prevents repeatedly falling back to anchor cache for frequently accessed anchors
             self.edge_property_cache.insert(version_id, cached.clone());
             return Ok(cached.as_ref().clone());
         }
 
-        // Cache miss - reconstruct properties using iterative helper
         self.full_reconstructions.fetch_add(1, Ordering::Relaxed);
 
         let properties = self.reconstruct_edge_properties_iterative(version_id)?;
@@ -2971,19 +2899,19 @@ impl HistoricalStorage {
         use crate::storage::snapshot::HistoricalStorageSnapshot;
         use std::sync::Arc;
 
-        // Collect Arc references to all node versions
-        let node_versions: Vec<Arc<NodeVersion>> = self
-            .node_versions
-            .values()
-            .map(|version| Arc::new(version.clone()))
-            .collect();
+        let mut node_versions = Vec::with_capacity(self.node_versions.len());
+        node_versions.extend(
+            self.node_versions
+                .values()
+                .map(|version| Arc::new(version.clone())),
+        );
 
-        // Collect Arc references to all edge versions
-        let edge_versions: Vec<Arc<EdgeVersion>> = self
-            .edge_versions
-            .values()
-            .map(|version| Arc::new(version.clone()))
-            .collect();
+        let mut edge_versions = Vec::with_capacity(self.edge_versions.len());
+        edge_versions.extend(
+            self.edge_versions
+                .values()
+                .map(|version| Arc::new(version.clone())),
+        );
 
         HistoricalStorageSnapshot::new(lsn, node_versions, edge_versions)
     }

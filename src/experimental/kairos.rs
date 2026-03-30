@@ -17,9 +17,12 @@
 //! # Example
 //!
 //! ```rust,no_run
+//! # #[cfg(feature = "nova")]
 //! use aletheiadb::AletheiaDB;
+//! # #[cfg(feature = "nova")]
 //! use aletheiadb::experimental::kairos::Kairos;
 //!
+//! # #[cfg(feature = "nova")]
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let db = AletheiaDB::new()?;
 //! let kairos = Kairos::new(&db);
@@ -33,6 +36,8 @@
 //! }
 //! # Ok(())
 //! # }
+//! # #[cfg(not(feature = "nova"))]
+//! # fn main() {}
 //! ```
 
 use crate::AletheiaDB;

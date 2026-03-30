@@ -1,24 +1,59 @@
 //! Error types for the Honeycomb client.
+//!
+//! This module defines the `Error` enum and the `Result` alias used throughout
+//! the `aletheiadb` Honeycomb telemetry integration. It consolidates all failure
+//! modes—such as network timeouts, invalid API keys, or serialization issues—into
+//! a single, easy-to-handle type.
 
 use std::fmt;
 
 /// Result type for Honeycomb client operations.
+///
+/// This is a convenient alias for `std::result::Result<T, Error>`.
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// Errors that can occur during Honeycomb client operations.
+///
+/// # Examples
+///
+/// Pattern matching on specific errors to decide how to recover:
+///
+/// ```
+/// use aletheiadb::honeycomb::error::Error;
+///
+/// fn handle_error(err: &Error) {
+///     match err {
+///         Error::Http(msg) => println!("Network issue: {msg} (Try again later)"),
+///         Error::Config(msg) => println!("Invalid setup: {msg} (Check your API key)"),
+///         _ => println!("Other telemetry error: {err}"),
+///     }
+/// }
+/// ```
 #[derive(Debug)]
 pub enum Error {
-    /// HTTP request failed
+    /// HTTP request failed.
+    ///
+    /// This usually happens if the network is down or Honeycomb's API is unreachable.
     Http(String),
-    /// JSON serialization/deserialization failed
+    /// JSON serialization/deserialization failed.
+    ///
+    /// This occurs if the event data couldn't be encoded as JSON.
     Serialization(String),
-    /// Configuration error
+    /// Configuration error.
+    ///
+    /// Triggered when the `HoneycombConfig` is invalid (e.g., missing API key).
     Config(String),
-    /// Batch buffer error
+    /// Batch buffer error.
+    ///
+    /// Occurs when the event batching buffer encounters an issue, like reaching capacity.
     Buffer(String),
-    /// Channel send error
+    /// Channel send error.
+    ///
+    /// Happens when the background worker thread crashes or stops accepting new events.
     Channel(String),
-    /// Timeout error
+    /// Timeout error.
+    ///
+    /// Triggered when flushing the batch queue takes longer than the configured timeout.
     Timeout(String),
 }
 

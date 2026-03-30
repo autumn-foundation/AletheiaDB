@@ -62,12 +62,15 @@
 //! // aletheiadb = { version = "0.1", features = ["nova"] }
 //!
 //! # #[cfg(feature = "nova")]
-//! # {
 //! use aletheiadb::AletheiaDB;
+//! # #[cfg(feature = "nova")]
 //! use aletheiadb::experimental::sherlock::{Sherlock, Mystery, Clue};
+//! # #[cfg(feature = "nova")]
 //! use aletheiadb::core::property::PropertyValue;
+//! # #[cfg(feature = "nova")]
 //! use std::time::Duration;
 //!
+//! # #[cfg(feature = "nova")]
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let db = AletheiaDB::new()?;
 //! # let node_id = db.create_node("User", Default::default())?;
@@ -90,7 +93,6 @@
 //!     println!("🕵️ Sherlock found {} suspicious sequences!", detections.len());
 //! }
 //! # Ok(())
-//! # }
 //! # }
 //! # #[cfg(not(feature = "nova"))]
 //! # fn main() {}
@@ -117,6 +119,7 @@ pub mod chameleon;
 #[cfg(feature = "nova")]
 /// Chimera: Hybrid Entity Synthesis Engine.
 pub mod chimera;
+#[cfg(feature = "nova")]
 /// Chronos: Temporal Graph Analysis & Pathfinding.
 pub mod chronos;
 #[cfg(feature = "nova")]
@@ -128,6 +131,7 @@ pub mod dissonance;
 #[cfg(feature = "nova")]
 /// Semantic Trajectory Extrapolation ("Dreamer").
 pub mod dreamer;
+#[cfg(feature = "nova")]
 /// Temporal Resonance Engine ("Echo") for finding nodes with similar activity patterns.
 pub mod echo;
 #[cfg(feature = "nova")]
@@ -168,6 +172,7 @@ pub mod ripple;
 #[cfg(feature = "nova")]
 /// Semantic Navigator for vector-guided pathfinding.
 pub mod semantic_navigator;
+#[cfg(feature = "nova")]
 /// Sherlock: Temporal Pattern Matching Engine.
 pub mod sherlock;
 #[cfg(feature = "nova")]
@@ -184,6 +189,7 @@ pub mod telepathy;
 #[cfg(feature = "nova")]
 /// Temporal Diff Engine for computing snapshot differences.
 pub mod temporal_diff;
+#[cfg(feature = "nova")]
 /// Temporal narrative generator for natural language history logs.
 pub mod temporal_narrative;
 

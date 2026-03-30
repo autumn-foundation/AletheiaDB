@@ -55,11 +55,13 @@
 
 mod converter;
 mod error;
+mod match_parser;
 mod parser;
 mod temporal;
 mod temporal_parser;
+mod vector_parser;
 
-pub use converter::{SqlConverter, parse_sql, parse_sql_with_params};
+pub use converter::{SqlConverter, SqlParameterValue, parse_sql, parse_sql_with_params};
 pub use error::SqlError;
 pub use parser::SqlParser;
 pub use temporal::TemporalClause;

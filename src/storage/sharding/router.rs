@@ -5,6 +5,13 @@ use super::types::ShardId;
 use crate::core::id::NodeId;
 use std::collections::{HashMap, HashSet};
 
+/// Cost multiplier per additional shard involved in a query.
+const CROSS_SHARD_PENALTY: f64 = 2.0;
+/// Base cost per traversal hop within a single shard.
+const HOP_COST: f64 = 1.5;
+/// Cost per traversal hop that crosses a shard boundary.
+const CROSS_SHARD_HOP_COST: f64 = 3.0;
+
 /// A step in a multi-shard traversal plan.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TraversalStep {
@@ -150,8 +157,7 @@ impl ShardRouter {
             // Calculate cost based on number of shards involved
             // Cross-shard queries have higher cost due to network latency
             let base_cost = 1.0;
-            let cross_shard_penalty = 2.0; // ~2x cost per additional shard
-            let cost = base_cost + (involved_shards.len() as f64 - 1.0) * cross_shard_penalty;
+            let cost = base_cost + (involved_shards.len() as f64 - 1.0) * CROSS_SHARD_PENALTY;
 
             TraversalPlan::multi_shard(start_shard, involved_shards).with_cost(cost)
         }
@@ -198,13 +204,11 @@ impl ShardRouter {
         }
 
         // Estimate cost based on hops and potential cross-shard operations
-        let hop_cost = 1.5; // Cost per hop
-        let cross_shard_cost = 3.0; // Additional cost for cross-shard hops
         let mut cost = 1.0;
         for step in &plan.steps {
-            cost += hop_cost;
+            cost += HOP_COST;
             if step.may_cross_shard {
-                cost += cross_shard_cost;
+                cost += CROSS_SHARD_HOP_COST;
             }
         }
         plan.estimated_cost = cost;

@@ -1944,4 +1944,59 @@ mod sentry_tests {
         let err = result.unwrap_err();
         assert!(format!("{}", err).contains("Deserialized TimeRange invalid"));
     }
+
+    #[test]
+    #[should_panic(expected = "exceeds MAX_VALID_TIMESTAMP")]
+    fn test_sentry_timerange_from_exceeds_max_valid() {
+        // 🛡️ Sentry Test: Verify TimeRange::from panics if start > MAX_VALID_TIMESTAMP
+        let ts = HybridTimestamp::new_unchecked(MAX_VALID_TIMESTAMP + 1, 0);
+        let _ = TimeRange::from(ts);
+    }
+
+    #[test]
+    #[should_panic(expected = "exceeds MAX_VALID_TIMESTAMP")]
+    fn test_sentry_timerange_at_exceeds_max_valid() {
+        // 🛡️ Sentry Test: Verify TimeRange::at panics if timestamp > MAX_VALID_TIMESTAMP
+        let ts = HybridTimestamp::new_unchecked(MAX_VALID_TIMESTAMP + 1, 0);
+        let _ = TimeRange::at(ts);
+    }
+
+    #[test]
+    fn test_sentry_timerange_close_at_exceeds_max_valid() {
+        // 🛡️ Sentry Test: Verify TimeRange::close_at returns error if end > MAX_VALID_TIMESTAMP
+        let open = TimeRange::from(100.into());
+        let ts = HybridTimestamp::new_unchecked(MAX_VALID_TIMESTAMP + 1, 0);
+        let result = open.close_at(ts);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_sentry_overlaps_empty_range_inside_non_empty() {
+        // 🛡️ Sentry Test: Verify overlaps() returns false when one range is empty, even if inside the other
+        // This targets the || mutant in is_empty() checks
+        let wide = TimeRange::new(100.into(), 200.into()).unwrap();
+        let point = TimeRange::at(150.into());
+
+        assert!(
+            !wide.overlaps(&point),
+            "Non-empty range should not overlap an empty range inside it"
+        );
+        assert!(
+            !point.overlaps(&wide),
+            "Empty range should not overlap a non-empty range"
+        );
+    }
+
+    #[test]
+    fn test_sentry_bitemporal_deserialize_excess_bytes() {
+        // 🛡️ Sentry Test: Verify BiTemporalInterval::deserialize returns correct consumed length
+        // even if given a buffer larger than required (kills < vs == mutant)
+        let interval = BiTemporalInterval::now(100.into(), 200.into());
+        let mut bytes = interval.serialize();
+        bytes.push(0xFF); // length is now 49
+
+        let (parsed, consumed) = BiTemporalInterval::deserialize(&bytes).unwrap();
+        assert_eq!(parsed, interval);
+        assert_eq!(consumed, 48, "Should consume exactly 48 bytes");
+    }
 }
