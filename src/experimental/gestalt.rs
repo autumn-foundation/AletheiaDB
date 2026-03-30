@@ -18,8 +18,13 @@ use crate::core::error::Result;
 use crate::core::id::{EdgeId, NodeId};
 use std::collections::{HashMap, HashSet};
 
-/// A node in the pattern graph.
+/// A required entity within a target query pattern graph.
+///
+/// Contains explicit bounds outlining how to qualify matching nodes within the
+/// actual database (e.g. they must possess a `Person` label, and be within `0.85`
+/// similarity of a particular vector geometry).
 #[derive(Debug, Clone)]
+
 pub struct PatternNode {
     /// The ID of the node within the pattern (0, 1, 2...).
     pub id: usize,
@@ -29,8 +34,10 @@ pub struct PatternNode {
     pub vector_constraint: Option<VectorConstraint>,
 }
 
-/// A vector constraint on a pattern node.
+/// Specifies numeric threshold criteria that a `Node`'s property embedding
+/// must clear (using cosine similarity) to be considered a successful semantic match.
 #[derive(Debug, Clone)]
+
 pub struct VectorConstraint {
     /// The property containing the vector.
     pub property: String,
@@ -40,8 +47,9 @@ pub struct VectorConstraint {
     pub threshold: f32,
 }
 
-/// An edge in the pattern graph.
+/// Specifies a required topological connection between two pattern nodes.
 #[derive(Debug, Clone)]
+
 pub struct PatternEdge {
     /// The source pattern node ID.
     pub source: usize,
@@ -53,8 +61,12 @@ pub struct PatternEdge {
     pub directed: bool,
 }
 
-/// A graph pattern to search for.
+/// A declarative blueprint representing a topological and semantic structure
+/// to be mapped against the actual data residing in the database.
+///
+/// Needs to be passed into `GestaltMatcher::find_matches()` to initiate scanning.
 #[derive(Debug, Clone, Default)]
+
 pub struct Pattern {
     /// Nodes in the pattern.
     pub nodes: Vec<PatternNode>,
@@ -125,8 +137,12 @@ impl Pattern {
     }
 }
 
-/// A concrete match found in the database.
+/// A successfully materialized subgraph returned from `GestaltMatcher::find_matches()`.
+///
+/// Maps the conceptual ID labels provided in the `Pattern` definition directly
+/// to their instantiated, physical database equivalents (`NodeId` / `EdgeId`).
 #[derive(Debug, Clone)]
+
 pub struct Match {
     /// Mapping from Pattern Node ID -> Database Node ID.
     pub nodes: HashMap<usize, NodeId>,
@@ -136,7 +152,21 @@ pub struct Match {
     pub score: f32,
 }
 
-/// The Gestalt Engine.
+/// Central evaluation engine for tracking complex semantic patterns.
+///
+/// Coordinates execution across the underlying `AletheiaDB` instance, tracking node
+/// constraints and traversing valid graph edges recursively using a combination of label matching
+/// and semantic vector constraints.
+///
+/// # Examples
+/// ```rust
+/// use aletheiadb::AletheiaDB;
+/// use aletheiadb::experimental::gestalt::GestaltMatcher;
+///
+/// let db = AletheiaDB::new().unwrap();
+/// let matcher = GestaltMatcher::new(&db);
+/// ```
+
 pub struct GestaltMatcher<'a> {
     db: &'a AletheiaDB,
 }

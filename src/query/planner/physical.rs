@@ -103,13 +103,26 @@ impl PhysicalPlan {
     /// - Estimated cardinalities (row counts)
     /// - Temporal context if applicable
     ///
-    /// # Example Output
+    /// # Example
     ///
-    /// ```text
-    /// Physical Plan (cost: cpu=10.5µs, io=2, mem=1.0KB)
-    /// Filter (rows: ~100, cost: cpu=5.0µs)
-    ///   └─ IndexedTraversal (rows: ~1000, cost: cpu=5.0µs)
-    ///      └─ NodeLookup (rows: 1, cost: cpu=0.5µs)
+    /// ```rust
+    /// use aletheiadb::core::NodeId;
+    /// use aletheiadb::query::planner::physical::{PhysicalPlan, PhysicalOp};
+    /// use aletheiadb::query::planner::cost::Cost;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let plan = PhysicalPlan {
+    ///     root: PhysicalOp::NodeLookup { node_ids: vec![NodeId::new(1)?] },
+    ///     estimated_cost: Cost { cpu: 0.5, io: 1.0, memory: 1024, network: 0.0 },
+    ///     temporal_context: None,
+    ///     parallel: false,
+    ///     include_provenance: false,
+    /// };
+    ///
+    /// let explanation = plan.explain();
+    /// assert!(explanation.contains("NodeLookup"));
+    /// assert!(explanation.contains("cpu=0.5"));
+    /// # Ok(())
+    /// # }
     /// ```
     #[must_use]
     pub fn explain(&self) -> String {
@@ -607,7 +620,11 @@ impl PhysicalOp {
         )
     }
 
-    /// Get the depth of this operator tree
+    /// Calculate the nested execution depth of this pipeline branch.
+    ///
+    /// Assesses how many downstream operations exist until a leaf iterator is hit.
+    /// Deep pipelines carry increased `next()` invocation overhead which might
+    /// warrant restructuring or flattening by the optimizer.
     #[must_use]
     pub fn depth(&self) -> usize {
         match self {

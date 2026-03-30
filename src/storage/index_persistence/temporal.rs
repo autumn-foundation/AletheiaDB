@@ -45,22 +45,27 @@ use super::formats::{EdgeVersionEntry, NodeVersionEntry, PersistedVersionType, T
 use super::graph::{persist_property_map, restore_property_map};
 use super::{MANIFEST_VERSION, TEMPORAL_MAGIC};
 
-/// Convert NodeVersion to NodeVersionEntry for persistence.
+/// Flatten an in-memory `NodeVersion` into a `NodeVersionEntry` bitcode serializable struct.
 ///
-/// This function flattens the `NodeVersion` structure into a `NodeVersionEntry` suitable for disk storage.
-/// It handles both `Anchor` and `Delta` versions.
+/// Reduces pointer indirections (`Arc`) and complex nested enumerations to byte-aligned
+/// numeric identifiers (such as interned string IDs) that are safe and efficient to
+/// persist directly to disk.
 ///
-/// # Vector Delta Handling
+/// # Vector Delta Constraints
 ///
-/// If the version contains `VectorDelta::Sparse`, this function will return an error.
-/// Sparse deltas rely on the base version to be fully reconstructed, which is complex during persistence.
-/// Therefore, sparse deltas must be materialized (converted to full vectors) before persistence.
+/// ⚠️ **Crucially**, this stage enforces strict safety against incomplete snapshot storage.
+/// A `VectorDelta::Sparse` relies entirely on a preceding `Anchor` snapshot being resident
+/// and properly aligned in memory to resolve the complete vector shape.
+///
+/// Attempting to persist a sparse vector directly is a fail-closed operation, as there
+/// is no guarantee that its preceding `Anchor` is stored sequentially on disk or will
+/// be loaded during recovery. All sparse deltas must be **materialized into full vectors**
+/// via `PropertyDelta::materialize_vector_deltas()` before hitting this phase.
 ///
 /// # Errors
 ///
-/// Returns an error if:
-/// - Property conversion fails (e.g., unsupported Array type).
-/// - A `VectorDelta::Sparse` is encountered (preventing data loss).
+/// Fails explicitly if a sparse vector delta is encountered, or if the underlying
+/// property type maps poorly to the `bitcode` definitions.
 pub fn convert_node_version(version: &NodeVersion) -> Result<NodeVersionEntry> {
     let valid_time = version.temporal.valid_time();
     let tx_time = version.temporal.transaction_time();
@@ -151,13 +156,15 @@ pub fn convert_node_version(version: &NodeVersion) -> Result<NodeVersionEntry> {
     })
 }
 
-/// Convert EdgeVersion to EdgeVersionEntry for persistence.
+/// Transform an in-memory `EdgeVersion` into its contiguous `bitcode` representation.
 ///
-/// Similar to `convert_node_version`, this flattens `EdgeVersion` for storage.
+/// Converts complex enumerations and `Arc` pointer allocations into basic scalars to prepare
+/// them for zero-copy file storage. Identical constraints to `convert_node_version` apply.
 ///
 /// # Errors
 ///
-/// Returns an error if property conversion fails or `VectorDelta::Sparse` is encountered.
+/// Explicitly catches and blocks `VectorDelta::Sparse` from being committed to disk.
+/// Ensure upstream operations invoke `PropertyDelta::materialize_vector_deltas()`.
 pub fn convert_edge_version(version: &EdgeVersion) -> Result<EdgeVersionEntry> {
     let valid_time = version.temporal.valid_time();
     let tx_time = version.temporal.transaction_time();
@@ -238,18 +245,19 @@ pub fn convert_edge_version(version: &EdgeVersion) -> Result<EdgeVersionEntry> {
     })
 }
 
-/// Restore NodeVersionEntry back to NodeVersion.
+/// Hydrate a persisted `NodeVersionEntry` into its runtime memory structure (`NodeVersion`).
 ///
-/// This reconstructs the in-memory `NodeVersion` from the persisted entry.
-/// It resolves interned strings and rebuilds `VersionData` (Anchor or Delta).
+/// Rebuilds the complex nested enums, dynamically allocates new pointers (`Arc`) for graph
+/// property maps, and resolves previously flattened string keys back through the `GLOBAL_INTERNER`
+/// registry.
 ///
-/// # Arguments
-///
-/// * `entry` - The persisted node version entry
+/// This function acts on individual records. Its caller is responsible for reconstructing
+/// the linked lists (the `prev_version` and `next_version` pointers) connecting the node's temporal chain.
 ///
 /// # Errors
 ///
-/// Returns an error if property restoration fails (e.g., corrupted interned strings).
+/// Triggers deserialization faults if the underlying byte-aligned indices point to unregistered
+/// global interned keys or if a corrupted `VersionId` surpasses its type boundary (`MAX_VALID_ID`).
 pub fn restore_node_version(entry: &NodeVersionEntry) -> Result<NodeVersion> {
     let label = InternedString::from_raw(entry.label_idx);
     let node_id = NodeId::new(entry.node_id).map_err(|e| {
@@ -328,17 +336,15 @@ pub fn restore_node_version(entry: &NodeVersionEntry) -> Result<NodeVersion> {
     })
 }
 
-/// Restore EdgeVersionEntry back to EdgeVersion.
+/// Hydrate a structured `EdgeVersionEntry` into its runtime target (`EdgeVersion`).
 ///
-/// Reconstructs the in-memory `EdgeVersion` from the persisted entry.
-///
-/// # Arguments
-///
-/// * `entry` - The persisted edge version entry
+/// Similar to `restore_node_version`, this rebuilds complex object properties and
+/// resolves the pointer/identifier relationships (e.g., the source and target node bindings).
 ///
 /// # Errors
 ///
-/// Returns an error if property restoration fails (e.g., corrupted interned strings).
+/// Returns an error when indices for labels/keys do not exist in the loaded global
+/// interner state, or if either `source` or `target` are invalid `NodeId` instances.
 pub fn restore_edge_version(entry: &EdgeVersionEntry) -> Result<EdgeVersion> {
     let label = InternedString::from_raw(entry.label_idx);
     let edge_id = EdgeId::new(entry.edge_id).map_err(|e| {
@@ -429,20 +435,24 @@ pub fn restore_edge_version(entry: &EdgeVersionEntry) -> Result<EdgeVersion> {
     })
 }
 
-/// Restore temporal index data into HistoricalStorage.
+/// Materializes an entire snapshot of temporal history into active graph memory.
 ///
-/// This function populates the `HistoricalStorage` with versions loaded from disk.
-/// It also triggers `rebuild_version_chains()` to reconstruct the linked lists
-/// of versions (prev/next pointers).
+/// Iteratively walks through the decoupled structs encoded in `TemporalIndexData` and
+/// inserts them into an instantiated `HistoricalStorage`. It pre-allocates block capacity
+/// in the storage implementation before beginning bulk loading to eliminate reallocation spikes.
+///
+/// Finally, after successfully inserting all unlinked nodes/edges, it dynamically rebuilds
+/// the chronological pointer chains by invoking `rebuild_version_chains()`.
 ///
 /// # Arguments
 ///
-/// * `data` - The temporal index data loaded from disk
-/// * `historical` - The HistoricalStorage to populate
+/// * `data` - The deserialized temporal index payload from disk
+/// * `historical` - The target active storage structure
 ///
 /// # Errors
 ///
-/// Returns an error if version restoration or insertion fails.
+/// Will return a `Serialization` fault if any single entity insertion within the
+/// collection fails its `NodeId` or label validation.
 pub fn restore_into_historical_storage(
     data: &TemporalIndexData,
     historical: &mut crate::storage::historical::HistoricalStorage,
@@ -484,24 +494,30 @@ pub fn restore_into_historical_storage(
     Ok(())
 }
 
-/// Save temporal index data to disk with CRC32 checksum using atomic write.
+/// Fast-paths a `TemporalIndexData` payload via CRC32 byte encoding to the target directory.
+///
+/// Uses an atomic file swap to write out the data stream, preventing partial
+/// overwrites or corrupt states if the database process shuts down unexpectedly.
 pub fn save_temporal_index(data: &TemporalIndexData, path: &Path) -> Result<()> {
     super::common::save_encoded_with_crc(data, path)
 }
 
-/// Load temporal index data from disk and validate CRC32 checksum.
+/// Safely load and validate an encoded temporal persistence file.
 ///
-/// # Validation
+/// Ensures the blob structure is verified before attempting `bitcode` deserialization,
+/// checking against hard limits to prevent malicious OOM scenarios during boot.
 ///
-/// This function performs strict validation:
-/// - File size check (against `MAX_TEMPORAL_INDEX_FILE_SIZE`)
-/// - CRC32 checksum verification
-/// - Magic bytes check (`TEMPORAL_MAGIC`)
-/// - Version check (`MANIFEST_VERSION`)
+/// # Strict Validation
+///
+/// Rejects files if they fail:
+/// - Maximum allowed length (`MAX_TEMPORAL_INDEX_FILE_SIZE`).
+/// - CRC32 block checksums matching the computed tail byte segment.
+/// - File structure magic headers (`TEMPORAL_MAGIC`).
+/// - Breaking format changes (`MANIFEST_VERSION` backwards compatibility).
 ///
 /// # Errors
 ///
-/// Returns an error if the file is missing, corrupted, or incompatible.
+/// Yields `IndexPersistenceError`s enumerating the specific boundary/corruption fault.
 pub fn load_temporal_index(path: &Path) -> Result<TemporalIndexData> {
     let data: TemporalIndexData = super::common::load_encoded_with_crc(
         path,
