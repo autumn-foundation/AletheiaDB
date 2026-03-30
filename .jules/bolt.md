@@ -39,3 +39,7 @@
 **[DashMap Guard iterators and .cloned()]**
 **Learning:** In AletheiaDB, `CurrentIndexes` iterators (`iter_nodes`, `iter_edges`) yield `impl Deref<Target = Node>` representing DashMap guards, not simple references (`&T`). Thus, attempting to apply `.cloned()` fails to compile since it strictly requires `&T`.
 **Action:** Always use `.map(|n| n.clone())` instead of `.cloned()` when iterating over DashMap guards or opaque `impl Deref` types.
+
+**[Optimize Vec allocations with Vec::with_capacity and exact size hints]**
+**Learning:** In Rust, replacing an idiomatic `.collect::<Vec<_>>()` chain with a manual `for` loop and `Vec::with_capacity()` is often a de-optimization. Iterators implementing `ExactSizeIterator` or `TrustedLen` (e.g., from slices or `std::vec::IntoIter`) automatically pre-allocate perfect capacity and elide bounds checks during `.collect()`. However, when `.filter(...)` is introduced into an iterator chain, the exact size hint is lost, causing `.collect()` to dynamically reallocate.
+**Action:** When filtering a collection of known maximum size into a `Vec`, manually pre-allocate `Vec::with_capacity(collection.len())` and use a `for` loop (or `.extend()`) to avoid all intermediate heap reallocations.
