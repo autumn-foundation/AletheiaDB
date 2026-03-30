@@ -714,6 +714,8 @@ mod tests {
 }
 
 // HNSW implementation
+/// Configuration for vector index.
+pub mod config;
 pub mod hnsw;
 
 // Temporal vector index (Phase 3)

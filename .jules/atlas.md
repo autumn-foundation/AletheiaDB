@@ -79,3 +79,7 @@
 **[Broke Storage-API Dependency Cycle]
 **Tangle:** The `storage` module had an implementation of `From<&crate::api::transaction::BufferedWrite> for WalOperation` in `src/storage/wal/entry.rs`, meaning the underlying storage engine depended structurally on the public API layer.
 **Blueprint:** Moved the `From` implementation to `src/api/transaction/write_buffer.rs`. Now, the `api` module is aware of how its `BufferedWrite` converts into a `WalOperation` to send down to `storage`, enforcing a unidirectional dependency graph from `api` -> `storage`.
+
+## 2026-05-24 - The Blob in src/config.rs
+**Tangle:** `src/config.rs` was a "Blob" module containing configuration definitions and builders for multiple distinct domain sub-systems (WAL, Historical Storage, Vector Indexes). This violated the Single Responsibility Principle and caused high coupling as any domain configuration change modified the central config file.
+**Blueprint:** Refactored `src/config.rs` into a Facade. Extracted domain-specific configurations (`WalConfig`, `HistoricalConfig`, `VectorIndexConfig`) and their builders into their respective submodules (`src/storage/wal/config.rs`, `src/storage/historical/config.rs`, `src/index/vector/config.rs`). `src/config.rs` now strictly maintains the top-level `AletheiaDBConfig` and `ConfigError` and uses `pub use` to present a unified configuration API.

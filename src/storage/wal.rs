@@ -102,6 +102,8 @@
 //! - **20-50% throughput improvement** for batch sizes > 10
 
 // Durability mode support
+/// Configuration for WAL.
+pub mod config;
 pub mod durability;
 pub mod group_commit;
 

@@ -10,6 +10,9 @@
 //! - Reconstruction walks backward to nearest anchor and applies deltas forward
 //! - TinyLFU cache reduces redundant delta chain traversals for concurrent reads
 
+/// Configuration for historical storage.
+pub mod config;
+
 use crate::core::error::{Result, StorageError, TemporalError};
 use crate::core::graph::{Edge, Node};
 use crate::core::history::{EntityHistory, VersionDiff, VersionInfo};

@@ -1403,9 +1403,9 @@ pub fn decode_edge_version(data: &[u8]) -> Result<EdgeVersion> {
     })
 }
 
-fn encode_version_data(data: &crate::storage::version::VersionData) -> SerializableVersionData {
+fn encode_version_data(data: &crate::core::version::VersionData) -> SerializableVersionData {
     use crate::core::interning::GLOBAL_INTERNER;
-    use crate::storage::version::VersionData;
+    use crate::core::version::VersionData;
 
     match data {
         VersionData::Anchor {
@@ -1451,12 +1451,10 @@ fn encode_version_data(data: &crate::storage::version::VersionData) -> Serializa
     }
 }
 
-fn decode_version_data(
-    data: SerializableVersionData,
-) -> Result<crate::storage::version::VersionData> {
+fn decode_version_data(data: SerializableVersionData) -> Result<crate::core::version::VersionData> {
     use crate::core::interning::GLOBAL_INTERNER;
     use crate::core::property::PropertyMapBuilder;
-    use crate::storage::version::{PropertyDelta, VersionData};
+    use crate::core::version::{PropertyDelta, VersionData};
 
     match data {
         SerializableVersionData::Anchor {
