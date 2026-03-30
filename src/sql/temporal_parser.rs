@@ -614,6 +614,42 @@ mod tests {
     use crate::core::temporal::Timestamp;
 
     #[test]
+    #[should_panic(expected = "unreachable")]
+    fn test_extract_temporal_clause_unreachable_time_name() {
+        let tokens = vec![(0, Token::For), (4, Token::Other("SOMETHING".to_string()))];
+        let _ = extract_temporal_clause_from_tokens(&tokens, Token::Other("SOMETHING".to_string()));
+    }
+
+    #[test]
+    #[should_panic(expected = "unreachable")]
+    fn test_extract_temporal_clause_as_of_unreachable() {
+        let tokens = vec![
+            (0, Token::For),
+            (4, Token::Other("SOMETHING".to_string())),
+            (14, Token::AsOf),
+            (20, Token::Timestamp),
+            (30, Token::QuotedValue("2020-01-01T00:00:00Z".to_string())),
+        ];
+        let _ = extract_temporal_clause_from_tokens(&tokens, Token::Other("SOMETHING".to_string()));
+    }
+
+    #[test]
+    #[should_panic(expected = "unreachable")]
+    fn test_extract_temporal_clause_between_unreachable() {
+        let tokens = vec![
+            (0, Token::For),
+            (4, Token::Other("SOMETHING".to_string())),
+            (14, Token::Between),
+            (22, Token::Timestamp),
+            (32, Token::QuotedValue("2020-01-01T00:00:00Z".to_string())),
+            (55, Token::And),
+            (59, Token::Timestamp),
+            (69, Token::QuotedValue("2020-01-02T00:00:00Z".to_string())),
+        ];
+        let _ = extract_temporal_clause_from_tokens(&tokens, Token::Other("SOMETHING".to_string()));
+    }
+
+    #[test]
     fn test_tokenize_keywords() {
         let sql = "SELECT * FROM nodes FOR SYSTEM_TIME AS OF TIMESTAMP '1000'";
         let tokens = tokenize_temporal_keywords(sql);

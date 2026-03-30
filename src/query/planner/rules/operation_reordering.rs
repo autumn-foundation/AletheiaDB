@@ -522,6 +522,18 @@ mod tests {
     // ==================== Filter Reordering Tests ====================
 
     #[test]
+    fn test_operation_reordering_null_selectivity() {
+        let rule = OperationReordering;
+        let stats = test_stats();
+
+        let pred = Predicate::eq("some_property", crate::query::ir::PredicateValue::Null);
+        let selectivity = rule.estimate_filter_selectivity(&pred, &stats);
+
+        // NULL_CHECK_SELECTIVITY is 0.1
+        assert_eq!(selectivity, 0.1);
+    }
+
+    #[test]
     fn test_reorder_filters_by_selectivity() {
         let rule = OperationReordering;
         let stats = test_stats();
