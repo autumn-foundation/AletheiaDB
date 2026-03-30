@@ -1226,3 +1226,92 @@ mod sentinel_evaluate_clock_skew_tests {
         assert_eq!(err_f.direction, ClockSkewDirection::Forward);
     }
 }
+
+#[cfg(test)]
+mod sentinel_hlc_tests {
+    use super::*;
+
+    #[test]
+    fn test_hybrid_timestamp_receive_exact_boundaries() {
+        // tests for receive boundaries, especially `&&` to `||` logic
+        let local = HybridTimestamp::new(1000, 10).unwrap();
+        let msg = HybridTimestamp::new(2000, 20).unwrap();
+
+        let next = local.receive(msg, 1500).unwrap();
+        assert_eq!(next.wallclock(), 2000);
+        assert_eq!(next.logical(), 21);
+    }
+
+    #[test]
+    fn test_hybrid_timestamp_deserialize_exact_boundaries() {
+        let bytes = [0u8; 12];
+        let (ts, consumed) = HybridTimestamp::deserialize(&bytes).unwrap();
+        assert_eq!(ts.wallclock(), 0);
+        assert_eq!(consumed, 12);
+
+        let invalid_wc = MAX_VALID_TIMESTAMP + 1;
+        let mut invalid_bytes = [0u8; 12];
+        invalid_bytes[0..8].copy_from_slice(&invalid_wc.to_le_bytes());
+        let res = HybridTimestamp::deserialize(&invalid_bytes);
+        assert!(res.is_err());
+
+        let ok_ts = HybridTimestamp::new(0, 1).unwrap();
+        let serialized_ok = ok_ts.serialize();
+        let (ts2, _) = HybridTimestamp::deserialize(&serialized_ok).unwrap();
+        assert_eq!(ts2.logical(), 1);
+
+        let mut err_bytes = serialized_ok.clone();
+        err_bytes[0..8].copy_from_slice(&i64::MAX.to_le_bytes());
+        let res2 = HybridTimestamp::deserialize(&err_bytes);
+        assert!(res2.is_err());
+    }
+
+    #[test]
+    fn test_evaluate_clock_skew_exact_math() {
+        let res = evaluate_clock_skew(2000, 1000, Some(2000), false);
+        assert!(res.is_ok());
+
+        let res2 = evaluate_clock_skew(1000, 2000, None, false);
+        assert!(res2.is_ok());
+    }
+
+    #[test]
+    fn test_hybrid_timestamp_as_secs_millis_exact_math() {
+        let ts = HybridTimestamp::new(5_000_000, 0).unwrap();
+        assert_eq!(ts.as_secs(), 5);
+        assert_ne!(ts.as_secs(), 0);
+        assert_ne!(ts.as_secs(), 5_000_000_000_000);
+
+        assert_eq!(ts.as_millis(), 5000);
+        assert_ne!(ts.as_millis(), 0);
+        assert_ne!(ts.as_millis(), 5_000_000_000);
+    }
+
+    #[test]
+    fn test_hybrid_timestamp_send_exact_overflow() {
+        let ts = HybridTimestamp::new(1000, u32::MAX - 1).unwrap();
+        let next = ts.send(1000).unwrap();
+        assert_eq!(next.logical(), u32::MAX);
+
+        let res = next.send(1000);
+        assert!(matches!(
+            res,
+            Err(TemporalError::LogicalCounterOverflow { .. })
+        ));
+
+        let local = HybridTimestamp::new(1000, u32::MAX).unwrap();
+        let msg = HybridTimestamp::new(1000, 10).unwrap();
+        let res2 = local.receive(msg, 1000);
+        assert!(matches!(
+            res2,
+            Err(TemporalError::LogicalCounterOverflow { .. })
+        ));
+    }
+
+    #[test]
+    fn test_is_clock_skew_self_heal_enabled_exact_return() {
+        // By default, ALETHEIADB_ENABLE_CLOCK_SKEW_SELF_HEAL is not set, so it should be false.
+        // We assert exactly false to kill mutants that replace it with true.
+        assert!(!is_clock_skew_self_heal_enabled());
+    }
+}
