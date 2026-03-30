@@ -98,6 +98,19 @@ impl PersistenceTracker {
     }
 
     /// Set the starting LSN for all components (used during initialization/recovery).
+    ///
+    /// This establishes the baseline Sequence Number across all index types,
+    /// typically loaded from the latest `IndexManifest` during database startup.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// use aletheiadb::storage::index_persistence::tracker::PersistenceTracker;
+    ///
+    /// let tracker = PersistenceTracker::new();
+    /// tracker.set_start_lsn(500);
+    /// assert_eq!(tracker.get_safe_manifest_lsn(), 500);
+    /// ```
     pub fn set_start_lsn(&self, lsn: u64) {
         self.last_vector_lsn.store(lsn, Ordering::Relaxed);
         self.last_graph_lsn.store(lsn, Ordering::Relaxed);
@@ -106,6 +119,17 @@ impl PersistenceTracker {
     }
 
     /// Update the last persisted LSN for vector indexes.
+    ///
+    /// Uses atomic `fetch_max` to ensure the LSN only moves forward.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// use aletheiadb::storage::index_persistence::tracker::PersistenceTracker;
+    ///
+    /// let tracker = PersistenceTracker::new();
+    /// tracker.update_vector_lsn(100);
+    /// ```
     pub fn update_vector_lsn(&self, lsn: u64) {
         self.last_vector_lsn.fetch_max(lsn, Ordering::Release);
     }
@@ -159,6 +183,19 @@ impl PersistenceTracker {
     /// This LSN represents the point in time up to which ALL persisted components are consistent.
     /// WAL replay should start from this LSN to ensure no operations are missed for components
     /// that might be lagging behind.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// use aletheiadb::storage::index_persistence::tracker::PersistenceTracker;
+    ///
+    /// let tracker = PersistenceTracker::new();
+    /// tracker.set_start_lsn(100);
+    /// tracker.update_vector_lsn(150);
+    ///
+    /// // The safe LSN is still 100 because the other components haven't caught up
+    /// assert_eq!(tracker.get_safe_manifest_lsn(), 100);
+    /// ```
     pub fn get_safe_manifest_lsn(&self) -> u64 {
         let vector = self.last_vector_lsn.load(Ordering::Acquire);
         let graph = self.last_graph_lsn.load(Ordering::Acquire);
@@ -170,6 +207,18 @@ impl PersistenceTracker {
     }
 
     /// Increment vector mutation counter.
+    ///
+    /// Should be called by the write path whenever a vector property is added or updated.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// use aletheiadb::storage::index_persistence::tracker::PersistenceTracker;
+    ///
+    /// let tracker = PersistenceTracker::new();
+    /// tracker.record_vector_mutation();
+    /// assert_eq!(tracker.get_vector_mutations(), 1);
+    /// ```
     pub fn record_vector_mutation(&self) {
         self.vector_mutations.fetch_add(1, Ordering::Relaxed);
     }
@@ -190,6 +239,23 @@ impl PersistenceTracker {
     }
 
     /// Get and reset vector mutation counter, updating last persist time.
+    ///
+    /// This atomic operation is used by the background persistence worker
+    /// after successfully saving the vector index to disk.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// use aletheiadb::storage::index_persistence::tracker::PersistenceTracker;
+    ///
+    /// let tracker = PersistenceTracker::new();
+    /// tracker.record_vector_mutation();
+    /// tracker.record_vector_mutation();
+    ///
+    /// let prior_count = tracker.reset_vector_mutations();
+    /// assert_eq!(prior_count, 2);
+    /// assert_eq!(tracker.get_vector_mutations(), 0);
+    /// ```
     pub fn reset_vector_mutations(&self) -> u64 {
         let count = self.vector_mutations.swap(0, Ordering::Relaxed);
         self.last_vector_persist.store(

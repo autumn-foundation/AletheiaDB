@@ -62,7 +62,25 @@ impl IndexManifest {
         }
     }
 
-    /// Update the last_modified timestamp.
+    /// Update the `last_modified` timestamp to the current system time.
+    ///
+    /// This is automatically called by methods that mutate the manifest
+    /// (like `set_lsn`) to ensure the metadata accurately reflects when
+    /// the index state was last changed.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use aletheiadb::storage::index_persistence::formats::IndexManifest;
+    ///
+    /// let mut manifest = IndexManifest::new(100);
+    /// let original_time = manifest.last_modified;
+    ///
+    /// // Simulate some delay (or just force an update)
+    /// manifest.touch();
+    ///
+    /// assert!(manifest.last_modified >= original_time);
+    /// ```
     pub fn touch(&mut self) {
         self.last_modified = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -70,7 +88,21 @@ impl IndexManifest {
             .as_secs() as i64;
     }
 
-    /// Update the LSN.
+    /// Update the Last Sequence Number (LSN) and touch the modified timestamp.
+    ///
+    /// The LSN acts as the watermark for WAL replay. Upon crash recovery,
+    /// any WAL entries with an LSN greater than this value will be replayed.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use aletheiadb::storage::index_persistence::formats::IndexManifest;
+    ///
+    /// let mut manifest = IndexManifest::new(100);
+    /// manifest.set_lsn(200);
+    ///
+    /// assert_eq!(manifest.lsn, 200);
+    /// ```
     pub fn set_lsn(&mut self, lsn: u64) {
         self.lsn = lsn;
         self.touch();

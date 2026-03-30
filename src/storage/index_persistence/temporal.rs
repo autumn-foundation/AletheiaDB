@@ -58,6 +58,30 @@ use super::{MANIFEST_VERSION, TEMPORAL_MAGIC};
 ///
 /// # Errors
 ///
+/// Convert NodeVersion to NodeVersionEntry for persistence.
+///
+/// This function flattens the `NodeVersion` structure into a `NodeVersionEntry` suitable for disk storage.
+/// It handles both `Anchor` and `Delta` versions.
+///
+/// # Vector Delta Handling
+///
+/// If the version contains `VectorDelta::Sparse`, this function will return an error.
+/// Sparse deltas rely on the base version to be fully reconstructed, which is complex during persistence.
+/// Therefore, sparse deltas must be materialized (converted to full vectors) before persistence.
+///
+/// # Examples
+///
+/// ```
+/// use aletheiadb::core::version::NodeVersion;
+/// use aletheiadb::core::id::{NodeId, VersionId, TxId};
+/// use aletheiadb::core::interning::InternedString;
+/// use aletheiadb::core::temporal::BiTemporalInterval;
+/// // ... create a valid NodeVersion ...
+/// // let entry = convert_node_version(&version).unwrap();
+/// ```
+///
+/// # Errors
+///
 /// Returns an error if:
 /// - Property conversion fails (e.g., unsupported Array type).
 /// - A `VectorDelta::Sparse` is encountered (preventing data loss).
@@ -154,6 +178,13 @@ pub fn convert_node_version(version: &NodeVersion) -> Result<NodeVersionEntry> {
 /// Convert EdgeVersion to EdgeVersionEntry for persistence.
 ///
 /// Similar to `convert_node_version`, this flattens `EdgeVersion` for storage.
+///
+/// # Examples
+///
+/// ```
+/// use aletheiadb::core::version::EdgeVersion;
+/// // let entry = convert_edge_version(&edge_version).unwrap();
+/// ```
 ///
 /// # Errors
 ///
