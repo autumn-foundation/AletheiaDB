@@ -445,6 +445,7 @@ let _doc2_id = db.create_node("Document",
 // Find similar nodes
 // Note: find_similar excludes the query node itself from results
 let similar = db.find_similar(doc_id, 10)?;
+println!("Found similar: {:?}", similar);
 ```
 
 ### Hybrid Queries (Graph + Vector + Temporal)
@@ -694,13 +695,13 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let db = AletheiaDB::new().unwrap();
 
     // Basic graph query
-    let results = db.execute_aql(
+    let _results = db.execute_aql(
         "MATCH (n:Person {name: 'Alice'})-[:KNOWS]->(friend:Person) RETURN friend"
     )?;
 
     // Bi-temporal query (point-in-time)
-    let results = db.execute_aql(
-        "AS OF '2024-01-15T10:00:00Z' MATCH (n:Person {name: 'Alice'}) RETURN n"
+    let _results = db.execute_aql(
+        "AS OF 1705312800000000 MATCH (n:Person {name: 'Alice'}) RETURN n"
     )?;
 
     Ok(())
@@ -718,7 +719,7 @@ RANK BY SIMILARITY TO $bob_embedding TOP 10
 RETURN friend
 
 -- Full hybrid: temporal + graph + vector
-AS OF '2024-06-01T00:00:00Z'
+AS OF 1717200000000000
 MATCH (user:User {id: $user_id})-[:VIEWED]->(item:Product)
 RANK BY SIMILARITY TO $recommendation_embedding TOP 20
 WHERE item.price < 100
@@ -818,7 +819,7 @@ use std::sync::Arc;
 
 // Note: Requires `tokio` dependency in Cargo.toml
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     // Enable in Cargo.toml: features = ["embedding-openai"]
 
     // 1. Create embedding service
