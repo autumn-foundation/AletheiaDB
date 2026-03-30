@@ -1119,16 +1119,21 @@ impl From<Vec<PropertyValue>> for PropertyValue {
     }
 }
 
-impl From<Vec<f32>> for PropertyValue {
-    fn from(v: Vec<f32>) -> Self {
-        // Use v.into() to reuse the Vec's buffer, avoiding allocation and copy
-        PropertyValue::Vector(v.into())
+impl TryFrom<Vec<f32>> for PropertyValue {
+    type Error = crate::core::error::Error;
+
+    fn try_from(v: Vec<f32>) -> Result<Self> {
+        validate_vector_dimensions(v.len())?;
+        Ok(PropertyValue::Vector(v.into()))
     }
 }
 
-impl From<&[f32]> for PropertyValue {
-    fn from(v: &[f32]) -> Self {
-        PropertyValue::Vector(Arc::from(v))
+impl TryFrom<&[f32]> for PropertyValue {
+    type Error = crate::core::error::Error;
+
+    fn try_from(v: &[f32]) -> Result<Self> {
+        validate_vector_dimensions(v.len())?;
+        Ok(PropertyValue::Vector(Arc::from(v)))
     }
 }
 
@@ -2092,7 +2097,7 @@ mod tests {
     #[test]
     fn test_vector_from_vec() {
         let data: Vec<f32> = vec![0.1, 0.2, 0.3, 0.4, 0.5];
-        let vec_prop: PropertyValue = data.clone().into();
+        let vec_prop: PropertyValue = data.clone().try_into().unwrap();
 
         assert_eq!(vec_prop.as_vector(), Some(&data[..]));
     }
@@ -2100,7 +2105,7 @@ mod tests {
     #[test]
     fn test_vector_from_slice() {
         let data = [1.5f32, 2.5, 3.5];
-        let vec_prop: PropertyValue = (&data[..]).into();
+        let vec_prop: PropertyValue = (&data[..]).try_into().unwrap();
 
         assert_eq!(vec_prop.as_vector(), Some(&data[..]));
     }
@@ -3371,7 +3376,7 @@ mod tests {
             .insert("a", 1)
             .insert("b", "test")
             .remove("a")
-            .insert("c", vec![1.0f32, 2.0])
+            .insert("c", PropertyValue::vector(vec![1.0f32, 2.0]))
             .build();
 
         let serialized = map.serialize().unwrap();
@@ -4268,5 +4273,21 @@ mod sentry_tests {
             f1.semantically_equal(&f2),
             "semantically_equal should treat NaN as equal"
         );
+    }
+
+    #[test]
+    fn test_vector_from_vec_excessive_dimensions() {
+        use crate::core::vector::constants::MAX_VECTOR_DIMENSIONS;
+        let max_size: Vec<f32> = vec![0.0; MAX_VECTOR_DIMENSIONS + 1];
+        let result: std::result::Result<PropertyValue, _> = max_size.try_into();
+        assert!(result.is_err(), "Expected error for excessive dimensions");
+    }
+
+    #[test]
+    fn test_vector_from_slice_excessive_dimensions() {
+        use crate::core::vector::constants::MAX_VECTOR_DIMENSIONS;
+        let max_size: Vec<f32> = vec![0.0; MAX_VECTOR_DIMENSIONS + 1];
+        let result: std::result::Result<PropertyValue, _> = max_size.as_slice().try_into();
+        assert!(result.is_err(), "Expected error for excessive dimensions");
     }
 }

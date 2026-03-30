@@ -1,5 +1,5 @@
 use aletheiadb::index::vector::temporal::TemporalVectorConfig;
-use aletheiadb::{AletheiaDB, DistanceMetric, HnswConfig, properties};
+use aletheiadb::{AletheiaDB, DistanceMetric, HnswConfig, properties, PropertyValue};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let db = AletheiaDB::new().unwrap();
@@ -18,7 +18,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "Document",
         properties! {
             "title" => "Introduction to Rust",
-            "embedding" => &embedding[..],
+            "embedding" => PropertyValue::try_from(&embedding[..]).unwrap(),
         },
     )?;
 
@@ -27,7 +27,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "Document",
         properties! {
             "title" => "Rust for Beginners",
-            "embedding" => &embedding[..], // Same embedding for max similarity
+            "embedding" => PropertyValue::try_from(&embedding[..]).unwrap(), // Same embedding for max similarity
         },
     )?;
 

@@ -22,3 +22,6 @@
 ## Panic Risks in Query Iterators and Mock Clients
 **Learning:** `unwrap()` inside iterator implementations (like `VectorRerankIterator::next`) or trait implementations for mock clients (like `MockVectorNodeClient`) pose a significant availability risk, as a panic can crash the thread handling the query or the entire database process.
 **Action:** Always gracefully handle `None` on iterators (returning `None` or propagating errors) and map lock poisoning errors (`PoisonError`) to domain-specific errors (e.g. `VectorError`) to ensure the system degrades gracefully instead of crashing during simulated faults or unexpected states.
+## Trait Implementation Invariants
+**Learning:** Fallible conversions of dynamic data must use `TryFrom` instead of `From` to avoid introducing DoS vulnerabilities through panics.
+**Action:** Always prefer `TryFrom` when converting data that might fail validation, and ensure all callers handle the resulting `Result` appropriately.

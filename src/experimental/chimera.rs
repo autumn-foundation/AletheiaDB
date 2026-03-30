@@ -262,7 +262,7 @@ impl<'a> ChimeraEngine<'a> {
                 .zip(vb.iter())
                 .map(|(x, y)| op(*x as f64, *y as f64) as f32)
                 .collect();
-            return Some(PropertyValue::from(res));
+            return PropertyValue::try_from(res).ok();
         }
 
         // Try scalars
@@ -271,7 +271,7 @@ impl<'a> ChimeraEngine<'a> {
 
         if let (Some(x), Some(y)) = (na, nb) {
             let res = op(x, y);
-            Some(PropertyValue::from(res))
+            Some(PropertyValue::Float(res))
         } else {
             // Fallback for non-numerics under numeric strategy
             Some(a.clone())
