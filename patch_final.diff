@@ -1,0 +1,75 @@
+--- src/core/id.rs
++++ src/core/id.rs
+@@ -1900,16 +1900,24 @@
+     use super::*;
+     use std::str::FromStr;
+
+     #[test]
+-    fn kill_mutants_id() {
++    fn test_entity_id_exact_formatting() {
+         assert_eq!(NodeId::new_unchecked(123).as_u64(), 123);
+         assert_eq!(format!("{}", NodeId::new_unchecked(123)), "Node(123)");
+         assert_eq!(EdgeId::new_unchecked(123).as_u64(), 123);
+         assert_eq!(format!("{}", EdgeId::new_unchecked(123)), "Edge(123)");
+         assert_eq!(VersionId::new_unchecked(123).as_u64(), 123);
+         assert_eq!(format!("{}", VersionId::new_unchecked(123)), "Version(123)");
+
+         let node_id = NodeId::new_unchecked(123);
+         let edge_id = EdgeId::new_unchecked(123);
++
++        assert_eq!(format!("{}", EntityId::from(node_id)), "Node(123)");
++        assert_eq!(format!("{}", EntityId::from(edge_id)), "Edge(123)");
++    }
++
++    #[test]
++    fn test_entity_id_type_encapsulation_matching() {
++        let node_id = NodeId::new_unchecked(123);
++        let edge_id = EdgeId::new_unchecked(123);
+         let entity_node: EntityId = node_id.into();
+         let entity_edge: EntityId = edge_id.into();
+
+@@ -1926,11 +1934,11 @@
+         assert_eq!(entity_node.as_edge(), None);
+         assert_eq!(entity_edge.as_edge(), Some(edge_id));
+-
+-        assert_eq!(format!("{}", entity_node), "Node(123)");
+-        assert_eq!(format!("{}", entity_edge), "Edge(123)");
++    }
+
++    #[test]
++    fn test_id_generator_exact_sequence_states() {
+         assert_eq!(IdGenerator::with_start(123).current(), 123);
+
+         let id_gen = IdGenerator::with_start(123);
+         assert_eq!(id_gen.next().unwrap(), 123);
+@@ -1942,7 +1950,10 @@
+         assert_eq!(id_gen.current(), 1000);
+         id_gen.ensure_at_least(500);
+         assert_eq!(id_gen.current(), 1000);
++    }
+
++    #[test]
++    fn test_id_generator_max_boundary_overflow() {
+         let id_gen_overflow = IdGenerator::with_start(MAX_VALID_ID);
+         assert_eq!(id_gen_overflow.next().unwrap(), MAX_VALID_ID);
+         assert!(id_gen_overflow.next().is_err());
+@@ -1949,6 +1960,9 @@
+         assert_eq!(TxId::new(123).as_u64(), 123);
+         assert_eq!(format!("{}", TxId::new(123)), "TxId(123)");
++    }
+
++    #[test]
++    fn test_tx_id_generator_exact_sequence_states() {
+         let tx_id_gen = TxIdGenerator::default();
+         let tx1 = tx_id_gen.next();
+         let tx2 = tx_id_gen.next();
+@@ -1955,6 +1969,9 @@
+         assert_eq!(tx2.as_u64(), tx1.as_u64() + 1);
+         assert_eq!(tx_id_gen.current().as_u64(), tx2.as_u64());
++    }
+
++    #[test]
++    fn test_id_parsing_default_override_prevention() {
+         assert_eq!(NodeId::try_from(123).unwrap(), NodeId::new_unchecked(123));
+         assert_eq!(NodeId::from_str("123").unwrap(), NodeId::new_unchecked(123));
+         assert_eq!(EdgeId::try_from(123).unwrap(), EdgeId::new_unchecked(123));
