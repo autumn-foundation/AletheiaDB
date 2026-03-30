@@ -213,16 +213,16 @@ pub mod gestalt;
 /// Gravity: Semantic Mass and Orbit Analysis.
 pub mod gravity;
 
-#[cfg(feature = "nova")]
 /// Metaphor: Semantic Graph Alignment Engine.
+#[cfg(feature = "nova")]
 pub mod metaphor;
 
-#[cfg(feature = "nova")]
 /// Mnemosyne: Semantic Memory Consolidation.
+#[cfg(feature = "nova")]
 pub mod mnemosyne;
 
-#[cfg(feature = "nova")]
 /// Muse: The Semantic Ideator.
+#[cfg(feature = "nova")]
 pub mod muse;
 
 #[cfg(feature = "nova")]
