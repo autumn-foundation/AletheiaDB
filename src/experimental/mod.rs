@@ -247,6 +247,9 @@ pub mod voyager;
 /// Serendipity: The Scenic Route Finder.
 pub mod serendipity;
 
+#[cfg(test)]
+/// Havoc tests containing fuzz, proptest and loom suites.
+pub mod havoc_tests;
 #[cfg(feature = "nova")]
 /// Tremor: Semantic Earthquake Detector.
 pub mod tremor;

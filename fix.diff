@@ -1,0 +1,30 @@
+<<<<<<< SEARCH
+        // This is a simplified conversion - for production use chrono crate
+        let datetime = UNIX_EPOCH + std::time::Duration::new(secs as u64, nanos);
+        format!("{:?}", datetime) // Simplified - use chrono for proper formatting
+=======
+        // This is a simplified conversion - for production use chrono crate
+        if secs >= 0 {
+            if let Some(datetime) = UNIX_EPOCH.checked_add(std::time::Duration::new(secs as u64, nanos)) {
+                format!("{:?}", datetime)
+            } else {
+                format!("+{}s +{}ns", secs, nanos)
+            }
+        } else {
+            let abs_secs = secs.abs() as u64;
+            // Handle edge case where adding nanoseconds to negative seconds reduces the negative magnitude
+            if nanos > 0 {
+                if let Some(datetime) = UNIX_EPOCH.checked_sub(std::time::Duration::new(abs_secs - 1, 1_000_000_000 - nanos)) {
+                    format!("{:?}", datetime)
+                } else {
+                    format!("-{}s +{}ns", abs_secs, nanos)
+                }
+            } else {
+                if let Some(datetime) = UNIX_EPOCH.checked_sub(std::time::Duration::new(abs_secs, 0)) {
+                    format!("{:?}", datetime)
+                } else {
+                    format!("-{}s", abs_secs)
+                }
+            }
+        }
+>>>>>>> REPLACE

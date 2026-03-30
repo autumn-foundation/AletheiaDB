@@ -674,11 +674,39 @@ pub mod time {
         let wallclock = timestamp.wallclock();
         // Convert microseconds to seconds and nanoseconds
         let secs = wallclock / 1_000_000;
-        let nanos = ((wallclock % 1_000_000) * 1000) as u32;
+        let nanos = ((wallclock.abs() % 1_000_000) * 1000) as u32;
 
         // This is a simplified conversion - for production use chrono crate
-        let datetime = UNIX_EPOCH + std::time::Duration::new(secs as u64, nanos);
-        format!("{:?}", datetime) // Simplified - use chrono for proper formatting
+        if secs >= 0 {
+            if let Some(datetime) =
+                UNIX_EPOCH.checked_add(std::time::Duration::new(secs as u64, nanos))
+            {
+                format!("{:?}", datetime)
+            } else {
+                format!("+{}s +{}ns", secs, nanos)
+            }
+        } else {
+            let abs_secs = secs.unsigned_abs();
+            // Handle edge case where adding nanoseconds to negative seconds reduces the negative magnitude
+            if nanos > 0 {
+                if let Some(datetime) = UNIX_EPOCH.checked_sub(std::time::Duration::new(
+                    abs_secs - 1,
+                    1_000_000_000 - nanos,
+                )) {
+                    format!("{:?}", datetime)
+                } else {
+                    format!("-{}s +{}ns", abs_secs, nanos)
+                }
+            } else {
+                if let Some(datetime) =
+                    UNIX_EPOCH.checked_sub(std::time::Duration::new(abs_secs, 0))
+                {
+                    format!("{:?}", datetime)
+                } else {
+                    format!("-{}s", abs_secs)
+                }
+            }
+        }
     }
 
     /// Create a timestamp from seconds since Unix epoch.
