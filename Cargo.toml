@@ -101,7 +101,7 @@ tokio = { version = "1.50", features = ["rt-multi-thread", "macros", "test-util"
 # Mutex for serializing env var tests
 lazy_static = "1.4"
 # Readline with auto-complete for examples
-rustyline = "17.0"
+rustyline = "18.0"
 # Loom for concurrency testing
 loom = { version = "0.7.2", features = ["checkpoint"] }
 rand = "0.8"
