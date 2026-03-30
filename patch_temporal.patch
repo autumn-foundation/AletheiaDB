@@ -1,0 +1,37 @@
+--- src/index/temporal.rs
++++ src/index/temporal.rs
+@@ -1274,12 +1274,26 @@
+
+         // Query both temporal dimensions with point-in-time queries
+         // Using find_indices_at_point for correct boundary handling (start <= T < end)
+-        let valid_indices = timelines.valid.find_indices_at_point(valid_time);
++        let valid_iter = timelines.valid.find_indices_at_point_iter(valid_time);
+         let tx_indices = timelines.tx.find_indices_at_point(transaction_time);
+
+         // Intersect metadata indices: version must be visible in BOTH dimensions
+-        let intersected_indices = Self::intersect_metadata_indices(&valid_indices, &tx_indices);
++        let intersected_iter = Self::intersect_metadata_indices_iter(valid_iter, &tx_indices);
+
+         // Resolve intersected indices to VersionIds
+-        timelines.resolve_version_ids(&intersected_indices)
++        intersected_iter
++            .map(|idx| timelines.resolve_version_id(idx))
++            .collect()
++    }
++
++    /// ⚡ Bolt Optimization: Iterator-based intersection of metadata indices.
++    fn intersect_metadata_indices_iter<'a>(
++        a: impl Iterator<Item = TimelineVersionMetadataIndex> + 'a,
++        b: &'a IndexVec,
++    ) -> Box<dyn Iterator<Item = TimelineVersionMetadataIndex> + 'a> {
++        const HASH_THRESHOLD: usize = 16;
++        if b.len() < HASH_THRESHOLD {
++            Box::new(a.filter(move |v| b.contains(v)))
++        } else {
++            use std::collections::HashSet;
++            let b_set: std::collections::HashSet<_> = b.iter().copied().collect();
++            Box::new(a.filter(move |v| b_set.contains(v)))
++        }
+     }
+
+     /// Efficiently intersect two sets of metadata indices.

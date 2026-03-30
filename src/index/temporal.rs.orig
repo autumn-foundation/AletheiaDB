@@ -1274,30 +1274,47 @@ impl TemporalIndexes {
 
         // Query both temporal dimensions with point-in-time queries
         // Using find_indices_at_point for correct boundary handling (start <= T < end)
-        let valid_iter = timelines.valid.find_indices_at_point_iter(valid_time);
+        let valid_indices = timelines.valid.find_indices_at_point(valid_time);
         let tx_indices = timelines.tx.find_indices_at_point(transaction_time);
 
         // Intersect metadata indices: version must be visible in BOTH dimensions
-        let intersected_iter = Self::intersect_metadata_indices_iter(valid_iter, &tx_indices);
+        let intersected_indices = Self::intersect_metadata_indices(&valid_indices, &tx_indices);
 
         // Resolve intersected indices to VersionIds
-        intersected_iter
-            .map(|idx| timelines.resolve_version_id(idx))
-            .collect()
+        timelines.resolve_version_ids(&intersected_indices)
     }
 
-    /// ⚡ Bolt Optimization: Iterator-based intersection of metadata indices.
-    fn intersect_metadata_indices_iter<'a>(
-        a: impl Iterator<Item = TimelineVersionMetadataIndex> + 'a,
-        b: &'a IndexVec,
-    ) -> Box<dyn Iterator<Item = TimelineVersionMetadataIndex> + 'a> {
+    /// Efficiently intersect two sets of metadata indices.
+    ///
+    /// Uses linear intersection for small sets (K < threshold) and HashSet
+    /// for larger sets to avoid O(K²) complexity when K is large.
+    ///
+    /// # Performance
+    ///
+    /// - Small K (< 16): O(K²) but with low constant factor
+    /// - Large K (>= 16): O(K) using HashSet
+    fn intersect_metadata_indices(
+        a: &[TimelineVersionMetadataIndex],
+        b: &[TimelineVersionMetadataIndex],
+    ) -> IndexVec {
+        // Threshold for switching to HashSet-based intersection.
+        // Below this, linear scan is faster due to cache locality and no allocation.
         const HASH_THRESHOLD: usize = 16;
-        if b.len() < HASH_THRESHOLD {
-            Box::new(a.filter(move |v| b.contains(v)))
+
+        let max_len = a.len().max(b.len());
+
+        if max_len < HASH_THRESHOLD {
+            // Small sets: linear intersection is efficient due to cache locality
+            if a.len() <= b.len() {
+                a.iter().copied().filter(|v| b.contains(v)).collect()
+            } else {
+                b.iter().copied().filter(|v| a.contains(v)).collect()
+            }
         } else {
+            // Large sets: use HashSet for O(K) intersection instead of O(K²)
             use std::collections::HashSet;
             let b_set: HashSet<_> = b.iter().copied().collect();
-            Box::new(a.filter(move |v| b_set.contains(v)))
+            a.iter().copied().filter(|v| b_set.contains(v)).collect()
         }
     }
 

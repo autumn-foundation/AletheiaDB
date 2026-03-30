@@ -32,3 +32,7 @@
 **Optimize Checkpoint Serialization Vec Pre-allocation**
 **Learning:** Found multiple vectors (`nodes`, `edges`, `node_versions`, `edge_versions`, etc.) in `extract_graph_data_from_snapshot` and `extract_temporal_data_from_snapshot` within `src/storage/checkpoint.rs` being created without capacity, resulting in potentially multiple heap reallocations when persisting thousands or millions of entities. `clippy::unused_doc_comments` lint caught the invalid `///` doc comment usage inside function bodies.
 **Action:** Use `Vec::with_capacity(n)` instead of `Vec::new()` when initializing vectors and calculating their capacity using snapshot's `node_count`, `edge_count`, `node_version_count`, and `edge_version_count` methods. Use standard `//` for inline comments to avoid unused doc comment warnings.
+
+**Optimize Bi-Temporal Intersection Point Queries**
+**Learning:** In bi-temporal index lookups (`find_version_at_point_impl` in `src/index/temporal.rs`), eager evaluation of intersecting indices created intermediate vectors (e.g. `IndexVec` via `collect`) for both `valid_time` index matches and the intersection result, introducing unnecessary allocations on the hot path.
+**Action:** Chain iterator execution using `intersect_metadata_indices_iter` instead of `intersect_metadata_indices`, lazily returning a `Box<dyn Iterator>` to filter the intersection. This eliminates two collection passes and maps directly to the output `Vec<VersionId>` in a single pass.
