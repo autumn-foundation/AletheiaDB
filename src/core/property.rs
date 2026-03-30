@@ -3801,6 +3801,27 @@ mod sentry_tests {
         }
     }
 
+    #[test]
+    #[should_panic(expected = "Property insertion failed")]
+    fn test_property_map_insert_recursion_panic() {
+        let mut nested_array = PropertyValue::Array(std::sync::Arc::new(vec![]));
+        for _ in 0..MAX_RECURSION_DEPTH + 1 {
+            nested_array = PropertyValue::Array(std::sync::Arc::new(vec![nested_array]));
+        }
+        PropertyMapBuilder::new().insert("key", nested_array);
+    }
+
+    #[test]
+    #[should_panic(expected = "Property insertion failed")]
+    fn test_property_map_insert_by_key_recursion_panic() {
+        let mut nested_array = PropertyValue::Array(std::sync::Arc::new(vec![]));
+        for _ in 0..MAX_RECURSION_DEPTH + 1 {
+            nested_array = PropertyValue::Array(std::sync::Arc::new(vec![nested_array]));
+        }
+        let key = GLOBAL_INTERNER.intern("key").unwrap();
+        PropertyMapBuilder::new().insert_by_key(key, nested_array);
+    }
+
     /// 🎯 Target: PropertyMapBuilder::remove correctness
     /// 💣 Risk: Removing a key should actually remove it and update size/len correctly.
     /// 🧪 Strategy: Insert keys, remove one, verify map state.
