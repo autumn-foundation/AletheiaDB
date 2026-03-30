@@ -22,3 +22,10 @@
 ## Panic Risks in Query Iterators and Mock Clients
 **Learning:** `unwrap()` inside iterator implementations (like `VectorRerankIterator::next`) or trait implementations for mock clients (like `MockVectorNodeClient`) pose a significant availability risk, as a panic can crash the thread handling the query or the entire database process.
 **Action:** Always gracefully handle `None` on iterators (returning `None` or propagating errors) and map lock poisoning errors (`PoisonError`) to domain-specific errors (e.g. `VectorError`) to ensure the system degrades gracefully instead of crashing during simulated faults or unexpected states.
+**SparseVec Input Validation**
+**Learning:** In sparse vector construction, table-driven tests that use single elements or sorted arrays only exercise the "fast-path" O(N) validation. The "slow-path" (which sorts and re-validates) must be explicitly targeted by providing unsorted input arrays containing the invalid elements.
+**Action:** Always ensure test data explicitly bypasses fast-paths or early-returns if testing fallback logic or deeper validation loops.
+
+**Sparse Vector Similarity on Empty Vectors**
+**Learning:** Sparse vector operations like `sparse_dot_product` and `sparse_euclidean_distance` gracefully handle fully empty vectors (nnz = 0).
+**Action:** Always test the extreme boundary condition of two entirely empty structures when dealing with iterators or zip-based operations to guarantee no NaN or panic is produced.

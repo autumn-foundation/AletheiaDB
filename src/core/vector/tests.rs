@@ -2739,6 +2739,12 @@ fn test_sparse_dot_product_no_overlap() {
 
     let dot = sparse_dot_product(&a, &b).unwrap();
     assert_eq!(dot, 0.0);
+
+    let empty_a = SparseVec::new(vec![], vec![], 10).unwrap();
+    let empty_b = SparseVec::new(vec![], vec![], 10).unwrap();
+
+    let dot_empty = sparse_dot_product(&empty_a, &empty_b).unwrap();
+    assert_eq!(dot_empty, 0.0);
 }
 
 #[test]
@@ -2797,6 +2803,15 @@ fn test_sparse_cosine_similarity_orthogonal() {
 }
 
 #[test]
+fn test_sparse_cosine_similarity_empty() {
+    let a = SparseVec::new(vec![], vec![], 5).unwrap();
+    let b = SparseVec::new(vec![], vec![], 5).unwrap();
+
+    let sim = sparse_cosine_similarity(&a, &b).unwrap();
+    assert_eq!(sim, 0.0);
+}
+
+#[test]
 fn test_sparse_cosine_similarity_opposite() {
     let a = SparseVec::new(vec![0, 2], vec![1.0, 2.0], 5).unwrap();
     let b = SparseVec::new(vec![0, 2], vec![-1.0, -2.0], 5).unwrap();
@@ -2846,6 +2861,15 @@ fn test_sparse_squared_euclidean_distance_dimension_mismatch() {
         result.unwrap_err(),
         Error::Vector(VectorError::DimensionMismatch { .. })
     ));
+}
+
+#[test]
+fn test_sparse_euclidean_distance_empty_vectors() {
+    let a = SparseVec::new(vec![], vec![], 5).unwrap();
+    let b = SparseVec::new(vec![], vec![], 5).unwrap();
+
+    let dist = sparse_euclidean_distance(&a, &b).unwrap();
+    assert_eq!(dist, 0.0);
 }
 
 #[test]

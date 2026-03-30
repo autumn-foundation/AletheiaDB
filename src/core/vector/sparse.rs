@@ -770,6 +770,41 @@ mod tests {
                 dimension: 10,
                 expected_error_contains: "infinity",
             },
+            TestCase {
+                name: "Duplicate index (unsorted fast-path bypass)",
+                indices: vec![5, 1, 1],
+                values: vec![1.0, 2.0, 3.0],
+                dimension: 10,
+                expected_error_contains: "Duplicate index",
+            },
+            TestCase {
+                name: "Index out of bounds (unsorted fast-path bypass)",
+                indices: vec![5, 1, 10],
+                values: vec![1.0, 2.0, 3.0],
+                dimension: 10,
+                expected_error_contains: "out of bounds",
+            },
+            TestCase {
+                name: "NaN value (unsorted fast-path bypass)",
+                indices: vec![5, 1, 3],
+                values: vec![1.0, 2.0, f32::NAN],
+                dimension: 10,
+                expected_error_contains: "NaN",
+            },
+            TestCase {
+                name: "Infinity value (unsorted fast-path bypass)",
+                indices: vec![5, 1, 3],
+                values: vec![1.0, f32::INFINITY, 3.0],
+                dimension: 10,
+                expected_error_contains: "infinity",
+            },
+            TestCase {
+                name: "Zero value (unsorted fast-path bypass)",
+                indices: vec![5, 1, 3],
+                values: vec![1.0, 0.0, 3.0],
+                dimension: 10,
+                expected_error_contains: "zero value",
+            },
         ];
 
         for case in cases {
