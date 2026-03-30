@@ -28,3 +28,7 @@
 **Optimize Vec allocations with Vec::with_capacity in loops over collections**
 **Learning:** Initializing a vector with `Vec::new()` and then populating it in a loop whose length is known (e.g. iterating over a `DashMap`) causes unnecessary intermediate heap reallocations.
 **Action:** Use `Vec::with_capacity(collection.len())` when the target collection size is known in advance to avoid these reallocations.
+
+**Optimize Iterator conversions by using Map rather than Collect**
+**Learning:** Calling `.into_iter().map(...).collect()` on a collection just to store the result as a `std::vec::IntoIter` inside a struct forces an unnecessary intermediate heap allocation.
+**Action:** Change the struct field's type to hold the original collection's iterator directly (or `Map`) and perform the mapping lazily in the `.next()` method. This completely eliminates the extra `Vec` allocation per query.
