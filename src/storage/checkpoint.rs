@@ -1,5 +1,8 @@
 //! Checkpoint system with full state snapshot via index persistence.
 //!
+//! Zstd compression levels range from [`MIN_ZSTD_LEVEL`] (fastest) to
+//! [`MAX_ZSTD_LEVEL`] (best ratio). Default is [`DEFAULT_ZSTD_LEVEL`].
+//!
 //! This module integrates the checkpoint system with index persistence to enable:
 //! - Full state snapshots (not just metadata)
 //! - Fast recovery by loading indexes from disk instead of replaying WAL
@@ -61,6 +64,13 @@ use crate::storage::redb_cold_storage::RedbColdStorage;
 use crate::storage::wal::LSN;
 use crate::storage::wal::concurrent_system::ConcurrentWalSystem;
 
+/// Minimum valid zstd compression level.
+pub const MIN_ZSTD_LEVEL: i32 = 1;
+/// Maximum valid zstd compression level.
+pub const MAX_ZSTD_LEVEL: i32 = 22;
+/// Default zstd compression level (balances speed and ratio).
+pub const DEFAULT_ZSTD_LEVEL: i32 = 3;
+
 /// Convert IndexPersistenceError to our Result type.
 fn persistence_err(e: IndexPersistenceError) -> crate::core::error::Error {
     StorageError::CheckpointError {
@@ -91,7 +101,7 @@ impl Default for CheckpointConfig {
             checkpoint_interval: Duration::from_secs(300), // 5 minutes
             min_wal_entries: 1000,
             enable_compression: true,
-            compression_level: 3,
+            compression_level: DEFAULT_ZSTD_LEVEL,
         }
     }
 }
@@ -210,7 +220,9 @@ impl CheckpointManager {
     /// ```
     pub fn new(config: CheckpointConfig) -> Result<Self> {
         // Validate compression level (zstd supports 1-22)
-        if config.enable_compression && !(1..=22).contains(&config.compression_level) {
+        if config.enable_compression
+            && !(MIN_ZSTD_LEVEL..=MAX_ZSTD_LEVEL).contains(&config.compression_level)
+        {
             return Err(StorageError::CheckpointError {
                 reason: format!(
                     "Invalid compression level {}: must be 1-22 for zstd",
@@ -676,10 +688,8 @@ impl CheckpointManager {
         &self,
         snapshot: &crate::storage::snapshot::CurrentStorageSnapshot,
     ) -> Result<GraphIndexData> {
-        use crate::storage::snapshot::StorageSnapshot;
-
-        let mut nodes = Vec::new();
-        let mut edges = Vec::new();
+        let mut nodes = Vec::with_capacity(snapshot.node_count());
+        let mut edges = Vec::with_capacity(snapshot.edge_count());
 
         // Extract all nodes from snapshot (isolated from concurrent writes)
         for node in snapshot.iter_nodes() {
@@ -745,10 +755,10 @@ impl CheckpointManager {
             PersistedVersionType,
         };
 
-        let mut node_versions = Vec::new();
-        let mut node_anchors = Vec::new();
-        let mut edge_versions = Vec::new();
-        let mut edge_anchors = Vec::new();
+        let mut node_versions = Vec::with_capacity(snapshot.node_version_count());
+        let mut node_anchors = Vec::with_capacity(snapshot.node_version_count());
+        let mut edge_versions = Vec::with_capacity(snapshot.edge_version_count());
+        let mut edge_anchors = Vec::with_capacity(snapshot.edge_version_count());
 
         // Extract node versions from snapshot (isolated from concurrent writes)
         for version_arc in snapshot.iter_node_versions() {

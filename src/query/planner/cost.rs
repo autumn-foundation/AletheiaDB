@@ -13,6 +13,36 @@
 use super::physical::PhysicalOp;
 use super::stats::Statistics;
 
+// ── Cardinality / selectivity defaults ───────────────────────────────────────
+
+/// Default fraction of rows surviving a filter when statistics are unavailable.
+const DEFAULT_FILTER_SELECTIVITY: f64 = 0.1;
+
+/// Default fraction of rows remaining after a DISTINCT operation.
+const DEFAULT_DISTINCT_RATIO: f64 = 0.5;
+
+/// Default fraction of the cross-product surviving a join predicate.
+const DEFAULT_JOIN_SELECTIVITY: f64 = 0.1;
+
+// ── Memory estimation factors ────────────────────────────────────────────────
+
+/// Estimated number of property fields stored per current-state node.
+const ESTIMATED_FIELDS_PER_NODE: usize = 10;
+
+/// Estimated number of property fields stored per temporal (versioned) node.
+const ESTIMATED_FIELDS_PER_TEMPORAL_NODE: usize = 20;
+
+// ── I/O and overhead factors ─────────────────────────────────────────────────
+
+/// Number of rows assumed per sequential I/O batch during a node scan.
+const BATCH_IO_ROWS: f64 = 1000.0;
+
+/// Multiplicative overhead applied to HNSW search when a label filter is active.
+const FILTERED_SEARCH_OVERHEAD: f64 = 2.0;
+
+/// Multiplicative overhead for temporal vector search snapshot lookups.
+const TEMPORAL_SNAPSHOT_OVERHEAD: f64 = 1.5;
+
 /// Estimated cost of executing a query plan.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Cost {
@@ -336,6 +366,8 @@ impl CostModel {
 
             PhysicalOp::NodeScan { estimated_rows, .. } => self.estimate_node_scan(*estimated_rows),
 
+            PhysicalOp::EdgeScan { estimated_rows, .. } => self.estimate_edge_scan(*estimated_rows),
+
             // PropertyScan is cheaper than NodeScan+Filter because it skips predicate
             // evaluation on non-matching nodes at the storage level
             PhysicalOp::PropertyScan { estimated_rows, .. } => {
@@ -443,6 +475,7 @@ impl CostModel {
         match op {
             PhysicalOp::NodeLookup { node_ids } => node_ids.len(),
             PhysicalOp::NodeScan { estimated_rows, .. } => *estimated_rows,
+            PhysicalOp::EdgeScan { estimated_rows, .. } => *estimated_rows,
             PhysicalOp::PropertyScan { estimated_rows, .. } => *estimated_rows,
             PhysicalOp::HnswSearch { k, .. } => *k,
             PhysicalOp::TemporalNodeLookup { node_ids, .. } => node_ids.len(),
@@ -453,8 +486,9 @@ impl CostModel {
                 (input_card as f64 * avg_degree.powi(*depth as i32)) as usize
             }
             PhysicalOp::Filter { input, .. } => {
-                // Assume 10% selectivity by default
-                (self.estimate_cardinality(input, stats) as f64 * 0.1) as usize
+                // Assume default selectivity when statistics are unavailable
+                (self.estimate_cardinality(input, stats) as f64 * DEFAULT_FILTER_SELECTIVITY)
+                    as usize
             }
             PhysicalOp::VectorRerank { k, .. } => *k,
             PhysicalOp::Limit { count, input, .. } => {
@@ -464,15 +498,15 @@ impl CostModel {
                 self.estimate_cardinality(input, stats)
             }
             PhysicalOp::Distinct { input } => {
-                // Assume 50% unique
-                self.estimate_cardinality(input, stats) / 2
+                // Assume default distinct ratio
+                (self.estimate_cardinality(input, stats) as f64 * DEFAULT_DISTINCT_RATIO) as usize
             }
             PhysicalOp::Count { .. } => 1,
             PhysicalOp::HashJoin { left, right, .. } => {
-                // Assume 10% of cross product
+                // Assume default join selectivity of cross product
                 let left_card = self.estimate_cardinality(left, stats);
                 let right_card = self.estimate_cardinality(right, stats);
-                (left_card as f64 * right_card as f64 * 0.1) as usize
+                (left_card as f64 * right_card as f64 * DEFAULT_JOIN_SELECTIVITY) as usize
             }
             PhysicalOp::Union { left, right } => {
                 self.estimate_cardinality(left, stats) + self.estimate_cardinality(right, stats)
@@ -494,8 +528,8 @@ impl CostModel {
     fn estimate_node_lookup(&self, count: usize) -> Cost {
         Cost {
             cpu: self.operation_costs.node_lookup * count as f64,
-            io: 0.0,                                         // In-memory
-            memory: count * std::mem::size_of::<u64>() * 10, // Rough estimate per node
+            io: 0.0, // In-memory
+            memory: count * std::mem::size_of::<u64>() * ESTIMATED_FIELDS_PER_NODE, // Rough estimate per node
             network: 0.0,
         }
     }
@@ -503,8 +537,23 @@ impl CostModel {
     fn estimate_node_scan(&self, estimated_rows: usize) -> Cost {
         Cost {
             cpu: self.operation_costs.node_lookup * estimated_rows as f64,
-            io: (estimated_rows as f64 / 1000.0).ceil(), // Batch I/O
-            memory: estimated_rows * std::mem::size_of::<u64>() * 10,
+            io: (estimated_rows as f64 / BATCH_IO_ROWS).ceil(), // Batch I/O
+            memory: estimated_rows * std::mem::size_of::<u64>() * ESTIMATED_FIELDS_PER_NODE,
+            network: 0.0,
+        }
+    }
+
+    /// Estimate cost for a full edge scan.
+    ///
+    /// Currently mirrors `estimate_node_scan` since edges and nodes have similar
+    /// storage characteristics, but is kept as a separate method so the cost model
+    /// can diverge later (e.g. edges may have fewer properties or different I/O
+    /// patterns).
+    fn estimate_edge_scan(&self, estimated_rows: usize) -> Cost {
+        Cost {
+            cpu: self.operation_costs.node_lookup * estimated_rows as f64,
+            io: (estimated_rows as f64 / BATCH_IO_ROWS).ceil(),
+            memory: estimated_rows * std::mem::size_of::<u64>() * ESTIMATED_FIELDS_PER_NODE,
             network: 0.0,
         }
     }
@@ -512,7 +561,11 @@ impl CostModel {
     fn estimate_hnsw_search(&self, k: usize, has_filter: bool, stats: &Statistics) -> Cost {
         let vector_count = stats.vector_count().max(1) as f64;
         let log_factor = vector_count.log2().max(1.0);
-        let filter_overhead = if has_filter { 2.0 } else { 1.0 };
+        let filter_overhead = if has_filter {
+            FILTERED_SEARCH_OVERHEAD
+        } else {
+            1.0
+        };
 
         Cost {
             cpu: self.operation_costs.hnsw_search_per_k
@@ -544,7 +597,7 @@ impl CostModel {
             cpu: lock_overhead
                 + self.operation_costs.temporal_delta * avg_delta_chain * count as f64,
             io: avg_delta_chain * count as f64,
-            memory: count * std::mem::size_of::<u64>() * 20, // Larger due to versioning
+            memory: count * std::mem::size_of::<u64>() * ESTIMATED_FIELDS_PER_TEMPORAL_NODE, // Larger due to versioning
             network: 0.0,
         }
     }
@@ -554,8 +607,8 @@ impl CostModel {
         // but may need to check multiple snapshots
         let base = self.estimate_hnsw_search(k, false, stats);
         Cost {
-            cpu: base.cpu * 1.5, // Snapshot lookup overhead
-            io: base.io + 1.0,   // Snapshot access
+            cpu: base.cpu * TEMPORAL_SNAPSHOT_OVERHEAD, // Snapshot lookup overhead
+            io: base.io + 1.0,                          // Snapshot access
             memory: base.memory,
             network: 0.0,
         }
@@ -764,5 +817,61 @@ mod tests {
             offset: 0,
         };
         assert_eq!(model.estimate_cardinality(&limit, &stats), 5);
+    }
+
+    #[test]
+    fn test_edge_scan_cost() {
+        let model = CostModel::default();
+        let stats = test_stats();
+
+        let op = PhysicalOp::EdgeScan {
+            edge_type: Some("KNOWS".to_string()),
+            estimated_rows: 500,
+        };
+
+        let cost = model.estimate(&op, &stats);
+        assert!(cost.cpu > 0.0, "EdgeScan should have positive CPU cost");
+        assert!(cost.io > 0.0, "EdgeScan should have positive I/O cost");
+        assert!(cost.memory > 0, "EdgeScan should have positive memory cost");
+    }
+
+    #[test]
+    fn test_edge_scan_cardinality() {
+        let model = CostModel::default();
+        let stats = test_stats();
+
+        let op = PhysicalOp::EdgeScan {
+            edge_type: None,
+            estimated_rows: 750,
+        };
+        assert_eq!(model.estimate_cardinality(&op, &stats), 750);
+    }
+
+    #[test]
+    fn test_edge_scan_cost_matches_node_scan_for_now() {
+        // The edge scan cost model currently mirrors node scan.
+        // This test documents that contract so we notice when they diverge.
+        let model = CostModel::default();
+        let stats = test_stats();
+        let rows = 200;
+
+        let node_cost = model.estimate(
+            &PhysicalOp::NodeScan {
+                label: None,
+                estimated_rows: rows,
+            },
+            &stats,
+        );
+        let edge_cost = model.estimate(
+            &PhysicalOp::EdgeScan {
+                edge_type: None,
+                estimated_rows: rows,
+            },
+            &stats,
+        );
+
+        assert_eq!(node_cost.cpu, edge_cost.cpu);
+        assert_eq!(node_cost.io, edge_cost.io);
+        assert_eq!(node_cost.memory, edge_cost.memory);
     }
 }

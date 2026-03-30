@@ -1,0 +1,356 @@
+//! Cypher Query Language Abstract Syntax Tree (AST)
+//!
+//! This module defines the AST types produced by the Cypher parser. Every type
+//! in this module derives [`Debug`], [`Clone`], and [`PartialEq`] so that ASTs
+//! can be inspected, duplicated, and compared in tests.
+//!
+//! # Structure
+//!
+//! ```text
+//! CypherStatement
+//!   ├── CypherPattern          (graph pattern: nodes + relationships)
+//!   │     └── CypherPatternElement
+//!   │           ├── CypherNodePattern
+//!   │           └── CypherRelPattern
+//!   ├── CypherExpr             (WHERE / filter expressions)
+//!   ├── CypherReturn           (projection: items, ordering, pagination)
+//!   ├── CypherTemporal         (bi-temporal qualifiers)
+//!   └── CypherWith             (intermediate projection)
+//! ```
+
+use std::sync::Arc;
+
+// ---------------------------------------------------------------------------
+// Top-level statement
+// ---------------------------------------------------------------------------
+
+/// A complete Cypher statement ready for planning and execution.
+///
+/// Currently only `MATCH` is supported; `CREATE`, `MERGE`, `DELETE`, etc.
+/// will be added as additional variants in future phases.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CypherStatement {
+    /// A `MATCH` (or `OPTIONAL MATCH`) statement that reads from the graph.
+    Match {
+        /// Whether this is an `OPTIONAL MATCH` (returns nulls for unmatched patterns).
+        optional: bool,
+        /// One or more comma-separated graph patterns to match.
+        pattern: Vec<CypherPattern>,
+        /// An optional `WHERE` clause that filters matched results.
+        where_clause: Option<CypherExpr>,
+        /// The `RETURN` clause that defines output projection.
+        return_clause: CypherReturn,
+        /// An optional temporal qualifier (e.g., `AS OF TIMESTAMP ...`).
+        temporal: Option<CypherTemporal>,
+        /// Zero or more intermediate `WITH` projections.
+        with_clauses: Vec<CypherWith>,
+    },
+}
+
+// ---------------------------------------------------------------------------
+// Graph patterns
+// ---------------------------------------------------------------------------
+
+/// A single graph pattern consisting of alternating node and relationship elements.
+///
+/// A valid pattern always starts and ends with a node. For example,
+/// `(a:Person)-[:KNOWS]->(b:Person)` has three elements:
+/// `[Node(a), Relationship(KNOWS), Node(b)]`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CypherPattern {
+    /// The ordered sequence of nodes and relationships that form this pattern.
+    pub elements: Vec<CypherPatternElement>,
+}
+
+/// A single element inside a graph pattern -- either a node or a relationship.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CypherPatternElement {
+    /// A node pattern, e.g. `(n:Person {name: 'Alice'})`.
+    Node(CypherNodePattern),
+    /// A relationship pattern, e.g. `-[:KNOWS]->`.
+    Relationship(CypherRelPattern),
+}
+
+/// A node pattern within a `MATCH` clause.
+///
+/// Examples:
+/// - `(n)` -- bare variable, no label or properties
+/// - `(n:Person)` -- variable with label
+/// - `(:Person {name: 'Alice'})` -- anonymous node with label and properties
+#[derive(Debug, Clone, PartialEq)]
+pub struct CypherNodePattern {
+    /// An optional variable name bound to this node (e.g. `n` in `(n:Person)`).
+    pub variable: Option<String>,
+    /// Zero or more labels required on the node (e.g. `["Person"]`).
+    pub labels: Vec<String>,
+    /// Zero or more property key-value constraints (e.g. `{name: 'Alice'}`).
+    pub properties: Vec<(String, CypherValue)>,
+}
+
+/// A relationship pattern within a `MATCH` clause.
+///
+/// Examples:
+/// - `-[:KNOWS]->` -- outgoing, typed
+/// - `<-[:FOLLOWS]-` -- incoming, typed
+/// - `-[r:KNOWS|LIKES*1..3]->` -- outgoing, variable, multi-type, variable-length
+#[derive(Debug, Clone, PartialEq)]
+pub struct CypherRelPattern {
+    /// An optional variable name bound to this relationship.
+    pub variable: Option<String>,
+    /// Zero or more relationship types (e.g. `["KNOWS", "LIKES"]`).
+    pub rel_types: Vec<String>,
+    /// The traversal direction of this relationship.
+    pub direction: CypherDirection,
+    /// An optional variable-length path specifier (e.g. `*1..3`).
+    pub depth: Option<CypherDepth>,
+    /// Zero or more property key-value constraints on the relationship.
+    pub properties: Vec<(String, CypherValue)>,
+}
+
+/// The traversal direction of a relationship in a pattern.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CypherDirection {
+    /// Outgoing: `(a)-[]->(b)`.
+    Outgoing,
+    /// Incoming: `(a)<-[]-(b)`.
+    Incoming,
+    /// Bidirectional (either direction): `(a)-[]-(b)`.
+    Both,
+}
+
+/// A variable-length path depth specifier.
+///
+/// Appears after `*` in a relationship pattern to indicate how many hops are
+/// allowed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CypherDepth {
+    /// `*` -- any number of hops (including zero).
+    Unbounded,
+    /// `*N` -- exactly N hops.
+    Exact(usize),
+    /// `*..M` -- at most M hops.
+    Max(usize),
+    /// `*N..` -- at least N hops.
+    Min(usize),
+    /// `*N..M` -- between N and M hops (inclusive).
+    Range {
+        /// Minimum number of hops.
+        min: usize,
+        /// Maximum number of hops.
+        max: usize,
+    },
+}
+
+// ---------------------------------------------------------------------------
+// Values
+// ---------------------------------------------------------------------------
+
+/// A literal value or parameter reference in a Cypher expression.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CypherValue {
+    /// The `NULL` literal.
+    Null,
+    /// A boolean literal (`TRUE` / `FALSE`).
+    Bool(bool),
+    /// A 64-bit signed integer literal.
+    Int(i64),
+    /// A 64-bit floating-point literal.
+    Float(f64),
+    /// A string literal (single- or double-quoted).
+    String(String),
+    /// A parameter reference (e.g. `$name`). The string is the parameter name
+    /// without the leading `$`.
+    Parameter(String),
+    /// A dense vector literal used for similarity search.
+    Vector(Arc<[f32]>),
+}
+
+// ---------------------------------------------------------------------------
+// Expressions
+// ---------------------------------------------------------------------------
+
+/// An expression node in the Cypher AST.
+///
+/// Expressions appear in `WHERE` clauses, `RETURN` items, and `ORDER BY` clauses.
+/// They form a tree with operators as interior nodes and values / variables as leaves.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CypherExpr {
+    /// A literal value (number, string, boolean, null, parameter, vector).
+    Value(CypherValue),
+    /// A bare variable reference (e.g. `n`).
+    Variable(String),
+    /// A property access expression (e.g. `n.name`).
+    Property {
+        /// The variable whose property is being accessed.
+        variable: String,
+        /// The property key name.
+        property: String,
+    },
+    /// A comparison expression (e.g. `n.age > 18`).
+    Comparison {
+        /// The left-hand operand.
+        left: Box<CypherExpr>,
+        /// The comparison operator.
+        op: CypherCompOp,
+        /// The right-hand operand.
+        right: Box<CypherExpr>,
+    },
+    /// Logical AND of two expressions.
+    And(Box<CypherExpr>, Box<CypherExpr>),
+    /// Logical OR of two expressions.
+    Or(Box<CypherExpr>, Box<CypherExpr>),
+    /// Logical NOT of an expression.
+    Not(Box<CypherExpr>),
+    /// `IS NULL` predicate.
+    IsNull(Box<CypherExpr>),
+    /// `IS NOT NULL` predicate.
+    IsNotNull(Box<CypherExpr>),
+    /// `IN [...]` list membership test.
+    In {
+        /// The expression to test for membership.
+        expr: Box<CypherExpr>,
+        /// The list of values to test against.
+        values: Vec<CypherExpr>,
+    },
+    /// `CONTAINS 'substring'` string predicate.
+    Contains {
+        /// The expression whose string representation is tested.
+        expr: Box<CypherExpr>,
+        /// The substring to search for.
+        substring: String,
+    },
+    /// `STARTS WITH 'prefix'` string predicate.
+    StartsWith {
+        /// The expression whose string representation is tested.
+        expr: Box<CypherExpr>,
+        /// The required prefix.
+        prefix: String,
+    },
+    /// `ENDS WITH 'suffix'` string predicate.
+    EndsWith {
+        /// The expression whose string representation is tested.
+        expr: Box<CypherExpr>,
+        /// The required suffix.
+        suffix: String,
+    },
+    /// A function call (e.g. `count(n)`, `avg(n.age)`).
+    FunctionCall {
+        /// The function name (case-insensitive at parse time).
+        name: String,
+        /// The arguments passed to the function.
+        args: Vec<CypherExpr>,
+    },
+    /// A parenthesized sub-expression used for grouping.
+    Grouped(Box<CypherExpr>),
+}
+
+/// A comparison operator in a Cypher expression.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CypherCompOp {
+    /// `=` equality.
+    Eq,
+    /// `<>` or `!=` inequality.
+    Ne,
+    /// `<` less than.
+    Lt,
+    /// `<=` less than or equal.
+    Le,
+    /// `>` greater than.
+    Gt,
+    /// `>=` greater than or equal.
+    Ge,
+}
+
+// ---------------------------------------------------------------------------
+// RETURN clause
+// ---------------------------------------------------------------------------
+
+/// The `RETURN` clause of a Cypher statement.
+///
+/// Controls which data is projected out of the query, along with ordering,
+/// deduplication, and pagination.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CypherReturn {
+    /// Whether `DISTINCT` was specified to deduplicate results.
+    pub distinct: bool,
+    /// The items to return (variables, expressions, or `*`).
+    pub items: Vec<CypherReturnItem>,
+    /// Zero or more `ORDER BY` items that determine result ordering.
+    pub order_by: Vec<CypherOrderItem>,
+    /// An optional `SKIP n` offset for pagination.
+    pub skip: Option<usize>,
+    /// An optional `LIMIT n` cap on result count.
+    pub limit: Option<usize>,
+}
+
+/// A single item in the `RETURN` clause.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CypherReturnItem {
+    /// `RETURN *` -- return all bound variables.
+    Star,
+    /// A bare variable name (e.g. `RETURN n`).
+    Variable(String),
+    /// An arbitrary expression with an optional alias (e.g. `RETURN n.name AS name`).
+    Expression {
+        /// The expression to evaluate and return.
+        expr: CypherExpr,
+        /// An optional alias for the column (set via `AS`).
+        alias: Option<String>,
+    },
+}
+
+/// A single `ORDER BY` item specifying sort expression and direction.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CypherOrderItem {
+    /// The expression to sort by.
+    pub expr: CypherExpr,
+    /// Whether to sort in descending order (`true` = DESC, `false` = ASC).
+    pub descending: bool,
+}
+
+// ---------------------------------------------------------------------------
+// Temporal extensions
+// ---------------------------------------------------------------------------
+
+/// A temporal qualifier for bi-temporal queries.
+///
+/// These extend standard Cypher with AletheiaDB's time-travel capabilities.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CypherTemporal {
+    /// `AS OF TIMESTAMP '...'` -- point-in-time query (defaults to valid time).
+    AsOfTimestamp(String),
+    /// `FOR VALID_TIME AS OF '...'` -- explicit valid-time point query.
+    AsOfValidTime(String),
+    /// `FOR SYSTEM_TIME AS OF '...'` -- explicit system/transaction-time point query.
+    AsOfSystemTime(String),
+    /// Bi-temporal query combining valid time and system time.
+    BiTemporal {
+        /// The valid-time timestamp.
+        valid_time: String,
+        /// The system/transaction-time timestamp.
+        system_time: String,
+    },
+    /// `BETWEEN '...' AND '...'` -- time-range query.
+    Between {
+        /// The start of the time range (inclusive).
+        start: String,
+        /// The end of the time range (inclusive).
+        end: String,
+    },
+}
+
+// ---------------------------------------------------------------------------
+// WITH clause
+// ---------------------------------------------------------------------------
+
+/// An intermediate `WITH` projection clause.
+///
+/// `WITH` acts like a sub-`RETURN` that pipes results into subsequent clauses,
+/// optionally filtering with a `WHERE`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CypherWith {
+    /// The items to project through the `WITH`.
+    pub items: Vec<CypherReturnItem>,
+    /// An optional `WHERE` clause that filters after projection.
+    pub where_clause: Option<CypherExpr>,
+}

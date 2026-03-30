@@ -154,7 +154,6 @@ pub(crate) fn replay_wal_into_storage(
                     None => node_id.as_u64(),
                 });
 
-                // Label is already an InternedString (no allocation needed!)
                 let interned_label = label;
 
                 // Transaction time comes from when the WAL entry was logged
@@ -195,7 +194,6 @@ pub(crate) fn replay_wal_into_storage(
                     None => edge_id.as_u64(),
                 });
 
-                // Label is already an InternedString (no allocation needed!)
                 let interned_label = label;
 
                 let commit_timestamp = entry.timestamp;
@@ -235,7 +233,6 @@ pub(crate) fn replay_wal_into_storage(
             } => {
                 next_version_id = next_version_id.max(version_id.as_u64() + 1);
 
-                // Label is already an InternedString (no allocation needed!)
                 let interned_label = label;
 
                 let commit_timestamp = entry.timestamp;
@@ -277,7 +274,6 @@ pub(crate) fn replay_wal_into_storage(
 
                 let current_edge = current.get_edge(edge_id)?;
 
-                // Label is already an InternedString (no allocation needed!)
                 let interned_label = label;
 
                 let commit_timestamp = entry.timestamp;

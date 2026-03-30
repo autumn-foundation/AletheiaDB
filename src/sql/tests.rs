@@ -541,6 +541,86 @@ mod phase2_temporal {
             TemporalClause::system_time_between(Timestamp::from(2000), Timestamp::from(1000));
         assert!(clause.is_err());
     }
+
+    // ========================================================================
+    // Full Pipeline End-to-End Tests
+    // Verify temporal context flows through convert_sql() correctly
+    // ========================================================================
+
+    #[test]
+    fn test_temporal_context_wired_through_full_pipeline() {
+        // Verify temporal context flows correctly through the complete pipeline
+        let query = parse_sql(
+            "SELECT * FROM Person FOR SYSTEM_TIME AS OF TIMESTAMP '1705315200000000' WHERE name = 'Alice'",
+        )
+        .expect("Should parse temporal query");
+
+        // Must have temporal context
+        assert!(
+            query.temporal_context.is_some(),
+            "temporal_context must be set"
+        );
+        let ctx = query.temporal_context.as_ref().unwrap();
+        let (_valid_time, tx_time) = ctx.as_of_tuple().unwrap();
+        assert_eq!(tx_time.wallclock(), 1705315200000000);
+
+        // Must also have the WHERE filter
+        assert!(query.ops.iter().any(|op| matches!(op, QueryOp::Filter(_))));
+
+        // Must also have label scan (Person)
+        assert!(query.ops.iter().any(|op| matches!(
+            op,
+            QueryOp::ScanNodes { label: Some(l) } if l == "person"
+        )));
+    }
+
+    #[test]
+    fn test_valid_time_wired_through_full_pipeline() {
+        let query =
+            parse_sql("SELECT * FROM nodes FOR VALID_TIME AS OF TIMESTAMP '1705315200000000'")
+                .expect("Should parse valid time query");
+
+        assert!(query.temporal_context.is_some());
+        let ctx = query.temporal_context.as_ref().unwrap();
+        let (valid_time, _tx_time) = ctx.as_of_tuple().unwrap();
+        assert_eq!(valid_time.wallclock(), 1705315200000000);
+    }
+
+    #[test]
+    fn test_bitemporal_wired_through_full_pipeline() {
+        let query = parse_sql(
+            "SELECT * FROM nodes FOR SYSTEM_TIME AS OF TIMESTAMP '2000000' FOR VALID_TIME AS OF TIMESTAMP '1500000'",
+        )
+        .expect("Should parse bi-temporal query");
+
+        assert!(query.temporal_context.is_some());
+        let ctx = query.temporal_context.as_ref().unwrap();
+        let (valid_time, tx_time) = ctx.as_of_tuple().unwrap();
+        assert_eq!(valid_time.wallclock(), 1500000);
+        assert_eq!(tx_time.wallclock(), 2000000);
+    }
+
+    #[test]
+    fn test_system_time_between_wired_through_full_pipeline() {
+        let query = parse_sql(
+            "SELECT * FROM nodes FOR SYSTEM_TIME BETWEEN TIMESTAMP '1000000' AND TIMESTAMP '2000000' WHERE age > 21",
+        )
+        .expect("Should parse temporal range + filter");
+
+        assert!(query.temporal_context.is_some());
+        let ctx = query.temporal_context.as_ref().unwrap();
+        assert!(ctx.transaction_time_between.is_some());
+        assert!(query.ops.iter().any(|op| matches!(op, QueryOp::Filter(_))));
+    }
+
+    #[test]
+    fn test_no_temporal_clause_leaves_context_none() {
+        let query = parse_sql("SELECT * FROM Person WHERE name = 'Alice'").expect("parse");
+        assert!(
+            query.temporal_context.is_none(),
+            "Non-temporal query should have None context"
+        );
+    }
 }
 
 // ============================================================================
@@ -892,129 +972,340 @@ mod phase3_graph {
     use super::*;
     use crate::query::ir::TraversalDepth;
 
+    // ========================================================================
+    // MATCH clause tests (Task 4: #532)
+    // ========================================================================
+
+    #[test]
+    fn test_parse_match_outgoing_single_hop() {
+        let query = parse_sql(
+            "SELECT * FROM nodes AS source MATCH (source)-[:KNOWS]->(target) WHERE source.name = 'Alice'",
+        )
+        .unwrap();
+
+        assert!(query.ops.iter().any(|op| matches!(
+            op,
+            QueryOp::TraverseOut { label: Some(l), depth: TraversalDepth::Exact(1) } if l == "KNOWS"
+        )));
+        assert!(query.ops.iter().any(|op| matches!(op, QueryOp::Filter(_))));
+    }
+
+    #[test]
+    fn test_parse_match_incoming_edge() {
+        let query =
+            parse_sql("SELECT * FROM nodes AS child MATCH (parent)<-[:PARENT_OF]-(child)").unwrap();
+
+        assert!(query.ops.iter().any(|op| matches!(
+            op,
+            QueryOp::TraverseIn { label: Some(l), depth: TraversalDepth::Exact(1) } if l == "PARENT_OF"
+        )));
+    }
+
+    #[test]
+    fn test_parse_match_bidirectional() {
+        let query = parse_sql("SELECT * FROM nodes AS n MATCH (n)-[:RELATED]-(related)").unwrap();
+
+        assert!(query.ops.iter().any(|op| matches!(
+            op,
+            QueryOp::TraverseBoth { label: Some(l), depth: TraversalDepth::Exact(1) } if l == "RELATED"
+        )));
+    }
+
+    #[test]
+    fn test_parse_match_with_where_order_limit() {
+        let query = parse_sql(
+            "SELECT * FROM nodes AS source MATCH (source)-[:KNOWS]->(target) WHERE source.name = 'Alice' ORDER BY target.name LIMIT 10",
+        )
+        .unwrap();
+
+        assert!(
+            query
+                .ops
+                .iter()
+                .any(|op| matches!(op, QueryOp::TraverseOut { .. }))
+        );
+        assert!(query.ops.iter().any(|op| matches!(op, QueryOp::Filter(_))));
+        assert!(
+            query
+                .ops
+                .iter()
+                .any(|op| matches!(op, QueryOp::Sort { .. }))
+        );
+        assert!(query.ops.iter().any(|op| matches!(op, QueryOp::Limit(10))));
+    }
+
+    #[test]
+    fn test_parse_match_no_where() {
+        let query = parse_sql("SELECT * FROM nodes AS a MATCH (a)-[:FOLLOWS]->(b)").unwrap();
+
+        assert!(query.ops.iter().any(|op| matches!(
+            op,
+            QueryOp::TraverseOut { label: Some(l), .. } if l == "FOLLOWS"
+        )));
+        assert!(!query.ops.iter().any(|op| matches!(op, QueryOp::Filter(_))));
+    }
+
+    #[test]
+    fn test_parse_match_with_label_table() {
+        let query = parse_sql("SELECT * FROM Person AS p MATCH (p)-[:KNOWS]->(friend)").unwrap();
+
+        assert!(query.ops.iter().any(|op| matches!(
+            op,
+            QueryOp::ScanNodes { label: Some(l) } if l == "person"
+        )));
+        assert!(
+            query
+                .ops
+                .iter()
+                .any(|op| matches!(op, QueryOp::TraverseOut { .. }))
+        );
+    }
+
+    // ========================================================================
+    // Variable-length traversal tests (Task 5: #534)
+    // ========================================================================
+
+    #[test]
+    fn test_parse_match_variable_length_range() {
+        let query = parse_sql(
+            "SELECT * FROM nodes AS source MATCH (source)-[:KNOWS*1..3]->(target) WHERE source.name = 'Alice'",
+        )
+        .unwrap();
+
+        assert!(query.ops.iter().any(|op| matches!(
+            op,
+            QueryOp::TraverseOut { label: Some(l), depth: TraversalDepth::Range { min: 1, max: 3 } } if l == "KNOWS"
+        )));
+    }
+
+    #[test]
+    fn test_parse_match_exact_depth() {
+        let query =
+            parse_sql("SELECT * FROM nodes AS source MATCH (source)-[:KNOWS*2]->(target)").unwrap();
+
+        assert!(query.ops.iter().any(|op| matches!(
+            op,
+            QueryOp::TraverseOut { label: Some(l), depth: TraversalDepth::Exact(2) } if l == "KNOWS"
+        )));
+    }
+
+    #[test]
+    fn test_parse_match_unbounded() {
+        let query =
+            parse_sql("SELECT * FROM nodes AS source MATCH (source)-[:KNOWS*]->(target)").unwrap();
+
+        assert!(query.ops.iter().any(|op| matches!(
+            op,
+            QueryOp::TraverseOut { label: Some(l), depth: TraversalDepth::Variable } if l == "KNOWS"
+        )));
+    }
+
+    #[test]
+    fn test_parse_match_open_ended_min() {
+        // *2.. means min=2, max=default(10)
+        let query =
+            parse_sql("SELECT * FROM nodes AS source MATCH (source)-[:KNOWS*2..]->(target)")
+                .unwrap();
+
+        assert!(query.ops.iter().any(|op| matches!(
+            op,
+            QueryOp::TraverseOut { label: Some(l), depth: TraversalDepth::Range { min: 2, max: 10 } } if l == "KNOWS"
+        )));
+    }
+
+    #[test]
+    fn test_parse_match_open_ended_max() {
+        // *..3 means min=1, max=3
+        let query =
+            parse_sql("SELECT * FROM nodes AS source MATCH (source)-[:KNOWS*..3]->(target)")
+                .unwrap();
+
+        assert!(query.ops.iter().any(|op| matches!(
+            op,
+            QueryOp::TraverseOut { label: Some(l), depth: TraversalDepth::Range { min: 1, max: 3 } } if l == "KNOWS"
+        )));
+    }
+
+    #[test]
+    fn test_parse_match_with_temporal() {
+        // MATCH + temporal should both work
+        let query = parse_sql(
+            "SELECT * FROM nodes AS a FOR SYSTEM_TIME AS OF TIMESTAMP '2000000' MATCH (a)-[:KNOWS]->(b) WHERE a.name = 'Alice'",
+        )
+        .unwrap();
+
+        assert!(query.temporal_context.is_some());
+        assert!(
+            query
+                .ops
+                .iter()
+                .any(|op| matches!(op, QueryOp::TraverseOut { .. }))
+        );
+        assert!(query.ops.iter().any(|op| matches!(op, QueryOp::Filter(_))));
+    }
+
+    // ========================================================================
+    // Original placeholder tests (now properly asserting)
+    // ========================================================================
+
     #[test]
     fn test_parse_match_simple_traversal() {
-        // MATCH (n)-[:KNOWS]->(m) style syntax embedded in SQL
-        // This requires custom syntax extensions
-        let result = parse_sql("SELECT * FROM nodes MATCH (source)-[:KNOWS]->(target)");
-        // This may not be supported initially - that's OK for TDD
-        // The test documents the expected behavior
-        if let Ok(query) = result {
-            assert!(
-                query
-                    .ops
-                    .iter()
-                    .any(|op| matches!(op, QueryOp::TraverseOut { .. }))
-            );
-        }
+        let query =
+            parse_sql("SELECT * FROM nodes AS source MATCH (source)-[:KNOWS]->(target)").unwrap();
+
+        assert!(
+            query
+                .ops
+                .iter()
+                .any(|op| matches!(op, QueryOp::TraverseOut { .. }))
+        );
     }
 
     #[test]
     fn test_parse_match_variable_length() {
-        let result = parse_sql("SELECT * FROM nodes MATCH (source)-[:KNOWS*1..3]->(target)");
-        if let Ok(query) = result {
-            let traverse = query
-                .ops
-                .iter()
-                .find(|op| matches!(op, QueryOp::TraverseOut { .. }));
-            if let Some(QueryOp::TraverseOut { depth, .. }) = traverse {
-                assert!(matches!(depth, TraversalDepth::Range { min: 1, max: 3 }));
-            }
+        let query =
+            parse_sql("SELECT * FROM nodes AS source MATCH (source)-[:KNOWS*1..3]->(target)")
+                .unwrap();
+
+        let traverse = query
+            .ops
+            .iter()
+            .find(|op| matches!(op, QueryOp::TraverseOut { .. }));
+        if let Some(QueryOp::TraverseOut { depth, .. }) = traverse {
+            assert!(matches!(depth, TraversalDepth::Range { min: 1, max: 3 }));
+        } else {
+            panic!("Expected TraverseOut op");
         }
     }
 
     #[test]
     fn test_parse_match_incoming() {
-        let result = parse_sql("SELECT * FROM nodes MATCH (source)<-[:FOLLOWS]-(target)");
-        if let Ok(query) = result {
-            assert!(
-                query
-                    .ops
-                    .iter()
-                    .any(|op| matches!(op, QueryOp::TraverseIn { .. }))
-            );
-        }
-    }
+        let query =
+            parse_sql("SELECT * FROM nodes AS source MATCH (source)<-[:FOLLOWS]-(target)").unwrap();
 
-    #[test]
-    fn test_parse_match_bidirectional() {
-        let result = parse_sql("SELECT * FROM nodes MATCH (source)-[:RELATED]-(target)");
-        if let Ok(query) = result {
-            assert!(
-                query
-                    .ops
-                    .iter()
-                    .any(|op| matches!(op, QueryOp::TraverseBoth { .. }))
-            );
-        }
-    }
-}
-
-// ============================================================================
-// PHASE 4: Vector Extension Tests
-// ============================================================================
-
-mod phase4_vector {
-    use super::*;
-
-    #[test]
-    fn test_parse_order_by_vector_distance() {
-        // PostgreSQL pgvector style: ORDER BY embedding <=> '[0.1, 0.2, 0.3]'::vector
-        let result = parse_sql(
-            "SELECT * FROM nodes ORDER BY embedding <=> '[0.1, 0.2, 0.3]'::vector LIMIT 10",
+        assert!(
+            query
+                .ops
+                .iter()
+                .any(|op| matches!(op, QueryOp::TraverseIn { .. }))
         );
-        // This requires custom operator support
-        if let Ok(query) = result {
-            assert!(
-                query
-                    .ops
-                    .iter()
-                    .any(|op| matches!(op, QueryOp::VectorSearch { .. }))
-            );
-        }
+    }
+
+    // ========================================================================
+    // Edge Scanning Tests (#533)
+    // ========================================================================
+
+    #[test]
+    fn test_parse_select_from_edges() {
+        let query = parse_sql("SELECT * FROM edges").unwrap();
+        assert!(
+            query
+                .ops
+                .iter()
+                .any(|op| matches!(op, QueryOp::ScanEdges { edge_type: None }))
+        );
     }
 
     #[test]
-    fn test_parse_knn_function() {
-        // Alternative syntax: KNN(embedding, '[0.1, 0.2, 0.3]', 10)
-        let result = parse_sql("SELECT * FROM nodes WHERE KNN(embedding, '[0.1, 0.2, 0.3]', 10)");
-        if let Ok(query) = result {
-            assert!(
-                query
-                    .ops
-                    .iter()
-                    .any(|op| matches!(op, QueryOp::VectorSearch { k: 10, .. }))
-            );
-        }
+    fn test_parse_select_from_edges_with_filter() {
+        let query = parse_sql("SELECT * FROM edges WHERE type = 'KNOWS'").unwrap();
+        assert!(
+            query
+                .ops
+                .iter()
+                .any(|op| matches!(op, QueryOp::ScanEdges { .. }))
+        );
+        assert!(query.ops.iter().any(|op| matches!(op, QueryOp::Filter(_))));
     }
 
     #[test]
-    fn test_parse_similar_to_function() {
-        // SIMILAR_TO(node_id, 10) function
-        let result = parse_sql("SELECT * FROM nodes WHERE SIMILAR_TO(42, 10)");
-        if let Ok(query) = result {
-            assert!(
-                query
-                    .ops
-                    .iter()
-                    .any(|op| matches!(op, QueryOp::SimilarTo { k: 10, .. }))
-            );
-        }
+    fn test_parse_select_from_edges_with_limit() {
+        let query = parse_sql("SELECT * FROM edges LIMIT 10").unwrap();
+        assert!(
+            query
+                .ops
+                .iter()
+                .any(|op| matches!(op, QueryOp::ScanEdges { .. }))
+        );
+        assert!(query.ops.iter().any(|op| matches!(op, QueryOp::Limit(10))));
     }
 
     #[test]
-    fn test_parse_rank_by_similarity() {
-        let result = parse_sql("SELECT * FROM nodes RANK BY SIMILARITY TO '[0.1, 0.2, 0.3]' TOP 5");
-        if let Ok(query) = result {
-            assert!(
-                query
-                    .ops
-                    .iter()
-                    .any(|op| matches!(op, QueryOp::RankBySimilarity { top_k: Some(5), .. }))
-            );
-        }
+    fn test_parse_select_from_edges_with_order_by() {
+        let query = parse_sql("SELECT * FROM edges ORDER BY timestamp DESC").unwrap();
+        assert!(
+            query
+                .ops
+                .iter()
+                .any(|op| matches!(op, QueryOp::ScanEdges { .. }))
+        );
+        assert!(query.ops.iter().any(|op| matches!(
+            op,
+            QueryOp::Sort {
+                key: SortKey::Timestamp,
+                descending: true
+            }
+        )));
+    }
+
+    // ========================================================================
+    // JOIN Error Improvement Tests (#538)
+    // ========================================================================
+
+    #[test]
+    fn test_join_gives_helpful_error() {
+        let result = parse_sql("SELECT p.name FROM Person p JOIN Company c ON p.company_id = c.id");
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("MATCH"),
+            "Error should suggest MATCH alternative: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_parse_multiple_match_clauses() {
+        // Multiple MATCH clauses should all be extracted and produce two traversal ops.
+        let query = parse_sql(
+            "SELECT * FROM nodes AS a MATCH (a)-[:KNOWS]->(b) MATCH (b)-[:WORKS_AT]->(c) WHERE a.name = 'Alice'",
+        )
+        .unwrap();
+
+        let traverse_count = query
+            .ops
+            .iter()
+            .filter(|op| {
+                matches!(
+                    op,
+                    QueryOp::TraverseOut { .. }
+                        | QueryOp::TraverseIn { .. }
+                        | QueryOp::TraverseBoth { .. }
+                )
+            })
+            .count();
+        assert_eq!(
+            traverse_count, 2,
+            "Expected exactly 2 traversal ops, got {}",
+            traverse_count
+        );
+    }
+
+    #[test]
+    fn test_parse_match_no_edge_type() {
+        // MATCH without edge type should traverse any edge
+        let query = parse_sql("SELECT * FROM nodes AS a MATCH (a)-[]->(b)").unwrap();
+
+        assert!(
+            query
+                .ops
+                .iter()
+                .any(|op| matches!(op, QueryOp::TraverseOut { label: None, .. }))
+        );
     }
 }
+
+// Old phase4_vector TDD stubs removed — replaced by full implementation below.
 
 // ============================================================================
 // Integration Tests
@@ -1065,6 +1356,383 @@ mod integration {
 }
 
 // ============================================================================
+// PHASE 4: Vector Extensions Tests
+// ============================================================================
+
+mod phase4_vector {
+    use super::*;
+    use crate::sql::converter::SqlParameterValue;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    #[test]
+    fn test_parse_vector_knn_with_literal() {
+        let query = parse_sql(
+            "SELECT * FROM Documents ORDER BY embedding <=> '[0.1, 0.2, 0.3]'::vector LIMIT 10",
+        )
+        .unwrap();
+
+        assert!(
+            query
+                .ops
+                .iter()
+                .any(|op| matches!(op, QueryOp::VectorSearch { k: 10, .. }))
+        );
+    }
+
+    #[test]
+    fn test_parse_vector_knn_with_parameter() {
+        let embedding: Arc<[f32]> = vec![0.1, 0.2, 0.3].into();
+        let mut params = HashMap::new();
+        params.insert(
+            "query_embedding".to_string(),
+            SqlParameterValue::Embedding(embedding),
+        );
+
+        let query = parse_sql_with_params(
+            "SELECT * FROM Documents ORDER BY embedding <=> $query_embedding LIMIT 10",
+            params,
+        )
+        .unwrap();
+
+        assert!(
+            query
+                .ops
+                .iter()
+                .any(|op| matches!(op, QueryOp::VectorSearch { .. }))
+        );
+    }
+
+    #[test]
+    fn test_parse_vector_knn_property_key() {
+        let query = parse_sql(
+            "SELECT * FROM Documents ORDER BY embedding <=> '[0.1, 0.2]'::vector LIMIT 5",
+        )
+        .unwrap();
+
+        if let Some(QueryOp::VectorSearch {
+            k, property_key, ..
+        }) = query
+            .ops
+            .iter()
+            .find(|op| matches!(op, QueryOp::VectorSearch { .. }))
+        {
+            assert_eq!(*k, 5);
+            assert_eq!(property_key.as_deref(), Some("embedding"));
+        } else {
+            panic!("Expected VectorSearch op");
+        }
+    }
+
+    #[test]
+    fn test_parse_vector_knn_function() {
+        let embedding: Arc<[f32]> = vec![0.1, 0.2, 0.3].into();
+        let mut params = HashMap::new();
+        params.insert("query".to_string(), SqlParameterValue::Embedding(embedding));
+
+        let query = parse_sql_with_params(
+            "SELECT * FROM KNN('Documents', 'embedding', $query, 10)",
+            params,
+        )
+        .unwrap();
+
+        assert!(
+            query
+                .ops
+                .iter()
+                .any(|op| matches!(op, QueryOp::VectorSearch { k: 10, .. }))
+        );
+    }
+
+    #[test]
+    fn test_parse_hybrid_graph_plus_vector() {
+        let embedding: Arc<[f32]> = vec![0.1, 0.2, 0.3].into();
+        let mut params = HashMap::new();
+        params.insert("query".to_string(), SqlParameterValue::Embedding(embedding));
+
+        let query = parse_sql_with_params(
+            "SELECT * FROM nodes AS doctor MATCH (doctor)-[:COMPANION]->(companion) WHERE doctor.name = 'David Tennant' ORDER BY companion.embedding <=> $query LIMIT 10",
+            params,
+        )
+        .unwrap();
+
+        // Should have traversal + filter + RankBySimilarity (not VectorSearch) + Limit
+        assert!(
+            query
+                .ops
+                .iter()
+                .any(|op| matches!(op, QueryOp::TraverseOut { .. }))
+        );
+        assert!(query.ops.iter().any(|op| matches!(op, QueryOp::Filter(_))));
+        assert!(
+            query
+                .ops
+                .iter()
+                .any(|op| matches!(op, QueryOp::RankBySimilarity { .. }))
+        );
+    }
+
+    #[test]
+    fn test_parse_full_hybrid_temporal_graph_vector() {
+        let embedding: Arc<[f32]> = vec![0.1, 0.2, 0.3].into();
+        let mut params = HashMap::new();
+        params.insert("rec".to_string(), SqlParameterValue::Embedding(embedding));
+
+        let query = parse_sql_with_params(
+            "SELECT * FROM nodes AS user FOR SYSTEM_TIME AS OF TIMESTAMP '2000000' MATCH (user)-[:VIEWED]->(item) WHERE item.price < 100 ORDER BY item.embedding <=> $rec LIMIT 10",
+            params,
+        )
+        .unwrap();
+
+        // Full hybrid: temporal + graph + vector
+        assert!(query.temporal_context.is_some());
+        assert!(
+            query
+                .ops
+                .iter()
+                .any(|op| matches!(op, QueryOp::TraverseOut { .. }))
+        );
+        assert!(query.ops.iter().any(|op| matches!(op, QueryOp::Filter(_))));
+        assert!(
+            query
+                .ops
+                .iter()
+                .any(|op| matches!(op, QueryOp::RankBySimilarity { .. }))
+        );
+        assert!(query.ops.iter().any(|op| matches!(op, QueryOp::Limit(10))));
+    }
+
+    #[test]
+    fn test_parse_vector_no_limit_defaults() {
+        // ORDER BY <=> without LIMIT should default k=10
+        let query =
+            parse_sql("SELECT * FROM Documents ORDER BY embedding <=> '[0.1, 0.2]'::vector")
+                .unwrap();
+
+        if let Some(QueryOp::VectorSearch { k, .. }) = query
+            .ops
+            .iter()
+            .find(|op| matches!(op, QueryOp::VectorSearch { .. }))
+        {
+            assert_eq!(*k, 10, "Default k should be 10");
+        } else {
+            panic!("Expected VectorSearch op");
+        }
+    }
+
+    #[test]
+    fn test_parse_vector_unbound_parameter_error() {
+        let result =
+            parse_sql("SELECT * FROM Documents ORDER BY embedding <=> $nonexistent LIMIT 10");
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("nonexistent") || err.contains("Unbound"),
+            "Error should mention parameter: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_parse_vector_l2_distance_metric() {
+        let query = parse_sql(
+            "SELECT * FROM Documents ORDER BY embedding <-> '[0.1, 0.2]'::vector LIMIT 5",
+        )
+        .unwrap();
+
+        if let Some(QueryOp::VectorSearch { metric, .. }) = query
+            .ops
+            .iter()
+            .find(|op| matches!(op, QueryOp::VectorSearch { .. }))
+        {
+            assert_eq!(
+                *metric,
+                crate::index::vector::DistanceMetric::Euclidean,
+                "Should use Euclidean for <->"
+            );
+        } else {
+            panic!("Expected VectorSearch op");
+        }
+    }
+
+    #[test]
+    fn test_parse_vector_similar_to() {
+        let embedding: Arc<[f32]> = vec![0.1, 0.2, 0.3].into();
+        let mut params = HashMap::new();
+        params.insert(
+            "query_embedding".to_string(),
+            SqlParameterValue::Embedding(embedding),
+        );
+
+        let query = parse_sql_with_params(
+            "SELECT * FROM Documents WHERE SIMILAR_TO(embedding, $query_embedding, 0.8)",
+            params,
+        )
+        .unwrap();
+
+        // SIMILAR_TO currently maps to a VectorSearch op
+        assert!(
+            query
+                .ops
+                .iter()
+                .any(|op| matches!(op, QueryOp::VectorSearch { .. }))
+        );
+    }
+
+    #[test]
+    fn test_parse_vector_knn_function_replaces_scan() {
+        let embedding: Arc<[f32]> = vec![0.1, 0.2, 0.3].into();
+        let mut params = HashMap::new();
+        params.insert("query".to_string(), SqlParameterValue::Embedding(embedding));
+
+        let query = parse_sql_with_params(
+            "SELECT * FROM KNN('Documents', 'embedding', $query, 10)",
+            params,
+        )
+        .unwrap();
+
+        // VectorSearch should be the first op, replacing ScanNodes
+        assert!(matches!(&query.ops[0], QueryOp::VectorSearch { .. }));
+        // No ScanNodes should remain
+        assert!(
+            !query
+                .ops
+                .iter()
+                .any(|op| matches!(op, QueryOp::ScanNodes { .. }))
+        );
+    }
+
+    #[test]
+    fn test_similar_to_enforces_threshold() {
+        let embedding: Arc<[f32]> = vec![0.1, 0.2, 0.3].into();
+        let mut params = HashMap::new();
+        params.insert(
+            "query_embedding".to_string(),
+            SqlParameterValue::Embedding(embedding),
+        );
+
+        let query = parse_sql_with_params(
+            "SELECT * FROM Documents WHERE SIMILAR_TO(embedding, $query_embedding, 0.8)",
+            params,
+        )
+        .unwrap();
+
+        // Should have a VectorSearch followed by a Filter(Gte score 0.8)
+        assert!(
+            query
+                .ops
+                .iter()
+                .any(|op| matches!(op, QueryOp::VectorSearch { .. }))
+        );
+        let has_score_filter = query.ops.iter().any(|op| {
+            matches!(
+                op,
+                QueryOp::Filter(Predicate::Gte {
+                    key,
+                    value: PredicateValue::Float(t),
+                }) if key == "score" && (*t - 0.8).abs() < f64::EPSILON
+            )
+        });
+        assert!(
+            has_score_filter,
+            "Expected a Filter(Gte score >= 0.8) op, got: {:?}",
+            query.ops
+        );
+    }
+
+    #[test]
+    fn test_knn_offset_accounts_for_skip() {
+        // LIMIT 10 OFFSET 5 should produce VectorSearch(k=15) + Skip(5) + Limit(10)
+        let query = parse_sql(
+            "SELECT * FROM Documents ORDER BY embedding <=> '[0.1, 0.2]'::vector LIMIT 10 OFFSET 5",
+        )
+        .unwrap();
+
+        if let Some(QueryOp::VectorSearch { k, .. }) = query
+            .ops
+            .iter()
+            .find(|op| matches!(op, QueryOp::VectorSearch { .. }))
+        {
+            assert_eq!(*k, 15, "k should be limit + offset = 15");
+        } else {
+            panic!("Expected VectorSearch op");
+        }
+
+        assert!(
+            query.ops.iter().any(|op| matches!(op, QueryOp::Skip(5))),
+            "Expected Skip(5), got: {:?}",
+            query.ops
+        );
+        assert!(
+            query.ops.iter().any(|op| matches!(op, QueryOp::Limit(10))),
+            "Expected Limit(10), got: {:?}",
+            query.ops
+        );
+    }
+
+    #[test]
+    fn test_knn_without_offset_no_extra_limit() {
+        // LIMIT 10 without OFFSET should produce VectorSearch(k=10) and no Limit op
+        let query = parse_sql(
+            "SELECT * FROM Documents ORDER BY embedding <=> '[0.1, 0.2]'::vector LIMIT 10",
+        )
+        .unwrap();
+
+        if let Some(QueryOp::VectorSearch { k, .. }) = query
+            .ops
+            .iter()
+            .find(|op| matches!(op, QueryOp::VectorSearch { .. }))
+        {
+            assert_eq!(*k, 10);
+        } else {
+            panic!("Expected VectorSearch op");
+        }
+
+        // No Limit op should remain (VectorSearch handles it)
+        assert!(
+            !query.ops.iter().any(|op| matches!(op, QueryOp::Limit(_))),
+            "No Limit op expected without OFFSET, got: {:?}",
+            query.ops
+        );
+    }
+
+    #[test]
+    fn test_knn_function_preserves_label_filter() {
+        let embedding: Arc<[f32]> = vec![0.1, 0.2, 0.3].into();
+        let mut params = HashMap::new();
+        params.insert("query".to_string(), SqlParameterValue::Embedding(embedding));
+
+        let query = parse_sql_with_params(
+            "SELECT * FROM KNN('Documents', 'embedding', $query, 10)",
+            params,
+        )
+        .unwrap();
+
+        // VectorSearch should be first
+        assert!(matches!(&query.ops[0], QueryOp::VectorSearch { .. }));
+
+        // FilterLabel should follow to scope results to 'documents'
+        let has_label_filter = query
+            .ops
+            .iter()
+            .any(|op| matches!(op, QueryOp::FilterLabel(l) if l == "documents"));
+        assert!(
+            has_label_filter,
+            "Expected FilterLabel('documents'), got: {:?}",
+            query.ops
+        );
+
+        // No ScanNodes should remain
+        assert!(
+            !query
+                .ops
+                .iter()
+                .any(|op| matches!(op, QueryOp::ScanNodes { .. }))
+        );
+    }
+}
+
+// ============================================================================
 // Error Handling Tests
 // ============================================================================
 
@@ -1087,5 +1755,90 @@ mod errors {
     fn test_error_multiple_statements() {
         let result = parse_sql("SELECT * FROM nodes; SELECT * FROM edges");
         assert!(matches!(result, Err(SqlError::UnsupportedFeature(_))));
+    }
+}
+
+// ============================================================================
+// POLISH: ORDER BY and misc improvements
+// ============================================================================
+
+mod polish {
+    use super::*;
+
+    #[test]
+    fn test_order_by_simple_identifier() {
+        let query = parse_sql("SELECT * FROM Person ORDER BY name").unwrap();
+        assert!(query.ops.iter().any(|op| matches!(
+            op,
+            QueryOp::Sort {
+                key: SortKey::Property(p),
+                descending: false
+            } if p == "name"
+        )));
+    }
+
+    #[test]
+    fn test_order_by_compound_identifier() {
+        let query = parse_sql("SELECT * FROM Person ORDER BY person.age DESC").unwrap();
+        assert!(query.ops.iter().any(|op| matches!(
+            op,
+            QueryOp::Sort {
+                key: SortKey::Property(p),
+                descending: true
+            } if p == "age"
+        )));
+    }
+
+    #[test]
+    fn test_order_by_score_special_key() {
+        let query = parse_sql("SELECT * FROM nodes ORDER BY score DESC").unwrap();
+        assert!(query.ops.iter().any(|op| matches!(
+            op,
+            QueryOp::Sort {
+                key: SortKey::Score,
+                descending: true
+            }
+        )));
+    }
+
+    #[test]
+    fn test_order_by_timestamp_special_key() {
+        let query = parse_sql("SELECT * FROM nodes ORDER BY timestamp ASC").unwrap();
+        assert!(query.ops.iter().any(|op| matches!(
+            op,
+            QueryOp::Sort {
+                key: SortKey::Timestamp,
+                descending: false
+            }
+        )));
+    }
+
+    #[test]
+    fn test_order_by_complex_expression_gives_clear_error() {
+        let result = parse_sql("SELECT * FROM nodes ORDER BY price * quantity");
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("ORDER BY") || err.contains("Complex") || err.contains("not supported"),
+            "Error should be about ORDER BY expressions: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_order_by_function_gives_clear_error() {
+        let result = parse_sql("SELECT * FROM nodes ORDER BY LOWER(name)");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_multiple_order_by_clauses() {
+        let query = parse_sql("SELECT * FROM Person ORDER BY age DESC, name ASC").unwrap();
+        let sort_ops: Vec<_> = query
+            .ops
+            .iter()
+            .filter(|op| matches!(op, QueryOp::Sort { .. }))
+            .collect();
+        assert_eq!(sort_ops.len(), 2, "Should have two sort operations");
     }
 }

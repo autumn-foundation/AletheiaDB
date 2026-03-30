@@ -11,7 +11,7 @@
 //! ```text
 //! ┌─────────────────────────────────────────────────────────────┐
 //! │ Header (16 bytes)                                           │
-//! │   Magic: "GDB2" (4 bytes)                                  │
+//! │   Magic: "ADB2" (4 bytes)                                  │
 //! │   Version: u8                                               │
 //! │   Reserved: 3 bytes                                         │
 //! │   Entry count: u64                                          │
@@ -41,8 +41,8 @@ use std::sync::RwLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Magic bytes for the commit log file.
-const COMMIT_LOG_MAGIC: [u8; 4] = *b"GDB2";
+/// Magic bytes for the commit log file (AletheiaDB 2PC).
+const COMMIT_LOG_MAGIC: [u8; 4] = *b"ADB2";
 
 /// Current commit log format version.
 const COMMIT_LOG_VERSION: u8 = 2;
@@ -626,10 +626,13 @@ impl PersistentCommitLog {
         self.pending
             .read()
             .map(|p| {
-                p.values()
-                    .filter(|e| e.entry_type == EntryType::Commit)
-                    .cloned()
-                    .collect()
+                let mut result = Vec::with_capacity(p.len());
+                for value in p.values() {
+                    if value.entry_type == EntryType::Commit {
+                        result.push(value.clone());
+                    }
+                }
+                result
             })
             .unwrap_or_default()
     }
@@ -639,10 +642,13 @@ impl PersistentCommitLog {
         self.pending
             .read()
             .map(|p| {
-                p.values()
-                    .filter(|e| e.entry_type == EntryType::Abort)
-                    .cloned()
-                    .collect()
+                let mut result = Vec::with_capacity(p.len());
+                for value in p.values() {
+                    if value.entry_type == EntryType::Abort {
+                        result.push(value.clone());
+                    }
+                }
+                result
             })
             .unwrap_or_default()
     }

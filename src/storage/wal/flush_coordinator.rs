@@ -30,6 +30,7 @@
 //! The coordinator is designed to be run from a single thread. Multiple
 //! threads should not call `flush()` concurrently.
 
+use std::borrow::Cow;
 use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -43,14 +44,7 @@ use super::ring_buffer::PendingEntry;
 
 use crate::core::error::{Error, Result, StorageError};
 
-/// Magic bytes identifying a AletheiaDB WAL segment file.
-const WAL_MAGIC: [u8; 4] = *b"GWAL";
-
-/// Current WAL format version.
-const WAL_VERSION: u8 = 1;
-
-/// Size of the WAL segment header (magic + version).
-const WAL_HEADER_SIZE: usize = 5;
+use super::segment_reader::{WAL_HEADER_SIZE, WAL_MAGIC, WAL_VERSION, WAL_VERSION_ENCRYPTED};
 
 /// Metadata about a WAL segment's LSN range.
 ///
@@ -108,7 +102,7 @@ impl SegmentMetadata {
 }
 
 /// Configuration for the flush coordinator.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct FlushCoordinatorConfig {
     /// WAL directory path.
     pub wal_dir: PathBuf,
@@ -122,6 +116,29 @@ pub struct FlushCoordinatorConfig {
     pub sync_on_flush: bool,
     /// Write buffer size for segment files.
     pub write_buffer_size: usize,
+    /// Optional cipher for encrypting WAL entries before writing to disk.
+    ///
+    /// When set, entries are encrypted with a 4-byte length prefix and
+    /// segments use version 2 format. When `None`, segments use version 1
+    /// (plaintext, backward compatible).
+    pub wal_cipher: Option<Arc<dyn crate::encryption::cipher::Cipher>>,
+}
+
+impl std::fmt::Debug for FlushCoordinatorConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FlushCoordinatorConfig")
+            .field("wal_dir", &self.wal_dir)
+            .field("segment_size", &self.segment_size)
+            .field("segments_to_retain", &self.segments_to_retain)
+            .field("flush_interval_ms", &self.flush_interval_ms)
+            .field("sync_on_flush", &self.sync_on_flush)
+            .field("write_buffer_size", &self.write_buffer_size)
+            .field(
+                "wal_cipher",
+                &self.wal_cipher.as_ref().map(|c| c.algorithm_name()),
+            )
+            .finish()
+    }
 }
 
 impl Default for FlushCoordinatorConfig {
@@ -133,6 +150,7 @@ impl Default for FlushCoordinatorConfig {
             flush_interval_ms: 10, // 10ms
             sync_on_flush: true,
             write_buffer_size: 64 * 1024, // 64 KB
+            wal_cipher: None,
         }
     }
 }
@@ -360,7 +378,13 @@ impl FlushCoordinator {
                     e
                 )))
             })?;
-            writer.write_all(&[WAL_VERSION]).map_err(|e| {
+            // Use version 2 for encrypted segments, version 1 for plaintext.
+            let version = if self.config.wal_cipher.is_some() {
+                WAL_VERSION_ENCRYPTED
+            } else {
+                WAL_VERSION
+            };
+            writer.write_all(&[version]).map_err(|e| {
                 Error::Storage(StorageError::IoError(format!(
                     "Failed to write WAL version: {}",
                     e
@@ -519,9 +543,7 @@ impl FlushCoordinator {
         let current_id = self.current_segment_id.load(Ordering::Relaxed);
         let mut removed_count = 0;
 
-        // Collect segments to check
-        let mut segments_to_check: Vec<(u64, PathBuf)> = Vec::new();
-
+        // Remove old segments in a single pass without allocating an intermediate vector
         if let Ok(entries) = std::fs::read_dir(&self.config.wal_dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
@@ -531,30 +553,25 @@ impl FlushCoordinator {
                         .and_then(|s| s.to_string_lossy().parse::<u64>().ok())
                     && segment_id < current_id
                 {
-                    segments_to_check.push((segment_id, path));
-                }
-            }
-        }
+                    let should_remove =
+                        if let Some(metadata) = self.read_segment_metadata(segment_id) {
+                            // Remove if all entries in segment are before truncate point
+                            metadata.max_lsn.0 < truncate_lsn.0
+                        } else {
+                            // No metadata file - be conservative and don't remove
+                            false
+                        };
 
-        // Check each segment's metadata and remove if max_lsn < truncate_lsn
-        for (segment_id, path) in segments_to_check {
-            let should_remove = if let Some(metadata) = self.read_segment_metadata(segment_id) {
-                // Remove if all entries in segment are before truncate point
-                metadata.max_lsn.0 < truncate_lsn.0
-            } else {
-                // No metadata file - be conservative and don't remove
-                // (This could happen for old segments created before LSN tracking)
-                false
-            };
-
-            if should_remove {
-                // Remove segment file
-                if std::fs::remove_file(&path).is_ok() {
-                    removed_count += 1;
+                    if should_remove {
+                        // Remove segment file
+                        if std::fs::remove_file(&path).is_ok() {
+                            removed_count += 1;
+                        }
+                        // Remove metadata file
+                        let meta_path = self.segment_meta_path(segment_id);
+                        let _ = std::fs::remove_file(&meta_path);
+                    }
                 }
-                // Remove metadata file
-                let meta_path = self.segment_meta_path(segment_id);
-                let _ = std::fs::remove_file(&meta_path);
             }
         }
 
@@ -647,13 +664,34 @@ impl FlushCoordinator {
                     batch_min_lsn = batch_min_lsn.min(entry.lsn.0);
                     batch_max_lsn = batch_max_lsn.max(entry.lsn.0);
 
-                    writer.write_all(&entry.data).map_err(|e| {
+                    // When a cipher is present, encrypt the entry and prepend a
+                    // 4-byte LE length prefix so the reader knows how many bytes
+                    // each encrypted entry occupies. Without a cipher, write the
+                    // raw entry data directly (no allocation, zero overhead).
+                    let write_data: Cow<'_, [u8]> = if let Some(ref cipher) = self.config.wal_cipher
+                    {
+                        let encrypted = crate::encryption::wal_encryption::encrypt_wal_payload(
+                            &entry.data,
+                            cipher,
+                        )
+                        .map_err(|e| Error::Storage(StorageError::Encryption(e.to_string())))?;
+                        // Prepend 4-byte LE length of the encrypted block
+                        let len_bytes = (encrypted.len() as u32).to_le_bytes();
+                        let mut framed = Vec::with_capacity(4 + encrypted.len());
+                        framed.extend_from_slice(&len_bytes);
+                        framed.extend_from_slice(&encrypted);
+                        Cow::Owned(framed)
+                    } else {
+                        Cow::Borrowed(&entry.data)
+                    };
+
+                    writer.write_all(&write_data).map_err(|e| {
                         Error::Storage(StorageError::IoError(format!(
                             "Failed to write WAL entry: {}",
                             e
                         )))
                     })?;
-                    bytes_written += entry.data.len();
+                    bytes_written += write_data.len();
                 }
 
                 // Flush buffer to OS
@@ -829,6 +867,10 @@ impl FlushSignal {
 
     /// Request an immediate flush.
     pub fn request_flush(&self) {
+        // 👺 HAVOC FIX: Must acquire the mutex before notifying condvar
+        // to prevent a "lost wakeup" race condition where a waiter checks
+        // the flag just before we set it, and we notify before they sleep.
+        let _guard = self.mutex.lock().unwrap_or_else(|e| e.into_inner());
         self.requested.store(true, Ordering::Release);
         self.condvar.notify_all();
     }

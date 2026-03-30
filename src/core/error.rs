@@ -185,6 +185,43 @@ impl From<crate::sql::SqlError> for Error {
     }
 }
 
+#[cfg(feature = "cypher")]
+impl From<crate::cypher::CypherError> for Error {
+    fn from(e: crate::cypher::CypherError) -> Self {
+        let query_error = match e {
+            crate::cypher::CypherError::LexError { message, .. } => {
+                QueryError::SyntaxError { message }
+            }
+            crate::cypher::CypherError::ParseError { message, .. } => {
+                QueryError::SyntaxError { message }
+            }
+            crate::cypher::CypherError::UnsupportedFeature(feature) => {
+                QueryError::UnsupportedFeature { feature }
+            }
+            crate::cypher::CypherError::InvalidTemporalClause(clause) => {
+                QueryError::InvalidParameter {
+                    parameter: "temporal_clause".to_string(),
+                    reason: format!("invalid temporal clause: {}", clause),
+                }
+            }
+            crate::cypher::CypherError::InvalidTimestamp(timestamp) => {
+                QueryError::InvalidParameter {
+                    parameter: "timestamp".to_string(),
+                    reason: format!("invalid timestamp: {}", timestamp),
+                }
+            }
+            crate::cypher::CypherError::ParameterError(reason) => QueryError::InvalidParameter {
+                parameter: "parameter".to_string(),
+                reason,
+            },
+            crate::cypher::CypherError::SemanticError(message) => {
+                QueryError::SyntaxError { message }
+            }
+        };
+        Error::Query(query_error)
+    }
+}
+
 /// Structured categories for persistence failures.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PersistenceErrorKind {
@@ -355,6 +392,12 @@ pub enum StorageError {
         /// The resource whose lock was poisoned
         resource: String,
     },
+    /// Encryption or decryption operation failed.
+    #[error("Encryption error: {0}")]
+    Encryption(String),
+    /// Key provider could not load or access the encryption key.
+    #[error("Key provider error: {0}")]
+    KeyProvider(String),
 }
 
 impl StorageError {
@@ -389,6 +432,18 @@ impl From<crate::storage::index_persistence::IndexPersistenceError> for StorageE
             kind,
             message: e.to_string(),
         }
+    }
+}
+
+impl From<crate::encryption::EncryptionError> for StorageError {
+    fn from(e: crate::encryption::EncryptionError) -> Self {
+        StorageError::Encryption(e.to_string())
+    }
+}
+
+impl From<crate::encryption::KeyProviderError> for StorageError {
+    fn from(e: crate::encryption::KeyProviderError) -> Self {
+        StorageError::KeyProvider(e.to_string())
     }
 }
 

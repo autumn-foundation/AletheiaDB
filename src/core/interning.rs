@@ -19,6 +19,9 @@ use std::sync::atomic::{AtomicU32, Ordering};
 /// Default maximum number of interned strings (DoS protection)
 pub const DEFAULT_MAX_INTERNED_STRINGS: usize = 100_000;
 
+/// Maximum spin iterations in get_all_strings() before assuming deadlock.
+const MAX_SPIN_WAIT_ITERATIONS: usize = 100_000;
+
 /// Common strings that are pre-interned at startup for optimal performance.
 ///
 /// These strings represent frequently used property keys and labels across
@@ -393,13 +396,11 @@ impl StringInterner {
                     spins += 1;
 
                     // Safety valve: don't spin forever if something is truly broken
-                    if spins > 100_000 {
-                        // This should technically be unreachable given the intern() logic,
-                        // but we panic to be safe rather than returning a corrupted snapshot.
+                    if spins > MAX_SPIN_WAIT_ITERATIONS {
                         panic!(
-                            "Deadlock detected in get_all_strings: ID {} never appeared after 100k spins. \
+                            "Deadlock detected in get_all_strings: ID {} never appeared after {} spins. \
                              This indicates a bug in the interner logic (e.g. rolled back ID not properly handled).",
-                            id
+                            id, MAX_SPIN_WAIT_ITERATIONS
                         );
                     }
                 }
@@ -478,11 +479,11 @@ use std::sync::LazyLock;
 
 /// Environment variable to configure the maximum number of interned strings.
 ///
-/// Set `GALLIFREYDB_MAX_INTERNED_STRINGS` to override the default limit of 100,000.
+/// Set `ALETHEIADB_MAX_INTERNED_STRINGS` to override the default limit of 100,000.
 /// This is useful for large knowledge graphs with many unique labels or property keys.
 ///
-/// Example: `GALLIFREYDB_MAX_INTERNED_STRINGS=1000000`
-pub const MAX_INTERNED_STRINGS_ENV: &str = "GALLIFREYDB_MAX_INTERNED_STRINGS";
+/// Example: `ALETHEIADB_MAX_INTERNED_STRINGS=1000000`
+pub const MAX_INTERNED_STRINGS_ENV: &str = "ALETHEIADB_MAX_INTERNED_STRINGS";
 
 /// Global string interner for sharing common strings across the database.
 ///
@@ -495,7 +496,7 @@ pub const MAX_INTERNED_STRINGS_ENV: &str = "GALLIFREYDB_MAX_INTERNED_STRINGS";
 ///
 /// ## Configuration
 ///
-/// The maximum capacity can be configured via the `GALLIFREYDB_MAX_INTERNED_STRINGS`
+/// The maximum capacity can be configured via the `ALETHEIADB_MAX_INTERNED_STRINGS`
 /// environment variable. If not set, defaults to 100,000.
 pub static GLOBAL_INTERNER: LazyLock<StringInterner> = LazyLock::new(|| {
     let max_capacity = std::env::var(MAX_INTERNED_STRINGS_ENV)

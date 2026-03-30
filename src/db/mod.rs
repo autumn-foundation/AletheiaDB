@@ -143,6 +143,8 @@ pub struct AletheiaDB {
     pub(crate) persistence_thread_stopped: Arc<std::sync::atomic::AtomicBool>,
     /// Background persistence thread handle (if enabled) - used to join thread on shutdown
     pub(crate) persistence_thread_handle: Option<std::thread::JoinHandle<()>>,
+    /// Encryption manager (if encryption at rest is enabled)
+    pub(crate) encryption_manager: Option<Arc<crate::encryption::EncryptionManager>>,
 }
 
 impl std::fmt::Debug for AletheiaDB {
@@ -157,6 +159,7 @@ impl std::fmt::Debug for AletheiaDB {
             .field("current_timestamp", &current_ts)
             .field("default_durability", &self.default_durability)
             .field("persistence_enabled", &self.persistence_manager.is_some())
+            .field("encryption_enabled", &self.encryption_manager.is_some())
             .field("stats", &self.stats)
             .finish_non_exhaustive()
     }

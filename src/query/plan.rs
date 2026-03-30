@@ -208,6 +208,14 @@ pub enum ScanOp {
         label_filter: Option<String>,
     },
 
+    /// Full edge scan with optional edge type filter
+    EdgeScan {
+        /// Optional edge type to filter by (e.g., "KNOWS", "FOLLOWS")
+        edge_type: Option<String>,
+        /// Estimated number of rows (for cost estimation)
+        estimated_rows: Option<usize>,
+    },
+
     /// Property-based node scan: nodes with a given label where property == value.
     ///
     /// This is the fused form of `NodeScan { label } + Filter(Eq { key, value })`,
@@ -301,16 +309,8 @@ pub enum BinaryOp {
     },
 }
 
-/// Key for sorting results.
-#[derive(Debug, Clone, PartialEq)]
-pub enum SortKey {
-    /// Sort by a property value
-    Property(String),
-    /// Sort by similarity score
-    Score,
-    /// Sort by timestamp
-    Timestamp,
-}
+/// Re-export `SortKey` from the IR to avoid maintaining two identical enums.
+pub use super::ir::SortKey;
 
 /// Temporal context for a query.
 ///

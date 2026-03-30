@@ -61,10 +61,8 @@ use crate::core::error::{Error, Result, VectorError};
 use crate::core::hasher::IdentityHasher;
 use crate::core::id::NodeId;
 use crate::core::vector::validate_vector;
-use crate::index::vector::{DistanceMetric, Quantization, VectorIndex};
+use crate::index::vector::{DistanceMetric, Quantization, VectorIndex, merge_top_k_results};
 use rayon::prelude::*;
-use std::cmp::Reverse;
-use std::collections::BinaryHeap;
 use std::collections::hash_map::DefaultHasher;
 use std::fmt;
 use std::hash::{BuildHasherDefault, Hash, Hasher};
@@ -232,6 +230,28 @@ pub enum CircuitState {
 }
 
 /// Configuration for circuit breaker.
+///
+/// The `CircuitBreakerConfig` defines the thresholds and durations for the
+/// [`NodeCircuitBreaker`] to transition between `Closed`, `Open`, and `HalfOpen` states.
+/// It helps prevent cascading failures in a distributed setup when remote nodes are unresponsive.
+///
+/// # Examples
+///
+/// ```rust
+/// # #[cfg(feature = "nova")]
+/// # fn main() {
+/// use aletheiadb::index::vector::distributed::CircuitBreakerConfig;
+/// use std::time::Duration;
+///
+/// let config = CircuitBreakerConfig {
+///     failure_threshold: 5,
+///     open_duration: Duration::from_secs(30),
+///     success_threshold: 3,
+/// };
+/// # }
+/// # #[cfg(not(feature = "nova"))]
+/// # fn main() {}
+/// ```
 #[derive(Debug, Clone)]
 pub struct CircuitBreakerConfig {
     /// Number of failures before opening circuit.
@@ -253,6 +273,29 @@ impl Default for CircuitBreakerConfig {
 }
 
 /// Circuit breaker for a single node connection.
+///
+/// The `NodeCircuitBreaker` tracks failures and successes of requests to a remote node
+/// (typically represented by a [`VectorNodeClient`]). If failures exceed the configured
+/// threshold, it transitions to an `Open` state, failing fast. After a timeout, it transitions
+/// to a `HalfOpen` state to test if the node has recovered.
+///
+/// # Examples
+///
+/// ```rust
+/// # #[cfg(feature = "nova")]
+/// # fn main() {
+/// use aletheiadb::index::vector::distributed::{CircuitBreakerConfig, NodeCircuitBreaker, CircuitState};
+///
+/// let config = CircuitBreakerConfig::default();
+/// let breaker = NodeCircuitBreaker::new(config);
+///
+/// // Initially, the circuit is closed and allows requests
+/// assert_eq!(breaker.state(), CircuitState::Closed);
+/// assert!(breaker.should_allow());
+/// # }
+/// # #[cfg(not(feature = "nova"))]
+/// # fn main() {}
+/// ```
 #[derive(Debug)]
 pub struct NodeCircuitBreaker {
     config: CircuitBreakerConfig,
@@ -417,6 +460,31 @@ impl NodeCircuitBreaker {
 // ============================================================================
 
 /// A connection to a remote vector index node.
+///
+/// The `NodeConnection` wraps a [`VectorNodeClient`] with a [`NodeCircuitBreaker`]
+/// and tracks basic metrics (requests, failures). It acts as the primary interface
+/// for executing requests against a specific node in a distributed index.
+///
+/// # Examples
+///
+/// ```rust
+/// # #[cfg(feature = "nova")]
+/// # fn main() {
+/// use aletheiadb::index::vector::distributed::{
+///     MockVectorNodeClient, NodeConnection, CircuitBreakerConfig
+/// };
+/// use aletheiadb::index::vector::DistanceMetric;
+/// use std::sync::Arc;
+///
+/// let client = Arc::new(MockVectorNodeClient::new(0, 384, DistanceMetric::Cosine));
+/// let connection = NodeConnection::new(client, CircuitBreakerConfig::default());
+///
+/// assert_eq!(connection.node_id(), 0);
+/// assert!(connection.is_available());
+/// # }
+/// # #[cfg(not(feature = "nova"))]
+/// # fn main() {}
+/// ```
 pub struct NodeConnection<C: VectorNodeClient> {
     /// The client for this node.
     client: Arc<C>,
@@ -509,6 +577,29 @@ impl<C: VectorNodeClient> NodeConnection<C> {
 }
 
 /// Statistics for a node connection.
+///
+/// `NodeConnectionStats` contains diagnostic information about a [`NodeConnection`],
+/// including its current circuit state, total requests, and total failures.
+///
+/// # Examples
+///
+/// ```rust
+/// # #[cfg(feature = "nova")]
+/// # fn main() {
+/// use aletheiadb::index::vector::distributed::{NodeConnectionStats, CircuitState};
+///
+/// let stats = NodeConnectionStats {
+///     node_id: 1,
+///     circuit_state: CircuitState::Closed,
+///     request_count: 100,
+///     failure_count: 2,
+/// };
+///
+/// assert_eq!(stats.success_rate(), 0.98);
+/// # }
+/// # #[cfg(not(feature = "nova"))]
+/// # fn main() {}
+/// ```
 #[derive(Debug, Clone)]
 pub struct NodeConnectionStats {
     /// Node ID.
@@ -537,6 +628,26 @@ impl NodeConnectionStats {
 // ============================================================================
 
 /// Configuration for a single vector node.
+///
+/// The `VectorNodeConfig` describes how to connect to a specific remote node,
+/// including its endpoint, timeout settings, and specific [`CircuitBreakerConfig`].
+///
+/// # Examples
+///
+/// ```rust
+/// # #[cfg(feature = "nova")]
+/// # fn main() {
+/// use aletheiadb::index::vector::distributed::VectorNodeConfig;
+/// use std::time::Duration;
+///
+/// let node_config = VectorNodeConfig::new(1, "node1:9000")
+///     .with_timeout(Duration::from_secs(10));
+///
+/// assert_eq!(node_config.node_id, 1);
+/// # }
+/// # #[cfg(not(feature = "nova"))]
+/// # fn main() {}
+/// ```
 #[derive(Debug, Clone)]
 pub struct VectorNodeConfig {
     /// Node ID (must be unique).
@@ -584,6 +695,28 @@ pub enum RoutingStrategy {
 }
 
 /// Configuration for the distributed vector index.
+///
+/// The `DistributedVectorConfig` sets up the topology and behavior for a
+/// [`DistributedVectorIndex`], including the expected vector dimensionality,
+/// distance metric, routing strategy, and the list of [`VectorNodeConfig`]s.
+///
+/// # Examples
+///
+/// ```rust
+/// # #[cfg(feature = "nova")]
+/// # fn main() {
+/// use aletheiadb::index::vector::distributed::{DistributedVectorConfig, VectorNodeConfig};
+/// use aletheiadb::index::vector::DistanceMetric;
+///
+/// let config = DistributedVectorConfig::new(384, DistanceMetric::Cosine)
+///     .with_node(VectorNodeConfig::new(0, "node0:9000"))
+///     .with_node(VectorNodeConfig::new(1, "node1:9000"));
+///
+/// assert!(config.validate().is_ok());
+/// # }
+/// # #[cfg(not(feature = "nova"))]
+/// # fn main() {}
+/// ```
 #[derive(Debug, Clone)]
 pub struct DistributedVectorConfig {
     /// Vector dimensionality.
@@ -671,6 +804,27 @@ impl DistributedVectorConfig {
 // ============================================================================
 
 /// Statistics for the distributed index.
+///
+/// `DistributedIndexStats` provides a cluster-wide summary of the [`DistributedVectorIndex`],
+/// aggregating counts and holding detailed [`NodeConnectionStats`] for all participating nodes.
+///
+/// # Examples
+///
+/// ```rust
+/// # #[cfg(feature = "nova")]
+/// # fn main() {
+/// use aletheiadb::index::vector::distributed::{DistributedIndexStats, NodeConnectionStats, CircuitState};
+///
+/// let stats = DistributedIndexStats {
+///     total_vectors: 1000,
+///     node_count: 2,
+///     available_nodes: 2,
+///     node_stats: vec![], // Would contain actual node stats
+/// };
+/// # }
+/// # #[cfg(not(feature = "nova"))]
+/// # fn main() {}
+/// ```
 #[derive(Debug, Clone)]
 pub struct DistributedIndexStats {
     /// Total vectors across all nodes.
@@ -684,6 +838,31 @@ pub struct DistributedIndexStats {
 }
 
 /// Statistics for rebalancing the distributed index.
+///
+/// `RebalanceStats` describes the current balance of vectors across nodes in a
+/// [`DistributedVectorIndex`]. It helps determine if rebalancing is necessary based
+/// on the `imbalance_ratio` compared to the [`RECOMMENDED_IMBALANCE_THRESHOLD`].
+///
+/// # Examples
+///
+/// ```rust
+/// # #[cfg(feature = "nova")]
+/// # fn main() {
+/// use aletheiadb::index::vector::distributed::RebalanceStats;
+///
+/// let stats = RebalanceStats {
+///     total_vectors: 200,
+///     node_count: 2,
+///     min_node_size: 50,
+///     max_node_size: 150,
+///     imbalance_ratio: 3.0,
+///     vectors_to_move: 50,
+///     node_sizes: vec![(0, 50), (1, 150)],
+/// };
+/// # }
+/// # #[cfg(not(feature = "nova"))]
+/// # fn main() {}
+/// ```
 #[derive(Debug, Clone)]
 pub struct RebalanceStats {
     /// Total vectors across all nodes.
@@ -707,6 +886,33 @@ pub struct RebalanceStats {
 /// This structure provides horizontal scalability by partitioning vectors
 /// across multiple remote nodes and coordinating search operations using
 /// a scatter-gather pattern.
+///
+/// See [`DistributedVectorConfig`] for configuring the topology, and
+/// [`VectorNodeClient`] for the required abstraction to interface with remote nodes.
+///
+/// # Examples
+///
+/// ```rust
+/// # #[cfg(feature = "nova")]
+/// # fn main() -> aletheiadb::core::error::Result<()> {
+/// use std::sync::Arc;
+/// use aletheiadb::index::vector::distributed::{
+///     DistributedVectorIndex, DistributedVectorConfig, VectorNodeConfig, MockVectorNodeClient
+/// };
+/// use aletheiadb::index::vector::DistanceMetric;
+///
+/// let config = DistributedVectorConfig::new(128, DistanceMetric::Cosine)
+///     .with_node(VectorNodeConfig::new(0, "node0:9000"));
+///
+/// let client = Arc::new(MockVectorNodeClient::new(0, 128, DistanceMetric::Cosine));
+/// let index = DistributedVectorIndex::new(config, vec![client])?;
+///
+/// assert_eq!(index.node_count(), 1);
+/// # Ok(())
+/// # }
+/// # #[cfg(not(feature = "nova"))]
+/// # fn main() {}
+/// ```
 pub struct DistributedVectorIndex<C: VectorNodeClient> {
     /// Configuration.
     config: DistributedVectorConfig,
@@ -902,61 +1108,7 @@ impl<C: VectorNodeClient + 'static> DistributedVectorIndex<C> {
 
     /// Merge search results from multiple nodes using a min-heap for efficiency.
     fn merge_results(node_results: Vec<Vec<(NodeId, f32)>>, k: usize) -> Vec<(NodeId, f32)> {
-        if k == 0 {
-            return Vec::new();
-        }
-
-        let mut heap: BinaryHeap<(Reverse<OrderedFloat>, NodeId)> =
-            BinaryHeap::with_capacity(k + 1);
-
-        for results in node_results {
-            for (id, score) in results {
-                let ordered_score = OrderedFloat(score);
-
-                if heap.len() < k {
-                    heap.push((Reverse(ordered_score), id));
-                } else if let Some(&(Reverse(min_score), _)) = heap.peek()
-                    && ordered_score > min_score
-                {
-                    heap.pop();
-                    heap.push((Reverse(ordered_score), id));
-                }
-            }
-        }
-
-        let mut results: Vec<(NodeId, f32)> = heap
-            .into_iter()
-            .map(|(Reverse(score), id)| (id, score.0))
-            .collect();
-
-        results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-
-        results
-    }
-}
-
-/// Wrapper for f32 that implements Ord for use in BinaryHeap.
-#[derive(Debug, Clone, Copy, PartialEq)]
-struct OrderedFloat(f32);
-
-impl Eq for OrderedFloat {}
-
-impl PartialOrd for OrderedFloat {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for OrderedFloat {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.0
-            .partial_cmp(&other.0)
-            .unwrap_or_else(|| match (self.0.is_nan(), other.0.is_nan()) {
-                (true, true) => std::cmp::Ordering::Equal,
-                (true, false) => std::cmp::Ordering::Less,
-                (false, true) => std::cmp::Ordering::Greater,
-                (false, false) => unreachable!(),
-            })
+        merge_top_k_results(node_results, k)
     }
 }
 
@@ -1107,6 +1259,33 @@ impl<C: VectorNodeClient + 'static> VectorIndex for DistributedVectorIndex<C> {
 // ============================================================================
 
 /// Mock client for testing distributed vector operations.
+///
+/// `MockVectorNodeClient` implements the [`VectorNodeClient`] trait in-memory
+/// without actually performing any network I/O. It tracks vectors in a local hash map
+/// and implements simple distance calculations, making it ideal for unit testing
+/// [`DistributedVectorIndex`] logic.
+///
+/// # Examples
+///
+/// ```rust
+/// # #[cfg(feature = "nova")]
+/// # fn main() -> aletheiadb::core::error::Result<()> {
+/// use aletheiadb::index::vector::distributed::{MockVectorNodeClient, VectorNodeClient};
+/// use aletheiadb::index::vector::DistanceMetric;
+/// use aletheiadb::core::id::NodeId;
+///
+/// let client = MockVectorNodeClient::new(0, 128, DistanceMetric::Cosine);
+///
+/// let node_id = NodeId::new(42).unwrap();
+/// let vec = vec![0.1f32; 128];
+/// client.add(node_id, &vec)?;
+///
+/// assert_eq!(client.len()?, 1);
+/// # Ok(())
+/// # }
+/// # #[cfg(not(feature = "nova"))]
+/// # fn main() {}
+/// ```
 #[derive(Debug)]
 pub struct MockVectorNodeClient {
     node_id: u16,

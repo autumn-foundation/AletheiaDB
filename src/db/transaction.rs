@@ -3,8 +3,27 @@ use crate::core::error::{Result, ResultExt, TransactionError};
 use crate::core::hlc::HybridTimestamp;
 use crate::core::temporal::Timestamp;
 use crate::db::AletheiaDB;
+use crate::storage::index_persistence::tracker::PersistenceTracker;
 use crate::storage::wal::WriteOptions;
 use std::sync::Arc;
+
+/// Record persistence mutations after a successful commit.
+///
+/// Only scans write flags when persistence tracking is active,
+/// avoiding unnecessary buffer scans when persistence is disabled.
+fn record_tx_mutations(tracker: Option<&Arc<PersistenceTracker>>, tx: &WriteTransaction) {
+    if let Some(tracker) = tracker {
+        if tx.has_node_writes() || tx.has_edge_writes() {
+            tracker.record_graph_mutation();
+            tracker.record_temporal_mutation();
+            // Labels are interned strings, so node/edge writes always mutate the interner
+            tracker.record_string_mutation();
+        }
+        if tx.has_vector_writes() {
+            tracker.record_vector_mutation();
+        }
+    }
+}
 
 impl AletheiaDB {
     /// Compute a snapshot timestamp that is strictly greater than the last commit
@@ -86,11 +105,7 @@ impl AletheiaDB {
         let result = (|| {
             let tx_id = self.tx_id_gen.next();
             let snapshot_timestamp = self.snapshot_timestamp_for_read()?;
-
-            // Register as active
             self.visibility_manager.register_active(tx_id);
-
-            // Capture snapshot
             let snapshot = self.visibility_manager.capture_snapshot(snapshot_timestamp);
 
             Ok(ReadTransaction::new(
@@ -193,11 +208,7 @@ impl AletheiaDB {
         let result = (|| {
             let tx_id = self.tx_id_gen.next();
             let snapshot_timestamp = self.snapshot_timestamp_for_read()?;
-
-            // Register as active
             self.visibility_manager.register_active(tx_id);
-
-            // Capture snapshot
             let snapshot = self.visibility_manager.capture_snapshot(snapshot_timestamp);
 
             Ok(WriteTransaction::new_with_clock_observed_at(
@@ -272,27 +283,8 @@ impl AletheiaDB {
     {
         let mut tx = self.write_transaction().map_err(E::from)?;
         let result = f(&mut tx)?;
-
-        // Track mutations for persistence before committing
-        let has_node_writes = tx.has_node_writes();
-        let has_edge_writes = tx.has_edge_writes();
-        let has_vector_writes = tx.has_vector_writes();
-
-        tx.commit().map_err(E::from)?; // Ignore commit timestamp for simple write()
-
-        // Record mutations after successful commit
-        if let Some(ref tracker) = self.persistence_tracker {
-            if has_node_writes || has_edge_writes {
-                tracker.record_graph_mutation();
-                tracker.record_temporal_mutation();
-                // String interner mutations happen with every node/edge (labels)
-                tracker.record_string_mutation();
-            }
-            if has_vector_writes {
-                tracker.record_vector_mutation();
-            }
-        }
-
+        record_tx_mutations(self.persistence_tracker.as_ref(), &tx);
+        tx.commit().map_err(E::from)?;
         Ok(result)
     }
 
@@ -346,25 +338,8 @@ impl AletheiaDB {
     {
         let mut tx = self.write_transaction().map_err(E::from)?;
         let result = f(&mut tx)?;
-
-        // Track mutations for persistence before committing
-        let has_node_writes = tx.has_node_writes();
-        let has_edge_writes = tx.has_edge_writes();
-        let has_vector_writes = tx.has_vector_writes();
-
+        record_tx_mutations(self.persistence_tracker.as_ref(), &tx);
         let commit_ts = tx.commit_with_timestamp().map_err(E::from)?;
-
-        // Record mutations after successful commit
-        if let Some(ref tracker) = self.persistence_tracker {
-            if has_node_writes || has_edge_writes {
-                tracker.record_graph_mutation();
-                tracker.record_temporal_mutation();
-            }
-            if has_vector_writes {
-                tracker.record_vector_mutation();
-            }
-        }
-
         Ok((result, commit_ts))
     }
 
@@ -429,27 +404,8 @@ impl AletheiaDB {
             .write_transaction_with_options(options)
             .map_err(E::from)?;
         let result = f(&mut tx)?;
-
-        // Track mutations for persistence before committing
-        let has_node_writes = tx.has_node_writes();
-        let has_edge_writes = tx.has_edge_writes();
-        let has_vector_writes = tx.has_vector_writes();
-
-        tx.commit().map_err(E::from)?; // Ignore commit timestamp for simple write_with_options()
-
-        // Record mutations after successful commit
-        if let Some(ref tracker) = self.persistence_tracker {
-            if has_node_writes || has_edge_writes {
-                tracker.record_graph_mutation();
-                tracker.record_temporal_mutation();
-                // String interner mutations happen with every node/edge (labels)
-                tracker.record_string_mutation();
-            }
-            if has_vector_writes {
-                tracker.record_vector_mutation();
-            }
-        }
-
+        record_tx_mutations(self.persistence_tracker.as_ref(), &tx);
+        tx.commit().map_err(E::from)?;
         Ok(result)
     }
 
@@ -483,14 +439,9 @@ impl AletheiaDB {
         let result = (|| {
             let tx_id = self.tx_id_gen.next();
             let snapshot_timestamp = self.snapshot_timestamp_for_read()?;
-
-            // Register as active
             self.visibility_manager.register_active(tx_id);
-
-            // Capture snapshot
             let snapshot = self.visibility_manager.capture_snapshot(snapshot_timestamp);
 
-            // Determine effective durability mode
             let durability = options.effective_durability(self.default_durability);
 
             Ok(WriteTransaction::new_with_durability_and_clock_observed_at(

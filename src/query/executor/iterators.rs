@@ -275,28 +275,19 @@ impl ResultIterator for TemporalNodeIterator {
             let historical = self.historical.read();
 
             // Find the version valid at the requested time
-            let version_id =
-                historical
-                    .find_node_version_at_time(id, self.valid_time, self.transaction_time)
-                    .ok_or(crate::core::error::TemporalError::NodeNotFoundAtTime {
-                        node_id: id,
-                        valid_time: self.valid_time,
-                        transaction_time: self.transaction_time,
-                    })?;
+            let version_id = historical
+                .find_node_version_at_time(id, self.valid_time, self.transaction_time)
+                .ok_or(crate::core::error::TemporalError::NodeNotFoundAtTime {
+                    node_id: id,
+                    valid_time: self.valid_time,
+                    transaction_time: self.transaction_time,
+                })?;
 
-            // INVARIANT: If find_node_version_at_time returns a version_id,
-            // that version MUST exist in storage. If this fails, it indicates
-            // a critical data inconsistency (broken version chain or dangling version_id).
-            debug_assert!(
-                historical.get_node_version(version_id).is_some(),
-                "INVARIANT VIOLATION: find_node_version_at_time returned non-existent version_id {}",
-                version_id
-            );
-
-            // Get the version metadata
-            let version = historical
-                .get_node_version(version_id)
-                .ok_or(crate::core::error::TemporalError::VersionNotFound(version_id))?;
+            // Get the version metadata (also validates the invariant that
+            // find_node_version_at_time only returns existing version IDs)
+            let version = historical.get_node_version(version_id).ok_or(
+                crate::core::error::TemporalError::VersionNotFound(version_id),
+            )?;
 
             // Reconstruct the properties from the version
             let properties = historical.reconstruct_node_properties(version_id)?;
@@ -358,19 +349,11 @@ impl BatchTemporalNodeIterator {
                         transaction_time,
                     })?;
 
-                // INVARIANT: If find_node_version_at_time returns a version_id,
-                // that version MUST exist in storage. If this fails, it indicates
-                // a critical data inconsistency (broken version chain or dangling version_id).
-                debug_assert!(
-                    guard.get_node_version(version_id).is_some(),
-                    "INVARIANT VIOLATION: find_node_version_at_time returned non-existent version_id {}",
-                    version_id
-                );
-
-                // Get the version metadata
-                let version = guard
-                    .get_node_version(version_id)
-                    .ok_or(crate::core::error::TemporalError::VersionNotFound(version_id))?;
+                // Get the version metadata (also validates the invariant that
+                // find_node_version_at_time only returns existing version IDs)
+                let version = guard.get_node_version(version_id).ok_or(
+                    crate::core::error::TemporalError::VersionNotFound(version_id),
+                )?;
 
                 // Reconstruct the properties from the version
                 let properties = guard.reconstruct_node_properties(version_id)?;
@@ -516,16 +499,8 @@ impl TemporalNodeScanIterator {
                 transaction_time: self.transaction_time,
             })?;
 
-        // INVARIANT: If find_node_version_at_time returns a version_id,
-        // that version MUST exist in storage. If this fails, it indicates
-        // a critical data inconsistency (broken version chain or dangling version_id).
-        debug_assert!(
-            guard.get_node_version(version_id).is_some(),
-            "INVARIANT VIOLATION: find_node_version_at_time returned non-existent version_id {}",
-            version_id
-        );
-
-        // Step 2: Get the version metadata
+        // Step 2: Get the version metadata (also validates the invariant that
+        // find_node_version_at_time only returns existing version IDs)
         let version = guard.get_node_version(version_id).ok_or(
             crate::core::error::TemporalError::VersionNotFound(version_id),
         )?;
@@ -854,7 +829,10 @@ impl ResultIterator for TraversalIterator {
                 let neighbors = self.get_neighbors(node_id);
                 for (target, edge_id) in neighbors {
                     if self.visited.insert(target) {
-                        let mut new_path = path.clone();
+                        // ⚡ Bolt Optimization: Pre-allocate capacity for new path to avoid reallocations.
+                        // We are adding exactly 2 elements (edge and node) to the current path length.
+                        let mut new_path = Vec::with_capacity(path.len() + 2);
+                        new_path.extend_from_slice(&path);
                         new_path.push(EntityId::Edge(edge_id));
                         new_path.push(EntityId::Node(target));
                         self.frontier
@@ -1118,7 +1096,7 @@ impl Ord for ScoredRow {
 
 /// Iterator for vector reranking.
 pub struct VectorRerankIterator {
-    sorted: Option<std::vec::IntoIter<(QueryRow, f32)>>,
+    sorted: Option<std::vec::IntoIter<Reverse<ScoredRow>>>,
     input: Option<Box<dyn ResultIterator>>,
     embedding: Arc<[f32]>,
     k: usize,
@@ -1185,7 +1163,7 @@ impl ResultIterator for VectorRerankIterator {
         if self.sorted.is_none() && self.input.is_some() {
             // Check if vector index is configured
             let vector_property = match &self.vector_property {
-                Some(prop) => prop.clone(),
+                Some(prop) => prop.as_str(),
                 None => {
                     return Some(Err(crate::core::error::Error::Vector(
                         crate::core::error::VectorError::IndexError(
@@ -1205,7 +1183,7 @@ impl ResultIterator for VectorRerankIterator {
                 match result {
                     Ok(row) => {
                         // Get vector from node and compute similarity
-                        if let Some(similarity) = self.compute_similarity(&row, &vector_property) {
+                        if let Some(similarity) = self.compute_similarity(&row, vector_property) {
                             debug_assert!(similarity.is_finite(), "Non-finite similarity score");
                             if heap.len() < self.k {
                                 heap.push(Reverse(ScoredRow {
@@ -1236,17 +1214,12 @@ impl ResultIterator for VectorRerankIterator {
             // [Smallest Reverse<ScoredRow>, ..., Largest Reverse<ScoredRow>]
             // Smallest Reverse<ScoredRow> corresponds to Largest ScoredRow (highest score).
             // So the result is [Highest Score, ..., Lowest Score], which is exactly what we want.
-            let sorted_rows: Vec<(QueryRow, f32)> = heap
-                .into_sorted_vec()
-                .into_iter()
-                .map(|Reverse(item)| (item.row, item.score))
-                .collect();
-
-            self.sorted = Some(sorted_rows.into_iter());
+            self.sorted = Some(heap.into_sorted_vec().into_iter());
         }
 
-        self.sorted.as_mut()?.next().map(|(mut row, score)| {
-            row.score = Some(score);
+        self.sorted.as_mut()?.next().map(|Reverse(item)| {
+            let mut row = item.row;
+            row.score = Some(item.score);
             Ok(row)
         })
     }

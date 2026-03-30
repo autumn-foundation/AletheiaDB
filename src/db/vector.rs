@@ -484,10 +484,6 @@ impl AletheiaDB {
     ) -> Result<Vec<(NodeId, f32)>> {
         #[cfg(feature = "observability")]
         let _span = tracing::info_span!("find_similar_by_embedding_with_label").entered();
-        #[cfg(feature = "observability")]
-        let _span = tracing::info_span!("find_similar_by_embedding").entered();
-        #[cfg(feature = "observability")]
-        let _span = tracing::info_span!("find_similar").entered();
         self.current
             .find_similar_by_embedding_with_label(embedding, label, k)
             .record_error_metric()

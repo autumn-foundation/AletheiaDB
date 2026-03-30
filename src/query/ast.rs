@@ -340,14 +340,18 @@ pub enum RelationshipDirection {
 
 /// Depth specification for variable-length paths.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(missing_docs)]
 pub enum DepthSpec {
     /// Exactly N hops: *N
     Exact(usize),
     /// Up to N hops: *..N
     Max(usize),
     /// Range of hops: *M..N
-    Range { min: usize, max: usize },
+    Range {
+        /// Minimum number of hops
+        min: usize,
+        /// Maximum number of hops
+        max: usize,
+    },
     /// Unbounded: *
     Variable,
 }

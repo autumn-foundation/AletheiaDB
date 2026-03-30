@@ -60,6 +60,20 @@ impl Point {
 }
 
 /// Configuration for the simulation.
+///
+/// # Examples
+///
+/// ```rust
+/// use aletheiadb::experimental::kaleidoscope::LayoutConfig;
+///
+/// let config = LayoutConfig {
+///     iterations: 200,
+///     semantic_strength: 50.0,
+///     ..LayoutConfig::default()
+/// };
+/// assert_eq!(config.iterations, 200);
+/// assert_eq!(config.semantic_strength, 50.0);
+/// ```
 #[derive(Debug, Clone)]
 pub struct LayoutConfig {
     /// Ideal distance between nodes (k).
@@ -96,6 +110,31 @@ impl Default for LayoutConfig {
 }
 
 /// The Layout Engine.
+///
+/// # Examples
+///
+/// ```rust
+/// use aletheiadb::experimental::kaleidoscope::{LayoutEngine, LayoutConfig};
+/// use aletheiadb::core::id::NodeId;
+///
+/// let mut engine = LayoutEngine::new(LayoutConfig::default());
+///
+/// let n1 = NodeId::new(1).unwrap();
+/// let n2 = NodeId::new(2).unwrap();
+/// let n3 = NodeId::new(3).unwrap();
+///
+/// engine.add_node(n1);
+/// engine.add_node(n2);
+/// engine.add_node(n3);
+///
+/// engine.add_edge(n1, n2); // Topological pull
+/// engine.add_semantic_link(n1, n3, 0.9); // Semantic pull
+///
+/// engine.run();
+///
+/// let positions = engine.get_positions();
+/// assert_eq!(positions.len(), 3);
+/// ```
 pub struct LayoutEngine {
     config: LayoutConfig,
     nodes: Vec<NodeId>,

@@ -1,11 +1,13 @@
 //! Temporal Resonance Engine ("Echo").
 //!
-//! This module implements "Temporal Resonance", a way to find nodes that share
-//! similar historical activity patterns.
-//!
+//! # The Spark
 //! The "Echo" engine generates a `TemporalFingerprint` for a node based on its
 //! mutation history (when it was updated) and compares these fingerprints
 //! to find "resonant" nodes.
+//!
+//! # The Details
+//! This module implements "Temporal Resonance", a way to find nodes that share
+//! similar historical activity patterns.
 //!
 //! # The Hook
 //! "Find me every sensor that failed with the same stuttering pattern as Sensor X."
@@ -17,6 +19,30 @@ use crate::core::id::NodeId;
 use crate::core::temporal::time;
 
 /// A normalized representation of a node's temporal activity.
+///
+/// # The Details
+/// Temporal fingerprints are used to compute the similarity of update histories between nodes.
+///
+/// # Examples
+///
+/// ```
+/// # #[cfg(feature = "nova")]
+/// # fn main() {
+/// use aletheiadb::experimental::echo::TemporalFingerprint;
+///
+/// let fp1 = TemporalFingerprint { bins: vec![1.0, 0.0], resolution_us: 1000 };
+/// let fp2 = TemporalFingerprint { bins: vec![0.0, 1.0], resolution_us: 1000 };
+/// let fp3 = TemporalFingerprint { bins: vec![1.0, 0.0], resolution_us: 1000 };
+///
+/// // fp1 and fp2 are orthogonal
+/// assert!(fp1.similarity(&fp2) < 0.01);
+///
+/// // fp1 and fp3 are identical
+/// assert!(fp1.similarity(&fp3) > 0.99);
+/// # }
+/// # #[cfg(not(feature = "nova"))]
+/// # fn main() {}
+/// ```
 #[derive(Debug, Clone)]
 pub struct TemporalFingerprint {
     /// Normalized activity bins (sum of squares = 1.0 for cosine similarity).
@@ -63,8 +89,25 @@ pub trait Resonator {
 
 /// A resonator that measures activity density over a fixed time window.
 ///
+/// # The Details
 /// It looks at the "Last N" microseconds of history and bins updates into
 /// a histogram.
+///
+/// # Examples
+///
+/// ```
+/// # #[cfg(feature = "nova")]
+/// # fn main() {
+/// use aletheiadb::experimental::echo::{ActivityDensityResonator, Resonator};
+///
+/// let resonator = ActivityDensityResonator {
+///     window_size_us: 3600 * 1_000_000, // 1 hour
+///     num_bins: 60,                     // 1 minute resolution
+/// };
+/// # }
+/// # #[cfg(not(feature = "nova"))]
+/// # fn main() {}
+/// ```
 pub struct ActivityDensityResonator {
     /// Total time window to consider (in microseconds).
     pub window_size_us: i64,
@@ -126,6 +169,31 @@ impl Resonator for ActivityDensityResonator {
 
 #[cfg(feature = "nova")]
 /// The Echo Chamber finds resonant nodes.
+///
+/// # The Details
+/// Finds other nodes that have similar temporal update patterns (e.g., nodes that
+/// are frequently updated at the same times).
+///
+/// # Examples
+///
+/// ```
+/// # #[cfg(feature = "nova")]
+/// # fn main() {
+/// use aletheiadb::AletheiaDB;
+/// use aletheiadb::experimental::echo::EchoChamber;
+/// use aletheiadb::core::id::NodeId;
+///
+/// let db = AletheiaDB::new().unwrap();
+/// let chamber = EchoChamber::new(&db);
+///
+/// let target_node = NodeId::new(1).unwrap();
+/// let candidates = vec![NodeId::new(2).unwrap(), NodeId::new(3).unwrap()];
+///
+/// // chamber.find_echoes(target_node, &candidates);
+/// # }
+/// # #[cfg(not(feature = "nova"))]
+/// # fn main() {}
+/// ```
 pub struct EchoChamber<'a> {
     db: &'a AletheiaDB,
     resonator: Box<dyn Resonator>,
@@ -133,6 +201,31 @@ pub struct EchoChamber<'a> {
 
 #[cfg(not(feature = "nova"))]
 /// The Echo Chamber finds resonant nodes.
+///
+/// # The Details
+/// Finds other nodes that have similar temporal update patterns (e.g., nodes that
+/// are frequently updated at the same times).
+///
+/// # Examples
+///
+/// ```
+/// # #[cfg(feature = "nova")]
+/// # fn main() {
+/// use aletheiadb::AletheiaDB;
+/// use aletheiadb::experimental::echo::EchoChamber;
+/// use aletheiadb::core::id::NodeId;
+///
+/// let db = AletheiaDB::new().unwrap();
+/// let chamber = EchoChamber::new(&db);
+///
+/// let target_node = NodeId::new(1).unwrap();
+/// let candidates = vec![NodeId::new(2).unwrap(), NodeId::new(3).unwrap()];
+///
+/// // chamber.find_echoes(target_node, &candidates);
+/// # }
+/// # #[cfg(not(feature = "nova"))]
+/// # fn main() {}
+/// ```
 #[deprecated(
     note = "EchoChamber requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
 )]

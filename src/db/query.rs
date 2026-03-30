@@ -239,6 +239,71 @@ impl AletheiaDB {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Cypher query execution (feature-gated)
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "cypher")]
+impl AletheiaDB {
+    /// Execute a Cypher query string.
+    ///
+    /// Parses the Cypher query into AletheiaDB's internal query IR and
+    /// executes it through the standard query pipeline.
+    ///
+    /// # Arguments
+    ///
+    /// * `query_string` - A Cypher query string (e.g., `MATCH (n:Person) RETURN n`)
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let results = db.execute_cypher("MATCH (n:Person {name: 'Alice'}) RETURN n")?;
+    /// for row in results {
+    ///     println!("{:?}", row);
+    /// }
+    /// ```
+    pub fn execute_cypher(&self, query_string: &str) -> Result<QueryResults> {
+        let query = crate::cypher::parse_cypher(query_string)?;
+        self.execute_query(query)
+    }
+
+    /// Execute a Cypher query string with parameter bindings.
+    ///
+    /// Parameters are bound to `$param` references in the Cypher query,
+    /// preventing injection attacks and enabling query reuse.
+    ///
+    /// # Arguments
+    ///
+    /// * `query_string` - A Cypher query string with `$param` references
+    /// * `params` - A map of parameter names to values
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use std::collections::HashMap;
+    /// use aletheiadb::cypher::CypherParameterValue;
+    ///
+    /// let mut params = HashMap::new();
+    /// params.insert("name".to_string(), CypherParameterValue::String("Alice".into()));
+    ///
+    /// let results = db.execute_cypher_with_params(
+    ///     "MATCH (n:Person {name: $name}) RETURN n",
+    ///     params,
+    /// )?;
+    /// for row in results {
+    ///     println!("{:?}", row);
+    /// }
+    /// ```
+    pub fn execute_cypher_with_params(
+        &self,
+        query_string: &str,
+        params: std::collections::HashMap<String, crate::cypher::CypherParameterValue>,
+    ) -> Result<QueryResults> {
+        let query = crate::cypher::parse_cypher_with_params(query_string, params)?;
+        self.execute_query(query)
+    }
+}
+
 #[cfg(test)]
 mod tests_aql {
 
