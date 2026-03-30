@@ -86,3 +86,33 @@ impl IndexPersistenceError {
 
 /// Result type for index persistence operations.
 pub type Result<T> = std::result::Result<T, IndexPersistenceError>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io;
+
+    #[test]
+    fn test_is_not_found_returns_true_for_not_found_error() {
+        let err =
+            IndexPersistenceError::Io(io::Error::new(io::ErrorKind::NotFound, "file not found"));
+        assert!(err.is_not_found());
+    }
+
+    #[test]
+    fn test_is_not_found_returns_false_for_other_io_errors() {
+        let err = IndexPersistenceError::Io(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "permission denied",
+        ));
+        assert!(!err.is_not_found());
+    }
+
+    #[test]
+    fn test_is_not_found_returns_false_for_non_io_errors() {
+        let err = IndexPersistenceError::MissingIndex {
+            name: "test".to_string(),
+        };
+        assert!(!err.is_not_found());
+    }
+}

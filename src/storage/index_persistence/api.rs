@@ -88,3 +88,17 @@ pub struct VectorIndexStatus {
     /// Number of temporal snapshots
     pub snapshot_count: u32,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_persistence_config_default() {
+        let config = PersistenceConfig::default();
+        assert!(config.enabled);
+        assert_eq!(config.data_dir, PathBuf::from("data"));
+        assert!(config.load_on_startup);
+        assert!(config.use_mmap);
+    }
+}
