@@ -175,6 +175,8 @@ impl<'a, G: GraphView + ?Sized> SemanticPathfinder<'a, G> {
     ///
     /// # Errors
     /// Returns an error if an underlying database operation fails.
+    ///
+    /// ⚡ Bolt Optimization: Reused pre-allocated Vec inside A* loop to prevent thousands of heap allocations.
     pub fn find_path(
         &self,
         start: NodeId,
@@ -184,6 +186,7 @@ impl<'a, G: GraphView + ?Sized> SemanticPathfinder<'a, G> {
         bidirectional: bool,
     ) -> Result<Option<Vec<NodeId>>> {
         let mut pq = BinaryHeap::new();
+        let mut neighbors = Vec::new();
         // ⚡ Bolt: Use `IdentityHasher` instead of the default SipHash.
         // `NodeId` is already a unique wrapper over `u64`. In pathfinding (like A*),
         // we perform thousands of map insertions and lookups. Bypassing SipHash eliminates
@@ -219,7 +222,7 @@ impl<'a, G: GraphView + ?Sized> SemanticPathfinder<'a, G> {
             }
 
             // Collect neighbors (outgoing, or both directions if bidirectional)
-            let mut neighbors = Vec::new();
+            neighbors.clear();
 
             // Get outgoing edges
             for edge_id in self.db.get_outgoing_edges(node) {
@@ -238,7 +241,7 @@ impl<'a, G: GraphView + ?Sized> SemanticPathfinder<'a, G> {
             }
 
             // Process all neighbors
-            for target in neighbors {
+            for &target in &neighbors {
                 // Calculate semantic cost of moving to target
                 let semantic_cost = self.calculate_semantic_cost(target, query_embedding)?;
 
@@ -305,6 +308,8 @@ impl<'a, G: GraphView + ?Sized> SemanticPathfinder<'a, G> {
     ///
     /// # Errors
     /// Returns an error if an underlying database operation fails.
+    ///
+    /// ⚡ Bolt Optimization: Reused pre-allocated Vec inside A* loop to prevent thousands of heap allocations.
     pub fn find_path_at_time(
         &self,
         start: NodeId,
@@ -315,6 +320,7 @@ impl<'a, G: GraphView + ?Sized> SemanticPathfinder<'a, G> {
         bidirectional: bool,
     ) -> Result<Option<Vec<NodeId>>> {
         let mut pq = BinaryHeap::new();
+        let mut neighbor_edges = Vec::new();
         // ⚡ Bolt: Use `IdentityHasher` instead of the default SipHash.
         // `NodeId` is already a unique wrapper over `u64`. In pathfinding (like A*),
         // we perform thousands of map insertions and lookups. Bypassing SipHash eliminates
@@ -353,7 +359,7 @@ impl<'a, G: GraphView + ?Sized> SemanticPathfinder<'a, G> {
             }
 
             // Collect neighbors (outgoing, or both directions if bidirectional)
-            let mut neighbor_edges = Vec::new();
+            neighbor_edges.clear();
 
             // Get outgoing edges at the specified time
             for edge_id in self.db.get_outgoing_edges_at_time(node, time, time) {
@@ -367,7 +373,7 @@ impl<'a, G: GraphView + ?Sized> SemanticPathfinder<'a, G> {
                 }
             }
 
-            for (edge_id, is_outgoing) in neighbor_edges {
+            for &(edge_id, is_outgoing) in &neighbor_edges {
                 // Get edge details at the specified time
                 if let Ok(edge) = self.db.get_edge_at_time(edge_id, time, time) {
                     // For outgoing edges, target is the neighbor; for incoming, source is the neighbor
