@@ -4269,4 +4269,79 @@ mod sentry_tests {
             "semantically_equal should treat NaN as equal"
         );
     }
+
+    /// 🎯 Target: PropertyValue bounds checks
+    /// 💣 Risk: Missing bounds checks before calling try_into().unwrap() would cause panics
+    /// 🧪 Strategy: Pass truncated buffers that look valid to the length prefix
+    /// 🔬 Verification: Expect StorageError::CorruptedData instead of a panic
+    #[test]
+    fn test_property_value_deserialize_truncated_data_no_panic() {
+        // Helper to test a truncated buffer
+        let test_truncated = |bytes: &[u8], name: &str| {
+            let result = PropertyValue::deserialize(bytes);
+            assert!(
+                result.is_err(),
+                "{} should fail with CorruptedData, got Ok",
+                name
+            );
+            if let Err(crate::core::error::Error::Storage(StorageError::CorruptedData(_))) = result
+            {
+                // Expected
+            } else {
+                panic!("{} should fail with CorruptedData, got {:?}", name, result);
+            }
+        };
+
+        // 1. Truncated Int
+        // Tag (1) + Missing 8 bytes
+        let mut bytes = vec![TAG_INT];
+        bytes.extend_from_slice(&[0u8; 7]); // Only 7 bytes instead of 8
+        test_truncated(&bytes, "Int (7 bytes)");
+
+        // 2. Truncated Float
+        // Tag (1) + Missing 8 bytes
+        let mut bytes = vec![TAG_FLOAT];
+        bytes.extend_from_slice(&[0u8; 7]); // Only 7 bytes instead of 8
+        test_truncated(&bytes, "Float (7 bytes)");
+
+        // 3. Truncated String payload
+        // Tag (1) + Len (4 bytes, value=10) + Data (5 bytes) -> truncated data
+        let mut bytes = vec![TAG_STRING];
+        bytes.extend_from_slice(&10u32.to_le_bytes());
+        bytes.extend_from_slice(&[b'a'; 5]);
+        test_truncated(&bytes, "String (truncated payload)");
+
+        // 4. Truncated String length prefix
+        // Tag (1) + Len (3 bytes)
+        let mut bytes = vec![TAG_STRING];
+        bytes.extend_from_slice(&[0u8; 3]);
+        test_truncated(&bytes, "String (truncated len)");
+
+        // 5. Truncated Bytes payload
+        // Tag (1) + Len (4 bytes, value=10) + Data (5 bytes)
+        let mut bytes = vec![TAG_BYTES];
+        bytes.extend_from_slice(&10u32.to_le_bytes());
+        bytes.extend_from_slice(&[0u8; 5]);
+        test_truncated(&bytes, "Bytes (truncated payload)");
+
+        // 6. Truncated Array payload
+        // Tag (1) + Count (4 bytes, value=5) + Data (0 bytes)
+        let mut bytes = vec![TAG_ARRAY];
+        bytes.extend_from_slice(&5u32.to_le_bytes());
+        test_truncated(&bytes, "Array (missing elements)");
+
+        // 7. PropertyMap truncated length
+        // Count (3 bytes)
+        let bytes = vec![0u8; 3];
+        let result = PropertyMap::deserialize(&bytes);
+        assert!(result.is_err(), "PropertyMap truncated len should fail");
+
+        // 8. PropertyMap truncated key length
+        // Count (4 bytes, value=1) + Key Len (3 bytes)
+        let mut bytes = vec![];
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        bytes.extend_from_slice(&[0u8; 3]);
+        let result = PropertyMap::deserialize(&bytes);
+        assert!(result.is_err(), "PropertyMap truncated key len should fail");
+    }
 }
