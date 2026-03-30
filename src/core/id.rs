@@ -1919,4 +1919,61 @@ mod tests_conversions {
         let t_str = TxId::from_str("42").unwrap();
         assert_eq!(t_str.as_u64(), 42);
     }
+
+    #[test]
+    fn test_node_id_conversions_exhaustive_mutants() {
+        let n_try = NodeId::try_from(42).unwrap();
+        assert_eq!(n_try.as_u64(), 42);
+        assert_eq!(n_try, NodeId::new(42).unwrap());
+
+        // This will kill mutants replacing `try_from` with Default::default()
+        // Default::default() for u64 returns 0. If it returns 0, this will panic since 42 != 0.
+        let n_str = NodeId::from_str("42").unwrap();
+        assert_eq!(n_str.as_u64(), 42);
+        assert_eq!(n_str, NodeId::new(42).unwrap());
+    }
+
+    #[test]
+    fn test_edge_id_conversions_exhaustive_mutants() {
+        let e_try = EdgeId::try_from(42).unwrap();
+        assert_eq!(e_try.as_u64(), 42);
+        assert_eq!(e_try, EdgeId::new(42).unwrap());
+
+        let e_str = EdgeId::from_str("42").unwrap();
+        assert_eq!(e_str.as_u64(), 42);
+        assert_eq!(e_str, EdgeId::new(42).unwrap());
+    }
+
+    #[test]
+    fn test_version_id_conversions_exhaustive_mutants() {
+        let v_try = VersionId::try_from(42).unwrap();
+        assert_eq!(v_try.as_u64(), 42);
+        assert_eq!(v_try, VersionId::new(42).unwrap());
+
+        let v_str = VersionId::from_str("42").unwrap();
+        assert_eq!(v_str.as_u64(), 42);
+        assert_eq!(v_str, VersionId::new(42).unwrap());
+    }
+
+    #[test]
+    fn test_tx_id_conversions_exhaustive_mutants() {
+        let t_try = TxId::try_from(42).unwrap();
+        assert_eq!(t_try.as_u64(), 42);
+        assert_eq!(t_try, TxId::new(42));
+
+        let t_str = TxId::from_str("42").unwrap();
+        assert_eq!(t_str.as_u64(), 42);
+        assert_eq!(t_str, TxId::new(42));
+    }
+
+    #[test]
+    fn test_entity_id_as_node_edge_exhaustive_mutants() {
+        let node_id = NodeId::new(42).unwrap();
+        let entity_node: EntityId = node_id.into();
+        assert_eq!(entity_node.as_node(), Some(NodeId::new(42).unwrap()));
+
+        let edge_id = EdgeId::new(42).unwrap();
+        let entity_edge: EntityId = edge_id.into();
+        assert_eq!(entity_edge.as_edge(), Some(EdgeId::new(42).unwrap()));
+    }
 }
