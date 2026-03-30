@@ -626,6 +626,26 @@ mod proptests {
     use super::*;
     use proptest::prelude::*;
 
+    proptest! {
+        /// 🎯 Target: IdentityHasher FNV-1a Fallback
+        /// 💣 Risk: Fallback branch for arbitrary byte slices `_ =>` must correctly implement FNV-1a.
+        /// 🧪 Strategy: Property test generating arbitrary byte slices of unhandled lengths, asserting against reference FNV-1a.
+        /// 🔬 Verification: Run `cargo test`
+        #[test]
+        fn test_identity_hasher_fnv_fallback_arbitrary(bytes in proptest::collection::vec(any::<u8>(), 0..100)) {
+            // Skip lengths handled specifically by optimized branches
+            prop_assume!(!matches!(bytes.len(), 1 | 2 | 4 | 8 | 16));
+
+            let mut hasher = IdentityHasher::default();
+            hasher.write(&bytes);
+            let result = hasher.finish();
+
+            let reference_hash = reference_fnv1a(&bytes);
+
+            assert_eq!(result, reference_hash, "Fallback must match standard FNV-1a");
+        }
+    }
+
     /// A reference FNV-1a implementation for comparison.
     fn reference_fnv1a(bytes: &[u8]) -> u64 {
         let mut hash = FNV_OFFSET_BASIS;

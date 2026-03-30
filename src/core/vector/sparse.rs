@@ -816,19 +816,19 @@ mod tests {
         let b = SparseVec::new(vec![0], vec![1.0], 10).unwrap();
 
         assert!(
-            sparse_dot_product(&a, &b).is_err(),
+            matches!(sparse_dot_product(&a, &b), Err(crate::core::Error::Vector(VectorError::DimensionMismatch { expected: 5, actual: 10 }))),
             "dot_product should fail on mismatched dimensions"
         );
         assert!(
-            sparse_cosine_similarity(&a, &b).is_err(),
+            matches!(sparse_cosine_similarity(&a, &b), Err(crate::core::Error::Vector(VectorError::DimensionMismatch { expected: 5, actual: 10 }))),
             "cosine_similarity should fail on mismatched dimensions"
         );
         assert!(
-            sparse_euclidean_distance(&a, &b).is_err(),
+            matches!(sparse_euclidean_distance(&a, &b), Err(crate::core::Error::Vector(VectorError::DimensionMismatch { expected: 5, actual: 10 }))),
             "euclidean_distance should fail on mismatched dimensions"
         );
         assert!(
-            sparse_squared_euclidean_distance(&a, &b).is_err(),
+            matches!(sparse_squared_euclidean_distance(&a, &b), Err(crate::core::Error::Vector(VectorError::DimensionMismatch { expected: 5, actual: 10 }))),
             "squared_euclidean_distance should fail on mismatched dimensions"
         );
     }

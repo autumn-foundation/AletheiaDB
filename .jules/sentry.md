@@ -22,3 +22,10 @@
 ## Panic Risks in Query Iterators and Mock Clients
 **Learning:** `unwrap()` inside iterator implementations (like `VectorRerankIterator::next`) or trait implementations for mock clients (like `MockVectorNodeClient`) pose a significant availability risk, as a panic can crash the thread handling the query or the entire database process.
 **Action:** Always gracefully handle `None` on iterators (returning `None` or propagating errors) and map lock poisoning errors (`PoisonError`) to domain-specific errors (e.g. `VectorError`) to ensure the system degrades gracefully instead of crashing during simulated faults or unexpected states.
+## IdentityHasher FNV-1a Fallback Coverage Gap
+**Learning:** `IdentityHasher` implements a highly optimized pass-through hash for known primitive integers (length 1, 2, 4, 8, 16), but has a catch-all fallback (`_ =>`) using the FNV-1a algorithm for any other length byte slices. This fallback logic lacked property-based verification to ensure it accurately implements the FNV-1a algorithm for arbitrary slices and correctly chains state when prior writes have occurred. Testing this fallback logic revealed an edge case in empty slice fallback.
+**Action:** Always verify "catch-all" match arms using property testing to cover all unexpected shapes and lengths, ensuring manual implementations match reference implementations.
+
+## Vector Error Path Validation
+**Learning:** Rust doc tests often use `unwrap()` and this can inadvertently lead to a false sense of security where error paths inside logic components like `SparseVec::new` lack explicit test coverage. Missing explicit test cases for `VectorError` variants could lead to regressions.
+**Action:** Always add exhaustive table-driven tests mapping out every possible error path (`ContainsNaN`, `InvalidSparseVector` due to zero values, dimension mismatches, etc.) when testing logic components handling input.
