@@ -1,3 +1,30 @@
+//! # Context
+//! This module uses `proptest` for chaos engineering (the "Havoc" persona) to find edge cases,
+//! panics, and unexpected behaviors in SIMD vector math operations.
+//!
+//! # Usage
+//! It generates random input data, including extreme values, `NaN`s, and `Infinity`s, to verify
+//! that core mathematical functions (e.g., `normalize`, `dot_product`) do not panic and handle
+//! floating-point edge cases predictably.
+//!
+//! # Details
+//! Tests cover:
+//! - Random length vector garbage inputs.
+//! - SIMD normalization numerical stability with very small magnitude values.
+//! - Safe propagation of `NaN`s.
+//! - Safe propagation of `Infinity`.
+//!
+//! ## Panics
+//! These tests assert that no operations panic on invalid input. They also check for correct
+//! numeric handling without panicking.
+//!
+//! ## Examples
+//! ```rust,ignore
+//! let mut data = vec![f32::NAN; 100];
+//! ops::normalize_in_place(&mut data);
+//! assert!(data[0].is_nan());
+//! ```
+
 use proptest::prelude::*;
 
 // Helper to generate two vectors of the same random length

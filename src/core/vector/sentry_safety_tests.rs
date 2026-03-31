@@ -1,3 +1,28 @@
+//! # Context
+//! This module contains "Sentry" tests focused on the memory safety and correctness of low-level SIMD operations
+//! and unsafe blocks, particularly regarding uninitialized memory handling.
+//!
+//! # Usage
+//! These tests verify that core vector operations safely handle invalid floats (`NaN`, `Infinity`)
+//! without crashing or invoking undefined behavior.
+//!
+//! # Details
+//! Specifically, it ensures that:
+//! - `normalize()` properly returns `NaN` if inputs are `NaN` or `Infinity`.
+//! - `normalize()` handles Zero vectors correctly.
+//! - `scale_and_copy()` safely overwrites and initializes vectors, even handling SIMD remainder loops correctly.
+//!
+//! ## Panics
+//! These tests assert that invalid values map gracefully to predictable floating-point representations
+//! rather than panicking or faulting.
+//!
+//! ## Examples
+//! ```rust,ignore
+//! let v = vec![1.0, f32::NAN, 3.0];
+//! let normalized = normalize(&v);
+//! assert!(normalized[1].is_nan());
+//! ```
+
 use super::ops::*;
 use super::simd::*;
 use std::mem::MaybeUninit;

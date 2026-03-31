@@ -1,15 +1,29 @@
+//! # Context
+//! This module documents and tests the consistency (or lack thereof) of sparse vector operations
+//! regarding dimension mismatch handling.
+//!
+//! # Usage
+//! These tests establish the baseline behavior before refactoring, ensuring that `sparse_dot_product`,
+//! `sparse_cosine_similarity`, and `sparse_squared_euclidean_distance` behave consistently.
+//!
+//! # Details
+//! Current state:
+//! - `sparse_dot_product`: ALLOWS mismatch (inconsistent with dense)
+//! - `sparse_cosine_similarity`: ALLOWS mismatch (inconsistent with dense)
+//! - `sparse_squared_euclidean_distance`: REJECTS mismatch (consistent)
+//!
+//! ## Panics
+//! These tests assert that mismatch handling returns an `Error::Vector(VectorError::DimensionMismatch)`.
+//!
+//! ## Examples
+//! ```rust,ignore
+//! let a = SparseVec::new(vec![0], vec![1.0], 5).unwrap();
+//! let b = SparseVec::new(vec![0], vec![1.0], 10).unwrap();
+//! assert!(sparse_dot_product(&a, &b).is_err());
+//! ```
+
 use super::*;
 use crate::core::error::{Error, VectorError};
-
-// This file documents and tests the consistency (or lack thereof) of sparse vector operations
-// regarding dimension mismatch handling.
-//
-// Current state:
-// - sparse_dot_product: ALLOWS mismatch (inconsistent with dense)
-// - sparse_cosine_similarity: ALLOWS mismatch (inconsistent with dense)
-// - sparse_squared_euclidean_distance: REJECTS mismatch (consistent)
-//
-// These tests establish the baseline behavior before refactoring.
 
 #[test]
 fn test_sparse_dot_product_mismatch_behavior() {
