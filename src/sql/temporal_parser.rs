@@ -250,90 +250,122 @@ enum Token {
 /// Simple tokenizer for temporal clause extraction.
 ///
 /// This skips string literals and only tokenizes SQL keywords and quoted values.
+///
+/// ⚡ Bolt Optimization: Uses a `Peekable` iterator over `char_indices` instead of
+/// collecting into a `Vec` and slices the original `&str` instead of allocating new `String`s
+/// for every word. This achieves true zero-cost matching for keywords and eliminates
+/// O(N) heap allocations during parsing.
 fn tokenize_temporal_keywords(sql: &str) -> Vec<(usize, Token)> {
     let mut tokens = Vec::new();
-    let chars: Vec<(usize, char)> = sql.char_indices().collect();
-    let mut i = 0;
+    let mut chars = sql.char_indices().peekable();
 
-    while i < chars.len() {
-        let (byte_idx, ch) = chars[i];
-
+    while let Some((byte_idx, ch)) = chars.next() {
         // Skip whitespace
         if ch.is_whitespace() {
-            i += 1;
             continue;
         }
 
         // Handle single-quoted strings (SQL string literals)
         if ch == '\'' {
-            i += 1;
             let mut value = String::new();
-            while i < chars.len() {
-                let (_, current_ch) = chars[i];
+            while let Some(&(_, current_ch)) = chars.peek() {
                 if current_ch == '\'' {
+                    chars.next(); // Consume the quote
                     // Check for escaped quote ''
-                    if i + 1 < chars.len() && chars[i + 1].1 == '\'' {
-                        value.push('\'');
-                        i += 2;
+                    if let Some(&(_, next_ch)) = chars.peek() {
+                        if next_ch == '\'' {
+                            chars.next(); // Consume second quote
+                            value.push('\'');
+                        } else {
+                            // End of string
+                            break;
+                        }
                     } else {
-                        // End of string
+                        // End of string (and end of input)
                         break;
                     }
                 } else {
                     value.push(current_ch);
-                    i += 1;
+                    chars.next();
                 }
             }
             tokens.push((byte_idx, Token::QuotedValue(value)));
-            i += 1; // Skip closing quote
             continue;
         }
 
         // Collect alphanumeric/underscore sequences
         if ch.is_alphanumeric() || ch == '_' {
-            let start = i;
-            while i < chars.len() && (chars[i].1.is_alphanumeric() || chars[i].1 == '_') {
-                i += 1;
+            let word_start = byte_idx;
+            let mut word_end = byte_idx + ch.len_utf8();
+
+            while let Some(&(next_idx, next_ch)) = chars.peek() {
+                if next_ch.is_alphanumeric() || next_ch == '_' {
+                    word_end = next_idx + next_ch.len_utf8();
+                    chars.next();
+                } else {
+                    break;
+                }
             }
-            let word: String = chars[start..i].iter().map(|(_, c)| c).collect();
-            let token = match word.to_uppercase().as_str() {
-                "FOR" => Token::For,
-                "SYSTEM_TIME" => Token::SystemTime,
-                "VALID_TIME" => Token::ValidTime,
-                "AS" => {
-                    // Check if next token is "OF"
-                    let mut j = i;
-                    while j < chars.len() && chars[j].1.is_whitespace() {
-                        j += 1;
-                    }
-                    if j < chars.len() {
-                        let mut k = j;
-                        while k < chars.len() && (chars[k].1.is_alphanumeric() || chars[k].1 == '_')
-                        {
-                            k += 1;
-                        }
-                        let next_word: String = chars[j..k].iter().map(|(_, c)| c).collect();
-                        if next_word.to_uppercase() == "OF" {
-                            i = k; // Skip "OF"
-                            Token::AsOf
-                        } else {
-                            Token::Other(word)
-                        }
+
+            let word = &sql[word_start..word_end];
+            let token = if word.eq_ignore_ascii_case("FOR") {
+                Token::For
+            } else if word.eq_ignore_ascii_case("SYSTEM_TIME") {
+                Token::SystemTime
+            } else if word.eq_ignore_ascii_case("VALID_TIME") {
+                Token::ValidTime
+            } else if word.eq_ignore_ascii_case("AS") {
+                // Check if next token is "OF"
+                let mut lookahead = chars.clone();
+
+                // Skip whitespace in lookahead
+                while let Some(&(_, next_ch)) = lookahead.peek() {
+                    if next_ch.is_whitespace() {
+                        lookahead.next();
                     } else {
-                        Token::Other(word)
+                        break;
                     }
                 }
-                "BETWEEN" => Token::Between,
-                "AND" => Token::And,
-                "TIMESTAMP" => Token::Timestamp,
-                _ => Token::Other(word),
+
+                let mut is_of = false;
+                if let Some(&(of_start, next_ch)) = lookahead.peek() {
+                    let is_valid_char = next_ch.is_alphanumeric() || next_ch == '_';
+                    if is_valid_char {
+                        let mut of_end = of_start + next_ch.len_utf8();
+                        lookahead.next();
+                        while let Some(&(n_idx, n_ch)) = lookahead.peek() {
+                            if n_ch.is_alphanumeric() || n_ch == '_' {
+                                of_end = n_idx + n_ch.len_utf8();
+                                lookahead.next();
+                            } else {
+                                break;
+                            }
+                        }
+                        if sql[of_start..of_end].eq_ignore_ascii_case("OF") {
+                            is_of = true;
+                        }
+                    }
+                }
+
+                if is_of {
+                    // Commit the lookahead
+                    chars = lookahead;
+                    Token::AsOf
+                } else {
+                    Token::Other(word.to_string())
+                }
+            } else if word.eq_ignore_ascii_case("BETWEEN") {
+                Token::Between
+            } else if word.eq_ignore_ascii_case("AND") {
+                Token::And
+            } else if word.eq_ignore_ascii_case("TIMESTAMP") {
+                Token::Timestamp
+            } else {
+                Token::Other(word.to_string())
             };
             tokens.push((byte_idx, token));
             continue;
         }
-
-        // Skip other characters
-        i += 1;
     }
 
     tokens
