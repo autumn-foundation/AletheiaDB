@@ -1491,6 +1491,25 @@ wal_dir = "/custom/path/to/wal"
     }
 
     #[test]
+    fn test_historical_config_build_checked_cold_storage_missing_path() {
+        let result = HistoricalConfigBuilder::new()
+            .enable_cold_storage(true)
+            .build_checked();
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), ConfigError::InvalidValue(_)));
+    }
+
+    #[test]
+    fn test_historical_config_build_checked_cold_storage_valid_path() {
+        use std::path::PathBuf;
+        let result = HistoricalConfigBuilder::new()
+            .enable_cold_storage(true)
+            .cold_storage_path(PathBuf::from("/tmp/test"))
+            .build_checked();
+        assert!(result.is_ok());
+    }
+
+    #[test]
     fn test_vector_config_zero_max_k() {
         let result = VectorIndexConfigBuilder::new().max_k(0);
         assert!(result.is_err());
