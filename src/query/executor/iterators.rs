@@ -210,12 +210,48 @@ impl ResultIterator for NodeScanIterator {
 }
 
 /// Iterator for vector search results.
+///
+/// # Context
+/// Transforms raw `(NodeId, score)` pairs from a vector search operation
+/// (like `HnswSearch`) into fully populated `QueryRow` results containing
+/// the actual `Node` entities.
+///
+/// # Details
+/// Performs lazy, row-by-row lookups against `CurrentStorage`. This ensures that
+/// node properties are only materialized in memory when `next()` is explicitly called.
+///
+/// # Panics
+/// Does not panic. If a node ID from the search results is no longer found in storage
+/// (e.g., due to a concurrent deletion), it returns an `Err` which is yielded to the caller.
+///
+/// # Examples
+///
+/// ```rust
+/// # use std::sync::Arc;
+/// # use aletheiadb::storage::current::CurrentStorage;
+/// # use aletheiadb::core::id::NodeId;
+/// # use aletheiadb::query::executor::VectorResultIterator;
+/// # use aletheiadb::query::executor::ResultIterator;
+/// #
+/// # let current = Arc::new(CurrentStorage::new());
+/// # let node_id = current.create_node("Doc", aletheiadb::core::PropertyMapBuilder::new().build()).unwrap();
+/// // Raw results from an HNSW index search
+/// let raw_results = vec![(node_id, 0.95), (node_id, 0.85)];
+///
+/// let mut iter = VectorResultIterator::new(raw_results, current);
+///
+/// while let Some(result) = iter.next() {
+///     let row = result.expect("Node should exist");
+///     println!("Found node {:?} with similarity score: {}", row.entity, row.score.unwrap());
+/// }
+/// ```
 pub struct VectorResultIterator {
     results: std::vec::IntoIter<(NodeId, f32)>,
     current: Arc<CurrentStorage>,
 }
 
 impl VectorResultIterator {
+    /// Create a new VectorResultIterator.
     pub fn new(results: Vec<(NodeId, f32)>, current: Arc<CurrentStorage>) -> Self {
         VectorResultIterator {
             results: results.into_iter(),
@@ -240,14 +276,55 @@ impl ResultIterator for VectorResultIterator {
 
 /// Iterator for temporal node lookups.
 ///
-/// This iterator reconstructs nodes at a specific point in bi-temporal time
-/// by querying the historical storage for the appropriate version and
-/// reconstructing properties using the anchor+delta compression strategy.
+/// # Context
+/// Reconstructs nodes at a specific point in bi-temporal time by querying
+/// historical storage. It transforms a sequence of `NodeId`s into fully
+/// populated `Node`s representing their exact state at `(valid_time, transaction_time)`.
 ///
+/// # Details
 /// The reconstruction process:
-/// 1. Find the version valid at the requested (valid_time, transaction_time)
-/// 2. Reconstruct properties from the version using anchor+delta
-/// 3. Return a Node with the historical label and properties
+/// 1. Finds the version valid at the requested bi-temporal point.
+/// 2. Reconstructs properties from the version using the anchor+delta compression strategy.
+/// 3. Returns a `Node` with the historical label and properties.
+///
+/// This iterator acquires a brief, per-node read lock on `HistoricalStorage`.
+/// For bulk queries where lock overhead is a concern, use [`BatchTemporalNodeIterator`] instead.
+///
+/// # Panics
+/// Does not panic. If a node or version is not found, or if property reconstruction fails,
+/// it returns an `Err(TemporalError)`.
+///
+/// # Examples
+///
+/// ```rust
+/// # use std::sync::Arc;
+/// # use parking_lot::RwLock;
+/// # use aletheiadb::storage::historical::HistoricalStorage;
+/// # use aletheiadb::core::id::NodeId;
+/// # use aletheiadb::core::temporal::time;
+/// # use aletheiadb::query::executor::TemporalNodeIterator;
+/// # use aletheiadb::query::executor::ResultIterator;
+/// #
+/// # let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
+/// # let node_id = NodeId::new(1).unwrap();
+/// let now = time::now();
+/// let node_ids = vec![node_id];
+///
+/// let mut iter = TemporalNodeIterator::new(
+///     node_ids,
+///     now, // valid_time
+///     now, // transaction_time
+///     historical
+/// );
+///
+/// // Iterate over the historical states
+/// while let Some(result) = iter.next() {
+///     // Handle potential TemporalError if node didn't exist at `now`
+///     if let Ok(row) = result {
+///         println!("Historical node state: {:?}", row.entity);
+///     }
+/// }
+/// ```
 pub struct TemporalNodeIterator {
     node_ids: std::vec::IntoIter<NodeId>,
     valid_time: Timestamp,
@@ -256,6 +333,7 @@ pub struct TemporalNodeIterator {
 }
 
 impl TemporalNodeIterator {
+    /// Create a new TemporalNodeIterator.
     pub fn new(
         node_ids: Vec<NodeId>,
         valid_time: Timestamp,
@@ -310,15 +388,51 @@ impl ResultIterator for TemporalNodeIterator {
 
 /// Batch temporal node iterator for bulk queries.
 ///
-/// This iterator is optimized for querying many nodes at once by acquiring
-/// a single read lock, reconstructing all nodes at once, then releasing the lock.
+/// # Context
+/// An optimized alternative to [`TemporalNodeIterator`] for reconstructing
+/// many historical nodes simultaneously. It minimizes lock contention by acquiring
+/// a single read lock on `HistoricalStorage`, processing all nodes, and releasing it immediately.
 ///
+/// # Details
 /// **Performance**: Use this for bulk queries (>100 nodes) where lock acquisition
-/// overhead is significant. For small queries, use `TemporalNodeIterator` instead.
+/// overhead is significant.
 ///
-/// **Trade-off**: Collects all results eagerly during construction, which requires
-/// more memory upfront but avoids per-node lock overhead and allows the lock to be
-/// released immediately after construction.
+/// **Trade-off**: Collects all results eagerly into memory during construction.
+/// This requires more upfront memory allocation (O(n)) but avoids per-node lock
+/// overhead and allows writer threads to proceed without waiting for the entire
+/// iteration to complete.
+///
+/// # Panics
+/// Does not panic. Returns an error during construction if the `HistoricalStorage` lock is poisoned.
+///
+/// # Examples
+///
+/// ```rust
+/// # use std::sync::Arc;
+/// # use parking_lot::RwLock;
+/// # use aletheiadb::storage::historical::HistoricalStorage;
+/// # use aletheiadb::core::id::NodeId;
+/// # use aletheiadb::core::temporal::time;
+/// # use aletheiadb::query::executor::BatchTemporalNodeIterator;
+/// # use aletheiadb::query::executor::ResultIterator;
+/// #
+/// # let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
+/// # let node_ids = vec![NodeId::new(1).unwrap(), NodeId::new(2).unwrap()];
+/// let point_in_time = time::now();
+///
+/// // Lock is acquired, nodes are processed, and lock is released during `new()`
+/// let mut batch_iter = BatchTemporalNodeIterator::new(
+///     node_ids,
+///     point_in_time,
+///     point_in_time,
+///     historical
+/// ).expect("Lock should not be poisoned");
+///
+/// // Iteration is lock-free and pulls from memory
+/// while let Some(Ok(row)) = batch_iter.next() {
+///     println!("Bulk historical data: {:?}", row.entity);
+/// }
+/// ```
 pub struct BatchTemporalNodeIterator {
     results: std::vec::IntoIter<Result<QueryRow>>,
 }

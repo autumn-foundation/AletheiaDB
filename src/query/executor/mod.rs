@@ -21,7 +21,8 @@ pub use iterators::NodeScanIterator;
 pub use iterators::ResultIterator;
 pub use iterators::TemporalNodeScanIterator;
 pub use iterators::{
-    FilterIterator, LimitIterator, ProjectIterator, ProvenanceFilterIterator, VectorRerankIterator,
+    BatchTemporalNodeIterator, FilterIterator, LimitIterator, ProjectIterator,
+    ProvenanceFilterIterator, TemporalNodeIterator, VectorRerankIterator, VectorResultIterator,
 };
 pub use results::{EntityId, EntityResult, QueryResults, QueryRow};
 
