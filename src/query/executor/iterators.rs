@@ -172,7 +172,11 @@ impl NodeScanIterator {
         // The current implementation trades memory efficiency for correctness:
         // DashMap iterators cannot be sent across threads (not Send), and the
         // ResultIterator trait requires Send for parallel query execution.
-        let ids: Vec<NodeId> = self.current.get_all_node_ids();
+        let ids: Vec<NodeId> = if let Some(ref label) = self.label {
+            self.current.get_node_ids_by_label(label)
+        } else {
+            self.current.get_all_node_ids()
+        };
         self.node_ids = Some(ids.into_iter());
     }
 }

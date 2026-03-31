@@ -1,3 +1,6 @@
+**Node ID iterator memory optimization**
+**Learning:** Returning `Vec<NodeId>` when searching for all node IDs in a graph can result in massive allocations. When iterators exist specifically to only yield elements matching a predicate (like labels), allocating only the matched subset drastically reduces memory footprint. However, `get_nodes_by_label` clones the full node object, which is wasteful if we just want the ID. Adding `get_node_ids_by_label` ensures we filter directly on node references and only extract and collect the node IDs.
+**Action:** When filtering iterating data, avoid cloning the data itself if only the ID is needed. Expose methods that directly return IDs instead of full objects, minimizing unnecessary allocations.
 **Avoid intermediate Vec allocations when parsing queries**
 **Learning:** `cleaned.split_whitespace().collect::<Vec<_>>().join(" ");` creates an unnecessary `Vec` allocation on the heap, which isn't necessary for simple string transformations.
 **Action:** Use a pre-allocated string with `String::with_capacity(cleaned.len())` and a loop over the word iterator to concatenate spaces and words directly.
