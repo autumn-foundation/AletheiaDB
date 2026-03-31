@@ -1513,10 +1513,10 @@ mod tests {
         // Plan the query
         let result = planner.plan(query);
         let plan = result.unwrap();
-        assert!(!matches!(
-            plan.root,
-            crate::query::planner::PhysicalOp::Empty
-        ), "Query plan should not be empty");
+        assert!(
+            !matches!(plan.root, crate::query::planner::PhysicalOp::Empty),
+            "Query plan should not be empty"
+        );
     }
 
     #[test]
@@ -1537,10 +1537,10 @@ mod tests {
         // Plan the query
         let result = planner.plan(query);
         let plan = result.unwrap();
-        assert!(!matches!(
-            plan.root,
-            crate::query::planner::PhysicalOp::Empty
-        ), "Query plan should not be empty");
+        assert!(
+            !matches!(plan.root, crate::query::planner::PhysicalOp::Empty),
+            "Query plan should not be empty"
+        );
     }
 
     #[test]
@@ -1561,10 +1561,10 @@ mod tests {
         // Plan the query
         let result = planner.plan(query);
         let plan = result.unwrap();
-        assert!(!matches!(
-            plan.root,
-            crate::query::planner::PhysicalOp::Empty
-        ), "Query plan should not be empty");
+        assert!(
+            !matches!(plan.root, crate::query::planner::PhysicalOp::Empty),
+            "Query plan should not be empty"
+        );
 
         // Temporal queries should include temporal context in the plan
         assert!(plan.is_temporal());
