@@ -339,3 +339,17 @@
 **Finding:** The FNV-1a fallback tests for `IdentityHasher` (`test_identity_hasher_write_fallback_fnv` and `test_identity_hasher_write_fallback_fnv_dirty`) were tautological. They exactly mirrored the source implementation by reconstructing the FNV-1a multiplication and XOR sequence to generate their `expected` values. This meant they only asserted that "the code is the code" and provided no independent verification that the hashing logic was correct or consistent with standard FNV-1a.
 **Evidence:** The original tests explicitly copied the sequence `expected ^= 1; expected = expected.wrapping_mul(FNV_PRIME);` which exactly mirrors the `write` loop. Any mutation altering `FNV_PRIME` or the operation order would survive if the same change was incorrectly made to the test or if it was inherently flawed.
 **Recommendation:** Refactored the tests to use independently pre-computed integer constants as the `expected` values (the Oracle Problem solution). This ensures the implementation matches the ground truth rather than itself.
+
+**[HNSW Reentrancy Weak Assertions]**
+**Module:** `tests/havoc/havoc_hnsw_reentrancy.rs`
+**Severity:** 🟡 Suspect
+**Finding:** The tests `test_reentrant_search_returns_error` and `test_reentrant_search_with_filter_returns_error` ended with a weak assertion `assert!(result.is_ok());` which only verified that the outer search did not fail, but did not verify that it actually returned the expected items.
+**Evidence:** The final assertion in both tests was `assert!(result.is_ok());`.
+**Recommendation:** Replaced `assert!(result.is_ok());` with `assert_eq!(result.unwrap().len(), 1);` and verified the correct node was returned to ensure the outer search actually succeeded and functioned as expected.
+
+**[Query Planner Integration Weak Assertions]**
+**Module:** `src/query/converter.rs`, `tests/hybrid_query_planner.rs`
+**Severity:** 🟡 Suspect
+**Finding:** Multiple planner integration tests in `src/query/converter.rs` (e.g., `test_planner_integration_simple_match`, `test_planner_integration_with_filter`) and `tests/hybrid_query_planner.rs` (`test_minimal_query_planning`) used weak assertions (`assert!(result.is_ok());`) when planning queries. This only proves that the planner didn't panic or return an error, but it doesn't prove that it produced a valid or non-empty physical plan.
+**Evidence:** The tests called `planner.plan(query)` followed by `assert!(result.is_ok());` without inspecting the generated `PhysicalPlan`.
+**Recommendation:** Added assertions to unwrap the result and explicitly check that `!matches!(plan.root, PhysicalOp::Empty)` to ensure the planner actually built a meaningful execution plan.

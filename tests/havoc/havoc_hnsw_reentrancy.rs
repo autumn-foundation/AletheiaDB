@@ -32,8 +32,10 @@ fn test_reentrant_search_returns_error() {
         true
     });
 
-    // The outer search should succeed
-    assert!(result.is_ok());
+    // The outer search should succeed and return the one added node
+    let results = result.unwrap();
+    assert_eq!(results.len(), 1, "Outer search should find 1 node");
+    assert_eq!(results[0].0, NodeId::new(1).unwrap(), "Should find Node 1");
 }
 
 #[test]
@@ -67,5 +69,8 @@ fn test_reentrant_search_with_filter_returns_error() {
         true
     });
 
-    assert!(result.is_ok());
+    // The outer search should succeed and return the one added node
+    let results = result.unwrap();
+    assert_eq!(results.len(), 1, "Outer search should find 1 node");
+    assert_eq!(results[0].0, NodeId::new(1).unwrap(), "Should find Node 1");
 }

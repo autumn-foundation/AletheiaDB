@@ -387,6 +387,11 @@ fn test_minimal_query() {
     // Planning should succeed (execution would return empty results)
     let result = planner.plan(query);
     assert!(result.is_ok());
+    let plan = result.unwrap();
+    assert!(!matches!(
+        plan.root,
+        aletheiadb::query::planner::PhysicalOp::Empty
+    ), "Query plan should not be empty");
     println!("✓ Minimal query plans successfully");
 }
 
