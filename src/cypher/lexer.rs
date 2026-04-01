@@ -223,11 +223,16 @@ impl Token {
 ///
 /// # Examples
 ///
-/// ```rust,ignore
+/// ```rust
+/// # #[cfg(feature = "cypher")]
+/// # fn main() {
 /// use aletheiadb::cypher::lexer::{CypherLexer, TokenKind};
 ///
 /// let tokens = CypherLexer::tokenize("MATCH (n) RETURN n").unwrap();
 /// assert_eq!(tokens[0].kind, TokenKind::Match);
+/// # }
+/// # #[cfg(not(feature = "cypher"))]
+/// # fn main() {}
 /// ```
 pub struct CypherLexer<'a> {
     input: &'a str,
@@ -238,6 +243,35 @@ pub struct CypherLexer<'a> {
 impl<'a> CypherLexer<'a> {
     /// Tokenize the complete input, returning a vector that always ends with
     /// [`TokenKind::Eof`].
+    ///
+    /// # Context
+    /// Before a Cypher query can be parsed, it must be broken down into recognizable
+    /// fundamental components—"tokens". This function is the entry point for the entire
+    /// Cypher evaluation pipeline. It takes raw string input from the user and translates
+    /// it into structured elements.
+    ///
+    /// # Details
+    /// Reads through the provided `input` character-by-character to identify keywords,
+    /// literals, and symbols, packaging them into a sequence of [`Token`]s.
+    ///
+    /// Note: The output vector is guaranteed to end with the `TokenKind::Eof`
+    /// marker if successful, signaling to the parser that the stream is complete.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// # #[cfg(feature = "cypher")]
+    /// # fn main() {
+    /// use aletheiadb::cypher::lexer::{CypherLexer, TokenKind};
+    ///
+    /// let tokens = CypherLexer::tokenize("MATCH (n) RETURN n").unwrap();
+    /// assert_eq!(tokens[0].kind, TokenKind::Match);
+    /// assert_eq!(tokens[1].kind, TokenKind::LParen);
+    /// assert_eq!(tokens.last().unwrap().kind, TokenKind::Eof);
+    /// # }
+    /// # #[cfg(not(feature = "cypher"))]
+    /// # fn main() {}
+    /// ```
     pub fn tokenize(input: &str) -> Result<Vec<Token>, CypherError> {
         let mut lexer = CypherLexer {
             input,

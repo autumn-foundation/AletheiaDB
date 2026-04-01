@@ -27,10 +27,17 @@
 //!
 //! # Usage
 //!
-//! ```rust,ignore
+//! ```rust
+//! # #[cfg(feature = "cypher")]
+//! # fn main() {
 //! use aletheiadb::cypher::CypherParser;
+//! use aletheiadb::cypher::ast::CypherStatement;
 //!
-//! let ast = CypherParser::parse("MATCH (n:Person) RETURN n")?;
+//! let ast = CypherParser::parse("MATCH (n:Person) RETURN n").unwrap();
+//! assert!(matches!(ast, CypherStatement::Match { .. }));
+//! # }
+//! # #[cfg(not(feature = "cypher"))]
+//! # fn main() {}
 //! ```
 
 use super::ast::*;
@@ -538,6 +545,16 @@ impl CypherParser {
     /// ```text
     /// primary := value | var '.' prop | '(' expr ')' | func_call | var
     /// ```
+    ///
+    /// # Context
+    /// Mathematical parsing involves traversing an expression from its most
+    /// complex parts down to its most basic. A "primary expression" is the foundational
+    /// atom of Cypher execution logic.
+    ///
+    /// # Details
+    /// Evaluates base values (integers, strings, booleans, parameters), variable property
+    /// lookups (e.g., `n.age`), function calls (e.g., `vector.similarity(...)`), or
+    /// nested grouped operations via parenthesis.
     fn parse_primary_expr(&mut self) -> Result<CypherExpr, CypherError> {
         match self.peek().kind.clone() {
             // Parenthesized sub-expression
@@ -823,8 +840,14 @@ impl CypherParser {
     /// Try to parse a leading temporal clause. Returns `None` if the next token
     /// is not the start of a temporal clause.
     ///
+    /// # Context
+    /// AletheiaDB uniquely supports bi-temporal querying, extending standard Cypher
+    /// syntax. This method handles parsing these explicit time-travel constraints before
+    /// the `MATCH` pattern resolution begins, setting the global execution boundaries.
+    ///
+    /// # Details
     /// Supported forms:
-    /// - `AS OF TIMESTAMP '...'`
+    /// - `AS OF TIMESTAMP '...'` (Shortcut for valid/system match)
     /// - `FOR VALID_TIME AS OF '...'`
     /// - `FOR SYSTEM_TIME AS OF '...'`
     /// - `BETWEEN '...' AND '...'`

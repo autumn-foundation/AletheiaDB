@@ -17,17 +17,22 @@
 //!
 //! # Usage
 //!
-//! ```rust,ignore
+//! ```rust
+//! # #[cfg(feature = "cypher")]
+//! # fn main() {
 //! use aletheiadb::cypher::{parse_cypher, parse_cypher_with_params, CypherParameterValue};
 //! use std::collections::HashMap;
 //!
 //! // Simple: no parameters
-//! let query = parse_cypher("MATCH (n:Person) RETURN n")?;
+//! let query = parse_cypher("MATCH (n:Person) RETURN n").unwrap();
 //!
 //! // With parameters
 //! let mut params = HashMap::new();
 //! params.insert("name".to_string(), CypherParameterValue::String("Alice".into()));
-//! let query = parse_cypher_with_params("MATCH (n:Person {name: $name}) RETURN n", params)?;
+//! let query = parse_cypher_with_params("MATCH (n:Person {name: $name}) RETURN n", params).unwrap();
+//! # }
+//! # #[cfg(not(feature = "cypher"))]
+//! # fn main() {}
 //! ```
 
 use std::collections::HashMap;
@@ -333,7 +338,16 @@ impl CypherConverter {
 
     /// Convert a Cypher expression into a [`Predicate`].
     ///
-    /// This handles comparisons, logical operators, string predicates, etc.
+    /// # Context
+    /// Cypher AST queries evaluate properties flexibly, but the `AletheiaDB` execution
+    /// engine expects strictly structured [`Predicate`] trees. This internal conversion
+    /// step traverses the abstract `CypherExpr` and converts it into the exact physical
+    /// property, mathematical, and string comparisons supported by the execution layer.
+    ///
+    /// # Details
+    /// Handles mathematical comparisons (`=`, `>`, etc.), logical operators (`AND`, `OR`),
+    /// null-checks (`IS NULL`), string prefix/suffix operators (`STARTS WITH`),
+    /// and array inclusions (`IN`).
     fn convert_expr_to_predicate(&self, expr: &CypherExpr) -> Result<Predicate, CypherError> {
         match expr {
             CypherExpr::Comparison { left, op, right } => self.convert_comparison(left, *op, right),
@@ -441,7 +455,16 @@ impl CypherConverter {
 
     /// Convert an expression to a [`PredicateValue`].
     ///
-    /// Handles literal values and parameter references.
+    /// # Context
+    /// When querying the database, the execution engine requires strong typing
+    /// for values (like Integers, Strings, or Booleans). However, Cypher queries
+    /// are parsed as loose AST nodes. This method ensures that the AST Node
+    /// provided by the user is a valid literal value or parameter.
+    ///
+    /// # Details
+    /// Recursively handles literal values (like `42` or `'hello'`) and dynamically
+    /// resolves parameter references (`$name`) by substituting them with the
+    /// appropriate values provided during query execution.
     fn convert_expr_to_predicate_value(
         &self,
         expr: &CypherExpr,
