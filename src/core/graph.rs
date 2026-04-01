@@ -19,8 +19,56 @@ fn matches_label(label_id: InternedString, label: &str) -> bool {
 
 /// A node in the current state of the graph.
 ///
-/// This represents the current version of a node, optimized for fast access.
-/// Historical versions are stored separately in the temporal storage layer.
+/// # Context
+///
+/// `Node` represents the *current* valid state of an entity in AletheiaDB. It is
+/// heavily optimized for the "hot path" (fast traversals and queries), intentionally
+/// excluding historical data to maintain memory efficiency and cache locality.
+/// Historical versions of this node are maintained separately in the temporal storage layer.
+///
+/// # Usage
+///
+/// Nodes are rarely constructed manually by users; they are typically retrieved via
+/// the database transaction APIs (e.g., `db.read(|tx| tx.get_node(id))`).
+///
+/// # Details
+///
+/// - **Memory Efficiency**: Labels are stored as `InternedString` rather than `String` to prevent
+///   redundant heap allocations across millions of nodes.
+/// - **Concurrency**: `PropertyMap` uses `Arc` internally to allow cheap cloning when
+///   nodes are passed across thread boundaries during parallel query execution.
+/// - **Snapshot Isolation**: The `metadata` field holds transaction timestamps, ensuring
+///   readers only see nodes that were committed before their transaction began.
+///
+/// ## Examples
+///
+/// ```rust
+/// # use std::error::Error;
+/// # fn main() -> Result<(), Box<dyn Error>> {
+/// use aletheiadb::core::id::{NodeId, VersionId};
+/// use aletheiadb::core::interning::GLOBAL_INTERNER;
+/// use aletheiadb::core::property::PropertyMapBuilder;
+/// use aletheiadb::core::graph::Node;
+///
+/// // 1. Intern the string label globally
+/// let label = GLOBAL_INTERNER.intern("Person")?;
+///
+/// // 2. Build the node's properties
+/// let props = PropertyMapBuilder::new()
+///     .insert("name", "Alice")
+///     .insert("age", 30)
+///     .build();
+///
+/// // 3. Construct the Node
+/// let node_id = NodeId::new(42)?;
+/// let version = VersionId::new(1)?;
+/// let node = Node::new(node_id, label, props, version);
+///
+/// assert!(node.has_label_str("Person"));
+/// assert_eq!(node.get_property("name").unwrap().as_str(), Some("Alice"));
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Clone, PartialEq)]
 pub struct Node {
     /// Unique identifier for this node.
@@ -37,6 +85,38 @@ pub struct Node {
 
 impl Node {
     /// Create a new node with the given ID, label, and properties.
+    ///
+    /// # Context
+    ///
+    /// This is the primary constructor for creating a [`Node`] in the current graph state.
+    /// It automatically initializes the `metadata` field to its default value, which is
+    /// sufficient for nodes that don't need explicit transaction tracking during creation.
+    ///
+    /// # Usage
+    ///
+    /// You will typically only use this when implementing data importers, test fixtures,
+    /// or custom database engines.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// # use std::error::Error;
+    /// # fn main() -> Result<(), Box<dyn Error>> {
+    /// use aletheiadb::core::id::{NodeId, VersionId};
+    /// use aletheiadb::core::interning::GLOBAL_INTERNER;
+    /// use aletheiadb::core::property::PropertyMap;
+    /// use aletheiadb::core::graph::Node;
+    ///
+    /// let label = GLOBAL_INTERNER.intern("SystemNode")?;
+    /// let node = Node::new(
+    ///     NodeId::new(1)?,
+    ///     label,
+    ///     PropertyMap::new(),
+    ///     VersionId::new(1)?
+    /// );
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn new(
         id: NodeId,
         label: InternedString,
@@ -53,6 +133,38 @@ impl Node {
     }
 
     /// Create a new node with explicit metadata (for transactions).
+    ///
+    /// # Context
+    ///
+    /// This constructor allows explicit control over the transaction metadata attached
+    /// to the node. This is crucial for Snapshot Isolation, allowing the database to
+    /// determine whether a given transaction should be able to see this node.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// # use std::error::Error;
+    /// # fn main() -> Result<(), Box<dyn Error>> {
+    /// use aletheiadb::core::id::{NodeId, VersionId, TxId};
+    /// use aletheiadb::core::interning::GLOBAL_INTERNER;
+    /// use aletheiadb::core::property::PropertyMap;
+    /// use aletheiadb::core::version::VersionMetadata;
+    /// use aletheiadb::core::temporal::Timestamp;
+    /// use aletheiadb::core::graph::Node;
+    ///
+    /// let label = GLOBAL_INTERNER.intern("TrackedNode")?;
+    /// let metadata = VersionMetadata::new(TxId::new(42), Timestamp::from(100));
+    ///
+    /// let node = Node::with_metadata(
+    ///     NodeId::new(1)?,
+    ///     label,
+    ///     PropertyMap::new(),
+    ///     VersionId::new(1)?,
+    ///     metadata
+    /// );
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn with_metadata(
         id: NodeId,
         label: InternedString,
@@ -70,12 +182,73 @@ impl Node {
     }
 
     /// Get a property value by key.
+    ///
+    /// # Context
+    ///
+    /// Retrieves a reference to the underlying [`PropertyValue`](crate::core::property::PropertyValue)
+    /// for the given property key. This operation is extremely fast as it delegates directly
+    /// to the underlying map representation without copying the value.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// # use std::error::Error;
+    /// # fn main() -> Result<(), Box<dyn Error>> {
+    /// use aletheiadb::core::id::{NodeId, VersionId};
+    /// use aletheiadb::core::interning::GLOBAL_INTERNER;
+    /// use aletheiadb::core::property::PropertyMapBuilder;
+    /// use aletheiadb::core::graph::Node;
+    ///
+    /// let label = GLOBAL_INTERNER.intern("Person")?;
+    /// let props = PropertyMapBuilder::new()
+    ///     .insert("age", 42)
+    ///     .build();
+    ///
+    /// let node = Node::new(NodeId::new(1)?, label, props, VersionId::new(1)?);
+    ///
+    /// assert_eq!(node.get_property("age").unwrap().as_int(), Some(42));
+    /// assert!(node.get_property("missing_key").is_none());
+    /// # Ok(())
+    /// # }
+    /// ```
     #[inline]
     pub fn get_property(&self, key: &str) -> Option<&crate::core::property::PropertyValue> {
         self.properties.get(key)
     }
 
     /// Check if this node has a specific label.
+    ///
+    /// # Context
+    ///
+    /// A zero-cost equality check against an already-interned string. Since `InternedString`
+    /// resolves to a `u32` integer under the hood, this method is significantly faster than
+    /// performing a string comparison.
+    ///
+    /// # Usage
+    ///
+    /// Use this in tight loops (e.g., filtering thousands of nodes during a query) by
+    /// interning the search string once before the loop.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// # use std::error::Error;
+    /// # fn main() -> Result<(), Box<dyn Error>> {
+    /// use aletheiadb::core::id::{NodeId, VersionId};
+    /// use aletheiadb::core::interning::GLOBAL_INTERNER;
+    /// use aletheiadb::core::property::PropertyMap;
+    /// use aletheiadb::core::graph::Node;
+    ///
+    /// let person_label = GLOBAL_INTERNER.intern("Person")?;
+    /// let other_label = GLOBAL_INTERNER.intern("Company")?;
+    ///
+    /// let node = Node::new(NodeId::new(1)?, person_label, PropertyMap::new(), VersionId::new(1)?);
+    ///
+    /// assert!(node.has_label(person_label));
+    /// assert!(!node.has_label(other_label));
+    /// # Ok(())
+    /// # }
+    /// ```
     #[inline]
     pub fn has_label(&self, label: InternedString) -> bool {
         self.label == label
@@ -139,8 +312,55 @@ impl std::fmt::Debug for Node {
 
 /// An edge in the current state of the graph.
 ///
-/// Edges are directed relationships between nodes with properties.
-/// This represents the current version, optimized for fast traversals.
+/// # Context
+///
+/// `Edge` represents a directional relationship between two [`Node`]s in the current
+/// valid state of AletheiaDB. Like nodes, edges are optimized for rapid traversal and
+/// do not store historical relationship data directly.
+///
+/// # Usage
+///
+/// Edges are generally returned by graph traversal APIs (e.g., `get_outgoing_edges()`)
+/// during query execution.
+///
+/// # Details
+///
+/// - **Directionality**: Every edge connects exactly one `source` node to one `target` node.
+///   For bidirectional relationships, two separate edges are typically created.
+/// - **Interning**: The edge type (`label`) is interned to save memory and speed up type-filtering
+///   operations during graph traversal.
+/// - **Version Tracking**: `current_version` links to the exact historical record that
+///   produced this edge state.
+///
+/// ## Examples
+///
+/// ```rust
+/// # use std::error::Error;
+/// # fn main() -> Result<(), Box<dyn Error>> {
+/// use aletheiadb::core::id::{EdgeId, NodeId, VersionId};
+/// use aletheiadb::core::interning::GLOBAL_INTERNER;
+/// use aletheiadb::core::property::PropertyMapBuilder;
+/// use aletheiadb::core::graph::Edge;
+///
+/// let label = GLOBAL_INTERNER.intern("KNOWS")?;
+/// let props = PropertyMapBuilder::new()
+///     .insert("since", 2021)
+///     .build();
+///
+/// let edge = Edge::new(
+///     EdgeId::new(100)?,
+///     label,
+///     NodeId::new(1)?,   // Source
+///     NodeId::new(2)?,   // Target
+///     props,
+///     VersionId::new(1)?
+/// );
+///
+/// assert!(edge.connects(NodeId::new(1)?, NodeId::new(2)?));
+/// assert_eq!(edge.get_property("since").unwrap().as_int(), Some(2021));
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Clone, PartialEq)]
 pub struct Edge {
     /// Unique identifier for this edge.
@@ -161,6 +381,38 @@ pub struct Edge {
 
 impl Edge {
     /// Create a new edge with the given parameters.
+    ///
+    /// # Context
+    ///
+    /// This is the primary constructor for creating an [`Edge`] in the current graph state.
+    /// It automatically initializes the `metadata` field to its default value.
+    ///
+    /// # Usage
+    ///
+    /// Generally used internally by storage components to reconstruct edges from persistence layers.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// # use std::error::Error;
+    /// # fn main() -> Result<(), Box<dyn Error>> {
+    /// use aletheiadb::core::id::{EdgeId, NodeId, VersionId};
+    /// use aletheiadb::core::interning::GLOBAL_INTERNER;
+    /// use aletheiadb::core::property::PropertyMap;
+    /// use aletheiadb::core::graph::Edge;
+    ///
+    /// let label = GLOBAL_INTERNER.intern("RELATES_TO")?;
+    /// let edge = Edge::new(
+    ///     EdgeId::new(10)?,
+    ///     label,
+    ///     NodeId::new(1)?,
+    ///     NodeId::new(2)?,
+    ///     PropertyMap::new(),
+    ///     VersionId::new(1)?
+    /// );
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn new(
         id: EdgeId,
         label: InternedString,
@@ -181,6 +433,40 @@ impl Edge {
     }
 
     /// Create a new edge with explicit metadata (for transactions).
+    ///
+    /// # Context
+    ///
+    /// This constructor is required when creating edges as part of an active transaction.
+    /// The provided `VersionMetadata` tracks which transaction created this edge, enabling
+    /// Snapshot Isolation and preventing dirty reads.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// # use std::error::Error;
+    /// # fn main() -> Result<(), Box<dyn Error>> {
+    /// use aletheiadb::core::id::{EdgeId, NodeId, VersionId, TxId};
+    /// use aletheiadb::core::interning::GLOBAL_INTERNER;
+    /// use aletheiadb::core::property::PropertyMap;
+    /// use aletheiadb::core::version::VersionMetadata;
+    /// use aletheiadb::core::temporal::Timestamp;
+    /// use aletheiadb::core::graph::Edge;
+    ///
+    /// let label = GLOBAL_INTERNER.intern("FOLLOWS")?;
+    /// let metadata = VersionMetadata::new(TxId::new(10), Timestamp::from(500));
+    ///
+    /// let edge = Edge::with_metadata(
+    ///     EdgeId::new(1)?,
+    ///     label,
+    ///     NodeId::new(5)?,
+    ///     NodeId::new(6)?,
+    ///     PropertyMap::new(),
+    ///     VersionId::new(1)?,
+    ///     metadata
+    /// );
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn with_metadata(
         id: EdgeId,
         label: InternedString,
@@ -202,12 +488,68 @@ impl Edge {
     }
 
     /// Get a property value by key.
+    ///
+    /// # Context
+    ///
+    /// Provides zero-copy access to the edge's underlying property map.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// # use std::error::Error;
+    /// # fn main() -> Result<(), Box<dyn Error>> {
+    /// use aletheiadb::core::id::{EdgeId, NodeId, VersionId};
+    /// use aletheiadb::core::interning::GLOBAL_INTERNER;
+    /// use aletheiadb::core::property::PropertyMapBuilder;
+    /// use aletheiadb::core::graph::Edge;
+    ///
+    /// let label = GLOBAL_INTERNER.intern("WEIGHTED_EDGE")?;
+    /// let props = PropertyMapBuilder::new()
+    ///     .insert("weight", 4.2)
+    ///     .build();
+    ///
+    /// let edge = Edge::new(
+    ///     EdgeId::new(1)?, label, NodeId::new(1)?, NodeId::new(2)?,
+    ///     props, VersionId::new(1)?
+    /// );
+    ///
+    /// assert_eq!(edge.get_property("weight").unwrap().as_float(), Some(4.2));
+    /// # Ok(())
+    /// # }
+    /// ```
     #[inline]
     pub fn get_property(&self, key: &str) -> Option<&crate::core::property::PropertyValue> {
         self.properties.get(key)
     }
 
     /// Check if this edge has a specific label.
+    ///
+    /// # Context
+    ///
+    /// A fast equality check against an interned label.
+    /// Use this over `has_label_str` when checking multiple edges in a tight loop.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// # use std::error::Error;
+    /// # fn main() -> Result<(), Box<dyn Error>> {
+    /// use aletheiadb::core::id::{EdgeId, NodeId, VersionId};
+    /// use aletheiadb::core::interning::GLOBAL_INTERNER;
+    /// use aletheiadb::core::property::PropertyMap;
+    /// use aletheiadb::core::graph::Edge;
+    ///
+    /// let knows_label = GLOBAL_INTERNER.intern("KNOWS")?;
+    ///
+    /// let edge = Edge::new(
+    ///     EdgeId::new(1)?, knows_label, NodeId::new(1)?, NodeId::new(2)?,
+    ///     PropertyMap::new(), VersionId::new(1)?
+    /// );
+    ///
+    /// assert!(edge.has_label(knows_label));
+    /// # Ok(())
+    /// # }
+    /// ```
     #[inline]
     pub fn has_label(&self, label: InternedString) -> bool {
         self.label == label
@@ -253,6 +595,36 @@ impl Edge {
     }
 
     /// Check if this edge connects the given source and target nodes.
+    ///
+    /// # Context
+    ///
+    /// Checks exact directionality: the edge must start at `source` and end at `target`.
+    /// It returns `false` if the nodes are connected in the reverse direction.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// # use std::error::Error;
+    /// # fn main() -> Result<(), Box<dyn Error>> {
+    /// use aletheiadb::core::id::{EdgeId, NodeId, VersionId};
+    /// use aletheiadb::core::interning::GLOBAL_INTERNER;
+    /// use aletheiadb::core::property::PropertyMap;
+    /// use aletheiadb::core::graph::Edge;
+    ///
+    /// let label = GLOBAL_INTERNER.intern("DIRECTS")?;
+    /// let source = NodeId::new(1)?;
+    /// let target = NodeId::new(2)?;
+    ///
+    /// let edge = Edge::new(
+    ///     EdgeId::new(10)?, label, source, target,
+    ///     PropertyMap::new(), VersionId::new(1)?
+    /// );
+    ///
+    /// assert!(edge.connects(source, target)); // Correct direction
+    /// assert!(!edge.connects(target, source)); // Wrong direction
+    /// # Ok(())
+    /// # }
+    /// ```
     #[inline]
     pub fn connects(&self, source: NodeId, target: NodeId) -> bool {
         self.source == source && self.target == target
