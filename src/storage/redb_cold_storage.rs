@@ -1,10 +1,10 @@
 //! Redb-based cold storage backend for tiered storage architecture.
 //!
-//! This module implements the "Cold" tier of AletheiaDB's storage hierarchy using [Redb](https://github.com/cberner/redb),
-//! a pure Rust embedded database. It provides durable, disk-based storage for historical data that has
-//! aged out of the "Warm" memory tier.
+//! # Context
 //!
-//! # Role in Architecture
+//! This module implements the "Cold" tier of AletheiaDB's storage hierarchy using [Redb](https://github.com/cberner/redb), a pure Rust embedded database. It provides durable, disk-based storage for historical data that has aged out of the "Warm" memory tier.
+//!
+//! # Details
 //!
 //! 1.  **Historical Storage**: Persists `NodeVersion` and `EdgeVersion` objects that represent the
 //!     state of the graph at past points in time.

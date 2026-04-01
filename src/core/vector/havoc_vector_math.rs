@@ -1,3 +1,11 @@
+//! # Context
+//!
+//! This module contains fuzzing and chaos tests for SIMD vector math operations.
+//!
+//! # Details
+//!
+//! These tests ensure that SIMD instructions (AVX2, SSE2) do not panic or exhibit undefined behavior when encountering malformed inputs such as vectors with NaNs, infinities, or subnormal numbers.
+
 use proptest::prelude::*;
 
 // Helper to generate two vectors of the same random length

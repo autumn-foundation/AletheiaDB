@@ -1,4 +1,35 @@
-//! Serialization logic for WAL entries.
+//! # Context
+//!
+//! Serialization logic for Write-Ahead Log (WAL) entries.
+//!
+//! # Details
+//!
+//! This module defines the highly optimized binary format used to persist transactions to disk.
+//! It includes capacity estimation to prevent allocations during the hot path.
+//!
+//! ## Examples
+//!
+//! ```rust,ignore
+//! # use aletheiadb::storage::wal::{WalOperation, LSN};
+//! # use aletheiadb::core::id::NodeId;
+//! # use aletheiadb::core::interning::GLOBAL_INTERNER;
+//! # use aletheiadb::core::property::PropertyMapBuilder;
+//! # use aletheiadb::core::temporal::Timestamp;
+//! # use aletheiadb::core::hlc::HybridTimestamp;
+//! # let label = GLOBAL_INTERNER.intern("test").unwrap();
+//! # let properties = PropertyMapBuilder::new().build();
+//! # let valid_from = HybridTimestamp::new_unchecked(0, 0);
+//! let op = WalOperation::CreateNode {
+//!     node_id: NodeId::new(1).unwrap(),
+//!     label,
+//!     properties,
+//!     valid_from,
+//! };
+//! // Estimate capacity to avoid reallocations
+//! // let estimated_size = aletheiadb::storage::wal::serialization::estimate_entry_capacity(&op);
+//! // let mut buffer = Vec::with_capacity(estimated_size);
+//! // serialize_operation_into(LSN(1), valid_from, &op, &mut buffer).unwrap();
+//! ```
 
 #[cfg(test)]
 use super::entry::WalEntry;

@@ -1,8 +1,33 @@
 //! Query Executor
 //!
-//! Executes physical query plans using a pull-based iterator model.
-//! The executor transforms physical operators into iterators that
-//! lazily produce results.
+//! # Context
+//!
+//! Executes physical query plans using a Volcano-style pull-based iterator model.
+//!
+//! # Details
+//!
+//! The executor transforms `PhysicalPlan` operators into `ResultIterator` traits that lazily produce `QueryRow` results.
+//! This execution model minimizes memory overhead by streaming results through the pipeline rather than materializing intermediate datasets.
+//!
+//! ## Examples
+//!
+//! ```rust
+//! use aletheiadb::AletheiaDB;
+//! use aletheiadb::core::property::PropertyMapBuilder;
+//!
+//! let db = AletheiaDB::new().unwrap();
+//! db.create_node("Person", PropertyMapBuilder::new().insert("name", "Alice").build()).unwrap();
+//!
+//! // The query execution pipeline is run internally by `execute_aql`.
+//! // It parses, plans, and then streams the results using the executor's Volcano model.
+//! let mut results = db.execute_aql("MATCH (n:Person) RETURN n").unwrap();
+//!
+//! // Under the hood, this iterates over the generated `ResultIterator`
+//! while let Some(Ok(row)) = results.next() {
+//!     let entity = row.entity;
+//!     // Process entity incrementally
+//! }
+//! ```
 
 mod iterators;
 mod results;

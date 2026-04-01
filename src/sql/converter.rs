@@ -1,7 +1,25 @@
 //! SQL to QueryOp Converter.
 //!
-//! This module converts parsed SQL AST from sqlparser-rs into AletheiaDB's
-//! internal Query representation (QueryOp operations).
+//! # Context
+//!
+//! This module converts parsed SQL AST from sqlparser-rs into AletheiaDB's internal Query representation (QueryOp operations).
+//!
+//! # Details
+//!
+//! The converter acts as a bridge between the SQL dialect and the graph traversal engine, mapping SQL semantics to AletheiaDB's hybrid graph/vector operators.
+//!
+//! ## Examples
+//!
+//! ```rust
+//! use aletheiadb::sql::{SqlConverter, SqlParser};
+//!
+//! let sql = "MATCH (n:Person) RETURN n LIMIT 10";
+//! let mut parser = SqlParser::new();
+//! let statements = parser.parse(sql).unwrap();
+//!
+//! let mut converter = SqlConverter::new();
+//! let query = converter.convert(&statements[0]).unwrap();
+//! ```
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -37,13 +55,17 @@ pub enum SqlParameterValue {
 
 /// Converter from SQL AST to AletheiaDB Query.
 ///
-/// # Example
+/// ## Examples
 ///
-/// ```rust,ignore
-/// use aletheiadb::sql::SqlConverter;
+/// ```rust
+/// use aletheiadb::sql::{SqlConverter, SqlParser};
 ///
-/// let converter = SqlConverter::new();
-/// let query = converter.convert_sql("SELECT * FROM nodes WHERE label = 'Person'")?;
+/// let sql = "MATCH (n:Person) RETURN n LIMIT 10";
+/// let mut parser = SqlParser::new();
+/// let statements = parser.parse(sql).unwrap();
+///
+/// let mut converter = SqlConverter::new();
+/// let query = converter.convert(&statements[0]).unwrap();
 /// ```
 pub struct SqlConverter {
     /// Parameter bindings

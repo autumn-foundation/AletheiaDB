@@ -92,3 +92,7 @@
 ## 2025-03-05 - Experimental Feature Leaks II & Doctest Conditionals
 **Confusion:** Several experimental modules (`chronos`, `echo`, `sherlock`, and `temporal_narrative`) in `src/experimental/mod.rs` were missing their `#[cfg(feature = "nova")]` gating attributes. This allowed them to leak into the public API without the required feature flag enabled. Furthermore, the doctests for `sherlock` (in `mod.rs`) and `kairos` used an anonymous block (`# { ... }`) for feature gating, which generated `main function not found` or `expressions at the top level` warnings in `cargo test --doc`.
 **Clarification:** Added the missing `#[cfg(feature = "nova")]` attributes to the exposed experimental modules. Fixed the doctests to use conditional compilation on the `main` function and imports themselves (`# #[cfg(feature = "nova")] \n fn main() { ... }`), and added an empty fallback `main` function for when the feature is disabled.
+
+## 2025-03-08 - Opaque Test Intentions
+**Confusion:** The `src/core/vector/havoc_vector_math.rs` and other core files lacked module-level `//!` documentation, making their chaos-testing and serialization intentions opaque.
+**Clarification:** Added `//! # Context` and `//! # Details` module-level documentation to `havoc_vector_math.rs`, `serialization.rs`, `redb_cold_storage.rs`, `executor/mod.rs`, and `converter.rs` to explain *why* these modules exist and provide concrete examples.
