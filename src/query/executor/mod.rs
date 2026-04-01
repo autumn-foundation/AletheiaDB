@@ -336,6 +336,18 @@ impl QueryExecutor {
                     properties.clone(),
                 )))
             }
+            PhysicalOp::Aggregate {
+                input,
+                group_by,
+                aggregates,
+            } => {
+                let input_iter = self.execute_op(input)?;
+                Ok(Box::new(iterators::AggregateIterator::new(
+                    input_iter,
+                    group_by.clone(),
+                    aggregates.clone(),
+                )?))
+            }
 
             PhysicalOp::Empty => Ok(Box::new(iterators::EmptyIterator)),
             PhysicalOp::SimilarToNode {

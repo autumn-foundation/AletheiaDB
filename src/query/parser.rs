@@ -178,6 +178,7 @@ impl Parser {
     ///           rank_clause?
     ///           where_clause?
     ///           return_clause?
+    ///           group_by_clause?
     ///           order_clause?
     ///           skip_clause?
     ///           limit_clause?
@@ -208,6 +209,11 @@ impl Parser {
         // Parse optional RETURN clause
         if let Some(return_clause) = self.parse_return_clause()? {
             query = query.with_return(return_clause);
+        }
+
+        // Parse optional GROUP BY clause
+        if let Some(group_by) = self.parse_group_by_clause()? {
+            query = query.with_group_by(group_by);
         }
 
         // Parse optional ORDER BY clause
@@ -1096,15 +1102,45 @@ impl Parser {
     fn parse_expression(&mut self) -> Result<Expression, ParseError> {
         match self.current() {
             Some(Token::Identifier(_)) => {
-                // Could be property access (n.prop) or just identifier (n)
+                // Could be function call, property access (n.prop), or identifier (n)
                 let ident = self.parse_identifier()?;
+                if self.check(&Token::LeftParen) {
+                    self.advance(); // (
+                    let mut args = Vec::new();
+                    if !self.check(&Token::RightParen) {
+                        args.push(self.parse_expression()?);
+                        while self.check(&Token::Comma) {
+                            self.advance();
+                            args.push(self.parse_expression()?);
+                        }
+                    }
+                    self.expect(&Token::RightParen)?;
+                    return Ok(Expression::FunctionCall { name: ident, args });
+                }
                 if self.check(&Token::Dot) {
                     self.advance();
                     let prop = self.parse_identifier()?;
-                    Ok(Expression::Property(PropertyAccess {
-                        variable: ident,
-                        property: prop,
-                    }))
+                    if self.check(&Token::LeftParen) {
+                        self.advance(); // (
+                        let mut args = Vec::new();
+                        if !self.check(&Token::RightParen) {
+                            args.push(self.parse_expression()?);
+                            while self.check(&Token::Comma) {
+                                self.advance();
+                                args.push(self.parse_expression()?);
+                            }
+                        }
+                        self.expect(&Token::RightParen)?;
+                        Ok(Expression::FunctionCall {
+                            name: format!("{ident}.{prop}"),
+                            args,
+                        })
+                    } else {
+                        Ok(Expression::Property(PropertyAccess {
+                            variable: ident,
+                            property: prop,
+                        }))
+                    }
                 } else {
                     // Just an identifier - a variable reference
                     Ok(Expression::Identifier(ident))
@@ -1114,6 +1150,30 @@ impl Parser {
                 let param = p.clone();
                 self.advance();
                 Ok(Expression::Parameter(param))
+            }
+            Some(Token::Count | Token::Sum | Token::Avg | Token::Min | Token::Max) => {
+                let fn_name = match self.current() {
+                    Some(Token::Count) => "COUNT",
+                    Some(Token::Sum) => "SUM",
+                    Some(Token::Avg) => "AVG",
+                    Some(Token::Min) => "MIN",
+                    Some(Token::Max) => "MAX",
+                    _ => unreachable!(),
+                }
+                .to_string();
+                self.advance();
+                self.expect(&Token::LeftParen)?;
+                let arg = if self.check(&Token::Star) {
+                    self.advance();
+                    Expression::Identifier("*".to_string())
+                } else {
+                    self.parse_expression()?
+                };
+                self.expect(&Token::RightParen)?;
+                Ok(Expression::FunctionCall {
+                    name: fn_name,
+                    args: vec![arg],
+                })
             }
             _ => self.parse_literal_expression(),
         }
@@ -1175,26 +1235,6 @@ impl Parser {
             false
         };
 
-        // Check for COUNT
-        if self.check(&Token::Count) {
-            self.advance();
-            self.expect(&Token::LeftParen)?;
-            let arg = if self.check(&Token::Star) {
-                self.advance();
-                // Represent COUNT(*) with a special identifier
-                Expression::Identifier("*".to_string())
-            } else {
-                self.parse_expression()?
-            };
-            self.expect(&Token::RightParen)?;
-
-            let items = vec![ReturnItem::new(Expression::FunctionCall {
-                name: "COUNT".to_string(),
-                args: vec![arg],
-            })];
-            return Ok(Some(ReturnClause { items, distinct }));
-        }
-
         let mut items = vec![self.parse_return_item()?];
 
         while self.check(&Token::Comma) {
@@ -1203,6 +1243,23 @@ impl Parser {
         }
 
         Ok(Some(ReturnClause { items, distinct }))
+    }
+
+    fn parse_group_by_clause(&mut self) -> Result<Option<GroupByClause>, ParseError> {
+        if !self.check(&Token::Group) {
+            return Ok(None);
+        }
+
+        self.advance(); // GROUP
+        self.expect(&Token::By)?;
+
+        let mut items = vec![self.parse_expression()?];
+        while self.check(&Token::Comma) {
+            self.advance();
+            items.push(self.parse_expression()?);
+        }
+
+        Ok(Some(GroupByClause { items }))
     }
 
     fn parse_return_item(&mut self) -> Result<ReturnItem, ParseError> {
@@ -1862,6 +1919,23 @@ mod tests {
         } else {
             panic!("Expected return clause");
         }
+    }
+
+    #[test]
+    fn test_parse_return_multiple_aggregates() {
+        let query =
+            Parser::parse("MATCH (n) RETURN SUM(n.amount) AS total, AVG(n.amount) AS avg").unwrap();
+        let ret = query.return_clause.expect("expected return clause");
+        assert_eq!(ret.items.len(), 2);
+    }
+
+    #[test]
+    fn test_parse_group_by() {
+        let query =
+            Parser::parse("MATCH (n) RETURN n.category AS cat, COUNT(*) AS cnt GROUP BY cat")
+                .unwrap();
+        assert!(query.group_by.is_some());
+        assert_eq!(query.group_by.expect("group by").items.len(), 1);
     }
 
     #[test]

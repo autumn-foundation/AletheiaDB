@@ -30,7 +30,7 @@ use std::sync::Arc;
 use crate::core::NodeId;
 use crate::core::temporal::{TimeRange, Timestamp};
 
-use super::super::ir::{Direction, Predicate};
+use super::super::ir::{AggregateExpr, Direction, Predicate};
 use super::super::plan::{SortKey, TemporalContext};
 use super::cost::Cost;
 
@@ -560,6 +560,16 @@ pub enum PhysicalOp {
         input: Box<PhysicalOp>,
     },
 
+    /// Grouped aggregation
+    Aggregate {
+        /// Input operator
+        input: Box<PhysicalOp>,
+        /// Group-by keys
+        group_by: Vec<String>,
+        /// Aggregate expressions
+        aggregates: Vec<AggregateExpr>,
+    },
+
     /// Track temporal changes
     TemporalTrack {
         /// Input operator
@@ -603,6 +613,7 @@ impl PhysicalOp {
             PhysicalOp::Project { .. } => "Project",
             PhysicalOp::Distinct { .. } => "Distinct",
             PhysicalOp::Count { .. } => "Count",
+            PhysicalOp::Aggregate { .. } => "Aggregate",
             PhysicalOp::TemporalTrack { .. } => "TemporalTrack",
             PhysicalOp::Materialize { .. } => "Materialize",
             PhysicalOp::Empty => "Empty",
@@ -648,6 +659,7 @@ impl PhysicalOp {
             | PhysicalOp::Project { input, .. }
             | PhysicalOp::Distinct { input, .. }
             | PhysicalOp::Count { input, .. }
+            | PhysicalOp::Aggregate { input, .. }
             | PhysicalOp::TemporalTrack { input, .. }
             | PhysicalOp::Materialize { input, .. } => 1 + input.depth(),
 
@@ -831,6 +843,7 @@ impl PhysicalOp {
             | PhysicalOp::Project { input, .. }
             | PhysicalOp::Distinct { input, .. }
             | PhysicalOp::Count { input, .. }
+            | PhysicalOp::Aggregate { input, .. }
             | PhysicalOp::TemporalTrack { input, .. }
             | PhysicalOp::Materialize { input, .. } => Some(input),
             _ => None,

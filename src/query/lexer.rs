@@ -44,6 +44,16 @@ pub enum Token {
     Distinct,
     /// The `COUNT` keyword, used to count results.
     Count,
+    /// The `SUM` keyword.
+    Sum,
+    /// The `AVG` keyword.
+    Avg,
+    /// The `MIN` keyword.
+    Min,
+    /// The `MAX` keyword.
+    Max,
+    /// The `GROUP` keyword, used in `GROUP BY`.
+    Group,
     /// The `ASC` keyword, used for ascending order.
     Asc,
     /// The `DESC` keyword, used for descending order.
@@ -184,6 +194,11 @@ impl fmt::Display for Token {
             Token::Skip => write!(f, "SKIP"),
             Token::Distinct => write!(f, "DISTINCT"),
             Token::Count => write!(f, "COUNT"),
+            Token::Sum => write!(f, "SUM"),
+            Token::Avg => write!(f, "AVG"),
+            Token::Min => write!(f, "MIN"),
+            Token::Max => write!(f, "MAX"),
+            Token::Group => write!(f, "GROUP"),
             Token::Asc => write!(f, "ASC"),
             Token::Desc => write!(f, "DESC"),
             Token::And => write!(f, "AND"),
@@ -785,6 +800,11 @@ impl<'a> Lexer<'a> {
             "SKIP" => Token::Skip,
             "DISTINCT" => Token::Distinct,
             "COUNT" => Token::Count,
+            "SUM" => Token::Sum,
+            "AVG" => Token::Avg,
+            "MIN" => Token::Min,
+            "MAX" => Token::Max,
+            "GROUP" => Token::Group,
             "ASC" => Token::Asc,
             "DESC" => Token::Desc,
             "AND" => Token::And,

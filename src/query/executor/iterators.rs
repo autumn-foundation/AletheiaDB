@@ -5,7 +5,7 @@
 
 use parking_lot::RwLock;
 use std::cmp::Reverse;
-use std::collections::{BinaryHeap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BinaryHeap, HashSet, VecDeque};
 use std::sync::Arc;
 
 #[cfg(feature = "observability")]
@@ -16,8 +16,8 @@ use crate::core::graph::Node;
 use crate::core::interning::GLOBAL_INTERNER;
 use crate::core::property::PropertyValue;
 use crate::core::vector::cosine_similarity;
-use crate::core::{NodeId, Timestamp};
-use crate::query::ir::{Direction, Predicate, PredicateValue};
+use crate::core::{NodeId, Timestamp, VersionId};
+use crate::query::ir::{AggregateExpr, AggregateFunction, Direction, Predicate, PredicateValue};
 use crate::storage::current::CurrentStorage;
 use crate::storage::historical::HistoricalStorage;
 
@@ -1343,6 +1343,169 @@ impl ResultIterator for ProvenanceFilterIterator {
 pub struct ProjectIterator {
     input: Box<dyn ResultIterator>,
     properties: Vec<String>,
+}
+
+/// Iterator for grouped aggregation.
+pub struct AggregateIterator {
+    rows: std::vec::IntoIter<QueryRow>,
+}
+
+impl AggregateIterator {
+    pub fn new(
+        mut input: Box<dyn ResultIterator>,
+        group_by: Vec<String>,
+        aggregates: Vec<AggregateExpr>,
+    ) -> Result<Self> {
+        #[derive(Clone)]
+        struct AggState {
+            count: usize,
+            sum: f64,
+            min: Option<PropertyValue>,
+            max: Option<PropertyValue>,
+        }
+
+        let mut groups: BTreeMap<String, (Vec<(String, PropertyValue)>, Vec<AggState>)> =
+            BTreeMap::new();
+
+        while let Some(row) = input.next() {
+            let row = row?;
+            let node = match row.entity {
+                EntityResult::Node(n) => n,
+                _ => continue,
+            };
+
+            let mut group_values = Vec::with_capacity(group_by.len());
+            let mut key = String::new();
+            for g in &group_by {
+                let val = node
+                    .properties
+                    .get(g)
+                    .cloned()
+                    .unwrap_or(PropertyValue::Null);
+                key.push_str(&format!("|{:?}", val));
+                group_values.push((g.clone(), val));
+            }
+
+            let entry = groups.entry(key).or_insert_with(|| {
+                let states = aggregates
+                    .iter()
+                    .map(|_| AggState {
+                        count: 0,
+                        sum: 0.0,
+                        min: None,
+                        max: None,
+                    })
+                    .collect();
+                (group_values, states)
+            });
+
+            for (idx, agg) in aggregates.iter().enumerate() {
+                let state = &mut entry.1[idx];
+                match agg.function {
+                    AggregateFunction::Count => {
+                        if let Some(prop) = &agg.property {
+                            if node.properties.get(prop).is_some() {
+                                state.count += 1;
+                            }
+                        } else {
+                            state.count += 1;
+                        }
+                    }
+                    AggregateFunction::Sum | AggregateFunction::Avg => {
+                        if let Some(prop) = &agg.property {
+                            if let Some(val) = node.properties.get(prop) {
+                                match val {
+                                    PropertyValue::Int(i) => {
+                                        state.sum += *i as f64;
+                                        state.count += 1;
+                                    }
+                                    PropertyValue::Float(f) => {
+                                        state.sum += *f;
+                                        state.count += 1;
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+                    AggregateFunction::Min => {
+                        if let Some(prop) = &agg.property {
+                            if let Some(val) = node.properties.get(prop).cloned() {
+                                if state
+                                    .min
+                                    .as_ref()
+                                    .is_none_or(|m| format!("{:?}", val) < format!("{:?}", m))
+                                {
+                                    state.min = Some(val);
+                                }
+                            }
+                        }
+                    }
+                    AggregateFunction::Max => {
+                        if let Some(prop) = &agg.property {
+                            if let Some(val) = node.properties.get(prop).cloned() {
+                                if state
+                                    .max
+                                    .as_ref()
+                                    .is_none_or(|m| format!("{:?}", val) > format!("{:?}", m))
+                                {
+                                    state.max = Some(val);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let label = GLOBAL_INTERNER.intern("AggregationResult")?;
+        let version_id = VersionId::new(1)?;
+        let mut out = Vec::with_capacity(groups.len());
+        for (idx, (_k, (group_vals, states))) in groups.into_iter().enumerate() {
+            let mut builder = crate::core::PropertyMapBuilder::new();
+            for (k, v) in group_vals {
+                builder = builder.insert(&k, v);
+            }
+            for (agg, state) in aggregates.iter().zip(states.iter()) {
+                let value = match agg.function {
+                    AggregateFunction::Count => PropertyValue::Int(state.count as i64),
+                    AggregateFunction::Sum => PropertyValue::Float(state.sum),
+                    AggregateFunction::Avg => {
+                        if state.count == 0 {
+                            PropertyValue::Null
+                        } else {
+                            PropertyValue::Float(state.sum / state.count as f64)
+                        }
+                    }
+                    AggregateFunction::Min => state.min.clone().unwrap_or(PropertyValue::Null),
+                    AggregateFunction::Max => state.max.clone().unwrap_or(PropertyValue::Null),
+                };
+                builder = builder.insert(&agg.alias, value);
+            }
+
+            let node = Node::new(
+                NodeId::new((idx + 1) as u64)?,
+                label,
+                builder.build(),
+                version_id,
+            );
+            out.push(QueryRow::from_entity(EntityResult::Node(node)));
+        }
+
+        Ok(Self {
+            rows: out.into_iter(),
+        })
+    }
+}
+
+impl ResultIterator for AggregateIterator {
+    fn next(&mut self) -> Option<Result<QueryRow>> {
+        self.rows.next().map(Ok)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.rows.size_hint()
+    }
 }
 
 impl ProjectIterator {

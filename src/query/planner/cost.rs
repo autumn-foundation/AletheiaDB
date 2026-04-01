@@ -436,6 +436,7 @@ impl CostModel {
             PhysicalOp::Project { input, .. }
             | PhysicalOp::Distinct { input }
             | PhysicalOp::Count { input }
+            | PhysicalOp::Aggregate { input, .. }
             | PhysicalOp::Materialize { input }
             | PhysicalOp::TemporalTrack { input, .. } => self.estimate(input, stats),
 
@@ -502,6 +503,7 @@ impl CostModel {
                 (self.estimate_cardinality(input, stats) as f64 * DEFAULT_DISTINCT_RATIO) as usize
             }
             PhysicalOp::Count { .. } => 1,
+            PhysicalOp::Aggregate { input, .. } => self.estimate_cardinality(input, stats).max(1),
             PhysicalOp::HashJoin { left, right, .. } => {
                 // Assume default join selectivity of cross product
                 let left_card = self.estimate_cardinality(left, stats);

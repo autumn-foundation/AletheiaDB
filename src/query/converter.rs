@@ -403,9 +403,9 @@ impl AstConverter {
             self.convert_rank_clause(rank, &mut ops)?;
         }
 
-        // 5. Convert RETURN clause to projection
+        // 5. Convert RETURN/GROUP BY to projection or aggregation
         if let Some(ref return_clause) = ast.return_clause {
-            self.convert_return_clause_ops(return_clause, &mut ops)?;
+            self.convert_return_clause_ops(return_clause, ast.group_by.as_ref(), &mut ops)?;
         }
 
         // 6. Convert ORDER BY clause
@@ -450,8 +450,14 @@ impl AstConverter {
     fn convert_return_clause_ops(
         &self,
         return_clause: &ReturnClause,
+        group_by_clause: Option<&super::ast::GroupByClause>,
         ops: &mut Vec<QueryOp>,
     ) -> Result<()> {
+        if let Some(agg) = self.try_convert_aggregate(return_clause, group_by_clause)? {
+            ops.push(agg);
+            return Ok(());
+        }
+
         let projection = self.convert_return(return_clause)?;
         if !projection.is_empty() {
             ops.push(QueryOp::Project(projection));
@@ -460,6 +466,68 @@ impl AstConverter {
             ops.push(QueryOp::Distinct);
         }
         Ok(())
+    }
+
+    fn try_convert_aggregate(
+        &self,
+        return_clause: &ReturnClause,
+        group_by_clause: Option<&super::ast::GroupByClause>,
+    ) -> Result<Option<QueryOp>> {
+        let mut aggregates = Vec::new();
+        let mut has_aggregate = false;
+        for (idx, item) in return_clause.items.iter().enumerate() {
+            if let Expression::FunctionCall { name, args } = &item.expression {
+                let upper = name.to_uppercase();
+                let function = match upper.as_str() {
+                    "COUNT" => super::ir::AggregateFunction::Count,
+                    "SUM" => super::ir::AggregateFunction::Sum,
+                    "AVG" => super::ir::AggregateFunction::Avg,
+                    "MIN" => super::ir::AggregateFunction::Min,
+                    "MAX" => super::ir::AggregateFunction::Max,
+                    _ => continue,
+                };
+                has_aggregate = true;
+                let property = args.first().and_then(|expr| match expr {
+                    Expression::Property(prop) => Some(prop.property.clone()),
+                    Expression::Identifier(s) if s != "*" => Some(s.clone()),
+                    _ => None,
+                });
+                let alias = item
+                    .alias
+                    .clone()
+                    .unwrap_or_else(|| format!("agg_{}", idx + 1));
+                aggregates.push(super::ir::AggregateExpr {
+                    function,
+                    property,
+                    alias,
+                });
+            }
+        }
+
+        if !has_aggregate && group_by_clause.is_none() {
+            return Ok(None);
+        }
+
+        let mut group_by = Vec::new();
+        if let Some(group) = group_by_clause {
+            for expr in &group.items {
+                match expr {
+                    Expression::Property(prop) => group_by.push(prop.property.clone()),
+                    Expression::Identifier(name) => group_by.push(name.clone()),
+                    _ => {
+                        return Err(Error::Query(QueryError::SyntaxError {
+                            message: "GROUP BY currently supports only property or alias"
+                                .to_string(),
+                        }));
+                    }
+                }
+            }
+        }
+
+        Ok(Some(QueryOp::Aggregate {
+            group_by,
+            aggregates,
+        }))
     }
 
     fn convert_pagination(

@@ -157,6 +157,40 @@ pub enum QueryOp {
 
     /// Project specific properties
     Project(Vec<String>),
+
+    /// General aggregation with optional grouping
+    Aggregate {
+        /// Group-by property keys (or aliases)
+        group_by: Vec<String>,
+        /// Aggregate functions to compute
+        aggregates: Vec<AggregateExpr>,
+    },
+}
+
+/// Supported aggregate functions.
+#[derive(Debug, Clone, PartialEq)]
+pub enum AggregateFunction {
+    /// Count rows or non-null property values.
+    Count,
+    /// Sum numeric property values.
+    Sum,
+    /// Average numeric property values.
+    Avg,
+    /// Minimum property value.
+    Min,
+    /// Maximum property value.
+    Max,
+}
+
+/// An aggregate expression in a query.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AggregateExpr {
+    /// Aggregate function to apply.
+    pub function: AggregateFunction,
+    /// Optional input property (`None` for `COUNT(*)`).
+    pub property: Option<String>,
+    /// Output alias for this aggregate column.
+    pub alias: String,
 }
 
 /// Specifies how deep to traverse in graph operations.

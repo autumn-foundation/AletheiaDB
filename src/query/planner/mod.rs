@@ -399,6 +399,17 @@ impl QueryPlanner {
 
             QueryOp::Project(props) => Ok(LogicalOp::unary(UnaryOp::Project(props.clone()), input)),
 
+            QueryOp::Aggregate {
+                group_by,
+                aggregates,
+            } => Ok(LogicalOp::unary(
+                UnaryOp::Aggregate {
+                    group_by: group_by.clone(),
+                    aggregates: aggregates.clone(),
+                },
+                input,
+            )),
+
             QueryOp::Sort { key, descending } => Ok(LogicalOp::unary(
                 UnaryOp::Sort {
                     key: key.clone(),
@@ -441,6 +452,7 @@ impl QueryPlanner {
             QueryOp::Sort { .. } => "Sort",
             QueryOp::RankBySimilarity { .. } => "RankBySimilarity",
             QueryOp::GetEdges { .. } => "GetEdges",
+            QueryOp::Aggregate { .. } => "Aggregate",
             _ => "Operation",
         };
 
@@ -743,6 +755,15 @@ impl QueryPlanner {
 
             UnaryOp::Count => Ok(PhysicalOp::Count {
                 input: Box::new(input),
+            }),
+
+            UnaryOp::Aggregate {
+                group_by,
+                aggregates,
+            } => Ok(PhysicalOp::Aggregate {
+                input: Box::new(input),
+                group_by: group_by.clone(),
+                aggregates: aggregates.clone(),
             }),
 
             UnaryOp::TemporalTrack { time_range } => Ok(PhysicalOp::TemporalTrack {

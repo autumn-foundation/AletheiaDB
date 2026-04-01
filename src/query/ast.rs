@@ -21,6 +21,8 @@ pub struct QueryAst {
     pub where_clause: Option<WhereClause>,
     /// RETURN clause
     pub return_clause: Option<ReturnClause>,
+    /// GROUP BY clause
+    pub group_by: Option<GroupByClause>,
     /// ORDER BY clause
     pub order: Option<OrderClause>,
     /// SKIP clause
@@ -38,6 +40,7 @@ impl QueryAst {
             rank: None,
             where_clause: None,
             return_clause: None,
+            group_by: None,
             order: None,
             skip: None,
             limit: None,
@@ -69,6 +72,13 @@ impl QueryAst {
     #[must_use]
     pub fn with_return(mut self, return_clause: ReturnClause) -> Self {
         self.return_clause = Some(return_clause);
+        self
+    }
+
+    /// Add a GROUP BY clause to the query.
+    #[must_use]
+    pub fn with_group_by(mut self, group_by: GroupByClause) -> Self {
+        self.group_by = Some(group_by);
         self
     }
 
@@ -625,6 +635,13 @@ pub struct ReturnClause {
     pub distinct: bool,
 }
 
+/// GROUP BY clause.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GroupByClause {
+    /// Grouping expressions
+    pub items: Vec<Expression>,
+}
+
 impl ReturnClause {
     /// Create a new RETURN clause.
     pub fn new(items: Vec<ReturnItem>) -> Self {
@@ -726,6 +743,7 @@ mod tests {
         assert!(query.rank.is_none());
         assert!(query.where_clause.is_none());
         assert!(query.return_clause.is_none());
+        assert!(query.group_by.is_none());
         assert!(query.order.is_none());
         assert!(query.skip.is_none());
         assert!(query.limit.is_none());
