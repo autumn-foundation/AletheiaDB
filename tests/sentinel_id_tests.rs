@@ -231,3 +231,98 @@ fn test_entity_id_as_edge_exhaustive() {
     // Check node case returns None
     assert_eq!(entity_node.as_edge(), None);
 }
+
+#[test]
+fn test_id_generator_mutants() {
+    let generator = IdGenerator::with_start(42);
+    assert_ne!(generator.current(), 0); // kill return 0 from with_start Default
+
+    let val = generator.next().unwrap();
+    assert_eq!(val, 42);
+    assert_ne!(val, 0); // kill Ok(0)
+    assert_ne!(val, 1); // kill Ok(1)
+
+    let curr = generator.current();
+    assert_eq!(curr, 43);
+    assert_ne!(curr, 0); // kill return 0
+    assert_ne!(curr, 1); // kill return 1
+
+    let approx = generator.current_approximate();
+    assert_eq!(approx, 43);
+    assert_ne!(approx, 0); // kill return 0
+    assert_ne!(approx, 1); // kill return 1
+}
+
+#[test]
+fn test_tx_id_generator_current_mutants() {
+    let generator = TxIdGenerator::new();
+    let val = generator.current();
+    assert_eq!(val.as_u64(), 0);
+
+    generator.next();
+    let val2 = generator.current();
+    assert_eq!(val2.as_u64(), 1);
+    assert_ne!(val2, TxId::new(0)); // kill Default::default()
+}
+
+#[test]
+fn test_id_try_from_mutants() {
+    let n = NodeId::try_from(42).unwrap();
+    assert_eq!(n.as_u64(), 42);
+    assert_ne!(n, NodeId::new(0).unwrap()); // kill Ok(Default::default())
+
+    let e = EdgeId::try_from(100).unwrap();
+    assert_eq!(e.as_u64(), 100);
+    assert_ne!(e, EdgeId::new(0).unwrap()); // kill Ok(Default::default())
+
+    let v = VersionId::try_from(1000).unwrap();
+    assert_eq!(v.as_u64(), 1000);
+    assert_ne!(v, VersionId::new(0).unwrap()); // kill Ok(Default::default())
+
+    let t = TxId::try_from(55).unwrap();
+    assert_eq!(t.as_u64(), 55);
+    assert_ne!(t, TxId::new(0)); // kill Ok(Default::default())
+}
+
+#[test]
+fn test_id_from_str_mutants() {
+    use std::str::FromStr;
+    let n = NodeId::from_str("42").unwrap();
+    assert_eq!(n.as_u64(), 42);
+    assert_ne!(n, NodeId::new(0).unwrap()); // kill Ok(Default::default())
+
+    let e = EdgeId::from_str("100").unwrap();
+    assert_eq!(e.as_u64(), 100);
+    assert_ne!(e, EdgeId::new(0).unwrap()); // kill Ok(Default::default())
+
+    let v = VersionId::from_str("1000").unwrap();
+    assert_eq!(v.as_u64(), 1000);
+    assert_ne!(v, VersionId::new(0).unwrap()); // kill Ok(Default::default())
+
+    let t = TxId::from_str("55").unwrap();
+    assert_eq!(t.as_u64(), 55);
+    assert_ne!(t, TxId::new(0)); // kill Ok(Default::default())
+}
+
+#[test]
+fn test_id_display_defaults() {
+    let n = NodeId::new(42).unwrap();
+    assert_ne!(format!("{}", n), "Ok(Default::default())");
+    assert_ne!(format!("{}", n), "");
+    assert_eq!(format!("{}", n), "Node(42)");
+
+    let e = EdgeId::new(100).unwrap();
+    assert_ne!(format!("{}", e), "Ok(Default::default())");
+    assert_ne!(format!("{}", e), "");
+    assert_eq!(format!("{}", e), "Edge(100)");
+
+    let v = VersionId::new(1000).unwrap();
+    assert_ne!(format!("{}", v), "Ok(Default::default())");
+    assert_ne!(format!("{}", v), "");
+    assert_eq!(format!("{}", v), "Version(1000)");
+
+    let t = TxId::new(55);
+    assert_ne!(format!("{}", t), "Ok(Default::default())");
+    assert_ne!(format!("{}", t), "");
+    assert_eq!(format!("{}", t), "TxId(55)");
+}
