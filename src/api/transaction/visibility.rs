@@ -141,8 +141,9 @@ impl EpochRange {
             return None;
         }
 
-        let ts_value = self.start_ts.wallclock() + offset as i64;
-        Some(Timestamp::from(ts_value))
+        let ts_value_wallclock = self.start_ts.wallclock() + offset as i64;
+        let ts_value_logical = self.start_ts.logical();
+        Timestamp::new(ts_value_wallclock, ts_value_logical).ok()
     }
 
     /// Get the number of transactions represented by this epoch.
@@ -301,10 +302,13 @@ impl CompressedCommitLog {
                 let (next_tx, next_ts) = entries[i + run_length];
                 let expected_tx = TxId::new(end_tx.as_u64() + 1);
                 let expected_ts_wallclock = end_ts.wallclock() + 1;
+                let expected_ts_logical = end_ts.logical();
 
                 // Check if both tx_id and timestamp increment by 1
-                // Note: We compare wallclock values since logical component should be 0
-                if next_tx == expected_tx && next_ts.wallclock() == expected_ts_wallclock {
+                if next_tx == expected_tx
+                    && next_ts.wallclock() == expected_ts_wallclock
+                    && next_ts.logical() == expected_ts_logical
+                {
                     end_tx = next_tx;
                     end_ts = next_ts;
                     run_length += 1;
@@ -365,7 +369,8 @@ impl CompressedCommitLog {
             // 1. end_tx + 1 == next.start_tx (sequential transaction IDs)
             // 2. end_ts + 1 == next.start_ts (sequential timestamps)
             let can_merge = current.end_tx.as_u64() + 1 == next_epoch.start_tx.as_u64()
-                && current.end_ts.wallclock() + 1 == next_epoch.start_ts.wallclock();
+                && current.end_ts.wallclock() + 1 == next_epoch.start_ts.wallclock()
+                && current.end_ts.logical() == next_epoch.start_ts.logical();
 
             if can_merge {
                 // Extend current epoch to include next epoch
@@ -1210,6 +1215,41 @@ mod tests {
             memory_usage,
             uncompressed_estimate
         );
+    }
+
+    #[test]
+    fn test_compression_logical_timestamp_invariant_bug() {
+        let manager = TxVisibilityManager::new();
+
+        let start_tx = 1;
+        for i in 0..10 {
+            // Sequential logical *and* sequential wallclock
+            manager.register_commit(
+                TxId::new(start_tx + i),
+                Timestamp::new(100 + i as i64, i as u32).unwrap(),
+            );
+        }
+        manager.compress_commit_log();
+
+        let _snap = manager.capture_snapshot(Timestamp::from(5000));
+
+        // Let's see what happens to tx 5
+        let check_tx = TxId::new(start_tx + 5);
+        let commit_ts = manager.committed.read().unwrap().get(check_tx);
+
+        // Here's the core bug. It WILL get compressed because wallclock sequential.
+        // BUT when retrieving it via get_commit_timestamp, it only restores the wallclock and leaves logical as 0!
+        if let Some(ts) = commit_ts {
+            assert_eq!(ts.wallclock(), 105);
+            // This assertion WILL FAIL if the bug exists!
+            assert_eq!(
+                ts.logical(),
+                5,
+                "Logical part of timestamp was DESTROYED by compression/decompression!"
+            );
+        } else {
+            panic!("Transaction 5 should have a commit timestamp");
+        }
     }
 
     #[test]
