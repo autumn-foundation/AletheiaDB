@@ -79,4 +79,5 @@ fn test_havoc_hnsw_capacity_overflow() {
     // If the bug exists, we might have crashed entirely (segfault), which cargo test will report as failure.
     // If usearch handles overflow gracefully (unlikely given it's C++), we might see > capacity.
     println!("Final size: {}", index.len());
+    assert!(index.len() <= capacity, "Capacity overflow detected!");
 }
