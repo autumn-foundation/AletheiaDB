@@ -207,7 +207,9 @@ impl<'a, G: GraphView + ?Sized> SemanticPathfinder<'a, G> {
         });
 
         // Reuse allocation across iterations
-        let mut neighbors = Vec::new();
+        // ⚡ Bolt Optimization: Pre-allocate capacity for an average branching factor of 32
+        // to avoid multiple heap reallocations (0 -> 4 -> 8 -> 16 -> 32) on the first node expansion.
+        let mut neighbors = Vec::with_capacity(32);
 
         while let Some(State { cost, node, depth }) = pq.pop() {
             if node == end {
@@ -342,7 +344,9 @@ impl<'a, G: GraphView + ?Sized> SemanticPathfinder<'a, G> {
         });
 
         // Reuse allocation across iterations
-        let mut neighbor_edges = Vec::new();
+        // ⚡ Bolt Optimization: Pre-allocate capacity for an average branching factor of 32
+        // to avoid multiple heap reallocations (0 -> 4 -> 8 -> 16 -> 32) on the first node expansion.
+        let mut neighbor_edges = Vec::with_capacity(32);
 
         while let Some(State { cost, node, depth }) = pq.pop() {
             if node == end {

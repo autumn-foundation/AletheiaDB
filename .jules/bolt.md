@@ -46,3 +46,7 @@
 **[Optimize Vec allocations with Vec::with_capacity and exact size hints]**
 **Learning:** In Rust, replacing an idiomatic `.collect::<Vec<_>>()` chain with a manual `for` loop and `Vec::with_capacity()` is often a de-optimization. Iterators implementing `ExactSizeIterator` or `TrustedLen` (e.g., from slices or `std::vec::IntoIter`) automatically pre-allocate perfect capacity and elide bounds checks during `.collect()`. However, when `.filter(...)` is introduced into an iterator chain, the exact size hint is lost, causing `.collect()` to dynamically reallocate.
 **Action:** When filtering a collection of known maximum size into a `Vec`, manually pre-allocate `Vec::with_capacity(collection.len())` and use a `for` loop (or `.extend()`) to avoid all intermediate heap reallocations.
+
+**Optimize pathfinding neighbor vectors with pre-allocation**
+**Learning:** In A* semantic pathfinding logic, `neighbors` and `neighbor_edges` vectors are correctly reused across loop iterations (`.clear()`). However, initializing them with `Vec::new()` before the loop means the first time they are populated, they incur multiple heap reallocations (0 -> 4 -> 8 -> 16 -> 32 capacity).
+**Action:** Always initialize reusable collection vectors in algorithms like A* with `Vec::with_capacity()` based on an expected average branching factor (e.g. 32) to avoid these initial reallocations.
