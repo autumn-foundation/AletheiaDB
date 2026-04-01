@@ -1,3 +1,29 @@
+//! # Context
+//! This module contains regression and correctness tests for sparse vector mathematical operations,
+//! such as squared Euclidean distance.
+//!
+//! # Usage
+//! These tests ensure numerical stability and verify that the mathematical formulas implemented
+//! are robust against edge cases or floating-point inaccuracies.
+//!
+//! # Details
+//! Specifically, it ensures that:
+//! - Unstable mathematical formulas (like the expanded quadratic form) do not result in negative
+//!   distances due to floating point drift.
+//! - Non-negative squared distance checks prevent returning `NaN` from `sqrt()` operations.
+//! - Hand-calculated correctness values match output algorithms.
+//!
+//! ## Panics
+//! These tests assert that invalid mathematical operations do not panic or return non-finite values.
+//!
+//! ## Examples
+//! ```rust,ignore
+//! let vec = SparseVec::new(indices, values, size as u32).unwrap();
+//! let dist = sparse_euclidean_distance(&vec, &vec).unwrap();
+//! assert!(!dist.is_nan());
+//! assert!(dist >= 0.0);
+//! ```
+
 use super::*;
 
 #[test]
