@@ -24,7 +24,7 @@
 //!
 //! # Quick Start
 //!
-//! ```rust,ignore
+//! ```rust
 //! use aletheiadb::cypher::CypherError;
 //!
 //! // Errors carry position information for diagnostics
@@ -32,8 +32,7 @@
 //!     position: 42,
 //!     message: "expected RETURN clause".to_string(),
 //! };
-//! println!("{err}");
-//! // => "Cypher parse error at position 42: expected RETURN clause"
+//! assert_eq!(err.to_string(), "Cypher parse error at position 42: expected RETURN clause");
 //! ```
 //!
 //! # Planned Syntax
