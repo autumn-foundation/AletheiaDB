@@ -160,10 +160,31 @@ pub enum QueryOp {
 
     /// General aggregation with optional grouping
     Aggregate {
-        /// Group-by property keys (or aliases)
-        group_by: Vec<String>,
+        /// Group-by expressions
+        group_by: Vec<GroupByExpr>,
         /// Aggregate functions to compute
         aggregates: Vec<AggregateExpr>,
+    },
+}
+
+/// Group-by expression descriptor.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GroupByExpr {
+    /// Output alias/property name for this grouping column.
+    pub alias: String,
+    /// Grouping expression.
+    pub expr: GroupExpr,
+}
+
+/// Supported grouping expressions.
+#[derive(Debug, Clone, PartialEq)]
+pub enum GroupExpr {
+    /// Group by a node property value.
+    Property(String),
+    /// Group by temporal windows derived from row timestamp.
+    TimeWindow {
+        /// Window size in microseconds.
+        duration_micros: i64,
     },
 }
 

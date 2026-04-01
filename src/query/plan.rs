@@ -10,7 +10,7 @@ use crate::core::NodeId;
 use crate::core::temporal::{TimeRange, Timestamp};
 use crate::index::vector::DistanceMetric;
 
-use super::ir::{AggregateExpr, Direction, Predicate, TraversalDepth};
+use super::ir::{AggregateExpr, Direction, GroupByExpr, Predicate, TraversalDepth};
 
 /// A logical query plan represented as a tree of operations.
 #[derive(Debug, Clone, PartialEq)]
@@ -290,7 +290,7 @@ pub enum UnaryOp {
     /// Grouped aggregation
     Aggregate {
         /// Group-by keys
-        group_by: Vec<String>,
+        group_by: Vec<GroupByExpr>,
         /// Aggregate expressions
         aggregates: Vec<AggregateExpr>,
     },

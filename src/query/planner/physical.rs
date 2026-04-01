@@ -30,7 +30,7 @@ use std::sync::Arc;
 use crate::core::NodeId;
 use crate::core::temporal::{TimeRange, Timestamp};
 
-use super::super::ir::{AggregateExpr, Direction, Predicate};
+use super::super::ir::{AggregateExpr, Direction, GroupByExpr, Predicate};
 use super::super::plan::{SortKey, TemporalContext};
 use super::cost::Cost;
 
@@ -565,7 +565,7 @@ pub enum PhysicalOp {
         /// Input operator
         input: Box<PhysicalOp>,
         /// Group-by keys
-        group_by: Vec<String>,
+        group_by: Vec<GroupByExpr>,
         /// Aggregate expressions
         aggregates: Vec<AggregateExpr>,
     },

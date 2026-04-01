@@ -510,13 +510,35 @@ impl AstConverter {
 
         let mut group_by = Vec::new();
         if let Some(group) = group_by_clause {
+            let alias_map: std::collections::HashMap<_, _> = return_clause
+                .items
+                .iter()
+                .filter_map(|item| item.alias.as_ref().map(|a| (a.as_str(), &item.expression)))
+                .collect();
+
             for expr in &group.items {
                 match expr {
-                    Expression::Property(prop) => group_by.push(prop.property.clone()),
-                    Expression::Identifier(name) => group_by.push(name.clone()),
+                    Expression::Property(prop) => group_by.push(super::ir::GroupByExpr {
+                        alias: prop.property.clone(),
+                        expr: super::ir::GroupExpr::Property(prop.property.clone()),
+                    }),
+                    Expression::Identifier(name) => {
+                        if let Some(mapped) = alias_map.get(name.as_str()) {
+                            group_by.push(self.convert_group_expression(mapped, name)?);
+                        } else {
+                            group_by.push(super::ir::GroupByExpr {
+                                alias: name.clone(),
+                                expr: super::ir::GroupExpr::Property(name.clone()),
+                            });
+                        }
+                    }
+                    Expression::FunctionCall { .. } => {
+                        let alias = format!("group_{}", group_by.len() + 1);
+                        group_by.push(self.convert_group_expression(expr, &alias)?);
+                    }
                     _ => {
                         return Err(Error::Query(QueryError::SyntaxError {
-                            message: "GROUP BY currently supports only property or alias"
+                            message: "GROUP BY supports property, alias, or time.window(...)"
                                 .to_string(),
                         }));
                     }
@@ -528,6 +550,46 @@ impl AstConverter {
             group_by,
             aggregates,
         }))
+    }
+
+    fn convert_group_expression(
+        &self,
+        expr: &Expression,
+        alias: &str,
+    ) -> Result<super::ir::GroupByExpr> {
+        match expr {
+            Expression::Property(prop) => Ok(super::ir::GroupByExpr {
+                alias: alias.to_string(),
+                expr: super::ir::GroupExpr::Property(prop.property.clone()),
+            }),
+            Expression::FunctionCall { name, args } if name.eq_ignore_ascii_case("time.window") => {
+                let window_arg = args.first().ok_or_else(|| {
+                    Error::Query(QueryError::SyntaxError {
+                        message: "time.window(...) requires one duration argument".to_string(),
+                    })
+                })?;
+                let duration = match window_arg {
+                    Expression::Literal(super::ast::PropertyValue::String(s)) => {
+                        parse_window_duration(s)?
+                    }
+                    _ => {
+                        return Err(Error::Query(QueryError::SyntaxError {
+                            message: "time.window(...) expects a string literal duration"
+                                .to_string(),
+                        }));
+                    }
+                };
+                Ok(super::ir::GroupByExpr {
+                    alias: alias.to_string(),
+                    expr: super::ir::GroupExpr::TimeWindow {
+                        duration_micros: duration,
+                    },
+                })
+            }
+            _ => Err(Error::Query(QueryError::SyntaxError {
+                message: "Unsupported GROUP BY expression".to_string(),
+            })),
+        }
     }
 
     fn convert_pagination(
@@ -1163,6 +1225,33 @@ pub fn parse_query_with_params(
     converter.convert(&ast)
 }
 
+fn parse_window_duration(text: &str) -> Result<i64> {
+    let parts: Vec<&str> = text.split_whitespace().collect();
+    if parts.len() != 2 {
+        return Err(Error::Query(QueryError::SyntaxError {
+            message: format!("Invalid time.window duration '{}'", text),
+        }));
+    }
+    let qty = parts[0].parse::<i64>().map_err(|_| {
+        Error::Query(QueryError::SyntaxError {
+            message: format!("Invalid duration quantity in '{}'", text),
+        })
+    })?;
+    let unit_micros = match parts[1].to_ascii_lowercase().as_str() {
+        "second" | "seconds" => 1_000_000,
+        "minute" | "minutes" => 60 * 1_000_000,
+        "hour" | "hours" => 60 * 60 * 1_000_000,
+        "day" | "days" => 24 * 60 * 60 * 1_000_000,
+        "week" | "weeks" => 7 * 24 * 60 * 60 * 1_000_000,
+        _ => {
+            return Err(Error::Query(QueryError::SyntaxError {
+                message: format!("Unsupported duration unit '{}'", parts[1]),
+            }));
+        }
+    };
+    Ok(qty.saturating_mul(unit_micros))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1254,6 +1343,50 @@ mod tests {
         assert!(skip_op.is_some());
         if let Some(QueryOp::Skip(n)) = skip_op {
             assert_eq!(*n, 5);
+        }
+    }
+
+    #[test]
+    fn test_convert_group_by_alias_maps_to_property() {
+        let ast = Parser::parse("MATCH (n) RETURN n.category AS cat, COUNT(*) AS cnt GROUP BY cat")
+            .expect("parse");
+        let converter = AstConverter::new();
+        let query = converter.convert(&ast).expect("convert");
+
+        let agg = query
+            .ops
+            .iter()
+            .find(|op| matches!(op, QueryOp::Aggregate { .. }))
+            .expect("aggregate op");
+        if let QueryOp::Aggregate { group_by, .. } = agg {
+            assert_eq!(group_by.len(), 1);
+            assert!(matches!(
+                group_by[0].expr,
+                super::ir::GroupExpr::Property(ref p) if p == "category"
+            ));
+            assert_eq!(group_by[0].alias, "cat");
+        }
+    }
+
+    #[test]
+    fn test_convert_group_by_time_window() {
+        let ast = Parser::parse(
+            "MATCH (n) RETURN time.window('1 day') AS day, COUNT(*) AS cnt GROUP BY day",
+        )
+        .expect("parse");
+        let converter = AstConverter::new();
+        let query = converter.convert(&ast).expect("convert");
+
+        let agg = query
+            .ops
+            .iter()
+            .find(|op| matches!(op, QueryOp::Aggregate { .. }))
+            .expect("aggregate op");
+        if let QueryOp::Aggregate { group_by, .. } = agg {
+            assert!(matches!(
+                group_by[0].expr,
+                super::ir::GroupExpr::TimeWindow { duration_micros } if duration_micros == 86_400_000_000
+            ));
         }
     }
 

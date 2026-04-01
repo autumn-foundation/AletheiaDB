@@ -17,7 +17,9 @@ use crate::core::interning::GLOBAL_INTERNER;
 use crate::core::property::PropertyValue;
 use crate::core::vector::cosine_similarity;
 use crate::core::{NodeId, Timestamp, VersionId};
-use crate::query::ir::{AggregateExpr, AggregateFunction, Direction, Predicate, PredicateValue};
+use crate::query::ir::{
+    AggregateExpr, AggregateFunction, Direction, GroupByExpr, GroupExpr, Predicate, PredicateValue,
+};
 use crate::storage::current::CurrentStorage;
 use crate::storage::historical::HistoricalStorage;
 
@@ -1353,7 +1355,7 @@ pub struct AggregateIterator {
 impl AggregateIterator {
     pub fn new(
         mut input: Box<dyn ResultIterator>,
-        group_by: Vec<String>,
+        group_by: Vec<GroupByExpr>,
         aggregates: Vec<AggregateExpr>,
     ) -> Result<Self> {
         #[derive(Clone)]
@@ -1377,13 +1379,24 @@ impl AggregateIterator {
             let mut group_values = Vec::with_capacity(group_by.len());
             let mut key = String::new();
             for g in &group_by {
-                let val = node
-                    .properties
-                    .get(g)
-                    .cloned()
-                    .unwrap_or(PropertyValue::Null);
+                let val = match &g.expr {
+                    GroupExpr::Property(prop) => node
+                        .properties
+                        .get(prop)
+                        .cloned()
+                        .unwrap_or(PropertyValue::Null),
+                    GroupExpr::TimeWindow { duration_micros } => {
+                        if let Some(ts) = row.timestamp {
+                            let micros = ts.wallclock();
+                            let bucket = (micros / *duration_micros) * *duration_micros;
+                            PropertyValue::Int(bucket)
+                        } else {
+                            PropertyValue::Null
+                        }
+                    }
+                };
                 key.push_str(&format!("|{:?}", val));
-                group_values.push((g.clone(), val));
+                group_values.push((g.alias.clone(), val));
             }
 
             let entry = groups.entry(key).or_insert_with(|| {
@@ -1434,7 +1447,7 @@ impl AggregateIterator {
                                 if state
                                     .min
                                     .as_ref()
-                                    .is_none_or(|m| format!("{:?}", val) < format!("{:?}", m))
+                                    .is_none_or(|m| compare_property_value(&val, m).is_lt())
                                 {
                                     state.min = Some(val);
                                 }
@@ -1447,7 +1460,7 @@ impl AggregateIterator {
                                 if state
                                     .max
                                     .as_ref()
-                                    .is_none_or(|m| format!("{:?}", val) > format!("{:?}", m))
+                                    .is_none_or(|m| compare_property_value(&val, m).is_gt())
                                 {
                                     state.max = Some(val);
                                 }
@@ -1556,6 +1569,18 @@ fn predicate_to_property_value(pv: &PredicateValue) -> PropertyValue {
         PredicateValue::Int(i) => PropertyValue::Int(*i),
         PredicateValue::Float(f) => PropertyValue::Float(*f),
         PredicateValue::String(s) => PropertyValue::String(Arc::from(s.as_str())),
+    }
+}
+
+fn compare_property_value(a: &PropertyValue, b: &PropertyValue) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    match (a, b) {
+        (PropertyValue::Int(x), PropertyValue::Int(y)) => x.cmp(y),
+        (PropertyValue::Float(x), PropertyValue::Float(y)) => x.total_cmp(y),
+        (PropertyValue::Int(x), PropertyValue::Float(y)) => (*x as f64).total_cmp(y),
+        (PropertyValue::Float(x), PropertyValue::Int(y)) => x.total_cmp(&(*y as f64)),
+        (PropertyValue::String(x), PropertyValue::String(y)) => x.cmp(y),
+        _ => Ordering::Equal,
     }
 }
 
