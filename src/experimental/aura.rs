@@ -33,6 +33,7 @@
 //! // ... setup temporal graph ...
 //! # let subject_node = NodeId::new(0).unwrap();
 //!
+//! db.create_node("Node", aletheiadb::properties!{}).unwrap();
 //! let engine = AuraEngine::new(&db);
 //! // Calculate the Aura using a half-life of 7 days
 //! let half_life_us = 7 * 24 * 3600 * 1_000_000;

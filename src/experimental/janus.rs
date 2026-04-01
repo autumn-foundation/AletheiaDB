@@ -14,16 +14,17 @@
 //! # Example
 //! ```rust,no_run
 //! use aletheiadb::AletheiaDB;
+//! use aletheiadb::NodeId;
 //! use aletheiadb::experimental::janus::JanusDetector;
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let db = AletheiaDB::new()?;
 //! let janus = JanusDetector::new(&db);
 //!
-//! let score = janus.analyze_node(node_id, "embedding")?;
+//! let score = janus.analyze_node(NodeId::try_from(1).unwrap(), "embedding")?;
 //!
 //! if score.is_bridge() {
-//!     println!("Node {} is a bridge! Score: {:.2}", node_id, score.total_score);
+//!     println!("Node {} is a bridge! Score: {:.2}", NodeId::try_from(1).unwrap(), score.total_score);
 //! }
 //! # Ok(())
 //! # }

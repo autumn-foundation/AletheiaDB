@@ -221,7 +221,7 @@ Benchmarks are automatically run on every push to trunk and published to GitHub 
 - [x] String interning for memory efficiency
 - [x] Error types and Result handling
 - [x] Test coverage infrastructure (85%+ threshold enforced)
-- [x] Current storage layer with CSR adjacency indexes
+- [x] Current storage layer with fast graph lookups
 - [x] Historical storage with anchor+delta compression
 - [x] ACID transactions with snapshot isolation
 - [x] Write conflict detection
@@ -794,17 +794,24 @@ For complex operations involving multiple updates, use explicit transactions.
 ```rust
 use aletheiadb::prelude::*;
 
-// Explicit read transaction
-let result = db.read(|tx| {
-    tx.get_node(alice_id).map(|node| node.label.clone())
-})?;
+fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
+    let db = AletheiaDB::new().unwrap();
+    let alice_id = db.create_node("Person", properties! { "name" => "Alice" })?;
 
-// Explicit write transaction with multiple operations
-db.write(|tx| {
-    let node1 = tx.create_node("Event", PropertyMap::new())?;
-    let node2 = tx.create_node("Event", PropertyMap::new())?;
-    tx.create_edge(node1, node2, "FOLLOWS", PropertyMap::new())
-})?;
+    // Explicit read transaction
+    let result = db.read(|tx| {
+        tx.get_node(alice_id).map(|node| node.label.clone())
+    })?;
+
+    // Explicit write transaction with multiple operations
+    db.write(|tx| {
+        let node1 = tx.create_node("Event", PropertyMap::new())?;
+        let node2 = tx.create_node("Event", PropertyMap::new())?;
+        tx.create_edge(node1, node2, "FOLLOWS", PropertyMap::new())
+    })?;
+
+    Ok(())
+}
 ```
 
 ### Embedding Generation (Optional)

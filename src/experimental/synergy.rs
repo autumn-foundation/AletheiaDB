@@ -29,7 +29,7 @@
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let db = AletheiaDB::new()?;
 //! // ... setup graph ...
-//! # let nodes = vec![];
+//! # let n1 = db.create_node("N", aletheiadb::properties!{"embedding" => &vec![0.0f32; 10][..]}).unwrap(); let nodes = vec![n1];
 //!
 //! let synergy = Synergy::new(&db);
 //! let score = synergy.calculate_synergy(&nodes, "embedding")?;

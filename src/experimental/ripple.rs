@@ -19,6 +19,7 @@
 //!
 //! ```rust,no_run
 //! use aletheiadb::AletheiaDB;
+//! use aletheiadb::core::temporal::Timestamp;
 //! use aletheiadb::experimental::ripple::{RippleDetector, RippleConfig};
 //! use aletheiadb::core::temporal::{TimeRange, time};
 //!
@@ -31,7 +32,7 @@
 //!
 //! // Look for causal ripples in the last hour, with 1-minute resolution
 //! let config = RippleConfig {
-//!     window: TimeRange::new(time::now() - 3600 * 1_000_000, time::now())?,
+//!     window: TimeRange::new(Timestamp::new(time::now().wallclock() - 3600 * 1_000_000, 0).unwrap(), time::now())?,
 //!     bin_size_us: 60 * 1_000_000, // 1 minute
 //!     max_lag_bins: 10,            // Check lag up to 10 minutes
 //!     min_correlation: 0.5,        // Minimum correlation to report

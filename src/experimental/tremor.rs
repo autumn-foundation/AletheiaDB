@@ -15,6 +15,7 @@
 //! # Example
 //! ```rust,no_run
 //! use aletheiadb::AletheiaDB;
+//! use aletheiadb::core::temporal::Timestamp;
 //! use aletheiadb::experimental::tremor::TremorEngine;
 //! use aletheiadb::core::temporal::time;
 //!
@@ -22,7 +23,7 @@
 //! let db = AletheiaDB::new()?;
 //! let tremor = TremorEngine::new(&db);
 //!
-//! let t1 = time::now() - 3600 * 1_000_000 * 24 * 7; // Last week
+//! let t1 = Timestamp::new(time::now().wallclock() - 3600 * 1_000_000 * 24 * 7, 0).unwrap(); // Last week
 //! let t2 = time::now(); // Now
 //!
 //! let score = tremor.detect_shift(t1, t2, "embedding")?;

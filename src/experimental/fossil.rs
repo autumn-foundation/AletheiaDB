@@ -14,6 +14,7 @@
 //! # Example
 //! ```rust,no_run
 //! use aletheiadb::AletheiaDB;
+//! use aletheiadb::core::temporal::Timestamp;
 //! use aletheiadb::experimental::fossil::FossilDetector;
 //! use aletheiadb::core::temporal::{TimeRange, time};
 //!
@@ -22,7 +23,7 @@
 //! # let node_id = db.create_node("Node", Default::default())?;
 //! let detector = FossilDetector::new(&db);
 //!
-//! let start = time::now() - 3600 * 1_000_000 * 24 * 7; // Last week
+//! let start = Timestamp::new(time::now().wallclock() - 3600 * 1_000_000 * 24 * 7, 0).unwrap(); // Last week
 //! let end = time::now(); // Now
 //! let window = TimeRange::new(start, end).unwrap();
 //!
