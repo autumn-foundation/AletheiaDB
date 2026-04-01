@@ -114,6 +114,9 @@ pub mod aura;
 /// Semantic graph clustering ("Cartographer").
 pub mod cartographer;
 #[cfg(feature = "nova")]
+/// Catalyst: Semantic Catalyst Detector.
+pub mod catalyst;
+#[cfg(feature = "nova")]
 /// Chameleon: Context-Aware Faceted Search.
 pub mod chameleon;
 #[cfg(feature = "nova")]
