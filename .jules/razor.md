@@ -12,3 +12,8 @@
 **Bloat:** `StorageSnapshot` and `FieldHolder` traits.
 **Cut:** Deleted single-implementation traits `StorageSnapshot` (implemented only by `CurrentStorageSnapshot`) and `FieldHolder` (implemented only by `Event`, unused except in tests). Moved methods directly to structs.
 **Saved:** ~50 lines of boilerplate + cognitive load of unnecessary abstraction layers.
+
+## [Reduction]
+**Bloat:** `GraphView` trait
+**Cut:** Removed the `GraphView` trait and its only implementation for `AletheiaDB`. Refactored all query engines/components to directly depend on the concrete `AletheiaDB` struct.
+**Saved:** ~100 lines of boilerplate (trait definition, implementation forwarding logic) + removed indirection/mental overhead.
