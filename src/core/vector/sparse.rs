@@ -696,6 +696,53 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_validate_value_exhaustive() {
+        // Valid positive and negative values
+        assert!(SparseVec::validate_value(1.0).is_ok());
+        assert!(SparseVec::validate_value(-1.0).is_ok());
+
+        // Zero value should return InvalidSparseVector
+        let result = SparseVec::validate_value(0.0);
+        assert!(result.is_err());
+        match result {
+            Err(crate::core::error::Error::Vector(VectorError::InvalidSparseVector { reason })) => {
+                assert!(reason.contains("zero value"));
+            }
+            _ => panic!("Expected InvalidSparseVector error"),
+        }
+
+        // NaN should return ContainsNaN
+        let result = SparseVec::validate_value(f32::NAN);
+        assert!(result.is_err());
+        match result {
+            Err(crate::core::error::Error::Vector(VectorError::ContainsNaN { count })) => {
+                assert_eq!(count, 1);
+            }
+            _ => panic!("Expected ContainsNaN error"),
+        }
+
+        // Infinity should return ContainsInfinity
+        let result = SparseVec::validate_value(f32::INFINITY);
+        assert!(result.is_err());
+        match result {
+            Err(crate::core::error::Error::Vector(VectorError::ContainsInfinity { count })) => {
+                assert_eq!(count, 1);
+            }
+            _ => panic!("Expected ContainsInfinity error"),
+        }
+
+        // Negative Infinity should return ContainsInfinity
+        let result = SparseVec::validate_value(f32::NEG_INFINITY);
+        assert!(result.is_err());
+        match result {
+            Err(crate::core::error::Error::Vector(VectorError::ContainsInfinity { count })) => {
+                assert_eq!(count, 1);
+            }
+            _ => panic!("Expected ContainsInfinity error"),
+        }
+    }
+
+    #[test]
     fn test_sparse_vec_new_invalid_inputs() {
         // Table-driven tests for invalid sparse vector construction
         struct TestCase {
