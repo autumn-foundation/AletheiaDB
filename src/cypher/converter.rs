@@ -17,10 +17,11 @@
 //!
 //! # Usage
 //!
-//! ```rust,ignore
+//! ```rust
 //! use aletheiadb::cypher::{parse_cypher, parse_cypher_with_params, CypherParameterValue};
 //! use std::collections::HashMap;
 //!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! // Simple: no parameters
 //! let query = parse_cypher("MATCH (n:Person) RETURN n")?;
 //!
@@ -28,6 +29,8 @@
 //! let mut params = HashMap::new();
 //! params.insert("name".to_string(), CypherParameterValue::String("Alice".into()));
 //! let query = parse_cypher_with_params("MATCH (n:Person {name: $name}) RETURN n", params)?;
+//! # Ok(())
+//! # }
 //! ```
 
 use std::collections::HashMap;
@@ -717,10 +720,13 @@ fn is_vector_function(name: &str) -> bool {
 ///
 /// # Example
 ///
-/// ```rust,ignore
+/// ```rust
 /// use aletheiadb::cypher::parse_cypher;
 ///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let query = parse_cypher("MATCH (n:Person) RETURN n")?;
+/// # Ok(())
+/// # }
 /// ```
 pub fn parse_cypher(input: &str) -> Result<Query, CypherError> {
     let stmt = CypherParser::parse(input)?;
@@ -738,16 +744,19 @@ pub fn parse_cypher(input: &str) -> Result<Query, CypherError> {
 ///
 /// # Example
 ///
-/// ```rust,ignore
+/// ```rust
 /// use aletheiadb::cypher::{parse_cypher_with_params, CypherParameterValue};
 /// use std::collections::HashMap;
 ///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let mut params = HashMap::new();
 /// params.insert("name".to_string(), CypherParameterValue::String("Alice".into()));
 /// let query = parse_cypher_with_params(
 ///     "MATCH (n:Person {name: $name}) RETURN n",
 ///     params,
 /// )?;
+/// # Ok(())
+/// # }
 /// ```
 pub fn parse_cypher_with_params(
     input: &str,

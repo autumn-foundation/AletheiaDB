@@ -39,11 +39,14 @@ pub enum SqlParameterValue {
 ///
 /// # Example
 ///
-/// ```rust,ignore
+/// ```rust
 /// use aletheiadb::sql::SqlConverter;
 ///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let converter = SqlConverter::new();
 /// let query = converter.convert_sql("SELECT * FROM nodes WHERE label = 'Person'")?;
+/// # Ok(())
+/// # }
 /// ```
 pub struct SqlConverter {
     /// Parameter bindings
@@ -742,10 +745,13 @@ impl Default for SqlConverter {
 ///
 /// # Example
 ///
-/// ```rust,ignore
+/// ```rust
 /// use aletheiadb::sql::parse_sql;
 ///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let query = parse_sql("SELECT * FROM nodes WHERE label = 'Person' LIMIT 10")?;
+/// # Ok(())
+/// # }
 /// ```
 pub fn parse_sql(sql: &str) -> Result<Query, SqlError> {
     let converter = SqlConverter::new();
@@ -756,10 +762,12 @@ pub fn parse_sql(sql: &str) -> Result<Query, SqlError> {
 ///
 /// # Example
 ///
-/// ```rust,ignore
+/// ```rust
 /// use aletheiadb::sql::{parse_sql_with_params, SqlParameterValue};
 /// use aletheiadb::query::ir::PredicateValue;
+/// use std::collections::HashMap;
 ///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let mut params = HashMap::new();
 /// params.insert("min_age".to_string(), SqlParameterValue::Scalar(PredicateValue::Int(21)));
 ///
@@ -767,6 +775,8 @@ pub fn parse_sql(sql: &str) -> Result<Query, SqlError> {
 ///     "SELECT * FROM nodes WHERE age > min_age",
 ///     params
 /// )?;
+/// # Ok(())
+/// # }
 /// ```
 pub fn parse_sql_with_params(
     sql: &str,
