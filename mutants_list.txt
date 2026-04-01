@@ -1,0 +1,169 @@
+src/query/parser.rs:65:47: replace / with %
+src/query/parser.rs:65:47: replace / with *
+src/query/parser.rs:97:9: replace <impl std::fmt::Display for ParseError>::fmt -> std::fmt::Result with Ok(Default::default())
+src/query/parser.rs:116:9: replace <impl From<LexerError> for ParseError>::from -> Self with Default::default()
+src/query/parser.rs:161:9: replace Parser::parse -> Result<QueryAst, ParseError> with Ok(Default::default())
+src/query/parser.rs:187:9: replace Parser::parse_query -> Result<QueryAst, ParseError> with Ok(Default::default())
+src/query/parser.rs:229:12: delete ! in Parser::parse_query
+src/query/parser.rs:258:9: replace Parser::parse_temporal_clause -> Result<Option<TemporalClause>, ParseError> with Ok(None)
+src/query/parser.rs:258:9: replace Parser::parse_temporal_clause -> Result<Option<TemporalClause>, ParseError> with Ok(Some(Default::default()))
+src/query/parser.rs:273:9: replace Parser::parse_as_of_clause -> Result<TemporalClause, ParseError> with Ok(Default::default())
+src/query/parser.rs:289:9: replace Parser::parse_between_clause -> Result<TemporalClause, ParseError> with Ok(Default::default())
+src/query/parser.rs:297:9: replace Parser::parse_timestamp -> Result<TimestampLiteral, ParseError> with Ok(Default::default())
+src/query/parser.rs:298:13: delete match arm Some(Token::StringLiteral(s)) in Parser::parse_timestamp
+src/query/parser.rs:303:13: delete match arm Some(Token::IntegerLiteral(n)) in Parser::parse_timestamp
+src/query/parser.rs:331:9: replace Parser::parse_source_clause -> Result<SourceClause, ParseError> with Ok(Default::default())
+src/query/parser.rs:359:9: replace Parser::parse_match_clause -> Result<SourceClause, ParseError> with Ok(Default::default())
+src/query/parser.rs:373:9: replace Parser::parse_similar_clause -> Result<SourceClause, ParseError> with Ok(Default::default())
+src/query/parser.rs:400:9: replace Parser::parse_find_similar_clause -> Result<SourceClause, ParseError> with Ok(Default::default())
+src/query/parser.rs:420:9: replace Parser::parse_embedding_ref -> Result<EmbeddingRef, ParseError> with Ok(Default::default())
+src/query/parser.rs:421:13: delete match arm Some(Token::Parameter(name)) in Parser::parse_embedding_ref
+src/query/parser.rs:426:13: delete match arm Some(Token::LeftBracket) in Parser::parse_embedding_ref
+src/query/parser.rs:446:9: replace Parser::parse_float_list -> Result<Vec<f32>, ParseError> with Ok(vec![])
+src/query/parser.rs:446:9: replace Parser::parse_float_list -> Result<Vec<f32>, ParseError> with Ok(vec![0.0])
+src/query/parser.rs:446:9: replace Parser::parse_float_list -> Result<Vec<f32>, ParseError> with Ok(vec![1.0])
+src/query/parser.rs:446:9: replace Parser::parse_float_list -> Result<Vec<f32>, ParseError> with Ok(vec![-1.0])
+src/query/parser.rs:450:17: delete match arm Some(Token::FloatLiteral(f)) in Parser::parse_float_list
+src/query/parser.rs:451:17: delete match arm Some(Token::IntegerLiteral(i)) in Parser::parse_float_list
+src/query/parser.rs:452:17: delete match arm Some(Token::Dash) in Parser::parse_float_list
+src/query/parser.rs:455:25: delete match arm Some(Token::FloatLiteral(f)) in Parser::parse_float_list
+src/query/parser.rs:456:25: delete match arm Some(Token::IntegerLiteral(i)) in Parser::parse_float_list
+src/query/parser.rs:455:57: delete - in Parser::parse_float_list
+src/query/parser.rs:456:59: delete - in Parser::parse_float_list
+src/query/parser.rs:470:16: delete ! in Parser::parse_float_list
+src/query/parser.rs:480:9: replace Parser::parse_distance_metric -> Result<DistanceMetric, ParseError> with Ok(Default::default())
+src/query/parser.rs:481:13: delete match arm Some(Token::Cosine) in Parser::parse_distance_metric
+src/query/parser.rs:485:13: delete match arm Some(Token::Euclidean) in Parser::parse_distance_metric
+src/query/parser.rs:489:13: delete match arm Some(Token::DotProduct) in Parser::parse_distance_metric
+src/query/parser.rs:501:9: replace Parser::parse_node_ref -> Result<NodeRef, ParseError> with Ok(Default::default())
+src/query/parser.rs:502:13: delete match arm Some(Token::Identifier(name)) in Parser::parse_node_ref
+src/query/parser.rs:507:13: delete match arm Some(Token::IntegerLiteral(id)) in Parser::parse_node_ref
+src/query/parser.rs:512:13: delete match arm Some(Token::Parameter(name)) in Parser::parse_node_ref
+src/query/parser.rs:535:9: replace Parser::parse_pattern -> Result<Pattern, ParseError> with Ok(Default::default())
+src/query/parser.rs:549:9: replace Parser::is_relationship_start -> bool with true
+src/query/parser.rs:549:9: replace Parser::is_relationship_start -> bool with false
+src/query/parser.rs:553:9: replace Parser::parse_node_pattern -> Result<NodePattern, ParseError> with Ok(Default::default())
+src/query/parser.rs:588:9: replace Parser::parse_relationship_pattern -> Result<RelationshipPattern, ParseError> with Ok(Default::default())
+src/query/parser.rs:634:9: replace Parser::parse_relationship_direction_start -> Result<RelationshipDirection, ParseError> with Ok(Default::default())
+src/query/parser.rs:654:9: replace Parser::resolve_relationship_direction -> RelationshipDirection with Default::default()
+src/query/parser.rs:656:26: replace == with != in Parser::resolve_relationship_direction
+src/query/parser.rs:665:26: replace == with != in Parser::resolve_relationship_direction
+src/query/parser.rs:679:9: replace Parser::parse_depth_spec -> Result<DepthSpec, ParseError> with Ok(Default::default())
+src/query/parser.rs:683:13: delete match arm Some(Token::IntegerLiteral(n)) in Parser::parse_depth_spec
+src/query/parser.rs:693:13: delete match arm Some(Token::Dot) in Parser::parse_depth_spec
+src/query/parser.rs:710:9: replace Parser::validate_non_negative -> Result<usize, ParseError> with Ok(0)
+src/query/parser.rs:710:9: replace Parser::validate_non_negative -> Result<usize, ParseError> with Ok(1)
+src/query/parser.rs:710:14: replace < with == in Parser::validate_non_negative
+src/query/parser.rs:710:14: replace < with > in Parser::validate_non_negative
+src/query/parser.rs:710:14: replace < with <= in Parser::validate_non_negative
+src/query/parser.rs:721:9: replace Parser::parse_depth_range -> Result<DepthSpec, ParseError> with Ok(Default::default())
+src/query/parser.rs:726:20: replace > with == in Parser::parse_depth_range
+src/query/parser.rs:726:20: replace > with < in Parser::parse_depth_range
+src/query/parser.rs:726:20: replace > with >= in Parser::parse_depth_range
+src/query/parser.rs:745:9: replace Parser::parse_property_map -> Result<PropertyMap, ParseError> with Ok(Default::default())
+src/query/parser.rs:749:12: delete ! in Parser::parse_property_map
+src/query/parser.rs:756:20: delete ! in Parser::parse_property_map
+src/query/parser.rs:768:9: replace Parser::parse_property_value -> Result<PropertyValue, ParseError> with Ok(Default::default())
+src/query/parser.rs:770:26: replace == with != in Parser::parse_property_value
+src/query/parser.rs:782:9: replace Parser::parse_value -> Result<PropertyValue, ParseError> with Ok(Default::default())
+src/query/parser.rs:783:13: delete match arm Some(Token::Null) in Parser::parse_value
+src/query/parser.rs:787:13: delete match arm Some(Token::True) in Parser::parse_value
+src/query/parser.rs:791:13: delete match arm Some(Token::False) in Parser::parse_value
+src/query/parser.rs:795:13: delete match arm Some(Token::IntegerLiteral(n)) in Parser::parse_value
+src/query/parser.rs:800:13: delete match arm Some(Token::FloatLiteral(f)) in Parser::parse_value
+src/query/parser.rs:805:13: delete match arm Some(Token::StringLiteral(s)) in Parser::parse_value
+src/query/parser.rs:810:13: delete match arm Some(Token::Parameter(p)) in Parser::parse_value
+src/query/parser.rs:815:13: delete match arm Some(Token::Dash) in Parser::parse_value
+src/query/parser.rs:821:9: replace Parser::parse_negative_number -> Result<PropertyValue, ParseError> with Ok(Default::default())
+src/query/parser.rs:823:13: delete match arm Some(Token::IntegerLiteral(n)) in Parser::parse_negative_number
+src/query/parser.rs:828:13: delete match arm Some(Token::FloatLiteral(f)) in Parser::parse_negative_number
+src/query/parser.rs:824:44: delete - in Parser::parse_negative_number
+src/query/parser.rs:829:46: delete - in Parser::parse_negative_number
+src/query/parser.rs:854:9: replace Parser::parse_rank_clause -> Result<Option<RankClause>, ParseError> with Ok(None)
+src/query/parser.rs:854:9: replace Parser::parse_rank_clause -> Result<Option<RankClause>, ParseError> with Ok(Some(Default::default()))
+src/query/parser.rs:854:12: delete ! in Parser::parse_rank_clause
+src/query/parser.rs:888:9: replace Parser::parse_where_clause -> Result<Option<WhereClause>, ParseError> with Ok(None)
+src/query/parser.rs:888:9: replace Parser::parse_where_clause -> Result<Option<WhereClause>, ParseError> with Ok(Some(Default::default()))
+src/query/parser.rs:888:12: delete ! in Parser::parse_where_clause
+src/query/parser.rs:907:9: replace Parser::parse_predicate -> Result<PredicateExpr, ParseError> with Ok(Default::default())
+src/query/parser.rs:916:9: replace Parser::parse_or_predicate -> Result<PredicateExpr, ParseError> with Ok(Default::default())
+src/query/parser.rs:928:9: replace Parser::parse_and_predicate -> Result<PredicateExpr, ParseError> with Ok(Default::default())
+src/query/parser.rs:940:9: replace Parser::parse_not_predicate -> Result<PredicateExpr, ParseError> with Ok(Default::default())
+src/query/parser.rs:944:55: replace + with - in Parser::parse_not_predicate
+src/query/parser.rs:944:55: replace + with * in Parser::parse_not_predicate
+src/query/parser.rs:953:9: replace Parser::parse_primary_predicate -> Result<PredicateExpr, ParseError> with Ok(Default::default())
+src/query/parser.rs:971:71: replace || with && in Parser::parse_primary_predicate
+src/query/parser.rs:971:41: replace || with && in Parser::parse_primary_predicate
+src/query/parser.rs:985:9: replace Parser::parse_grouped_predicate -> Result<PredicateExpr, ParseError> with Ok(Default::default())
+src/query/parser.rs:988:47: replace + with - in Parser::parse_grouped_predicate
+src/query/parser.rs:988:47: replace + with * in Parser::parse_grouped_predicate
+src/query/parser.rs:994:9: replace Parser::parse_exists_predicate -> Result<PredicateExpr, ParseError> with Ok(Default::default())
+src/query/parser.rs:1002:9: replace Parser::parse_is_null_predicate -> Result<PredicateExpr, ParseError> with Ok(Default::default())
+src/query/parser.rs:1020:9: replace Parser::parse_string_predicate -> Result<PredicateExpr, ParseError> with Ok(Default::default())
+src/query/parser.rs:1050:9: replace Parser::parse_in_predicate -> Result<PredicateExpr, ParseError> with Ok(Default::default())
+src/query/parser.rs:1053:12: delete ! in Parser::parse_in_predicate
+src/query/parser.rs:1056:20: delete ! in Parser::parse_in_predicate
+src/query/parser.rs:1071:9: replace Parser::parse_comparison_predicate -> Result<PredicateExpr, ParseError> with Ok(Default::default())
+src/query/parser.rs:1072:13: delete match arm Some(Token::Eq) in Parser::parse_comparison_predicate
+src/query/parser.rs:1073:13: delete match arm Some(Token::Ne) in Parser::parse_comparison_predicate
+src/query/parser.rs:1074:13: delete match arm Some(Token::Lt) in Parser::parse_comparison_predicate
+src/query/parser.rs:1075:13: delete match arm Some(Token::Le) in Parser::parse_comparison_predicate
+src/query/parser.rs:1076:13: delete match arm Some(Token::Gt) in Parser::parse_comparison_predicate
+src/query/parser.rs:1077:13: delete match arm Some(Token::Ge) in Parser::parse_comparison_predicate
+src/query/parser.rs:1097:9: replace Parser::parse_expression -> Result<Expression, ParseError> with Ok(Default::default())
+src/query/parser.rs:1098:13: delete match arm Some(Token::Identifier(_)) in Parser::parse_expression
+src/query/parser.rs:1113:13: delete match arm Some(Token::Parameter(p)) in Parser::parse_expression
+src/query/parser.rs:1126:9: replace Parser::parse_literal_expression -> Result<Expression, ParseError> with Ok(Default::default())
+src/query/parser.rs:1130:30: replace == with != in Parser::parse_literal_expression
+src/query/parser.rs:1143:9: replace Parser::parse_property_access -> Result<PropertyAccess, ParseError> with Ok(Default::default())
+src/query/parser.rs:1165:9: replace Parser::parse_return_clause -> Result<Option<ReturnClause>, ParseError> with Ok(None)
+src/query/parser.rs:1165:9: replace Parser::parse_return_clause -> Result<Option<ReturnClause>, ParseError> with Ok(Some(Default::default()))
+src/query/parser.rs:1165:12: delete ! in Parser::parse_return_clause
+src/query/parser.rs:1209:9: replace Parser::parse_return_item -> Result<ReturnItem, ParseError> with Ok(Default::default())
+src/query/parser.rs:1236:9: replace Parser::parse_order_clause -> Result<Option<OrderClause>, ParseError> with Ok(None)
+src/query/parser.rs:1236:9: replace Parser::parse_order_clause -> Result<Option<OrderClause>, ParseError> with Ok(Some(Default::default()))
+src/query/parser.rs:1236:12: delete ! in Parser::parse_order_clause
+src/query/parser.rs:1254:9: replace Parser::parse_order_item -> Result<OrderItem, ParseError> with Ok(Default::default())
+src/query/parser.rs:1277:9: replace Parser::parse_skip_clause -> Result<Option<usize>, ParseError> with Ok(None)
+src/query/parser.rs:1277:9: replace Parser::parse_skip_clause -> Result<Option<usize>, ParseError> with Ok(Some(0))
+src/query/parser.rs:1277:9: replace Parser::parse_skip_clause -> Result<Option<usize>, ParseError> with Ok(Some(1))
+src/query/parser.rs:1277:12: delete ! in Parser::parse_skip_clause
+src/query/parser.rs:1286:9: replace Parser::parse_limit_clause -> Result<Option<usize>, ParseError> with Ok(None)
+src/query/parser.rs:1286:9: replace Parser::parse_limit_clause -> Result<Option<usize>, ParseError> with Ok(Some(0))
+src/query/parser.rs:1286:9: replace Parser::parse_limit_clause -> Result<Option<usize>, ParseError> with Ok(Some(1))
+src/query/parser.rs:1286:12: delete ! in Parser::parse_limit_clause
+src/query/parser.rs:1299:9: replace Parser::current -> Option<&Token> with None
+src/query/parser.rs:1299:9: replace Parser::current -> Option<&Token> with Some(Box::leak(Box::new(Default::default())))
+src/query/parser.rs:1303:9: replace Parser::peek -> Option<&Token> with None
+src/query/parser.rs:1303:9: replace Parser::peek -> Option<&Token> with Some(Box::leak(Box::new(Default::default())))
+src/query/parser.rs:1303:39: replace + with - in Parser::peek
+src/query/parser.rs:1303:39: replace + with * in Parser::peek
+src/query/parser.rs:1307:9: replace Parser::check -> bool with true
+src/query/parser.rs:1307:9: replace Parser::check -> bool with false
+src/query/parser.rs:1308:13: delete match arm (Some(current), expected) in Parser::check
+src/query/parser.rs:1309:49: replace == with != in Parser::check
+src/query/parser.rs:1316:9: replace Parser::advance with ()
+src/query/parser.rs:1316:12: delete ! in Parser::advance
+src/query/parser.rs:1317:27: replace += with -= in Parser::advance
+src/query/parser.rs:1317:27: replace += with *= in Parser::advance
+src/query/parser.rs:1322:9: replace Parser::is_at_end -> bool with true
+src/query/parser.rs:1322:9: replace Parser::is_at_end -> bool with false
+src/query/parser.rs:1326:9: replace Parser::check_recursion_depth -> Result<(), ParseError> with Ok(())
+src/query/parser.rs:1326:18: replace > with == in Parser::check_recursion_depth
+src/query/parser.rs:1326:18: replace > with < in Parser::check_recursion_depth
+src/query/parser.rs:1326:18: replace > with >= in Parser::check_recursion_depth
+src/query/parser.rs:1343:9: replace Parser::require_property_expr -> Result<PropertyAccess, ParseError> with Ok(Default::default())
+src/query/parser.rs:1354:9: replace Parser::expect -> Result<(), ParseError> with Ok(())
+src/query/parser.rs:1363:9: replace Parser::parse_identifier -> Result<String, ParseError> with Ok(String::new())
+src/query/parser.rs:1363:9: replace Parser::parse_identifier -> Result<String, ParseError> with Ok("xyzzy".into())
+src/query/parser.rs:1364:13: delete match arm Some(Token::Identifier(name)) in Parser::parse_identifier
+src/query/parser.rs:1377:9: replace Parser::parse_usize -> Result<usize, ParseError> with Ok(0)
+src/query/parser.rs:1377:9: replace Parser::parse_usize -> Result<usize, ParseError> with Ok(1)
+src/query/parser.rs:1378:13: delete match arm Some(Token::IntegerLiteral(n)) in Parser::parse_usize
+src/query/parser.rs:1380:22: replace < with == in Parser::parse_usize
+src/query/parser.rs:1380:22: replace < with > in Parser::parse_usize
+src/query/parser.rs:1380:22: replace < with <= in Parser::parse_usize
+src/query/parser.rs:1400:9: replace Parser::parse_string -> Result<String, ParseError> with Ok(String::new())
+src/query/parser.rs:1400:9: replace Parser::parse_string -> Result<String, ParseError> with Ok("xyzzy".into())
+src/query/parser.rs:1401:13: delete match arm Some(Token::StringLiteral(s)) in Parser::parse_string
+src/query/parser.rs:1411:9: replace Parser::error -> ParseError with Default::default()

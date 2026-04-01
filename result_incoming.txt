@@ -1,0 +1,120 @@
+   Compiling aletheiadb v0.1.0 (/app)
+    Finished `test` profile [optimized + debuginfo] target(s) in 16.33s
+     Running unittests src/lib.rs (target/debug/deps/aletheiadb-0e9fb6d95414fb4e)
+
+running 73 tests
+test query::parser::sentry_tests::test_depth_range_equal_min_max ... ok
+test query::parser::sentry_tests::test_limit_zero_allowed ... ok
+test query::parser::sentry_tests::test_parser_recursion_limit_boundary ... ok
+test query::parser::sentry_tests::test_parser_recursion_limit_nested_not ... ok
+test query::parser::sentry_tests::test_spaced_negative_float ... ok
+test query::parser::sentry_tests::test_skip_zero_allowed ... ok
+test query::parser::sentry_tests::test_parser_recursion_limit_nested_parens ... ok
+test query::parser::sentry_tests::test_spaced_negative_integer ... ok
+test query::parser::tests::test_depth_range_inverted ... ok
+test query::parser::sentry_tests::test_spaced_negative_in_float_list ... ok
+test query::parser::tests::test_depth_range_negative ... ok
+test query::parser::tests::test_depth_range_negative_max ... ok
+test query::parser::tests::test_expression_error_unexpected ... ok
+test query::parser::tests::test_parse_as_of_bitemporal ... ok
+test query::parser::tests::test_parse_as_of_string ... ok
+test query::parser::tests::test_parse_between ... ok
+test query::parser::tests::test_parse_error_display_full ... ok
+test query::parser::tests::test_parse_error_contains_on_non_property ... ok
+test query::parser::sentry_tests::test_unbounded_max_depth ... FAILED
+test query::parser::tests::test_parse_bidirectional_relationship ... FAILED
+test query::parser::tests::test_parse_error_empty_embedding ... ok
+test query::parser::tests::test_parse_error_from_lexer_error ... ok
+test query::parser::tests::test_parse_error_invalid_depth_range ... ok
+test query::parser::tests::test_parse_error_invalid_pattern ... ok
+test query::parser::tests::test_parse_error_in_on_non_property ... ok
+test query::parser::tests::test_parse_error_missing_label ... ok
+test query::parser::tests::test_parse_error_invalid_start_token ... ok
+test query::parser::tests::test_parse_error_missing_source ... ok
+test query::parser::tests::test_parse_error_negative_depth ... ok
+test query::parser::tests::test_parse_error_negative_limit ... ok
+test query::parser::tests::test_parse_error_negative_skip ... ok
+test query::parser::tests::test_parse_error_traits ... ok
+test query::parser::tests::test_parse_error_unclosed_paren ... ok
+test query::parser::tests::test_parse_error_unexpected_tokens ... ok
+test query::parser::tests::test_parse_exact_depth_path ... ok
+test query::parser::tests::test_parse_find_similar ... ok
+test query::parser::tests::test_parse_full_hybrid_query ... ok
+test query::parser::tests::test_parse_incoming_relationship ... FAILED
+test query::parser::tests::test_parse_limit ... ok
+test query::parser::tests::test_parse_match_multiple_patterns ... ok
+test query::parser::tests::test_parse_match_with_label ... ok
+test query::parser::tests::test_parse_match_with_properties ... ok
+test query::parser::tests::test_parse_no_return_clause ... ok
+test query::parser::tests::test_parse_order_by ... ok
+test query::parser::tests::test_parse_order_by_multiple ... ok
+test query::parser::tests::test_parse_outgoing_relationship ... FAILED
+test query::parser::tests::test_parse_rank_by_similarity ... ok
+test query::parser::tests::test_parse_rank_by_similarity_without_top ... ok
+test query::parser::tests::test_parse_return_count ... ok
+test query::parser::tests::test_parse_return_count_expression ... ok
+test query::parser::tests::test_parse_return_distinct ... ok
+test query::parser::tests::test_parse_return_multiple ... ok
+test query::parser::tests::test_parse_return_with_alias ... ok
+test query::parser::tests::test_parse_similar_to_literal ... ok
+test query::parser::tests::test_parse_similar_to_parameter ... ok
+test query::parser::tests::test_parse_similar_with_euclidean_and_dot_product ... ok
+test query::parser::tests::test_parse_similar_with_invalid_metric ... ok
+test query::parser::tests::test_parse_simple_match ... ok
+test query::parser::tests::test_parse_skip ... ok
+test query::parser::tests::test_parse_variable_length_path ... ok
+test query::parser::tests::test_parse_similar_with_metric ... ok
+test query::parser::tests::test_parse_where_and ... ok
+test query::parser::tests::test_parse_where_comparison ... ok
+test query::parser::tests::test_parse_where_contains ... ok
+test query::parser::tests::test_parse_where_equality ... ok
+test query::parser::tests::test_parse_where_grouped ... ok
+test query::parser::tests::test_parse_where_in ... ok
+test query::parser::tests::test_parse_where_is_not_null ... ok
+test query::parser::tests::test_parse_where_is_null ... ok
+test query::parser::tests::test_parse_where_not ... ok
+test query::parser::tests::test_parse_where_or ... ok
+test query::parser::tests::test_parse_where_starts_with ... ok
+test query::parser::tests::test_relationship_direction_half_open ... ok
+
+failures:
+
+---- query::parser::sentry_tests::test_unbounded_max_depth stdout ----
+
+thread 'query::parser::sentry_tests::test_unbounded_max_depth' (225592) panicked at src/query/parser.rs:2343:9:
+assertion `left == right` failed
+  left: Relationship(RelationshipPattern { variable: None, rel_type: Some("REL"), direction: Both, depth: Some(Range { min: 1, max: 9223372036854775807 }) })
+ right: Relationship(RelationshipPattern { variable: None, rel_type: Some("REL"), direction: Outgoing, depth: Some(Range { min: 1, max: 9223372036854775807 }) })
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- query::parser::tests::test_parse_bidirectional_relationship stdout ----
+
+thread 'query::parser::tests::test_parse_bidirectional_relationship' (225600) panicked at src/query/parser.rs:1504:13:
+assertion `left == right` failed
+  left: Incoming
+ right: Both
+
+---- query::parser::tests::test_parse_incoming_relationship stdout ----
+
+thread 'query::parser::tests::test_parse_incoming_relationship' (225620) panicked at src/query/parser.rs:1492:13:
+assertion `left == right` failed
+  left: Both
+ right: Incoming
+
+---- query::parser::tests::test_parse_outgoing_relationship stdout ----
+
+thread 'query::parser::tests::test_parse_outgoing_relationship' (225628) panicked at src/query/parser.rs:1479:17:
+assertion `left == right` failed
+  left: Both
+ right: Outgoing
+
+
+failures:
+    query::parser::sentry_tests::test_unbounded_max_depth
+    query::parser::tests::test_parse_bidirectional_relationship
+    query::parser::tests::test_parse_incoming_relationship
+    query::parser::tests::test_parse_outgoing_relationship
+
+test result: FAILED. 69 passed; 4 failed; 0 ignored; 0 measured; 3092 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--lib`

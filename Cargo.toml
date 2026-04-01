@@ -409,3 +409,7 @@ required-features = []
 [[example]]
 name = "story_demo"
 required-features = ["nova"]
+
+[[bin]]
+name = "test_parse_rel"
+path = "test_parse_rel.rs"

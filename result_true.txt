@@ -1,0 +1,394 @@
+   Compiling aletheiadb v0.1.0 (/app)
+    Finished `test` profile [optimized + debuginfo] target(s) in 38.50s
+     Running unittests src/lib.rs (target/debug/deps/aletheiadb-0e9fb6d95414fb4e)
+
+running 73 tests
+test query::parser::sentry_tests::test_limit_zero_allowed ... FAILED
+test query::parser::sentry_tests::test_depth_range_equal_min_max ... FAILED
+test query::parser::sentry_tests::test_parser_recursion_limit_boundary ... FAILED
+test query::parser::sentry_tests::test_parser_recursion_limit_nested_not ... FAILED
+test query::parser::sentry_tests::test_parser_recursion_limit_nested_parens ... FAILED
+test query::parser::sentry_tests::test_skip_zero_allowed ... FAILED
+test query::parser::sentry_tests::test_spaced_negative_in_float_list ... ok
+test query::parser::sentry_tests::test_spaced_negative_float ... FAILED
+test query::parser::sentry_tests::test_spaced_negative_integer ... FAILED
+test query::parser::sentry_tests::test_unbounded_max_depth ... FAILED
+test query::parser::tests::test_depth_range_inverted ... ok
+test query::parser::tests::test_depth_range_negative ... ok
+test query::parser::tests::test_depth_range_negative_max ... ok
+test query::parser::tests::test_expression_error_unexpected ... FAILED
+test query::parser::tests::test_parse_as_of_bitemporal ... FAILED
+test query::parser::tests::test_parse_as_of_string ... FAILED
+test query::parser::tests::test_parse_between ... FAILED
+test query::parser::tests::test_parse_bidirectional_relationship ... FAILED
+test query::parser::tests::test_parse_error_contains_on_non_property ... FAILED
+test query::parser::tests::test_parse_error_display_full ... ok
+test query::parser::tests::test_parse_error_from_lexer_error ... ok
+test query::parser::tests::test_parse_error_empty_embedding ... ok
+test query::parser::tests::test_parse_error_in_on_non_property ... FAILED
+test query::parser::tests::test_parse_error_invalid_depth_range ... ok
+test query::parser::tests::test_parse_error_invalid_pattern ... ok
+test query::parser::tests::test_parse_error_invalid_start_token ... ok
+test query::parser::tests::test_parse_error_missing_label ... ok
+test query::parser::tests::test_parse_error_missing_source ... ok
+test query::parser::tests::test_parse_error_negative_depth ... ok
+test query::parser::tests::test_parse_error_negative_skip ... ok
+test query::parser::tests::test_parse_error_negative_limit ... FAILED
+test query::parser::tests::test_parse_error_unclosed_paren ... ok
+test query::parser::tests::test_parse_error_traits ... ok
+test query::parser::tests::test_parse_error_unexpected_tokens ... FAILED
+test query::parser::tests::test_parse_exact_depth_path ... FAILED
+test query::parser::tests::test_parse_find_similar ... ok
+test query::parser::tests::test_parse_full_hybrid_query ... FAILED
+test query::parser::tests::test_parse_incoming_relationship ... FAILED
+test query::parser::tests::test_parse_limit ... FAILED
+test query::parser::tests::test_parse_match_multiple_patterns ... FAILED
+test query::parser::tests::test_parse_match_with_label ... FAILED
+test query::parser::tests::test_parse_no_return_clause ... FAILED
+test query::parser::tests::test_parse_match_with_properties ... FAILED
+test query::parser::tests::test_parse_order_by ... FAILED
+test query::parser::tests::test_parse_order_by_multiple ... FAILED
+test query::parser::tests::test_parse_outgoing_relationship ... FAILED
+test query::parser::tests::test_parse_rank_by_similarity ... FAILED
+test query::parser::tests::test_parse_rank_by_similarity_without_top ... FAILED
+test query::parser::tests::test_parse_return_count_expression ... FAILED
+test query::parser::tests::test_parse_return_count ... FAILED
+test query::parser::tests::test_parse_return_distinct ... FAILED
+test query::parser::tests::test_parse_return_multiple ... FAILED
+test query::parser::tests::test_parse_return_with_alias ... FAILED
+test query::parser::tests::test_parse_similar_to_literal ... ok
+test query::parser::tests::test_parse_similar_to_parameter ... ok
+test query::parser::tests::test_parse_similar_with_euclidean_and_dot_product ... ok
+test query::parser::tests::test_parse_similar_with_invalid_metric ... ok
+test query::parser::tests::test_parse_similar_with_metric ... ok
+test query::parser::tests::test_parse_simple_match ... FAILED
+test query::parser::tests::test_parse_skip ... FAILED
+test query::parser::tests::test_parse_variable_length_path ... FAILED
+test query::parser::tests::test_parse_where_and ... FAILED
+test query::parser::tests::test_parse_where_comparison ... FAILED
+test query::parser::tests::test_parse_where_contains ... FAILED
+test query::parser::tests::test_parse_where_equality ... FAILED
+test query::parser::tests::test_parse_where_grouped ... FAILED
+test query::parser::tests::test_parse_where_in ... FAILED
+test query::parser::tests::test_parse_where_is_not_null ... FAILED
+test query::parser::tests::test_parse_where_is_null ... FAILED
+test query::parser::tests::test_parse_where_not ... FAILED
+test query::parser::tests::test_parse_where_or ... FAILED
+test query::parser::tests::test_parse_where_starts_with ... FAILED
+test query::parser::tests::test_relationship_direction_half_open ... FAILED
+
+failures:
+
+---- query::parser::sentry_tests::test_limit_zero_allowed stdout ----
+
+thread 'query::parser::sentry_tests::test_limit_zero_allowed' (223779) panicked at src/query/parser.rs:2248:65:
+called `Result::unwrap()` on an `Err` value: ParseError { message: "Expected -", position: 4, expected: Some("-"), found: Some(Return) }
+
+---- query::parser::sentry_tests::test_depth_range_equal_min_max stdout ----
+
+thread 'query::parser::sentry_tests::test_depth_range_equal_min_max' (223778) panicked at src/query/parser.rs:2264:74:
+called `Result::unwrap()` on an `Err` value: ParseError { message: "Expected -", position: 18, expected: Some("-"), found: Some(Return) }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- query::parser::sentry_tests::test_parser_recursion_limit_boundary stdout ----
+
+thread 'query::parser::sentry_tests::test_parser_recursion_limit_boundary' (223780) panicked at src/query/parser.rs:2241:9:
+Should accept recursion up to the limit
+
+---- query::parser::sentry_tests::test_parser_recursion_limit_nested_not stdout ----
+
+thread 'query::parser::sentry_tests::test_parser_recursion_limit_nested_not' (223781) panicked at src/query/parser.rs:2220:9:
+Expected recursion limit error, got: Expected -
+
+---- query::parser::sentry_tests::test_parser_recursion_limit_nested_parens stdout ----
+
+thread 'query::parser::sentry_tests::test_parser_recursion_limit_nested_parens' (223782) panicked at src/query/parser.rs:2199:9:
+Expected recursion limit error, got: Expected -
+
+---- query::parser::sentry_tests::test_skip_zero_allowed stdout ----
+
+thread 'query::parser::sentry_tests::test_skip_zero_allowed' (223783) panicked at src/query/parser.rs:2256:64:
+called `Result::unwrap()` on an `Err` value: ParseError { message: "Expected -", position: 4, expected: Some("-"), found: Some(Return) }
+
+---- query::parser::sentry_tests::test_spaced_negative_float stdout ----
+
+thread 'query::parser::sentry_tests::test_spaced_negative_float' (223784) panicked at src/query/parser.rs:2297:61:
+called `Result::unwrap()` on an `Err` value: ParseError { message: "Expected -", position: 4, expected: Some("-"), found: Some(Return) }
+
+---- query::parser::sentry_tests::test_spaced_negative_integer stdout ----
+
+thread 'query::parser::sentry_tests::test_spaced_negative_integer' (223786) panicked at src/query/parser.rs:2287:59:
+called `Result::unwrap()` on an `Err` value: ParseError { message: "Expected -", position: 4, expected: Some("-"), found: Some(Return) }
+
+---- query::parser::sentry_tests::test_unbounded_max_depth stdout ----
+
+thread 'query::parser::sentry_tests::test_unbounded_max_depth' (223787) panicked at src/query/parser.rs:2324:73:
+called `Result::unwrap()` on an `Err` value: ParseError { message: "Expected -", position: 17, expected: Some("-"), found: Some(Return) }
+
+---- query::parser::tests::test_expression_error_unexpected stdout ----
+
+thread 'query::parser::tests::test_expression_error_unexpected' (223791) panicked at src/query/parser.rs:2138:9:
+assertion failed: err.message.contains("Expected expression")
+
+---- query::parser::tests::test_parse_as_of_bitemporal stdout ----
+
+thread 'query::parser::tests::test_parse_as_of_bitemporal' (223792) panicked at src/query/parser.rs:1627:91:
+called `Result::unwrap()` on an `Err` value: ParseError { message: "Expected -", position: 9, expected: Some("-"), found: Some(Return) }
+
+---- query::parser::tests::test_parse_as_of_string stdout ----
+
+thread 'query::parser::tests::test_parse_as_of_string' (223793) panicked at src/query/parser.rs:1612:86:
+called `Result::unwrap()` on an `Err` value: ParseError { message: "Expected -", position: 7, expected: Some("-"), found: Some(Return) }
+
+---- query::parser::tests::test_parse_between stdout ----
+
+thread 'query::parser::tests::test_parse_between' (223794) panicked at src/query/parser.rs:1646:87:
+called `Result::unwrap()` on an `Err` value: ParseError { message: "Expected -", position: 8, expected: Some("-"), found: Some(Return) }
+
+---- query::parser::tests::test_parse_bidirectional_relationship stdout ----
+
+thread 'query::parser::tests::test_parse_bidirectional_relationship' (223795) panicked at src/query/parser.rs:1499:75:
+called `Result::unwrap()` on an `Err` value: ParseError { message: "Expected -", position: 13, expected: Some("-"), found: Some(Return) }
+
+---- query::parser::tests::test_parse_error_contains_on_non_property stdout ----
+
+thread 'query::parser::tests::test_parse_error_contains_on_non_property' (223796) panicked at src/query/parser.rs:2013:9:
+assertion failed: err.message.contains("property expression")
+
+---- query::parser::tests::test_parse_error_in_on_non_property stdout ----
+
+thread 'query::parser::tests::test_parse_error_in_on_non_property' (223800) panicked at src/query/parser.rs:2021:9:
+assertion failed: err.message.contains("property expression")
+
+---- query::parser::tests::test_parse_error_negative_limit stdout ----
+
+thread 'query::parser::tests::test_parse_error_negative_limit' (223807) panicked at src/query/parser.rs:1975:9:
+assertion failed: err.message.contains("non-negative")
+
+---- query::parser::tests::test_parse_error_unexpected_tokens stdout ----
+
+thread 'query::parser::tests::test_parse_error_unexpected_tokens' (223811) panicked at src/query/parser.rs:2156:9:
+assertion failed: err.message.contains("Unexpected tokens")
+
+---- query::parser::tests::test_parse_exact_depth_path stdout ----
+
+thread 'query::parser::tests::test_parse_exact_depth_path' (223812) panicked at src/query/parser.rs:1521:73:
+called `Result::unwrap()` on an `Err` value: ParseError { message: "Expected -", position: 15, expected: Some("-"), found: Some(Return) }
+
+---- query::parser::tests::test_parse_full_hybrid_query stdout ----
+
+thread 'query::parser::tests::test_parse_full_hybrid_query' (223814) panicked at src/query/parser.rs:1930:10:
+called `Result::unwrap()` on an `Err` value: ParseError { message: "Expected -", position: 18, expected: Some("-"), found: Some(Rank) }
+
+---- query::parser::tests::test_parse_incoming_relationship stdout ----
+
+thread 'query::parser::tests::test_parse_incoming_relationship' (223815) panicked at src/query/parser.rs:1487:76:
+called `Result::unwrap()` on an `Err` value: ParseError { message: "Expected -", position: 13, expected: Some("-"), found: Some(Return) }
+
+---- query::parser::tests::test_parse_limit stdout ----
+
+thread 'query::parser::tests::test_parse_limit' (223816) panicked at src/query/parser.rs:1905:66:
+called `Result::unwrap()` on an `Err` value: ParseError { message: "Expected -", position: 4, expected: Some("-"), found: Some(Return) }
+
+---- query::parser::tests::test_parse_match_multiple_patterns stdout ----
+
+thread 'query::parser::tests::test_parse_match_multiple_patterns' (223817) panicked at src/query/parser.rs:2161:62:
+called `Result::unwrap()` on an `Err` value: ParseError { message: "Expected -", position: 4, expected: Some("-"), found: Some(Comma) }
+
+---- query::parser::tests::test_parse_match_with_label stdout ----
+
+thread 'query::parser::tests::test_parse_match_with_label' (223818) panicked at src/query/parser.rs:1438:64:
+called `Result::unwrap()` on an `Err` value: ParseError { message: "Expected -", position: 6, expected: Some("-"), found: Some(Return) }
+
+---- query::parser::tests::test_parse_no_return_clause stdout ----
+
+thread 'query::parser::tests::test_parse_no_return_clause' (223820) panicked at src/query/parser.rs:1869:48:
+called `Result::unwrap()` on an `Err` value: ParseError { message: "Expected -", position: 4, expected: Some("-"), found: Some(Eof) }
+
+---- query::parser::tests::test_parse_match_with_properties stdout ----
+
+thread 'query::parser::tests::test_parse_match_with_properties' (223819) panicked at src/query/parser.rs:1455:80:
+called `Result::unwrap()` on an `Err` value: ParseError { message: "Expected -", position: 11, expected: Some("-"), found: Some(Return) }
+
+---- query::parser::tests::test_parse_order_by stdout ----
+
+thread 'query::parser::tests::test_parse_order_by' (223821) panicked at src/query/parser.rs:1879:77:
+called `Result::unwrap()` on an `Err` value: ParseError { message: "Expected -", position: 4, expected: Some("-"), found: Some(Return) }
+
+---- query::parser::tests::test_parse_order_by_multiple stdout ----
+
+thread 'query::parser::tests::test_parse_order_by_multiple' (223822) panicked at src/query/parser.rs:1890:89:
+called `Result::unwrap()` on an `Err` value: ParseError { message: "Expected -", position: 4, expected: Some("-"), found: Some(Return) }
+
+---- query::parser::tests::test_parse_outgoing_relationship stdout ----
+
+thread 'query::parser::tests::test_parse_outgoing_relationship' (223823) panicked at src/query/parser.rs:1474:74:
+called `Result::unwrap()` on an `Err` value: ParseError { message: "Expected -", position: 13, expected: Some("-"), found: Some(Return) }
+
+---- query::parser::tests::test_parse_rank_by_similarity stdout ----
+
+thread 'query::parser::tests::test_parse_rank_by_similarity' (223824) panicked at src/query/parser.rs:1773:10:
+called `Result::unwrap()` on an `Err` value: ParseError { message: "Expected -", position: 15, expected: Some("-"), found: Some(Rank) }
+
+---- query::parser::tests::test_parse_rank_by_similarity_without_top stdout ----
+
+thread 'query::parser::tests::test_parse_rank_by_similarity_without_top' (223825) panicked at src/query/parser.rs:1786:18:
+called `Result::unwrap()` on an `Err` value: ParseError { message: "Expected -", position: 13, expected: Some("-"), found: Some(Rank) }
+
+---- query::parser::tests::test_parse_return_count_expression stdout ----
+
+thread 'query::parser::tests::test_parse_return_count_expression' (223827) panicked at src/query/parser.rs:1850:64:
+called `Result::unwrap()` on an `Err` value: ParseError { message: "Expected -", position: 4, expected: Some("-"), found: Some(Return) }
+
+---- query::parser::tests::test_parse_return_count stdout ----
+
+thread 'query::parser::tests::test_parse_return_count' (223826) panicked at src/query/parser.rs:1831:64:
+called `Result::unwrap()` on an `Err` value: ParseError { message: "Expected -", position: 4, expected: Some("-"), found: Some(Return) }
+
+---- query::parser::tests::test_parse_return_distinct stdout ----
+
+thread 'query::parser::tests::test_parse_return_distinct' (223828) panicked at src/query/parser.rs:1822:71:
+called `Result::unwrap()` on an `Err` value: ParseError { message: "Expected -", position: 4, expected: Some("-"), found: Some(Return) }
+
+---- query::parser::tests::test_parse_return_multiple stdout ----
+
+thread 'query::parser::tests::test_parse_return_multiple' (223829) panicked at src/query/parser.rs:1803:69:
+called `Result::unwrap()` on an `Err` value: ParseError { message: "Expected -", position: 4, expected: Some("-"), found: Some(Return) }
+
+---- query::parser::tests::test_parse_return_with_alias stdout ----
+
+thread 'query::parser::tests::test_parse_return_with_alias' (223830) panicked at src/query/parser.rs:1812:86:
+called `Result::unwrap()` on an `Err` value: ParseError { message: "Expected -", position: 4, expected: Some("-"), found: Some(Return) }
+
+---- query::parser::tests::test_parse_simple_match stdout ----
+
+thread 'query::parser::tests::test_parse_simple_match' (223836) panicked at src/query/parser.rs:1430:57:
+called `Result::unwrap()` on an `Err` value: ParseError { message: "Expected -", position: 4, expected: Some("-"), found: Some(Return) }
+
+---- query::parser::tests::test_parse_skip stdout ----
+
+thread 'query::parser::tests::test_parse_skip' (223837) panicked at src/query/parser.rs:1911:73:
+called `Result::unwrap()` on an `Err` value: ParseError { message: "Expected -", position: 4, expected: Some("-"), found: Some(Return) }
+
+---- query::parser::tests::test_parse_variable_length_path stdout ----
+
+thread 'query::parser::tests::test_parse_variable_length_path' (223838) panicked at src/query/parser.rs:1510:76:
+called `Result::unwrap()` on an `Err` value: ParseError { message: "Expected -", position: 18, expected: Some("-"), found: Some(Return) }
+
+---- query::parser::tests::test_parse_where_and stdout ----
+
+thread 'query::parser::tests::test_parse_where_and' (223839) panicked at src/query/parser.rs:1682:87:
+called `Result::unwrap()` on an `Err` value: ParseError { message: "Expected -", position: 4, expected: Some("-"), found: Some(Where) }
+
+---- query::parser::tests::test_parse_where_comparison stdout ----
+
+thread 'query::parser::tests::test_parse_where_comparison' (223840) panicked at src/query/parser.rs:1670:74:
+called `Result::unwrap()` on an `Err` value: ParseError { message: "Expected -", position: 4, expected: Some("-"), found: Some(Where) }
+
+---- query::parser::tests::test_parse_where_contains stdout ----
+
+thread 'query::parser::tests::test_parse_where_contains' (223841) panicked at src/query/parser.rs:1727:85:
+called `Result::unwrap()` on an `Err` value: ParseError { message: "Expected -", position: 4, expected: Some("-"), found: Some(Where) }
+
+---- query::parser::tests::test_parse_where_equality stdout ----
+
+thread 'query::parser::tests::test_parse_where_equality' (223842) panicked at src/query/parser.rs:1660:80:
+called `Result::unwrap()` on an `Err` value: ParseError { message: "Expected -", position: 4, expected: Some("-"), found: Some(Where) }
+
+---- query::parser::tests::test_parse_where_grouped stdout ----
+
+thread 'query::parser::tests::test_parse_where_grouped' (223843) panicked at src/query/parser.rs:1757:88:
+called `Result::unwrap()` on an `Err` value: ParseError { message: "Expected -", position: 4, expected: Some("-"), found: Some(Where) }
+
+---- query::parser::tests::test_parse_where_in stdout ----
+
+thread 'query::parser::tests::test_parse_where_in' (223844) panicked at src/query/parser.rs:1745:85:
+called `Result::unwrap()` on an `Err` value: ParseError { message: "Expected -", position: 4, expected: Some("-"), found: Some(Where) }
+
+---- query::parser::tests::test_parse_where_is_not_null stdout ----
+
+thread 'query::parser::tests::test_parse_where_is_not_null' (223845) panicked at src/query/parser.rs:1718:83:
+called `Result::unwrap()` on an `Err` value: ParseError { message: "Expected -", position: 4, expected: Some("-"), found: Some(Where) }
+
+---- query::parser::tests::test_parse_where_is_null stdout ----
+
+thread 'query::parser::tests::test_parse_where_is_null' (223846) panicked at src/query/parser.rs:1709:79:
+called `Result::unwrap()` on an `Err` value: ParseError { message: "Expected -", position: 4, expected: Some("-"), found: Some(Where) }
+
+---- query::parser::tests::test_parse_where_not stdout ----
+
+thread 'query::parser::tests::test_parse_where_not' (223847) panicked at src/query/parser.rs:1700:83:
+called `Result::unwrap()` on an `Err` value: ParseError { message: "Expected -", position: 4, expected: Some("-"), found: Some(Where) }
+
+---- query::parser::tests::test_parse_where_or stdout ----
+
+thread 'query::parser::tests::test_parse_where_or' (223848) panicked at src/query/parser.rs:1691:88:
+called `Result::unwrap()` on an `Err` value: ParseError { message: "Expected -", position: 4, expected: Some("-"), found: Some(Where) }
+
+---- query::parser::tests::test_parse_where_starts_with stdout ----
+
+thread 'query::parser::tests::test_parse_where_starts_with' (223849) panicked at src/query/parser.rs:1736:86:
+called `Result::unwrap()` on an `Err` value: ParseError { message: "Expected -", position: 4, expected: Some("-"), found: Some(Where) }
+
+---- query::parser::tests::test_relationship_direction_half_open stdout ----
+
+thread 'query::parser::tests::test_relationship_direction_half_open' (223850) panicked at src/query/parser.rs:2096:67:
+called `Result::unwrap()` on an `Err` value: ParseError { message: "Expected -", position: 12, expected: Some("-"), found: Some(Return) }
+
+
+failures:
+    query::parser::sentry_tests::test_depth_range_equal_min_max
+    query::parser::sentry_tests::test_limit_zero_allowed
+    query::parser::sentry_tests::test_parser_recursion_limit_boundary
+    query::parser::sentry_tests::test_parser_recursion_limit_nested_not
+    query::parser::sentry_tests::test_parser_recursion_limit_nested_parens
+    query::parser::sentry_tests::test_skip_zero_allowed
+    query::parser::sentry_tests::test_spaced_negative_float
+    query::parser::sentry_tests::test_spaced_negative_integer
+    query::parser::sentry_tests::test_unbounded_max_depth
+    query::parser::tests::test_expression_error_unexpected
+    query::parser::tests::test_parse_as_of_bitemporal
+    query::parser::tests::test_parse_as_of_string
+    query::parser::tests::test_parse_between
+    query::parser::tests::test_parse_bidirectional_relationship
+    query::parser::tests::test_parse_error_contains_on_non_property
+    query::parser::tests::test_parse_error_in_on_non_property
+    query::parser::tests::test_parse_error_negative_limit
+    query::parser::tests::test_parse_error_unexpected_tokens
+    query::parser::tests::test_parse_exact_depth_path
+    query::parser::tests::test_parse_full_hybrid_query
+    query::parser::tests::test_parse_incoming_relationship
+    query::parser::tests::test_parse_limit
+    query::parser::tests::test_parse_match_multiple_patterns
+    query::parser::tests::test_parse_match_with_label
+    query::parser::tests::test_parse_match_with_properties
+    query::parser::tests::test_parse_no_return_clause
+    query::parser::tests::test_parse_order_by
+    query::parser::tests::test_parse_order_by_multiple
+    query::parser::tests::test_parse_outgoing_relationship
+    query::parser::tests::test_parse_rank_by_similarity
+    query::parser::tests::test_parse_rank_by_similarity_without_top
+    query::parser::tests::test_parse_return_count
+    query::parser::tests::test_parse_return_count_expression
+    query::parser::tests::test_parse_return_distinct
+    query::parser::tests::test_parse_return_multiple
+    query::parser::tests::test_parse_return_with_alias
+    query::parser::tests::test_parse_simple_match
+    query::parser::tests::test_parse_skip
+    query::parser::tests::test_parse_variable_length_path
+    query::parser::tests::test_parse_where_and
+    query::parser::tests::test_parse_where_comparison
+    query::parser::tests::test_parse_where_contains
+    query::parser::tests::test_parse_where_equality
+    query::parser::tests::test_parse_where_grouped
+    query::parser::tests::test_parse_where_in
+    query::parser::tests::test_parse_where_is_not_null
+    query::parser::tests::test_parse_where_is_null
+    query::parser::tests::test_parse_where_not
+    query::parser::tests::test_parse_where_or
+    query::parser::tests::test_parse_where_starts_with
+    query::parser::tests::test_relationship_direction_half_open
+
+test result: FAILED. 22 passed; 51 failed; 0 ignored; 0 measured; 3092 filtered out; finished in 0.01s
+
+error: test failed, to rerun pass `--lib`
