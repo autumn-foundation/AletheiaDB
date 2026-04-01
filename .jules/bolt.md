@@ -46,3 +46,7 @@
 **[Optimize Vec allocations with Vec::with_capacity and exact size hints]**
 **Learning:** In Rust, replacing an idiomatic `.collect::<Vec<_>>()` chain with a manual `for` loop and `Vec::with_capacity()` is often a de-optimization. Iterators implementing `ExactSizeIterator` or `TrustedLen` (e.g., from slices or `std::vec::IntoIter`) automatically pre-allocate perfect capacity and elide bounds checks during `.collect()`. However, when `.filter(...)` is introduced into an iterator chain, the exact size hint is lost, causing `.collect()` to dynamically reallocate.
 **Action:** When filtering a collection of known maximum size into a `Vec`, manually pre-allocate `Vec::with_capacity(collection.len())` and use a `for` loop (or `.extend()`) to avoid all intermediate heap reallocations.
+
+**Optimize Tokenization in Temporal Parser**
+**Learning:** `tokenize_temporal_keywords` in `src/sql/temporal_parser.rs` previously copied substrings by manually advancing through a `char_indices().collect::<Vec<_>>()` and creating a `String` inside loops (`let word: String = chars[start..i].iter().map(|(_, c)| c).collect()`). This resulted in a heap allocation for every word parsed.
+**Action:** Used `sql.char_indices().peekable()` instead of collecting it. Leveraged `.len_utf8()` to calculate byte boundaries on the fly without allocations. Used a string slice `&sql[start..end]` to avoid `String` allocation for every word parsed, making parsing `0-cost` for non-matching tokens.
