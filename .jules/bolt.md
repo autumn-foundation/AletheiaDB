@@ -32,3 +32,6 @@
 **Optimize Checkpoint Serialization Vec Pre-allocation**
 **Learning:** Found multiple vectors (`nodes`, `edges`, `node_versions`, `edge_versions`, etc.) in `extract_graph_data_from_snapshot` and `extract_temporal_data_from_snapshot` within `src/storage/checkpoint.rs` being created without capacity, resulting in potentially multiple heap reallocations when persisting thousands or millions of entities. `clippy::unused_doc_comments` lint caught the invalid `///` doc comment usage inside function bodies.
 **Action:** Use `Vec::with_capacity(n)` instead of `Vec::new()` when initializing vectors and calculating their capacity using snapshot's `node_count`, `edge_count`, `node_version_count`, and `edge_version_count` methods. Use standard `//` for inline comments to avoid unused doc comment warnings.
+**Pre-allocate capacity in WAL ring buffer drain**
+**Learning:** Draining a `WalRingBuffer` with `Vec::new()` creates unnecessary heap allocations and memory copies when flushing high-throughput WAL entries to disk.
+**Action:** Use `Vec::with_capacity(self.len_approx())` to pre-allocate capacity based on the buffer's approximate length, eliminating reallocations during bursts of pending entries.
