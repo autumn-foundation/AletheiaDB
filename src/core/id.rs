@@ -1645,6 +1645,40 @@ mod sentinel_id_generator_tests {
     }
 
     #[test]
+    fn test_id_generator_next_exact_boundaries() {
+        let generator = IdGenerator::with_start(MAX_VALID_ID - 1);
+        let id1 = generator.next().unwrap();
+        assert_eq!(id1, MAX_VALID_ID - 1);
+        let id2 = generator.next().unwrap();
+        assert_eq!(id2, MAX_VALID_ID);
+        let id3 = generator.next();
+        assert!(id3.is_err());
+    }
+
+    #[test]
+    fn test_id_generator_ensure_at_least_exact_boundaries() {
+        let generator = IdGenerator::new();
+        generator.ensure_at_least(MAX_VALID_ID);
+        assert_eq!(generator.current(), MAX_VALID_ID);
+        generator.ensure_at_least(MAX_VALID_ID + 1);
+        assert_eq!(generator.current(), MAX_VALID_ID);
+    }
+
+    #[test]
+    fn test_tx_id_generator_next_exact_increment() {
+        let generator = TxIdGenerator::new();
+        let first = generator.next();
+        assert_eq!(first.as_u64(), 1);
+        let second = generator.next();
+        assert_eq!(second.as_u64(), 2);
+        generator.set_counter(0);
+        let zero_next = generator.next();
+        assert_eq!(zero_next.as_u64(), 1);
+        generator.set_counter(43);
+        assert_eq!(generator.current().as_u64(), 42);
+    }
+
+    #[test]
     fn test_tx_id_generator_next_exhaustive() {
         let generator = TxIdGenerator::new(); // Starts at 1
 
@@ -1683,6 +1717,16 @@ mod sentinel_id_generator_tests {
         } else {
             panic!("Expected InvalidId error");
         }
+    }
+
+    #[test]
+    fn test_entity_id_is_methods_exhaustive() {
+        let node = EntityId::Node(NodeId::new_unchecked(1));
+        let edge = EntityId::Edge(EdgeId::new_unchecked(2));
+        assert!(node.is_node());
+        assert!(!node.is_edge());
+        assert!(edge.is_edge());
+        assert!(!edge.is_node());
     }
 
     #[test]
@@ -1820,6 +1864,50 @@ impl FromStr for TxId {
 mod tests_conversions {
     use super::*;
     use std::str::FromStr;
+
+    #[test]
+    fn test_node_id_try_from_exact_value() {
+        let n = NodeId::try_from(42).unwrap();
+        assert_eq!(n.as_u64(), 42);
+        let n2 = NodeId::from_str("42").unwrap();
+        assert_eq!(n2.as_u64(), 42);
+    }
+
+    #[test]
+    fn test_edge_id_try_from_exact_value() {
+        let e = EdgeId::try_from(42).unwrap();
+        assert_eq!(e.as_u64(), 42);
+        let e2 = EdgeId::from_str("42").unwrap();
+        assert_eq!(e2.as_u64(), 42);
+    }
+
+    #[test]
+    fn test_version_id_try_from_exact_value() {
+        let v = VersionId::try_from(42).unwrap();
+        assert_eq!(v.as_u64(), 42);
+        let v2 = VersionId::from_str("42").unwrap();
+        assert_eq!(v2.as_u64(), 42);
+    }
+
+    #[test]
+    fn test_tx_id_try_from_exact_value() {
+        let tx = TxId::try_from(42).unwrap();
+        assert_eq!(tx.as_u64(), 42);
+        let tx2 = TxId::from_str("42").unwrap();
+        assert_eq!(tx2.as_u64(), 42);
+    }
+
+    #[test]
+    fn test_id_display_exact_value() {
+        assert_eq!(NodeId::new_unchecked(42).to_string(), "Node(42)");
+        assert_eq!(EdgeId::new_unchecked(42).to_string(), "Edge(42)");
+        assert_eq!(VersionId::new_unchecked(42).to_string(), "Version(42)");
+        assert_eq!(TxId(42).to_string(), "TxId(42)");
+        assert_eq!(
+            EntityId::Node(NodeId::new_unchecked(42)).to_string(),
+            "Node(42)"
+        );
+    }
 
     #[test]
     fn test_node_id_conversions() {
