@@ -682,6 +682,22 @@ Available MCP tools for LLMs:
 - **Temporal**: `get_node_at_time`, `get_edge_at_time`
 - **Hybrid**: `hybrid_query` (combined graph + vector + temporal)
 
+### CLI + Daemon
+
+A local CLI now mirrors MCP-style operations for quick shell workflows:
+
+```bash
+# Create and fetch graph entities
+cargo run --bin aletheia -- node create Person --properties '{"name":"Alice"}'
+cargo run --bin aletheia -- edge create 1 2 KNOWS --properties '{"since":2024}'
+cargo run --bin aletheia -- traverse 1 KNOWS --direction both
+
+# Manage the HTTP server as a background daemon
+cargo run --bin aletheia -- daemon start --host 127.0.0.1 --port 8080
+cargo run --bin aletheia -- daemon status
+cargo run --bin aletheia -- daemon stop
+```
+
 ### Query Language (AQL)
 
 AletheiaDB supports a Cypher-like query language with temporal and vector extensions.

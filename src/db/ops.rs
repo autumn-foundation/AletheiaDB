@@ -204,6 +204,11 @@ impl AletheiaDB {
         self.current.get_incoming_edges_iter(node_id)
     }
 
+    /// Get incoming edges with a specific label (current state).
+    pub fn get_incoming_edges_with_label(&self, node_id: NodeId, label: &str) -> Vec<EdgeId> {
+        self.current.get_incoming_edges_with_label(node_id, label)
+    }
+
     /// Get outgoing edges with a specific label (current state).
     pub fn get_outgoing_edges_with_label(&self, node_id: NodeId, label: &str) -> Vec<EdgeId> {
         self.current.get_outgoing_edges_with_label(node_id, label)

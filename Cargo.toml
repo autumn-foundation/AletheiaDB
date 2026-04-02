@@ -381,6 +381,11 @@ harness = false
 path = "benches/vector_rerank.rs"
 required-features = []
 
+# Unified CLI binary for local operations + daemon management
+[[bin]]
+name = "aletheia"
+path = "src/bin/aletheia.rs"
+
 # MCP server binary
 [[bin]]
 name = "aletheia-mcp"
