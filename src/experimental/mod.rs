@@ -250,3 +250,7 @@ pub mod serendipity;
 #[cfg(feature = "nova")]
 /// Tremor: Semantic Earthquake Detector.
 pub mod tremor;
+
+#[cfg(feature = "nova")]
+/// Symbiosis: Semantic Co-evolution Detector.
+pub mod symbiosis;
