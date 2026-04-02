@@ -1,3 +1,37 @@
+//! Tests for the HNSW vector index implementation.
+//!
+//! # Context
+//! This module contains tests for the `HnswIndex` and its integration with the `usearch` library.
+//! The test suite is divided into several sub-modules based on the functionality they test,
+//! ensuring comprehensive coverage of both standard paths and edge cases.
+//!
+//! # Sub-modules
+//!
+//! - `sentry_tests`: Core mathematical and structural tests enforcing safety properties,
+//!   particularly covering the `DistanceMetric` wrappers and FFI bounds.
+//! - `functional_tests`: Tests verifying standard index operations (create, add, search, remove)
+//!   and configuration building.
+//! - `warden_tests`: Tests focusing on bounds checking, data validation, and configuration
+//!   limitations (e.g., maximum dimensions).
+//! - `coverage_tests`: Tests specifically designed to hit edge-case lines in the codebase
+//!   that aren't triggered by standard functional tests (e.g., null pointer handling in FFI).
+//! - `capacity_tests`: Tests validating the dynamic capacity expansion logic of the HNSW index.
+//! - `race_recovery_tests`: Tests ensuring thread safety and race condition recovery when
+//!   multiple threads attempt to write to the index concurrently.
+//! - `coverage_reentrancy_tests`: Tests verifying that deadlock prevention mechanisms work
+//!   when a thread tries to modify the index from within a read callback.
+//! - `coverage_misc_tests`: Tests for miscellaneous edge cases, such as simulated read errors
+//!   during deserialization.
+//! - `coverage_additions`: Tests verifying the retry logic for transient `usearch` errors
+//!   and other asynchronous behaviors.
+//! - `optimization_tests`: Tests verifying query optimization features, such as filter pushing.
+//!
+//! # Usage
+//! Run these tests using standard cargo commands:
+//! ```bash
+//! cargo test --features "embeddings observability"
+//! ```
+
 use super::*;
 use crate::core::id::NodeId;
 use crate::index::vector::{DistanceMetric, Quantization, StorageMode};
