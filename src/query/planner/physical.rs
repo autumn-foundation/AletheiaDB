@@ -77,19 +77,72 @@ pub struct PhysicalPlan {
 }
 
 impl PhysicalPlan {
-    /// Check if this plan requires temporal storage access
+    /// Check if this plan requires temporal storage access.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// # use aletheiadb::query::planner::physical::{PhysicalPlan, PhysicalOp};
+    /// # use aletheiadb::query::planner::cost::Cost;
+    /// # use aletheiadb::query::plan::TemporalContext;
+    /// # use aletheiadb::core::temporal::Timestamp;
+    /// # fn main() {
+    /// let plan = PhysicalPlan {
+    ///     root: PhysicalOp::Empty,
+    ///     estimated_cost: Cost::default(),
+    ///     temporal_context: Some(TemporalContext::as_of(Timestamp::from(100), Timestamp::from(100))),
+    ///     parallel: false,
+    ///     include_provenance: false,
+    /// };
+    /// assert!(plan.is_temporal());
+    /// # }
+    /// ```
     #[must_use]
     pub fn is_temporal(&self) -> bool {
         self.temporal_context.is_some()
     }
 
-    /// Get the estimated CPU cost
+    /// Get the estimated CPU cost.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// # use aletheiadb::query::planner::physical::{PhysicalPlan, PhysicalOp};
+    /// # use aletheiadb::query::planner::cost::Cost;
+    /// # fn main() {
+    /// let plan = PhysicalPlan {
+    ///     root: PhysicalOp::Empty,
+    ///     estimated_cost: Cost { cpu: 42.5, io: 0.0, memory: 0, network: 0.0 },
+    ///     temporal_context: None,
+    ///     parallel: false,
+    ///     include_provenance: false,
+    /// };
+    /// assert_eq!(plan.cpu_cost(), 42.5);
+    /// # }
+    /// ```
     #[must_use]
     pub fn cpu_cost(&self) -> f64 {
         self.estimated_cost.cpu
     }
 
-    /// Get the estimated memory usage
+    /// Get the estimated memory usage.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// # use aletheiadb::query::planner::physical::{PhysicalPlan, PhysicalOp};
+    /// # use aletheiadb::query::planner::cost::Cost;
+    /// # fn main() {
+    /// let plan = PhysicalPlan {
+    ///     root: PhysicalOp::Empty,
+    ///     estimated_cost: Cost { cpu: 0.0, io: 0.0, memory: 2048, network: 0.0 },
+    ///     temporal_context: None,
+    ///     parallel: false,
+    ///     include_provenance: false,
+    /// };
+    /// assert_eq!(plan.memory_cost(), 2048);
+    /// # }
+    /// ```
     #[must_use]
     pub fn memory_cost(&self) -> usize {
         self.estimated_cost.memory

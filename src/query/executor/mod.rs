@@ -3,6 +3,13 @@
 //! Executes physical query plans using a pull-based iterator model.
 //! The executor transforms physical operators into iterators that
 //! lazily produce results.
+//!
+//! # Execution Model
+//!
+//! The executor uses a Volcano-style iterator model. Each `PhysicalOp`
+//! in the query plan is compiled into a `ResultIterator`. When a query
+//! is executed, no actual work is performed until the consumer pulls
+//! data from the root iterator. Data flows up the iterator tree row by row.
 
 mod iterators;
 mod results;
@@ -120,7 +127,22 @@ pub struct QueryExecutor {
 }
 
 impl QueryExecutor {
-    /// Create a new query executor
+    /// Create a new query executor.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// # use std::sync::Arc;
+    /// # use parking_lot::RwLock;
+    /// # use aletheiadb::storage::current::CurrentStorage;
+    /// # use aletheiadb::storage::historical::HistoricalStorage;
+    /// # use aletheiadb::query::QueryExecutor;
+    /// # fn main() {
+    /// let current = Arc::new(CurrentStorage::new());
+    /// let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
+    /// let executor = QueryExecutor::new(current, historical);
+    /// # }
+    /// ```
     pub fn new(current: Arc<CurrentStorage>, historical: Arc<RwLock<HistoricalStorage>>) -> Self {
         QueryExecutor {
             current,
@@ -129,7 +151,28 @@ impl QueryExecutor {
         }
     }
 
-    /// Create an executor with custom configuration
+    /// Create an executor with custom configuration.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// # use std::sync::Arc;
+    /// # use parking_lot::RwLock;
+    /// # use aletheiadb::storage::current::CurrentStorage;
+    /// # use aletheiadb::storage::historical::HistoricalStorage;
+    /// # use aletheiadb::query::QueryExecutor;
+    /// # use aletheiadb::query::executor::ExecutionConfig;
+    /// # fn main() {
+    /// let current = Arc::new(CurrentStorage::new());
+    /// let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
+    /// let config = ExecutionConfig {
+    ///     max_buffer_size: 5000,
+    ///     parallel: true,
+    ///     timeout_ms: 1000,
+    /// };
+    /// let executor = QueryExecutor::with_config(current, historical, config);
+    /// # }
+    /// ```
     pub fn with_config(
         current: Arc<CurrentStorage>,
         historical: Arc<RwLock<HistoricalStorage>>,

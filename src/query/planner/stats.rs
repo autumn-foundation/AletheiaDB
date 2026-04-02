@@ -41,8 +41,13 @@ const DEFAULT_AVG_DELTA_CHAIN_LENGTH: f64 = 5.0;
 
 /// Atomic f64 for lock-free floating-point statistics.
 ///
-/// Converts `f64` into its bit representation to be stored
-/// lock-free within an `AtomicU64`.
+/// Rust's standard library does not provide an `AtomicF64` out of the box because
+/// floating-point numbers do not naturally support atomic bitwise operations on all
+/// platforms. This struct works around that limitation by converting `f64` values into
+/// their equivalent raw bit representations (`u64`) and storing them in an `AtomicU64`.
+///
+/// This provides lock-free, zero-cost access to statistical averages (like `avg_out_degree`)
+/// from multiple concurrent reader threads during query planning, without acquiring an `RwLock`.
 ///
 /// ## Examples
 ///
@@ -50,11 +55,13 @@ const DEFAULT_AVG_DELTA_CHAIN_LENGTH: f64 = 5.0;
 /// use aletheiadb::query::planner::stats::AtomicF64;
 /// use std::sync::atomic::Ordering;
 ///
+/// # fn main() {
 /// let value = AtomicF64::new(42.5);
 /// assert_eq!(value.load(Ordering::Acquire), 42.5);
 ///
 /// value.store(100.0, Ordering::Release);
 /// assert_eq!(value.load(Ordering::Acquire), 100.0);
+/// # }
 /// ```
 #[derive(Debug)]
 pub struct AtomicF64 {
@@ -98,6 +105,7 @@ impl Default for AtomicF64 {
 /// use aletheiadb::query::planner::Statistics;
 /// use aletheiadb::core::interning::InternedString;
 ///
+/// # fn main() {
 /// let stats = Statistics::new();
 ///
 /// // Statistics are initially empty
@@ -116,6 +124,7 @@ impl Default for AtomicF64 {
 ///
 /// assert_eq!(stats.node_count(), 1000);
 /// assert!(stats.is_initialized());
+/// # }
 /// ```
 #[derive(Debug, Default)]
 pub struct Statistics {
@@ -171,9 +180,11 @@ impl Statistics {
     /// ```rust
     /// use aletheiadb::query::planner::Statistics;
     ///
+    /// # fn main() {
     /// let stats = Statistics::new();
     /// assert_eq!(stats.node_count(), 0);
     /// assert!(!stats.is_initialized());
+    /// # }
     /// ```
     #[must_use]
     pub fn new() -> Self {
@@ -187,8 +198,10 @@ impl Statistics {
     /// ```rust
     /// use aletheiadb::query::planner::Statistics;
     ///
+    /// # fn main() {
     /// let stats = Statistics::new();
     /// assert!(!stats.is_initialized()); // false by default
+    /// # }
     /// ```
     #[must_use]
     pub fn is_initialized(&self) -> bool {
@@ -202,8 +215,10 @@ impl Statistics {
     /// ```rust
     /// use aletheiadb::query::planner::Statistics;
     ///
+    /// # fn main() {
     /// let stats = Statistics::new();
     /// assert_eq!(stats.node_count(), 0);
+    /// # }
     /// ```
     #[must_use]
     pub fn node_count(&self) -> usize {
@@ -217,8 +232,10 @@ impl Statistics {
     /// ```rust
     /// use aletheiadb::query::planner::Statistics;
     ///
+    /// # fn main() {
     /// let stats = Statistics::new();
     /// assert_eq!(stats.edge_count(), 0);
+    /// # }
     /// ```
     #[must_use]
     pub fn edge_count(&self) -> usize {
@@ -232,8 +249,10 @@ impl Statistics {
     /// ```rust
     /// use aletheiadb::query::planner::Statistics;
     ///
+    /// # fn main() {
     /// let stats = Statistics::new();
     /// assert_eq!(stats.vector_count(), 0);
+    /// # }
     /// ```
     #[must_use]
     pub fn vector_count(&self) -> usize {
@@ -247,9 +266,11 @@ impl Statistics {
     /// ```rust
     /// use aletheiadb::query::planner::Statistics;
     ///
+    /// # fn main() {
     /// let stats = Statistics::new();
     /// // Returns a non-zero default estimate if statistics are uninitialized or the graph is empty.
     /// assert!(stats.average_out_degree() > 0.0);
+    /// # }
     /// ```
     #[must_use]
     pub fn average_out_degree(&self) -> f64 {
@@ -269,9 +290,11 @@ impl Statistics {
     /// ```rust
     /// use aletheiadb::query::planner::Statistics;
     ///
+    /// # fn main() {
     /// let stats = Statistics::new();
     /// // Returns a non-zero default even when uninitialized
     /// assert!(stats.average_delta_chain_length() > 0.0);
+    /// # }
     /// ```
     #[must_use]
     pub fn average_delta_chain_length(&self) -> f64 {
@@ -292,9 +315,11 @@ impl Statistics {
     /// use aletheiadb::query::planner::Statistics;
     /// use aletheiadb::core::interning::InternedString;
     ///
+    /// # fn main() {
     /// let stats = Statistics::new();
     /// let label = InternedString::from_raw(1); // Assuming 1 represents "Person"
     /// assert_eq!(stats.label_cardinality(&label), None);
+    /// # }
     /// ```
     #[must_use]
     pub fn label_cardinality(&self, label: &InternedString) -> Option<usize> {
@@ -314,6 +339,7 @@ impl Statistics {
     /// ```rust
     /// use aletheiadb::query::planner::Statistics;
     ///
+    /// # fn main() {
     /// let stats = Statistics::new();
     ///
     /// // Default selectivity (unknown distribution)
@@ -322,6 +348,7 @@ impl Statistics {
     /// // With known distinct counts (e.g. 2 statuses: active, inactive)
     /// stats.update_property_stats("status", 2);
     /// assert_eq!(stats.estimate_selectivity("status", "active"), 0.5);
+    /// # }
     /// ```
     #[must_use]
     pub fn estimate_selectivity(&self, property: &str, _value: &str) -> f64 {
@@ -343,9 +370,11 @@ impl Statistics {
     /// ```rust
     /// use aletheiadb::query::planner::Statistics;
     ///
+    /// # fn main() {
     /// let stats = Statistics::new();
     /// stats.refresh(100, 50, 10, vec![], 2.0);
     /// assert_eq!(stats.node_count(), 100);
+    /// # }
     /// ```
     pub fn refresh(
         &self,
@@ -386,12 +415,14 @@ impl Statistics {
     /// ```rust
     /// use aletheiadb::query::planner::Statistics;
     ///
+    /// # fn main() {
     /// let stats = Statistics::new();
     /// stats.refresh(100, 50, 10, vec![], 2.0);
     /// assert!(stats.is_initialized());
     ///
     /// stats.invalidate();
     /// assert!(!stats.is_initialized());
+    /// # }
     /// ```
     pub fn invalidate(&self) {
         self.initialized.store(false, Ordering::Release);
@@ -406,9 +437,11 @@ impl Statistics {
     /// ```rust
     /// use aletheiadb::query::planner::Statistics;
     ///
+    /// # fn main() {
     /// let stats = Statistics::new();
     /// stats.update_property_stats("status", 3);
     /// assert_eq!(stats.estimate_selectivity("status", "active"), 1.0 / 3.0);
+    /// # }
     /// ```
     pub fn update_property_stats(&self, property: &str, distinct_count: usize) {
         let mut stats = self.property_stats.write();

@@ -21,6 +21,9 @@ const LOW_SCORE_THRESHOLD: f64 = 0.5;
 const MAX_DISPLAY_PROPERTIES: usize = 5;
 
 /// A path through the graph, represented as a sequence of entity IDs.
+///
+/// Paths record the exact route taken during graph traversal operations, containing an ordered
+/// sequence of alternating `Node` and `Edge` `EntityId`s.
 pub type Path = Vec<EntityId>;
 
 /// Entity identifier (node or edge).
@@ -100,7 +103,20 @@ pub struct QueryRow {
 }
 
 impl QueryRow {
-    /// Create a new row with just an entity
+    /// Create a new row with just an entity.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// # use aletheiadb::query::executor::{EntityResult, QueryRow};
+    /// # use aletheiadb::core::NodeId;
+    /// # fn main() {
+    /// let node_id = NodeId::new(42).unwrap();
+    /// let row = QueryRow::from_entity(EntityResult::NodeId(node_id));
+    /// assert_eq!(row.entity.node_id(), Some(node_id));
+    /// assert!(row.score.is_none());
+    /// # }
+    /// ```
     #[must_use]
     pub fn from_entity(entity: EntityResult) -> Self {
         QueryRow {
@@ -111,7 +127,19 @@ impl QueryRow {
         }
     }
 
-    /// Create a row with entity and score
+    /// Create a row with entity and score.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// # use aletheiadb::query::executor::{EntityResult, QueryRow};
+    /// # use aletheiadb::core::NodeId;
+    /// # fn main() {
+    /// let node_id = NodeId::new(42).unwrap();
+    /// let row = QueryRow::with_score(EntityResult::NodeId(node_id), 0.85);
+    /// assert_eq!(row.score(), Some(0.85));
+    /// # }
+    /// ```
     #[must_use]
     pub fn with_score(entity: EntityResult, score: f32) -> Self {
         QueryRow {
@@ -140,13 +168,38 @@ impl QueryRow {
         self
     }
 
-    /// Get the entity as a node (if applicable)
+    /// Get the entity as a node (if applicable).
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// # use aletheiadb::query::executor::{EntityResult, QueryRow};
+    /// # use aletheiadb::core::NodeId;
+    /// # fn main() {
+    /// let node_id = NodeId::new(42).unwrap();
+    /// // Creating with NodeId instead of a full Node means as_node() will return None
+    /// let row = QueryRow::from_entity(EntityResult::NodeId(node_id));
+    /// assert!(row.as_node().is_none());
+    /// # }
+    /// ```
     #[must_use]
     pub fn as_node(&self) -> Option<&Node> {
         self.entity.as_node()
     }
 
-    /// Get the score (if applicable)
+    /// Get the score (if applicable).
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// # use aletheiadb::query::executor::{EntityResult, QueryRow};
+    /// # use aletheiadb::core::NodeId;
+    /// # fn main() {
+    /// let node_id = NodeId::new(42).unwrap();
+    /// let row = QueryRow::with_score(EntityResult::NodeId(node_id), 0.99);
+    /// assert_eq!(row.score(), Some(0.99));
+    /// # }
+    /// ```
     #[must_use]
     pub fn score(&self) -> Option<f32> {
         self.score
