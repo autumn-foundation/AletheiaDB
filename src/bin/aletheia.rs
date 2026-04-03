@@ -27,6 +27,10 @@ struct DaemonMetadata {
     server_exe: PathBuf,
 }
 
+/// The main entry point for the AletheiaDB CLI.
+///
+/// This simply wraps `run()` and handles exiting with the correct status code
+/// if an error occurs.
 fn main() {
     if let Err(err) = run() {
         eprintln!("error: {err}");
@@ -34,6 +38,11 @@ fn main() {
     }
 }
 
+/// Parses CLI arguments and routes to the appropriate subcommand handler.
+///
+/// # Returns
+/// - `Ok(())` if the command succeeded.
+/// - `Err(String)` with an error message if something failed or syntax was wrong.
 fn run() -> Result<(), String> {
     let mut args = env::args().skip(1);
     match args.next().as_deref() {
@@ -49,6 +58,7 @@ fn run() -> Result<(), String> {
     }
 }
 
+/// Prints the CLI usage instructions to standard output.
 fn print_usage() {
     println!(
         "AletheiaDB CLI\n\n\
@@ -65,10 +75,16 @@ Usage:\n\
     );
 }
 
+/// Opens the AletheiaDB database using the default configuration.
+///
+/// Converts underlying database errors into a clean string for CLI output.
 fn open_db() -> Result<AletheiaDB, String> {
     AletheiaDB::new().map_err(|e| format!("failed to initialize database: {e}"))
 }
 
+/// Handles all subcommands under `aletheia node`.
+///
+/// Routes to either `create` or `get` based on the first argument in `args`.
 fn handle_node(args: Vec<String>) -> Result<(), String> {
     match args.first().map(String::as_str) {
         Some("create") => {
@@ -99,6 +115,9 @@ fn handle_node(args: Vec<String>) -> Result<(), String> {
     }
 }
 
+/// Handles all subcommands under `aletheia edge`.
+///
+/// Routes to either `create` or `get` based on the first argument in `args`.
 fn handle_edge(args: Vec<String>) -> Result<(), String> {
     match args.first().map(String::as_str) {
         Some("create") => {
@@ -134,6 +153,10 @@ fn handle_edge(args: Vec<String>) -> Result<(), String> {
     }
 }
 
+/// Handles the `aletheia traverse` command.
+///
+/// Performs a single-hop graph traversal from a starting node, following edges
+/// with a specific label in the specified direction. Outputs results as JSON.
 fn handle_traverse(args: Vec<String>) -> Result<(), String> {
     if args.len() < 2 {
         return Err(
@@ -189,6 +212,9 @@ fn handle_traverse(args: Vec<String>) -> Result<(), String> {
     }))
 }
 
+/// Handles all subcommands under `aletheia daemon`.
+///
+/// Routes to `start`, `stop`, or `status` to manage the background server process.
 fn handle_daemon(args: Vec<String>) -> Result<(), String> {
     match args.first().map(String::as_str) {
         Some("start") => daemon_start(&args[1..]),
@@ -199,6 +225,11 @@ fn handle_daemon(args: Vec<String>) -> Result<(), String> {
     }
 }
 
+/// Starts the AletheiaDB background server daemon.
+///
+/// 1. Checks if it's already running.
+/// 2. Spawns the `aletheia-server` process in the background.
+/// 3. Writes the PID and executable path to `.aletheia/daemon.pid`.
 fn daemon_start(args: &[String]) -> Result<(), String> {
     let pid_file = PathBuf::from(
         arg_value(args, "--pid-file").unwrap_or_else(|| DEFAULT_PID_FILE.to_string()),
@@ -268,6 +299,10 @@ fn daemon_start(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+/// Stops the running AletheiaDB background server daemon.
+///
+/// Reads the PID from the pid-file, verifies the process is still the expected
+/// server executable, and sends a kill signal. Cleans up the pid-file afterwards.
 fn daemon_stop(args: &[String]) -> Result<(), String> {
     let pid_file = PathBuf::from(
         arg_value(args, "--pid-file").unwrap_or_else(|| DEFAULT_PID_FILE.to_string()),
@@ -303,6 +338,10 @@ fn daemon_stop(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+/// Checks and prints the status of the background server daemon.
+///
+/// Verifies whether the process ID in the pid-file is actively running and
+/// matches the expected server executable.
 fn daemon_status(args: &[String]) -> Result<(), String> {
     let pid_file = PathBuf::from(
         arg_value(args, "--pid-file").unwrap_or_else(|| DEFAULT_PID_FILE.to_string()),
@@ -331,6 +370,9 @@ fn daemon_status(args: &[String]) -> Result<(), String> {
     }
 }
 
+/// Resolves the absolute path to the `aletheia-server` executable.
+///
+/// Assumes the server binary is located in the same directory as this CLI binary.
 fn resolve_server_executable() -> Result<PathBuf, String> {
     let mut exe_path =
         env::current_exe().map_err(|e| format!("failed to get current executable path: {e}"))?;
@@ -357,6 +399,10 @@ fn resolve_server_executable() -> Result<PathBuf, String> {
     ))
 }
 
+/// Checks if the process defined in `meta` is currently running and is the correct binary.
+///
+/// Uses `/proc/<pid>` on Unix systems to verify the process executable. This prevents
+/// accidentally killing unrelated processes if a PID is reused by the OS after a crash.
 fn is_expected_daemon_running(meta: &DaemonMetadata) -> bool {
     let proc_dir = PathBuf::from(format!("/proc/{}", meta.pid));
     if !proc_dir.exists() {
@@ -374,12 +420,14 @@ fn is_expected_daemon_running(meta: &DaemonMetadata) -> bool {
     joined.contains(SERVER_BIN_NAME)
 }
 
+/// Writes the daemon's PID and executable path to the specified pid-file.
 fn write_daemon_metadata(path: &Path, meta: &DaemonMetadata) -> Result<(), String> {
     let content = format!("{}\n{}\n", meta.pid, meta.server_exe.display());
     fs::write(path, content)
         .map_err(|e| format!("failed to write pid file '{}': {e}", path.display()))
 }
 
+/// Reads the daemon's PID and executable path from the specified pid-file.
 fn read_daemon_metadata(path: &Path) -> Result<Option<DaemonMetadata>, String> {
     if !path.exists() {
         return Ok(None);
@@ -406,6 +454,7 @@ fn read_daemon_metadata(path: &Path) -> Result<Option<DaemonMetadata>, String> {
     }))
 }
 
+/// Ensures the parent directory for a given file path exists, creating it if necessary.
 fn ensure_parent_dir(path: &Path) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
@@ -414,6 +463,7 @@ fn ensure_parent_dir(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Extracts the value of a specific command-line flag (e.g., `--port 8080`).
 fn arg_value(args: &[String], flag: &str) -> Option<String> {
     let mut iter = args.iter();
     while let Some(token) = iter.next() {
@@ -424,6 +474,7 @@ fn arg_value(args: &[String], flag: &str) -> Option<String> {
     None
 }
 
+/// Parses the `--properties` JSON argument if present, converting it to a `PropertyMap`.
 fn parse_optional_properties(args: &[String]) -> Result<PropertyMap, String> {
     match arg_value(args, "--properties") {
         Some(json) => json_to_property_map(&json),
@@ -431,6 +482,7 @@ fn parse_optional_properties(args: &[String]) -> Result<PropertyMap, String> {
     }
 }
 
+/// Parses the `--direction` argument for traversals (defaults to "outgoing").
 fn parse_direction(args: &[String]) -> Result<String, String> {
     let direction = arg_value(args, "--direction").unwrap_or_else(|| "outgoing".to_string());
     if matches!(direction.as_str(), "outgoing" | "incoming" | "both") {
@@ -442,6 +494,7 @@ fn parse_direction(args: &[String]) -> Result<String, String> {
     }
 }
 
+/// Parses a string into a `NodeId`.
 fn parse_node_id(raw: &str) -> Result<NodeId, String> {
     let id = raw
         .parse::<u64>()
@@ -449,6 +502,7 @@ fn parse_node_id(raw: &str) -> Result<NodeId, String> {
     NodeId::new(id).map_err(|e| format!("invalid node id: {e}"))
 }
 
+/// Parses a string into an `EdgeId`.
 fn parse_edge_id(raw: &str) -> Result<EdgeId, String> {
     let id = raw
         .parse::<u64>()
@@ -456,6 +510,7 @@ fn parse_edge_id(raw: &str) -> Result<EdgeId, String> {
     EdgeId::new(id).map_err(|e| format!("invalid edge id: {e}"))
 }
 
+/// Converts a raw JSON string into a structured `PropertyMap`.
 fn json_to_property_map(raw: &str) -> Result<PropertyMap, String> {
     let parsed: serde_json::Value =
         serde_json::from_str(raw).map_err(|e| format!("invalid JSON properties payload: {e}"))?;
@@ -472,6 +527,7 @@ fn json_to_property_map(raw: &str) -> Result<PropertyMap, String> {
     Ok(map.build())
 }
 
+/// Converts a single JSON value into an internal `PropertyValue`.
 fn json_to_property_value(value: &serde_json::Value) -> Result<PropertyValue, String> {
     match value {
         serde_json::Value::Null => Ok(PropertyValue::Null),
@@ -499,6 +555,7 @@ fn json_to_property_value(value: &serde_json::Value) -> Result<PropertyValue, St
     }
 }
 
+/// Converts an internal `Node` object into a JSON representation for CLI output.
 fn node_to_json(node: &Node) -> serde_json::Value {
     serde_json::json!({
         "id": node.id.as_u64(),
@@ -507,6 +564,7 @@ fn node_to_json(node: &Node) -> serde_json::Value {
     })
 }
 
+/// Converts an internal `Edge` object into a JSON representation for CLI output.
 fn edge_to_json(edge: &Edge) -> serde_json::Value {
     serde_json::json!({
         "id": edge.id.as_u64(),
@@ -517,12 +575,14 @@ fn edge_to_json(edge: &Edge) -> serde_json::Value {
     })
 }
 
+/// Resolves an `InternedString` back into its raw string representation.
 fn resolve_label(label: aletheiadb::InternedString) -> String {
     GLOBAL_INTERNER
         .resolve_with(label, |s| s.to_string())
         .unwrap_or_else(|| "<unknown-label>".to_string())
 }
 
+/// Converts an internal `PropertyMap` into a JSON Object.
 fn property_map_to_json(props: &PropertyMap) -> serde_json::Value {
     let mut map = serde_json::Map::new();
     for (key, value) in props.iter() {
@@ -534,6 +594,7 @@ fn property_map_to_json(props: &PropertyMap) -> serde_json::Value {
     serde_json::Value::Object(map)
 }
 
+/// Converts an internal `PropertyValue` into a standard JSON Value.
 fn property_value_to_json(value: &PropertyValue) -> serde_json::Value {
     match value {
         PropertyValue::Null => serde_json::Value::Null,
@@ -556,6 +617,7 @@ fn property_value_to_json(value: &PropertyValue) -> serde_json::Value {
     }
 }
 
+/// Pretty-prints a JSON value to standard output.
 fn print_json_pretty(value: &serde_json::Value) -> Result<(), String> {
     let rendered = serde_json::to_string_pretty(value)
         .map_err(|e| format!("failed to render JSON output: {e}"))?;
