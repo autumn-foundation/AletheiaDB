@@ -1,4 +1,35 @@
 //! Serialization logic for WAL entries.
+//!
+//! This module implements a highly optimized, zero-allocation binary format
+//! specifically designed for the Write-Ahead Log (WAL).
+//!
+//! # Why a Custom Format?
+//!
+//! AletheiaDB requires extreme write throughput (~100K+ writes/sec). General-purpose
+//! serialization formats like JSON, Bincode, or Protobuf introduce unacceptable
+//! overhead due to intermediate allocations, schema encoding, or lack of
+//! precise capacity prediction.
+//!
+//! By using a custom, tightly packed byte-level format, we achieve:
+//! 1. **Zero-Allocation Hot Paths**: By predicting exact sizes using `estimate_entry_capacity`,
+//!    we pre-allocate a single buffer and stream bytes directly into it via `serialize_operation_into`.
+//!    This prevents heap fragmentation under heavy write load.
+//! 2. **Ring Buffer Compatibility**: The fixed-size headers and predictable payloads
+//!    allow us to write directly into the memory-mapped `RingBuffer` used by the
+//!    concurrent WAL system.
+//! 3. **Built-in Integrity**: Every record is suffixed with a CRC32 checksum over its
+//!    contents (including the `LSN` and `Timestamp`). This guarantees that partial
+//!    writes or disk corruption are detected during recovery before they can corrupt
+//!    the database state.
+//!
+//! # Binary Layout
+//!
+//! Every WAL entry has a fixed 24-byte overhead, followed by a variable-length payload:
+//!
+//! `[LSN: 8 bytes] [Timestamp: 12 bytes] [Checksum: 4 bytes] [Payload: ...]`
+//!
+//! The Payload always begins with a 1-byte Operation Tag (e.g., `OP_CREATE_NODE`),
+//! followed by the specific fields for that operation.
 
 #[cfg(test)]
 use super::entry::WalEntry;
@@ -28,6 +59,15 @@ fn serialize_interned_string(s: InternedString, buffer: &mut Vec<u8>) {
 /// This function provides an upper-bound estimate of the buffer size needed
 /// to serialize a WAL entry, allowing pre-allocation to avoid reallocations
 /// during the hot-path serialization process.
+///
+/// # Why Estimate Instead of Exact Size?
+///
+/// Property maps contain nested, variable-length elements (Strings, Arrays, Vectors).
+/// Calculating the *exact* byte-for-byte size requires iterating through the entire
+/// property map. Instead of doing a full pass before serialization, we use a
+/// conservative upper-bound estimate. Slightly over-allocating a `Vec` is vastly
+/// cheaper (CPU cycles) than traversing the properties twice or hitting a memory
+/// reallocation mid-serialization.
 ///
 /// # Size Breakdown
 ///
@@ -60,6 +100,26 @@ fn serialize_interned_string(s: InternedString, buffer: &mut Vec<u8>) {
 /// Pre-allocating the correct capacity eliminates dynamic reallocation overhead,
 /// which is especially important for the high-throughput WAL write path. Typical
 /// savings are 10-30% reduction in allocation overhead for property-heavy operations.
+///
+/// # Examples
+///
+/// ```rust
+/// use aletheiadb::storage::wal::entry::{WalOperation, LSN};
+/// use aletheiadb::core::id::NodeId;
+/// use aletheiadb::core::temporal::Timestamp;
+///
+/// // A lightweight operation without properties
+/// // (Using timestamp from wallclock because internal constructor is private)
+/// let delete_op = WalOperation::DeleteNode {
+///     node_id: NodeId::try_from(1).unwrap(),
+///     valid_from: Timestamp::from(12345),
+/// };
+///
+/// // Fixed overhead (24 bytes) + DeleteNode payload (21 bytes)
+/// // Note: This function is pub(crate) so we can't directly call it in doctests
+/// // let capacity = estimate_entry_capacity(&delete_op);
+/// // assert_eq!(capacity, 45);
+/// ```
 pub(crate) fn estimate_entry_capacity(operation: &WalOperation) -> usize {
     // Fixed overhead: LSN (8) + Timestamp (12) + Checksum (4)
     const FIXED_OVERHEAD: usize = 24;
@@ -106,7 +166,51 @@ pub(crate) fn estimate_entry_capacity(operation: &WalOperation) -> usize {
 
 /// Serialize a WAL entry components into the provided buffer
 ///
-/// This allows serialization without creating a WalEntry wrapper.
+/// This allows serialization without creating a `WalEntry` wrapper. By providing
+/// a mutable buffer, callers can reuse memory across multiple serializations,
+/// preventing the allocator from becoming a bottleneck during heavy write bursts.
+///
+/// # Memory Management
+///
+/// This function **appends** to the provided buffer. It is the caller's
+/// responsibility to clear the buffer (`buffer.clear()`) before reuse to maintain
+/// its capacity without retaining stale data.
+///
+/// # Format Structure
+///
+/// 1. `LSN` (8 bytes, little-endian)
+/// 2. `Timestamp` (12 bytes, Phase 2 HybridTimestamp)
+/// 3. `Checksum` Placeholder (4 bytes of zeroes)
+/// 4. Operation Payload (`OP_*` tag + specific fields)
+/// 5. (After payload is written, a CRC32 checksum is calculated and written into the placeholder).
+///
+/// # Examples
+///
+/// ```rust
+/// use aletheiadb::storage::wal::entry::{WalOperation, LSN};
+/// use aletheiadb::core::id::NodeId;
+/// use aletheiadb::core::temporal::Timestamp;
+///
+/// let op = WalOperation::DeleteNode {
+///     node_id: NodeId::try_from(42).unwrap(),
+///     valid_from: Timestamp::from(100),
+/// };
+///
+/// // 1. Pre-allocate the buffer using our estimate
+/// // let capacity = estimate_entry_capacity(&op);
+/// // let mut buffer = Vec::with_capacity(capacity);
+///
+/// // 2. Serialize
+/// // serialize_operation_into(
+/// //     LSN(1000),
+/// //     Timestamp::from(12345),
+/// //     &op,
+/// //     &mut buffer
+/// // ).unwrap();
+///
+/// // The buffer now holds the exact binary representation
+/// // assert_eq!(buffer.len(), 45); // Fixed length for DeleteNode
+/// ```
 pub(crate) fn serialize_operation_into(
     lsn: LSN,
     timestamp: Timestamp,
