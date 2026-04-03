@@ -298,50 +298,43 @@ fn cleanup_where_true(sql: &mut String) {
 
 /// Find a substring outside of single-quoted string literals.
 /// Returns the byte position of the first match, or None.
+/// ⚡ Bolt Optimization: Uses `char_indices().peekable()` instead of `.chars().collect::<Vec<_>>()`
+/// and `eq_ignore_ascii_case` instead of allocating new Strings and using `to_uppercase()`,
+/// completely eliminating multiple O(N) heap allocations for the SQL string on every call.
 fn find_outside_strings(sql: &str, needle: &str) -> Option<usize> {
-    let chars: Vec<char> = sql.chars().collect();
-    let needle_chars: Vec<char> = needle.chars().collect();
-    let needle_len = needle_chars.len();
+    let needle_len = needle.len();
+    let mut chars_iter = sql.char_indices().peekable();
 
-    let mut i = 0;
-    while i < chars.len() {
+    while let Some((byte_offset, c)) = chars_iter.next() {
         // Skip single-quoted strings
-        if chars[i] == '\'' {
-            i += 1;
-            while i < chars.len() {
-                if chars[i] == '\'' {
-                    if i + 1 < chars.len() && chars[i + 1] == '\'' {
-                        i += 2; // escaped quote
-                    } else {
-                        i += 1;
-                        break;
+        if c == '\'' {
+            while let Some(&(_, next_c)) = chars_iter.peek() {
+                chars_iter.next();
+                if next_c == '\'' {
+                    let is_escaped = chars_iter.peek().map(|&(_, c)| c == '\'').unwrap_or(false);
+                    if is_escaped {
+                        chars_iter.next(); // Escaped quote
+                        continue;
                     }
-                } else {
-                    i += 1;
+                    break; // End of string
                 }
             }
             continue;
         }
 
         // Check for needle match
-        if i + needle_len <= chars.len() {
-            let candidate: String = chars[i..i + needle_len].iter().collect();
+        if let Some(candidate) = sql.get(byte_offset..byte_offset + needle_len) {
             if candidate == needle {
-                // Convert char index to byte offset
-                let byte_offset: usize = chars[..i].iter().map(|c| c.len_utf8()).sum();
                 return Some(byte_offset);
             }
             // Also check case-insensitive for keyword-like needles (not operators)
             if !needle.starts_with('<')
                 && !needle.starts_with('>')
-                && candidate.to_uppercase() == needle.to_uppercase()
+                && candidate.eq_ignore_ascii_case(needle)
             {
-                let byte_offset: usize = chars[..i].iter().map(|c| c.len_utf8()).sum();
                 return Some(byte_offset);
             }
         }
-
-        i += 1;
     }
 
     None

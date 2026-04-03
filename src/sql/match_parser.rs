@@ -132,53 +132,63 @@ pub fn extract_match_clauses(sql: &str) -> Result<ExtractedMatch, SqlError> {
 /// Find a keyword in SQL that is NOT inside a string literal.
 ///
 /// Returns the byte offset of the first character of the keyword, or None.
+/// ⚡ Bolt Optimization: Uses `char_indices().peekable()` and `eq_ignore_ascii_case`
+/// instead of `.chars().collect::<Vec<_>>()` and allocating new Strings,
+/// completely eliminating multiple O(N) heap allocations for the SQL string on every call.
 fn find_keyword_outside_strings(sql: &str, keyword: &str) -> Option<usize> {
-    let sql_upper = sql.to_uppercase();
-    let keyword_upper = keyword.to_uppercase();
-    let keyword_len = keyword_upper.chars().count();
+    let keyword_len = keyword.len();
+    let mut chars_iter = sql.char_indices().peekable();
 
-    let mut i = 0;
-    let chars: Vec<char> = sql.chars().collect();
-    let upper_chars: Vec<char> = sql_upper.chars().collect();
-
-    while i < chars.len() {
+    while let Some((byte_offset, c)) = chars_iter.next() {
         // Skip string literals
-        if chars[i] == '\'' {
-            i += 1;
-            while i < chars.len() {
-                if chars[i] == '\'' {
+        if c == '\'' {
+            while let Some(&(_, next_c)) = chars_iter.peek() {
+                chars_iter.next();
+                if next_c == '\'' {
                     // Check for escaped quote ''
-                    if i + 1 < chars.len() && chars[i + 1] == '\'' {
-                        i += 2;
-                    } else {
-                        i += 1;
-                        break;
+                    let is_escaped = chars_iter.peek().map(|&(_, c)| c == '\'').unwrap_or(false);
+                    if is_escaped {
+                        chars_iter.next();
+                        continue;
                     }
-                } else {
-                    i += 1;
+                    break;
                 }
             }
             continue;
         }
 
         // Check if we have the keyword at this position
-        if i + keyword_len <= upper_chars.len() {
-            let candidate: String = upper_chars[i..i + keyword_len].iter().collect();
-            if candidate == keyword_upper {
-                // Ensure it's a word boundary (not part of a larger identifier)
-                let before_ok = i == 0 || !chars[i - 1].is_alphanumeric() && chars[i - 1] != '_';
-                let after_ok = i + keyword_len >= chars.len()
-                    || !chars[i + keyword_len].is_alphanumeric() && chars[i + keyword_len] != '_';
-
-                if before_ok && after_ok {
-                    // Calculate byte offset
-                    let byte_offset: usize = sql.chars().take(i).map(|c| c.len_utf8()).sum();
-                    return Some(byte_offset);
+        let candidate_opt = sql.get(byte_offset..byte_offset + keyword_len);
+        let is_match = candidate_opt.map(|c| c.eq_ignore_ascii_case(keyword)).unwrap_or(false);
+        if is_match {
+            // Ensure it's a word boundary (not part of a larger identifier)
+            let before_ok = byte_offset == 0 || {
+                if let Some(before_str) = sql.get(..byte_offset) {
+                    if let Some(before_char) = before_str.chars().next_back() {
+                        !before_char.is_alphanumeric() && before_char != '_'
+                    } else {
+                        true
+                    }
+                } else {
+                    false
                 }
+            };
+            let after_ok = byte_offset + keyword_len >= sql.len() || {
+                if let Some(after_str) = sql.get(byte_offset + keyword_len..) {
+                    if let Some(after_char) = after_str.chars().next() {
+                        !after_char.is_alphanumeric() && after_char != '_'
+                    } else {
+                        true
+                    }
+                } else {
+                    false
+                }
+            };
+
+            if before_ok && after_ok {
+                return Some(byte_offset);
             }
         }
-
-        i += 1;
     }
 
     None

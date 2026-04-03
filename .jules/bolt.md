@@ -50,3 +50,7 @@
 **Optimize Tokenization in Temporal Parser**
 **Learning:** `tokenize_temporal_keywords` in `src/sql/temporal_parser.rs` previously copied substrings by manually advancing through a `char_indices().collect::<Vec<_>>()` and creating a `String` inside loops (`let word: String = chars[start..i].iter().map(|(_, c)| c).collect()`). This resulted in a heap allocation for every word parsed.
 **Action:** Used `sql.char_indices().peekable()` instead of collecting it. Leveraged `.len_utf8()` to calculate byte boundaries on the fly without allocations. Used a string slice `&sql[start..end]` to avoid `String` allocation for every word parsed, making parsing `0-cost` for non-matching tokens.
+
+**Optimize zero-allocation SQL token scanning**
+**Learning:** Functions scanning for tokens outside of SQL string literals were heavily allocating intermediate `Vec<char>` and `String` candidates inside tight loops, leading to O(N) memory allocation and copy overhead on every call. `char_indices().peekable()` alongside `eq_ignore_ascii_case()` completely avoids these intermediate allocations.
+**Action:** When scanning strings for substrings or keywords, avoid `.chars().collect::<Vec<_>>()` and `to_uppercase()`. Instead, use `char_indices().peekable()` to track byte offsets and test candidates using string slices (`&sql[byte_offset..byte_offset + len]`) combined with `.eq_ignore_ascii_case()`.
