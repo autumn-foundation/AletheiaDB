@@ -1999,4 +1999,153 @@ mod sentry_tests {
         assert_eq!(parsed, interval);
         assert_eq!(consumed, 48, "Should consume exactly 48 bytes");
     }
+
+    #[test]
+    fn test_elenchus_time_range_contains_boundaries() {
+        // ⚔️ Elenchus Test: Kill boolean replacement and strict inequality mutants in contains()
+        // Mutants killed: `replace < with <=`, `replace >= with <`, `return true/false`
+        let range = TimeRange::new(100.into(), 200.into()).unwrap();
+
+        // Exact start bound
+        assert!(
+            range.contains(100.into()),
+            "Should contain exact start bound (>=)"
+        );
+        // Just before start bound
+        assert!(
+            !range.contains(99.into()),
+            "Should not contain just before start (<)"
+        );
+        // Just inside end bound
+        assert!(
+            range.contains(199.into()),
+            "Should contain just inside end bound"
+        );
+        // Exact end bound
+        assert!(
+            !range.contains(200.into()),
+            "Should not contain exact end bound (<)"
+        );
+    }
+
+    #[test]
+    fn test_elenchus_time_range_contains_or_after_boundaries() {
+        // ⚔️ Elenchus Test: Kill boolean replacement and strict inequality mutants in contains_or_after()
+        // Mutants killed: `replace >= with <`, `return true/false`
+        let range = TimeRange::new(100.into(), 200.into()).unwrap();
+
+        // Exact start bound
+        assert!(
+            range.contains_or_after(100.into()),
+            "Should be true for exact start (>=)"
+        );
+        // Just before start bound
+        assert!(
+            !range.contains_or_after(99.into()),
+            "Should be false for just before start (<)"
+        );
+        // After start bound
+        assert!(
+            range.contains_or_after(101.into()),
+            "Should be true for after start"
+        );
+    }
+
+    #[test]
+    fn test_elenchus_time_range_contains_range_boundaries() {
+        // ⚔️ Elenchus Test: Kill strict inequality mutants in contains_range()
+        // Mutants killed: `replace <= with >`, `replace && with ||`
+        let outer = TimeRange::new(100.into(), 300.into()).unwrap();
+
+        // Exact bounds (reflexive)
+        let exact = TimeRange::new(100.into(), 300.into()).unwrap();
+        assert!(
+            outer.contains_range(&exact),
+            "Should contain range with exact bounds (<=)"
+        );
+
+        // Exceeds start bound
+        let early_start = TimeRange::new(99.into(), 200.into()).unwrap();
+        assert!(
+            !outer.contains_range(&early_start),
+            "Should not contain range starting earlier"
+        );
+
+        // Exceeds end bound
+        let late_end = TimeRange::new(200.into(), 301.into()).unwrap();
+        assert!(
+            !outer.contains_range(&late_end),
+            "Should not contain range ending later"
+        );
+    }
+
+    #[test]
+    fn test_elenchus_time_range_close_at_boundaries() {
+        // ⚔️ Elenchus Test: Kill strict inequality mutants in close_at()
+        // Mutants killed: `replace < with ==`, `replace < with <=`
+        let open = TimeRange::from(100.into());
+
+        // End before start (invalid)
+        let invalid = open.close_at(99.into());
+        assert!(invalid.is_err(), "Should err when closing before start (<)");
+
+        // End exactly at start (valid, creates empty point range)
+        let valid_point = open.close_at(100.into());
+        assert!(valid_point.is_ok(), "Should allow closing exactly at start");
+        assert!(
+            valid_point.unwrap().is_empty(),
+            "Closing at start creates empty range"
+        );
+
+        // End just after start (valid)
+        let valid_after = open.close_at(101.into());
+        assert!(valid_after.is_ok(), "Should allow closing after start");
+    }
+
+    #[test]
+    fn test_elenchus_time_range_is_empty_boundaries() {
+        // ⚔️ Elenchus Test: Kill == vs != and boolean replacement in is_empty()
+        let empty = TimeRange::at(100.into());
+        assert!(empty.is_empty(), "Point range should be empty");
+
+        let non_empty = TimeRange::new(100.into(), 101.into()).unwrap();
+        assert!(
+            !non_empty.is_empty(),
+            "1-microsecond range should not be empty"
+        );
+    }
+
+    #[test]
+    fn test_elenchus_time_range_overlaps_boundaries() {
+        // ⚔️ Elenchus Test: Kill strict inequality mutants in overlaps()
+        // Mutants killed: `replace < with <=`, `replace < with ==`
+        let r1 = TimeRange::new(100.into(), 200.into()).unwrap();
+
+        // Touching at start (r2 ends exactly where r1 starts)
+        let r2 = TimeRange::new(50.into(), 100.into()).unwrap();
+        assert!(
+            !r1.overlaps(&r2),
+            "Ranges touching at start should not overlap"
+        );
+        assert!(!r2.overlaps(&r1), "Symmetry check");
+
+        // Touching at end (r3 starts exactly where r1 ends)
+        let r3 = TimeRange::new(200.into(), 250.into()).unwrap();
+        assert!(
+            !r1.overlaps(&r3),
+            "Ranges touching at end should not overlap"
+        );
+        assert!(!r3.overlaps(&r1), "Symmetry check");
+
+        // Overlapping by 1 microsecond at start
+        let r4 = TimeRange::new(50.into(), 101.into()).unwrap();
+        assert!(
+            r1.overlaps(&r4),
+            "Overlapping by 1us at start should overlap"
+        );
+
+        // Overlapping by 1 microsecond at end
+        let r5 = TimeRange::new(199.into(), 250.into()).unwrap();
+        assert!(r1.overlaps(&r5), "Overlapping by 1us at end should overlap");
+    }
 }
