@@ -79,3 +79,7 @@
 **[Broke Storage-API Dependency Cycle]
 **Tangle:** The `storage` module had an implementation of `From<&crate::api::transaction::BufferedWrite> for WalOperation` in `src/storage/wal/entry.rs`, meaning the underlying storage engine depended structurally on the public API layer.
 **Blueprint:** Moved the `From` implementation to `src/api/transaction/write_buffer.rs`. Now, the `api` module is aware of how its `BufferedWrite` converts into a `WalOperation` to send down to `storage`, enforcing a unidirectional dependency graph from `api` -> `storage`.
+
+## 2026-05-25 - Splitting the Bloat in src/core/property.rs
+**Tangle:** `src/core/property.rs` was a 4,200+ line "Bloat" module mixing core property logic, serialization, and over 2,400 lines of tests.
+**Blueprint:** Refactored into a `src/core/property/` directory. Moved the core logic to `mod.rs` and extracted all tests into `tests.rs`. This enforces module cohesion and reduces cognitive load without breaking public interfaces.
