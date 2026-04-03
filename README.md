@@ -704,6 +704,10 @@ AletheiaDB supports a Cypher-like query language with temporal and vector extens
 You can execute these directly using the `execute_aql` method:
 
 ```rust
+// ⚠️ REQUIRES FEATURE: cypher
+// [dependencies]
+// aletheiadb = { version = "0.1", features = ["cypher"] }
+
 use aletheiadb::prelude::*;
 
 fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
