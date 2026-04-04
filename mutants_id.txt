@@ -1,0 +1,56 @@
+src/core/id.rs:21:40: replace - with +
+src/core/id.rs:21:40: replace - with /
+src/core/id.rs:75:9: replace NodeId::new_unchecked -> Self with Default::default()
+src/core/id.rs:81:9: replace NodeId::as_u64 -> u64 with 0
+src/core/id.rs:81:9: replace NodeId::as_u64 -> u64 with 1
+src/core/id.rs:87:9: replace <impl fmt::Display for NodeId>::fmt -> fmt::Result with Ok(Default::default())
+src/core/id.rs:141:9: replace EdgeId::new_unchecked -> Self with Default::default()
+src/core/id.rs:147:9: replace EdgeId::as_u64 -> u64 with 0
+src/core/id.rs:147:9: replace EdgeId::as_u64 -> u64 with 1
+src/core/id.rs:153:9: replace <impl fmt::Display for EdgeId>::fmt -> fmt::Result with Ok(Default::default())
+src/core/id.rs:207:9: replace VersionId::new_unchecked -> Self with Default::default()
+src/core/id.rs:213:9: replace VersionId::as_u64 -> u64 with 0
+src/core/id.rs:213:9: replace VersionId::as_u64 -> u64 with 1
+src/core/id.rs:219:9: replace <impl fmt::Display for VersionId>::fmt -> fmt::Result with Ok(Default::default())
+src/core/id.rs:238:9: replace EntityId::is_node -> bool with true
+src/core/id.rs:238:9: replace EntityId::is_node -> bool with false
+src/core/id.rs:244:9: replace EntityId::is_edge -> bool with true
+src/core/id.rs:244:9: replace EntityId::is_edge -> bool with false
+src/core/id.rs:250:9: replace EntityId::as_node -> Option<NodeId> with None
+src/core/id.rs:250:9: replace EntityId::as_node -> Option<NodeId> with Some(Default::default())
+src/core/id.rs:259:9: replace EntityId::as_edge -> Option<EdgeId> with None
+src/core/id.rs:259:9: replace EntityId::as_edge -> Option<EdgeId> with Some(Default::default())
+src/core/id.rs:268:9: replace <impl fmt::Display for EntityId>::fmt -> fmt::Result with Ok(Default::default())
+src/core/id.rs:277:9: replace <impl From<NodeId> for EntityId>::from -> Self with Default::default()
+src/core/id.rs:283:9: replace <impl From<EdgeId> for EntityId>::from -> Self with Default::default()
+src/core/id.rs:304:9: replace IdGenerator::with_start -> Self with Default::default()
+src/core/id.rs:332:9: replace IdGenerator::next -> Result<u64, StorageError> with Ok(0)
+src/core/id.rs:332:9: replace IdGenerator::next -> Result<u64, StorageError> with Ok(1)
+src/core/id.rs:333:15: replace > with == in IdGenerator::next
+src/core/id.rs:333:15: replace > with < in IdGenerator::next
+src/core/id.rs:333:15: replace > with >= in IdGenerator::next
+src/core/id.rs:351:9: replace IdGenerator::current -> u64 with 0
+src/core/id.rs:351:9: replace IdGenerator::current -> u64 with 1
+src/core/id.rs:436:9: replace IdGenerator::current_approximate -> u64 with 0
+src/core/id.rs:436:9: replace IdGenerator::current_approximate -> u64 with 1
+src/core/id.rs:454:9: replace IdGenerator::reset_to with ()
+src/core/id.rs:479:9: replace IdGenerator::ensure_at_least with ()
+src/core/id.rs:480:25: replace > with == in IdGenerator::ensure_at_least
+src/core/id.rs:480:25: replace > with < in IdGenerator::ensure_at_least
+src/core/id.rs:480:25: replace > with >= in IdGenerator::ensure_at_least
+src/core/id.rs:1539:9: replace TxId::as_u64 -> u64 with 0
+src/core/id.rs:1539:9: replace TxId::as_u64 -> u64 with 1
+src/core/id.rs:1545:9: replace <impl std::fmt::Display for TxId>::fmt -> std::fmt::Result with Ok(Default::default())
+src/core/id.rs:1568:9: replace TxIdGenerator::next -> TxId with Default::default()
+src/core/id.rs:1570:24: replace == with != in TxIdGenerator::next
+src/core/id.rs:1575:25: replace + with - in TxIdGenerator::next
+src/core/id.rs:1575:25: replace + with * in TxIdGenerator::next
+src/core/id.rs:1587:9: replace TxIdGenerator::current -> TxId with Default::default()
+src/core/id.rs:1743:9: replace <impl TryFrom<u64> for NodeId>::try_from -> Result<Self, Self::Error> with Ok(Default::default())
+src/core/id.rs:1751:9: replace <impl FromStr for NodeId>::from_str -> Result<Self, Self::Err> with Ok(Default::default())
+src/core/id.rs:1763:9: replace <impl TryFrom<u64> for EdgeId>::try_from -> Result<Self, Self::Error> with Ok(Default::default())
+src/core/id.rs:1771:9: replace <impl FromStr for EdgeId>::from_str -> Result<Self, Self::Err> with Ok(Default::default())
+src/core/id.rs:1783:9: replace <impl TryFrom<u64> for VersionId>::try_from -> Result<Self, Self::Error> with Ok(Default::default())
+src/core/id.rs:1791:9: replace <impl FromStr for VersionId>::from_str -> Result<Self, Self::Err> with Ok(Default::default())
+src/core/id.rs:1803:9: replace <impl TryFrom<u64> for TxId>::try_from -> Result<Self, Self::Error> with Ok(Default::default())
+src/core/id.rs:1811:9: replace <impl FromStr for TxId>::from_str -> Result<Self, Self::Err> with Ok(Default::default())
