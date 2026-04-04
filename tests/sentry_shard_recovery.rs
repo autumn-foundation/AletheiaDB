@@ -1,6 +1,6 @@
-use aletheiadb::storage::sharding::config::{ShardConfig, ShardDefinition};
-use aletheiadb::storage::sharding::coordinator::ShardCoordinator;
-use aletheiadb::storage::sharding::types::ShardId;
+use aletheiadb::storage::sharding::ShardCoordinator;
+use aletheiadb::storage::sharding::ShardId;
+use aletheiadb::storage::sharding::{ShardConfig, ShardDefinition};
 use std::time::Duration;
 use tempfile::TempDir;
 

@@ -25,7 +25,10 @@
 #![cfg(feature = "embedding-all")]
 
 use aletheiadb::embeddings::EmbeddingService;
-use aletheiadb::embeddings::providers::{huggingface::*, ollama::*, onnx::*, openai::*};
+use aletheiadb::embeddings::providers::{
+    HuggingFaceConfig, HuggingFaceProvider, OllamaConfig, OllamaProvider, OnnxConfig, OnnxProvider,
+    OpenAIConfig, OpenAIModel, OpenAIProvider,
+};
 use std::sync::Arc;
 use std::time::Instant;
 

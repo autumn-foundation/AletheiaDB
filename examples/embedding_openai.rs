@@ -22,7 +22,7 @@
 #![cfg(feature = "embedding-openai")]
 
 use aletheiadb::embeddings::EmbeddingService;
-use aletheiadb::embeddings::providers::openai::*;
+use aletheiadb::embeddings::providers::{OpenAIConfig, OpenAIModel, OpenAIProvider};
 use aletheiadb::{AletheiaDB, PropertyMapBuilder};
 use std::sync::Arc;
 

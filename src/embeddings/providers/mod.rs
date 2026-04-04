@@ -4,13 +4,25 @@
 //! for various embedding services and local models.
 
 #[cfg(feature = "embedding-openai")]
-pub mod openai;
+mod openai;
 
 #[cfg(feature = "embedding-huggingface")]
-pub mod huggingface;
+mod huggingface;
 
 #[cfg(feature = "embedding-onnx")]
-pub mod onnx;
+mod onnx;
 
 #[cfg(feature = "embedding-ollama")]
-pub mod ollama;
+mod ollama;
+
+#[cfg(feature = "embedding-openai")]
+pub use openai::{OpenAIConfig, OpenAIModel, OpenAIProvider};
+
+#[cfg(feature = "embedding-huggingface")]
+pub use huggingface::{HuggingFaceConfig, HuggingFaceProvider};
+
+#[cfg(feature = "embedding-onnx")]
+pub use onnx::{OnnxConfig, OnnxModel, OnnxProvider};
+
+#[cfg(feature = "embedding-ollama")]
+pub use ollama::{OllamaConfig, OllamaProvider};

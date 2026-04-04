@@ -17,7 +17,7 @@
 #![cfg(feature = "embedding-ollama")]
 
 use aletheiadb::embeddings::EmbeddingService;
-use aletheiadb::embeddings::providers::ollama::*;
+use aletheiadb::embeddings::providers::{OllamaConfig, OllamaProvider};
 use aletheiadb::{AletheiaDB, PropertyMapBuilder};
 use std::sync::Arc;
 

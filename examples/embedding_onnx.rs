@@ -17,7 +17,7 @@
 #![cfg(feature = "embedding-onnx")]
 
 use aletheiadb::embeddings::EmbeddingService;
-use aletheiadb::embeddings::providers::onnx::*;
+use aletheiadb::embeddings::providers::{OnnxConfig, OnnxProvider};
 use aletheiadb::{AletheiaDB, PropertyMapBuilder};
 use std::sync::Arc;
 

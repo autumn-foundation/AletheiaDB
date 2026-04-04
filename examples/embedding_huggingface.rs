@@ -18,7 +18,7 @@
 #![cfg(feature = "embedding-huggingface")]
 
 use aletheiadb::embeddings::EmbeddingService;
-use aletheiadb::embeddings::providers::huggingface::*;
+use aletheiadb::embeddings::providers::{HuggingFaceConfig, HuggingFaceProvider};
 use aletheiadb::{AletheiaDB, PropertyMapBuilder};
 use std::sync::Arc;
 

@@ -44,18 +44,18 @@
 //! # }
 //! ```
 
-pub mod config;
-pub mod coordinator;
-pub mod executor;
-pub mod migration;
-pub mod network;
-pub mod persistent_commit_log;
-pub mod rebalance;
-pub mod router;
-pub mod rpc_client;
-pub mod simulation;
-pub mod transaction;
-pub mod types;
+mod config;
+mod coordinator;
+mod executor;
+mod migration;
+mod network;
+mod persistent_commit_log;
+mod rebalance;
+mod router;
+mod rpc_client;
+mod simulation;
+mod transaction;
+mod types;
 
 // Re-export commonly used types
 pub use config::{RebalanceConfig, ShardConfig, ShardDefinition, ShardDiscovery};

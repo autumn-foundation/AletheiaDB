@@ -1,6 +1,6 @@
 use aletheiadb::core::id::TxId;
-use aletheiadb::storage::sharding::persistent_commit_log::{CommitLogConfig, PersistentCommitLog};
-use aletheiadb::storage::sharding::types::ShardId;
+use aletheiadb::storage::sharding::ShardId;
+use aletheiadb::storage::sharding::{CommitLogConfig, PersistentCommitLog};
 use std::fs::OpenOptions;
 use std::io::Write;
 
