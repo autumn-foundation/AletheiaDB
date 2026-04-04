@@ -700,10 +700,21 @@ cargo run --bin aletheia -- daemon stop
 
 ### Query Language (AQL)
 
+> ⚠️ **IMPORTANT: REQUIRES FEATURE 'CYPHER'**
+>
+> AQL functionality requires the `cypher` feature flag.
+> **You MUST add this to your `Cargo.toml` or the code will not compile:**
+>
+> ```toml
+> [dependencies]
+> aletheiadb = { version = "0.1", features = ["cypher"] }
+> ```
+
 AletheiaDB supports a Cypher-like query language with temporal and vector extensions.
 You can execute these directly using the `execute_aql` method:
 
 ```rust
+// ⚠️ REQUIRES FEATURE: cypher
 use aletheiadb::prelude::*;
 
 fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
@@ -836,6 +847,7 @@ use std::sync::Arc;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Enable in Cargo.toml: features = ["embedding-openai"]
+    // Note: Requires `OPENAI_API_KEY` environment variable to be set!
 
     // 1. Create embedding service
     let config = OpenAIConfig::from_env(OpenAIModel::TextEmbedding3Small)?;
