@@ -1055,30 +1055,37 @@ impl fmt::Debug for PropertyValue {
 }
 
 // Convenient From implementations
+/// Convert a `bool` into a `PropertyValue`.
 impl From<bool> for PropertyValue {
     fn from(b: bool) -> Self {
         PropertyValue::Bool(b)
     }
 }
 
+/// Convert an `i64` into a `PropertyValue`.
 impl From<i64> for PropertyValue {
     fn from(i: i64) -> Self {
         PropertyValue::Int(i)
     }
 }
 
+/// Convert an `i32` into a `PropertyValue`.
 impl From<i32> for PropertyValue {
     fn from(i: i32) -> Self {
         PropertyValue::Int(i as i64)
     }
 }
 
+/// Convert an `f64` into a `PropertyValue`.
 impl From<f64> for PropertyValue {
     fn from(f: f64) -> Self {
         PropertyValue::Float(f)
     }
 }
 
+/// Convert a `String` into a `PropertyValue`.
+///
+/// This avoids unnecessary memory allocations.
 impl From<String> for PropertyValue {
     fn from(s: String) -> Self {
         // Use Arc::from(s) directly to avoid unnecessary allocation.
@@ -1090,12 +1097,16 @@ impl From<String> for PropertyValue {
     }
 }
 
+/// Convert a `&str` into a `PropertyValue`.
 impl From<&str> for PropertyValue {
     fn from(s: &str) -> Self {
         PropertyValue::String(Arc::from(s))
     }
 }
 
+/// Convert a `Vec<u8>` into a `PropertyValue`.
+///
+/// This avoids unnecessary memory allocations.
 impl From<Vec<u8>> for PropertyValue {
     fn from(b: Vec<u8>) -> Self {
         // Use Arc::from(b) directly to avoid unnecessary allocation.
@@ -1107,18 +1118,21 @@ impl From<Vec<u8>> for PropertyValue {
     }
 }
 
+/// Convert a `&[u8]` into a `PropertyValue`.
 impl From<&[u8]> for PropertyValue {
     fn from(b: &[u8]) -> Self {
         PropertyValue::Bytes(Arc::from(b))
     }
 }
 
+/// Convert a `Vec<PropertyValue>` into a `PropertyValue`.
 impl From<Vec<PropertyValue>> for PropertyValue {
     fn from(v: Vec<PropertyValue>) -> Self {
         PropertyValue::Array(Arc::new(v))
     }
 }
 
+/// Convert a `Vec<f32>` into a `PropertyValue`.
 impl From<Vec<f32>> for PropertyValue {
     fn from(v: Vec<f32>) -> Self {
         // Use v.into() to reuse the Vec's buffer, avoiding allocation and copy
@@ -1126,12 +1140,14 @@ impl From<Vec<f32>> for PropertyValue {
     }
 }
 
+/// Convert a `&[f32]` into a `PropertyValue`.
 impl From<&[f32]> for PropertyValue {
     fn from(v: &[f32]) -> Self {
         PropertyValue::Vector(Arc::from(v))
     }
 }
 
+/// Convert a `SparseVec` into a `PropertyValue`.
 impl From<SparseVec> for PropertyValue {
     fn from(sv: SparseVec) -> Self {
         PropertyValue::SparseVector(Arc::new(sv))
@@ -1551,12 +1567,14 @@ impl fmt::Debug for PropertyMap {
     }
 }
 
+/// Create an empty `PropertyMap`.
 impl Default for PropertyMap {
     fn default() -> Self {
         Self::new()
     }
 }
 
+/// Create a `PropertyMap` from an iterator of key-value pairs.
 impl FromIterator<(PropertyKey, PropertyValue)> for PropertyMap {
     fn from_iter<I: IntoIterator<Item = (PropertyKey, PropertyValue)>>(iter: I) -> Self {
         let iter = iter.into_iter();
@@ -1779,6 +1797,7 @@ impl PropertyMapBuilder {
     }
 }
 
+/// Create a new, empty `PropertyMapBuilder`.
 impl Default for PropertyMapBuilder {
     fn default() -> Self {
         Self::new()

@@ -272,12 +272,22 @@ impl fmt::Display for EntityId {
     }
 }
 
+/// Convert a `NodeId` into an `EntityId`.
+///
+/// This provides a convenient way to upgrade a specific node identifier
+/// into the more generic `EntityId` enum when working with APIs that can
+/// accept either nodes or edges.
 impl From<NodeId> for EntityId {
     fn from(id: NodeId) -> Self {
         EntityId::Node(id)
     }
 }
 
+/// Convert an `EdgeId` into an `EntityId`.
+///
+/// This provides a convenient way to upgrade a specific edge identifier
+/// into the more generic `EntityId` enum when working with APIs that can
+/// accept either nodes or edges.
 impl From<EdgeId> for EntityId {
     fn from(id: EdgeId) -> Self {
         EntityId::Edge(id)
@@ -1736,6 +1746,10 @@ mod sentinel_id_generator_tests {
 
 use std::str::FromStr;
 
+/// Try to construct a `NodeId` from a raw `u64`.
+///
+/// This performs the same validation as [`NodeId::new`], ensuring the value
+/// does not exceed [`MAX_VALID_ID`].
 impl TryFrom<u64> for NodeId {
     type Error = StorageError;
 
@@ -1744,6 +1758,10 @@ impl TryFrom<u64> for NodeId {
     }
 }
 
+/// Try to parse a `NodeId` from a string representation.
+///
+/// The string must contain a valid base-10 integer that is less than or
+/// equal to [`MAX_VALID_ID`].
 impl FromStr for NodeId {
     type Err = StorageError;
 
@@ -1756,6 +1774,10 @@ impl FromStr for NodeId {
     }
 }
 
+/// Try to construct an `EdgeId` from a raw `u64`.
+///
+/// This performs the same validation as [`EdgeId::new`], ensuring the value
+/// does not exceed [`MAX_VALID_ID`].
 impl TryFrom<u64> for EdgeId {
     type Error = StorageError;
 
@@ -1764,6 +1786,10 @@ impl TryFrom<u64> for EdgeId {
     }
 }
 
+/// Try to parse an `EdgeId` from a string representation.
+///
+/// The string must contain a valid base-10 integer that is less than or
+/// equal to [`MAX_VALID_ID`].
 impl FromStr for EdgeId {
     type Err = StorageError;
 
@@ -1776,6 +1802,10 @@ impl FromStr for EdgeId {
     }
 }
 
+/// Try to construct a `VersionId` from a raw `u64`.
+///
+/// This performs the same validation as [`VersionId::new`], ensuring the value
+/// does not exceed [`MAX_VALID_ID`].
 impl TryFrom<u64> for VersionId {
     type Error = StorageError;
 
@@ -1784,6 +1814,10 @@ impl TryFrom<u64> for VersionId {
     }
 }
 
+/// Try to parse a `VersionId` from a string representation.
+///
+/// The string must contain a valid base-10 integer that is less than or
+/// equal to [`MAX_VALID_ID`].
 impl FromStr for VersionId {
     type Err = StorageError;
 
@@ -1796,6 +1830,10 @@ impl FromStr for VersionId {
     }
 }
 
+/// Try to construct a `TxId` from a raw `u64`.
+///
+/// Unlike other ID types, `TxId` currently does not enforce the [`MAX_VALID_ID`] limit,
+/// so this conversion cannot fail.
 impl TryFrom<u64> for TxId {
     type Error = StorageError;
 
@@ -1804,6 +1842,9 @@ impl TryFrom<u64> for TxId {
     }
 }
 
+/// Try to parse a `TxId` from a string representation.
+///
+/// The string must contain a valid base-10 integer.
 impl FromStr for TxId {
     type Err = StorageError;
 
