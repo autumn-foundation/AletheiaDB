@@ -339,3 +339,17 @@
 **Finding:** The FNV-1a fallback tests for `IdentityHasher` (`test_identity_hasher_write_fallback_fnv` and `test_identity_hasher_write_fallback_fnv_dirty`) were tautological. They exactly mirrored the source implementation by reconstructing the FNV-1a multiplication and XOR sequence to generate their `expected` values. This meant they only asserted that "the code is the code" and provided no independent verification that the hashing logic was correct or consistent with standard FNV-1a.
 **Evidence:** The original tests explicitly copied the sequence `expected ^= 1; expected = expected.wrapping_mul(FNV_PRIME);` which exactly mirrors the `write` loop. Any mutation altering `FNV_PRIME` or the operation order would survive if the same change was incorrectly made to the test or if it was inherently flawed.
 **Recommendation:** Refactored the tests to use independently pre-computed integer constants as the `expected` values (the Oracle Problem solution). This ensures the implementation matches the ground truth rather than itself.
+
+**[Edge Connects Exhaustive False Confidence]**
+**Module:** `aletheiadb::core::graph`
+**Severity:** 🔴 Critical
+**Finding:** `test_edge_connects_exhaustive` claimed in comments to kill mutants replacing `&&` with `||`, but only tested match-both and mismatch-both scenarios, which evaluates the exact same for both `&&` and `||`. This created total false confidence.
+**Evidence:** A mental mutation analysis and later verification confirmed that `||` would evaluate to `true` on match-both and `false` on mismatch-both, completely surviving the test cases meant to kill it.
+**Recommendation:** Refactored the test to include match-source/mismatch-target and mismatch-source/match-target edge cases, directly distinguishing between `&&` and `||`.
+
+**[Weak Debug Format Assertions]**
+**Module:** `aletheiadb::core::graph`
+**Severity:** 🟡 Suspect
+**Finding:** `test_debug_format_not_empty`, `test_node_debug`, and `test_edge_debug` used weak assertions like `!is_empty()`, `len() > 10`, or `contains()` on the debug output string.
+**Evidence:** The tests merely proved that a formatted string existed and contained fragments, failing to verify the exact structure or all fields.
+**Recommendation:** Replaced weak assertions with strong `assert_eq!` directly comparing the generated string against the expected hardcoded literal representing the full debug structure.

@@ -456,13 +456,10 @@ mod tests {
         );
 
         let debug_str = format!("{:?}", node);
-        assert!(
-            debug_str.contains("Person"),
-            "Debug output should contain resolved label"
-        );
-        assert!(
-            debug_str.contains("Alice"),
-            "Debug output should contain property value"
+        assert_eq!(
+            debug_str,
+            "Node { id: NodeId(1), label: \"Person\", properties: {\"name\": String(\"Alice\")}, current_version: VersionId(1), metadata: VersionMetadata { created_by_tx: TxId(0), commit_timestamp: Some(HybridTimestamp { wallclock: 0, logical: 0 }) } }",
+            "Debug output must correctly format all node fields"
         );
     }
 
@@ -499,13 +496,10 @@ mod tests {
         );
 
         let debug_str = format!("{:?}", edge);
-        assert!(
-            debug_str.contains("KNOWS"),
-            "Debug output should contain resolved label"
-        );
-        assert!(
-            debug_str.contains("2024"),
-            "Debug output should contain property value"
+        assert_eq!(
+            debug_str,
+            "Edge { id: EdgeId(10), label: \"KNOWS\", source: NodeId(1), target: NodeId(2), properties: {\"since\": Int(2024)}, current_version: VersionId(1), metadata: VersionMetadata { created_by_tx: TxId(0), commit_timestamp: Some(HybridTimestamp { wallclock: 0, logical: 0 }) } }",
+            "Debug output must correctly format all edge fields"
         );
     }
 
@@ -628,6 +622,12 @@ mod tests {
         assert!(
             !edge.connects(NodeId::new(11).unwrap(), NodeId::new(20).unwrap()),
             "Should return false when source mismatches"
+        );
+
+        // Match source, mismatch target
+        assert!(
+            !edge.connects(NodeId::new(10).unwrap(), NodeId::new(21).unwrap()),
+            "Should return false when target mismatches"
         );
     }
 }
@@ -893,15 +893,10 @@ mod sentry_tests {
         );
 
         let node_debug = format!("{:?}", node);
-        assert!(
-            !node_debug.is_empty(),
-            "Node debug format must not be empty"
-        );
-        // Ok(Default::default()) results in an empty string from format!("{:?}") or similar empty state
-        // We explicitly assert length > 0
-        assert!(
-            node_debug.len() > 10,
-            "Node debug format must contain structured data"
+        assert_eq!(
+            node_debug,
+            "Node { id: NodeId(1), label: \"DebugLabel\", properties: {}, current_version: VersionId(1), metadata: VersionMetadata { created_by_tx: TxId(0), commit_timestamp: Some(HybridTimestamp { wallclock: 0, logical: 0 }) } }",
+            "Node debug format must explicitly match the structured data"
         );
 
         let edge = Edge::new(
@@ -914,13 +909,10 @@ mod sentry_tests {
         );
 
         let edge_debug = format!("{:?}", edge);
-        assert!(
-            !edge_debug.is_empty(),
-            "Edge debug format must not be empty"
-        );
-        assert!(
-            edge_debug.len() > 10,
-            "Edge debug format must contain structured data"
+        assert_eq!(
+            edge_debug,
+            "Edge { id: EdgeId(1), label: \"DebugLabel\", source: NodeId(1), target: NodeId(2), properties: {}, current_version: VersionId(1), metadata: VersionMetadata { created_by_tx: TxId(0), commit_timestamp: Some(HybridTimestamp { wallclock: 0, logical: 0 }) } }",
+            "Edge debug format must explicitly match the structured data"
         );
     }
 }
