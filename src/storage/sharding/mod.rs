@@ -80,7 +80,9 @@ pub use persistent_commit_log::{
 pub use rebalance::{MigrationPlan, MigrationProgress, MigrationState, RebalanceManager};
 pub use router::{ShardRouter, TraversalPlan, TraversalStep};
 pub use rpc_client::{ClientStats, HttpShardClient, RpcConfig};
-pub use simulation::{EdgeCutAnalysis, ShardingSimulation, SimulationResult};
+pub use simulation::{
+    EdgeCutAnalysis, EdgeTypeConfig, ShardingSimulation, SimulationResult, StorageAnalysis,
+};
 #[allow(deprecated)]
 pub use transaction::TwoPhaseCommitLog;
 pub use transaction::{DistributedTransaction, ParticipantState, TransactionPhase};

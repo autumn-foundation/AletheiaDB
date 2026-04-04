@@ -16,7 +16,7 @@
 //! # Example
 //!
 //! ```ignore
-//! use aletheiadb::storage::sharding::rpc_client::{HttpShardClient, RpcConfig};
+//! use aletheiadb::storage::sharding::{HttpShardClient, RpcConfig};
 //!
 //! let config = RpcConfig {
 //!     endpoint: "http://shard0:9000".to_string(),

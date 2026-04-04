@@ -11,7 +11,7 @@ use std::collections::HashMap;
 /// # Examples
 ///
 /// ```rust
-/// use aletheiadb::storage::sharding::simulation::SimulationResult;
+/// use aletheiadb::storage::sharding::SimulationResult;
 ///
 /// let result = SimulationResult::new(1000, 5000, 4);
 /// assert_eq!(result.total_nodes, 1000);
@@ -78,7 +78,7 @@ impl SimulationResult {
 /// # Examples
 ///
 /// ```rust
-/// use aletheiadb::storage::sharding::simulation::EdgeCutAnalysis;
+/// use aletheiadb::storage::sharding::EdgeCutAnalysis;
 ///
 /// let analysis = EdgeCutAnalysis::new(200, 800);
 /// assert_eq!(analysis.cross_shard_ratio, 0.2); // 200 / (200 + 800)
@@ -194,7 +194,7 @@ impl LatencyEstimates {
 /// # Examples
 ///
 /// ```rust
-/// use aletheiadb::storage::sharding::simulation::StorageAnalysis;
+/// use aletheiadb::storage::sharding::StorageAnalysis;
 ///
 /// // 1000 nodes, 5000 edges, 500 cross-shard edges
 /// let analysis = StorageAnalysis::calculate(1000, 5000, 500);
@@ -265,7 +265,7 @@ pub struct SimulationConfig {
 /// # Examples
 ///
 /// ```rust
-/// use aletheiadb::storage::sharding::simulation::EdgeTypeConfig;
+/// use aletheiadb::storage::sharding::EdgeTypeConfig;
 ///
 /// let config = EdgeTypeConfig {
 ///     source_label: "User".to_string(),
