@@ -839,6 +839,12 @@ mod tests {
         assert!(!interval.is_visible_at(1500.into(), 2500.into())); // Before transaction time
         assert!(!interval.is_visible_at(2500.into(), 3500.into())); // After valid time
         assert!(!interval.is_visible_at(1500.into(), 4500.into())); // After transaction time
+
+        // 🛡️ Sentry Test: Verify partial matches to kill mutant that changes && to ||
+        // Valid time is in range, but transaction time is not
+        assert!(!interval.is_visible_at(1500.into(), 2000.into()));
+        // Transaction time is in range, but valid time is not
+        assert!(!interval.is_visible_at(500.into(), 3500.into()));
     }
 
     #[test]
