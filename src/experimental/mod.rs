@@ -232,6 +232,10 @@ pub mod omen;
 pub mod oracle;
 
 #[cfg(feature = "nova")]
+/// Pendulum: Semantic Oscillation Detector.
+pub mod pendulum;
+
+#[cfg(feature = "nova")]
 /// Luna: Semantic Subgraph Synthesis.
 pub mod luna;
 

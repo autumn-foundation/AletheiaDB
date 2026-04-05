@@ -1,0 +1,13 @@
+<<<<<<< SEARCH
+#[cfg(feature = "nova")]
+/// Oracle: Probabilistic Graph Reasoning.
+pub mod oracle;
+=======
+#[cfg(feature = "nova")]
+/// Oracle: Probabilistic Graph Reasoning.
+pub mod oracle;
+
+#[cfg(feature = "nova")]
+/// Pendulum: Semantic Oscillation Detector.
+pub mod pendulum;
+>>>>>>> REPLACE
