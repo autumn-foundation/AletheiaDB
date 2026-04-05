@@ -1,3 +1,10 @@
+//! Tests for manifest consistency during multi-component index persistence.
+//!
+//! This module verifies that the `IndexManifest` maintains correct
+//! Logical Sequence Number (LSN) tracking across different index components,
+//! ensuring that recovery correctly handles scenarios where some indexes
+//! lag behind others in their persistence cycle.
+
 #[cfg(test)]
 mod tests {
     use super::super::worker::update_manifest;

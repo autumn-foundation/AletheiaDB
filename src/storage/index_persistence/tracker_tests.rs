@@ -1,3 +1,9 @@
+//! Tests for the persistence mutation tracker.
+//!
+//! This module verifies the `PersistenceTracker`'s ability to correctly
+//! count, reset, and signal mutations across various database operations,
+//! which is crucial for triggering background index persistence.
+
 use crate::storage::index_persistence::tracker::PersistenceTracker;
 
 #[test]

@@ -1,3 +1,10 @@
+//! Tests for graph index delta compression and reconstruction.
+//!
+//! This module verifies the behavior of `GraphIndexDelta` generation,
+//! saving, and loading. Delta compression allows AletheiaDB to persist
+//! incremental updates to the CSR adjacency graph without rewriting
+//! the entire index, saving disk I/O and time during checkpoints.
+
 use super::*;
 use crate::storage::index_persistence::formats::{
     GraphIndexDelta, PersistedEdge, PersistedNode, PersistedPropertyMap,

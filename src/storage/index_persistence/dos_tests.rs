@@ -1,3 +1,10 @@
+//! Tests for Denial of Service (DoS) protections during index loading.
+//!
+//! This module ensures that AletheiaDB correctly enforces size limits
+//! on persisted index files. By rejecting excessively large files,
+//! the system protects itself against memory exhaustion (OOM) attacks
+//! or accidental corruption that could cause "zip bomb" style memory spikes.
+
 use std::fs::File;
 use tempfile::tempdir;
 

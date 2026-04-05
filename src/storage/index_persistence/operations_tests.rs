@@ -1,3 +1,10 @@
+//! Tests for high-level persistence operations.
+//!
+//! This module verifies the orchestration logic that coordinates
+//! saving multiple index components (graph, temporal, vector, strings).
+//! It specifically checks that referential integrity is maintained
+//! (e.g., string IDs in indexes match the saved string interner).
+
 use super::*;
 use crate::core::GLOBAL_INTERNER;
 use crate::core::id::{NodeId, VersionId};
