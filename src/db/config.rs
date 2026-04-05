@@ -1,9 +1,9 @@
-use crate::api::transaction::TxVisibilityManager;
 use crate::config::AletheiaDBConfig;
 use crate::core::error::{Result, ResultExt, StorageError};
 use crate::core::id::{IdGenerator, TxIdGenerator};
 use crate::core::temporal::time;
 use crate::core::version::AnchorConfig;
+use crate::core::visibility::TxVisibilityManager;
 use crate::db::AletheiaDB;
 use crate::index::temporal::TemporalIndexes;
 use crate::query::planner::Statistics;

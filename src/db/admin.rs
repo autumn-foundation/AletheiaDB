@@ -1,6 +1,6 @@
-use crate::api::transaction::visibility::CompressionStats;
 use crate::core::error::{PersistenceErrorKind, Result, ResultExt, StorageError};
 use crate::core::temporal::Timestamp;
+use crate::core::visibility::CompressionStats;
 use crate::db::AletheiaDB;
 use crate::index::temporal::TemporalIndexes;
 use crate::query::planner::Statistics;

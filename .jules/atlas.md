@@ -79,3 +79,7 @@
 **[Broke Storage-API Dependency Cycle]
 **Tangle:** The `storage` module had an implementation of `From<&crate::api::transaction::BufferedWrite> for WalOperation` in `src/storage/wal/entry.rs`, meaning the underlying storage engine depended structurally on the public API layer.
 **Blueprint:** Moved the `From` implementation to `src/api/transaction/write_buffer.rs`. Now, the `api` module is aware of how its `BufferedWrite` converts into a `WalOperation` to send down to `storage`, enforcing a unidirectional dependency graph from `api` -> `storage`.
+
+## 2026-05-25 - Extracted TxVisibilityManager to core
+**Tangle:** The `TxVisibilityManager`, `TransactionSnapshot`, and `CompressionStats` structures were defined in `src/api/transaction/visibility.rs`. However, they are core primitives used extensively by `db` and other core modules, meaning `db` depended on `api`, creating a layering violation and structural smell.
+**Blueprint:** Moved `TxVisibilityManager`, `TransactionSnapshot`, and `CompressionStats` to a new `core::visibility` module. Updated `api::transaction` to re-export them from `core`, restoring the correct dependency flow.

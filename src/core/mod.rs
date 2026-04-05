@@ -36,6 +36,7 @@ pub mod observer;
 pub mod property;
 pub mod temporal;
 pub mod vector;
+pub mod visibility;
 
 // Re-export commonly used types for convenience
 pub use error::{Error, Result, StorageError, TemporalError};
@@ -72,4 +73,5 @@ pub use vector::{
     validate_vector,
     validate_vector_with_bounds,
 };
+pub use visibility::{CompressionStats, TransactionSnapshot, TxVisibilityManager};
 pub mod version;
