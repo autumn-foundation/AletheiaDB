@@ -415,6 +415,7 @@ use aletheiadb::prelude::*;
 use aletheiadb::{HnswConfig, DistanceMetric};
 use aletheiadb::index::vector::temporal::TemporalVectorConfig;
 
+fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 let db = AletheiaDB::new().unwrap();
 
 // Enable vector indexing with temporal support
@@ -444,7 +445,10 @@ let _doc2_id = db.create_node("Document",
 
 // Find similar nodes
 // Note: find_similar excludes the query node itself from results
-let similar = db.find_similar(doc_id, 10)?;
+let _similar = db.find_similar(doc_id, 10)?;
+
+Ok(())
+}
 ```
 
 ### Hybrid Queries (Graph + Vector + Temporal)
@@ -454,6 +458,7 @@ use aletheiadb::prelude::*;
 use aletheiadb::index::vector::{HnswConfig, DistanceMetric};
 use aletheiadb::index::vector::temporal::TemporalVectorConfig;
 
+fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 let db = AletheiaDB::new().unwrap();
 
 // First, configure and enable the vector index
@@ -504,6 +509,9 @@ let _results = db.query()
     .metric(DistanceMetric::Cosine)
     .finish()
     .execute(&db)?;
+
+Ok(())
+}
 ```
 
 See **[docs/guides/hybrid-query-guide.md](docs/guides/hybrid-query-guide.md)** for complete API reference.
@@ -516,6 +524,7 @@ use aletheiadb::index::vector::{HnswConfig, DistanceMetric};
 use aletheiadb::index::vector::temporal::{DriftMetric, TemporalVectorConfig, SnapshotStrategy};
 use aletheiadb::core::temporal::TimeRange;
 
+fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 let db = AletheiaDB::new().unwrap();
 
 // Configure vector indexing with frequent snapshots for demonstration
@@ -557,6 +566,9 @@ let drifted_nodes = db.find_drift_in(
 
 for (node_id, drift_score) in drifted_nodes {
     println!("Node {} drifted by {:.3}", node_id, drift_score);
+}
+
+Ok(())
 }
 ```
 
@@ -618,6 +630,7 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 use aletheiadb::{AletheiaDB, config::AletheiaDBConfig};
 use aletheiadb::storage::index_persistence::PersistenceConfig;
 
+fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 // Enable index persistence for 6-30x faster startup
 let config = AletheiaDBConfig::builder()
     .persistence(PersistenceConfig {
@@ -638,6 +651,8 @@ let _db = AletheiaDB::with_unified_config(config);
 
 // Note: On first run, you may see "Missing required index file" warnings.
 // This is normal for a fresh database.
+Ok(())
+}
 ```
 
 See **[docs/guides/index-persistence-guide.md](docs/guides/index-persistence-guide.md)** for complete guide.
@@ -648,6 +663,7 @@ See **[docs/guides/index-persistence-guide.md](docs/guides/index-persistence-gui
 use aletheiadb::{AletheiaDB, config::AletheiaDBConfig, WalConfigBuilder};
 use aletheiadb::storage::wal::DurabilityMode;
 
+fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 // Load from TOML file (requires file to exist)
 // let config = AletheiaDBConfig::from_toml_file("config/production.toml")?;
 // let db = AletheiaDB::with_unified_config(config);
@@ -661,6 +677,8 @@ let config = AletheiaDBConfig::builder()
     .build();
 
 let _db = AletheiaDB::with_unified_config(config)?;
+Ok(())
+}
 ```
 
 See **[docs/CONFIGURATION.md](docs/CONFIGURATION.md)** for all configuration options and presets.
@@ -709,13 +727,14 @@ use aletheiadb::prelude::*;
 fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let db = AletheiaDB::new().unwrap();
 
+    // ⚠️ REQUIRES FEATURE: cypher
     // Basic graph query
-    let results = db.execute_aql(
+    let _results = db.execute_aql(
         "MATCH (n:Person {name: 'Alice'})-[:KNOWS]->(friend:Person) RETURN friend"
     )?;
 
     // Bi-temporal query (point-in-time)
-    let results = db.execute_aql(
+    let _results = db.execute_aql(
         "AS OF 1705312800000000 MATCH (n:Person {name: 'Alice'}) RETURN n"
     )?;
 
@@ -758,6 +777,7 @@ use aletheiadb::storage::sharding::{
     ShardConfig, ShardDefinition, ShardCoordinator,
 };
 
+fn main() {
 // Define shard topology
 let config = ShardConfig::new(vec![
     ShardDefinition::new(0, "shard0:9000", vec!["Person", "User"]),
@@ -770,6 +790,7 @@ let coordinator = ShardCoordinator::new(config);
 
 // Route queries to appropriate shards
 let _shard = coordinator.router().route_node("Person");
+}
 ```
 
 See **[docs/guides/sharding-guide.md](docs/guides/sharding-guide.md)** for complete guide.
@@ -783,6 +804,7 @@ use aletheiadb::{AletheiaDB, config::AletheiaDBConfig};
 use aletheiadb::config::HistoricalConfigBuilder;
 use std::time::Duration;
 
+fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 // Configure cold storage via the unified config builder
 let config = AletheiaDBConfig::builder()
     .historical(
@@ -797,6 +819,8 @@ let config = AletheiaDBConfig::builder()
 
 // Cold storage automatically initialized!
 let _db = AletheiaDB::with_unified_config(config)?;
+Ok(())
+}
 ```
 
 See **[docs/guides/tiered-storage-guide.md](docs/guides/tiered-storage-guide.md)** for complete guide.
@@ -810,17 +834,26 @@ For complex operations involving multiple updates, use explicit transactions.
 ```rust
 use aletheiadb::prelude::*;
 
-// Explicit read transaction
-let result = db.read(|tx| {
-    tx.get_node(alice_id).map(|node| node.label.clone())
-})?;
+fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
+    let db = AletheiaDB::new().unwrap();
+    let alice_id = db.create_node("Person", properties! {
+        "name" => "Alice"
+    })?;
 
-// Explicit write transaction with multiple operations
-db.write(|tx| {
-    let node1 = tx.create_node("Event", PropertyMap::new())?;
-    let node2 = tx.create_node("Event", PropertyMap::new())?;
-    tx.create_edge(node1, node2, "FOLLOWS", PropertyMap::new())
-})?;
+    // Explicit read transaction
+    let _result = db.read(|tx| {
+        tx.get_node(alice_id).map(|node| node.label.clone())
+    })?;
+
+    // Explicit write transaction with multiple operations
+    db.write(|tx| {
+        let node1 = tx.create_node("Event", PropertyMap::new())?;
+        let node2 = tx.create_node("Event", PropertyMap::new())?;
+        tx.create_edge(node1, node2, "FOLLOWS", PropertyMap::new())
+    })?;
+
+    Ok(())
+}
 ```
 
 ### Embedding Generation (Optional)
@@ -837,7 +870,7 @@ use std::sync::Arc;
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Enable in Cargo.toml: features = ["embedding-openai"]
 
-    // 1. Create embedding service
+    // 1. Create embedding service (Requires OPENAI_API_KEY environment variable)
     let config = OpenAIConfig::from_env(OpenAIModel::TextEmbedding3Small)?;
     let provider = Arc::new(OpenAIProvider::new(config)?);
     let service = EmbeddingService::new(provider);
