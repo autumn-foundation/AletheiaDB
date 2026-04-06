@@ -12,6 +12,7 @@
 //! - **Always ends with `Eof`**: the token stream is always terminated.
 
 use super::CypherError;
+use crate::core::macros::match_ignore_ascii_case;
 
 // ---------------------------------------------------------------------------
 // Token types
@@ -629,7 +630,7 @@ impl<'a> CypherLexer<'a> {
             .unwrap_or(self.input.len());
         let text = &self.input[start..end];
 
-        let kind = match text.to_uppercase().as_str() {
+        let kind = match_ignore_ascii_case!(text,
             // Clauses
             "MATCH" => TokenKind::Match,
             "OPTIONAL" => TokenKind::OptionalMatch,
@@ -684,8 +685,8 @@ impl<'a> CypherLexer<'a> {
             "VALID_TIME" => TokenKind::ValidTime,
 
             // Not a keyword
-            _ => TokenKind::Identifier,
-        };
+            _ => TokenKind::Identifier
+        );
 
         Ok(Token::new(kind, text, start))
     }

@@ -4,6 +4,7 @@
 //! This is the first stage of parsing - converting raw text into structured tokens
 //! that the parser can work with.
 
+use crate::core::macros::match_ignore_ascii_case;
 use std::fmt;
 
 /// A token in the AQL language.
@@ -775,7 +776,7 @@ impl<'a> Lexer<'a> {
         let text = &self.input[start_pos..end_pos];
 
         // Check for keywords (case-insensitive)
-        let token = match text.to_uppercase().as_str() {
+        let token = match_ignore_ascii_case!(text,
             "MATCH" => Token::Match,
             "WHERE" => Token::Where,
             "RETURN" => Token::Return,
@@ -813,8 +814,8 @@ impl<'a> Lexer<'a> {
             "COSINE" => Token::Cosine,
             "EUCLIDEAN" => Token::Euclidean,
             "DOT_PRODUCT" => Token::DotProduct,
-            _ => Token::Identifier(text.to_string()),
-        };
+            _ => Token::Identifier(text.to_string())
+        );
 
         Ok(token)
     }
