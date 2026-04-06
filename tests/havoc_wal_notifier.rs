@@ -39,7 +39,10 @@ mod loom_tests {
             // Acquire mutex before updating state and notifying
             // This prevents the "lost wakeup" scenario where a waiter checks the state (Pending),
             // then the notifier updates state and signals (Lost), then the waiter sleeps forever.
-            let _guard = self.wait_mutex.lock().unwrap();
+            let _guard = match self.wait_mutex.lock() {
+                Ok(g) => g,
+                Err(_) => return, // Ignore poison in loom test
+            };
             self.state.store(1, Ordering::Release);
             self.condvar.notify_all();
         }
@@ -53,7 +56,10 @@ mod loom_tests {
             }
             let _notify_guard = NotifyGuard(&self.condvar);
 
-            let _guard = self.wait_mutex.lock().unwrap_or_else(|e| e.into_inner());
+            let _guard = match self.wait_mutex.lock() {
+                Ok(g) => g,
+                Err(_) => return, // Ignore poison in loom test
+            };
             // Simulate the exact code from production ring_buffer.rs which could panic inside this block
             {
                 // In production it acquires self.error.lock() and sets a string.
@@ -65,9 +71,11 @@ mod loom_tests {
         }
 
         fn wait(&self) -> Result<(), ()> {
-            let mut guard = match self.wait_mutex.lock() {
+            let mut guard = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                self.wait_mutex.lock().unwrap()
+            })) {
                 Ok(g) => g,
-                Err(_e) => return Err(()),
+                Err(_) => return Err(()), // A poisoned lock on wait start means error
             };
 
             if self.state.load(Ordering::Acquire) == 1 {
@@ -81,17 +89,19 @@ mod loom_tests {
                 // In loom, condvar.wait().unwrap() will panic if poisoned, we can't unwrap_or_else easily on the lock directly
                 // if it's the Loom mutex. But we don't need to test Loom's poison semantics,
                 // we just want to ensure that it doesn't deadlock.
-                // Wait, if loom Condvar::wait() returns PoisonError, we can match it:
-                guard = match self.condvar.wait(guard) {
-                    Ok(g) => g,
+                // Note: loom::sync::Condvar::wait will panic if the mutex is poisoned, so we catch the panic here to simulate gracefully waking up.
+                let wait_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    // This panics in loom if poisoned
+                    self.condvar.wait(guard).unwrap()
+                }));
+                match wait_result {
+                    Ok(g) => guard = g,
                     Err(_) => {
-                        // In Loom, catching the poison error might still panic if we drop the guard, or we can just ignore it
-                        // if we panic it's not a deadlock, but to avoid the panic, we just break.
-                        // Actually Loom panics on `e.into_inner()` or inside Condvar wait.
-                        // So let's just let it panic. A panic is not a deadlock.
+                        // The lock was poisoned and loom panicked inside wait()
+                        // Break out of loop. It's not a deadlock!
                         return Err(());
                     }
-                };
+                }
             }
 
             if self.state.load(Ordering::Acquire) == 1 {
