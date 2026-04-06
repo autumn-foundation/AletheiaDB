@@ -65,7 +65,10 @@ mod loom_tests {
         }
 
         fn wait(&self) -> Result<(), ()> {
-            let mut guard = match self.wait_mutex.lock() { Ok(g) => g, Err(_e) => return Err(()) };
+            let mut guard = match self.wait_mutex.lock() {
+                Ok(g) => g,
+                Err(_e) => return Err(()),
+            };
 
             if self.state.load(Ordering::Acquire) == 1 {
                 return Ok(());
