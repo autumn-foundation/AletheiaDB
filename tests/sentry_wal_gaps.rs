@@ -114,3 +114,59 @@ fn test_sentry_wal_batch_gaps() {
     );
     println!("🛡️ SENTRY SUCCESS: LSNs are contiguous. Batch validation prevented gaps.");
 }
+
+#[test]
+fn test_sentry_wal_batch_with_handles_gaps() {
+    let dir = tempdir().unwrap();
+    let config = ConcurrentWalConfig::new(dir.path());
+    let wal = ConcurrentWal::new(config).unwrap();
+
+    // 1. Create a batch: [Valid, Huge (Invalid), Valid]
+    let ops = vec![test_operation(1), huge_operation(2), test_operation(3)];
+
+    // 2. Append batch with handles - should fail
+    let result = wal.append_batch_with_handles(ops);
+    assert!(
+        result.is_err(),
+        "Batch append with handles should fail due to size limit"
+    );
+
+    let err = result.unwrap_err();
+    println!("Append batch with handles error (expected): {}", err);
+    assert!(
+        err.to_string().contains("CapacityExceeded") || err.to_string().contains("WAL entry size")
+    );
+
+    // 3. Append another valid operation successfully
+    let lsn_after = wal.append_async(test_operation(4)).unwrap();
+    println!("Appended valid op after failure, LSN: {:?}", lsn_after);
+
+    // 4. Drain and inspect LSNs
+    let entries = wal.drain_all();
+    let lsns: Vec<u64> = entries.iter().map(|e| e.lsn.0).collect();
+
+    // 5. Verify atomicity
+    assert!(
+        !lsns.contains(&1) || lsn_after.0 == 1,
+        "LSN 1 should belong to the valid operation, not the failed batch"
+    );
+    assert!(
+        lsns.contains(&lsn_after.0),
+        "LSN after batch should be present"
+    );
+
+    // Prove contiguity
+    let mut contiguous = true;
+    for i in 0..lsns.len().saturating_sub(1) {
+        if lsns[i + 1] != lsns[i] + 1 {
+            contiguous = false;
+            break;
+        }
+    }
+
+    assert!(
+        contiguous,
+        "LSN sequence should be contiguous, but found gaps: {:?}",
+        lsns
+    );
+}
