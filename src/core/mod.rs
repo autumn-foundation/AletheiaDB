@@ -27,13 +27,13 @@
 
 pub mod error;
 pub mod graph;
-/// Performance optimization macros.
-pub mod macros;
 pub mod hasher;
 pub mod history;
 pub mod hlc;
 pub mod id;
 pub mod interning;
+/// Performance optimization macros.
+pub mod macros;
 pub mod observer;
 pub mod property;
 pub mod temporal;
