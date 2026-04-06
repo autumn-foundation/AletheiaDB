@@ -406,6 +406,19 @@ impl ConcurrentWal {
             return Ok(Vec::new());
         }
 
+        // Pre-validate all operations to ensure they don't exceed the max entry size.
+        // This prevents partial batch failures which would cause gaps in the LSN sequence.
+        for operation in &operations {
+            let estimated_capacity = super::estimate_entry_capacity(operation);
+            if estimated_capacity > super::entry::MAX_WAL_ENTRY_SIZE {
+                return Err(Error::Storage(StorageError::CapacityExceeded {
+                    resource: "WAL entry size".to_string(),
+                    current: estimated_capacity,
+                    limit: super::entry::MAX_WAL_ENTRY_SIZE,
+                }));
+            }
+        }
+
         let count = operations.len() as u64;
 
         // Defensive check: ensure count > 0 to prevent panic in allocate_batch
@@ -461,6 +474,19 @@ impl ConcurrentWal {
         // Handle empty batch early
         if operations.is_empty() {
             return Ok((Vec::new(), Vec::new()));
+        }
+
+        // Pre-validate all operations to ensure they don't exceed the max entry size.
+        // This prevents partial batch failures which would cause gaps in the LSN sequence.
+        for operation in &operations {
+            let estimated_capacity = super::estimate_entry_capacity(operation);
+            if estimated_capacity > super::entry::MAX_WAL_ENTRY_SIZE {
+                return Err(Error::Storage(StorageError::CapacityExceeded {
+                    resource: "WAL entry size".to_string(),
+                    current: estimated_capacity,
+                    limit: super::entry::MAX_WAL_ENTRY_SIZE,
+                }));
+            }
         }
 
         let count = operations.len() as u64;

@@ -54,7 +54,7 @@ fn huge_operation(id: u64) -> WalOperation {
 }
 
 #[test]
-fn test_havoc_wal_batch_gaps() {
+fn test_sentry_wal_batch_gaps() {
     let dir = tempdir().unwrap();
     let config = ConcurrentWalConfig::new(dir.path());
     let wal = ConcurrentWal::new(config).unwrap();
@@ -85,48 +85,32 @@ fn test_havoc_wal_batch_gaps() {
 
     println!("Drained LSNs: {:?}", lsns);
 
-    // 5. Verify the wreckage: Gaps in LSN sequence
-    // Expected: LSN 1 (from first op in batch) MIGHT be there?
-    // No, `append_batch` loop:
-    // 1. Allocates 3 LSNs (current, current+1, current+2).
-    // 2. Loop idx=0: Serialize (ok), Append (ok). LSN 1 written.
-    // 3. Loop idx=1: Serialize (fail), Return Err.
-    // 4. Loop idx=2: Never executed.
-
-    // So LSN 1 should be written.
-    // LSN 2 was allocated but serialization failed.
-    // LSN 3 was allocated but loop aborted.
-    // Next LSN allocated by `append_async` should be 4.
-
-    // So we expect LSNs: [1, 4]
-    // Gap: 2, 3 are missing.
+    // 5. Verify atomicity: No partial batches and no LSN gaps
+    // Since we pre-validate the batch, the entire batch should be rejected before
+    // any LSNs are allocated. The next valid operation should receive LSN 1.
 
     assert!(
-        lsns.contains(&1),
-        "LSN 1 should be present (written before failure)"
+        !lsns.contains(&1) || lsn_after.0 == 1,
+        "LSN 1 should belong to the valid operation, not the failed batch"
     );
-    assert!(
-        !lsns.contains(&2),
-        "LSN 2 should be missing (failed serialization)"
-    );
-    assert!(!lsns.contains(&3), "LSN 3 should be missing (aborted loop)");
     assert!(
         lsns.contains(&lsn_after.0),
         "LSN after batch should be present"
     );
 
-    // Prove non-contiguity
+    // Prove contiguity
     let mut contiguous = true;
-    for i in 0..lsns.len() - 1 {
+    for i in 0..lsns.len().saturating_sub(1) {
         if lsns[i + 1] != lsns[i] + 1 {
             contiguous = false;
             break;
         }
     }
 
-    if !contiguous {
-        println!("👺 HAVOC SUCCESS: Found gaps in LSN sequence! System is fragile.");
-    } else {
-        panic!("Boring. LSNs are contiguous. Failed to break it.");
-    }
+    assert!(
+        contiguous,
+        "LSN sequence should be contiguous, but found gaps: {:?}",
+        lsns
+    );
+    println!("🛡️ SENTRY SUCCESS: LSNs are contiguous. Batch validation prevented gaps.");
 }
