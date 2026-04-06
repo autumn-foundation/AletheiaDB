@@ -1,3 +1,5 @@
+//! Tests for core vector structures and similarity metrics.
+
 use super::*;
 use crate::core::error::{Error, VectorError};
 #[allow(unused_imports)]

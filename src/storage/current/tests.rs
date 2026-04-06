@@ -1,3 +1,5 @@
+//! Tests for the current storage subsystem.
+
 use super::*;
 use crate::core::property::{PropertyMapBuilder, PropertyValue};
 

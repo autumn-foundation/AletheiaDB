@@ -1,3 +1,5 @@
+//! Tests for Cypher query language parsing and execution.
+//!
 //! Tests for Cypher query language support.
 //!
 //! These tests follow TDD methodology -- tests are written first to define

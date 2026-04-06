@@ -1,3 +1,5 @@
+//! Tests for the historical storage subsystem and temporal versioning.
+
 use super::*;
 use crate::core::interning::GLOBAL_INTERNER;
 use crate::core::observer::{StorageEvent, StorageObserver};

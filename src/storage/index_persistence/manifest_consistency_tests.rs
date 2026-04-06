@@ -1,3 +1,5 @@
+//! Tests for index manifest consistency during persistence.
+
 #[cfg(test)]
 mod tests {
     use super::super::worker::update_manifest;

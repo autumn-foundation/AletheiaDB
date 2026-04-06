@@ -1,3 +1,5 @@
+//! Tests for index persistence operations and workflows.
+
 use super::*;
 use crate::core::GLOBAL_INTERNER;
 use crate::core::id::{NodeId, VersionId};

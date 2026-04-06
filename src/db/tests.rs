@@ -1,3 +1,5 @@
+//! Integration and unit tests for the main AletheiaDB database API.
+
 use super::*;
 use crate::api::transaction::{ReadOps, WriteOps};
 use crate::core::GLOBAL_INTERNER;

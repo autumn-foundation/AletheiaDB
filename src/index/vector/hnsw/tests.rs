@@ -1,3 +1,5 @@
+//! Tests for the HNSW vector index implementation.
+
 use super::*;
 use crate::core::id::NodeId;
 use crate::index::vector::{DistanceMetric, Quantization, StorageMode};

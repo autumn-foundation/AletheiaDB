@@ -1,3 +1,5 @@
+//! Tests for the persistence mutation tracker.
+
 use crate::storage::index_persistence::tracker::PersistenceTracker;
 
 #[test]

@@ -1,3 +1,5 @@
+//! Coverage tests for temporal vector index.
+//!
 //! 🛡️ Sentry Coverage Tests for Temporal Vector Indexing
 //!
 //! This module contains targeted tests designed to improve test coverage metrics

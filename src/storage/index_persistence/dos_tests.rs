@@ -1,3 +1,5 @@
+//! Denial of Service (DoS) protection tests for index persistence.
+
 use std::fs::File;
 use tempfile::tempdir;
 

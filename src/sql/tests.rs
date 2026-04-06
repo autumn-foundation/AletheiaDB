@@ -1,3 +1,5 @@
+//! Tests for SQL query parsing and execution.
+//!
 //! Tests for SQL:2011 support.
 //!
 //! These tests follow TDD methodology - tests are written first to define

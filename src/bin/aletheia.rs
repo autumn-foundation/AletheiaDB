@@ -3,6 +3,12 @@
 //! This binary provides:
 //! - Direct local graph operations (inspired by MCP tool semantics)
 //! - Daemon management for the HTTP server process
+//!
+//! # Usage
+//! ```bash
+//! aletheia node create <label> [--properties '{}']
+//! aletheia daemon start
+//! ```
 
 use std::env;
 use std::fs;

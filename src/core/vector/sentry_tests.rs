@@ -1,3 +1,5 @@
+//! Sentry tests for vector core logic to catch mutants.
+
 use super::ops::*;
 use super::simd::*;
 

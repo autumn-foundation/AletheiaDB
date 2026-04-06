@@ -1,3 +1,5 @@
+//! Tests for graph index delta persistence and recovery.
+
 use super::*;
 use crate::storage::index_persistence::formats::{
     GraphIndexDelta, PersistedEdge, PersistedNode, PersistedPropertyMap,
