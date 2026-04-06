@@ -71,11 +71,14 @@ impl SegmentMetadata {
     }
 
     /// Serialize to bytes.
-    pub fn to_bytes(&self) -> Vec<u8> {
-        let mut bytes = Vec::with_capacity(24);
-        bytes.extend_from_slice(&self.min_lsn.0.to_le_bytes());
-        bytes.extend_from_slice(&self.max_lsn.0.to_le_bytes());
-        bytes.extend_from_slice(&self.entry_count.to_le_bytes());
+    ///
+    /// ⚡ Bolt Optimization: Return a fixed 24-byte stack array `[u8; 24]` instead of
+    /// a heap-allocated `Vec<u8>` to eliminate memory allocation during WAL segment rotation.
+    pub fn to_bytes(&self) -> [u8; 24] {
+        let mut bytes = [0u8; 24];
+        bytes[0..8].copy_from_slice(&self.min_lsn.0.to_le_bytes()[..]);
+        bytes[8..16].copy_from_slice(&self.max_lsn.0.to_le_bytes()[..]);
+        bytes[16..24].copy_from_slice(&self.entry_count.to_le_bytes()[..]);
         bytes
     }
 
@@ -316,7 +319,7 @@ impl FlushCoordinator {
             let meta_path = self.segment_meta_path(segment_id);
             let bytes = metadata.to_bytes();
 
-            std::fs::write(&meta_path, &bytes).map_err(|e| {
+            std::fs::write(&meta_path, bytes).map_err(|e| {
                 Error::Storage(StorageError::IoError(format!(
                     "Failed to write segment metadata: {}",
                     e
