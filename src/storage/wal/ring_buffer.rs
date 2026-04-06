@@ -281,17 +281,34 @@ impl CompletionNotifier {
 
     /// Notify successful completion.
     pub fn notify_success(&self) {
+        // Ensure notify_all is called even if thread panics
+        struct NotifyGuard<'a>(&'a Condvar);
+        impl<'a> Drop for NotifyGuard<'a> {
+            fn drop(&mut self) {
+                self.0.notify_all();
+            }
+        }
+        let _notify_guard = NotifyGuard(&self.condvar);
+
         // Acquire mutex to prevent lost wakeups
         // We must hold the mutex to ensure the waiter sees the state change
         // immediately after waking up or before going to sleep.
         let _guard = self.wait_mutex.lock().unwrap_or_else(|e| e.into_inner());
         self.state
             .store(CompletionState::Complete as u64, Ordering::Release);
-        self.condvar.notify_all();
     }
 
     /// Notify completion with error.
     pub fn notify_error(&self, error: &str) {
+        // Ensure notify_all is called even if thread panics
+        struct NotifyGuard<'a>(&'a Condvar);
+        impl<'a> Drop for NotifyGuard<'a> {
+            fn drop(&mut self) {
+                self.0.notify_all();
+            }
+        }
+        let _notify_guard = NotifyGuard(&self.condvar);
+
         // Acquire mutex to prevent lost wakeups
         // Note: We acquire wait_mutex BEFORE error mutex to match the lock order in wait()
         // wait(): locks wait_mutex -> locks error mutex (if state is Error)
@@ -302,7 +319,6 @@ impl CompletionNotifier {
         }
         self.state
             .store(CompletionState::Error as u64, Ordering::Release);
-        self.condvar.notify_all();
     }
 
     /// Wait for completion, blocking the current thread.
@@ -312,7 +328,7 @@ impl CompletionNotifier {
     /// - `Ok(())` if the entry was durably flushed
     /// - `Err(error)` if the flush failed
     pub fn wait(&self) -> Result<(), String> {
-        let guard = self.wait_mutex.lock().unwrap_or_else(|e| e.into_inner());
+        let mut guard = self.wait_mutex.lock().unwrap_or_else(|e| e.into_inner());
 
         // Check if already complete
         let state = self.state.load(Ordering::Acquire);
@@ -324,13 +340,12 @@ impl CompletionNotifier {
             return Err(err.clone().unwrap_or_else(|| "Unknown error".to_string()));
         }
 
-        // Wait for notification
-        let _guard = self
-            .condvar
-            .wait_while(guard, |_| {
-                self.state.load(Ordering::Acquire) == CompletionState::Pending as u64
-            })
-            .unwrap_or_else(|e| e.into_inner());
+        // Wait for notification using a manual loop
+        // We avoid wait_while because if the lock gets poisoned during wait,
+        // we want to catch the error and gracefully recover the lock.
+        while self.state.load(Ordering::Acquire) == CompletionState::Pending as u64 {
+            guard = self.condvar.wait(guard).unwrap_or_else(|e| e.into_inner());
+        }
 
         // Check final state
         let state = self.state.load(Ordering::Acquire);
