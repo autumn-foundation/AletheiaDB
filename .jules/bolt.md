@@ -50,3 +50,7 @@
 **Optimize Tokenization in Temporal Parser**
 **Learning:** `tokenize_temporal_keywords` in `src/sql/temporal_parser.rs` previously copied substrings by manually advancing through a `char_indices().collect::<Vec<_>>()` and creating a `String` inside loops (`let word: String = chars[start..i].iter().map(|(_, c)| c).collect()`). This resulted in a heap allocation for every word parsed.
 **Action:** Used `sql.char_indices().peekable()` instead of collecting it. Leveraged `.len_utf8()` to calculate byte boundaries on the fly without allocations. Used a string slice `&sql[start..end]` to avoid `String` allocation for every word parsed, making parsing `0-cost` for non-matching tokens.
+
+**[Zero-Cost Lexer Lookahead]**
+**Learning:** `Peekable::clone()` is not a zero-cost abstraction when parsing strings, especially since it clones the underlying iterator state on every single token. For simple ASCII characters (like `-`, `/`, `*`, `0`..`9`), `input.as_bytes().get(idx + 1)` is much faster and completely avoids heap allocations and iterator cloning overhead.
+**Action:** When doing lookaheads in a lexer over a `String` or `&str`, prefer slicing the underlying byte array `as_bytes()` if the characters you're looking for are strictly single-byte ASCII.
