@@ -206,6 +206,10 @@ pub mod sentinel;
 pub mod wormhole;
 
 #[cfg(feature = "nova")]
+/// Tapestry: Semantic Path Weaving Engine.
+pub mod tapestry;
+
+#[cfg(feature = "nova")]
 /// Gestalt: Semantic Subgraph Matching Engine.
 pub mod gestalt;
 
