@@ -1,6 +1,39 @@
 //! Query Result Types
 //!
-//! Defines the result types returned by query execution.
+//! This module defines the vocabulary for reading the story of a graph query.
+//! Once the query planner translates an intention into physical operations,
+//! and the executor pulls the records, those records materialize here.
+//!
+//! The result types bridge the gap between low-level database engine operations
+//! (which speak in iterators and raw byte arrays) and human developers (who
+//! expect meaningful structures like `QueryRow` and `QueryResult`).
+//!
+//! # The Journey of a Result
+//!
+//! Queries produce a lazy iterator of results, managed by `QueryResults`.
+//! This ensures that even queries matching millions of nodes don't exhaust memory.
+//! For users who want everything at once (e.g. for serialization to a client),
+//! `QueryResults::collect_structured()` gathers them into a `QueryResult` object.
+//!
+//! ## Example
+//!
+//! ```rust
+//! # use aletheiadb::query::executor::{QueryResults, QueryRow, EntityResult};
+//! # use aletheiadb::core::id::NodeId;
+//! # // Mocking a QueryResults is internal, but this shows how you consume them:
+//! # fn consume_results(results: QueryResults) -> Result<(), aletheiadb::core::error::Error> {
+//! // Iterating lazily is the memory-efficient way to read a story:
+//! for row in results {
+//!     let row = row?;
+//!     match row.entity {
+//!         EntityResult::Node(node) => println!("Found node: {}", node.id),
+//!         EntityResult::Edge(edge) => println!("Found edge: {}", edge.id),
+//!         _ => {}
+//!     }
+//! }
+//! # Ok(())
+//! # }
+//! ```
 
 use crate::core::error::Result;
 use crate::core::graph::{Edge, Node};
@@ -86,21 +119,39 @@ impl EntityResult {
     }
 }
 
-/// A single row in query results.
+/// A single, multi-dimensional row yielded from a query execution.
+///
+/// A `QueryRow` is more than just a matched node or edge. It carries context:
+/// * **Vector Search:** It might have a `score` reflecting its cosine similarity to the query embedding.
+/// * **Graph Traversal:** It might have a `path` showing exactly *how* it was reached from the start node.
+/// * **Time Travel:** It might have a `timestamp` showing *when* this specific snapshot of the entity was valid.
+///
+/// This context is why the query engine doesn't just return `Vec<Node>`.
+///
+/// ## Examples
+///
+/// ```rust
+/// use aletheiadb::query::executor::{QueryRow, EntityResult};
+/// use aletheiadb::core::id::NodeId;
+///
+/// let node_id = NodeId::new(42).unwrap();
+/// let row = QueryRow::from_entity(EntityResult::NodeId(node_id));
+/// assert!(row.score().is_none());
+/// ```
 #[derive(Debug, Clone)]
 pub struct QueryRow {
-    /// The primary entity (node or edge)
+    /// The primary entity (node or edge) returned by the query operation.
     pub entity: EntityResult,
-    /// Similarity score (for vector queries)
+    /// A similarity score between 0.0 and 1.0 (for vector search queries).
     pub score: Option<f32>,
-    /// Traversal path (for path queries)
+    /// The sequence of nodes and edges connecting the start point to this result.
     pub path: Option<Vec<EntityId>>,
-    /// Timestamp (for temporal queries)
+    /// The specific point in bi-temporal history this result represents.
     pub timestamp: Option<Timestamp>,
 }
 
 impl QueryRow {
-    /// Create a new row with just an entity
+    /// Create a basic row with just an entity, typically for simple lookups.
     #[must_use]
     pub fn from_entity(entity: EntityResult) -> Self {
         QueryRow {
@@ -111,7 +162,18 @@ impl QueryRow {
         }
     }
 
-    /// Create a row with entity and score
+    /// Create a row with an associated vector similarity score.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::query::executor::{QueryRow, EntityResult};
+    /// use aletheiadb::core::id::NodeId;
+    ///
+    /// let node_id = NodeId::new(42).unwrap();
+    /// let row = QueryRow::with_score(EntityResult::NodeId(node_id), 0.95);
+    /// assert_eq!(row.score(), Some(0.95));
+    /// ```
     #[must_use]
     pub fn with_score(entity: EntityResult, score: f32) -> Self {
         QueryRow {
@@ -153,21 +215,28 @@ impl QueryRow {
     }
 }
 
-/// Collected query results.
+/// A lazy stream of results from a query execution.
 ///
-/// This wraps a result iterator and provides convenience methods
-/// for collecting and processing results.
+/// The engine evaluates physical operations as a pipeline of iterators.
+/// `QueryResults` wraps this pipeline, giving users full control over how
+/// memory is allocated when consuming the matched items.
+///
+/// You can consume the stream item by item using the `Iterator` trait,
+/// or use convenience methods like `collect_all()` to exhaust it immediately.
 pub struct QueryResults {
     iterator: Box<dyn ResultIterator>,
 }
 
 impl QueryResults {
-    /// Create new query results from an iterator
+    /// Create a new stream of results from a boxed iterator.
     pub(crate) fn new(iterator: Box<dyn ResultIterator>) -> Self {
         QueryResults { iterator }
     }
 
-    /// Collect all results into a vector, stopping on first error
+    /// Eagerly collect every row in the result stream into a memory-backed vector.
+    ///
+    /// **Why?** Use this when the expected result set is small and you need random access.
+    /// **Panics:** It does not panic, but it stops and returns the first `Err` if the iterator fails.
     ///
     /// ⚡ Bolt Optimization: Pre-allocates vector based on iterator's lower size bound
     /// to reduce heap allocations during collection.
@@ -180,7 +249,10 @@ impl QueryResults {
         Ok(results)
     }
 
-    /// Collect all nodes from results
+    /// Collect only the full nodes from the result stream, discarding scores, edges, and paths.
+    ///
+    /// **Why?** Useful when your application only cares about the entity payload and doesn't
+    /// need provenance or similarity scoring context.
     ///
     /// ⚡ Bolt Optimization: Consumes the iterator directly to avoid allocating
     /// a large intermediate `Vec` of all rows before extracting the nodes.
@@ -213,7 +285,10 @@ impl QueryResults {
         Ok(results)
     }
 
-    /// Take at most n results
+    /// Pull up to `n` results from the stream, leaving the rest un-evaluated.
+    ///
+    /// **Why?** When you only need a handful of answers from an unbounded traversal
+    /// or massive dataset, this stops execution early.
     pub fn take_n(mut self, n: usize) -> Result<Vec<QueryRow>> {
         let mut results = Vec::with_capacity(n);
         for _ in 0..n {
@@ -226,7 +301,9 @@ impl QueryResults {
         Ok(results)
     }
 
-    /// Skip n results and take the rest
+    /// Fast-forward past the first `n` items without collecting them.
+    ///
+    /// **Why?** Useful for implementing pagination (`LIMIT` and `OFFSET`).
     pub fn skip_n(mut self, n: usize) -> Self {
         for _ in 0..n {
             if self.iterator.next().is_none() {
