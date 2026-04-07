@@ -88,7 +88,7 @@ impl<'a> TapestryEngine<'a> {
         if full_path.is_empty() {
             // Edge case: start_node == end_node and no waypoints
             if start_node == end_node && waypoints.is_empty() {
-                 return Ok(vec![start_node]);
+                return Ok(vec![start_node]);
             } else {
                 return Err(Error::other("Failed to weave path"));
             }
@@ -138,10 +138,14 @@ mod tests {
         let d = db.create_node("Node", props.clone()).unwrap();
         let e = db.create_node("Node", props.clone()).unwrap();
 
-        db.create_edge(a, b, "NEXT", PropertyMapBuilder::new().build()).unwrap();
-        db.create_edge(b, c, "NEXT", PropertyMapBuilder::new().build()).unwrap();
-        db.create_edge(c, d, "NEXT", PropertyMapBuilder::new().build()).unwrap();
-        db.create_edge(d, e, "NEXT", PropertyMapBuilder::new().build()).unwrap();
+        db.create_edge(a, b, "NEXT", PropertyMapBuilder::new().build())
+            .unwrap();
+        db.create_edge(b, c, "NEXT", PropertyMapBuilder::new().build())
+            .unwrap();
+        db.create_edge(c, d, "NEXT", PropertyMapBuilder::new().build())
+            .unwrap();
+        db.create_edge(d, e, "NEXT", PropertyMapBuilder::new().build())
+            .unwrap();
 
         let tapestry = TapestryEngine::new(&db);
         let path = tapestry.weave(a, &[c], e, "vec").unwrap();
