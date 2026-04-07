@@ -588,6 +588,15 @@ impl TxVisibilityManager {
         // Use Arc::make_mut for idiomatic copy-on-write.
         Arc::make_mut(&mut *active_guard).remove(&tx_id);
         committed.insert(tx_id, commit_timestamp);
+
+        // Ensure active_guard is dropped AFTER committed to prevent non-repeatable read race.
+        // If active_guard drops first, a snapshot can be captured while tx_id is NOT in active,
+        // but BEFORE the write lock on committed is released. A reader using that snapshot
+        // could then get a read lock on committed, see the commit, and determine it is visible,
+        // despite it not being in the active set of the snapshot.
+        // By dropping active_guard here (or implicitly by dropping committed first), we prevent it.
+        drop(committed);
+        drop(active_guard);
     }
 
     /// Register a transaction abort.
