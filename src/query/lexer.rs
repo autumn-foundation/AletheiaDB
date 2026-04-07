@@ -341,6 +341,12 @@ impl<'a> Lexer<'a> {
     /// assert_eq!(tokens[1], Token::IntegerLiteral(42));
     /// assert_eq!(tokens[2], Token::Eof);
     /// ```
+    ///
+    /// ⚡ Bolt Optimization: Uses `self.input.as_bytes().get(idx + 1)` for
+    /// zero-cost lookahead when parsing comments (`--`, `//`, `/*`) and decimal
+    /// numbers (`.`). This avoids cloning the `Peekable<CharIndices>` iterator
+    /// on every token, eliminating significant overhead on the hot path while
+    /// remaining perfectly safe since the targeted characters are single-byte ASCII.
     pub fn tokenize(input: &str) -> Result<Vec<Token>, LexerError> {
         let mut lexer = Lexer::new(input);
         let mut tokens = Vec::with_capacity(input.len() / 4);
@@ -478,12 +484,10 @@ impl<'a> Lexer<'a> {
             }
 
             // Check for comments
-            if let Some(&(_, ch)) = self.chars.peek() {
+            if let Some(&(idx, ch)) = self.chars.peek() {
                 if ch == '-' {
                     // Check for -- comment
-                    let mut chars_clone = self.chars.clone();
-                    chars_clone.next();
-                    if let Some(&(_, '-')) = chars_clone.peek() {
+                    if self.input.as_bytes().get(idx + 1) == Some(&b'-') {
                         // Skip to end of line
                         self.advance(); // first -
                         self.advance(); // second -
@@ -498,10 +502,8 @@ impl<'a> Lexer<'a> {
                     }
                 } else if ch == '/' {
                     // Check for // or /* comment
-                    let mut chars_clone = self.chars.clone();
-                    chars_clone.next();
-                    if let Some(&(_, next_ch)) = chars_clone.peek() {
-                        if next_ch == '/' {
+                    if let Some(&next_byte) = self.input.as_bytes().get(idx + 1) {
+                        if next_byte == b'/' {
                             // Skip to end of line
                             self.advance(); // first /
                             self.advance(); // second /
@@ -513,7 +515,7 @@ impl<'a> Lexer<'a> {
                                 self.advance();
                             }
                             continue;
-                        } else if next_ch == '*' {
+                        } else if next_byte == b'*' {
                             // Skip to */
                             self.advance(); // /
                             self.advance(); // *
@@ -689,10 +691,14 @@ impl<'a> Lexer<'a> {
                 }
                 '.' if !has_dot && !has_exp => {
                     // Check if next char is a digit
-                    let mut chars_clone = self.chars.clone();
-                    chars_clone.next();
-                    if let Some(&(_, next_ch)) = chars_clone.peek() {
-                        if next_ch.is_ascii_digit() {
+                    if let Some(&(idx, _)) = self.chars.peek() {
+                        if self
+                            .input
+                            .as_bytes()
+                            .get(idx + 1)
+                            .map(|b| b.is_ascii_digit())
+                            == Some(true)
+                        {
                             has_dot = true;
                             self.advance();
                         } else {
