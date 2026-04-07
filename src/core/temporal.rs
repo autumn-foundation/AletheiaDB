@@ -2005,4 +2005,210 @@ mod sentry_tests {
         assert_eq!(parsed, interval);
         assert_eq!(consumed, 48, "Should consume exactly 48 bytes");
     }
+
+    #[test]
+    fn test_sentry_kill_mutants_bitemporal_defaults() {
+        use crate::core::hlc::HybridTimestamp;
+        use crate::core::temporal::{BiTemporalInterval, TimeRange, TIMESTAMP_MAX};
+
+        let ts1 = HybridTimestamp::new(100, 0).unwrap();
+        let ts2 = HybridTimestamp::new(200, 0).unwrap();
+
+        // BiTemporalInterval::current
+        let current = BiTemporalInterval::current(ts1);
+        // Default::default() for BiTemporalInterval is not implemented but if the mutant uses a default pattern it would likely have 0.
+        assert_eq!(current.valid_time().start(), ts1, "Mutant check: BiTemporalInterval::current -> Default::default()");
+        assert_eq!(current.transaction_time().start(), ts1, "Mutant check: BiTemporalInterval::current -> Default::default()");
+        assert!(current.is_current(), "Should be current");
+
+        // BiTemporalInterval::now
+        let now = BiTemporalInterval::now(ts1, ts2);
+        assert_eq!(now.valid_time().start(), ts1, "Mutant check: BiTemporalInterval::now -> Default::default()");
+        assert_eq!(now.transaction_time().start(), ts2, "Mutant check: BiTemporalInterval::now -> Default::default()");
+        assert!(now.is_current(), "Should be current");
+
+        // BiTemporalInterval::with_valid_time
+        let with_valid = BiTemporalInterval::with_valid_time(ts1, ts2);
+        assert_eq!(with_valid.valid_time().start(), ts1, "Mutant check: BiTemporalInterval::with_valid_time -> Default::default()");
+        assert_eq!(with_valid.transaction_time().start(), ts2, "Mutant check: BiTemporalInterval::with_valid_time -> Default::default()");
+
+        // valid_time and transaction_time methods
+        let valid_time = now.valid_time();
+        assert_eq!(valid_time.start(), ts1, "Mutant check: valid_time -> Default::default()");
+        assert_eq!(valid_time.end(), TIMESTAMP_MAX, "Mutant check: valid_time -> Default::default()");
+
+        let tx_time = now.transaction_time();
+        assert_eq!(tx_time.start(), ts2, "Mutant check: transaction_time -> Default::default()");
+        assert_eq!(tx_time.end(), TIMESTAMP_MAX, "Mutant check: transaction_time -> Default::default()");
+    }
+
+    #[test]
+    fn test_sentry_kill_mutants_timerange_boolean() {
+        use crate::core::hlc::HybridTimestamp;
+        use crate::core::temporal::{TimeRange, TIMESTAMP_MAX};
+
+        let ts_100 = HybridTimestamp::new(100, 0).unwrap();
+        let ts_200 = HybridTimestamp::new(200, 0).unwrap();
+        let ts_300 = HybridTimestamp::new(300, 0).unwrap();
+
+        let closed_range = TimeRange::new(ts_100, ts_200).unwrap();
+        let open_range = TimeRange::from(ts_100);
+        let empty_range = TimeRange::at(ts_100);
+
+        // TimeRange::is_current
+        assert!(open_range.is_current(), "Mutant check: is_current -> false");
+        assert!(!closed_range.is_current(), "Mutant check: is_current -> true");
+
+        // TimeRange::is_closed
+        assert!(closed_range.is_closed(), "Mutant check: is_closed -> false");
+        assert!(!open_range.is_closed(), "Mutant check: is_closed -> true");
+
+        // TimeRange::contains
+        assert!(closed_range.contains(ts_100), "Mutant check: contains -> false");
+        assert!(!closed_range.contains(ts_200), "Mutant check: contains -> true");
+
+        // TimeRange::contains_or_after
+        assert!(closed_range.contains_or_after(ts_100), "Mutant check: contains_or_after -> false");
+        assert!(closed_range.contains_or_after(ts_200), "Mutant check: contains_or_after -> false");
+        assert!(!closed_range.contains_or_after(HybridTimestamp::new(99, 0).unwrap()), "Mutant check: contains_or_after -> true");
+
+        // TimeRange::is_empty
+        assert!(empty_range.is_empty(), "Mutant check: is_empty -> false");
+        assert!(!closed_range.is_empty(), "Mutant check: is_empty -> true");
+
+        // TimeRange::overlaps
+        let overlap_range = TimeRange::new(ts_100, ts_300).unwrap();
+        let no_overlap_range = TimeRange::new(ts_200, ts_300).unwrap();
+        assert!(closed_range.overlaps(&overlap_range), "Mutant check: overlaps -> false");
+        assert!(!closed_range.overlaps(&no_overlap_range), "Mutant check: overlaps -> true");
+
+        // TimeRange::contains_range
+        let inside_range = TimeRange::new(HybridTimestamp::new(150, 0).unwrap(), HybridTimestamp::new(160, 0).unwrap()).unwrap();
+        assert!(closed_range.contains_range(&inside_range), "Mutant check: contains_range -> false");
+        assert!(!inside_range.contains_range(&closed_range), "Mutant check: contains_range -> true");
+    }
+
+    #[test]
+    fn test_sentry_kill_mutants_bitemporal_boolean() {
+        use crate::core::hlc::HybridTimestamp;
+        use crate::core::temporal::{BiTemporalInterval, TimeRange};
+
+        let valid_start = HybridTimestamp::new(100, 0).unwrap();
+        let valid_end = HybridTimestamp::new(200, 0).unwrap();
+        let tx_start = HybridTimestamp::new(300, 0).unwrap();
+        let tx_end = HybridTimestamp::new(400, 0).unwrap();
+
+        let open_interval = BiTemporalInterval::now(valid_start, tx_start);
+        let closed_interval = BiTemporalInterval::new(
+            TimeRange::new(valid_start, valid_end).unwrap(),
+            TimeRange::new(tx_start, tx_end).unwrap()
+        );
+        let mixed_interval = BiTemporalInterval::new(
+            TimeRange::new(valid_start, valid_end).unwrap(),
+            TimeRange::from(tx_start)
+        );
+
+        // BiTemporalInterval::is_currently_valid
+        assert!(open_interval.is_currently_valid(), "Mutant check: is_currently_valid -> false");
+        assert!(!closed_interval.is_currently_valid(), "Mutant check: is_currently_valid -> true");
+
+        // BiTemporalInterval::is_currently_recorded
+        assert!(open_interval.is_currently_recorded(), "Mutant check: is_currently_recorded -> false");
+        assert!(!closed_interval.is_currently_recorded(), "Mutant check: is_currently_recorded -> true");
+
+        // BiTemporalInterval::is_current
+        assert!(open_interval.is_current(), "Mutant check: is_current -> false");
+        assert!(!mixed_interval.is_current(), "Mutant check: is_current -> true");
+
+        // BiTemporalInterval::is_valid_at
+        assert!(closed_interval.is_valid_at(valid_start), "Mutant check: is_valid_at -> false");
+        assert!(!closed_interval.is_valid_at(valid_end), "Mutant check: is_valid_at -> true");
+
+        // BiTemporalInterval::is_recorded_at
+        assert!(closed_interval.is_recorded_at(tx_start), "Mutant check: is_recorded_at -> false");
+        assert!(!closed_interval.is_recorded_at(tx_end), "Mutant check: is_recorded_at -> true");
+
+        // BiTemporalInterval::is_visible_at
+        assert!(closed_interval.is_visible_at(valid_start, tx_start), "Mutant check: is_visible_at -> false");
+        assert!(!closed_interval.is_visible_at(valid_end, tx_start), "Mutant check: is_visible_at -> true");
+    }
+
+    #[test]
+    fn test_sentry_kill_mutants_timerange_math() {
+        use crate::core::hlc::HybridTimestamp;
+        use crate::core::temporal::time;
+
+        let secs = 100;
+        let ts_from_secs = time::from_secs(secs);
+        // 100 * 1_000_000 = 100,000,000
+        assert_eq!(ts_from_secs.wallclock(), 100_000_000, "Mutant check: time::from_secs math replaced");
+
+        let millis = 100;
+        let ts_from_millis = time::from_millis(millis);
+        // 100 * 1_000 = 100,000
+        assert_eq!(ts_from_millis.wallclock(), 100_000, "Mutant check: time::from_millis math replaced");
+
+        let ts_to_secs = HybridTimestamp::new_unchecked(100_000_000, 0);
+        // 100,000,000 / 1_000_000 = 100
+        assert_eq!(time::to_secs(ts_to_secs), 100, "Mutant check: time::to_secs math replaced");
+        // Test `%` or `*` mutant directly
+        let ts_to_secs_2 = HybridTimestamp::new_unchecked(1_000_005, 0);
+        assert_eq!(time::to_secs(ts_to_secs_2), 1, "Mutant check: time::to_secs math replaced with %");
+
+        let ts_to_millis = HybridTimestamp::new_unchecked(100_000, 0);
+        // 100,000 / 1_000 = 100
+        assert_eq!(time::to_millis(ts_to_millis), 100, "Mutant check: time::to_millis math replaced");
+        // Test `%` mutant
+        let ts_to_millis_2 = HybridTimestamp::new_unchecked(1005, 0);
+        assert_eq!(time::to_millis(ts_to_millis_2), 1, "Mutant check: time::to_millis math replaced with %");
+
+        // Default checks
+        assert_ne!(time::to_secs(ts_to_secs), 0, "Mutant check: time::to_secs -> 0");
+        assert_ne!(time::to_secs(ts_to_secs), 1, "Mutant check: time::to_secs -> 1");
+        assert_ne!(time::to_secs(ts_to_secs), -1, "Mutant check: time::to_secs -> -1");
+        assert_ne!(time::to_millis(ts_to_millis), 0, "Mutant check: time::to_millis -> 0");
+        assert_ne!(time::to_millis(ts_to_millis), 1, "Mutant check: time::to_millis -> 1");
+        assert_ne!(time::to_millis(ts_to_millis), -1, "Mutant check: time::to_millis -> -1");
+    }
+
+    #[test]
+    fn test_sentry_kill_mutants_time_now_default() {
+        use crate::core::temporal::time;
+        let now = time::now();
+        assert_ne!(now.wallclock(), 0, "Mutant check: time::now -> Default::default()");
+
+        let try_now = time::try_now().unwrap();
+        assert_ne!(try_now.wallclock(), 0, "Mutant check: time::try_now -> Default::default()");
+    }
+
+    #[test]
+    fn test_sentry_kill_mutants_serialize_returns() {
+        use crate::core::hlc::HybridTimestamp;
+        use crate::core::temporal::{BiTemporalInterval, TimeRange};
+
+        let start = HybridTimestamp::new(100, 0).unwrap();
+        let end = HybridTimestamp::new(200, 0).unwrap();
+
+        let range = TimeRange::new(start, end).unwrap();
+        let bytes = range.serialize();
+        assert_eq!(bytes.len(), 24, "Mutant check: serialize -> vec![]");
+        assert_ne!(bytes, vec![0], "Mutant check: serialize -> vec![0]");
+        assert_ne!(bytes, vec![1], "Mutant check: serialize -> vec![1]");
+
+        let interval = BiTemporalInterval::new(range, range);
+        let bytes = interval.serialize();
+        assert_eq!(bytes.len(), 48, "Mutant check: serialize -> vec![]");
+        assert_ne!(bytes, vec![0], "Mutant check: serialize -> vec![0]");
+        assert_ne!(bytes, vec![1], "Mutant check: serialize -> vec![1]");
+    }
+
+    #[test]
+    fn test_sentry_kill_mutants_to_iso8601() {
+        use crate::core::hlc::HybridTimestamp;
+        use crate::core::temporal::time;
+        let ts = HybridTimestamp::new(100_000_000, 0).unwrap();
+        let iso = time::to_iso8601(ts);
+        assert_ne!(iso, "", "Mutant check: to_iso8601 -> String::new()");
+        assert_ne!(iso, "xyzzy", "Mutant check: to_iso8601 -> 'xyzzy'");
+    }
 }
