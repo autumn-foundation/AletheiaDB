@@ -3621,6 +3621,64 @@ mod sentry_tests {
         );
     }
 
+    /// 🎯 Target: PropertyMapBuilder::try_remove
+    /// 💣 Risk: Should fail gracefully (return Err) instead of panicking on deep recursion when computing old value size.
+    /// 🧪 Strategy: Force a deeply nested structure into the map and attempt to remove it via try_remove.
+    /// 🔬 Verification: Check that Result is Err and contains the recursion limit message.
+    #[test]
+    fn test_property_map_builder_try_remove_returns_error_on_deep_recursion() {
+        let mut value = PropertyValue::Int(42);
+        for _ in 0..MAX_RECURSION_DEPTH + 1 {
+            value = PropertyValue::Array(Arc::new(vec![value]));
+        }
+
+        let mut builder = PropertyMapBuilder::new();
+        let key = GLOBAL_INTERNER.intern("deep").unwrap();
+        // Insert directly to bypass try_insert's checks
+        builder.map.insert(key, value);
+
+        // try_remove should return an error
+        let result = builder.try_remove("deep");
+
+        assert!(result.is_err(), "Expected error, got Ok");
+        let err = result.err().unwrap();
+        let err_msg = format!("{}", err);
+        assert!(
+            err_msg.contains("recursion depth limit exceeded"),
+            "Unexpected error message: {}",
+            err_msg
+        );
+    }
+
+    /// 🎯 Target: PropertyMapBuilder::try_remove_by_key
+    /// 💣 Risk: Should fail gracefully (return Err) instead of panicking on deep recursion when computing old value size.
+    /// 🧪 Strategy: Force a deeply nested structure into the map and attempt to remove it via try_remove_by_key.
+    /// 🔬 Verification: Check that Result is Err and contains the recursion limit message.
+    #[test]
+    fn test_property_map_builder_try_remove_by_key_returns_error_on_deep_recursion() {
+        let mut value = PropertyValue::Int(42);
+        for _ in 0..MAX_RECURSION_DEPTH + 1 {
+            value = PropertyValue::Array(Arc::new(vec![value]));
+        }
+
+        let mut builder = PropertyMapBuilder::new();
+        let key = GLOBAL_INTERNER.intern("deep").unwrap();
+        // Insert directly to bypass try_insert's checks
+        builder.map.insert(key, value);
+
+        // try_remove_by_key should return an error
+        let result = builder.try_remove_by_key(&key);
+
+        assert!(result.is_err(), "Expected error, got Ok");
+        let err = result.err().unwrap();
+        let err_msg = format!("{}", err);
+        assert!(
+            err_msg.contains("recursion depth limit exceeded"),
+            "Unexpected error message: {}",
+            err_msg
+        );
+    }
+
     /// 🎯 Target: PropertyMapBuilder::try_insert_by_key
     /// 💣 Risk: Should fail gracefully (return Err) instead of panicking on deep recursion when using an interned key.
     /// 🧪 Strategy: Try to insert a deeply nested structure using try_insert_by_key.
