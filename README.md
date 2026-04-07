@@ -444,7 +444,7 @@ let _doc2_id = db.create_node("Document",
 
 // Find similar nodes
 // Note: find_similar excludes the query node itself from results
-let similar = db.find_similar(doc_id, 10)?;
+let _similar = db.find_similar(doc_id, 10)?;
 ```
 
 ### Hybrid Queries (Graph + Vector + Temporal)
@@ -811,7 +811,7 @@ For complex operations involving multiple updates, use explicit transactions.
 use aletheiadb::prelude::*;
 
 // Explicit read transaction
-let result = db.read(|tx| {
+let _result = db.read(|tx| {
     tx.get_node(alice_id).map(|node| node.label.clone())
 })?;
 
