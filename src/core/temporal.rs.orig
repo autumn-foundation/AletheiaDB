@@ -2009,7 +2009,7 @@ mod sentry_tests {
     #[test]
     fn test_sentry_kill_mutants_bitemporal_defaults() {
         use crate::core::hlc::HybridTimestamp;
-        use crate::core::temporal::{BiTemporalInterval, TIMESTAMP_MAX};
+        use crate::core::temporal::{BiTemporalInterval, TIMESTAMP_MAX, TimeRange};
 
         let ts1 = HybridTimestamp::new(100, 0).unwrap();
         let ts2 = HybridTimestamp::new(200, 0).unwrap();
@@ -2085,7 +2085,7 @@ mod sentry_tests {
     #[test]
     fn test_sentry_kill_mutants_timerange_boolean() {
         use crate::core::hlc::HybridTimestamp;
-        use crate::core::temporal::TimeRange;
+        use crate::core::temporal::{TIMESTAMP_MAX, TimeRange};
 
         let ts_100 = HybridTimestamp::new(100, 0).unwrap();
         let ts_200 = HybridTimestamp::new(200, 0).unwrap();
