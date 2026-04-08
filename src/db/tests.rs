@@ -1,3 +1,8 @@
+//! Tests for the main AletheiaDB interface.
+//!
+//! This module verifies the high-level API for creating, reading, and managing
+//! nodes and edges, ensuring the database core functions correctly from a user's perspective.
+
 use super::*;
 use crate::api::transaction::{ReadOps, WriteOps};
 use crate::core::GLOBAL_INTERNER;

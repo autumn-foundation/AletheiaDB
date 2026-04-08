@@ -2,6 +2,9 @@
 //!
 //! These tests follow TDD methodology - tests are written first to define
 //! expected behavior, then implementation is added to make them pass.
+//!
+//! This module verifies SQL parsing, IR conversion, and the implementation
+//! of temporal SQL clauses like `FOR SYSTEM_TIME AS OF`.
 
 use super::*;
 use crate::query::ir::{Predicate, PredicateValue, QueryOp, SortKey};

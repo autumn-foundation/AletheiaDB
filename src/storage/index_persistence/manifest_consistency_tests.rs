@@ -1,3 +1,8 @@
+//! Tests for manifest consistency in index persistence.
+//!
+//! This module verifies that the persistence manifest correctly tracks LSNs
+//! (Log Sequence Numbers) to ensure safe recovery and avoid data loss.
+
 #[cfg(test)]
 mod tests {
     use super::super::worker::update_manifest;

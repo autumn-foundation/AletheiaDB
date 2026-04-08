@@ -1,3 +1,8 @@
+//! Tests for Denial of Service (DoS) protections in index persistence.
+//!
+//! This module verifies that the system can safely handle maliciously crafted
+//! or extremely large index files, preventing memory exhaustion and panics.
+
 use std::fs::File;
 use tempfile::tempdir;
 

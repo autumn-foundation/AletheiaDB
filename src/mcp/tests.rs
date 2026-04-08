@@ -8,6 +8,8 @@
 //! - Vector similarity search
 //! - Temporal queries
 //! - Hybrid queries
+//!
+//! Tests are executed sequentially to avoid cross-test interference on internal state.
 
 use std::collections::HashMap;
 use std::sync::Arc;

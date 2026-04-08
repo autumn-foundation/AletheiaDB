@@ -1,3 +1,8 @@
+//! Tests for the current state storage engine.
+//!
+//! This module verifies the fast-path graph operations (CRUD) operating on the
+//! latest version of the dataset, ensuring the CSR adjacency indexes remain consistent.
+
 use super::*;
 use crate::core::property::{PropertyMapBuilder, PropertyValue};
 

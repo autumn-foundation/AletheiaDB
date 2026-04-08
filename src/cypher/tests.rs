@@ -2,6 +2,9 @@
 //!
 //! These tests follow TDD methodology -- tests are written first to define
 //! expected behavior, then implementation is added to make them pass.
+//!
+//! This module validates the parser, IR conversion, and error handling for
+//! the Cypher-like AletheiaDB Query Language (AQL).
 
 use std::sync::Arc;
 

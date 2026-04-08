@@ -1,3 +1,8 @@
+//! Tests for the background persistence tracking mechanism.
+//!
+//! This module verifies the `PersistenceTracker`'s ability to count mutations
+//! and track LSNs to trigger automatic background saves.
+
 use crate::storage::index_persistence::tracker::PersistenceTracker;
 
 #[test]

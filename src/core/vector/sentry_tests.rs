@@ -1,3 +1,8 @@
+//! Safety and robustness tests for SIMD vector operations.
+//!
+//! This module verifies that SIMD instructions handle unaligned memory access,
+//! NaN propagation, and denormalized numbers safely without causing undefined behavior.
+
 use super::ops::*;
 use super::simd::*;
 
