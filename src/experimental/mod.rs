@@ -135,6 +135,9 @@ pub mod dreamer;
 /// Temporal Resonance Engine ("Echo") for finding nodes with similar activity patterns.
 pub mod echo;
 #[cfg(feature = "nova")]
+/// Echo Chamber: Semantic Orthodoxy Detector.
+pub mod echo_chamber;
+#[cfg(feature = "nova")]
 /// Entanglement: Detecting Quantum Entanglement in the Graph.
 pub mod entanglement;
 #[cfg(feature = "nova")]
