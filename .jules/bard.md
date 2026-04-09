@@ -96,3 +96,6 @@
 ## 2024-04-07 - [QueryResults API Confusion]
 **Confusion:** The query execution API was opaque, returning raw struct definitions for `QueryResults`, `QueryResult`, and `QueryRow` without context. Users were likely confused about when to use the lazy iterator versus the eagerly evaluated batch objects, and how context like scores, paths, and timestamps fit into rows instead of raw nodes.
 **Clarification:** Added module-level documentation (`//!`) to explain the "Journey of a Result" from planner to materialized structures. Supplemented struct definitions with `///` comments explaining the *why* (e.g. "Why? Use this when the expected result set is small"). Also added executable doctests for `consume_results`, `QueryRow::from_entity`, and `QueryRow::with_score`.
+## 2026-04-09 - [Hidden Dependency in OpenAIConfig]
+**Confusion:** Users copy-pasting the `OpenAIConfig::from_env` example would experience runtime panics if the `OPENAI_API_KEY` environment variable was not set.
+**Clarification:** Added an explicit comment `// Note: The OPENAI_API_KEY environment variable is required.` before the calls in `src/embeddings/mod.rs`, `src/embeddings/providers/openai.rs`, and `src/embeddings/service.rs`.

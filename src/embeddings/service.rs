@@ -15,6 +15,7 @@ use std::sync::Arc;
 /// use aletheiadb::embeddings::{EmbeddingService, providers::openai::*};
 /// use std::sync::Arc;
 ///
+/// // Note: The OPENAI_API_KEY environment variable is required.
 /// let config = OpenAIConfig::from_env(OpenAIModel::TextEmbedding3Small)?;
 /// let provider = Arc::new(OpenAIProvider::new(config)?);
 /// let service = EmbeddingService::new(provider);

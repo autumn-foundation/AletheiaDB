@@ -11,6 +11,7 @@
 //! use aletheiadb::embeddings::{EmbeddingService, providers::openai::*};
 //! use std::sync::Arc;
 //!
+//! // Note: The OPENAI_API_KEY environment variable is required.
 //! let config = OpenAIConfig::from_env(OpenAIModel::TextEmbedding3Small)?;
 //! let provider = Arc::new(OpenAIProvider::new(config)?);
 //! let service = EmbeddingService::new(provider);
@@ -96,6 +97,7 @@ impl OpenAIConfig {
     /// # Example
     ///
     /// ```ignore
+    /// // Note: The OPENAI_API_KEY environment variable is required.
     /// let config = OpenAIConfig::from_env(OpenAIModel::TextEmbedding3Small)?;
     /// ```
     pub fn from_env(model: OpenAIModel) -> Result<Self, EmbeddingError> {
@@ -179,6 +181,7 @@ impl OpenAIProvider {
     /// # Example
     ///
     /// ```ignore
+    /// // Note: The OPENAI_API_KEY environment variable is required.
     /// let config = OpenAIConfig::from_env(OpenAIModel::TextEmbedding3Small)?;
     /// let provider = OpenAIProvider::new(config)?;
     /// ```
