@@ -3008,7 +3008,10 @@ fn test_simd_mismatched_lengths_safety() {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
             super::simd::x86_ops::scale_and_copy_sse2(&a, &mut dst, 2.0)
         }));
-        assert!(result.is_err(), "SSE2 scale_and_copy should panic on mismatch");
+        assert!(
+            result.is_err(),
+            "SSE2 scale_and_copy should panic on mismatch"
+        );
     }
 
     // Test AVX2 if available
@@ -3037,7 +3040,10 @@ fn test_simd_mismatched_lengths_safety() {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
             super::simd::x86_ops::scale_and_copy_avx2(&a, &mut dst, 2.0)
         }));
-        assert!(result.is_err(), "AVX2 scale_and_copy should panic on mismatch");
+        assert!(
+            result.is_err(),
+            "AVX2 scale_and_copy should panic on mismatch"
+        );
     }
 }
 
