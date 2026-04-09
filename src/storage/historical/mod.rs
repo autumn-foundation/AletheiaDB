@@ -2013,7 +2013,9 @@ impl HistoricalStorage {
             .ok_or(StorageError::NodeNotFound(node_id))?;
 
         // Traverse the version chain backwards to get all versions in order
-        let mut version_ids = Vec::new();
+        let version_count = self.node_version_counts.get(&node_id).copied().unwrap_or(0);
+        // ⚡ Bolt Optimization: Pre-allocate Vec using cached version count to prevent reallocation during version chain traversal.
+        let mut version_ids = Vec::with_capacity(version_count);
         let mut current_id = Some(current_version_id);
 
         while let Some(vid) = current_id {
@@ -2058,7 +2060,9 @@ impl HistoricalStorage {
             .ok_or(StorageError::NodeNotFound(node_id))?;
 
         // Traverse the version chain backwards to collect all versions
-        let mut version_ids = Vec::new();
+        let version_count = self.node_version_counts.get(&node_id).copied().unwrap_or(0);
+        // ⚡ Bolt Optimization: Pre-allocate Vec using cached version count to prevent reallocation during version chain traversal.
+        let mut version_ids = Vec::with_capacity(version_count);
         let mut current_id = Some(current_version_id);
 
         while let Some(vid) = current_id {
@@ -2159,7 +2163,9 @@ impl HistoricalStorage {
             .ok_or(StorageError::EdgeNotFound(edge_id))?;
 
         // Traverse the version chain backwards to get all versions
-        let mut version_ids = Vec::new();
+        let version_count = self.edge_version_counts.get(&edge_id).copied().unwrap_or(0);
+        // ⚡ Bolt Optimization: Pre-allocate Vec using cached version count to prevent reallocation during version chain traversal.
+        let mut version_ids = Vec::with_capacity(version_count);
         let mut current_id = Some(current_version_id);
 
         while let Some(vid) = current_id {

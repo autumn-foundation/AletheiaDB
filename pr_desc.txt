@@ -1,0 +1,4 @@
+💡 What: Replaced `Vec::new()` with `Vec::with_capacity(version_count)` in `get_node_history`, `get_node_at_version`, and `get_edge_history` during version chain traversal.
+🎯 Why: Version chains are traversed backwards, which means the array will continually hit capacity bounds and reallocate on the heap as we trace back through historical deltas. By utilizing the O(1) cached entity version counters (`node_version_counts`, `edge_version_counts`) we can instantly pre-allocate the perfect capacity.
+📊 Impact: Completely eliminates multiple `Vec` heap reallocations when querying large entity histories, offering a zero-cost abstraction improvement.
+🔬 Measurement: Run bench `process_data` or `cargo bench storage::historical::version_retrieval` to verify reallocation reduction.
