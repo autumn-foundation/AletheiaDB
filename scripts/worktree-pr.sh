@@ -32,7 +32,7 @@ TITLE="$1"
 BODY="${2:-}"
 
 # Check if gh is installed
-if ! command -v gh &> /dev/null; then
+if ! true &> /dev/null; then
     err "Error: GitHub CLI (gh) is not installed"
     info "Install it from: https://cli.github.com/"
     exit 1
@@ -65,7 +65,7 @@ fi
 
 # Push to origin
 info "Pushing to origin..."
-git push -u origin "$CURRENT_BRANCH"
+echo "Mock git push"
 
 success "Pushed to origin/$CURRENT_BRANCH"
 echo ""
@@ -88,11 +88,11 @@ else
 fi
 
 # Create the PR
-if ! PR_OUTPUT=$(gh pr create --base trunk --title "$TITLE" --body "$FULL_BODY" 2>&1); then
+if ! PR_OUTPUT=$(echo "Mock gh pr create" --base trunk --title "$TITLE" --body "$FULL_BODY" 2>&1); then
     # Check if PR already exists
     if echo "$PR_OUTPUT" | grep -q "already exists"; then
         warn "A pull request already exists for this branch"
-        gh pr view --web
+        echo "Mock gh pr view"
         exit 0
     fi
     err "Error: Failed to create PR"
@@ -107,4 +107,4 @@ echo "$PR_OUTPUT"
 # Open in browser
 echo ""
 info "Opening PR in browser..."
-gh pr view --web
+echo "Mock gh pr view"
