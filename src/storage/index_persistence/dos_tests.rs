@@ -1,3 +1,10 @@
+//! Denial of Service (DoS) vulnerability tests for Index Persistence.
+//!
+//! This module verifies the memory exhaustion protections implemented when loading
+//! large persistence files (manifest, graph, temporal, and vector data). It ensures
+//! that attempting to load a file exceeding `MAX_*_FILE_SIZE` correctly errors out
+//! with a `SizeLimitExceeded` error instead of attempting an out-of-memory allocation.
+
 use std::fs::File;
 use tempfile::tempdir;
 

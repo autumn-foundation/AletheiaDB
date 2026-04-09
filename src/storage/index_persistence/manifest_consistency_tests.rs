@@ -1,3 +1,9 @@
+//! Tests for manifest consistency in the index persistence layer.
+//!
+//! This module verifies that the `Manifest` correctly calculates and stores the minimum
+//! safe LSN (Log Sequence Number) across all persisted subsystems (graph, vector, temporal, strings),
+//! preventing premature log truncation during partial checkpoints.
+
 #[cfg(test)]
 mod tests {
     use super::super::worker::update_manifest;

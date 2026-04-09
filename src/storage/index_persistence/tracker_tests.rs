@@ -1,3 +1,9 @@
+//! Tests for the Persistence Tracker.
+//!
+//! This module verifies the behavior of the `PersistenceTracker` component,
+//! which monitors the number of mutations across different subsystems (graph, temporal,
+//! vector, string) to determine when a checkpoint flush should be triggered.
+
 use crate::storage::index_persistence::tracker::PersistenceTracker;
 
 #[test]

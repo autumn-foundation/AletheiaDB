@@ -1,3 +1,9 @@
+//! Tests for the Graph Index Delta format.
+//!
+//! This module verifies the functionality of adding, removing, and persisting graph deltas
+//! (node and edge modifications) to disk. It ensures that delta operations are accurately
+//! captured, serialized, and subsequently recovered without data loss or corruption.
+
 use super::*;
 use crate::storage::index_persistence::formats::{
     GraphIndexDelta, PersistedEdge, PersistedNode, PersistedPropertyMap,

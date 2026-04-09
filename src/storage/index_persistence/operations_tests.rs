@@ -1,3 +1,9 @@
+//! Tests for the persistence operations layer.
+//!
+//! This module contains tests verifying the high-level operations for index persistence,
+//! such as correctly tracking mutations across subsystems (`PersistenceTracker`) and
+//! ensuring that index flushing behaves predictably under various edge cases.
+
 use super::*;
 use crate::core::GLOBAL_INTERNER;
 use crate::core::id::{NodeId, VersionId};

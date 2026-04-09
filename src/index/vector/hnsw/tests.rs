@@ -1,3 +1,9 @@
+//! Tests for the HNSW Vector Index component.
+//!
+//! This module verifies the functionality of the HNSW (Hierarchical Navigable Small World)
+//! vector index, including configuration handling, serialization/deserialization logic,
+//! unaligned memory safety checks (via `sentry_tests`), and specific integrations with `usearch`.
+
 use super::*;
 use crate::core::id::NodeId;
 use crate::index::vector::{DistanceMetric, Quantization, StorageMode};

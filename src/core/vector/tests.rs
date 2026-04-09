@@ -1,3 +1,9 @@
+//! Tests for core vector operations and primitives.
+//!
+//! This module verifies the correctness of mathematical and topological operations for
+//! vector embeddings. It covers distance metrics (Cosine, L2, Dot Product), vector parsing,
+//! dimension validation, and property transformations.
+
 use super::*;
 use crate::core::error::{Error, VectorError};
 #[allow(unused_imports)]
