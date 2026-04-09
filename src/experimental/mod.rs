@@ -33,6 +33,7 @@
 //! | `hindsight` | **Hindsight** | Counterfactual Analysis. "What if this edge didn't exist?" |
 //! | `janus` | **Janus** | Semantic Bridge Detection. "Who connects these two worlds?" |
 //! | `prism` | **Prism** | Semantic Spectroscopy. Decompose vectors into conceptual components. |
+//! | `horizon` | **Horizon** | Semantic Event Horizon. "Where does a concept end?" |
 //! | `chronos` | **Chronos** | Temporal Pathfinding. "Find a path that respects time travel." |
 //! | `ariadne` | **Ariadne** | Semantic Thread Weaver. Connect disparate concepts via narrative threads. |
 //! | `echo` | **Echo** | Temporal Resonance. Find nodes with similar activity patterns. |
@@ -155,6 +156,9 @@ pub mod hindsight;
 #[cfg(feature = "nova")]
 /// Janus: Semantic Bridge Detector.
 pub mod janus;
+#[cfg(feature = "nova")]
+/// Horizon: Semantic Event Horizon.
+pub mod horizon;
 #[cfg(feature = "nova")]
 /// Kairos: Semantic Event Detection & History Summarization.
 pub mod kairos;
