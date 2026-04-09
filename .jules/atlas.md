@@ -79,3 +79,10 @@
 **[Broke Storage-API Dependency Cycle]
 **Tangle:** The `storage` module had an implementation of `From<&crate::api::transaction::BufferedWrite> for WalOperation` in `src/storage/wal/entry.rs`, meaning the underlying storage engine depended structurally on the public API layer.
 **Blueprint:** Moved the `From` implementation to `src/api/transaction/write_buffer.rs`. Now, the `api` module is aware of how its `BufferedWrite` converts into a `WalOperation` to send down to `storage`, enforcing a unidirectional dependency graph from `api` -> `storage`.
+**[Module Split]**
+**Tangle:**  was a 4,300+ line "Blob" containing value definition, map logic, builder implementations, and serialization rules.
+**Blueprint:** Splitted  into  with , , , , and . Extracted types into coherent submodules while preserving public API and reducing map/builder tight-coupling through shared internal imports.
+
+## 2023-01-01 - Splitting Property Blob
+**Tangle:** `src/core/property.rs` was a 4,300+ line "Blob" containing value definition, map logic, builder implementations, and serialization rules.
+**Blueprint:** Splitted `src/core/property.rs` into `src/core/property/` with `mod.rs`, `value.rs`, `map.rs`, `builder.rs`, and `tests.rs`. Extracted types into coherent submodules while preserving public API.
