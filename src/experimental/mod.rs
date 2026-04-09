@@ -154,11 +154,11 @@ pub mod highlander;
 /// Hindsight: Counterfactual Graph Analysis Engine.
 pub mod hindsight;
 #[cfg(feature = "nova")]
-/// Janus: Semantic Bridge Detector.
-pub mod janus;
-#[cfg(feature = "nova")]
 /// Horizon: Semantic Event Horizon.
 pub mod horizon;
+#[cfg(feature = "nova")]
+/// Janus: Semantic Bridge Detector.
+pub mod janus;
 #[cfg(feature = "nova")]
 /// Kairos: Semantic Event Detection & History Summarization.
 pub mod kairos;

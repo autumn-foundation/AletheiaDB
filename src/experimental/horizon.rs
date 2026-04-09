@@ -38,11 +38,11 @@
 //! # }
 //! ```
 
+use crate::AletheiaDB;
 use crate::api::transaction::ReadOps;
 use crate::core::error::{Error, Result};
 use crate::core::id::NodeId;
 use crate::core::vector::ops::cosine_similarity;
-use crate::AletheiaDB;
 use std::collections::{HashSet, VecDeque};
 
 /// The result of mapping the Semantic Event Horizon.
@@ -87,13 +87,16 @@ impl<'a> HorizonEngine<'a> {
         self.db.read(|tx| {
             // Get seed vector
             let seed_node = tx.get_node(seed)?;
-            let seed_vec = match seed_node.get_property(property_name).and_then(|p| p.as_vector()) {
+            let seed_vec = match seed_node
+                .get_property(property_name)
+                .and_then(|p| p.as_vector())
+            {
                 Some(v) => v,
                 None => {
                     return Err(Error::other(format!(
                         "Seed node {} does not have vector property '{}'",
                         seed, property_name
-                    )))
+                    )));
                 }
             };
 
@@ -108,12 +111,14 @@ impl<'a> HorizonEngine<'a> {
                 }
 
                 // Get all neighbors (both outgoing and incoming for true semantic reach)
-                let mut neighbors = tx.get_outgoing_edges(current_node_id)
+                let mut neighbors = tx
+                    .get_outgoing_edges(current_node_id)
                     .into_iter()
                     .filter_map(|e| tx.get_edge(e).ok().map(|edge| edge.target))
                     .collect::<Vec<_>>();
 
-                let incoming = tx.get_incoming_edges(current_node_id)
+                let incoming = tx
+                    .get_incoming_edges(current_node_id)
                     .into_iter()
                     .filter_map(|e| tx.get_edge(e).ok().map(|edge| edge.source))
                     .collect::<Vec<_>>();
@@ -128,7 +133,10 @@ impl<'a> HorizonEngine<'a> {
                     visited.insert(neighbor_id);
 
                     if let Ok(neighbor_node) = tx.get_node(neighbor_id) {
-                        if let Some(neighbor_vec) = neighbor_node.get_property(property_name).and_then(|p| p.as_vector()) {
+                        if let Some(neighbor_vec) = neighbor_node
+                            .get_property(property_name)
+                            .and_then(|p| p.as_vector())
+                        {
                             // Calculate similarity with the *seed* node
                             let sim = cosine_similarity(seed_vec, neighbor_vec)?;
 
@@ -170,52 +178,62 @@ mod tests {
 
         db.write(|tx| {
             // A (seed): Core Concept
-            a = tx.create_node(
-                "Concept",
-                PropertyMapBuilder::new()
-                    .insert_vector("vec", &[1.0, 0.0, 0.0])
-                    .build(),
-            ).unwrap();
+            a = tx
+                .create_node(
+                    "Concept",
+                    PropertyMapBuilder::new()
+                        .insert_vector("vec", &[1.0, 0.0, 0.0])
+                        .build(),
+                )
+                .unwrap();
 
             // B: Very similar to A (cosine sim = 0.9)
             // dot product = 0.9, norm = 1.0 * 1.0
             // x * 1.0 = 0.9 => x = 0.9
             // y^2 + z^2 = 1 - 0.9^2 = 1 - 0.81 = 0.19
             // let y = sqrt(0.19) ~ 0.4358
-            b = tx.create_node(
-                "Concept",
-                PropertyMapBuilder::new()
-                    .insert_vector("vec", &[0.9, 0.435889, 0.0])
-                    .build(),
-            ).unwrap();
+            b = tx
+                .create_node(
+                    "Concept",
+                    PropertyMapBuilder::new()
+                        .insert_vector("vec", &[0.9, 0.435889, 0.0])
+                        .build(),
+                )
+                .unwrap();
 
             // C: Somewhat similar to A (cosine sim = 0.6)
             // dot product = 0.6 => x = 0.6
             // y = sqrt(1 - 0.36) = 0.8
-            c = tx.create_node(
-                "Concept",
-                PropertyMapBuilder::new()
-                    .insert_vector("vec", &[0.6, 0.8, 0.0])
-                    .build(),
-            ).unwrap();
+            c = tx
+                .create_node(
+                    "Concept",
+                    PropertyMapBuilder::new()
+                        .insert_vector("vec", &[0.6, 0.8, 0.0])
+                        .build(),
+                )
+                .unwrap();
 
             // D: Different from A (cosine sim = 0.2)
             // x = 0.2
             // y = sqrt(1 - 0.04) = 0.9797
-            d = tx.create_node(
-                "Concept",
-                PropertyMapBuilder::new()
-                    .insert_vector("vec", &[0.2, 0.979795, 0.0])
-                    .build(),
-            ).unwrap();
+            d = tx
+                .create_node(
+                    "Concept",
+                    PropertyMapBuilder::new()
+                        .insert_vector("vec", &[0.2, 0.979795, 0.0])
+                        .build(),
+                )
+                .unwrap();
 
             // E: Completely different (cosine sim = 0.0)
-            e = tx.create_node(
-                "Concept",
-                PropertyMapBuilder::new()
-                    .insert_vector("vec", &[0.0, 1.0, 0.0])
-                    .build(),
-            ).unwrap();
+            e = tx
+                .create_node(
+                    "Concept",
+                    PropertyMapBuilder::new()
+                        .insert_vector("vec", &[0.0, 1.0, 0.0])
+                        .build(),
+                )
+                .unwrap();
 
             // Graph structure: A -> B -> C -> D -> E
             tx.create_edge(a, b, "LINK", Default::default()).unwrap();
@@ -224,7 +242,8 @@ mod tests {
             tx.create_edge(d, e, "LINK", Default::default()).unwrap();
 
             Ok::<(), Error>(())
-        }).unwrap();
+        })
+        .unwrap();
 
         let engine = HorizonEngine::new(&db);
 
