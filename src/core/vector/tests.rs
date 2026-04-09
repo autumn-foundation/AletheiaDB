@@ -2969,6 +2969,14 @@ fn test_dot_product_sum_mismatch_panics() {
 }
 
 #[test]
+#[should_panic]
+fn test_scale_and_copy_mismatch_panics() {
+    let a = vec![1.0, 2.0];
+    let mut b = vec![std::mem::MaybeUninit::uninit(); 3];
+    let _ = super::simd::scale_and_copy(&a, &mut b, 2.0);
+}
+
+#[test]
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 fn test_simd_mismatched_lengths_safety() {
     let a = vec![1.0; 8];
@@ -2995,6 +3003,12 @@ fn test_simd_mismatched_lengths_safety() {
             result.is_err(),
             "SSE2 squared_diff_sum should panic on mismatch"
         );
+
+        let mut dst = vec![std::mem::MaybeUninit::uninit(); 9];
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+            super::simd::x86_ops::scale_and_copy_sse2(&a, &mut dst, 2.0)
+        }));
+        assert!(result.is_err(), "SSE2 scale_and_copy should panic on mismatch");
     }
 
     // Test AVX2 if available
@@ -3018,6 +3032,12 @@ fn test_simd_mismatched_lengths_safety() {
             result.is_err(),
             "AVX2 squared_diff_sum should panic on mismatch"
         );
+
+        let mut dst = vec![std::mem::MaybeUninit::uninit(); 9];
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+            super::simd::x86_ops::scale_and_copy_avx2(&a, &mut dst, 2.0)
+        }));
+        assert!(result.is_err(), "AVX2 scale_and_copy should panic on mismatch");
     }
 }
 

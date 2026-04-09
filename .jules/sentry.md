@@ -26,3 +26,7 @@
 **[Temporal TimeRange Max Timestamp and Deserialize Mutants]**
 **Learning:** `cargo mutants` revealed missing test coverage for `MAX_VALID_TIMESTAMP` bounds checking in open ranges (`TimeRange::from` and `TimeRange::at`), empty range overlap edge cases (`TimeRange::overlaps` short-circuit behavior), and deserialization stringency (`BiTemporalInterval::deserialize` exact consumed length checking against buffer size `> 48`).
 **Action:** Added targeted unit tests checking `#[should_panic]` when `MAX_VALID_TIMESTAMP` is exceeded, explicitly testing overlap between empty point-ranges within larger non-empty ranges, and appending excess bytes to binary formats to verify exact parser length consumption limits.
+
+**[SIMD Mismatched Lengths Panics]**
+**Learning:** Functions that write to uninitialized destination buffers (like `scale_and_copy_sse2`/`avx2`) are extremely unsafe if length checks fail. They require `assert_eq!(src.len(), dst.len())` but those checks weren't actually tested in `#[should_panic]` test blocks.
+**Action:** When validating unsafe SIMD memory slices or `MaybeUninit` blocks, explicitly ensure that the out-of-bounds/mismatched length panics are part of the `test_simd_mismatched_lengths_safety` coverage.
