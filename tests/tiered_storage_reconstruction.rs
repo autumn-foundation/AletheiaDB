@@ -177,9 +177,21 @@ fn test_reconstruct_properties_with_cold_versions_in_chain() {
     );
 
     // Verify they're in cold storage via tiered access
-    assert!(historical.get_node_version_tiered(v2_id).unwrap().is_some());
-    assert!(historical.get_node_version_tiered(v3_id).unwrap().is_some());
-    assert!(historical.get_node_version_tiered(v4_id).unwrap().is_some());
+    let cv2 = historical
+        .get_node_version_tiered(v2_id)
+        .unwrap()
+        .expect("v2 should be in tiered storage");
+    assert_eq!(cv2.id, v2_id);
+    let cv3 = historical
+        .get_node_version_tiered(v3_id)
+        .unwrap()
+        .expect("v3 should be in tiered storage");
+    assert_eq!(cv3.id, v3_id);
+    let cv4 = historical
+        .get_node_version_tiered(v4_id)
+        .unwrap()
+        .expect("v4 should be in tiered storage");
+    assert_eq!(cv4.id, v4_id);
 
     // Clear the property cache to force actual reconstruction (not using cached values)
     println!("Clearing property cache to force chain traversal");

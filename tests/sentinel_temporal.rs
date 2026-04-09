@@ -191,11 +191,15 @@ fn test_sentinel_timerange_new_validation() {
     let t200 = 200.into();
 
     // Valid: start < end
-    assert!(TimeRange::new(t100, t200).is_ok());
+    let range1 = TimeRange::new(t100, t200).expect("Should create valid TimeRange");
+    assert_eq!(range1.start(), t100);
+    assert_eq!(range1.end(), t200);
 
     // Valid: start == end (empty range)
     // This is crucial: mutating > to >= would break this
-    assert!(TimeRange::new(t100, t100).is_ok());
+    let range2 = TimeRange::new(t100, t100).expect("Should create valid empty TimeRange");
+    assert_eq!(range2.start(), t100);
+    assert_eq!(range2.end(), t100);
 
     // Invalid: start > end
     // This targets mutating > to >= (which would make equal invalid, caught above)

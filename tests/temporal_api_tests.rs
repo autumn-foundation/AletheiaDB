@@ -265,7 +265,8 @@ fn test_get_nodes_at_time_mixed_results() {
     assert_eq!(results.len(), 3);
 
     // First result should be Some
-    assert!(results[0].1.is_some());
+    let n1 = results[0].1.as_ref().expect("Expected node1 to be found");
+    assert_eq!(n1.id, node1);
     assert_eq!(results[0].0, node1);
 
     // Second result should be None (non-existent node)
@@ -273,7 +274,8 @@ fn test_get_nodes_at_time_mixed_results() {
     assert_eq!(results[1].0, non_existent);
 
     // Third result should be Some
-    assert!(results[2].1.is_some());
+    let n2 = results[2].1.as_ref().expect("Expected node2 to be found");
+    assert_eq!(n2.id, node2);
     assert_eq!(results[2].0, node2);
 }
 
@@ -327,7 +329,9 @@ fn test_get_nodes_at_time_after_deletion() {
 
     assert_eq!(results.len(), 2);
     assert!(results[0].1.is_none()); // node1 was deleted
-    assert!(results[1].1.is_some()); // node2 still exists
+
+    let n2 = results[1].1.as_ref().expect("Expected node2 to be found");
+    assert_eq!(n2.id, node2);
 
     // Query at time before deletion - both should exist
     let results = db
@@ -335,8 +339,16 @@ fn test_get_nodes_at_time_after_deletion() {
         .unwrap();
 
     assert_eq!(results.len(), 2);
-    assert!(results[0].1.is_some()); // node1 existed
-    assert!(results[1].1.is_some()); // node2 existed
+    let past_n1 = results[0]
+        .1
+        .as_ref()
+        .expect("Expected node1 to be found in past");
+    assert_eq!(past_n1.id, node1);
+    let past_n2 = results[1]
+        .1
+        .as_ref()
+        .expect("Expected node2 to be found in past");
+    assert_eq!(past_n2.id, node2);
 }
 
 #[test]
@@ -460,7 +472,8 @@ fn test_get_edges_at_time_mixed_results() {
     assert_eq!(results.len(), 2);
 
     // First result should be Some
-    assert!(results[0].1.is_some());
+    let e1 = results[0].1.as_ref().expect("Expected edge1 to be found");
+    assert_eq!(e1.id, edge1);
     assert_eq!(results[0].0, edge1);
 
     // Second result should be None (non-existent edge)
@@ -519,7 +532,8 @@ fn test_get_edges_at_time_after_deletion() {
 
     assert_eq!(results.len(), 2);
     assert!(results[0].1.is_none()); // edge1 was deleted
-    assert!(results[1].1.is_some()); // edge2 still exists
+    let e2 = results[1].1.as_ref().expect("Expected edge2 to be found");
+    assert_eq!(e2.id, edge2);
 
     // Query at time before deletion - both should exist
     let results = db
@@ -527,8 +541,16 @@ fn test_get_edges_at_time_after_deletion() {
         .unwrap();
 
     assert_eq!(results.len(), 2);
-    assert!(results[0].1.is_some()); // edge1 existed
-    assert!(results[1].1.is_some()); // edge2 existed
+    let past_e1 = results[0]
+        .1
+        .as_ref()
+        .expect("Expected edge1 to be found in past");
+    assert_eq!(past_e1.id, edge1);
+    let past_e2 = results[1]
+        .1
+        .as_ref()
+        .expect("Expected edge2 to be found in past");
+    assert_eq!(past_e2.id, edge2);
 }
 
 #[test]
@@ -553,11 +575,12 @@ fn test_get_nodes_at_time_large_batch() {
 
     // All should exist
     assert_eq!(results.len(), 100);
-    assert!(results.iter().all(|(_, node)| node.is_some()));
 
-    // Verify order is preserved
-    for (i, (id, _)) in results.iter().enumerate() {
+    // Verify order is preserved and all exist
+    for (i, (id, node_opt)) in results.iter().enumerate() {
         assert_eq!(*id, node_ids[i]);
+        let node = node_opt.as_ref().expect("Expected node to be found");
+        assert_eq!(node.id, node_ids[i]);
     }
 }
 
@@ -619,11 +642,12 @@ fn test_get_edges_at_time_large_batch() {
 
     // All should exist
     assert_eq!(results.len(), 100);
-    assert!(results.iter().all(|(_, edge)| edge.is_some()));
 
-    // Verify order is preserved
-    for (i, (id, _)) in results.iter().enumerate() {
+    // Verify order is preserved and all exist
+    for (i, (id, edge_opt)) in results.iter().enumerate() {
         assert_eq!(*id, edge_ids[i]);
+        let edge = edge_opt.as_ref().expect("Expected edge to be found");
+        assert_eq!(edge.id, edge_ids[i]);
     }
 }
 

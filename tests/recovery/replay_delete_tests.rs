@@ -225,11 +225,14 @@ fn test_replay_multiple_deletes() -> Result<()> {
 
     // Then: Only 3 nodes should exist in current storage (1, 3, 5)
     assert_eq!(current.node_count(), 3);
-    assert!(current.get_node(NodeId::new(1).unwrap()).is_ok());
+    let n1 = current.get_node(NodeId::new(1).unwrap()).unwrap();
+    assert_eq!(n1.label, GLOBAL_INTERNER.intern("Node").unwrap());
     assert!(current.get_node(NodeId::new(2).unwrap()).is_err()); // Deleted
-    assert!(current.get_node(NodeId::new(3).unwrap()).is_ok());
+    let n3 = current.get_node(NodeId::new(3).unwrap()).unwrap();
+    assert_eq!(n3.label, GLOBAL_INTERNER.intern("Node").unwrap());
     assert!(current.get_node(NodeId::new(4).unwrap()).is_err()); // Deleted
-    assert!(current.get_node(NodeId::new(5).unwrap()).is_ok());
+    let n5 = current.get_node(NodeId::new(5).unwrap()).unwrap();
+    assert_eq!(n5.label, GLOBAL_INTERNER.intern("Node").unwrap());
 
     // And: Historical storage should have 7 versions (5 creates + 2 deletes)
     let hist_stats = historical.stats();
@@ -339,17 +342,19 @@ fn test_replay_mixed_creates_updates_deletes() -> Result<()> {
 
     // Then: Only nodes 1 and 3 should exist in current storage
     assert_eq!(current.node_count(), 2);
-    assert!(current.get_node(NodeId::new(1).unwrap()).is_ok());
-    assert!(current.get_node(NodeId::new(2).unwrap()).is_err()); // Deleted
-    assert!(current.get_node(NodeId::new(3).unwrap()).is_ok());
+
+    use aletheiadb::core::property::PropertyValue;
 
     // And: Node 1 should have the updated value
-    use aletheiadb::core::property::PropertyValue;
-    let node1 = current.get_node(NodeId::new(1).unwrap())?;
-    assert!(matches!(
-        node1.properties.get("value"),
-        Some(PropertyValue::Int(10))
-    ));
+    let node1 = current.get_node(NodeId::new(1).unwrap()).unwrap();
+    assert_eq!(node1.properties.get("value"), Some(&PropertyValue::Int(10)));
+    assert_eq!(node1.label, GLOBAL_INTERNER.intern("Node").unwrap());
+
+    assert!(current.get_node(NodeId::new(2).unwrap()).is_err()); // Deleted
+
+    let node3 = current.get_node(NodeId::new(3).unwrap()).unwrap();
+    assert_eq!(node3.properties.get("value"), Some(&PropertyValue::Int(3)));
+    assert_eq!(node3.label, GLOBAL_INTERNER.intern("Node").unwrap());
 
     // And: Historical storage should have 5 versions
     // - Create node 1: v1

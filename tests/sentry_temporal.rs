@@ -531,9 +531,7 @@ fn test_time_try_now_exact() {
     use aletheiadb::core::temporal::time;
 
     let now_result = time::try_now();
-    assert!(now_result.is_ok(), "try_now should return Ok");
-
-    let now = now_result.unwrap();
+    let now = now_result.expect("try_now should return Ok");
     // Verify it doesn't return Ok(Default::default())
     let default_ts = HybridTimestamp::new(0, 0).unwrap();
     assert_ne!(
@@ -1061,18 +1059,15 @@ fn test_timerange_from_at_mutants_strict() {
     assert_eq!(range.end(), TIMESTAMP_MAX, "Mutant test: from -> default");
 
     let max_valid = HybridTimestamp::new(MAX_VALID_TIMESTAMP, 0).unwrap();
-    let res = std::panic::catch_unwind(|| {
-        TimeRange::from(max_valid);
-    });
-    assert!(res.is_ok(), "Mutant test: > -> >= (should succeed for ==)");
+    let res = std::panic::catch_unwind(|| TimeRange::from(max_valid));
+    let range = res.expect("Mutant test: > -> >= (should succeed for ==)");
+    assert_eq!(range.start(), max_valid);
+    assert_eq!(range.end(), TIMESTAMP_MAX);
 
-    let res = std::panic::catch_unwind(|| {
-        TimeRange::from(TIMESTAMP_MAX);
-    });
-    assert!(
-        res.is_ok(),
-        "Mutant test: != -> == (should succeed for TIMESTAMP_MAX)"
-    );
+    let res = std::panic::catch_unwind(|| TimeRange::from(TIMESTAMP_MAX));
+    let range = res.expect("Mutant test: != -> == (should succeed for TIMESTAMP_MAX)");
+    assert_eq!(range.start(), TIMESTAMP_MAX);
+    assert_eq!(range.end(), TIMESTAMP_MAX);
 
     // For TimeRange::at
     let valid_ts = HybridTimestamp::new(100, 0).unwrap();
@@ -1082,15 +1077,15 @@ fn test_timerange_from_at_mutants_strict() {
     assert_eq!(range.end(), valid_ts, "Mutant test: at -> default");
 
     let max_valid = HybridTimestamp::new(MAX_VALID_TIMESTAMP, 0).unwrap();
-    let res = std::panic::catch_unwind(|| {
-        TimeRange::at(max_valid);
-    });
-    assert!(res.is_ok(), "Mutant test: > -> >= in at");
+    let res = std::panic::catch_unwind(|| TimeRange::at(max_valid));
+    let range = res.expect("Mutant test: > -> >= in at");
+    assert_eq!(range.start(), max_valid);
+    assert_eq!(range.end(), max_valid);
 
-    let res = std::panic::catch_unwind(|| {
-        TimeRange::at(TIMESTAMP_MAX);
-    });
-    assert!(res.is_ok(), "Mutant test: != -> == in at");
+    let res = std::panic::catch_unwind(|| TimeRange::at(TIMESTAMP_MAX));
+    let range = res.expect("Mutant test: != -> == in at");
+    assert_eq!(range.start(), TIMESTAMP_MAX);
+    assert_eq!(range.end(), TIMESTAMP_MAX);
 }
 
 #[test]
@@ -1189,23 +1184,27 @@ fn test_timerange_close_at_mutants() {
 
     // mutant: replace < with > in TimeRange::close_at
     let end_gt = HybridTimestamp::new(101, 0).unwrap();
-    assert!(range.close_at(end_gt).is_ok(), "Should close at later time");
+    let closed_gt = range.close_at(end_gt).expect("Should close at later time");
+    assert_eq!(closed_gt.start(), range.start());
+    assert_eq!(closed_gt.end(), end_gt);
 
     // mutant: replace && with ||
     // mutant: replace > with == (end.wallclock() > MAX_VALID_TIMESTAMP)
     use aletheiadb::core::temporal::MAX_VALID_TIMESTAMP;
 
     let max_ts = HybridTimestamp::new(MAX_VALID_TIMESTAMP, 0).unwrap();
-    assert!(
-        range.close_at(max_ts).is_ok(),
-        "Should close at exact MAX_VALID_TIMESTAMP"
-    );
+    let closed_max_ts = range
+        .close_at(max_ts)
+        .expect("Should close at exact MAX_VALID_TIMESTAMP");
+    assert_eq!(closed_max_ts.start(), range.start());
+    assert_eq!(closed_max_ts.end(), max_ts);
 
     use aletheiadb::core::temporal::TIMESTAMP_MAX;
-    assert!(
-        range.close_at(TIMESTAMP_MAX).is_ok(),
-        "Should allow TIMESTAMP_MAX"
-    );
+    let closed_timestamp_max = range
+        .close_at(TIMESTAMP_MAX)
+        .expect("Should allow TIMESTAMP_MAX");
+    assert_eq!(closed_timestamp_max.start(), range.start());
+    assert_eq!(closed_timestamp_max.end(), TIMESTAMP_MAX);
 }
 
 #[test]

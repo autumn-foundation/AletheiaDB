@@ -201,8 +201,7 @@ mod phase2_read_path {
         let guard = index.get_adjacency(NodeId::new(0).unwrap());
 
         // Fast path: should return slice directly
-        assert!(guard.as_slice().is_some());
-        let slice = guard.as_slice().unwrap();
+        let slice = guard.as_slice().expect("Expected a slice from fast path");
         assert_eq!(slice.len(), 1);
         assert_eq!(slice[0].target, NodeId::new(1).unwrap());
     }
@@ -1639,11 +1638,11 @@ mod phase9_frozen_view {
         let index = IncrementalAdjacencyIndex::from_frozen(Arc::new(frozen));
 
         // No delta, no tombstones - should get view
-        let view = index.frozen_view();
-        assert!(view.is_some(), "Should get frozen view when clean");
+        let view = index
+            .frozen_view()
+            .expect("Should get frozen view when clean");
 
         // View should provide direct slice access
-        let view = view.unwrap();
         let slice = view.get_adjacency(NodeId::new(0).unwrap());
         assert_eq!(slice.len(), 2);
     }
@@ -1714,10 +1713,10 @@ mod phase9_frozen_view {
         index.compact();
 
         // After compaction - should get view
-        let view = index.frozen_view();
-        assert!(view.is_some(), "Should get frozen view after compaction");
+        let view = index
+            .frozen_view()
+            .expect("Should get frozen view after compaction");
 
-        let view = view.unwrap();
         let slice = view.get_adjacency(NodeId::new(0).unwrap());
         assert_eq!(slice.len(), 5);
     }
