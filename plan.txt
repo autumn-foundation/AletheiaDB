@@ -1,0 +1,5 @@
+1. We need to implement validation that current and historical snapshots are consistent in `tests/snapshot_race_condition.rs:test_concurrent_write_during_snapshot_creation`.
+2. The specific rule is "no orphaned versions (historical version referencing node that doesn't exist in current snapshot)".
+3. We can achieve this by recovering the checkpoint from disk using `CheckpointManager::recover` into `CurrentStorage` and `HistoricalStorage`.
+4. Then iterate over `HistoricalStorage::get_all_node_versions()` and check that the node referenced by the version actually exists in `CurrentStorage` using `recovered_current.get_node(node_id).is_ok()`.
+5. I'll need to inject `CheckpointManager` and `ConcurrentWalSystem` and recover it.

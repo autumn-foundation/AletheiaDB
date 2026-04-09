@@ -1,0 +1,64 @@
+--- tests/snapshot_race_condition.rs
++++ tests/snapshot_race_condition.rs
+@@ -10,7 +10,7 @@
+ use aletheiadb::storage::historical::HistoricalStorage;
+
+ use aletheiadb::storage::wal::LSN;
+-use std::sync::{Arc, Barrier};
++use std::sync::{Arc, Barrier, Mutex};
+ use std::thread;
+ use tempfile::tempdir;
+
+@@ -35,16 +35,21 @@
+     let barrier_clone = barrier.clone();
+     let current_clone = current.clone();
+     let historical_clone = historical.clone();
++
++    let dir = tempdir().unwrap();
++    let dir_path = dir.path().to_path_buf();
+
+     // Thread 1: Create checkpoint (will call create_snapshot twice)
++    let dir_path_clone = dir_path.clone();
+     let checkpoint_thread = thread::spawn(move || {
+         barrier_clone.wait(); // Synchronize start
+
+-        let dir = tempdir().unwrap();
+-        let config = CheckpointConfig::with_data_dir(dir.path());
++        let config = CheckpointConfig::with_data_dir(&dir_path_clone);
+         let mut manager = CheckpointManager::new(config).unwrap();
+
+         // This should be ATOMIC - no writes should sneak in between snapshots
+         manager
+             .create_checkpoint(LSN(1), &current_clone, &historical_clone)
+             .unwrap()
+@@ -93,8 +98,28 @@
+         "Should have at least initial 100 nodes"
+     );
+
+-    // TODO: After fix, add validation that current and historical snapshots
+-    // are consistent (no orphaned versions)
++    // Validate that current and historical snapshots are consistent
++    // by recovering the checkpoint and ensuring no orphaned versions exist.
++    let config = CheckpointConfig::with_data_dir(&dir_path);
++    let mut manager = CheckpointManager::new(config).unwrap();
++
++    // Create a dummy WAL system since recover requires it
++    let wal_dir = tempdir().unwrap();
++    let wal_config = aletheiadb::storage::wal::ConcurrentWalSystemConfig::new(wal_dir.path());
++    let wal = aletheiadb::storage::wal::ConcurrentWalSystem::new(wal_config).unwrap();
++
++    let (recovered_current, recovered_historical, _lsn) = manager.recover(&wal).unwrap();
++
++    // Check that every historical node version references a valid node in current storage
++    let historical_node_versions = recovered_historical.get_all_node_versions();
++    for (&node_id, _versions) in &historical_node_versions {
++        assert!(
++            recovered_current.get_node(node_id).is_ok(),
++            "Orphaned historical version detected! Node ID {} exists in historical storage but not in current storage. \
++             This means the historical snapshot captured a version for a node that was not yet visible in the current snapshot.",
++            node_id.as_u64()
++        );
++    }
+ }
+
+ /// Simpler test: Verify the ABSENCE of write coordination (documents current bug)

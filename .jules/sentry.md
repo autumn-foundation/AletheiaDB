@@ -26,3 +26,9 @@
 **[Temporal TimeRange Max Timestamp and Deserialize Mutants]**
 **Learning:** `cargo mutants` revealed missing test coverage for `MAX_VALID_TIMESTAMP` bounds checking in open ranges (`TimeRange::from` and `TimeRange::at`), empty range overlap edge cases (`TimeRange::overlaps` short-circuit behavior), and deserialization stringency (`BiTemporalInterval::deserialize` exact consumed length checking against buffer size `> 48`).
 **Action:** Added targeted unit tests checking `#[should_panic]` when `MAX_VALID_TIMESTAMP` is exceeded, explicitly testing overlap between empty point-ranges within larger non-empty ranges, and appending excess bytes to binary formats to verify exact parser length consumption limits.
+
+## [Test Validation] snapshot_race_condition
+**Target:** Validate that current and historical snapshots are consistent with no orphaned versions.
+**Risk:** Reusing existing code and using `CheckpointManager::recover` directly to ensure no invalid nodes are stored.
+**Strategy:** Recover the snapshot via `CheckpointManager::recover` and check if all node IDs from historical versions exist in `CurrentStorage`.
+**Verification:** Added tests for the race condition validation pass successfully.
