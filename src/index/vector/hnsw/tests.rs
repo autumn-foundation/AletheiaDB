@@ -1,3 +1,9 @@
+//! Tests for the HNSW vector index implementation.
+//!
+//! This module contains unit and integration tests verifying the behavior, safety,
+//! and performance of the Hierarchical Navigable Small World index used for
+//! semantic vector search in AletheiaDB.
+
 use super::*;
 use crate::core::id::NodeId;
 use crate::index::vector::{DistanceMetric, Quantization, StorageMode};

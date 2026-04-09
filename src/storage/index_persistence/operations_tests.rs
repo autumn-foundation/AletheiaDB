@@ -1,3 +1,8 @@
+//! Tests for high-level index persistence operations.
+//!
+//! This module verifies the orchestration of saving and loading various indexes
+//! (graph, temporal, vector, interner) through the unified persistence API.
+
 use super::*;
 use crate::core::GLOBAL_INTERNER;
 use crate::core::id::{NodeId, VersionId};

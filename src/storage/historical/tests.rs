@@ -1,3 +1,8 @@
+//! Tests for historical storage mechanisms.
+//!
+//! This module verifies the anchor+delta compression, bitemporal versioning,
+//! and time-travel query resolution within the `HistoricalStorage` component.
+
 use super::*;
 use crate::core::interning::GLOBAL_INTERNER;
 use crate::core::observer::{StorageEvent, StorageObserver};

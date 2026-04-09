@@ -1,3 +1,8 @@
+//! Tests for the graph delta mechanism in index persistence.
+//!
+//! This module validates the logic used to calculate and apply incremental changes
+//! (deltas) to graph indexes, ensuring efficient and correct background persistence.
+
 use super::*;
 use crate::storage::index_persistence::formats::{
     GraphIndexDelta, PersistedEdge, PersistedNode, PersistedPropertyMap,

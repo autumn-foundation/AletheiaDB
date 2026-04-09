@@ -1,3 +1,8 @@
+//! Tests for core vector types and metrics.
+//!
+//! This module verifies the behavior of the base vector structures, dimensions,
+//! metrics, and operations, ensuring fundamental math and logic are correct.
+
 use super::*;
 use crate::core::error::{Error, VectorError};
 #[allow(unused_imports)]
