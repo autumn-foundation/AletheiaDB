@@ -79,3 +79,7 @@
 **[Broke Storage-API Dependency Cycle]
 **Tangle:** The `storage` module had an implementation of `From<&crate::api::transaction::BufferedWrite> for WalOperation` in `src/storage/wal/entry.rs`, meaning the underlying storage engine depended structurally on the public API layer.
 **Blueprint:** Moved the `From` implementation to `src/api/transaction/write_buffer.rs`. Now, the `api` module is aware of how its `BufferedWrite` converts into a `WalOperation` to send down to `storage`, enforcing a unidirectional dependency graph from `api` -> `storage`.
+
+**[The Blob]**
+**Tangle:** `src/index/temporal.rs` grew into a massive >4000 line monolith (The Blob anti-pattern), making it hard to navigate and mixing implementation with extensive tests. Also, stricter inference in Rust 1.94.1 caused tests to fail due to ambiguous iterator types.
+**Blueprint:** Extracted the entire test suite into `src/index/temporal/tests.rs` and moved the main implementation to `src/index/temporal/mod.rs`. Applied explicit type annotations (`Vec<(VersionId, BiTemporalInterval)>`) to iterators in the tests to satisfy the strict inference requirements, reducing coupling between tests and core logic.

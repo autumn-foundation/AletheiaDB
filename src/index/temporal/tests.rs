@@ -1,16 +1,6 @@
-use super::*;
-use crate::core::temporal::{BiTemporalInterval, TIMESTAMP_MAX, TimeRange};
-use crate::core::id::{NodeId, VersionId, EntityId, EdgeId};
-use crate::index::temporal::{TemporalIndexes, TemporalIndexConfig, DeduplicationPolicy, EntityTimeline, TimelineVersionMetadata, TimelineEntry};
 
-// use super::*;
-use crate::core::id::{EdgeId, EntityId};
-use crate::core::id::{NodeId, VersionId};
-use crate::core::temporal::{BiTemporalInterval, TIMESTAMP_MAX, TimeRange};
-use crate::index::temporal::{
-    DeduplicationPolicy, EntityTimeline, TemporalIndexConfig, TemporalIndexes, TimelineEntry,
-    TimelineVersionMetadata,
-};
+use super::*;
+use crate::core::temporal::{BiTemporalInterval, TIMESTAMP_MAX};
 
 #[test]
 fn test_insert_and_find_node_versions() {
@@ -1390,7 +1380,7 @@ fn test_find_node_version_at_point_boundary_conditions() {
 
 // Property-based tests using proptest
 mod proptests {
-    // use super::*;
+    use super::*;
     use proptest::prelude::*;
 
     // Strategy for generating valid timestamps (avoid overflow)
@@ -1454,7 +1444,7 @@ mod proptests {
 
             // Clear and insert in shuffled order
             indexes.clear();
-            let mut shuffled = versions.clone();
+            let mut shuffled: Vec<(crate::core::id::VersionId, crate::core::temporal::BiTemporalInterval)> = versions.clone();
             shuffled.sort_by_key(|(vid, _)| *vid); // Sort by version ID (different order)
             for (version_id, temporal) in shuffled {
                 indexes.insert_node_version(node_id, version_id, temporal).unwrap();
@@ -1538,7 +1528,8 @@ mod proptests {
 
             // Batch insert
             let indexes2 = TemporalIndexes::new();
-            indexes2.insert_node_versions_batch(node_id, versions.clone()).unwrap();
+            let batch: Vec<(crate::core::id::VersionId, crate::core::temporal::BiTemporalInterval)> = versions.clone();
+        indexes2.insert_node_versions_batch(node_id, batch).unwrap();
 
             // Both should produce identical timelines
             let entity_id = EntityId::Node(node_id);
@@ -1666,7 +1657,7 @@ mod proptests {
 // valid-time and transaction-time indexes.
 
 mod consolidated_storage_tests {
-    // use super::*;
+    use super::*;
 
     /// Test that version metadata is stored only once per version,
     /// not duplicated across valid and transaction timelines.
