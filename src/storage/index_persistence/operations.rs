@@ -56,6 +56,30 @@ mod tests;
 ///    - `current.usearch`: The native HNSW index.
 ///    - `meta.idx`: Metadata including dimensions, metric, and configuration.
 ///    - `mappings.idx`: Mapping between internal `NodeId`s and usearch's `u64` keys.
+///
+/// By persisting vector mappings and configuration alongside the HNSW index, we allow AletheiaDB
+/// to perform fast semantic searches immediately upon startup without needing to recompute embeddings.
+///
+/// # Examples
+///
+/// In practice, this happens automatically during database shutdown:
+///
+/// ```rust
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// use aletheiadb::AletheiaDB;
+///
+/// // 1. Start a database (will create or load indexes)
+/// # let dir = tempfile::tempdir()?;
+/// # std::env::set_current_dir(&dir)?;
+/// let db = AletheiaDB::new()?;
+///
+/// // 2. Shutting down the database calls `persist_vector_indexes`
+/// //    and other persistence operations under the hood to ensure
+/// //    data is safely stored to disk.
+/// drop(db);
+/// # Ok(())
+/// # }
+/// ```
 pub(crate) fn persist_vector_indexes(
     current: &Arc<CurrentStorage>,
     manager: &Arc<IndexPersistenceManager>,
@@ -160,6 +184,8 @@ pub(crate) fn persist_vector_indexes(
 
 /// Load vector indexes from disk.
 ///
+/// Reconstructs the semantic search indexes for fast startup.
+///
 /// This function:
 /// 1. Scans the vector index directory.
 /// 2. For each subdirectory (representing a property), loads metadata and mappings.
@@ -169,6 +195,24 @@ pub(crate) fn persist_vector_indexes(
 ///
 /// Errors during loading of individual indexes are logged but do not abort the process,
 /// allowing valid indexes to be loaded even if some are corrupted.
+///
+/// # Examples
+///
+/// This loading process is transparently handled during database initialization:
+///
+/// ```rust
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// use aletheiadb::AletheiaDB;
+///
+/// # let dir = tempfile::tempdir()?;
+/// # std::env::set_current_dir(&dir)?;
+/// // When you create a new AletheiaDB instance, it automatically calls
+/// // `load_vector_indexes` to restore any previously persisted indexes
+/// // into memory, bypassing expensive WAL replays.
+/// let db = AletheiaDB::new()?;
+/// # Ok(())
+/// # }
+/// ```
 pub(crate) fn load_vector_indexes(
     current: &Arc<CurrentStorage>,
     manager: &IndexPersistenceManager,
@@ -315,17 +359,21 @@ pub(crate) fn load_vector_indexes(
 ///
 /// # Examples
 ///
-/// ```ignore
-/// use aletheiadb::storage::index_persistence::operations::persist_graph_index;
+/// The graph index is automatically saved during a graceful shutdown:
 ///
-/// // Example of persisting the graph (Internal API)
-/// let (nodes, edges) = persist_graph_index(
-///     &current_storage,
-///     &manager,
-///     Some(&tracker),
-///     current_lsn
-/// ).unwrap();
-/// println!("Persisted {} nodes and {} edges", nodes, edges);
+/// ```rust
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// use aletheiadb::AletheiaDB;
+///
+/// # let dir = tempfile::tempdir()?;
+/// # std::env::set_current_dir(&dir)?;
+/// let db = AletheiaDB::new()?;
+///
+/// // Safely closing the database writes all nodes and edges
+/// // into the compact graph index format.
+/// drop(db);
+/// # Ok(())
+/// # }
 /// ```
 pub(crate) fn persist_graph_index(
     current: &Arc<CurrentStorage>,
@@ -415,10 +463,32 @@ pub(crate) fn persist_graph_index(
 /// Converts the historical versions of nodes and edges into a disk-friendly format
 /// and writes them to `versions.idx`.
 ///
+/// This allows the database to instantly access historical data and provenance details
+/// across restarts without playing back the entire commit log.
+///
 /// # Panics
 ///
 /// This function does not panic under normal conditions, but relies on obtaining a read lock
 /// on the `HistoricalStorage`. If the lock is poisoned, it will panic.
+///
+/// # Examples
+///
+/// Temporal history is preserved to disk as part of the database lifecycle:
+///
+/// ```rust
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// use aletheiadb::AletheiaDB;
+///
+/// # let dir = tempfile::tempdir()?;
+/// # std::env::set_current_dir(&dir)?;
+/// let db = AletheiaDB::new()?;
+///
+/// // Graceful shutdown serializes all temporal versions
+/// // via `persist_temporal_index` to maintain historical provenance.
+/// drop(db);
+/// # Ok(())
+/// # }
+/// ```
 pub(crate) fn persist_temporal_index(
     historical: &Arc<RwLock<HistoricalStorage>>,
     _temporal_indexes: &Arc<TemporalIndexes>,
@@ -492,6 +562,25 @@ pub(crate) fn persist_temporal_index(
 ///
 /// Writes the global string interner state so that `InternedString` IDs can be accurately
 /// resolved across restarts. This must be the first index loaded on startup.
+///
+/// # Examples
+///
+/// The string interner is synchronized to disk when the database closes:
+///
+/// ```rust
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// use aletheiadb::AletheiaDB;
+///
+/// # let dir = tempfile::tempdir()?;
+/// # std::env::set_current_dir(&dir)?;
+/// let db = AletheiaDB::new()?;
+///
+/// // All `InternedString` IDs are locked into persistence
+/// // before the node and edge files are created.
+/// drop(db);
+/// # Ok(())
+/// # }
+/// ```
 pub(crate) fn persist_string_interner(
     manager: &Arc<IndexPersistenceManager>,
     tracker: &Arc<PersistenceTracker>,
@@ -518,6 +607,25 @@ pub(crate) fn persist_string_interner(
 ///
 /// Saves the temporal adjacency index which allows fast temporal edge traversal.
 /// If the index is not enabled or empty, this does nothing.
+///
+/// # Examples
+///
+/// Adjacency structures are safely written to disk upon termination:
+///
+/// ```rust
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// use aletheiadb::AletheiaDB;
+///
+/// # let dir = tempfile::tempdir()?;
+/// # std::env::set_current_dir(&dir)?;
+/// let db = AletheiaDB::new()?;
+///
+/// // Persisting the adjacency index enables quick traversal
+/// // of historical paths on the next boot.
+/// drop(db);
+/// # Ok(())
+/// # }
+/// ```
 pub(crate) fn persist_temporal_adjacency_index(
     historical: &Arc<RwLock<HistoricalStorage>>,
     manager: &Arc<IndexPersistenceManager>,
@@ -555,6 +663,25 @@ pub(crate) fn persist_temporal_adjacency_index(
 /// The manifest is written last. On startup, we first check for a valid manifest.
 /// If it exists and matches the WAL LSN, we know the shutdown was clean and we can
 /// safely load the indexes.
+///
+/// # Examples
+///
+/// This operation is the core of the database shutdown sequence:
+///
+/// ```rust
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// use aletheiadb::AletheiaDB;
+///
+/// # let dir = tempfile::tempdir()?;
+/// # std::env::set_current_dir(&dir)?;
+/// let db = AletheiaDB::new()?;
+///
+/// // Running shutdown calls `persist_all_indexes` to ensure
+/// // zero data loss and create a fast-recovery manifest.
+/// drop(db);
+/// # Ok(())
+/// # }
+/// ```
 pub(crate) fn persist_all_indexes(
     current: &Arc<CurrentStorage>,
     historical: &Arc<RwLock<HistoricalStorage>>,
@@ -661,6 +788,24 @@ pub(crate) fn persist_all_indexes(
 /// some indexes are corrupted or missing. It does not return a Result
 /// because it handles all errors internally, typically by falling back to
 /// an empty state for the corrupted component.
+///
+/// # Examples
+///
+/// Reconstructing indexes is the core feature of database startup:
+///
+/// ```rust
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// use aletheiadb::AletheiaDB;
+///
+/// # let dir = tempfile::tempdir()?;
+/// # std::env::set_current_dir(&dir)?;
+/// // During initialization, AletheiaDB looks for the shutdown manifest.
+/// // If found, it calls `load_indexes_startup` to immediately
+/// // reconstruct the graph memory state.
+/// let db = AletheiaDB::new()?;
+/// # Ok(())
+/// # }
+/// ```
 pub(crate) fn load_indexes_startup(
     manager: &IndexPersistenceManager,
     current: &Arc<CurrentStorage>,
