@@ -28,6 +28,9 @@ mod tests {
 
     #[test]
     fn test_scale_and_copy_avx2_panic() {
+        if !is_x86_feature_detected!("avx2") {
+            return;
+        }
         let src = vec![1.0; 10];
         let mut dst = vec![0.0; 5];
         // We only allocate 5 elements but pass 10 elements in src.
