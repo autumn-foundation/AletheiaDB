@@ -322,13 +322,21 @@ fn daemon_stop(args: &[String]) -> Result<(), String> {
         ));
     }
 
-    let status = Command::new("kill")
-        .arg(meta.pid.to_string())
-        .status()
-        .map_err(|e| format!("failed to invoke kill: {e}"))?;
+    #[cfg(unix)]
+    {
+        use nix::sys::signal::{Signal, kill};
+        use nix::unistd::Pid;
 
-    if !status.success() {
-        return Err(format!("failed to stop daemon process {}", meta.pid));
+        if let Err(e) = kill(Pid::from_raw(meta.pid as i32), Signal::SIGTERM) {
+            return Err(format!("failed to stop daemon process {}: {}", meta.pid, e));
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        return Err(format!(
+            "failed to stop daemon process {}: platform not supported",
+            meta.pid
+        ));
     }
 
     fs::remove_file(&pid_file)
