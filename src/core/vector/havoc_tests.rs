@@ -17,7 +17,10 @@ mod tests {
             simd::x86_ops::dot_product_avx2(&a, &b)
         }));
 
-        assert!(result.is_err(), "Should have panicked due to length mismatch instead of causing UB");
+        assert!(
+            result.is_err(),
+            "Should have panicked due to length mismatch instead of causing UB"
+        );
     }
 
     #[test]
@@ -26,14 +29,16 @@ mod tests {
         let mut dst = vec![0.0; 5];
         // We only allocate 5 elements but pass 10 elements in src.
         // AletheiaDB correctly has `assert_eq!(src.len(), dst.len());` inside this unsafe function
-        let dst_slice = unsafe {
-            std::slice::from_raw_parts_mut(dst.as_mut_ptr() as *mut MaybeUninit<f32>, 5)
-        };
+        let dst_slice =
+            unsafe { std::slice::from_raw_parts_mut(dst.as_mut_ptr() as *mut MaybeUninit<f32>, 5) };
 
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
             simd::x86_ops::scale_and_copy_avx2(&src, dst_slice, 2.0)
         }));
 
-        assert!(result.is_err(), "Should have panicked due to length mismatch instead of causing UB");
+        assert!(
+            result.is_err(),
+            "Should have panicked due to length mismatch instead of causing UB"
+        );
     }
 }
