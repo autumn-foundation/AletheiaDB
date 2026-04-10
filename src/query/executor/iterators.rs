@@ -2538,6 +2538,60 @@ mod tests {
         assert!(filter.evaluate(&node));
     }
 
+    #[test]
+    fn test_filter_type_mismatch_cross_types() {
+        // Float vs Int should safely return false, not panic
+        let props = PropertyMapBuilder::new()
+            .insert("age_int", 30i64)
+            .insert("score_float", 30.0f64)
+            .build();
+        let label = GLOBAL_INTERNER.intern("Person").unwrap();
+        let node = Node::new(
+            NodeId::new(1).unwrap(),
+            label,
+            props,
+            VersionId::new(1).unwrap(),
+        );
+
+        // age_int (Int) vs 30.0 (Float)
+        let p_eq = Predicate::Eq {
+            key: "age_int".to_string(),
+            value: PredicateValue::Float(30.0),
+        };
+        assert!(!FilterIterator::new(Box::new(EmptyIterator), p_eq).evaluate(&node));
+
+        let p_gt = Predicate::Gt {
+            key: "age_int".to_string(),
+            value: PredicateValue::Float(20.0),
+        };
+        assert!(!FilterIterator::new(Box::new(EmptyIterator), p_gt).evaluate(&node));
+
+        let p_lt = Predicate::Lt {
+            key: "age_int".to_string(),
+            value: PredicateValue::Float(40.0),
+        };
+        assert!(!FilterIterator::new(Box::new(EmptyIterator), p_lt).evaluate(&node));
+
+        // score_float (Float) vs 30 (Int)
+        let p_eq2 = Predicate::Eq {
+            key: "score_float".to_string(),
+            value: PredicateValue::Int(30),
+        };
+        assert!(!FilterIterator::new(Box::new(EmptyIterator), p_eq2).evaluate(&node));
+
+        let p_gt2 = Predicate::Gt {
+            key: "score_float".to_string(),
+            value: PredicateValue::Int(20),
+        };
+        assert!(!FilterIterator::new(Box::new(EmptyIterator), p_gt2).evaluate(&node));
+
+        let p_lt2 = Predicate::Lt {
+            key: "score_float".to_string(),
+            value: PredicateValue::Int(40),
+        };
+        assert!(!FilterIterator::new(Box::new(EmptyIterator), p_lt2).evaluate(&node));
+    }
+
     // ==================== Complex nested predicates ====================
 
     #[test]
