@@ -748,6 +748,15 @@ mod tests {
         let (deserialized, consumed) = HybridTimestamp::deserialize(&bytes).unwrap();
         assert_eq!(deserialized, ts);
         assert_eq!(consumed, 12);
+
+        // Also verify serialize_into manually directly
+        let mut buf = Vec::new();
+        ts.serialize_into(&mut buf);
+        assert_eq!(buf, bytes);
+
+        // Mutants check: assert exact bytes to kill replace with vec![0] or vec![]
+        // wallclock (8 bytes) + logical (4 bytes)
+        assert_eq!(bytes, vec![21, 205, 91, 7, 0, 0, 0, 0, 42, 0, 0, 0]);
     }
 
     #[test]
@@ -771,6 +780,23 @@ mod tests {
         let sentinel = HybridTimestamp::new_unchecked(i64::MAX, 0);
         let bytes = sentinel.serialize();
         assert!(HybridTimestamp::deserialize(&bytes).is_ok());
+
+        // Sentinel with non-zero logical is invalid
+        let invalid_sentinel = HybridTimestamp::new_unchecked(i64::MAX, 1);
+        let bytes = invalid_sentinel.serialize();
+        assert!(matches!(
+            HybridTimestamp::deserialize(&bytes),
+            Err(StorageError::CorruptedData(_))
+        ));
+
+        // Valid timestamp
+        let valid_ts = HybridTimestamp::new(MAX_VALID_TIMESTAMP, 0).unwrap();
+        let bytes = valid_ts.serialize();
+        let res = HybridTimestamp::deserialize(&bytes);
+        assert!(res.is_ok());
+        let (ts, consumed) = res.unwrap();
+        assert_eq!(ts, valid_ts);
+        assert_eq!(consumed, 12);
     }
 
     #[test]
@@ -998,6 +1024,24 @@ mod tests {
         let ts2 = HybridTimestamp::new(1_234_567, 0).unwrap();
         assert_eq!(ts2.as_secs(), 1); // Not 1_234_567 * 1_000_000 or % 1_000_000
         assert_eq!(ts2.as_millis(), 1_234);
+
+        // Kill "replace HybridTimestamp::as_secs -> i64 with 0"
+        // Kill "replace HybridTimestamp::as_secs -> i64 with 1"
+        // Kill "replace HybridTimestamp::as_secs -> i64 with -1"
+        let ts3 = HybridTimestamp::new(42_000_000, 0).unwrap();
+        assert_eq!(ts3.as_secs(), 42);
+
+        let ts4 = HybridTimestamp::new(-42_000_000, 0).unwrap();
+        assert_eq!(ts4.as_secs(), -42);
+
+        // Kill "replace HybridTimestamp::as_millis -> i64 with 0"
+        // Kill "replace HybridTimestamp::as_millis -> i64 with 1"
+        // Kill "replace HybridTimestamp::as_millis -> i64 with -1"
+        let ts5 = HybridTimestamp::new(42_000, 0).unwrap();
+        assert_eq!(ts5.as_millis(), 42);
+
+        let ts6 = HybridTimestamp::new(-42_000, 0).unwrap();
+        assert_eq!(ts6.as_millis(), -42);
     }
 
     #[test]
@@ -1039,6 +1083,34 @@ mod tests {
         // If `||` mutant: evaluates T, returns max(10, 20) + 1 = 21.
         // Actual `&&` code: evaluates F, moves to `new == local` -> returns local.logical + 1 = 11.
         assert_eq!(next3.logical(), 11);
+    }
+
+    #[test]
+    fn test_hybrid_timestamp_increment_logical_mutants() {
+        let next = HybridTimestamp::increment_logical(5, 1000).unwrap();
+        assert_eq!(next, 6);
+
+        let next_max = HybridTimestamp::increment_logical(u32::MAX - 1, 1000).unwrap();
+        assert_eq!(next_max, u32::MAX);
+    }
+
+    #[test]
+    fn test_hybrid_timestamp_receive_mutant_kill() {
+        let local = HybridTimestamp::new(1000, 5).unwrap();
+        let msg = HybridTimestamp::new(2000, 10).unwrap();
+
+        let received = local.receive(msg, 1500).unwrap();
+        // The correct logic updates wallclock to max(local, msg, physical) = max(1000, 2000, 1500) = 2000
+        // If Ok(Default::default()) is returned, it would be 0
+        assert_eq!(received.wallclock, 2000);
+    }
+
+    #[test]
+    fn test_evaluate_clock_skew_mutant_kill() {
+        let current = 1000;
+        let frontier = current + MAX_BACKWARD_DRIFT_US + 1; // backward drift exceeding limit
+        let result = evaluate_clock_skew(current, frontier, None, false);
+        assert!(result.is_err());
     }
 }
 
