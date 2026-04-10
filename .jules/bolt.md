@@ -50,3 +50,10 @@
 **Optimize Tokenization in Temporal Parser**
 **Learning:** `tokenize_temporal_keywords` in `src/sql/temporal_parser.rs` previously copied substrings by manually advancing through a `char_indices().collect::<Vec<_>>()` and creating a `String` inside loops (`let word: String = chars[start..i].iter().map(|(_, c)| c).collect()`). This resulted in a heap allocation for every word parsed.
 **Action:** Used `sql.char_indices().peekable()` instead of collecting it. Leveraged `.len_utf8()` to calculate byte boundaries on the fly without allocations. Used a string slice `&sql[start..end]` to avoid `String` allocation for every word parsed, making parsing `0-cost` for non-matching tokens.
+**[Optimize PropertyMap cloning in Result Collection]**
+**Learning:** In AletheiaDB's query executor (`collect_structured`), iterating over owned `QueryRow`s and extracting properties via `.map(|n| n.properties.clone())` causes unnecessary and costly heap allocations for the underlying `PropertyMap` (which contains `Arc` strings and HashMaps).
+**Action:** Since the rows are consumed, use pattern matching on `row.entity` (e.g., `EntityResult::Node(n)`) to directly consume the inner `Node` and take ownership of `n.properties` without cloning.
+
+**[Avoid Vec::with_capacity for Error Paths]**
+**Learning:** Replacing `Vec::new()` with `Vec::with_capacity()` for vectors that track errors or failures (the unhappy path) is a performance anti-pattern. `Vec::new()` does not allocate heap memory until the first element is pushed, whereas `Vec::with_capacity()` forces a guaranteed heap allocation on every execution, introducing a performance regression on the happy path.
+**Action:** Only pre-allocate `Vec`s that are guaranteed or highly likely to be populated. Leave error tracking vectors as `Vec::new()`.

@@ -558,6 +558,8 @@ impl QueryResults {
     /// the streaming iterator directly for result sets exceeding 100K rows.
     /// ⚡ Bolt Optimization: Pre-allocates vector based on iterator's lower size bound
     /// to reduce heap allocations during collection of structured results.
+    /// Also avoids costly `.clone()` heap allocations for `PropertyMap`s by
+    /// consuming the `Node` and taking ownership of its properties directly.
     pub fn collect_structured(mut self) -> Result<QueryResult> {
         // First pass: collect all rows
         let (lower, _) = self.iterator.size_hint();
@@ -605,18 +607,21 @@ impl QueryResults {
         };
 
         for row in rows {
-            // Extract node ID
-            if let Some(node_id) = row.entity.node_id() {
-                nodes.push(node_id);
-                // Extract properties if we are collecting them
-                if let Some(ref mut props) = properties {
-                    let map = row
-                        .entity
-                        .as_node()
-                        .map(|n| n.properties.clone())
-                        .unwrap_or_default();
-                    props.push(map);
+            // Extract node ID and optionally properties
+            match row.entity {
+                EntityResult::Node(n) => {
+                    nodes.push(n.id);
+                    if let Some(ref mut props) = properties {
+                        props.push(n.properties);
+                    }
                 }
+                EntityResult::NodeId(id) => {
+                    nodes.push(id);
+                    if let Some(ref mut props) = properties {
+                        props.push(Default::default());
+                    }
+                }
+                _ => {} // Skip edges for now, as collect_structured focuses on nodes
             }
 
             // Extract or pad scores
