@@ -49,6 +49,7 @@
 //! | `luna` | **Luna** | Semantic Subgraph Synthesis. "Materialize the core concept bridging these ideas." |
 //! | `serendipity` | **Serendipity** | Scenic Route Finder. "Find paths that maximize semantic divergence." |
 //! | `tremor` | **Tremor** | Semantic Earthquake Detector. "Did the global semantic state suddenly shift?" |
+//! | `zeitgeist` | **Zeitgeist** | Semantic Subgraph Evolution. "What is the spirit of the times?" |
 //!
 //! # Example: Detecting Suspicious Patterns with Sherlock
 //!
@@ -208,6 +209,10 @@ pub mod wormhole;
 #[cfg(feature = "nova")]
 /// Gestalt: Semantic Subgraph Matching Engine.
 pub mod gestalt;
+
+#[cfg(feature = "nova")]
+/// Zeitgeist: Semantic Subgraph Evolution Engine.
+pub mod zeitgeist;
 
 #[cfg(feature = "nova")]
 /// Gravity: Semantic Mass and Orbit Analysis.
