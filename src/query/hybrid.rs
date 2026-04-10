@@ -30,7 +30,6 @@
 use crate::core::error::Result;
 use crate::core::id::NodeId;
 use crate::core::vector::{cosine_similarity, validate_vector};
-use crate::query::traits::GraphView;
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashSet};
 
@@ -112,8 +111,8 @@ impl Ord for ScoredCandidate {
 /// let bob_embedding = db.get_node(bob_id)?.get_property("embedding")?.as_vector()?;
 /// let similar_friends = traverse_and_rank(&db, alice_id, "KNOWS", bob_embedding, 5)?;
 /// ```
-pub fn traverse_and_rank<G: GraphView + ?Sized>(
-    db: &G,
+pub fn traverse_and_rank(
+    db: &crate::db::AletheiaDB,
     start: NodeId,
     edge_label: &str,
     target_embedding: &[f32],
@@ -245,8 +244,8 @@ pub fn traverse_and_rank<G: GraphView + ?Sized>(
 ///     println!("Document {:?} was similar at that time: {:.3}", node_id, similarity);
 /// }
 /// ```
-pub fn find_similar_as_of<G: GraphView + ?Sized>(
-    db: &G,
+pub fn find_similar_as_of(
+    db: &crate::db::AletheiaDB,
     embedding: &[f32],
     k: usize,
     timestamp: crate::core::temporal::Timestamp,
