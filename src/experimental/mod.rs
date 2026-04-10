@@ -234,6 +234,10 @@ pub mod mnemosyne;
 pub mod muse;
 
 #[cfg(feature = "nova")]
+/// Meteor: Semantic Collision Prediction.
+pub mod meteor;
+
+#[cfg(feature = "nova")]
 pub mod omen;
 #[cfg(feature = "nova")]
 /// Oracle: Probabilistic Graph Reasoning.
