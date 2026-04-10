@@ -14,11 +14,26 @@ use super::formats::{
 use super::{MANIFEST_VERSION, VECTOR_META_MAGIC};
 
 /// Save vector index metadata with CRC32 checksum.
+///
+/// Ensures the integrity of the stored vector metadata by computing and appending a CRC32
+/// checksum. This allows AletheiaDB to verify data hasn't been corrupted at rest.
+///
+/// # Errors
+///
+/// Returns an error if serialization or disk I/O fails.
 pub fn save_vector_meta(meta: &VectorIndexMeta, path: &Path) -> Result<()> {
     super::common::save_encoded_with_crc(meta, path)
 }
 
 /// Load vector index metadata and validate CRC32 checksum.
+///
+/// Reads the encoded vector metadata and verifies its CRC32 checksum before decoding
+/// to ensure we don't load corrupted configuration.
+///
+/// # Errors
+///
+/// Returns an error if the file is missing, corrupted, exceeds `MAX_VECTOR_INDEX_FILE_SIZE`,
+/// or if the manifest version/magic bytes do not match.
 pub fn load_vector_meta(path: &Path) -> Result<VectorIndexMeta> {
     // Metadata should be small, but use standard limit for consistency
     let meta: VectorIndexMeta = super::common::load_encoded_with_crc(
@@ -46,21 +61,51 @@ pub fn load_vector_meta(path: &Path) -> Result<VectorIndexMeta> {
 }
 
 /// Save vector ID mappings with CRC32 checksum.
+///
+/// Persists the explicit translation table between AletheiaDB's internal `NodeId`s
+/// and `usearch`'s external `u64` keys. Includes a CRC32 checksum for integrity.
+///
+/// # Errors
+///
+/// Returns an error if serialization or disk I/O fails.
 pub fn save_vector_mappings(mappings: &VectorMappingsData, path: &Path) -> Result<()> {
     super::common::save_encoded_with_crc(mappings, path)
 }
 
 /// Load vector ID mappings and validate CRC32 checksum.
+///
+/// Restores the `NodeId` <-> `u64` translation table into memory, verifying
+/// its integrity via CRC32 checksum before decoding.
+///
+/// # Errors
+///
+/// Returns an error if the file is missing, corrupted, or exceeds `MAX_VECTOR_INDEX_FILE_SIZE`.
 pub fn load_vector_mappings(path: &Path) -> Result<VectorMappingsData> {
     super::common::load_encoded_with_crc(path, super::MAX_VECTOR_INDEX_FILE_SIZE, "Vector index")
 }
 
 /// Save vector snapshot metadata with CRC32 checksum.
+///
+/// Used for point-in-time vector index checkpoints. Includes a CRC32 checksum
+/// to prevent loading a corrupted checkpoint.
+///
+/// # Errors
+///
+/// Returns an error if serialization or disk I/O fails.
+#[allow(dead_code)]
 pub fn save_snapshot_meta(meta: &VectorSnapshotMeta, path: &Path) -> Result<()> {
     super::common::save_encoded_with_crc(meta, path)
 }
 
 /// Load vector snapshot metadata and validate CRC32 checksum.
+///
+/// Restores point-in-time vector index checkpoint metadata, verifying
+/// its integrity via CRC32 checksum before decoding.
+///
+/// # Errors
+///
+/// Returns an error if the file is missing, corrupted, or exceeds `MAX_VECTOR_INDEX_FILE_SIZE`.
+#[allow(dead_code)]
 pub fn load_snapshot_meta(path: &Path) -> Result<VectorSnapshotMeta> {
     super::common::load_encoded_with_crc(path, super::MAX_VECTOR_INDEX_FILE_SIZE, "Vector index")
 }
@@ -91,6 +136,10 @@ pub fn load_vector_index(path: &Path) -> Result<VectorIndexData> {
 }
 
 /// Create new vector index metadata.
+///
+/// Initializes a new configuration object for an HNSW vector index, capturing the
+/// creation timestamp, index dimensions, distance metric, and the `usearch`
+/// hyper-parameters (`m`, `ef_construction`, `ef_search`).
 pub fn new_vector_meta(
     property_name: &str,
     dimensions: u32,
@@ -116,6 +165,9 @@ pub fn new_vector_meta(
 }
 
 /// Create empty vector mappings.
+///
+/// Initializes a new, empty mapping structure for translating between AletheiaDB's
+/// `NodeId`s and the native `u64` keys required by the `usearch` index.
 pub fn new_vector_mappings() -> VectorMappingsData {
     VectorMappingsData {
         version: MANIFEST_VERSION,

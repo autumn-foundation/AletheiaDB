@@ -17,6 +17,12 @@ use super::{MANIFEST_VERSION, TEMPORAL_ADJACENCY_MAGIC};
 /// Save temporal adjacency index to disk.
 ///
 /// Creates `temporal_adjacency/adjacency.idx` with all index entries.
+/// Only the outgoing edges are extracted and serialized to disk to save space,
+/// since the incoming index can be efficiently reconstructed from the outgoing data.
+///
+/// # Errors
+///
+/// Returns an error if the directory cannot be created or if writing the file fails.
 pub fn save_temporal_adjacency_index(
     index: &TemporalAdjacencyIndex,
     data_dir: &Path,
@@ -55,7 +61,16 @@ const MAX_ADJACENCY_FILE_SIZE: u64 = 10 * 1024 * 1024;
 /// Load temporal adjacency index from disk.
 ///
 /// Reads `temporal_adjacency/adjacency.idx` and reconstructs the index.
-/// The incoming index is automatically rebuilt from outgoing edges during reconstruction.
+/// The incoming index is automatically rebuilt from outgoing edges during reconstruction
+/// by inserting edges symmetrically.
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - The file cannot be read or is missing.
+/// - The file exceeds `MAX_ADJACENCY_FILE_SIZE` (DoS protection).
+/// - The data cannot be deserialized.
+/// - The manifest version or magic bytes do not match.
 pub fn load_temporal_adjacency_index(data_dir: &Path) -> Result<Arc<TemporalAdjacencyIndex>> {
     let adjacency_file = data_dir.join("temporal_adjacency").join("adjacency.idx");
 
