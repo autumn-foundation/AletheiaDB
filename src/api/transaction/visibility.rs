@@ -300,11 +300,11 @@ impl CompressedCommitLog {
             while i + run_length < entries.len() {
                 let (next_tx, next_ts) = entries[i + run_length];
                 let expected_tx = TxId::new(end_tx.as_u64() + 1);
-                let expected_ts_wallclock = end_ts.wallclock() + 1;
+                let expected_ts_wallclock = end_ts.wallclock().checked_add(1);
 
                 // Check if both tx_id and timestamp increment by 1
                 // Note: We compare wallclock values since logical component should be 0
-                if next_tx == expected_tx && next_ts.wallclock() == expected_ts_wallclock {
+                if next_tx == expected_tx && Some(next_ts.wallclock()) == expected_ts_wallclock {
                     end_tx = next_tx;
                     end_ts = next_ts;
                     run_length += 1;
