@@ -63,7 +63,7 @@ fn gen_clustered_vector(dim: usize, cluster_id: usize, variance: f32) -> Vec<f32
 fn build_uniform_graph(node_count: usize, fan_out: usize, dim: usize) -> AletheiaDB {
     let db = AletheiaDB::new().unwrap();
     let config = HnswConfig::new(dim, DistanceMetric::Cosine);
-    db.enable_vector_index("embedding", config).unwrap();
+    db.vector_index("embedding").hnsw(config).enable().unwrap();
 
     // Create nodes with embeddings
     for i in 0..node_count {
@@ -101,7 +101,7 @@ fn build_uniform_graph(node_count: usize, fan_out: usize, dim: usize) -> Alethei
 fn build_power_law_graph(node_count: usize, dim: usize) -> AletheiaDB {
     let db = AletheiaDB::new().unwrap();
     let config = HnswConfig::new(dim, DistanceMetric::Cosine);
-    db.enable_vector_index("embedding", config).unwrap();
+    db.vector_index("embedding").hnsw(config).enable().unwrap();
 
     // Create nodes with clustered embeddings (10 clusters)
     let num_clusters = 10;
@@ -148,7 +148,7 @@ fn build_power_law_graph(node_count: usize, dim: usize) -> AletheiaDB {
 fn build_sparse_graph(node_count: usize, dim: usize) -> AletheiaDB {
     let db = AletheiaDB::new().unwrap();
     let config = HnswConfig::new(dim, DistanceMetric::Cosine);
-    db.enable_vector_index("embedding", config).unwrap();
+    db.vector_index("embedding").hnsw(config).enable().unwrap();
 
     // Create nodes
     for i in 0..node_count {

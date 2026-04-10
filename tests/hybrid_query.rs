@@ -53,7 +53,9 @@ const TEST_VECTOR_DIM: usize = 4;
 fn create_test_db() -> AletheiaDB {
     let db = AletheiaDB::new().unwrap();
     let config = HnswConfig::new(TEST_VECTOR_DIM, DistanceMetric::Cosine);
-    db.enable_vector_index("embedding", config)
+    db.vector_index("embedding")
+        .hnsw(config)
+        .enable()
         .expect("Failed to enable vector index");
     db
 }
@@ -66,7 +68,9 @@ fn create_temporal_test_db() -> AletheiaDB {
     })
     .unwrap();
     let config = HnswConfig::new(TEST_VECTOR_DIM, DistanceMetric::Cosine);
-    db.enable_vector_index("embedding", config)
+    db.vector_index("embedding")
+        .hnsw(config)
+        .enable()
         .expect("Failed to enable vector index");
     db
 }

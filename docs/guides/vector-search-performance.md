@@ -359,7 +359,7 @@ let config = HnswConfig::new(384, DistanceMetric::Cosine)
     .with_expansion_search(200)      // Thorough search
     .with_capacity(expected_size);
 
-db.enable_vector_index("embedding", config)?;
+db.vector_index("embedding").hnsw(config).enable()?;
 ```
 
 **Expected Performance:**
@@ -379,7 +379,7 @@ let config = HnswConfig::new(384, DistanceMetric::Cosine)
     .with_expansion_search(64)
     .with_capacity(expected_size);
 
-db.enable_vector_index("embedding", config)?;
+db.vector_index("embedding").hnsw(config).enable()?;
 ```
 
 **Expected Performance:**
@@ -399,7 +399,7 @@ let config = HnswConfig::new(384, DistanceMetric::DotProduct)
     .with_expansion_search(32)
     .with_capacity(expected_size);
 
-db.enable_vector_index("embedding", config)?;
+db.vector_index("embedding").hnsw(config).enable()?;
 
 // Set lower ef_search at runtime
 index.set_ef_search(16);
@@ -422,7 +422,7 @@ let config = HnswConfig::new(128, DistanceMetric::Cosine)  // Lower dimensions
     .with_expansion_search(32)
     .with_capacity(expected_size);
 
-db.enable_vector_index("embedding", config)?;
+db.vector_index("embedding").hnsw(config).enable()?;
 ```
 
 **Expected Performance:**

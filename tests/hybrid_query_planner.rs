@@ -14,7 +14,9 @@ use std::sync::Arc;
 fn create_test_db() -> AletheiaDB {
     let db = AletheiaDB::new().unwrap();
     let config = HnswConfig::new(4, DistanceMetric::Cosine);
-    db.enable_vector_index("embedding", config)
+    db.vector_index("embedding")
+        .hnsw(config)
+        .enable()
         .expect("Failed to enable vector index");
     db
 }
@@ -441,7 +443,9 @@ fn test_temporal_context_preserved() {
     })
     .unwrap();
     let config = HnswConfig::new(4, DistanceMetric::Cosine);
-    db.enable_vector_index("embedding", config)
+    db.vector_index("embedding")
+        .hnsw(config)
+        .enable()
         .expect("Failed to enable vector index");
 
     // Create a node
@@ -497,7 +501,9 @@ fn test_full_hybrid_temporal_graph_vector() {
     })
     .unwrap();
     let config = HnswConfig::new(4, DistanceMetric::Cosine);
-    db.enable_vector_index("embedding", config)
+    db.vector_index("embedding")
+        .hnsw(config)
+        .enable()
         .expect("Failed to enable vector index");
 
     let (alice, _bob, _carol, _dave) = create_social_graph(&db);
@@ -879,7 +885,9 @@ fn test_execute_temporal_node_lookup_returns_historical_state() {
     })
     .unwrap();
     let config = HnswConfig::new(4, DistanceMetric::Cosine);
-    db.enable_vector_index("embedding", config)
+    db.vector_index("embedding")
+        .hnsw(config)
+        .enable()
         .expect("Failed to enable vector index");
 
     // Create a node with initial properties
@@ -1371,7 +1379,9 @@ fn test_all_query_dimension_combinations() {
     })
     .unwrap();
     let config = HnswConfig::new(4, DistanceMetric::Cosine);
-    db.enable_vector_index("embedding", config)
+    db.vector_index("embedding")
+        .hnsw(config)
+        .enable()
         .expect("Failed to enable vector index");
 
     let (alice, _bob, _carol, _dave) = create_social_graph(&db);

@@ -37,7 +37,7 @@ use aletheiadb::index::vector::{HnswConfig, DistanceMetric};
 
 // Enable index BEFORE performing searches
 let config = HnswConfig::new(384, DistanceMetric::Cosine);
-db.enable_vector_index("embedding", config)?;
+db.vector_index("embedding").hnsw(config).enable()?;
 
 // Now searches will work
 let results = db.find_similar(node_id, 10)?;
@@ -72,7 +72,7 @@ Error: Vector(DimensionMismatch { expected: 384, actual: 768 })
 ```rust
 // ❌ WRONG: Mismatched dimensions
 let config = HnswConfig::new(384, DistanceMetric::Cosine);
-db.enable_vector_index("embedding", config)?;
+db.vector_index("embedding").hnsw(config).enable()?;
 
 let wrong_embedding = vec![0.0f32; 768];  // 768 dims, but index expects 384!
 db.create_node(
@@ -84,7 +84,7 @@ db.create_node(
 
 // ✅ CORRECT: Matching dimensions
 let config = HnswConfig::new(384, DistanceMetric::Cosine);
-db.enable_vector_index("embedding", config)?;
+db.vector_index("embedding").hnsw(config).enable()?;
 
 let correct_embedding = vec![0.0f32; 384];  // 384 dims matches config
 db.create_node(
@@ -231,13 +231,13 @@ Error: VectorIndexAlreadyEnabled
 ```rust
 // ❌ WRONG: Enable twice
 let config = HnswConfig::new(384, DistanceMetric::Cosine);
-db.enable_vector_index("embedding", config.clone())?;
-db.enable_vector_index("embedding", config)?;  // Error!
+db.vector_index("embedding").hnsw(config.clone()).enable()?;
+db.vector_index("embedding").hnsw(config).enable()?;  // Error!
 
 // ✅ CORRECT: Check before enabling
 if !db.is_vector_index_enabled() {
     let config = HnswConfig::new(384, DistanceMetric::Cosine);
-    db.enable_vector_index("embedding", config)?;
+    db.vector_index("embedding").hnsw(config).enable()?;
 }
 ```
 
@@ -292,7 +292,7 @@ println!("Total indexed nodes: {}", all_results.len());
    ```rust
    // Problem: Index enabled but no nodes created with vectors
    let config = HnswConfig::new(384, DistanceMetric::Cosine);
-   db.enable_vector_index("embedding", config)?;
+   db.vector_index("embedding").hnsw(config).enable()?;
 
    // Created nodes without vector property
    db.create_node("Doc", PropertyMapBuilder::new()

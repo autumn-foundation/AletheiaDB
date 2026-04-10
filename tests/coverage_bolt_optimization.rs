@@ -40,7 +40,9 @@ fn test_get_node_vector_failure_coverage() {
     // We can trigger get_node_vector via find_similar, but vector index must be enabled first
     use aletheiadb::index::vector::{DistanceMetric, HnswConfig};
     let config = HnswConfig::new(2, DistanceMetric::Cosine);
-    db.enable_vector_index("embedding", config)
+    db.vector_index("embedding")
+        .hnsw(config)
+        .enable()
         .expect("Failed to enable index");
 
     let non_existent = NodeId::new(9999).unwrap();

@@ -359,7 +359,7 @@ mod tests {
         let db = AletheiaDB::new().unwrap();
         // Enable vector index to ensure vector logic works (though Prism works on raw props too)
         let config = HnswConfig::new(2, DistanceMetric::Cosine);
-        db.enable_vector_index("embedding", config).unwrap();
+        db.vector_index("embedding").hnsw(config).enable().unwrap();
 
         let mut prism = Prism::new(&db);
 
@@ -428,7 +428,7 @@ mod tests {
     fn test_prism_from_node() {
         let db = AletheiaDB::new().unwrap();
         let config = HnswConfig::new(2, DistanceMetric::Cosine);
-        db.enable_vector_index("vec", config).unwrap();
+        db.vector_index("vec").hnsw(config).enable().unwrap();
 
         let props = PropertyMapBuilder::new()
             .insert_vector("vec", &[1.0, 0.0])
@@ -498,7 +498,7 @@ mod tests {
         let db = AletheiaDB::new().unwrap();
         // Enable vector index so vectors are allowed
         let config = HnswConfig::new(2, DistanceMetric::Cosine);
-        db.enable_vector_index("vec", config).unwrap();
+        db.vector_index("vec").hnsw(config).enable().unwrap();
 
         let t1 = time::from_millis(1000);
         let t2 = time::from_millis(2000);

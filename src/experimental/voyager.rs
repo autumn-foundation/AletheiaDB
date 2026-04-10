@@ -167,7 +167,9 @@ mod tests {
     #[test]
     fn test_voyager_chooses_lowest_similarity() {
         let db = AletheiaDB::new().unwrap();
-        db.enable_vector_index("vec", HnswConfig::new(2, DistanceMetric::Cosine))
+        db.vector_index("vec")
+            .hnsw(HnswConfig::new(2, DistanceMetric::Cosine))
+            .enable()
             .unwrap();
 
         // Node A: [1.0, 0.0] (Start)
@@ -224,7 +226,9 @@ mod tests {
     #[test]
     fn test_voyager_avoids_cycles() {
         let db = AletheiaDB::new().unwrap();
-        db.enable_vector_index("vec", HnswConfig::new(2, DistanceMetric::Cosine))
+        db.vector_index("vec")
+            .hnsw(HnswConfig::new(2, DistanceMetric::Cosine))
+            .enable()
             .unwrap();
 
         // Node A: [1.0, 0.0]

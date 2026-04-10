@@ -18,11 +18,11 @@ fn test_enable_vector_index() {
 
     // Enable vector index
     let config = HnswConfig::new(3, DistanceMetric::Cosine).with_capacity(100);
-    db.enable_vector_index("embedding", config).unwrap();
+    db.vector_index("embedding").hnsw(config).enable().unwrap();
 
     // Trying to enable again should fail
     let config2 = HnswConfig::new(3, DistanceMetric::Cosine);
-    assert!(db.enable_vector_index("embedding", config2).is_err());
+    assert!(db.vector_index("embedding").hnsw(config2).enable().is_err());
 }
 
 #[test]
@@ -31,7 +31,7 @@ fn test_find_similar_basic() {
 
     // Enable vector index
     let config = HnswConfig::new(3, DistanceMetric::Cosine).with_capacity(100);
-    db.enable_vector_index("embedding", config).unwrap();
+    db.vector_index("embedding").hnsw(config).enable().unwrap();
 
     // Create nodes with vector embeddings
     let doc1 = db
@@ -85,7 +85,7 @@ fn test_find_similar_with_label() {
 
     // Enable vector index
     let config = HnswConfig::new(3, DistanceMetric::Cosine).with_capacity(100);
-    db.enable_vector_index("embedding", config).unwrap();
+    db.vector_index("embedding").hnsw(config).enable().unwrap();
 
     // Create Document nodes
     let doc1 = db
@@ -148,7 +148,7 @@ fn test_vector_index_with_euclidean_distance() {
 
     // Enable vector index with Euclidean distance
     let config = HnswConfig::new(3, DistanceMetric::Euclidean).with_capacity(100);
-    db.enable_vector_index("embedding", config).unwrap();
+    db.vector_index("embedding").hnsw(config).enable().unwrap();
 
     // Create nodes with vector embeddings
     let doc1 = db
@@ -194,7 +194,7 @@ fn test_vector_index_with_large_k() {
 
     // Enable vector index
     let config = HnswConfig::new(3, DistanceMetric::Cosine).with_capacity(100);
-    db.enable_vector_index("embedding", config).unwrap();
+    db.vector_index("embedding").hnsw(config).enable().unwrap();
 
     // Create 5 nodes
     let mut node_ids = Vec::new();
@@ -229,7 +229,7 @@ fn test_transaction_nodes_are_indexed() {
 
     // Enable vector index
     let config = HnswConfig::new(3, DistanceMetric::Cosine).with_capacity(100);
-    db.enable_vector_index("embedding", config).unwrap();
+    db.vector_index("embedding").hnsw(config).enable().unwrap();
 
     // Create nodes via write transaction (not convenience method)
     let (doc1, doc2, _doc3) = db
@@ -272,7 +272,7 @@ fn test_find_similar_by_embedding() {
 
     // Enable vector index
     let config = HnswConfig::new(3, DistanceMetric::Cosine).with_capacity(100);
-    db.enable_vector_index("embedding", config).unwrap();
+    db.vector_index("embedding").hnsw(config).enable().unwrap();
 
     // Create nodes with vector embeddings
     let doc1 = db
@@ -322,7 +322,7 @@ fn test_find_similar_by_embedding_with_label() {
 
     // Enable vector index
     let config = HnswConfig::new(3, DistanceMetric::Cosine).with_capacity(100);
-    db.enable_vector_index("embedding", config).unwrap();
+    db.vector_index("embedding").hnsw(config).enable().unwrap();
 
     // Create Document nodes
     let doc1 = db
@@ -371,7 +371,7 @@ fn test_find_similar_by_embedding_dimension_mismatch() {
 
     // Enable vector index with 3 dimensions
     let config = HnswConfig::new(3, DistanceMetric::Cosine).with_capacity(100);
-    db.enable_vector_index("embedding", config).unwrap();
+    db.vector_index("embedding").hnsw(config).enable().unwrap();
 
     // Create a node
     db.create_node(
@@ -396,7 +396,7 @@ fn test_find_similar_empty_database() {
 
     // Enable vector index but don't add any nodes
     let config = HnswConfig::new(3, DistanceMetric::Cosine).with_capacity(100);
-    db.enable_vector_index("embedding", config).unwrap();
+    db.vector_index("embedding").hnsw(config).enable().unwrap();
 
     // Search should return empty results, not error
     let query_embedding = [1.0f32, 0.0, 0.0];
@@ -411,7 +411,7 @@ fn test_find_similar_k_zero() {
 
     // Enable vector index and add some nodes
     let config = HnswConfig::new(3, DistanceMetric::Cosine).with_capacity(100);
-    db.enable_vector_index("embedding", config).unwrap();
+    db.vector_index("embedding").hnsw(config).enable().unwrap();
 
     db.create_node(
         "Document",
@@ -434,7 +434,7 @@ fn test_concurrent_vector_indexing() {
 
     // Enable vector index
     let config = HnswConfig::new(4, DistanceMetric::Cosine).with_capacity(1000);
-    db.enable_vector_index("embedding", config).unwrap();
+    db.vector_index("embedding").hnsw(config).enable().unwrap();
 
     // Spawn multiple threads that create nodes with vectors concurrently
     let mut handles = vec![];
@@ -496,7 +496,7 @@ fn test_find_similar_with_missing_property() {
 
     // Enable vector index on "embedding" property
     let config = HnswConfig::new(3, DistanceMetric::Cosine).with_capacity(100);
-    db.enable_vector_index("embedding", config).unwrap();
+    db.vector_index("embedding").hnsw(config).enable().unwrap();
 
     // Create some nodes with the indexed property
     let doc1 = db
@@ -1266,7 +1266,10 @@ fn test_temporal_config_without_hnsw_config() {
 
     // Enable vector index first
     let hnsw_config = HnswConfig::new(4, DistanceMetric::Cosine).with_capacity(100);
-    db.enable_vector_index("embedding", hnsw_config).unwrap();
+    db.vector_index("embedding")
+        .hnsw(hnsw_config)
+        .enable()
+        .unwrap();
 
     // Now enable temporal vector index WITHOUT providing hnsw_config
     // This should succeed because vector index already exists
@@ -1366,9 +1369,13 @@ fn test_concurrent_vector_operations_with_multiple_properties() {
     let hnsw_config1 = HnswConfig::new(4, DistanceMetric::Cosine).with_capacity(100);
     let hnsw_config2 = HnswConfig::new(4, DistanceMetric::Cosine).with_capacity(100);
 
-    db.enable_vector_index("title_embedding", hnsw_config1)
+    db.vector_index("title_embedding")
+        .hnsw(hnsw_config1)
+        .enable()
         .unwrap();
-    db.enable_vector_index("content_embedding", hnsw_config2)
+    db.vector_index("content_embedding")
+        .hnsw(hnsw_config2)
+        .enable()
         .unwrap();
 
     // Spawn multiple threads that create nodes with different embeddings concurrently
@@ -1456,7 +1463,7 @@ fn test_aletheiadb_is_vector_index_enabled_for() {
 
     // Enable index for "embedding"
     let config = HnswConfig::new(128, DistanceMetric::Cosine);
-    db.enable_vector_index("embedding", config).unwrap();
+    db.vector_index("embedding").hnsw(config).enable().unwrap();
 
     // Now should be enabled
     assert!(db.is_vector_index_enabled());
@@ -1465,7 +1472,7 @@ fn test_aletheiadb_is_vector_index_enabled_for() {
 
     // Enable another index
     let config2 = HnswConfig::new(256, DistanceMetric::Euclidean);
-    db.enable_vector_index("vector", config2).unwrap();
+    db.vector_index("vector").hnsw(config2).enable().unwrap();
 
     assert!(db.is_vector_index_enabled_for("vector"));
 }

@@ -798,7 +798,7 @@ mod tests {
 
         // Enable vector index
         let config = HnswConfig::new(2, DistanceMetric::Cosine);
-        db.enable_vector_index("vec", config).unwrap();
+        db.vector_index("vec").hnsw(config).enable().unwrap();
 
         // DB: Node 1 at [1.0, 0.0]
         let props1 = PropertyMapBuilder::new()

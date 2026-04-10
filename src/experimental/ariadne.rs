@@ -343,7 +343,7 @@ mod tests {
 
         // Setup vector index
         let config = HnswConfig::new(2, DistanceMetric::Cosine);
-        db.enable_vector_index("embedding", config).unwrap();
+        db.vector_index("embedding").hnsw(config).enable().unwrap();
 
         // Story: A -> B -> (Jump) -> C -> D
         // Times: 10 -> 20 -> (Jump) -> 30 -> 40

@@ -1441,7 +1441,12 @@ impl AletheiaMcpServer {
 
         let config = HnswConfig::new(req.dimensions, distance_metric);
 
-        match self.db.enable_vector_index(&req.property_name, config) {
+        match self
+            .db
+            .vector_index(&req.property_name)
+            .hnsw(config)
+            .enable()
+        {
             Ok(()) => self.success_json(json!({
                 "success": true,
                 "property_name": req.property_name,

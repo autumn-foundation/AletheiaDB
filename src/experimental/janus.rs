@@ -218,7 +218,9 @@ mod tests {
     #[test]
     fn test_janus_dumbbell_bridge() {
         let db = AletheiaDB::new().unwrap();
-        db.enable_vector_index("emb", HnswConfig::new(2, DistanceMetric::Euclidean))
+        db.vector_index("emb")
+            .hnsw(HnswConfig::new(2, DistanceMetric::Euclidean))
+            .enable()
             .unwrap();
 
         // Cluster A (near 0,0)
@@ -314,7 +316,9 @@ mod tests {
     #[test]
     fn test_janus_homogeneous_cluster() {
         let db = AletheiaDB::new().unwrap();
-        db.enable_vector_index("emb", HnswConfig::new(2, DistanceMetric::Euclidean))
+        db.vector_index("emb")
+            .hnsw(HnswConfig::new(2, DistanceMetric::Euclidean))
+            .enable()
             .unwrap();
 
         // One big cluster around 0,0

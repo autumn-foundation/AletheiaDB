@@ -201,7 +201,9 @@ mod tests {
     fn test_telepathy_semantic_gate() {
         let db = AletheiaDB::new().unwrap();
         // Config: 2D vectors
-        db.enable_vector_index("vec", HnswConfig::new(2, DistanceMetric::Cosine))
+        db.vector_index("vec")
+            .hnsw(HnswConfig::new(2, DistanceMetric::Cosine))
+            .enable()
             .unwrap();
 
         // Node A: Source [1.0, 0.0]
@@ -257,7 +259,9 @@ mod tests {
     #[test]
     fn test_telepathy_decay_chain() {
         let db = AletheiaDB::new().unwrap();
-        db.enable_vector_index("vec", HnswConfig::new(2, DistanceMetric::Cosine))
+        db.vector_index("vec")
+            .hnsw(HnswConfig::new(2, DistanceMetric::Cosine))
+            .enable()
             .unwrap();
 
         // Chain: A -> B -> C

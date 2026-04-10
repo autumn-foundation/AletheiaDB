@@ -39,7 +39,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = HnswConfig::new(384, DistanceMetric::Cosine)
         .with_capacity(10000);
 
-    db.enable_vector_index("embedding", config)?;
+    db.vector_index("embedding").hnsw(config).enable()?;
 
     Ok(())
 }
@@ -114,7 +114,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let config = HnswConfig::new(384, DistanceMetric::Cosine)
         .with_capacity(1000);
-    db.enable_vector_index("embedding", config)?;
+    db.vector_index("embedding").hnsw(config).enable()?;
 
     // 2. Insert documents with embeddings
     let documents = vec![

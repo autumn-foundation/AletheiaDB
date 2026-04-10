@@ -701,7 +701,9 @@ fn setup_indexed_db(dimensions: usize) -> AletheiaDB {
 
     let db = AletheiaDB::new().unwrap();
     let config = HnswConfig::new(dimensions, DistanceMetric::Cosine).with_capacity(100);
-    db.enable_vector_index("embedding", config)
+    db.vector_index("embedding")
+        .hnsw(config)
+        .enable()
         .expect("Failed to enable vector index");
     db
 }
@@ -721,7 +723,7 @@ fn test_enable_vector_index() {
 
     // Enable index
     let config = HnswConfig::new(384, DistanceMetric::Cosine);
-    db.enable_vector_index("embedding", config).unwrap();
+    db.vector_index("embedding").hnsw(config).enable().unwrap();
 
     // Index should now be enabled
     assert!(db.is_vector_index_enabled());
@@ -735,10 +737,13 @@ fn test_double_enable_vector_index_fails() {
 
     // Enable index once
     let config = HnswConfig::new(384, DistanceMetric::Cosine);
-    db.enable_vector_index("embedding", config.clone()).unwrap();
+    db.vector_index("embedding")
+        .hnsw(config.clone())
+        .enable()
+        .unwrap();
 
     // Attempt to enable again should fail
-    let result = db.enable_vector_index("embedding", config);
+    let result = db.vector_index("embedding").hnsw(config).enable();
     assert!(result.is_err());
 }
 
@@ -1134,10 +1139,16 @@ fn test_delete_node_removes_from_multiple_indexes() {
 
     // Enable multiple vector indexes
     let config1 = HnswConfig::new(64, DistanceMetric::Cosine).with_capacity(100);
-    db.enable_vector_index("text_embedding", config1).unwrap();
+    db.vector_index("text_embedding")
+        .hnsw(config1)
+        .enable()
+        .unwrap();
 
     let config2 = HnswConfig::new(64, DistanceMetric::Cosine).with_capacity(100);
-    db.enable_vector_index("image_embedding", config2).unwrap();
+    db.vector_index("image_embedding")
+        .hnsw(config2)
+        .enable()
+        .unwrap();
 
     // Create node with multiple embeddings
     let text_emb = generate_embedding(64, 1.0);

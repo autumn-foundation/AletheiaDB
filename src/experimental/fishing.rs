@@ -251,7 +251,7 @@ mod tests {
 
         // Enable vector index
         let config = HnswConfig::new(2, DistanceMetric::Cosine);
-        db.enable_vector_index("embedding", config).unwrap();
+        db.vector_index("embedding").hnsw(config).enable().unwrap();
 
         // Create nodes
         // Node 1: "The Bait" (we'll use its vector)
@@ -319,7 +319,7 @@ mod tests {
 
         // Enable vector index
         let config = HnswConfig::new(2, DistanceMetric::Cosine);
-        db.enable_vector_index("embedding", config).unwrap();
+        db.vector_index("embedding").hnsw(config).enable().unwrap();
 
         // Node 1: "The Bait"
         let props1 = PropertyMapBuilder::new()
@@ -423,7 +423,7 @@ mod tests {
         // but we can ensure it doesn't crash or behave illogically.
         let db = AletheiaDB::new().unwrap();
         let config = HnswConfig::new(2, DistanceMetric::Cosine);
-        db.enable_vector_index("embedding", config).unwrap();
+        db.vector_index("embedding").hnsw(config).enable().unwrap();
 
         let props = PropertyMapBuilder::new()
             .insert_vector("embedding", &[1.0, 0.0])

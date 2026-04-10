@@ -401,7 +401,7 @@ mod tests {
 
         let db = AletheiaDB::new().unwrap();
         let config = HnswConfig::new(2, DistanceMetric::Cosine);
-        db.enable_vector_index("embedding", config).unwrap();
+        db.vector_index("embedding").hnsw(config).enable().unwrap();
 
         // A: [1, 0]
         let p_a = PropertyMapBuilder::new()

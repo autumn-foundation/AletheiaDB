@@ -338,7 +338,7 @@ mod tests {
     fn test_chameleon_clustering() {
         let db = AletheiaDB::new().unwrap();
         let config = HnswConfig::new(2, DistanceMetric::Euclidean);
-        db.enable_vector_index("vec", config).unwrap();
+        db.vector_index("vec").hnsw(config).enable().unwrap();
 
         // Create Central Node
         let center = db
@@ -398,7 +398,7 @@ mod tests {
     fn test_chameleon_clustering_orthogonal() {
         let db = AletheiaDB::new().unwrap();
         let config = HnswConfig::new(2, DistanceMetric::Euclidean);
-        db.enable_vector_index("vec", config).unwrap();
+        db.vector_index("vec").hnsw(config).enable().unwrap();
 
         let center = db
             .create_node("Center", PropertyMapBuilder::new().build())

@@ -249,7 +249,7 @@ mod tests {
         let db = AletheiaDB::new().unwrap();
         // Config vector index
         let config = HnswConfig::new(2, DistanceMetric::Euclidean);
-        db.enable_vector_index("vec", config).unwrap();
+        db.vector_index("vec").hnsw(config).enable().unwrap();
 
         // 1. Initial: [0.0, 0.0]
         let props = PropertyMapBuilder::new()
@@ -323,7 +323,7 @@ mod tests {
         // Test that small drifts eventually trigger a frame if they accumulate
         let db = AletheiaDB::new().unwrap();
         let config = HnswConfig::new(2, DistanceMetric::Euclidean);
-        db.enable_vector_index("vec", config).unwrap();
+        db.vector_index("vec").hnsw(config).enable().unwrap();
 
         let props = PropertyMapBuilder::new()
             .insert_vector("vec", &[0.0, 0.0])
@@ -373,7 +373,7 @@ mod tests {
     fn test_mnemosyne_property_change() {
         let db = AletheiaDB::new().unwrap();
         let config = HnswConfig::new(2, DistanceMetric::Euclidean);
-        db.enable_vector_index("vec", config).unwrap();
+        db.vector_index("vec").hnsw(config).enable().unwrap();
 
         let props = PropertyMapBuilder::new()
             .insert_vector("vec", &[0.0, 0.0])

@@ -24,7 +24,7 @@ impl AletheiaDB {
     /// use aletheiadb::index::vector::{HnswConfig, DistanceMetric};
     ///
     /// let config = HnswConfig::new(384, DistanceMetric::Cosine);
-    /// db.enable_vector_index("embedding", config)?;
+    /// db.vector_index("embedding").hnsw(config).enable()?;
     /// ```
     ///
     /// # Errors

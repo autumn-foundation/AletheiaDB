@@ -181,7 +181,7 @@ mod tests {
     fn test_muse_finds_void() {
         let db = AletheiaDB::new().unwrap();
         let config = HnswConfig::new(2, DistanceMetric::Cosine);
-        db.enable_vector_index("vec", config).unwrap();
+        db.vector_index("vec").hnsw(config).enable().unwrap();
 
         // Node A: [1, 0]
         let props_a = PropertyMapBuilder::new()
@@ -222,7 +222,7 @@ mod tests {
     fn test_muse_finds_crowded_space() {
         let db = AletheiaDB::new().unwrap();
         let config = HnswConfig::new(2, DistanceMetric::Cosine);
-        db.enable_vector_index("vec", config).unwrap();
+        db.vector_index("vec").hnsw(config).enable().unwrap();
 
         // Node A: [1, 0]
         let props_a = PropertyMapBuilder::new()

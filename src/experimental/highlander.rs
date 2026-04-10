@@ -225,7 +225,7 @@ mod tests {
 
         // Enable vector index
         let config = HnswConfig::new(2, DistanceMetric::Cosine);
-        db.enable_vector_index("embedding", config).unwrap();
+        db.vector_index("embedding").hnsw(config).enable().unwrap();
 
         // 1. Create Target Node: "John Smith" [1.0, 0.0]
         let props1 = PropertyMapBuilder::new()

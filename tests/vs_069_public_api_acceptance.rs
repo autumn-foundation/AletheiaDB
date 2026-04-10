@@ -25,7 +25,9 @@ use aletheiadb::{
 fn create_test_db() -> AletheiaDB {
     let db = AletheiaDB::new().unwrap();
     let config = HnswConfig::new(4, DistanceMetric::Cosine);
-    db.enable_vector_index("embedding", config)
+    db.vector_index("embedding")
+        .hnsw(config)
+        .enable()
         .expect("Failed to enable vector index");
     db
 }

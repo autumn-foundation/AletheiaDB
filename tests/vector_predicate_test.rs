@@ -7,7 +7,7 @@ fn test_find_similar_with_predicate() -> Result<()> {
     // 1. Setup DB and vector index
     let db = AletheiaDB::new()?;
     let config = HnswConfig::new(2, DistanceMetric::Cosine);
-    db.enable_vector_index("embedding", config)?;
+    db.vector_index("embedding").hnsw(config).enable()?;
 
     // 2. Insert nodes with vectors and metadata
     // Node 1: [1.0, 0.0], category="A"
@@ -70,7 +70,7 @@ fn test_find_similar_with_predicate() -> Result<()> {
 fn test_find_similar_with_predicate_dimension_mismatch() -> Result<()> {
     let db = AletheiaDB::new()?;
     let config = HnswConfig::new(2, DistanceMetric::Cosine);
-    db.enable_vector_index("embedding", config)?;
+    db.vector_index("embedding").hnsw(config).enable()?;
 
     // Create a node to ensure index exists and is active
     let props = PropertyMapBuilder::new()

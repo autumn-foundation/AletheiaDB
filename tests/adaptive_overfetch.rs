@@ -10,7 +10,9 @@ use aletheiadb::index::vector::{DistanceMetric, HnswConfig};
 fn test_adaptive_overfetch_learns_from_sparse_labels() {
     // Create database with vector index
     let db = AletheiaDB::new().unwrap();
-    db.enable_vector_index("embedding", HnswConfig::new(4, DistanceMetric::Cosine))
+    db.vector_index("embedding")
+        .hnsw(HnswConfig::new(4, DistanceMetric::Cosine))
+        .enable()
         .unwrap();
 
     // Create 100 nodes: 90 with label "Common", 10 with label "Rare"
@@ -60,7 +62,9 @@ fn test_adaptive_overfetch_learns_from_sparse_labels() {
 fn test_adaptive_overfetch_learns_from_dense_labels() {
     // Create database with vector index
     let db = AletheiaDB::new().unwrap();
-    db.enable_vector_index("embedding", HnswConfig::new(4, DistanceMetric::Cosine))
+    db.vector_index("embedding")
+        .hnsw(HnswConfig::new(4, DistanceMetric::Cosine))
+        .enable()
         .unwrap();
 
     // Create 100 nodes: 95 with label "Common", 5 with label "Rare"
@@ -103,7 +107,9 @@ fn test_adaptive_overfetch_learns_from_dense_labels() {
 fn test_adaptive_overfetch_embedding_search() {
     // Test adaptive over-fetch with find_similar_by_embedding_with_label
     let db = AletheiaDB::new().unwrap();
-    db.enable_vector_index("embedding", HnswConfig::new(4, DistanceMetric::Cosine))
+    db.vector_index("embedding")
+        .hnsw(HnswConfig::new(4, DistanceMetric::Cosine))
+        .enable()
         .unwrap();
 
     // Create 100 nodes with varying labels
@@ -143,7 +149,9 @@ fn test_adaptive_overfetch_embedding_search() {
 fn test_adaptive_overfetch_respects_max_cap() {
     // Ensure adaptive strategy doesn't exceed reasonable bounds
     let db = AletheiaDB::new().unwrap();
-    db.enable_vector_index("embedding", HnswConfig::new(4, DistanceMetric::Cosine))
+    db.vector_index("embedding")
+        .hnsw(HnswConfig::new(4, DistanceMetric::Cosine))
+        .enable()
         .unwrap();
 
     // Create 1000 nodes with a very rare label (0.1% pass rate)
@@ -182,7 +190,9 @@ fn test_adaptive_overfetch_respects_max_cap() {
 fn test_adaptive_overfetch_varying_distributions() {
     // Test adaptive over-fetch with varying label distributions
     let db = AletheiaDB::new().unwrap();
-    db.enable_vector_index("embedding", HnswConfig::new(4, DistanceMetric::Cosine))
+    db.vector_index("embedding")
+        .hnsw(HnswConfig::new(4, DistanceMetric::Cosine))
+        .enable()
         .unwrap();
 
     // Create nodes with different label distributions
@@ -222,7 +232,9 @@ fn test_adaptive_overfetch_varying_distributions() {
 fn test_adaptive_overfetch_statistics_tracking() {
     // Verify that statistics are being tracked correctly
     let db = AletheiaDB::new().unwrap();
-    db.enable_vector_index("embedding", HnswConfig::new(4, DistanceMetric::Cosine))
+    db.vector_index("embedding")
+        .hnsw(HnswConfig::new(4, DistanceMetric::Cosine))
+        .enable()
         .unwrap();
 
     // Create a controlled dataset: 50% label "A", 50% label "B"
@@ -331,7 +343,9 @@ fn run_adaptive_overfetch_concurrent_safety(
     use std::thread;
 
     let db = Arc::new(AletheiaDB::new().unwrap());
-    db.enable_vector_index("embedding", HnswConfig::new(4, DistanceMetric::Cosine))
+    db.vector_index("embedding")
+        .hnsw(HnswConfig::new(4, DistanceMetric::Cosine))
+        .enable()
         .unwrap();
 
     // Create 20 nodes with 2 labels (reduced for CI reliability)

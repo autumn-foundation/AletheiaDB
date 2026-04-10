@@ -207,7 +207,9 @@ mod tests {
 
     fn create_db() -> AletheiaDB {
         let db = AletheiaDB::new().unwrap();
-        db.enable_vector_index("vec", HnswConfig::new(2, DistanceMetric::Cosine))
+        db.vector_index("vec")
+            .hnsw(HnswConfig::new(2, DistanceMetric::Cosine))
+            .enable()
             .unwrap();
         db
     }

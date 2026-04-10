@@ -262,7 +262,9 @@ mod tests {
     fn test_omen_head_on_collision() {
         let db = AletheiaDB::new().unwrap();
         // Enable index
-        db.enable_vector_index("vec", HnswConfig::new(2, DistanceMetric::Euclidean))
+        db.vector_index("vec")
+            .hnsw(HnswConfig::new(2, DistanceMetric::Euclidean))
+            .enable()
             .unwrap();
 
         // Node A: Starts at [0, 0], moving Right (+X)
@@ -343,7 +345,9 @@ mod tests {
     #[test]
     fn test_omen_diverging() {
         let db = AletheiaDB::new().unwrap();
-        db.enable_vector_index("vec", HnswConfig::new(2, DistanceMetric::Euclidean))
+        db.vector_index("vec")
+            .hnsw(HnswConfig::new(2, DistanceMetric::Euclidean))
+            .enable()
             .unwrap();
 
         // Start together at [0,0]
@@ -400,7 +404,9 @@ mod tests {
     #[test]
     fn test_omen_static_target() {
         let db = AletheiaDB::new().unwrap();
-        db.enable_vector_index("vec", HnswConfig::new(2, DistanceMetric::Euclidean))
+        db.vector_index("vec")
+            .hnsw(HnswConfig::new(2, DistanceMetric::Euclidean))
+            .enable()
             .unwrap();
 
         // Static Target T at [10, 0]
@@ -446,7 +452,9 @@ mod tests {
     #[test]
     fn test_omen_parallel() {
         let db = AletheiaDB::new().unwrap();
-        db.enable_vector_index("vec", HnswConfig::new(2, DistanceMetric::Euclidean))
+        db.vector_index("vec")
+            .hnsw(HnswConfig::new(2, DistanceMetric::Euclidean))
+            .enable()
             .unwrap();
 
         // A: [0, 0] -> [1, 0]

@@ -311,7 +311,7 @@ mod tests {
     fn setup_db() -> AletheiaDB {
         let db = AletheiaDB::new().unwrap();
         let config = HnswConfig::new(2, DistanceMetric::Cosine);
-        db.enable_vector_index("embedding", config).unwrap();
+        db.vector_index("embedding").hnsw(config).enable().unwrap();
         db
     }
 
@@ -463,7 +463,7 @@ mod tests {
 
         // Enable index
         let config = HnswConfig::new(2, DistanceMetric::Cosine);
-        db.enable_vector_index("embedding", config).unwrap();
+        db.vector_index("embedding").hnsw(config).enable().unwrap();
 
         // Create nodes without vectors
         let n3 = db
