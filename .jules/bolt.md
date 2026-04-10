@@ -54,3 +54,6 @@
 **[Zero-Cost Lexer Lookahead]**
 **Learning:** `Peekable::clone()` is not a zero-cost abstraction when parsing strings, especially since it clones the underlying iterator state on every single token. For simple ASCII characters (like `-`, `/`, `*`, `0`..`9`), `input.as_bytes().get(idx + 1)` is much faster and completely avoids heap allocations and iterator cloning overhead.
 **Action:** When doing lookaheads in a lexer over a `String` or `&str`, prefer slicing the underlying byte array `as_bytes()` if the characters you're looking for are strictly single-byte ASCII.
+**[QueryRow Entity Extraction]**
+**Learning:** Destructuring a struct (like `QueryRow`) and pattern matching directly on its owned components (`EntityResult`) inside a loop completely eliminates the need for expensive heap allocations caused by intermediate `.clone()` calls on nested data structures like HashMaps (properties). Rust's move semantics are the ultimate zero-cost abstraction for consuming data iterators.
+**Action:** When mapping over iterators or structs that are fully consumed, never use `as_ref().map(|x| x.clone())`. Instead, destructure the container and take ownership by value.
