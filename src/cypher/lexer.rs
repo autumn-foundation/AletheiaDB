@@ -500,7 +500,9 @@ impl<'a> CypherLexer<'a> {
     // -----------------------------------------------------------------------
 
     fn read_string(&mut self, start: usize) -> Result<Token, CypherError> {
-        let (_, quote) = self.advance().unwrap(); // consume opening quote
+        let (_, quote) = self.advance().ok_or_else(|| {
+            self.lex_error(start, "Unexpected end of input at string start".to_string())
+        })?;
         let mut value = String::new();
 
         loop {
@@ -517,9 +519,18 @@ impl<'a> CypherLexer<'a> {
                         Some((_, 'n')) => value.push('\n'),
                         Some((_, 't')) => value.push('\t'),
                         Some((_, 'r')) => value.push('\r'),
+                        Some((_, '0')) => value.push('\0'),
+                        Some((_, '\'')) => value.push('\''),
+                        Some((_, '"')) => value.push('"'),
+                        Some((_, 'b')) => value.push('\x08'),
+                        Some((_, 'f')) => value.push('\x0C'),
                         Some((_, other)) => {
-                            value.push('\\');
-                            value.push(other);
+                            // According to cypher spec, unknown escapes are just the character
+                            // However, strictly we could also just return an error. Let's return error
+                            // to be safe against garbage and strictly follow standard.
+                            return Err(
+                                self.lex_error(start, format!("Invalid escape sequence: \\{}", other))
+                            );
                         }
                         None => {
                             return Err(

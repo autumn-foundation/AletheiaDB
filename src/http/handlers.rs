@@ -1010,3 +1010,11 @@ mod tests {
         );
     }
 }
+#[actix_rt::test]
+async fn test_json_to_predicate_value_unsupported_types() {
+    let unsupported1 = serde_json::Value::Array(vec![]);
+    let unsupported2 = serde_json::Value::Object(serde_json::Map::new());
+
+    assert_eq!(json_to_predicate_value(&unsupported1), None);
+    assert_eq!(json_to_predicate_value(&unsupported2), None);
+}
