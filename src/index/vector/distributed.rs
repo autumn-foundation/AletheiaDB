@@ -1168,7 +1168,8 @@ impl<C: VectorNodeClient + 'static> VectorIndex for DistributedVectorIndex<C> {
             .collect();
 
         // Collect successful results
-        let mut successful_results = Vec::new();
+        // ⚡ Bolt Optimization: Pre-allocate successful_results vector using results.len() to prevent intermediate heap reallocations on the happy path.
+        let mut successful_results = Vec::with_capacity(results.len());
         let mut failed_count = 0;
         let mut sample_error = String::new();
 
