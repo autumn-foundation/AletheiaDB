@@ -9,6 +9,9 @@ mod tests {
 
     #[test]
     fn test_dot_product_avx2_panic() {
+        if !is_x86_feature_detected!("avx2") || !is_x86_feature_detected!("fma") {
+            return;
+        }
         let a = vec![1.0; 10];
         let b = vec![2.0; 5];
 
