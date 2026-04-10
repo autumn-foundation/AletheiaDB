@@ -129,4 +129,52 @@ mod tests {
         assert_eq!(rows[0].entity.node_id(), Some(b));
         assert_eq!(rows[1].entity.node_id(), Some(b));
     }
+
+    #[test]
+    fn test_filter_iterator_strict_type_equality() {
+        // 🎯 Target: FilterIterator::compare_eq and related type strictness
+        // 💣 Risk: False confidence in filtering if type coercion isn`t explicitly tested and documented as strict.
+        use aletheiadb::query::ir::{Predicate, PredicateValue};
+
+        let (current, historical, _, _) = create_cycle_graph();
+
+        // Add a node with an integer property
+        let node_id = current
+            .create_node(
+                "Test",
+                PropertyMapBuilder::new().insert("value", 5i64).build(),
+            )
+            .unwrap();
+
+        // Querying with float 5.0 should NOT match integer 5 due to strict typing
+        let predicate = Predicate::Eq {
+            key: "value".to_string(),
+            value: PredicateValue::Float(5.0),
+        };
+
+        // We use NodeLookup as the input iterator
+        let executor = QueryExecutor::new(current, historical);
+        let plan = PhysicalPlan {
+            root: PhysicalOp::Filter {
+                input: Box::new(PhysicalOp::NodeLookup {
+                    node_ids: vec![node_id],
+                }),
+                predicate,
+            },
+            estimated_cost: Default::default(),
+            temporal_context: None,
+            parallel: false,
+            include_provenance: false,
+        };
+
+        let results = executor.execute(plan).expect("Execution failed");
+        let rows: Vec<_> = results.collect_all().expect("Collection failed");
+
+        // Strict equality (Int != Float) means this evaluates to false
+        assert_eq!(
+            rows.len(),
+            0,
+            "FilterIterator enforces strict type equality, so Int(5) != Float(5.0)"
+        );
+    }
 }

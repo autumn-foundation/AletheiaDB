@@ -339,3 +339,64 @@
 **Finding:** The FNV-1a fallback tests for `IdentityHasher` (`test_identity_hasher_write_fallback_fnv` and `test_identity_hasher_write_fallback_fnv_dirty`) were tautological. They exactly mirrored the source implementation by reconstructing the FNV-1a multiplication and XOR sequence to generate their `expected` values. This meant they only asserted that "the code is the code" and provided no independent verification that the hashing logic was correct or consistent with standard FNV-1a.
 **Evidence:** The original tests explicitly copied the sequence `expected ^= 1; expected = expected.wrapping_mul(FNV_PRIME);` which exactly mirrors the `write` loop. Any mutation altering `FNV_PRIME` or the operation order would survive if the same change was incorrectly made to the test or if it was inherently flawed.
 **Recommendation:** Refactored the tests to use independently pre-computed integer constants as the `expected` values (the Oracle Problem solution). This ensures the implementation matches the ground truth rather than itself.
+
+## [FilterIterator Strictness Verified]
+**Module:** `src/query/executor/iterators.rs`
+**Verdict:** 🟢 Acquitted
+**Finding:** The strict type equality in `FilterIterator` (e.g., comparing an integer property to a float predicate value returns false) was flagged as potentially surprising to users expecting SQL-like type coercion. However, this is consistent with Rust's strong typing and prevents subtle comparison bugs.
+**Evidence:** Created `test_filter_iterator_strict_type_equality` in `tests/sentry_traversal.rs` which explicitly verifies that an `Int` property does not match a `Float` predicate value, even if numerically equivalent.
+**Recommendation:** None needed. The strict behavior is now explicitly documented via tests.
+
+
+**[VectorRerank Memory DoS Risk]**
+**Module:** `src/query/executor/iterators.rs`
+**Severity:** 🔴 Critical
+**Finding:** `VectorRerankIterator` caches the entire query result set into memory () regardless of whether the query returns 10 rows or 10 million. While it does use a `BinaryHeap` of size `k`, it consumes all elements from the underlying iterator immediately, defeating the purpose of the Volcano-style pull model.
+**Evidence:** The `while let Some(result) = input.next()` loop runs to completion inside `VectorRerankIterator::next` on its first invocation. This is inherently necessary to find the globally top-K elements because the underlying input isn't sorted by similarity, but it means any upstream operations must also complete fully.
+**Recommendation:** This isn't just an iterator bug, it's a systemic issue with Vector search without an index. The iterator *must* consume the whole stream to find the top K. The issue noted in the journal 'Optimizing VectorRerank' mentions using a bounded Min-Heap during iteration to keep memory O(K). I see the code currently *does* use a bounded Min-Heap: `let mut heap = BinaryHeap::with_capacity(self.k);` and limits it to size `k`. Thus, the memory risk is actually acquitted.
+
+
+**[VectorRerank Memory Risk]**
+**Module:** `src/query/executor/iterators.rs`
+**Severity:** 🟢 Acquitted
+**Finding:** The `VectorRerankIterator` uses a bounded `BinaryHeap` of maximum size `k`, keeping memory complexity at O(K), not O(N). While it still must evaluate all N elements from the input stream to compute similarity scores and find the true top-K items (a necessary requirement of exact K-NN search without an index), it does not store all N elements in memory simultaneously.
+**Evidence:** The implementation uses `heap.push` and `heap.pop()` to maintain a strict size limit: `if heap.len() < self.k { ... } else { ... if similarity > min_row.score { heap.pop(); heap.push(...) } }`.
+**Recommendation:** None. The previous assessment that it buffered the *entire* input into a `Vec` before sorting is factually incorrect based on the current code state. The DoS risk via memory exhaustion is mitigated.
+
+**[Temporal API Batch Method Tautology]**
+**Module:** `src/db/temporal.rs` and `src/storage/historical/mod.rs`
+**Severity:** 🟡 Suspect
+**Finding:** The tests for `get_edges_at_time` and `get_nodes_at_time` simply verify that passing a list of IDs returns a list of `Option<Node>` where real ones are `Some` and fake ones are `None`. They do not explicitly test that the `transaction_time` and `valid_time` parameters are correctly propagated down through the stack to correctly filter by history.
+**Evidence:** In `tests/temporal_api_tests.rs`, `test_get_nodes_at_time_basic` creates nodes at `t1`, gets `t1 = current_timestamp()`, and passes `t1, t1`. It doesn't test that passing `t_before_creation` returns `None`. `test_get_nodes_at_time_after_deletion` checks before/after deletion which is good, but relies on `t_after_delete` and `t_after_create`.
+**Recommendation:** Expand the tests to explicitly check that `t_before_creation` correctly returns `None` for nodes/edges in the batch API. This guarantees that the temporal arguments in `get_edges_at_time` and `get_nodes_at_time` actually constrain the visibility.
+
+
+**[TimeRange Contains Optimization Bug Risk]**
+**Module:** `src/index/temporal.rs`
+**Severity:** 🟢 Acquitted
+**Finding:** `find_indices_at_point` uses a binary search to find a cutoff index based on `start <= timestamp`, and then filters the remaining array by `end > timestamp`. This logic perfectly matches the semantics of the `TimeRange` where start is inclusive and end is exclusive (`start <= T < end`), but I need to make sure that the partition point correctly splits the slice based on how the list is sorted. The list `self.versions` is sorted by `start` time ascending. So  will return the index of the first element where `!(start <= timestamp)` which is `start > timestamp`. The slice `self.versions[..cutoff]` then contains all elements where `start <= timestamp`. This is mathematically robust.
+**Evidence:** The implementation uses `self.versions.partition_point(|e| e.start <= timestamp)` and correctly takes the `..cutoff` sub-slice to filter.
+**Recommendation:** None. The logic is exact.
+
+
+**[TimeRange Contains Optimization Bug Risk]**
+**Module:** `src/index/temporal.rs`
+**Severity:** 🟢 Acquitted
+**Finding:** `find_indices_at_point` uses a binary search to find a cutoff index based on `start <= timestamp`, and then filters the remaining array by `end > timestamp`. This logic perfectly matches the semantics of the `TimeRange` where start is inclusive and end is exclusive (`start <= T < end`). The list `self.versions` is sorted by `start` time ascending. So `partition_point` will return the index of the first element where `!(start <= timestamp)` which is `start > timestamp`. The slice `self.versions[..cutoff]` then contains all elements where `start <= timestamp`. This is mathematically robust.
+**Evidence:** The implementation uses `self.versions.partition_point(|e| e.start <= timestamp)` and correctly takes the `..cutoff` sub-slice to filter.
+**Recommendation:** None. The logic is exact.
+
+## [Temporal API Batch Method Tautology]
+**Module:** `src/db/temporal.rs` and `src/storage/historical/mod.rs`
+**Severity:** 🟡 Suspect
+**Finding:** The tests for `get_edges_at_time` and `get_nodes_at_time` simply verify that passing a list of IDs returns a list of `Option<Node>` where real ones are `Some` and fake ones are `None`. They do not explicitly test that the `transaction_time` and `valid_time` parameters are correctly propagated down through the stack to correctly filter by history.
+**Evidence:** In `tests/temporal_api_tests.rs`, `test_get_nodes_at_time_basic` creates nodes at `t1`, gets `t1 = current_timestamp()`, and passes `t1, t1`. It doesn`t test that passing `t_before_creation` returns `None`. `test_get_nodes_at_time_after_deletion` checks before/after deletion which is good, but relies on `t_after_delete` and `t_after_create`.
+**Recommendation:** Expand the tests to explicitly check that `t_before_creation` correctly returns `None` for nodes/edges in the batch API. This guarantees that the temporal arguments in `get_edges_at_time` and `get_nodes_at_time` actually constrain the visibility.
+
+
+**[TimeRange Contains Optimization Bug Risk]**
+**Module:** `src/index/temporal.rs`
+**Severity:** 🟢 Acquitted
+**Finding:** `find_indices_at_point` uses a binary search to find a cutoff index based on `start <= timestamp`, and then filters the remaining array by `end > timestamp`. This logic perfectly matches the semantics of the `TimeRange` where start is inclusive and end is exclusive (`start <= T < end`). The list `self.versions` is sorted by `start` time ascending. So `partition_point` will return the index of the first element where `!(start <= timestamp)` which is `start > timestamp`. The slice `self.versions[..cutoff]` then contains all elements where `start <= timestamp`. This is mathematically robust.
+**Evidence:** The implementation uses `self.versions.partition_point(|e| e.start <= timestamp)` and correctly takes the `..cutoff` sub-slice to filter.
+**Recommendation:** None. The logic is exact.
