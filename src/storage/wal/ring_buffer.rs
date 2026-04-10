@@ -1186,7 +1186,13 @@ mod tests {
                     drained_count += 1;
                     // Verify data integrity
                     // Access data by reference since Drop implementation prevents moving fields
-                    let val = u64::from_le_bytes(entry.data.as_slice().try_into().unwrap());
+                    let val = u64::from_le_bytes(
+                        entry
+                            .data
+                            .as_slice()
+                            .try_into()
+                            .expect("expected 8 bytes for u64"),
+                    );
                     checksum = checksum.wrapping_add(val);
                 }
             }
