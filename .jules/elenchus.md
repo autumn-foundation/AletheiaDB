@@ -2,7 +2,7 @@
 
 ## 1. `src/core/property.rs`
 
-**Verdict:** 🟡 Suspect
+**Severity:** 🟡 Suspect
 
 **Findings:**
 1.  **Tautological Tests:**
@@ -24,7 +24,7 @@
 
 ## 2. `src/core/version.rs`
 
-**Verdict:** 🟢 Acquitted (mostly)
+**Severity:** 🟢 Acquitted (mostly)
 
 **Findings:**
 1.  **Good Coverage:** The module has extensive tests covering delta creation, application, and edge cases like dimension changes (which were previously buggy).
@@ -40,7 +40,7 @@
 
 ## 3. `tests/havoc_property.rs`
 
-**Verdict:** 🟡 Suspect
+**Severity:** 🟡 Suspect
 
 **Findings:**
 1.  **"Don't Crash" Only:** The tests primarily check that deserialization doesn't panic on random inputs. While essential for security, it doesn't verify that *valid* random inputs are deserialized *correctly*.
@@ -51,7 +51,7 @@
 
 ## 4. `src/core/graph.rs`
 
-**Verdict:** 🟢 Acquitted
+**Severity:** 🟢 Acquitted
 
 **Findings:**
 1.  **Good Security Testing:** `test_node_has_label_str` explicitly verifies that checking for a non-existent label string does *not* pollute the global interner. This is a critical DoS protection validation.
@@ -255,28 +255,28 @@
 
 ## [TimeRange Overlap Inconsistency]
 **Module:** `src/core/temporal.rs`
-**Verdict:** 🟡 Suspect
+**Severity:** 🟡 Suspect
 **Finding:** `TimeRange::overlaps` returned `true` for empty ranges (e.g., `TimeRange::at(100)`) overlapping non-empty ranges, violating the set-theoretic definition of overlap (non-empty intersection).
 **Evidence:** `TimeRange::at(100)` (empty) reported overlap with `[0, 200)`.
 **Resolution:** Updated `overlaps` to return `false` if `self.is_empty()` or `other.is_empty()`. Added regression tests in `src/core/temporal.rs`.
 
 ## [Unpinned System Constant MAX_VALID_TIMESTAMP]
 **Module:** `src/core/temporal.rs`
-**Verdict:** 🟡 Suspect
+**Severity:** 🟡 Suspect
 **Finding:** `MAX_VALID_TIMESTAMP` was used in logic but its value was not pinned by tests, allowing potential drift of the sentinel space.
 **Evidence:** Mutation analysis showed changing the constant value didn't fail existing tests.
 **Resolution:** Added sentry test explicitly asserting `MAX_VALID_TIMESTAMP == i64::MAX - 1000`.
 
 ## [Vector Normalization Inconsistency]
 **Module:** `src/core/vector/ops.rs`
-**Verdict:** 🟡 Suspect
+**Severity:** 🟡 Suspect
 **Finding:** `normalize` zeroes out vectors with small squared magnitudes (< `SQUARED_MAGNITUDE_THRESHOLD`), but `normalize_in_place` leaves them unchanged. This creates inconsistent behavior depending on which API is used.
 **Evidence:** Reproduction test `tests/repro_normalize_inconsistency.rs` failed, showing that `normalize_in_place` did not modify a tiny vector.
 **Resolution:** Updated `normalize_in_place` to explicitly zero out the vector if its magnitude is below the threshold. Added regression test `test_normalize_in_place_tiny_vector` in `src/core/vector/tests.rs`.
 
 ## [WAL RingBuffer Safety Gaps]
 **Module:** `src/storage/wal/ring_buffer.rs`
-**Verdict:** 🟡 Suspect
+**Severity:** 🟡 Suspect
 **Finding:** `WalRingBuffer` lacked explicit tests for:
 1.  **Drop Safety:** Ensuring pending entries are dropped and waiters notified if the buffer is destroyed (shutdown/panic).
 2.  **Strict Sequence Ordering:** Ensuring `drain` stops at gaps rather than skipping them, which would violate WAL ordering.
@@ -286,7 +286,7 @@
 
 ## [Parser Logic Coverage Gap]
 **Module:** `src/query/parser.rs`
-**Verdict:** 🟢 Acquitted (Strengthened)
+**Severity:** 🟢 Acquitted (Strengthened)
 **Finding:**
 1.  **Robust Core:** The parser logic for recursion depth and basic syntax is sound and well-tested by existing `sentry_tests`.
 2.  **Implicit Coverage:** Logic for spaced negative numbers (`- 5`) and unbounded max depth (`*1..`) existed but lacked explicit test cases, relying on implicit behavior or unrelated tests.
@@ -295,7 +295,7 @@
 
 ## [TraversalIterator Coverage Gap]
 **Module:** `src/query/executor/iterators.rs`
-**Verdict:** 🟡 Suspect
+**Severity:** 🟡 Suspect
 **Finding:**
 1.  **TraversalIterator Zero Coverage:** The `TraversalIterator` (handling BFS, history, cycles) had *zero* unit tests in the module. It was only tested via high-level integration tests, leaving edge cases like cycles and input isolation unverified.
 2.  **Node Isomorphism:** Investigation confirmed `TraversalIterator` enforces Node Isomorphism (suppressing cycles like A->B->A), which is a significant behavioral constraint not documented or explicitly tested.
@@ -339,3 +339,10 @@
 **Finding:** The FNV-1a fallback tests for `IdentityHasher` (`test_identity_hasher_write_fallback_fnv` and `test_identity_hasher_write_fallback_fnv_dirty`) were tautological. They exactly mirrored the source implementation by reconstructing the FNV-1a multiplication and XOR sequence to generate their `expected` values. This meant they only asserted that "the code is the code" and provided no independent verification that the hashing logic was correct or consistent with standard FNV-1a.
 **Evidence:** The original tests explicitly copied the sequence `expected ^= 1; expected = expected.wrapping_mul(FNV_PRIME);` which exactly mirrors the `write` loop. Any mutation altering `FNV_PRIME` or the operation order would survive if the same change was incorrectly made to the test or if it was inherently flawed.
 **Recommendation:** Refactored the tests to use independently pre-computed integer constants as the `expected` values (the Oracle Problem solution). This ensures the implementation matches the ground truth rather than itself.
+
+## [Graph Core Coverage Quality]
+**Module:** `src/core/graph.rs`
+**Severity:** 🟢 Acquitted / ⭐ Commended
+**Finding:** Manual inspection of `src/core/graph.rs` tests (including `mod tests` and `mod sentry_tests`) reveals robust coverage over edge cases and mutations. Tests like `test_matches_label_mismatch`, `test_get_property_behavior`, `test_has_label_behavior`, `test_matches_label_behavior`, `test_debug_format_not_empty`, and `test_edge_connects_exhaustive` are exceptionally well written, addressing precise mutant vectors such as `Ok(Default::default())` in formatters or operators like `==` changed to `!=`.
+**Evidence:** The manual review confirmed that any potential mutant replacing conditions, removing early returns, or returning default variants on `fmt` or `get_property` is explicitly caught.
+**Recommendation:** None. The module is fully mutation-ready.

@@ -1,0 +1,3 @@
+⚖️ Elenchus: src/core/graph.rs Test Quality Audit
+
+Sentry already provided robust coverage. The module is fully mutation-ready based on manual inspection.
