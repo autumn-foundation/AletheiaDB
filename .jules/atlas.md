@@ -79,3 +79,7 @@
 **[Broke Storage-API Dependency Cycle]
 **Tangle:** The `storage` module had an implementation of `From<&crate::api::transaction::BufferedWrite> for WalOperation` in `src/storage/wal/entry.rs`, meaning the underlying storage engine depended structurally on the public API layer.
 **Blueprint:** Moved the `From` implementation to `src/api/transaction/write_buffer.rs`. Now, the `api` module is aware of how its `BufferedWrite` converts into a `WalOperation` to send down to `storage`, enforcing a unidirectional dependency graph from `api` -> `storage`.
+
+## 2026-05-25 - Splitting RedbColdStorage
+**Tangle:** `src/storage/redb_cold_storage.rs` was a 4100-line "Blob" containing mixed storage logic and 2000 lines of tests, making it hard to navigate and maintain.
+**Blueprint:** Refactored into `src/storage/redb_cold_storage/` directory. Moved tests to `tests.rs` (~2000 lines), leaving the core logic in `mod.rs` (~2100 lines). This separates concerns and makes the core logic more accessible.
