@@ -50,3 +50,6 @@
 **Optimize Tokenization in Temporal Parser**
 **Learning:** `tokenize_temporal_keywords` in `src/sql/temporal_parser.rs` previously copied substrings by manually advancing through a `char_indices().collect::<Vec<_>>()` and creating a `String` inside loops (`let word: String = chars[start..i].iter().map(|(_, c)| c).collect()`). This resulted in a heap allocation for every word parsed.
 **Action:** Used `sql.char_indices().peekable()` instead of collecting it. Leveraged `.len_utf8()` to calculate byte boundaries on the fly without allocations. Used a string slice `&sql[start..end]` to avoid `String` allocation for every word parsed, making parsing `0-cost` for non-matching tokens.
+**Optimize filter passes over collections**
+**Learning:** Found two O(N) chained `.iter().filter().collect()` passes iterating over `shard_states` in `src/storage/sharding/rebalance.rs` to separate elements into `overloaded` and `underloaded` vectors. The float threshold math was also being recalculated per item inside the closures.
+**Action:** Replace multiple sequential `.filter().collect()` passes with a single `for` loop that hoists invariant math outside the loop and uses `push()` with mutually exclusive `if / else if` branches to partition the data in exactly one pass.

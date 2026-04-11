@@ -427,19 +427,21 @@ impl RebalanceManager {
         let avg_nodes = total_nodes / shard_states.len() as u64;
 
         // Find overloaded and underloaded shards
-        let mut overloaded: Vec<&ShardState> = shard_states
-            .iter()
-            .filter(|s| {
-                s.node_count as f64 > avg_nodes as f64 * (1.0 + self.config.imbalance_threshold)
-            })
-            .collect();
+        // ⚡ Bolt Optimization: Combines two O(N) `.filter().collect()` passes into a single loop
+        // over `shard_states`, correctly hoisting float math outside of the loop.
+        let mut overloaded = Vec::new();
+        let mut underloaded = Vec::new();
+        let upper_threshold = avg_nodes as f64 * (1.0 + self.config.imbalance_threshold);
+        let lower_threshold = avg_nodes as f64 * (1.0 - self.config.imbalance_threshold);
 
-        let mut underloaded: Vec<&ShardState> = shard_states
-            .iter()
-            .filter(|s| {
-                (s.node_count as f64) < avg_nodes as f64 * (1.0 - self.config.imbalance_threshold)
-            })
-            .collect();
+        for s in shard_states {
+            let count = s.node_count as f64;
+            if count > upper_threshold {
+                overloaded.push(s);
+            } else if count < lower_threshold {
+                underloaded.push(s);
+            }
+        }
 
         // Sort by severity
         overloaded.sort_by_key(|s| std::cmp::Reverse(s.node_count));
