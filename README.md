@@ -30,6 +30,11 @@ AletheiaDB tracks both **valid time** (when facts were true in reality) and **tr
 
 ## Quick Start
 
+> # ⚠️ REQUIRES FEATURE NOVA
+>
+> If you are trying to use `NarrativeGenerator` or run `story_demo`, you MUST enable the `nova` feature in your `Cargo.toml`.
+
+
 ### Prerequisites
 
 - Rust 1.92+ (edition 2024)
