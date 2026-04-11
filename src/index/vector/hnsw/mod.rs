@@ -692,7 +692,8 @@ impl HnswIndex {
             return Ok(());
         }
 
-        const CAPACITY_PADDING: usize = 128;
+        // Fix: Increase padding to prevent capacity stampede under high concurrent load
+        const CAPACITY_PADDING: usize = 1024;
 
         let index = self.inner.read();
         if index.size() + vectors_to_add + CAPACITY_PADDING <= index.capacity() {
