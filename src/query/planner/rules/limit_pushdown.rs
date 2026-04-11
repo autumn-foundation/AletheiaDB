@@ -324,4 +324,241 @@ mod tests {
         let result = rule.apply(&plan, &stats).unwrap();
         assert!(result.is_none()); // No change needed
     }
+
+    use crate::query::ir::{Predicate, PredicateValue};
+    use crate::query::plan::BinaryOp;
+
+    #[test]
+    fn test_limit_pushdown_through_filter() {
+        let rule = LimitPushdown;
+        let stats = test_stats();
+
+        // Limit(5, Filter(Limit(10, Scan)))
+        // -> Limit(5, Filter(Limit(5, Scan)))
+        // This will trigger `changed || effective_limit != *n` in the outer limit
+        // because effective_limit (5) == *n (5), but changed (from input) is true.
+        let plan = LogicalPlan::new(LogicalOp::unary(
+            UnaryOp::Limit(5),
+            LogicalOp::unary(
+                UnaryOp::Filter(Predicate::Eq {
+                    key: "age".to_string(),
+                    value: PredicateValue::Int(30),
+                }),
+                LogicalOp::unary(
+                    UnaryOp::Limit(10),
+                    LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(1).unwrap()])),
+                ),
+            ),
+        ));
+
+        let result = rule.apply(&plan, &stats).unwrap();
+        assert!(result.is_some());
+
+        let new_plan = result.unwrap();
+        if let LogicalOp::Unary {
+            op: UnaryOp::Limit(n),
+            input,
+        } = &new_plan.root
+        {
+            assert_eq!(*n, 5);
+            if let LogicalOp::Unary {
+                op: UnaryOp::Filter(_),
+                input: inner_input,
+            } = input.as_ref()
+            {
+                if let LogicalOp::Unary {
+                    op: UnaryOp::Limit(inner_n),
+                    ..
+                } = inner_input.as_ref()
+                {
+                    assert_eq!(*inner_n, 5);
+                } else {
+                    panic!("Expected inner limit");
+                }
+            } else {
+                panic!("Expected filter");
+            }
+        } else {
+            panic!("Expected limit at root");
+        }
+    }
+
+    #[test]
+    fn test_limit_pushdown_through_project() {
+        let rule = LimitPushdown;
+        let stats = test_stats();
+
+        // Limit(5, Project(Limit(10, Scan))) -> Limit(5, Project(Limit(5, Scan)))
+        let plan = LogicalPlan::new(LogicalOp::unary(
+            UnaryOp::Limit(5),
+            LogicalOp::unary(
+                UnaryOp::Project(vec!["name".to_string()]),
+                LogicalOp::unary(
+                    UnaryOp::Limit(10),
+                    LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(1).unwrap()])),
+                ),
+            ),
+        ));
+
+        let result = rule.apply(&plan, &stats).unwrap();
+        assert!(result.is_some());
+
+        let new_plan = result.unwrap();
+        if let LogicalOp::Unary {
+            op: UnaryOp::Limit(n),
+            input,
+        } = &new_plan.root
+        {
+            assert_eq!(*n, 5);
+            if let LogicalOp::Unary {
+                op: UnaryOp::Project(_),
+                input: inner_input,
+            } = input.as_ref()
+            {
+                if let LogicalOp::Unary {
+                    op: UnaryOp::Limit(inner_n),
+                    ..
+                } = inner_input.as_ref()
+                {
+                    assert_eq!(*inner_n, 5);
+                } else {
+                    panic!("Expected inner limit");
+                }
+            } else {
+                panic!("Expected project");
+            }
+        } else {
+            panic!("Expected limit at root");
+        }
+    }
+
+    #[test]
+    fn test_limit_pushdown_through_sort() {
+        let rule = LimitPushdown;
+        let stats = test_stats();
+
+        // Limit(5, Sort(Limit(10, Scan))) -> Limit(5, Sort(Limit(10, Scan)))
+        // Wait, Sort propagates limit as None!
+        // `let (optimized_input, changed) = self.push_down(input, None)?;`
+        // So Limit(10, Scan) remains Limit(10, Scan).
+        // But the Limit(5, ...) triggers changed=false from inner, and effective_limit == *n (5 == 5) if we start with 5.
+        // Let's test Limit(5, Sort(Scan)) -> no change to limit, but we need to cover `changed` in Limit.
+
+        // Actually, we can test that Limit DOES NOT push down through BinaryOp.
+        // Limit(5, Binary(Union, Scan, Scan))
+        let plan = LogicalPlan::new(LogicalOp::unary(
+            UnaryOp::Limit(5),
+            LogicalOp::binary(
+                BinaryOp::Union,
+                LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(1).unwrap()])),
+                LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(2).unwrap()])),
+            ),
+        ));
+
+        let result = rule.apply(&plan, &stats).unwrap();
+        assert!(result.is_none()); // No change because BinaryOp doesn't propagate limit, and inner nodes don't change.
+    }
+
+    #[test]
+    fn test_limit_pushdown_binary_op_changed() {
+        let rule = LimitPushdown;
+        let stats = test_stats();
+
+        // Limit(5, Binary(Union, Limit(10, Scan), Limit(10, Scan)))
+        // The BinaryOp does not propagate the outer Limit(5).
+        // However, if the inner limits were changeable, they would change.
+        // Wait, the inner limits are NOT pushed down limits from the top, they just start as Limit(10).
+        // Let's test that BinaryOp propagates `changed` if its children change.
+        // We can do this by having a changeable child: Limit(10, Limit(20, Scan)) inside the BinaryOp.
+        let plan = LogicalPlan::new(LogicalOp::binary(
+            BinaryOp::Union,
+            LogicalOp::unary(
+                UnaryOp::Limit(10),
+                LogicalOp::unary(
+                    UnaryOp::Limit(20),
+                    LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(1).unwrap()])),
+                ),
+            ),
+            LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(2).unwrap()])),
+        ));
+
+        let result = rule.apply(&plan, &stats).unwrap();
+        assert!(result.is_some());
+        let new_plan = result.unwrap();
+        if let LogicalOp::Binary {
+            op: BinaryOp::Union,
+            left,
+            right: _,
+        } = &new_plan.root
+        {
+            if let LogicalOp::Unary {
+                op: UnaryOp::Limit(n),
+                ..
+            } = left.as_ref()
+            {
+                assert_eq!(*n, 10);
+            } else {
+                panic!("Expected limit on left");
+            }
+        } else {
+            panic!("Expected binary op");
+        }
+    }
+
+    #[test]
+    fn test_limit_changed_flag_on_vector_rank_with_filter() {
+        let rule = LimitPushdown;
+        let stats = test_stats();
+
+        // Limit(5, Filter(VectorRank(top_k=10)))
+        // -> Limit(5, Filter(VectorRank(top_k=5)))
+        let plan = LogicalPlan::new(LogicalOp::unary(
+            UnaryOp::Limit(5),
+            LogicalOp::unary(
+                UnaryOp::Filter(Predicate::Eq {
+                    key: "age".to_string(),
+                    value: PredicateValue::Int(30),
+                }),
+                LogicalOp::unary(
+                    UnaryOp::VectorRank {
+                        embedding: Arc::from([0.1f32; 4].as_slice()),
+                        top_k: Some(10),
+                        property_key: None,
+                    },
+                    LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(1).unwrap()])),
+                ),
+            ),
+        ));
+
+        let result = rule.apply(&plan, &stats).unwrap();
+        assert!(result.is_some());
+
+        let new_plan = result.unwrap();
+        if let LogicalOp::Unary {
+            op: UnaryOp::Limit(n),
+            input,
+        } = &new_plan.root
+        {
+            assert_eq!(*n, 5);
+            if let LogicalOp::Unary {
+                op: UnaryOp::Filter(_),
+                input: inner_input,
+            } = input.as_ref()
+            {
+                if let LogicalOp::Unary {
+                    op: UnaryOp::VectorRank { top_k, .. },
+                    ..
+                } = inner_input.as_ref()
+                {
+                    assert_eq!(*top_k, Some(5));
+                } else {
+                    panic!("Expected vector rank");
+                }
+            } else {
+                panic!("Expected filter");
+            }
+        } else {
+            panic!("Expected limit at root");
+        }
+    }
 }
