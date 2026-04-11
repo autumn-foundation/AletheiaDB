@@ -81,7 +81,6 @@ impl TemporalFingerprint {
     }
 }
 
-
 /// A resonator that measures activity density over a fixed time window.
 ///
 /// # The Details
