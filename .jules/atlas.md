@@ -79,3 +79,13 @@
 **[Broke Storage-API Dependency Cycle]
 **Tangle:** The `storage` module had an implementation of `From<&crate::api::transaction::BufferedWrite> for WalOperation` in `src/storage/wal/entry.rs`, meaning the underlying storage engine depended structurally on the public API layer.
 **Blueprint:** Moved the `From` implementation to `src/api/transaction/write_buffer.rs`. Now, the `api` module is aware of how its `BufferedWrite` converts into a `WalOperation` to send down to `storage`, enforcing a unidirectional dependency graph from `api` -> `storage`.
+
+## 2026-06-21 - Splitting the Temporal Indexes Blob
+**Tangle:** `src/index/temporal.rs` had grown into a massive ~4,200-line "Blob" module. It contained everything from configuration (`TemporalIndexConfig`), metadata structures (`TimelineVersionMetadata`), timeline entities (`TimelineEntry`, `EntityTimeline`), and the core facade implementation (`TemporalIndexes`), mixed alongside 2,000 lines of tests. This made the file difficult to navigate and maintain, violating the Single Responsibility Principle.
+**Blueprint:** Refactored into a `src/index/temporal/` module directory:
+1. `config.rs`: Isolated configuration structs.
+2. `metadata.rs`: Isolated timeline version indexing logic.
+3. `timeline.rs`: Encapsulated core timeline tracking structs (`EntityTimeline`, `EntityTimelines`).
+4. `mod.rs`: Created a clean facade for `TemporalIndexes`, exporting only what the public API needed and implementing the core temporal logic.
+5. `tests.rs`: Extracted all unit tests.
+This separation strictly enforces boundaries, eliminates the 4,200-line Blob, and improves maintainability while preserving perfect backward compatibility for the broader test suite.
