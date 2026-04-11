@@ -692,7 +692,7 @@ impl HnswIndex {
             return Ok(());
         }
 
-        const CAPACITY_PADDING: usize = 128;
+        const CAPACITY_PADDING: usize = 1024;
 
         let index = self.inner.read();
         if index.size() + vectors_to_add + CAPACITY_PADDING <= index.capacity() {
