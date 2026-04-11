@@ -9,7 +9,7 @@
 //! "Find a \[Person ~ 'Engineer'\] connected to a \[Company ~ 'Startup'\] via \[WORKS_FOR\]."
 //!
 //! # Concepts
-//! - **Pattern**: A template subgraph with constraints.
+//! - **GestaltPattern**: A template subgraph with constraints.
 //! - **Anchor**: A node in the pattern with a vector constraint, used to seed the search.
 //! - **Match**: A concrete subgraph in the database that satisfies the pattern.
 
@@ -20,7 +20,7 @@ use std::collections::{HashMap, HashSet};
 
 /// A node in the pattern graph.
 #[derive(Debug, Clone)]
-pub struct PatternNode {
+pub struct GestaltPatternNode {
     /// The ID of the node within the pattern (0, 1, 2...).
     pub id: usize,
     /// Optional label constraint (exact match).
@@ -42,7 +42,7 @@ pub struct VectorConstraint {
 
 /// An edge in the pattern graph.
 #[derive(Debug, Clone)]
-pub struct PatternEdge {
+pub struct GestaltPatternEdge {
     /// The source pattern node ID.
     pub source: usize,
     /// The target pattern node ID.
@@ -63,10 +63,10 @@ pub struct PatternEdge {
 /// Building a pattern to find a specific sub-graph structure:
 ///
 /// ```
-/// use aletheiadb::experimental::gestalt::Pattern;
+/// use aletheiadb::experimental::gestalt::GestaltPattern;
 ///
 /// # fn main() {
-/// let mut pattern = Pattern::new();
+/// let mut pattern = GestaltPattern::new();
 ///
 /// // Create a starting node constraint.
 /// // We're looking for a Person matching this embedding concept:
@@ -86,14 +86,14 @@ pub struct PatternEdge {
 /// # }
 /// ```
 #[derive(Debug, Clone, Default)]
-pub struct Pattern {
+pub struct GestaltPattern {
     /// Nodes in the pattern.
-    pub nodes: Vec<PatternNode>,
+    pub nodes: Vec<GestaltPatternNode>,
     /// Edges in the pattern.
-    pub edges: Vec<PatternEdge>,
+    pub edges: Vec<GestaltPatternEdge>,
 }
 
-impl Pattern {
+impl GestaltPattern {
     /// Create a new, empty pattern.
     pub fn new() -> Self {
         Self::default()
@@ -104,7 +104,7 @@ impl Pattern {
     /// Returns the internal index of the new node, which can be used to connect edges.
     pub fn add_node(&mut self, label: Option<String>) -> usize {
         let id = self.nodes.len();
-        self.nodes.push(PatternNode {
+        self.nodes.push(GestaltPatternNode {
             id,
             label,
             vector_constraint: None,
@@ -127,7 +127,7 @@ impl Pattern {
         threshold: f32,
     ) -> usize {
         let id = self.nodes.len();
-        self.nodes.push(PatternNode {
+        self.nodes.push(GestaltPatternNode {
             id,
             label,
             vector_constraint: Some(VectorConstraint {
@@ -142,10 +142,10 @@ impl Pattern {
     /// Add a directed edge between two previously added nodes.
     ///
     /// The `source` and `target` IDs must correspond to nodes already created
-    /// via [`add_node`](Pattern::add_node) or [`add_semantic_node`](Pattern::add_semantic_node).
+    /// via [`add_node`](GestaltPattern::add_node) or [`add_semantic_node`](GestaltPattern::add_semantic_node).
     /// If invalid IDs are used, an error will be returned when [`GestaltMatcher::find_matches`] evaluates the pattern.
     pub fn add_edge(&mut self, source: usize, target: usize, label: Option<String>) {
-        self.edges.push(PatternEdge {
+        self.edges.push(GestaltPatternEdge {
             source,
             target,
             label,
@@ -159,7 +159,7 @@ impl Pattern {
         for edge in &self.edges {
             if edge.source >= node_count || edge.target >= node_count {
                 return Err(crate::core::error::Error::other(format!(
-                    "Pattern edge references invalid node ID: {} -> {}",
+                    "GestaltPattern edge references invalid node ID: {} -> {}",
                     edge.source, edge.target
                 )));
             }
@@ -171,9 +171,9 @@ impl Pattern {
 /// A concrete match found in the database.
 #[derive(Debug, Clone)]
 pub struct Match {
-    /// Mapping from Pattern Node ID -> Database Node ID.
+    /// Mapping from GestaltPattern Node ID -> Database Node ID.
     pub nodes: HashMap<usize, NodeId>,
-    /// Mapping from Pattern Edge (index) -> Database Edge ID.
+    /// Mapping from GestaltPattern Edge (index) -> Database Edge ID.
     pub edges: HashMap<usize, EdgeId>,
     /// The average similarity score of all vector constraints in this match.
     pub score: f32,
@@ -181,7 +181,7 @@ pub struct Match {
 
 /// The Gestalt Engine for semantic sub-graph matching.
 ///
-/// This engine is responsible for executing a [`Pattern`] query against an [`AletheiaDB`] instance.
+/// This engine is responsible for executing a [`GestaltPattern`] query against an [`AletheiaDB`] instance.
 /// It uses a "backtracking search" strategy, beginning at the "anchor" node (the node with
 /// the semantic constraint) and traversing outward to verify the structural constraints.
 pub struct GestaltMatcher<'a> {
@@ -197,14 +197,14 @@ impl<'a> GestaltMatcher<'a> {
     /// Find occurrences of the pattern in the database up to a specified limit.
     ///
     /// The returned `Vec<Match>` will contain the concrete `NodeId` and `EdgeId` mappings
-    /// from the database that satisfy the [`Pattern`].
+    /// from the database that satisfy the [`GestaltPattern`].
     ///
     /// # Errors
     ///
     /// Returns an error if:
-    /// - The [`Pattern`] is invalid (e.g., edges point to non-existent nodes).
-    /// - The [`Pattern`] does not contain at least one node with a `vector_constraint` (anchor).
-    pub fn find_matches(&self, pattern: &Pattern, limit: usize) -> Result<Vec<Match>> {
+    /// - The [`GestaltPattern`] is invalid (e.g., edges point to non-existent nodes).
+    /// - The [`GestaltPattern`] does not contain at least one node with a `vector_constraint` (anchor).
+    pub fn find_matches(&self, pattern: &GestaltPattern, limit: usize) -> Result<Vec<Match>> {
         pattern.validate()?;
 
         if pattern.nodes.is_empty() {
@@ -273,7 +273,7 @@ impl<'a> GestaltMatcher<'a> {
     // Recursive backtracking to complete the match.
     fn backtrack(
         &self,
-        pattern: &Pattern,
+        pattern: &GestaltPattern,
         current_match: &mut Match,
         results: &mut Vec<Match>,
         limit: usize,
@@ -303,7 +303,7 @@ impl<'a> GestaltMatcher<'a> {
             // Find candidates for this node
             // Candidates must be neighbors of the mapped nodes that connect to it.
             // 1. Identify constraints from existing mappings.
-            // E.g. Pattern: 0 -> 1. 0 is mapped to A. 1 must be a neighbor of A.
+            // E.g. GestaltPattern: 0 -> 1. 0 is mapped to A. 1 must be a neighbor of A.
 
             let candidates = self.find_candidates_for_node(pattern, next_idx, current_match)?;
 
@@ -333,7 +333,7 @@ impl<'a> GestaltMatcher<'a> {
                 }
             }
         } else {
-            // Pattern might be disconnected?
+            // GestaltPattern might be disconnected?
             // If we have unmapped nodes but can't reach them from mapped ones,
             // we'd need to pick a new anchor for the disconnected component.
             // For MVP, we assume connected patterns or fail.
@@ -344,7 +344,7 @@ impl<'a> GestaltMatcher<'a> {
         Ok(())
     }
 
-    fn pick_next_node(&self, pattern: &Pattern, current_match: &Match) -> Option<usize> {
+    fn pick_next_node(&self, pattern: &GestaltPattern, current_match: &Match) -> Option<usize> {
         // Find an unmapped pattern node that is connected to a mapped pattern node
         for edge in &pattern.edges {
             let s_mapped = current_match.nodes.contains_key(&edge.source);
@@ -362,7 +362,7 @@ impl<'a> GestaltMatcher<'a> {
 
     fn find_candidates_for_node(
         &self,
-        pattern: &Pattern,
+        pattern: &GestaltPattern,
         target_idx: usize,
         current_match: &Match,
     ) -> Result<Vec<NodeId>> {
@@ -457,7 +457,11 @@ impl<'a> GestaltMatcher<'a> {
         }
     }
 
-    fn check_node_constraints(&self, node_id: NodeId, pattern_node: &PatternNode) -> Result<bool> {
+    fn check_node_constraints(
+        &self,
+        node_id: NodeId,
+        pattern_node: &GestaltPatternNode,
+    ) -> Result<bool> {
         // Label check
         if !self.check_node_label(node_id, &pattern_node.label)? {
             return Ok(false);
@@ -483,7 +487,7 @@ impl<'a> GestaltMatcher<'a> {
         Ok(true)
     }
 
-    fn verify_edges(&self, pattern: &Pattern, current_match: &mut Match) -> Result<bool> {
+    fn verify_edges(&self, pattern: &GestaltPattern, current_match: &mut Match) -> Result<bool> {
         // Ensure all pattern edges exist in the database between the mapped nodes
         for (i, edge) in pattern.edges.iter().enumerate() {
             let u = current_match.nodes[&edge.source];
@@ -512,7 +516,7 @@ impl<'a> GestaltMatcher<'a> {
         Ok(true)
     }
 
-    fn calculate_score(&self, pattern: &Pattern, current_match: &Match) -> Result<f32> {
+    fn calculate_score(&self, pattern: &GestaltPattern, current_match: &Match) -> Result<f32> {
         let mut total_score = 0.0;
         let mut count = 0;
 
@@ -594,12 +598,12 @@ mod tests {
         db.create_edge(e, f, "WORKS_FOR", Default::default())
             .unwrap();
 
-        // Pattern:
+        // GestaltPattern:
         // Node 0: [1, 0] (Sim > 0.9)
         // Node 1: [0, 1] (Sim > 0.9)
         // Edge 0 -> 1 (WORKS_FOR)
 
-        let mut pattern = Pattern::new();
+        let mut pattern = GestaltPattern::new();
         let p0 = pattern.add_semantic_node(
             Some("Person".to_string()),
             "vec".to_string(),

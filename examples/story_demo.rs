@@ -27,7 +27,7 @@ use aletheiadb::WriteOps;
 // ⚠️ REQUIRES FEATURE 'NOVA' IN CARGO.TOML
 // [dependencies]
 // aletheiadb = { version = "0.1", features = ["nova"] }
-use aletheiadb::experimental::temporal_narrative::NarrativeGenerator;
+use aletheiadb::experimental::temporal_narrative::TemporalNarrativeGenerator;
 use aletheiadb::properties;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -55,7 +55,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     })?;
 
     // 3. Generate Narrative
-    let generator = NarrativeGenerator::new(&db);
+    let generator = TemporalNarrativeGenerator::new(&db);
     let narrative = generator.generate_node_narrative(node_id)?;
 
     for event in narrative {

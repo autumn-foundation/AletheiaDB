@@ -1,4 +1,4 @@
-//! Chronos: Temporal Graph Analysis & Pathfinding.
+//! ChronosEngine: Temporal Graph Analysis & Pathfinding.
 //!
 //! This module implements tools for analyzing the graph's evolution over time
 //! and navigating it at specific historical snapshots.
@@ -29,7 +29,7 @@
 //! # {
 //! use aletheiadb::{AletheiaDB, properties, ReadOps, WriteOps, Error};
 //! use aletheiadb::core::temporal::time;
-//! use aletheiadb::experimental::chronos::Chronos;
+//! use aletheiadb::experimental::chronos::ChronosEngine;
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let db = AletheiaDB::new()?;
@@ -60,8 +60,8 @@
 //!     Ok::<_, Error>(())
 //! })?;
 //!
-//! // 3. Analyze history with Chronos
-//! let chronos = Chronos::new(&db);
+//! // 3. Analyze history with ChronosEngine
+//! let chronos = ChronosEngine::new(&db);
 //!
 //! // At T2 (present), the path is broken
 //! let path_now = chronos.find_path_at_time(alice, charlie, time::now(), time::now())?;
@@ -71,7 +71,7 @@
 //! let path_then = chronos.find_path_at_time(alice, charlie, t1, t1)?;
 //! assert_eq!(path_then.unwrap(), vec![alice, bob, charlie]);
 //!
-//! println!("🕵️ Chronos confirmed: The connection existed in the past!");
+//! println!("🕵️ ChronosEngine confirmed: The connection existed in the past!");
 //! # Ok(())
 //! # }
 //! # }
@@ -88,22 +88,22 @@ use std::collections::{HashSet, VecDeque};
 
 #[cfg(feature = "nova")]
 /// The Time Lord of the Graph.
-pub struct Chronos<'a> {
+pub struct ChronosEngine<'a> {
     db: &'a AletheiaDB,
 }
 
 #[cfg(not(feature = "nova"))]
 /// The Time Lord of the Graph.
 #[deprecated(
-    note = "Chronos requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
+    note = "ChronosEngine requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
 )]
-pub struct Chronos<'a> {
+pub struct ChronosEngine<'a> {
     _marker: std::marker::PhantomData<&'a AletheiaDB>,
 }
 
 #[cfg(feature = "nova")]
-impl<'a> Chronos<'a> {
-    /// Create a new Chronos instance.
+impl<'a> ChronosEngine<'a> {
+    /// Create a new ChronosEngine instance.
     pub fn new(db: &'a AletheiaDB) -> Self {
         Self { db }
     }
@@ -323,8 +323,8 @@ impl<'a> Chronos<'a> {
 
 #[cfg(not(feature = "nova"))]
 #[allow(deprecated)]
-impl<'a> Chronos<'a> {
-    /// Create a new Chronos instance.
+impl<'a> ChronosEngine<'a> {
+    /// Create a new ChronosEngine instance.
     ///
     /// # Panics
     ///
@@ -333,7 +333,7 @@ impl<'a> Chronos<'a> {
     #[track_caller]
     pub fn new(db: &'a AletheiaDB) -> Self {
         panic!(
-            "Chronos requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
+            "ChronosEngine requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
         );
     }
 
@@ -352,7 +352,7 @@ impl<'a> Chronos<'a> {
         tx_time: Timestamp,
     ) -> Result<Option<Vec<NodeId>>> {
         panic!(
-            "Chronos requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
+            "ChronosEngine requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
         );
     }
 
@@ -365,7 +365,7 @@ impl<'a> Chronos<'a> {
     #[track_caller]
     pub fn node_volatility(&self, node_id: NodeId, window: TimeRange) -> Result<f32> {
         panic!(
-            "Chronos requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
+            "ChronosEngine requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
         );
     }
 
@@ -378,7 +378,7 @@ impl<'a> Chronos<'a> {
     #[track_caller]
     pub fn path_stability(&self, path: &[EdgeId], window: TimeRange) -> Result<f32> {
         panic!(
-            "Chronos requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
+            "ChronosEngine requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
         );
     }
 }
@@ -420,7 +420,7 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(10));
         let t3 = time::now();
 
-        let chronos = Chronos::new(&db);
+        let chronos = ChronosEngine::new(&db);
 
         // Path should exist at T2 (between creation and deletion?)
         // Create edge happened "at" some time between t1 and t2 (when create_edge returned).
@@ -460,7 +460,7 @@ mod tests {
 
         let t_end = time::now();
 
-        let chronos = Chronos::new(&db);
+        let chronos = ChronosEngine::new(&db);
         let window = TimeRange::new(t_start, t_end).unwrap();
 
         let vol = chronos.node_volatility(node, window).unwrap();
@@ -482,19 +482,19 @@ mod stub_tests {
 
     #[test]
     #[should_panic(
-        expected = "Chronos requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
+        expected = "ChronosEngine requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
     )]
     fn test_stub_panic_on_new() {
         let db = AletheiaDB::new().unwrap();
-        let _ = Chronos::new(&db);
+        let _ = ChronosEngine::new(&db);
     }
 
     #[test]
     #[should_panic(
-        expected = "Chronos requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
+        expected = "ChronosEngine requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
     )]
     fn test_stub_panic_on_find_path_at_time() {
-        let chronos = Chronos {
+        let chronos = ChronosEngine {
             _marker: std::marker::PhantomData,
         };
         let _ = chronos.find_path_at_time(
@@ -507,10 +507,10 @@ mod stub_tests {
 
     #[test]
     #[should_panic(
-        expected = "Chronos requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
+        expected = "ChronosEngine requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
     )]
     fn test_stub_panic_on_node_volatility() {
-        let chronos = Chronos {
+        let chronos = ChronosEngine {
             _marker: std::marker::PhantomData,
         };
         let _ = chronos.node_volatility(
@@ -525,10 +525,10 @@ mod stub_tests {
 
     #[test]
     #[should_panic(
-        expected = "Chronos requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
+        expected = "ChronosEngine requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
     )]
     fn test_stub_panic_on_path_stability() {
-        let chronos = Chronos {
+        let chronos = ChronosEngine {
             _marker: std::marker::PhantomData,
         };
         let _ = chronos.path_stability(

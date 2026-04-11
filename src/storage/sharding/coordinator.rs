@@ -43,7 +43,7 @@
 //! method replays the pending decisions from the log, ensuring that all participants
 //! eventually reach a consistent state.
 
-use super::config::{RebalanceConfig, ShardConfig};
+use super::config::{ShardConfig, ShardRebalanceConfig};
 use super::persistent_commit_log::{CommitLogConfig, PersistentCommitLog};
 use super::router::{ShardRouter, TraversalPlan};
 use super::transaction::{DistributedTransaction, DistributedTxError, TransactionPhase};
@@ -63,14 +63,14 @@ use crate::core::hlc::MAX_BACKWARD_DRIFT_US;
 
 /// Result of recovery operation.
 #[derive(Debug, Clone)]
-pub struct RecoveryResult {
+pub struct ShardRecoveryResult {
     /// Transactions that were successfully recovered.
     pub recovered: Vec<TxId>,
     /// Transactions that failed recovery and were dead-lettered.
     pub dead_lettered: Vec<DeadLetteredTransaction>,
 }
 
-impl RecoveryResult {
+impl ShardRecoveryResult {
     /// Check if recovery was fully successful (no dead letters).
     pub fn is_complete(&self) -> bool {
         self.dead_lettered.is_empty()
@@ -230,7 +230,7 @@ pub struct ShardCoordinator {
     /// Metrics per shard.
     metrics: RwLock<HashMap<ShardId, Arc<ShardMetrics>>>,
     /// Rebalance configuration.
-    rebalance_config: RebalanceConfig,
+    rebalance_config: ShardRebalanceConfig,
     /// Timeout for transaction operations.
     transaction_timeout: Duration,
     /// Dead letter queue for transactions that failed recovery.
@@ -278,7 +278,7 @@ impl ShardCoordinator {
             commit_clock: Mutex::new(time::now()),
             commit_clock_observed_at: Mutex::new(Instant::now()),
             metrics: RwLock::new(metrics),
-            rebalance_config: RebalanceConfig::default(),
+            rebalance_config: ShardRebalanceConfig::default(),
             transaction_timeout,
             dead_letter_queue: RwLock::new(HashMap::new()),
         };
@@ -290,7 +290,7 @@ impl ShardCoordinator {
     }
 
     /// Create a coordinator with custom rebalance config.
-    pub fn with_rebalance_config(mut self, config: RebalanceConfig) -> Self {
+    pub fn with_rebalance_config(mut self, config: ShardRebalanceConfig) -> Self {
         self.rebalance_config = config;
         self
     }
@@ -877,10 +877,10 @@ impl ShardCoordinator {
     ///
     /// # Returns
     ///
-    /// A `RecoveryResult` containing:
+    /// A `ShardRecoveryResult` containing:
     /// *   `recovered`: List of `TxId`s that were successfully completed.
     /// *   `dead_lettered`: List of transactions that failed after max retries and require manual intervention.
-    pub fn recover_pending_transactions(&self) -> RecoveryResult {
+    pub fn recover_pending_transactions(&self) -> ShardRecoveryResult {
         let decisions = {
             let log = self.commit_log.read().expect("Commit log lock poisoned");
             log.pending_commits()
@@ -965,7 +965,7 @@ impl ShardCoordinator {
             }
         }
 
-        RecoveryResult {
+        ShardRecoveryResult {
             recovered,
             dead_lettered,
         }
@@ -1377,18 +1377,18 @@ mod tests {
         assert!(metrics.is_some());
     }
 
-    // ==================== RecoveryResult Tests ====================
+    // ==================== ShardRecoveryResult Tests ====================
 
     #[test]
     fn test_recovery_result_is_complete() {
-        let result = RecoveryResult {
+        let result = ShardRecoveryResult {
             recovered: vec![TxId::new(1), TxId::new(2)],
             dead_lettered: vec![],
         };
         assert!(result.is_complete());
         assert_eq!(result.dead_letter_count(), 0);
 
-        let result_with_dead = RecoveryResult {
+        let result_with_dead = ShardRecoveryResult {
             recovered: vec![TxId::new(1)],
             dead_lettered: vec![DeadLetteredTransaction {
                 tx_id: TxId::new(2),
@@ -1433,7 +1433,7 @@ mod tests {
     #[test]
     fn test_coordinator_with_rebalance_config() {
         let config = test_config();
-        let rebalance_config = RebalanceConfig {
+        let rebalance_config = ShardRebalanceConfig {
             imbalance_threshold: 0.5,
             batch_size: 500,
             max_concurrent_migrations: 2,
@@ -1576,7 +1576,7 @@ mod tests {
 
     #[test]
     fn test_recovery_result_debug() {
-        let result = RecoveryResult {
+        let result = ShardRecoveryResult {
             recovered: vec![TxId::new(1)],
             dead_lettered: vec![],
         };

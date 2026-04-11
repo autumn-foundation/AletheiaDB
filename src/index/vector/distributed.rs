@@ -231,7 +231,7 @@ pub enum CircuitState {
 
 /// Configuration for circuit breaker.
 ///
-/// The `CircuitBreakerConfig` defines the thresholds and durations for the
+/// The `DistributedCircuitBreakerConfig` defines the thresholds and durations for the
 /// [`NodeCircuitBreaker`] to transition between `Closed`, `Open`, and `HalfOpen` states.
 /// It helps prevent cascading failures in a distributed setup when remote nodes are unresponsive.
 ///
@@ -240,10 +240,10 @@ pub enum CircuitState {
 /// ```rust
 /// # #[cfg(feature = "nova")]
 /// # fn main() {
-/// use aletheiadb::index::vector::distributed::CircuitBreakerConfig;
+/// use aletheiadb::index::vector::distributed::DistributedCircuitBreakerConfig;
 /// use std::time::Duration;
 ///
-/// let config = CircuitBreakerConfig {
+/// let config = DistributedCircuitBreakerConfig {
 ///     failure_threshold: 5,
 ///     open_duration: Duration::from_secs(30),
 ///     success_threshold: 3,
@@ -253,7 +253,7 @@ pub enum CircuitState {
 /// # fn main() {}
 /// ```
 #[derive(Debug, Clone)]
-pub struct CircuitBreakerConfig {
+pub struct DistributedCircuitBreakerConfig {
     /// Number of failures before opening circuit.
     pub failure_threshold: usize,
     /// Duration to keep circuit open.
@@ -262,7 +262,7 @@ pub struct CircuitBreakerConfig {
     pub success_threshold: usize,
 }
 
-impl Default for CircuitBreakerConfig {
+impl Default for DistributedCircuitBreakerConfig {
     fn default() -> Self {
         Self {
             failure_threshold: DEFAULT_FAILURE_THRESHOLD,
@@ -284,9 +284,9 @@ impl Default for CircuitBreakerConfig {
 /// ```rust
 /// # #[cfg(feature = "nova")]
 /// # fn main() {
-/// use aletheiadb::index::vector::distributed::{CircuitBreakerConfig, NodeCircuitBreaker, CircuitState};
+/// use aletheiadb::index::vector::distributed::{DistributedCircuitBreakerConfig, NodeCircuitBreaker, CircuitState};
 ///
-/// let config = CircuitBreakerConfig::default();
+/// let config = DistributedCircuitBreakerConfig::default();
 /// let breaker = NodeCircuitBreaker::new(config);
 ///
 /// // Initially, the circuit is closed and allows requests
@@ -298,7 +298,7 @@ impl Default for CircuitBreakerConfig {
 /// ```
 #[derive(Debug)]
 pub struct NodeCircuitBreaker {
-    config: CircuitBreakerConfig,
+    config: DistributedCircuitBreakerConfig,
     state: RwLock<CircuitState>,
     failure_count: AtomicUsize,
     success_count: AtomicUsize,
@@ -307,7 +307,7 @@ pub struct NodeCircuitBreaker {
 
 impl NodeCircuitBreaker {
     /// Create a new circuit breaker.
-    pub fn new(config: CircuitBreakerConfig) -> Self {
+    pub fn new(config: DistributedCircuitBreakerConfig) -> Self {
         Self {
             config,
             state: RwLock::new(CircuitState::Closed),
@@ -471,13 +471,13 @@ impl NodeCircuitBreaker {
 /// # #[cfg(feature = "nova")]
 /// # fn main() {
 /// use aletheiadb::index::vector::distributed::{
-///     MockVectorNodeClient, NodeConnection, CircuitBreakerConfig
+///     MockVectorNodeClient, NodeConnection, DistributedCircuitBreakerConfig
 /// };
 /// use aletheiadb::index::vector::DistanceMetric;
 /// use std::sync::Arc;
 ///
 /// let client = Arc::new(MockVectorNodeClient::new(0, 384, DistanceMetric::Cosine));
-/// let connection = NodeConnection::new(client, CircuitBreakerConfig::default());
+/// let connection = NodeConnection::new(client, DistributedCircuitBreakerConfig::default());
 ///
 /// assert_eq!(connection.node_id(), 0);
 /// assert!(connection.is_available());
@@ -509,7 +509,7 @@ impl<C: VectorNodeClient> fmt::Debug for NodeConnection<C> {
 
 impl<C: VectorNodeClient> NodeConnection<C> {
     /// Create a new node connection.
-    pub fn new(client: Arc<C>, circuit_config: CircuitBreakerConfig) -> Self {
+    pub fn new(client: Arc<C>, circuit_config: DistributedCircuitBreakerConfig) -> Self {
         Self {
             client,
             circuit_breaker: NodeCircuitBreaker::new(circuit_config),
@@ -630,7 +630,7 @@ impl NodeConnectionStats {
 /// Configuration for a single vector node.
 ///
 /// The `VectorNodeConfig` describes how to connect to a specific remote node,
-/// including its endpoint, timeout settings, and specific [`CircuitBreakerConfig`].
+/// including its endpoint, timeout settings, and specific [`DistributedCircuitBreakerConfig`].
 ///
 /// # Examples
 ///
@@ -657,7 +657,7 @@ pub struct VectorNodeConfig {
     /// Request timeout.
     pub timeout: Duration,
     /// Circuit breaker configuration.
-    pub circuit_breaker: CircuitBreakerConfig,
+    pub circuit_breaker: DistributedCircuitBreakerConfig,
 }
 
 impl VectorNodeConfig {
@@ -667,7 +667,7 @@ impl VectorNodeConfig {
             node_id,
             endpoint: endpoint.into(),
             timeout: DEFAULT_TIMEOUT,
-            circuit_breaker: CircuitBreakerConfig::default(),
+            circuit_breaker: DistributedCircuitBreakerConfig::default(),
         }
     }
 
@@ -678,7 +678,7 @@ impl VectorNodeConfig {
     }
 
     /// Set the circuit breaker configuration.
-    pub fn with_circuit_breaker(mut self, config: CircuitBreakerConfig) -> Self {
+    pub fn with_circuit_breaker(mut self, config: DistributedCircuitBreakerConfig) -> Self {
         self.circuit_breaker = config;
         self
     }
@@ -1770,7 +1770,7 @@ mod tests {
 
     #[test]
     fn test_circuit_breaker_opens_on_failures() {
-        let config = CircuitBreakerConfig {
+        let config = DistributedCircuitBreakerConfig {
             failure_threshold: 3,
             open_duration: Duration::from_millis(100),
             success_threshold: 2,
@@ -1790,7 +1790,7 @@ mod tests {
 
     #[test]
     fn test_circuit_breaker_half_open_transition() {
-        let config = CircuitBreakerConfig {
+        let config = DistributedCircuitBreakerConfig {
             failure_threshold: 1,
             open_duration: Duration::from_millis(10),
             success_threshold: 1,
@@ -1807,7 +1807,7 @@ mod tests {
 
     #[test]
     fn test_circuit_breaker_closes_from_half_open() {
-        let config = CircuitBreakerConfig {
+        let config = DistributedCircuitBreakerConfig {
             failure_threshold: 1,
             open_duration: Duration::from_millis(10),
             success_threshold: 2,
@@ -2267,7 +2267,7 @@ mod tests {
 
     #[test]
     fn test_circuit_breaker_remaining_time() {
-        let config = CircuitBreakerConfig {
+        let config = DistributedCircuitBreakerConfig {
             failure_threshold: 1,
             open_duration: Duration::from_secs(60),
             success_threshold: 1,
@@ -2297,7 +2297,7 @@ mod tests {
         let client = Arc::new(MockVectorNodeClient::new(0, 4, DistanceMetric::Cosine));
         let connection = NodeConnection::new(
             client,
-            CircuitBreakerConfig {
+            DistributedCircuitBreakerConfig {
                 failure_threshold: 1,
                 open_duration: Duration::from_secs(60),
                 success_threshold: 1,
@@ -2316,7 +2316,7 @@ mod tests {
     #[test]
     fn test_node_connection_debug() {
         let client = Arc::new(MockVectorNodeClient::new(0, 4, DistanceMetric::Cosine));
-        let connection = NodeConnection::new(client, CircuitBreakerConfig::default());
+        let connection = NodeConnection::new(client, DistributedCircuitBreakerConfig::default());
 
         let debug_str = format!("{:?}", connection);
         assert!(debug_str.contains("NodeConnection"));
@@ -2413,7 +2413,7 @@ mod tests {
     fn test_circuit_breaker_concurrent_failures() {
         use std::thread;
 
-        let config = CircuitBreakerConfig {
+        let config = DistributedCircuitBreakerConfig {
             failure_threshold: 10,
             open_duration: Duration::from_secs(60),
             success_threshold: 3,
@@ -2445,7 +2445,7 @@ mod tests {
     fn test_circuit_breaker_concurrent_success_failure_mix() {
         use std::thread;
 
-        let config = CircuitBreakerConfig {
+        let config = DistributedCircuitBreakerConfig {
             failure_threshold: 5,
             open_duration: Duration::from_millis(10),
             success_threshold: 2,
@@ -2495,7 +2495,7 @@ mod tests {
     fn test_circuit_breaker_concurrent_state_checks() {
         use std::thread;
 
-        let config = CircuitBreakerConfig {
+        let config = DistributedCircuitBreakerConfig {
             failure_threshold: 3,
             open_duration: Duration::from_millis(50),
             success_threshold: 2,

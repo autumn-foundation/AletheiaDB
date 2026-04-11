@@ -1,8 +1,8 @@
-//! Sherlock: Temporal Pattern Matching Engine.
+//! SherlockEngine: Temporal Pattern Matching Engine.
 //!
 //! "It is a capital mistake to theorize before one has data."
 //!
-//! Sherlock allows you to define "Mysteries" (Temporal Patterns) and investigate
+//! SherlockEngine allows you to define "Mysteries" (Temporal Patterns) and investigate
 //! the graph history to find "Deductions" (Matches).
 //!
 //! It answers questions like:
@@ -11,8 +11,8 @@
 //!
 //! # Concepts
 //! - **Clue**: A specific condition to look for (e.g., Property Change).
-//! - **Mystery**: A sequence of Clues with time constraints.
-//! - **Deduction**: A concrete sequence of events that matches the Mystery.
+//! - **SherlockMystery**: A sequence of Clues with time constraints.
+//! - **Deduction**: A concrete sequence of events that matches the SherlockMystery.
 
 use crate::AletheiaDB;
 use crate::core::error::Result;
@@ -48,18 +48,18 @@ pub enum Clue {
 }
 
 #[cfg(feature = "nova")]
-/// A Mystery defines the pattern to search for.
+/// A SherlockMystery defines the pattern to search for.
 ///
 /// # Examples
 ///
 /// ```rust
 /// # #[cfg(feature = "nova")]
 /// # fn main() {
-/// use aletheiadb::experimental::sherlock::{Mystery, Clue};
+/// use aletheiadb::experimental::sherlock::{SherlockMystery, Clue};
 /// use aletheiadb::core::property::PropertyValue;
 /// use std::time::Duration;
 ///
-/// let mystery = Mystery::new(Duration::from_secs(60))
+/// let mystery = SherlockMystery::new(Duration::from_secs(60))
 ///     .add_clue(Clue::PropertyState {
 ///         key: "status".to_string(),
 ///         value: Some(PropertyValue::from("Pending")),
@@ -69,7 +69,7 @@ pub enum Clue {
 /// # fn main() {}
 /// ```
 #[derive(Debug, Clone)]
-pub struct Mystery {
+pub struct SherlockMystery {
     /// The sequence of clues to find.
     pub clues: Vec<Clue>,
     /// Maximum time allowed between the first and last clue.
@@ -77,17 +77,17 @@ pub struct Mystery {
 }
 
 #[cfg(not(feature = "nova"))]
-/// A Mystery defines the pattern to search for.
+/// A SherlockMystery defines the pattern to search for.
 #[deprecated(
-    note = "Mystery requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
+    note = "SherlockMystery requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
 )]
-pub struct Mystery {
+pub struct SherlockMystery {
     _marker: std::marker::PhantomData<Duration>,
 }
 
 #[cfg(feature = "nova")]
-impl Mystery {
-    /// Create a new Mystery builder.
+impl SherlockMystery {
+    /// Create a new SherlockMystery builder.
     pub fn new(time_window: Duration) -> Self {
         Self {
             clues: Vec::new(),
@@ -104,8 +104,8 @@ impl Mystery {
 
 #[cfg(not(feature = "nova"))]
 #[allow(deprecated)]
-impl Mystery {
-    /// Create a new Mystery builder.
+impl SherlockMystery {
+    /// Create a new SherlockMystery builder.
     ///
     /// # Panics
     ///
@@ -114,7 +114,7 @@ impl Mystery {
     #[track_caller]
     pub fn new(time_window: Duration) -> Self {
         panic!(
-            "Mystery requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
+            "SherlockMystery requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
         );
     }
 
@@ -127,7 +127,7 @@ impl Mystery {
     #[track_caller]
     pub fn add_clue(self, clue: Clue) -> Self {
         panic!(
-            "Mystery requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
+            "SherlockMystery requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
         );
     }
 }
@@ -155,7 +155,7 @@ pub struct Deduction {
 }
 
 #[cfg(feature = "nova")]
-/// The Sherlock Engine.
+/// The SherlockEngine Engine.
 ///
 /// # Examples
 ///
@@ -163,7 +163,7 @@ pub struct Deduction {
 /// # #[cfg(feature = "nova")]
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// use aletheiadb::AletheiaDB;
-/// use aletheiadb::experimental::sherlock::{Sherlock, Mystery, Clue};
+/// use aletheiadb::experimental::sherlock::{SherlockEngine, SherlockMystery, Clue};
 /// use aletheiadb::core::property::{PropertyValue, PropertyMapBuilder};
 /// use aletheiadb::api::transaction::WriteOps;
 /// use std::time::Duration;
@@ -180,8 +180,8 @@ pub struct Deduction {
 ///     PropertyMapBuilder::new().insert("status", "Completed").build()
 /// ))?;
 ///
-/// let sherlock = Sherlock::new(&db);
-/// let mystery = Mystery::new(Duration::from_secs(60))
+/// let sherlock = SherlockEngine::new(&db);
+/// let mystery = SherlockMystery::new(Duration::from_secs(60))
 ///     .add_clue(Clue::PropertyState {
 ///         key: "status".to_string(),
 ///         value: Some(PropertyValue::from("Pending")),
@@ -198,29 +198,33 @@ pub struct Deduction {
 /// # #[cfg(not(feature = "nova"))]
 /// # fn main() {}
 /// ```
-pub struct Sherlock<'a> {
+pub struct SherlockEngine<'a> {
     #[allow(dead_code)]
     db: &'a AletheiaDB,
 }
 
 #[cfg(not(feature = "nova"))]
-/// The Sherlock Engine.
+/// The SherlockEngine Engine.
 #[deprecated(
-    note = "Sherlock requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
+    note = "SherlockEngine requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
 )]
-pub struct Sherlock<'a> {
+pub struct SherlockEngine<'a> {
     _marker: std::marker::PhantomData<&'a AletheiaDB>,
 }
 
 #[cfg(feature = "nova")]
-impl<'a> Sherlock<'a> {
-    /// Create a new Sherlock instance.
+impl<'a> SherlockEngine<'a> {
+    /// Create a new SherlockEngine instance.
     pub fn new(db: &'a AletheiaDB) -> Self {
         Self { db }
     }
 
-    /// Investigate a specific node for the given Mystery.
-    pub fn investigate(&self, node_id: NodeId, mystery: &Mystery) -> Result<Vec<Deduction>> {
+    /// Investigate a specific node for the given SherlockMystery.
+    pub fn investigate(
+        &self,
+        node_id: NodeId,
+        mystery: &SherlockMystery,
+    ) -> Result<Vec<Deduction>> {
         let history = self.db.get_node_history(node_id)?;
         let mut deductions = Vec::new();
 
@@ -329,8 +333,8 @@ impl<'a> Sherlock<'a> {
 
 #[cfg(not(feature = "nova"))]
 #[allow(deprecated)]
-impl<'a> Sherlock<'a> {
-    /// Create a new Sherlock instance.
+impl<'a> SherlockEngine<'a> {
+    /// Create a new SherlockEngine instance.
     ///
     /// # Panics
     ///
@@ -339,20 +343,24 @@ impl<'a> Sherlock<'a> {
     #[track_caller]
     pub fn new(db: &'a AletheiaDB) -> Self {
         panic!(
-            "Sherlock requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
+            "SherlockEngine requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
         );
     }
 
-    /// Investigate a specific node for the given Mystery.
+    /// Investigate a specific node for the given SherlockMystery.
     ///
     /// # Panics
     ///
     /// This method panics if the `nova` feature is not enabled.
     #[allow(unused_variables)]
     #[track_caller]
-    pub fn investigate(&self, node_id: NodeId, mystery: &Mystery) -> Result<Vec<Deduction>> {
+    pub fn investigate(
+        &self,
+        node_id: NodeId,
+        mystery: &SherlockMystery,
+    ) -> Result<Vec<Deduction>> {
         panic!(
-            "Sherlock requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
+            "SherlockEngine requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
         );
     }
 }
@@ -397,11 +405,11 @@ mod tests {
         })
         .unwrap();
 
-        let sherlock = Sherlock::new(&db);
+        let sherlock = SherlockEngine::new(&db);
 
-        // Mystery: Pending -> Delivered (skipping Shipped is allowed if order preserved? No, we just look for A then B)
+        // SherlockMystery: Pending -> Delivered (skipping Shipped is allowed if order preserved? No, we just look for A then B)
         // Let's look for Pending -> Shipped -> Delivered
-        let mystery = Mystery::new(Duration::from_secs(1))
+        let mystery = SherlockMystery::new(Duration::from_secs(1))
             .add_clue(Clue::PropertyState {
                 key: "status".to_string(),
                 value: Some(PropertyValue::from("Pending")),
@@ -441,10 +449,10 @@ mod tests {
         })
         .unwrap();
 
-        let sherlock = Sherlock::new(&db);
+        let sherlock = SherlockEngine::new(&db);
 
-        // Mystery: A -> B within 10ms (Should Fail)
-        let impossible_mystery = Mystery::new(Duration::from_millis(10))
+        // SherlockMystery: A -> B within 10ms (Should Fail)
+        let impossible_mystery = SherlockMystery::new(Duration::from_millis(10))
             .add_clue(Clue::PropertyState {
                 key: "state".to_string(),
                 value: Some(PropertyValue::from("A")),
@@ -460,8 +468,8 @@ mod tests {
             "Should not match due to time constraint"
         );
 
-        // Mystery: A -> B within 500ms (Should Pass)
-        let possible_mystery = Mystery::new(Duration::from_millis(500))
+        // SherlockMystery: A -> B within 500ms (Should Pass)
+        let possible_mystery = SherlockMystery::new(Duration::from_millis(500))
             .add_clue(Clue::PropertyState {
                 key: "state".to_string(),
                 value: Some(PropertyValue::from("A")),
@@ -485,27 +493,27 @@ mod stub_tests {
 
     #[test]
     #[should_panic(
-        expected = "Sherlock requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
+        expected = "SherlockEngine requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
     )]
     fn test_stub_panic_on_new() {
         let db = AletheiaDB::new().unwrap();
-        let _ = Sherlock::new(&db);
+        let _ = SherlockEngine::new(&db);
     }
 
     #[test]
     #[should_panic(
-        expected = "Mystery requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
+        expected = "SherlockMystery requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
     )]
     fn test_stub_panic_on_mystery() {
-        let _ = Mystery::new(Duration::from_secs(1));
+        let _ = SherlockMystery::new(Duration::from_secs(1));
     }
 
     #[test]
     #[should_panic(
-        expected = "Mystery requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
+        expected = "SherlockMystery requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
     )]
     fn test_stub_panic_on_add_clue() {
-        let mystery = Mystery {
+        let mystery = SherlockMystery {
             _marker: std::marker::PhantomData,
         };
         let clue = Clue::PropertyState {
@@ -517,13 +525,13 @@ mod stub_tests {
 
     #[test]
     #[should_panic(
-        expected = "Sherlock requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
+        expected = "SherlockEngine requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
     )]
     fn test_stub_panic_on_investigate() {
-        let sherlock = Sherlock {
+        let sherlock = SherlockEngine {
             _marker: std::marker::PhantomData,
         };
-        let mystery = Mystery {
+        let mystery = SherlockMystery {
             _marker: std::marker::PhantomData,
         };
         let _ = sherlock.investigate(NodeId::new(0).unwrap(), &mystery);

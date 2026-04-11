@@ -427,7 +427,7 @@ impl<C: ShardClient> MigrationExecutor<C> {
     }
 
     /// Execute a migration plan.
-    pub fn execute(&self, plan: &mut MigrationPlan) -> MigrationResult<MigrationStats> {
+    pub fn execute(&self, plan: &mut MigrationPlan) -> MigrationResult<ShardMigrationStats> {
         let start = Instant::now();
         let migration_id = plan.id;
 
@@ -473,7 +473,7 @@ impl<C: ShardClient> MigrationExecutor<C> {
             flags.remove(&migration_id);
         }
 
-        Ok(MigrationStats {
+        Ok(ShardMigrationStats {
             migration_id,
             total_time: start.elapsed(),
             batches_transferred: copy_stats.batches,
@@ -496,8 +496,8 @@ impl<C: ShardClient> MigrationExecutor<C> {
     }
 
     /// Get executor statistics.
-    pub fn stats(&self) -> ExecutorStats {
-        ExecutorStats {
+    pub fn stats(&self) -> ShardMigrationExecutorStats {
+        ShardMigrationExecutorStats {
             batches_transferred: self.batches_transferred.load(Ordering::Relaxed),
             bytes_transferred: self.bytes_transferred.load(Ordering::Relaxed),
             active_migrations: self.cancellation_flags.read().map(|f| f.len()).unwrap_or(0),
@@ -685,7 +685,7 @@ struct CopyStats {
 
 /// Statistics from a migration.
 #[derive(Debug, Clone)]
-pub struct MigrationStats {
+pub struct ShardMigrationStats {
     /// Migration ID.
     pub migration_id: u64,
     /// Total time taken.
@@ -704,7 +704,7 @@ pub struct MigrationStats {
 
 /// Executor statistics.
 #[derive(Debug, Clone)]
-pub struct ExecutorStats {
+pub struct ShardMigrationExecutorStats {
     /// Total batches transferred.
     pub batches_transferred: u64,
     /// Total bytes transferred.
@@ -932,11 +932,11 @@ mod tests {
         assert!(!executor.cancel(999));
     }
 
-    // ==================== MigrationStats Tests ====================
+    // ==================== ShardMigrationStats Tests ====================
 
     #[test]
     fn test_migration_stats() {
-        let stats = MigrationStats {
+        let stats = ShardMigrationStats {
             migration_id: 1,
             total_time: Duration::from_secs(10),
             batches_transferred: 100,
@@ -1093,11 +1093,11 @@ mod tests {
         assert!(debug.contains("batch_retries"));
     }
 
-    // ==================== ExecutorStats Tests ====================
+    // ==================== ShardMigrationExecutorStats Tests ====================
 
     #[test]
     fn test_executor_stats_default() {
-        let stats = ExecutorStats {
+        let stats = ShardMigrationExecutorStats {
             batches_transferred: 0,
             bytes_transferred: 0,
             active_migrations: 0,

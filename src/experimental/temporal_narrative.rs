@@ -25,21 +25,21 @@ pub struct NarrativeEvent {
 
 /// Generator for creating natural language narratives from temporal history.
 #[cfg(feature = "nova")]
-pub struct NarrativeGenerator<'a> {
+pub struct TemporalNarrativeGenerator<'a> {
     db: &'a AletheiaDB,
 }
 
 #[cfg(not(feature = "nova"))]
 /// Generator for creating natural language narratives from temporal history.
 #[deprecated(
-    note = "NarrativeGenerator requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
+    note = "TemporalNarrativeGenerator requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
 )]
-pub struct NarrativeGenerator<'a> {
+pub struct TemporalNarrativeGenerator<'a> {
     _marker: std::marker::PhantomData<&'a AletheiaDB>,
 }
 
 #[cfg(feature = "nova")]
-impl<'a> NarrativeGenerator<'a> {
+impl<'a> TemporalNarrativeGenerator<'a> {
     /// Create a new narrative generator.
     pub fn new(db: &'a AletheiaDB) -> Self {
         Self { db }
@@ -142,7 +142,7 @@ impl<'a> NarrativeGenerator<'a> {
 
 #[cfg(not(feature = "nova"))]
 #[allow(deprecated)]
-impl<'a> NarrativeGenerator<'a> {
+impl<'a> TemporalNarrativeGenerator<'a> {
     /// Create a new narrative generator.
     ///
     /// # Panics
@@ -152,7 +152,7 @@ impl<'a> NarrativeGenerator<'a> {
     #[track_caller]
     pub fn new(db: &'a AletheiaDB) -> Self {
         panic!(
-            "NarrativeGenerator requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
+            "TemporalNarrativeGenerator requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
         );
     }
 
@@ -165,7 +165,7 @@ impl<'a> NarrativeGenerator<'a> {
     #[track_caller]
     pub fn generate_node_narrative(&self, node_id: NodeId) -> Result<Vec<NarrativeEvent>> {
         panic!(
-            "NarrativeGenerator requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
+            "TemporalNarrativeGenerator requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
         );
     }
 }
@@ -199,7 +199,7 @@ mod tests {
         .unwrap();
 
         // 3. Generate Narrative
-        let generator = NarrativeGenerator::new(&db);
+        let generator = TemporalNarrativeGenerator::new(&db);
         let narrative = generator.generate_node_narrative(node_id).unwrap();
 
         assert_eq!(narrative.len(), 2);
@@ -264,7 +264,7 @@ mod tests {
         .unwrap();
 
         // 3. Generate Narrative
-        let generator = NarrativeGenerator::new(&db);
+        let generator = TemporalNarrativeGenerator::new(&db);
         let narrative = generator.generate_node_narrative(node_id).unwrap();
 
         assert_eq!(narrative.len(), 2);
@@ -295,23 +295,23 @@ mod stub_tests {
 
     #[test]
     #[should_panic(
-        expected = "NarrativeGenerator requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
+        expected = "TemporalNarrativeGenerator requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
     )]
     fn test_stub_panic_on_new() {
         let db = AletheiaDB::new().unwrap();
         // This should panic
-        let _ = NarrativeGenerator::new(&db);
+        let _ = TemporalNarrativeGenerator::new(&db);
     }
 
     #[test]
     #[should_panic(
-        expected = "NarrativeGenerator requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
+        expected = "TemporalNarrativeGenerator requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
     )]
     fn test_stub_panic_on_generate() {
-        // Construct a fake NarrativeGenerator to test method panic
-        // Safety: NarrativeGenerator is a ZST with PhantomData, so it's valid to transmute from unit or zeroed.
+        // Construct a fake TemporalNarrativeGenerator to test method panic
+        // Safety: TemporalNarrativeGenerator is a ZST with PhantomData, so it's valid to transmute from unit or zeroed.
         // We just need it to call the method.
-        let generator: NarrativeGenerator<'_> = NarrativeGenerator {
+        let generator: TemporalNarrativeGenerator<'_> = TemporalNarrativeGenerator {
             _marker: std::marker::PhantomData,
         };
         // This should panic

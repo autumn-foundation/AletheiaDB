@@ -58,15 +58,17 @@ pub mod transaction;
 pub mod types;
 
 // Re-export commonly used types
-pub use config::{RebalanceConfig, ShardConfig, ShardDefinition, ShardDiscovery};
-pub use coordinator::{DeadLetteredTransaction, RecoveryResult, ShardConnection, ShardCoordinator};
+pub use config::{ShardConfig, ShardDefinition, ShardDiscovery, ShardRebalanceConfig};
+pub use coordinator::{
+    DeadLetteredTransaction, ShardConnection, ShardCoordinator, ShardRecoveryResult,
+};
 pub use executor::{
     AggregationStrategy, DistributedQuery, ExecutorConfig, ExecutorError, ExecutorResult,
-    ExecutorStats, QueryExecutor, QueryResult, ShardResult,
+    ShardExecutorStats, ShardQueryResult, ShardResult, ShardedQueryExecutor,
 };
 pub use migration::{
     DualWriteRouter, MigrationConfig, MigrationError, MigrationExecutor, MigrationResult,
-    MigrationStats, RoutingToken,
+    RoutingToken, ShardMigrationStats,
 };
 pub use network::{
     CircuitBreaker, CircuitBreakerConfig, CircuitState, ConnectionPool, MigrationBatch,
@@ -77,7 +79,7 @@ pub use persistent_commit_log::{
     CommitLogConfig, CommitLogEntry, CommitLogError, CommitLogResult, CommitLogStats, EntryType,
     PersistentCommitLog,
 };
-pub use rebalance::{MigrationPlan, MigrationProgress, MigrationState, RebalanceManager};
+pub use rebalance::{MigrationPlan, MigrationState, RebalanceManager, ShardMigrationProgress};
 pub use router::{ShardRouter, TraversalPlan, TraversalStep};
 pub use rpc_client::{ClientStats, HttpShardClient, RpcConfig};
 pub use simulation::{EdgeCutAnalysis, ShardingSimulation, SimulationResult};

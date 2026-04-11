@@ -180,11 +180,11 @@ impl Resonator for ActivityDensityResonator {
 /// # #[cfg(feature = "nova")]
 /// # fn main() {
 /// use aletheiadb::AletheiaDB;
-/// use aletheiadb::experimental::echo::EchoChamber;
+/// use aletheiadb::experimental::echo::EchoChamberEngine;
 /// use aletheiadb::core::id::NodeId;
 ///
 /// let db = AletheiaDB::new().unwrap();
-/// let chamber = EchoChamber::new(&db);
+/// let chamber = EchoChamberEngine::new(&db);
 ///
 /// let target_node = NodeId::new(1).unwrap();
 /// let candidates = vec![NodeId::new(2).unwrap(), NodeId::new(3).unwrap()];
@@ -194,7 +194,7 @@ impl Resonator for ActivityDensityResonator {
 /// # #[cfg(not(feature = "nova"))]
 /// # fn main() {}
 /// ```
-pub struct EchoChamber<'a> {
+pub struct EchoChamberEngine<'a> {
     db: &'a AletheiaDB,
     resonator: Box<dyn Resonator>,
 }
@@ -212,11 +212,11 @@ pub struct EchoChamber<'a> {
 /// # #[cfg(feature = "nova")]
 /// # fn main() {
 /// use aletheiadb::AletheiaDB;
-/// use aletheiadb::experimental::echo::EchoChamber;
+/// use aletheiadb::experimental::echo::EchoChamberEngine;
 /// use aletheiadb::core::id::NodeId;
 ///
 /// let db = AletheiaDB::new().unwrap();
-/// let chamber = EchoChamber::new(&db);
+/// let chamber = EchoChamberEngine::new(&db);
 ///
 /// let target_node = NodeId::new(1).unwrap();
 /// let candidates = vec![NodeId::new(2).unwrap(), NodeId::new(3).unwrap()];
@@ -227,15 +227,15 @@ pub struct EchoChamber<'a> {
 /// # fn main() {}
 /// ```
 #[deprecated(
-    note = "EchoChamber requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
+    note = "EchoChamberEngine requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
 )]
-pub struct EchoChamber<'a> {
+pub struct EchoChamberEngine<'a> {
     _marker: std::marker::PhantomData<&'a AletheiaDB>,
 }
 
 #[cfg(feature = "nova")]
-impl<'a> EchoChamber<'a> {
-    /// Create a new EchoChamber with default settings.
+impl<'a> EchoChamberEngine<'a> {
+    /// Create a new EchoChamberEngine with default settings.
     pub fn new(db: &'a AletheiaDB) -> Self {
         Self {
             db,
@@ -243,7 +243,7 @@ impl<'a> EchoChamber<'a> {
         }
     }
 
-    /// Configure the EchoChamber with a custom resonator.
+    /// Configure the EchoChamberEngine with a custom resonator.
     pub fn with_resonator<R: Resonator + 'static>(mut self, resonator: R) -> Self {
         self.resonator = Box::new(resonator);
         self
@@ -285,8 +285,8 @@ impl<'a> EchoChamber<'a> {
 
 #[cfg(not(feature = "nova"))]
 #[allow(deprecated)]
-impl<'a> EchoChamber<'a> {
-    /// Create a new EchoChamber with default settings.
+impl<'a> EchoChamberEngine<'a> {
+    /// Create a new EchoChamberEngine with default settings.
     ///
     /// # Panics
     ///
@@ -295,11 +295,11 @@ impl<'a> EchoChamber<'a> {
     #[track_caller]
     pub fn new(db: &'a AletheiaDB) -> Self {
         panic!(
-            "EchoChamber requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
+            "EchoChamberEngine requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
         );
     }
 
-    /// Configure the EchoChamber with a custom resonator.
+    /// Configure the EchoChamberEngine with a custom resonator.
     ///
     /// # Panics
     ///
@@ -308,7 +308,7 @@ impl<'a> EchoChamber<'a> {
     #[track_caller]
     pub fn with_resonator<R: Resonator + 'static>(self, resonator: R) -> Self {
         panic!(
-            "EchoChamber requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
+            "EchoChamberEngine requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
         );
     }
 
@@ -321,7 +321,7 @@ impl<'a> EchoChamber<'a> {
     #[track_caller]
     pub fn find_echoes(&self, target: NodeId, candidates: &[NodeId]) -> Result<Vec<(NodeId, f32)>> {
         panic!(
-            "EchoChamber requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
+            "EchoChamberEngine requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
         );
     }
 }
@@ -416,7 +416,7 @@ mod tests {
             num_bins: 10,
         };
 
-        let chamber = EchoChamber::new(&db).with_resonator(resonator);
+        let chamber = EchoChamberEngine::new(&db).with_resonator(resonator);
 
         // Find echoes for Node A among B and C
         let echoes = chamber.find_echoes(node_a, &[node_b, node_c]).unwrap();
@@ -454,19 +454,19 @@ mod stub_tests {
 
     #[test]
     #[should_panic(
-        expected = "EchoChamber requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
+        expected = "EchoChamberEngine requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
     )]
     fn test_stub_panic_on_new() {
         let db = AletheiaDB::new().unwrap();
-        let _ = EchoChamber::new(&db);
+        let _ = EchoChamberEngine::new(&db);
     }
 
     #[test]
     #[should_panic(
-        expected = "EchoChamber requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
+        expected = "EchoChamberEngine requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
     )]
     fn test_stub_panic_on_with_resonator() {
-        let chamber = EchoChamber {
+        let chamber = EchoChamberEngine {
             _marker: std::marker::PhantomData,
         };
         // We need a dummy resonator. Since Resonator trait is public but ActivityDensityResonator is only stubbed out...
@@ -479,10 +479,10 @@ mod stub_tests {
 
     #[test]
     #[should_panic(
-        expected = "EchoChamber requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
+        expected = "EchoChamberEngine requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
     )]
     fn test_stub_panic_on_find_echoes() {
-        let chamber = EchoChamber {
+        let chamber = EchoChamberEngine {
             _marker: std::marker::PhantomData,
         };
         let _ = chamber.find_echoes(NodeId::new(0).unwrap(), &[]);

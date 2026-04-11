@@ -238,7 +238,7 @@ pub struct ShardResult {
 
 /// Aggregated result from all shards.
 #[derive(Debug, Clone)]
-pub struct QueryResult {
+pub struct ShardQueryResult {
     /// Query ID.
     pub query_id: u64,
     /// Aggregated data.
@@ -255,7 +255,7 @@ pub struct QueryResult {
     pub total_results: usize,
 }
 
-impl QueryResult {
+impl ShardQueryResult {
     /// Check if all shards succeeded.
     pub fn is_complete(&self) -> bool {
         self.shards_queried == self.shards_succeeded
@@ -273,7 +273,7 @@ impl QueryResult {
 
 /// Distributed query executor.
 #[derive(Debug)]
-pub struct QueryExecutor<C: ShardClient> {
+pub struct ShardedQueryExecutor<C: ShardClient> {
     /// Configuration.
     config: ExecutorConfig,
     /// Shard clients indexed by shard ID.
@@ -288,7 +288,7 @@ pub struct QueryExecutor<C: ShardClient> {
     queries_failed: AtomicU64,
 }
 
-impl<C: ShardClient> QueryExecutor<C> {
+impl<C: ShardClient> ShardedQueryExecutor<C> {
     /// Create a new query executor.
     pub fn new(config: ExecutorConfig, router: ShardRouter) -> Self {
         Self {
@@ -329,7 +329,7 @@ impl<C: ShardClient> QueryExecutor<C> {
     ///   are marked as `pending` in the timeout error (or silently omitted if results are returned).
     ///
     /// This means the order of `target_shards` matters: earlier shards are prioritized.
-    pub fn execute(&self, query: DistributedQuery) -> ExecutorResult<QueryResult> {
+    pub fn execute(&self, query: DistributedQuery) -> ExecutorResult<ShardQueryResult> {
         let start = Instant::now();
         let timeout = query.timeout.unwrap_or(self.config.default_timeout);
 
@@ -406,7 +406,7 @@ impl<C: ShardClient> QueryExecutor<C> {
 
         self.queries_executed.fetch_add(1, Ordering::Relaxed);
 
-        Ok(QueryResult {
+        Ok(ShardQueryResult {
             query_id: query.id,
             data: aggregated,
             shard_results: results.clone(),
@@ -423,7 +423,7 @@ impl<C: ShardClient> QueryExecutor<C> {
         _start_node: NodeId,
         start_label: &str,
         target_labels: &[&str],
-    ) -> ExecutorResult<QueryResult> {
+    ) -> ExecutorResult<ShardQueryResult> {
         let plan = self.router.route_traversal(start_label, target_labels);
 
         // Build query from traversal plan
@@ -446,8 +446,8 @@ impl<C: ShardClient> QueryExecutor<C> {
     }
 
     /// Get executor statistics.
-    pub fn stats(&self) -> ExecutorStats {
-        ExecutorStats {
+    pub fn stats(&self) -> ShardExecutorStats {
+        ShardExecutorStats {
             queries_executed: self.queries_executed.load(Ordering::Relaxed),
             queries_failed: self.queries_failed.load(Ordering::Relaxed),
             registered_clients: self.clients.len(),
@@ -597,7 +597,7 @@ impl<C: ShardClient> QueryExecutor<C> {
 
 /// Statistics for the query executor.
 #[derive(Debug, Clone)]
-pub struct ExecutorStats {
+pub struct ShardExecutorStats {
     /// Total queries executed.
     pub queries_executed: u64,
     /// Total queries failed.
@@ -606,7 +606,7 @@ pub struct ExecutorStats {
     pub registered_clients: usize,
 }
 
-impl ExecutorStats {
+impl ShardExecutorStats {
     /// Calculate success rate.
     pub fn success_rate(&self) -> f64 {
         let total = self.queries_executed + self.queries_failed;
@@ -679,11 +679,11 @@ mod tests {
         assert_eq!(query.aggregation, AggregationStrategy::Sum);
     }
 
-    // ==================== QueryResult Tests ====================
+    // ==================== ShardQueryResult Tests ====================
 
     #[test]
     fn test_query_result_complete() {
-        let result = QueryResult {
+        let result = ShardQueryResult {
             query_id: 1,
             data: vec![],
             shard_results: vec![],
@@ -699,7 +699,7 @@ mod tests {
 
     #[test]
     fn test_query_result_partial() {
-        let result = QueryResult {
+        let result = ShardQueryResult {
             query_id: 1,
             data: vec![],
             shard_results: vec![],
@@ -713,12 +713,12 @@ mod tests {
         assert!((result.success_rate() - 0.666).abs() < 0.01);
     }
 
-    // ==================== QueryExecutor Tests ====================
+    // ==================== ShardedQueryExecutor Tests ====================
 
     #[test]
     fn test_executor_creation() {
-        let executor: QueryExecutor<MockShardClient> =
-            QueryExecutor::new(ExecutorConfig::default(), test_router());
+        let executor: ShardedQueryExecutor<MockShardClient> =
+            ShardedQueryExecutor::new(ExecutorConfig::default(), test_router());
 
         assert_eq!(executor.stats().registered_clients, 0);
         assert_eq!(executor.stats().queries_executed, 0);
@@ -726,8 +726,8 @@ mod tests {
 
     #[test]
     fn test_executor_register_client() {
-        let mut executor: QueryExecutor<MockShardClient> =
-            QueryExecutor::new(ExecutorConfig::default(), test_router());
+        let mut executor: ShardedQueryExecutor<MockShardClient> =
+            ShardedQueryExecutor::new(ExecutorConfig::default(), test_router());
 
         let client = Arc::new(MockShardClient::new(make_shard_id(0)));
         executor.register_client(make_shard_id(0), client);
@@ -737,8 +737,8 @@ mod tests {
 
     #[test]
     fn test_executor_unregister_client() {
-        let mut executor: QueryExecutor<MockShardClient> =
-            QueryExecutor::new(ExecutorConfig::default(), test_router());
+        let mut executor: ShardedQueryExecutor<MockShardClient> =
+            ShardedQueryExecutor::new(ExecutorConfig::default(), test_router());
 
         let client = Arc::new(MockShardClient::new(make_shard_id(0)));
         executor.register_client(make_shard_id(0), client);
@@ -749,8 +749,8 @@ mod tests {
 
     #[test]
     fn test_executor_no_shards() {
-        let executor: QueryExecutor<MockShardClient> =
-            QueryExecutor::new(ExecutorConfig::default(), test_router());
+        let executor: ShardedQueryExecutor<MockShardClient> =
+            ShardedQueryExecutor::new(ExecutorConfig::default(), test_router());
 
         let query = DistributedQuery::new(1, vec![]);
         let result = executor.execute(query);
@@ -760,8 +760,8 @@ mod tests {
 
     #[test]
     fn test_executor_single_shard_success() {
-        let mut executor: QueryExecutor<MockShardClient> =
-            QueryExecutor::new(ExecutorConfig::default(), test_router());
+        let mut executor: ShardedQueryExecutor<MockShardClient> =
+            ShardedQueryExecutor::new(ExecutorConfig::default(), test_router());
 
         let client = Arc::new(MockShardClient::new(make_shard_id(0)));
         executor.register_client(make_shard_id(0), client);
@@ -776,8 +776,8 @@ mod tests {
 
     #[test]
     fn test_executor_multiple_shards_success() {
-        let mut executor: QueryExecutor<MockShardClient> =
-            QueryExecutor::new(ExecutorConfig::default(), test_router());
+        let mut executor: ShardedQueryExecutor<MockShardClient> =
+            ShardedQueryExecutor::new(ExecutorConfig::default(), test_router());
 
         for i in 0..3 {
             let client = Arc::new(MockShardClient::new(make_shard_id(i)));
@@ -797,8 +797,8 @@ mod tests {
 
     #[test]
     fn test_executor_partial_failure() {
-        let mut executor: QueryExecutor<MockShardClient> =
-            QueryExecutor::new(ExecutorConfig::default(), test_router());
+        let mut executor: ShardedQueryExecutor<MockShardClient> =
+            ShardedQueryExecutor::new(ExecutorConfig::default(), test_router());
 
         let client0 = Arc::new(MockShardClient::new(make_shard_id(0)));
         let client1 = Arc::new(MockShardClient::new(make_shard_id(1)));
@@ -820,8 +820,8 @@ mod tests {
             allow_partial_results: true,
             ..Default::default()
         };
-        let mut executor: QueryExecutor<MockShardClient> =
-            QueryExecutor::new(config, test_router());
+        let mut executor: ShardedQueryExecutor<MockShardClient> =
+            ShardedQueryExecutor::new(config, test_router());
 
         let client0 = Arc::new(MockShardClient::new(make_shard_id(0)));
         let client1 = Arc::new(MockShardClient::new(make_shard_id(1)));
@@ -840,8 +840,8 @@ mod tests {
 
     #[test]
     fn test_executor_all_failed() {
-        let mut executor: QueryExecutor<MockShardClient> =
-            QueryExecutor::new(ExecutorConfig::default(), test_router());
+        let mut executor: ShardedQueryExecutor<MockShardClient> =
+            ShardedQueryExecutor::new(ExecutorConfig::default(), test_router());
 
         let client0 = Arc::new(MockShardClient::new(make_shard_id(0)));
         client0.set_healthy(false);
@@ -858,8 +858,8 @@ mod tests {
 
     #[test]
     fn test_aggregation_concat() {
-        let mut executor: QueryExecutor<MockShardClient> =
-            QueryExecutor::new(ExecutorConfig::default(), test_router());
+        let mut executor: ShardedQueryExecutor<MockShardClient> =
+            ShardedQueryExecutor::new(ExecutorConfig::default(), test_router());
 
         let client0 = Arc::new(MockShardClient::new(make_shard_id(0)));
         let client1 = Arc::new(MockShardClient::new(make_shard_id(1)));
@@ -877,8 +877,8 @@ mod tests {
 
     #[test]
     fn test_aggregation_merge_nodes() {
-        let mut executor: QueryExecutor<MockShardClient> =
-            QueryExecutor::new(ExecutorConfig::default(), test_router());
+        let mut executor: ShardedQueryExecutor<MockShardClient> =
+            ShardedQueryExecutor::new(ExecutorConfig::default(), test_router());
 
         let client0 = Arc::new(MockShardClient::new(make_shard_id(0)));
         // Simulate client0 returning some data
@@ -903,8 +903,8 @@ mod tests {
 
     #[test]
     fn test_aggregation_count() {
-        let mut executor: QueryExecutor<MockShardClient> =
-            QueryExecutor::new(ExecutorConfig::default(), test_router());
+        let mut executor: ShardedQueryExecutor<MockShardClient> =
+            ShardedQueryExecutor::new(ExecutorConfig::default(), test_router());
 
         let client = Arc::new(MockShardClient::new(make_shard_id(0)));
         executor.register_client(make_shard_id(0), client);
@@ -919,8 +919,8 @@ mod tests {
 
     #[test]
     fn test_aggregation_by_shard() {
-        let mut executor: QueryExecutor<MockShardClient> =
-            QueryExecutor::new(ExecutorConfig::default(), test_router());
+        let mut executor: ShardedQueryExecutor<MockShardClient> =
+            ShardedQueryExecutor::new(ExecutorConfig::default(), test_router());
 
         let client0 = Arc::new(MockShardClient::new(make_shard_id(0)));
         let client1 = Arc::new(MockShardClient::new(make_shard_id(1)));
@@ -985,8 +985,8 @@ mod tests {
         use crate::storage::sharding::router::{TraversalPlan, TraversalStep};
         use std::collections::HashSet;
 
-        let executor: QueryExecutor<MockShardClient> =
-            QueryExecutor::new(ExecutorConfig::default(), test_router());
+        let executor: ShardedQueryExecutor<MockShardClient> =
+            ShardedQueryExecutor::new(ExecutorConfig::default(), test_router());
 
         let mut plan = TraversalPlan {
             start_shard: make_shard_id(0),
@@ -1063,12 +1063,12 @@ mod tests {
         assert_eq!(serialized.capacity(), serialized.len());
     }
 
-    // ==================== ExecutorStats Tests ====================
+    // ==================== ShardExecutorStats Tests ====================
 
     #[test]
     fn test_executor_stats() {
-        let mut executor: QueryExecutor<MockShardClient> =
-            QueryExecutor::new(ExecutorConfig::default(), test_router());
+        let mut executor: ShardedQueryExecutor<MockShardClient> =
+            ShardedQueryExecutor::new(ExecutorConfig::default(), test_router());
 
         let client = Arc::new(MockShardClient::new(make_shard_id(0)));
         executor.register_client(make_shard_id(0), client);
@@ -1085,8 +1085,8 @@ mod tests {
 
     #[test]
     fn test_executor_stats_with_failures() {
-        let mut executor: QueryExecutor<MockShardClient> =
-            QueryExecutor::new(ExecutorConfig::default(), test_router());
+        let mut executor: ShardedQueryExecutor<MockShardClient> =
+            ShardedQueryExecutor::new(ExecutorConfig::default(), test_router());
 
         let client = Arc::new(MockShardClient::new(make_shard_id(0)));
         client.set_healthy(false);
@@ -1102,8 +1102,8 @@ mod tests {
 
     #[test]
     fn test_query_id_generation() {
-        let executor: QueryExecutor<MockShardClient> =
-            QueryExecutor::new(ExecutorConfig::default(), test_router());
+        let executor: ShardedQueryExecutor<MockShardClient> =
+            ShardedQueryExecutor::new(ExecutorConfig::default(), test_router());
 
         let id1 = executor.next_query_id();
         let id2 = executor.next_query_id();

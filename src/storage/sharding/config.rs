@@ -233,7 +233,7 @@ impl Default for ShardConfig {
 
 /// Configuration for shard rebalancing.
 #[derive(Debug, Clone)]
-pub struct RebalanceConfig {
+pub struct ShardRebalanceConfig {
     /// Trigger rebalancing when size variance exceeds this threshold.
     /// Value is a ratio (e.g., 0.3 = 30% imbalance triggers rebalancing).
     pub imbalance_threshold: f64,
@@ -253,7 +253,7 @@ pub struct RebalanceConfig {
     pub migration_retries: u32,
 }
 
-impl RebalanceConfig {
+impl ShardRebalanceConfig {
     /// Create a new rebalance configuration with default values.
     pub fn new() -> Self {
         Self::default()
@@ -289,7 +289,7 @@ impl RebalanceConfig {
     }
 }
 
-impl Default for RebalanceConfig {
+impl Default for ShardRebalanceConfig {
     fn default() -> Self {
         Self {
             imbalance_threshold: 0.3, // 30%
@@ -416,7 +416,7 @@ mod tests {
 
     #[test]
     fn test_rebalance_config_defaults() {
-        let config = RebalanceConfig::new();
+        let config = ShardRebalanceConfig::new();
         assert!((config.imbalance_threshold - 0.3).abs() < 0.001);
         assert_eq!(config.batch_size, 10_000);
         assert!(config.auto_rebalance);
@@ -424,7 +424,7 @@ mod tests {
 
     #[test]
     fn test_rebalance_config_builders() {
-        let config = RebalanceConfig::new()
+        let config = ShardRebalanceConfig::new()
             .with_imbalance_threshold(0.5)
             .with_batch_size(5000)
             .with_auto_rebalance(false);
@@ -436,16 +436,16 @@ mod tests {
 
     #[test]
     fn test_rebalance_config_threshold_clamping() {
-        let config = RebalanceConfig::new().with_imbalance_threshold(1.5);
+        let config = ShardRebalanceConfig::new().with_imbalance_threshold(1.5);
         assert!((config.imbalance_threshold - 1.0).abs() < 0.001);
 
-        let config = RebalanceConfig::new().with_imbalance_threshold(-0.5);
+        let config = ShardRebalanceConfig::new().with_imbalance_threshold(-0.5);
         assert!((config.imbalance_threshold - 0.0).abs() < 0.001);
     }
 
     #[test]
     fn test_rebalance_config_should_rebalance() {
-        let config = RebalanceConfig::new().with_imbalance_threshold(0.3);
+        let config = ShardRebalanceConfig::new().with_imbalance_threshold(0.3);
 
         // Below threshold
         assert!(!config.should_rebalance(0.2));

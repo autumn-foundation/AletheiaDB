@@ -58,7 +58,7 @@ use crate::AletheiaDB;
 use crate::core::error::Result;
 use crate::core::id::NodeId;
 use crate::core::interning::{GLOBAL_INTERNER, InternedString};
-use crate::experimental::temporal_narrative::NarrativeGenerator;
+use crate::experimental::temporal_narrative::TemporalNarrativeGenerator;
 use std::fmt::Write;
 
 /// Builder for generating a rich context description of a node.
@@ -175,7 +175,7 @@ impl<'a> GraphContextBuilder<'a> {
 
         // 3. Evolution (History)
         writeln!(&mut output, "\n## Evolution").unwrap();
-        let generator = NarrativeGenerator::new(self.db);
+        let generator = TemporalNarrativeGenerator::new(self.db);
         match generator.generate_node_narrative(self.center_node) {
             Ok(events) => {
                 if events.is_empty() {

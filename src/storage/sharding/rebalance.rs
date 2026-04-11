@@ -3,7 +3,7 @@
 //! Handles online data migration between shards when they become unbalanced
 //! or when new shards are added to the cluster.
 
-use super::config::RebalanceConfig;
+use super::config::ShardRebalanceConfig;
 use super::types::{ShardId, ShardState};
 use crate::core::id::NodeId;
 use std::collections::{HashMap, VecDeque};
@@ -51,7 +51,7 @@ impl fmt::Display for MigrationState {
 
 /// Progress of a migration operation.
 #[derive(Debug, Clone)]
-pub struct MigrationProgress {
+pub struct ShardMigrationProgress {
     /// Total nodes to migrate.
     pub total_nodes: u64,
     /// Nodes migrated so far.
@@ -70,7 +70,7 @@ pub struct MigrationProgress {
     pub estimated_completion: Option<Instant>,
 }
 
-impl MigrationProgress {
+impl ShardMigrationProgress {
     /// Create a new progress tracker.
     pub fn new(total_nodes: u64, total_edges: u64) -> Self {
         Self {
@@ -143,7 +143,7 @@ pub struct MigrationPlan {
     /// Current state of the migration.
     pub state: MigrationState,
     /// Progress tracking.
-    pub progress: MigrationProgress,
+    pub progress: ShardMigrationProgress,
     /// When this plan was created.
     pub created_at: Instant,
     /// Priority (higher = more urgent).
@@ -197,7 +197,7 @@ impl MigrationPlan {
             labels_to_migrate: labels,
             nodes_to_migrate: None,
             state: MigrationState::Planned,
-            progress: MigrationProgress::new(estimated_nodes, estimated_edges),
+            progress: ShardMigrationProgress::new(estimated_nodes, estimated_edges),
             created_at: Instant::now(),
             priority: 1,
             reason,
@@ -221,7 +221,7 @@ impl MigrationPlan {
             labels_to_migrate: Vec::new(),
             nodes_to_migrate: Some(nodes),
             state: MigrationState::Planned,
-            progress: MigrationProgress::new(num_nodes, estimated_edges),
+            progress: ShardMigrationProgress::new(num_nodes, estimated_edges),
             created_at: Instant::now(),
             priority: 1,
             reason,
@@ -372,7 +372,7 @@ impl std::error::Error for RebalanceError {}
 /// Manager for coordinating shard rebalancing operations.
 pub struct RebalanceManager {
     /// Configuration for rebalancing.
-    config: RebalanceConfig,
+    config: ShardRebalanceConfig,
     /// Queue of planned migrations.
     migration_queue: VecDeque<MigrationPlan>,
     /// Currently active migrations.
@@ -389,7 +389,7 @@ pub struct RebalanceManager {
 
 impl RebalanceManager {
     /// Create a new rebalance manager.
-    pub fn new(config: RebalanceConfig) -> Self {
+    pub fn new(config: ShardRebalanceConfig) -> Self {
         Self {
             config,
             migration_queue: VecDeque::new(),
@@ -664,7 +664,7 @@ mod tests {
 
     #[test]
     fn test_migration_progress() {
-        let mut progress = MigrationProgress::new(100, 200);
+        let mut progress = ShardMigrationProgress::new(100, 200);
         assert_eq!(progress.percentage(), 0.0);
         assert!(!progress.is_complete());
 
@@ -678,7 +678,7 @@ mod tests {
 
     #[test]
     fn test_migration_progress_error_tracking() {
-        let mut progress = MigrationProgress::new(100, 100);
+        let mut progress = ShardMigrationProgress::new(100, 100);
         assert_eq!(progress.errors, 0);
 
         progress.record_error();
@@ -800,7 +800,7 @@ mod tests {
 
     #[test]
     fn test_rebalance_manager_creation() {
-        let config = RebalanceConfig::new();
+        let config = ShardRebalanceConfig::new();
         let manager = RebalanceManager::new(config);
 
         assert_eq!(manager.active_count(), 0);
@@ -810,7 +810,7 @@ mod tests {
 
     #[test]
     fn test_rebalance_manager_plan_rebalance() {
-        let config = RebalanceConfig::new().with_imbalance_threshold(0.3);
+        let config = ShardRebalanceConfig::new().with_imbalance_threshold(0.3);
         let mut manager = RebalanceManager::new(config);
 
         let states = vec![make_shard_state(0, 1000), make_shard_state(1, 100)];
@@ -826,7 +826,7 @@ mod tests {
 
     #[test]
     fn test_rebalance_manager_cooldown() {
-        let config = RebalanceConfig::new().with_cooldown(Duration::from_secs(3600));
+        let config = ShardRebalanceConfig::new().with_cooldown(Duration::from_secs(3600));
         let mut manager = RebalanceManager::new(config);
 
         let states = vec![make_shard_state(0, 1000), make_shard_state(1, 100)];
@@ -850,7 +850,7 @@ mod tests {
 
     #[test]
     fn test_rebalance_manager_queue_migration() {
-        let config = RebalanceConfig::new();
+        let config = ShardRebalanceConfig::new();
         let mut manager = RebalanceManager::new(config);
 
         let plan1 = MigrationPlan::new(
@@ -887,7 +887,7 @@ mod tests {
 
     #[test]
     fn test_rebalance_manager_start_migration() {
-        let config = RebalanceConfig::new();
+        let config = ShardRebalanceConfig::new();
         let mut manager = RebalanceManager::new(config);
 
         let plan = MigrationPlan::new(
@@ -915,7 +915,7 @@ mod tests {
 
     #[test]
     fn test_rebalance_manager_max_concurrent() {
-        let config = RebalanceConfig::new();
+        let config = ShardRebalanceConfig::new();
         let mut manager = RebalanceManager::new(config);
 
         // Queue multiple migrations
@@ -945,7 +945,7 @@ mod tests {
 
     #[test]
     fn test_rebalance_manager_advance_migration() {
-        let config = RebalanceConfig::new();
+        let config = ShardRebalanceConfig::new();
         let mut manager = RebalanceManager::new(config);
 
         let plan = MigrationPlan::new(
@@ -976,7 +976,7 @@ mod tests {
 
     #[test]
     fn test_rebalance_manager_update_progress() {
-        let config = RebalanceConfig::new();
+        let config = ShardRebalanceConfig::new();
         let mut manager = RebalanceManager::new(config);
 
         let plan = MigrationPlan::new(
@@ -1001,7 +1001,7 @@ mod tests {
 
     #[test]
     fn test_rebalance_manager_fail_migration() {
-        let config = RebalanceConfig::new();
+        let config = ShardRebalanceConfig::new();
         let mut manager = RebalanceManager::new(config);
 
         let plan = MigrationPlan::new(
@@ -1026,7 +1026,7 @@ mod tests {
 
     #[test]
     fn test_rebalance_manager_cancel_migration() {
-        let config = RebalanceConfig::new();
+        let config = ShardRebalanceConfig::new();
         let mut manager = RebalanceManager::new(config);
 
         // Cancel from queue
@@ -1083,7 +1083,7 @@ mod tests {
 
     #[test]
     fn test_rebalance_manager_debug() {
-        let config = RebalanceConfig::new();
+        let config = ShardRebalanceConfig::new();
         let manager = RebalanceManager::new(config);
         let debug = format!("{:?}", manager);
         assert!(debug.contains("RebalanceManager"));
