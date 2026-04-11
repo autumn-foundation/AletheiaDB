@@ -45,7 +45,7 @@ std::thread_local! {
 }
 
 #[cfg(test)]
-pub(crate) static TEST_SKIP_CAPACITY_CHECK: std::sync::atomic::AtomicBool =
+pub static TEST_SKIP_CAPACITY_CHECK: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
 /// RAII guard that sets IN_FILTER_CALLBACK to true on creation and restores previous value on drop.
@@ -692,7 +692,7 @@ impl HnswIndex {
             return Ok(());
         }
 
-        const CAPACITY_PADDING: usize = 128;
+        const CAPACITY_PADDING: usize = 50000;
 
         let index = self.inner.read();
         if index.size() + vectors_to_add + CAPACITY_PADDING <= index.capacity() {
