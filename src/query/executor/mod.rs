@@ -132,7 +132,6 @@ pub struct QueryExecutor {
 }
 
 impl QueryExecutor {
-    /// Create a new query executor
     /// Create a new query executor with default config.
     ///
     /// # Details
@@ -147,7 +146,6 @@ impl QueryExecutor {
         }
     }
 
-    /// Create an executor with custom configuration
     /// Create a new query executor with custom config.
     ///
     /// # Details

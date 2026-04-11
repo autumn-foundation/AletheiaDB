@@ -232,11 +232,6 @@ impl ShardConnection {
     }
 
     /// Perform a health check.
-    ///
-    /// # Details
-    ///
-    /// Pings the remote shard to update the connection's healthy status.
-    /// Returns the current health state.
     pub fn health_check(&mut self) -> bool {
         // In a real implementation, this would ping the shard
         self.last_ping = Some(Instant::now());
@@ -253,10 +248,6 @@ impl ShardConnection {
     }
 
     /// Mark the connection as healthy.
-    ///
-    /// # Details
-    ///
-    /// Resets the connection to a healthy state after a successful health check.
     pub fn mark_healthy(&mut self) {
         self.healthy = true;
         self.last_ping = Some(Instant::now());
@@ -502,10 +493,6 @@ impl ShardCoordinator {
     }
 
     /// Route a node query.
-    ///
-    /// # Details
-    ///
-    /// Hashes the node's label to determine its assigned shard.
     pub fn route_node(&self, label: &str) -> ShardId {
         self.router.route_node(label)
     }
@@ -531,11 +518,6 @@ impl ShardCoordinator {
     }
 
     /// Get all shard states.
-    ///
-    /// # Details
-    ///
-    /// Returns a snapshot of the states for all managed shards, useful
-    /// for rebalancing and cluster monitoring.
     pub fn get_all_shard_states(&self) -> Vec<ShardState> {
         self.shard_states
             .read()
@@ -544,11 +526,6 @@ impl ShardCoordinator {
     }
 
     /// Update shard state.
-    ///
-    /// # Details
-    ///
-    /// Updates the local view of a shard's state based on heartbeats
-    /// or metadata syncing.
     pub fn update_shard_state(&self, shard_id: ShardId, state: ShardState) {
         if let Ok(mut states) = self.shard_states.write() {
             states.insert(shard_id, state);
