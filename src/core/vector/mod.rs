@@ -120,5 +120,7 @@ pub use sparse::*;
 pub use types::*;
 pub use validation::*;
 
+#[cfg(all(test, any(target_arch = "x86", target_arch = "x86_64")))]
+mod havoc_tests;
 #[cfg(test)]
 mod havoc_vector_math;
