@@ -2200,8 +2200,8 @@ fn test_create_then_delete_edge_across_transactions() {
     assert_eq!(db.edge_count(), 0);
 
     // Nodes still exist
-    assert!(db.get_node(n1).is_ok());
-    assert!(db.get_node(n2).is_ok());
+    let _ = db.get_node(n1).unwrap();
+    let _ = db.get_node(n2).unwrap();
 }
 
 // ========================================================================

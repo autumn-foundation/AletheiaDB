@@ -441,6 +441,6 @@ mod tests {
         };
 
         let result = rod.cast(bait, trip);
-        assert!(result.is_ok());
+        let _ = result.unwrap();
     }
 }

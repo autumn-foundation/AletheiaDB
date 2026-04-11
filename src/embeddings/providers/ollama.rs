@@ -306,8 +306,6 @@ mod tests {
     fn test_provider_creation() {
         let config = OllamaConfig::nomic_embed_text();
         let provider = OllamaProvider::new(config);
-        assert!(provider.is_ok());
-
         let provider = provider.unwrap();
         assert_eq!(provider.dimensions(), 768);
         assert_eq!(provider.name(), "nomic-embed-text");

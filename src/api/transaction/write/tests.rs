@@ -690,7 +690,7 @@ mod general_tests {
         let node_id = current.create_node("Person", props).unwrap();
 
         // Verify node exists
-        assert!(current.get_node(node_id).is_ok());
+        let _ = current.get_node(node_id).unwrap();
 
         // Delete the node
         tx.delete_node(node_id).unwrap();
@@ -728,7 +728,7 @@ mod general_tests {
             .unwrap();
 
         // Verify edge exists
-        assert!(current.get_edge(edge_id).is_ok());
+        let _ = current.get_edge(edge_id).unwrap();
 
         // Delete the edge
         tx.delete_edge(edge_id).unwrap();
@@ -792,7 +792,7 @@ mod general_tests {
         // Test ReadOps methods on transaction
         assert_eq!(tx.node_count(), 2);
         assert_eq!(tx.edge_count(), 1);
-        assert!(tx.get_node(node1).is_ok());
+        let _ = tx.get_node(node1).unwrap();
         assert_eq!(tx.get_outgoing_edges(node1).len(), 1);
         assert_eq!(tx.get_incoming_edges(node2).len(), 1);
         assert_eq!(tx.get_outgoing_edges_with_label(node1, "KNOWS").len(), 1);
@@ -812,7 +812,7 @@ mod general_tests {
         let node_id = current.create_node("Person", props).unwrap();
 
         // Verify node exists in current storage
-        assert!(current.get_node(node_id).is_ok());
+        let _ = current.get_node(node_id).unwrap();
 
         // Delete the node
         tx.delete_node(node_id).unwrap();
@@ -852,7 +852,7 @@ mod general_tests {
             .unwrap();
 
         // Verify edge exists
-        assert!(current.get_edge(edge_id).is_ok());
+        let _ = current.get_edge(edge_id).unwrap();
 
         // Delete the edge
         tx.delete_edge(edge_id).unwrap();
@@ -1169,10 +1169,10 @@ mod general_tests {
         assert!(current.get_edge(edge2).is_err());
 
         // Verify non-deleted entities still exist
-        assert!(current.get_node(node1).is_ok());
-        assert!(current.get_node(node2).is_ok());
-        assert!(current.get_node(node5).is_ok());
-        assert!(current.get_edge(edge3).is_ok());
+        let _ = current.get_node(node1).unwrap();
+        let _ = current.get_node(node2).unwrap();
+        let _ = current.get_node(node5).unwrap();
+        let _ = current.get_edge(edge3).unwrap();
     }
 
     #[test]
@@ -1259,9 +1259,9 @@ mod general_tests {
         tx.commit().unwrap();
 
         // Verify all edges exist
-        assert!(current.get_edge(edge1).is_ok());
-        assert!(current.get_edge(edge2).is_ok());
-        assert!(current.get_edge(edge3).is_ok());
+        let _ = current.get_edge(edge1).unwrap();
+        let _ = current.get_edge(edge2).unwrap();
+        let _ = current.get_edge(edge3).unwrap();
 
         // Delete the central node with cascade
         let (mut tx2, _temp_dir2) = create_test_write_tx_from_existing(Arc::clone(&current));
@@ -1286,9 +1286,9 @@ mod general_tests {
         );
 
         // Verify other nodes still exist
-        assert!(current.get_node(node1).is_ok());
-        assert!(current.get_node(node2).is_ok());
-        assert!(current.get_node(node3).is_ok());
+        let _ = current.get_node(node1).unwrap();
+        let _ = current.get_node(node2).unwrap();
+        let _ = current.get_node(node3).unwrap();
     }
 
     #[test]
@@ -1314,7 +1314,7 @@ mod general_tests {
         tx.commit().unwrap();
 
         // Verify edge exists
-        assert!(current.get_edge(edge1).is_ok());
+        let _ = current.get_edge(edge1).unwrap();
 
         // Delete the node WITHOUT cascade (default behavior)
         let (mut tx2, _temp_dir2) = create_test_write_tx_from_existing(Arc::clone(&current));
@@ -1362,7 +1362,7 @@ mod general_tests {
         assert!(current.get_edge(edge_b_to_a).is_err());
 
         // node_b should still exist
-        assert!(current.get_node(node_b).is_ok());
+        let _ = current.get_node(node_b).unwrap();
     }
 
     #[test]
@@ -1418,10 +1418,10 @@ mod general_tests {
 
         // Verify all edges exist
         for edge in &outgoing_edges {
-            assert!(current.get_edge(*edge).is_ok());
+            let _ = current.get_edge(*edge).unwrap();
         }
         for edge in &incoming_edges {
-            assert!(current.get_edge(*edge).is_ok());
+            let _ = current.get_edge(*edge).unwrap();
         }
 
         // Delete the central node with cascade - should be performant
@@ -1886,8 +1886,8 @@ mod conflict_detection_tests {
         tx1.commit().unwrap();
 
         // Both nodes should exist
-        assert!(harness.current.get_node(node1).is_ok());
-        assert!(harness.current.get_node(node2).is_ok());
+        let _ = harness.current.get_node(node1).unwrap();
+        let _ = harness.current.get_node(node2).unwrap();
     }
 
     /// Test: Conflict error message contains useful information.
@@ -3077,7 +3077,7 @@ mod bitemporal_validation_tests {
         let mut tx = harness.begin_write();
         let node_id = tx.create_node("Person", PropertyMap::new()).unwrap();
         let commit_result = tx.commit();
-        assert!(commit_result.is_ok());
+        commit_result.unwrap();
 
         // Get the node's creation time
         let historical = harness.historical.read();

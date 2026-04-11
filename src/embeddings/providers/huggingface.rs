@@ -414,8 +414,6 @@ mod tests {
             384,
         );
         let provider = HuggingFaceProvider::new(config);
-        assert!(provider.is_ok());
-
         let provider = provider.unwrap();
         assert_eq!(provider.dimensions(), 384);
         assert_eq!(provider.name(), "sentence-transformers/all-MiniLM-L6-v2");

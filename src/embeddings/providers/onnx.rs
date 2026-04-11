@@ -306,8 +306,6 @@ mod tests {
     fn test_provider_creation() {
         let config = OnnxConfig::default();
         let provider = OnnxProvider::new(config);
-        assert!(provider.is_ok());
-
         let provider = provider.unwrap();
         assert_eq!(provider.dimensions(), 384);
         assert_eq!(provider.name(), "all-MiniLM-L6-v2");

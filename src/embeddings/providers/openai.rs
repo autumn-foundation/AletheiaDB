@@ -423,8 +423,6 @@ mod tests {
     fn test_provider_creation() {
         let config = OpenAIConfig::new("test-key".to_string(), OpenAIModel::TextEmbedding3Small);
         let provider = OpenAIProvider::new(config);
-        assert!(provider.is_ok());
-
         let provider = provider.unwrap();
         assert_eq!(provider.dimensions(), 1536);
         assert_eq!(provider.name(), "text-embedding-3-small");

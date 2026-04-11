@@ -262,7 +262,7 @@ mod tests {
         let props3 = PropertyMapBuilder::new()
             .insert_vector("embedding", &[0.0, 1.0])
             .build();
-        assert!(rule.validate(&props3).is_ok());
+        let _ = rule.validate(&props3).unwrap();
     }
 
     #[test]
@@ -340,7 +340,7 @@ mod tests {
             .insert_vector("embedding", &[0.0, 1.0])
             .insert("age", 25)
             .build();
-        assert!(sentinel.validate(&valid).is_ok());
+        let _ = sentinel.validate(&valid).unwrap();
 
         // Invalid: Toxic
         let toxic = PropertyMapBuilder::new()
