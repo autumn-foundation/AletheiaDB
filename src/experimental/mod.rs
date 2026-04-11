@@ -50,6 +50,7 @@
 //! | `luna` | **Luna** | Semantic Subgraph Synthesis. "Materialize the core concept bridging these ideas." |
 //! | `serendipity` | **Serendipity** | Scenic Route Finder. "Find paths that maximize semantic divergence." |
 //! | `tremor` | **Tremor** | Semantic Earthquake Detector. "Did the global semantic state suddenly shift?" |
+//! | `crossroads` | **Crossroads** | Semantic Divergence Router. "Take the most interesting forks in the road." |
 //!
 //! # Example: Detecting Suspicious Patterns with Sherlock
 //!
@@ -126,6 +127,9 @@ pub mod chronos;
 #[cfg(feature = "nova")]
 /// Concept Algebra for semantic vector arithmetic.
 pub mod concept_algebra;
+#[cfg(feature = "nova")]
+/// Crossroads: Semantic Divergence Router.
+pub mod crossroads;
 #[cfg(feature = "nova")]
 /// Dissonance: Semantic Stress Detector.
 pub mod dissonance;
