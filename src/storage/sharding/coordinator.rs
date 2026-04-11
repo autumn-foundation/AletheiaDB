@@ -61,109 +61,109 @@ use std::time::{Duration, Instant};
 #[cfg(test)]
 use crate::core::hlc::MAX_BACKWARD_DRIFT_US;
 
-/// Result of a Two-Phase Commit (2PC) recovery operation.
+/// Result of a Two-Phase Commit (2PC) recovery operation. //
 ///
-/// # The Spark
-/// When a node running AletheiaDB crashes midway through a distributed transaction
-/// (specifically during the commit phase), it leaves "dangling" transactions on participant shards.
-/// `RecoveryResult` represents the outcome of reading the write-ahead log upon restart
-/// and determining the final fate of those interrupted transactions.
+/// # The Spark //
+/// When a node running AletheiaDB crashes midway through a distributed transaction //
+/// (specifically during the commit phase), it leaves "dangling" transactions on participant shards. //
+/// `RecoveryResult` represents the outcome of reading the write-ahead log upon restart //
+/// and determining the final fate of those interrupted transactions. //
 ///
-/// # The Details
-/// The coordinator attempts to finish what it started by parsing pending log entries.
-/// - If it successfully reaches all participants and finalizes the commit, the transaction
-///   is appended to `recovered`.
-/// - If a participant repeatedly times out or fails (exceeding retry limits), the transaction
-///   is appended to `dead_lettered`. These transactions require human intervention.
+/// # The Details //
+/// The coordinator attempts to finish what it started by parsing pending log entries. //
+/// - If it successfully reaches all participants and finalizes the commit, the transaction //
+///   is appended to `recovered`. //
+/// - If a participant repeatedly times out or fails (exceeding retry limits), the transaction //
+///   is appended to `dead_lettered`. These transactions require human intervention. //
 ///
-/// # Examples
-/// ```
-/// use aletheiadb::storage::sharding::coordinator::RecoveryResult;
-/// use aletheiadb::core::id::TxId;
+/// # Examples //
+/// ``` //
+/// use aletheiadb::storage::sharding::coordinator::RecoveryResult; //
+/// use aletheiadb::core::id::TxId; //
 ///
-/// let result = RecoveryResult {
-///     recovered: vec![TxId::new(42)],
-///     dead_lettered: vec![],
-/// };
+/// let result = RecoveryResult { //
+///     recovered: vec![TxId::new(42)], //
+///     dead_lettered: vec![], //
+/// }; //
 ///
-/// assert!(result.is_complete());
-/// ```
+/// assert!(result.is_complete()); //
+/// ``` //
 #[derive(Debug, Clone)]
 pub struct RecoveryResult {
-    /// Transactions that were successfully recovered and completed.
+    /// Transactions that were successfully recovered and completed. //
     pub recovered: Vec<TxId>,
-    /// Transactions that repeatedly failed recovery and were dead-lettered, requiring manual intervention.
+    /// Transactions that repeatedly failed recovery and were dead-lettered, requiring manual intervention. //
     pub dead_lettered: Vec<DeadLetteredTransaction>,
 }
 
 impl RecoveryResult {
-    /// Check if recovery was fully successful (no dead letters).
+    /// Check if recovery was fully successful (no dead letters). //
     ///
-    /// # The Spark
-    /// It's tedious to check `dead_lettered.is_empty()` manually. This provides a clear,
-    /// semantic way to assert that the database achieved full consistency on startup.
+    /// # The Spark //
+    /// It's tedious to check `dead_lettered.is_empty()` manually. This provides a clear, //
+    /// semantic way to assert that the database achieved full consistency on startup. //
     ///
-    /// # The Details
-    /// Returns `true` if and only if the `dead_lettered` queue is completely empty. If this
-    /// returns `false`, administrators must manually investigate the failed participant shards.
+    /// # The Details //
+    /// Returns `true` if and only if the `dead_lettered` queue is completely empty. If this //
+    /// returns `false`, administrators must manually investigate the failed participant shards. //
     pub fn is_complete(&self) -> bool {
         self.dead_lettered.is_empty()
     }
 
-    /// Get the number of transactions that require manual intervention.
+    /// Get the number of transactions that require manual intervention. //
     ///
-    /// # The Spark
-    /// Often used for telemetry and logging to report the severity of a partial recovery.
+    /// # The Spark //
+    /// Often used for telemetry and logging to report the severity of a partial recovery. //
     ///
-    /// # The Details
-    /// Returns the exact count of dead-lettered transactions. A value of `0` means perfect
-    /// health.
+    /// # The Details //
+    /// Returns the exact count of dead-lettered transactions. A value of `0` means perfect //
+    /// health. //
     pub fn dead_letter_count(&self) -> usize {
         self.dead_lettered.len()
     }
 }
 
-/// A transaction that repeatedly failed recovery and requires manual intervention.
+/// A transaction that repeatedly failed recovery and requires manual intervention. //
 ///
-/// # The Spark
-/// When a distributed transaction fails to commit across all shards during automatic
-/// startup recovery (usually due to a permanently unreachable node), AletheiaDB cannot simply
-/// drop it or retry forever. It moves it to the "Dead Letter Queue" (DLQ).
+/// # The Spark //
+/// When a distributed transaction fails to commit across all shards during automatic //
+/// startup recovery (usually due to a permanently unreachable node), AletheiaDB cannot simply //
+/// drop it or retry forever. It moves it to the "Dead Letter Queue" (DLQ). //
 ///
-/// # The Details
-/// This struct holds the metadata required for a human operator to diagnose *why*
-/// the transaction failed (via the `reason` field) and how much effort the system
-/// expended before giving up (`attempt_count`). Operators can use this ID to query
-/// participant shards manually and resolve the inconsistency.
+/// # The Details //
+/// This struct holds the metadata required for a human operator to diagnose *why* //
+/// the transaction failed (via the `reason` field) and how much effort the system //
+/// expended before giving up (`attempt_count`). Operators can use this ID to query //
+/// participant shards manually and resolve the inconsistency. //
 #[derive(Debug, Clone)]
 pub struct DeadLetteredTransaction {
-    /// The globally unique transaction ID.
+    /// The globally unique transaction ID. //
     pub tx_id: TxId,
-    /// The human-readable string explaining why the final recovery attempt failed (e.g., "Connection refused").
+    /// The human-readable string explaining why the final recovery attempt failed (e.g., "Connection refused"). //
     pub reason: String,
-    /// The wall-clock time of the final, failed recovery attempt.
+    /// The wall-clock time of the final, failed recovery attempt. //
     pub last_attempt: Instant,
-    /// The total number of recovery retries attempted before moving to the DLQ.
+    /// The total number of recovery retries attempted before moving to the DLQ. //
     pub attempt_count: u32,
 }
 
-/// Connection to a shard (placeholder for actual network implementation).
+/// Connection to a shard (placeholder for actual network implementation). //
 #[derive(Debug)]
 pub struct ShardConnection {
-    /// The shard ID this connection is for.
+    /// The shard ID this connection is for. //
     pub shard_id: ShardId,
-    /// Endpoint address.
+    /// Endpoint address. //
     pub endpoint: String,
-    /// Whether the connection is healthy.
+    /// Whether the connection is healthy. //
     pub healthy: bool,
-    /// Remote HLC frontier observed from this shard.
+    /// Remote HLC frontier observed from this shard. //
     hlc_frontier: Mutex<HybridTimestamp>,
-    /// Last successful ping time.
+    /// Last successful ping time. //
     pub last_ping: Option<Instant>,
 }
 
 impl ShardConnection {
-    /// Create a new shard connection.
+    /// Create a new shard connection. //
     pub fn new(shard_id: ShardId, endpoint: String) -> Self {
         Self {
             shard_id,
@@ -174,7 +174,7 @@ impl ShardConnection {
         }
     }
 
-    /// Simulate a prepare call to the shard.
+    /// Simulate a prepare call to the shard. //
     pub fn prepare(
         &self,
         _tx_id: TxId,
@@ -190,7 +190,7 @@ impl ShardConnection {
         Ok(())
     }
 
-    /// Simulate a commit call to the shard.
+    /// Simulate a commit call to the shard. //
     pub fn commit(
         &self,
         _tx_id: TxId,
@@ -206,7 +206,7 @@ impl ShardConnection {
         Ok(())
     }
 
-    /// Simulate an abort call to the shard.
+    /// Simulate an abort call to the shard. //
     pub fn abort(&self, _tx_id: TxId) -> Result<(), DistributedTxError> {
         if !self.healthy {
             return Err(DistributedTxError::ParticipantUnavailable {
@@ -226,102 +226,102 @@ impl ShardConnection {
         }
     }
 
-    /// Perform a health check.
+    /// Perform a health check. //
     pub fn health_check(&mut self) -> bool {
         // In a real implementation, this would ping the shard
         self.last_ping = Some(Instant::now());
         self.healthy
     }
 
-    /// Mark the connection as unhealthy.
+    /// Mark the connection as unhealthy. //
     pub fn mark_unhealthy(&mut self) {
         self.healthy = false;
     }
 
-    /// Mark the connection as healthy.
+    /// Mark the connection as healthy. //
     pub fn mark_healthy(&mut self) {
         self.healthy = true;
         self.last_ping = Some(Instant::now());
     }
 }
 
-/// Coordinator for managing shards and distributed operations.
+/// Coordinator for managing shards and distributed operations. //
 ///
-/// # The Spark
-/// In a multi-machine AletheiaDB cluster, someone needs to act as the "conductor"
-/// to ensure that cross-shard operations remain strongly consistent. If Node A and Node B
-/// both need to update a relationship, they must either both succeed or both fail.
-/// `ShardCoordinator` manages this using the Two-Phase Commit (2PC) protocol and Hybrid Logical Clocks.
+/// # The Spark //
+/// In a multi-machine AletheiaDB cluster, someone needs to act as the "conductor" //
+/// to ensure that cross-shard operations remain strongly consistent. If Node A and Node B //
+/// both need to update a relationship, they must either both succeed or both fail. //
+/// `ShardCoordinator` manages this using the Two-Phase Commit (2PC) protocol and Hybrid Logical Clocks. //
 ///
-/// # The Details
-/// This struct holds the state required to orchestrate distributed operations:
-/// - Maintains active network connections to all shards via `ShardConnection`.
-/// - Controls the global `IdGenerator` for transaction IDs (`TxId`).
-/// - Manages the `PersistentCommitLog` to ensure 2PC decisions survive coordinator crashes.
-/// - Drives the global commit clock (HLC) to enforce temporal causality across the cluster.
+/// # The Details //
+/// This struct holds the state required to orchestrate distributed operations: //
+/// - Maintains active network connections to all shards via `ShardConnection`. //
+/// - Controls the global `IdGenerator` for transaction IDs (`TxId`). //
+/// - Manages the `PersistentCommitLog` to ensure 2PC decisions survive coordinator crashes. //
+/// - Drives the global commit clock (HLC) to enforce temporal causality across the cluster. //
 ///
-/// # Examples
+/// # Examples //
 ///
-/// ```no_run
-/// use aletheiadb::storage::sharding::{ShardCoordinator, ShardConfig, ShardDefinition};
+/// ```no_run //
+/// use aletheiadb::storage::sharding::{ShardCoordinator, ShardConfig, ShardDefinition}; //
 ///
-/// // Configure the cluster topology
-/// let config = ShardConfig::new(vec![
-///     ShardDefinition::new(0, "shard0:9000", vec!["Person"]),
-///     ShardDefinition::new(1, "shard1:9000", vec!["Place"]),
-/// ]);
+/// // Configure the cluster topology //
+/// let config = ShardConfig::new(vec![ //
+///     ShardDefinition::new(0, "shard0:9000", vec!["Person"]), //
+///     ShardDefinition::new(1, "shard1:9000", vec!["Place"]), //
+/// ]); //
 ///
-/// let coordinator = ShardCoordinator::new(config);
+/// let coordinator = ShardCoordinator::new(config); //
 ///
-/// // Route a query to the correct physical shard
-/// let shard_id = coordinator.route_node("Person");
-/// assert_eq!(shard_id.as_u16(), 0);
-/// ```
+/// // Route a query to the correct physical shard //
+/// let shard_id = coordinator.route_node("Person"); //
+/// assert_eq!(shard_id.as_u16(), 0); //
+/// ``` //
 pub struct ShardCoordinator {
-    /// Router for query routing decisions.
+    /// Router for query routing decisions. //
     router: ShardRouter,
-    /// Connections to each shard.
+    /// Connections to each shard. //
     connections: RwLock<HashMap<ShardId, ShardConnection>>,
-    /// State of each shard.
+    /// State of each shard. //
     shard_states: RwLock<HashMap<ShardId, ShardState>>,
-    /// Transaction ID generator.
+    /// Transaction ID generator. //
     tx_id_generator: IdGenerator,
-    /// Active distributed transactions.
+    /// Active distributed transactions. //
     active_transactions: RwLock<HashMap<TxId, DistributedTransaction>>,
-    /// Commit log for recovery.
+    /// Commit log for recovery. //
     commit_log: RwLock<PersistentCommitLog>,
-    /// Coordinating HLC frontier used to assign cross-shard commit timestamps.
+    /// Coordinating HLC frontier used to assign cross-shard commit timestamps. //
     commit_clock: Mutex<HybridTimestamp>,
-    /// Monotonic observation time for commit clock drift checks.
+    /// Monotonic observation time for commit clock drift checks. //
     commit_clock_observed_at: Mutex<Instant>,
-    /// Metrics per shard.
+    /// Metrics per shard. //
     metrics: RwLock<HashMap<ShardId, Arc<ShardMetrics>>>,
-    /// Rebalance configuration.
+    /// Rebalance configuration. //
     rebalance_config: RebalanceConfig,
-    /// Timeout for transaction operations.
+    /// Timeout for transaction operations. //
     transaction_timeout: Duration,
-    /// Dead letter queue for transactions that failed recovery.
+    /// Dead letter queue for transactions that failed recovery. //
     dead_letter_queue: RwLock<HashMap<TxId, DeadLetteredTransaction>>,
 }
 
 impl ShardCoordinator {
-    /// Creates a new shard coordinator.
+    /// Creates a new shard coordinator. //
     ///
-    /// # The Spark
-    /// Bootstrapping a distributed database is complex. This constructor not only initializes
-    /// networking and routing maps but also automatically recovers any transactions that
-    /// were interrupted during a prior crash.
+    /// # The Spark //
+    /// Bootstrapping a distributed database is complex. This constructor not only initializes //
+    /// networking and routing maps but also automatically recovers any transactions that //
+    /// were interrupted during a prior crash. //
     ///
-    /// # The Details
-    /// 1. Initializes `ShardConnection` instances for all shards defined in `config`.
-    /// 2. Opens (or creates) the `PersistentCommitLog` on disk.
-    /// 3. Resumes the `IdGenerator` from the highest transaction ID found in the WAL.
-    /// 4. Executes `startup_recovery()` to replay any pending commits.
+    /// # The Details //
+    /// 1. Initializes `ShardConnection` instances for all shards defined in `config`. //
+    /// 2. Opens (or creates) the `PersistentCommitLog` on disk. //
+    /// 3. Resumes the `IdGenerator` from the highest transaction ID found in the WAL. //
+    /// 4. Executes `startup_recovery()` to replay any pending commits. //
     ///
-    /// # Panics
-    /// Panics if the `PersistentCommitLog` fails to initialize (e.g., lack of file permissions).
-    /// Panics if `startup_recovery()` finds transactions that require manual intervention
-    /// (dead-lettered transactions), enforcing a "fail-fast" safety mechanism.
+    /// # Panics //
+    /// Panics if the `PersistentCommitLog` fails to initialize (e.g., lack of file permissions). //
+    /// Panics if `startup_recovery()` finds transactions that require manual intervention //
+    /// (dead-lettered transactions), enforcing a "fail-fast" safety mechanism. //
     pub fn new(config: ShardConfig) -> Self {
         let mut connections = HashMap::new();
         let mut shard_states = HashMap::new();
@@ -369,25 +369,25 @@ impl ShardCoordinator {
         coordinator
     }
 
-    /// Create a coordinator with custom rebalance config.
+    /// Create a coordinator with custom rebalance config. //
     pub fn with_rebalance_config(mut self, config: RebalanceConfig) -> Self {
         self.rebalance_config = config;
         self
     }
 
-    /// Automatically replays pending commits from the WAL.
+    /// Automatically replays pending commits from the WAL. //
     ///
-    /// # The Spark
-    /// If the coordinator lost power exactly halfway through executing a Two-Phase Commit,
-    /// we can't start accepting new queries until we clean up the mess.
+    /// # The Spark //
+    /// If the coordinator lost power exactly halfway through executing a Two-Phase Commit, //
+    /// we can't start accepting new queries until we clean up the mess. //
     ///
-    /// # The Details
-    /// Evaluates `recover_pending_transactions()`. If it returns any dead-lettered transactions,
-    /// it means the system cannot automatically guarantee consistency. In this case, we panic
-    /// to prevent data corruption.
+    /// # The Details //
+    /// Evaluates `recover_pending_transactions()`. If it returns any dead-lettered transactions, //
+    /// it means the system cannot automatically guarantee consistency. In this case, we panic //
+    /// to prevent data corruption. //
     ///
-    /// # Panics
-    /// Panics if any transactions are moved to the dead letter queue during startup recovery.
+    /// # Panics //
+    /// Panics if any transactions are moved to the dead letter queue during startup recovery. //
     fn startup_recovery(&self) {
         // Recover pending transactions on startup
         // This will panic if the commit log lock is poisoned (unlikely on startup)
@@ -509,27 +509,27 @@ impl ShardCoordinator {
         Ok(next)
     }
 
-    /// Get the router.
+    /// Get the router. //
     pub fn router(&self) -> &ShardRouter {
         &self.router
     }
 
-    /// Route a node query.
+    /// Route a node query. //
     pub fn route_node(&self, label: &str) -> ShardId {
         self.router.route_node(label)
     }
 
-    /// Route a traversal query.
+    /// Route a traversal query. //
     pub fn route_traversal(&self, start_label: &str, target_labels: &[&str]) -> TraversalPlan {
         self.router.route_traversal(start_label, target_labels)
     }
 
-    /// Get the state of a shard.
+    /// Get the state of a shard. //
     pub fn get_shard_state(&self, shard_id: ShardId) -> Option<ShardState> {
         self.shard_states.read().ok()?.get(&shard_id).cloned()
     }
 
-    /// Get all shard states.
+    /// Get all shard states. //
     pub fn get_all_shard_states(&self) -> Vec<ShardState> {
         self.shard_states
             .read()
@@ -537,31 +537,31 @@ impl ShardCoordinator {
             .unwrap_or_default()
     }
 
-    /// Update shard state.
+    /// Update shard state. //
     pub fn update_shard_state(&self, shard_id: ShardId, state: ShardState) {
         if let Ok(mut states) = self.shard_states.write() {
             states.insert(shard_id, state);
         }
     }
 
-    /// Get metrics for a shard.
+    /// Get metrics for a shard. //
     pub fn get_metrics(&self, shard_id: ShardId) -> Option<Arc<ShardMetrics>> {
         self.metrics.read().ok()?.get(&shard_id).cloned()
     }
 
-    /// Starts a new distributed transaction.
+    /// Starts a new distributed transaction. //
     ///
-    /// # The Spark
-    /// Before modifying data across multiple shards, we need a unique identifier and a
-    /// state tracking object to represent the lifecycle of the operation.
+    /// # The Spark //
+    /// Before modifying data across multiple shards, we need a unique identifier and a //
+    /// state tracking object to represent the lifecycle of the operation. //
     ///
-    /// # The Details
-    /// Generates a monotonically increasing `TxId` via the global `IdGenerator`.
-    /// Instantiates a `DistributedTransaction` in the `Pending` phase and stores it in
-    /// the coordinator's active transaction map.
+    /// # The Details //
+    /// Generates a monotonically increasing `TxId` via the global `IdGenerator`. //
+    /// Instantiates a `DistributedTransaction` in the `Pending` phase and stores it in //
+    /// the coordinator's active transaction map. //
     ///
-    /// # Returns
-    /// Returns the assigned `TxId` if successful.
+    /// # Returns //
+    /// Returns the assigned `TxId` if successful. //
     pub fn begin_distributed_transaction(
         &self,
         participants: Vec<ShardId>,
@@ -585,18 +585,18 @@ impl ShardCoordinator {
         Ok(tx_id)
     }
 
-    /// Executes Phase 1 (Prepare) of the Two-Phase Commit protocol.
+    /// Executes Phase 1 (Prepare) of the Two-Phase Commit protocol. //
     ///
-    /// # The Spark
-    /// We must ask all participants: "Are you ready and able to commit this transaction?"
-    /// If even one shard says "No" (or times out), the entire transaction must be aborted.
+    /// # The Spark //
+    /// We must ask all participants: "Are you ready and able to commit this transaction?" //
+    /// If even one shard says "No" (or times out), the entire transaction must be aborted. //
     ///
-    /// # The Details
-    /// 1. Assigns a global Hybrid Logical Clock (HLC) commit timestamp. This ensures all
-    ///    participants process the commit at the exact same logical point in time.
-    /// 2. Broadcasts `Prepare` requests to the participant shards.
-    /// 3. Transitions the transaction to `Prepared` if all vote yes.
-    /// 4. Triggers an automatic abort if any shard is unreachable or rejects the prepare.
+    /// # The Details //
+    /// 1. Assigns a global Hybrid Logical Clock (HLC) commit timestamp. This ensures all //
+    ///    participants process the commit at the exact same logical point in time. //
+    /// 2. Broadcasts `Prepare` requests to the participant shards. //
+    /// 3. Transitions the transaction to `Prepared` if all vote yes. //
+    /// 4. Triggers an automatic abort if any shard is unreachable or rejects the prepare. //
     pub fn prepare_distributed_transaction(&self, tx_id: TxId) -> Result<(), DistributedTxError> {
         // Get the transaction
         let mut transaction = {
@@ -702,20 +702,20 @@ impl ShardCoordinator {
         Ok(())
     }
 
-    /// Executes Phase 2 (Commit) of the Two-Phase Commit protocol.
+    /// Executes Phase 2 (Commit) of the Two-Phase Commit protocol. //
     ///
-    /// # The Spark
-    /// Once all participants are prepared, we must finalize the transaction. This is the
-    /// "Point of No Return" - once we log the decision to commit, the transaction is
-    /// guaranteed to eventually succeed, even if the power goes out.
+    /// # The Spark //
+    /// Once all participants are prepared, we must finalize the transaction. This is the //
+    /// "Point of No Return" - once we log the decision to commit, the transaction is //
+    /// guaranteed to eventually succeed, even if the power goes out. //
     ///
-    /// # The Details
-    /// 1. **Log Decision**: Persists a `Commit` entry to the `PersistentCommitLog`. If the
-    ///    coordinator crashes after this line, `startup_recovery` will take over on reboot.
-    /// 2. **Send Commit**: Broadcasts `Commit` commands to all participants. Uses exponential
-    ///    backoff to ride over transient network failures.
-    /// 3. **Clear Log**: Once all shards acknowledge the write, the transaction is marked as
-    ///    complete and removed from the active log, freeing up disk space.
+    /// # The Details //
+    /// 1. **Log Decision**: Persists a `Commit` entry to the `PersistentCommitLog`. If the //
+    ///    coordinator crashes after this line, `startup_recovery` will take over on reboot. //
+    /// 2. **Send Commit**: Broadcasts `Commit` commands to all participants. Uses exponential //
+    ///    backoff to ride over transient network failures. //
+    /// 3. **Clear Log**: Once all shards acknowledge the write, the transaction is marked as //
+    ///    complete and removed from the active log, freeing up disk space. //
     pub fn commit_distributed_transaction(&self, tx_id: TxId) -> Result<(), DistributedTxError> {
         // Get the transaction
         let mut transaction = {
@@ -887,15 +887,15 @@ impl ShardCoordinator {
         Ok(())
     }
 
-    /// Explicitly aborts a distributed transaction.
+    /// Explicitly aborts a distributed transaction. //
     ///
-    /// # The Spark
-    /// If a transaction fails its logic (e.g., constraints violated) or a participant crashes
-    /// during the prepare phase, we must tell everyone to throw away their temporary locks.
+    /// # The Spark //
+    /// If a transaction fails its logic (e.g., constraints violated) or a participant crashes //
+    /// during the prepare phase, we must tell everyone to throw away their temporary locks. //
     ///
-    /// # The Details
-    /// Logs an `Abort` decision to the WAL (to prevent recovery from accidentally committing it),
-    /// then broadcasts `Abort` requests to all participants on a best-effort basis.
+    /// # The Details //
+    /// Logs an `Abort` decision to the WAL (to prevent recovery from accidentally committing it), //
+    /// then broadcasts `Abort` requests to all participants on a best-effort basis. //
     pub fn abort_distributed_transaction(
         &self,
         tx_id: TxId,
@@ -968,7 +968,7 @@ impl ShardCoordinator {
         Ok(())
     }
 
-    /// Get an active transaction by ID.
+    /// Get an active transaction by ID. //
     pub fn get_transaction(&self, tx_id: TxId) -> Option<DistributedTransaction> {
         self.active_transactions.read().ok()?.get(&tx_id).map(|tx| {
             // Create a copy of the transaction state
@@ -985,20 +985,20 @@ impl ShardCoordinator {
         })
     }
 
-    /// Reads the write-ahead log and resumes interrupted transactions.
+    /// Reads the write-ahead log and resumes interrupted transactions. //
     ///
-    /// # The Spark
-    /// Ensures Durability (the 'D' in ACID). If the coordinator dies while telling nodes
-    /// to commit, we use this function to pick up exactly where we left off.
+    /// # The Spark //
+    /// Ensures Durability (the 'D' in ACID). If the coordinator dies while telling nodes //
+    /// to commit, we use this function to pick up exactly where we left off. //
     ///
-    /// # The Details
-    /// Iterates through the `PersistentCommitLog` to find transactions where a `Commit`
-    /// decision was logged, but no `Complete` marker exists. It attempts to resend the
-    /// commit RPCs to all participants with exponential backoff.
+    /// # The Details //
+    /// Iterates through the `PersistentCommitLog` to find transactions where a `Commit` //
+    /// decision was logged, but no `Complete` marker exists. It attempts to resend the //
+    /// commit RPCs to all participants with exponential backoff. //
     ///
-    /// # Returns
-    /// Returns a `RecoveryResult` detailing which transactions were saved and which were
-    /// relegated to the dead letter queue due to permanent participant failure.
+    /// # Returns //
+    /// Returns a `RecoveryResult` detailing which transactions were saved and which were //
+    /// relegated to the dead letter queue due to permanent participant failure. //
     pub fn recover_pending_transactions(&self) -> RecoveryResult {
         let decisions = {
             let log = self.commit_log.read().expect("Commit log lock poisoned");
@@ -1090,9 +1090,9 @@ impl ShardCoordinator {
         }
     }
 
-    /// Get transactions in the dead letter queue.
+    /// Get transactions in the dead letter queue. //
     ///
-    /// These are transactions that failed recovery and require manual intervention.
+    /// These are transactions that failed recovery and require manual intervention. //
     pub fn get_dead_lettered_transactions(&self) -> Vec<DeadLetteredTransaction> {
         self.dead_letter_queue
             .read()
@@ -1100,10 +1100,10 @@ impl ShardCoordinator {
             .unwrap_or_default()
     }
 
-    /// Manually retry a dead-lettered transaction.
+    /// Manually retry a dead-lettered transaction. //
     ///
-    /// This removes the transaction from the dead letter queue and attempts
-    /// recovery again.
+    /// This removes the transaction from the dead letter queue and attempts //
+    /// recovery again. //
     pub fn retry_dead_lettered_transaction(&self, tx_id: TxId) -> Result<(), DistributedTxError> {
         // Remove from dead letter queue
         let dlq_entry = {
@@ -1159,14 +1159,14 @@ impl ShardCoordinator {
         }
     }
 
-    /// Clear all dead-lettered transactions (after manual resolution).
+    /// Clear all dead-lettered transactions (after manual resolution). //
     pub fn clear_dead_letter_queue(&self) {
         if let Ok(mut dlq) = self.dead_letter_queue.write() {
             dlq.clear();
         }
     }
 
-    /// Perform health checks on all shards.
+    /// Perform health checks on all shards. //
     pub fn health_check_all(&self) {
         if let Ok(mut connections) = self.connections.write() {
             for conn in connections.values_mut() {
@@ -1175,7 +1175,7 @@ impl ShardCoordinator {
         }
     }
 
-    /// Mark a shard as unavailable.
+    /// Mark a shard as unavailable. //
     pub fn mark_shard_unavailable(&self, shard_id: ShardId) {
         if let Ok(mut connections) = self.connections.write()
             && let Some(conn) = connections.get_mut(&shard_id)
@@ -1190,7 +1190,7 @@ impl ShardCoordinator {
         }
     }
 
-    /// Mark a shard as available.
+    /// Mark a shard as available. //
     pub fn mark_shard_available(&self, shard_id: ShardId) {
         if let Ok(mut connections) = self.connections.write()
             && let Some(conn) = connections.get_mut(&shard_id)
@@ -1205,9 +1205,9 @@ impl ShardCoordinator {
         }
     }
 
-    /// Calculate the imbalance ratio across shards.
+    /// Calculate the imbalance ratio across shards. //
     ///
-    /// Returns the coefficient of variation (std dev / mean) of node counts.
+    /// Returns the coefficient of variation (std dev / mean) of node counts. //
     pub fn calculate_imbalance(&self) -> f64 {
         let states: Vec<u64> = self
             .shard_states
@@ -1236,13 +1236,13 @@ impl ShardCoordinator {
         variance.sqrt() / mean
     }
 
-    /// Check if rebalancing is needed based on current imbalance.
+    /// Check if rebalancing is needed based on current imbalance. //
     pub fn needs_rebalancing(&self) -> bool {
         let imbalance = self.calculate_imbalance();
         self.rebalance_config.should_rebalance(imbalance)
     }
 
-    /// Get the number of active distributed transactions.
+    /// Get the number of active distributed transactions. //
     pub fn active_transaction_count(&self) -> usize {
         self.active_transactions
             .read()
