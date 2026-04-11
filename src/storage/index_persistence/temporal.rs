@@ -247,6 +247,12 @@ pub fn convert_edge_version(version: &EdgeVersion) -> Result<EdgeVersionEntry> {
 ///
 /// * `entry` - The persisted node version entry
 ///
+/// Restore a persisted NodeVersionEntry back into a NodeVersion.
+///
+/// Rebuilds the complex `VersionData` structure (either Anchor or Delta) from the
+/// flattened `NodeVersionEntry`. This maps raw integer labels back to `InternedString`s
+/// and reconstructs `HybridTimestamp`s.
+///
 /// # Errors
 ///
 /// Returns an error if property restoration fails (e.g., corrupted interned strings).
@@ -335,6 +341,11 @@ pub fn restore_node_version(entry: &NodeVersionEntry) -> Result<NodeVersion> {
 /// # Arguments
 ///
 /// * `entry` - The persisted edge version entry
+///
+/// Restore a persisted EdgeVersionEntry back into an EdgeVersion.
+///
+/// Like `restore_node_version`, this rebuilds the runtime representation of an edge
+/// from its serialized format, resolving interned strings and timestamps.
 ///
 /// # Errors
 ///
@@ -440,6 +451,12 @@ pub fn restore_edge_version(entry: &EdgeVersionEntry) -> Result<EdgeVersion> {
 /// * `data` - The temporal index data loaded from disk
 /// * `historical` - The HistoricalStorage to populate
 ///
+/// Restore all persisted versions into `HistoricalStorage`.
+///
+/// Processes the deserialized `TemporalIndexData`, converting each entry back into its
+/// runtime `NodeVersion` or `EdgeVersion` format, and inserts them sequentially into
+/// the provided `HistoricalStorage` instance.
+///
 /// # Errors
 ///
 /// Returns an error if version restoration or insertion fails.
@@ -485,6 +502,13 @@ pub fn restore_into_historical_storage(
 }
 
 /// Save temporal index data to disk with CRC32 checksum using atomic write.
+///
+/// Ensures the integrity of the stored temporal data by computing and appending a CRC32
+/// checksum. This allows AletheiaDB to verify data hasn't been corrupted at rest.
+///
+/// # Errors
+///
+/// Returns an error if serialization or disk I/O fails.
 pub fn save_temporal_index(data: &TemporalIndexData, path: &Path) -> Result<()> {
     super::common::save_encoded_with_crc(data, path)
 }
@@ -498,6 +522,11 @@ pub fn save_temporal_index(data: &TemporalIndexData, path: &Path) -> Result<()> 
 /// - CRC32 checksum verification
 /// - Magic bytes check (`TEMPORAL_MAGIC`)
 /// - Version check (`MANIFEST_VERSION`)
+///
+/// Load temporal index data from disk.
+///
+/// Reads the encoded temporal data and verifies its CRC32 checksum before decoding
+/// to ensure we don't load corrupted historical states into memory.
 ///
 /// # Errors
 ///
@@ -528,6 +557,9 @@ pub fn load_temporal_index(path: &Path) -> Result<TemporalIndexData> {
 }
 
 /// Create a new empty TemporalIndexData.
+///
+/// Initializes a new temporal index container with the correct magic bytes
+/// (`TEMPORAL_MAGIC`) and the current manifest version.
 pub fn new_temporal_index_data() -> TemporalIndexData {
     TemporalIndexData {
         magic: TEMPORAL_MAGIC,
