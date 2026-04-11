@@ -41,6 +41,12 @@ pub use results::{EntityId, EntityResult, QueryResults, QueryRow};
 /// assert_eq!(config.max_buffer_size, 5000);
 /// ```
 #[derive(Debug, Clone)]
+/// Configuration for the query executor.
+///
+/// # Details
+///
+/// Holds settings such as target batch size, parallel execution flags,
+/// and maximum hop depth.
 pub struct ExecutionConfig {
     /// Maximum number of results to buffer before backpressure is applied.
     /// Default is 10,000.
@@ -110,6 +116,12 @@ impl Default for ExecutionConfig {
 /// # Ok(())
 /// # }
 /// ```
+/// Core engine for executing physical query plans.
+///
+/// # Details
+///
+/// Uses standard iterators to pull records out of current and historical
+/// storage seamlessly based on the execution plan logic.
 pub struct QueryExecutor {
     /// Reference to current storage
     current: Arc<CurrentStorage>,
@@ -121,6 +133,12 @@ pub struct QueryExecutor {
 
 impl QueryExecutor {
     /// Create a new query executor
+    /// Create a new query executor with default config.
+    ///
+    /// # Details
+    ///
+    /// The default configuration prioritizes minimal memory usage but does not
+    /// enable parallel execution.
     pub fn new(current: Arc<CurrentStorage>, historical: Arc<RwLock<HistoricalStorage>>) -> Self {
         QueryExecutor {
             current,
@@ -130,6 +148,12 @@ impl QueryExecutor {
     }
 
     /// Create an executor with custom configuration
+    /// Create a new query executor with custom config.
+    ///
+    /// # Details
+    ///
+    /// Use this to modify default batch sizes or concurrency targets before
+    /// executing queries.
     pub fn with_config(
         current: Arc<CurrentStorage>,
         historical: Arc<RwLock<HistoricalStorage>>,
@@ -187,6 +211,22 @@ impl QueryExecutor {
     /// for row in results {
     ///     println!("Got row: {:?}", row);
     /// }
+    /// ```
+    /// Execute a physical query plan.
+    ///
+    /// # Details
+    ///
+    /// Evaluates the sequence of operators defined in the plan against the underlying
+    /// storage engines. Materializes the results.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// # use aletheiadb::query::executor::QueryExecutor;
+    /// # use aletheiadb::query::planner::physical::PhysicalPlan;
+    /// # use std::sync::{Arc, RwLock};
+    /// // let executor = QueryExecutor::new(current, historical);
+    /// // let results = executor.execute(plan).unwrap();
     /// ```
     pub fn execute(&self, plan: PhysicalPlan) -> Result<QueryResults> {
         let iterator = self.execute_op(&plan.root)?;

@@ -50,6 +50,10 @@ impl fmt::Display for MigrationState {
 }
 
 /// Progress of a migration operation.
+///
+/// # Details
+///
+/// Tracks the number of nodes and edges copied, as well as elapsed time.
 #[derive(Debug, Clone)]
 pub struct MigrationProgress {
     /// Total nodes to migrate.
@@ -72,6 +76,10 @@ pub struct MigrationProgress {
 
 impl MigrationProgress {
     /// Create a new progress tracker.
+    ///
+    /// # Details
+    ///
+    /// Initializes progress to zero with the expected total counts.
     pub fn new(total_nodes: u64, total_edges: u64) -> Self {
         Self {
             total_nodes,
@@ -254,6 +262,10 @@ impl MigrationPlan {
     }
 
     /// Mark the migration as failed.
+    ///
+    /// # Details
+    ///
+    /// Transitions state to `Failed` and saves the error message.
     pub fn mark_failed(&mut self, reason: &str) {
         self.state = MigrationState::Failed;
         // In a real implementation, would log the reason
@@ -261,11 +273,19 @@ impl MigrationPlan {
     }
 
     /// Cancel the migration.
+    ///
+    /// # Details
+    ///
+    /// Aborts an ongoing or queued migration and transitions state to `Cancelled`.
     pub fn cancel(&mut self) {
         self.state = MigrationState::Cancelled;
     }
 
     /// Check if the migration is in a terminal state.
+    ///
+    /// # Details
+    ///
+    /// Returns true if it has Completed, Failed, or Cancelled.
     pub fn is_terminal(&self) -> bool {
         matches!(
             self.state,

@@ -62,6 +62,11 @@ use std::time::{Duration, Instant};
 use crate::core::hlc::MAX_BACKWARD_DRIFT_US;
 
 /// Result of recovery operation.
+///
+/// # Details
+///
+/// Returned when the `ShardCoordinator` replays pending decisions
+/// from the log, typically during startup.
 #[derive(Debug, Clone)]
 pub struct RecoveryResult {
     /// Transactions that were successfully recovered.
@@ -72,17 +77,33 @@ pub struct RecoveryResult {
 
 impl RecoveryResult {
     /// Check if recovery was fully successful (no dead letters).
+    ///
+    /// # Details
+    ///
+    /// A successful recovery means all pending transactions were either
+    /// completed or successfully aborted, with none stuck in an indeterminate state.
     pub fn is_complete(&self) -> bool {
         self.dead_lettered.is_empty()
     }
 
     /// Get the number of transactions that required manual intervention.
+    ///
+    /// # Details
+    ///
+    /// These are transactions that exceeded the maximum number of recovery
+    /// attempts due to persistent participant failures and require an operator
+    /// to manually resolve them.
     pub fn dead_letter_count(&self) -> usize {
         self.dead_lettered.len()
     }
 }
 
 /// A transaction that failed recovery and requires manual intervention.
+///
+/// # Details
+///
+/// Transactions enter this state when they exhaust all retry attempts
+/// during crash recovery. Operators can inspect these and retry or abort them.
 #[derive(Debug, Clone)]
 pub struct DeadLetteredTransaction {
     /// The transaction ID.
@@ -96,6 +117,11 @@ pub struct DeadLetteredTransaction {
 }
 
 /// Connection to a shard (placeholder for actual network implementation).
+///
+/// # Details
+///
+/// Maintains the endpoint string, health status, and synchronizes the
+/// Hybrid Logical Clock (HLC) frontier with the remote shard.
 #[derive(Debug)]
 pub struct ShardConnection {
     /// The shard ID this connection is for.
@@ -112,6 +138,21 @@ pub struct ShardConnection {
 
 impl ShardConnection {
     /// Create a new shard connection.
+    ///
+    /// # Details
+    ///
+    /// Initializes the connection as healthy by default and sets the initial
+    /// HLC frontier to the current wallclock time.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::storage::sharding::coordinator::ShardConnection;
+    /// use aletheiadb::storage::sharding::types::ShardId;
+    ///
+    /// let shard_id = ShardId::new(1).unwrap();
+    /// let connection = ShardConnection::new(shard_id, "http://localhost:8080".to_string());
+    /// ```
     pub fn new(shard_id: ShardId, endpoint: String) -> Self {
         Self {
             shard_id,
@@ -123,6 +164,12 @@ impl ShardConnection {
     }
 
     /// Simulate a prepare call to the shard.
+    ///
+    /// # Details
+    ///
+    /// This is part of the 2PC protocol. It sends the `Prepare` message to the
+    /// participant. If the connection is unhealthy, it returns an error immediately.
+    /// It also synchronizes the HLC clock with the remote timestamp.
     pub fn prepare(
         &self,
         _tx_id: TxId,
@@ -139,6 +186,11 @@ impl ShardConnection {
     }
 
     /// Simulate a commit call to the shard.
+    ///
+    /// # Details
+    ///
+    /// This is part of the 2PC protocol. It sends the `Commit` message to the
+    /// participant to finalize the transaction.
     pub fn commit(
         &self,
         _tx_id: TxId,
@@ -155,6 +207,11 @@ impl ShardConnection {
     }
 
     /// Simulate an abort call to the shard.
+    ///
+    /// # Details
+    ///
+    /// Rolls back the specified transaction on this shard if the coordinator
+    /// decides to abort the transaction.
     pub fn abort(&self, _tx_id: TxId) -> Result<(), DistributedTxError> {
         if !self.healthy {
             return Err(DistributedTxError::ParticipantUnavailable {
@@ -175,6 +232,11 @@ impl ShardConnection {
     }
 
     /// Perform a health check.
+    ///
+    /// # Details
+    ///
+    /// Pings the remote shard to update the connection's healthy status.
+    /// Returns the current health state.
     pub fn health_check(&mut self) -> bool {
         // In a real implementation, this would ping the shard
         self.last_ping = Some(Instant::now());
@@ -182,11 +244,19 @@ impl ShardConnection {
     }
 
     /// Mark the connection as unhealthy.
+    ///
+    /// # Details
+    ///
+    /// Used manually or automatically when requests to the shard timeout or fail.
     pub fn mark_unhealthy(&mut self) {
         self.healthy = false;
     }
 
     /// Mark the connection as healthy.
+    ///
+    /// # Details
+    ///
+    /// Resets the connection to a healthy state after a successful health check.
     pub fn mark_healthy(&mut self) {
         self.healthy = true;
         self.last_ping = Some(Instant::now());
@@ -290,6 +360,11 @@ impl ShardCoordinator {
     }
 
     /// Create a coordinator with custom rebalance config.
+    ///
+    /// # Details
+    ///
+    /// Overrides the default rebalance settings to tune the frequency
+    /// and aggressiveness of data migrations.
     pub fn with_rebalance_config(mut self, config: RebalanceConfig) -> Self {
         self.rebalance_config = config;
         self
@@ -417,26 +492,50 @@ impl ShardCoordinator {
     }
 
     /// Get the router.
+    ///
+    /// # Details
+    ///
+    /// Provides access to the `ShardRouter` for routing queries
+    /// based on node labels.
     pub fn router(&self) -> &ShardRouter {
         &self.router
     }
 
     /// Route a node query.
+    ///
+    /// # Details
+    ///
+    /// Hashes the node's label to determine its assigned shard.
     pub fn route_node(&self, label: &str) -> ShardId {
         self.router.route_node(label)
     }
 
     /// Route a traversal query.
+    ///
+    /// # Details
+    ///
+    /// Creates an execution plan for distributed traversals by identifying
+    /// which shards need to be queried based on the start and target labels.
     pub fn route_traversal(&self, start_label: &str, target_labels: &[&str]) -> TraversalPlan {
         self.router.route_traversal(start_label, target_labels)
     }
 
     /// Get the state of a shard.
+    ///
+    /// # Details
+    ///
+    /// Retrieves the current status and metrics (like node count) for
+    /// a specific shard, if it exists.
     pub fn get_shard_state(&self, shard_id: ShardId) -> Option<ShardState> {
         self.shard_states.read().ok()?.get(&shard_id).cloned()
     }
 
     /// Get all shard states.
+    ///
+    /// # Details
+    ///
+    /// Returns a snapshot of the states for all managed shards, useful
+    /// for rebalancing and cluster monitoring.
     pub fn get_all_shard_states(&self) -> Vec<ShardState> {
         self.shard_states
             .read()
@@ -445,6 +544,11 @@ impl ShardCoordinator {
     }
 
     /// Update shard state.
+    ///
+    /// # Details
+    ///
+    /// Updates the local view of a shard's state based on heartbeats
+    /// or metadata syncing.
     pub fn update_shard_state(&self, shard_id: ShardId, state: ShardState) {
         if let Ok(mut states) = self.shard_states.write() {
             states.insert(shard_id, state);
