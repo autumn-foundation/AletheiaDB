@@ -39,7 +39,7 @@
 
 use crate::AletheiaDB;
 use crate::api::transaction::ReadOps;
-use crate::core::error::{Result, VectorError, Error};
+use crate::core::error::{Error, Result, VectorError};
 use crate::core::id::NodeId;
 use crate::core::vector::ops::cosine_similarity;
 
@@ -135,11 +135,12 @@ impl<'a> Crossroads<'a> {
 
                 for selected_vec in &selected_vectors {
                     // Cosine distance = 1 - Cosine Similarity
-                    let sim = cosine_similarity(candidate_vec, selected_vec)
-                        .map_err(|_| Error::Vector(VectorError::DimensionMismatch {
+                    let sim = cosine_similarity(candidate_vec, selected_vec).map_err(|_| {
+                        Error::Vector(VectorError::DimensionMismatch {
                             expected: candidate_vec.len(),
-                            actual: selected_vec.len()
-                        }))?;
+                            actual: selected_vec.len(),
+                        })
+                    })?;
                     let dist = 1.0 - sim;
 
                     if dist < min_dist_to_selected {
@@ -176,40 +177,71 @@ mod tests {
     fn test_crossroads_divergence() -> Result<()> {
         let db = AletheiaDB::new()?;
 
-        let start_node = db.write(|tx| {
-            tx.create_node("Start", PropertyMapBuilder::new().build())
-        })?;
+        let start_node =
+            db.write(|tx| tx.create_node("Start", PropertyMapBuilder::new().build()))?;
 
         // Create 3 neighbors that are highly similar (e.g. all representing "Apple")
         let similar_1 = db.write(|tx| {
-            tx.create_node("Concept", PropertyMapBuilder::new()
-                .insert_vector("embedding", &[1.0, 0.0, 0.0])
-                .build())
+            tx.create_node(
+                "Concept",
+                PropertyMapBuilder::new()
+                    .insert_vector("embedding", &[1.0, 0.0, 0.0])
+                    .build(),
+            )
         })?;
         let similar_2 = db.write(|tx| {
-            tx.create_node("Concept", PropertyMapBuilder::new()
-                .insert_vector("embedding", &[0.9, 0.1, 0.0])
-                .build())
+            tx.create_node(
+                "Concept",
+                PropertyMapBuilder::new()
+                    .insert_vector("embedding", &[0.9, 0.1, 0.0])
+                    .build(),
+            )
         })?;
         let similar_3 = db.write(|tx| {
-            tx.create_node("Concept", PropertyMapBuilder::new()
-                .insert_vector("embedding", &[0.9, 0.0, 0.1])
-                .build())
+            tx.create_node(
+                "Concept",
+                PropertyMapBuilder::new()
+                    .insert_vector("embedding", &[0.9, 0.0, 0.1])
+                    .build(),
+            )
         })?;
 
         // Create 1 neighbor that is highly divergent (orthogonal) (e.g. "Orange")
         let divergent = db.write(|tx| {
-            tx.create_node("Concept", PropertyMapBuilder::new()
-                .insert_vector("embedding", &[0.0, 1.0, 0.0])
-                .build())
+            tx.create_node(
+                "Concept",
+                PropertyMapBuilder::new()
+                    .insert_vector("embedding", &[0.0, 1.0, 0.0])
+                    .build(),
+            )
         })?;
 
         // Connect them all
         db.write(|tx| {
-            tx.create_edge(start_node, similar_1, "CONNECTS", PropertyMapBuilder::new().build())?;
-            tx.create_edge(start_node, similar_2, "CONNECTS", PropertyMapBuilder::new().build())?;
-            tx.create_edge(start_node, similar_3, "CONNECTS", PropertyMapBuilder::new().build())?;
-            tx.create_edge(start_node, divergent, "CONNECTS", PropertyMapBuilder::new().build())?;
+            tx.create_edge(
+                start_node,
+                similar_1,
+                "CONNECTS",
+                PropertyMapBuilder::new().build(),
+            )?;
+            tx.create_edge(
+                start_node,
+                similar_2,
+                "CONNECTS",
+                PropertyMapBuilder::new().build(),
+            )?;
+            tx.create_edge(
+                start_node,
+                similar_3,
+                "CONNECTS",
+                PropertyMapBuilder::new().build(),
+            )?;
+            tx.create_edge(
+                start_node,
+                divergent,
+                "CONNECTS",
+                PropertyMapBuilder::new().build(),
+            )?;
             Ok::<_, Error>(())
         })?;
 
