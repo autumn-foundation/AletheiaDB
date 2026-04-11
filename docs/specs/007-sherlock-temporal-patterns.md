@@ -1,67 +1,67 @@
-# Spec: Sherlock 2.0 - Temporal Pattern Matching Engine
+# 🔭 Vantage Spec: Sherlock 2.0 (Temporal Pattern Matching Engine)
 
-## Status
-- **State**: Draft
-- **Owner**: Vantage
-- **Date**: 2024-05-22
+| Metadata | Details |
+| :--- | :--- |
+| **ID** | SPEC-007 |
+| **Status** | 📝 Draft |
+| **Owner** | Vantage (Product) |
+| **Implementer** | Nova (Engineering) |
+| **Priority** | P2 (Medium) |
+| **Related Code** | `src/experimental/sherlock/` |
 
-## Context
-AletheiaDB stores the *history* of every node and edge. While we can query "What was the state at time T?", we currently lack a high-level way to query *patterns* of change over time. Users often need to find sequences of events that match a specific criteria, especially for compliance, fraud detection, and process optimization.
+## 1. 👤 User Stories
 
-The existing `Sherlock` prototype (v1) is a basic linear scanner that supports simple property checks. It lacks expressiveness (no negation, no logical operators) and robustness.
+> **As a** Compliance Officer or Fraud Analyst,
+> **I want to** automatically flag specific temporal sequences of events (e.g., an 'Approval' occurring *before* a 'Risk Check', or an 'Email Change' followed quickly by a 'Large Transfer'),
+> **So that** I can detect regulatory violations or coordinated account takeovers that happen over a period of time, ensuring compliance and preventing fraud.
 
-## User Stories
+> **As a** Process Engineer,
+> **I want to** identify orders that went from 'Shipped' back to 'Processing',
+> **So that** I can debug our logistics pipeline and identify bottlenecks or errors.
 
-### 1. Compliance Officer
-"As a Compliance Officer, I want to automatically flag any transaction where 'Approval' occurred *before* 'Risk Check' was completed, so that I can ensure regulatory compliance."
+## 2. 🧐 The "So What?" (Business Value)
 
-### 2. Fraud Analyst
-"As a Fraud Analyst, I want to find users who changed their 'Email Address' and then initiated a 'Large Transfer' within 5 minutes, so I can block potential account takeovers."
+While AletheiaDB stores the *history* of every node and edge (allowing "What was the state at time T?"), users currently lack a declarative, expressive way to query *sequences* of change. Users often need to find sequences of events that match a specific criteria, especially for compliance, fraud detection, and process optimization.
 
-### 3. Process Engineer
-"As a Process Engineer, I want to identify orders that went from 'Shipped' back to 'Processing', so I can debug our logistics pipeline."
+The existing prototype (Sherlock v1) is a basic linear scanner without logical operators or robust sequence detection. It lacks expressiveness (no negation, no logical operators) and robustness.
 
-## The "Mystery" DSL (Domain Specific Language)
+**The Gap:**
+- **Expressiveness:** No easy way to query "A happened, then B happened."
+- **Efficiency:** Writing manual queries for sequences involves complex, slow joins over historical data.
 
-We propose a declarative DSL for defining "Mysteries" (Temporal Patterns).
+**ROI:**
+- **Productivity:** Sherlock 2.0 provides an expressive Domain Specific Language (DSL) to easily define and match complex temporal patterns (Mysteries), significantly reducing the time required to build compliance and fraud detection rules.
+- **Accuracy:** Improves detection accuracy by formalizing the structure of temporal patterns.
 
-### Conceptual Model
-A `Mystery` consists of:
-1.  **Sequence**: An ordered list of `Clue`s.
-2.  **Time Window**: The maximum duration for the entire sequence (or between steps).
-3.  **Constraints**: Additional logic (e.g. Negation).
+## 3. ✅ Acceptance Criteria
 
-### Clue Types
--   **PropertyState**: `Node.property == Value` (at a specific time).
--   **PropertyChange**: `Node.property` changed from `Old` to `New`.
--   **EdgeExistence**: `(Node)-[:REL]->(Other)` exists.
--   **SemanticSimilarity**: `cosine_similarity(Node.vector, TargetVector) > Threshold`.
+### Functional Requirements
 
-### Example (Pseudocode)
+1.  **Declarative API (DSL)**:
+    -   Must define a builder-based API in Rust for defining `Mystery` sequences consisting of ordered `Clue`s.
+    -   Clue types must include: `PropertyState` (property == value at a time), `PropertyChange` (property changed from old to new), `EdgeExistence` (relationship exists), and `SemanticSimilarity` (cosine similarity > threshold).
+2.  **Sequence Detection**:
+    -   Must correctly identify sequences of events (e.g., A -> B -> C) occurring in the specified order.
+3.  **Time Windows**:
+    -   Must enforce a maximum Time Window (e.g., the entire sequence must occur within 5 minutes, or between steps).
+4.  **Integration**:
+    -   Should integrate with `NarrativeGenerator` to explain *why* a pattern matched.
 
-```rust
-let mystery = Mystery::new()
-    .within(Duration::from_minutes(5))
-    .sequence(vec![
-        Clue::PropertyChange("email", Any, Any), // Step 1: Email changed
-        Clue::PropertyChange("status", "Normal", "HighValueTransfer"), // Step 2: High Value Transfer
-    ]);
-```
+### Non-Functional Requirements
+-   **Performance**: Must be optimized to avoid O(N^2) scans over history, leveraging the sorted nature of historical versions.
+-   **Metric Definition**: Success = Match Recall: Sherlock 2.0 correctly identifies 100% of defined sequential patterns within specified time windows in a historical dataset. Query Latency: Matching a 3-step sequence over a 1-month history for a specific node completes in <10ms.
 
-## Acceptance Criteria
+## 4. 🚫 Out of Scope (Phase 1)
 
-1.  **Sequence Detection**: Must correctly identify sequences of events (A -> B -> C) in the correct order.
-2.  **Time Windows**: Must respect a maximum time window for the entire sequence.
-3.  **Semantic Clues**: Must support vector similarity as a condition (e.g. "User's behavior vector drifted > 0.5").
-4.  **Negation (Future)**: "A happened, and B did NOT happen within X time." (Phase 2).
-5.  **Cross-Node Patterns (Future)**: "Node A did X, then Node B (connected to A) did Y." (Phase 2).
+-   **Real-time Stream Processing**: Full Complex Event Processing (CEP) engine features (e.g., sliding windows, continuous aggregations). MVP focuses on *historical batch analysis*.
+-   **Cross-Node Patterns**: (e.g., "Node A did X, then Node B did Y"). Single-shard/single-node analysis first.
+-   **Negation Logic**: (e.g., "A happened, and B did NOT happen within X time").
+-   **Cross-Shard Patterns**: Detecting patterns that span across different distributed shards.
 
-## Out of Scope (Phase 1)
--   **Real-time Stream Processing**: We focus on *historical analysis* (batch) first.
--   **Complex Event Processing (CEP)**: Full CEP engine features (sliding windows, aggregation) are out of scope. We focus on *sequence matching*.
--   **Cross-Shard Patterns**: Single-shard/single-node analysis first.
+## 5. 📝 Gap Analysis (Current vs. Spec)
 
-## Technical Considerations
--   **Efficiency**: Avoid O(N^2) scans over history. Use the sorted nature of the log/versions.
--   **API**: The API should be builder-based for ease of use in Rust.
--   **Integration**: Should integrate with `NarrativeGenerator` to explain *why* a pattern matched.
+| Feature | Current State | Required State | Action |
+| :--- | :--- | :--- | :--- |
+| **API** | Simple linear scan function | Declarative builder (DSL) | Implement `Mystery` and `Clue` structures |
+| **Logic** | Basic property matching | Sequence, Order, Time bounds | Update matching engine logic |
+| **Performance** | O(N) scan per node | Optimized historical lookup | Use binary search on version history |

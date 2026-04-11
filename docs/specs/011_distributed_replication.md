@@ -11,9 +11,9 @@
 
 ## 1. 👤 User Stories
 
-> **As a** DevOps Engineer,
-> **I want to** run AletheiaDB across multiple nodes in an active-passive or active-active configuration,
-> **So that** my application can survive a single-node hardware failure without losing data or experiencing significant downtime.
+> **As a** DevOps Engineer, Database Administrator or SRE,
+> **I want to** deploy AletheiaDB across multiple nodes in an active-passive or active-active configuration with automated cross-node replication and failover,
+> **So that** my application can survive a single-node hardware failure without losing data or experiencing significant downtime, ensuring my mission-critical temporal graph and vector queries remain accessible and durable even if a primary server crashes or experiences a network partition.
 
 > **As a** Solutions Architect,
 > **I want to** route read-heavy analytical queries to read-only replicas,
@@ -25,17 +25,17 @@
 
 ## 2. 🧐 The "So What?" (Business Value)
 
-AletheiaDB currently runs as a single-node database. While it is highly performant and supports sharding, a single node is a single point of failure (SPOF).
+AletheiaDB currently runs as a single-node database. While it is highly performant and supports single-node persistence (via WAL) and horizontal sharding, a single node is a single point of failure (SPOF). It lacks built-in replica sets for high availability (HA).
 
 **The Gap:**
-- **Reliability:** Hardware fails. Cloud VMs restart. Without replication, a node going down means total downtime.
+- **Reliability:** Hardware fails. Cloud VMs restart. Without replication, a node going down means total downtime. Enterprise users cannot rely on a database for production RAG (Retrieval-Augmented Generation) applications or compliance auditing if a single machine failure causes downtime.
 - **Read Scaling:** All read queries hit the same node that processes writes, creating a bottleneck for read-heavy workloads (like semantic search and historical traversals).
-- **Enterprise Readiness:** Mission-critical applications require High Availability (HA) guarantees that we currently cannot provide.
+- **Enterprise Readiness:** Mission-critical applications require High Availability (HA) guarantees that we currently cannot provide. High Availability Replication solves the "single point of failure" problem, moving AletheiaDB from a "research database" to a "production-ready enterprise database."
 
 **ROI:**
-- **Enterprise Adoption:** Unlocks deals with enterprise customers who strictly require HA and Disaster Recovery (DR) capabilities.
+- **Enterprise Adoption:** Unlocks deals with enterprise customers who strictly require HA and Disaster Recovery (DR) capabilities, ensuring 99.99% uptime.
 - **Performance:** Dramatically improves read latency and throughput by allowing read queries to be distributed across a cluster.
-- **Trust:** Ensures zero data loss (RPO = 0) in synchronous replication setups.
+- **Trust:** Ensures zero data loss (RPO = 0) during unplanned outages in synchronous replication setups.
 
 ## 3. ✅ Acceptance Criteria
 
@@ -53,22 +53,25 @@ AletheiaDB currently runs as a single-node database. While it is highly performa
     -   Follower nodes must be able to serve read-only queries (e.g., `MATCH`, `SIMILAR TO`, `AS OF`).
     -   If a write query is sent to a Follower, it must either be rejected or proxied to the Leader.
 
-4.  **Failover (Phase 1: Manual)**:
-    -   Must provide an admin command/API to promote a Follower to Leader.
+4.  **Failover**:
+    -   Must define a protocol for automated or manual Leader Election and Failover.
 
 5.  **Observability**:
     -   Must expose metrics for replication lag (in seconds and WAL LSN offset).
     -   Must expose cluster state and node roles via the `/status` HTTP API.
 
 ### Non-Functional Requirements
--   **Performance**: Asynchronous replication must add < 2ms overhead to the Leader's write path.
+-   **Metric Definition:**
+    -   **Uptime:** The database cluster remains available for reads and writes even if a single replica or leader node fails.
+    -   **Failover Latency:** Automatic failover (if implemented) or manual promotion takes <5 seconds.
+    -   **Replication Latency:** Asynchronous replication must add < 2ms overhead to the Leader's write path.
 -   **Consistency**: A Follower serving a read query must guarantee causal consistency (Read-Your-Writes) if configured to do so.
 
 ## 4. 🚫 Out of Scope (Phase 1)
 
--   **Automatic Failover (Leader Election)**: Implementing Raft/Paxos for automatic leader election is complex. We will rely on external tools (like Consul/ZooKeeper) or manual intervention for Phase 1.
 -   **Multi-Master (Active-Active)**: Conflict resolution is too complex for our bi-temporal model right now. We stick to Single-Leader.
 -   **Partial Replication**: Replicating only specific shards/graphs to specific nodes. The entire dataset is replicated.
+-   **Automatic Failover (Leader Election)**: Implementing Raft/Paxos for automatic leader election is complex. We will rely on external tools (like Consul/ZooKeeper) or manual intervention for Phase 1.
 
 ## 5. 📝 Gap Analysis (Current vs. Spec)
 
