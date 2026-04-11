@@ -54,3 +54,7 @@
 **[Zero-Cost Lexer Lookahead]**
 **Learning:** `Peekable::clone()` is not a zero-cost abstraction when parsing strings, especially since it clones the underlying iterator state on every single token. For simple ASCII characters (like `-`, `/`, `*`, `0`..`9`), `input.as_bytes().get(idx + 1)` is much faster and completely avoids heap allocations and iterator cloning overhead.
 **Action:** When doing lookaheads in a lexer over a `String` or `&str`, prefer slicing the underlying byte array `as_bytes()` if the characters you're looking for are strictly single-byte ASCII.
+**Removed Vec allocations with Iterator Chaining**\n**Learning:** Gathering iterators using  just to iterate over their combination causes unnecessary heap allocations inside tight loops (like a BFS traversal).\n**Action:** Use  to lazily iterate over multiple sources directly and maintain zero-cost abstractions.
+**Removed Vec allocations with Iterator Chaining**
+**Learning:** Gathering iterators using `.collect::<Vec<_>>()` just to iterate over their combination causes unnecessary heap allocations inside tight loops (like a BFS traversal).
+**Action:** Use `.chain()` to lazily iterate over multiple sources directly and maintain zero-cost abstractions.
