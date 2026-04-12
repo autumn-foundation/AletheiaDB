@@ -197,7 +197,10 @@ fn test_recover_tracks_max_version_id() -> Result<()> {
     let another_node_id = current.create_node("AnotherNode", PropertyMap::new())?;
     // The first create used version 103, this one should be 104
     // We can't directly access version IDs, but we verify recovery completed successfully
-    assert_eq!(current.get_node(another_node_id).unwrap().id, another_node_id);
+    assert_eq!(
+        current.get_node(another_node_id).unwrap().id,
+        another_node_id
+    );
 
     Ok(())
 }

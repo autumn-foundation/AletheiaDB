@@ -542,8 +542,14 @@ fn test_large_dataset_with_deletions() -> Result<()> {
     assert!(current.get_node(NodeId::new(100).unwrap()).is_err());
 
     // Verify remaining nodes exist
-    assert_eq!(current.get_node(NodeId::new(1).unwrap()).unwrap().id, NodeId::new(1).unwrap());
-    assert_eq!(current.get_node(NodeId::new(99).unwrap()).unwrap().id, NodeId::new(99).unwrap());
+    assert_eq!(
+        current.get_node(NodeId::new(1).unwrap()).unwrap().id,
+        NodeId::new(1).unwrap()
+    );
+    assert_eq!(
+        current.get_node(NodeId::new(99).unwrap()).unwrap().id,
+        NodeId::new(99).unwrap()
+    );
 
     // Historical: creates + delete tombstones
     let expected_versions = node_count + nodes_to_delete;

@@ -394,9 +394,15 @@ fn test_checkpoint_recovery_with_deletes() -> Result<()> {
 
     // Then: Should have 2 nodes (node 2 was deleted)
     assert_eq!(recovered_current.node_count(), 2);
-    assert_eq!(recovered_current.get_node(NodeId::new(1)?).unwrap().id, NodeId::new(1)?);
+    assert_eq!(
+        recovered_current.get_node(NodeId::new(1)?).unwrap().id,
+        NodeId::new(1)?
+    );
     assert!(recovered_current.get_node(NodeId::new(2)?).is_err()); // Deleted
-    assert_eq!(recovered_current.get_node(NodeId::new(3)?).unwrap().id, NodeId::new(3)?);
+    assert_eq!(
+        recovered_current.get_node(NodeId::new(3)?).unwrap().id,
+        NodeId::new(3)?
+    );
 
     Ok(())
 }

@@ -225,11 +225,20 @@ fn test_replay_multiple_deletes() -> Result<()> {
 
     // Then: Only 3 nodes should exist in current storage (1, 3, 5)
     assert_eq!(current.node_count(), 3);
-    assert_eq!(current.get_node(NodeId::new(1).unwrap()).unwrap().id, NodeId::new(1).unwrap());
+    assert_eq!(
+        current.get_node(NodeId::new(1).unwrap()).unwrap().id,
+        NodeId::new(1).unwrap()
+    );
     assert!(current.get_node(NodeId::new(2).unwrap()).is_err()); // Deleted
-    assert_eq!(current.get_node(NodeId::new(3).unwrap()).unwrap().id, NodeId::new(3).unwrap());
+    assert_eq!(
+        current.get_node(NodeId::new(3).unwrap()).unwrap().id,
+        NodeId::new(3).unwrap()
+    );
     assert!(current.get_node(NodeId::new(4).unwrap()).is_err()); // Deleted
-    assert_eq!(current.get_node(NodeId::new(5).unwrap()).unwrap().id, NodeId::new(5).unwrap());
+    assert_eq!(
+        current.get_node(NodeId::new(5).unwrap()).unwrap().id,
+        NodeId::new(5).unwrap()
+    );
 
     // And: Historical storage should have 7 versions (5 creates + 2 deletes)
     let hist_stats = historical.stats();
@@ -339,9 +348,15 @@ fn test_replay_mixed_creates_updates_deletes() -> Result<()> {
 
     // Then: Only nodes 1 and 3 should exist in current storage
     assert_eq!(current.node_count(), 2);
-    assert_eq!(current.get_node(NodeId::new(1).unwrap()).unwrap().id, NodeId::new(1).unwrap());
+    assert_eq!(
+        current.get_node(NodeId::new(1).unwrap()).unwrap().id,
+        NodeId::new(1).unwrap()
+    );
     assert!(current.get_node(NodeId::new(2).unwrap()).is_err()); // Deleted
-    assert_eq!(current.get_node(NodeId::new(3).unwrap()).unwrap().id, NodeId::new(3).unwrap());
+    assert_eq!(
+        current.get_node(NodeId::new(3).unwrap()).unwrap().id,
+        NodeId::new(3).unwrap()
+    );
 
     // And: Node 1 should have the updated value
     use aletheiadb::core::property::PropertyValue;

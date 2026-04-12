@@ -71,7 +71,10 @@ fn test_new_validates_wallclock() {
 
     // MAX_VALID_TIMESTAMP should succeed
     let at_max = HybridTimestamp::new(MAX_VALID_TIMESTAMP, 0);
-    assert!(at_max.is_ok(), "Expected valid timestamp at MAX_VALID_TIMESTAMP");
+    assert!(
+        at_max.is_ok(),
+        "Expected valid timestamp at MAX_VALID_TIMESTAMP"
+    );
 
     // Wallclock exceeding MAX_VALID_TIMESTAMP should fail
     let invalid = HybridTimestamp::new(MAX_VALID_TIMESTAMP + 1, 0);

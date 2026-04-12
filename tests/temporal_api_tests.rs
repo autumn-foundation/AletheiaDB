@@ -553,7 +553,10 @@ fn test_get_nodes_at_time_large_batch() {
 
     // All should exist
     assert_eq!(results.len(), 100);
-    assert!(results.iter().all(|(_, node)| node.is_some()), "Expected all nodes to be valid");
+    assert!(
+        results.iter().all(|(_, node)| node.is_some()),
+        "Expected all nodes to be valid"
+    );
 
     // Verify order is preserved
     for (i, (id, _)) in results.iter().enumerate() {
@@ -619,7 +622,10 @@ fn test_get_edges_at_time_large_batch() {
 
     // All should exist
     assert_eq!(results.len(), 100);
-    assert!(results.iter().all(|(_, edge)| edge.is_some()), "Expected all edges to be valid");
+    assert!(
+        results.iter().all(|(_, edge)| edge.is_some()),
+        "Expected all edges to be valid"
+    );
 
     // Verify order is preserved
     for (i, (id, _)) in results.iter().enumerate() {
