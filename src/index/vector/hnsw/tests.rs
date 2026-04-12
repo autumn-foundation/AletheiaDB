@@ -908,7 +908,8 @@ mod capacity_tests {
         assert_eq!(index.len(), 0);
 
         // This should pass without expanding
-        index.check_and_expand_capacity(1).unwrap();
+        index.in_flight_adds.store(1, std::sync::atomic::Ordering::Relaxed);
+        index.check_and_expand_capacity().unwrap();
 
         // Fill to capacity
         for i in 0..10 {
@@ -919,7 +920,9 @@ mod capacity_tests {
         assert_eq!(index.len(), 10);
 
         // This should trigger expansion
-        index.check_and_expand_capacity(1).unwrap();
+        index.in_flight_adds.store(1, std::sync::atomic::Ordering::Relaxed);
+        index.check_and_expand_capacity().unwrap();
+        index.in_flight_adds.store(0, std::sync::atomic::Ordering::Relaxed);
     }
 }
 

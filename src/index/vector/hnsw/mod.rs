@@ -14,7 +14,7 @@ use std::fs::File;
 use std::io::BufWriter;
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use usearch::{Index, IndexOptions, MetricKind, ScalarKind, ffi::Matches};
 
 /// HNSW configuration and builder.
@@ -189,6 +189,20 @@ pub struct HnswIndex {
     /// Sharded locks to serialize updates to the same key/node.
     /// Prevents "lost update" races where two threads try to update the same vector simultaneously.
     entry_locks: Vec<Mutex<()>>,
+    /// Tracks the number of threads currently adding vectors to the index.
+    /// Used for precise capacity checks to prevent "stampede overflow" races.
+    pub(crate) in_flight_adds: AtomicUsize,
+}
+
+/// RAII guard to decrement `in_flight_adds` when a thread finishes adding a vector.
+pub(crate) struct InFlightGuard<'a> {
+    index: &'a HnswIndex,
+}
+
+impl<'a> Drop for InFlightGuard<'a> {
+    fn drop(&mut self) {
+        self.index.in_flight_adds.fetch_sub(1, Ordering::Relaxed);
+    }
 }
 
 // SAFETY: HnswIndex is safe to send between and share across threads.
@@ -378,6 +392,7 @@ impl HnswIndex {
             is_mmap: false,
             save_lock: Arc::new(RwLock::new(())),
             entry_locks: (0..NUM_ENTRY_LOCKS).map(|_| Mutex::new(())).collect(),
+            in_flight_adds: AtomicUsize::new(0),
         })
     }
 
@@ -539,6 +554,7 @@ impl HnswIndex {
             is_mmap: false,
             save_lock: Arc::new(RwLock::new(())),
             entry_locks: (0..NUM_ENTRY_LOCKS).map(|_| Mutex::new(())).collect(),
+            in_flight_adds: AtomicUsize::new(0),
         })
     }
 
@@ -633,6 +649,7 @@ impl HnswIndex {
             is_mmap: true,
             save_lock: Arc::new(RwLock::new(())),
             entry_locks: (0..NUM_ENTRY_LOCKS).map(|_| Mutex::new(())).collect(),
+            in_flight_adds: AtomicUsize::new(0),
         })
     }
 
@@ -686,22 +703,22 @@ impl HnswIndex {
         unreachable!("Retry loop should always return")
     }
 
-    pub(crate) fn check_and_expand_capacity(&self, vectors_to_add: usize) -> Result<()> {
+    pub(crate) fn check_and_expand_capacity(&self) -> Result<()> {
         #[cfg(test)]
         if TEST_SKIP_CAPACITY_CHECK.load(Ordering::Relaxed) {
             return Ok(());
         }
 
-        const CAPACITY_PADDING: usize = 128;
+        let in_flight = self.in_flight_adds.load(Ordering::Relaxed);
 
         let index = self.inner.read();
-        if index.size() + vectors_to_add + CAPACITY_PADDING <= index.capacity() {
+        if index.size() + in_flight <= index.capacity() {
             return Ok(());
         }
         drop(index);
 
         let index = self.inner.write();
-        if index.size() + vectors_to_add + CAPACITY_PADDING <= index.capacity() {
+        if index.size() + in_flight <= index.capacity() {
             return Ok(());
         }
 
@@ -872,7 +889,10 @@ impl VectorIndex for HnswIndex {
         }
 
         self.maybe_block_in_place(|| {
-            self.check_and_expand_capacity(1)?;
+            self.in_flight_adds.fetch_add(1, Ordering::Relaxed);
+            let _in_flight_guard = InFlightGuard { index: self };
+
+            self.check_and_expand_capacity()?;
 
             let lock_idx = (id.as_u64() as usize) % self.entry_locks.len();
             let _key_guard = self.entry_locks[lock_idx].lock();
