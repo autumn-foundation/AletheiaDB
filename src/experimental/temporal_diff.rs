@@ -10,8 +10,20 @@ use crate::core::property::PropertyMap;
 use crate::core::temporal::Timestamp;
 use std::collections::HashMap;
 
-/// A report of changes between two timestamps.
+/// A report detailing the changes between two timestamps.
 #[derive(Debug, Clone)]
+///
+/// # Examples
+/// ```
+/// use aletheiadb::experimental::temporal_diff::DiffReport;
+/// use aletheiadb::core::temporal::Timestamp;
+///
+/// let report = DiffReport {
+///     t1: Timestamp::from(0),
+///     t2: Timestamp::from(100),
+///     changes: vec![],
+/// };
+/// ```
 pub struct DiffReport {
     /// The first timestamp (baseline).
     pub t1: Timestamp,
@@ -66,8 +78,24 @@ pub enum ChangeType {
     },
 }
 
-/// Difference in properties.
+/// Represents the difference between two property maps.
 #[derive(Debug, Clone, Default)]
+///
+/// # Examples
+/// ```
+/// use aletheiadb::experimental::temporal_diff::PropertyDiff;
+/// use std::collections::HashMap;
+///
+/// let mut changed = HashMap::new();
+/// changed.insert("status".to_string(), ("old".to_string(), "new".to_string()));
+///
+/// let diff = PropertyDiff {
+///     added: vec!["created_at".to_string()],
+///     removed: vec![],
+///     changed,
+/// };
+/// assert!(!diff.is_empty());
+/// ```
 pub struct PropertyDiff {
     /// Keys added in the new version.
     pub added: Vec<String>,
@@ -77,7 +105,18 @@ pub struct PropertyDiff {
     pub changed: HashMap<String, (String, String)>,
 }
 
-/// The Temporal Diff Engine.
+/// Engine for computing temporal diffs on a graph.
+///
+/// # Examples
+/// ```
+/// use aletheiadb::AletheiaDB;
+/// use aletheiadb::experimental::temporal_diff::TemporalDiff;
+///
+/// fn main() {
+///     let db = AletheiaDB::new().unwrap();
+///     let engine = TemporalDiff::new(&db);
+/// }
+/// ```
 pub struct TemporalDiff<'a> {
     db: &'a AletheiaDB,
 }

@@ -72,11 +72,30 @@ pub struct RecoveryResult {
 
 impl RecoveryResult {
     /// Check if recovery was fully successful (no dead letters).
+    ///
+    /// This is useful to determine if automated recovery finished cleanly,
+    /// or if manual intervention is required to resolve stuck transactions.
+    ///
+    /// # Examples
+    /// ```
+    /// use aletheiadb::storage::sharding::coordinator::RecoveryResult;
+    ///
+    /// let result = RecoveryResult { recovered: vec![], dead_lettered: vec![] };
+    /// assert!(result.is_complete());
+    /// ```
     pub fn is_complete(&self) -> bool {
         self.dead_lettered.is_empty()
     }
 
     /// Get the number of transactions that required manual intervention.
+    ///
+    /// # Examples
+    /// ```
+    /// use aletheiadb::storage::sharding::coordinator::RecoveryResult;
+    ///
+    /// let result = RecoveryResult { recovered: vec![], dead_lettered: vec![] };
+    /// assert_eq!(result.dead_letter_count(), 0);
+    /// ```
     pub fn dead_letter_count(&self) -> usize {
         self.dead_lettered.len()
     }
@@ -112,6 +131,19 @@ pub struct ShardConnection {
 
 impl ShardConnection {
     /// Create a new shard connection.
+    ///
+    /// This establishes the metadata necessary for the coordinator to
+    /// communicate with a remote shard during distributed queries and transactions.
+    ///
+    /// # Examples
+    /// ```
+    /// use aletheiadb::storage::sharding::coordinator::ShardConnection;
+    /// use aletheiadb::storage::sharding::types::ShardId;
+    ///
+    /// let shard_id = ShardId::new(1).unwrap();
+    /// let conn = ShardConnection::new(shard_id, "127.0.0.1:8080".to_string());
+    /// assert_eq!(conn.shard_id, shard_id);
+    /// ```
     pub fn new(shard_id: ShardId, endpoint: String) -> Self {
         Self {
             shard_id,

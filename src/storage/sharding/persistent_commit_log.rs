@@ -130,6 +130,23 @@ pub enum EntryType {
 
 impl CommitLogEntry {
     /// Create a commit entry.
+    ///
+    /// This is used during the Two-Phase Commit protocol when all participants
+    /// have successfully voted to commit. It serves as the durable record
+    /// that the transaction should be applied, allowing recovery to succeed
+    /// even if the coordinator crashes immediately after.
+    ///
+    /// # Examples
+    /// ```
+    /// use aletheiadb::storage::sharding::persistent_commit_log::CommitLogEntry;
+    /// use aletheiadb::core::id::TxId;
+    /// use aletheiadb::storage::sharding::types::ShardId;
+    /// use aletheiadb::core::temporal::time;
+    ///
+    /// let tx_id = TxId::new(42);
+    /// let shard = ShardId::new(1).unwrap();
+    /// let entry = CommitLogEntry::commit(1, tx_id, vec![shard], Some(time::now()));
+    /// ```
     pub fn commit(
         lsn: u64,
         tx_id: TxId,
@@ -147,6 +164,21 @@ impl CommitLogEntry {
     }
 
     /// Create an abort entry.
+    ///
+    /// This is used when a transaction fails or times out during the
+    /// prepare phase. Writing this ensures the coordinator remembers
+    /// not to commit this transaction upon recovery.
+    ///
+    /// # Examples
+    /// ```
+    /// use aletheiadb::storage::sharding::persistent_commit_log::CommitLogEntry;
+    /// use aletheiadb::core::id::TxId;
+    /// use aletheiadb::storage::sharding::types::ShardId;
+    ///
+    /// let tx_id = TxId::new(42);
+    /// let shard = ShardId::new(1).unwrap();
+    /// let entry = CommitLogEntry::abort(2, tx_id, vec![shard]);
+    /// ```
     pub fn abort(lsn: u64, tx_id: TxId, participants: Vec<ShardId>) -> Self {
         Self {
             lsn,
@@ -159,6 +191,20 @@ impl CommitLogEntry {
     }
 
     /// Create a completion entry.
+    ///
+    /// This indicates that the 2PC protocol is fully complete for this
+    /// transaction (all shards have acknowledged the commit/abort decision).
+    /// This allows the coordinator to garbage-collect the transaction
+    /// state from memory.
+    ///
+    /// # Examples
+    /// ```
+    /// use aletheiadb::storage::sharding::persistent_commit_log::CommitLogEntry;
+    /// use aletheiadb::core::id::TxId;
+    ///
+    /// let tx_id = TxId::new(42);
+    /// let entry = CommitLogEntry::complete(3, tx_id);
+    /// ```
     pub fn complete(lsn: u64, tx_id: TxId) -> Self {
         Self {
             lsn,
@@ -171,6 +217,17 @@ impl CommitLogEntry {
     }
 
     /// Serialize the entry to bytes.
+    ///
+    /// # Examples
+    /// ```
+    /// use aletheiadb::storage::sharding::persistent_commit_log::CommitLogEntry;
+    /// use aletheiadb::core::id::TxId;
+    ///
+    /// let tx_id = TxId::new(42);
+    /// let entry = CommitLogEntry::complete(3, tx_id);
+    /// let bytes = entry.serialize();
+    /// assert!(!bytes.is_empty());
+    /// ```
     pub fn serialize(&self) -> Vec<u8> {
         let mut data = Vec::with_capacity(64);
 
