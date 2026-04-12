@@ -176,7 +176,7 @@ fn test_distance_metric_all_values() {
     // Verify all byte values decode correctly
     for i in 0..=5 {
         let result = DistanceMetric::from_u8(i);
-        assert!(result.is_ok());
+        assert!(result.is_ok(), "Expected valid DistanceMetric decoding");
     }
 
     // Values >= 6 should fail

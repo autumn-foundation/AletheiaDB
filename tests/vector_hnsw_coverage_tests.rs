@@ -741,5 +741,5 @@ fn test_remove_nonexistent_id() {
     let node = NodeId::new(999).unwrap();
     // Should be a no-op, not an error
     let result = index.remove(node);
-    assert!(result.is_ok());
+    assert!(result.is_ok(), "Expected Ok result");
 }

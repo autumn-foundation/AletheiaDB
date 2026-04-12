@@ -57,7 +57,7 @@ fn stress_concurrent_operations() {
 
     // Verify index is still usable
     let results = index.search(&vec![0.5f32; 64], 10);
-    assert!(results.is_ok());
+    assert!(results.is_ok(), "Expected valid query execution");
 }
 
 /// Stress test: rapid add/remove cycles.

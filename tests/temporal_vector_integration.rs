@@ -124,8 +124,8 @@ fn test_multiple_nodes_with_temporal_vectors() {
     }
 
     // Verify: Both nodes can be retrieved
-    assert!(db.read(|tx| tx.get_node(node1)).is_ok());
-    assert!(db.read(|tx| tx.get_node(node2)).is_ok());
+    assert_eq!(db.read(|tx| tx.get_node(node1)).unwrap().id, node1);
+    assert_eq!(db.read(|tx| tx.get_node(node2)).unwrap().id, node2);
 
     println!("✓ Multiple nodes tracked with temporal vectors");
 }
@@ -265,7 +265,7 @@ fn test_edge_versions_with_temporal_vectors() {
     }
 
     // Verify: Edge can be retrieved
-    assert!(db.read(|tx| tx.get_edge(edge_id)).is_ok());
+    assert_eq!(db.read(|tx| tx.get_edge(edge_id)).unwrap().id, edge_id);
 
     println!("✓ Edge anchors work with temporal vectors");
 }

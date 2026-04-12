@@ -33,7 +33,7 @@ fn test_reentrant_search_returns_error() {
     });
 
     // The outer search should succeed
-    assert!(result.is_ok());
+    assert!(result.is_ok(), "Expected Ok result");
 }
 
 #[test]
@@ -67,5 +67,5 @@ fn test_reentrant_search_with_filter_returns_error() {
         true
     });
 
-    assert!(result.is_ok());
+    assert!(result.is_ok(), "Expected Ok result");
 }

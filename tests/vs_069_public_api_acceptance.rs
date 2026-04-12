@@ -89,7 +89,7 @@ fn test_query_method_exists_and_returns_query_builder() {
     let query = builder.start(alice).build();
 
     // Verify the query can be executed
-    assert!(db.execute_query(query).is_ok());
+    assert!(db.execute_query(query).is_ok(), "Expected valid query execution");
 }
 
 #[test]

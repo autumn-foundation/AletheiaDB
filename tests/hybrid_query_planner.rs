@@ -117,7 +117,7 @@ fn test_query_builder_basic() {
 
     // Verify by planning - if planning succeeds, the query is valid
     let planner = create_test_planner();
-    assert!(planner.plan(query).is_ok());
+    assert!(planner.plan(query).is_ok(), "Failed to plan query");
     println!("✓ Query builder creates valid query");
 }
 
@@ -134,7 +134,7 @@ fn test_query_builder_with_filter() {
 
     // Verify by planning
     let planner = create_test_planner();
-    assert!(planner.plan(query).is_ok());
+    assert!(planner.plan(query).is_ok(), "Failed to plan query");
     println!("✓ Query builder with filter works");
 }
 
@@ -148,7 +148,7 @@ fn test_query_builder_traverse() {
 
     // Verify by planning
     let planner = create_test_planner();
-    assert!(planner.plan(query).is_ok());
+    assert!(planner.plan(query).is_ok(), "Failed to plan query");
     println!("✓ Query builder with traversal works");
 }
 
@@ -162,7 +162,7 @@ fn test_query_builder_vector_search() {
 
     // Verify by planning
     let planner = create_test_planner();
-    assert!(planner.plan(query).is_ok());
+    assert!(planner.plan(query).is_ok(), "Failed to plan query");
     println!("✓ Query builder for vector search works");
 }
 
@@ -181,7 +181,7 @@ fn test_query_builder_hybrid() {
 
     // Verify by planning
     let planner = create_test_planner();
-    assert!(planner.plan(query).is_ok());
+    assert!(planner.plan(query).is_ok(), "Failed to plan query");
     println!("✓ Query builder for hybrid query works");
 }
 
@@ -386,7 +386,7 @@ fn test_minimal_query() {
 
     // Planning should succeed (execution would return empty results)
     let result = planner.plan(query);
-    assert!(result.is_ok());
+    assert!(result.is_ok(), "Failed to plan logical query");
     println!("✓ Minimal query plans successfully");
 }
 

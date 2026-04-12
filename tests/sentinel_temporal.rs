@@ -191,11 +191,11 @@ fn test_sentinel_timerange_new_validation() {
     let t200 = 200.into();
 
     // Valid: start < end
-    assert!(TimeRange::new(t100, t200).is_ok());
+    assert_eq!(TimeRange::new(t100, t200).unwrap().start(), t100);
 
     // Valid: start == end (empty range)
     // This is crucial: mutating > to >= would break this
-    assert!(TimeRange::new(t100, t100).is_ok());
+    assert_eq!(TimeRange::new(t100, t100).unwrap().start(), t100);
 
     // Invalid: start > end
     // This targets mutating > to >= (which would make equal invalid, caught above)

@@ -126,7 +126,7 @@ async fn test_error_propagation() {
 
     // Should succeed for normal text
     let result = service.embed("success").await;
-    assert!(result.is_ok());
+    assert!(result.is_ok(), "Expected Ok result");
 
     // Should fail for configured text
     let result = service.embed("fail").await;
@@ -192,7 +192,7 @@ async fn test_concurrent_embedding() {
     // Wait for all to complete
     for handle in handles {
         let result = handle.await.unwrap();
-        assert!(result.is_ok());
+        assert!(result.is_ok(), "Expected Ok result");
         assert_eq!(result.unwrap().len(), 256);
     }
 }

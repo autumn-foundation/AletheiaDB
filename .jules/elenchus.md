@@ -339,3 +339,10 @@
 **Finding:** The FNV-1a fallback tests for `IdentityHasher` (`test_identity_hasher_write_fallback_fnv` and `test_identity_hasher_write_fallback_fnv_dirty`) were tautological. They exactly mirrored the source implementation by reconstructing the FNV-1a multiplication and XOR sequence to generate their `expected` values. This meant they only asserted that "the code is the code" and provided no independent verification that the hashing logic was correct or consistent with standard FNV-1a.
 **Evidence:** The original tests explicitly copied the sequence `expected ^= 1; expected = expected.wrapping_mul(FNV_PRIME);` which exactly mirrors the `write` loop. Any mutation altering `FNV_PRIME` or the operation order would survive if the same change was incorrectly made to the test or if it was inherently flawed.
 **Recommendation:** Refactored the tests to use independently pre-computed integer constants as the `expected` values (the Oracle Problem solution). This ensures the implementation matches the ground truth rather than itself.
+
+**[Weak Assertions Audit]**
+**Module:** `tests/*`
+**Severity:** 🟡 Suspect
+**Finding:** Over 40 test files used weak assertions like `assert!(result.is_ok())` or `assert!(result.is_some())` rather than verifying the exact contents or behavior of the returned values. This leads to false confidence, as unexpected but `Ok` or `Some` values would incorrectly pass the tests.
+**Evidence:** `grep -rn "assert!(.*\.is_ok())" tests/` returned 42 instances across modules like `generic_error_types.rs`, `checkpoint_recovery_tests.rs`, `temporal_api_tests.rs`, and others.
+**Recommendation:** Replaced `assert!(...is_ok())` and `assert!(...is_some())` with explicit equality checks (`assert_eq!(result, Ok(expected))`, `assert_eq!(result.unwrap().id, expected_id)`, etc.) or added descriptive error messages to `assert!(...is_ok(), "...")` where equality was not straightforward to check.

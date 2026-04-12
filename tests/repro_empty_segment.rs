@@ -37,6 +37,6 @@ fn test_read_segment_header_only_file() {
 
     let result = read_segment(&segment_path, LSN(0));
 
-    assert!(result.is_ok());
+    assert!(result.is_ok(), "Expected Ok result");
     assert!(result.unwrap().is_empty());
 }

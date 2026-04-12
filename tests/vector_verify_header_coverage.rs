@@ -51,7 +51,7 @@ fn test_verify_header_quantization_coverage() {
         let config =
             HnswConfig::new(16, DistanceMetric::Cosine).with_quantization(Quantization::F16);
         let loaded = HnswIndex::load(&path, config);
-        assert!(loaded.is_ok());
+        assert!(loaded.is_ok(), "Expected valid index to load successfully");
     }
 
     // I8
@@ -67,6 +67,6 @@ fn test_verify_header_quantization_coverage() {
         let config =
             HnswConfig::new(16, DistanceMetric::Cosine).with_quantization(Quantization::I8);
         let loaded = HnswIndex::load(&path, config);
-        assert!(loaded.is_ok());
+        assert!(loaded.is_ok(), "Expected valid index to load successfully");
     }
 }
