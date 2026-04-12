@@ -404,8 +404,14 @@ impl QueryResult {
     /// Create a new empty query result
     #[must_use]
     pub fn new() -> Self {
+        QueryResult::with_capacity(0)
+    }
+
+    /// Create a new query result pre-allocated with a specific capacity for nodes
+    #[must_use]
+    pub fn with_capacity(capacity: usize) -> Self {
         QueryResult {
-            nodes: Vec::new(),
+            nodes: Vec::with_capacity(capacity),
             properties: None,
             scores: None,
             paths: None,
@@ -639,15 +645,13 @@ impl QueryResults {
         // First pass: collect all rows
         let (lower, _) = self.iterator.size_hint();
         let mut rows = Vec::with_capacity(lower);
-        while let Some(row) = self.iterator.next() {
-            rows.push(row?);
-        }
 
-        // Determine which fields we have (single pass)
         let (mut has_any_scores, mut has_any_paths, mut has_any_versions, mut has_any_nodes) =
             (false, false, false, false);
         let mut node_count = 0usize;
-        for row in &rows {
+
+        while let Some(row_res) = self.iterator.next() {
+            let row = row_res?;
             has_any_scores = has_any_scores || row.score.is_some();
             has_any_paths = has_any_paths || row.path.is_some();
             has_any_versions = has_any_versions || row.timestamp.is_some();
@@ -655,6 +659,7 @@ impl QueryResults {
                 has_any_nodes = true;
                 node_count += 1;
             }
+            rows.push(row);
         }
 
         // Second pass: extract data with padding
