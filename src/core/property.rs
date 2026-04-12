@@ -3240,6 +3240,12 @@ mod tests {
                 1 + 4 + 9 + (1 + 4 + 6), // tag + count + (tag + int) + (tag + len + "nested")
             ),
             (PropertyValue::vector([1.0f32, 2.0, 3.0]), 1 + 4 + 12), // tag + len + 3 * 4 bytes
+            (
+                PropertyValue::SparseVector(Arc::new(
+                    crate::core::vector::SparseVec::new(vec![0, 2], vec![1.0, 3.0], 5).unwrap(),
+                )),
+                1 + 4 + 4 + (2 * 8), // tag (1) + dim (4) + nnz (4) + indices/values (2 * 8 bytes)
+            ),
         ];
 
         for (value, expected_size) in values {

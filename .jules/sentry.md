@@ -26,3 +26,7 @@
 **[Temporal TimeRange Max Timestamp and Deserialize Mutants]**
 **Learning:** `cargo mutants` revealed missing test coverage for `MAX_VALID_TIMESTAMP` bounds checking in open ranges (`TimeRange::from` and `TimeRange::at`), empty range overlap edge cases (`TimeRange::overlaps` short-circuit behavior), and deserialization stringency (`BiTemporalInterval::deserialize` exact consumed length checking against buffer size `> 48`).
 **Action:** Added targeted unit tests checking `#[should_panic]` when `MAX_VALID_TIMESTAMP` is exceeded, explicitly testing overlap between empty point-ranges within larger non-empty ranges, and appending excess bytes to binary formats to verify exact parser length consumption limits.
+
+## SparseVector Size Serialization Gap
+**Learning:** When a new variant like `SparseVector` is added to an enum (like `PropertyValue`) with a manual recursive size predictor (`serialized_size_recursive`), it is critical to explicitly add it to the table-driven serialization size tests (e.g. `test_serialized_size_matches_actual`). Missing this coverage can lead to silent regressions where the predicted size under-allocates or over-allocates the serialization buffer, potentially causing panics.
+**Action:** Always cross-reference enum definitions against serialization table tests to guarantee 100% variant coverage when implementing custom size tracking.
