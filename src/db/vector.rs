@@ -102,7 +102,7 @@ impl AletheiaDB {
                     crate::core::error::VectorError::IndexError(
                         "HNSW configuration is required when no vector index exists. \
                      Use TemporalVectorConfig::default_with_hnsw() to provide one, \
-                     or enable the vector index first with enable_vector_index()."
+                     or enable the vector index first with db.vector_index(\"...\").hnsw(...).enable()."
                             .to_string(),
                     ),
                 ));
