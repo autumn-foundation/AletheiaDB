@@ -258,3 +258,7 @@ pub mod serendipity;
 #[cfg(feature = "nova")]
 /// Tremor: Semantic Earthquake Detector.
 pub mod tremor;
+
+#[cfg(feature = "nova")]
+/// Ouroboros: Cyclic Semantic Drift Engine.
+pub mod ouroboros;
