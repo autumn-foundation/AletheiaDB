@@ -111,21 +111,22 @@ impl<'a> HorizonEngine<'a> {
                 }
 
                 // Get all neighbors (both outgoing and incoming for true semantic reach)
-                let mut neighbors = tx
+                let outgoing = tx
                     .get_outgoing_edges(current_node_id)
                     .into_iter()
-                    .filter_map(|e| tx.get_edge(e).ok().map(|edge| edge.target))
-                    .collect::<Vec<_>>();
+                    .filter_map(|e| tx.get_edge(e).ok().map(|edge| edge.target));
 
                 let incoming = tx
                     .get_incoming_edges(current_node_id)
                     .into_iter()
-                    .filter_map(|e| tx.get_edge(e).ok().map(|edge| edge.source))
-                    .collect::<Vec<_>>();
+                    .filter_map(|e| tx.get_edge(e).ok().map(|edge| edge.source));
 
-                neighbors.extend(incoming);
+                // ⚡ Bolt optimization: Use `.chain()` instead of intermediate `.collect::<Vec<_>>()`
+                // followed by `.extend()`. This merges the two edge iterators dynamically, avoiding
+                // two unnecessary heap allocations per explored node on the hot path of the BFS traversal.
+                let all_neighbors = outgoing.chain(incoming);
 
-                for neighbor_id in neighbors {
+                for neighbor_id in all_neighbors {
                     if visited.contains(&neighbor_id) {
                         continue;
                     }
