@@ -81,6 +81,12 @@ impl PartialOrd for SearchState {
 }
 
 /// The Ariadne Weaver engine.
+///
+/// # The Spark
+/// Traditional graph traversals are bound by the explicit edges created during data ingestion.
+/// If an edge is missing, the traversal stops. Ariadne overcomes this by utilizing vector embeddings
+/// to "jump" across the graph when explicit relationships are absent, effectively combining structured
+/// relationships with semantic search.
 pub struct Ariadne<'a> {
     db: &'a AletheiaDB,
 }
@@ -93,16 +99,66 @@ impl<'a> Ariadne<'a> {
 
     /// Weave a narrative thread from a start node.
     ///
-    /// This explores the graph to find a coherent sequence of events starting from `start_node`.
-    /// It prefers explicit edges but will "jump" via vector similarity if needed to continue the story.
+    /// This explores the graph to find a coherent sequence of events.
+    /// It prefers explicit edges but will "jump" via vector similarity
+    /// if edges are unavailable or more "expensive" heuristically.
     ///
-    /// # Arguments
-    /// * `start_node` - The starting event.
-    /// * `goal_node` - Optional target event to steer towards.
-    /// * `time_property` - The property key containing the event timestamp (must be integer).
-    /// * `vector_property` - The property key containing the vector embedding.
+    /// * `start_node` - The origin event.
+    /// * `goal_node` - Optional explicit destination.
+    /// * `time_property` - Property name for timestamps.
+    /// * `vector_property` - Property name for embeddings.
     /// * `max_steps` - Maximum length of the thread.
     /// * `beam_width` - Number of candidates to consider at each step.
+    ///
+    /// # The Spark
+    /// Standard graph traversals only follow explicit edges, ignoring semantic similarity.
+    /// Pure vector searches find similar concepts but ignore causal relationships and time.
+    /// `weave` bridges this gap by finding a path that prefers explicit causal edges but can
+    /// gracefully "jump" across the graph using vector similarity when edges are missing or sub-optimal.
+    ///
+    /// # The Details
+    /// The algorithm uses an A* search variant where:
+    /// - **Edges** are cheap (cost = 1.0).
+    /// - **Semantic Jumps** are expensive and scale inversely with similarity (cost = 1.5 + (1.0 - similarity) * 5.0).
+    /// - **Time Arrow** is strictly enforced: every step must move forward in time.
+    ///
+    /// # Examples
+    /// ```rust
+    /// # #[cfg(feature = "nova")]
+    /// # fn main() {
+    /// #   use aletheiadb::AletheiaDB;
+    /// #   use aletheiadb::core::property::PropertyMapBuilder;
+    /// #   use aletheiadb::index::vector::{HnswConfig, DistanceMetric};
+    /// #   use aletheiadb::experimental::ariadne::Ariadne;
+    /// #
+    /// #   let db = AletheiaDB::new().unwrap();
+    /// #   db.enable_vector_index("embedding", HnswConfig::new(2, DistanceMetric::Cosine)).unwrap();
+    /// #
+    /// #   // A starts the story
+    /// #   let a = db.create_node("Event", PropertyMapBuilder::new()
+    /// #       .insert("time", 10i64)
+    /// #       .insert_vector("embedding", &[1.0, 0.0]).build()).unwrap();
+    /// #
+    /// #   // B is caused by A
+    /// #   let b = db.create_node("Event", PropertyMapBuilder::new()
+    /// #       .insert("time", 20i64)
+    /// #       .insert_vector("embedding", &[0.9, 0.4]).build()).unwrap();
+    /// #   db.create_edge(a, b, "NEXT", PropertyMapBuilder::new().build()).unwrap();
+    /// #
+    /// #   // C is not explicitly linked, but semantically close to B
+    /// #   let c = db.create_node("Event", PropertyMapBuilder::new()
+    /// #       .insert("time", 30i64)
+    /// #       .insert_vector("embedding", &[0.8, 0.5]).build()).unwrap();
+    /// #
+    /// #   let ariadne = Ariadne::new(&db);
+    /// #   let path = ariadne.weave(a, Some(c), "time", "embedding", 10, 10).unwrap();
+    /// #
+    /// #   assert_eq!(path.first().unwrap().node_id, a);
+    /// #   assert_eq!(path.last().unwrap().node_id, c);
+    /// # }
+    /// # #[cfg(not(feature = "nova"))]
+    /// # fn main() {}
+    /// ```
     pub fn weave(
         &self,
         start_node: NodeId,
