@@ -57,3 +57,6 @@
 **[QueryRow Entity Extraction]**
 **Learning:** Destructuring a struct (like `QueryRow`) and pattern matching directly on its owned components (`EntityResult`) inside a loop completely eliminates the need for expensive heap allocations caused by intermediate `.clone()` calls on nested data structures like HashMaps (properties). Rust's move semantics are the ultimate zero-cost abstraction for consuming data iterators.
 **Action:** When mapping over iterators or structs that are fully consumed, never use `as_ref().map(|x| x.clone())`. Instead, destructure the container and take ownership by value.
+**[Zero-cost abstraction for iterator concatenation]**
+**Learning:** In Rust, combining two iterators into a temporary vector using `.collect::<Vec<_>>()` and `.extend()` inside loops causes unnecessary intermediate heap allocations. You can chain iterators without allocations and pass the elements directly to the next loop iterator using `.chain()` which is extremely useful when aggregating items from multiple inputs.
+**Action:** Replaced `.collect::<Vec<_>>()` and `.extend()` with zero-cost chaining `outgoing.chain(incoming)` for graph edge mapping traversal.
