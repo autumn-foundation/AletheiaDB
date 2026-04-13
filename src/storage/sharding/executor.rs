@@ -645,16 +645,16 @@ mod tests {
     #[test]
     fn test_executor_error_display() {
         let err = ExecutorError::NoShardsAvailable;
-        assert!(format!("{}", err).contains("No shards"));
+        assert_eq!(format!("{}", err), "No shards available for query");
 
         let err = ExecutorError::InvalidQuery("bad".into());
-        assert!(format!("{}", err).contains("Invalid"));
+        assert_eq!(format!("{}", err), "Invalid query: bad");
 
         let err = ExecutorError::AllShardsFailed {
             query_id: 1,
             failures: vec![],
         };
-        assert!(format!("{}", err).contains("failed on all"));
+        assert_eq!(format!("{}", err), "Query 1 failed on all 0 shards");
     }
 
     // ==================== DistributedQuery Tests ====================

@@ -365,6 +365,13 @@ mod tests {
         assert_eq!(format!("{}", ShardStatus::Joining), "Joining");
         assert_eq!(format!("{}", ShardStatus::Leaving), "Leaving");
         assert_eq!(format!("{}", ShardStatus::Rebalancing), "Rebalancing");
+
+        assert_eq!(ShardStatus::Healthy.to_string(), "Healthy");
+        assert_eq!(ShardStatus::Degraded.to_string(), "Degraded");
+        assert_eq!(ShardStatus::Unavailable.to_string(), "Unavailable");
+        assert_eq!(ShardStatus::Joining.to_string(), "Joining");
+        assert_eq!(ShardStatus::Leaving.to_string(), "Leaving");
+        assert_eq!(ShardStatus::Rebalancing.to_string(), "Rebalancing");
     }
 
     #[test]

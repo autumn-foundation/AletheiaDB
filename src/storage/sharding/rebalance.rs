@@ -1062,16 +1062,19 @@ mod tests {
     #[test]
     fn test_rebalance_error_display() {
         let err = RebalanceError::TooManyConcurrentMigrations { current: 3, max: 2 };
-        assert!(format!("{}", err).contains("Too many concurrent"));
+        assert_eq!(
+            format!("{}", err),
+            "Too many concurrent migrations: 3 (max: 2)"
+        );
 
         let err = RebalanceError::ShardUnavailable(ShardId::new(1).unwrap());
-        assert!(format!("{}", err).contains("unavailable"));
+        assert_eq!(format!("{}", err), "Shard Shard(1) is unavailable");
 
         let err = RebalanceError::Timeout {
             migration_id: 1,
             phase: MigrationState::Copying,
         };
-        assert!(format!("{}", err).contains("timed out"));
+        assert_eq!(format!("{}", err), "Migration 1 timed out in Copying phase");
     }
 
     #[test]

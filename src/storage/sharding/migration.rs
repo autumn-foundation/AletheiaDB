@@ -761,13 +761,16 @@ mod tests {
             expected: 100,
             actual: 200,
         };
-        assert!(format!("{}", err).contains("Checksum"));
+        assert_eq!(
+            format!("{}", err),
+            "Checksum mismatch in batch 1: expected 100, got 200"
+        );
 
         let err = MigrationError::Cancelled(42);
-        assert!(format!("{}", err).contains("cancelled"));
+        assert_eq!(format!("{}", err), "Migration 42 was cancelled");
 
         let err = MigrationError::SourceUnavailable(make_shard_id(0));
-        assert!(format!("{}", err).contains("Source"));
+        assert_eq!(format!("{}", err), "Source shard Shard(0) unavailable");
     }
 
     #[test]
