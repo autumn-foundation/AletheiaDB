@@ -406,7 +406,7 @@ impl<C: ShardClient> QueryExecutor<C> {
 
         self.queries_executed.fetch_add(1, Ordering::Relaxed);
 
-        let shards_succeeded = results.len();
+        let shards_succeeded = results.len(); // Optimization note
 
         Ok(QueryResult {
             query_id: query.id,
