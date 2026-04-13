@@ -682,33 +682,45 @@ impl QueryResults {
         };
 
         for row in rows {
-            // Extract node ID
-            if let Some(node_id) = row.entity.node_id() {
-                nodes.push(node_id);
-                // Extract properties if we are collecting them
-                if let Some(ref mut props) = properties {
-                    let map = row
-                        .entity
-                        .as_node()
-                        .map(|n| n.properties.clone())
-                        .unwrap_or_default();
-                    props.push(map);
+            let QueryRow {
+                entity,
+                score,
+                path,
+                timestamp,
+            } = row;
+
+            // ⚡ Bolt Optimization: Consumes the entity directly by value instead of cloning
+            // properties map via `as_node().map(|n| n.properties.clone())`. This eliminates
+            // one large heap allocation per row during result structurization.
+            match entity {
+                EntityResult::Node(n) => {
+                    nodes.push(n.id);
+                    if let Some(ref mut props) = properties {
+                        props.push(n.properties);
+                    }
                 }
+                EntityResult::NodeId(id) => {
+                    nodes.push(id);
+                    if let Some(ref mut props) = properties {
+                        props.push(Default::default());
+                    }
+                }
+                _ => {} // Ignore edges, etc.
             }
 
             // Extract or pad scores
             if let Some(ref mut s) = scores {
-                s.push(row.score.unwrap_or(0.0));
+                s.push(score.unwrap_or(0.0));
             }
 
             // Extract or pad paths
             if let Some(ref mut p) = paths {
-                p.push(row.path.unwrap_or_default());
+                p.push(path.unwrap_or_default());
             }
 
             // Extract or pad versions
             if let Some(ref mut v) = versions {
-                if let Some(timestamp) = row.timestamp {
+                if let Some(timestamp) = timestamp {
                     // Safely convert timestamp (i64) to VersionId (u64)
                     // Negative timestamps are clamped to 0
                     // Phase 2: Use wallclock component for version ID
