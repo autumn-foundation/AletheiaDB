@@ -77,6 +77,28 @@ impl RecoveryResult {
     }
 
     /// Get the number of transactions that required manual intervention.
+    ///
+    /// # The Spark
+    /// Similar to `is_complete`, this allows observability tools to report the exact size of the
+    /// backlog that operations teams need to manually investigate and resolve.
+    ///
+    /// # Examples
+    /// ```
+    /// use aletheiadb::storage::sharding::coordinator::{RecoveryResult, DeadLetteredTransaction};
+    /// use aletheiadb::core::id::TxId;
+    /// use std::time::Instant;
+    ///
+    /// let result = RecoveryResult {
+    ///     recovered: vec![],
+    ///     dead_lettered: vec![DeadLetteredTransaction {
+    ///         tx_id: TxId::new(2),
+    ///         reason: "Shard unrecoverable".to_string(),
+    ///         last_attempt: Instant::now(),
+    ///         attempt_count: 1,
+    ///     }],
+    /// };
+    /// assert_eq!(result.dead_letter_count(), 1);
+    /// ```
     pub fn dead_letter_count(&self) -> usize {
         self.dead_lettered.len()
     }
