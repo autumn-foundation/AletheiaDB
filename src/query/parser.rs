@@ -443,7 +443,7 @@ impl Parser {
     }
 
     fn parse_float_list(&mut self) -> Result<Vec<f32>, ParseError> {
-        let mut values = Vec::new();
+        let mut values = Vec::with_capacity(128); // ⚡ Bolt Optimization: Pre-allocate capacity for typical vector embeddings to avoid O(log N) heap reallocations during parsing of large arrays.
 
         loop {
             let value = match self.current() {
