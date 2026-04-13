@@ -406,13 +406,15 @@ impl<C: ShardClient> QueryExecutor<C> {
 
         self.queries_executed.fetch_add(1, Ordering::Relaxed);
 
+        let shards_succeeded = results.len();
+
         Ok(QueryResult {
             query_id: query.id,
             data: aggregated,
-            shard_results: results.clone(),
+            shard_results: results,
             total_time,
             shards_queried: target_shards.len(),
-            shards_succeeded: results.len(),
+            shards_succeeded,
             total_results,
         })
     }
