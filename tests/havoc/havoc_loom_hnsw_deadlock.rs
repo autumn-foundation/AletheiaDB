@@ -35,18 +35,6 @@ impl MockHnswIndex {
         // Critical section...
     }
 
-    // Models add() Occupied path
-    fn add_occupied(&self) {
-        // 1. Lock Map (to check existence and get value)
-        // CRITICAL: Hold lock continuously
-        let _map_guard = self.id_mapping.lock().unwrap();
-
-        // 2. Lock Inner (to update vector)
-        let _inner_guard = self.inner.write().unwrap();
-
-        // Critical section...
-    }
-
     // Models add() Occupied path with FIX
     fn add_occupied_fixed(&self) {
         // 1. Lock Map (to check existence and get value)
@@ -62,28 +50,6 @@ impl MockHnswIndex {
 
         // Critical section...
     }
-}
-
-#[test]
-#[should_panic]
-#[ignore] // Ignored because it crashes the test runner with SIGABRT
-fn test_deadlock_reproduction() {
-    loom::model(|| {
-        let index = Arc::new(MockHnswIndex::new());
-
-        let index1 = index.clone();
-        let t1 = thread::spawn(move || {
-            index1.add_vacant();
-        });
-
-        let index2 = index.clone();
-        let t2 = thread::spawn(move || {
-            index2.add_occupied();
-        });
-
-        t1.join().unwrap();
-        t2.join().unwrap();
-    });
 }
 
 #[test]
