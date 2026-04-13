@@ -50,6 +50,7 @@
 //! | `luna` | **Luna** | Semantic Subgraph Synthesis. "Materialize the core concept bridging these ideas." |
 //! | `serendipity` | **Serendipity** | Scenic Route Finder. "Find paths that maximize semantic divergence." |
 //! | `tremor` | **Tremor** | Semantic Earthquake Detector. "Did the global semantic state suddenly shift?" |
+//! | `phantom` | **Phantom** | Semantic Residue Detector. "Are we haunted by the past?" |
 //!
 //! # Example: Detecting Suspicious Patterns with Sherlock
 //!
@@ -204,6 +205,10 @@ pub mod thermos;
 #[cfg(feature = "nova")]
 /// Sentinel: Semantic Firewall for validating data insertion.
 pub mod sentinel;
+
+#[cfg(feature = "nova")]
+/// Phantom: Detecting Semantic Ghosts.
+pub mod phantom;
 
 #[cfg(feature = "nova")]
 /// Wormhole: Detecting Semantic-Structural Gaps.
