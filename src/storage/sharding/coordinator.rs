@@ -572,6 +572,7 @@ impl ShardCoordinator {
             }
 
             transaction.abort("Prepare phase failed");
+            drop(connections); // Prevent deadlock with active_transactions.write()
 
             // Re-insert the aborted transaction for tracking
             if let Ok(mut txns) = self.active_transactions.write() {
@@ -585,6 +586,7 @@ impl ShardCoordinator {
 
         // Mark as prepared
         transaction.mark_prepared()?;
+        drop(connections); // Prevent deadlock with active_transactions.write()
 
         // Re-insert the transaction
         if let Ok(mut txns) = self.active_transactions.write() {
@@ -735,6 +737,7 @@ impl ShardCoordinator {
             // Recovery process will retry
             let uncommitted = transaction.uncommitted_participants();
             transaction.mark_failed();
+            drop(connections); // Prevent deadlock with active_transactions.write()
 
             // Re-insert for recovery tracking
             if let Ok(mut txns) = self.active_transactions.write() {
