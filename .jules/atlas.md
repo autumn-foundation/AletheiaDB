@@ -79,3 +79,7 @@
 **[Broke Storage-API Dependency Cycle]
 **Tangle:** The `storage` module had an implementation of `From<&crate::api::transaction::BufferedWrite> for WalOperation` in `src/storage/wal/entry.rs`, meaning the underlying storage engine depended structurally on the public API layer.
 **Blueprint:** Moved the `From` implementation to `src/api/transaction/write_buffer.rs`. Now, the `api` module is aware of how its `BufferedWrite` converts into a `WalOperation` to send down to `storage`, enforcing a unidirectional dependency graph from `api` -> `storage`.
+
+## 2026-05-25 - Breaking db/query Circular Dependency
+**Tangle:** Tests within `src/query/hybrid.rs` and `src/query/semantic_pathfinding.rs` imported `crate::db::AletheiaDB` for integration testing. Meanwhile, the `db` module actively imported and used items from the `query` module (like `QueryPlanner`, `QueryExecutor`, `Statistics`). This created a test-level cycle: `db` -> `query` -> `db`.
+**Blueprint:** Extracted the integration-style tests from the `query` module and relocated them into the root `tests/` directory as `tests/query_hybrid_tests.rs` and `tests/query_semantic_pathfinding_tests.rs`. This correctly classifies them as external integration tests relying strictly on the crate's public API, fully untangling the graph and removing the circular import.
