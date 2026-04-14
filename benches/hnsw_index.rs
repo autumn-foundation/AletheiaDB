@@ -7,10 +7,13 @@
 //! - Filtered search (by label)
 //! - HNSW parameter tuning (M, ef_construction, ef_search)
 
-use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
-use gallifreydb::core::id::NodeId;
-use gallifreydb::index::vector::hnsw::{HnswConfig, HnswIndex};
-use gallifreydb::index::vector::{DistanceMetric, VectorIndex};
+mod common;
+
+use aletheiadb::core::id::NodeId;
+use aletheiadb::index::vector::hnsw::{HnswConfig, HnswIndex};
+use aletheiadb::index::vector::{DistanceMetric, VectorIndex};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use std::hint::black_box;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -327,39 +330,174 @@ fn bench_distance_metrics(c: &mut Criterion) {
 }
 
 // ============================================================================
+// Benchmark: Filtered Search (Issue #206 - Hot Path Optimization)
+// ============================================================================
+
+fn bench_search_with_filter(c: &mut Criterion) {
+    let mut group = c.benchmark_group("search_with_filter");
+
+    let dimensions = 384;
+    let index_size = 10000; // Large index to exercise the hot path
+    let k = 10;
+
+    // Create a populated index
+    let index = create_populated_index(dimensions, DistanceMetric::Cosine, index_size, 16, 128);
+    let query_vector = generate_random_vector(dimensions);
+
+    // Benchmark 1: Filter accepting all nodes (baseline)
+    group.bench_function("filter_accept_all", |b| {
+        b.iter(|| index.search_with_filter(black_box(&query_vector), black_box(k), |_| true));
+    });
+
+    // Benchmark 2: Filter accepting ~50% of nodes (realistic use case)
+    group.bench_function("filter_50_percent", |b| {
+        b.iter(|| {
+            index.search_with_filter(black_box(&query_vector), black_box(k), |id| {
+                id.as_u64() % 2 == 0
+            })
+        });
+    });
+
+    // Benchmark 3: Filter accepting ~10% of nodes (selective filter)
+    group.bench_function("filter_10_percent", |b| {
+        b.iter(|| {
+            index.search_with_filter(black_box(&query_vector), black_box(k), |id| {
+                id.as_u64() % 10 == 0
+            })
+        });
+    });
+
+    // Benchmark 4: More complex filter with multiple conditions
+    group.bench_function("filter_complex", |b| {
+        b.iter(|| {
+            index.search_with_filter(black_box(&query_vector), black_box(k), |id| {
+                let raw = id.as_u64();
+                raw % 2 == 0 && raw < 8000 && raw > 100
+            })
+        });
+    });
+
+    // Benchmark 5: Compare against unfiltered search (baseline)
+    group.bench_function("no_filter_baseline", |b| {
+        b.iter(|| index.search(black_box(&query_vector), black_box(k)));
+    });
+
+    group.finish();
+}
+
+// ============================================================================
+// Benchmark: Filter Hot Path with Different Index Sizes
+// ============================================================================
+
+fn bench_filter_vs_index_size(c: &mut Criterion) {
+    let mut group = c.benchmark_group("filter_vs_index_size");
+
+    let dimensions = 384;
+    let k = 10;
+
+    for &index_size in &[1000, 5000, 10000, 20000] {
+        let index = create_populated_index(dimensions, DistanceMetric::Cosine, index_size, 16, 128);
+        let query_vector = generate_random_vector(dimensions);
+
+        group.bench_with_input(
+            BenchmarkId::new("index_size", index_size),
+            &index_size,
+            |b, _| {
+                b.iter(|| {
+                    index.search_with_filter(black_box(&query_vector), black_box(k), |id| {
+                        id.as_u64() % 2 == 0
+                    })
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
+// ============================================================================
 // Benchmark Groups
 // ============================================================================
 
-fn configure_criterion() -> Criterion {
-    let sample_size = std::env::var("BENCH_SAMPLE_SIZE")
-        .map(|s| s.parse().unwrap_or(50))
-        .unwrap_or(50);
+// ============================================================================
+// Benchmark: Vector Updates (Issue #207)
+// ============================================================================
 
-    Criterion::default().sample_size(sample_size)
+/// Benchmark vector updates to validate Issue #207 optimization.
+///
+/// This benchmark measures the performance of updating existing vectors,
+/// which exercises the optimized path that checks if a key exists before
+/// calling remove().
+fn bench_vector_updates(c: &mut Criterion) {
+    let mut group = c.benchmark_group("vector_updates");
+
+    for &update_count in &[10, 50, 100, 500] {
+        let dimensions = 384;
+        let config = HnswConfig::new(dimensions, DistanceMetric::Cosine).with_capacity(1000);
+        let index = HnswIndex::new(config).expect("Failed to create index");
+
+        // Pre-populate with initial vectors
+        for i in 0..update_count {
+            let node_id = NodeId::new(i as u64).expect("Valid node ID");
+            let vector = generate_random_vector(dimensions);
+            index
+                .add(node_id, &vector)
+                .expect("Failed to add initial vector");
+        }
+
+        // Generate update vectors
+        let update_vectors = generate_random_vectors(update_count, dimensions);
+
+        group.throughput(Throughput::Elements(update_count as u64));
+
+        group.bench_with_input(
+            BenchmarkId::new("update_count", update_count),
+            &update_count,
+            |b, &count| {
+                b.iter(|| {
+                    // Update all vectors
+                    for (i, vector) in update_vectors.iter().enumerate().take(count) {
+                        let node_id = NodeId::new(i as u64).expect("Valid node ID");
+                        index.add(black_box(node_id), black_box(vector)).ok();
+                    }
+                });
+            },
+        );
+    }
+
+    group.finish();
 }
 
 criterion_group!(
     name = index_ops;
-    config = configure_criterion();
+    config = common::configure_criterion();
     targets = bench_index_creation,
     bench_vector_addition_single,
     bench_vector_addition_batch,
+    bench_vector_updates,
 );
 
 criterion_group!(
     name = search_ops;
-    config = configure_criterion();
+    config = common::configure_criterion();
     targets = bench_knn_search,
     bench_knn_search_index_size,
 );
 
 criterion_group!(
     name = tuning_ops;
-    config = configure_criterion();
+    config = common::configure_criterion();
     targets = bench_hnsw_parameter_m,
     bench_hnsw_parameter_ef_construction,
     bench_hnsw_parameter_ef_search,
     bench_distance_metrics,
 );
 
-criterion_main!(index_ops, search_ops, tuning_ops);
+criterion_group!(
+    name = filter_ops;
+    config = common::configure_criterion();
+    targets = bench_search_with_filter,
+    bench_filter_vs_index_size,
+);
+
+criterion_main!(index_ops, search_ops, tuning_ops, filter_ops);

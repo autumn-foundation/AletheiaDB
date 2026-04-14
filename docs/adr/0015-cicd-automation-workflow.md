@@ -7,7 +7,7 @@
 
 ## Context
 
-GallifreyDB is developed with multiple parallel Claude instances working simultaneously via git worktrees, creating unique challenges for maintaining code quality, dependency management, and release processes. As the project matures toward a public release, we need robust automation to:
+AletheiaDB is developed with multiple parallel Claude instances working simultaneously via git worktrees, creating unique challenges for maintaining code quality, dependency management, and release processes. As the project matures toward a public release, we need robust automation to:
 
 1. **Manage dependencies safely** - Regular updates without breaking changes
 2. **Enforce code quality** - Consistent standards across all contributions
@@ -133,7 +133,7 @@ We will implement a comprehensive CI/CD automation suite with the following comp
 - Self-contained with all context provided
 - Avoids: architecture changes, breaking changes, design decisions
 
-**The vision:** Use GallifreyDB itself to track autonomous development patterns, success rates, and codebase context over time - demonstrating **temporal reasoning for AI software development**.
+**The vision:** Use AletheiaDB itself to track autonomous development patterns, success rates, and codebase context over time - demonstrating **temporal reasoning for AI software development**.
 
 ## Consequences
 
@@ -149,7 +149,7 @@ We will implement a comprehensive CI/CD automation suite with the following comp
 - **GitHub Pages integration**: Documentation and benchmarks auto-publish
 - **Continuous forward momentum**: Autonomous developer works on issues even when humans are busy
 - **Cutting-edge AI demonstration**: Showcases state-of-the-art autonomous AI development
-- **Dogfooding opportunity**: Can use GallifreyDB to track autonomous development patterns
+- **Dogfooding opportunity**: Can use AletheiaDB to track autonomous development patterns
 
 ### Negative
 

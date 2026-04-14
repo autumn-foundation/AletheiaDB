@@ -39,7 +39,7 @@ jobs:
           prompt: |
             **AUTOMATED SECURITY SCAN**
 
-            Perform a comprehensive security analysis of the GallifreyDB codebase. Focus on:
+            Perform a comprehensive security analysis of the AletheiaDB codebase. Focus on:
 
             1. **Unsafe Code Review**
                - Review all `unsafe` blocks in the codebase
@@ -106,7 +106,7 @@ jobs:
           prompt: |
             **AUTOMATED PERFORMANCE SCAN**
 
-            Analyze GallifreyDB for performance optimization opportunities. Remember our performance targets from CLAUDE.md:
+            Analyze AletheiaDB for performance optimization opportunities. Remember our performance targets from CLAUDE.md:
             - Current-state queries: <1µs single-hop, <100µs 3-hop
             - Time-travel queries: <10ms reconstruction
             - Storage overhead: <2X vs non-temporal
@@ -177,7 +177,7 @@ jobs:
           prompt: |
             **AUTOMATED CODE QUALITY SCAN**
 
-            Review GallifreyDB for code quality and maintainability improvements. Focus on:
+            Review AletheiaDB for code quality and maintainability improvements. Focus on:
 
             1. **Error Handling**
                - Find `.unwrap()` or `.expect()` in production code (not tests)

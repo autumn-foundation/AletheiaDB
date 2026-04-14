@@ -1,7 +1,11 @@
-//! Benchmarks for current-state graph operations.
+#![allow(deprecated)]
+//! Benchmarks for storage layer primitives (fast path)
 //!
-//! These benchmarks test the performance of the "hot path" - queries that only
-//! touch the current state without any temporal operations.
+//! This file covers:
+//! - Graph operations (nodes, edges, traversals)
+//! - ID generation
+//! - String interning
+//! - Property storage
 //!
 //! Performance Targets:
 //! - Single-hop traversal: <1µs
@@ -9,8 +13,16 @@
 //! - Node lookup: <100ns
 //! - Edge creation: <10µs
 
-use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
-use gallifreydb::{CurrentStorage, PropertyMapBuilder};
+mod common;
+
+use aletheiadb::core::id::IdGenerator;
+use aletheiadb::core::interning::StringInterner;
+use aletheiadb::{CurrentStorage, PropertyMapBuilder};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
+use std::hint::black_box;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Barrier};
+use std::thread;
 
 /// Create a test graph with a specified number of nodes and edges.
 ///
@@ -58,7 +70,7 @@ fn bench_single_hop_traversal(c: &mut Criterion) {
 
     for graph_size in [100, 1000, 10000] {
         let storage = create_test_graph(graph_size, 10);
-        let first_node = gallifreydb::NodeId::new(0).unwrap();
+        let first_node = aletheiadb::NodeId::new(0).unwrap();
 
         group.bench_with_input(
             BenchmarkId::from_parameter(format!("{}_nodes", graph_size)),
@@ -81,7 +93,7 @@ fn bench_single_hop_traversal(c: &mut Criterion) {
 /// Target: <100µs per operation
 fn bench_multi_hop_traversal(c: &mut Criterion) {
     let storage = create_test_graph(1000, 10);
-    let start_node = gallifreydb::NodeId::new(0).unwrap();
+    let start_node = aletheiadb::NodeId::new(0).unwrap();
 
     c.bench_function("3_hop_traversal", |b| {
         b.iter(|| {
@@ -113,7 +125,7 @@ fn bench_multi_hop_traversal(c: &mut Criterion) {
 /// Target: <100ns per operation
 fn bench_node_lookup(c: &mut Criterion) {
     let storage = create_test_graph(10000, 10);
-    let node_id = gallifreydb::NodeId::new(5000).unwrap();
+    let node_id = aletheiadb::NodeId::new(5000).unwrap();
 
     c.bench_function("node_lookup", |b| {
         b.iter(|| {
@@ -126,7 +138,7 @@ fn bench_node_lookup(c: &mut Criterion) {
 /// Benchmark edge lookup by ID.
 fn bench_edge_lookup(c: &mut Criterion) {
     let storage = create_test_graph(1000, 10);
-    let edge_id = gallifreydb::EdgeId::new(5000).unwrap();
+    let edge_id = aletheiadb::EdgeId::new(5000).unwrap();
 
     c.bench_function("edge_lookup", |b| {
         b.iter(|| {
@@ -139,7 +151,7 @@ fn bench_edge_lookup(c: &mut Criterion) {
 /// Benchmark labeled edge traversal.
 fn bench_labeled_traversal(c: &mut Criterion) {
     let storage = create_test_graph(1000, 10);
-    let node_id = gallifreydb::NodeId::new(0).unwrap();
+    let node_id = aletheiadb::NodeId::new(0).unwrap();
 
     c.bench_function("labeled_traversal", |b| {
         b.iter(|| {
@@ -198,7 +210,7 @@ fn bench_edge_creation(c: &mut Criterion) {
 /// Benchmark graph degree queries.
 fn bench_degree_queries(c: &mut Criterion) {
     let storage = create_test_graph(1000, 10);
-    let node_id = gallifreydb::NodeId::new(0).unwrap();
+    let node_id = aletheiadb::NodeId::new(0).unwrap();
 
     c.bench_function("out_degree", |b| {
         b.iter(|| {
@@ -218,7 +230,7 @@ fn bench_degree_queries(c: &mut Criterion) {
 /// Benchmark finding neighbors (targets of outgoing edges).
 fn bench_find_neighbors(c: &mut Criterion) {
     let storage = create_test_graph(1000, 10);
-    let node_id = gallifreydb::NodeId::new(0).unwrap();
+    let node_id = aletheiadb::NodeId::new(0).unwrap();
 
     c.bench_function("find_neighbors", |b| {
         b.iter(|| {
@@ -233,17 +245,492 @@ fn bench_find_neighbors(c: &mut Criterion) {
     });
 }
 
-fn configure_criterion() -> Criterion {
-    let sample_size = std::env::var("BENCH_SAMPLE_SIZE")
-        .map(|s| s.parse().unwrap_or(50))
-        .unwrap_or(50);
+// ============================================================================
+// ID Generation Benchmarks
+// ============================================================================
 
-    Criterion::default().sample_size(sample_size)
+/// Benchmark single-threaded ID generation.
+fn bench_id_single_thread(c: &mut Criterion) {
+    let mut group = c.benchmark_group("id_generation_single_thread");
+
+    group.bench_function("sequential_1000", |b| {
+        let generator = IdGenerator::new();
+        b.iter(|| {
+            for _ in 0..1000 {
+                black_box(generator.next().unwrap());
+            }
+        });
+    });
+
+    group.bench_function("sequential_10000", |b| {
+        let generator = IdGenerator::new();
+        b.iter(|| {
+            for _ in 0..10000 {
+                black_box(generator.next().unwrap());
+            }
+        });
+    });
+
+    group.finish();
+}
+
+/// Benchmark concurrent ID generation with varying thread counts.
+fn bench_id_concurrent(c: &mut Criterion) {
+    let mut group = c.benchmark_group("id_generation_concurrent");
+
+    for thread_count in [2, 4, 8, 16] {
+        group.bench_with_input(
+            BenchmarkId::new("threads", thread_count),
+            &thread_count,
+            |b, &thread_count| {
+                let generator = Arc::new(IdGenerator::new());
+                // Keep enough work per iteration to amortize synchronization jitter.
+                let ids_per_thread = 1000;
+                let start_barrier = Arc::new(Barrier::new(thread_count + 1));
+                let done_barrier = Arc::new(Barrier::new(thread_count + 1));
+                let stop = Arc::new(AtomicBool::new(false));
+
+                // Keep worker threads alive across iterations to avoid measuring
+                // thread spawn/join overhead and OS scheduler noise.
+                let handles: Vec<_> = (0..thread_count)
+                    .map(|_| {
+                        let gen_clone = Arc::clone(&generator);
+                        let start_clone = Arc::clone(&start_barrier);
+                        let done_clone = Arc::clone(&done_barrier);
+                        let stop_clone = Arc::clone(&stop);
+                        thread::spawn(move || {
+                            loop {
+                                start_clone.wait();
+                                if stop_clone.load(Ordering::Acquire) {
+                                    break;
+                                }
+
+                                for _ in 0..ids_per_thread {
+                                    black_box(gen_clone.next().unwrap());
+                                }
+
+                                done_clone.wait();
+                            }
+                        })
+                    })
+                    .collect();
+
+                b.iter(|| {
+                    start_barrier.wait();
+                    done_barrier.wait();
+                });
+
+                stop.store(true, Ordering::Release);
+                // Wake workers so they can observe the stop flag and exit.
+                start_barrier.wait();
+                for handle in handles {
+                    handle.join().unwrap();
+                }
+            },
+        );
+    }
+
+    group.finish();
+}
+
+/// Benchmark current() method (read-only).
+fn bench_id_current(c: &mut Criterion) {
+    let mut group = c.benchmark_group("id_generation_current");
+
+    group.bench_function("read_current", |b| {
+        let generator = IdGenerator::new();
+        // Generate some IDs first
+        for _ in 0..1000 {
+            generator.next().unwrap();
+        }
+
+        b.iter(|| {
+            black_box(generator.current());
+        });
+    });
+
+    group.bench_function("read_current_approximate", |b| {
+        let generator = IdGenerator::new();
+        // Generate some IDs first
+        for _ in 0..1000 {
+            generator.next().unwrap();
+        }
+
+        b.iter(|| {
+            black_box(generator.current_approximate());
+        });
+    });
+
+    group.finish();
+}
+
+/// Benchmark the full lifecycle: create generator, generate IDs, get current.
+fn bench_id_full_lifecycle(c: &mut Criterion) {
+    let mut group = c.benchmark_group("id_generation_lifecycle");
+
+    group.bench_function("create_and_generate_1000", |b| {
+        b.iter(|| {
+            let generator = IdGenerator::new();
+            for _ in 0..1000 {
+                black_box(generator.next().unwrap());
+            }
+            black_box(generator.current());
+        });
+    });
+
+    group.finish();
+}
+
+// ============================================================================
+// String Interning Benchmarks
+// ============================================================================
+
+/// Benchmark single string access using resolve() vs resolve_with().
+fn bench_string_single_access(c: &mut Criterion) {
+    let mut group = c.benchmark_group("string_access_single");
+
+    let interner = StringInterner::new();
+    let id = interner.intern("test_string").unwrap();
+
+    group.bench_function("resolve", |b| {
+        b.iter(|| {
+            let s = interner.resolve(id).unwrap();
+            black_box(s.len())
+        });
+    });
+
+    group.bench_function("resolve_with", |b| {
+        b.iter(|| interner.resolve_with(id, |s| black_box(s.len())));
+    });
+
+    group.finish();
+}
+
+/// Benchmark string length computation (common read-only operation).
+fn bench_string_length(c: &mut Criterion) {
+    let mut group = c.benchmark_group("string_length");
+
+    let interner = StringInterner::new();
+    let id = interner
+        .intern("this is a test string for benchmarking")
+        .unwrap();
+
+    group.bench_function("resolve", |b| {
+        b.iter(|| {
+            let s = interner.resolve(id).unwrap();
+            black_box(s.len())
+        });
+    });
+
+    group.bench_function("resolve_with", |b| {
+        b.iter(|| interner.resolve_with(id, |s| black_box(s.len())));
+    });
+
+    group.finish();
+}
+
+/// Benchmark string comparison (another common read-only operation).
+fn bench_string_comparison(c: &mut Criterion) {
+    let mut group = c.benchmark_group("string_comparison");
+
+    let interner = StringInterner::new();
+    let id = interner.intern("Person").unwrap();
+
+    group.bench_function("resolve", |b| {
+        b.iter(|| {
+            let s = interner.resolve(id).unwrap();
+            black_box(s.as_ref() == "Person")
+        });
+    });
+
+    group.bench_function("resolve_with", |b| {
+        b.iter(|| interner.resolve_with(id, |s| black_box(s == "Person")));
+    });
+
+    group.finish();
+}
+
+/// Benchmark multiple string accesses in a loop (simulates real workload).
+fn bench_string_multiple_accesses(c: &mut Criterion) {
+    let mut group = c.benchmark_group("multiple_accesses");
+
+    let interner = StringInterner::new();
+    let ids: Vec<_> = (0..100)
+        .map(|i| interner.intern(format!("string_{}", i)).unwrap())
+        .collect();
+
+    group.bench_function("resolve_100", |b| {
+        b.iter(|| {
+            for &id in &ids {
+                let s = interner.resolve(id).unwrap();
+                black_box(s.len());
+            }
+        });
+    });
+
+    group.bench_function("resolve_with_100", |b| {
+        b.iter(|| {
+            for &id in &ids {
+                interner.resolve_with(id, |s| black_box(s.len()));
+            }
+        });
+    });
+
+    group.finish();
+}
+
+/// Benchmark simulated serialization workload (common use case).
+fn bench_string_serialization(c: &mut Criterion) {
+    let mut group = c.benchmark_group("serialization_simulation");
+
+    let interner = StringInterner::new();
+    let property_keys: Vec<_> = ["name", "age", "email", "address", "phone"]
+        .iter()
+        .map(|&s| interner.intern(s).unwrap())
+        .collect();
+
+    // Simulate serializing 1000 objects with 5 properties each
+    group.bench_function("resolve", |b| {
+        b.iter(|| {
+            let mut total_len = 0;
+            for _ in 0..1000 {
+                for &key_id in &property_keys {
+                    let key = interner.resolve(key_id).unwrap();
+                    // Simulate serialization by computing length and hashing
+                    total_len += key.len();
+                    black_box(key.as_ref());
+                }
+            }
+            black_box(total_len);
+        });
+    });
+
+    group.bench_function("resolve_with", |b| {
+        b.iter(|| {
+            let mut total_len = 0;
+            for _ in 0..1000 {
+                for &key_id in &property_keys {
+                    interner.resolve_with(key_id, |key| {
+                        // Simulate serialization by computing length and hashing
+                        total_len += key.len();
+                        black_box(key);
+                    });
+                }
+            }
+            black_box(total_len);
+        });
+    });
+
+    group.finish();
+}
+
+/// Benchmark Arc clone overhead isolation (measures just the Arc operations).
+fn bench_string_arc_overhead(c: &mut Criterion) {
+    let mut group = c.benchmark_group("arc_overhead");
+
+    let interner = StringInterner::new();
+    let id = interner.intern("overhead_test").unwrap();
+
+    // Measure Arc clone + drop overhead
+    group.bench_function("arc_clone_drop", |b| {
+        b.iter(|| {
+            let arc = interner.resolve(id).unwrap();
+            black_box(arc);
+            // Arc is dropped here (atomic decrement)
+        });
+    });
+
+    // Measure direct access without Arc clone
+    group.bench_function("direct_access", |b| {
+        b.iter(|| {
+            interner.resolve_with(id, |s| {
+                black_box(s);
+            });
+        });
+    });
+
+    group.finish();
+}
+
+/// Benchmark hot-path scenario: tight loop with repeated accesses.
+fn bench_string_hot_path(c: &mut Criterion) {
+    let mut group = c.benchmark_group("hot_path");
+
+    let interner = Arc::new(StringInterner::new());
+    let id = interner.intern("hot_path_string").unwrap();
+
+    for iterations in [100, 1000, 10000] {
+        group.bench_with_input(
+            BenchmarkId::new("resolve", iterations),
+            &iterations,
+            |b, &iterations| {
+                b.iter(|| {
+                    for _ in 0..iterations {
+                        let s = interner.resolve(id).unwrap();
+                        black_box(s.len());
+                    }
+                });
+            },
+        );
+
+        group.bench_with_input(
+            BenchmarkId::new("resolve_with", iterations),
+            &iterations,
+            |b, &iterations| {
+                b.iter(|| {
+                    for _ in 0..iterations {
+                        interner.resolve_with(id, |s| black_box(s.len()));
+                    }
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
+/// Benchmark property-based node lookup.
+///
+/// Target: Competitive with get_nodes_by_label + manual filter
+fn bench_find_nodes_by_property(c: &mut Criterion) {
+    use aletheiadb::core::property::PropertyValue;
+
+    let mut group = c.benchmark_group("find_nodes_by_property");
+
+    for graph_size in [100, 1000, 10000] {
+        // Create a graph where each node has a "category" property
+        // with ~10% matching a specific value
+        let storage = CurrentStorage::new();
+        for i in 0..graph_size {
+            let category = format!("cat_{}", i % 10);
+            storage
+                .create_node(
+                    "Item",
+                    PropertyMapBuilder::new()
+                        .insert("category", category.as_str())
+                        .insert("index", i as i64)
+                        .build(),
+                )
+                .unwrap();
+        }
+
+        let target = PropertyValue::String(std::sync::Arc::from("cat_0"));
+
+        group.bench_with_input(
+            BenchmarkId::from_parameter(format!("{}_nodes", graph_size)),
+            &(storage, target),
+            |b, (storage, target)| {
+                b.iter(|| {
+                    let results =
+                        storage.find_nodes_by_property(black_box("Item"), "category", target);
+                    black_box(results)
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
+/// Benchmark property lookup vs manual label scan + filter.
+fn bench_property_lookup_vs_scan(c: &mut Criterion) {
+    use aletheiadb::core::property::PropertyValue;
+
+    let storage = CurrentStorage::new();
+    for i in 0..1000 {
+        let name = format!("user_{}", i);
+        storage
+            .create_node(
+                "User",
+                PropertyMapBuilder::new()
+                    .insert("name", name.as_str())
+                    .build(),
+            )
+            .unwrap();
+    }
+
+    let target = PropertyValue::String(std::sync::Arc::from("user_500"));
+
+    let mut group = c.benchmark_group("property_lookup_vs_scan");
+
+    group.bench_function("find_nodes_by_property", |b| {
+        b.iter(|| {
+            let results =
+                storage.find_nodes_by_property(black_box("User"), "name", black_box(&target));
+            black_box(results)
+        });
+    });
+
+    group.bench_function("manual_label_scan_filter", |b| {
+        b.iter(|| {
+            let nodes = storage.get_nodes_by_label(black_box("User"));
+            let results: Vec<_> = nodes
+                .iter()
+                .filter(|n| n.properties.get("name").is_some_and(|v| *v == target))
+                .map(|n| n.id)
+                .collect();
+            black_box(results)
+        });
+    });
+
+    group.finish();
+}
+
+/// Benchmark allocation overhead in get_outgoing() at the index level.
+///
+/// This micro-benchmark isolates the Vec allocation cost by directly
+/// accessing CurrentIndexes rather than going through CurrentStorage.
+/// Target: Eliminate 100-500ns allocation overhead.
+fn bench_get_outgoing_allocation_overhead(c: &mut Criterion) {
+    use aletheiadb::core::graph::Edge;
+    use aletheiadb::core::id::{EdgeId, VersionId};
+    use aletheiadb::core::interning::GLOBAL_INTERNER;
+    use aletheiadb::index::current::CurrentIndexes;
+
+    let mut group = c.benchmark_group("get_outgoing_allocation");
+
+    // Create a test graph at the index level with varying degrees
+    for out_degree in [1, 10, 100] {
+        let indexes = CurrentIndexes::new();
+        let node_id = aletheiadb::NodeId::new(0).unwrap();
+        let knows = GLOBAL_INTERNER.intern("KNOWS").unwrap();
+
+        // Insert edges to create adjacency list
+        for i in 0..out_degree {
+            let edge = Edge::new(
+                EdgeId::new(i).unwrap(),
+                knows,
+                node_id,
+                aletheiadb::NodeId::new(i + 1).unwrap(),
+                PropertyMapBuilder::new().build(),
+                VersionId::new(1).unwrap(),
+            );
+            indexes.insert_edge(edge);
+        }
+
+        // Trigger initial compaction
+        indexes.compact_adjacency();
+
+        group.bench_with_input(
+            BenchmarkId::from_parameter(format!("degree_{}", out_degree)),
+            &(indexes, node_id),
+            |b, (indexes, node)| {
+                b.iter(|| {
+                    // After optimization: returns AdjacencyGuard with Arc clone (~5-10ns)
+                    // Previously: allocated Vec on every call (100-500ns overhead)
+                    let adjacency = indexes.get_outgoing(black_box(*node));
+                    black_box(adjacency)
+                });
+            },
+        );
+    }
+
+    group.finish();
 }
 
 criterion_group!(
     name = benches;
-    config = configure_criterion();
+    config = common::configure_criterion();
     targets = bench_single_hop_traversal,
     bench_multi_hop_traversal,
     bench_node_lookup,
@@ -253,6 +740,23 @@ criterion_group!(
     bench_edge_creation,
     bench_degree_queries,
     bench_find_neighbors,
+    bench_get_outgoing_allocation_overhead,
+    // Property-based lookup
+    bench_find_nodes_by_property,
+    bench_property_lookup_vs_scan,
+    // ID Generation
+    bench_id_single_thread,
+    bench_id_concurrent,
+    bench_id_current,
+    bench_id_full_lifecycle,
+    // String Interning
+    bench_string_single_access,
+    bench_string_length,
+    bench_string_comparison,
+    bench_string_multiple_accesses,
+    bench_string_serialization,
+    bench_string_arc_overhead,
+    bench_string_hot_path,
 );
 
 criterion_main!(benches);

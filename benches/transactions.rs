@@ -3,13 +3,17 @@
 //! These benchmarks measure the overhead introduced by the transaction layer
 //! compared to direct operations.
 
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
-use gallifreydb::{GallifreyDB, PropertyMapBuilder, ReadOps, WriteOps};
+mod common;
+
+use aletheiadb::Error;
+use aletheiadb::{AletheiaDB, PropertyMapBuilder, ReadOps, WriteOps};
+use criterion::{Criterion, criterion_group, criterion_main};
+use std::hint::black_box;
 use std::sync::Arc;
 use std::thread;
 
 fn bench_read_transaction_creation(c: &mut Criterion) {
-    let db = GallifreyDB::new();
+    let db = AletheiaDB::new().unwrap();
 
     c.bench_function("read_transaction_creation", |b| {
         b.iter(|| {
@@ -19,7 +23,7 @@ fn bench_read_transaction_creation(c: &mut Criterion) {
 }
 
 fn bench_write_transaction_creation(c: &mut Criterion) {
-    let db = GallifreyDB::new();
+    let db = AletheiaDB::new().unwrap();
 
     c.bench_function("write_transaction_creation", |b| {
         b.iter(|| {
@@ -29,17 +33,17 @@ fn bench_write_transaction_creation(c: &mut Criterion) {
 }
 
 fn bench_closure_based_write_empty(c: &mut Criterion) {
-    let db = GallifreyDB::new();
+    let db = AletheiaDB::new().unwrap();
 
     c.bench_function("closure_write_empty_commit", |b| {
         b.iter(|| {
-            db.write(|_tx| Ok(())).unwrap();
+            db.write(|_tx| Ok::<_, Error>(())).unwrap();
         });
     });
 }
 
 fn bench_closure_based_write_single_node(c: &mut Criterion) {
-    let db = GallifreyDB::new();
+    let db = AletheiaDB::new().unwrap();
 
     c.bench_function("closure_write_single_node", |b| {
         b.iter(|| {
@@ -58,7 +62,7 @@ fn bench_closure_based_write_single_node(c: &mut Criterion) {
 }
 
 fn bench_closure_based_write_10_ops(c: &mut Criterion) {
-    let db = GallifreyDB::new();
+    let db = AletheiaDB::new().unwrap();
 
     c.bench_function("closure_write_10_operations", |b| {
         b.iter(|| {
@@ -81,7 +85,7 @@ fn bench_closure_based_write_10_ops(c: &mut Criterion) {
                         PropertyMapBuilder::new().build(),
                     )?;
                 }
-                Ok(())
+                Ok::<_, Error>(())
             })
             .unwrap();
         });
@@ -89,7 +93,7 @@ fn bench_closure_based_write_10_ops(c: &mut Criterion) {
 }
 
 fn bench_explicit_transaction_commit(c: &mut Criterion) {
-    let db = GallifreyDB::new();
+    let db = AletheiaDB::new().unwrap();
 
     c.bench_function("explicit_transaction_commit", |b| {
         b.iter(|| {
@@ -105,7 +109,7 @@ fn bench_explicit_transaction_commit(c: &mut Criterion) {
 }
 
 fn bench_implicit_vs_explicit(c: &mut Criterion) {
-    let db = GallifreyDB::new();
+    let db = AletheiaDB::new().unwrap();
 
     let mut group = c.benchmark_group("implicit_vs_explicit");
 
@@ -135,7 +139,7 @@ fn bench_implicit_vs_explicit(c: &mut Criterion) {
 }
 
 fn bench_read_transaction_overhead(c: &mut Criterion) {
-    let db = GallifreyDB::new();
+    let db = AletheiaDB::new().unwrap();
 
     // Create a node to read
     let node_id = db
@@ -157,29 +161,13 @@ fn bench_read_transaction_overhead(c: &mut Criterion) {
         b.iter(|| {
             db.read(|tx| {
                 let _node = tx.get_node(black_box(node_id))?;
-                Ok(())
+                Ok::<_, Error>(())
             })
             .unwrap();
         });
     });
 
     group.finish();
-}
-
-fn bench_wal_overhead(c: &mut Criterion) {
-    let db = GallifreyDB::new();
-
-    c.bench_function("write_with_wal_flush", |b| {
-        b.iter(|| {
-            db.write(|tx| {
-                tx.create_node(
-                    "Person",
-                    PropertyMapBuilder::new().insert("name", "Test").build(),
-                )
-            })
-            .unwrap();
-        });
-    });
 }
 
 /// Benchmark batch edge insertions to verify adjacency rebuild optimization.
@@ -192,7 +180,7 @@ fn bench_batch_edge_insertions(c: &mut Criterion) {
     for batch_size in [100, 1000, 10000] {
         group.bench_function(format!("batch_{}_edges", batch_size), |b| {
             b.iter(|| {
-                let db = GallifreyDB::new();
+                let db = AletheiaDB::new().unwrap();
 
                 db.write(|tx| {
                     // Create nodes first
@@ -215,7 +203,7 @@ fn bench_batch_edge_insertions(c: &mut Criterion) {
                         )?;
                     }
 
-                    Ok(())
+                    Ok::<_, Error>(())
                 })
                 .unwrap();
             });
@@ -231,7 +219,7 @@ fn bench_batch_edge_updates(c: &mut Criterion) {
         b.iter_batched(
             || {
                 // Setup: Create DB with 1000 edges
-                let db = GallifreyDB::new();
+                let db = AletheiaDB::new().unwrap();
                 let edge_ids: Vec<_> = db
                     .write(|tx| {
                         let mut nodes = Vec::new();
@@ -255,7 +243,7 @@ fn bench_batch_edge_updates(c: &mut Criterion) {
                             edges.push(edge);
                         }
 
-                        Ok(edges)
+                        Ok::<_, Error>(edges)
                     })
                     .unwrap();
                 (db, edge_ids)
@@ -269,7 +257,7 @@ fn bench_batch_edge_updates(c: &mut Criterion) {
                             PropertyMapBuilder::new().insert("weight", 1i64).build(),
                         )?;
                     }
-                    Ok(())
+                    Ok::<_, Error>(())
                 })
                 .unwrap();
             },
@@ -284,7 +272,7 @@ fn bench_batch_edge_deletions(c: &mut Criterion) {
         b.iter_batched(
             || {
                 // Setup: create DB with 1000 edges
-                let db = GallifreyDB::new();
+                let db = AletheiaDB::new().unwrap();
                 let edge_ids: Vec<_> = db
                     .write(|tx| {
                         let mut nodes = Vec::new();
@@ -308,7 +296,7 @@ fn bench_batch_edge_deletions(c: &mut Criterion) {
                             edges.push(edge);
                         }
 
-                        Ok(edges)
+                        Ok::<_, Error>(edges)
                     })
                     .unwrap();
 
@@ -320,7 +308,7 @@ fn bench_batch_edge_deletions(c: &mut Criterion) {
                     for edge_id in edge_ids {
                         tx.delete_edge(edge_id)?;
                     }
-                    Ok(())
+                    Ok::<_, Error>(())
                 })
                 .unwrap();
             },
@@ -340,7 +328,7 @@ fn bench_batch_insertions_with_prepopulated_graph(c: &mut Criterion) {
             b.iter_batched(
                 || {
                     // Setup: create DB with existing edges
-                    let db = GallifreyDB::new();
+                    let db = AletheiaDB::new().unwrap();
 
                     // Pre-populate with existing edges
                     db.write(|tx| {
@@ -362,7 +350,7 @@ fn bench_batch_insertions_with_prepopulated_graph(c: &mut Criterion) {
                             )?;
                         }
 
-                        Ok(())
+                        Ok::<_, Error>(())
                     })
                     .unwrap();
 
@@ -391,7 +379,7 @@ fn bench_batch_insertions_with_prepopulated_graph(c: &mut Criterion) {
                             )?;
                         }
 
-                        Ok(())
+                        Ok::<_, Error>(())
                     })
                     .unwrap();
                 },
@@ -409,7 +397,7 @@ fn bench_read_during_rebuild(c: &mut Criterion) {
     // Pre-populate a database with 4K nodes + 4K edges
     // Note: stays under DEFAULT_MAX_OPERATIONS (50K) limit defined in
     // src/api/transaction/write_buffer.rs for DoS protection
-    let db = GallifreyDB::new();
+    let db = AletheiaDB::new().unwrap();
     let node_ids: Vec<_> = db
         .write(|tx| {
             let mut nodes = Vec::new();
@@ -430,7 +418,7 @@ fn bench_read_during_rebuild(c: &mut Criterion) {
                 )?;
             }
 
-            Ok(nodes)
+            Ok::<_, Error>(nodes)
         })
         .unwrap();
 
@@ -458,7 +446,7 @@ fn bench_concurrent_visibility_checks(c: &mut Criterion) {
     // Pre-populate database with committed data (500 nodes)
     // Note: stays under DEFAULT_MAX_OPERATIONS (50K) limit defined in
     // src/api/transaction/write_buffer.rs for DoS protection
-    let db = Arc::new(GallifreyDB::new());
+    let db = Arc::new(AletheiaDB::new().unwrap());
     let node_ids: Vec<_> = db
         .write(|tx| {
             let mut nodes = Vec::new();
@@ -469,7 +457,7 @@ fn bench_concurrent_visibility_checks(c: &mut Criterion) {
                 )?;
                 nodes.push(node);
             }
-            Ok(nodes)
+            Ok::<_, Error>(nodes)
         })
         .unwrap();
 
@@ -503,7 +491,7 @@ fn bench_concurrent_visibility_checks(c: &mut Criterion) {
 
 /// Benchmark single-threaded visibility check performance (baseline).
 fn bench_sequential_visibility_checks(c: &mut Criterion) {
-    let db = GallifreyDB::new();
+    let db = AletheiaDB::new().unwrap();
 
     // Pre-populate with 500 nodes
     // Note: stays under DEFAULT_MAX_OPERATIONS (50K) limit defined in
@@ -518,7 +506,7 @@ fn bench_sequential_visibility_checks(c: &mut Criterion) {
                 )?;
                 nodes.push(node);
             }
-            Ok(nodes)
+            Ok::<_, Error>(nodes)
         })
         .unwrap();
 
@@ -550,7 +538,7 @@ fn bench_concurrent_transaction_creation_with_active_txs(c: &mut Criterion) {
             b.iter_batched(
                 || {
                     // Setup: create DB and start many active write transactions
-                    let db = Arc::new(GallifreyDB::new());
+                    let db = Arc::new(AletheiaDB::new().unwrap());
                     let mut active_txs = Vec::new();
 
                     for _ in 0..active_count {
@@ -594,7 +582,7 @@ fn bench_apply_changes_large_tx(c: &mut Criterion) {
             b.iter_batched(
                 || {
                     // Setup: create DB with some existing data for updates/deletes
-                    let db = GallifreyDB::new();
+                    let db = AletheiaDB::new().unwrap();
                     let (nodes, edges) = db
                         .write(|tx| {
                             let mut nodes = Vec::new();
@@ -620,7 +608,7 @@ fn bench_apply_changes_large_tx(c: &mut Criterion) {
                                 edges.push(edge);
                             }
 
-                            Ok((nodes, edges))
+                            Ok::<_, Error>((nodes, edges))
                         })
                         .unwrap();
 
@@ -662,7 +650,7 @@ fn bench_apply_changes_large_tx(c: &mut Criterion) {
                             tx.delete_edge(edge_id)?;
                         }
 
-                        Ok(())
+                        Ok::<_, Error>(())
                     })
                     .unwrap();
                 },
@@ -673,7 +661,7 @@ fn bench_apply_changes_large_tx(c: &mut Criterion) {
         // Create-heavy workload
         group.bench_function(format!("creates_{}_ops", size), |b| {
             b.iter(|| {
-                let db = GallifreyDB::new();
+                let db = AletheiaDB::new().unwrap();
                 db.write(|tx| {
                     for i in 0..size {
                         tx.create_node(
@@ -684,7 +672,7 @@ fn bench_apply_changes_large_tx(c: &mut Criterion) {
                                 .build(),
                         )?;
                     }
-                    Ok(())
+                    Ok::<_, Error>(())
                 })
                 .unwrap();
             });
@@ -695,7 +683,7 @@ fn bench_apply_changes_large_tx(c: &mut Criterion) {
             b.iter_batched(
                 || {
                     // Setup: create DB with nodes and edges to delete
-                    let db = GallifreyDB::new();
+                    let db = AletheiaDB::new().unwrap();
                     let (nodes, edges) = db
                         .write(|tx| {
                             let mut nodes = Vec::new();
@@ -719,7 +707,7 @@ fn bench_apply_changes_large_tx(c: &mut Criterion) {
                                 edges.push(edge);
                             }
 
-                            Ok((nodes, edges))
+                            Ok::<_, Error>((nodes, edges))
                         })
                         .unwrap();
 
@@ -739,7 +727,7 @@ fn bench_apply_changes_large_tx(c: &mut Criterion) {
                             tx.delete_node(node)?;
                         }
 
-                        Ok(())
+                        Ok::<_, Error>(())
                     })
                     .unwrap();
                 },
@@ -770,7 +758,7 @@ fn bench_commit_vector_vs_nonvector(c: &mut Criterion) {
     // Benchmark 1: Non-vector transaction (should be optimized)
     group.bench_function("commit_without_vectors", |b| {
         b.iter(|| {
-            let db = GallifreyDB::new();
+            let db = AletheiaDB::new().unwrap();
             db.write(|tx| {
                 // Create nodes with scalar properties only (no vectors)
                 for i in 0..10 {
@@ -783,7 +771,7 @@ fn bench_commit_vector_vs_nonvector(c: &mut Criterion) {
                             .build(),
                     )?;
                 }
-                Ok(())
+                Ok::<_, Error>(())
             })
             .unwrap();
         });
@@ -792,7 +780,7 @@ fn bench_commit_vector_vs_nonvector(c: &mut Criterion) {
     // Benchmark 2: Vector transaction (will call vector notification)
     group.bench_function("commit_with_vectors", |b| {
         b.iter(|| {
-            let db = GallifreyDB::new();
+            let db = AletheiaDB::new().unwrap();
             db.write(|tx| {
                 // Create nodes with vector properties
                 let embedding = vec![0.1f32, 0.2, 0.3, 0.4];
@@ -805,7 +793,7 @@ fn bench_commit_vector_vs_nonvector(c: &mut Criterion) {
                             .build(),
                     )?;
                 }
-                Ok(())
+                Ok::<_, Error>(())
             })
             .unwrap();
         });
@@ -814,7 +802,7 @@ fn bench_commit_vector_vs_nonvector(c: &mut Criterion) {
     // Benchmark 3: Large non-vector transaction (amplifies the optimization benefit)
     group.bench_function("commit_100_ops_without_vectors", |b| {
         b.iter(|| {
-            let db = GallifreyDB::new();
+            let db = AletheiaDB::new().unwrap();
             db.write(|tx| {
                 // Create 100 nodes with scalar properties only
                 for i in 0..100 {
@@ -826,7 +814,7 @@ fn bench_commit_vector_vs_nonvector(c: &mut Criterion) {
                             .build(),
                     )?;
                 }
-                Ok(())
+                Ok::<_, Error>(())
             })
             .unwrap();
         });
@@ -835,7 +823,7 @@ fn bench_commit_vector_vs_nonvector(c: &mut Criterion) {
     // Benchmark 4: Large vector transaction
     group.bench_function("commit_100_ops_with_vectors", |b| {
         b.iter(|| {
-            let db = GallifreyDB::new();
+            let db = AletheiaDB::new().unwrap();
             db.write(|tx| {
                 let embedding = vec![0.1f32; 128]; // Realistic embedding size
                 for i in 0..100 {
@@ -847,7 +835,7 @@ fn bench_commit_vector_vs_nonvector(c: &mut Criterion) {
                             .build(),
                     )?;
                 }
-                Ok(())
+                Ok::<_, Error>(())
             })
             .unwrap();
         });
@@ -856,17 +844,115 @@ fn bench_commit_vector_vs_nonvector(c: &mut Criterion) {
     group.finish();
 }
 
-fn configure_criterion() -> Criterion {
-    let sample_size = std::env::var("BENCH_SAMPLE_SIZE")
-        .map(|s| s.parse().unwrap_or(50))
-        .unwrap_or(50);
+/// Benchmark epoch-based compression for MVCC commit log (Issue #237).
+///
+/// This benchmark measures the memory savings and performance characteristics
+/// of the epoch-based compression optimization. It demonstrates:
+/// - Compression ratio for sequential transaction patterns
+/// - Memory usage reduction (10-100x target)
+/// - Compression algorithm performance
+/// - Impact on visibility checks after compression
+fn bench_mvcc_compression(c: &mut Criterion) {
+    let mut group = c.benchmark_group("mvcc_compression");
 
-    Criterion::default().sample_size(sample_size)
+    // Benchmark 1: Compression of fully sequential commits
+    group.bench_function("compress_10k_sequential", |b| {
+        b.iter_batched(
+            || {
+                // Setup: Create DB and commit 10K sequential transactions
+                let db = AletheiaDB::new().unwrap();
+                for i in 1..=10000 {
+                    db.write(|tx| {
+                        tx.create_node(
+                            "Node",
+                            PropertyMapBuilder::new().insert("id", i as i64).build(),
+                        )
+                    })
+                    .unwrap();
+                }
+                db
+            },
+            |db| {
+                // Measure: compression time and ratio
+                db.compress_commit_log();
+                let stats = db.get_compression_stats();
+                // Verify compression is working
+                assert!(
+                    stats.compression_ratio > 100.0,
+                    "Expected >100x compression for sequential data"
+                );
+            },
+            criterion::BatchSize::SmallInput,
+        );
+    });
+
+    // Benchmark 2: Memory usage comparison
+    group.bench_function("memory_usage_10k_transactions", |b| {
+        b.iter_batched(
+            || {
+                let db = AletheiaDB::new().unwrap();
+                for i in 1..=10000 {
+                    db.write(|tx| {
+                        tx.create_node(
+                            "Node",
+                            PropertyMapBuilder::new().insert("id", i as i64).build(),
+                        )
+                    })
+                    .unwrap();
+                }
+                db
+            },
+            |db| {
+                let before_memory = db.commit_log_memory_usage();
+                db.compress_commit_log();
+                let after_memory = db.commit_log_memory_usage();
+                let stats = db.get_compression_stats();
+
+                // Verify significant memory savings
+                assert!(
+                    after_memory < before_memory / 10,
+                    "Expected >10x memory reduction, got {}x",
+                    before_memory / after_memory.max(1)
+                );
+
+                black_box(stats);
+            },
+            criterion::BatchSize::SmallInput,
+        );
+    });
+
+    // Benchmark 3: Visibility checks after compression (should have same performance)
+    group.bench_function("visibility_check_after_compression", |b| {
+        // Setup: Create DB with 10K transactions and compress
+        let db = Arc::new(AletheiaDB::new().unwrap());
+        let node_ids: Vec<_> = (1..=10000)
+            .map(|i| {
+                db.write(|tx| {
+                    tx.create_node(
+                        "Node",
+                        PropertyMapBuilder::new().insert("id", i as i64).build(),
+                    )
+                })
+                .unwrap()
+            })
+            .collect();
+
+        db.compress_commit_log();
+
+        b.iter(|| {
+            // Measure: visibility checks should still be fast after compression
+            for node_id in node_ids.iter().take(100) {
+                let _ = db.get_node(black_box(*node_id));
+            }
+        });
+    });
+
+    group.finish();
 }
 
 criterion_group!(
     name = benches;
-    config = configure_criterion();
+    config = common::configure_criterion();
     targets = bench_read_transaction_creation,
     bench_write_transaction_creation,
     bench_closure_based_write_empty,
@@ -875,7 +961,6 @@ criterion_group!(
     bench_explicit_transaction_commit,
     bench_implicit_vs_explicit,
     bench_read_transaction_overhead,
-    bench_wal_overhead,
     bench_batch_edge_insertions,
     bench_batch_edge_updates,
     bench_batch_edge_deletions,
@@ -886,6 +971,7 @@ criterion_group!(
     bench_concurrent_transaction_creation_with_active_txs,
     bench_apply_changes_large_tx,
     bench_commit_vector_vs_nonvector,
+    bench_mvcc_compression,
 );
 
 criterion_main!(benches);

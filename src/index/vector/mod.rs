@@ -43,18 +43,15 @@
 //!
 //! # Examples
 //!
-//! ```no_run
-//! // Examples use `no_run` because no VectorIndex implementation exists yet.
-//! // VS-022 will add the HNSW implementation using usearch.
-//!
-//! use gallifreydb::index::VectorIndex;
-//! use gallifreydb::core::id::NodeId;
+//! ```rust
+//! use aletheiadb::index::VectorIndex;
+//! use aletheiadb::core::id::NodeId;
 //!
 //! fn search_similar_documents(
 //!     index: &impl VectorIndex,
 //!     query_embedding: &[f32],
 //!     limit: usize
-//! ) -> gallifreydb::utils::Result<Vec<(NodeId, f32)>> {
+//! ) -> aletheiadb::core::error::Result<Vec<(NodeId, f32)>> {
 //!     // Find top-k most similar documents
 //!     let results = index.search(query_embedding, limit)?;
 //!
@@ -71,27 +68,132 @@
 //!     query: &[f32],
 //!     allowed_ids: &[NodeId],
 //!     k: usize
-//! ) -> gallifreydb::utils::Result<Vec<(NodeId, f32)>> {
+//! ) -> aletheiadb::core::error::Result<Vec<(NodeId, f32)>> {
 //!     // Search only within a subset of nodes
 //!     index.search_with_filter(query, k, |id| allowed_ids.contains(id))
 //! }
 //! ```
 //!
-//! # Phase 2 Implementation
+//! # Implementation
 //!
-//! Phase 2 of vector search will implement this trait using HNSW (Hierarchical
-//! Navigable Small World) via the `usearch` crate, which provides:
-//! - Typical query latency: 100µs-1ms (depends on dataset size and dimensionality)
-//! - High recall (>95% for typical configurations)
-//! - Memory-efficient graph structure
-//! - Configurable index parameters (M, ef_construction, ef_search)
-//! - Concurrent insertions via internal locking
+//! AletheiaDB implements this trait using HNSW (Hierarchical Navigable Small World)
+//! via the `usearch` crate. This implementation provides:
+//!
+//! - **High Performance**: 100µs-1ms typical query latency
+//! - **High Recall**: >95% for typical configurations
+//! - **Memory Efficiency**: Memory-efficient graph structure with optional quantization
+//! - **Concurrency**: Thread-safe insertions and searches via internal locking
 //!
 //! See [`docs/VECTOR_SEARCH_DESIGN.md`](../../docs/VECTOR_SEARCH_DESIGN.md) for complete architecture.
 
+use crate::core::error::Result;
 use crate::core::id::NodeId;
 use crate::core::temporal::Timestamp;
-use crate::utils::Result;
+use std::path::PathBuf;
+use std::sync::Arc;
+
+/// Quantization level for vector storage.
+///
+/// Lower precision reduces memory usage but may impact recall slightly.
+/// - F32: Full precision (default), no recall impact
+/// - F16: Half precision, ~2x memory savings, <1% recall impact typical
+/// - I8: Quarter precision, ~4x memory savings, 1-3% recall impact typical
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Quantization {
+    /// 32-bit floating point (default, full precision)
+    #[default]
+    F32,
+    /// 16-bit floating point (half precision, ~2x memory savings)
+    F16,
+    /// 8-bit signed integer (quarter precision, ~4x memory savings)
+    I8,
+}
+
+impl Quantization {
+    /// Encode quantization level as a byte for serialization.
+    ///
+    /// Encoding:
+    /// - 0 = F32
+    /// - 1 = F16
+    /// - 2 = I8
+    pub fn to_u8(self) -> u8 {
+        match self {
+            Quantization::F32 => 0,
+            Quantization::F16 => 1,
+            Quantization::I8 => 2,
+        }
+    }
+
+    /// Decode quantization level from a byte.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the byte value is not a valid quantization encoding (>= 3).
+    pub fn from_u8(value: u8) -> Result<Self> {
+        match value {
+            0 => Ok(Quantization::F32),
+            1 => Ok(Quantization::F16),
+            2 => Ok(Quantization::I8),
+            _ => Err(crate::core::error::StorageError::CorruptedData(format!(
+                "Invalid quantization encoding: {}",
+                value
+            ))
+            .into()),
+        }
+    }
+}
+
+/// Storage mode for the vector index.
+///
+/// - InMemory: All data in RAM (default, fastest queries)
+/// - MemoryMapped: Data on disk, lazily loaded (saves RAM, slightly slower)
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum StorageMode {
+    /// Store index entirely in memory (default)
+    #[default]
+    InMemory,
+    /// Memory-map index from disk path
+    MemoryMapped {
+        /// Path to the index file
+        path: PathBuf,
+    },
+}
+
+/// Custom distance metric function.
+///
+/// Allows user-defined similarity functions for specialized use cases.
+pub struct CustomMetric {
+    /// Human-readable name for the metric
+    pub name: String,
+    /// The distance function: takes two vectors, returns distance (lower = more similar)
+    #[allow(clippy::type_complexity)]
+    pub distance_fn: Arc<dyn Fn(&[f32], &[f32]) -> f32 + Send + Sync>,
+}
+
+impl Clone for CustomMetric {
+    fn clone(&self) -> Self {
+        CustomMetric {
+            name: self.name.clone(),
+            distance_fn: Arc::clone(&self.distance_fn),
+        }
+    }
+}
+
+impl std::fmt::Debug for CustomMetric {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CustomMetric")
+            .field("name", &self.name)
+            .field("distance_fn", &"<function>")
+            .finish()
+    }
+}
+
+impl PartialEq for CustomMetric {
+    fn eq(&self, other: &Self) -> bool {
+        // Compare by name only; function pointers cannot be meaningfully compared
+        self.name == other.name
+    }
+}
 
 /// Type alias for temporal search results: Vec<(timestamp, Vec<(node_id, similarity)>)>
 pub type TemporalSearchResults = Vec<(Timestamp, Vec<(NodeId, f32)>)>;
@@ -110,6 +212,12 @@ pub enum DistanceMetric {
     Euclidean,
     /// Dot product: inner product of vectors, range (-∞, ∞)
     DotProduct,
+    /// Haversine: great circle distance for geographic coordinates
+    Haversine,
+    /// Hamming: bit-level distance for binary vectors
+    Hamming,
+    /// Tanimoto: bit-level Jaccard similarity for chemical fingerprints
+    Tanimoto,
 }
 impl DistanceMetric {
     /// Encode distance metric as a byte for serialization.
@@ -118,21 +226,30 @@ impl DistanceMetric {
     /// - 0 = Cosine
     /// - 1 = Euclidean
     /// - 2 = DotProduct
+    /// - 3 = Haversine
+    /// - 4 = Hamming
+    /// - 5 = Tanimoto
     ///
     /// # Example
     ///
     /// ```
-    /// use gallifreydb::index::vector::DistanceMetric;
+    /// use aletheiadb::index::vector::DistanceMetric;
     ///
     /// assert_eq!(DistanceMetric::Cosine.to_u8(), 0);
     /// assert_eq!(DistanceMetric::Euclidean.to_u8(), 1);
     /// assert_eq!(DistanceMetric::DotProduct.to_u8(), 2);
+    /// assert_eq!(DistanceMetric::Haversine.to_u8(), 3);
+    /// assert_eq!(DistanceMetric::Hamming.to_u8(), 4);
+    /// assert_eq!(DistanceMetric::Tanimoto.to_u8(), 5);
     /// ```
     pub fn to_u8(self) -> u8 {
         match self {
             DistanceMetric::Cosine => 0,
             DistanceMetric::Euclidean => 1,
             DistanceMetric::DotProduct => 2,
+            DistanceMetric::Haversine => 3,
+            DistanceMetric::Hamming => 4,
+            DistanceMetric::Tanimoto => 5,
         }
     }
 
@@ -140,24 +257,30 @@ impl DistanceMetric {
     ///
     /// # Errors
     ///
-    /// Returns an error if the byte value is not a valid metric encoding.
+    /// Returns an error if the byte value is not a valid metric encoding (>= 6).
     ///
     /// # Example
     ///
     /// ```
-    /// use gallifreydb::index::vector::DistanceMetric;
+    /// use aletheiadb::index::vector::DistanceMetric;
     ///
     /// assert_eq!(DistanceMetric::from_u8(0).unwrap(), DistanceMetric::Cosine);
     /// assert_eq!(DistanceMetric::from_u8(1).unwrap(), DistanceMetric::Euclidean);
     /// assert_eq!(DistanceMetric::from_u8(2).unwrap(), DistanceMetric::DotProduct);
-    /// assert!(DistanceMetric::from_u8(3).is_err());
+    /// assert_eq!(DistanceMetric::from_u8(3).unwrap(), DistanceMetric::Haversine);
+    /// assert_eq!(DistanceMetric::from_u8(4).unwrap(), DistanceMetric::Hamming);
+    /// assert_eq!(DistanceMetric::from_u8(5).unwrap(), DistanceMetric::Tanimoto);
+    /// assert!(DistanceMetric::from_u8(6).is_err());
     /// ```
     pub fn from_u8(value: u8) -> Result<Self> {
         match value {
             0 => Ok(DistanceMetric::Cosine),
             1 => Ok(DistanceMetric::Euclidean),
             2 => Ok(DistanceMetric::DotProduct),
-            _ => Err(crate::utils::error::StorageError::CorruptedData(format!(
+            3 => Ok(DistanceMetric::Haversine),
+            4 => Ok(DistanceMetric::Hamming),
+            5 => Ok(DistanceMetric::Tanimoto),
+            _ => Err(crate::core::error::StorageError::CorruptedData(format!(
                 "Invalid distance metric encoding: {}",
                 value
             ))
@@ -169,7 +292,7 @@ impl DistanceMetric {
 /// Trait for vector indexes supporting approximate k-nearest neighbor search.
 ///
 /// This trait abstracts over different vector index implementations, allowing
-/// GallifreyDB to support multiple ANN (Approximate Nearest Neighbor) algorithms
+/// AletheiaDB to support multiple ANN (Approximate Nearest Neighbor) algorithms
 /// while maintaining a consistent query interface.
 ///
 /// # Invariants
@@ -226,11 +349,12 @@ pub trait VectorIndex: Send + Sync {
     ///
     /// # Examples
     ///
-    /// ```no_run
-    /// // Example uses `no_run` - no implementation exists until VS-022
-    /// # use gallifreydb::index::VectorIndex;
-    /// # use gallifreydb::core::id::NodeId;
-    /// # fn example(index: &impl VectorIndex) -> gallifreydb::utils::Result<()> {
+    /// ```rust
+    /// # use aletheiadb::index::VectorIndex;
+    /// # use aletheiadb::core::id::NodeId;
+    /// # use aletheiadb::index::vector::{HnswIndexBuilder, DistanceMetric};
+    /// # fn main() -> aletheiadb::core::error::Result<()> {
+    /// # let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine).build()?;
     /// let node_id = NodeId::new(123).unwrap();
     /// let embedding = vec![0.1, 0.2, 0.3, 0.4];
     /// index.add(node_id, &embedding)?;
@@ -254,11 +378,12 @@ pub trait VectorIndex: Send + Sync {
     ///
     /// # Examples
     ///
-    /// ```no_run
-    /// // Example uses `no_run` - no implementation exists until VS-022
-    /// # use gallifreydb::index::VectorIndex;
-    /// # use gallifreydb::core::id::NodeId;
-    /// # fn example(index: &impl VectorIndex) -> gallifreydb::utils::Result<()> {
+    /// ```rust
+    /// # use aletheiadb::index::VectorIndex;
+    /// # use aletheiadb::core::id::NodeId;
+    /// # use aletheiadb::index::vector::{HnswIndexBuilder, DistanceMetric};
+    /// # fn main() -> aletheiadb::core::error::Result<()> {
+    /// # let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine).build()?;
     /// let node_id = NodeId::new(123).unwrap();
     /// index.remove(node_id)?;
     /// # Ok(())
@@ -291,10 +416,11 @@ pub trait VectorIndex: Send + Sync {
     ///
     /// # Examples
     ///
-    /// ```no_run
-    /// // Example uses `no_run` - no implementation exists until VS-022
-    /// # use gallifreydb::index::VectorIndex;
-    /// # fn example(index: &impl VectorIndex) -> gallifreydb::utils::Result<()> {
+    /// ```rust
+    /// # use aletheiadb::index::VectorIndex;
+    /// # use aletheiadb::index::vector::{HnswIndexBuilder, DistanceMetric};
+    /// # fn main() -> aletheiadb::core::error::Result<()> {
+    /// # let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine).build()?;
     /// let query = vec![0.5, 0.3, 0.1, 0.9];
     /// let results = index.search(&query, 10)?;
     ///
@@ -340,12 +466,13 @@ pub trait VectorIndex: Send + Sync {
     ///
     /// # Examples
     ///
-    /// ```no_run
-    /// // Example uses `no_run` - no implementation exists until VS-022
-    /// # use gallifreydb::index::VectorIndex;
-    /// # use gallifreydb::core::id::NodeId;
+    /// ```rust
+    /// # use aletheiadb::index::VectorIndex;
+    /// # use aletheiadb::core::id::NodeId;
     /// # use std::collections::HashSet;
-    /// # fn example(index: &impl VectorIndex) -> gallifreydb::utils::Result<()> {
+    /// # use aletheiadb::index::vector::{HnswIndexBuilder, DistanceMetric};
+    /// # fn main() -> aletheiadb::core::error::Result<()> {
+    /// # let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine).build()?;
     /// let query = vec![0.5, 0.3, 0.1, 0.9];
     /// let allowed = HashSet::from([NodeId::new(1).unwrap(), NodeId::new(5).unwrap(), NodeId::new(10).unwrap()]);
     ///
@@ -367,11 +494,13 @@ pub trait VectorIndex: Send + Sync {
     ///
     /// # Examples
     ///
-    /// ```no_run
-    /// // Example uses `no_run` - no implementation exists until VS-022
-    /// # use gallifreydb::index::VectorIndex;
-    /// # fn example(index: &impl VectorIndex) {
+    /// ```rust
+    /// # use aletheiadb::index::VectorIndex;
+    /// # use aletheiadb::index::vector::{HnswIndexBuilder, DistanceMetric};
+    /// # fn main() -> aletheiadb::core::error::Result<()> {
+    /// # let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine).build()?;
     /// println!("Index contains {} vectors", index.len());
+    /// # Ok(())
     /// # }
     /// ```
     #[must_use]
@@ -383,12 +512,14 @@ pub trait VectorIndex: Send + Sync {
     ///
     /// # Examples
     ///
-    /// ```no_run
-    /// // Example uses `no_run` - no implementation exists until VS-022
-    /// # use gallifreydb::index::VectorIndex;
-    /// # fn example(index: &impl VectorIndex) {
+    /// ```rust
+    /// # use aletheiadb::index::VectorIndex;
+    /// # use aletheiadb::index::vector::{HnswIndexBuilder, DistanceMetric};
+    /// # fn main() -> aletheiadb::core::error::Result<()> {
+    /// # let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine).build()?;
     /// let dims = index.dimensions();
     /// println!("This index accepts {}-dimensional vectors", dims);
+    /// # Ok(())
     /// # }
     /// ```
     #[must_use]
@@ -411,15 +542,20 @@ pub trait VectorIndex: Send + Sync {
     ///
     /// # Examples
     ///
-    /// ```no_run
-    /// // Example uses `no_run` - no implementation exists until VS-022
-    /// # use gallifreydb::index::{VectorIndex, DistanceMetric};
-    /// # fn example(index: &impl VectorIndex) {
+    /// ```rust
+    /// # use aletheiadb::index::{VectorIndex, DistanceMetric};
+    /// # use aletheiadb::index::vector::HnswIndexBuilder;
+    /// # fn main() -> aletheiadb::core::error::Result<()> {
+    /// # let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine).build()?;
     /// match index.distance_metric() {
     ///     DistanceMetric::Cosine => println!("Using cosine similarity"),
     ///     DistanceMetric::Euclidean => println!("Using Euclidean distance"),
     ///     DistanceMetric::DotProduct => println!("Using dot product"),
+    ///     DistanceMetric::Haversine => println!("Using Haversine distance"),
+    ///     DistanceMetric::Hamming => println!("Using Hamming distance"),
+    ///     DistanceMetric::Tanimoto => println!("Using Tanimoto similarity"),
     /// }
+    /// # Ok(())
     /// # }
     /// ```
     #[must_use]
@@ -431,18 +567,85 @@ pub trait VectorIndex: Send + Sync {
     ///
     /// # Examples
     ///
-    /// ```no_run
-    /// // Example uses `no_run` - no implementation exists until VS-022
-    /// # use gallifreydb::index::VectorIndex;
-    /// # fn example(index: &impl VectorIndex) {
+    /// ```rust
+    /// # use aletheiadb::index::VectorIndex;
+    /// # use aletheiadb::index::vector::{HnswIndexBuilder, DistanceMetric};
+    /// # fn main() -> aletheiadb::core::error::Result<()> {
+    /// # let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine).build()?;
     /// if index.is_empty() {
     ///     println!("No vectors indexed yet");
     /// }
+    /// # Ok(())
     /// # }
     /// ```
     #[must_use]
     fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+
+    /// Adds multiple vectors in a batch operation.
+    ///
+    /// More efficient than calling `add()` repeatedly for bulk insertions.
+    /// Default implementation calls `add()` sequentially.
+    fn add_batch(&self, items: &[(NodeId, Vec<f32>)]) -> Result<()> {
+        for (id, vec) in items {
+            self.add(*id, vec)?;
+        }
+        Ok(())
+    }
+
+    /// Adds multiple vectors in a batch operation using references.
+    ///
+    /// This allows adding vectors without transferring ownership, avoiding clones.
+    /// Default implementation calls `add()` sequentially.
+    fn add_batch_ref(&self, items: &[(NodeId, &[f32])]) -> Result<()> {
+        for (id, vec) in items {
+            self.add(*id, vec)?;
+        }
+        Ok(())
+    }
+
+    /// Removes multiple vectors in a batch operation.
+    ///
+    /// Default implementation calls `remove()` sequentially.
+    fn remove_batch(&self, ids: &[NodeId]) -> Result<()> {
+        for id in ids {
+            self.remove(*id)?;
+        }
+        Ok(())
+    }
+
+    /// Saves the index to a file path.
+    ///
+    /// Returns `Err(UnsupportedOperation)` if the implementation doesn't support persistence.
+    fn save(&self, _path: &std::path::Path) -> Result<()> {
+        Err(crate::core::error::Error::Vector(
+            crate::core::error::VectorError::IndexError(
+                "save not supported by this index type".to_string(),
+            ),
+        ))
+    }
+
+    /// Returns the approximate memory usage of this index in bytes.
+    ///
+    /// Default returns 0 (unknown).
+    fn memory_usage(&self) -> usize {
+        0
+    }
+
+    /// Returns the quantization level of this index.
+    ///
+    /// Default returns F32 (full precision).
+    fn quantization(&self) -> Quantization {
+        Quantization::F32
+    }
+
+    /// Compacts the index, reclaiming space from deleted entries.
+    ///
+    /// For indexes that support native deletes, this may be a no-op.
+    /// For indexes using soft deletes, this rebuilds the index.
+    fn compact(&self) -> Result<()> {
+        Ok(())
     }
 }
 
@@ -468,6 +671,46 @@ mod tests {
         assert_eq!(metric, DistanceMetric::Cosine);
         assert_ne!(metric, DistanceMetric::Euclidean);
     }
+
+    #[test]
+    fn test_quantization_default() {
+        assert_eq!(Quantization::default(), Quantization::F32);
+    }
+
+    #[test]
+    fn test_storage_mode_default() {
+        assert!(matches!(StorageMode::default(), StorageMode::InMemory));
+    }
+
+    #[test]
+    fn test_distance_metric_new_variants() {
+        // Test new variants serialize/deserialize correctly
+        assert_eq!(DistanceMetric::Haversine.to_u8(), 3);
+        assert_eq!(DistanceMetric::Hamming.to_u8(), 4);
+        assert_eq!(DistanceMetric::Tanimoto.to_u8(), 5);
+        assert_eq!(
+            DistanceMetric::from_u8(3).unwrap(),
+            DistanceMetric::Haversine
+        );
+        assert_eq!(DistanceMetric::from_u8(4).unwrap(), DistanceMetric::Hamming);
+        assert_eq!(
+            DistanceMetric::from_u8(5).unwrap(),
+            DistanceMetric::Tanimoto
+        );
+    }
+
+    #[test]
+    fn test_quantization_variants() {
+        assert_eq!(Quantization::F32.to_u8(), 0);
+        assert_eq!(Quantization::F16.to_u8(), 1);
+        assert_eq!(Quantization::I8.to_u8(), 2);
+
+        assert_eq!(Quantization::from_u8(0).unwrap(), Quantization::F32);
+        assert_eq!(Quantization::from_u8(1).unwrap(), Quantization::F16);
+        assert_eq!(Quantization::from_u8(2).unwrap(), Quantization::I8);
+
+        assert!(Quantization::from_u8(3).is_err());
+    }
 }
 
 // HNSW implementation
@@ -482,5 +725,107 @@ pub use hnsw::{HnswConfig, HnswIndex, HnswIndexBuilder};
 // Re-export temporal types for convenience
 pub use temporal::{
     DriftMetric, RetentionPolicy, SnapshotInfo, SnapshotStrategy, TemporalVectorConfig,
-    TemporalVectorIndex,
+    TemporalVectorIndex, VectorIndexObserver,
+};
+
+// Sparse vector index (Phase 5)
+pub mod sparse;
+
+// Re-export sparse types for convenience
+pub use sparse::{
+    ScoringMethod, SparseIndexConfig, SparseIndexStats, SparseVectorIndex, hybrid_fusion,
+    reciprocal_rank_fusion,
+};
+
+// Sharded vector index (VS-103)
+pub mod sharded;
+
+// Re-export sharded types for convenience
+pub use sharded::{
+    RebalanceConfig as ShardedRebalanceConfig, ShardStats, ShardedVectorConfig, ShardedVectorIndex,
+    ShardingStrategy,
+};
+
+// ============================================================================
+// Shared utilities for distributed and sharded vector indexes
+// ============================================================================
+
+/// Wrapper for f32 that implements Ord for use in BinaryHeap.
+///
+/// NaN values are treated as less than all other values for consistent ordering.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct OrderedFloat(pub f32);
+
+impl Eq for OrderedFloat {}
+
+impl PartialOrd for OrderedFloat {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for OrderedFloat {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.0
+            .partial_cmp(&other.0)
+            .unwrap_or_else(|| match (self.0.is_nan(), other.0.is_nan()) {
+                (true, true) => std::cmp::Ordering::Equal,
+                (true, false) => std::cmp::Ordering::Less,
+                (false, true) => std::cmp::Ordering::Greater,
+                (false, false) => unreachable!(),
+            })
+    }
+}
+
+/// Merge search results from multiple sources using a min-heap for top-k efficiency.
+///
+/// O(n log k) where n is total results and k is the desired count.
+pub(crate) fn merge_top_k_results(
+    all_results: Vec<Vec<(crate::core::id::NodeId, f32)>>,
+    k: usize,
+) -> Vec<(crate::core::id::NodeId, f32)> {
+    use std::cmp::Reverse;
+    use std::collections::BinaryHeap;
+
+    if k == 0 {
+        return Vec::new();
+    }
+
+    let mut heap: BinaryHeap<(Reverse<OrderedFloat>, crate::core::id::NodeId)> =
+        BinaryHeap::with_capacity(k + 1);
+
+    for results in all_results {
+        for (id, score) in results {
+            let ordered_score = OrderedFloat(score);
+
+            if heap.len() < k {
+                heap.push((Reverse(ordered_score), id));
+            } else if let Some(&(Reverse(min_score), _)) = heap.peek()
+                && ordered_score > min_score
+            {
+                heap.pop();
+                heap.push((Reverse(ordered_score), id));
+            }
+        }
+    }
+
+    let mut results: Vec<(crate::core::id::NodeId, f32)> = heap
+        .into_iter()
+        .map(|(Reverse(score), id)| (id, score.0))
+        .collect();
+
+    results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+    results
+}
+
+// Distributed vector index (VS-107)
+pub mod distributed;
+
+// Re-export distributed types for convenience
+pub use distributed::{
+    CircuitBreakerConfig as DistributedCircuitBreakerConfig, CircuitState, DistributedError,
+    DistributedIndexStats, DistributedVectorConfig, DistributedVectorIndex, MockVectorNodeClient,
+    NodeCircuitBreaker, NodeConnection, NodeConnectionStats, RECOMMENDED_IMBALANCE_THRESHOLD,
+    RebalanceStats, RoutingStrategy, VectorNodeClient, VectorNodeConfig,
 };

@@ -13,7 +13,7 @@
 //! # Example
 //!
 //! ```ignore
-//! use gallifreydb::embeddings::{EmbeddingService, providers::huggingface::*};
+//! use aletheiadb::embeddings::{EmbeddingService, providers::huggingface::*};
 //! use std::sync::Arc;
 //!
 //! let config = HuggingFaceConfig::from_env(
@@ -40,7 +40,7 @@ pub struct HuggingFaceConfig {
     pub model_id: String,
     /// Expected dimensions (must match model)
     pub dimensions: usize,
-    /// API URL (default: https://api-inference.huggingface.co)
+    /// API URL (default: <https://api-inference.huggingface.co>)
     pub base_url: Option<String>,
     /// Request timeout
     pub timeout_secs: u64,
@@ -79,7 +79,19 @@ impl HuggingFaceConfig {
     /// )?;
     /// ```
     pub fn from_env(model_id: String, dimensions: usize) -> Result<Self, EmbeddingError> {
-        let api_token = std::env::var("HF_TOKEN").map_err(|_| {
+        Self::from_env_with_provider(model_id, dimensions, |k| std::env::var(k))
+    }
+
+    /// Internal helper to allow mocking environment variables in tests
+    pub(crate) fn from_env_with_provider<F>(
+        model_id: String,
+        dimensions: usize,
+        env_provider: F,
+    ) -> Result<Self, EmbeddingError>
+    where
+        F: Fn(&str) -> Result<String, std::env::VarError>,
+    {
+        let api_token = env_provider("HF_TOKEN").map_err(|_| {
             EmbeddingError::ConfigError("HF_TOKEN environment variable not set".to_string())
         })?;
 
@@ -336,22 +348,15 @@ impl EmbeddingProvider for HuggingFaceProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-
-    lazy_static::lazy_static! {
-        static ref ENV_MUTEX: Mutex<()> = Mutex::new(());
-    }
 
     #[test]
     fn test_config_from_missing_env() {
-        let _guard = ENV_MUTEX.lock().unwrap(); // Lock before manipulating env
-        let original_var = std::env::var("HF_TOKEN").ok();
+        // Simulate missing environment variable using the provider pattern
+        let result =
+            HuggingFaceConfig::from_env_with_provider("test-model".to_string(), 384, |_| {
+                Err(std::env::VarError::NotPresent)
+            });
 
-        unsafe {
-            std::env::remove_var("HF_TOKEN");
-        }
-
-        let result = HuggingFaceConfig::from_env("test-model".to_string(), 384);
         assert!(result.is_err());
         match result {
             Err(EmbeddingError::ConfigError(msg)) => {
@@ -359,14 +364,7 @@ mod tests {
             }
             _ => panic!("Expected ConfigError"),
         }
-
-        // Restore original value
-        if let Some(val) = original_var {
-            unsafe {
-                std::env::set_var("HF_TOKEN", val);
-            }
-        }
-    } // Mutex is unlocked when _guard goes out of scope
+    }
 
     #[test]
     fn test_config_builder() {

@@ -1,6 +1,6 @@
-# Embedding Generation for GallifreyDB
+# Embedding Generation for AletheiaDB
 
-GallifreyDB provides optional embedding generation capabilities through a plugin-based provider system. This allows you to generate vector embeddings from text using various services and local models, while maintaining the flexibility to bring your own embeddings.
+AletheiaDB provides optional embedding generation capabilities through a plugin-based provider system. This allows you to generate vector embeddings from text using various services and local models, while maintaining the flexibility to bring your own embeddings.
 
 ## Table of Contents
 
@@ -40,7 +40,7 @@ User Application
     │
     ├─→ EmbeddingService (optional) ─→ Providers (OpenAI, HF, ONNX, Ollama)
     │                                          ↓
-    └─→ GallifreyDB ←──────────────── Vec<f32> embeddings
+    └─→ AletheiaDB ←──────────────── Vec<f32> embeddings
 ```
 
 **Key Principle**: The database layer is pure - it only stores and indexes vectors. The embedding service is a separate, optional layer that generates embeddings before storage.
@@ -53,7 +53,7 @@ Add the embedding features you need to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-gallifreydb = { version = "0.1", features = ["embedding-openai"] }
+aletheiadb = { version = "0.1", features = ["embedding-openai"] }
 ```
 
 Available features:
@@ -67,8 +67,8 @@ Available features:
 ### 2. Basic Usage
 
 ```rust
-use gallifreydb::embeddings::{EmbeddingService, providers::openai::*};
-use gallifreydb::{GallifreyDB, PropertyMapBuilder};
+use aletheiadb::embeddings::{EmbeddingService, providers::openai::*};
+use aletheiadb::{AletheiaDB, PropertyMapBuilder};
 use std::sync::Arc;
 
 #[tokio::main]
@@ -79,11 +79,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let service = EmbeddingService::new(provider);
 
     // 2. Generate embedding
-    let text = "GallifreyDB is a bi-temporal graph database";
+    let text = "AletheiaDB is a bi-temporal graph database";
     let embedding = service.embed(text).await?;
 
     // 3. Store in database
-    let db = GallifreyDB::new();
+    let db = AletheiaDB::new();
     let node_id = db.create_node(
         "Document",
         PropertyMapBuilder::new()
@@ -111,7 +111,7 @@ export OPENAI_API_KEY=sk-...
 #### Configuration
 
 ```rust
-use gallifreydb::embeddings::providers::openai::*;
+use aletheiadb::embeddings::providers::openai::*;
 
 // From environment variable
 let config = OpenAIConfig::from_env(OpenAIModel::TextEmbedding3Small)?;
@@ -160,7 +160,7 @@ export HF_TOKEN=hf_...
 #### Configuration
 
 ```rust
-use gallifreydb::embeddings::providers::huggingface::*;
+use aletheiadb::embeddings::providers::huggingface::*;
 
 // From environment variable
 let config = HuggingFaceConfig::from_env(
@@ -209,7 +209,7 @@ ollama pull nomic-embed-text
 #### Configuration
 
 ```rust
-use gallifreydb::embeddings::providers::ollama::*;
+use aletheiadb::embeddings::providers::ollama::*;
 
 // Use presets
 let config = OllamaConfig::nomic_embed_text();     // 768 dims
@@ -256,7 +256,7 @@ Ultra-fast local inference using ONNX Runtime. Best for maximum performance and 
 #### Configuration
 
 ```rust
-use gallifreydb::embeddings::providers::onnx::*;
+use aletheiadb::embeddings::providers::onnx::*;
 
 // Use preset
 let config = OnnxConfig::default();  // all-MiniLM-L6-v2
@@ -324,7 +324,7 @@ let service = EmbeddingService::new(provider)
 ### Error Handling
 
 ```rust
-use gallifreydb::embeddings::EmbeddingError;
+use aletheiadb::embeddings::EmbeddingError;
 
 match service.embed(text).await {
     Ok(embedding) => {

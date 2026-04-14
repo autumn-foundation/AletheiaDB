@@ -81,7 +81,7 @@ jobs:
           model: claude-sonnet-4.5
           max_turns: 100
           prompt: |
-            You are an autonomous developer for GallifreyDB, a high-performance bi-temporal graph database.
+            You are an autonomous developer for AletheiaDB, a high-performance bi-temporal graph database.
 
             **Your Mission:**
             Work on issue #${{ steps.find-issue.outputs.issue_number || steps.manual-override.outputs.issue_number }} and create a high-quality pull request.

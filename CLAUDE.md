@@ -1,4 +1,4 @@
-# GallifreyDB Architecture & Development Guidelines
+# AletheiaDB Architecture & Development Guidelines
 
 ## ⚠️ CRITICAL: NEVER COMMIT DIRECTLY TO TRUNK ⚠️
 
@@ -16,87 +16,38 @@ This is enforced by a pre-commit hook that will block direct commits to trunk.
 
 ## Project Overview
 
-GallifreyDB is a high-performance bi-temporal graph database written in Rust. It tracks both **valid time** (when facts were true in reality) and **transaction time** (when facts were recorded in the database), while maintaining performance comparable to regular graph databases for current-state queries.
+AletheiaDB is a high-performance bi-temporal graph database written in Rust. It tracks both **valid time** (when facts were true in reality) and **transaction time** (when facts were recorded in the database), while maintaining performance comparable to regular graph databases for current-state queries.
 
 **Primary Use Case - LLM Integration**: Enable reasoning LLMs to query not just current knowledge, but see how that knowledge evolved over time. This allows LLMs to understand temporal context, track when facts changed, reason about causality, and detect contradictions through provenance tracking.
 
-## Architecture Principles
+## Quick Architecture Reference
 
-### 1. Performance First
+### Core Principles
 
-**Current-State Queries Must Be Fast:**
-- Current state stored separately from historical data (hybrid storage architecture)
-- Zero abstraction overhead for non-temporal queries
-- CSR (Compressed Sparse Row) adjacency representation for cache-friendly traversals
-- **Target**: <1µs single-hop traversal, <100µs for 3-hop traversal
+1. **Performance First**: Current-state queries <1µs single-hop, temporal queries <10ms reconstruction
+2. **Storage Efficiency**: Anchor+delta compression, <2X overhead vs non-temporal storage
+3. **Correctness**: ACID guarantees via WAL, MVCC snapshot isolation, crash recovery with checkpoint-based replay
 
-**Temporal Queries Must Be Efficient:**
-- Anchor+delta compression reduces storage 5-6X
-- Temporal B-Tree indexes for range queries
-- Anchor-based reconstruction skips unnecessary versions
-- **Target**: <10ms for point-in-time reconstruction
-
-### 2. Storage Efficiency
-
-**Compression Strategy:**
-- Create anchor (full snapshot) every 10 versions (configurable)
-- Delta encoding for incremental changes
-- Copy-on-write with `Arc<T>` for property deduplication
-- String interning for labels and property keys
-- **Target**: <2X overhead vs non-temporal storage
-
-**Immutable History:**
-- Historical versions are immutable after creation
-- Enables aggressive caching and compression
-- Safe for concurrent access without locks
-
-### 3. Correctness Guarantees
-
-**Temporal Consistency:**
-- Transaction time is monotonically increasing
-- Valid time can be retroactive but must be consistent
-- No temporal paradoxes (e.g., deleting an entity before it was created)
-
-**ACID Properties:**
-- **Atomicity**: WAL ensures atomic commits
-- **Consistency**: Invariants checked on write
-- **Isolation**: MVCC provides snapshot isolation
-- **Durability**: WAL + fsync guarantees
-
-## Design Patterns
-
-### Hybrid Storage Architecture
+### Hybrid Storage
 
 ```
-┌─────────────────────────────────────────────────────┐
-│              Query Engine                            │
-│  - Temporal Query Planner                           │
-│  - Graph Traversal Engine                           │
-└─────────────────────────────────────────────────────┘
-                        │
-        ┌───────────────┴───────────────┐
-        │                               │
-┌───────▼─────────┐          ┌─────────▼─────────┐
-│ Current Storage │          │ Historical Storage │
-│  (Fast Path)    │          │  (Temporal Path)  │
-│                 │          │                   │
-│ - Live graph    │          │ - Version chains  │
-│ - Hot indexes   │          │ - Anchor+delta    │
-│ - No temporal   │          │ - Compressed      │
-└─────────────────┘          └───────────────────┘
+Query Engine
+     │
+     ├─→ Current Storage (fast path, no temporal overhead)
+     └─→ Historical Storage (temporal path, anchor+delta compressed)
+
+Recovery Flow:
+   Startup → Load Checkpoint → Replay WAL → Restore Indexes → Ready
 ```
 
-**When to Use Each:**
-- **Current**: All non-temporal queries, latest state access
-- **Historical**: Time-travel, audit trails, temporal analysis, LLM reasoning
+**Durability & Recovery:**
+- **Synchronous Mode**: fsync on every commit, no data loss
+- **GroupCommit Mode**: batched fsync with waiting, ACID-compliant, ~100K+/sec
+- **Async Mode**: background fsync, eventual consistency, ~500K+/sec
+- **Recovery**: Checkpoint-based WAL replay, <5s for 10K nodes/50K edges
+- **Checkpoints**: Periodic snapshots for fast startup without full WAL replay
 
-### Temporal Query Processing
-
-**Query Types:**
-
-1. **Time Point Query** (as of timestamp T): Lookup in temporal index → Find nearest anchor ≤ T → Apply deltas → Return state
-2. **Time Range Query** (between T1 and T2): Range scan temporal index → Reconstruct each version → Stream results
-3. **Knowledge Evolution Query** (for LLMs): Track how entity changed over time → Provenance and sources → Identify when understanding shifted
+**See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for complete architecture documentation.**
 
 ## Rust Coding Standards
 
@@ -122,7 +73,6 @@ GallifreyDB is a high-performance bi-temporal graph database written in Rust. It
 
 ### Coverage Requirements
 
-GallifreyDB enforces strict code coverage thresholds:
 - **Minimum 85% line coverage** (current: 86.45%)
 - **Minimum 88% function coverage** (current: 89.10%)
 - **Minimum 88% region coverage** (current: 88.91%)
@@ -133,65 +83,97 @@ GallifreyDB enforces strict code coverage thresholds:
 just test              # Run all tests
 just coverage          # Generate HTML coverage report
 just coverage-check    # Verify coverage meets thresholds
-just bench             # Run benchmarks
+just bench             # Run benchmarks (includes recovery benchmarks)
 just check-all         # Full quality check (tests, coverage, lint)
 ```
 
-### Test Types Required
+### Mandatory Benchmarks
 
-1. **Unit Tests**: Test each module in isolation
-2. **Integration Tests**: End-to-end workflows
-3. **Property-Based Tests**: Use `proptest` for temporal invariants
-4. **Performance Benchmarks**: Required for critical paths (see below)
+All performance-critical features must include benchmarks:
 
-### Performance Benchmarks
+- **Current-state queries**: <1µs single-hop traversal
+- **Temporal queries**: <10ms reconstruction
+- **WAL operations**: Throughput targets per durability mode
+- **Recovery operations**: <5s for medium datasets (10K nodes, 50K edges)
+  - Checkpoint creation/loading
+  - WAL replay with various entry counts
+  - Full crash recovery scenarios
+- **Vector search**: <10ms k-NN (k=10, 1M vectors)
+- **Hybrid queries**: <30ms graph+vector+temporal
 
-**Required Benchmarks:**
-1. Current-state single-hop traversal (<1µs)
-2. Current-state 3-hop traversal (<100µs)
-3. Time-travel reconstruction (<10ms)
-4. Batch insertion throughput (>100k edges/sec)
-5. Storage overhead (<2X vs non-temporal)
+### Miri - Undefined Behavior Detection
 
-## WAL Format and Migration
+All `unsafe` code must be validated with [Miri](https://github.com/rust-lang/miri).
+
+**Quick Commands:**
+```bash
+just miri-setup        # Install miri (one-time)
+just miri              # Run miri on all tests
+just miri-test name    # Run specific test
+```
+
+**When to run Miri:**
+- Before committing any changes to `unsafe` blocks
+- After modifying SIMD, lock-free, or concurrent code
+- When working with raw pointers, transmute, or FFI
+
+**See [docs/MIRI.md](docs/MIRI.md) for complete guide, configuration, and troubleshooting.**
+
+## Major Features
+
+### Write-Ahead Log (WAL)
+
+Striped lock-free ring buffer architecture for high-throughput concurrent writes.
+
+**Performance:**
+- **Synchronous**: ~1.5ms latency, ~600/sec throughput, Full ACID
+- **GroupCommit**: ~10-50ms latency, ~100K+/sec throughput, Full ACID
+- **Async**: <100ns latency, ~500K+/sec throughput, Eventual durability
+
+**Batch Append API (Issue #219):**
+For high-throughput workloads with multiple operations, use `append_batch()` for significant performance improvements:
+- Single atomic LSN allocation for all operations
+- Better CPU cache locality during serialization
+- 20-50% throughput improvement for batch sizes > 10
 
 **See [docs/WAL.md](docs/WAL.md) for comprehensive WAL documentation.**
 
-### Quick Reference
+### Persistence Systems
 
-**Current Version**: 2 (binary format with "GWAL" magic bytes)
+AletheiaDB provides three persistence layers for different needs:
 
-**Key Features**:
-- Version-aware format with automatic detection
-- Full property and temporal interval serialization
-- Checksum verification for data integrity
-- Backward compatible with V1 (with data loss warnings)
+**1. WAL (Write-Ahead Log)**
+- Transaction durability and crash recovery
+- Required for data safety
+- ~100K+/sec throughput (GroupCommit mode)
 
-**Migration**:
+**2. Index Persistence**
+- Fast cold starts (6-30x faster than WAL replay)
+- Saves current state to disk
+- Zstd compression (60-75% size reduction)
+
+**3. Cold Storage (Redb)**
+- Unlimited bi-temporal history on disk
+- Three-tier architecture (Hot RAM → Warm Cache → Cold Disk)
+- Enables time-travel queries over years of data
+
+**See [docs/guides/PERSISTENCE.md](docs/guides/PERSISTENCE.md) for comprehensive persistence documentation.**
+
+### Vector Storage & Indexing
+
+Dense vector embeddings as first-class properties with HNSW k-NN search for semantic similarity.
+
+**Quick Start:**
 ```rust
-use gallifreydb::storage::wal::migrate_wal_directory;
+use aletheiadb::{AletheiaDB, PropertyMapBuilder};
+use aletheiadb::index::vector::{HnswConfig, DistanceMetric};
 
-// Migrate all segments (creates .bak backups)
-let results = migrate_wal_directory(Path::new("data/wal/"))?;
-```
-
-**Adding New Versions**: See [docs/WAL.md](docs/WAL.md#adding-new-wal-versions) for the 5-step process.
-
-## Vector Storage & Indexing
-
-GallifreyDB supports dense vector embeddings as first-class properties with HNSW k-NN search for semantic similarity, enabling RAG workflows and LLM integration with full bi-temporal versioning.
-
-### Quick Start
-
-```rust
-use gallifreydb::{GallifreyDB, PropertyMapBuilder};
-use gallifreydb::index::vector::{HnswConfig, DistanceMetric};
-
-let db = GallifreyDB::new();
+let db = AletheiaDB::new();
 
 // Enable vector indexing
-let config = HnswConfig::new(384, DistanceMetric::Cosine);
-db.enable_vector_index("embedding", config)?;
+db.vector_index("embedding")
+    .hnsw(HnswConfig::new(384, DistanceMetric::Cosine))
+    .enable()?;
 
 // Store node with embedding - automatically indexed!
 let node_id = db.create_node("Document",
@@ -205,134 +187,381 @@ let node_id = db.create_node("Document",
 let similar = db.find_similar(node_id, 10)?;
 ```
 
-### Key Features
+**Key Features:**
+- Multi-property vector indexes (multiple embeddings per database)
+- Temporal vector indexes (track embedding evolution over time)
+- Semantic drift tracking (detect knowledge changes)
+- Full bi-temporal versioning
 
-| Feature | Details |
-|---------|---------|
-| **Storage** | Vectors as `Arc<[f32]>`, efficient cloning |
-| **Dimensions** | Up to 100,000 (common: 384, 768, 1536, 3072) |
-| **Distance Metrics** | Cosine, Euclidean, DotProduct |
-| **Indexing** | HNSW for sub-linear k-NN search |
-| **Temporal** | Full versioning - track embedding evolution |
-| **Auto-indexing** | Automatic on create/update with rollback |
+**See:**
+- [docs/guides/vector-search-integration.md](docs/guides/vector-search-integration.md) - Complete API reference
+- [docs/guides/vector-search-performance.md](docs/guides/vector-search-performance.md) - Tuning guide
+- [docs/VECTOR_SEARCH_DESIGN.md](docs/VECTOR_SEARCH_DESIGN.md) - Architecture and roadmap
 
-### Similarity Functions
+### Hybrid Query API
 
+Unified API combining **graph traversal + vector similarity + bi-temporal queries**.
+
+**Quick Start:**
 ```rust
-use gallifreydb::core::vector::{cosine_similarity, euclidean_distance, dot_product};
+use aletheiadb::query::QueryBuilder;
 
-// Choose the right metric for your use case
-let sim = cosine_similarity(&a, &b)?;      // Semantic similarity
-let dist = euclidean_distance(&a, &b)?;    // Spatial clustering
-let dot = dot_product(&a, &b)?;            // MaxSim, ColBERT
+// Simple: Graph + Vector hybrid
+let results = db.traverse_and_rank(alice_id, "KNOWS", &bob_embedding, 10)?;
+
+// Complex: Full hybrid with builder
+let results = db.query()
+    .as_of(valid_time, tx_time)
+    .start(alice_id)
+    .traverse("KNOWS")
+    .rank_by_similarity(&bob_embedding, 10)
+    .filter(Predicate::gt("score", 0.8))
+    .execute(&db)?;
 ```
 
-### Comprehensive Documentation
+**Performance Targets:**
+- Single node lookup: <1µs
+- 3-hop traversal: <100µs
+- k-NN search (k=10, 1M vectors): <10ms
+- Graph+Vector hybrid: <20ms
+- Full hybrid (temporal): <30ms
 
-- **[Integration Guide](docs/guides/vector-search-integration.md)** - Complete API reference and examples
-- **[Performance Guide](docs/guides/vector-search-performance.md)** - Tuning HNSW parameters
-- **[Troubleshooting Guide](docs/guides/vector-search-troubleshooting.md)** - Common issues and solutions
-- **[Design Document](docs/VECTOR_SEARCH_DESIGN.md)** - Architecture and roadmap (Phases 3-5)
+**See [docs/guides/hybrid-query-guide.md](docs/guides/hybrid-query-guide.md) for complete guide.**
 
-## Embedding Generation (Optional)
+### Tiered Storage
 
-GallifreyDB provides **optional** embedding providers via feature flags. Embedding generation is separate from the database - generate embeddings first, then store them.
+Three-tier storage architecture for unlimited historical depth while preserving current-state query performance.
 
-### Quick Start
+**Architecture:**
+- **Hot Tier (RAM)**: Current state, 22-70ns lookup
+- **Warm Tier (LRU Cache)**: Recently accessed history, <1µs lookup
+- **Cold Tier (Redb)**: Compressed historical versions, <1ms lookup
 
+**Quick Start:**
 ```rust
-use gallifreydb::embeddings::{EmbeddingService, providers::openai::*};
+use aletheiadb::{AletheiaDB, config::AletheiaDBConfig};
+use aletheiadb::config::HistoricalConfigBuilder;
+use std::time::Duration;
 
-// 1. Generate embedding
-let config = OpenAIConfig::from_env(OpenAIModel::TextEmbedding3Small)?;
-let service = EmbeddingService::new(Arc::new(OpenAIProvider::new(config)?));
-let embedding = service.embed(text).await?;
+// Configure cold storage via unified config builder
+let config = AletheiaDBConfig::builder()
+    .historical(
+        HistoricalConfigBuilder::new()
+            .enable_cold_storage(true)
+            .cold_storage_path("data/cold.redb")
+            .migration_age_threshold(Duration::from_secs(3600)) // 1 hour
+            .max_hot_versions(1000)
+            .build(),
+    )
+    .build();
 
-// 2. Store in database
-let node_id = db.create_node("Document",
-    PropertyMapBuilder::new()
-        .insert_vector("embedding", &embedding)
-        .build()
-)?;
+// Cold storage automatically initialized!
+let db = AletheiaDB::with_unified_config(config)?;
 ```
 
-### Available Providers
+**Key Features:**
+- Unlimited historical depth on disk
+- Pure Rust implementation (no FFI dependencies)
+- Current-state performance unchanged (22-70ns)
+- Configurable migration policies (age, memory thresholds)
+- Zstd/LZ4 compression (3-5x compression ratio)
+- LSN-based WAL truncation for efficient recovery
+- Latency metrics with percentiles (p50, p95, p99)
 
-| Provider | Type | Latency | Cost | Privacy | Feature Flag |
-|----------|------|---------|------|---------|--------------|
-| OpenAI | API | ~100-200ms | $$$ | ❌ Cloud | `embedding-openai` |
-| HuggingFace | API | ~200-500ms | $ | ❌ Cloud | `embedding-huggingface` |
-| Ollama | Local | ~20-50ms | Free | ✅ Local | `embedding-ollama` |
-| ONNX | Local | ~1-10ms* | Free | ✅ Local | `embedding-onnx` |
+**See [docs/guides/tiered-storage-guide.md](docs/guides/tiered-storage-guide.md) for complete guide.**
 
-*ONNX is currently a placeholder
+### MCP Server (Claude Integration)
 
-### Why Separate?
+Model Context Protocol server enabling LLMs to interact with AletheiaDB.
 
-- **Zero Coupling**: DB layer stays lightweight, focused on storage/indexing
-- **Flexibility**: Easy to swap providers without changing DB code
-- **Optional**: Zero runtime overhead when features disabled
-
-### Documentation
-
-- **[docs/EMBEDDINGS.md](docs/EMBEDDINGS.md)** - Comprehensive user guide with examples
-- **[docs/adr/0016-embedding-providers.md](docs/adr/0016-embedding-providers.md)** - Architecture decision record
-
-## LLM Integration Patterns
-
-### Temporal Query API for LLMs
-
-**Natural Language-Like Queries:**
-```rust
-db.as_of("2024-01-15T10:00:00Z").find_node("Person", "name" == "Alice").get_relationships("KNOWS")
-db.between("2024-01-01", "2024-12-31").track_changes(node_id).with_provenance()
+**Quick Start:**
+```bash
+# Run the MCP server (communicates over stdio)
+cargo run --bin aletheia-mcp --features mcp-server
 ```
 
-**Query Patterns LLMs Can Use:**
-- "What did we know about X at time T?" → `db.as_of(T).get(X)`
-- "How has Y changed?" → `db.history(Y).changes()`
-- "When did we first record F?" → `db.first_occurrence(F)`
-- "Show changes to E between T1 and T2" → `db.between(T1, T2).track_changes(E)`
+**Available Tools:**
+| Category | Tools |
+|----------|-------|
+| **Nodes** | `get_node`, `create_node`, `update_node`, `delete_node`, `delete_node_cascade`, `list_nodes`, `count_nodes` |
+| **Edges** | `get_edge`, `create_edge`, `update_edge`, `delete_edge`, `get_outgoing_edges`, `get_incoming_edges` |
+| **Traversal** | `traverse` (multi-hop graph traversal) |
+| **Vector** | `find_similar`, `enable_vector_index`, `list_vector_indexes` |
+| **Temporal** | `get_node_at_time`, `get_edge_at_time` |
+| **Hybrid** | `hybrid_query` (combined graph + vector + temporal) |
 
-### Integration Methods
+**Programmatic Usage:**
+```rust
+use aletheiadb::mcp::AletheiaMcpServer;
+use aletheiadb::AletheiaDB;
+use std::sync::Arc;
 
-1. **Direct Rust API** (for embedded use)
-2. **MCP Server** (for Claude integration)
-3. **REST/GraphQL API** (for general LLM tool use)
-4. **Natural Query Language** (intuitive for LLMs to generate)
+let db = Arc::new(AletheiaDB::new()?);
+let server = AletheiaMcpServer::new(db);
+server.serve_stdio().await?;
+```
+
+### Query Language (AQL)
+
+Cypher-like query language with temporal and vector extensions.
+
+**Grammar Support:**
+- Graph patterns: `MATCH (n:Label)-[:REL]->(m)`
+- Variable-depth traversal: `-[:KNOWS*1..3]->`
+- Vector search: `SIMILAR TO $embedding LIMIT 10`
+- Hybrid queries: `RANK BY SIMILARITY TO $embedding TOP 10`
+- Bi-temporal: `AS OF '2024-01-15T10:00:00Z'`, `BETWEEN ... AND ...`
+- Filtering: `WHERE`, `ORDER BY`, `LIMIT`, `SKIP`
+
+**Example Queries:**
+```cypher
+-- Basic graph query
+MATCH (n:Person {name: "Alice"})-[:KNOWS]->(friend:Person)
+RETURN friend
+
+-- Hybrid: temporal + graph + vector
+AS OF '2024-06-01T00:00:00Z'
+MATCH (user:User {id: $user_id})-[:VIEWED]->(item:Product)
+RANK BY SIMILARITY TO $recommendation_embedding TOP 20
+WHERE item.price < 100
+RETURN item
+ORDER BY score DESC
+LIMIT 10
+```
+
+**See [docs/query-language-design.md](docs/query-language-design.md) for complete grammar and semantics.**
+
+### Cypher Query Language
+
+OpenCypher-compatible query language with temporal and vector extensions.
+
+**Quick Start:**
+```rust
+// Enable the feature: cypher = [] in Cargo.toml
+use aletheiadb::AletheiaDB;
+
+let db = AletheiaDB::new()?;
+
+// Basic graph query
+let results = db.execute_cypher("MATCH (n:Person {name: 'Alice'})-[:KNOWS]->(friend) RETURN friend")?;
+
+// With parameters
+use std::collections::HashMap;
+use aletheiadb::cypher::CypherParameterValue;
+let mut params = HashMap::new();
+params.insert("name".into(), CypherParameterValue::String("Alice".into()));
+let results = db.execute_cypher_with_params("MATCH (n:Person {name: $name}) RETURN n", params)?;
+```
+
+**Supported Syntax:**
+- Graph patterns: `MATCH (n:Label {prop: value})-[:REL]->(m)`
+- Variable-depth: `-[:KNOWS*1..3]->`
+- Directions: `->` (outgoing), `<-` (incoming), `-` (both)
+- Filtering: `WHERE n.age > 18 AND n.name = 'Alice'`
+- Results: `RETURN`, `RETURN DISTINCT`, `AS` aliases
+- Ordering: `ORDER BY n.age DESC`
+- Pagination: `SKIP 10 LIMIT 20`
+- Query chaining: `WITH b WHERE b.score > 0.5 RETURN b`
+- Parameters: `$paramName`
+
+**Temporal Extensions:**
+- `AS OF TIMESTAMP '2024-01-15T10:00:00Z'`
+- `AS OF VALID_TIME '2024-01-15'`
+- `AS OF SYSTEM_TIME '2024-01-15'` / `FOR SYSTEM_TIME AS OF '...'`
+- Bi-temporal: `AS OF VALID_TIME '...' AS OF SYSTEM_TIME '...'`
+- `BETWEEN '2024-01-01' AND '2024-12-31'`
+
+**Vector Extensions:**
+- `ORDER BY vector.similarity(n.embedding, $query) DESC LIMIT 10`
+- `vector.cosine()`, `vector.euclidean()` distance functions
+- Hybrid: graph traversal + vector ranking in one query
+
+**See [docs/plans/2026-03-26-cypher-query-language.md](docs/plans/2026-03-26-cypher-query-language.md) for complete Cypher grammar and implementation details.**
+
+### Graph Sharding
+
+Domain-based horizontal scaling for datasets exceeding single-machine capacity.
+
+**Key Features:**
+- Domain-based partitioning (nodes partitioned by label)
+- Edge replication for cross-shard traversal
+- Two-Phase Commit (2PC) distributed transactions
+- Circuit breakers for fault tolerance
+- Online migration with dual-write support
+
+**Quick Start:**
+```rust
+use aletheiadb::storage::sharding::{
+    ShardConfig, ShardDefinition, ShardCoordinator,
+};
+
+// Define shard topology
+let config = ShardConfig::new(vec![
+    ShardDefinition::new(0, "shard0:9000", vec!["Person", "User"]),
+    ShardDefinition::new(1, "shard1:9000", vec!["Place", "Location"]),
+    ShardDefinition::new(2, "shard2:9000", vec!["Event", "Activity"]),
+]);
+
+let coordinator = ShardCoordinator::new(config);
+let shard = coordinator.router().route_node("Person");
+```
+
+**When to Use:**
+- Dataset exceeds single-machine RAM (~256GB → ~1.2B nodes)
+- Need geographic distribution
+- Require isolation between domains
+
+**See [docs/guides/sharding-guide.md](docs/guides/sharding-guide.md) for complete guide.**
+
+### Embedding Generation (Optional)
+
+Optional embedding providers via feature flags (OpenAI, HuggingFace, Ollama, ONNX).
+
+**See [docs/EMBEDDINGS.md](docs/EMBEDDINGS.md) for comprehensive user guide.**
+
+## Configuration
+
+AletheiaDB uses a unified configuration system for WAL, historical storage, vector indexes, and persistence.
+
+**Quick Start:**
+```rust
+use aletheiadb::{AletheiaDB, config::AletheiaDBConfig};
+
+// Default configuration
+let db = AletheiaDB::new();
+
+// Load from TOML file
+let config = AletheiaDBConfig::from_toml_file("config/production.toml")?;
+let db = AletheiaDB::with_unified_config(config);
+
+// Programmatic configuration
+let config = AletheiaDBConfig::builder()
+    .wal(WalConfigBuilder::new()
+        .num_stripes(32).unwrap()
+        .durability_mode(DurabilityMode::group_commit_default())
+        .build())
+    .build();
+```
+
+**See [docs/CONFIGURATION.md](docs/CONFIGURATION.md) for all configuration options and presets.**
+
+## Persistence Quickstart
+
+**⚠️ Common Mistake:** There is **NO `AletheiaDB::open()` method**. Use `with_unified_config()` instead.
+
+AletheiaDB provides **two persistence systems** (cold storage requires manual setup):
+
+| System | Purpose | Setup |
+|--------|---------|-------|
+| **WAL** | Transaction durability | ✅ Via config |
+| **Index Persistence** | Fast restarts (6-30x) | ✅ Via config |
+| **Cold Storage (Redb)** | Unlimited history | ⚙️ Manual (see guide) |
+
+### Quick Setup (WAL + Index Persistence)
+
+```rust
+use aletheiadb::{AletheiaDB, AletheiaDBConfig};
+use aletheiadb::config::WalConfigBuilder;
+use aletheiadb::storage::index_persistence::PersistenceConfig;
+use aletheiadb::storage::wal::DurabilityMode;
+
+let db_path = std::env::current_dir()?.join(".my-app-data");
+
+let config = AletheiaDBConfig::builder()
+    // 1. WAL for crash recovery
+    .wal(WalConfigBuilder::new()
+        .wal_dir(db_path.join("wal"))
+        .durability_mode(DurabilityMode::GroupCommit {
+            max_delay_ms: 10,
+            max_batch_size: 200,
+        })
+        .build())
+    // 2. Index persistence for fast restarts
+    .persistence(PersistenceConfig {
+        enabled: true,
+        data_dir: db_path.join("indexes"),
+        load_on_startup: true,
+        ..Default::default()
+    })
+    .build();
+
+// ✅ Creates directories automatically!
+let db = AletheiaDB::with_unified_config(config)?;
+```
+
+**File Structure:**
+```
+.my-app-data/
+├── wal/                # WAL (transaction durability)
+└── indexes/            # Index persistence (fast restarts)
+```
+
+### Adding Cold Storage (Optional)
+
+For unlimited bi-temporal history, set up cold storage manually:
+
+```rust
+use aletheiadb::storage::tiered::{TieredStorage, TieredStorageConfig};
+use aletheiadb::storage::redb_cold_storage::{RedbColdStorage, RedbConfig};
+use std::sync::Arc;
+
+// After creating database, set up cold storage
+let cold = Arc::new(RedbColdStorage::new(
+    &db_path.join("cold.redb"),
+    RedbConfig::new()
+)?);
+
+let tiered = Arc::new(TieredStorage::new(
+    TieredStorageConfig::default(),
+    cold
+));
+
+// Manually set on historical storage (requires db internals access)
+// See docs/guides/tiered-storage-guide.md for complete setup
+```
+
+**See:**
+- **[docs/guides/tiered-storage-guide.md](docs/guides/tiered-storage-guide.md)** - Cold storage setup
+- **[examples/file_based_persistence.rs](examples/file_based_persistence.rs)** - Working example
 
 ## Development Workflow
 
-### IMPORTANT: Worktree-First Development
+### ⚠️ MANDATORY: Pre-Commit Quality Checks
 
-**When starting ANY implementation task, Claude instances MUST:**
+**BEFORE EVERY COMMIT, you MUST run these commands in order:**
 
-1. **Create a worktree first** before making any code changes:
-   ```bash
-   just worktree-new feature/descriptive-name   # For new features
-   just worktree-new fix/descriptive-name       # For bug fixes
-   ```
+```bash
+# 1. Run clippy with ALL warnings as errors
+cargo clippy --all-targets --all-features -- -D warnings
 
-2. **Navigate to the worktree** and work there:
-   ```bash
-   cd agents/feature-descriptive-name
-   ```
+# 2. Format all code
+cargo fmt --all
 
-3. **After completing work**, commit, create PR, and clean up:
-   ```bash
-   git add . && git commit -m "feat: description"
-   just worktree-pr "PR Title" "Description"
-   # After merge: just worktree-remove feature/descriptive-name
-   ```
+# 3. Verify tests pass
+cargo test
+```
 
-This enables multiple Claude instances to work in parallel without conflicts. Each instance gets an isolated copy of the codebase.
+**These checks are NON-NEGOTIABLE:**
+- `cargo clippy` ensures code quality and catches potential bugs
+- `cargo fmt` maintains consistent code style
+- Both MUST pass before committing
+
+**Quick command:** `just pre-commit` runs all checks.
+
+### Worktree-First Development
+
+**When starting ANY implementation task, you MUST:**
+
+1. Create a worktree first: `just worktree-new feature/descriptive-name`
+2. Navigate to worktree: `cd agents/feature-descriptive-name`
+3. Work, commit, and create PR: `just worktree-pr "Title" "Description"`
+
+This enables multiple Claude instances to work in parallel without conflicts.
 
 **Skip worktree creation only if:**
 - You're already in a worktree (check with `git worktree list`)
 - The task is read-only (exploration, answering questions)
 - The user explicitly asks you to work in the main repo
-
-See `WORKTREE_WORKFLOW.md` for complete documentation.
 
 ### Feature Development Process
 
@@ -342,26 +571,54 @@ See `WORKTREE_WORKFLOW.md` for complete documentation.
 4. **Benchmark**: Add benchmarks for performance-critical code
 5. **Document**: Update docs if architecture changes
 
+**See [docs/DEVELOPMENT_WORKFLOW.md](docs/DEVELOPMENT_WORKFLOW.md) for complete workflow documentation.**
+
 ### Code Review Checklist
 
+- [ ] **Clippy passes**: `cargo clippy --all-targets --all-features -- -D warnings` with no errors
+- [ ] **Code formatted**: `cargo fmt --all` applied
+- [ ] **Tests pass**: All tests passing
+- [ ] **Coverage maintained**: Meets coverage thresholds
+- [ ] **Miri passes** (if unsafe code changed): `just miri-test <affected_module>`
 - [ ] Temporal invariants preserved
 - [ ] No performance regression on benchmarks
 - [ ] Error handling is comprehensive (no unwrap/expect)
 - [ ] Tests cover edge cases
 - [ ] Documentation updated
-- [ ] No unsafe without safety comments
+- [ ] No unsafe without safety comments (SAFETY: comments required)
 - [ ] Strong typing used (no raw primitives for IDs)
 - [ ] Code follows [CODING_STANDARDS.md](docs/CODING_STANDARDS.md)
 
-## Profiling and Performance Tools
+## Development Tools
+
+All common tasks via `just`:
+
+```bash
+just test              # Run tests
+just coverage          # Generate coverage report
+just lint              # Run clippy
+just fmt               # Format code
+just pre-commit        # Quick pre-commit checks
+just check-all         # Full quality check
+just bench             # Run benchmarks
+just doc               # Generate docs
+just worktree-new      # Create worktree
+just worktree-pr       # Create PR from worktree
+```
+
+See `justfile` for complete list of commands.
+
+## Profiling and Performance
 
 ### Tracy Profiler
 
-Use Tracy for detailed CPU profiling:
-
-1. Download Tracy from [releases](https://github.com/wolfpld/tracy/releases)
-2. Build with profiling: `cargo build --release --features tracy`
-3. Run profiled build: `just profile-tracy`
+```bash
+# 1. Download Tracy from releases
+# 2. Build with profiling
+cargo build --release --features tracy
+# 3. Run profiled build
+just profile-tracy
+```
 
 **Instrumenting code:**
 ```rust
@@ -375,54 +632,65 @@ pub fn hot_path_function() {
 }
 ```
 
-### Development Tools
+## LLM Integration
 
-All common tasks via `just`:
-- `just test` - Run tests
-- `just coverage` - Generate coverage report
-- `just lint` - Run clippy
-- `just fmt` - Format code
-- `just pre-commit` - Quick pre-commit checks
-- `just check-all` - Full quality check
+AletheiaDB is designed for LLM integration with temporal query patterns:
 
-See `justfile` for complete list of commands.
+**Natural Language-Like Queries:**
+```rust
+db.as_of("2024-01-15T10:00:00Z").find_node("Person", "name" == "Alice")
+db.between("2024-01-01", "2024-12-31").track_changes(node_id)
+```
+
+**Query Patterns:**
+- "What did we know about X at time T?" → `db.as_of(T).get(X)`
+- "How has Y changed?" → `db.history(Y).changes()`
+- "When did we first record F?" → `db.first_occurrence(F)`
+
+**Integration Methods:**
+1. Direct Rust API (for embedded use)
+2. MCP Server (for Claude integration)
+3. REST/GraphQL API (for general LLM tool use)
+
+**See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for complete LLM integration patterns.**
+
+## Known Limitations
+
+### Orphaned Edges on Node Deletion
+
+Calling `delete_node` removes only the node itself -- any edges where the deleted node
+is the source or target will remain in storage as **orphaned edges**. Traversals that
+follow these edges may encounter missing endpoints.
+
+**Recommended**: Use `delete_node_cascade` instead, which atomically deletes the node
+and all connected edges, preventing orphans. The non-cascade `delete_node` is retained
+for cases where callers manage edge cleanup themselves or where performance requires
+avoiding the edge scan.
 
 ## Future Considerations
 
 ### Vector Search (SUPERRAG) - Remaining Phases
 
-**Status**: Phases 1-2 complete (storage + HNSW indexing), Phases 3-5 pending
+**Status**: Phases 1-4 complete (storage, indexing, temporal, hybrid queries), Phase 5 pending
 
-**Remaining phases will add:**
-- **Phase 3**: Temporal vector queries (semantic time-travel)
-- **Phase 4**: Hybrid graph+vector queries
-- **Phase 5**: Advanced features (streaming, incremental updates)
+**Phase 5 will add:**
+- Streaming temporal queries
+- Incremental index updates
+- Advanced optimization techniques
 
-**Key query patterns Phase 3+ will enable:**
-```rust
-// Semantic time-travel
-db.as_of(timestamp_2023).find_similar(embedding, k)
-
-// Graph + Vector: traverse then rank
-db.traverse(alice_id, "KNOWS").rank_by_similarity(bob_embedding, 10)
-
-// Knowledge evolution
-db.track_semantic_drift(node_id, time_range)
-```
-
-See **[docs/VECTOR_SEARCH_DESIGN.md](docs/VECTOR_SEARCH_DESIGN.md)** for complete roadmap.
+**See [docs/VECTOR_SEARCH_DESIGN.md](docs/VECTOR_SEARCH_DESIGN.md) for complete roadmap.**
 
 ### Scalability
 
-- Sharding for horizontal scale
-- Distributed transaction coordination
-- Replication for high availability
+- ✅ Sharding for horizontal scale (implemented)
+- ✅ Distributed transaction coordination with 2PC (implemented)
+- Replication for high availability (planned)
 
 ### Query Language
 
-- Cypher-like temporal extensions
-- SQL:2011 temporal syntax
-- Time-aware pattern matching
+- ✅ Cypher-like temporal extensions (implemented)
+- SQL:2011 temporal syntax (planned)
+- ✅ Time-aware pattern matching (implemented)
 
 ### Advanced Features
 
@@ -430,6 +698,34 @@ See **[docs/VECTOR_SEARCH_DESIGN.md](docs/VECTOR_SEARCH_DESIGN.md)** for complet
 - Streaming temporal queries
 - Incremental materialized views
 - LLM-assisted query generation
+
+## Quick Reference Documentation
+
+### Core Documentation
+- **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** - Architecture principles, design patterns, system design
+- **[docs/CONFIGURATION.md](docs/CONFIGURATION.md)** - All configuration options, presets, tuning
+- **[docs/DEVELOPMENT_WORKFLOW.md](docs/DEVELOPMENT_WORKFLOW.md)** - Complete development workflow
+- **[docs/CODING_STANDARDS.md](docs/CODING_STANDARDS.md)** - Rust coding standards
+- **[TESTING.md](TESTING.md)** - Testing requirements and coverage
+- **[docs/MIRI.md](docs/MIRI.md)** - Undefined behavior detection for unsafe code
+
+### Feature Documentation
+- **[docs/WAL.md](docs/WAL.md)** - Write-ahead log internals
+- **[docs/VECTOR_SEARCH_DESIGN.md](docs/VECTOR_SEARCH_DESIGN.md)** - Vector search architecture and roadmap
+- **[docs/EMBEDDINGS.md](docs/EMBEDDINGS.md)** - Embedding generation guide
+- **[docs/query-language-design.md](docs/query-language-design.md)** - Query language grammar and semantics
+
+### User Guides
+- **[docs/guides/vector-search-integration.md](docs/guides/vector-search-integration.md)** - Complete vector search API
+- **[docs/guides/vector-search-performance.md](docs/guides/vector-search-performance.md)** - Performance tuning
+- **[docs/guides/hybrid-query-guide.md](docs/guides/hybrid-query-guide.md)** - Hybrid query API reference
+- **[docs/guides/index-persistence-guide.md](docs/guides/index-persistence-guide.md)** - Index persistence details
+- **[docs/guides/tiered-storage-guide.md](docs/guides/tiered-storage-guide.md)** - Tiered storage configuration and usage
+- **[docs/guides/sharding-guide.md](docs/guides/sharding-guide.md)** - Graph sharding and distributed deployment
+- **[docs/guides/query-pipeline-guide.md](docs/guides/query-pipeline-guide.md)** - Query execution pipeline
+
+### Architecture Decision Records (ADRs)
+See `docs/adr/` for all architectural decisions.
 
 ## References
 

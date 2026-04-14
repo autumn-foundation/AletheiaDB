@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Setup pre-commit hooks for GallifreyDB
+# Setup pre-commit hooks for AletheiaDB
 set -e
 
-echo "🔧 Setting up pre-commit hooks for GallifreyDB..."
+echo "🔧 Setting up pre-commit hooks for AletheiaDB..."
 
 # Check if pre-commit is installed
 if ! command -v pre-commit &> /dev/null; then

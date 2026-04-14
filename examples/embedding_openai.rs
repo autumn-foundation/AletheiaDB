@@ -1,9 +1,9 @@
-//! Example: Using OpenAI embeddings with GallifreyDB
+//! Example: Using OpenAI embeddings with AletheiaDB
 //!
 //! This example demonstrates how to:
 //! 1. Configure the OpenAI provider
 //! 2. Generate embeddings from text
-//! 3. Store embeddings in GallifreyDB
+//! 3. Store embeddings in AletheiaDB
 //! 4. Perform similarity search
 //!
 //! # Setup
@@ -19,9 +19,11 @@
 //! cargo run --example embedding_openai --features embedding-openai
 //! ```
 
-use gallifreydb::embeddings::EmbeddingService;
-use gallifreydb::embeddings::providers::openai::*;
-use gallifreydb::{GallifreyDB, PropertyMapBuilder};
+#![cfg(feature = "embedding-openai")]
+
+use aletheiadb::embeddings::EmbeddingService;
+use aletheiadb::embeddings::providers::openai::*;
+use aletheiadb::{AletheiaDB, PropertyMapBuilder};
 use std::sync::Arc;
 
 #[tokio::main]
@@ -40,7 +42,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 2. Generate embeddings
     println!("🔮 Generating embeddings...");
     let documents = vec![
-        "GallifreyDB is a bi-temporal graph database",
+        "AletheiaDB is a bi-temporal graph database",
         "Vector embeddings enable semantic search",
         "Time travel queries show historical data",
     ];
@@ -48,9 +50,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let embeddings = embedding_service.embed_batch(&documents).await?;
     println!("✅ Generated {} embeddings\n", embeddings.len());
 
-    // 3. Store in GallifreyDB
-    println!("💾 Storing in GallifreyDB...");
-    let db = GallifreyDB::new();
+    // 3. Store in AletheiaDB
+    println!("💾 Storing in AletheiaDB...");
+    let db = AletheiaDB::new()?;
 
     let mut node_ids = Vec::new();
     for (doc, embedding) in documents.iter().zip(embeddings.iter()) {
@@ -67,13 +69,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 4. Query similar documents
     println!("\n🔍 Finding similar documents...");
-    let query = "What is GallifreyDB?";
+    let query = "What is AletheiaDB?";
     let query_embedding = embedding_service.embed(query).await?;
 
     println!("Query: {}", query);
 
     // Manual similarity calculation (since HNSW has compilation errors)
-    use gallifreydb::core::vector::cosine_similarity;
+    use aletheiadb::core::vector::cosine_similarity;
 
     let mut similarities: Vec<(usize, f32)> = embeddings
         .iter()
@@ -98,4 +100,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("\n✨ Example complete!");
     Ok(())
+}
+
+#[cfg(not(feature = "embedding-openai"))]
+fn main() {
+    eprintln!("This example requires the 'embedding-openai' feature.");
+    eprintln!("Run with: cargo run --example embedding_openai --features embedding-openai");
+    std::process::exit(1);
 }

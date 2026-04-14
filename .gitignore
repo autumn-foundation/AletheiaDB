@@ -1,6 +1,5 @@
 # Rust build artifacts
 /target
-Cargo.lock
 
 # Coverage reports
 /coverage
@@ -31,16 +30,23 @@ Cargo.lock
 # Test artifacts
 *.log
 /test_data
+/data
+
+# WAL and database directories created by tests
+/aletheiadb/
 
 # Backup files
 *.bak
 *.backup
 
+.claude/
 settings.local.json
 nul
+$null
 
 # Git worktrees for parallel development
 agents/
+.worktrees/
 
 # Proptest regression files
 # Proptest regression files
@@ -53,3 +59,24 @@ __pycache__/
 # Benchmark output
 /benchmark-results/
 /benchmark-data.json
+benchmark-results-*.md
+pr-comment.md
+test-pr-comment*.md
+benchmark-summary.md
+
+# Temporary Claude working directories
+tmpclaude-*-cwd
+run-benchmarks.bat
+
+# Cleanup scripts
+final_cleanup.sh
+*_cleanup.sh
+
+# Debug output files
+*_output.txt
+test_output_*.txt
+
+# Mutation testing output
+mutants.out/
+mutants.out.old/
+echo_project/

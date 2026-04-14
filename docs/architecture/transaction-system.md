@@ -1,6 +1,6 @@
 # Transaction System Architecture
 
-GallifreyDB implements ACID transactions with Multi-Version Concurrency Control (MVCC) and Snapshot Isolation.
+AletheiaDB implements ACID transactions with Multi-Version Concurrency Control (MVCC) and Snapshot Isolation.
 
 ## Overview
 

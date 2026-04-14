@@ -2,12 +2,12 @@
 
 **Status:** Accepted
 **Date:** 2024-12-31
-**Deciders:** GallifreyDB Core Team
+**Deciders:** AletheiaDB Core Team
 **Categories:** core, temporal
 
 ## Context
 
-GallifreyDB's primary goal is enabling LLMs to reason about knowledge evolution over time. To support this, we need to answer questions like:
+AletheiaDB's primary goal is enabling LLMs to reason about knowledge evolution over time. To support this, we need to answer questions like:
 - "What did we know about X at time T?" (historical knowledge state)
 - "When did we learn about X?" (provenance tracking)
 - "How has our understanding of X changed?" (knowledge evolution)
@@ -53,14 +53,17 @@ pub struct TimeRange {
     pub end: Timestamp,    // Exclusive
 }
 
-/// Timestamp is microseconds since Unix epoch (i64)
-/// Supports dates from ~290,000 BCE to ~290,000 CE
-pub type Timestamp = i64;
+/// Timestamp is a Hybrid Logical Clock (HybridTimestamp)
+/// Combines physical wallclock (microseconds since Unix epoch) + logical counter
+/// See ADR-0024 for details on HybridTimestamp design
+pub type Timestamp = HybridTimestamp;
 ```
 
 - Ranges are half-open: `[start, end)`
-- `end = Timestamp::MAX` represents "ongoing" or "until now"
-- All timestamps are in microseconds for high precision
+- `end = TIMESTAMP_MAX` represents "ongoing" or "until now" (i64::MAX sentinel)
+- Wallclock in microseconds for high precision
+- Logical counter provides total ordering for concurrent transactions
+- See [ADR-0024: Hybrid Logical Clock Timestamps](0024-hybrid-logical-clock-timestamps.md) for implementation details
 
 ### Temporal Query Patterns
 

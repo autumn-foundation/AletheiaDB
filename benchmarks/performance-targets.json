@@ -1,5 +1,5 @@
 {
-  "description": "GallifreyDB Performance Targets - Single source of truth for performance goals",
+  "description": "AletheiaDB Performance Targets - Single source of truth for performance goals",
   "targets": [
     {
       "metric": "Current-state single-hop traversal",

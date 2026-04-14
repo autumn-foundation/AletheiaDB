@@ -2,12 +2,12 @@
 
 **Status:** Accepted
 **Date:** 2024-12-31
-**Deciders:** GallifreyDB Core Team
+**Deciders:** AletheiaDB Core Team
 **Categories:** transaction, concurrency
 
 ## Context
 
-GallifreyDB requires concurrent access from multiple transactions while maintaining ACID guarantees. The transaction isolation level significantly impacts both correctness and performance:
+AletheiaDB requires concurrent access from multiple transactions while maintaining ACID guarantees. The transaction isolation level significantly impacts both correctness and performance:
 
 - **Read Committed**: Allows non-repeatable reads, insufficient for complex graph traversals
 - **Repeatable Read**: Prevents phantom reads but complex to implement

@@ -1,4 +1,5 @@
-//! Doctor Who Demo - A fun exploration of GallifreyDB's bi-temporal capabilities
+#![allow(deprecated)]
+//! Doctor Who Demo - A fun exploration of AletheiaDB's bi-temporal capabilities
 //!
 //! This demo creates a knowledge graph about the Doctor Who universe,
 //! perfect for demonstrating temporal versioning since:
@@ -8,8 +9,8 @@
 //!
 //! Run with: cargo run --example doctor_who_demo
 
-use gallifreydb::{
-    GLOBAL_INTERNER, GallifreyDB, InternedString, NodeId, PropertyMapBuilder, Result, Timestamp,
+use aletheiadb::{
+    AletheiaDB, GLOBAL_INTERNER, InternedString, NodeId, PropertyMapBuilder, Result, Timestamp,
     WriteOps,
 };
 use std::collections::HashMap;
@@ -25,8 +26,8 @@ fn label_str(label: InternedString) -> String {
 }
 
 /// Helper to format property values nicely
-fn format_value(value: &gallifreydb::PropertyValue) -> String {
-    use gallifreydb::PropertyValue;
+fn format_value(value: &aletheiadb::PropertyValue) -> String {
+    use aletheiadb::PropertyValue;
     match value {
         PropertyValue::Null => "null".to_string(),
         PropertyValue::Bool(b) => b.to_string(),
@@ -36,22 +37,26 @@ fn format_value(value: &gallifreydb::PropertyValue) -> String {
         PropertyValue::Bytes(b) => format!("<{} bytes>", b.len()),
         PropertyValue::Array(arr) => format!("[{} items]", arr.len()),
         PropertyValue::Vector(v) => format!("<vector dim={}>", v.len()),
+        PropertyValue::SparseVector(sv) => {
+            format!("<sparse_vector dim={}, nnz={}>", sv.dimension(), sv.nnz())
+        }
     }
 }
 
 /// Get current timestamp in microseconds
 fn now_timestamp() -> Timestamp {
-    SystemTime::now()
+    (SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
-        .as_micros() as Timestamp
+        .as_micros() as i64)
+        .into()
 }
 
 /// Format timestamp for display
 #[allow(dead_code)]
 fn format_timestamp(ts: Timestamp) -> String {
     // Convert microseconds to a readable format
-    let secs = ts / 1_000_000;
+    let secs = ts.wallclock() / 1_000_000;
     chrono_lite_format(secs)
 }
 
@@ -99,7 +104,7 @@ macro_rules! props {
 /// Stores node IDs and temporal events for easy reference
 struct DemoData {
     nodes: HashMap<String, NodeId>,
-    db: GallifreyDB,
+    db: AletheiaDB,
     /// Track all Doctor regenerations with timestamps for time-travel demos
     regenerations: Vec<RegenerationEvent>,
     /// When the database was first populated
@@ -108,13 +113,13 @@ struct DemoData {
 }
 
 impl DemoData {
-    fn new() -> Self {
-        Self {
+    fn new() -> Result<Self> {
+        Ok(Self {
             nodes: HashMap::new(),
-            db: GallifreyDB::new(),
+            db: AletheiaDB::new()?,
             regenerations: Vec::new(),
             creation_time: now_timestamp(),
-        }
+        })
     }
 
     fn get(&self, name: &str) -> Option<NodeId> {
@@ -762,7 +767,7 @@ fn update_doctor_incarnation(
             .properties
             .get("regeneration_count")
             .and_then(|v| {
-                if let gallifreydb::PropertyValue::Int(n) = v {
+                if let aletheiadb::PropertyValue::Int(n) = v {
                     Some(*n)
                 } else {
                     None
@@ -1012,7 +1017,7 @@ fn main() -> Result<()> {
 "#
     );
 
-    let mut demo = DemoData::new();
+    let mut demo = DemoData::new()?;
     populate_database(&mut demo)?;
 
     print_help();

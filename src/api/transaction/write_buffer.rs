@@ -1,16 +1,27 @@
 //! Write buffering for uncommitted transaction changes
 
+use crate::core::error::{Result, StorageError};
+use crate::core::hasher::IdentityHasher;
 use crate::core::id::{EdgeId, NodeId, VersionId};
 use crate::core::interning::InternedString;
 use crate::core::property::PropertyMap;
-use crate::core::temporal::BiTemporalInterval;
-use crate::utils::error::{Result, StorageError};
+use crate::core::temporal::Timestamp;
 use std::collections::HashMap;
+use std::hash::BuildHasherDefault;
+
+type FastHashMap<K, V> = HashMap<K, V, BuildHasherDefault<IdentityHasher>>;
 
 /// Buffered write operation
 ///
 /// Represents an uncommitted write operation that will be applied
 /// atomically when the transaction commits.
+///
+/// ## Bi-Temporal Semantics
+///
+/// Each write variant stores `valid_from` (when the fact became true in reality),
+/// but not `transaction_time` (which is only known at commit time). This enables
+/// true bi-temporal semantics where valid_time can be backdated independently
+/// of when the transaction commits.
 #[derive(Debug, Clone)]
 pub enum BufferedWrite {
     /// Create a new node
@@ -23,8 +34,8 @@ pub enum BufferedWrite {
         label: InternedString,
         /// Node properties
         properties: PropertyMap,
-        /// Bi-temporal interval
-        temporal: BiTemporalInterval,
+        /// When the node became valid in reality (user-controlled)
+        valid_from: Timestamp,
     },
     /// Create a new edge
     CreateEdge {
@@ -40,8 +51,8 @@ pub enum BufferedWrite {
         label: InternedString,
         /// Edge properties
         properties: PropertyMap,
-        /// Bi-temporal interval
-        temporal: BiTemporalInterval,
+        /// When the edge became valid in reality (user-controlled)
+        valid_from: Timestamp,
     },
     /// Update an existing node (creates new version)
     UpdateNode {
@@ -53,8 +64,8 @@ pub enum BufferedWrite {
         label: InternedString,
         /// New properties
         properties: PropertyMap,
-        /// Bi-temporal interval
-        temporal: BiTemporalInterval,
+        /// When this update became valid in reality (user-controlled)
+        valid_from: Timestamp,
     },
     /// Update an existing edge (creates new version)
     UpdateEdge {
@@ -70,19 +81,77 @@ pub enum BufferedWrite {
         label: InternedString,
         /// New properties
         properties: PropertyMap,
-        /// Bi-temporal interval
-        temporal: BiTemporalInterval,
+        /// When this update became valid in reality (user-controlled)
+        valid_from: Timestamp,
     },
     /// Delete a node
     DeleteNode {
         /// Node ID to delete
         node_id: NodeId,
+        /// When the deletion became valid in reality (user-controlled)
+        valid_from: Timestamp,
     },
     /// Delete an edge
     DeleteEdge {
         /// Edge ID to delete
         edge_id: EdgeId,
+        /// When the deletion became valid in reality (user-controlled)
+        valid_from: Timestamp,
     },
+}
+
+impl BufferedWrite {
+    /// Return the node ID if this operation applies to a node
+    pub fn node_id(&self) -> Option<NodeId> {
+        match self {
+            Self::CreateNode { node_id, .. } => Some(*node_id),
+            Self::UpdateNode { node_id, .. } => Some(*node_id),
+            Self::DeleteNode { node_id, .. } => Some(*node_id),
+            _ => None,
+        }
+    }
+
+    /// Return the edge ID if this operation applies to an edge
+    pub fn edge_id(&self) -> Option<EdgeId> {
+        match self {
+            Self::CreateEdge { edge_id, .. } => Some(*edge_id),
+            Self::UpdateEdge { edge_id, .. } => Some(*edge_id),
+            Self::DeleteEdge { edge_id, .. } => Some(*edge_id),
+            _ => None,
+        }
+    }
+
+    /// Return a reference to the properties map if the operation has one
+    pub fn properties(&self) -> Option<&PropertyMap> {
+        match self {
+            Self::CreateNode { properties, .. } => Some(properties),
+            Self::UpdateNode { properties, .. } => Some(properties),
+            Self::CreateEdge { properties, .. } => Some(properties),
+            Self::UpdateEdge { properties, .. } => Some(properties),
+            _ => None,
+        }
+    }
+
+    /// Check if this is a node operation
+    pub fn is_node_operation(&self) -> bool {
+        matches!(
+            self,
+            Self::CreateNode { .. } | Self::UpdateNode { .. } | Self::DeleteNode { .. }
+        )
+    }
+
+    /// Check if this is an edge operation
+    pub fn is_edge_operation(&self) -> bool {
+        matches!(
+            self,
+            Self::CreateEdge { .. } | Self::UpdateEdge { .. } | Self::DeleteEdge { .. }
+        )
+    }
+
+    /// Check if this operation modifies edge structure
+    pub fn is_edge_structure_modification(&self) -> bool {
+        matches!(self, Self::CreateEdge { .. } | Self::DeleteEdge { .. })
+    }
 }
 
 /// Default maximum number of operations per transaction (DoS protection)
@@ -102,11 +171,15 @@ pub struct WriteBuffer {
 
     /// Quick lookup: which nodes have been written to
     /// Maps NodeId → index in operations vector
-    modified_nodes: HashMap<NodeId, usize>,
+    ///
+    /// Using IdentityHasher avoids SipHash overhead since NodeId is already a high-quality unique u64 ID.
+    modified_nodes: FastHashMap<NodeId, usize>,
 
     /// Quick lookup: which edges have been written to
     /// Maps EdgeId → index in operations vector
-    modified_edges: HashMap<EdgeId, usize>,
+    ///
+    /// Using IdentityHasher avoids SipHash overhead since EdgeId is already a high-quality unique u64 ID.
+    modified_edges: FastHashMap<EdgeId, usize>,
 
     /// Maximum number of operations allowed (DoS protection)
     max_operations: usize,
@@ -115,10 +188,26 @@ pub struct WriteBuffer {
     /// This flag is used to optimize the commit path by only triggering
     /// temporal vector index updates when vector data was actually modified.
     has_vector_operations: bool,
+
+    /// Track whether any edge structure changes occurred in this transaction.
+    /// This flag is used to optimize the commit path by only calling
+    /// compact_adjacency() when the graph topology was modified.
+    /// Only CreateEdge and DeleteEdge set this flag; UpdateEdge does not,
+    /// since property-only updates don't affect adjacency structure.
+    has_edge_operations: bool,
 }
 
 impl WriteBuffer {
     /// Create a new empty write buffer with default capacity limit
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::api::transaction::WriteBuffer;
+    ///
+    /// let buffer = WriteBuffer::new();
+    /// assert!(buffer.is_empty());
+    /// ```
     pub fn new() -> Self {
         Self::with_max_operations(DEFAULT_MAX_OPERATIONS)
     }
@@ -127,10 +216,11 @@ impl WriteBuffer {
     pub fn with_max_operations(max_operations: usize) -> Self {
         WriteBuffer {
             operations: Vec::new(),
-            modified_nodes: HashMap::new(),
-            modified_edges: HashMap::new(),
+            modified_nodes: FastHashMap::default(),
+            modified_edges: FastHashMap::default(),
             max_operations,
             has_vector_operations: false,
+            has_edge_operations: false,
         }
     }
 
@@ -141,16 +231,48 @@ impl WriteBuffer {
     pub fn with_capacity(capacity: usize) -> Self {
         WriteBuffer {
             operations: Vec::with_capacity(capacity),
-            modified_nodes: HashMap::with_capacity(capacity / 2),
-            modified_edges: HashMap::with_capacity(capacity / 2),
+            modified_nodes: FastHashMap::with_capacity_and_hasher(
+                capacity / 2,
+                BuildHasherDefault::default(),
+            ),
+            modified_edges: FastHashMap::with_capacity_and_hasher(
+                capacity / 2,
+                BuildHasherDefault::default(),
+            ),
             max_operations: capacity,
             has_vector_operations: false,
+            has_edge_operations: false,
         }
     }
 
     /// Add a write operation to the buffer
     ///
     /// Returns an error if the maximum number of operations is exceeded (DoS protection).
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::api::transaction::{WriteBuffer, BufferedWrite};
+    /// use aletheiadb::core::id::{NodeId, VersionId};
+    /// use aletheiadb::core::interning::GLOBAL_INTERNER;
+    /// use aletheiadb::core::property::PropertyMap;
+    /// use aletheiadb::core::temporal::time;
+    ///
+    /// let mut buffer = WriteBuffer::new();
+    /// let node_id = NodeId::new(1).unwrap();
+    /// let version_id = VersionId::new(1).unwrap();
+    /// let label = GLOBAL_INTERNER.intern("Person").unwrap();
+    ///
+    /// buffer.add(BufferedWrite::CreateNode {
+    ///     node_id,
+    ///     version_id,
+    ///     label,
+    ///     properties: PropertyMap::new(),
+    ///     valid_from: time::now(),
+    /// }).unwrap();
+    ///
+    /// assert_eq!(buffer.len(), 1);
+    /// ```
     pub fn add(&mut self, write: BufferedWrite) -> Result<()> {
         // Check capacity limit (DoS protection)
         if self.operations.len() >= self.max_operations {
@@ -165,44 +287,20 @@ impl WriteBuffer {
         let index = self.operations.len();
 
         // Track which entities are modified for conflict detection
-        // and check for vector properties
-        match &write {
-            BufferedWrite::CreateNode {
-                node_id,
-                properties,
-                ..
-            }
-            | BufferedWrite::UpdateNode {
-                node_id,
-                properties,
-                ..
-            } => {
-                self.modified_nodes.insert(*node_id, index);
-                // Check if this operation contains vector properties
-                self.has_vector_operations =
-                    self.has_vector_operations || properties.contains_vector();
-            }
-            BufferedWrite::DeleteNode { node_id } => {
-                self.modified_nodes.insert(*node_id, index);
-            }
-            BufferedWrite::CreateEdge {
-                edge_id,
-                properties,
-                ..
-            }
-            | BufferedWrite::UpdateEdge {
-                edge_id,
-                properties,
-                ..
-            } => {
-                self.modified_edges.insert(*edge_id, index);
-                // Check if this operation contains vector properties
-                self.has_vector_operations =
-                    self.has_vector_operations || properties.contains_vector();
-            }
-            BufferedWrite::DeleteEdge { edge_id } => {
-                self.modified_edges.insert(*edge_id, index);
-            }
+        if let Some(node_id) = write.node_id() {
+            self.modified_nodes.insert(node_id, index);
+        } else if let Some(edge_id) = write.edge_id() {
+            self.modified_edges.insert(edge_id, index);
+        }
+
+        // Check if this operation contains vector properties
+        if let Some(properties) = write.properties() {
+            self.has_vector_operations |= properties.contains_vector();
+        }
+
+        // Check if edge structure was modified
+        if write.is_edge_structure_modification() {
+            self.has_edge_operations = true;
         }
 
         self.operations.push(write);
@@ -244,6 +342,7 @@ impl WriteBuffer {
         self.modified_nodes.clear();
         self.modified_edges.clear();
         self.has_vector_operations = false;
+        self.has_edge_operations = false;
     }
 
     /// Get the number of buffered operations
@@ -258,7 +357,7 @@ impl WriteBuffer {
 
     /// Check if this transaction contains any vector property operations.
     ///
-    /// This is used to optimize the commit path by only triggering temporal
+    /// This is used to optimize the commit path by only triggering valid_from
     /// vector index updates when vector data was actually modified.
     pub fn has_vector_operations(&self) -> bool {
         self.has_vector_operations
@@ -272,11 +371,97 @@ impl WriteBuffer {
     pub fn mark_has_vector_operations(&mut self) {
         self.has_vector_operations = true;
     }
+
+    /// Check whether any edge structure changes occurred in this transaction.
+    ///
+    /// This is used to optimize the commit path by only calling compact_adjacency()
+    /// when the graph topology was modified. Returns true only for CreateEdge and
+    /// DeleteEdge operations; UpdateEdge (property-only changes) returns false.
+    pub fn has_edge_operations(&self) -> bool {
+        self.has_edge_operations
+    }
 }
 
 impl Default for WriteBuffer {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl From<&BufferedWrite> for crate::storage::wal::WalOperation {
+    fn from(write: &BufferedWrite) -> Self {
+        match write {
+            BufferedWrite::CreateNode {
+                node_id,
+                label,
+                properties,
+                valid_from,
+                ..
+            } => crate::storage::wal::WalOperation::CreateNode {
+                node_id: *node_id,
+                label: *label,
+                properties: properties.clone(),
+                valid_from: *valid_from,
+            },
+            BufferedWrite::CreateEdge {
+                edge_id,
+                source,
+                target,
+                label,
+                properties,
+                valid_from,
+                ..
+            } => crate::storage::wal::WalOperation::CreateEdge {
+                edge_id: *edge_id,
+                source: *source,
+                target: *target,
+                label: *label,
+                properties: properties.clone(),
+                valid_from: *valid_from,
+            },
+            BufferedWrite::UpdateNode {
+                node_id,
+                version_id,
+                label,
+                properties,
+                valid_from,
+                ..
+            } => crate::storage::wal::WalOperation::UpdateNode {
+                node_id: *node_id,
+                version_id: *version_id,
+                label: *label,
+                properties: properties.clone(),
+                valid_from: *valid_from,
+            },
+            BufferedWrite::UpdateEdge {
+                edge_id,
+                version_id,
+                label,
+                properties,
+                valid_from,
+                ..
+            } => crate::storage::wal::WalOperation::UpdateEdge {
+                edge_id: *edge_id,
+                version_id: *version_id,
+                label: *label,
+                properties: properties.clone(),
+                valid_from: *valid_from,
+            },
+            BufferedWrite::DeleteNode {
+                node_id,
+                valid_from,
+            } => crate::storage::wal::WalOperation::DeleteNode {
+                node_id: *node_id,
+                valid_from: *valid_from,
+            },
+            BufferedWrite::DeleteEdge {
+                edge_id,
+                valid_from,
+            } => crate::storage::wal::WalOperation::DeleteEdge {
+                edge_id: *edge_id,
+                valid_from: *valid_from,
+            },
+        }
     }
 }
 
@@ -301,7 +486,7 @@ mod tests {
             .intern("Person")
             .unwrap();
         let properties = PropertyMap::new();
-        let temporal = BiTemporalInterval::current(time::now());
+        let valid_from = time::now();
 
         buffer
             .add(BufferedWrite::CreateNode {
@@ -309,7 +494,7 @@ mod tests {
                 version_id,
                 label,
                 properties,
-                temporal,
+                valid_from,
             })
             .unwrap();
 
@@ -330,7 +515,7 @@ mod tests {
             .intern("KNOWS")
             .unwrap();
         let properties = PropertyMap::new();
-        let temporal = BiTemporalInterval::current(time::now());
+        let valid_from = time::now();
 
         buffer
             .add(BufferedWrite::CreateEdge {
@@ -340,7 +525,7 @@ mod tests {
                 target,
                 label,
                 properties,
-                temporal,
+                valid_from,
             })
             .unwrap();
 
@@ -359,7 +544,7 @@ mod tests {
             .intern("Test")
             .unwrap();
         let properties = PropertyMap::new();
-        let temporal = BiTemporalInterval::current(time::now());
+        let valid_from = time::now();
 
         // Add node
         buffer
@@ -368,7 +553,7 @@ mod tests {
                 version_id,
                 label,
                 properties: properties.clone(),
-                temporal,
+                valid_from,
             })
             .unwrap();
 
@@ -381,7 +566,7 @@ mod tests {
                 target: NodeId::new(2).unwrap(),
                 label,
                 properties,
-                temporal,
+                valid_from,
             })
             .unwrap();
 
@@ -399,7 +584,7 @@ mod tests {
             .intern("Test")
             .unwrap();
         let properties = PropertyMap::new();
-        let temporal = BiTemporalInterval::current(time::now());
+        let valid_from = time::now();
 
         buffer
             .add(BufferedWrite::CreateNode {
@@ -407,7 +592,7 @@ mod tests {
                 version_id,
                 label,
                 properties,
-                temporal,
+                valid_from,
             })
             .unwrap();
 
@@ -430,7 +615,7 @@ mod tests {
             .intern("Test")
             .unwrap();
         let properties = PropertyMap::new();
-        let temporal = BiTemporalInterval::current(time::now());
+        let valid_from = time::now();
 
         // Create node
         buffer
@@ -439,7 +624,7 @@ mod tests {
                 version_id: version_id_1,
                 label,
                 properties: properties.clone(),
-                temporal,
+                valid_from,
             })
             .unwrap();
 
@@ -450,7 +635,7 @@ mod tests {
                 version_id: version_id_2,
                 label,
                 properties,
-                temporal,
+                valid_from,
             })
             .unwrap();
 
@@ -470,7 +655,7 @@ mod tests {
             .intern("Test")
             .unwrap();
         let properties = PropertyMap::new();
-        let temporal = BiTemporalInterval::current(time::now());
+        let valid_from = time::now();
 
         // Add first operation - should succeed
         buffer
@@ -479,7 +664,7 @@ mod tests {
                 version_id: VersionId::new(1).unwrap(),
                 label,
                 properties: properties.clone(),
-                temporal,
+                valid_from,
             })
             .unwrap();
 
@@ -490,7 +675,7 @@ mod tests {
                 version_id: VersionId::new(2).unwrap(),
                 label,
                 properties: properties.clone(),
-                temporal,
+                valid_from,
             })
             .unwrap();
 
@@ -500,12 +685,12 @@ mod tests {
             version_id: VersionId::new(3).unwrap(),
             label,
             properties,
-            temporal,
+            valid_from,
         });
 
         assert!(result.is_err());
         match result.unwrap_err() {
-            crate::utils::error::Error::Storage(StorageError::CapacityExceeded {
+            crate::core::error::Error::Storage(StorageError::CapacityExceeded {
                 resource,
                 current,
                 limit,
@@ -535,7 +720,7 @@ mod tests {
         let label = crate::core::interning::GLOBAL_INTERNER
             .intern("Document")
             .unwrap();
-        let temporal = BiTemporalInterval::current(time::now());
+        let valid_from = time::now();
 
         // Initially, no vector operations
         assert!(!buffer.has_vector_operations());
@@ -553,7 +738,7 @@ mod tests {
                 version_id,
                 label,
                 properties: props,
-                temporal,
+                valid_from,
             })
             .unwrap();
 
@@ -569,7 +754,7 @@ mod tests {
         let label = crate::core::interning::GLOBAL_INTERNER
             .intern("Person")
             .unwrap();
-        let temporal = BiTemporalInterval::current(time::now());
+        let valid_from = time::now();
 
         // Create node with only scalar properties (no vectors)
         let props = PropertyMap::new()
@@ -585,7 +770,7 @@ mod tests {
                 version_id,
                 label,
                 properties: props,
-                temporal,
+                valid_from,
             })
             .unwrap();
 
@@ -603,7 +788,7 @@ mod tests {
         let label = crate::core::interning::GLOBAL_INTERNER
             .intern("Document")
             .unwrap();
-        let temporal = BiTemporalInterval::current(time::now());
+        let valid_from = time::now();
 
         // Add operation with vector
         let props = PropertyMap::new()
@@ -617,7 +802,7 @@ mod tests {
                 version_id,
                 label,
                 properties: props,
-                temporal,
+                valid_from,
             })
             .unwrap();
 
@@ -641,7 +826,7 @@ mod tests {
         let label = crate::core::interning::GLOBAL_INTERNER
             .intern("SIMILAR_TO")
             .unwrap();
-        let temporal = BiTemporalInterval::current(time::now());
+        let valid_from = time::now();
 
         // Initially, no vector operations
         assert!(!buffer.has_vector_operations());
@@ -660,7 +845,7 @@ mod tests {
                 target,
                 label,
                 properties: props,
-                temporal,
+                valid_from,
             })
             .unwrap();
 
@@ -678,7 +863,7 @@ mod tests {
         let label = crate::core::interning::GLOBAL_INTERNER
             .intern("Document")
             .unwrap();
-        let temporal = BiTemporalInterval::current(time::now());
+        let valid_from = time::now();
 
         // Update node with vector property
         let props = PropertyMap::new()
@@ -692,7 +877,7 @@ mod tests {
                 version_id,
                 label,
                 properties: props,
-                temporal,
+                valid_from,
             })
             .unwrap();
 
@@ -712,7 +897,7 @@ mod tests {
         let label = crate::core::interning::GLOBAL_INTERNER
             .intern("SIMILAR_TO")
             .unwrap();
-        let temporal = BiTemporalInterval::current(time::now());
+        let valid_from = time::now();
 
         // Update edge with vector property
         let props = PropertyMap::new()
@@ -728,7 +913,7 @@ mod tests {
                 target,
                 label,
                 properties: props,
-                temporal,
+                valid_from,
             })
             .unwrap();
 
@@ -753,7 +938,7 @@ mod tests {
         use crate::core::property::PropertyValue;
 
         let mut buffer = WriteBuffer::new();
-        let temporal = BiTemporalInterval::current(time::now());
+        let valid_from = time::now();
         let label = crate::core::interning::GLOBAL_INTERNER
             .intern("Test")
             .unwrap();
@@ -766,7 +951,7 @@ mod tests {
                     version_id: VersionId::new(i).unwrap(),
                     label,
                     properties: PropertyMap::new().builder().insert("id", i as i64).build(),
-                    temporal,
+                    valid_from,
                 })
                 .unwrap();
         }
@@ -785,7 +970,7 @@ mod tests {
                 version_id: VersionId::new(100).unwrap(),
                 label,
                 properties: props,
-                temporal,
+                valid_from,
             })
             .unwrap();
 
@@ -800,11 +985,393 @@ mod tests {
                     version_id: VersionId::new(i).unwrap(),
                     label,
                     properties: PropertyMap::new().builder().insert("id", i as i64).build(),
-                    temporal,
+                    valid_from,
                 })
                 .unwrap();
         }
 
         assert!(buffer.has_vector_operations());
+    }
+
+    #[test]
+    fn test_edge_operations_tracking_create_edge() {
+        let mut buffer = WriteBuffer::new();
+        let edge_id = EdgeId::new(1).unwrap();
+        let version_id = VersionId::new(1).unwrap();
+        let source = NodeId::new(1).unwrap();
+        let target = NodeId::new(2).unwrap();
+        let label = crate::core::interning::GLOBAL_INTERNER
+            .intern("KNOWS")
+            .unwrap();
+        let valid_from = time::now();
+
+        // Initially, no edge operations
+        assert!(!buffer.has_edge_operations());
+
+        // Create edge
+        buffer
+            .add(BufferedWrite::CreateEdge {
+                edge_id,
+                version_id,
+                source,
+                target,
+                label,
+                properties: PropertyMap::new(),
+                valid_from,
+            })
+            .unwrap();
+
+        // Should now track edge operations
+        assert!(buffer.has_edge_operations());
+    }
+
+    #[test]
+    fn test_edge_operations_tracking_update_edge() {
+        let mut buffer = WriteBuffer::new();
+        let edge_id = EdgeId::new(1).unwrap();
+        let version_id = VersionId::new(1).unwrap();
+        let source = NodeId::new(1).unwrap();
+        let target = NodeId::new(2).unwrap();
+        let label = crate::core::interning::GLOBAL_INTERNER
+            .intern("KNOWS")
+            .unwrap();
+        let valid_from = time::now();
+
+        // Initially, no edge operations
+        assert!(!buffer.has_edge_operations());
+
+        // Update edge (property-only, doesn't change topology)
+        buffer
+            .add(BufferedWrite::UpdateEdge {
+                edge_id,
+                version_id,
+                source,
+                target,
+                label,
+                properties: PropertyMap::new(),
+                valid_from,
+            })
+            .unwrap();
+
+        // Should NOT track edge operations (property updates don't affect adjacency)
+        assert!(!buffer.has_edge_operations());
+    }
+
+    #[test]
+    fn test_edge_operations_tracking_delete_edge() {
+        let mut buffer = WriteBuffer::new();
+        let edge_id = EdgeId::new(1).unwrap();
+
+        // Initially, no edge operations
+        assert!(!buffer.has_edge_operations());
+
+        // Delete edge
+        buffer
+            .add(BufferedWrite::DeleteEdge {
+                edge_id,
+                valid_from: crate::core::temporal::time::now(),
+            })
+            .unwrap();
+
+        // Should now track edge operations
+        assert!(buffer.has_edge_operations());
+    }
+
+    #[test]
+    fn test_edge_operations_tracking_only_nodes() {
+        let mut buffer = WriteBuffer::new();
+        let node_id = NodeId::new(1).unwrap();
+        let version_id = VersionId::new(1).unwrap();
+        let label = crate::core::interning::GLOBAL_INTERNER
+            .intern("Person")
+            .unwrap();
+        let valid_from = time::now();
+
+        // Create node (no edge operations)
+        let props = PropertyMap::new().builder().insert("name", "Alice").build();
+
+        buffer
+            .add(BufferedWrite::CreateNode {
+                node_id,
+                version_id,
+                label,
+                properties: props,
+                valid_from,
+            })
+            .unwrap();
+
+        // Should NOT track edge operations
+        assert!(!buffer.has_edge_operations());
+    }
+
+    #[test]
+    fn test_edge_operations_tracking_clear() {
+        let mut buffer = WriteBuffer::new();
+        let edge_id = EdgeId::new(1).unwrap();
+        let version_id = VersionId::new(1).unwrap();
+        let source = NodeId::new(1).unwrap();
+        let target = NodeId::new(2).unwrap();
+        let label = crate::core::interning::GLOBAL_INTERNER
+            .intern("KNOWS")
+            .unwrap();
+        let valid_from = time::now();
+
+        // Add edge operation
+        buffer
+            .add(BufferedWrite::CreateEdge {
+                edge_id,
+                version_id,
+                source,
+                target,
+                label,
+                properties: PropertyMap::new(),
+                valid_from,
+            })
+            .unwrap();
+
+        assert!(buffer.has_edge_operations());
+
+        // Clear should reset the flag
+        buffer.clear();
+        assert!(!buffer.has_edge_operations());
+        assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn test_edge_operations_tracking_mixed_operations() {
+        let mut buffer = WriteBuffer::new();
+        let node_id = NodeId::new(1).unwrap();
+        let edge_id = EdgeId::new(1).unwrap();
+        let version_id = VersionId::new(1).unwrap();
+        let label = crate::core::interning::GLOBAL_INTERNER
+            .intern("Person")
+            .unwrap();
+        let valid_from = time::now();
+
+        // Initially, no edge operations
+        assert!(!buffer.has_edge_operations());
+
+        // Add node operation
+        buffer
+            .add(BufferedWrite::CreateNode {
+                node_id,
+                version_id,
+                label,
+                properties: PropertyMap::new(),
+                valid_from,
+            })
+            .unwrap();
+
+        // Should still be false (only node operations so far)
+        assert!(!buffer.has_edge_operations());
+
+        // Add edge operation
+        buffer
+            .add(BufferedWrite::CreateEdge {
+                edge_id,
+                version_id,
+                source: node_id,
+                target: NodeId::new(2).unwrap(),
+                label,
+                properties: PropertyMap::new(),
+                valid_from,
+            })
+            .unwrap();
+
+        // Should now track edge operations
+        assert!(buffer.has_edge_operations());
+
+        // Add more node operations - flag should remain true
+        buffer
+            .add(BufferedWrite::CreateNode {
+                node_id: NodeId::new(3).unwrap(),
+                version_id: VersionId::new(2).unwrap(),
+                label,
+                properties: PropertyMap::new(),
+                valid_from,
+            })
+            .unwrap();
+
+        assert!(buffer.has_edge_operations());
+    }
+
+    #[test]
+    fn test_edge_operations_tracking_create_update_distinction() {
+        let mut buffer = WriteBuffer::new();
+        let edge_id_1 = EdgeId::new(1).unwrap();
+        let edge_id_2 = EdgeId::new(2).unwrap();
+        let version_id = VersionId::new(1).unwrap();
+        let source = NodeId::new(1).unwrap();
+        let target = NodeId::new(2).unwrap();
+        let label = crate::core::interning::GLOBAL_INTERNER
+            .intern("KNOWS")
+            .unwrap();
+        let valid_from = time::now();
+
+        // Initially, no edge operations
+        assert!(!buffer.has_edge_operations());
+
+        // UpdateEdge alone should NOT trigger the flag
+        buffer
+            .add(BufferedWrite::UpdateEdge {
+                edge_id: edge_id_1,
+                version_id,
+                source,
+                target,
+                label,
+                properties: PropertyMap::new(),
+                valid_from,
+            })
+            .unwrap();
+
+        assert!(!buffer.has_edge_operations());
+
+        // CreateEdge SHOULD trigger the flag
+        buffer
+            .add(BufferedWrite::CreateEdge {
+                edge_id: edge_id_2,
+                version_id,
+                source,
+                target,
+                label,
+                properties: PropertyMap::new(),
+                valid_from,
+            })
+            .unwrap();
+
+        assert!(buffer.has_edge_operations());
+
+        // Clear and test with DeleteEdge
+        buffer.clear();
+        assert!(!buffer.has_edge_operations());
+
+        // UpdateEdge alone still shouldn't trigger
+        buffer
+            .add(BufferedWrite::UpdateEdge {
+                edge_id: edge_id_1,
+                version_id,
+                source,
+                target,
+                label,
+                properties: PropertyMap::new(),
+                valid_from,
+            })
+            .unwrap();
+
+        assert!(!buffer.has_edge_operations());
+
+        // DeleteEdge SHOULD trigger the flag
+        buffer
+            .add(BufferedWrite::DeleteEdge {
+                edge_id: edge_id_1,
+                valid_from,
+            })
+            .unwrap();
+
+        assert!(buffer.has_edge_operations());
+    }
+
+    // =========================================================================
+    // Phase 3: True Bi-Temporal - BufferedWrite with valid_from Tests
+    // =========================================================================
+
+    #[test]
+    fn test_buffered_write_stores_valid_from_separately() {
+        use crate::core::hlc::HybridTimestamp;
+
+        let valid_from = HybridTimestamp::new(1000, 0).unwrap();
+
+        let write = BufferedWrite::CreateNode {
+            node_id: NodeId::new(1).unwrap(),
+            version_id: VersionId::new(1).unwrap(),
+            label: crate::core::interning::GLOBAL_INTERNER
+                .intern("Person")
+                .unwrap(),
+            properties: PropertyMap::new(),
+            valid_from,
+        };
+
+        match write {
+            BufferedWrite::CreateNode { valid_from: vf, .. } => {
+                assert_eq!(vf, valid_from);
+            }
+            _ => panic!("Wrong variant"),
+        }
+    }
+
+    #[test]
+    fn test_buffered_write_update_stores_valid_from() {
+        use crate::core::hlc::HybridTimestamp;
+
+        let valid_from = HybridTimestamp::new(2000, 0).unwrap();
+
+        let write = BufferedWrite::UpdateNode {
+            node_id: NodeId::new(1).unwrap(),
+            version_id: VersionId::new(2).unwrap(),
+            label: crate::core::interning::GLOBAL_INTERNER
+                .intern("Person")
+                .unwrap(),
+            properties: PropertyMap::new(),
+            valid_from,
+        };
+
+        match write {
+            BufferedWrite::UpdateNode { valid_from: vf, .. } => {
+                assert_eq!(vf, valid_from);
+            }
+            _ => panic!("Wrong variant"),
+        }
+    }
+
+    #[test]
+    fn test_buffered_write_create_edge_stores_valid_from() {
+        use crate::core::hlc::HybridTimestamp;
+
+        let valid_from = HybridTimestamp::new(3000, 0).unwrap();
+
+        let write = BufferedWrite::CreateEdge {
+            edge_id: EdgeId::new(1).unwrap(),
+            version_id: VersionId::new(1).unwrap(),
+            source: NodeId::new(1).unwrap(),
+            target: NodeId::new(2).unwrap(),
+            label: crate::core::interning::GLOBAL_INTERNER
+                .intern("KNOWS")
+                .unwrap(),
+            properties: PropertyMap::new(),
+            valid_from,
+        };
+
+        match write {
+            BufferedWrite::CreateEdge { valid_from: vf, .. } => {
+                assert_eq!(vf, valid_from);
+            }
+            _ => panic!("Wrong variant"),
+        }
+    }
+
+    #[test]
+    fn test_buffered_write_update_edge_stores_valid_from() {
+        use crate::core::hlc::HybridTimestamp;
+
+        let valid_from = HybridTimestamp::new(4000, 0).unwrap();
+
+        let write = BufferedWrite::UpdateEdge {
+            edge_id: EdgeId::new(1).unwrap(),
+            version_id: VersionId::new(2).unwrap(),
+            source: NodeId::new(1).unwrap(),
+            target: NodeId::new(2).unwrap(),
+            label: crate::core::interning::GLOBAL_INTERNER
+                .intern("KNOWS")
+                .unwrap(),
+            properties: PropertyMap::new(),
+            valid_from,
+        };
+
+        match write {
+            BufferedWrite::UpdateEdge { valid_from: vf, .. } => {
+                assert_eq!(vf, valid_from);
+            }
+            _ => panic!("Wrong variant"),
+        }
     }
 }

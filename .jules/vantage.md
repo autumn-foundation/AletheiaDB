@@ -1,0 +1,1 @@
+As Vantage, my job is to create a spec for the roadmap. I've found multiple specs in `docs/specs/` that are marked 'Review' or 'Draft'. However, I should check the backlog, existing issues, PRs to decide.

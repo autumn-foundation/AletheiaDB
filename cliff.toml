@@ -6,7 +6,7 @@
 header = """
 # Changelog
 
-All notable changes to GallifreyDB will be documented in this file.
+All notable changes to AletheiaDB will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
@@ -93,4 +93,4 @@ sort_commits = "oldest"
 [github]
 # GitHub integration for PRs and issues
 owner = "madmax983"
-repo = "GallifreyDB"
+repo = "AletheiaDB"

@@ -47,15 +47,15 @@ check:
 
 # Run clippy lints
 lint:
-    cargo clippy -- -D warnings
+    cargo clippy --all-targets --all-features -- -D warnings
 
 # Format code
 fmt:
-    cargo fmt
+    cargo fmt --all
 
 # Check formatting without modifying
 fmt-check:
-    cargo fmt -- --check
+    cargo fmt --all -- --check
 
 # Clean build artifacts
 clean:
@@ -187,6 +187,11 @@ version-preview:
 criterion:
     cargo bench --bench '*'
 
+# Run sustained cold-storage write throughput with stable benchmark settings.
+# Usage: just bench-sustained-write-stable [threads] [sample] [seconds]
+bench-sustained-write-stable threads='8' sample='20' seconds='20':
+    RAYON_NUM_THREADS={{threads}} BENCH_SUSTAINED_WRITE_SAMPLE_SIZE={{sample}} BENCH_SUSTAINED_WRITE_MEASUREMENT_TIME={{seconds}} cargo bench --bench cold_storage sustained_write_10k_versions
+
 # Generate flamegraph (requires cargo-flamegraph)
 flamegraph:
     cargo flamegraph --bench current_state
@@ -223,6 +228,53 @@ outdated:
 # Audit dependencies for security issues
 audit:
     cargo audit
+
+# === Mutation Testing ===
+
+# Run mutation tests on all code
+mutants:
+    cargo mutants --in-place -vV
+
+# Run mutation tests only on uncommitted changes
+mutants-diff:
+    #!/usr/bin/env bash
+    trap 'rm -f mutants-diff.tmp' EXIT
+    git diff HEAD > mutants-diff.tmp
+    cargo mutants --in-place -vV --in-diff mutants-diff.tmp
+
+# Run mutation tests on changes vs trunk
+mutants-branch:
+    #!/usr/bin/env bash
+    trap 'rm -f mutants-diff.tmp' EXIT
+    git diff origin/trunk.. > mutants-diff.tmp
+    cargo mutants --in-place -vV --in-diff mutants-diff.tmp
+
+# === Miri (Undefined Behavior Detection) ===
+
+# Install miri component
+miri-setup:
+    rustup +nightly component add miri
+    cargo +nightly miri setup
+
+# Run miri on all tests (excludes FFI-heavy tests automatically via cfg)
+miri:
+    cargo +nightly miri test
+
+# Run miri on a specific test
+miri-test TEST:
+    cargo +nightly miri test {{TEST}}
+
+# Run miri with extra verbose output for debugging
+miri-verbose:
+    cargo +nightly miri test -- --nocapture --test-threads=1
+
+# Run miri with tree-borrows instead of stacked-borrows (experimental)
+miri-tree-borrows:
+    MIRIFLAGS="-Zmiri-tree-borrows" cargo +nightly miri test
+
+# Run miri on library only (faster than all tests)
+miri-lib:
+    cargo +nightly miri test --lib
 
 # === Git Worktree Commands ===
 # These commands enable parallel development with multiple Claude instances

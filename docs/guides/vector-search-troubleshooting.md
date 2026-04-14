@@ -1,10 +1,10 @@
 # Vector Search Troubleshooting Guide
 
-> Common issues and solutions for vector search in GallifreyDB
+> Common issues and solutions for vector search in AletheiaDB
 
 ## Overview
 
-This guide covers common problems, error messages, and debugging techniques for GallifreyDB's vector search functionality. If you don't find your issue here, check the [Integration Guide](vector-search-integration.md) or [Performance Guide](vector-search-performance.md).
+This guide covers common problems, error messages, and debugging techniques for AletheiaDB's vector search functionality. If you don't find your issue here, check the [Integration Guide](vector-search-integration.md) or [Performance Guide](vector-search-performance.md).
 
 ## Quick Diagnosis
 
@@ -33,7 +33,7 @@ Error: VectorIndexNotEnabled
 **Solution:**
 
 ```rust
-use gallifreydb::index::vector::{HnswConfig, DistanceMetric};
+use aletheiadb::index::vector::{HnswConfig, DistanceMetric};
 
 // Enable index BEFORE performing searches
 let config = HnswConfig::new(384, DistanceMetric::Cosine);
@@ -97,7 +97,7 @@ db.create_node(
 
 **Validation before indexing:**
 ```rust
-use gallifreydb::core::vector::validate_vector_with_bounds;
+use aletheiadb::core::vector::validate_vector_with_bounds;
 
 let embedding = get_embedding_from_model();
 
@@ -179,7 +179,7 @@ Error: Vector(InvalidVector("Vector contains infinite values"))
 **Solution:**
 
 ```rust
-use gallifreydb::core::vector::{validate_vector, normalize_in_place};
+use aletheiadb::core::vector::{validate_vector, normalize_in_place};
 
 let mut embedding = get_embedding_from_model();
 
@@ -201,7 +201,7 @@ db.create_node(
 
 **Handling zero-magnitude vectors:**
 ```rust
-use gallifreydb::core::vector::{magnitude, normalize_in_place};
+use aletheiadb::core::vector::{magnitude, normalize_in_place};
 
 let mut embedding = get_embedding_from_model();
 let mag = magnitude(&embedding);
@@ -241,7 +241,7 @@ if !db.is_vector_index_enabled() {
 }
 ```
 
-**Note:** Currently GallifreyDB supports one vector index per database. Multi-index support planned for future releases.
+**Note:** Currently AletheiaDB supports one vector index per database. Multi-index support planned for future releases.
 
 ---
 
@@ -366,7 +366,7 @@ println!("Query took: {:?}", latency);
 
 3. **Non-normalized vectors with Cosine metric**
    ```rust
-   use gallifreydb::core::vector::normalize_in_place;
+   use aletheiadb::core::vector::normalize_in_place;
 
    // Problem: Normalization on every distance computation
    let embedding = get_embedding_from_model();
@@ -453,7 +453,7 @@ println!("Expected memory: ~{} MB", total_mb);
 
 2. **Check distance metric:**
    ```rust
-   use gallifreydb::core::vector::{cosine_similarity, euclidean_distance};
+   use aletheiadb::core::vector::{cosine_similarity, euclidean_distance};
 
    let emb1 = get_embedding("cat");
    let emb2 = get_embedding("dog");
@@ -541,11 +541,11 @@ for handle in handles {
 2. **Sharing mutable references**
    ```rust
    // ❌ WRONG: Sharing &mut across threads
-   let mut db = GallifreyDB::new();
+   let mut db = AletheiaDB::new();
    // Can't share mutable reference across threads
 
    // ✅ CORRECT: Use Arc for shared ownership
-   let db = Arc::new(GallifreyDB::new());
+   let db = Arc::new(AletheiaDB::new());
    // Can clone Arc and share across threads
    ```
 
@@ -579,7 +579,7 @@ for (i, embedding) in embeddings.iter().enumerate() {
 
 1. **Invalid vectors in batch**
    ```rust
-   use gallifreydb::core::vector::validate_vector;
+   use aletheiadb::core::vector::validate_vector;
 
    // Pre-validate embeddings
    for (i, embedding) in embeddings.iter().enumerate() {
@@ -616,7 +616,7 @@ for (i, embedding) in embeddings.iter().enumerate() {
 env_logger::init();
 
 // Set RUST_LOG environment variable:
-// RUST_LOG=gallifreydb=debug cargo run
+// RUST_LOG=aletheiadb=debug cargo run
 ```
 
 ### Inspect Index State
@@ -634,7 +634,7 @@ println!("Indexed nodes: {}", all_results.len());
 ### Validate Embedding Quality
 
 ```rust
-use gallifreydb::core::vector::{
+use aletheiadb::core::vector::{
     magnitude,
     is_normalized,
     cosine_similarity,
@@ -698,15 +698,15 @@ println!("Average insert latency: {:?}", avg_insert);
 1. **Check error message** against this guide
 2. **Verify configuration** matches your use case
 3. **Test with minimal example** to isolate issue
-4. **Check GallifreyDB version** - ensure you're up-to-date
+4. **Check AletheiaDB version** - ensure you're up-to-date
 
 ### Reporting Bugs
 
 Include in your bug report:
 
 ```rust
-// 1. GallifreyDB version
-println!("gallifreydb version: 0.1.0");
+// 1. AletheiaDB version
+println!("aletheiadb version: 0.1.0");
 
 // 2. Configuration
 println!("Dimensions: 384");
@@ -726,7 +726,7 @@ println!("Error: ...");
 
 ### Community Resources
 
-- **GitHub Issues**: https://github.com/yourusername/gallifreydb/issues
+- **GitHub Issues**: https://github.com/yourusername/aletheiadb/issues
 - **Documentation**: [Integration Guide](vector-search-integration.md), [Performance Guide](vector-search-performance.md)
 - **Design Document**: [VECTOR_SEARCH_DESIGN.md](../VECTOR_SEARCH_DESIGN.md)
 

@@ -13,14 +13,14 @@
 //! # Prerequisites
 //!
 //! Ollama must be installed and running:
-//! 1. Install: https://ollama.ai
+//! 1. Install: <https://ollama.ai>
 //! 2. Pull a model: `ollama pull nomic-embed-text`
 //! 3. Ollama server runs on `localhost:11434` by default
 //!
 //! # Example
 //!
 //! ```ignore
-//! use gallifreydb::embeddings::{EmbeddingService, providers::ollama::*};
+//! use aletheiadb::embeddings::{EmbeddingService, providers::ollama::*};
 //! use std::sync::Arc;
 //!
 //! let config = OllamaConfig::nomic_embed_text();

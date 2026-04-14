@@ -38,9 +38,9 @@ if [ -z "$REPO_ROOT" ]; then
 fi
 
 # Validate branch name format
-if ! [[ "$BRANCH_NAME" =~ ^(feature|fix)/[a-zA-Z0-9_-]+$ ]]; then
-    err "Error: Branch name must be in format 'feature/<name>' or 'fix/<name>'"
-    err "  Examples: feature/add-auth, fix/memory-leak"
+if ! [[ "$BRANCH_NAME" =~ ^(feature|fix|docs)/[a-zA-Z0-9_-]+$ ]]; then
+    err "Error: Branch name must be in format 'feature/<name>', 'fix/<name>', or 'docs/<name>'"
+    err "  Examples: feature/add-auth, fix/memory-leak, docs/update-readme"
     exit 1
 fi
 

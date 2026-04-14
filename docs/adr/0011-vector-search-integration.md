@@ -3,7 +3,7 @@
 **Status:** Accepted (Phases 1-2 Implemented)
 **Date:** 2024-12-31
 **Updated:** 2025-01-03
-**Deciders:** GallifreyDB Core Team
+**Deciders:** AletheiaDB Core Team
 **Categories:** index, vector
 
 ## Implementation Status
@@ -12,19 +12,24 @@
 |-------|--------|-----|
 | Phase 1: Vector Storage | ✅ Complete | #138 |
 | Phase 2: HNSW Index Integration | ✅ Complete | #169 |
-| Phase 3: Temporal Vector Support | 🔲 Planned | - |
-| Phase 4: Hybrid Query Engine | 🔲 Planned | - |
+| Phase 3: Temporal Vector Support | ✅ Complete | #403 |
+| Phase 4: Hybrid Query Engine | ✅ Complete | VS-065 |
 | Phase 5: Persistence & Performance | 🔲 Planned | - |
+
+**Related ADRs:**
+- [ADR-0018](0018-temporal-vector-historical-integration.md) - Temporal snapshot integration
+- [ADR-0019](0019-hybrid-query-planner.md) - Hybrid query planner design
+- [ADR-0022](0022-multi-property-vector-index.md) - Multi-property vector index support
 
 ## Context
 
-GallifreyDB's primary use case is enabling LLMs to reason about knowledge evolution. Modern LLMs heavily rely on vector embeddings for semantic similarity. Adding vector search would enable:
+AletheiaDB's primary use case is enabling LLMs to reason about knowledge evolution. Modern LLMs heavily rely on vector embeddings for semantic similarity. Adding vector search would enable:
 
 - **Semantic retrieval**: Find nodes by meaning, not just keywords
 - **Hybrid queries**: Combine graph traversal with similarity ranking
 - **Temporal semantics**: Track how meanings drift over time
 
-This positions GallifreyDB as "SUPERRAG" - combining:
+This positions AletheiaDB as "SUPERRAG" - combining:
 - **Graph**: Relationship traversal
 - **Vector**: Semantic similarity
 - **Bi-temporal**: Knowledge evolution

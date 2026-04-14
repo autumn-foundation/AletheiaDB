@@ -1,0 +1,102 @@
+# Bard's Journal 🎻
+
+## 2024-05-23 - Outdated Vector Index Docs
+**Confusion:** The `src/index/vector/mod.rs` documentation contained outdated comments stating "no VectorIndex implementation exists yet" and referencing future phases, despite `HnswIndex` being fully implemented. The examples were also marked `no_run`.
+**Clarification:** Updated the documentation to reflect that `HnswIndex` is the concrete implementation. Examples were updated to use `ignore` (as they require setup) and the text was updated to describe the current state of the implementation.
+
+## 2024-05-24 - Transaction Consistency Guarantees
+**Confusion:** The `ReadOps` trait methods in `src/api/transaction/mod.rs` did not specify consistency guarantees. Specifically, `node_count()` is *not* snapshot-isolated (returns current count), while `get_node()` *is* snapshot-isolated. This distinction is critical but was undocumented.
+**Clarification:** Updated `ReadOps` documentation to explicitly state snapshot isolation behavior, ordering guarantees (none), and performance complexity for all methods. Added examples to `WriteOps` to demonstrate correct usage.
+
+## 2024-05-24 - Historical Version Metadata
+**Confusion:** Historical versions retrieved from storage (not currently in memory) may have `created_by_tx` set to `TxId(0)`. This is because the creating transaction ID is not currently preserved in the historical storage format to save space.
+**Clarification:** Updated `VersionMetadata` documentation to explicitly state this behavior.
+
+## 2024-05-25 - AletheiaDB Default Configuration
+**Confusion:** `AletheiaDB::new()` documentation did not specify whether it creates an in-memory or disk-based database. It defaults to disk-based storage at `./aletheiadb/wal`, which could surprise users expecting an ephemeral in-memory instance.
+**Clarification:** Updated `AletheiaDB::new()` documentation to explicitly state the default disk-based configuration and point to `with_unified_config` for customization.
+
+## 2024-05-25 - WAL Entry Binary Format
+**Confusion:** The on-disk binary format of `WalEntry` was only documented in code comments within the serialization logic, making it hard to understand the storage format without deep diving into implementation details.
+**Clarification:** Added detailed binary layout documentation to the `WalEntry` struct in `src/storage/wal/entry.rs`, including field sizes and ordering.
+
+## 2024-05-26 - HTTP JSON Conversion Limits
+**Confusion:** The HTTP API's JSON conversion logic enforces a recursion depth limit (100) to prevent stack overflow attacks, but this behavior was undocumented and could surprise developers working with deeply nested data.
+**Clarification:** Added documentation to `src/http/converters.rs` explicitly stating the recursion limit and detailing the type mappings between AletheiaDB types and JSON types.
+
+## 2024-05-27 - Hidden Transaction Time Access
+**Confusion:** The `VersionInfo` struct does not expose a `tx_time` field, forcing users to dive into the source code to realize they must access `version.temporal.transaction_time().start()`.
+**Clarification:** Added a "Temporal Access" section to `VersionInfo` documentation with a clear code example demonstrating how to retrieve both valid time and transaction time.
+
+## 2024-05-27 - Temporal Logic Pitfalls
+**Confusion:** Users were unaware of critical boundaries like `MAX_VALID_TIMESTAMP` (causing runtime errors) and the reflexive nature of `TimeRange::contains_range` (causing off-by-one logic bugs).
+**Clarification:** Added a "Gotchas & Corner Cases" section to `src/core/temporal.rs` explicitly listing `MAX_VALID_TIMESTAMP` limits, range containment rules, and visibility logic nuances.
+
+## 2024-05-27 - Experimental Feature Opacity
+**Confusion:** The `Chronos` (pathfinding) and `Dreamer` (vector extrapolation) experimental modules lacked explanations of their underlying algorithms, making them opaque "black boxes."
+**Clarification:** Added detailed algorithmic explanations to `Chronos` (Snapshot Pathfinding, Path Stability) and clarified `Dreamer`'s dependency on `search_vectors_in`.
+
+## 2024-05-28 - Broken Links in Feature-Gated Modules
+**Confusion:** Running `cargo doc` without features enabled resulted in broken intra-doc links to experimental modules (like `sherlock` or `hindsight`), causing warnings and confusion about missing items.
+**Clarification:** Documentation generation for experimental features requires enabling the `nova` feature flag (e.g., `cargo doc --features nova`).
+
+## 2024-05-29 - Experimental Feature Leaks
+**Confusion:** The `experimental` module documentation claimed that all features were gated behind `feature = "nova"`. However, `metaphor` and `muse` were publicly exposed even without the feature enabled, leading to inconsistent API availability and potential runtime panics (as `metaphor` used internal runtime checks instead of compile-time gating).
+**Clarification:** Updated `src/experimental/mod.rs` to explicitly gate `metaphor` and `muse` with `#[cfg(feature = "nova")]`, aligning the code with the documentation and ensuring a consistent compile-time experience.
+
+## 2024-05-30 - The Case of the Fake Statistic
+**Confusion:** The `Statistics::avg_delta_chain` field (used for cost-based optimization of temporal queries) was documented as "collected statistics" but was actually hardcoded to `5.0` in `refresh_statistics`, with a TODO comment (Issue #366) hidden in the implementation. This could mislead users debugging query performance on deep historical graphs.
+**Clarification:** Refactored `AletheiaDB::refresh_statistics` to calculate the actual average chain length from `HistoricalStorage` metadata (`total_versions / total_anchors`). Updated `Statistics` documentation to explain its lifecycle and role in query planning.
+
+## 2026-02-25 - The Case of the Sequential Scatter
+**Confusion:** The architecture documentation described a "Scatter-Gather" query executor and "Distributed Transactions", implying high-concurrency parallelism. However, the implementation actually processes shards sequentially (one by one), meaning latency scales linearly ((N)$) rather than remaining constant.
+**Clarification:** Updated `src/storage/sharding/executor.rs`, `coordinator.rs`, and `network.rs` to explicitly document the sequential, blocking nature of the current implementation. Added performance warnings to the `README.md` to set correct expectations for Phase 1 sharding.
+## 2025-02-28 - Escaping Square Brackets in Docs
+**Confusion:** The rustdoc generator attempts to resolve anything inside square brackets `[Like This]` as an intra-doc link, which causes `rustdoc::broken_intra_doc_links` warnings if the text is just meant to be a literal string (e.g., demonstrating a pattern match like `[Person ~ 'Engineer']`).
+**Clarification:** You must explicitly escape square brackets that are not meant to be links using backslashes: `\[Like This\]`.
+
+## 2025-02-28 - Redundant Explicit Link Targets
+**Confusion:** Writing `[`GLOBAL_INTERNER`](crate::core::GLOBAL_INTERNER)` causes a `rustdoc::redundant_explicit_links` warning because the path resolves to the same destination as the link text itself.
+**Clarification:** Rustdoc can automatically resolve the path if it's imported in scope or if it's a known global. Just use `[`GLOBAL_INTERNER`]` directly without the explicit target to keep the documentation source cleaner and avoid warnings.
+
+## 2025-03-01 - README Getting Started Examples
+**Confusion:** Users copying examples from the README encountered compilation errors due to missing `aletheiadb::prelude::*` imports and missing feature flags (like `sharding-rpc`). Furthermore, running multiple examples sequentially in the same directory caused runtime crashes (e.g., `InvalidTimeRange`) due to conflicting leftover state in the default `./aletheiadb` directory. Unused variables also caused compiler warnings.
+**Clarification:** Updated README examples to consistently include `use aletheiadb::prelude::*`, explicitly declare required feature flags for sharding, prefix unused variables with `_`, and added a prominent warning about database state persistence and cleanup between example runs.
+
+## 2025-03-02 - Opaque Iterator Implementation Details
+**Confusion:** The `src/storage/current/iterators.rs` module lacked documentation explaining why specific iterator types were generated via macros instead of just returning a standard `Vec<EdgeId>`. This obscured the "Zero-Allocation Traversal" performance philosophy.
+**Clarification:** Added module-level documentation explaining that these iterators avoid expensive memory allocations on hot paths by holding lock-free references to contiguous memory arrays, reducing traversal overhead by 100-500ns per hop.
+
+## 2025-03-02 - Logical vs Physical Plan Clarification
+**Confusion:** The `src/query/planner/physical.rs` module lacked documentation detailing the distinction between logical query plans (what data to fetch) and physical query plans (the execution strategy used to fetch it). This is a core concept that makes the query planner opaque.
+**Clarification:** Added module-level documentation describing the optimizer's role in creating a `PhysicalPlan` and providing an example of how to view the underlying structure via `.explain()`.
+
+## 2025-03-05 - Prophet Algorithm Clarification
+**Confusion:** The `Prophet` link prediction engine was vaguely documented as "predicting the future". Users could easily assume it was a standard ML model or purely topological (like mutual friends). The interplay between the Adamic-Adar index (topology) and cosine similarity (semantics) was buried in the source code.
+**Clarification:** Added comprehensive module-level documentation and struct-level examples detailing the specific algorithm (`Score = AdamicAdar * (1.0 + VectorSimilarity)`), explaining exactly how it bridges structural positioning with conceptual alignment.
+
+## 2025-03-05 - Doctests with Feature Flags
+**Confusion:** When writing doctests for modules behind a feature flag (like `nova`), wrapping the test block in `# #[cfg(feature = "nova")] \n # { ... }` causes `rustdoc` to generate invalid syntax when the test is extracted. It creates an anonymous block at the root level which is an expression, not an item, breaking `cargo test`. If the feature flag is disabled, it leaves an empty file causing a `main function not found` error.
+**Clarification:** To properly feature-gate doctests, conditionally compile the imports and the `main` function itself: `# #[cfg(feature = "nova")] \n fn main() { ... }`, and crucially, provide an empty fallback `main` function for when the feature is disabled: `# #[cfg(not(feature = "nova"))] \n # fn main() {}`.
+
+## 2025-03-05 - Logical vs Physical Plans and Iterator Performance
+**Confusion:** The difference between logical plans (`LogicalOp`) and physical plans (`PhysicalOp`) in the query engine was unclear. Additionally, the iterators used for execution (`ResultIterator` implementations) lacked clarity on their streaming architecture.
+**Clarification:** Documented `PhysicalOp` to explain its 1:1 mapping with iterators. Added struct-level documentation to `ResultIterator` implementations to clarify the pull-based, lazy execution model used during query processing.
+## 2025-03-05 - Opaque Persistence Architecture
+**Confusion:** The `src/index/vector/hnsw/persistence.rs` module lacked documentation explaining the two-file architecture (the usearch `.bin` file vs the AletheiaDB `.idx` file), making it difficult to understand how and why index mapping was persisted. Furthermore, the DoS protections (like `MAX_MAPPINGS_COUNT`) were not clearly highlighted at the module level.
+**Clarification:** Added a module-level `//!` documentation block detailing the architecture and security protections. Additionally, documented the `IndexMetadata` struct to explain why exact configuration matching is required.
+
+## 2025-03-05 - The Spark and Details Format
+**Confusion:** Basic documentation comments like "Creates a new ID" don't help tired developers understand *why* strong types exist or *when* checkpoints trigger.
+**Clarification:** Added `# The Spark` and `# The Details` narrative structures to `NodeId`, `EdgeId`, `VersionId`, and `CheckpointManager` methods to explain the context of use, plus concrete `# Examples`.
+## 2025-03-05 - Experimental Feature Leaks II & Doctest Conditionals
+**Confusion:** Several experimental modules (`chronos`, `echo`, `sherlock`, and `temporal_narrative`) in `src/experimental/mod.rs` were missing their `#[cfg(feature = "nova")]` gating attributes. This allowed them to leak into the public API without the required feature flag enabled. Furthermore, the doctests for `sherlock` (in `mod.rs`) and `kairos` used an anonymous block (`# { ... }`) for feature gating, which generated `main function not found` or `expressions at the top level` warnings in `cargo test --doc`.
+**Clarification:** Added the missing `#[cfg(feature = "nova")]` attributes to the exposed experimental modules. Fixed the doctests to use conditional compilation on the `main` function and imports themselves (`# #[cfg(feature = "nova")] \n fn main() { ... }`), and added an empty fallback `main` function for when the feature is disabled.
+
+## 2024-04-07 - [QueryResults API Confusion]
+**Confusion:** The query execution API was opaque, returning raw struct definitions for `QueryResults`, `QueryResult`, and `QueryRow` without context. Users were likely confused about when to use the lazy iterator versus the eagerly evaluated batch objects, and how context like scores, paths, and timestamps fit into rows instead of raw nodes.
+**Clarification:** Added module-level documentation (`//!`) to explain the "Journey of a Result" from planner to materialized structures. Supplemented struct definitions with `///` comments explaining the *why* (e.g. "Why? Use this when the expected result set is small"). Also added executable doctests for `consume_results`, `QueryRow::from_entity`, and `QueryRow::with_score`.
+
+## 2025-03-05 - The Case of the Silent Shard Rebalancer
+**Confusion:** The `src/storage/sharding/rebalance.rs` and `src/storage/sharding/rpc_client.rs` modules lacked any executable examples or context about *why* specific structures existed. Users trying to understand or manually trigger cluster migrations had to read the source code of `RebalanceManager` and guess how it interacts with `MigrationPlan`.
+**Clarification:** Added comprehensive module-level documentation and struct-level `# The Spark` and `# The Details` sections with executable `///` doctests.

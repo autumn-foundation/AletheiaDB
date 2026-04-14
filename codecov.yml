@@ -1,4 +1,4 @@
-# Codecov Configuration for GallifreyDB
+# Codecov Configuration for AletheiaDB
 # Enforces the coverage thresholds defined in CLAUDE.md
 
 coverage:

@@ -2,7 +2,7 @@
 
 **Status:** Accepted
 **Date:** 2024-12-31
-**Deciders:** GallifreyDB Core Team
+**Deciders:** AletheiaDB Core Team
 **Categories:** index, concurrency
 
 ## Context

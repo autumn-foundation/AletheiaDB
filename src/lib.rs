@@ -1,6 +1,6 @@
-//! GallifreyDB - A high-performance bi-temporal graph database.
+//! AletheiaDB - A high-performance bi-temporal graph database.
 //!
-//! GallifreyDB tracks both **valid time** (when facts were true in reality) and
+//! AletheiaDB tracks both **valid time** (when facts were true in reality) and
 //! **transaction time** (when facts were recorded in the database). This enables
 //! powerful time-traveling queries and historical analysis.
 //!
@@ -23,10 +23,12 @@
 //!
 //! # Example
 //!
-//! ```ignore
-//! use gallifreydb::{GallifreyDB, properties};
+//! ```rust,no_run
+//! use aletheiadb::{AletheiaDB, properties, WriteOps};
+//! use aletheiadb::core::temporal::time;
 //!
-//! let db = GallifreyDB::new();
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let db = AletheiaDB::new()?;
 //!
 //! // Create a node
 //! let alice = db.create_node("Person", properties! {
@@ -35,34 +37,70 @@
 //! })?;
 //!
 //! // Later, update a property
-//! db.update_node(alice, properties! {
+//! db.write(|tx| tx.update_node(alice, properties! {
 //!     "age" => 31,
-//! })?;
+//! }))?;
 //!
 //! // Query current state
 //! let current = db.get_node(alice)?;
 //!
 //! // Time-travel to see historical state
-//! let historical = db.as_of(timestamp).get_node(alice)?;
+//! // Use current time as a placeholder for the point in time we want to query
+//! let now = time::now();
+//! let historical = db.get_node_at_time(alice, now, now)?;
+//! # Ok(())
+//! # }
 //! ```
 
 #![warn(missing_docs)]
 #![warn(rust_2018_idioms)]
 
 pub mod api;
+pub mod config;
 pub mod core;
 pub mod db;
+/// Encryption at rest (ADR-0028).
+pub mod encryption;
 pub mod index;
+pub mod query;
 pub mod storage;
-pub mod utils;
+// Experimental features ("Nova")
+pub mod experimental;
 // Optional embedding generation module
 #[cfg(feature = "embeddings")]
 pub mod embeddings;
 // Optional observability infrastructure
 #[cfg(feature = "observability")]
 pub mod observability;
+// Optional MCP server module
+#[cfg(feature = "mcp-server")]
+pub mod mcp;
+// Custom Honeycomb client module (replaces libhoney-rust git dependency)
+#[cfg(feature = "honeycomb-client")]
+pub mod honeycomb;
+// Optional SQL:2011 temporal syntax support
+#[cfg(feature = "sql")]
+pub mod sql;
+// Optional Cypher query language support
+#[cfg(feature = "cypher")]
+pub mod cypher;
+// Optional HTTP server module
+#[cfg(feature = "http-server")]
+pub mod http;
+// Test utilities (only available in tests)
+#[cfg(test)]
+pub mod test_utils;
+
+/// Prelude for convenient imports of common types and traits.
+pub mod prelude;
 
 // Re-export commonly used types at the crate root
+pub use config::{
+    AletheiaDBConfig, AletheiaDBConfigBuilder, ConfigError, HistoricalConfig,
+    HistoricalConfigBuilder, VectorIndexConfig, VectorIndexConfigBuilder, WalConfig,
+    WalConfigBuilder,
+};
+pub use core::temporal::time;
 pub use core::{
     BiTemporalInterval, Edge, EdgeId, EntityId, GLOBAL_INTERNER, InternedString, Node, NodeId,
     PropertyKey, PropertyMap, PropertyMapBuilder, PropertyValue, StringInterner, TimeRange,
@@ -70,10 +108,20 @@ pub use core::{
 };
 
 pub use api::{ReadOps, ReadTransaction, TxId, TxState, WriteOps, WriteTransaction};
-pub use db::GallifreyDB;
+pub use core::error::{Error, QueryError, Result, StorageError, TemporalError, TransactionError};
+pub use db::{AletheiaDB, VectorIndexBuilder};
 pub use index::{
     AdjacencyIndex, CurrentIndexes, TemporalIndexes,
-    vector::{DistanceMetric, HnswConfig},
+    vector::{DistanceMetric, HnswConfig, TemporalVectorConfig},
 };
 pub use storage::CurrentStorage;
-pub use utils::{Error, QueryError, Result, StorageError, TemporalError, TransactionError};
+pub use storage::index_persistence::PersistenceConfig;
+pub use storage::wal::{DurabilityMode, WriteOptions};
+
+// Query planner re-exports (VS-060)
+pub use query::{
+    Query, QueryBuilder, QueryExecutor, QueryPlanner, QueryResults, QueryRow,
+    ir::{Direction, Predicate, QueryOp, TraversalDepth},
+    plan::{LogicalOp, LogicalPlan},
+    planner::{Cost, CostModel, PhysicalOp, PhysicalPlan, Statistics},
+};

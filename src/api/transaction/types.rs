@@ -1,31 +1,30 @@
 //! Transaction types and metadata
+//!
+//! This module defines the core types that describe the lifecycle and identity
+//! of a transaction in AletheiaDB.
+//!
+//! # Transaction State Lifecycle
+//!
+//! 1.  `Active`: The transaction is currently open and accepting operations.
+//! 2.  `Preparing`: The transaction is validating operations before commit.
+//! 3.  `Committed` or `Aborted`: Terminal states indicating success or failure.
 
 use crate::core::temporal::Timestamp;
-use std::sync::atomic::{AtomicU64, Ordering};
-
-/// Transaction ID - globally unique identifier for transactions
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct TxId(u64);
-
-impl TxId {
-    /// Create a new transaction ID
-    pub fn new(id: u64) -> Self {
-        TxId(id)
-    }
-
-    /// Get the inner ID value
-    pub fn as_u64(&self) -> u64 {
-        self.0
-    }
-}
-
-impl std::fmt::Display for TxId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "TxId({})", self.0)
-    }
-}
+// Re-export TxId from core to break dependency cycles
+pub use crate::core::id::TxId;
 
 /// Transaction state
+///
+/// Represents the current phase of a transaction's lifecycle.
+///
+/// ## Examples
+///
+/// ```rust
+/// use aletheiadb::api::transaction::TxState;
+///
+/// let state = TxState::Active;
+/// assert_eq!(format!("{}", state), "Active");
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TxState {
     /// Transaction is active and can perform operations
@@ -50,6 +49,27 @@ impl std::fmt::Display for TxState {
 }
 
 /// Transaction metadata
+///
+/// Contains information about a transaction's identity, timestamps, and current state.
+/// This is typically retrieved via the `metadata()` method on a transaction handle.
+///
+/// ## Examples
+///
+/// ```rust
+/// use aletheiadb::api::transaction::{TxId, TxState, TxMetadata};
+/// use aletheiadb::core::temporal::Timestamp;
+///
+/// let metadata = TxMetadata {
+///     tx_id: TxId::new(42),
+///     start_timestamp: Timestamp::from(100),
+///     commit_timestamp: None,
+///     state: TxState::Active,
+///     is_read_only: false,
+/// };
+///
+/// assert_eq!(metadata.state, TxState::Active);
+/// assert!(!metadata.is_read_only);
+/// ```
 #[derive(Debug, Clone)]
 pub struct TxMetadata {
     /// Transaction ID
@@ -64,40 +84,6 @@ pub struct TxMetadata {
     pub is_read_only: bool,
 }
 
-/// Global transaction ID generator
-///
-/// Generates monotonically increasing transaction IDs using atomic operations.
-pub struct TxIdGenerator {
-    counter: AtomicU64,
-}
-
-impl TxIdGenerator {
-    /// Create a new transaction ID generator starting from 1
-    pub fn new() -> Self {
-        TxIdGenerator {
-            counter: AtomicU64::new(1),
-        }
-    }
-
-    /// Generate the next transaction ID
-    ///
-    /// This operation is atomic and thread-safe.
-    pub fn next(&self) -> TxId {
-        TxId(self.counter.fetch_add(1, Ordering::SeqCst))
-    }
-
-    /// Get the current transaction ID (last generated)
-    pub fn current(&self) -> TxId {
-        TxId(self.counter.load(Ordering::SeqCst).saturating_sub(1))
-    }
-}
-
-impl Default for TxIdGenerator {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -105,7 +91,7 @@ mod tests {
     #[test]
     fn test_tx_id_creation() {
         let tx_id = TxId::new(42);
-        assert_eq!(tx_id.as_u64(), 42);
+        assert_eq!(tx_id.as_u64(), 42u64);
     }
 
     #[test]
@@ -132,19 +118,21 @@ mod tests {
 
     #[test]
     fn test_tx_id_generator() {
+        use crate::core::id::TxIdGenerator;
         let generator = TxIdGenerator::new();
         let tx1 = generator.next();
         let tx2 = generator.next();
         let tx3 = generator.next();
 
-        assert_eq!(tx1.as_u64(), 1);
-        assert_eq!(tx2.as_u64(), 2);
-        assert_eq!(tx3.as_u64(), 3);
-        assert_eq!(generator.current().as_u64(), 3);
+        assert_eq!(tx1.as_u64(), 1u64);
+        assert_eq!(tx2.as_u64(), 2u64);
+        assert_eq!(tx3.as_u64(), 3u64);
+        assert_eq!(generator.current().as_u64(), 3u64);
     }
 
     #[test]
     fn test_tx_id_generator_concurrent() {
+        use crate::core::id::TxIdGenerator;
         use std::sync::Arc;
         use std::thread;
 
@@ -179,21 +167,21 @@ mod tests {
         assert_eq!(unique_count, 1000);
 
         // Final current should be 1000
-        assert_eq!(generator.current().as_u64(), 1000);
+        assert_eq!(generator.current().as_u64(), 1000u64);
     }
 
     #[test]
     fn test_tx_metadata() {
         let metadata = TxMetadata {
             tx_id: TxId::new(1),
-            start_timestamp: 100,
+            start_timestamp: 100.into(),
             commit_timestamp: None,
             state: TxState::Active,
             is_read_only: false,
         };
 
         assert_eq!(metadata.tx_id, TxId::new(1));
-        assert_eq!(metadata.start_timestamp, 100);
+        assert_eq!(metadata.start_timestamp, 100.into());
         assert_eq!(metadata.commit_timestamp, None);
         assert_eq!(metadata.state, TxState::Active);
         assert!(!metadata.is_read_only);

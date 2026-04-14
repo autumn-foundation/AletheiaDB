@@ -1,10 +1,11 @@
 //! Integration tests for vector storage functionality (Phase 1).
 //!
 //! These tests verify end-to-end vector property handling through the
-//! GallifreyDB API, including storage, retrieval, versioning, and
+//! AletheiaDB API, including storage, retrieval, versioning, and
 //! temporal queries.
 
-use gallifreydb::{GallifreyDB, PropertyMapBuilder, WriteOps};
+use aletheiadb::Error;
+use aletheiadb::{AletheiaDB, PropertyMapBuilder, WriteOps};
 
 // ============================================================
 // Helper Functions
@@ -17,7 +18,7 @@ fn generate_embedding(dim: usize, seed: f32) -> Vec<f32> {
 
 /// Sleep briefly to ensure timestamps differ between operations.
 ///
-/// GallifreyDB uses `time::now()` for transaction timestamps. Operations
+/// AletheiaDB uses `time::now()` for transaction timestamps. Operations
 /// executed within the same millisecond may receive identical timestamps,
 /// which can affect version ordering. This helper ensures sufficient time
 /// passes between operations for distinct timestamps.
@@ -40,7 +41,7 @@ fn advance_time() {
 /// use approximate equality with an epsilon tolerance.
 #[test]
 fn test_create_node_with_vector_and_retrieve() {
-    let db = GallifreyDB::new();
+    let db = AletheiaDB::new().unwrap();
 
     // Create node with embedding
     let embedding = vec![0.1f32, 0.2, 0.3, 0.4, 0.5];
@@ -65,7 +66,7 @@ fn test_create_node_with_vector_and_retrieve() {
 
 #[test]
 fn test_update_vector_property_creates_version() {
-    let db = GallifreyDB::new();
+    let db = AletheiaDB::new().unwrap();
 
     // Create node with initial embedding
     let embedding_v1 = vec![0.1f32, 0.2, 0.3];
@@ -113,7 +114,7 @@ fn test_update_vector_property_creates_version() {
 
 #[test]
 fn test_multiple_nodes_with_vectors_isolation() {
-    let db = GallifreyDB::new();
+    let db = AletheiaDB::new().unwrap();
 
     // Create multiple nodes with different embeddings
     let embedding_a = vec![1.0f32, 0.0, 0.0];
@@ -220,7 +221,7 @@ fn test_multiple_nodes_with_vectors_isolation() {
 
 #[test]
 fn test_edge_with_vector_property() {
-    let db = GallifreyDB::new();
+    let db = AletheiaDB::new().unwrap();
 
     // Create two nodes
     let node_a = db
@@ -266,7 +267,7 @@ fn test_edge_with_vector_property() {
 
 #[test]
 fn test_update_edge_vector_property() {
-    let db = GallifreyDB::new();
+    let db = AletheiaDB::new().unwrap();
 
     let node_a = db
         .create_node("Entity", PropertyMapBuilder::new().build())
@@ -331,7 +332,7 @@ fn test_update_edge_vector_property() {
 
 #[test]
 fn test_large_vector_1000_dimensions() {
-    let db = GallifreyDB::new();
+    let db = AletheiaDB::new().unwrap();
 
     const DIMENSIONS: usize = 1000;
     let large_embedding = generate_embedding(DIMENSIONS, 0.0);
@@ -357,7 +358,7 @@ fn test_large_vector_1000_dimensions() {
 
 #[test]
 fn test_very_large_vector_4096_dimensions() {
-    let db = GallifreyDB::new();
+    let db = AletheiaDB::new().unwrap();
 
     // 4096 dimensions (larger than typical embedding models)
     const DIMENSIONS: usize = 4096;
@@ -392,7 +393,7 @@ macro_rules! test_embedding_dimension {
     ($test_name:ident, $dim:expr, $model:expr, $label:expr) => {
         #[test]
         fn $test_name() {
-            let db = GallifreyDB::new();
+            let db = AletheiaDB::new().unwrap();
             const DIMENSIONS: usize = $dim;
             let embedding = generate_embedding(DIMENSIONS, 0.0);
 
@@ -459,7 +460,7 @@ test_embedding_dimension!(
 
 #[test]
 fn test_multiple_vector_updates_version_chain() {
-    let db = GallifreyDB::new();
+    let db = AletheiaDB::new().unwrap();
 
     // Create node with initial embedding
     let embedding_v1 = vec![0.1f32, 0.2, 0.3];
@@ -527,7 +528,7 @@ fn test_multiple_vector_updates_version_chain() {
 
 #[test]
 fn test_historical_stats_with_vectors() {
-    let db = GallifreyDB::new();
+    let db = AletheiaDB::new().unwrap();
 
     // Create node and update it multiple times
     let node_id = db
@@ -576,7 +577,7 @@ fn test_historical_stats_with_vectors() {
 
 #[test]
 fn test_empty_vector() {
-    let db = GallifreyDB::new();
+    let db = AletheiaDB::new().unwrap();
 
     let empty_vec: Vec<f32> = vec![];
     let node_id = db
@@ -597,7 +598,7 @@ fn test_empty_vector() {
 
 #[test]
 fn test_node_with_multiple_embeddings() {
-    let db = GallifreyDB::new();
+    let db = AletheiaDB::new().unwrap();
 
     // Node with multiple embedding fields (e.g., from different models)
     let text_embedding = vec![0.1f32, 0.2, 0.3, 0.4];
@@ -637,7 +638,7 @@ fn test_node_with_multiple_embeddings() {
 
 #[test]
 fn test_graph_with_mixed_properties_and_vectors() {
-    let db = GallifreyDB::new();
+    let db = AletheiaDB::new().unwrap();
 
     // Create a small knowledge graph with embeddings
     let alice = db
@@ -695,10 +696,10 @@ fn test_graph_with_mixed_properties_and_vectors() {
 // ============================================================
 
 /// Helper function to create a database with vector index enabled.
-fn setup_indexed_db(dimensions: usize) -> GallifreyDB {
-    use gallifreydb::index::vector::{DistanceMetric, HnswConfig};
+fn setup_indexed_db(dimensions: usize) -> AletheiaDB {
+    use aletheiadb::index::vector::{DistanceMetric, HnswConfig};
 
-    let db = GallifreyDB::new();
+    let db = AletheiaDB::new().unwrap();
     let config = HnswConfig::new(dimensions, DistanceMetric::Cosine).with_capacity(100);
     db.enable_vector_index("embedding", config)
         .expect("Failed to enable vector index");
@@ -711,9 +712,9 @@ fn setup_indexed_db(dimensions: usize) -> GallifreyDB {
 
 #[test]
 fn test_enable_vector_index() {
-    use gallifreydb::index::vector::{DistanceMetric, HnswConfig};
+    use aletheiadb::index::vector::{DistanceMetric, HnswConfig};
 
-    let db = GallifreyDB::new();
+    let db = AletheiaDB::new().unwrap();
 
     // Index should not be enabled initially
     assert!(!db.is_vector_index_enabled());
@@ -728,9 +729,9 @@ fn test_enable_vector_index() {
 
 #[test]
 fn test_double_enable_vector_index_fails() {
-    use gallifreydb::index::vector::{DistanceMetric, HnswConfig};
+    use aletheiadb::index::vector::{DistanceMetric, HnswConfig};
 
-    let db = GallifreyDB::new();
+    let db = AletheiaDB::new().unwrap();
 
     // Enable index once
     let config = HnswConfig::new(384, DistanceMetric::Cosine);
@@ -910,8 +911,313 @@ fn test_update_node_updates_index() {
     assert_eq!(results[0].0, node_id);
 }
 
-// Note: test_delete_node_removes_from_index skipped - delete_node not yet implemented
-// TODO: Add this test when delete_node is implemented in GallifreyDB
+// ============================================================
+// Delete Node Vector Cleanup Tests (Issue #323)
+// ============================================================
+
+/// Test that delete_node() via transaction removes vectors from HNSW index.
+///
+/// This test verifies the fix for issue #323: delete_node() was not
+/// removing vector embeddings from the HNSW index, causing memory leaks
+/// and incorrect search results.
+#[test]
+fn test_delete_node_removes_from_index() {
+    let db = setup_indexed_db(128);
+
+    let emb1 = generate_embedding(128, 1.0);
+    let emb2 = generate_embedding(128, 2.0);
+
+    // Create two nodes with embeddings
+    let node1 = db
+        .create_node(
+            "Document",
+            PropertyMapBuilder::new()
+                .insert("title", "Doc 1")
+                .insert_vector("embedding", &emb1)
+                .build(),
+        )
+        .unwrap();
+
+    let node2 = db
+        .create_node(
+            "Document",
+            PropertyMapBuilder::new()
+                .insert("title", "Doc 2")
+                .insert_vector("embedding", &emb2)
+                .build(),
+        )
+        .unwrap();
+
+    // Verify both nodes are in the index
+    let results_before = db.find_similar_by_embedding(&emb1, 10).unwrap();
+    assert_eq!(
+        results_before.len(),
+        2,
+        "Should have 2 nodes before deletion"
+    );
+
+    // Delete node1 via transaction
+    db.write(|tx| {
+        tx.delete_node(node1)?;
+        Ok::<_, Error>(())
+    })
+    .unwrap();
+
+    // Verify node1 is removed from the index
+    let results_after = db.find_similar_by_embedding(&emb1, 10).unwrap();
+    assert_eq!(
+        results_after.len(),
+        1,
+        "Should have only 1 node after deletion"
+    );
+    assert_eq!(results_after[0].0, node2, "Remaining node should be node2");
+
+    // Deleted node should not appear in similarity search
+    let similar_to_node2 = db.find_similar(node2, 10).unwrap();
+    assert!(
+        !similar_to_node2.iter().any(|(id, _)| *id == node1),
+        "Deleted node should not appear in similarity search"
+    );
+}
+
+/// Test that delete_node() doesn't cause memory leaks with repeated create/delete cycles.
+///
+/// This test creates and deletes nodes repeatedly to verify that vector index
+/// memory is properly reclaimed.
+#[test]
+fn test_delete_node_memory_stability_repeated_cycles() {
+    let db = setup_indexed_db(128);
+
+    // Perform multiple create/delete cycles
+    for i in 0..100 {
+        let emb = generate_embedding(128, i as f32);
+
+        // Create node
+        let node_id = db
+            .create_node(
+                "Document",
+                PropertyMapBuilder::new()
+                    .insert_vector("embedding", &emb)
+                    .build(),
+            )
+            .unwrap();
+
+        // Verify it's indexed
+        let results = db.find_similar(node_id, 1).unwrap();
+        assert_eq!(
+            results.len(),
+            0,
+            "Should find no similar nodes (only this node exists)"
+        );
+
+        // Delete node via transaction
+        db.write(|tx| {
+            tx.delete_node(node_id)?;
+            Ok::<_, Error>(())
+        })
+        .unwrap();
+
+        // Verify it's removed from index
+        let results_after = db.find_similar_by_embedding(&emb, 10).unwrap();
+        assert_eq!(
+            results_after.len(),
+            0,
+            "Should find no nodes after deletion in cycle {}",
+            i
+        );
+    }
+
+    // Final verification: database should be empty
+    assert_eq!(
+        db.node_count(),
+        0,
+        "Database should be empty after all deletes"
+    );
+    let final_search = db
+        .find_similar_by_embedding(&generate_embedding(128, 0.0), 10)
+        .unwrap();
+    assert_eq!(final_search.len(), 0, "Index should be empty");
+}
+
+/// Test that deleted nodes don't appear in find_similar() results.
+///
+/// This specifically tests the bug where deleted nodes would still appear
+/// in similarity search results.
+#[test]
+fn test_deleted_nodes_not_in_similarity_results() {
+    let db = setup_indexed_db(128);
+
+    // Create a reference node
+    let ref_emb = generate_embedding(128, 5.0);
+    let ref_node = db
+        .create_node(
+            "Document",
+            PropertyMapBuilder::new()
+                .insert("title", "Reference")
+                .insert_vector("embedding", &ref_emb)
+                .build(),
+        )
+        .unwrap();
+
+    // Create several similar nodes
+    let similar_nodes: Vec<_> = (0..5)
+        .map(|i| {
+            let emb = generate_embedding(128, 5.0 + (i as f32 * 0.1));
+            db.create_node(
+                "Document",
+                PropertyMapBuilder::new()
+                    .insert("title", format!("Similar {}", i))
+                    .insert_vector("embedding", &emb)
+                    .build(),
+            )
+            .unwrap()
+        })
+        .collect();
+
+    // Verify all nodes are found
+    let results_before = db.find_similar(ref_node, 10).unwrap();
+    assert_eq!(
+        results_before.len(),
+        5,
+        "Should find all 5 similar nodes before deletion"
+    );
+
+    // Delete some nodes via transaction
+    db.write(|tx| {
+        tx.delete_node(similar_nodes[0])?;
+        tx.delete_node(similar_nodes[2])?;
+        tx.delete_node(similar_nodes[4])?;
+        Ok::<_, Error>(())
+    })
+    .unwrap();
+
+    // Verify deleted nodes don't appear in results
+    let results_after = db.find_similar(ref_node, 10).unwrap();
+    assert_eq!(
+        results_after.len(),
+        2,
+        "Should find only 2 remaining nodes after deletion"
+    );
+
+    let remaining_ids: Vec<_> = results_after.iter().map(|(id, _)| *id).collect();
+    assert!(
+        remaining_ids.contains(&similar_nodes[1]),
+        "Node 1 should still be in results"
+    );
+    assert!(
+        remaining_ids.contains(&similar_nodes[3]),
+        "Node 3 should still be in results"
+    );
+    assert!(
+        !remaining_ids.contains(&similar_nodes[0]),
+        "Deleted node 0 should not be in results"
+    );
+    assert!(
+        !remaining_ids.contains(&similar_nodes[2]),
+        "Deleted node 2 should not be in results"
+    );
+    assert!(
+        !remaining_ids.contains(&similar_nodes[4]),
+        "Deleted node 4 should not be in results"
+    );
+}
+
+/// Test delete_node() with multi-property vector indexes.
+///
+/// Verifies that delete_node() removes the node from ALL vector indexes,
+/// not just one.
+#[test]
+fn test_delete_node_removes_from_multiple_indexes() {
+    use aletheiadb::index::vector::{DistanceMetric, HnswConfig};
+
+    let db = AletheiaDB::new().unwrap();
+
+    // Enable multiple vector indexes
+    let config1 = HnswConfig::new(64, DistanceMetric::Cosine).with_capacity(100);
+    db.enable_vector_index("text_embedding", config1).unwrap();
+
+    let config2 = HnswConfig::new(64, DistanceMetric::Cosine).with_capacity(100);
+    db.enable_vector_index("image_embedding", config2).unwrap();
+
+    // Create node with multiple embeddings
+    let text_emb = generate_embedding(64, 1.0);
+    let image_emb = generate_embedding(64, 2.0);
+
+    let node_id = db
+        .create_node(
+            "MultimodalDoc",
+            PropertyMapBuilder::new()
+                .insert("title", "Test")
+                .insert_vector("text_embedding", &text_emb)
+                .insert_vector("image_embedding", &image_emb)
+                .build(),
+        )
+        .unwrap();
+
+    // Create another node for reference
+    let ref_node = db
+        .create_node(
+            "MultimodalDoc",
+            PropertyMapBuilder::new()
+                .insert("title", "Reference")
+                .insert_vector("text_embedding", &generate_embedding(64, 1.1))
+                .insert_vector("image_embedding", &generate_embedding(64, 2.1))
+                .build(),
+        )
+        .unwrap();
+
+    // Verify node is in both indexes
+    let results_before_text = db
+        .search_vectors_in("text_embedding", &text_emb, 10)
+        .unwrap();
+    assert_eq!(
+        results_before_text.len(),
+        2,
+        "Should find 2 nodes in text_embedding index before deletion"
+    );
+    let results_before_image = db
+        .search_vectors_in("image_embedding", &image_emb, 10)
+        .unwrap();
+    assert_eq!(
+        results_before_image.len(),
+        2,
+        "Should find 2 nodes in image_embedding index before deletion"
+    );
+
+    // Delete the node via transaction
+    db.write(|tx| {
+        tx.delete_node(node_id)?;
+        Ok::<_, Error>(())
+    })
+    .unwrap();
+
+    // Verify node is removed from both indexes
+    let results_after_text = db
+        .search_vectors_in("text_embedding", &text_emb, 10)
+        .unwrap();
+    assert_eq!(
+        results_after_text.len(),
+        1,
+        "Should find only 1 node in text_embedding index after deletion"
+    );
+    assert_eq!(
+        results_after_text[0].0, ref_node,
+        "Remaining node should be reference node in text_embedding index"
+    );
+
+    let results_after_image = db
+        .search_vectors_in("image_embedding", &image_emb, 10)
+        .unwrap();
+    assert_eq!(
+        results_after_image.len(),
+        1,
+        "Should find only 1 node in image_embedding index after deletion"
+    );
+    assert_eq!(
+        results_after_image[0].0, ref_node,
+        "Remaining node should be reference node in image_embedding index"
+    );
+}
 
 #[test]
 fn test_node_without_vector_property_not_indexed() {
@@ -950,9 +1256,9 @@ fn test_node_without_vector_property_not_indexed() {
 
 #[test]
 fn test_find_similar_on_non_indexed_db_fails() {
-    use gallifreydb::core::id::NodeId;
+    use aletheiadb::core::id::NodeId;
 
-    let db = GallifreyDB::new(); // No index enabled
+    let db = AletheiaDB::new().unwrap(); // No index enabled
 
     let node_id = NodeId::new(1).unwrap();
     let result = db.find_similar(node_id, 10);
@@ -963,7 +1269,7 @@ fn test_find_similar_on_non_indexed_db_fails() {
 
 #[test]
 fn test_find_similar_with_invalid_node_id_fails() {
-    use gallifreydb::core::id::NodeId;
+    use aletheiadb::core::id::NodeId;
 
     let db = setup_indexed_db(128);
 

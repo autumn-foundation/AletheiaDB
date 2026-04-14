@@ -7,13 +7,16 @@
 //! - Snapshot pruning
 //! - Temporal vector index overhead vs current-only index
 
-use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
-use gallifreydb::core::id::NodeId;
-use gallifreydb::core::temporal::TimeRange;
-use gallifreydb::index::vector::temporal::{
+mod common;
+
+use aletheiadb::core::id::NodeId;
+use aletheiadb::core::temporal::TimeRange;
+use aletheiadb::index::vector::temporal::{
     RetentionPolicy, SnapshotStrategy, TemporalVectorConfig, TemporalVectorIndex,
 };
-use gallifreydb::index::vector::{DistanceMetric, HnswConfig, HnswIndex, VectorIndex};
+use aletheiadb::index::vector::{DistanceMetric, HnswConfig, HnswIndex, VectorIndex};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use std::hint::black_box;
 use std::sync::Arc;
 
 /// Helper to create a test temporal index
@@ -23,7 +26,8 @@ fn create_temporal_index(dimensions: usize) -> TemporalVectorIndex {
         snapshot_strategy: SnapshotStrategy::TransactionInterval(10),
         retention_policy: RetentionPolicy::KeepN(100),
         max_snapshots: 100,
-        hnsw_config,
+        full_snapshot_interval: 10,
+        hnsw_config: Some(hnsw_config),
     };
     TemporalVectorIndex::new(config).unwrap()
 }
@@ -57,7 +61,8 @@ fn bench_snapshot_creation(c: &mut Criterion) {
                     snapshot_strategy: snapshot_strategy.clone(),
                     retention_policy: RetentionPolicy::KeepN(10),
                     max_snapshots: 100,
-                    hnsw_config,
+                    full_snapshot_interval: 10,
+                    hnsw_config: Some(hnsw_config),
                 };
                 let index = TemporalVectorIndex::new(config).unwrap();
 
@@ -65,7 +70,7 @@ fn bench_snapshot_creation(c: &mut Criterion) {
                 for i in 0..100 {
                     let node_id = NodeId::new(i).unwrap();
                     let vector = gen_vector(384, i as usize);
-                    let _ = index.add(node_id, &vector, i as i64 * 1000);
+                    let _ = index.add(node_id, &vector, (i as i64 * 1000).into());
                 }
 
                 b.iter(|| {
@@ -94,7 +99,7 @@ fn bench_point_in_time_queries(c: &mut Criterion) {
                 for i in 0..size {
                     let node_id = NodeId::new(i).unwrap();
                     let vector = gen_vector(128, i as usize);
-                    let _ = index.add(node_id, &vector, i as i64 * 1000);
+                    let _ = index.add(node_id, &vector, (i as i64 * 1000).into());
 
                     if i % 100 == 0 {
                         let _ = index.on_transaction();
@@ -108,7 +113,7 @@ fn bench_point_in_time_queries(c: &mut Criterion) {
                     let _ = index.find_similar_as_of(
                         black_box(&query_vector),
                         black_box(10),
-                        black_box(query_timestamp),
+                        black_box(query_timestamp.into()),
                     );
                 });
             },
@@ -118,12 +123,13 @@ fn bench_point_in_time_queries(c: &mut Criterion) {
     group.finish();
 }
 
-/// Benchmark time-range vector queries
+/// Benchmark time-range vector queries (parallel processing)
 fn bench_time_range_queries(c: &mut Criterion) {
     let mut group = c.benchmark_group("time_range_queries");
     group.throughput(Throughput::Elements(1));
 
-    for snapshot_count in [5, 10, 20] {
+    // Test with increasing snapshot counts to demonstrate parallel scalability
+    for snapshot_count in [5, 10, 20, 40] {
         group.bench_with_input(
             BenchmarkId::from_parameter(format!("{}snapshots", snapshot_count)),
             &snapshot_count,
@@ -138,13 +144,14 @@ fn bench_time_range_queries(c: &mut Criterion) {
                             NodeId::new((snapshot_idx * vectors_per_snapshot + i) as u64).unwrap();
                         let vector = gen_vector(128, (snapshot_idx + i) as usize);
                         let timestamp = (snapshot_idx * 10000 + i * 100) as i64;
-                        let _ = index.add(node_id, &vector, timestamp);
+                        let _ = index.add(node_id, &vector, timestamp.into());
                     }
                     let _ = index.on_transaction();
                 }
 
                 let query_vector = gen_vector(128, 0);
-                let time_range = TimeRange::between(0, (snapshot_count * 10000) as i64);
+                let time_range =
+                    TimeRange::between(0.into(), ((snapshot_count * 10000) as i64).into()).unwrap();
 
                 b.iter(|| {
                     let _ = index.find_similar_in_range(
@@ -180,14 +187,15 @@ fn bench_snapshot_pruning(c: &mut Criterion) {
                             snapshot_strategy: SnapshotStrategy::TransactionInterval(1),
                             retention_policy: RetentionPolicy::KeepN(snapshot_count / 2),
                             max_snapshots: snapshot_count * 2,
-                            hnsw_config,
+                            full_snapshot_interval: 10,
+                            hnsw_config: Some(hnsw_config),
                         };
                         let index = TemporalVectorIndex::new(config).unwrap();
 
                         // Create snapshots
                         for (i, vector) in vectors.iter().enumerate().take(snapshot_count) {
                             let node_id = NodeId::new(i as u64).unwrap();
-                            let _ = index.add(node_id, vector, i as i64 * 1000);
+                            let _ = index.add(node_id, vector, (i as i64 * 1000).into());
                             let _ = index.on_transaction();
                         }
 
@@ -237,7 +245,7 @@ fn bench_temporal_vs_current_overhead(c: &mut Criterion) {
             let _ = index.add(
                 black_box(node_id),
                 black_box(&vectors[idx]),
-                black_box(counter * 1000),
+                black_box((counter * 1000).into()),
             );
             counter += 1;
         });
@@ -267,7 +275,7 @@ fn bench_temporal_vs_current_overhead(c: &mut Criterion) {
         for i in 0..1000 {
             let node_id = NodeId::new(i).unwrap();
             let vector = gen_vector(128, i as usize);
-            let _ = index.add(node_id, &vector, i as i64 * 1000);
+            let _ = index.add(node_id, &vector, (i as i64 * 1000).into());
         }
 
         let query_vector = gen_vector(128, 0);
@@ -301,8 +309,11 @@ fn bench_snapshot_creation_by_size(c: &mut Criterion) {
                         // Setup: create index with vectors
                         let index = create_temporal_index(128);
                         for (i, vector) in vectors.iter().enumerate().take(vector_count) {
-                            let _ =
-                                index.add(NodeId::new(i as u64).unwrap(), vector, i as i64 * 1000);
+                            let _ = index.add(
+                                NodeId::new(i as u64).unwrap(),
+                                vector,
+                                (i as i64 * 1000).into(),
+                            );
                         }
                         index
                     },
@@ -335,11 +346,12 @@ fn bench_semantic_evolution(c: &mut Criterion) {
                 let node_id = NodeId::new(42).unwrap();
                 for i in 0..snapshot_count {
                     let vector = gen_vector(384, i);
-                    let _ = index.add(node_id, &vector, i as i64 * 1000);
+                    let _ = index.add(node_id, &vector, (i as i64 * 1000).into());
                     let _ = index.on_transaction();
                 }
 
-                let time_range = TimeRange::between(0, snapshot_count as i64 * 1000);
+                let time_range =
+                    TimeRange::between(0.into(), (snapshot_count as i64 * 1000).into()).unwrap();
 
                 b.iter(|| {
                     let _ = index.semantic_evolution(black_box(node_id), black_box(time_range));
@@ -379,7 +391,7 @@ fn bench_track_semantic_drift(c: &mut Criterion) {
                             }
                         })
                         .collect();
-                    let _ = index.add(node_id, &vector, i as i64 * 1000);
+                    let _ = index.add(node_id, &vector, (i as i64 * 1000).into());
                     let _ = index.on_transaction();
                 }
 
@@ -388,7 +400,8 @@ fn bench_track_semantic_drift(c: &mut Criterion) {
                     v[0] = 1.0;
                     v
                 };
-                let time_range = TimeRange::between(0, snapshot_count as i64 * 1000);
+                let time_range =
+                    TimeRange::between(0.into(), (snapshot_count as i64 * 1000).into()).unwrap();
 
                 b.iter(|| {
                     let _ = index.track_semantic_drift(
@@ -431,11 +444,12 @@ fn bench_calculate_consecutive_drift(c: &mut Criterion) {
                             }
                         })
                         .collect();
-                    let _ = index.add(node_id, &vector, i as i64 * 1000);
+                    let _ = index.add(node_id, &vector, (i as i64 * 1000).into());
                     let _ = index.on_transaction();
                 }
 
-                let time_range = TimeRange::between(0, snapshot_count as i64 * 1000);
+                let time_range =
+                    TimeRange::between(0.into(), (snapshot_count as i64 * 1000).into()).unwrap();
 
                 b.iter(|| {
                     let _ = index
@@ -461,7 +475,7 @@ fn bench_semantic_evolution_memory_overhead(c: &mut Criterion) {
                 let all_snapshots_vectors: Vec<Vec<Vec<f32>>> = (0..10)
                     .map(|snapshot_idx| {
                         (0..vector_count)
-                            .map(|i| gen_vector(384, (snapshot_idx + i) as usize))
+                            .map(|i| gen_vector(384, snapshot_idx + i))
                             .collect()
                     })
                     .collect();
@@ -476,8 +490,11 @@ fn bench_semantic_evolution_memory_overhead(c: &mut Criterion) {
                             for (i, vector) in vectors.iter().enumerate() {
                                 let node_id =
                                     NodeId::new((snapshot_idx * vector_count + i) as u64).unwrap();
-                                let _ =
-                                    index.add(node_id, vector, (snapshot_idx * 1000 + i) as i64);
+                                let _ = index.add(
+                                    node_id,
+                                    vector,
+                                    ((snapshot_idx * 1000 + i) as i64).into(),
+                                );
                             }
                             let _ = index.on_transaction();
                         }
@@ -487,7 +504,7 @@ fn bench_semantic_evolution_memory_overhead(c: &mut Criterion) {
                     |index| {
                         // Measure semantic evolution retrieval
                         let node_id = NodeId::new(vector_count as u64 / 2).unwrap();
-                        let time_range = TimeRange::between(0, 10000);
+                        let time_range = TimeRange::between(0.into(), 10000.into()).unwrap();
                         let _ = index.semantic_evolution(node_id, time_range);
                     },
                     criterion::BatchSize::SmallInput,
@@ -499,17 +516,140 @@ fn bench_semantic_evolution_memory_overhead(c: &mut Criterion) {
     group.finish();
 }
 
-fn configure_criterion() -> Criterion {
-    let sample_size = std::env::var("BENCH_SAMPLE_SIZE")
-        .map(|s| s.parse().unwrap_or(50))
-        .unwrap_or(50);
+/// Benchmark add_batch() vs multiple add() calls (Issue #233)
+///
+/// This benchmark demonstrates the performance improvement from using add_batch()
+/// instead of multiple individual add() calls. The improvement comes from:
+/// - Single lock acquisition for the entire batch vs N lock acquisitions
+/// - Better CPU cache locality during vector storage
+fn bench_add_batch_vs_individual(c: &mut Criterion) {
+    let mut group = c.benchmark_group("add_batch_optimization");
 
-    Criterion::default().sample_size(sample_size)
+    for batch_size in [10, 50, 100, 500, 1000] {
+        let index1 = create_temporal_index(128);
+        let index2 = create_temporal_index(128);
+
+        // Prepare batch data
+        let batch: Vec<_> = (0..batch_size)
+            .map(|i| {
+                let node_id = NodeId::new(i as u64).unwrap();
+                let vector = gen_vector(128, i);
+                let timestamp = ((i * 1000) as i64).into();
+                (node_id, vector, timestamp)
+            })
+            .collect();
+
+        // Benchmark individual add() calls
+        group.bench_with_input(
+            BenchmarkId::new("individual_add", batch_size),
+            &batch_size,
+            |b, _| {
+                b.iter(|| {
+                    for (id, vector, ts) in &batch {
+                        let _ = black_box(index1.add(*id, vector, *ts));
+                    }
+                });
+            },
+        );
+
+        // Benchmark add_batch()
+        group.bench_with_input(
+            BenchmarkId::new("add_batch", batch_size),
+            &batch_size,
+            |b, _| {
+                b.iter(|| {
+                    let _ = black_box(index2.add_batch(&batch));
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
+/// Benchmark add_batch() throughput with large batches
+fn bench_add_batch_throughput(c: &mut Criterion) {
+    let mut group = c.benchmark_group("add_batch_throughput");
+
+    for batch_size in [100, 500, 1000, 5000] {
+        group.throughput(Throughput::Elements(batch_size as u64));
+
+        // Prepare batch data
+        let batch: Vec<_> = (0..batch_size)
+            .map(|i| {
+                let node_id = NodeId::new(i as u64).unwrap();
+                let vector = gen_vector(128, i);
+                let timestamp = ((i * 1000) as i64).into();
+                (node_id, vector, timestamp)
+            })
+            .collect();
+
+        group.bench_with_input(
+            BenchmarkId::from_parameter(batch_size),
+            &batch_size,
+            |b, _| {
+                let index = create_temporal_index(128);
+                b.iter(|| {
+                    let _ = black_box(index.add_batch(&batch));
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
+/// Benchmark concurrent add() operations to measure RwLock contention
+///
+/// **Issue #233**: Tests whether RwLock causes performance regression compared to DashMap.
+/// Measures throughput of concurrent individual add() calls from multiple threads.
+fn bench_concurrent_add_operations(c: &mut Criterion) {
+    use std::sync::Arc;
+    use std::thread;
+
+    let mut group = c.benchmark_group("concurrent_add_operations");
+
+    for num_threads in [1, 2, 4, 8] {
+        group.throughput(Throughput::Elements((num_threads * 100) as u64));
+
+        group.bench_with_input(
+            BenchmarkId::from_parameter(format!("{}threads", num_threads)),
+            &num_threads,
+            |b, &num_threads| {
+                b.iter_batched(
+                    || Arc::new(create_temporal_index(128)),
+                    |index| {
+                        let mut handles = vec![];
+                        for thread_id in 0..num_threads {
+                            let index_clone = Arc::clone(&index);
+                            let handle = thread::spawn(move || {
+                                for i in 0..100 {
+                                    let node_id =
+                                        NodeId::new((thread_id * 100 + i) as u64).unwrap();
+                                    let vector = gen_vector(128, (thread_id * 100 + i) as usize);
+                                    let timestamp = ((thread_id * 100 + i) as i64 * 1000).into();
+                                    let _ = black_box(index_clone.add(node_id, &vector, timestamp));
+                                }
+                            });
+                            handles.push(handle);
+                        }
+
+                        for handle in handles {
+                            handle.join().unwrap();
+                        }
+                    },
+                    criterion::BatchSize::SmallInput,
+                );
+            },
+        );
+    }
+
+    group.finish();
 }
 
 criterion_group!(
     name = benches;
-    config = configure_criterion();
+    config = common::configure_criterion();
     targets = bench_snapshot_creation,
     bench_point_in_time_queries,
     bench_time_range_queries,
@@ -520,5 +660,8 @@ criterion_group!(
     bench_track_semantic_drift,
     bench_calculate_consecutive_drift,
     bench_semantic_evolution_memory_overhead,
+    bench_add_batch_vs_individual,
+    bench_add_batch_throughput,
+    bench_concurrent_add_operations,
 );
 criterion_main!(benches);

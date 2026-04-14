@@ -1,6 +1,6 @@
 # Benchmarking Guide
 
-GallifreyDB uses [Criterion.rs](https://github.com/bheisler/criterion.rs) for performance benchmarking with custom HTML table formatting for easy viewing.
+AletheiaDB uses [Criterion.rs](https://github.com/bheisler/criterion.rs) for performance benchmarking with custom HTML table formatting for easy viewing.
 
 ## Running Benchmarks
 
@@ -14,10 +14,10 @@ just bench
 just bench-tables
 
 # Run specific benchmark suite
-cargo bench --bench gallifreydb
+cargo bench --bench aletheiadb
 
 # Run specific benchmark
-cargo bench --bench gallifreydb -- node_lookup
+cargo bench --bench aletheiadb -- node_lookup
 ```
 
 ### Available Benchmark Suites
@@ -25,7 +25,7 @@ cargo bench --bench gallifreydb -- node_lookup
 | Suite | Description | Key Metrics |
 |-------|-------------|-------------|
 | `current_state` | Fast-path current state queries | Node lookup, edge traversal |
-| `gallifreydb` | Core database operations with versioning | Node/edge creation, multi-hop traversal |
+| `aletheiadb` | Core database operations with versioning | Node/edge creation, multi-hop traversal |
 | `persistence` | WAL and durability operations | Write throughput, recovery time |
 | `transactions` | Transaction management | Commit latency, concurrency |
 | `vector_similarity` | Vector operations | Distance calculations |
@@ -52,7 +52,7 @@ xdg-open benchmark-results/index.html
 ```
 
 The generated page includes:
-- **Performance targets** - GallifreyDB's performance goals
+- **Performance targets** - AletheiaDB's performance goals
 - **Benchmark tables** - Organized by suite with mean, std dev, and median
 - **Link to detailed Criterion reports** - For statistical analysis and historical comparisons
 
@@ -60,13 +60,13 @@ The generated page includes:
 
 Benchmark results are automatically published to GitHub Pages on every push to `trunk`:
 
-**New HTML Tables**: https://madmax983.github.io/GallifreyDB/benchmarks/
+**New HTML Tables**: https://madmax983.github.io/AletheiaDB/benchmarks/
 - Clean table-based overview of all benchmark suites
 - Performance targets comparison
 - Mean, std dev, and median for each benchmark
 - Links to detailed Criterion reports
 
-**Historical Trends**: https://madmax983.github.io/GallifreyDB/dev/bench/
+**Historical Trends**: https://madmax983.github.io/AletheiaDB/dev/bench/
 - Time-series charts showing benchmark trends over time
 - Regression detection and alerts
 - Comparison between commits
@@ -84,7 +84,7 @@ Benchmarks run automatically in two scenarios:
 
 ## Performance Targets
 
-GallifreyDB aims to meet these performance targets:
+AletheiaDB aims to meet these performance targets:
 
 | Metric | Target | Rationale |
 |--------|--------|-----------|
@@ -133,11 +133,11 @@ For accurate comparisons:
 
 ```rust
 use criterion::{criterion_group, criterion_main, Criterion, black_box};
-use gallifreydb::GallifreyDB;
+use aletheiadb::AletheiaDB;
 
 fn bench_my_operation(c: &mut Criterion) {
     c.bench_function("my_operation", |b| {
-        let db = GallifreyDB::new();
+        let db = AletheiaDB::new();
 
         b.iter(|| {
             // Operation to benchmark
@@ -181,7 +181,7 @@ criterion_main!(benches);
 4. **Name conventions**
    - Use snake_case for benchmark functions
    - Group related benchmarks in same file
-   - Prefix with component: `gallifreydb_node_creation`
+   - Prefix with component: `aletheiadb_node_creation`
 
 ### Registering New Benchmarks
 

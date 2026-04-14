@@ -1,0 +1,26 @@
+[
+  {
+    "name": "Romanticism",
+    "period": "1800-1850",
+    "characteristics": "Emotion, individualism, nature, idealized past, heroic individuals, exotic settings",
+    "key_figures": "Pushkin, Lermontov, early Gogol"
+  },
+  {
+    "name": "Realism",
+    "period": "1850-1890",
+    "characteristics": "Detailed depiction of reality, social issues, psychological depth, rejection of romanticism",
+    "key_figures": "Turgenev, Dostoevsky, Tolstoy, Goncharov, Chekhov"
+  },
+  {
+    "name": "Psychological Realism",
+    "period": "1860-1890",
+    "characteristics": "Deep exploration of consciousness, moral psychology, existential questions",
+    "key_figures": "Dostoevsky, Tolstoy, Turgenev"
+  },
+  {
+    "name": "Social Realism",
+    "period": "1890-1930",
+    "characteristics": "Focus on social conditions, working class, revolutionary themes",
+    "key_figures": "Gorky, Chekhov"
+  }
+]

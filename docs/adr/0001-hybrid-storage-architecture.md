@@ -2,12 +2,12 @@
 
 **Status:** Accepted
 **Date:** 2024-12-31
-**Deciders:** GallifreyDB Core Team
+**Deciders:** AletheiaDB Core Team
 **Categories:** storage, performance
 
 ## Context
 
-GallifreyDB is a bi-temporal graph database designed to track both valid time (when facts were true in reality) and transaction time (when facts were recorded). The primary use case is enabling LLMs to query not just current knowledge, but to see how knowledge evolved over time.
+AletheiaDB is a bi-temporal graph database designed to track both valid time (when facts were true in reality) and transaction time (when facts were recorded). The primary use case is enabling LLMs to query not just current knowledge, but to see how knowledge evolved over time.
 
 The fundamental tension is between:
 1. **Current-state query performance**: 90%+ of queries target current data

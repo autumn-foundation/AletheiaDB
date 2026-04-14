@@ -13,7 +13,7 @@
 //! # Example
 //!
 //! ```ignore
-//! use gallifreydb::embeddings::{EmbeddingService, providers::openai::*};
+//! use aletheiadb::embeddings::{EmbeddingService, providers::openai::*};
 //! use std::sync::Arc;
 //!
 //! let config = OpenAIConfig::from_env(OpenAIModel::TextEmbedding3Small)?;
@@ -63,7 +63,7 @@ pub use service::EmbeddingService;
 /// # Example Implementation
 ///
 /// ```ignore
-/// use gallifreydb::embeddings::{EmbeddingProvider, EmbeddingError};
+/// use aletheiadb::embeddings::{EmbeddingProvider, EmbeddingError};
 /// use async_trait::async_trait;
 ///
 /// struct MyProvider { /* fields */ }
@@ -312,14 +312,14 @@ impl std::fmt::Display for EmbeddingError {
 #[cfg(feature = "embeddings")]
 impl std::error::Error for EmbeddingError {}
 
-/// Convert `EmbeddingError` to GallifreyDB's main `Error` type.
+/// Convert `EmbeddingError` to AletheiaDB's main `Error` type.
 ///
 /// This allows embedding errors to be used with the `?` operator in
-/// functions that return `Result<T, gallifreydb::utils::Error>`.
+/// functions that return `Result<T, aletheiadb::core::error::Error>`.
 #[cfg(feature = "embeddings")]
-impl From<EmbeddingError> for crate::utils::Error {
+impl From<EmbeddingError> for crate::core::error::Error {
     fn from(e: EmbeddingError) -> Self {
-        crate::utils::Error::Other(format!("Embedding error: {}", e))
+        crate::core::error::Error::Other(format!("Embedding error: {}", e))
     }
 }
 
@@ -529,7 +529,7 @@ mod tests {
     #[test]
     fn test_embedding_error_conversion_to_main_error() {
         let emb_err = EmbeddingError::ConfigError("Test error".to_string());
-        let main_err: crate::utils::Error = emb_err.into();
+        let main_err: crate::core::error::Error = emb_err.into();
 
         let display = format!("{}", main_err);
         assert!(display.contains("Embedding error"));

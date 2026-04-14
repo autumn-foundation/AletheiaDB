@@ -1,10 +1,10 @@
 # Vector Search Integration Guide
 
-> Guide for integrating vector search capabilities into GallifreyDB applications
+> Guide for integrating vector search capabilities into AletheiaDB applications
 
 ## Overview
 
-GallifreyDB provides built-in HNSW (Hierarchical Navigable Small World) indexing for fast k-nearest neighbor (k-NN) search on vector embeddings. This enables semantic similarity search, recommendation systems, and RAG (Retrieval-Augmented Generation) workflows while maintaining full bi-temporal versioning of your vector data.
+AletheiaDB provides built-in HNSW (Hierarchical Navigable Small World) indexing for fast k-nearest neighbor (k-NN) search on vector embeddings. This enables semantic similarity search, recommendation systems, and RAG (Retrieval-Augmented Generation) workflows while maintaining full bi-temporal versioning of your vector data.
 
 **Key Features:**
 - Store dense vector embeddings as first-class properties
@@ -16,11 +16,11 @@ GallifreyDB provides built-in HNSW (Hierarchical Navigable Small World) indexing
 
 ## Prerequisites
 
-Add GallifreyDB to your `Cargo.toml`:
+Add AletheiaDB to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-gallifreydb = "0.1"
+aletheiadb = "0.1"
 ```
 
 ## Quick Start
@@ -28,11 +28,11 @@ gallifreydb = "0.1"
 ### 1. Enable Vector Indexing
 
 ```rust
-use gallifreydb::{GallifreyDB, PropertyMapBuilder};
-use gallifreydb::index::vector::{HnswConfig, DistanceMetric};
+use aletheiadb::{AletheiaDB, PropertyMapBuilder};
+use aletheiadb::index::vector::{HnswConfig, DistanceMetric};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let db = GallifreyDB::new();
+    let db = AletheiaDB::new();
 
     // Enable vector indexing on "embedding" property
     // 384 dimensions, cosine similarity, capacity for 10,000 vectors
@@ -105,12 +105,12 @@ let similar_docs = db.find_similar_with_label(doc_id, "Document", 10)?;
 ## Complete Example: Document Similarity Search
 
 ```rust
-use gallifreydb::{GallifreyDB, PropertyMapBuilder};
-use gallifreydb::index::vector::{HnswConfig, DistanceMetric};
+use aletheiadb::{AletheiaDB, PropertyMapBuilder};
+use aletheiadb::index::vector::{HnswConfig, DistanceMetric};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 1. Create database and enable vector index
-    let db = GallifreyDB::new();
+    let db = AletheiaDB::new();
 
     let config = HnswConfig::new(384, DistanceMetric::Cosine)
         .with_capacity(1000);
@@ -156,6 +156,103 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 fn generate_embedding(text: &str) -> Vec<f32> {
     // In production, call your embedding API (OpenAI, Cohere, etc.)
     vec![0.0; 384]
+}
+```
+
+## Multi-Property Vector Indexes
+
+AletheiaDB supports multiple vector properties per database, each with independent HNSW indexes. This enables use cases like storing different embedding types (title vs content) or multi-modal embeddings (text vs image).
+
+### Enabling Multiple Vector Indexes
+
+```rust
+use aletheiadb::{AletheiaDB, PropertyMapBuilder};
+use aletheiadb::index::vector::{HnswConfig, DistanceMetric};
+
+let db = AletheiaDB::new();
+
+// Enable separate indexes for different properties
+db.vector_index("title_embedding")
+    .hnsw(HnswConfig::new(384, DistanceMetric::Cosine))
+    .enable()?;
+
+db.vector_index("content_embedding")
+    .hnsw(HnswConfig::new(768, DistanceMetric::Cosine))
+    .enable()?;
+
+db.vector_index("image_embedding")
+    .hnsw(HnswConfig::new(512, DistanceMetric::Euclidean))
+    .enable()?;
+```
+
+### Storing Nodes with Multiple Embeddings
+
+```rust
+let node_id = db.create_node(
+    "Document",
+    PropertyMapBuilder::new()
+        .insert("title", "Introduction to Rust")
+        .insert_vector("title_embedding", &title_emb)    // 384 dims
+        .insert_vector("content_embedding", &content_emb) // 768 dims
+        .insert_vector("image_embedding", &image_emb)     // 512 dims
+        .build(),
+)?;
+```
+
+### Querying Specific Properties
+
+Use the `_in` suffix methods to query specific properties:
+
+```rust
+// Query by title embeddings
+let by_title = db.find_similar_in("title_embedding", node_id, 10)?;
+
+// Query by content embeddings
+let by_content = db.find_similar_in("content_embedding", node_id, 10)?;
+
+// Search by embedding vector in specific property
+let results = db.find_similar_by_embedding_in(
+    "content_embedding",
+    &query_embedding,
+    10,
+)?;
+
+// With label filter
+let filtered = db.find_similar_by_embedding_in_with_label(
+    "title_embedding",
+    &query_embedding,
+    "Document",
+    10,
+)?;
+```
+
+### Reranking with Different Properties
+
+```rust
+// Get initial results by title similarity
+let candidates = db.find_similar_in("title_embedding", node_id, 100)?;
+let candidate_ids: Vec<_> = candidates.iter().map(|(id, _)| *id).collect();
+
+// Rerank by content similarity
+let reranked = db.rank_by_similarity_in(
+    "content_embedding",
+    &candidate_ids,
+    &query_content_embedding,
+    10,
+)?;
+```
+
+### Checking Property-Specific Index Status
+
+```rust
+// Check if any vector index is enabled
+if db.is_vector_index_enabled() {
+    println!("At least one vector index is active");
+}
+
+// Check specific property
+if db.is_vector_index_enabled_for("content_embedding") {
+    println!("Content embedding index is active");
 }
 ```
 
@@ -329,8 +426,8 @@ Configure your index dimensions based on your embedding model:
 ## Error Handling
 
 ```rust
-use gallifreydb::utils::VectorError;
-use gallifreydb::Error;
+use aletheiadb::utils::VectorError;
+use aletheiadb::Error;
 
 match db.find_similar(node_id, 10) {
     Ok(results) => {
@@ -378,7 +475,7 @@ let config = HnswConfig::new(384, DistanceMetric::Cosine);
 ### 3. Normalize Vectors for Cosine Similarity
 
 ```rust
-use gallifreydb::core::vector::normalize;
+use aletheiadb::core::vector::normalize;
 
 // If using cosine metric, normalize embeddings for optimal performance
 let mut embedding = get_embedding_from_model();
@@ -436,19 +533,20 @@ tx.commit()?;  // Single commit for all operations
 
 ## API Reference
 
-### GallifreyDB Methods
+### AletheiaDB Methods
 
 ```rust
-impl GallifreyDB {
-    /// Enable vector indexing on a specific property
-    pub fn enable_vector_index(
-        &self,
-        property_name: &str,
-        config: HnswConfig,
-    ) -> Result<()>;
+impl AletheiaDB {
+    /// Enable vector indexing on a specific property (builder pattern)
+    pub fn vector_index(&self, property_name: &str) -> VectorIndexBuilder;
 
-    /// Check if vector index is enabled
+    /// Check if any vector index is enabled
     pub fn is_vector_index_enabled(&self) -> bool;
+
+    /// Check if a specific property has a vector index
+    pub fn is_vector_index_enabled_for(&self, property_name: &str) -> bool;
+
+    // === Default property methods (uses "embedding") ===
 
     /// Find k most similar nodes to a given node
     pub fn find_similar(
@@ -468,6 +566,42 @@ impl GallifreyDB {
     /// Find k most similar nodes to an embedding vector
     pub fn find_similar_by_embedding(
         &self,
+        query_embedding: &[f32],
+        k: usize,
+    ) -> Result<Vec<(NodeId, f32)>>;
+
+    // === Property-specific methods (multi-property support) ===
+
+    /// Find k most similar nodes in a specific property
+    pub fn find_similar_in(
+        &self,
+        property_name: &str,
+        query_node_id: NodeId,
+        k: usize,
+    ) -> Result<Vec<(NodeId, f32)>>;
+
+    /// Find similar by embedding in a specific property
+    pub fn find_similar_by_embedding_in(
+        &self,
+        property_name: &str,
+        query_embedding: &[f32],
+        k: usize,
+    ) -> Result<Vec<(NodeId, f32)>>;
+
+    /// Find similar by embedding with label filter in a specific property
+    pub fn find_similar_by_embedding_in_with_label(
+        &self,
+        property_name: &str,
+        query_embedding: &[f32],
+        label: &str,
+        k: usize,
+    ) -> Result<Vec<(NodeId, f32)>>;
+
+    /// Rerank node IDs by similarity in a specific property
+    pub fn rank_by_similarity_in(
+        &self,
+        property_name: &str,
+        node_ids: &[NodeId],
         query_embedding: &[f32],
         k: usize,
     ) -> Result<Vec<(NodeId, f32)>>;

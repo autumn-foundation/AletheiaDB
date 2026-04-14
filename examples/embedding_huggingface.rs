@@ -1,4 +1,4 @@
-//! Example: Using HuggingFace embeddings with GallifreyDB
+//! Example: Using HuggingFace embeddings with AletheiaDB
 //!
 //! This example demonstrates using the HuggingFace Inference API for embeddings.
 //!
@@ -15,9 +15,11 @@
 //! cargo run --example embedding_huggingface --features embedding-huggingface
 //! ```
 
-use gallifreydb::embeddings::EmbeddingService;
-use gallifreydb::embeddings::providers::huggingface::*;
-use gallifreydb::{GallifreyDB, PropertyMapBuilder};
+#![cfg(feature = "embedding-huggingface")]
+
+use aletheiadb::embeddings::EmbeddingService;
+use aletheiadb::embeddings::providers::huggingface::*;
+use aletheiadb::{AletheiaDB, PropertyMapBuilder};
 use std::sync::Arc;
 
 #[tokio::main]
@@ -44,9 +46,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let embeddings = embedding_service.embed_batch(&documents).await?;
     println!("✅ Generated {} embeddings\n", embeddings.len());
 
-    // 3. Store in GallifreyDB
-    println!("💾 Storing in GallifreyDB...");
-    let db = GallifreyDB::new();
+    // 3. Store in AletheiaDB
+    println!("💾 Storing in AletheiaDB...");
+    let db = AletheiaDB::new()?;
 
     for (doc, embedding) in documents.iter().zip(embeddings.iter()) {
         db.create_node(
@@ -61,4 +63,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("\n✨ Example complete!");
     Ok(())
+}
+
+#[cfg(not(feature = "embedding-huggingface"))]
+fn main() {
+    eprintln!("This example requires the 'embedding-huggingface' feature.");
+    eprintln!(
+        "Run with: cargo run --example embedding_huggingface --features embedding-huggingface"
+    );
+    std::process::exit(1);
 }

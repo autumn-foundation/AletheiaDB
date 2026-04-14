@@ -70,16 +70,16 @@ jobs:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            artifact_name: gallifreydb-linux-x86_64
+            artifact_name: aletheiadb-linux-x86_64
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-            artifact_name: gallifreydb-windows-x86_64
+            artifact_name: aletheiadb-windows-x86_64
           - os: macos-latest
             target: x86_64-apple-darwin
-            artifact_name: gallifreydb-macos-x86_64
+            artifact_name: aletheiadb-macos-x86_64
           - os: macos-latest
             target: aarch64-apple-darwin
-            artifact_name: gallifreydb-macos-arm64
+            artifact_name: aletheiadb-macos-arm64
 
     steps:
       - name: Checkout code
@@ -97,9 +97,9 @@ jobs:
         shell: bash
         run: |
           if [ "${{ matrix.os }}" = "windows-latest" ]; then
-            7z a ${{ matrix.artifact_name }}.zip ./target/${{ matrix.target }}/release/gallifreydb.exe
+            7z a ${{ matrix.artifact_name }}.zip ./target/${{ matrix.target }}/release/aletheiadb.exe
           else
-            tar czf ${{ matrix.artifact_name }}.tar.gz -C ./target/${{ matrix.target }}/release gallifreydb
+            tar czf ${{ matrix.artifact_name }}.tar.gz -C ./target/${{ matrix.target }}/release aletheiadb
           fi
 
       - name: Upload Release Asset

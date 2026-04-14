@@ -1,4 +1,4 @@
-//! Example: Using Ollama local embeddings with GallifreyDB
+//! Example: Using Ollama local embeddings with AletheiaDB
 //!
 //! This example demonstrates using Ollama for local embedding generation.
 //!
@@ -14,9 +14,11 @@
 //! cargo run --example embedding_ollama --features embedding-ollama
 //! ```
 
-use gallifreydb::embeddings::EmbeddingService;
-use gallifreydb::embeddings::providers::ollama::*;
-use gallifreydb::{GallifreyDB, PropertyMapBuilder};
+#![cfg(feature = "embedding-ollama")]
+
+use aletheiadb::embeddings::EmbeddingService;
+use aletheiadb::embeddings::providers::ollama::*;
+use aletheiadb::{AletheiaDB, PropertyMapBuilder};
 use std::sync::Arc;
 
 #[tokio::main]
@@ -52,9 +54,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         duration.as_millis() as f64 / documents.len() as f64
     );
 
-    // 3. Store in GallifreyDB
-    println!("💾 Storing in GallifreyDB...");
-    let db = GallifreyDB::new();
+    // 3. Store in AletheiaDB
+    println!("💾 Storing in AletheiaDB...");
+    let db = AletheiaDB::new()?;
 
     for (doc, embedding) in documents.iter().zip(embeddings.iter()) {
         db.create_node(
@@ -70,4 +72,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n✨ Example complete!");
     println!("💡 Tip: Ollama runs locally - no data leaves your machine!");
     Ok(())
+}
+
+#[cfg(not(feature = "embedding-ollama"))]
+fn main() {
+    eprintln!("This example requires the 'embedding-ollama' feature.");
+    eprintln!("Run with: cargo run --example embedding_ollama --features embedding-ollama");
+    std::process::exit(1);
 }

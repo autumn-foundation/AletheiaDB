@@ -1,76 +1,135 @@
 [package]
-name = "gallifreydb"
+name = "aletheiadb"
 version = "0.1.0"
 edition = "2024"
-authors = ["GallifreyDB Contributors"]
+authors = ["AletheiaDB Contributors"]
 description = "A high-performance bi-temporal graph database for LLM integration"
 license = "MIT"
-repository = "https://github.com/yourusername/gallifreydb"
+repository = "https://github.com/madmax983/AletheiaDB"
 keywords = ["database", "graph", "temporal", "bitemporal", "llm"]
 categories = ["database-implementations"]
 
 [dependencies]
+bytemuck = { version = "1.25.0", features = ["extern_crate_alloc", "derive"] }
 dashmap = "6.1"
 crc32fast = "1.4"
 parking_lot = "0.12"
-hnsw_rs = "0.3"
-arc-swap = "1.7"
+usearch = { git = "https://github.com/madmax983/USearch", rev = "ca8a0213cc56f43354b35ffc83e12f033993fd4a" }
+arc-swap = "1.9"
 quick_cache = "0.6"
+crossbeam-channel = "0.5"
+bitcode = "0.6"
+zstd = "0.13"
+memmap2 = "0.9"
+thiserror = "2.0"
+smallvec = "1.13"
+chrono = "0.4"
+
+# Force native-tls to 0.2.16 to avoid build breakage in 0.2.17
+native-tls = "=0.2.18"
+
+# Configuration support (optional TOML config files)
+serde = { version = "1.0", features = ["derive"], optional = true }
+toml = { version = "1.1", optional = true }
 
 # Optional Tracy profiling support
-tracy-client = { version = "0.17", optional = true, default-features = false }
+tracy-client = { version = "0.18", optional = true, default-features = false }
 
 # Observability framework (optional via feature flags)
 tracing = { version = "0.1", optional = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"], optional = true }
 tracing-tracy = { version = "0.11", optional = true }
-tracing-honeycomb = { version = "0.4", optional = true }
-libhoney-rust = { version = "0.1", optional = true }
 
 # Prometheus metrics (optional)
 metrics = { version = "0.24", optional = true }
 metrics-exporter-prometheus = { version = "0.17", optional = true }
 
+# MCP server support (optional)
+# Note: rmcp re-exports schemars, so we don't need a separate dependency
+rmcp = { version = "0.13", features = ["server", "transport-io"], optional = true }
+base64 = { version = "0.22", optional = true }
+
+# HTTP server support (optional)
+actix-web = { version = "4.9", optional = true }
+actix-cors = { version = "0.7", optional = true }
+actix-rt = { version = "2.10", optional = true }
+actix-governor = { version = "0.10", optional = true }
+
 # Embedding generation dependencies (all optional via feature flags)
 # Async runtime for API-based embedding providers
-tokio = { version = "1.35", features = ["rt-multi-thread", "macros"], optional = true }
+tokio = { version = "1.51", features = ["rt-multi-thread", "macros"], optional = true }
 async-trait = { version = "0.1", optional = true }
 
-# HTTP client for API-based providers (OpenAI, HuggingFace, Ollama)
-reqwest = { version = "0.11", features = ["json"], optional = true }
-serde = { version = "1.0", features = ["derive"], optional = true }
-serde_json = { version = "1.0", optional = true }
+# HTTP client for API-based providers (OpenAI, HuggingFace, Ollama) and sharding RPC
+reqwest = { version = "0.12", features = ["json", "blocking", "rustls-tls"], default-features = false, optional = true }
+serde_json = { version = "1.0", optional = false }
 
 # ONNX runtime for local model inference
 ort = { version = "2.0.0-rc.0", optional = true }
-tokenizers = { version = "0.15", optional = true }
+tokenizers = { version = "0.22", optional = true }
 num_cpus = { version = "1.16", optional = true }
 
-[dev-dependencies]
-criterion = "0.5"
-proptest = "1.4"
+# Redb for tiered cold storage (pure Rust, ADR-0025)
+redb = "4.0"
+
+# SQL parser for SQL:2011 temporal syntax support (optional)
+sqlparser = { version = "0.40", optional = true }
+
+# Parallel iteration for sharded vector index
+rayon = "1.12"
+comfy-table = "7.2.2"
+crossterm = "0.29.0"
 rand = "0.8"
-tempfile = "3.8"
+
+# Encryption at rest (ADR-0028)
+aes-gcm = "0.10"
+chacha20poly1305 = "0.10"
+hkdf = "0.12"
+sha2 = "0.10"
+zeroize = { version = "1.8", features = ["derive"] }
+
+# AWS KMS key provider (optional, ADR-0028)
+aws-sdk-kms = { version = "1.0", optional = true }
+
+[dev-dependencies]
+criterion = "0.8"
+proptest = "1.11"
+tempfile = "3.27"
+serial_test = "3.4"
 # Tokio for async tests
-tokio = { version = "1.35", features = ["rt-multi-thread", "macros", "test-util"] }
+tokio = { version = "1.51", features = ["rt-multi-thread", "macros", "test-util"] }
 # Mutex for serializing env var tests
 lazy_static = "1.4"
-rayon = "1.8"
+# Readline with auto-complete for examples
+rustyline = "18.0"
+# Loom for concurrency testing
+loom = { version = "0.7.2", features = ["checkpoint"] }
+rand = "0.8"
 
 [features]
+# Nova experimental features
+nova = []
+
 # Enable Tracy profiling (use with: cargo build --release --features tracy)
 tracy = ["tracy-client/enable"]
 
 # Observability features
 observability = ["dep:tracing", "dep:tracing-subscriber"]
 observability-tracy = ["observability", "dep:tracing-tracy", "tracy"]
-observability-honeycomb = ["observability", "dep:tracing-honeycomb", "dep:libhoney-rust"]
+observability-honeycomb = ["observability", "honeycomb"]
 observability-prometheus = ["observability", "dep:metrics", "dep:metrics-exporter-prometheus"]
 
 # Default features
-default = []
+default = ["config-toml"]
+
+# Async runtime support
+tokio = ["dep:tokio"]
+
+# Configuration file support (TOML)
+config-toml = ["dep:serde", "dep:toml"]
+
 # Embedding generation features
-embeddings = ["dep:tokio", "dep:async-trait", "dep:serde", "dep:serde_json"]
+embeddings = ["dep:tokio", "dep:async-trait"]
 
 # Individual provider features (each implies 'embeddings')
 embedding-openai = ["embeddings", "dep:reqwest"]
@@ -86,6 +145,40 @@ embedding-all = [
     "embedding-onnx",
     "embedding-ollama"
 ]
+
+# MCP server support
+mcp-server = ["dep:rmcp", "dep:tokio", "dep:serde", "dep:base64"]
+
+# Sharding RPC client support (uses blocking reqwest)
+sharding-rpc = ["dep:reqwest", "dep:serde"]
+
+# SQL:2011 temporal syntax support
+sql = ["dep:sqlparser"]
+
+# Cypher query language support
+cypher = []
+
+# HTTP server support (Issue #465)
+http-server = ["dep:actix-web", "dep:actix-cors", "dep:actix-rt", "dep:tokio", "dep:serde", "dep:actix-governor"]
+
+# MVCC snapshot-focused integration tests
+mvcc-snapshots-tdd = []
+
+# Custom Honeycomb client (replaces libhoney-rust git dependency)
+# This provides a minimal, security-focused client with modern dependencies
+honeycomb-client = ["dep:serde"]
+
+# Honeycomb client with HTTP transmission support
+honeycomb = ["honeycomb-client", "dep:reqwest"]
+
+# Encryption at rest (ADR-0028)
+encryption = ["dep:serde"]
+
+# AWS KMS key provider (optional)
+encryption-aws-kms = ["encryption", "dep:tokio", "dep:aws-sdk-kms"]
+
+# HashiCorp Vault key provider (optional)
+encryption-vault = ["encryption", "dep:tokio", "dep:reqwest"]
 
 [profile.dev]
 # Fast compilation for development
@@ -117,10 +210,58 @@ fail-under-functions = 75.0
 # Exclude certain files from coverage
 exclude = [
     "src/main.rs",
-    "benches/*",
-    "tests/*",
+    "src/bin/**",
+    "benches/**",
+    "tests/**",
+    "examples/**",
 ]
 
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }
+
+# Examples with required features
+# Embedding examples require their respective feature flags
+[[example]]
+name = "embedding_openai"
+required-features = ["embedding-openai"]
+
+[[example]]
+name = "embedding_huggingface"
+required-features = ["embedding-huggingface"]
+
+[[example]]
+name = "embedding_ollama"
+required-features = ["embedding-ollama"]
+
+[[example]]
+name = "embedding_onnx"
+required-features = ["embedding-onnx"]
+
+[[example]]
+name = "embedding_comparison"
+required-features = ["embedding-all"]
+
+# Recovery examples demonstrating database recovery functionality
+[[example]]
+name = "basic_recovery"
+path = "examples/recovery/basic_recovery.rs"
+
+[[example]]
+name = "manual_recovery"
+path = "examples/recovery/manual_recovery.rs"
+
+[[example]]
+name = "progress_callback"
+path = "examples/recovery/progress_callback.rs"
+
+# Performance targets - lightweight validation of key performance metrics
+[[bench]]
+name = "performance_targets"
+harness = false
+path = "benches/performance_targets.rs"
+required-features = []
+
+# Storage layer - raw storage primitives and fast path
 [[bench]]
 name = "current_state"
 harness = false
@@ -128,23 +269,64 @@ path = "benches/current_state.rs"
 required-features = []
 
 [[bench]]
-name = "gallifreydb"
+name = "historical_storage"
 harness = false
-path = "benches/gallifreydb.rs"
+path = "benches/historical_storage.rs"
 required-features = []
+
+# High-level API - includes transaction overhead and API layer
+[[bench]]
+name = "aletheiadb"
+harness = false
+path = "benches/aletheiadb.rs"
+required-features = []
+
+# Storage layer benchmarks
+[[bench]]
+name = "storage_current"
+harness = false
+path = "benches/storage/current.rs"
+required-features = []
+
+# Persistence layer - durability modes and checkpoint operations
+[[bench]]
+name = "durability_modes"
+harness = false
+path = "benches/durability_modes.rs"
 
 [[bench]]
-name = "persistence"
+name = "checkpoints"
 harness = false
-path = "benches/persistence.rs"
+path = "benches/checkpoints.rs"
+
+# Cold storage - tiered storage backend (Issue #120 / SCALE-002)
+[[bench]]
+name = "cold_storage"
+harness = false
+path = "benches/cold_storage.rs"
 required-features = []
 
+# Transaction layer - ACID guarantees and transaction overhead
 [[bench]]
 name = "transactions"
 harness = false
 path = "benches/transactions.rs"
 required-features = []
 
+# Temporal layer - time-travel queries and version reconstruction
+[[bench]]
+name = "temporal_query"
+harness = false
+path = "benches/temporal_query.rs"
+required-features = []
+
+[[bench]]
+name = "temporal_vector"
+harness = false
+path = "benches/temporal_vector.rs"
+required-features = []
+
+# Vector operations - similarity metrics and HNSW k-NN search
 [[bench]]
 name = "vector_similarity"
 harness = false
@@ -158,33 +340,77 @@ path = "benches/hnsw_index.rs"
 required-features = []
 
 [[bench]]
-name = "id_generation"
+name = "wal_serialization"
 harness = false
-path = "benches/id_generation.rs"
+path = "benches/wal_serialization.rs"
+required-features = []
+
+# Hybrid queries - Phase 4 graph+vector operations
+[[bench]]
+name = "hybrid_query"
+harness = false
+path = "benches/hybrid_query.rs"
 required-features = []
 
 [[bench]]
-name = "string_interning"
+name = "query_optimization"
 harness = false
-path = "benches/string_interning.rs"
+path = "benches/query_optimization.rs"
 required-features = []
 
 [[bench]]
-name = "temporal_vector"
+name = "recovery_benchmarks"
 harness = false
-path = "benches/temporal_vector.rs"
+path = "benches/recovery_benchmarks.rs"
 required-features = []
 
 [[bench]]
-name = "concurrent_reads"
+name = "vector_serialization"
 harness = false
-path = "benches/concurrent_reads.rs"
+path = "benches/vector_serialization.rs"
+
+# Incremental CSR Adjacency (ADR-0026)
+[[bench]]
+name = "incremental_adjacency"
+harness = false
+path = "benches/incremental_adjacency.rs"
+
+[[bench]]
+name = "vector_rerank"
+harness = false
+path = "benches/vector_rerank.rs"
 required-features = []
 
-# Patch libhoney-rust to use git version with updated dependencies
-# This overrides the crates.io version for ALL dependencies (including tracing-honeycomb)
-# Reason: crates.io v0.1.6 uses reqwest 0.10 with known CVEs
-# Git version uses reqwest 0.11 and tokio 1.0 (updated Jan 2021, not published)
-# See: https://github.com/nlopes/libhoney-rust/issues/80
-[patch.crates-io]
-libhoney-rust = { git = "https://github.com/nlopes/libhoney-rust" }
+# Unified CLI binary for local operations + daemon management
+[[bin]]
+name = "aletheia"
+path = "src/bin/aletheia.rs"
+
+# MCP server binary
+[[bin]]
+name = "aletheia-mcp"
+path = "src/bin/mcp_server.rs"
+required-features = ["mcp-server"]
+
+# HTTP server binary (Issue #465)
+[[bin]]
+name = "aletheia-server"
+path = "src/bin/server.rs"
+required-features = ["http-server"]
+
+[[bench]]
+name = "edge_iteration"
+harness = false
+path = "benches/edge_iteration.rs"
+required-features = []
+
+[[bench]]
+name = "graph_label_checks"
+harness = false
+path = "benches/graph_label_checks.rs"
+required-features = []
+
+# Experimental features
+[[example]]
+name = "story_demo"
+required-features = ["nova"]
