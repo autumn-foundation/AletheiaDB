@@ -67,6 +67,9 @@ impl<'a> HorizonEngine<'a> {
 
     /// Map the semantic event horizon of a seed node.
     ///
+    /// Performance Note: Iterating over outgoing and incoming edges uses `.chain()` instead
+    /// of collecting into an intermediate vector, eliminating unnecessary heap allocations and improving performance on large graphs.
+    ///
     /// # Arguments
     /// * `seed` - The starting node.
     /// * `property_name` - The vector property to use for semantic comparison.
@@ -111,21 +114,17 @@ impl<'a> HorizonEngine<'a> {
                 }
 
                 // Get all neighbors (both outgoing and incoming for true semantic reach)
-                let mut neighbors = tx
+                let outgoing = tx
                     .get_outgoing_edges(current_node_id)
                     .into_iter()
-                    .filter_map(|e| tx.get_edge(e).ok().map(|edge| edge.target))
-                    .collect::<Vec<_>>();
+                    .filter_map(|e| tx.get_edge(e).ok().map(|edge| edge.target));
 
                 let incoming = tx
                     .get_incoming_edges(current_node_id)
                     .into_iter()
-                    .filter_map(|e| tx.get_edge(e).ok().map(|edge| edge.source))
-                    .collect::<Vec<_>>();
+                    .filter_map(|e| tx.get_edge(e).ok().map(|edge| edge.source));
 
-                neighbors.extend(incoming);
-
-                for neighbor_id in neighbors {
+                for neighbor_id in outgoing.chain(incoming) {
                     if visited.contains(&neighbor_id) {
                         continue;
                     }
