@@ -12,3 +12,8 @@
 **Bloat:** `StorageSnapshot` and `FieldHolder` traits.
 **Cut:** Deleted single-implementation traits `StorageSnapshot` (implemented only by `CurrentStorageSnapshot`) and `FieldHolder` (implemented only by `Event`, unused except in tests). Moved methods directly to structs.
 **Saved:** ~50 lines of boilerplate + cognitive load of unnecessary abstraction layers.
+
+## [Reduction]
+**Bloat:** `ResultExt` trait and `.record_error_metric()` abstraction (Used only on `Result` types but adds unnecessary boilerplate, most implementations should log errors explicitly at the entry/exit bounds instead of implicit trait extension over `Result`).
+**Cut:** Deleted `ResultExt` trait from `core/error.rs`, removed its implementations, and removed 49 usages of `.record_error_metric()` along with unused `ResultExt` imports.
+**Saved:** ~100 lines of code + cognitive load of checking side effects on `Result` handling.

@@ -11,22 +11,6 @@ use thiserror::Error;
 /// Result type alias using AletheiaDB's Error type.
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// Extension methods for [`Result`] values using AletheiaDB's error type.
-pub trait ResultExt<T> {
-    /// Record an error metric (if this is `Err`) and return the original result.
-    fn record_error_metric(self) -> Self;
-}
-
-impl<T> ResultExt<T> for Result<T> {
-    #[inline]
-    fn record_error_metric(self) -> Self {
-        if let Err(ref err) = self {
-            err.record_metric();
-        }
-        self
-    }
-}
-
 /// Main error type for all AletheiaDB operations.
 #[derive(Debug, Error)]
 pub enum Error {
@@ -1115,20 +1099,6 @@ mod tests {
             converted,
             Error::Query(QueryError::InvalidParameter { parameter, .. }) if parameter == "column"
         ));
-    }
-
-    #[cfg(feature = "observability")]
-    #[test]
-    fn test_result_ext_records_storage_metric_once() {
-        crate::observability::METRICS.reset();
-
-        let err: Result<()> = Err(StorageError::NodeNotFound(NodeId::new(1).unwrap()).into());
-        let snapshot = crate::observability::METRICS.snapshot();
-        assert_eq!(snapshot.error_storage_total, 0);
-
-        let _ = err.record_error_metric();
-        let snapshot = crate::observability::METRICS.snapshot();
-        assert_eq!(snapshot.error_storage_total, 1);
     }
 
     #[test]

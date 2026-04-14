@@ -7,7 +7,7 @@
 //! - No commit overhead
 
 use super::{ReadOps, TransactionSnapshot, TxId, TxMetadata, TxState, TxVisibilityManager};
-use crate::core::error::{Result, ResultExt, StorageError};
+use crate::core::error::{Result, StorageError};
 use crate::core::graph::{Edge, Node};
 use crate::core::id::{EdgeId, NodeId};
 use crate::core::property::PropertyValue;
@@ -249,7 +249,7 @@ impl ReadTransaction {
 
 impl ReadOps for ReadTransaction {
     fn get_node(&self, id: NodeId) -> Result<Node> {
-        let result = if let Ok(current_node) = self.current.get_node(id) {
+        if let Ok(current_node) = self.current.get_node(id) {
             // Check if current version is visible in our snapshot
             if self
                 .visibility_manager
@@ -264,13 +264,11 @@ impl ReadOps for ReadTransaction {
             // If the node is not in current storage (e.g., it was deleted),
             // we must still check historical storage.
             self.get_node_from_historical(id)
-        };
-
-        result.record_error_metric()
+        }
     }
 
     fn get_edge(&self, id: EdgeId) -> Result<Edge> {
-        let result = if let Ok(current_edge) = self.current.get_edge(id) {
+        if let Ok(current_edge) = self.current.get_edge(id) {
             // Check if current version is visible in our snapshot
             if self
                 .visibility_manager
@@ -285,9 +283,7 @@ impl ReadOps for ReadTransaction {
             // If the edge is not in current storage (e.g., it was deleted),
             // we must still check historical storage.
             self.get_edge_from_historical(id)
-        };
-
-        result.record_error_metric()
+        }
     }
 
     fn get_outgoing_edges(&self, node_id: NodeId) -> Vec<EdgeId> {

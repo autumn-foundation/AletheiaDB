@@ -1,6 +1,6 @@
 use crate::api::transaction::TxVisibilityManager;
 use crate::config::AletheiaDBConfig;
-use crate::core::error::{Result, ResultExt, StorageError};
+use crate::core::error::{Result, StorageError};
 use crate::core::id::{IdGenerator, TxIdGenerator};
 use crate::core::temporal::time;
 use crate::core::version::AnchorConfig;
@@ -173,218 +173,213 @@ impl AletheiaDB {
     /// let db = AletheiaDB::with_unified_config(config)?;
     /// ```
     pub fn with_unified_config(config: AletheiaDBConfig) -> Result<Self> {
-        let result = (|| {
-            let durability_mode = config.wal.durability_mode;
+        let durability_mode = config.wal.durability_mode;
 
-            // Create encryption manager if encryption is enabled
-            let encryption_manager = if config.encryption.enabled {
-                let manager = crate::encryption::EncryptionManager::from_config(&config.encryption)
-                    .map_err(|e| -> crate::core::error::Error {
-                        crate::core::error::StorageError::KeyProvider(e.to_string()).into()
-                    })?;
-                Some(Arc::new(manager))
-            } else {
-                None
-            };
+        // Create encryption manager if encryption is enabled
+        let encryption_manager = if config.encryption.enabled {
+            let manager = crate::encryption::EncryptionManager::from_config(&config.encryption)
+                .map_err(|e| -> crate::core::error::Error {
+                    crate::core::error::StorageError::KeyProvider(e.to_string()).into()
+                })?;
+            Some(Arc::new(manager))
+        } else {
+            None
+        };
 
-            // Extract WAL cipher from encryption manager (if enabled)
-            let wal_cipher = encryption_manager
-                .as_ref()
-                .map(|mgr| Arc::clone(mgr.wal_cipher()));
+        // Extract WAL cipher from encryption manager (if enabled)
+        let wal_cipher = encryption_manager
+            .as_ref()
+            .map(|mgr| Arc::clone(mgr.wal_cipher()));
 
-            let wal_system_config = ConcurrentWalSystemConfig {
-                wal_dir: config.wal.wal_dir,
-                num_stripes: config.wal.num_stripes,
-                stripe_capacity: config.wal.stripe_capacity,
-                segment_size: config.wal.segment_size,
-                segments_to_retain: config.wal.segments_to_retain,
-                flush_interval_ms: flush_interval_from_durability(
-                    durability_mode,
-                    config.wal.flush_interval_ms,
-                ),
+        let wal_system_config = ConcurrentWalSystemConfig {
+            wal_dir: config.wal.wal_dir,
+            num_stripes: config.wal.num_stripes,
+            stripe_capacity: config.wal.stripe_capacity,
+            segment_size: config.wal.segment_size,
+            segments_to_retain: config.wal.segments_to_retain,
+            flush_interval_ms: flush_interval_from_durability(
                 durability_mode,
-                write_buffer_size: config.wal.write_buffer_size,
-                wal_cipher,
-            };
+                config.wal.flush_interval_ms,
+            ),
+            durability_mode,
+            write_buffer_size: config.wal.write_buffer_size,
+            wal_cipher,
+        };
 
-            let wal = Arc::new(ConcurrentWalSystem::new(wal_system_config)?);
+        let wal = Arc::new(ConcurrentWalSystem::new(wal_system_config)?);
 
-            // Create persistence manager if enabled
-            let persistence_manager = if config.persistence.enabled {
-                Some(Arc::new(
-                    crate::storage::index_persistence::IndexPersistenceManager::new(
-                        &config.persistence.data_dir,
-                    ),
-                ))
-            } else {
-                None
-            };
+        // Create persistence manager if enabled
+        let persistence_manager = if config.persistence.enabled {
+            Some(Arc::new(
+                crate::storage::index_persistence::IndexPersistenceManager::new(
+                    &config.persistence.data_dir,
+                ),
+            ))
+        } else {
+            None
+        };
 
-            // Create persistence tracker if persistence is enabled
-            let persistence_tracker = if config.persistence.enabled {
-                Some(Arc::new(PersistenceTracker::new()))
-            } else {
-                None
-            };
+        // Create persistence tracker if persistence is enabled
+        let persistence_tracker = if config.persistence.enabled {
+            Some(Arc::new(PersistenceTracker::new()))
+        } else {
+            None
+        };
 
-            // Extract cold storage configuration before config.historical is moved
-            let enable_cold_storage = config.historical.enable_cold_storage;
-            let cold_storage_path = config.historical.cold_storage_path.clone();
+        // Extract cold storage configuration before config.historical is moved
+        let enable_cold_storage = config.historical.enable_cold_storage;
+        let cold_storage_path = config.historical.cold_storage_path.clone();
 
-            let mut db = AletheiaDB {
-                current: Arc::new(CurrentStorage::new()),
-                historical: Arc::new(RwLock::new(HistoricalStorage::from_unified_config(
-                    config.historical,
-                ))),
-                temporal_indexes: Arc::new(TemporalIndexes::new()),
-                wal,
-                current_timestamp: Arc::new(Mutex::new(time::now())),
-                commit_clock_observed_at: Arc::new(Mutex::new(Instant::now())),
-                tx_id_gen: Arc::new(TxIdGenerator::new()),
-                visibility_manager: Arc::new(TxVisibilityManager::new()),
-                node_id_gen: Arc::new(IdGenerator::new()),
-                edge_id_gen: Arc::new(IdGenerator::new()),
-                version_id_gen: Arc::new(IdGenerator::new()),
-                default_durability: durability_mode,
-                stats: Arc::new(Statistics::new()),
-                persistence_config: config.persistence.clone(),
-                persistence_manager: persistence_manager.clone(),
-                persistence_tracker: persistence_tracker.clone(),
-                persistence_thread_stopped: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-                persistence_thread_handle: None,
-                encryption_manager: encryption_manager.clone(),
-            };
+        let mut db = AletheiaDB {
+            current: Arc::new(CurrentStorage::new()),
+            historical: Arc::new(RwLock::new(HistoricalStorage::from_unified_config(
+                config.historical,
+            ))),
+            temporal_indexes: Arc::new(TemporalIndexes::new()),
+            wal,
+            current_timestamp: Arc::new(Mutex::new(time::now())),
+            commit_clock_observed_at: Arc::new(Mutex::new(Instant::now())),
+            tx_id_gen: Arc::new(TxIdGenerator::new()),
+            visibility_manager: Arc::new(TxVisibilityManager::new()),
+            node_id_gen: Arc::new(IdGenerator::new()),
+            edge_id_gen: Arc::new(IdGenerator::new()),
+            version_id_gen: Arc::new(IdGenerator::new()),
+            default_durability: durability_mode,
+            stats: Arc::new(Statistics::new()),
+            persistence_config: config.persistence.clone(),
+            persistence_manager: persistence_manager.clone(),
+            persistence_tracker: persistence_tracker.clone(),
+            persistence_thread_stopped: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            persistence_thread_handle: None,
+            encryption_manager: encryption_manager.clone(),
+        };
 
-            // Load indexes on startup if enabled
-            if let Some(ref manager) = persistence_manager
-                && config.persistence.load_on_startup
+        // Load indexes on startup if enabled
+        if let Some(ref manager) = persistence_manager
+            && config.persistence.load_on_startup
+        {
+            let loaded_lsn = crate::storage::index_persistence::operations::load_indexes_startup(
+                manager,
+                &db.current,
+                &db.historical,
+                &db.node_id_gen,
+                &db.edge_id_gen,
+                &db.version_id_gen,
+            );
+
+            // Initialize tracker LSNs from the loaded manifest
+            if let Some(ref tracker) = persistence_tracker
+                && let Some(lsn) = loaded_lsn
             {
-                let loaded_lsn =
-                    crate::storage::index_persistence::operations::load_indexes_startup(
-                        manager,
-                        &db.current,
-                        &db.historical,
-                        &db.node_id_gen,
-                        &db.edge_id_gen,
-                        &db.version_id_gen,
-                    );
+                tracker.set_start_lsn(lsn);
+                tracker.update_last_persisted_counts(
+                    db.current.node_count() as u64,
+                    db.current.edge_count() as u64,
+                );
+                // Also initialize string count from current state
+                tracker
+                    .update_last_persisted_string_count(crate::core::GLOBAL_INTERNER.len() as u64);
+            }
 
-                // Initialize tracker LSNs from the loaded manifest
-                if let Some(ref tracker) = persistence_tracker
-                    && let Some(lsn) = loaded_lsn
-                {
-                    tracker.set_start_lsn(lsn);
-                    tracker.update_last_persisted_counts(
-                        db.current.node_count() as u64,
-                        db.current.edge_count() as u64,
-                    );
-                    // Also initialize string count from current state
-                    tracker.update_last_persisted_string_count(
-                        crate::core::GLOBAL_INTERNER.len() as u64
-                    );
-                }
-
-                // Replay WAL entries that occurred after the persisted snapshot
-                // This ensures no data loss if the WAL is ahead of the indexes (e.g. crash before persist)
-                let start_lsn = match loaded_lsn {
-                    Some(lsn) => crate::storage::wal::LSN(lsn).next(),
-                    None => {
-                        // Safety check: if we have data but no LSN, replaying from initial is dangerous
-                        // as it might overwrite existing data with old WAL entries or duplicate IDs.
-                        if db.current.node_count() > 0 {
-                            #[cfg(feature = "observability")]
-                            tracing::error!(
-                                "Database contains data ({} nodes) but no persistence LSN found. \
+            // Replay WAL entries that occurred after the persisted snapshot
+            // This ensures no data loss if the WAL is ahead of the indexes (e.g. crash before persist)
+            let start_lsn = match loaded_lsn {
+                Some(lsn) => crate::storage::wal::LSN(lsn).next(),
+                None => {
+                    // Safety check: if we have data but no LSN, replaying from initial is dangerous
+                    // as it might overwrite existing data with old WAL entries or duplicate IDs.
+                    if db.current.node_count() > 0 {
+                        #[cfg(feature = "observability")]
+                        tracing::error!(
+                            "Database contains data ({} nodes) but no persistence LSN found. \
                              Skipping WAL replay to prevent potential data corruption. \
                              This may indicate a missing or corrupted manifest file.",
-                                db.current.node_count()
-                            );
-                            #[cfg(not(feature = "observability"))]
-                            eprintln!(
-                                "ERROR: Database contains data ({} nodes) but no persistence LSN found. \
+                            db.current.node_count()
+                        );
+                        #[cfg(not(feature = "observability"))]
+                        eprintln!(
+                            "ERROR: Database contains data ({} nodes) but no persistence LSN found. \
                              Skipping WAL replay to prevent potential data corruption.",
-                                db.current.node_count()
-                            );
-                            // Skip replay by setting start_lsn to current WAL LSN (effectively no-op)
-                            db.wal.current_lsn()
-                        } else {
-                            crate::storage::wal::LSN::initial()
-                        }
+                            db.current.node_count()
+                        );
+                        // Skip replay by setting start_lsn to current WAL LSN (effectively no-op)
+                        db.wal.current_lsn()
+                    } else {
+                        crate::storage::wal::LSN::initial()
                     }
-                };
-
-                // Capture initial version ID before replay
-                let initial_version_id = db.version_id_gen.current();
-
-                let mut historical_guard = db.historical.write();
-                let (_final_lsn, max_node_id, max_edge_id, next_version_id) =
-                    crate::storage::recovery::replay_wal_into_storage(
-                        &db.wal,
-                        &db.current,
-                        &mut historical_guard,
-                        start_lsn,
-                        initial_version_id,
-                    )?;
-                drop(historical_guard);
-
-                // Update ID generators to account for replayed entities.
-                // This ensures that subsequent writes use IDs that don't collide with replayed data.
-                if let Some(max_nid) = max_node_id {
-                    db.node_id_gen.ensure_at_least(max_nid + 1);
                 }
-                if let Some(max_eid) = max_edge_id {
-                    db.edge_id_gen.ensure_at_least(max_eid + 1);
-                }
-                db.version_id_gen.ensure_at_least(next_version_id);
+            };
+
+            // Capture initial version ID before replay
+            let initial_version_id = db.version_id_gen.current();
+
+            let mut historical_guard = db.historical.write();
+            let (_final_lsn, max_node_id, max_edge_id, next_version_id) =
+                crate::storage::recovery::replay_wal_into_storage(
+                    &db.wal,
+                    &db.current,
+                    &mut historical_guard,
+                    start_lsn,
+                    initial_version_id,
+                )?;
+            drop(historical_guard);
+
+            // Update ID generators to account for replayed entities.
+            // This ensures that subsequent writes use IDs that don't collide with replayed data.
+            if let Some(max_nid) = max_node_id {
+                db.node_id_gen.ensure_at_least(max_nid + 1);
+            }
+            if let Some(max_eid) = max_edge_id {
+                db.edge_id_gen.ensure_at_least(max_eid + 1);
+            }
+            db.version_id_gen.ensure_at_least(next_version_id);
+        }
+
+        // Start background persistence thread if enabled
+        if let Some(ref tracker) = persistence_tracker
+            && let Some(ref manager) = persistence_manager
+        {
+            let handle = spawn_background_persistence_thread(
+                Arc::clone(&db.current),
+                Arc::clone(&db.historical),
+                Arc::clone(&db.temporal_indexes),
+                Arc::clone(&db.wal),
+                Arc::clone(manager),
+                Arc::clone(tracker),
+                config.persistence.policies.clone(),
+                Arc::clone(&db.persistence_thread_stopped),
+            );
+            db.persistence_thread_handle = Some(handle);
+        }
+
+        wire_temporal_indexes(&db);
+
+        // Initialize cold storage if enabled
+        if enable_cold_storage && let Some(cold_storage_path) = cold_storage_path {
+            // Create Redb cold storage backend, with optional encryption cipher
+            let mut cold_storage = RedbColdStorage::new(&cold_storage_path, RedbConfig::new())?;
+
+            if let Some(ref enc_mgr) = encryption_manager {
+                cold_storage = cold_storage.with_cipher(Arc::clone(enc_mgr.cold_cipher()));
             }
 
-            // Start background persistence thread if enabled
-            if let Some(ref tracker) = persistence_tracker
-                && let Some(ref manager) = persistence_manager
-            {
-                let handle = spawn_background_persistence_thread(
-                    Arc::clone(&db.current),
-                    Arc::clone(&db.historical),
-                    Arc::clone(&db.temporal_indexes),
-                    Arc::clone(&db.wal),
-                    Arc::clone(manager),
-                    Arc::clone(tracker),
-                    config.persistence.policies.clone(),
-                    Arc::clone(&db.persistence_thread_stopped),
-                );
-                db.persistence_thread_handle = Some(handle);
-            }
+            let cold_storage = Arc::new(cold_storage);
 
-            wire_temporal_indexes(&db);
+            // Create tiered storage with warm cache configuration
+            let tiered_config = TieredStorageConfig::default();
+            let tiered_storage = TieredStorage::new(tiered_config, cold_storage);
 
-            // Initialize cold storage if enabled
-            if enable_cold_storage && let Some(cold_storage_path) = cold_storage_path {
-                // Create Redb cold storage backend, with optional encryption cipher
-                let mut cold_storage = RedbColdStorage::new(&cold_storage_path, RedbConfig::new())?;
+            // Wire tiered storage to historical storage
+            // Note: migration_age_threshold and max_hot_versions from config.historical
+            // are used by HistoricalStorage's migration logic, not by TieredStorage
+            db.historical
+                .write()
+                .set_tiered_storage(Arc::new(tiered_storage));
+        }
 
-                if let Some(ref enc_mgr) = encryption_manager {
-                    cold_storage = cold_storage.with_cipher(Arc::clone(enc_mgr.cold_cipher()));
-                }
+        seed_startup_current_timestamp(&db)?;
 
-                let cold_storage = Arc::new(cold_storage);
-
-                // Create tiered storage with warm cache configuration
-                let tiered_config = TieredStorageConfig::default();
-                let tiered_storage = TieredStorage::new(tiered_config, cold_storage);
-
-                // Wire tiered storage to historical storage
-                // Note: migration_age_threshold and max_hot_versions from config.historical
-                // are used by HistoricalStorage's migration logic, not by TieredStorage
-                db.historical
-                    .write()
-                    .set_tiered_storage(Arc::new(tiered_storage));
-            }
-
-            seed_startup_current_timestamp(&db)?;
-
-            Ok(db)
-        })();
-        result.record_error_metric()
+        Ok(db)
     }
 
     /// Create a new database with both anchor and WAL configuration.
@@ -399,53 +394,50 @@ impl AletheiaDB {
         anchor_config: AnchorConfig,
         wal_config: crate::config::WalConfig,
     ) -> Result<Self> {
-        let result = (|| {
-            let durability_mode = wal_config.durability_mode;
+        let durability_mode = wal_config.durability_mode;
 
-            let wal_system_config = ConcurrentWalSystemConfig {
-                wal_dir: wal_config.wal_dir,
-                num_stripes: wal_config.num_stripes,
-                stripe_capacity: wal_config.stripe_capacity,
-                segment_size: wal_config.segment_size,
-                segments_to_retain: wal_config.segments_to_retain,
-                flush_interval_ms: flush_interval_from_durability(
-                    durability_mode,
-                    wal_config.flush_interval_ms,
-                ),
+        let wal_system_config = ConcurrentWalSystemConfig {
+            wal_dir: wal_config.wal_dir,
+            num_stripes: wal_config.num_stripes,
+            stripe_capacity: wal_config.stripe_capacity,
+            segment_size: wal_config.segment_size,
+            segments_to_retain: wal_config.segments_to_retain,
+            flush_interval_ms: flush_interval_from_durability(
                 durability_mode,
-                write_buffer_size: wal_config.write_buffer_size,
-                wal_cipher: None,
-            };
+                wal_config.flush_interval_ms,
+            ),
+            durability_mode,
+            write_buffer_size: wal_config.write_buffer_size,
+            wal_cipher: None,
+        };
 
-            let wal = Arc::new(ConcurrentWalSystem::new(wal_system_config)?);
+        let wal = Arc::new(ConcurrentWalSystem::new(wal_system_config)?);
 
-            let db = AletheiaDB {
-                current: Arc::new(CurrentStorage::new()),
-                historical: Arc::new(RwLock::new(HistoricalStorage::with_config(anchor_config))),
-                temporal_indexes: Arc::new(TemporalIndexes::new()),
-                wal,
-                current_timestamp: Arc::new(Mutex::new(time::now())),
-                commit_clock_observed_at: Arc::new(Mutex::new(Instant::now())),
-                tx_id_gen: Arc::new(TxIdGenerator::new()),
-                visibility_manager: Arc::new(TxVisibilityManager::new()),
-                node_id_gen: Arc::new(IdGenerator::new()),
-                edge_id_gen: Arc::new(IdGenerator::new()),
-                version_id_gen: Arc::new(IdGenerator::new()),
-                default_durability: durability_mode,
-                stats: Arc::new(Statistics::new()),
-                persistence_config: crate::storage::index_persistence::PersistenceConfig::default(),
-                persistence_manager: None,
-                persistence_tracker: None,
-                persistence_thread_stopped: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-                persistence_thread_handle: None,
-                encryption_manager: None,
-            };
-            seed_startup_current_timestamp(&db)?;
-            wire_temporal_indexes(&db);
+        let db = AletheiaDB {
+            current: Arc::new(CurrentStorage::new()),
+            historical: Arc::new(RwLock::new(HistoricalStorage::with_config(anchor_config))),
+            temporal_indexes: Arc::new(TemporalIndexes::new()),
+            wal,
+            current_timestamp: Arc::new(Mutex::new(time::now())),
+            commit_clock_observed_at: Arc::new(Mutex::new(Instant::now())),
+            tx_id_gen: Arc::new(TxIdGenerator::new()),
+            visibility_manager: Arc::new(TxVisibilityManager::new()),
+            node_id_gen: Arc::new(IdGenerator::new()),
+            edge_id_gen: Arc::new(IdGenerator::new()),
+            version_id_gen: Arc::new(IdGenerator::new()),
+            default_durability: durability_mode,
+            stats: Arc::new(Statistics::new()),
+            persistence_config: crate::storage::index_persistence::PersistenceConfig::default(),
+            persistence_manager: None,
+            persistence_tracker: None,
+            persistence_thread_stopped: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            persistence_thread_handle: None,
+            encryption_manager: None,
+        };
+        seed_startup_current_timestamp(&db)?;
+        wire_temporal_indexes(&db);
 
-            Ok(db)
-        })();
-        result.record_error_metric()
+        Ok(db)
     }
 
     /// Get the default durability mode for this database.
