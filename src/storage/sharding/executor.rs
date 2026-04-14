@@ -224,6 +224,20 @@ pub enum AggregationStrategy {
 }
 
 /// Result from a single shard.
+///
+/// # Examples
+/// ```rust
+/// use aletheiadb::storage::sharding::executor::ShardResult;
+/// use aletheiadb::storage::sharding::types::ShardId;
+/// use std::time::Duration;
+///
+/// let result = ShardResult {
+///     shard_id: ShardId::new(1).unwrap(),
+///     data: vec![],
+///     execution_time: Duration::from_millis(50),
+/// };
+/// assert_eq!(result.shard_id, ShardId::new(1).unwrap());
+/// ```
 #[derive(Debug, Clone)]
 pub struct ShardResult {
     /// Shard ID.

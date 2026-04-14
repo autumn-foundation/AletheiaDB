@@ -28,6 +28,17 @@ use super::results::{EntityId, EntityResult, QueryRow};
 /// Query execution uses a pull-based iterator model, where each physical
 /// operator is implemented as an iterator. Calling `next()` pulls results
 /// sequentially through the pipeline.
+///
+/// # Examples
+/// ```ignore
+/// use aletheiadb::query::executor::ResultIterator;
+///
+/// // Suppose `iter` implements ResultIterator
+/// while let Some(result) = iter.next() {
+///     let row = result.unwrap();
+///     // process row...
+/// }
+/// ```
 pub trait ResultIterator: Send {
     /// Get the next result row
     fn next(&mut self) -> Option<Result<QueryRow>>;

@@ -62,6 +62,17 @@ use std::time::{Duration, Instant};
 use crate::core::hlc::MAX_BACKWARD_DRIFT_US;
 
 /// Result of recovery operation.
+///
+/// # Examples
+/// ```rust
+/// use aletheiadb::storage::sharding::coordinator::RecoveryResult;
+///
+/// let result = RecoveryResult {
+///     recovered: vec![],
+///     dead_lettered: vec![],
+/// };
+/// assert!(result.is_complete());
+/// ```
 #[derive(Debug, Clone)]
 pub struct RecoveryResult {
     /// Transactions that were successfully recovered.
@@ -105,6 +116,21 @@ impl RecoveryResult {
 }
 
 /// A transaction that failed recovery and requires manual intervention.
+///
+/// # Examples
+/// ```rust
+/// use aletheiadb::storage::sharding::coordinator::DeadLetteredTransaction;
+/// use aletheiadb::core::id::TxId;
+/// use std::time::Instant;
+///
+/// let dead_letter = DeadLetteredTransaction {
+///     tx_id: TxId::new(1),
+///     reason: "Timeout".to_string(),
+///     last_attempt: Instant::now(),
+///     attempt_count: 3,
+/// };
+/// assert_eq!(dead_letter.attempt_count, 3);
+/// ```
 #[derive(Debug, Clone)]
 pub struct DeadLetteredTransaction {
     /// The transaction ID.
