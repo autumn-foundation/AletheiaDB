@@ -339,3 +339,9 @@
 **Finding:** The FNV-1a fallback tests for `IdentityHasher` (`test_identity_hasher_write_fallback_fnv` and `test_identity_hasher_write_fallback_fnv_dirty`) were tautological. They exactly mirrored the source implementation by reconstructing the FNV-1a multiplication and XOR sequence to generate their `expected` values. This meant they only asserted that "the code is the code" and provided no independent verification that the hashing logic was correct or consistent with standard FNV-1a.
 **Evidence:** The original tests explicitly copied the sequence `expected ^= 1; expected = expected.wrapping_mul(FNV_PRIME);` which exactly mirrors the `write` loop. Any mutation altering `FNV_PRIME` or the operation order would survive if the same change was incorrectly made to the test or if it was inherently flawed.
 **Recommendation:** Refactored the tests to use independently pre-computed integer constants as the `expected` values (the Oracle Problem solution). This ensures the implementation matches the ground truth rather than itself.
+**[TimeRange Overlaps Mutation Gaps]**
+**Module:** `src/core/temporal.rs`
+**Severity:** 🟡 Suspect
+**Finding:** Mutants replacing the logical operators in `TimeRange::overlaps` (`||` to `&&` in the empty check, `&&` to `||` in the bounds check) and inequality operators (`<` to `<=`, etc.) were surviving due to incomplete bounds and disjoint range testing.
+**Evidence:** The mutant analysis output `mutants.txt` showed multiple `overlaps` mutants surviving, such as replacing `||` with `&&` or `<` with `<=`.
+**Recommendation:** Added tests explicitly verifying logic bounds with disjoint ranges (`test_sentry_overlaps_disjoint_logic`) and a dedicated test verifying when both ranges are empty (`test_sentry_overlaps_both_empty_mutant`).

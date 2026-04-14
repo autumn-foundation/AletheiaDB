@@ -1977,6 +1977,62 @@ mod sentry_tests {
     }
 
     #[test]
+    fn test_sentry_overlaps_both_empty_mutant() {
+        // 🛡️ Sentry Test: Verify overlaps() returns false when BOTH ranges are empty
+        // This specifically targets the mutant that changes `||` to `&&` in the empty check:
+        // `if self.is_empty() && other.is_empty()`
+
+        let empty1 = TimeRange::at(150.into());
+        let empty2 = TimeRange::at(150.into());
+        let empty3 = TimeRange::at(200.into());
+
+        assert!(
+            !empty1.overlaps(&empty2),
+            "Two empty ranges should not overlap, even if at the same timestamp"
+        );
+
+        assert!(
+            !empty1.overlaps(&empty3),
+            "Two empty ranges at different timestamps should not overlap"
+        );
+    }
+
+    #[test]
+    fn test_sentry_overlaps_disjoint_logic() {
+        // 🛡️ Sentry Test: Verify overlaps() bounds logic
+        // This targets mutants that change bounds checking logic in overlaps.
+        // mutant: replace `<` with `<=` or `<` with `==`
+        let r1 = TimeRange::new(100.into(), 200.into()).unwrap();
+        let r2 = TimeRange::new(200.into(), 300.into()).unwrap();
+        assert!(!r1.overlaps(&r2));
+        assert!(!r2.overlaps(&r1));
+
+        let disjoint_left = TimeRange::new(50.into(), 80.into()).unwrap();
+        let disjoint_right = TimeRange::new(350.into(), 400.into()).unwrap();
+
+        // mutant: replace `&&` with `||`
+        // 100 < 80 (false) && 50 < 200 (true) => false
+        // If ||, it would be true.
+        assert!(!r1.overlaps(&disjoint_left));
+
+        // 100 < 400 (true) && 350 < 200 (false) => false
+        // If ||, it would be true.
+        assert!(!r1.overlaps(&disjoint_right));
+
+        let contained = TimeRange::new(120.into(), 180.into()).unwrap();
+        let contains = TimeRange::new(50.into(), 250.into()).unwrap();
+        let overlaps_left = TimeRange::new(50.into(), 150.into()).unwrap();
+        let overlaps_right = TimeRange::new(150.into(), 250.into()).unwrap();
+
+        // Check overlapping cases to ensure we didn't break functionality
+        // and to catch mutants that always return false or replace true with false
+        assert!(r1.overlaps(&contained));
+        assert!(r1.overlaps(&contains));
+        assert!(r1.overlaps(&overlaps_left));
+        assert!(r1.overlaps(&overlaps_right));
+    }
+
+    #[test]
     fn test_sentry_overlaps_empty_range_inside_non_empty() {
         // 🛡️ Sentry Test: Verify overlaps() returns false when one range is empty, even if inside the other
         // This targets the || mutant in is_empty() checks
