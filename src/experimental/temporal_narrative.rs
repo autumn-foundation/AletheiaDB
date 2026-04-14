@@ -31,6 +31,10 @@ pub struct NarrativeGenerator<'a> {
 
 #[cfg(not(feature = "nova"))]
 /// Generator for creating natural language narratives from temporal history.
+///
+/// **⚠️ WARNING:** The `nova` feature is not enabled.
+/// Calling any methods on this struct will panic at runtime.
+/// Add `features = ["nova"]` to your `Cargo.toml` to use this feature.
 #[deprecated(
     note = "NarrativeGenerator requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
 )]

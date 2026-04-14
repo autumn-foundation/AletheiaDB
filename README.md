@@ -562,11 +562,10 @@ for (node_id, drift_score) in drifted_nodes {
 
 ### Narrative Generation (Experimental)
 
-> ⚠️ **IMPORTANT: REQUIRES FEATURE 'NOVA'**
+> # 🚨 ⚠️ HUGE BANNER: REQUIRES FEATURE NOVA ⚠️ 🚨
 >
-> Experimental features like **Narrative Generation** require the `nova` feature flag.
-> **You MUST add this to your `Cargo.toml` or the code will not compile:**
->
+> IF YOU WANT TO USE NARRATIVE GENERATION OR OTHER EXPERIMENTAL FEATURES,
+> YOU **MUST** ENABLE THE `nova` FEATURE IN YOUR `Cargo.toml` OR THE CODE WILL NOT COMPILE:
 > ```toml
 > [dependencies]
 > aletheiadb = { version = "0.1", features = ["nova"] }
@@ -834,7 +833,7 @@ use std::sync::Arc;
 
 // Note: Requires `tokio` dependency in Cargo.toml
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     // Enable in Cargo.toml: features = ["embedding-openai"]
 
     // 1. Create embedding service
