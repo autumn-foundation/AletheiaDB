@@ -96,3 +96,7 @@
 ## 2024-04-07 - [QueryResults API Confusion]
 **Confusion:** The query execution API was opaque, returning raw struct definitions for `QueryResults`, `QueryResult`, and `QueryRow` without context. Users were likely confused about when to use the lazy iterator versus the eagerly evaluated batch objects, and how context like scores, paths, and timestamps fit into rows instead of raw nodes.
 **Clarification:** Added module-level documentation (`//!`) to explain the "Journey of a Result" from planner to materialized structures. Supplemented struct definitions with `///` comments explaining the *why* (e.g. "Why? Use this when the expected result set is small"). Also added executable doctests for `consume_results`, `QueryRow::from_entity`, and `QueryRow::with_score`.
+
+## 2025-03-05 - The Case of the Silent Shard Rebalancer
+**Confusion:** The `src/storage/sharding/rebalance.rs` and `src/storage/sharding/rpc_client.rs` modules lacked any executable examples or context about *why* specific structures existed. Users trying to understand or manually trigger cluster migrations had to read the source code of `RebalanceManager` and guess how it interacts with `MigrationPlan`.
+**Clarification:** Added comprehensive module-level documentation and struct-level `# The Spark` and `# The Details` sections with executable `///` doctests.

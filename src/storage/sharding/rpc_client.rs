@@ -41,6 +41,30 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 /// Configuration for RPC client.
+///
+/// # The Spark
+/// Shard-to-shard communication over a network is inherently unreliable. The
+/// `RpcConfig` allows operators to tune how resilient the system should be to
+/// transient network partitions and latency spikes during distributed transactions.
+///
+/// # The Details
+/// Includes settings for request timeouts and retry logic with exponential backoff.
+/// In production, `timeout` should typically be set lower than the 2PC coordinator
+/// timeout to prevent cascading failures.
+///
+/// # Examples
+/// ```
+/// use aletheiadb::storage::sharding::rpc_client::RpcConfig;
+/// use std::time::Duration;
+///
+/// let config = RpcConfig {
+///     endpoint: "http://shard1:9000".to_string(),
+///     timeout: Duration::from_secs(5),
+///     max_retries: 3,
+///     ..Default::default()
+/// };
+/// assert_eq!(config.max_retries, 3);
+/// ```
 #[derive(Debug, Clone)]
 pub struct RpcConfig {
     /// Base endpoint URL (e.g., "http://shard0:9000").
@@ -83,9 +107,18 @@ impl Default for RpcConfig {
 /// connection health tracking, and comprehensive error handling.
 ///
 /// # Thread Safety
+/// HTTP-based implementation of the ShardClient trait.
 ///
-/// This client is thread-safe and can be shared across multiple threads.
-/// Internal state is protected by atomic operations and RwLocks.
+/// # The Spark
+/// In a sharded environment, nodes must coordinate to execute distributed queries
+/// and Two-Phase Commit (2PC) transactions. The `HttpShardClient` abstracts away
+/// the network complexity, making a remote shard look like a local resource.
+///
+/// # The Details
+/// This client uses `reqwest` internally and implements the `ShardClient` trait
+/// to send `Prepare`, `Commit`, and `Abort` signals. It handles network retries
+/// automatically based on its `RpcConfig`. It is thread-safe and designed to be
+/// shared via `Arc`. Internal state is protected by atomic operations and RwLocks.
 ///
 /// # Protocol
 ///
@@ -99,6 +132,19 @@ impl Default for RpcConfig {
 /// - `POST /api/v1/migration/receive` - Receive migration batch
 /// - `POST /api/v1/migration/extract` - Extract migration batch
 /// - `GET /api/v1/health` - Health check
+///
+/// # Examples
+/// ```ignore
+/// use aletheiadb::storage::sharding::types::ShardId;
+/// use aletheiadb::storage::sharding::rpc_client::{HttpShardClient, RpcConfig};
+///
+/// let shard_id = ShardId::new(1).unwrap();
+/// let config = RpcConfig::default();
+///
+/// // In a real app, this connects to the remote shard's HTTP API
+/// let client = HttpShardClient::new(shard_id, config).unwrap();
+/// let state = client.get_state().unwrap();
+/// ```
 pub struct HttpShardClient {
     /// Shard ID this client connects to.
     shard_id: ShardId,
