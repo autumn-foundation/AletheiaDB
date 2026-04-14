@@ -30,3 +30,7 @@
 ## LimitPushdown Mutants
 **Learning:** `cargo mutants` revealed missing test coverage for `LimitPushdown::push_down` in several conditions around `||`. Also limits shouldn't be blindly pushed down through filters, because limits only apply after the filter reduces the row count. Tests covering the lack of modification of binary children boundaries have also been introduced.
 **Action:** When adding rules like `LimitPushdown`, always ensure to write exhaustive structural test cases (verifying limits propagating, or explicitly stopping at operations like `Filter` or `Sort`).
+
+## ProjectIterator try_insert unwrapping
+**Learning:** `unwrap()` inside iterator implementations (like `ProjectIterator::next`) poses a significant panic risk when handling properties, especially dynamically sized ones where recursion depth limits can be exceeded or insertion errors can occur. In a database context, panics inside iterators will crash the entire query process rather than just returning an error to the client.
+**Action:** Always gracefully handle property insertion errors using `match` or `?` and propagate them down the iterator pipeline instead of unwrapping, allowing the query to fail safely. Added tests mocking a `try_insert` failure by using an invalid property state.
