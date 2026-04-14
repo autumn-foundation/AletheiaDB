@@ -8,11 +8,13 @@
 ## Context
 
 Graph databases use labels extensively:
+
 - **Node labels**: "Person", "Document", "Concept", "Fact"
 - **Edge labels**: "KNOWS", "REFERENCES", "CONTAINS", "INFLUENCED_BY"
 - **Property keys**: "name", "created_at", "embedding", "source"
 
 In a knowledge graph with millions of nodes and edges:
+
 - Labels are highly repetitive (few unique labels, many uses)
 - Each `String` in Rust is 24 bytes (ptr + len + capacity) + heap allocation
 - String comparison is O(n) where n is string length
@@ -44,8 +46,7 @@ pub struct StringInterner {
 
 /// Global singleton interner
 pub static GLOBAL_INTERNER: Lazy<StringInterner> = Lazy::new(StringInterner::new);
-```
-
+```text
 ### API
 
 ```rust
@@ -80,8 +81,7 @@ pub fn intern(s: &str) -> InternedString {
 pub fn resolve(id: InternedString) -> Option<Arc<str>> {
     GLOBAL_INTERNER.resolve(id)
 }
-```
-
+```text
 ### Usage
 
 ```rust
@@ -97,8 +97,7 @@ pub struct AdjacencyEntry {
     pub edge_id: EdgeId,
     pub label: InternedString,  // Enables O(1) label comparison
 }
-```
-
+```text
 ## Consequences
 
 ### Positive
@@ -129,6 +128,7 @@ pub struct AdjacencyEntry {
 Use `String` or `Arc<str>` directly everywhere.
 
 **Rejected because:**
+
 - 6x memory overhead per reference
 - O(n) string comparison
 - Not viable at scale (millions of labels)
@@ -138,6 +138,7 @@ Use `String` or `Arc<str>` directly everywhere.
 Use `&'static str` for known labels.
 
 **Rejected because:**
+
 - Cannot handle dynamic/user-provided labels
 - Requires compile-time knowledge of all labels
 - Inflexible for knowledge graphs
@@ -147,6 +148,7 @@ Use `&'static str` for known labels.
 Each structure maintains its own string table.
 
 **Rejected because:**
+
 - Cannot compare labels across structures efficiently
 - Duplicated storage of same labels
 - Complex coordination
@@ -156,6 +158,7 @@ Each structure maintains its own string table.
 Use gperf or similar for compile-time perfect hash.
 
 **Rejected because:**
+
 - Requires static set of labels
 - Cannot handle dynamic labels
 - Complex build process
@@ -182,8 +185,7 @@ pub fn intern(&self, s: &str) -> InternedString {
     self.to_string.insert(id, arc);
     id
 }
-```
-
+```text
 ### Display and Debug
 
 ```rust
@@ -195,11 +197,11 @@ impl std::fmt::Display for InternedString {
         }
     }
 }
-```
-
+```text
 ### Persistence Considerations
 
 For database persistence:
+
 1. Serialize string table separately
 2. On load, rebuild interner from table
 3. IDs may differ between runs (remap on load)
@@ -213,6 +215,7 @@ For database persistence:
 | Arc<str> in interner | 16 bytes + string length |
 
 For 100 unique labels used 1M times:
+
 - Without interning: 24MB references + 100 × avg_len strings
 - With interning: 4MB handles + 100 × (16 + avg_len) overhead
 

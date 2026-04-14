@@ -15,6 +15,7 @@ The Current Storage layer requires a concurrent hashmap for node and edge lookup
 4. **No read blocking**: Readers should never wait for writers
 
 Standard library `HashMap` with `RwLock` has limitations:
+
 - Writers block all readers
 - Lock contention under high concurrency
 - Priority inversion risks
@@ -39,8 +40,7 @@ pub struct CurrentIndexes {
     pub outgoing: Arc<RwLock<AdjacencyIndex>>,
     pub incoming: Arc<RwLock<AdjacencyIndex>>,
 }
-```
-
+```text
 ### API Patterns
 
 ```rust
@@ -71,8 +71,7 @@ impl CurrentIndexes {
         self.nodes.iter().map(|r| (*r.key(), r.value().clone()))
     }
 }
-```
-
+```text
 ### DashMap Characteristics
 
 | Feature | Behavior |
@@ -114,9 +113,9 @@ impl CurrentIndexes {
 struct Indexes {
     nodes: RwLock<HashMap<NodeId, Node>>,
 }
-```
-
+```text
 **Rejected because:**
+
 - Writers block all readers
 - Single lock becomes bottleneck
 - High contention under load
@@ -127,9 +126,9 @@ struct Indexes {
 struct Indexes {
     nodes: HashMap<NodeId, Mutex<Node>>,
 }
-```
-
+```text
 **Rejected because:**
+
 - Entry addition/removal still needs global lock
 - High memory overhead (Mutex per entry)
 - Complex implementation
@@ -139,6 +138,7 @@ struct Indexes {
 Implement a fully lock-free hashmap.
 
 **Rejected because:**
+
 - Significant implementation effort
 - Complex correctness proofs
 - DashMap is "good enough" for our use case
@@ -148,6 +148,7 @@ Implement a fully lock-free hashmap.
 Use skip list for ordered concurrent access.
 
 **Rejected because:**
+
 - O(log n) vs O(1) lookup
 - No ordering requirement for our indexes
 - Higher memory overhead
@@ -157,6 +158,7 @@ Use skip list for ordered concurrent access.
 Use evmap for fully lock-free reads with eventual consistency.
 
 **Considered for future because:**
+
 - Even better read performance
 - More complex write semantics
 - Would need careful integration with MVCC
@@ -166,12 +168,12 @@ Use evmap for fully lock-free reads with eventual consistency.
 ### Thread Safety
 
 DashMap uses sharded locking:
-```
+
+```text
 Map → [Shard 0][Shard 1][Shard 2]...[Shard 63]
          ↓         ↓         ↓              ↓
       RwLock   RwLock    RwLock         RwLock
-```
-
+```text
 - Reads acquire read lock on one shard
 - Writes acquire write lock on one shard
 - Different shards can be accessed concurrently
@@ -179,6 +181,7 @@ Map → [Shard 0][Shard 1][Shard 2]...[Shard 63]
 ### Reference Handling
 
 DashMap returns `Ref<K, V>` guards:
+
 ```rust
 // Guard holds reference to shard
 let node_ref: dashmap::mapref::one::Ref<NodeId, Node> = self.nodes.get(&id)?;
@@ -189,8 +192,7 @@ drop(node_ref);  // Releases shard reference
 
 // Or use map pattern
 self.nodes.get(&id).map(|r| r.clone())
-```
-
+```text
 ### Performance Characteristics
 
 | Operation | Complexity | Typical Latency |
@@ -203,15 +205,14 @@ self.nodes.get(&id).map(|r| r.clone())
 
 ### Memory Layout
 
-```
+```text
 DashMap<K, V>:
 ├─ shards: [Shard; 64]
 │   ├─ Shard 0: RwLock<HashMap<K, V>>
 │   ├─ Shard 1: RwLock<HashMap<K, V>>
 │   └─ ...
 └─ hasher: S (hash function)
-```
-
+```text
 ## References
 
 - [DashMap Documentation](https://docs.rs/dashmap/latest/dashmap/)

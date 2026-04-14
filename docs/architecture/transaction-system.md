@@ -27,8 +27,7 @@ graph TB
 
     style RTX fill:#90EE90
     style WTX fill:#87CEEB
-```
-
+```text
 ## Transaction Lifecycle
 
 ### State Machine
@@ -50,8 +49,7 @@ stateDiagram-v2
 
     Committed --> [*]: cleanup
     Aborted --> [*]: discard buffer
-```
-
+```text
 ### State Transitions
 
 ```rust
@@ -61,8 +59,7 @@ pub enum TxState {
     Committed,  // Successfully committed
     Aborted,    // Rolled back
 }
-```
-
+```text
 ## Read Transactions
 
 ### Purpose
@@ -87,8 +84,7 @@ classDiagram
     }
 
     ReadTransaction --> TransactionSnapshot
-```
-
+```text
 ### Read Path
 
 ```mermaid
@@ -110,8 +106,7 @@ sequenceDiagram
     else Not Visible
         RTX-->>App: Err(NotFound)
     end
-```
-
+```text
 ### API
 
 ```rust
@@ -124,8 +119,7 @@ pub trait ReadOps {
     fn node_count(&self) -> usize;
     fn edge_count(&self) -> usize;
 }
-```
-
+```text
 ## Write Transactions
 
 ### Purpose
@@ -169,8 +163,7 @@ classDiagram
 
     WriteTransaction --> WriteBuffer
     WriteBuffer --> BufferedWrite
-```
-
+```text
 ### Write Buffering
 
 ```mermaid
@@ -190,8 +183,7 @@ sequenceDiagram
     WTX-->>App: Ok(())
 
     Note over BUF: All changes buffered<br/>Not visible to others
-```
-
+```text
 ### Read-Your-Writes
 
 ```mermaid
@@ -205,8 +197,7 @@ flowchart TD
 
     MERGE --> RET_MERGED["Return merged node"]
     CHECK_STORAGE --> RET_STORAGE["Return stored node"]
-```
-
+```text
 ### Commit Process
 
 ```mermaid
@@ -258,8 +249,7 @@ sequenceDiagram
 
     WTX->>VIS: Mark as committed
     WTX-->>App: Ok(())
-```
-
+```text
 ## Snapshot Isolation
 
 ### Visibility Rules
@@ -280,8 +270,7 @@ graph TB
     style NOT_VISIBLE fill:#FFB6C1
     style NOT_VISIBLE2 fill:#FFB6C1
     style NOT_VISIBLE3 fill:#FFB6C1
-```
-
+```text
 ### Snapshot Capture
 
 ```mermaid
@@ -298,8 +287,7 @@ sequenceDiagram
     Note over VIS: active = {TX5, TX7, TX9}
 
     VIS-->>TX: TransactionSnapshot {<br/>  timestamp: 1000,<br/>  active: {TX5, TX7, TX9}<br/>}
-```
-
+```text
 ### Write-Write Conflict Detection
 
 ```mermaid
@@ -321,8 +309,7 @@ flowchart TD
     T2_START --> T2_MODIFY --> T2_COMMIT --> T2_CONFLICT
 
     T1_COMMIT -.->|Creates V2| T2_CONFLICT
-```
-
+```text
 ### Isolation Guarantees
 
 | Anomaly | Description | Prevented? |
@@ -350,8 +337,7 @@ classDiagram
         +get_snapshot() TransactionSnapshot
         +is_visible(Version, Snapshot) bool
     }
-```
-
+```text
 ### Thread Safety
 
 ```mermaid
@@ -369,8 +355,7 @@ graph LR
     TX2 --> MUTEX
     TX3 --> MUTEX
     TX4 --> MUTEX
-```
-
+```text
 ## Transaction ID Generation
 
 ### Requirements
@@ -396,8 +381,7 @@ graph LR
     FETCH --> ID1["TxId(1)"]
     FETCH --> ID2["TxId(2)"]
     FETCH --> IDN["TxId(N)"]
-```
-
+```text
 ## Error Handling
 
 ### Transaction Errors
@@ -411,8 +395,7 @@ graph TB
         E4["WriteAfterCommit<br/>Illegal operation"]
         E5["RollbackFailed<br/>Cleanup error"]
     end
-```
-
+```text
 ### Error Recovery
 
 ```mermaid
@@ -428,8 +411,7 @@ flowchart TD
     ABORT --> UNREGISTER
 
     UNREGISTER --> NOTIFY["Return error to caller"]
-```
-
+```text
 ## Usage Patterns
 
 ### Closure-Based (Recommended)
@@ -441,8 +423,7 @@ let node_id = db.write(|tx| {
     tx.create_edge(alice, bob, "KNOWS", edge_props)?;
     Ok(alice)
 })?;
-```
-
+```text
 ### Explicit Transaction
 
 ```rust
@@ -454,8 +435,7 @@ tx.create_edge(alice, bob, "KNOWS", edge_props)?;
 // Must explicitly commit or rollback
 tx.commit()?;
 // tx.rollback();  // Alternative
-```
-
+```text
 ## Related Documentation
 
 - [ADR-0003: MVCC with Snapshot Isolation](../adr/0003-mvcc-snapshot-isolation.md)

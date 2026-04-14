@@ -32,8 +32,7 @@ sequenceDiagram
     TX-->>App: committed
 
     Note over App,Disk: Blocks until disk confirms
-```
-
+```text
 ### Batched Mode
 
 ```mermaid
@@ -63,8 +62,7 @@ sequenceDiagram
     Note over Timer: Or max_delay expires
     Timer->>WAL: trigger sync
     WAL->>Disk: fsync()
-```
-
+```text
 ### Async Mode
 
 ```mermaid
@@ -87,8 +85,7 @@ sequenceDiagram
         BG->>Disk: write + fsync
         Disk-->>BG: confirmed
     end
-```
-
+```text
 ## Component Architecture
 
 ```mermaid
@@ -131,8 +128,7 @@ graph TB
     BGTHREAD --> FILE
 
     FILE --> DISK
-```
-
+```text
 ## Configuration
 
 ### DurabilityMode Enum
@@ -151,8 +147,7 @@ pub enum DurabilityMode {
     /// Background thread handles fsync
     Async,
 }
-```
-
+```text
 ### WriteOptions for Per-Transaction Override
 
 ```mermaid
@@ -175,8 +170,7 @@ graph LR
     TO1 --> EFF
     TO2 --> EFF
     TO3 --> EFF
-```
-
+```text
 ## Batched Mode Internals
 
 ```mermaid
@@ -198,8 +192,7 @@ stateDiagram-v2
         Single fsync for entire batch
         Much more efficient
     end note
-```
-
+```text
 ## Async Mode Internals
 
 ```mermaid
@@ -235,8 +228,7 @@ graph TB
 
     style RB fill:#f9f,stroke:#333
     style BG fill:#bbf,stroke:#333
-```
-
+```text
 ### Backpressure Handling
 
 ```mermaid
@@ -254,8 +246,7 @@ flowchart TD
     H --> D
 
     E -->|Error| I[Return BufferFull error]
-```
-
+```text
 ## Performance Comparison
 
 ```mermaid
@@ -277,8 +268,7 @@ graph LR
 
     SYNC_T -.->|25x more| BATCH_T
     BATCH_T -.->|7x more| ASYNC_T
-```
-
+```text
 ## Use Case Decision Tree
 
 ```mermaid
@@ -299,8 +289,7 @@ flowchart TD
     SYNC --> SYNC_DESC[Zero data loss\n~600 writes/sec]
     BATCH --> BATCH_DESC[Balanced\n~15K writes/sec]
     ASYNC --> ASYNC_DESC[Maximum speed\n~100K+ writes/sec]
-```
-
+```text
 ## Graceful Shutdown
 
 All modes ensure pending writes are synced on shutdown:
@@ -327,8 +316,7 @@ sequenceDiagram
 
     WAL-->>DB: closed
     DB-->>App: shutdown complete
-```
-
+```text
 ## Related Documentation
 
 - [ADR-0012: Configurable Durability Modes](../adr/0012-configurable-durability-modes.md)

@@ -10,11 +10,13 @@
 GallifreyDB is a bi-temporal graph database designed to track both valid time (when facts were true in reality) and transaction time (when facts were recorded). The primary use case is enabling LLMs to query not just current knowledge, but to see how knowledge evolved over time.
 
 The fundamental tension is between:
+
 1. **Current-state query performance**: 90%+ of queries target current data
 2. **Temporal query capability**: Must support efficient time-travel queries
 3. **Storage efficiency**: Cannot afford unbounded storage growth
 
 Traditional approaches either:
+
 - Store everything temporally (slow current-state queries due to version filtering)
 - Store only current state (no temporal capability)
 - Use views/snapshots (complex consistency, high storage)
@@ -25,7 +27,7 @@ We need current-state queries to be as fast as non-temporal graph databases whil
 
 We will implement a **hybrid storage architecture** with separate storage paths for current state and historical data:
 
-```
+```text
 ┌─────────────────────────────────────────────────────┐
 │              Query Engine                            │
 │  - Temporal Query Planner                           │
@@ -43,8 +45,7 @@ We will implement a **hybrid storage architecture** with separate storage paths 
 │ - No temporal   │          │ - Compressed      │
 │   overhead      │          │                   │
 └─────────────────┘          └───────────────────┘
-```
-
+```text
 ### Key Design Principles
 
 1. **Current Storage** optimizes for read performance:
@@ -97,6 +98,7 @@ We will implement a **hybrid storage architecture** with separate storage paths 
 Store all data with full temporal metadata, filter to current state at query time.
 
 **Rejected because:**
+
 - Every current-state query incurs temporal filtering overhead
 - Index structures must include temporal dimensions
 - Cannot achieve <1µs single-hop traversal target
@@ -107,6 +109,7 @@ Store all data with full temporal metadata, filter to current state at query tim
 Maintain a "current view" as a materialized view over temporal storage.
 
 **Rejected because:**
+
 - View maintenance adds write latency
 - Complex invalidation logic needed
 - Still need full temporal storage underneath
@@ -117,6 +120,7 @@ Maintain a "current view" as a materialized view over temporal storage.
 Store full snapshots at regular intervals, delta from most recent snapshot for current state.
 
 **Rejected because:**
+
 - High storage overhead for full snapshots
 - Current state reads may need snapshot + deltas
 - Less efficient than dedicated current-state storage

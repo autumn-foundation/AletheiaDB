@@ -8,12 +8,14 @@
 ## Context
 
 Graph databases use IDs extensively:
+
 - **NodeId**: Identifies nodes
 - **EdgeId**: Identifies edges
 - **VersionId**: Identifies specific versions
 - **TxId**: Identifies transactions
 
 Using raw `u64` for all IDs creates risks:
+
 - Accidentally passing a NodeId where EdgeId is expected
 - Function signatures like `fn get(id: u64)` are ambiguous
 - Compiler cannot catch ID type mismatches
@@ -49,8 +51,7 @@ pub enum EntityId {
     Node(NodeId),
     Edge(EdgeId),
 }
-```
-
+```text
 ### ID Generation
 
 ```rust
@@ -80,8 +81,7 @@ impl IdGenerator {
         VersionId(self.counter.fetch_add(1, Ordering::Relaxed))
     }
 }
-```
-
+```text
 ### Type-Safe API
 
 ```rust
@@ -94,8 +94,7 @@ pub trait ReadOps {
 
 // This would be a compile error:
 // let node = db.get_node(edge_id);  // Error: expected NodeId, found EdgeId
-```
-
+```text
 ## Consequences
 
 ### Positive
@@ -125,9 +124,9 @@ pub trait ReadOps {
 ```rust
 fn get_node(id: u64) -> Node;
 fn get_edge(id: u64) -> Edge;
-```
-
+```text
 **Rejected because:**
+
 - No compile-time type safety
 - Easy to accidentally use wrong ID type
 - Function signatures are ambiguous
@@ -138,9 +137,9 @@ fn get_edge(id: u64) -> Edge;
 struct Id<T>(u64, PhantomData<T>);
 type NodeId = Id<Node>;
 type EdgeId = Id<Edge>;
-```
-
+```text
 **Considered but:**
+
 - More complex generic bounds
 - Phantom data adds complexity
 - Separate types are clearer
@@ -150,6 +149,7 @@ type EdgeId = Id<Edge>;
 Use 128-bit UUIDs for all IDs.
 
 **Rejected because:**
+
 - Larger memory footprint (16 bytes vs 8)
 - Slower comparison and hashing
 - Overkill for single-node database
@@ -160,6 +160,7 @@ Use 128-bit UUIDs for all IDs.
 Use string identifiers (like Neo4j element IDs).
 
 **Rejected because:**
+
 - Much larger memory footprint
 - Slower comparison
 - Allocation overhead
@@ -181,8 +182,7 @@ impl std::fmt::Display for EdgeId {
         write!(f, "edge:{}", self.0)
     }
 }
-```
-
+```text
 ### Conversion Traits
 
 ```rust
@@ -193,8 +193,7 @@ impl From<u64> for NodeId {
 impl From<NodeId> for u64 {
     fn from(id: NodeId) -> Self { id.0 }
 }
-```
-
+```text
 ### EntityId for Unified Handling
 
 ```rust
@@ -219,8 +218,7 @@ pub struct VersionChain {
     entity_id: EntityId,
     versions: Vec<VersionId>,
 }
-```
-
+```text
 ### ID Space Considerations
 
 - IDs are generated sequentially from 0

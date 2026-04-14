@@ -16,6 +16,7 @@ Graph databases store properties on nodes and edges. The property type system mu
 5. **Future extensibility**: Support new types (e.g., vectors for embeddings)
 
 Key considerations for GallifreyDB:
+
 - LLM integration benefits from structured metadata
 - Embeddings will be stored as properties (vector search)
 - Properties may be large (document content) or small (timestamps)
@@ -54,8 +55,7 @@ pub enum PropertyValue {
     // Future: Vector for embeddings
     // Vector(Arc<[f32]>),
 }
-```
-
+```text
 ### PropertyMap Type
 
 ```rust
@@ -69,8 +69,7 @@ pub struct PropertyMap {
 pub struct PropertyMapBuilder {
     map: HashMap<String, PropertyValue>,
 }
-```
-
+```text
 ### API Design
 
 ```rust
@@ -117,8 +116,7 @@ impl From<i64> for PropertyValue {
     fn from(n: i64) -> Self { PropertyValue::Int(n) }
 }
 // ... etc for other types
-```
-
+```text
 ### Usage Example
 
 ```rust
@@ -135,8 +133,7 @@ let props = PropertyMapBuilder::new()
 
 // Properties can be cloned cheaply (Arc increment)
 let props2 = props.clone();  // Only increments refcount
-```
-
+```text
 ## Consequences
 
 ### Positive
@@ -169,9 +166,9 @@ let props2 = props.clone();  // Only increments refcount
 struct PropertyMap {
     values: HashMap<String, Box<dyn Any>>,
 }
-```
-
+```text
 **Rejected because:**
+
 - Type erasure loses type information
 - Downcasting is verbose and error-prone
 - Cannot implement PartialEq easily
@@ -182,6 +179,7 @@ struct PropertyMap {
 Store all properties as JSON strings.
 
 **Rejected because:**
+
 - Parsing overhead on every access
 - No native number types (JSON numbers are imprecise)
 - Binary data requires encoding (base64)
@@ -192,6 +190,7 @@ Store all properties as JSON strings.
 Define schema and generate code.
 
 **Rejected because:**
+
 - Rigid schema not suitable for knowledge graphs
 - Schema evolution is complex
 - LLM-generated content is inherently dynamic
@@ -205,9 +204,9 @@ struct PropertyMap {
     floats: HashMap<String, f64>,
     // ...
 }
-```
-
+```text
 **Rejected because:**
+
 - Complex API for mixed-type access
 - Hard to iterate all properties
 - Doesn't support heterogeneous arrays
@@ -224,11 +223,11 @@ struct PropertyMap {
 
 // Compare to String: 24 bytes (ptr + len + capacity)
 // Compare to Box<dyn Any>: 16 bytes (ptr + vtable) + heap allocation
-```
-
+```text
 ### Serialization Strategy
 
 For persistence:
+
 ```rust
 // Custom binary format for efficiency
 impl PropertyValue {
@@ -241,8 +240,7 @@ impl PropertyValue {
         }
     }
 }
-```
-
+```text
 ### Vector Extension (Future)
 
 ```rust
@@ -255,8 +253,7 @@ pub enum PropertyValue {
     /// Sparse vector for BM25/SPLADE
     SparseVector(Arc<SparseVec>),
 }
-```
-
+```text
 ## References
 
 - [serde_json Value type](https://docs.rs/serde_json/latest/serde_json/enum.Value.html)

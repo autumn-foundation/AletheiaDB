@@ -14,6 +14,7 @@ GallifreyDB's primary use case is enabling LLMs to reason about knowledge evolut
 - **Temporal semantics**: Track how meanings drift over time
 
 This positions GallifreyDB as "SUPERRAG" - combining:
+
 - **Graph**: Relationship traversal
 - **Vector**: Semantic similarity
 - **Bi-temporal**: Knowledge evolution
@@ -33,8 +34,7 @@ pub enum PropertyValue {
     /// Dense float vector for embeddings (e.g., 384, 768, 1536 dimensions)
     Vector(Arc<[f32]>),
 }
-```
-
+```text
 ### Phase 2: HNSW Index Integration
 
 Use **usearch** crate for HNSW (Hierarchical Navigable Small World) index:
@@ -69,8 +69,7 @@ pub enum DistanceMetric {
     Euclidean,
     InnerProduct,
 }
-```
-
+```text
 ### Phase 3: Query API
 
 ```rust
@@ -94,8 +93,7 @@ pub trait VectorOps {
         timestamp: Timestamp,
     ) -> Result<Vec<(NodeId, f32)>>;
 }
-```
-
+```text
 ### Phase 4: Hybrid Queries
 
 ```rust
@@ -117,8 +115,7 @@ pub trait HybridOps {
         edge_labels: &[&str],
     ) -> Result<Vec<(NodeId, Vec<NodeId>)>>;
 }
-```
-
+```text
 ### Phase 5: Temporal Vector Snapshots
 
 For time-travel vector queries, maintain periodic HNSW snapshots:
@@ -134,8 +131,7 @@ pub struct TemporalVectorIndex {
     /// Snapshot interval
     snapshot_interval: Duration,
 }
-```
-
+```text
 ## Consequences
 
 ### Positive
@@ -165,6 +161,7 @@ pub struct TemporalVectorIndex {
 Use dedicated vector DB (Pinecone, Qdrant, Weaviate).
 
 **Rejected because:**
+
 - Loses temporal integration
 - Network overhead
 - Separate consistency domain
@@ -175,6 +172,7 @@ Use dedicated vector DB (Pinecone, Qdrant, Weaviate).
 Use hora crate instead of usearch.
 
 **Considered because:**
+
 - Pure Rust, no FFI
 - But: Less mature, fewer features
 
@@ -185,6 +183,7 @@ Use hora crate instead of usearch.
 No index, compute distances at query time.
 
 **Rejected because:**
+
 - O(n) per query
 - Not viable for >10k vectors
 - But: Keep as fallback for small datasets
@@ -194,6 +193,7 @@ No index, compute distances at query time.
 Use PQ for compressed vectors.
 
 **Considered for future:**
+
 - Reduces memory by 4-8x
 - Slight accuracy loss
 - Good for very large collections
@@ -211,13 +211,14 @@ Use PQ for compressed vectors.
 ### Temporal Strategy
 
 For time-travel vector queries:
+
 1. **Current queries**: Use live index
 2. **Historical queries**: Find nearest snapshot, filter by timestamp
 3. **Range queries**: Iterate snapshots in range
 
 ### Integration with Existing Architecture
 
-```
+```text
 ┌─────────────────────────────────────────────────────────┐
 │                    Query Engine                          │
 │   Graph Traversal │ Vector Search │ Temporal Queries    │
@@ -228,8 +229,7 @@ For time-travel vector queries:
     │  Storage  │    │  Index    │     │  Storage  │
     │ (DashMap) │    │  (HNSW)   │     │ (Anchor+Δ)│
     └───────────┘    └───────────┘     └───────────┘
-```
-
+```text
 ### Example Queries
 
 ```rust
@@ -241,8 +241,7 @@ db.traverse(alice_id, "KNOWS").rank_by_similarity(bob_embedding, 10)
 
 // Knowledge evolution: track semantic drift
 db.track_semantic_drift(node_id, time_range)
-```
-
+```text
 ## References
 
 - [HNSW Paper](https://arxiv.org/abs/1603.09320)

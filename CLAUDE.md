@@ -11,12 +11,14 @@ GallifreyDB is a high-performance bi-temporal graph database written in Rust. It
 ### 1. Performance First
 
 **Current-State Queries Must Be Fast:**
+
 - Current state stored separately from historical data (hybrid storage architecture)
 - Zero abstraction overhead for non-temporal queries
 - CSR (Compressed Sparse Row) adjacency representation for cache-friendly traversals
 - **Target**: <1µs single-hop traversal, <100µs for 3-hop traversal
 
 **Temporal Queries Must Be Efficient:**
+
 - Anchor+delta compression reduces storage 5-6X
 - Temporal B-Tree indexes for range queries
 - Anchor-based reconstruction skips unnecessary versions
@@ -25,6 +27,7 @@ GallifreyDB is a high-performance bi-temporal graph database written in Rust. It
 ### 2. Storage Efficiency
 
 **Compression Strategy:**
+
 - Create anchor (full snapshot) every 10 versions (configurable)
 - Delta encoding for incremental changes
 - Copy-on-write with `Arc<T>` for property deduplication
@@ -32,6 +35,7 @@ GallifreyDB is a high-performance bi-temporal graph database written in Rust. It
 - **Target**: <2X overhead vs non-temporal storage
 
 **Immutable History:**
+
 - Historical versions are immutable after creation
 - Enables aggressive caching and compression
 - Safe for concurrent access without locks
@@ -39,11 +43,13 @@ GallifreyDB is a high-performance bi-temporal graph database written in Rust. It
 ### 3. Correctness Guarantees
 
 **Temporal Consistency:**
+
 - Transaction time is monotonically increasing
 - Valid time can be retroactive but must be consistent
 - No temporal paradoxes (e.g., deleting an entity before it was created)
 
 **ACID Properties:**
+
 - **Atomicity**: WAL ensures atomic commits
 - **Consistency**: Invariants checked on write
 - **Isolation**: MVCC provides snapshot isolation
@@ -53,7 +59,7 @@ GallifreyDB is a high-performance bi-temporal graph database written in Rust. It
 
 ### Hybrid Storage Architecture
 
-```
+```text
 ┌─────────────────────────────────────────────────────┐
 │              Query Engine                            │
 │  - Temporal Query Planner                           │
@@ -73,6 +79,7 @@ GallifreyDB is a high-performance bi-temporal graph database written in Rust. It
 ```
 
 **When to Use Each:**
+
 - **Current**: All non-temporal queries, latest state access
 - **Historical**: Time-travel, audit trails, temporal analysis, LLM reasoning
 
@@ -86,6 +93,7 @@ Node { current_version, first_version }
 ```
 
 **Invariants:**
+
 - Versions ordered by transaction time (immutable)
 - Anchor exists at start of chain or periodically
 - Delta chain never exceeds configured limit
@@ -93,18 +101,21 @@ Node { current_version, first_version }
 ### Temporal Query Processing
 
 **1. Time Point Query (as of timestamp T):**
+
 - Lookup in temporal index: `(EntityId, T) → VersionId`
 - Find nearest anchor ≤ T
 - Apply deltas forward to T
 - Return reconstructed state
 
 **2. Time Range Query (between T1 and T2):**
+
 - Range scan temporal index
 - Collect all versions in range
 - Reconstruct each version
 - Return as stream
 
 **3. Knowledge Evolution Query (for LLMs):**
+
 - Query how entity/relationship changed over time
 - Track provenance and sources
 - Identify when understanding shifted
@@ -114,6 +125,7 @@ Node { current_version, first_version }
 ### Type Safety
 
 **Strong Typing for IDs:**
+
 ```rust
 // GOOD: Distinct types prevent mix-ups
 pub struct NodeId(u64);
@@ -125,6 +137,7 @@ fn get_node(id: u64) -> Node { /* which kind of ID? */ }
 ```
 
 **Temporal Types:**
+
 ```rust
 // GOOD: Explicit temporal semantics
 pub struct BiTemporalInterval {
@@ -138,6 +151,7 @@ pub struct BiTemporalInterval {
 ### Error Handling
 
 **Use `Result<T, Error>` for Fallible Operations:**
+
 ```rust
 pub fn get_node(&self, id: NodeId) -> Result<Node, Error> {
     self.nodes.get(&id).ok_or(Error::NodeNotFound(id))
@@ -145,6 +159,7 @@ pub fn get_node(&self, id: NodeId) -> Result<Node, Error> {
 ```
 
 **Define Specific Error Types:**
+
 ```rust
 pub enum StorageError {
     NodeNotFound(NodeId),
@@ -165,6 +180,7 @@ impl From<io::Error> for StorageError {
 ```
 
 **Never Use `.unwrap()` or `.expect()` in Production Code:**
+
 - Only use in tests or when impossible to fail (document why)
 - Prefer `?` operator for error propagation
 - Handle errors at appropriate levels
@@ -172,6 +188,7 @@ impl From<io::Error> for StorageError {
 ### Performance Guidelines
 
 **Minimize Allocations:**
+
 ```rust
 // GOOD: Reuse buffers
 let mut buffer = Vec::with_capacity(100);
@@ -188,6 +205,7 @@ for item in items {
 ```
 
 **Use Zero-Copy Where Possible:**
+
 ```rust
 // GOOD: Return references
 pub fn get_properties(&self) -> &PropertyMap {
@@ -201,6 +219,7 @@ pub fn get_properties(&self) -> PropertyMap {
 ```
 
 **Prefer Iterator Chains:**
+
 ```rust
 // GOOD: Lazy evaluation
 edges.iter()
@@ -218,6 +237,7 @@ filtered.iter().map(|e| e.target).collect()
 ### Concurrency
 
 **Use Lock-Free Structures for Hot Paths:**
+
 ```rust
 // Current indexes use DashMap (concurrent hashmap)
 pub struct CurrentIndexes {
@@ -227,6 +247,7 @@ pub struct CurrentIndexes {
 ```
 
 **Immutable History Needs No Locks:**
+
 ```rust
 // Historical versions are immutable after creation
 // Safe to read concurrently without locks
@@ -236,6 +257,7 @@ pub struct HistoricalStorage {
 ```
 
 **Avoid `RwLock` and `Mutex` on Hot Paths:**
+
 - Use lock-free data structures (DashMap, atomic types)
 - Prefer immutability over locking
 - If locking is necessary, hold locks for minimal time
@@ -243,6 +265,7 @@ pub struct HistoricalStorage {
 ### Memory Management
 
 **Use `Arc` for Shared Ownership:**
+
 ```rust
 // Properties shared across versions
 pub struct PropertyMap {
@@ -258,6 +281,7 @@ impl Clone for PropertyMap {
 ```
 
 **String Interning for Repeated Strings:**
+
 ```rust
 // Labels and property keys are interned
 pub struct StringInterner {
@@ -269,6 +293,7 @@ pub struct InternedString(u32);  // 4 bytes instead of 24
 ```
 
 **Profile Before Optimizing:**
+
 - Use `cargo flamegraph` for CPU profiling
 - Use `heaptrack` or `valgrind` for memory profiling
 - Benchmark before/after optimizations
@@ -279,6 +304,7 @@ pub struct InternedString(u32);  // 4 bytes instead of 24
 ### Unit Tests
 
 **Test Each Module in Isolation:**
+
 ```rust
 #[cfg(test)]
 mod tests {
@@ -305,6 +331,7 @@ mod tests {
 ### Integration Tests
 
 **Test End-to-End Workflows:**
+
 ```rust
 // tests/integration/temporal_queries.rs
 #[test]
@@ -338,6 +365,7 @@ fn test_time_travel_query() -> Result<()> {
 ### Property-Based Tests
 
 **Use `proptest` for Temporal Invariants:**
+
 ```rust
 use proptest::prelude::*;
 
@@ -373,6 +401,7 @@ proptest! {
 ### Performance Benchmarks
 
 **Criterion Benchmarks for Critical Paths:**
+
 ```rust
 // benches/current_state.rs
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
@@ -404,6 +433,7 @@ criterion_main!(benches);
 ```
 
 **Continuous Performance Monitoring:**
+
 - Run benchmarks on each PR
 - Fail if performance regresses >10%
 - Track latency percentiles (p50, p95, p99)
@@ -412,6 +442,7 @@ criterion_main!(benches);
 ### Correctness Tests
 
 **Temporal Invariants Must Hold:**
+
 1. Transaction time is strictly increasing within a version chain
 2. Valid time intervals are well-formed (start ≤ end)
 3. No entity exists before it was created
@@ -419,6 +450,7 @@ criterion_main!(benches);
 5. Anchor+delta reconstruction matches full snapshot
 
 **ACID Properties Must Hold:**
+
 1. Transactions are atomic (all-or-nothing)
 2. Constraints are enforced (consistency)
 3. Concurrent transactions don't interfere (isolation)
@@ -429,6 +461,7 @@ criterion_main!(benches);
 ### Measurement First
 
 **Always Measure Before Optimizing:**
+
 1. Identify bottleneck with profiler (flamegraph)
 2. Write benchmark for specific case
 3. Implement optimization
@@ -436,6 +469,7 @@ criterion_main!(benches);
 5. Document trade-offs
 
 **Avoid Premature Optimization:**
+
 - Write clear code first
 - Optimize only proven bottlenecks
 - Keep optimized code well-documented
@@ -443,11 +477,13 @@ criterion_main!(benches);
 ### Hot Path Optimization
 
 **Optimize Current-State Queries First:**
+
 - These represent 90%+ of typical workload
 - Must be as fast as non-temporal graph DB
 - Use `unsafe` if necessary (with safety proofs and comments)
 
 **Temporal Queries Can Be Slower:**
+
 - Still aim for <10ms for typical cases
 - Trade-off: storage space vs reconstruction time
 - Anchor interval is tunable parameter
@@ -455,12 +491,14 @@ criterion_main!(benches);
 ### Memory Hierarchy Awareness
 
 **Design for Cache Efficiency:**
+
 - CSR adjacency list: sequential access pattern
 - Group related data (consider struct-of-arrays vs array-of-structs)
 - Align hot structures to cache lines (64 bytes)
 - Keep hot data compact
 
 **Minimize Memory Footprint:**
+
 - String interning (reduces heap pressure)
 - Arc-based sharing (avoid copies)
 - Compression for cold data
@@ -469,6 +507,7 @@ criterion_main!(benches);
 ### Async/Await Considerations
 
 **Use Async for I/O, Not CPU:**
+
 ```rust
 // GOOD: Async for I/O operations
 pub async fn flush_wal(&self) -> Result<()> {
@@ -487,6 +526,7 @@ pub async fn compute_graph_stats(&self) -> Stats {
 ### Temporal Query API for LLMs
 
 **Natural Language-Like Queries:**
+
 ```rust
 // LLM-friendly API design
 db.as_of("2024-01-15T10:00:00Z")
@@ -499,6 +539,7 @@ db.between("2024-01-01", "2024-12-31")
 ```
 
 **Query Patterns LLMs Can Use:**
+
 - "What did we know about X at time T?" → `db.as_of(T).get(X)`
 - "How has Y changed?" → `db.history(Y).changes()`
 - "When did we first record F?" → `db.first_occurrence(F)`
@@ -507,6 +548,7 @@ db.between("2024-01-01", "2024-12-31")
 ### Provenance and Confidence Tracking
 
 **Track Information Sources:**
+
 ```rust
 pub struct PropertyValue {
     value: Value,
@@ -522,6 +564,7 @@ pub struct Metadata {
 ```
 
 **Enable LLM Reasoning About Certainty:**
+
 - Track how confidence evolved over time
 - Identify conflicting sources
 - Support "why do we believe X?" queries
@@ -540,17 +583,20 @@ pub struct Metadata {
 **When starting ANY implementation task, Claude instances MUST:**
 
 1. **Create a worktree first** before making any code changes:
+
    ```bash
    just worktree-new feature/descriptive-name   # For new features
    just worktree-new fix/descriptive-name       # For bug fixes
    ```
 
 2. **Navigate to the worktree** and work there:
+
    ```bash
    cd agents/feature-descriptive-name
    ```
 
 3. **After completing work**, commit, create PR, and clean up:
+
    ```bash
    git add . && git commit -m "feat: description"
    just worktree-pr "PR Title" "Description"
@@ -560,6 +606,7 @@ pub struct Metadata {
 This enables multiple Claude instances to work in parallel without conflicts. Each instance gets an isolated copy of the codebase.
 
 **Skip worktree creation only if:**
+
 - You're already in a worktree (check with `git worktree list`)
 - The task is read-only (exploration, answering questions)
 - The user explicitly asks you to work in the main repo
@@ -587,6 +634,7 @@ See `WORKTREE_WORKFLOW.md` for complete documentation.
 ### Performance Testing
 
 **Required Benchmarks:**
+
 1. Current-state single-hop traversal (<1µs)
 2. Current-state 3-hop traversal (<100µs)
 3. Time-travel reconstruction (<10ms)
@@ -596,12 +644,14 @@ See `WORKTREE_WORKFLOW.md` for complete documentation.
 ## Unsafe Rust Guidelines
 
 **When Unsafe Is Acceptable:**
+
 - Performance-critical hot paths with proven bottlenecks
 - Zero-copy optimizations
 - FFI boundaries
 - Interacting with hardware or memory-mapped files
 
 **Requirements for Unsafe Code:**
+
 ```rust
 // ALWAYS document safety invariants
 // GOOD:
@@ -623,6 +673,7 @@ unsafe {
 ### Coverage Requirements
 
 GallifreyDB enforces strict code coverage thresholds:
+
 - **Minimum 85% line coverage** (current: 86.45%)
 - **Minimum 88% function coverage** (current: 89.10%)
 - **Minimum 88% region coverage** (current: 88.91%)
@@ -630,6 +681,7 @@ GallifreyDB enforces strict code coverage thresholds:
 See `TESTING.md` for detailed instructions on running coverage reports.
 
 **Quick commands:**
+
 ```bash
 # Check coverage meets thresholds
 just coverage-check
@@ -651,6 +703,7 @@ Use Tracy profiler for detailed performance analysis:
 4. Run profiled build: `just profile-tracy`
 
 **Instrumenting code:**
+
 ```rust
 #[cfg(feature = "tracy")]
 use tracy_client::span;
@@ -683,6 +736,7 @@ Add benchmarks in `benches/` directory following existing patterns.
 ### Development Tools
 
 All common tasks are available via `just`:
+
 - `just test` - Run tests
 - `just coverage` - Generate coverage report
 - `just lint` - Run clippy
@@ -698,7 +752,7 @@ See `justfile` for complete list of commands.
 
 The Write-Ahead Log (WAL) uses a versioned binary format to enable future evolution:
 
-```
+```text
 Segment Header (5 bytes):
 [magic: 4 bytes "GWAL"][version: 1 byte]
 
@@ -706,12 +760,14 @@ Entry Format:
 [LSN: 8 bytes][timestamp: 8 bytes][checksum: 4 bytes][op_type: 1 byte][operation data...]
 ```
 
-**Current Version: 2**
+### Current Version: 2
+
 - Full serialization of properties (PropertyMap)
 - Full serialization of bi-temporal intervals (32 bytes each)
 - Labels serialized for all operation types
 
 **Legacy Version: 1** (no header)
+
 - Properties were not serialized (data loss on recovery)
 - Temporal intervals were not serialized (reconstructed from timestamp)
 - Update operations did not serialize labels
@@ -719,10 +775,12 @@ Entry Format:
 ### Backward Compatibility
 
 The WAL reader automatically detects the format version:
+
 - **V2+ segments**: Identified by "GWAL" magic bytes at start
 - **V1 segments**: No header, recognized by absence of magic bytes
 
 When reading V1 segments:
+
 - Properties default to `PropertyMap::new()` (empty)
 - Temporal intervals default to `BiTemporalInterval::current(timestamp)`
 - Update labels default to empty string
@@ -764,6 +822,7 @@ When adding new serialization features:
 1. Increment `WAL_VERSION` constant
 2. Update `serialize_entry()` to write new format
 3. Update `read_segment()` with version-aware parsing:
+
    ```rust
    let (data, len) = if version >= NEW_VERSION {
        // Deserialize new format
@@ -771,6 +830,7 @@ When adding new serialization features:
        // Use placeholder for older versions
    };
    ```
+
 4. Update `parse_wal_entries_versioned()` for migration support
 5. Add tests for new format and backward compatibility
 
@@ -863,6 +923,7 @@ let dot = dot_product(&a, &b)?;
 ```
 
 **Choosing the Right Metric:**
+
 | Metric | Use Case | Range | Notes |
 |--------|----------|-------|-------|
 | `cosine_similarity` | Semantic similarity | [-1, 1] | Ignores magnitude |
@@ -959,9 +1020,7 @@ tx.commit()?;
 - **Memory**: ~4 bytes per dimension + small overhead
 - **Similarity ops**: O(n) where n = dimensions; consider pre-normalization for cosine
 
-### Error Handling
-
-Vector operations return `Result<T, Error>` with specific error types:
+### Vector Error Handling
 
 ```rust
 use gallifreydb::utils::VectorError;
@@ -992,6 +1051,7 @@ Phase 1 provides the foundation for vector storage and similarity computation. F
 - **Phase 5**: Advanced features (streaming, incremental updates)
 
 See **[docs/VECTOR_SEARCH_DESIGN.md](docs/VECTOR_SEARCH_DESIGN.md)** for the complete design including:
+
 - Architecture integration with existing storage
 - 5-phase implementation plan
 - Temporal vector strategy (versioned embeddings)
@@ -999,6 +1059,7 @@ See **[docs/VECTOR_SEARCH_DESIGN.md](docs/VECTOR_SEARCH_DESIGN.md)** for the com
 - Hybrid query patterns
 
 **Key query patterns this enables (Phase 2+):**
+
 ```rust
 // Semantic time-travel
 db.as_of(timestamp_2023).find_similar(embedding, k)
@@ -1011,16 +1072,19 @@ db.track_semantic_drift(node_id, time_range)
 ```
 
 ### Scalability
+
 - Sharding for horizontal scale
 - Distributed transaction coordination
 - Replication for high availability
 
 ### Query Language
+
 - Cypher-like temporal extensions
 - SQL:2011 temporal syntax
 - Time-aware pattern matching
 
 ### Advanced Features
+
 - Temporal graph algorithms (shortest path over time)
 - Streaming temporal queries
 - Incremental materialized views

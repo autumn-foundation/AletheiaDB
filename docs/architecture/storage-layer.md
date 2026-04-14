@@ -38,8 +38,7 @@ graph TB
     style CS fill:#90EE90
     style HS fill:#87CEEB
     style WAL fill:#FFB6C1
-```
-
+```text
 ## Current Storage
 
 ### Purpose
@@ -75,8 +74,7 @@ classDiagram
 
     CurrentStorage --> CurrentIndexes
     CurrentIndexes --> Node
-```
-
+```text
 ### Operations
 
 | Operation | Complexity | Lock Type |
@@ -107,8 +105,7 @@ graph LR
     style S1 fill:#90EE90
     style S2 fill:#90EE90
     style SN fill:#90EE90
-```
-
+```text
 ## Historical Storage
 
 ### Purpose
@@ -132,8 +129,7 @@ graph LR
 
     style V1 fill:#FFD700
     style V5 fill:#FFD700
-```
-
+```text
 ### Anchor Decision Logic
 
 ```mermaid
@@ -148,8 +144,7 @@ flowchart TD
 
     ANCHOR --> STORE["Store Version"]
     DELTA --> STORE
-```
-
+```text
 ### Configuration
 
 ```rust
@@ -160,8 +155,7 @@ pub struct AnchorConfig {
     /// Force anchor if chain exceeds this (default: 20)
     pub max_delta_chain: usize,
 }
-```
-
+```text
 ### Reconstruction Algorithm
 
 ```mermaid
@@ -187,16 +181,14 @@ sequenceDiagram
     end
 
     HS-->>Q: Reconstructed PropertyMap
-```
-
+```text
 ### Storage Efficiency
 
 ```mermaid
 pie title Storage Comparison (1000 versions, 10% change per version)
     "Full Copies" : 1000
     "Anchor+Delta" : 145
-```
-
+```text
 | Scenario | Full Copies | Anchor+Delta | Savings |
 |----------|-------------|--------------|---------|
 | 100 versions, 10% change | 100x | ~19x | 81% |
@@ -220,8 +212,7 @@ graph LR
     end
 
     LSN --> TS --> OP --> CRC
-```
-
+```text
 ### Operations Logged
 
 ```mermaid
@@ -254,8 +245,7 @@ classDiagram
 
     WalOperation --> CreateNode
     WalOperation --> UpdateNode
-```
-
+```text
 ### Write Path
 
 ```mermaid
@@ -275,8 +265,7 @@ sequenceDiagram
     WAL->>FILE: sync_all() [fsync]
     FILE-->>WAL: Durable
     WAL-->>TX: Ok
-```
-
+```text
 ### Recovery Process
 
 ```mermaid
@@ -300,8 +289,7 @@ flowchart TD
     MORE -->|No| DONE["Recovery complete"]
 
     DONE --> TRUNCATE["Truncate incomplete TX"]
-```
-
+```text
 ## Checkpointing
 
 ### Purpose
@@ -322,8 +310,7 @@ graph TB
     META --> SNAP_C
     META --> SNAP_H
     META --> SNAP_I
-```
-
+```text
 ### Recovery with Checkpoint
 
 ```mermaid
@@ -341,8 +328,7 @@ sequenceDiagram
     end
 
     DB->>DB: Ready for queries
-```
-
+```text
 ## Data Flow Summary
 
 ```mermaid
@@ -367,8 +353,7 @@ flowchart LR
         H3 --> H4["Reconstruct"]
         H4 --> H5["Return State"]
     end
-```
-
+```text
 ## Related Documentation
 
 - [ADR-0001: Hybrid Storage Architecture](../adr/0001-hybrid-storage-architecture.md)

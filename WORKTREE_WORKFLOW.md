@@ -7,18 +7,22 @@ This document describes how to use git worktrees for parallel development, enabl
 **IMPORTANT**: When you start working on ANY implementation task:
 
 1. **Check if you're in a worktree**:
+
    ```bash
    git worktree list
    ```
+
    If you see only one entry (the main repo), you need to create a worktree.
 
 2. **Create a worktree for your task**:
+
    ```bash
    just worktree-new feature/task-name   # or fix/task-name
    cd agents/feature-task-name
    ```
 
 3. **Work in the worktree**, then commit and create PR:
+
    ```bash
    # After making changes
    git add . && git commit -m "feat: description"
@@ -64,6 +68,7 @@ Use the following prefixes:
 - `fix/` - Bug fixes (e.g., `fix/memory-leak`, `fix/query-timeout`)
 
 Examples:
+
 ```bash
 just worktree-new feature/temporal-indexes
 just worktree-new fix/version-chain-ordering
@@ -73,7 +78,7 @@ just worktree-new fix/version-chain-ordering
 
 Worktrees are created in the `agents/` directory:
 
-```
+```text
 gallifreydb/
 ├── agents/
 │   ├── feature-my-feature/     # Worktree for feature/my-feature
@@ -183,22 +188,24 @@ All three can work independently without conflicts.
 
 ### Worktree already exists
 
-```
+```text
 Error: Worktree already exists at /path/to/agents/feature-name
 ```
 
 Either use a different branch name, or remove the existing worktree:
+
 ```bash
 just worktree-remove feature/name
 ```
 
 ### Branch already exists
 
-```
+```text
 Error: Branch 'feature/name' already exists
 ```
 
 The branch might exist from a previous attempt. Delete it:
+
 ```bash
 git branch -D feature/name
 ```
@@ -206,7 +213,8 @@ git branch -D feature/name
 ### Uncommitted changes warning
 
 When removing a worktree with uncommitted changes:
-```
+
+```text
 Warning: 5 uncommitted change(s) in worktree!
 Continue anyway? (y/N)
 ```
@@ -216,6 +224,7 @@ Either commit your changes first, or confirm to discard them.
 ### Cannot push to origin
 
 If `gh` CLI isn't authenticated:
+
 ```bash
 gh auth login
 ```

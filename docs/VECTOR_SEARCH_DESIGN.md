@@ -12,7 +12,7 @@ Adding vector search to GallifreyDB enables the combination of **graph traversal
 
 ### Current Architecture (for reference)
 
-```
+```text
 ┌─────────────────────────────────────────────────────┐
 │              Query Engine                            │
 │  - Temporal Query Planner                           │
@@ -29,11 +29,10 @@ Adding vector search to GallifreyDB enables the combination of **graph traversal
 │ - Hot indexes   │          │ - Anchor+delta    │
 │ - No temporal   │          │ - Compressed      │
 └─────────────────┘          └───────────────────┘
-```
-
+```text
 ### Proposed Architecture with Vectors
 
-```
+```text
 ┌─────────────────────────────────────────────────────────┐
 │                    Query Engine                          │
 │   Graph Traversal │ Vector Search │ Temporal Queries    │
@@ -51,8 +50,7 @@ Adding vector search to GallifreyDB enables the combination of **graph traversal
                     │  Persistence  │
                     │  (WAL + Snap) │
                     └───────────────┘
-```
-
+```text
 ### Why the Architecture Fits
 
 1. **Arc-based PropertyMap**: Vectors stored as properties won't duplicate across versions if unchanged
@@ -91,8 +89,7 @@ PropertyValue::Bytes(Arc<[u8]>)  // Less type-safe, manual conversion
 struct VectorStorage {
     embeddings: HashMap<NodeId, Arc<[f32]>>,
 }
-```
-
+```text
 **Recommendation**: Option A - explicit `Vector` variant provides type safety and enables optimized operations.
 
 ### Decision 3: Index Library
@@ -150,58 +147,67 @@ pub trait HybridOps: GraphOps + VectorOps + TemporalOps {
         time_range: TimeRange,
     ) -> Result<Vec<(Timestamp, Arc<[f32]>)>>;
 }
-```
-
+```text
 ## Implementation Plan
 
 ### Phase 1: Vector Storage Foundation
+
 **Estimated effort**: 1-2 days
 
 **Goals**:
+
 - Add `PropertyValue::Vector(Arc<[f32]>)` variant
 - Implement serialization/deserialization for vectors
 - Basic cosine similarity computation
 - Unit tests for vector operations
 
 **Files to modify**:
+
 - `src/core/property.rs` - Add Vector variant
 - `src/storage/current.rs` - Handle vector properties
 - `src/storage/historical.rs` - Version vector changes
 
 **New files**:
+
 - `src/core/vector.rs` - Vector utilities (similarity, normalization)
 
 ### Phase 2: HNSW Index Integration
+
 **Estimated effort**: 3-5 days
 
 **Goals**:
+
 - Integrate usearch (or hora) crate
 - Create `VectorIndex` structure
 - Index current-state vectors automatically
 - Implement k-NN queries
 
 **Files to create**:
+
 - `src/index/vector.rs` - VectorIndex implementation
 - `src/index/vector/hnsw.rs` - HNSW wrapper
 
 **API additions**:
+
 ```rust
 impl CurrentStorage {
     pub fn find_similar(&self, embedding: &[f32], k: usize) -> Result<Vec<(NodeId, f32)>>;
     pub fn find_similar_with_label(&self, embedding: &[f32], k: usize, label: &str) -> Result<Vec<(NodeId, f32)>>;
 }
-```
-
+```text
 ### Phase 3: Temporal Vector Support
+
 **Estimated effort**: 3-5 days
 
 **Goals**:
+
 - Version vector changes using existing anchor+delta system
 - Temporal vector index (snapshots at key timestamps)
 - Point-in-time vector queries
 - Semantic drift tracking
 
 **Key challenge**: Efficient temporal vector indexing
+
 - Option A: Rebuild HNSW at query time (slow, accurate)
 - Option B: Maintain periodic snapshots (fast, more storage)
 - Option C: Delta-based vector reconstruction (balanced)
@@ -209,18 +215,22 @@ impl CurrentStorage {
 **Recommendation**: Option B for MVP - maintain HNSW snapshots at configurable intervals.
 
 **Files to create**:
+
 - `src/index/temporal_vector.rs` - Time-aware vector index
 
 ### Phase 4: Hybrid Query Engine
+
 **Estimated effort**: 2-3 days
 
 **Goals**:
+
 - Graph + Vector queries
 - Vector + Temporal queries
 - Full hybrid: Graph + Vector + Temporal
 - Query planner for optimal execution
 
 **Example queries**:
+
 ```rust
 // Graph + Vector: "Who does Alice know that's similar to Bob?"
 db.traverse(alice_id, "KNOWS")
@@ -234,25 +244,27 @@ db.as_of(timestamp_2023)
 db.as_of(timestamp_2023)
   .traverse(alice_id, "KNOWS")
   .rank_by_similarity(bob_embedding, 10)
-```
-
+```text
 ### Phase 5: Persistence & Performance
+
 **Estimated effort**: 2-3 days
 
 **Goals**:
+
 - Persist vector indexes to disk
 - Incremental index updates (avoid full rebuilds)
 - Benchmark suite for vector operations
 - Performance optimization
 
 **Targets**:
+
 - Vector search: <10ms for 1M vectors
 - Index update: <1ms per vector
 - Storage overhead: <20% for index structures
 
 ## Module Structure
 
-```
+```text
 src/
 ├── core/
 │   ├── property.rs      # Add Vector variant
@@ -269,12 +281,12 @@ src/
     ├── mod.rs
     ├── planner.rs       # Query optimization
     └── hybrid.rs        # Hybrid query execution
-```
-
+```text
 ## SUPERRAG Query Examples
 
 ### Example 1: Knowledge Evolution
-```
+
+```text
 User: "How has our understanding of 'machine learning' evolved?"
 
 Query:
@@ -282,10 +294,10 @@ db.find_nodes_with_label("Concept")
   .filter(|n| n.name == "machine learning")
   .semantic_evolution(TimeRange::all())
   .with_related_concepts(depth: 2)
-```
-
+```text
 ### Example 2: Temporal Semantic Search
-```
+
+```text
 User: "What did we know about quantum computing in 2020
        that's similar to today's AI safety concerns?"
 
@@ -296,10 +308,10 @@ db.as_of(timestamp_2020)
   .filter(|n| n.domain == "quantum computing")
   .rank_by_similarity(ai_safety_embedding, 10)
   .with_provenance()
-```
-
+```text
 ### Example 3: Relationship Discovery
-```
+
+```text
 User: "Who influenced Alice's work that has similar
        research interests to Bob?"
 
@@ -308,10 +320,10 @@ let bob_interests = db.get_node(bob_id).embedding;
 db.traverse(alice_id, "INFLUENCED_BY")
   .rank_by_similarity(bob_interests, 5)
   .include_path()
-```
-
+```text
 ### Example 4: Contradiction Detection
-```
+
+```text
 User: "Find facts that changed meaning over time"
 
 Query:
@@ -319,22 +331,24 @@ db.find_nodes_with_label("Fact")
   .where_semantic_drift_exceeds(threshold: 0.3)
   .between(time_start, time_end)
   .with_version_history()
-```
-
+```text
 ## Performance Considerations
 
 ### Memory Budget
+
 - HNSW index: ~1KB per vector (for 384-dim embeddings)
 - 1M nodes with embeddings: ~1GB index memory
 - Temporal snapshots: multiply by snapshot count
 
 ### CPU Considerations
+
 - Index building: O(n log n) for HNSW
 - Query: O(log n) average case
 - Batch operations preferred for index updates
 
 ### Storage Format
-```
+
+```text
 Vector Index File (.vidx):
 ┌─────────────────────────────────┐
 │ Header (version, dimensions)    │
@@ -345,21 +359,23 @@ Vector Index File (.vidx):
 ├─────────────────────────────────┤
 │ NodeId → Vector Offset Map      │
 └─────────────────────────────────┘
-```
-
+```text
 ## Testing Strategy
 
 ### Unit Tests
+
 - Vector similarity calculations
 - PropertyValue::Vector serialization
 - Index add/remove/query operations
 
 ### Integration Tests
+
 - End-to-end vector search
 - Temporal vector queries
 - Hybrid graph+vector queries
 
 ### Benchmarks
+
 ```rust
 // benches/vector_search.rs
 fn bench_knn_search(c: &mut Criterion) {
@@ -380,8 +396,7 @@ fn bench_temporal_vector_search(c: &mut Criterion) {
         b.iter(|| db.as_of(timestamp).find_similar(&query, 10))
     });
 }
-```
-
+```text
 ## Dependencies to Add
 
 ```toml
@@ -397,8 +412,7 @@ ndarray = "0.15"        # If we need matrix operations
 
 [dev-dependencies]
 rand = "0.8"            # For generating test vectors
-```
-
+```text
 ## Open Questions
 
 1. **Embedding generation**: Should GallifreyDB generate embeddings or expect them as input?

@@ -44,8 +44,7 @@ What other options were evaluated?
 ## References
 
 - Links to related issues, PRs, documentation, or research
-```
-
+```text
 ## ADR Index
 
 ### Accepted
@@ -81,10 +80,9 @@ What other options were evaluated?
 
 ## ADR Lifecycle
 
-```
+```text
 Proposed → Accepted → [Deprecated | Superseded]
-```
-
+```text
 - **Proposed**: Under discussion, not yet implemented
 - **Accepted**: Approved and implemented (or being implemented)
 - **Deprecated**: No longer relevant, kept for historical context

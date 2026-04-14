@@ -18,6 +18,7 @@ ACID databases require **Durability**: committed transactions must survive crash
    - Recover by replaying log
 
 For GallifreyDB:
+
 - Knowledge graphs can have bursty updates
 - Transaction commit latency matters for interactive use
 - Data integrity is critical (LLM reasoning depends on accurate history)
@@ -46,8 +47,7 @@ pub struct WriteAheadLog {
 /// Log Sequence Number - globally unique, monotonically increasing
 #[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd)]
 pub struct LSN(u64);
-```
-
+```text
 ### Log Entry Format
 
 ```rust
@@ -112,19 +112,17 @@ pub enum WalOperation {
         tx_id: TxId,
     },
 }
-```
-
+```text
 ### Write Path
 
-```
+```text
 Transaction Commit:
 1. Write WAL entries for all buffered operations
 2. Write Commit marker
 3. fsync() WAL file ← durability point
 4. Apply changes to in-memory storage
 5. Return success to client
-```
-
+```text
 ```rust
 impl WriteAheadLog {
     pub fn append(&mut self, entry: WalEntry) -> Result<LSN> {
@@ -139,8 +137,7 @@ impl WriteAheadLog {
         Ok(())
     }
 }
-```
-
+```text
 ### Recovery Process
 
 ```rust
@@ -186,8 +183,7 @@ impl WriteAheadLog {
         Ok(stats)
     }
 }
-```
-
+```text
 ## Consequences
 
 ### Positive
@@ -218,6 +214,7 @@ impl WriteAheadLog {
 Write all modified pages to disk on every commit.
 
 **Rejected because:**
+
 - Many random writes per commit
 - High latency for multi-operation transactions
 - Poor performance for graph operations (many small writes)
@@ -227,6 +224,7 @@ Write all modified pages to disk on every commit.
 Maintain shadow copies of modified pages.
 
 **Rejected because:**
+
 - High storage overhead
 - Complex page management
 - WAL is simpler and well-understood
@@ -236,6 +234,7 @@ Maintain shadow copies of modified pages.
 No persistence, accept data loss on crash.
 
 **Rejected because:**
+
 - Unacceptable for production use
 - LLM reasoning requires reliable data
 - Knowledge accumulation would be lost
@@ -245,6 +244,7 @@ No persistence, accept data loss on crash.
 Use external log system for durability.
 
 **Considered for future because:**
+
 - Adds deployment dependency
 - Overkill for single-node
 - Could enable distributed version later
@@ -267,8 +267,7 @@ impl WalEntry {
         self.checksum == self.calculate_checksum()
     }
 }
-```
-
+```text
 ### Configuration
 
 ```rust
@@ -285,8 +284,7 @@ pub struct WalConfig {
     /// Maximum WAL size before checkpoint
     pub max_size: u64,
 }
-```
-
+```text
 ### Performance Targets
 
 | Operation | Target |
@@ -297,7 +295,7 @@ pub struct WalConfig {
 
 ### File Format
 
-```
+```text
 ┌────────────────────────────────────────┐
 │ WAL Header (version, checksum_type)   │
 ├────────────────────────────────────────┤
@@ -307,8 +305,7 @@ pub struct WalConfig {
 ├────────────────────────────────────────┤
 │ ...                                    │
 └────────────────────────────────────────┘
-```
-
+```text
 ## References
 
 - [ARIES: A Transaction Recovery Method](https://cs.stanford.edu/people/chr101/cs345/aries.pdf)

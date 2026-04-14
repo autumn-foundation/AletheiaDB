@@ -83,6 +83,7 @@ See `justfile` for all available commands.
 **Current Phase**: Core Complete, Vector Search in Progress
 
 ### Core Features (Complete)
+
 - [x] Core ID types (NodeId, EdgeId, VersionId)
 - [x] Temporal primitives (BiTemporalInterval, TimeRange)
 - [x] Property system with Arc-based deduplication
@@ -100,6 +101,7 @@ See `justfile` for all available commands.
 - [x] Public API with read/write transactions
 
 ### Vector Storage (Phase 1 Complete)
+
 - [x] Vector type with validation (VS-001 to VS-010)
 - [x] Similarity functions: cosine, Euclidean, dot product
 - [x] Vector normalization utilities
@@ -108,6 +110,7 @@ See `justfile` for all available commands.
 - [x] Historical vector versioning
 
 ### In Progress
+
 - [ ] Vector indexing (HNSW integration)
 - [ ] Graph + Vector hybrid queries
 - [ ] Temporal vector drift tracking
@@ -119,7 +122,7 @@ See `justfile` for all available commands.
 
 GallifreyDB uses a hybrid storage architecture:
 
-```
+```text
 ┌─────────────────────────────────────────────────────┐
 │              Query Engine                            │
 │  - Temporal Query Planner                           │
@@ -137,6 +140,7 @@ GallifreyDB uses a hybrid storage architecture:
 ```
 
 **Key Design Decisions**:
+
 - Current state separated for zero-overhead queries
 - Anchor+delta compression for 5-6X storage savings
 - Copy-on-write properties with Arc for deduplication
@@ -239,6 +243,7 @@ Run benchmarks with `just bench` to verify on your hardware.
 ### LLM Temporal Reasoning
 
 Enable LLMs to:
+
 - Query "What did we know about X at time T?"
 - Track how relationships evolved over time
 - Detect contradictions through provenance
@@ -247,6 +252,7 @@ Enable LLMs to:
 ### Knowledge Graph Evolution
 
 Track how your knowledge graph changes:
+
 - Audit trails for compliance
 - Historical analysis and trend detection
 - Rollback capabilities
@@ -262,6 +268,7 @@ Track how your knowledge graph changes:
 6. Submit a pull request
 
 All contributions must:
+
 - Pass all tests
 - Maintain ≥80% code coverage
 - Follow coding guidelines in CLAUDE.md

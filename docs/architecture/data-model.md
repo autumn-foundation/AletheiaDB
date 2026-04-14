@@ -14,8 +14,7 @@ graph TB
     end
 
     L4 --> L3 --> L2 --> L1
-```
-
+```text
 ## Core Primitives
 
 ### Identity Types
@@ -45,8 +44,7 @@ classDiagram
     }
 
     note for NodeId "Strongly typed<br/>4 bytes in-memory<br/>Copy + Clone"
-```
-
+```text
 ### ID Generation
 
 ```mermaid
@@ -68,8 +66,7 @@ sequenceDiagram
         COUNTER-->>GEN: 1
         GEN-->>T2: NodeId(1)
     end
-```
-
+```text
 ### Timestamp Model
 
 ```mermaid
@@ -89,8 +86,7 @@ graph LR
     NOW --> MICRO
     FROM_SEC --> MICRO
     FROM_MS --> MICRO
-```
-
+```text
 ## Temporal Model
 
 ### TimeRange
@@ -109,8 +105,7 @@ classDiagram
     }
 
     note for TimeRange "Half-open: [start, end)<br/>end = MAX for 'ongoing'"
-```
-
+```text
 ### Range Semantics
 
 ```mermaid
@@ -131,8 +126,7 @@ graph TB
     R2 --> CONTAINS
     R3 --> OVERLAPS
     R4 --> OVERLAPS
-```
-
+```text
 ### BiTemporalInterval
 
 ```mermaid
@@ -153,8 +147,7 @@ classDiagram
 
     BiTemporalInterval --> TimeRange : valid_time
     BiTemporalInterval --> TimeRange : transaction_time
-```
-
+```text
 ### Bi-Temporal Diagram
 
 ```mermaid
@@ -175,8 +168,7 @@ graph TB
     VT --> Q2
     TT --> Q1
     TT --> Q3
-```
-
+```text
 ### Temporal Query Examples
 
 ```mermaid
@@ -196,8 +188,7 @@ flowchart LR
     Q1 --> R1
     Q2 --> R2
     Q3 --> R3
-```
-
+```text
 ## Property System
 
 ### PropertyValue
@@ -216,8 +207,7 @@ classDiagram
     }
 
     note for PropertyValue "Arc-based for sharing<br/>24 bytes max size<br/>Clone = refcount++"
-```
-
+```text
 ### Type Sizes
 
 ```mermaid
@@ -245,8 +235,7 @@ graph LR
     PAYLOAD --> P5
     PAYLOAD --> P6
     PAYLOAD --> P7
-```
-
+```text
 ### PropertyMap
 
 ```mermaid
@@ -269,8 +258,7 @@ classDiagram
     }
 
     PropertyMapBuilder --> PropertyMap : builds
-```
-
+```text
 ### Copy-on-Write Semantics
 
 ```mermaid
@@ -288,8 +276,7 @@ sequenceDiagram
     V2->>V2: Need to modify
     V2->>V2: Arc::make_mut()
     Note over V2: Creates new HashMap<br/>if refcount > 1
-```
-
+```text
 ## Graph Entities
 
 ### Node Structure
@@ -314,8 +301,7 @@ classDiagram
 
     Node --> PropertyMap
     Node --> NodeMetadata
-```
-
+```text
 ### Edge Structure
 
 ```mermaid
@@ -339,8 +325,7 @@ classDiagram
     Edge --> EdgeMetadata
     Edge --> NodeId : source
     Edge --> NodeId : target
-```
-
+```text
 ### Graph Example
 
 ```mermaid
@@ -358,8 +343,7 @@ graph LR
 
     N1 -->|E1| N2
     N1 -->|E2| N3
-```
-
+```text
 ## Version Model
 
 ### NodeVersion Structure
@@ -389,8 +373,7 @@ classDiagram
 
     NodeVersion --> VersionData
     VersionData --> PropertyDelta
-```
-
+```text
 ### Version Chain
 
 ```mermaid
@@ -407,8 +390,7 @@ graph LR
 
     style V1 fill:#FFD700
     style V4 fill:#FFD700
-```
-
+```text
 ### Delta Operations
 
 ```mermaid
@@ -423,8 +405,7 @@ flowchart TD
     OLD --> DIFF
     NEW --> DIFF
     DIFF --> RESULT
-```
-
+```text
 ```mermaid
 flowchart TD
     subgraph "Delta Application"
@@ -437,8 +418,7 @@ flowchart TD
     BASE --> APPLY
     DELTA --> APPLY
     APPLY --> FINAL
-```
-
+```text
 ## String Interning
 
 ### InternedString
@@ -464,8 +444,7 @@ classDiagram
 
     StringInterner --> InternedString
     GLOBAL_INTERNER --> StringInterner
-```
-
+```text
 ### Memory Comparison
 
 ```mermaid
@@ -486,8 +465,7 @@ graph TB
     end
 
     TOTAL1 -->|"Savings"| TOTAL2
-```
-
+```text
 ### Comparison Performance
 
 ```mermaid
@@ -504,8 +482,7 @@ graph LR
 
     SC --> SC_TIME
     IC --> IC_TIME
-```
-
+```text
 ## Entity Relationships
 
 ### Complete Data Model
@@ -546,8 +523,7 @@ erDiagram
         BiTemporalInterval temporal
         VersionData data
     }
-```
-
+```text
 ## Query Patterns
 
 ### Current State Queries
@@ -561,8 +537,7 @@ flowchart LR
     CS --> RESULT["Node/Edge"]
     ADJ --> RESULT
     SCAN --> RESULT
-```
-
+```text
 ### Temporal Queries
 
 ```mermaid
@@ -576,8 +551,7 @@ flowchart LR
     HS --> CHAIN["Version Chain"]
     CHAIN --> RECONSTRUCT
     RECONSTRUCT --> RESULT["Historical State"]
-```
-
+```text
 ## Related Documentation
 
 - [ADR-0002: Bi-Temporal Data Model](../adr/0002-bitemporal-data-model.md)

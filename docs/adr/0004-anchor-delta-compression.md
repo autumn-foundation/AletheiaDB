@@ -10,10 +10,12 @@
 GallifreyDB tracks all historical versions of nodes and edges, which creates significant storage pressure. Without compression, storage grows linearly with the number of updates.
 
 Consider a node with 1000 updates over its lifetime:
+
 - **Naive approach**: Store 1000 full copies → 1000x storage
 - **Delta-only**: Store 1 base + 999 deltas → Must traverse all deltas to reconstruct
 
 The challenge is balancing:
+
 1. **Storage efficiency**: Minimize space used
 2. **Reconstruction speed**: Quickly reconstruct any historical version
 3. **Append-only writes**: Historical versions are immutable
@@ -24,13 +26,12 @@ We will implement **anchor+delta compression** for version chains:
 
 ### Version Chain Structure
 
-```
+```text
 Version Chain:
   [Anchor] → [Delta] → [Delta] → ... → [Anchor] → [Delta] → ...
      ↑                                      ↑
    Full snapshot                        New anchor every N versions
-```
-
+```text
 ### Data Structures
 
 ```rust
@@ -57,8 +58,7 @@ pub struct PropertyDelta {
     /// Properties that were removed
     pub removed: HashSet<String>,
 }
-```
-
+```text
 ### Configuration
 
 ```rust
@@ -69,8 +69,7 @@ pub struct AnchorConfig {
     /// Force anchor if delta chain exceeds this length
     pub max_delta_chain: usize,  // Default: 20
 }
-```
-
+```text
 ### Reconstruction Algorithm
 
 ```rust
@@ -95,8 +94,7 @@ fn reconstruct_at_version(&self, target_version_id: VersionId) -> PropertyMap {
 
     result
 }
-```
-
+```text
 ### Storage Analysis
 
 | Scenario | Full Copies | Anchor+Delta (interval=10) |
@@ -135,6 +133,7 @@ fn reconstruct_at_version(&self, target_version_id: VersionId) -> PropertyMap {
 Store complete snapshot for each version.
 
 **Rejected because:**
+
 - Unbounded storage growth
 - Properties that rarely change are duplicated
 - 5-10x more storage than anchor+delta
@@ -144,6 +143,7 @@ Store complete snapshot for each version.
 Store base version plus deltas only.
 
 **Rejected because:**
+
 - Reconstruction requires traversing entire history
 - O(n) reconstruction time for n versions
 - Single base version is a bottleneck
@@ -153,6 +153,7 @@ Store base version plus deltas only.
 Use persistent data structure like HAMT.
 
 **Considered for future because:**
+
 - More complex implementation
 - Good for fine-grained sharing
 - May be valuable for very large property maps
@@ -162,6 +163,7 @@ Use persistent data structure like HAMT.
 Create snapshots at time intervals rather than version intervals.
 
 **Rejected because:**
+
 - Uneven delta chain lengths
 - Some entities would have very long chains
 - Version-based is more predictable
@@ -203,8 +205,7 @@ impl PropertyDelta {
         }
     }
 }
-```
-
+```text
 ### Anchor Decision
 
 ```rust
@@ -212,8 +213,7 @@ fn should_create_anchor(&self, version_count: usize, delta_chain_length: usize) 
     version_count % self.config.anchor_interval == 0 ||
     delta_chain_length >= self.config.max_delta_chain
 }
-```
-
+```text
 ### Performance Targets
 
 | Operation | Target |

@@ -27,8 +27,7 @@ graph TB
     end
 
     TS -->|When current state exceeds RAM| COORD
-```
-
+```text
 | Phase | When to Use | Capacity |
 |-------|-------------|----------|
 | **Tiered Storage** | Historical data exceeds RAM | Unlimited history on disk |
@@ -79,8 +78,7 @@ graph TB
     CURRENT -.->|age threshold| MIGRATOR
     MIGRATOR --> ROCKS
     ROCKS --> CACHE
-```
-
+```text
 ### Query Routing
 
 ```mermaid
@@ -102,8 +100,7 @@ flowchart TD
     style C fill:#90EE90
     style E fill:#87CEEB
     style I fill:#FFB6C1
-```
-
+```text
 ### Version Migration Flow
 
 ```mermaid
@@ -126,8 +123,7 @@ sequenceDiagram
         Migrator->>Hot: remove(version_ids)
         Migrator->>Migrator: update version chain pointers
     end
-```
-
+```text
 ### Storage Tiers Detail
 
 ```mermaid
@@ -162,8 +158,7 @@ graph LR
     style C1 fill:#FFB6C1
     style C2 fill:#FFB6C1
     style C3 fill:#FFB6C1
-```
-
+```text
 ### Performance by Tier
 
 | Tier | Storage | Capacity | Read Latency | Use Case |
@@ -219,8 +214,7 @@ graph TB
     TXMGR -.->|2PC| S0_WAL
     TXMGR -.->|2PC| S1_WAL
     TXMGR -.->|2PC| S2_WAL
-```
-
+```text
 ### Domain-Based Partitioning
 
 ```mermaid
@@ -236,8 +230,7 @@ graph LR
         S0 <-->|ATTENDED| S2
         S1 <-->|HOSTED| S2
     end
-```
-
+```text
 ### Query Routing Decision Tree
 
 ```mermaid
@@ -255,8 +248,7 @@ flowchart TD
     H --> I[Build execution plan]
     I --> J[Scatter to relevant shards]
     J --> K[Gather and merge results]
-```
-
+```text
 ### Edge Replication Detail
 
 ```mermaid
@@ -278,9 +270,9 @@ graph TB
 
     style E1 fill:#FFE4B5
     style E2 fill:#FFE4B5
-```
-
+```text
 **Benefits:**
+
 - Outgoing traversal from Alice: local on Shard 0
 - Incoming traversal to Paris: local on Shard 1
 - Single-hop traversal never crosses network
@@ -310,8 +302,7 @@ sequenceDiagram
         C->>S0: ABORT
         C->>S1: ABORT
     end
-```
-
+```text
 ### Rebalancing Flow
 
 ```mermaid
@@ -336,8 +327,7 @@ stateDiagram-v2
         Atomic routing update
         Reads switch instantly
     end note
-```
-
+```text
 ### Shard Topology Example
 
 ```mermaid
@@ -380,8 +370,7 @@ graph TB
     S0P -.->|replicate| S0R
     S1P -.->|replicate| S1R
     S2P -.->|replicate| S2R
-```
-
+```text
 ---
 
 ## Capacity Planning

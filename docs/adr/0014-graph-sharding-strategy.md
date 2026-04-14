@@ -10,16 +10,19 @@
 When the current-state dataset exceeds single-machine RAM (even with tiered storage for historical data), horizontal sharding becomes necessary:
 
 **Scaling Limits:**
+
 - Single machine: ~256GB RAM → ~1.2B current nodes
 - Beyond this: Must distribute across multiple machines
 
 **Graph Sharding Challenges:**
+
 - **Edge cuts**: Edges crossing shard boundaries require network hops
 - **Multi-hop queries**: N-hop traversal may touch N shards
 - **Distributed transactions**: Writes spanning shards need coordination
 - **Rebalancing**: Moving data between shards is expensive
 
 **GallifreyDB-Specific Considerations:**
+
 - Bi-temporal data must maintain consistency across shards
 - Time-travel queries may need to reconstruct state across shards
 - LLM queries often traverse relationships (multi-hop patterns)
@@ -30,7 +33,7 @@ We will implement **domain-based partitioning with edge replication** as the pri
 
 ### Sharding Architecture
 
-```
+```text
 ┌─────────────────────────────────────────────────────────────────┐
 │                      Shard Coordinator                           │
 │   • Query routing         • Transaction coordination             │
@@ -49,8 +52,7 @@ We will implement **domain-based partitioning with edge replication** as the pri
               │                    │                    │
               └────────────────────┴────────────────────┘
                     * Cross-shard edges replicated
-```
-
+```text
 ### Partitioning Strategy
 
 **Primary: Domain-Based Partitioning**
@@ -89,9 +91,9 @@ let config = ShardConfig {
         },
     ],
 };
-```
-
+```text
 **Rationale:**
+
 - Queries within a domain stay local (e.g., "find all people named Alice")
 - Domain experts can size shards based on data distribution
 - Natural alignment with application data model
@@ -101,19 +103,20 @@ let config = ShardConfig {
 
 Cross-shard edges are stored on **both** source and target shards:
 
-```
+```text
 Person (Shard 0)  ----VISITED---->  Place (Shard 1)
 
 Shard 0 stores: (person_id) --VISITED--> (place_id@shard1)
 Shard 1 stores: (person_id@shard0) --VISITED--> (place_id)
-```
-
+```text
 **Benefits:**
+
 - Outgoing traversal from Person: local lookup on Shard 0
 - Incoming traversal to Place: local lookup on Shard 1
 - No network hop for first-level traversal
 
 **Trade-off:**
+
 - 2x storage for cross-shard edges
 - Must maintain consistency on edge updates
 
@@ -138,13 +141,12 @@ impl ShardRouter {
         // Multi-shard if traversal crosses domains
     }
 }
-```
-
+```text
 ### Distributed Transaction Protocol
 
 For writes spanning multiple shards, we use **Two-Phase Commit (2PC)**:
 
-```
+```text
 Coordinator                 Shard A                 Shard B
      │                          │                       │
      │───── PREPARE ───────────►│                       │
@@ -158,8 +160,7 @@ Coordinator                 Shard A                 Shard B
      │                          │                       │
      │◄──── COMMITTED ─────────│                       │
      │◄──── COMMITTED ──────────────────────────────────│
-```
-
+```text
 **Implementation:**
 
 ```rust
@@ -215,11 +216,11 @@ impl ShardCoordinator {
         Ok(())
     }
 }
-```
-
+```text
 **Recovery Notes:**
 
 On coordinator startup, scan the commit decision log:
+
 - For each logged `COMMIT` decision, retry sending commit to any shards that haven't acknowledged
 - For each logged `PREPARE` without a decision, send abort to all participants
 - This ensures eventual consistency even if coordinator crashes mid-transaction
@@ -246,8 +247,7 @@ pub struct RebalanceConfig {
     /// Minimum time between rebalances
     pub cooldown: Duration,  // default: 1 hour
 }
-```
-
+```text
 ## Consequences
 
 ### Positive
@@ -279,6 +279,7 @@ pub struct RebalanceConfig {
 Assign nodes to shards based on hash(node_id) % num_shards.
 
 **Rejected because:**
+
 - No data locality - related nodes scattered randomly
 - Every multi-hop traversal crosses shards
 - Rebalancing requires moving ~1/N data when adding shard
@@ -288,6 +289,7 @@ Assign nodes to shards based on hash(node_id) % num_shards.
 Use graph algorithms to find dense subgraphs, shard by community.
 
 **Rejected because:**
+
 - Expensive to compute (O(E) or worse)
 - Requires full graph analysis before any sharding
 - Communities change over time, requiring frequent recomputation
@@ -298,6 +300,7 @@ Use graph algorithms to find dense subgraphs, shard by community.
 Shard by relationship depth from "anchor" nodes.
 
 **Rejected because:**
+
 - Requires identifying stable anchor nodes
 - Depth from anchor changes as graph grows
 - Complex to reason about shard placement
@@ -314,8 +317,7 @@ pub enum ShardDiscovery {
     Etcd { endpoints: Vec<String>, prefix: String },
     Consul { address: String, service: String },
 }
-```
-
+```text
 ### Failure Handling
 
 - **Shard failure**: Queries to that shard fail, others continue

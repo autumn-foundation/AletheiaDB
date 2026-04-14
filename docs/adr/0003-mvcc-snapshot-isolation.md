@@ -15,6 +15,7 @@ GallifreyDB requires concurrent access from multiple transactions while maintain
 - **Snapshot Isolation (SI)**: Each transaction sees consistent snapshot, good balance
 
 For a graph database serving LLM queries, we need:
+
 1. Consistent view of the graph during multi-hop traversals
 2. High read concurrency (many LLM queries simultaneously)
 3. Reasonable write performance for knowledge updates
@@ -39,8 +40,7 @@ pub struct TransactionSnapshot {
     pub snapshot_timestamp: Timestamp,
     pub active_transactions: HashSet<TxId>,
 }
-```
-
+```text
 ### Visibility Rules
 
 A version is visible to a transaction if:
@@ -57,8 +57,7 @@ fn is_visible(&self, version: &Version, snapshot: &TransactionSnapshot) -> bool 
         }
     }
 }
-```
-
+```text
 ### Isolation Guarantees
 
 | Anomaly | Prevented? | Notes |
@@ -84,8 +83,7 @@ fn detect_conflicts(&self) -> Result<()> {
     }
     Ok(())
 }
-```
-
+```text
 ### Read-Your-Writes
 
 Transactions see their own uncommitted changes:
@@ -99,8 +97,7 @@ fn get_node(&self, id: NodeId) -> Result<Node> {
     // Fall back to committed data
     self.current.get_node(id)
 }
-```
-
+```text
 ## Consequences
 
 ### Positive
@@ -131,6 +128,7 @@ fn get_node(&self, id: NodeId) -> Result<Node> {
 Use read and write locks with two-phase locking protocol.
 
 **Rejected because:**
+
 - Readers block writers and vice versa
 - Deadlock potential requires detection/prevention
 - Poor fit for read-heavy LLM query workload
@@ -141,6 +139,7 @@ Use read and write locks with two-phase locking protocol.
 Extend SI to detect and prevent write skew.
 
 **Rejected for now because:**
+
 - Additional complexity and overhead
 - Write skew is acceptable for our use case (graph updates are typically independent)
 - Can be added later if needed
@@ -150,6 +149,7 @@ Extend SI to detect and prevent write skew.
 Validate at commit time without versions.
 
 **Rejected because:**
+
 - Higher abort rates under contention
 - Less efficient for read-heavy workloads
 - MVCC versions already needed for temporal features
@@ -158,7 +158,7 @@ Validate at commit time without versions.
 
 ### Transaction Lifecycle
 
-```
+```text
 1. Begin Transaction
    ├─ Generate TxId (atomic counter)
    ├─ Capture snapshot timestamp
@@ -179,8 +179,7 @@ Validate at commit time without versions.
 4. Rollback (on error)
    ├─ Discard write buffer
    └─ Unregister from active set
-```
-
+```text
 ### Key Components
 
 - `TxIdGenerator`: Lock-free atomic counter

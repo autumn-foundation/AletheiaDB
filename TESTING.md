@@ -71,6 +71,7 @@ Follow these guidelines:
 4. **Benchmarks** in `benches/` measure performance
 
 Example unit test:
+
 ```rust
 #[cfg(test)]
 mod tests {
@@ -85,6 +86,7 @@ mod tests {
 ```
 
 Example property-based test:
+
 ```rust
 use proptest::prelude::*;
 
@@ -102,6 +104,7 @@ proptest! {
 ### Coverage Thresholds
 
 GallifreyDB enforces minimum coverage thresholds:
+
 - **80%** line coverage
 - **75%** function coverage
 - **70%** branch coverage
@@ -132,7 +135,8 @@ just coverage-summary
 HTML reports are generated in `target/llvm-cov/html/index.html`.
 
 Example output:
-```
+
+```text
 Filename                      Regions    Missed Regions     Cover   Functions  Missed Functions  Executed
 -----------------------------------------------------------------------------------------------------------------
 src/core/id.rs                    24                 0   100.00%          15                 0   100.00%
@@ -154,6 +158,7 @@ fn debug_only_function() {
 ```
 
 Or exclude entire modules in `Cargo.toml`:
+
 ```toml
 [package.metadata.llvm-cov]
 exclude = [
@@ -258,6 +263,7 @@ Criterion generates detailed HTML reports in `target/criterion/`.
 ## Continuous Integration
 
 The CI workflow (`just ci`) runs:
+
 1. Format check (`cargo fmt --check`)
 2. Lint check (`cargo clippy`)
 3. All tests (`cargo test`)
@@ -315,6 +321,7 @@ RUST_LOG=debug cargo test
 ## Troubleshooting
 
 ### Coverage not working
+
 ```bash
 # Make sure llvm-cov is installed
 cargo install cargo-llvm-cov
@@ -325,11 +332,13 @@ just coverage
 ```
 
 ### Tracy not connecting
+
 - Ensure Tracy profiler GUI is running first
 - Check firewall isn't blocking connection
 - Verify `--features tracy` is enabled in build
 
 ### Benchmarks failing
+
 ```bash
 # Clear benchmark cache
 rm -rf target/criterion

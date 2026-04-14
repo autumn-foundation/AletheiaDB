@@ -39,8 +39,7 @@ graph TB
     style TI_VT fill:#DDA0DD
     style TI_TT fill:#DDA0DD
     style VI fill:#FFE4B5
-```
-
+```text
 ## Current Indexes (DashMap)
 
 ### Purpose
@@ -69,8 +68,7 @@ classDiagram
     }
 
     CurrentIndexes --> DashMapInternals
-```
-
+```text
 ### Sharding Strategy
 
 ```mermaid
@@ -88,8 +86,7 @@ graph TB
         S1 --> RW1["RwLock<br/>HashMap"]
         SN --> RWN["RwLock<br/>HashMap"]
     end
-```
-
+```text
 ### Concurrency Characteristics
 
 | Operation | Lock Type | Contention |
@@ -114,8 +111,7 @@ graph LR
     L1 --> L2 --> L3 --> L4
 
     TOTAL["Total: ~65ns"]
-```
-
+```text
 ## Adjacency Index (CSR Format)
 
 ### Purpose
@@ -152,8 +148,7 @@ graph TB
         O2 -.->|"Node 2: empty"| O3
         O3 -.->|"Node 3 edges"| E5
     end
-```
-
+```text
 ### Data Structures
 
 ```mermaid
@@ -174,8 +169,7 @@ classDiagram
     }
 
     AdjacencyIndex --> AdjacencyEntry
-```
-
+```text
 ### Lookup Algorithm
 
 ```mermaid
@@ -188,8 +182,7 @@ flowchart TD
     CALC --> SLICE["Return &edges[start..end]"]
 
     SLICE --> RESULT["O(1) slice access<br/>O(k) iteration"]
-```
-
+```text
 ### Build Process
 
 ```mermaid
@@ -212,11 +205,10 @@ sequenceDiagram
     BUILD->>CSR: Copy edges to flat array
 
     CSR-->>TX: Complete AdjacencyIndex
-```
-
+```text
 ### Memory Layout
 
-```
+```text
 Sequential Memory Access Pattern:
 
 Node 42 edges lookup:
@@ -227,8 +219,7 @@ Node 42 edges lookup:
 Cache Line: 64 bytes
   → 3 entries per cache line
   → Minimal cache misses for traversal
-```
-
+```text
 ### Dual Indexes
 
 ```mermaid
@@ -245,8 +236,7 @@ graph TB
 
     OUT_Q --> OUT_I
     IN_Q --> IN_I
-```
-
+```text
 ## Temporal Indexes (BTreeMap)
 
 ### Purpose
@@ -272,8 +262,7 @@ classDiagram
     }
 
     TemporalIndexes --> TemporalKey
-```
-
+```text
 ### Index Organization
 
 ```mermaid
@@ -296,8 +285,7 @@ graph TB
         N1 --> L2
         N1 --> L3
     end
-```
-
+```text
 ### Query Patterns
 
 ```mermaid
@@ -316,8 +304,7 @@ flowchart TD
 
     Q1 --> S1 --> R1
     Q2 --> S2 --> R2
-```
-
+```text
 ### Dual Time Dimensions
 
 ```mermaid
@@ -337,8 +324,7 @@ graph LR
         BT --> VT
         BT --> TT
     end
-```
-
+```text
 ### Performance Characteristics
 
 | Operation | Complexity | Typical Use |
@@ -373,8 +359,7 @@ sequenceDiagram
         TX->>ADJ: Rebuild CSR (batched)
         Note over ADJ: O(E log E) rebuild
     end
-```
-
+```text
 ### Batched Adjacency Rebuild
 
 ```mermaid
@@ -392,8 +377,7 @@ flowchart TD
 
     REPLACE_OUT --> DONE["Commit complete"]
     REPLACE_IN --> DONE
-```
-
+```text
 ## Future: Vector Index (HNSW)
 
 ### Purpose
@@ -423,8 +407,7 @@ classDiagram
     }
 
     VectorIndex --> VectorIndexConfig
-```
-
+```text
 ### HNSW Layers
 
 ```mermaid
@@ -440,8 +423,7 @@ graph TB
 
     EP["Entry Point"] --> L3
     Q["Query"] --> EP
-```
-
+```text
 ### Query Flow
 
 ```mermaid
@@ -461,8 +443,7 @@ sequenceDiagram
 
     L0-->>HNSW: k nearest neighbors
     HNSW-->>Q: Vec<(NodeId, similarity)>
-```
-
+```text
 ## Index Selection
 
 ### Query Routing
@@ -480,8 +461,7 @@ flowchart TD
     CSR --> RESULT
     BT --> RESULT
     HNSW --> RESULT
-```
-
+```text
 ### Performance Summary
 
 | Index | Structure | Insert | Lookup | Range | Use Case |

@@ -15,11 +15,13 @@ Graph traversal is the core operation for a graph database. The data structure u
 4. **Update cost**: Writes must not excessively slow down reads
 
 Common adjacency representations:
+
 - **Adjacency List (HashMap)**: O(1) lookup but poor cache locality
 - **Adjacency Matrix**: O(1) lookup but O(n²) space
 - **CSR (Compressed Sparse Row)**: Sequential access, compact storage
 
 For LLM query patterns, we expect:
+
 - Read-heavy workload (90%+ reads)
 - Multi-hop traversals (2-5 hops common)
 - Batch updates during knowledge ingestion
@@ -48,11 +50,10 @@ pub struct AdjacencyEntry {
     pub edge_id: EdgeId,
     pub label: InternedString,
 }
-```
-
+```text
 ### Memory Layout
 
-```
+```text
 offsets: [0, 3, 5, 5, 9, ...]
            │  │  │  │
            │  │  │  └─ Node 3 has edges at [5..9]
@@ -62,8 +63,7 @@ offsets: [0, 3, 5, 5, 9, ...]
 
 edges: [e0, e1, e2, e3, e4, e5, e6, e7, e8, ...]
         └─ Node 0 ─┘  └ N1 ┘      └─ Node 3 ─┘
-```
-
+```text
 ### Query Pattern
 
 ```rust
@@ -85,8 +85,7 @@ impl AdjacencyIndex {
             .collect()
     }
 }
-```
-
+```text
 **Future Optimization**: For high-degree nodes, sorting edges by label within each node's edge list during the build process would enable binary search in `get_edges_with_label`, reducing complexity from O(degree) to O(log(degree) + matches).
 
 ### Build Process
@@ -117,8 +116,7 @@ impl AdjacencyIndex {
         AdjacencyIndex { offsets, edges, max_node_id: max_id }
     }
 }
-```
-
+```text
 ## Consequences
 
 ### Positive
@@ -148,9 +146,9 @@ impl AdjacencyIndex {
 
 ```rust
 HashMap<NodeId, Vec<AdjacencyEntry>>
-```
-
+```text
 **Rejected because:**
+
 - Hash lookup overhead per node
 - Poor cache locality (pointer chasing)
 - Higher memory overhead (hash table + Vec headers)
@@ -159,9 +157,9 @@ HashMap<NodeId, Vec<AdjacencyEntry>>
 
 ```rust
 BTreeMap<NodeId, Vec<AdjacencyEntry>>
-```
-
+```text
 **Rejected because:**
+
 - Log(n) lookup vs O(1) offset lookup
 - Tree traversal has cache misses
 - More complex than CSR
@@ -171,6 +169,7 @@ BTreeMap<NodeId, Vec<AdjacencyEntry>>
 Store edges in sparse matrix format.
 
 **Rejected because:**
+
 - Better for dense graphs
 - Our graphs are typically sparse
 - Higher memory for sparse adjacency
@@ -180,6 +179,7 @@ Store edges in sparse matrix format.
 Allow incremental updates to CSR.
 
 **Considered for future because:**
+
 - Could reduce rebuild frequency
 - More complex implementation
 - Current rebuild-on-commit is fast enough
@@ -189,6 +189,7 @@ Allow incremental updates to CSR.
 ### Dual Indexes
 
 We maintain two CSR indexes:
+
 - **Outgoing**: Indexed by source node
 - **Incoming**: Indexed by target node
 
@@ -199,8 +200,7 @@ pub struct CurrentIndexes {
     outgoing: Arc<RwLock<AdjacencyIndex>>,  // source → targets
     incoming: Arc<RwLock<AdjacencyIndex>>,  // target → sources
 }
-```
-
+```text
 ### Rebuild Strategy
 
 CSR indexes are rebuilt at transaction commit:
@@ -216,8 +216,7 @@ impl WriteTransaction {
         // ... finalize commit ...
     }
 }
-```
-
+```text
 ### Performance Targets
 
 | Operation | Target | Rationale |
@@ -228,12 +227,11 @@ impl WriteTransaction {
 
 ### Memory Overhead
 
-```
+```text
 Per edge: 8 (target) + 8 (edge_id) + 4 (label) = 20 bytes
 Offsets: 8 bytes per node
 Total: 20E + 8N bytes (E=edges, N=nodes)
-```
-
+```text
 ## References
 
 - [Compressed Sparse Row Format](https://en.wikipedia.org/wiki/Sparse_matrix#Compressed_sparse_row_(CSR,_CRS_or_Yale_format))

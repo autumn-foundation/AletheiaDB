@@ -5,6 +5,7 @@
 ## Overview
 
 GallifreyDB combines three powerful concepts:
+
 - **Graph Database**: Nodes and edges with property storage
 - **Bi-Temporal Tracking**: Valid time + transaction time
 - **LLM Integration**: Enabling AI reasoning about knowledge evolution
@@ -42,8 +43,7 @@ graph TB
     style CS fill:#90EE90
     style HS fill:#87CEEB
     style WAL fill:#FFB6C1
-```
-
+```text
 ## Core Design Principles
 
 ### 1. Hybrid Storage Architecture
@@ -67,8 +67,7 @@ flowchart LR
 
     style CS fill:#90EE90
     style HS fill:#87CEEB
-```
-
+```text
 ### 2. Bi-Temporal Model
 
 Track two independent time dimensions:
@@ -90,8 +89,7 @@ graph TB
     TT --> Q2
     VT --> Q3
     TT --> Q3
-```
-
+```text
 ### 3. ACID with MVCC
 
 Full transactional guarantees with high concurrency:
@@ -117,8 +115,7 @@ sequenceDiagram
     TX->>CS: Apply changes
     TX->>HS: Create versions
     TX-->>C: Success
-```
-
+```text
 ## Architecture Layers
 
 ### Layer 1: Core Types
@@ -168,8 +165,7 @@ classDiagram
 
     BiTemporalInterval --> TimeRange
     PropertyMap --> PropertyValue
-```
-
+```text
 ### Layer 2: Graph Entities
 
 Nodes and edges with temporal versioning:
@@ -211,8 +207,7 @@ classDiagram
     Node --> NodeVersion : versions
     NodeVersion --> VersionData
     VersionData --> PropertyDelta
-```
-
+```text
 ### Layer 3: Storage
 
 Dual-path storage with WAL durability:
@@ -246,8 +241,7 @@ graph TB
     CS_NODES --> WAL_FILE
     CS_EDGES --> WAL_FILE
     HS_CHAINS --> WAL_FILE
-```
-
+```text
 ### Layer 4: Indexes
 
 Multiple index strategies for different query types:
@@ -271,8 +265,7 @@ graph TB
         EDGES["edges: [AdjEntry, AdjEntry, ...]"]
         OFFSETS --> EDGES
     end
-```
-
+```text
 ### Layer 5: Transactions
 
 MVCC with Snapshot Isolation:
@@ -287,8 +280,7 @@ stateDiagram-v2
     Active --> Aborted: rollback()
     Committed --> [*]
     Aborted --> [*]
-```
-
+```text
 ## Data Flow
 
 ### Write Path
@@ -322,8 +314,7 @@ sequenceDiagram
     WTX->>IDX: Rebuild adjacency (batched)
 
     WTX-->>App: Ok(())
-```
-
+```text
 ### Read Path
 
 ```mermaid
@@ -345,8 +336,7 @@ sequenceDiagram
     RTX->>IDX: CSR lookup
     RTX->>RTX: Filter by visibility
     RTX-->>App: Vec<EdgeId>
-```
-
+```text
 ### Time-Travel Path
 
 ```mermaid
@@ -367,8 +357,7 @@ sequenceDiagram
     HS-->>DB: NodeVersion
 
     DB-->>App: Historical Node State
-```
-
+```text
 ## Performance Characteristics
 
 ### Target Metrics
@@ -404,11 +393,10 @@ graph LR
     R3 -->|No lock| DM
     W1 -->|Shard lock| DM
     W1 -->|Write lock| CSR
-```
-
+```text
 ## Module Organization
 
-```
+```text
 gallifreydb/
 ├── src/
 │   ├── lib.rs              # Public exports
@@ -449,19 +437,21 @@ gallifreydb/
 │   ├── adr/               # Architecture Decision Records
 │   └── architecture/      # This documentation
 └── tests/                 # Integration tests
-```
-
+```text
 ## Related Documentation
 
 ### Core Architecture
+
 - [Storage Layer](storage-layer.md) - Detailed storage architecture
 - [Transaction System](transaction-system.md) - MVCC and isolation
 - [Index Layer](index-layer.md) - Index structures and algorithms
 - [Data Model](data-model.md) - Core types and temporal model
 
 ### Performance & Scalability
+
 - [Durability Modes](durability-modes.md) - Configurable WAL sync strategies (Sync/Batched/Async)
 - [Scalability](scalability.md) - Tiered storage and horizontal sharding
 
 ### Decision Records
+
 - [ADRs](../adr/README.md) - Architecture Decision Records

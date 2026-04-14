@@ -10,17 +10,20 @@
 GallifreyDB achieves exceptional read performance (22-24ns node lookup, 52-71ns traversal) through pure in-memory storage. However, this limits dataset size to available RAM:
 
 **Current Constraints:**
+
 - 64GB RAM → ~300M nodes with properties
 - 256GB RAM → ~1.2B nodes with properties
 - Historical versions multiply storage requirements
 
 **Scalability Requirements:**
+
 - Support datasets larger than single-machine RAM
 - Preserve current-state query performance (critical for LLM integration)
 - Accept higher latency for historical/time-travel queries
 - Enable cost-effective storage of years of temporal history
 
 The bi-temporal nature of GallifreyDB creates a natural hot/cold split:
+
 - **Current state**: Frequently accessed, performance-critical
 - **Historical versions**: Infrequently accessed, acceptable higher latency
 
@@ -30,7 +33,7 @@ We will implement a tiered storage architecture that keeps current state in RAM 
 
 ### Architecture Overview
 
-```
+```text
 ┌─────────────────────────────────────────────────────────────┐
 │                      Query Engine                            │
 │   Current queries → Hot Tier    Time-travel → Cold Tier     │
@@ -52,8 +55,7 @@ We will implement a tiered storage architecture that keeps current state in RAM 
          │         Migration Service              │
          └────────────────────────────────────────┘
                  (Background, continuous)
-```
-
+```text
 ### Storage Tiers
 
 | Tier | Storage | Latency | Content |
@@ -77,9 +79,9 @@ pub struct MigrationPolicy {
     /// Minimum versions to keep in hot tier
     pub min_hot_versions: usize,  // default: 1 (current only)
 }
-```
-
+```text
 **Migration Flow:**
+
 1. Background thread monitors hot tier size and version ages
 2. When thresholds exceeded, identify candidate versions
 3. Serialize and compress versions to cold tier
@@ -111,19 +113,20 @@ impl HistoricalStorage {
         Ok(v)
     }
 }
-```
-
+```text
 ### Cold Tier Implementation
 
 We will use **RocksDB** as the cold storage engine:
 
 **Rationale:**
+
 - LSM-tree optimized for write-heavy workloads (version ingestion)
 - Built-in compression (LZ4/Zstd)
 - Proven at scale (used by Meta, Netflix, etc.)
 - Rust bindings available (`rocksdb` crate)
 
 **Alternative Considered - LMDB:**
+
 - B-tree optimized for read-heavy workloads
 - Memory-mapped, excellent read performance
 - Single-writer limitation
@@ -152,8 +155,7 @@ impl ColdStorage {
         }
     }
 }
-```
-
+```text
 ## Consequences
 
 ### Positive
@@ -184,6 +186,7 @@ impl ColdStorage {
 Use mmap for all storage, let OS handle paging.
 
 **Rejected because:**
+
 - No control over what stays in memory
 - Graph traversal patterns can thrash page cache
 - Page faults on hot path break latency guarantees
@@ -193,6 +196,7 @@ Use mmap for all storage, let OS handle paging.
 Skip tiered storage, go directly to distributed sharding.
 
 **Rejected because:**
+
 - Adds distributed systems complexity prematurely
 - Network latency higher than disk latency for single-machine
 - Current state fits in single machine for most use cases
@@ -203,6 +207,7 @@ Skip tiered storage, go directly to distributed sharding.
 Store cold data in S3 or similar object storage.
 
 **Rejected because:**
+
 - 50-200ms latency per request is too high
 - Network costs for time-travel queries
 - Complexity of eventual consistency
@@ -212,6 +217,7 @@ Store cold data in S3 or similar object storage.
 ### Compression Strategy
 
 Historical versions compress well due to:
+
 - Delta encoding (small changes between versions)
 - Property value repetition
 - Label/key interning
@@ -230,11 +236,11 @@ pub struct CacheConfig {
     /// Eviction policy
     pub policy: EvictionPolicy,  // LRU, LFU, or ARC
 }
-```
-
+```text
 ### Monitoring
 
 Key metrics to expose:
+
 - Hot tier size (bytes, version count)
 - Cold tier size (bytes, version count)
 - Cache hit ratio

@@ -10,11 +10,13 @@
 GallifreyDB's current WAL implementation performs a synchronous `fsync` on every transaction commit. While this provides maximum durability (zero data loss on crash), it severely limits write throughput:
 
 **Current Performance:**
+
 - Node creation: ~1.8ms (99% spent in fsync)
 - Edge creation: ~1.6ms
 - Throughput: ~600 writes/second
 
 **Target Performance:**
+
 - Node creation: <100µs (batched), <10µs (async)
 - Throughput: 15,000-100,000+ writes/second
 
@@ -53,11 +55,10 @@ pub enum DurabilityMode {
     /// Risk: ~10ms of data (background sync interval)
     Async,
 }
-```
-
+```text
 ### Data Flow by Mode
 
-```
+```text
 Synchronous:
   Write → WAL Buffer → fsync() → Return to caller
                           ↑
@@ -74,8 +75,7 @@ Async:
   Write → WAL Buffer → Return to caller (immediate)
                  ↓
            Background thread → Continuous fsync loop
-```
-
+```text
 ### Configuration API
 
 **Global Default (set at database creation):**
@@ -97,8 +97,7 @@ let db = GallifreyDB::builder()
         ..Default::default()
     })
     .build()?;
-```
-
+```text
 **Per-Transaction Override:**
 
 ```rust
@@ -120,8 +119,7 @@ impl WriteOptions {
 db.write_with_options(WriteOptions::critical(), |tx| {
     tx.create_node("Payment", payment_data)
 })?;
-```
-
+```text
 ## Consequences
 
 ### Positive
@@ -152,6 +150,7 @@ db.write_with_options(WriteOptions::critical(), |tx| {
 Keep the current fsync-per-commit behavior.
 
 **Rejected because:**
+
 - 600 writes/sec is too slow for bulk imports and high-throughput workloads
 - Competing databases offer configurable durability
 - LLM knowledge graph updates need higher throughput
@@ -161,6 +160,7 @@ Keep the current fsync-per-commit behavior.
 Make all writes async with no synchronous option.
 
 **Rejected because:**
+
 - Financial and audit use cases require guaranteed durability
 - No way to ensure critical operations survive crash
 - Violates user expectations for database durability
@@ -170,6 +170,7 @@ Make all writes async with no synchronous option.
 Create separate WAL files for different durability levels.
 
 **Rejected because:**
+
 - Complicates recovery (must replay multiple WALs in order)
 - Potential ordering issues between WALs
 - Unnecessary complexity for the flexibility gained
@@ -195,8 +196,7 @@ impl WriteAheadLog {
         Ok(())
     }
 }
-```
-
+```text
 ### Async Mode Implementation
 
 ```rust
@@ -245,8 +245,7 @@ fn sync_loop(receiver: Receiver<WalEntry>, wal: &mut Wal, sync_interval: Duratio
         }
     }
 }
-```
-
+```text
 ### Graceful Shutdown
 
 All modes must flush pending writes on shutdown:
@@ -273,8 +272,7 @@ impl Drop for AsyncWalWriter {
         }
     }
 }
-```
-
+```text
 **Note:** The async mode's `Drop` is critical - without it, entries in the channel
 would be lost on shutdown. The background thread handles the final drain in its
 `Disconnected` case (see `sync_loop` above).
