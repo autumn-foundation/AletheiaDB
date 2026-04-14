@@ -1,3 +1,4 @@
+#![cfg(feature = "sql")]
 use aletheiadb::sql::parse_sql;
 
 #[test]
