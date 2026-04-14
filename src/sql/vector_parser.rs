@@ -206,8 +206,6 @@ fn extract_similar_to(sql: &mut String, ops: &mut Vec<VectorOp>) -> Result<(), S
 /// LIMIT/OFFSET for sqlparser to handle.
 fn extract_order_by_distance(sql: &mut String, ops: &mut Vec<VectorOp>) -> Result<(), SqlError> {
     // Look for `<=>` or `<->` outside string literals
-    let upper = sql.to_uppercase();
-
     let (op_pos, op_len, metric) = if let Some(pos) = find_outside_strings(sql, "<=>") {
         (pos, 3, DistanceMetric::Cosine)
     } else if let Some(pos) = find_outside_strings(sql, "<->") {
@@ -218,7 +216,8 @@ fn extract_order_by_distance(sql: &mut String, ops: &mut Vec<VectorOp>) -> Resul
 
     // Find the ORDER BY that governs this distance operator.
     // Search backwards from the operator position for "ORDER BY".
-    let before = &upper[..op_pos];
+    let before_string = sql[..op_pos].to_uppercase();
+    let before = before_string.as_str();
     let order_by_pos = before.rfind("ORDER BY").ok_or_else(|| {
         SqlError::ParseError(
             "Distance operator <=> / <-> must appear in an ORDER BY clause".to_string(),
