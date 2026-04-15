@@ -100,3 +100,6 @@
 ## 2025-03-05 - The Case of the Silent Shard Rebalancer
 **Confusion:** The `src/storage/sharding/rebalance.rs` and `src/storage/sharding/rpc_client.rs` modules lacked any executable examples or context about *why* specific structures existed. Users trying to understand or manually trigger cluster migrations had to read the source code of `RebalanceManager` and guess how it interacts with `MigrationPlan`.
 **Clarification:** Added comprehensive module-level documentation and struct-level `# The Spark` and `# The Details` sections with executable `///` doctests.
+## 2025-03-05 - The Danger of Tautological Documentation
+**Confusion:** The instruction to explain *what* and *why* for public functions was misinterpreted as "add a comment to everything", resulting in tautological noise (e.g., `/// Creates a new TraversalIterator.` for `TraversalIterator::new()`).
+**Clarification:** Strict adherence to the `🚫 Never do: Write comments that simply repeat the function name` rule is required. When documenting basic constructor methods, instead of writing "Creates X", always include a `# Why?` section explaining the architectural context (e.g., "Why? This is used for `NodeLookup` physical operations where the query planner has already resolved exact node IDs").

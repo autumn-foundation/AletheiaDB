@@ -274,6 +274,11 @@ impl std::fmt::Debug for SnapshotIndex {
 }
 
 impl SnapshotIndex {
+    /// Searches the snapshot for the top `k` nearest neighbors to the `query` vector.
+    ///
+    /// # Why?
+    /// This provides a point-in-time semantic search. It routes the query to either
+    /// the fully consolidated HNSW index, or a delta-index depending on the snapshot's state.
     pub fn search(&self, query: &[f32], k: usize) -> Result<Vec<(NodeId, f32)>> {
         match self {
             SnapshotIndex::Full(index) => index.search(query, k),
@@ -281,6 +286,12 @@ impl SnapshotIndex {
         }
     }
 
+    /// Searches the snapshot for the top `k` nearest neighbors, applying a custom predicate filter.
+    ///
+    /// # Why?
+    /// Pure vector search often returns irrelevant results (e.g., matching a document from
+    /// the wrong user). This allows pre-filtering the candidate list during the HNSW traversal
+    /// to guarantee both semantic relevance and logical correctness.
     pub fn search_with_filter(
         &self,
         query: &[f32],

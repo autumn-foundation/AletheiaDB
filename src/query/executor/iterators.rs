@@ -75,6 +75,11 @@ pub struct NodeLookupIterator {
 }
 
 impl NodeLookupIterator {
+    /// Initialize the iterator with a predefined list of node identifiers.
+    ///
+    /// # Why?
+    /// This is used for `NodeLookup` physical operations where the query
+    /// planner has already resolved exact node IDs (e.g., from an index or literal).
     pub fn new(node_ids: Vec<NodeId>, current: Arc<CurrentStorage>) -> Self {
         NodeLookupIterator {
             node_ids: node_ids.into_iter(),
@@ -440,6 +445,13 @@ pub struct BatchTemporalNodeIterator {
 impl BatchTemporalNodeIterator {
     /// Create a new batch temporal node iterator.
     ///
+    /// Initialize an iterator that resolves multiple historical nodes simultaneously.
+    ///
+    /// # Why?
+    /// Unlike the standard `TemporalNodeIterator`, this optimizes lock acquisition
+    /// by grabbing the read lock once for the entire batch. This prevents lock contention
+    /// on highly active graphs during deep historical traversals.
+    ///
     /// Acquires the historical storage lock once, reconstructs all nodes,
     /// then releases the lock and returns the iterator over results.
     ///
@@ -557,7 +569,11 @@ pub struct TemporalNodeScanIterator {
 }
 
 impl TemporalNodeScanIterator {
-    /// Create a new temporal node scan iterator.
+    /// Initialize a scanning iterator that searches historical storage.
+    ///
+    /// # Why?
+    /// This provides a fallback mechanism to find nodes in the past when temporal
+    /// indexes are either unavailable or explicitly bypassed.
     ///
     /// # Arguments
     ///
@@ -749,6 +765,12 @@ pub struct TraversalIterator {
 }
 
 impl TraversalIterator {
+    /// Initialize a Breadth-First Search (BFS) graph traversal iterator.
+    ///
+    /// # Why?
+    /// This is the core engine for `MATCH (a)-[*]->(b)` operations. It manages
+    /// a frontier of visited nodes to prevent infinite loops in cyclic graphs,
+    /// and conditionally queries the historical storage if a temporal context is present.
     pub fn new(
         input: Box<dyn ResultIterator>,
         direction: Direction,
@@ -1528,6 +1550,11 @@ pub struct PropertyScanIterator {
 }
 
 impl PropertyScanIterator {
+    /// Initialize a full-scan iterator that evaluates a property predicate against all nodes.
+    ///
+    /// # Why?
+    /// Use this as a fallback when no index is available for the requested `label` and `key`.
+    /// It eagerly loads all matching nodes into memory, so it is best used on small datasets.
     pub fn new(
         label: String,
         key: String,

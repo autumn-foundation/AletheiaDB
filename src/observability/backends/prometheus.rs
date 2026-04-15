@@ -102,10 +102,21 @@ pub struct PrometheusBackend;
 
 #[cfg(not(feature = "observability-prometheus"))]
 impl PrometheusBackend {
+    /// Create a fallback Prometheus backend when the feature is disabled.
+    ///
+    /// # Why?
+    /// This prevents compile errors in downstream code that blindly attempts to construct
+    /// the backend. It effectively becomes a no-op.
     pub fn new(_config: PrometheusConfig) -> Self {
         Self
     }
 
+    /// Attempt to start the Prometheus backend (always fails when disabled).
+    ///
+    /// # Why?
+    /// Calling this without the `observability-prometheus` feature flag active
+    /// acts as a fail-safe, returning an error to alert the operator that metrics
+    /// cannot be collected.
     pub fn start(self) -> Result<(), Error> {
         Err(Error::other(
             "Prometheus support not compiled in. Enable the 'observability-prometheus' feature.",

@@ -17,6 +17,12 @@ use crate::encryption::factory::Algorithm;
     feature = "config-toml",
     serde(tag = "type", rename_all = "snake_case")
 )]
+/// Configuration options for the Master Encryption Key (MEK) provider.
+///
+/// # Why?
+/// Different environments require different security postures. Development might
+/// use a file-based key, while production typically injects keys via environment variables
+/// or a KMS (Key Management Service).
 pub enum KeyProviderConfig {
     /// Load the MEK from a file on disk (hex or raw binary).
     File {
