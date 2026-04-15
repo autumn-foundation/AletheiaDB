@@ -100,3 +100,7 @@
 ## 2025-03-05 - The Case of the Silent Shard Rebalancer
 **Confusion:** The `src/storage/sharding/rebalance.rs` and `src/storage/sharding/rpc_client.rs` modules lacked any executable examples or context about *why* specific structures existed. Users trying to understand or manually trigger cluster migrations had to read the source code of `RebalanceManager` and guess how it interacts with `MigrationPlan`.
 **Clarification:** Added comprehensive module-level documentation and struct-level `# The Spark` and `# The Details` sections with executable `///` doctests.
+
+## 2025-04-15 - The Case of the Missing Keys
+**Confusion:** The encryption modules `cipher.rs` and `manager.rs` lacked storytelling and explicit executable examples. Users reading the `Cipher` trait wouldn't understand the `[nonce][ciphertext][tag]` wire format, which is critical for writing external decryption tools. Furthermore, `EncryptionManager` seemed like a generic struct, obscuring its important role in limiting blast radius by deriving independent DEKs per component via HKDF.
+**Clarification:** Added `# The Spark` and `# The Details` with concrete `# Examples` to `Cipher`, `Aes256GcmCipher`, and `EncryptionManager`. These additions explain *why* the wire format is structured that way and *how* the manager acts as an isolation boundary. Added doctests to `Node` and `Edge` to complete their missing documentation.

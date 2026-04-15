@@ -8,7 +8,35 @@ use zeroize::Zeroizing;
 
 /// AEAD cipher for encrypting/decrypting data at rest.
 ///
-/// All implementations prepend the nonce and append the auth tag to the output.
+/// # The Spark
+/// The database needs a uniform way to encrypt data blocks (like WAL entries or index pages)
+/// without caring whether the underlying algorithm is AES or ChaCha. This trait provides that abstraction.
+///
+/// # The Details
+/// All implementations must produce ciphertext in a specific wire format: `[nonce][ciphertext][tag]`.
+/// This format allows the decryption process to read the nonce from the beginning and the tag from the end,
+/// without needing external storage for these components.
+///
+/// # Examples
+///
+/// ```rust
+/// use aletheiadb::encryption::{Cipher, Aes256GcmCipher};
+/// use zeroize::Zeroizing;
+///
+/// // Create a dummy 32-byte key
+/// let key = Zeroizing::new([42u8; 32]);
+/// let cipher = Aes256GcmCipher::new(&key);
+///
+/// let plaintext = b"Hello, secure world!";
+/// let aad = b"header-data"; // Additional Authenticated Data
+///
+/// // Encrypt
+/// let ciphertext = cipher.encrypt(plaintext, aad).unwrap();
+///
+/// // Decrypt
+/// let decrypted = cipher.decrypt(&ciphertext, aad).unwrap();
+/// assert_eq!(decrypted, plaintext);
+/// ```
 pub trait Cipher: Send + Sync {
     /// Encrypt `plaintext`, returning `[nonce || ciphertext || tag]`.
     ///
@@ -41,8 +69,26 @@ use aes_gcm::{Aes256Gcm, KeyInit, Nonce as AesNonce};
 
 /// AES-256-GCM authenticated encryption cipher.
 ///
+/// # The Spark
+/// When running on modern x86/x86_64 hardware, AES-NI instructions make AES-256-GCM extremely fast.
+/// This is the preferred algorithm when hardware acceleration is available.
+///
+/// # The Details
 /// Nonce: 12 bytes (96 bits), Tag: 16 bytes (128 bits).
 /// Total overhead: 28 bytes per encrypted payload.
+/// The nonce is generated randomly for every encryption operation using `rand::thread_rng()`.
+///
+/// # Examples
+/// ```rust
+/// use aletheiadb::encryption::Aes256GcmCipher;
+/// use aletheiadb::encryption::Cipher;
+/// use zeroize::Zeroizing;
+///
+/// let key = Zeroizing::new([0u8; 32]);
+/// let cipher = Aes256GcmCipher::new(&key);
+/// assert_eq!(cipher.algorithm_name(), "AES-256-GCM");
+/// assert_eq!(cipher.overhead(), 28);
+/// ```
 pub struct Aes256GcmCipher {
     inner: Aes256Gcm,
 }
@@ -58,6 +104,15 @@ const AES_TAG_SIZE: usize = 16;
 
 impl Aes256GcmCipher {
     /// Create a new AES-256-GCM cipher from a 32-byte key.
+    ///
+    /// # Examples
+    /// ```rust
+    /// use aletheiadb::encryption::Aes256GcmCipher;
+    /// use zeroize::Zeroizing;
+    ///
+    /// let key = Zeroizing::new([7u8; 32]);
+    /// let cipher = Aes256GcmCipher::new(&key);
+    /// ```
     pub fn new(key: &Zeroizing<[u8; 32]>) -> Self {
         let inner = Aes256Gcm::new_from_slice(key.as_ref())
             .expect("32-byte key is always valid for AES-256");

@@ -19,8 +19,31 @@ fn matches_label(label_id: InternedString, label: &str) -> bool {
 
 /// A node in the current state of the graph.
 ///
+/// # The Spark
+/// Nodes are the fundamental entities in AletheiaDB. This structure is specifically optimized
+/// for the "hot path" — holding only the most recent data to ensure fast traversals without
+/// the overhead of searching through temporal history.
+///
+/// # The Details
 /// This represents the current version of a node, optimized for fast access.
 /// Historical versions are stored separately in the temporal storage layer.
+/// It uses `InternedString` for its label to minimize memory allocations.
+///
+/// # Examples
+/// ```rust
+/// use aletheiadb::core::graph::Node;
+/// use aletheiadb::core::id::{NodeId, VersionId};
+/// use aletheiadb::core::property::PropertyMap;
+/// use aletheiadb::core::interning::GLOBAL_INTERNER;
+///
+/// let id = NodeId::new(1).unwrap();
+/// let label = GLOBAL_INTERNER.intern("Person");
+/// let props = PropertyMap::default();
+/// let version = VersionId::new(1).unwrap();
+///
+/// let node = Node::new(id, label, props, version);
+/// assert_eq!(node.id.as_u64(), 1);
+/// ```
 #[derive(Clone, PartialEq)]
 pub struct Node {
     /// Unique identifier for this node.
@@ -37,6 +60,21 @@ pub struct Node {
 
 impl Node {
     /// Create a new node with the given ID, label, and properties.
+    ///
+    /// # Examples
+    /// ```rust
+    /// use aletheiadb::core::graph::Node;
+    /// use aletheiadb::core::id::{NodeId, VersionId};
+    /// use aletheiadb::core::property::PropertyMap;
+    /// use aletheiadb::core::interning::GLOBAL_INTERNER;
+    ///
+    /// let node = Node::new(
+    ///     NodeId::new(1).unwrap(),
+    ///     GLOBAL_INTERNER.intern("User"),
+    ///     PropertyMap::default(),
+    ///     VersionId::new(1).unwrap()
+    /// );
+    /// ```
     pub fn new(
         id: NodeId,
         label: InternedString,
@@ -161,6 +199,23 @@ pub struct Edge {
 
 impl Edge {
     /// Create a new edge with the given parameters.
+    ///
+    /// # Examples
+    /// ```rust
+    /// use aletheiadb::core::graph::Edge;
+    /// use aletheiadb::core::id::{EdgeId, NodeId, VersionId};
+    /// use aletheiadb::core::property::PropertyMap;
+    /// use aletheiadb::core::interning::GLOBAL_INTERNER;
+    ///
+    /// let edge = Edge::new(
+    ///     EdgeId::new(1).unwrap(),
+    ///     GLOBAL_INTERNER.intern("FRIENDS_WITH"),
+    ///     NodeId::new(1).unwrap(),
+    ///     NodeId::new(2).unwrap(),
+    ///     PropertyMap::default(),
+    ///     VersionId::new(1).unwrap()
+    /// );
+    /// ```
     pub fn new(
         id: EdgeId,
         label: InternedString,

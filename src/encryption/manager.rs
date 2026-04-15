@@ -17,9 +17,25 @@ use crate::encryption::key_provider::{EnvKeyProvider, FileKeyProvider, KeyProvid
 
 /// Central manager that owns per-component ciphers for encryption at rest.
 ///
+/// # The Spark
+/// To minimize blast radius if a single key is compromised, AletheiaDB doesn't use the Master Encryption Key (MEK) directly.
+/// Instead, it uses HKDF to derive unique Data Encryption Keys (DEKs) for the WAL, Indexes, Checkpoints, and Cold Storage.
+/// This manager holds all four ciphers and distributes them to the components that need them.
+///
+/// # The Details
 /// Created once at database startup via [`from_config`](Self::from_config) and
 /// then shared (via `Arc`) with every persistence subsystem that needs to
 /// encrypt/decrypt data.
+///
+/// # Examples
+/// ```rust
+/// use aletheiadb::encryption::{EncryptionManager, EncryptionConfig};
+/// use aletheiadb::encryption::factory::Algorithm;
+///
+/// // Create a dummy config (in real usage, you'd provide an actual key via env or file)
+/// let config = EncryptionConfig::disabled();
+/// // Normally we'd use from_config, but here we just note the manager's structure.
+/// ```
 pub struct EncryptionManager {
     wal_cipher: Arc<dyn Cipher>,
     index_cipher: Arc<dyn Cipher>,
@@ -45,6 +61,19 @@ impl std::fmt::Debug for EncryptionManager {
 
 impl EncryptionManager {
     /// Build an [`EncryptionManager`] from an [`EncryptionConfig`].
+    ///
+    /// # Examples
+    /// ```rust
+    /// use aletheiadb::encryption::{EncryptionManager, EncryptionConfig, KeyProviderConfig};
+    /// use aletheiadb::encryption::factory::Algorithm;
+    /// use std::path::PathBuf;
+    ///
+    /// // In a real environment, you might load from an environment variable:
+    /// let config = EncryptionConfig::env_based("MY_SECRET_KEY");
+    ///
+    /// // Assuming MY_SECRET_KEY is set to a 64-char hex string, this would succeed:
+    /// // let manager = EncryptionManager::from_config(&config).unwrap();
+    /// ```
     ///
     /// This:
     /// 1. Creates the appropriate [`KeyProvider`] based on config.
