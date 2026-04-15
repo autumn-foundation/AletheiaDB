@@ -87,9 +87,7 @@ chacha20poly1305 = "0.10"
 hkdf = "0.12"
 sha2 = "0.10"
 zeroize = { version = "1.8", features = ["derive"] }
-
-# AWS KMS key provider (optional, ADR-0028)
-aws-sdk-kms = { version = "1.0", optional = true }
+aws-sdk-kms = { version = "1.0.0", optional = true }
 
 [dev-dependencies]
 criterion = "0.8"
@@ -175,10 +173,11 @@ honeycomb = ["honeycomb-client", "dep:reqwest"]
 encryption = ["dep:serde"]
 
 # AWS KMS key provider (optional)
-encryption-aws-kms = ["encryption", "dep:tokio", "dep:aws-sdk-kms"]
+encryption-aws-kms = ["encryption", "dep:tokio"]
 
 # HashiCorp Vault key provider (optional)
 encryption-vault = ["encryption", "dep:tokio", "dep:reqwest"]
+aws-sdk-kms = ["dep:aws-sdk-kms"]
 
 [profile.dev]
 # Fast compilation for development
