@@ -238,6 +238,9 @@ pub mod omen;
 #[cfg(feature = "nova")]
 /// Oracle: Probabilistic Graph Reasoning.
 pub mod oracle;
+#[cfg(feature = "nova")]
+/// Papyrus: Semantic Graph to Mermaid JS Exporter.
+pub mod papyrus;
 
 #[cfg(feature = "nova")]
 /// Luna: Semantic Subgraph Synthesis.
