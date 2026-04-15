@@ -124,7 +124,7 @@ impl<'a> FishingRod<'a> {
                     } else {
                         return Err(crate::core::error::Error::Vector(
                             crate::core::error::VectorError::IndexError(
-                                "No vector indexes configured. Call enable_vector_index() first."
+                                "No vector indexes configured. Call db.vector_index(\"...\").hnsw(...).enable() first."
                                     .to_string(),
                             ),
                         ));
