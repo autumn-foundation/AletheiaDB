@@ -16,8 +16,8 @@
 //! let papyrus = Papyrus::new(&db);
 //!
 //! # let start_node = aletheiadb::core::id::NodeId::new(1).unwrap();
-//! // Export the ego-network around a specific node up to 2 hops
-//! let mermaid_chart = papyrus.export_ego_graph(start_node, 2)?;
+//! // Export the ego-network around a specific node up to 2 hops, capped at 500 nodes
+//! let mermaid_chart = papyrus.export_ego_graph(start_node, 2, Some(500))?;
 //! println!("{}", mermaid_chart);
 //! # Ok(())
 //! # }
@@ -43,7 +43,17 @@ impl<'a> Papyrus<'a> {
     }
 
     /// Exports an ego-graph centered around `start_node` up to `max_depth` hops.
-    pub fn export_ego_graph(&self, start_node: NodeId, max_depth: usize) -> Result<String> {
+    ///
+    /// `max_nodes` caps the total number of nodes included in the export. When
+    /// `Some(n)` is provided the BFS stops once `n` nodes have been visited,
+    /// preventing excessive memory use on dense or deeply-connected graphs.
+    /// Pass `None` to visit all reachable nodes within `max_depth`.
+    pub fn export_ego_graph(
+        &self,
+        start_node: NodeId,
+        max_depth: usize,
+        max_nodes: Option<usize>,
+    ) -> Result<String> {
         let mut output = String::new();
         writeln!(&mut output, "graph TD").unwrap();
 
@@ -55,7 +65,7 @@ impl<'a> Papyrus<'a> {
         visited_nodes.insert(start_node);
 
         while let Some((current_node, depth)) = queue.pop_front() {
-            // Write node definition
+            // Write node definition – propagates an error if the node is missing.
             self.write_node(&mut output, current_node)?;
 
             if depth >= max_depth {
@@ -65,22 +75,26 @@ impl<'a> Papyrus<'a> {
             // Get outgoing edges
             let edges = self.db.get_outgoing_edges(current_node);
             for edge_id in edges {
-                if visited_edges.contains(&edge_id) {
+                if !visited_edges.insert(edge_id) {
                     continue;
                 }
-                visited_edges.insert(edge_id);
 
                 if let Ok(edge) = self.db.get_edge(edge_id) {
                     let target = edge.target;
+                    let is_new_target = !visited_nodes.contains(&target);
 
-                    // Add target to queue if not visited
-                    if !visited_nodes.contains(&target) {
-                        visited_nodes.insert(target);
-                        queue.push_back((target, depth + 1));
+                    if is_new_target {
+                        // Only include new nodes that are within the cap.
+                        if max_nodes.is_none_or(|limit| visited_nodes.len() < limit) {
+                            visited_nodes.insert(target);
+                            queue.push_back((target, depth + 1));
+                            self.write_edge(&mut output, current_node, target, edge.label)?;
+                        }
+                        // else: over the limit — omit this node and its edge.
+                    } else {
+                        // Target already in the subgraph; record cross/back-edges.
+                        self.write_edge(&mut output, current_node, target, edge.label)?;
                     }
-
-                    // Write edge
-                    self.write_edge(&mut output, current_node, target, edge.label)?;
                 }
             }
         }
@@ -89,30 +103,29 @@ impl<'a> Papyrus<'a> {
     }
 
     fn write_node(&self, output: &mut String, node_id: NodeId) -> Result<()> {
-        if let Ok(node) = self.db.get_node(node_id) {
-            let label = Self::resolve_str(node.label);
+        let node = self.db.get_node(node_id)?;
+        let label = Self::resolve_str(node.label);
 
-            // Try to find a human-readable name property
-            let name = if let Some(val) = node.get_property("name") {
-                val.to_string()
-            } else if let Some(val) = node.get_property("title") {
-                val.to_string()
-            } else if let Some(val) = node.get_property("id") {
-                val.to_string()
-            } else {
-                label.clone()
-            };
+        // Try to find a human-readable name property
+        let name = if let Some(val) = node.get_property("name") {
+            val.to_string()
+        } else if let Some(val) = node.get_property("title") {
+            val.to_string()
+        } else if let Some(val) = node.get_property("id") {
+            val.to_string()
+        } else {
+            label.clone()
+        };
 
-            // Format: N1["Person: Alice"]
-            writeln!(
-                output,
-                "    N{}[\"{}: {}\"]",
-                node_id.as_u64(),
-                label,
-                self.escape_mermaid(&name)
-            )
-            .unwrap();
-        }
+        // Format: N1["Person: Alice"]
+        writeln!(
+            output,
+            "    N{}[\"{}: {}\"]",
+            node_id.as_u64(),
+            label,
+            Self::escape_mermaid(&name)
+        )
+        .unwrap();
         Ok(())
     }
 
@@ -124,12 +137,13 @@ impl<'a> Papyrus<'a> {
         label: InternedString,
     ) -> Result<()> {
         let label_str = Self::resolve_str(label);
+        let escaped_label = Self::escape_mermaid(&label_str);
         // Format: N1 -->|"KNOWS"| N2
         writeln!(
             output,
             "    N{} -->|\"{}\"| N{}",
             source.as_u64(),
-            label_str,
+            escaped_label,
             target.as_u64()
         )
         .unwrap();
@@ -142,8 +156,8 @@ impl<'a> Papyrus<'a> {
             .unwrap_or_else(|| "Unknown".to_string())
     }
 
-    fn escape_mermaid(&self, s: &str) -> String {
-        s.replace('"', "'")
+    fn escape_mermaid(s: &str) -> String {
+        s.replace('"', "'").replace('\n', "<br/>")
     }
 }
 
@@ -169,7 +183,7 @@ mod tests {
             .unwrap();
 
         let papyrus = Papyrus::new(&db);
-        let chart = papyrus.export_ego_graph(node_a, 1).unwrap();
+        let chart = papyrus.export_ego_graph(node_a, 1, None).unwrap();
 
         assert!(chart.contains("graph TD"));
         assert!(chart.contains(&format!("N{}[\"Person: 'Alice'\"]", node_a.as_u64())));
@@ -210,13 +224,63 @@ mod tests {
         let papyrus = Papyrus::new(&db);
 
         // Depth 1: should only see A and B
-        let chart1 = papyrus.export_ego_graph(a, 1).unwrap();
+        let chart1 = papyrus.export_ego_graph(a, 1, None).unwrap();
         assert!(chart1.contains("A"));
         assert!(chart1.contains("B"));
         assert!(!chart1.contains("C"), "Depth 1 should not include node C");
 
         // Depth 2: should see all
-        let chart2 = papyrus.export_ego_graph(a, 2).unwrap();
+        let chart2 = papyrus.export_ego_graph(a, 2, None).unwrap();
         assert!(chart2.contains("C"));
+    }
+
+    #[test]
+    fn test_papyrus_max_nodes() {
+        let db = AletheiaDB::new().unwrap();
+
+        let a = db
+            .create_node(
+                "Node",
+                PropertyMapBuilder::new().insert("name", "A").build(),
+            )
+            .unwrap();
+        let b = db
+            .create_node(
+                "Node",
+                PropertyMapBuilder::new().insert("name", "B").build(),
+            )
+            .unwrap();
+        let c = db
+            .create_node(
+                "Node",
+                PropertyMapBuilder::new().insert("name", "C").build(),
+            )
+            .unwrap();
+
+        db.create_edge(a, b, "L1", Default::default()).unwrap();
+        db.create_edge(b, c, "L2", Default::default()).unwrap();
+
+        let papyrus = Papyrus::new(&db);
+
+        // max_nodes = 1: only the start node should appear
+        let chart = papyrus.export_ego_graph(a, 2, Some(1)).unwrap();
+        assert!(chart.contains("A"));
+        assert!(!chart.contains("B"), "max_nodes=1 should stop before B");
+        assert!(!chart.contains("C"), "max_nodes=1 should stop before C");
+    }
+
+    #[test]
+    fn test_papyrus_escape_mermaid_newline() {
+        let db = AletheiaDB::new().unwrap();
+        let props = PropertyMapBuilder::new()
+            .insert("name", "Line1\nLine2")
+            .build();
+        let node = db.create_node("Item", props).unwrap();
+        let papyrus = Papyrus::new(&db);
+        let chart = papyrus.export_ego_graph(node, 0, None).unwrap();
+        assert!(
+            chart.contains("<br/>"),
+            "Newlines in labels must be escaped as <br/>"
+        );
     }
 }
