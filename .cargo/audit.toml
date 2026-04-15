@@ -1,0 +1,26 @@
+[advisories]
+# RUSTSEC-2026-0098: rustls-webpki — Name constraints for URI names were incorrectly accepted
+# RUSTSEC-2026-0099: rustls-webpki — Name constraints were accepted for certificates asserting a wildcard name
+#
+# Both advisories affect rustls-webpki 0.101.7, which is pulled in transitively via:
+#   aws-sdk-kms → aws-smithy-http-client 1.1.12 → rustls 0.21.12 → rustls-webpki 0.101.7
+#
+# The patched versions (rustls-webpki >=0.103.12) require rustls 0.23+, which uses a
+# different API. rustls 0.21.x cannot use the patched webpki 0.103.x line.
+# aws-smithy-http-client 1.1.12 is the latest AWS SDK Smithy client and still bundles
+# both the legacy rustls 0.21 and the modern rustls 0.23 code paths for compatibility.
+# There is no upgrade path that removes this dependency without replacing the AWS SDK
+# integration entirely.
+#
+# Risk assessment: Both vulnerabilities are in TLS name-constraint validation and are
+# exploitable only when a CA misissues certificates (i.e. issues certs that exceed
+# permitted subtree constraints). AWS services use properly issued certificates, so the
+# practical exposure is negligible. The aws-sdk-kms feature is also optional
+# (encryption-aws-kms feature flag) and not enabled in the default build.
+#
+# Tracking: This should be revisited whenever aws-smithy-http-client drops its rustls
+# 0.21 compatibility shim.
+ignore = [
+    "RUSTSEC-2026-0098",
+    "RUSTSEC-2026-0099",
+]
