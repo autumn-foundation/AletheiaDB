@@ -99,3 +99,7 @@
 ## 2025-05-18 - Automated Structure Missing Examples
 **Confusion:** Many structs and functions in the codebase were lacking `# Examples` sections in their documentation. This violates the Bard philosophy of "A good example is worth 1,000 lines of explanation."
 **Clarification:** I created a python script `find_undocumented.py` to calculate code-to-documentation ratios, identifying `src/query/executor/mod.rs`, `src/storage/sharding/rebalance.rs`, `src/storage/sharding/coordinator.rs`, `src/storage/checkpoint.rs` as the lowest. I then programmatically updated the main public structs and functions in these files to include `# Examples` blocks, ensuring `cargo clippy --all-targets --all-features -- -D warnings` still passed.
+
+## 2025-03-05 - The Case of the Silent Shard Rebalancer
+**Confusion:** The `src/storage/sharding/rebalance.rs` and `src/storage/sharding/rpc_client.rs` modules lacked any executable examples or context about *why* specific structures existed. Users trying to understand or manually trigger cluster migrations had to read the source code of `RebalanceManager` and guess how it interacts with `MigrationPlan`.
+**Clarification:** Added comprehensive module-level documentation and struct-level `# The Spark` and `# The Details` sections with executable `///` doctests.

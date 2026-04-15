@@ -57,3 +57,6 @@
 **[QueryRow Entity Extraction]**
 **Learning:** Destructuring a struct (like `QueryRow`) and pattern matching directly on its owned components (`EntityResult`) inside a loop completely eliminates the need for expensive heap allocations caused by intermediate `.clone()` calls on nested data structures like HashMaps (properties). Rust's move semantics are the ultimate zero-cost abstraction for consuming data iterators.
 **Action:** When mapping over iterators or structs that are fully consumed, never use `as_ref().map(|x| x.clone())`. Instead, destructure the container and take ownership by value.
+**[Optimizing BFS Traversal]**
+**Learning:** Using `iterator.chain()` to iterate over neighbors in BFS traversal instead of allocating intermediate arrays reduces heap allocations without compromising performance or logic.
+**Action:** When finding multiple `.collect::<Vec<_>>()` and `.extend()` combinations, use `.chain()` whenever possible to eliminate allocations.

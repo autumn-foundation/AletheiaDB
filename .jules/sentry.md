@@ -26,3 +26,7 @@
 **[Temporal TimeRange Max Timestamp and Deserialize Mutants]**
 **Learning:** `cargo mutants` revealed missing test coverage for `MAX_VALID_TIMESTAMP` bounds checking in open ranges (`TimeRange::from` and `TimeRange::at`), empty range overlap edge cases (`TimeRange::overlaps` short-circuit behavior), and deserialization stringency (`BiTemporalInterval::deserialize` exact consumed length checking against buffer size `> 48`).
 **Action:** Added targeted unit tests checking `#[should_panic]` when `MAX_VALID_TIMESTAMP` is exceeded, explicitly testing overlap between empty point-ranges within larger non-empty ranges, and appending excess bytes to binary formats to verify exact parser length consumption limits.
+
+## LimitPushdown Mutants
+**Learning:** `cargo mutants` revealed missing test coverage for `LimitPushdown::push_down` in several conditions around `||`. Also limits shouldn't be blindly pushed down through filters, because limits only apply after the filter reduces the row count. Tests covering the lack of modification of binary children boundaries have also been introduced.
+**Action:** When adding rules like `LimitPushdown`, always ensure to write exhaustive structural test cases (verifying limits propagating, or explicitly stopping at operations like `Filter` or `Sort`).

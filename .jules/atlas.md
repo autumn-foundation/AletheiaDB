@@ -79,3 +79,8 @@
 **[Broke Storage-API Dependency Cycle]
 **Tangle:** The `storage` module had an implementation of `From<&crate::api::transaction::BufferedWrite> for WalOperation` in `src/storage/wal/entry.rs`, meaning the underlying storage engine depended structurally on the public API layer.
 **Blueprint:** Moved the `From` implementation to `src/api/transaction/write_buffer.rs`. Now, the `api` module is aware of how its `BufferedWrite` converts into a `WalOperation` to send down to `storage`, enforcing a unidirectional dependency graph from `api` -> `storage`.
+## 2026-05-25 - Splitting PropertyMap God Module
+**Tangle:** `src/core/property.rs` was a 4300-line "God Module" containing data definitions (`PropertyValue`), complex reference-counted property map logic (`PropertyMap`, `PropertyMapBuilder`), constants, serialization types, limits, and extensive tests.
+**Blueprint:** Refactored into `src/core/property/` directory.
+1. Extracted tests to `src/core/property/tests.rs` (2500+ lines).
+2. Left `mod.rs` with the core data definitions and implementation, significantly reducing module size and improving navigability.

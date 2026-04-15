@@ -1,7 +1,17 @@
 //! Shard rebalancing implementation.
 //!
+//! # The Abstract
 //! Handles online data migration between shards when they become unbalanced
-//! or when new shards are added to the cluster.
+//! or when new shards are added to the cluster. This module orchestrates
+//! the lifecycle of a migration, from planning through dual-write dual-commit
+//! phases to the final cutover.
+//!
+//! # The Hero's Journey
+//! When a shard grows too large (exceeding its `imbalance_threshold`), the
+//! `RebalanceManager` drafts a `MigrationPlan`. This plan transitions through
+//! states like `DualWrite` and `Copying`, meticulously tracking its progress
+//! via `MigrationProgress` so that operators can monitor cluster health in
+//! real-time.
 
 use super::config::RebalanceConfig;
 use super::types::{ShardId, ShardState};
@@ -50,6 +60,27 @@ impl fmt::Display for MigrationState {
 }
 
 /// Progress of a migration operation.
+///
+/// # The Spark
+/// Migrating gigabytes of graph data takes time. We need a way to track
+/// exactly how far along the operation is, so operators aren't left guessing
+/// if the cluster is stalled.
+///
+/// # The Details
+/// This struct continuously updates its estimates based on the current transfer
+/// rate. It tracks both nodes and edges separately, as edge migrations often
+/// involve complex cross-shard updates.
+///
+/// # Examples
+/// ```
+/// use aletheiadb::storage::sharding::rebalance::MigrationProgress;
+///
+/// let mut progress = MigrationProgress::new(1000, 5000);
+/// progress.update(100, 500, 1024 * 1024); // 100 nodes, 500 edges, 1MB
+///
+/// assert_eq!(progress.percentage(), 10.0);
+/// assert!(!progress.is_complete());
+/// ```
 #[derive(Debug, Clone)]
 pub struct MigrationProgress {
     /// Total nodes to migrate.
@@ -128,6 +159,34 @@ impl MigrationProgress {
 }
 
 /// A plan for migrating data between shards.
+///
+/// # The Spark
+/// A migration is not a single atomic action; it's a state machine. The
+/// `MigrationPlan` captures the intent (who, what, where) and orchestrates
+/// the safe transition of data between a source and a target.
+///
+/// # The Details
+/// Every plan executes a careful choreography: Dual Write -> Background Copy ->
+/// Verify -> Cutover. This ensures zero downtime and strong consistency during
+/// the cluster rebalancing phase.
+///
+/// # Examples
+/// ```
+/// use aletheiadb::storage::sharding::types::ShardId;
+/// use aletheiadb::storage::sharding::rebalance::{MigrationPlan, MigrationReason, MigrationState};
+///
+/// let plan = MigrationPlan::new(
+///     1,
+///     ShardId::new(0).unwrap(),
+///     ShardId::new(1).unwrap(),
+///     vec!["User".to_string()],
+///     1000,
+///     5000,
+///     MigrationReason::Imbalance,
+/// );
+///
+/// assert_eq!(plan.state, MigrationState::Planned);
+/// ```
 #[derive(Debug, Clone)]
 pub struct MigrationPlan {
     /// Unique identifier for this migration.
@@ -370,6 +429,27 @@ impl fmt::Display for RebalanceError {
 impl std::error::Error for RebalanceError {}
 
 /// Manager for coordinating shard rebalancing operations.
+///
+/// # The Spark
+/// A cluster with unbalanced shards leads to hot spots and tail latency degradation.
+/// The `RebalanceManager` acts as the traffic controller, detecting these hot spots
+/// and scheduling migrations to return the cluster to equilibrium.
+///
+/// # The Details
+/// It maintains queues of planned, active, and completed migrations, enforcing
+/// concurrency limits (`max_concurrent_migrations`) to prevent rebalancing storms
+/// from degrading regular query performance.
+///
+/// # Examples
+/// ```
+/// use aletheiadb::storage::sharding::config::RebalanceConfig;
+/// use aletheiadb::storage::sharding::rebalance::RebalanceManager;
+///
+/// let config = RebalanceConfig::new().with_imbalance_threshold(0.15); // 15% deviation
+/// let mut manager = RebalanceManager::new(config);
+///
+/// assert_eq!(manager.active_count(), 0);
+/// ```
 pub struct RebalanceManager {
     /// Configuration for rebalancing.
     config: RebalanceConfig,
