@@ -1,0 +1,43 @@
+# GitHub Labels Configuration
+# These labels are automatically applied to PRs by Dependabot and CI workflows.
+# Run the "Setup Labels" workflow to create any missing labels.
+
+- name: "dependencies"
+  color: "0075ca"
+  description: "Pull requests that update a dependency file"
+
+- name: "ci"
+  color: "e4e669"
+  description: "Changes to CI/CD workflows and configuration"
+
+- name: "auto-merge-candidate"
+  color: "0e8a16"
+  description: "Safe dependency updates eligible for automatic merging"
+
+- name: "bug"
+  color: "d73a4a"
+  description: "Something isn't working"
+
+- name: "documentation"
+  color: "0075ca"
+  description: "Improvements or additions to documentation"
+
+- name: "enhancement"
+  color: "a2eeef"
+  description: "New feature or request"
+
+- name: "good first issue"
+  color: "7057ff"
+  description: "Good for newcomers"
+
+- name: "help wanted"
+  color: "008672"
+  description: "Extra attention is needed"
+
+- name: "performance"
+  color: "e4b9a3"
+  description: "Performance improvements or benchmarks"
+
+- name: "security"
+  color: "ee0701"
+  description: "Security-related changes or fixes"
