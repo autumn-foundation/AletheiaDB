@@ -108,9 +108,10 @@ pub fn extract_vector_clauses(sql: &str) -> Result<ExtractedVector, SqlError> {
 ///
 /// Replaces the KNN function call with the label as a normal table reference.
 fn extract_knn_function(sql: &mut String, ops: &mut Vec<VectorOp>) -> Result<(), SqlError> {
-    // Case-insensitive search for KNN( outside string literals
-    let upper = sql.to_uppercase();
-    let Some(knn_pos) = find_outside_strings(&upper, "KNN(") else {
+    // Case-insensitive search for KNN( outside string literals.
+    // Use the original string directly; find_outside_strings handles case-insensitive
+    // matching and returns byte offsets valid for the original string.
+    let Some(knn_pos) = find_outside_strings(sql, "KNN(") else {
         return Ok(());
     };
 
@@ -156,8 +157,9 @@ fn extract_knn_function(sql: &mut String, ops: &mut Vec<VectorOp>) -> Result<(),
 ///
 /// Replaces the SIMILAR_TO call with `1=1` so sqlparser can still parse the WHERE.
 fn extract_similar_to(sql: &mut String, ops: &mut Vec<VectorOp>) -> Result<(), SqlError> {
-    let upper = sql.to_uppercase();
-    let Some(st_pos) = find_outside_strings(&upper, "SIMILAR_TO(") else {
+    // Use the original string directly; find_outside_strings handles case-insensitive
+    // matching and returns byte offsets valid for the original string.
+    let Some(st_pos) = find_outside_strings(sql, "SIMILAR_TO(") else {
         return Ok(());
     };
 
@@ -206,8 +208,6 @@ fn extract_similar_to(sql: &mut String, ops: &mut Vec<VectorOp>) -> Result<(), S
 /// LIMIT/OFFSET for sqlparser to handle.
 fn extract_order_by_distance(sql: &mut String, ops: &mut Vec<VectorOp>) -> Result<(), SqlError> {
     // Look for `<=>` or `<->` outside string literals
-    let upper = sql.to_uppercase();
-
     let (op_pos, op_len, metric) = if let Some(pos) = find_outside_strings(sql, "<=>") {
         (pos, 3, DistanceMetric::Cosine)
     } else if let Some(pos) = find_outside_strings(sql, "<->") {
@@ -218,8 +218,9 @@ fn extract_order_by_distance(sql: &mut String, ops: &mut Vec<VectorOp>) -> Resul
 
     // Find the ORDER BY that governs this distance operator.
     // Search backwards from the operator position for "ORDER BY".
-    let before = &upper[..op_pos];
-    let order_by_pos = before.rfind("ORDER BY").ok_or_else(|| {
+    // Use rfind_ascii_ci on the original string to get a byte offset that is
+    // valid for slicing `sql` even when multi-byte characters are present.
+    let order_by_pos = rfind_ascii_ci(&sql[..op_pos], "ORDER BY").ok_or_else(|| {
         SqlError::ParseError(
             "Distance operator <=> / <-> must appear in an ORDER BY clause".to_string(),
         )
@@ -256,8 +257,9 @@ fn extract_order_by_distance(sql: &mut String, ops: &mut Vec<VectorOp>) -> Resul
 /// If the WHERE clause is now just `WHERE TRUE` (or `WHERE TRUE AND ...` was reduced),
 /// remove the standalone `WHERE TRUE` to avoid confusing the SQL converter.
 fn cleanup_where_true(sql: &mut String) {
-    let upper = sql.to_uppercase();
-    let Some(where_pos) = find_outside_strings(&upper, "WHERE") else {
+    // Use the original string directly; find_outside_strings handles case-insensitive
+    // matching and returns byte offsets valid for the original string.
+    let Some(where_pos) = find_outside_strings(sql, "WHERE") else {
         return;
     };
 
@@ -294,6 +296,31 @@ fn cleanup_where_true(sql: &mut String) {
         let after_and_ws = sql[and_end..].len() - sql[and_end..].trim_start().len();
         sql.replace_range(true_pos..and_end + after_and_ws, "");
     }
+}
+
+/// Find the last byte position of an ASCII `needle` in `haystack` using
+/// ASCII-case-insensitive comparison.
+///
+/// The returned offset is a valid byte index into `haystack` regardless of
+/// any multi-byte Unicode characters in the haystack, because the search only
+/// considers char-boundary-aligned positions and `needle` is pure ASCII.
+fn rfind_ascii_ci(haystack: &str, needle: &str) -> Option<usize> {
+    debug_assert!(needle.is_ascii(), "rfind_ascii_ci: needle must be ASCII");
+    let n = needle.len();
+    if n == 0 {
+        return Some(haystack.len());
+    }
+    let haystack_bytes = haystack.as_bytes();
+    let needle_bytes = needle.as_bytes();
+    let mut last = None;
+    for (byte_pos, _) in haystack.char_indices() {
+        if byte_pos + n <= haystack_bytes.len()
+            && haystack_bytes[byte_pos..byte_pos + n].eq_ignore_ascii_case(needle_bytes)
+        {
+            last = Some(byte_pos);
+        }
+    }
+    last
 }
 
 /// Find a substring outside of single-quoted string literals.
