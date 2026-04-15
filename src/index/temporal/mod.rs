@@ -225,14 +225,20 @@ impl EntityTimeline {
             .partition_point(|e| (e.start, e.metadata_idx) < new_key);
         self.versions.insert(idx, entry);
 
-        // Rebuild position map after insertion (positions shifted)
-        self.rebuild_position_map();
+        // Incrementally update the position map: only entries at positions >= idx were shifted.
+        // This avoids a full O(N) clear+rebuild; instead we update only the displaced entries.
+        for pos in (idx + 1)..self.versions.len() {
+            self.metadata_to_position
+                .insert(self.versions[pos].metadata_idx, pos);
+        }
+        self.metadata_to_position.insert(metadata_idx, idx);
     }
 
-    /// Rebuild the metadata_to_position HashMap after operations that shift positions.
+    /// Rebuild the metadata_to_position HashMap after bulk operations that reorder entries.
     ///
-    /// This is called after insertions that aren't at the end, which are rare
-    /// (most inserts are chronological and append to the end).
+    /// Called by `insert_batch()` after sort + dedup, when the full position mapping
+    /// must be reconstructed. For single retroactive insertions, use the incremental
+    /// position update instead to avoid the O(N) clear+rebuild cost.
     fn rebuild_position_map(&mut self) {
         self.metadata_to_position.clear();
         for (pos, entry) in self.versions.iter().enumerate() {
@@ -504,6 +510,10 @@ struct EntityTimelines {
     /// Consolidated version metadata storage.
     /// Both valid and tx timelines reference this via `TimelineVersionMetadataIndex`.
     version_metadata: Vec<TimelineVersionMetadata>,
+    /// O(1) reverse lookup: VersionId → metadata index.
+    /// Mirrors `version_metadata` so that `find_metadata_index` avoids O(N) linear scans,
+    /// which would make batch insertion O(M × N) for M incoming versions and N existing ones.
+    version_id_to_idx: std::collections::HashMap<VersionId, TimelineVersionMetadataIndex>,
     /// Valid-time timeline index.
     valid: EntityTimeline,
     /// Transaction-time timeline index.
@@ -548,8 +558,10 @@ impl EntityTimelines {
             }
             .into());
         }
+        let idx = index as TimelineVersionMetadataIndex;
+        self.version_id_to_idx.insert(metadata.version_id(), idx);
         self.version_metadata.push(metadata);
-        Ok(index as TimelineVersionMetadataIndex)
+        Ok(idx)
     }
 
     /// Resolve a metadata index to a `VersionId`.
@@ -592,12 +604,10 @@ impl EntityTimelines {
     /// Find the metadata index for a given VersionId.
     ///
     /// Returns `None` if the VersionId is not found in this entity's metadata.
+    /// O(1) lookup via the reverse-index map maintained by `add_version_metadata`.
     #[inline]
     fn find_metadata_index(&self, version_id: VersionId) -> Option<TimelineVersionMetadataIndex> {
-        self.version_metadata
-            .iter()
-            .position(|m| m.version_id() == version_id)
-            .map(|idx| idx as TimelineVersionMetadataIndex)
+        self.version_id_to_idx.get(&version_id).copied()
     }
 
     /// Update the valid time end timestamp for a version.
@@ -910,6 +920,7 @@ impl TemporalIndexes {
 
         // Pre-allocate capacity for metadata storage
         timelines.version_metadata.reserve(versions.len());
+        timelines.version_id_to_idx.reserve(versions.len());
 
         let mut valid_entries = Vec::with_capacity(versions.len());
         let mut tx_entries = Vec::with_capacity(versions.len());
@@ -1166,17 +1177,16 @@ impl TemporalIndexes {
 
     /// Find node versions visible at a specific bi-temporal point (iterator version).
     ///
-    /// Returns an iterator over VersionIds, allowing zero-allocation access for
-    /// use cases like `.find()`, `.next()`, or `.take(1)`.
+    /// Returns an iterator over matching `VersionId`s. The iterator is backed by an
+    /// eagerly-allocated `Vec` (required by DashMap's guard-based access patterns),
+    /// but exposes an iterator API so callers can use `.next()`, `.take()`, or `.find()`
+    /// without paying the cost of cloning into a second collection.
     ///
-    /// # Performance Benefits (Issue #197)
+    /// # Performance Notes (Issue #197)
     ///
-    /// - First result only: `find_node_version_at_point_iter(...).next()` - minimal allocation
-    /// - Count: `find_node_version_at_point_iter(...).count()` - no VersionId vec allocation
-    /// - Lazy evaluation: Only processes what caller needs
-    ///
-    /// For typical bi-temporal databases where K=1-2, this significantly reduces allocation
-    /// overhead compared to the Vec-based API, especially when only the first result is needed.
+    /// For typical bi-temporal databases where K=1-2, only a small Vec is allocated.
+    /// Prefer this API over the Vec-returning variant when only the first result is needed,
+    /// as no additional collection is required by the caller.
     ///
     /// # Arguments
     ///
@@ -1187,7 +1197,7 @@ impl TemporalIndexes {
     /// # Example
     ///
     /// ```ignore
-    /// // Get first matching version without allocating Vec
+    /// // Get the first matching version
     /// let version = temporal_indexes
     ///     .find_node_version_at_point_iter(node_id, valid_time, tx_time)
     ///     .next();
@@ -1203,17 +1213,16 @@ impl TemporalIndexes {
 
     /// Find edge versions visible at a specific bi-temporal point (iterator version).
     ///
-    /// Returns an iterator over VersionIds, allowing zero-allocation access for
-    /// use cases like `.find()`, `.next()`, or `.take(1)`.
+    /// Returns an iterator over matching `VersionId`s. The iterator is backed by an
+    /// eagerly-allocated `Vec` (required by DashMap's guard-based access patterns),
+    /// but exposes an iterator API so callers can use `.next()`, `.take()`, or `.find()`
+    /// without paying the cost of cloning into a second collection.
     ///
-    /// # Performance Benefits (Issue #197)
+    /// # Performance Notes (Issue #197)
     ///
-    /// - First result only: `find_edge_version_at_point_iter(...).next()` - minimal allocation
-    /// - Count: `find_edge_version_at_point_iter(...).count()` - no VersionId vec allocation
-    /// - Lazy evaluation: Only processes what caller needs
-    ///
-    /// For typical bi-temporal databases where K=1-2, this significantly reduces allocation
-    /// overhead compared to the Vec-based API, especially when only the first result is needed.
+    /// For typical bi-temporal databases where K=1-2, only a small Vec is allocated.
+    /// Prefer this API over the Vec-returning variant when only the first result is needed,
+    /// as no additional collection is required by the caller.
     ///
     /// # Arguments
     ///
