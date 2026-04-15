@@ -1481,7 +1481,10 @@ impl ResultIterator for ProjectIterator {
                     let mut new_props = crate::core::PropertyMapBuilder::new();
                     for prop in &self.properties {
                         if let Some(val) = node.properties.get(prop) {
-                            new_props = new_props.try_insert(prop, val.clone()).unwrap();
+                            new_props = match new_props.try_insert(prop, val.clone()) {
+                                Ok(p) => p,
+                                Err(e) => return Some(Err(e)),
+                            };
                         }
                     }
                     let new_node = crate::core::graph::Node::new(
@@ -2440,6 +2443,46 @@ mod tests {
 
         let res = project_iter.next().unwrap();
         assert!(res.is_err());
+    }
+
+    #[test]
+    fn test_project_iterator_handles_recursion_error_gracefully() {
+        // Create a property value that fails serialized_size()
+        let mut deep_val = PropertyValue::Int(1);
+        for _ in 0..101 {
+            deep_val = PropertyValue::Array(std::sync::Arc::new(vec![deep_val.clone()]));
+        }
+
+        // We can create a Node by bypassing try_insert. Since PropertyMap uses Arc<HashMap...>, let's just make one.
+        let mut map = std::collections::HashMap::default();
+        let key = crate::core::interning::GLOBAL_INTERNER
+            .intern("deep")
+            .unwrap();
+        map.insert(key, deep_val);
+
+        let props = crate::core::PropertyMap {
+            inner: std::sync::Arc::new(map),
+            cached_size: 100, // Lie about size to avoid computing it
+        };
+
+        let node = Node::new(
+            NodeId::new(1).unwrap(),
+            crate::core::interning::GLOBAL_INTERNER
+                .intern("Test")
+                .unwrap(),
+            props,
+            crate::core::id::VersionId::new(1).unwrap(),
+        );
+
+        let row = QueryRow::from_entity(EntityResult::Node(node));
+        let mock_iter = MockIterator::from_results(vec![Ok(row)]);
+        let mut project_iter = ProjectIterator::new(Box::new(mock_iter), vec!["deep".to_string()]);
+
+        let res = project_iter.next().unwrap();
+        assert!(
+            res.is_err(),
+            "ProjectIterator should gracefully handle property insertion errors"
+        );
     }
 
     #[test]
