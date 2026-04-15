@@ -449,3 +449,97 @@ mod tests {
         assert!(result.is_none()); // Sort requires all elements to sort them before limiting
     }
 }
+
+#[cfg(test)]
+mod sentry_tests {
+    use super::*;
+    use crate::core::NodeId;
+    use crate::query::plan::{BinaryOp, ScanOp};
+
+    fn test_stats() -> Statistics {
+        Statistics::default()
+    }
+
+    #[test]
+    fn test_pushdown_binary_partial_change() {
+        let rule = LimitPushdown;
+        let stats = test_stats();
+
+        // Left: Limit(10, Limit(20, Scan)) -> Limit(10, Scan) [changed = true]
+        let left = LogicalOp::unary(
+            UnaryOp::Limit(10),
+            LogicalOp::unary(
+                UnaryOp::Limit(20),
+                LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(1).unwrap()])),
+            ),
+        );
+
+        // Right: Scan -> Scan [changed = false]
+        let right = LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(2).unwrap()]));
+
+        let plan = LogicalPlan::new(LogicalOp::binary(BinaryOp::Union, left, right));
+
+        let result = rule.apply(&plan, &stats).unwrap();
+        let expected_plan = LogicalPlan::new(LogicalOp::binary(
+            BinaryOp::Union,
+            LogicalOp::unary(
+                UnaryOp::Limit(10),
+                LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(1).unwrap()])),
+            ),
+            LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(2).unwrap()])),
+        ));
+
+        assert_eq!(
+            result,
+            Some(expected_plan),
+            "Partial optimization in left branch should propagate with exact limit structure"
+        );
+    }
+
+    #[test]
+    fn test_pushdown_limit_neq_child_limit() {
+        let rule = LimitPushdown;
+
+        let op = LogicalOp::unary(
+            UnaryOp::Limit(10),
+            LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(1).unwrap()])),
+        );
+        let (new_op, changed) = rule.push_down(&op, Some(5)).unwrap();
+
+        assert!(changed, "Expected limit to shrink from 10 to 5");
+        if let LogicalOp::Unary {
+            op: UnaryOp::Limit(n),
+            ..
+        } = new_op
+        {
+            assert_eq!(n, 5);
+        } else {
+            panic!("Expected limit");
+        }
+    }
+
+    #[test]
+    fn test_pushdown_vector_rank_neq() {
+        let rule = LimitPushdown;
+        // Vector rank with top_k = None, pass down limit = Some(5)
+        let op = LogicalOp::unary(
+            UnaryOp::VectorRank {
+                embedding: vec![0.1f32].into(),
+                top_k: None,
+                property_key: None,
+            },
+            LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(1).unwrap()])),
+        );
+        let (new_op, changed) = rule.push_down(&op, Some(5)).unwrap();
+        assert!(changed, "Vector rank should apply new top_k");
+        if let LogicalOp::Unary {
+            op: UnaryOp::VectorRank { top_k, .. },
+            ..
+        } = new_op
+        {
+            assert_eq!(top_k, Some(5));
+        } else {
+            panic!("Expected VectorRank");
+        }
+    }
+}
