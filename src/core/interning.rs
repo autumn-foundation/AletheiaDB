@@ -224,6 +224,8 @@ impl StringInterner {
     ///
     /// - **For read-only access**: Use [`resolve_with`](Self::resolve_with) to avoid Arc cloning.
     /// - **When an owned Arc is needed**: Use this method (`resolve`).
+    ///
+    /// Resolves an interned string to an owned `Arc<str>`.
     #[deprecated(
         since = "0.1.0",
         note = "Use resolve_with() for read-only access; use resolve() only when an owned Arc<str> is strictly required"

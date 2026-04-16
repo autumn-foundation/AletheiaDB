@@ -89,6 +89,12 @@ impl Query {
 pub trait QueryState: private::Sealed {}
 
 mod private {
+    /// Sealed trait pattern to prevent downstream crates from implementing query states.
+    ///
+    /// # Why?
+    /// The query builder relies on a strict, internal state machine (Initial -> Traversing -> Filtered).
+    /// If external users could implement this trait, they could bypass the compile-time safety checks
+    /// and construct invalid queries that panic at runtime.
     pub trait Sealed {}
 }
 
