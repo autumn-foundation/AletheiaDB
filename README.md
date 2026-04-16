@@ -810,16 +810,17 @@ For complex operations involving multiple updates, use explicit transactions.
 ```rust
 use aletheiadb::prelude::*;
 
-// Explicit read transaction
-let result = db.read(|tx| {
-    tx.get_node(alice_id).map(|node| node.label.clone())
-})?;
-
 // Explicit write transaction with multiple operations
-db.write(|tx| {
+let (node1_id, _) = db.write(|tx| -> Result<(NodeId, NodeId)> {
     let node1 = tx.create_node("Event", PropertyMap::new())?;
     let node2 = tx.create_node("Event", PropertyMap::new())?;
-    tx.create_edge(node1, node2, "FOLLOWS", PropertyMap::new())
+    tx.create_edge(node1, node2, "FOLLOWS", PropertyMap::new())?;
+    Ok((node1, node2))
+})?;
+
+// Explicit read transaction
+let _result = db.read(|tx| {
+    tx.get_node(node1_id).map(|node| node.label.clone())
 })?;
 ```
 
@@ -834,7 +835,7 @@ use std::sync::Arc;
 
 // Note: Requires `tokio` dependency in Cargo.toml
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     // Enable in Cargo.toml: features = ["embedding-openai"]
 
     // 1. Create embedding service
