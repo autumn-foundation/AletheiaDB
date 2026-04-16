@@ -1,12 +1,40 @@
 //! Cipher abstraction and implementations for authenticated encryption.
 //!
-//! All ciphers produce output in the wire format: `[nonce][ciphertext][tag]`.
+//! # The Spark
+//! AletheiaDB encrypts data at rest using Authenticated Encryption with Associated Data (AEAD).
+//! This module provides the `Cipher` trait and concrete implementations (`Aes256GcmCipher` and `ChaCha20Poly1305Cipher`)
+//! to secure graph data before writing it to disk.
+//!
+//! # The Details
+//! All ciphers produce output in a strict wire format: `[nonce][ciphertext][tag]`.
+//! The `aad` (Additional Authenticated Data) parameter is used to tie encrypted payloads
+//! to their specific physical locations (like Page IDs), preventing block-swapping attacks.
+//!
+//! # Examples
+//!
+//! ```rust
+//! use aletheiadb::encryption::cipher::{Aes256GcmCipher, Cipher};
+//! use zeroize::Zeroizing;
+//!
+//! let mut key = Zeroizing::new([0u8; 32]);
+//! let cipher = Aes256GcmCipher::new(&key);
+//!
+//! let encrypted = cipher.encrypt(b"secret graph data", b"metadata").unwrap();
+//! let decrypted = cipher.decrypt(&encrypted, b"metadata").unwrap();
+//!
+//! assert_eq!(decrypted, b"secret graph data");
+//! ```
 
 use crate::encryption::EncryptionError;
 use rand::RngCore;
 use zeroize::Zeroizing;
 
 /// AEAD cipher for encrypting/decrypting data at rest.
+///
+/// # Why?
+/// This trait provides a unified abstraction for multiple underlying encryption algorithms
+/// (like AES-GCM and ChaCha20-Poly1305), allowing AletheiaDB to switch implementations
+/// gracefully without altering the rest of the storage pipeline.
 ///
 /// All implementations prepend the nonce and append the auth tag to the output.
 pub trait Cipher: Send + Sync {
@@ -40,6 +68,20 @@ use aes_gcm::aead::Aead;
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce as AesNonce};
 
 /// AES-256-GCM authenticated encryption cipher.
+///
+/// # Why?
+/// This is the default cipher for AletheiaDB. It provides excellent performance
+/// on modern hardware with AES-NI instructions.
+///
+/// # Examples
+/// ```rust
+/// use aletheiadb::encryption::cipher::{Aes256GcmCipher, Cipher};
+/// use zeroize::Zeroizing;
+///
+/// let key = Zeroizing::new([0u8; 32]);
+/// let cipher = Aes256GcmCipher::new(&key);
+/// let encrypted = cipher.encrypt(b"hello", &[]).unwrap();
+/// ```
 ///
 /// Nonce: 12 bytes (96 bits), Tag: 16 bytes (128 bits).
 /// Total overhead: 28 bytes per encrypted payload.
@@ -132,8 +174,21 @@ use chacha20poly1305::Nonce as ChaChaNonce;
 
 /// ChaCha20-Poly1305 authenticated encryption cipher.
 ///
+/// # Why?
+/// Preferred on platforms without AES-NI hardware acceleration, providing better
+/// performance and side-channel resistance in pure software environments.
+///
+/// # Examples
+/// ```rust
+/// use aletheiadb::encryption::cipher::{ChaCha20Poly1305Cipher, Cipher};
+/// use zeroize::Zeroizing;
+///
+/// let key = Zeroizing::new([0u8; 32]);
+/// let cipher = ChaCha20Poly1305Cipher::new(&key);
+/// let encrypted = cipher.encrypt(b"hello", &[]).unwrap();
+/// ```
+///
 /// Nonce: 12 bytes, Tag: 16 bytes. Total overhead: 28 bytes.
-/// Preferred on platforms without AES-NI hardware acceleration.
 pub struct ChaCha20Poly1305Cipher {
     inner: ChaChaInner,
 }
