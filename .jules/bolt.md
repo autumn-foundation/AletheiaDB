@@ -60,3 +60,6 @@
 **[Optimizing BFS Traversal]**
 **Learning:** Using `iterator.chain()` to iterate over neighbors in BFS traversal instead of allocating intermediate arrays reduces heap allocations without compromising performance or logic.
 **Action:** When finding multiple `.collect::<Vec<_>>()` and `.extend()` combinations, use `.chain()` whenever possible to eliminate allocations.
+**[Optimize match query keyword parsing allocations]**
+**Learning:** `find_keyword_outside_strings` originally converted strings to uppercase and collected `Vec<char>` to perform string matching during parse operations. This causes an arbitrary number of heap allocations proportional to the text input size for basic lexing. Slicing raw bytes and using `.eq_ignore_ascii_case()` directly prevents allocation entirely.
+**Action:** When doing text lexing in hot paths like query parsing, use `char_indices().peekable()` alongside slice references `&sql.as_bytes()[start..end]`. Avoid intermediate conversions to collections or `String`.
