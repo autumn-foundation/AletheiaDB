@@ -882,45 +882,60 @@ mod sentry_tests {
     }
 
     #[test]
-    fn test_debug_format_not_empty() {
+    fn test_debug_format_exact() {
         // 🛡️ Sentry Test: Kill mutants replacing `fmt` body with `Ok(Default::default())`.
         let label = GLOBAL_INTERNER.intern("DebugLabel").unwrap();
-        let node = Node::new(
+        let mut props1 = PropertyMapBuilder::new();
+        props1 = props1.insert("test_key", "test_val");
+        let mut props2 = PropertyMapBuilder::new();
+        props2 = props2.insert("test_key", "test_val");
+
+        let tx_id = crate::core::id::TxId::new(123);
+        let timestamp = crate::core::temporal::Timestamp::from(456);
+        let metadata = crate::core::version::VersionMetadata::new(tx_id, timestamp);
+
+        let node = Node::with_metadata(
             NodeId::new(1).unwrap(),
             label,
-            PropertyMapBuilder::new().build(),
+            props1.build(),
             VersionId::new(1).unwrap(),
+            metadata,
         );
 
         let node_debug = format!("{:?}", node);
-        assert!(
-            !node_debug.is_empty(),
-            "Node debug format must not be empty"
+        let expected_node_debug = format!(
+            "Node {{ id: {:?}, label: {:?}, properties: {:?}, current_version: {:?}, metadata: {:?} }}",
+            node.id, "DebugLabel", node.properties, node.current_version, node.metadata
         );
-        // Ok(Default::default()) results in an empty string from format!("{:?}") or similar empty state
-        // We explicitly assert length > 0
-        assert!(
-            node_debug.len() > 10,
-            "Node debug format must contain structured data"
+        assert_eq!(
+            node_debug, expected_node_debug,
+            "Node debug format must exactly match expected structured data"
         );
 
-        let edge = Edge::new(
+        let edge = Edge::with_metadata(
             EdgeId::new(1).unwrap(),
             label,
             NodeId::new(1).unwrap(),
             NodeId::new(2).unwrap(),
-            PropertyMapBuilder::new().build(),
+            props2.build(),
             VersionId::new(1).unwrap(),
+            metadata,
         );
 
         let edge_debug = format!("{:?}", edge);
-        assert!(
-            !edge_debug.is_empty(),
-            "Edge debug format must not be empty"
+        let expected_edge_debug = format!(
+            "Edge {{ id: {:?}, label: {:?}, source: {:?}, target: {:?}, properties: {:?}, current_version: {:?}, metadata: {:?} }}",
+            edge.id,
+            "DebugLabel",
+            edge.source,
+            edge.target,
+            edge.properties,
+            edge.current_version,
+            edge.metadata
         );
-        assert!(
-            edge_debug.len() > 10,
-            "Edge debug format must contain structured data"
+        assert_eq!(
+            edge_debug, expected_edge_debug,
+            "Edge debug format must exactly match expected structured data"
         );
     }
 }
