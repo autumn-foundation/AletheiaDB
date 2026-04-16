@@ -103,3 +103,8 @@
 ## 2025-03-05 - The Danger of Tautological Documentation
 **Confusion:** The instruction to explain *what* and *why* for public functions was misinterpreted as "add a comment to everything", resulting in tautological noise (e.g., `/// Creates a new TraversalIterator.` for `TraversalIterator::new()`).
 **Clarification:** Strict adherence to the `🚫 Never do: Write comments that simply repeat the function name` rule is required. When documenting basic constructor methods, instead of writing "Creates X", always include a `# Why?` section explaining the architectural context (e.g., "Why? This is used for `NodeLookup` physical operations where the query planner has already resolved exact node IDs").
+## 2024-05-18 - Missing API Documentation
+
+**Confusion:** Users did not understand the purpose of certain data structures (e.g. `WalConfig`, `HistoricalConfig`, `VectorIndexConfig`, `AletheiaDBConfig`, `NodeId`, `CurrentEdgesIterator`, `CurrentNodesIterator`, `Chronos`, `PrometheusBackend`). They were undocumented, missing context, or missing basic usage examples.
+
+**Clarification:** Added comprehensive block documentation with `# The Context`, `# The Spark` and `# Examples` to help bridge the understanding gap, using the standard `///` documentation blocks. Also added documentation for `resolve` on `StringInterner` and `between` on `TemporalFilter`.

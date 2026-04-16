@@ -97,6 +97,19 @@ fn sync_metrics_to_prometheus() {
     counter!("aletheiadb_errors_total", "category" => "other").absolute(snapshot.error_other_total);
 }
 
+/// Prometheus metrics backend (Fallback)
+///
+/// This is a stub implementation provided when the `observability-prometheus`
+/// feature is disabled. It ensures that downstream code doesn't fail to compile.
+///
+/// # Examples
+/// ```rust
+/// use aletheiadb::observability::backends::prometheus::{PrometheusBackend, PrometheusConfig};
+///
+/// let config = PrometheusConfig { bind_addr: "127.0.0.1:9090".to_string() };
+/// let backend = PrometheusBackend::new(config);
+/// // Calling `backend.start()` will fail because the feature is disabled.
+/// ```
 #[cfg(not(feature = "observability-prometheus"))]
 pub struct PrometheusBackend;
 

@@ -54,6 +54,12 @@ use crate::storage::version::AnchorConfig;
 #[cfg_attr(feature = "config-toml", derive(Serialize, Deserialize))]
 #[cfg_attr(feature = "config-toml", serde(default))]
 #[non_exhaustive]
+/// Configuration for WAL (Write-Ahead Log) system.
+///
+/// # The Context
+/// The WAL is responsible for ensuring durability in AletheiaDB. This struct
+/// configures the size limits, flush intervals, and sync behaviors of the WAL
+/// to tune the trade-off between performance and durability.
 pub struct WalConfig {
     /// Number of stripes for concurrent appends (must be power of 2).
     /// Higher values improve concurrency but use more memory.
@@ -318,6 +324,12 @@ impl Default for WalConfigBuilder {
 #[cfg_attr(feature = "config-toml", derive(Serialize, Deserialize))]
 #[cfg_attr(feature = "config-toml", serde(default))]
 #[non_exhaustive]
+/// Configuration for Historical Storage subsystem.
+///
+/// # The Context
+/// This controls how AletheiaDB manages old versions of graph entities. It limits
+/// how many versions of a node or edge are retained, and the depth of reconstruction
+/// permitted during temporal queries.
 pub struct HistoricalConfig {
     /// Maximum versions to retain per entity before pruning.
     /// Higher values preserve more history but use more memory.
@@ -612,6 +624,12 @@ impl Default for HistoricalConfigBuilder {
 #[cfg_attr(feature = "config-toml", derive(Serialize, Deserialize))]
 #[cfg_attr(feature = "config-toml", serde(default))]
 #[non_exhaustive]
+/// Configuration for Vector Index subsystem.
+///
+/// # The Context
+/// This determines the resource allocation and performance tuning parameters
+/// for HNSW-based vector indexes, such as memory capacity, cache limits,
+/// and SIMD acceleration paths.
 pub struct VectorIndexConfig {
     /// Maximum value of k for k-NN queries.
     /// Prevents excessive memory usage from large result sets.
@@ -710,6 +728,11 @@ impl Default for VectorIndexConfigBuilder {
 #[cfg_attr(feature = "config-toml", derive(Serialize, Deserialize))]
 #[cfg_attr(feature = "config-toml", serde(default))]
 #[non_exhaustive]
+/// Unified Database Configuration.
+///
+/// # The Context
+/// This is the top-level configuration object for AletheiaDB. It acts as a container
+/// for subsystem-specific configurations (WAL, Historical, Vector Indexes).
 pub struct AletheiaDBConfig {
     /// WAL configuration
     pub wal: WalConfig,

@@ -230,6 +230,27 @@ impl StringInterner {
         since = "0.1.0",
         note = "Use resolve_with() for read-only access; use resolve() only when an owned Arc<str> is strictly required"
     )]
+    /// Resolves an `InternedString` handle back into its original string value.
+    ///
+    /// # The Details
+    /// Because an `InternedString` is just a lightweight `u32` identifier, it doesn't contain
+    /// the string bytes itself. This method looks up the original `Arc<str>` in the global
+    /// string registry.
+    ///
+    /// # Return
+    /// Returns `Some(Arc<str>)` if the string ID exists in the interner, or `None` if it does not.
+    ///
+    /// # Examples
+    /// ```rust
+    /// use aletheiadb::core::interning::StringInterner;
+    ///
+    /// let interner = StringInterner::new();
+    /// let id = interner.intern("hello");
+    ///
+    /// // Retrieve the original string
+    /// let text = interner.resolve(id).unwrap();
+    /// assert_eq!(&*text, "hello");
+    /// ```
     pub fn resolve(&self, id: InternedString) -> Option<Arc<str>> {
         self.id_to_string
             .get(&id)

@@ -49,6 +49,9 @@ macro_rules! impl_edge_iter {
             "\nunnecessarily allocated a new `Vec<EdgeId>` on every call, adding 100-500ns",
             "\noverhead per traversal."
         )]
+        /// Zero-allocation edge iterator.
+        ///
+        /// (Detailed docs are generated automatically above via macro attributes).
         pub struct $name<'a> {
             guard: MergedAdjacencyGuard<'a>,
             index: usize,
@@ -136,6 +139,9 @@ macro_rules! impl_edge_iter_with_label {
             "\n- **O(n) complexity**: Single linear scan regardless of match distribution",
             "\n- **Early termination**: If label doesn't exist, returns empty iterator"
         )]
+        /// Zero-allocation edge iterator.
+        ///
+        /// (Detailed docs are generated automatically above via macro attributes).
         pub struct $name<'a> {
             guard: MergedAdjacencyGuard<'a>,
             index: usize,

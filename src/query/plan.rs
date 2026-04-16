@@ -439,6 +439,22 @@ impl TemporalContext {
         since = "0.1.0",
         note = "Use valid_time_between() or transaction_time_between() instead"
     )]
+    /// Filter nodes or edges whose valid time overlaps with the given `TimeRange`.
+    ///
+    /// # The Details
+    /// Temporal data in AletheiaDB uses a bi-temporal model. This constructor explicitly
+    /// creates a `ValidTime(Overlap(...))` filter for checking if a graph element's valid
+    /// time intersects with the specified time range.
+    ///
+    /// # Examples
+    /// ```rust
+    /// use aletheiadb::query::plan::TemporalFilter;
+    /// use aletheiadb::core::temporal::TimeRange;
+    ///
+    /// let range = TimeRange::new(100, 200).unwrap();
+    /// let filter = TemporalFilter::between(range);
+    /// // The filter can now be applied to queries.
+    /// ```
     pub fn between(range: TimeRange) -> Self {
         Self::valid_time_between(range)
     }
