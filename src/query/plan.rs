@@ -433,6 +433,7 @@ impl TemporalContext {
     /// Create a time range context (backward compatibility - uses valid_time dimension).
     ///
     /// **Deprecated**: Use `valid_time_between()` or `transaction_time_between()` for clarity.
+    /// Sets the temporal context to query data valid between the specified `TimeRange`.
     #[must_use]
     #[deprecated(
         since = "0.1.0",

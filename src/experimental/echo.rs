@@ -194,6 +194,12 @@ impl Resonator for ActivityDensityResonator {
 /// # #[cfg(not(feature = "nova"))]
 /// # fn main() {}
 /// ```
+/// A simulator for testing semantic drift and reinforcement loops.
+///
+/// # Why?
+/// In recommender systems, repeatedly suggesting content similar to a user's
+/// previous interactions creates an echo chamber. This struct simulates that
+/// process over time to measure the degradation of content diversity.
 pub struct EchoChamber<'a> {
     db: &'a AletheiaDB,
     resonator: Box<dyn Resonator>,
@@ -229,6 +235,12 @@ pub struct EchoChamber<'a> {
 #[deprecated(
     note = "EchoChamber requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
 )]
+/// A simulator for testing semantic drift and reinforcement loops.
+///
+/// # Why?
+/// In recommender systems, repeatedly suggesting content similar to a user's
+/// previous interactions creates an echo chamber. This struct simulates that
+/// process over time to measure the degradation of content diversity.
 pub struct EchoChamber<'a> {
     _marker: std::marker::PhantomData<&'a AletheiaDB>,
 }

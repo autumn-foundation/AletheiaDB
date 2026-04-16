@@ -69,6 +69,12 @@ pub enum Clue {
 /// # fn main() {}
 /// ```
 #[derive(Debug, Clone)]
+/// A deductive reasoning task over the graph topology.
+///
+/// # Why?
+/// Sherlock allows for programmatic hypothesis testing on graph structures,
+/// determining if a specific path or subgraph matches a complex logical pattern
+/// (e.g., "Is there a cycle of trust between these 5 accounts?").
 pub struct Mystery {
     /// The sequence of clues to find.
     pub clues: Vec<Clue>,
@@ -81,6 +87,12 @@ pub struct Mystery {
 #[deprecated(
     note = "Mystery requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
 )]
+/// A deductive reasoning task over the graph topology.
+///
+/// # Why?
+/// Sherlock allows for programmatic hypothesis testing on graph structures,
+/// determining if a specific path or subgraph matches a complex logical pattern
+/// (e.g., "Is there a cycle of trust between these 5 accounts?").
 pub struct Mystery {
     _marker: std::marker::PhantomData<Duration>,
 }
@@ -198,6 +210,12 @@ pub struct Deduction {
 /// # #[cfg(not(feature = "nova"))]
 /// # fn main() {}
 /// ```
+/// The deductive reasoning engine for AletheiaDB.
+///
+/// # Why?
+/// This struct orchestrates the evaluation of `Mystery` constraints against
+/// the current state of the database, utilizing a backtracking algorithm
+/// to find subgraphs that satisfy complex topological rules.
 pub struct Sherlock<'a> {
     #[allow(dead_code)]
     db: &'a AletheiaDB,
@@ -208,6 +226,12 @@ pub struct Sherlock<'a> {
 #[deprecated(
     note = "Sherlock requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
 )]
+/// The deductive reasoning engine for AletheiaDB.
+///
+/// # Why?
+/// This struct orchestrates the evaluation of `Mystery` constraints against
+/// the current state of the database, utilizing a backtracking algorithm
+/// to find subgraphs that satisfy complex topological rules.
 pub struct Sherlock<'a> {
     _marker: std::marker::PhantomData<&'a AletheiaDB>,
 }

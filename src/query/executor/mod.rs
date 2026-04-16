@@ -400,7 +400,7 @@ impl QueryExecutor {
         // 1. Validate that property_key matches the indexed property
         let indexed_property = self.current.get_indexed_property_name().ok_or_else(|| {
             crate::core::error::Error::Query(crate::core::error::QueryError::ExecutionError {
-                message: "No vector index is enabled. Call enable_vector_index() first."
+                message: "No vector index is enabled. Call db.vector_index(\"...\").hnsw(...).enable() first."
                     .to_string(),
             })
         })?;
