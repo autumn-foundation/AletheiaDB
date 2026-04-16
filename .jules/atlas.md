@@ -84,3 +84,6 @@
 **Blueprint:** Refactored into `src/core/property/` directory.
 1. Extracted tests to `src/core/property/tests.rs` (2500+ lines).
 2. Left `mod.rs` with the core data definitions and implementation, significantly reducing module size and improving navigability.
+## 2026-06-21 - Splitting Temporal Index Blob
+**Tangle:** `src/index/temporal.rs` was over 4000 lines long, a "Blob" module holding both core temporal indexing logic and over 2800 lines of tests. It made navigation and understanding the core operations difficult.
+**Blueprint:** Refactored into a `src/index/temporal/` module. Kept the core data definitions and implementation in `mod.rs` (reduced to ~1300 lines) and moved all tests to `tests.rs` (~2800 lines), maintaining the `#[cfg(test)]` block functionality but with better physical separation.
