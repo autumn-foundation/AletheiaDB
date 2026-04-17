@@ -749,7 +749,6 @@ impl CheckpointManager {
         &self,
         snapshot: &crate::storage::snapshot::HistoricalStorageSnapshot,
     ) -> Result<TemporalIndexData> {
-        use crate::core::property::PropertyMapBuilder;
         use crate::storage::index_persistence::formats::{
             EdgeAnchorEntry, EdgeVersionEntry, NodeAnchorEntry, NodeVersionEntry,
             PersistedVersionType,
@@ -784,11 +783,8 @@ impl CheckpointManager {
                 }
                 VersionData::Delta { delta } => {
                     // Convert delta to PropertyMap for persistence
-                    let mut builder = PropertyMapBuilder::new();
-                    for (key, value) in &delta.changed {
-                        builder = builder.insert_by_key(*key, value.clone());
-                    }
-                    let changed_props = builder.build();
+                    let changed_props: crate::core::property::PropertyMap =
+                        delta.changed.iter().map(|(k, v)| (*k, v.clone())).collect();
                     let removed_keys: Vec<u32> = delta
                         .removed
                         .iter()
@@ -856,11 +852,8 @@ impl CheckpointManager {
                 }
                 VersionData::Delta { delta } => {
                     // Convert delta to PropertyMap for persistence
-                    let mut builder = PropertyMapBuilder::new();
-                    for (key, value) in &delta.changed {
-                        builder = builder.insert_by_key(*key, value.clone());
-                    }
-                    let changed_props = builder.build();
+                    let changed_props: crate::core::property::PropertyMap =
+                        delta.changed.iter().map(|(k, v)| (*k, v.clone())).collect();
                     let removed_keys: Vec<u32> = delta
                         .removed
                         .iter()

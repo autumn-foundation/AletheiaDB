@@ -60,3 +60,6 @@
 **[Optimizing BFS Traversal]**
 **Learning:** Using `iterator.chain()` to iterate over neighbors in BFS traversal instead of allocating intermediate arrays reduces heap allocations without compromising performance or logic.
 **Action:** When finding multiple `.collect::<Vec<_>>()` and `.extend()` combinations, use `.chain()` whenever possible to eliminate allocations.
+**[Optimize temporal checkpoint PropertyMap pre-allocation]**
+**Learning:** In `extract_temporal_data_from_snapshot`, manually creating a `PropertyMapBuilder` and iterating to insert items incurs unnecessary intermediate HashMap allocations. `PropertyMap` implements `FromIterator<(PropertyKey, PropertyValue)>`, which correctly utilizes `.size_hint()` to pre-allocate the underlying map capacity exactly once.
+**Action:** Use `delta.changed.iter().map(|(k, v)| (*k, v.clone())).collect::<PropertyMap>()` instead of a manual `PropertyMapBuilder` loop when reconstructing a property map from a delta map.
