@@ -36,10 +36,11 @@ Currently, AletheiaDB provides "read-your-writes" for Nodes (finding buffered no
 ### Functional Requirements
 
 1.  **Buffer Traversal:**
-    - The edge traversal methods MUST combine results from both the committed state AND the transaction's active write buffer.
+    - The edge traversal methods (`get_outgoing_edges`, `get_incoming_edges`, `get_outgoing_edges_with_label`) MUST combine results from both the committed state AND the transaction's active write buffer.
 2.  **State Consolidation:**
     - If an edge exists in storage but was marked as deleted in the buffer, it MUST NOT be returned in the traversal.
     - If a new edge was added in the buffer, it MUST be included in the traversal.
+    - If an edge is created and then deleted within the same transaction, it MUST NOT be returned in the traversal.
 3.  **Cascade Delete Fix:**
     - The cascading delete operation MUST correctly identify and delete all edges connected to the target node, including edges created within the same active transaction.
 
