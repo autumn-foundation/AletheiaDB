@@ -744,7 +744,7 @@ impl Parser {
     fn parse_property_map(&mut self) -> Result<PropertyMap, ParseError> {
         self.expect(&Token::LeftBrace)?;
 
-        let mut props = Vec::new();
+        let mut props = Vec::with_capacity(8); // ⚡ Bolt Optimization: Most property maps are small, pre-allocating avoids small reallocations
 
         if !self.check(&Token::RightBrace) {
             loop {
@@ -1049,7 +1049,7 @@ impl Parser {
     fn parse_in_predicate(&mut self, expr: Expression) -> Result<PredicateExpr, ParseError> {
         self.advance();
         self.expect(&Token::LeftBracket)?;
-        let mut values = Vec::new();
+        let mut values = Vec::with_capacity(4); // ⚡ Bolt Optimization: Most IN predicates have few values
         if !self.check(&Token::RightBracket) {
             loop {
                 values.push(self.parse_property_value()?);

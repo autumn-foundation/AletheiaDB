@@ -405,7 +405,8 @@ impl QueryResult {
     #[must_use]
     pub fn new() -> Self {
         QueryResult {
-            nodes: Vec::new(),
+            // ⚡ Bolt Optimization: Most queries return results, start with small capacity
+            nodes: Vec::with_capacity(16),
             properties: None,
             scores: None,
             paths: None,
