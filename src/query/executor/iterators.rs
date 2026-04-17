@@ -154,6 +154,10 @@ pub struct NodeScanIterator {
 
 impl NodeScanIterator {
     /// Create a new NodeScanIterator.
+    ///
+    /// # Why?
+    /// This is used to implement a full table scan. The query planner relies on this
+    /// when no indexes are available to filter the dataset upfront.
     pub fn new(label: Option<String>, current: Arc<CurrentStorage>) -> Self {
         NodeScanIterator {
             label,
@@ -257,6 +261,10 @@ pub struct VectorResultIterator {
 
 impl VectorResultIterator {
     /// Create a new VectorResultIterator.
+    ///
+    /// # Why?
+    /// Used by `HnswSearch` physical operations to stream top-k vector similarity results
+    /// back to the pipeline, combining scores with the materialized nodes.
     pub fn new(results: Vec<(NodeId, f32)>, current: Arc<CurrentStorage>) -> Self {
         VectorResultIterator {
             results: results.into_iter(),
@@ -339,6 +347,10 @@ pub struct TemporalNodeIterator {
 
 impl TemporalNodeIterator {
     /// Create a new TemporalNodeIterator.
+    ///
+    /// # Why?
+    /// Used for retrieving specific node versions given their ID and a temporal context.
+    /// This grabs a lock per node, allowing concurrent graph reads for smaller batch sizes.
     pub fn new(
         node_ids: Vec<NodeId>,
         valid_time: Timestamp,
