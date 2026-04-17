@@ -811,6 +811,7 @@ For complex operations involving multiple updates, use explicit transactions.
 use aletheiadb::prelude::*;
 
 // Explicit write transaction with multiple operations
+let db = AletheiaDB::new().unwrap();
 let (node1_id, _) = db.write(|tx| -> Result<(NodeId, NodeId)> {
     let node1 = tx.create_node("Event", PropertyMap::new())?;
     let node2 = tx.create_node("Event", PropertyMap::new())?;
