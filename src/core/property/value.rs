@@ -1063,3 +1063,147 @@ impl From<SparseVec> for PropertyValue {
         PropertyValue::SparseVector(Arc::new(sv))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::vector::SparseVec;
+    use std::sync::Arc;
+
+    #[test]
+    fn test_property_value_equality() {
+        // Null
+        assert_eq!(PropertyValue::Null, PropertyValue::Null);
+
+        // Bool
+        assert_eq!(PropertyValue::Bool(true), PropertyValue::Bool(true));
+        assert_ne!(PropertyValue::Bool(true), PropertyValue::Bool(false));
+
+        // Int
+        assert_eq!(PropertyValue::Int(42), PropertyValue::Int(42));
+        assert_ne!(PropertyValue::Int(42), PropertyValue::Int(43));
+
+        // Float
+        assert_eq!(PropertyValue::Float(3.0), PropertyValue::Float(3.0));
+        assert_ne!(PropertyValue::Float(3.0), PropertyValue::Float(2.0));
+
+        // String
+        let s1: Arc<str> = Arc::from("hello");
+        let s2: Arc<str> = Arc::from("hello");
+        let s3: Arc<str> = Arc::from("world");
+
+        assert_eq!(
+            PropertyValue::String(s1.clone()),
+            PropertyValue::String(s1.clone())
+        ); // ptr_eq
+        assert_eq!(
+            PropertyValue::String(s1.clone()),
+            PropertyValue::String(s2.clone())
+        ); // a == b
+        assert_ne!(
+            PropertyValue::String(s1.clone()),
+            PropertyValue::String(s3.clone())
+        );
+
+        // Bytes
+        let b1: Arc<[u8]> = Arc::from(vec![1, 2, 3]);
+        let b2: Arc<[u8]> = Arc::from(vec![1, 2, 3]);
+        let b3: Arc<[u8]> = Arc::from(vec![4, 5, 6]);
+
+        assert_eq!(
+            PropertyValue::Bytes(b1.clone()),
+            PropertyValue::Bytes(b1.clone())
+        );
+        assert_eq!(
+            PropertyValue::Bytes(b1.clone()),
+            PropertyValue::Bytes(b2.clone())
+        );
+        assert_ne!(
+            PropertyValue::Bytes(b1.clone()),
+            PropertyValue::Bytes(b3.clone())
+        );
+
+        // Array
+        let a1: Arc<Vec<PropertyValue>> = Arc::new(vec![PropertyValue::Int(1)]);
+        let a2: Arc<Vec<PropertyValue>> = Arc::new(vec![PropertyValue::Int(1)]);
+        let a3: Arc<Vec<PropertyValue>> = Arc::new(vec![PropertyValue::Int(2)]);
+
+        assert_eq!(
+            PropertyValue::Array(a1.clone()),
+            PropertyValue::Array(a1.clone())
+        );
+        assert_eq!(
+            PropertyValue::Array(a1.clone()),
+            PropertyValue::Array(a2.clone())
+        );
+        assert_ne!(
+            PropertyValue::Array(a1.clone()),
+            PropertyValue::Array(a3.clone())
+        );
+
+        // Vector
+        let v1: Arc<[f32]> = Arc::from(vec![1.0, 2.0]);
+        let v2: Arc<[f32]> = Arc::from(vec![1.0, 2.0]);
+        let v3: Arc<[f32]> = Arc::from(vec![3.0, 4.0]);
+
+        assert_eq!(
+            PropertyValue::Vector(v1.clone()),
+            PropertyValue::Vector(v1.clone())
+        );
+        assert_eq!(
+            PropertyValue::Vector(v1.clone()),
+            PropertyValue::Vector(v2.clone())
+        );
+        assert_ne!(
+            PropertyValue::Vector(v1.clone()),
+            PropertyValue::Vector(v3.clone())
+        );
+
+        // SparseVector
+        let sv1: Arc<SparseVec> = Arc::new(SparseVec::new(vec![0], vec![1.0], 1).unwrap());
+        let sv2: Arc<SparseVec> = Arc::new(SparseVec::new(vec![0], vec![1.0], 1).unwrap());
+        let sv3: Arc<SparseVec> = Arc::new(SparseVec::new(vec![1], vec![2.0], 2).unwrap());
+
+        assert_eq!(
+            PropertyValue::SparseVector(sv1.clone()),
+            PropertyValue::SparseVector(sv1.clone())
+        );
+        assert_eq!(
+            PropertyValue::SparseVector(sv1.clone()),
+            PropertyValue::SparseVector(sv2.clone())
+        );
+        assert_ne!(
+            PropertyValue::SparseVector(sv1.clone()),
+            PropertyValue::SparseVector(sv3.clone())
+        );
+
+        // Different variants (_ => false fallback)
+        assert_ne!(PropertyValue::Null, PropertyValue::Bool(true));
+        assert_ne!(PropertyValue::Bool(true), PropertyValue::Int(42));
+        assert_ne!(PropertyValue::Int(42), PropertyValue::Float(3.0));
+        assert_ne!(
+            PropertyValue::Float(3.0),
+            PropertyValue::String(s1.clone())
+        );
+        assert_ne!(
+            PropertyValue::String(s1.clone()),
+            PropertyValue::Bytes(b1.clone())
+        );
+        assert_ne!(
+            PropertyValue::Bytes(b1.clone()),
+            PropertyValue::Array(a1.clone())
+        );
+        assert_ne!(
+            PropertyValue::Array(a1.clone()),
+            PropertyValue::Vector(v1.clone())
+        );
+        assert_ne!(
+            PropertyValue::Vector(v1.clone()),
+            PropertyValue::SparseVector(sv1.clone())
+        );
+        assert_ne!(
+            PropertyValue::SparseVector(sv1.clone()),
+            PropertyValue::Null
+        );
+    }
+}
