@@ -885,10 +885,9 @@ mod sentry_tests {
     fn test_debug_format_exact() {
         // 🛡️ Sentry Test: Kill mutants replacing `fmt` body with `Ok(Default::default())`.
         let label = GLOBAL_INTERNER.intern("DebugLabel").unwrap();
-        let mut props1 = PropertyMapBuilder::new();
-        props1 = props1.insert("test_key", "test_val");
-        let mut props2 = PropertyMapBuilder::new();
-        props2 = props2.insert("test_key", "test_val");
+        let props = PropertyMapBuilder::new()
+            .insert("test_key", "test_val")
+            .build();
 
         let tx_id = crate::core::id::TxId::new(123);
         let timestamp = crate::core::temporal::Timestamp::from(456);
@@ -897,7 +896,7 @@ mod sentry_tests {
         let node = Node::with_metadata(
             NodeId::new(1).unwrap(),
             label,
-            props1.build(),
+            props.clone(),
             VersionId::new(1).unwrap(),
             metadata,
         );
@@ -917,7 +916,7 @@ mod sentry_tests {
             label,
             NodeId::new(1).unwrap(),
             NodeId::new(2).unwrap(),
-            props2.build(),
+            props,
             VersionId::new(1).unwrap(),
             metadata,
         );
