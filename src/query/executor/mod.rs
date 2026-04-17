@@ -1522,4 +1522,5 @@ mod tests {
         // Embedding should be filtered out
         assert!(node.properties.get("embedding").is_none());
     }
+
 }
