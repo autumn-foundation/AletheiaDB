@@ -215,6 +215,12 @@ pub mod tapestry;
 
 #[cfg(feature = "nova")]
 /// Gestalt: Semantic Subgraph Matching Engine.
+#[cfg(feature = "nova")]
+/// Geiger: Semantic Radiation Detector.
+pub mod geiger;
+
+#[cfg(feature = "nova")]
+/// Gestalt: Semantic Subgraph Matching Engine.
 pub mod gestalt;
 
 #[cfg(feature = "nova")]
