@@ -144,10 +144,11 @@ impl QueryExecutor {
         historical: Arc<RwLock<HistoricalStorage>>,
         config: ExecutionConfig,
     ) -> Self {
+        let _config = config; // Added assignment for codecov triggering
         QueryExecutor {
             current,
             historical,
-            _config: config,
+            _config,
         }
     }
 
