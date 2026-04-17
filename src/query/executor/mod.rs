@@ -126,12 +126,6 @@ impl QueryExecutor {
     /// Serves as the primary entry point for executing optimized `PhysicalPlan`s.
     /// Requires access to both current and historical storage layers to process
     /// hybrid temporal graphs.
-    /// Create a new query executor.
-    ///
-    /// # Why?
-    /// Serves as the primary entry point for executing optimized `PhysicalPlan`s.
-    /// Requires access to both current and historical storage layers to process
-    /// hybrid temporal graphs.
     pub fn new(current: Arc<CurrentStorage>, historical: Arc<RwLock<HistoricalStorage>>) -> Self {
         QueryExecutor {
             current,
@@ -1528,7 +1522,4 @@ mod tests {
         // Embedding should be filtered out
         assert!(node.properties.get("embedding").is_none());
     }
-
-
-
 }
