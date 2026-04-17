@@ -87,3 +87,6 @@
 ## 2026-06-21 - Splitting Temporal Index Blob
 **Tangle:** `src/index/temporal.rs` was over 4000 lines long, a "Blob" module holding both core temporal indexing logic and over 2800 lines of tests. It made navigation and understanding the core operations difficult.
 **Blueprint:** Refactored into a `src/index/temporal/` module. Kept the core data definitions and implementation in `mod.rs` (reduced to ~1300 lines) and moved all tests to `tests.rs` (~2800 lines), maintaining the `#[cfg(test)]` block functionality but with better physical separation.
+**Break Circular Dependency between DB and Query**
+**Tangle:** A circular dependency existed between the `db` and `query` modules. The `db` module imports `query` for constructing query plans (`QueryBuilder`, `QueryExecutor`), while `query` imported `db` inside its `#[cfg(test)]` modules (`query/hybrid.rs` and `query/semantic_pathfinding.rs`) to instantiate a test `AletheiaDB`. Although valid in rust's test compilation model, this created a logical module cycle.
+**Blueprint:** Extracted the tests from `query/hybrid.rs` and `query/semantic_pathfinding.rs` and moved them to the integration `tests/` folder as `tests/hybrid_query_unit.rs` and `tests/semantic_pathfinding_unit.rs`. This completely removes the `AletheiaDB` dependency from the `query` module tree, strictly enforcing acyclic module boundaries.
