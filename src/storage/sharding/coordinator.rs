@@ -1263,6 +1263,26 @@ mod tests {
     }
 
     #[test]
+    fn test_coordinator_coverage_mark_prepared_and_committed() {
+        // This test ensures the `let _ = transaction.mark_prepared()` and `let _ = transaction.mark_committed()`
+        // lines are explicitly hit by tests, which addresses the Codecov failure.
+        let coordinator = ShardCoordinator::new(test_config());
+        let shards = vec![ShardId::new(0).unwrap(), ShardId::new(1).unwrap()];
+
+        let tx_id = coordinator.begin_distributed_transaction(shards).unwrap();
+
+        // 1. Coverage for line 612 (mark_prepared)
+        // Since we mock connections/network interactions as successful in the base mock setup for tests
+        // calling prepare directly will exercise the successful prepared path and hit `let _ = transaction.mark_prepared();`
+        assert!(coordinator.prepare_distributed_transaction(tx_id).is_ok());
+
+        // 2. Coverage for line 794 (mark_committed)
+        // Calling commit on a prepared transaction should exercise the successful commit path
+        // and hit `let _ = transaction.mark_committed();`
+        assert!(coordinator.commit_distributed_transaction(tx_id).is_ok());
+    }
+
+    #[test]
     fn test_coordinator_prepare_commit_flow() {
         let coordinator = ShardCoordinator::new(test_config());
         let shards = vec![ShardId::new(0).unwrap(), ShardId::new(1).unwrap()];
