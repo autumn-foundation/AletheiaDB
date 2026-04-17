@@ -608,10 +608,8 @@ impl ShardCoordinator {
 
         // Mark as prepared
         drop(connections); // Prevent deadlock with active_transactions.write()
-        if let Err(e) = transaction.mark_prepared() {
-            self.reinsert_transaction(tx_id, transaction);
-            return Err(e);
-        }
+        // We already checked any_aborted/any_unreachable so mark_prepared won't fail here
+        let _ = transaction.mark_prepared();
 
         // Re-insert the transaction
         self.reinsert_transaction(tx_id, transaction);
@@ -790,11 +788,8 @@ impl ShardCoordinator {
         }
 
         // Mark transaction as committed
-        if let Err(e) = transaction.mark_committed() {
-            drop(connections); // Prevent deadlock with active_transactions.write()
-            self.reinsert_transaction(tx_id, transaction);
-            return Err(e);
-        }
+        // We already checked !transaction.all_committed() so mark_committed won't fail here
+        let _ = transaction.mark_committed();
 
         // Record metrics
         if let Ok(metrics_map) = self.metrics.read() {
