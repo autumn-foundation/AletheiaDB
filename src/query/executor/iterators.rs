@@ -1315,7 +1315,7 @@ impl ResultIterator for VectorRerankIterator {
                 }
             };
 
-            let mut input = self.input.take().unwrap();
+            let mut input = self.input.take()?;
             // Use a min-heap to keep the top-k results
             let mut heap = BinaryHeap::with_capacity(self.k);
 
@@ -3444,5 +3444,28 @@ mod tests {
             results.push(row);
         }
         assert_eq!(results.len(), 0);
+    }
+
+    #[test]
+    fn test_vector_rerank_iterator_safely_handles_empty_input() {
+        // 🛡️ Sentry: Ensure `take().unwrap()` was removed and gracefully handles missing input
+        let current = Arc::new(CurrentStorage::new());
+        let embedding: Arc<[f32]> = Arc::new([1.0, 0.0]);
+        let input = Box::new(EmptyIterator);
+
+        let mut iter =
+            VectorRerankIterator::new(input, embedding, 10, current, Some("embedding".to_string()));
+
+        // First call will take the input and exhaust it, and build self.sorted = Some(empty)
+        assert!(iter.next().is_none());
+
+        // A second call will see self.sorted.is_some(), but it's empty
+        assert!(iter.next().is_none());
+
+        // Let's explicitly trigger the path where input is missing but we're trying to init
+        iter.sorted = None; // Force re-initialization
+
+        // This used to unwrap and panic because input was taken in the first call
+        assert!(iter.next().is_none());
     }
 }
