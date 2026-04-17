@@ -1181,10 +1181,7 @@ mod tests {
         assert_ne!(PropertyValue::Null, PropertyValue::Bool(true));
         assert_ne!(PropertyValue::Bool(true), PropertyValue::Int(42));
         assert_ne!(PropertyValue::Int(42), PropertyValue::Float(3.0));
-        assert_ne!(
-            PropertyValue::Float(3.0),
-            PropertyValue::String(s1.clone())
-        );
+        assert_ne!(PropertyValue::Float(3.0), PropertyValue::String(s1.clone()));
         assert_ne!(
             PropertyValue::String(s1.clone()),
             PropertyValue::Bytes(b1.clone())
