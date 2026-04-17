@@ -140,6 +140,7 @@ impl QueryExecutor {
     /// let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
     /// let executor = QueryExecutor::new(current, historical);
     /// ```
+    #[inline(never)]
     pub fn new(current: Arc<CurrentStorage>, historical: Arc<RwLock<HistoricalStorage>>) -> Self {
         QueryExecutor {
             current,
@@ -168,6 +169,7 @@ impl QueryExecutor {
     /// let config = ExecutionConfig { max_buffer_size: 100, parallel: false, timeout_ms: 0 };
     /// let executor = QueryExecutor::with_config(current, historical, config);
     /// ```
+    #[inline(never)]
     pub fn with_config(
         current: Arc<CurrentStorage>,
         historical: Arc<RwLock<HistoricalStorage>>,
@@ -1552,4 +1554,5 @@ mod tests {
         // Embedding should be filtered out
         assert!(node.properties.get("embedding").is_none());
     }
+
 }
