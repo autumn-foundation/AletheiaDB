@@ -11,6 +11,20 @@ use crate::core::temporal::Timestamp;
 use std::collections::HashMap;
 
 /// A report of changes between two timestamps.
+///
+/// ## Examples
+///
+/// ```rust
+/// use aletheiadb::experimental::temporal_diff::{DiffReport, EntityChange};
+/// use aletheiadb::core::temporal::Timestamp;
+///
+/// let report = DiffReport {
+///     t1: Timestamp::from(100),
+///     t2: Timestamp::from(200),
+///     changes: vec![],
+/// };
+/// assert_eq!(report.t1, Timestamp::from(100));
+/// ```
 #[derive(Debug, Clone)]
 pub struct DiffReport {
     /// The first timestamp (baseline).
@@ -78,6 +92,21 @@ pub struct PropertyDiff {
 }
 
 /// The Temporal Diff Engine.
+///
+/// Computes structural and property differences between two points in time.
+///
+/// ## Examples
+///
+/// ```rust
+/// use aletheiadb::AletheiaDB;
+/// use aletheiadb::experimental::temporal_diff::TemporalDiff;
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let db = AletheiaDB::new_in_memory()?;
+/// let diff_engine = TemporalDiff::new(&db);
+/// # Ok(())
+/// # }
+/// ```
 pub struct TemporalDiff<'a> {
     db: &'a AletheiaDB,
 }

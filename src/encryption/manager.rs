@@ -20,6 +20,36 @@ use crate::encryption::key_provider::{EnvKeyProvider, FileKeyProvider, KeyProvid
 /// Created once at database startup via [`from_config`](Self::from_config) and
 /// then shared (via `Arc`) with every persistence subsystem that needs to
 /// encrypt/decrypt data.
+///
+/// ## Examples
+///
+/// ```rust
+/// use aletheiadb::encryption::config::{EncryptionConfig, KeyProviderConfig};
+/// use aletheiadb::encryption::factory::Algorithm;
+/// use aletheiadb::encryption::manager::EncryptionManager;
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// # use std::io::Write;
+/// # let mut temp_file = tempfile::NamedTempFile::new()?;
+/// # temp_file.write_all(b"0123456789abcdef0123456789abcdef")?;
+/// // Configure the encryption system to use a file-based Master Key
+/// let config = EncryptionConfig {
+///     enabled: true,
+///     algorithm: Algorithm::Aes256Gcm,
+///     key_provider: KeyProviderConfig::File {
+///         path: temp_file.path().to_path_buf(),
+///     },
+/// };
+///
+/// // Initialize the manager (this derives all component DEKs internally)
+/// let manager = EncryptionManager::from_config(&config)?;
+///
+/// // Obtain a component-specific cipher
+/// let wal_cipher = manager.wal_cipher();
+/// assert_eq!(wal_cipher.algorithm_name(), "AES-256-GCM");
+/// # Ok(())
+/// # }
+/// ```
 pub struct EncryptionManager {
     wal_cipher: Arc<dyn Cipher>,
     index_cipher: Arc<dyn Cipher>,

@@ -43,6 +43,32 @@ use aes_gcm::{Aes256Gcm, KeyInit, Nonce as AesNonce};
 ///
 /// Nonce: 12 bytes (96 bits), Tag: 16 bytes (128 bits).
 /// Total overhead: 28 bytes per encrypted payload.
+///
+/// ## Examples
+///
+/// ```rust
+/// use zeroize::Zeroizing;
+/// use rand::RngCore;
+/// use aletheiadb::encryption::cipher::{Cipher, Aes256GcmCipher};
+///
+/// # fn main() -> Result<(), aletheiadb::encryption::EncryptionError> {
+/// // Generate a random 32-byte key
+/// let mut key = Zeroizing::new([0u8; 32]);
+/// rand::thread_rng().fill_bytes(key.as_mut());
+///
+/// let cipher = Aes256GcmCipher::new(&key);
+/// let plaintext = b"Hello, AletheiaDB!";
+/// let aad = b"context";
+///
+/// // Encrypt the data
+/// let encrypted = cipher.encrypt(plaintext, aad)?;
+///
+/// // Decrypt the data back
+/// let decrypted = cipher.decrypt(&encrypted, aad)?;
+/// assert_eq!(decrypted, plaintext);
+/// # Ok(())
+/// # }
+/// ```
 pub struct Aes256GcmCipher {
     inner: Aes256Gcm,
 }
@@ -134,6 +160,32 @@ use chacha20poly1305::Nonce as ChaChaNonce;
 ///
 /// Nonce: 12 bytes, Tag: 16 bytes. Total overhead: 28 bytes.
 /// Preferred on platforms without AES-NI hardware acceleration.
+///
+/// ## Examples
+///
+/// ```rust
+/// use zeroize::Zeroizing;
+/// use rand::RngCore;
+/// use aletheiadb::encryption::cipher::{Cipher, ChaCha20Poly1305Cipher};
+///
+/// # fn main() -> Result<(), aletheiadb::encryption::EncryptionError> {
+/// // Generate a random 32-byte key
+/// let mut key = Zeroizing::new([0u8; 32]);
+/// rand::thread_rng().fill_bytes(key.as_mut());
+///
+/// let cipher = ChaCha20Poly1305Cipher::new(&key);
+/// let plaintext = b"Hello, ChaCha20!";
+/// let aad = b"context";
+///
+/// // Encrypt the data
+/// let encrypted = cipher.encrypt(plaintext, aad)?;
+///
+/// // Decrypt the data back
+/// let decrypted = cipher.decrypt(&encrypted, aad)?;
+/// assert_eq!(decrypted, plaintext);
+/// # Ok(())
+/// # }
+/// ```
 pub struct ChaCha20Poly1305Cipher {
     inner: ChaChaInner,
 }
