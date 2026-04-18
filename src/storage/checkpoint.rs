@@ -783,8 +783,24 @@ impl CheckpointManager {
                 }
                 VersionData::Delta { delta } => {
                     // Convert delta to PropertyMap for persistence
-                    let changed_props: crate::core::property::PropertyMap =
-                        delta.changed.iter().map(|(k, v)| (*k, v.clone())).collect();
+                    let mut changed_props: crate::core::property::PropertyMap = delta.changed.iter().map(|(k, v)| (*k, v.clone())).collect();
+                    for (key, vec_delta) in &delta.vector_deltas {
+                        match vec_delta {
+                            crate::core::version::VectorDelta::Full(vec) => {
+                                changed_props.insert(*key, crate::core::property::PropertyValue::Vector(vec.clone()));
+                            }
+                            crate::core::version::VectorDelta::Sparse { .. } => {
+                                return Err(crate::core::error::StorageError::CheckpointError {
+                                    reason: format!(
+                                        "Cannot persist version {}: VectorDelta::Sparse found for property key {:?}. \
+                                         This indicates a logic error, as deltas should be materialized before checkpointing.",
+                                        version.id.as_u64(),
+                                        key
+                                    ),
+                                }.into());
+                            }
+                        }
+                    }
                     let removed_keys: Vec<u32> = delta
                         .removed
                         .iter()
@@ -852,8 +868,24 @@ impl CheckpointManager {
                 }
                 VersionData::Delta { delta } => {
                     // Convert delta to PropertyMap for persistence
-                    let changed_props: crate::core::property::PropertyMap =
-                        delta.changed.iter().map(|(k, v)| (*k, v.clone())).collect();
+                    let mut changed_props: crate::core::property::PropertyMap = delta.changed.iter().map(|(k, v)| (*k, v.clone())).collect();
+                    for (key, vec_delta) in &delta.vector_deltas {
+                        match vec_delta {
+                            crate::core::version::VectorDelta::Full(vec) => {
+                                changed_props.insert(*key, crate::core::property::PropertyValue::Vector(vec.clone()));
+                            }
+                            crate::core::version::VectorDelta::Sparse { .. } => {
+                                return Err(crate::core::error::StorageError::CheckpointError {
+                                    reason: format!(
+                                        "Cannot persist version {}: VectorDelta::Sparse found for property key {:?}. \
+                                         This indicates a logic error, as deltas should be materialized before checkpointing.",
+                                        version.id.as_u64(),
+                                        key
+                                    ),
+                                }.into());
+                            }
+                        }
+                    }
                     let removed_keys: Vec<u32> = delta
                         .removed
                         .iter()
