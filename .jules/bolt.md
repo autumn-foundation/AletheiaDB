@@ -60,3 +60,6 @@
 **[Optimizing BFS Traversal]**
 **Learning:** Using `iterator.chain()` to iterate over neighbors in BFS traversal instead of allocating intermediate arrays reduces heap allocations without compromising performance or logic.
 **Action:** When finding multiple `.collect::<Vec<_>>()` and `.extend()` combinations, use `.chain()` whenever possible to eliminate allocations.
+**[Refactor Manual Vector Operations to SIMD]**
+**Learning:** Found manual iterator logic computing magnitude and dot product `.iter().map(|x| x * x).sum::<f32>().sqrt()` and `.iter().zip(b.iter()).map(|(x, y)| x * y).sum()` inside `MockVectorNodeClient` logic and embedding service tests. Replacing these unrolled loops with AletheiaDB's highly optimized `crate::core::vector::ops` (like `cosine_similarity`, `euclidean_distance`, `dot_product`, and `magnitude`) leverages SIMD execution on the host CPU and prevents redundant and slower iteration logic.
+**Action:** Always utilize centralized SIMD-accelerated math primitives for vector metrics instead of rewriting unrolled iterative `.sum()` logic in local closures or tests.
