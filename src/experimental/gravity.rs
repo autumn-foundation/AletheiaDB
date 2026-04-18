@@ -302,14 +302,9 @@ impl<'a> GravitySimulator<'a> {
 /// Calculate Cosine Distance (1.0 - Cosine Similarity).
 /// Range: [0.0, 2.0]. 0.0 = identical, 1.0 = orthogonal, 2.0 = opposite.
 fn cosine_distance(a: &[f32], b: &[f32]) -> f32 {
-    if a.len() != b.len() {
-        return 1.0;
-    }
-
-    match crate::core::vector::cosine_similarity(a, b) {
-        Ok(sim) => 1.0 - sim,
-        Err(_) => 1.0, // Shouldn't happen since we check length
-    }
+    crate::core::vector::cosine_similarity(a, b)
+        .map(|sim| 1.0 - sim)
+        .unwrap_or(1.0)
 }
 
 #[cfg(test)]
