@@ -1084,7 +1084,7 @@ impl<C: VectorNodeClient + 'static> DistributedVectorIndex<C> {
         };
 
         let target_per_node = if node_count > 0 {
-            total_vectors / node_count
+            total_vectors.checked_div(node_count).unwrap_or(0)
         } else {
             0
         };
