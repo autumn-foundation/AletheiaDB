@@ -310,7 +310,7 @@ mod tests {
         let embedding = service.embed("test").await.unwrap();
 
         // Check that embedding is normalized (magnitude ≈ 1.0)
-        let magnitude: f32 = embedding.iter().map(|x| x * x).sum::<f32>().sqrt();
+        let magnitude: f32 = crate::core::vector::magnitude(&embedding);
         assert!((magnitude - 1.0).abs() < 1e-6);
     }
 
@@ -553,7 +553,7 @@ mod tests {
         let embedding = service.embed("test").await.unwrap();
 
         // Check that embedding is NOT normalized
-        let magnitude: f32 = embedding.iter().map(|x| x * x).sum::<f32>().sqrt();
+        let magnitude: f32 = crate::core::vector::magnitude(&embedding);
         // Should be sqrt(10 * 0.04^2) = 0.126... not 1.0
         assert!((magnitude - 1.0).abs() > 0.1);
     }
@@ -572,7 +572,7 @@ mod tests {
 
         // Service should not double-normalize, so the vector should remain un-normalized
         // as returned by the mock provider (which doesn't actually normalize).
-        let magnitude: f32 = embedding.iter().map(|x| x * x).sum::<f32>().sqrt();
+        let magnitude: f32 = crate::core::vector::magnitude(&embedding);
         assert!(
             (magnitude - 1.0).abs() > 1e-6,
             "Service should not normalize if provider claims to have already done so"
@@ -595,7 +595,7 @@ mod tests {
 
         // All embeddings should be normalized
         for embedding in embeddings {
-            let magnitude: f32 = embedding.iter().map(|x| x * x).sum::<f32>().sqrt();
+            let magnitude: f32 = crate::core::vector::magnitude(&embedding);
             assert!((magnitude - 1.0).abs() < 1e-6);
         }
     }
