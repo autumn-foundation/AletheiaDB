@@ -352,4 +352,4 @@ cargo test --test hnsw_allocation_tests -- --nocapture
 - Issue #232: https://github.com/madmax983/AletheiaDB/issues/232
 - PR #403 (usearch migration): https://github.com/madmax983/AletheiaDB/pull/403
 - usearch repository: https://github.com/unum-cloud/usearch
-- AletheiaDB fork: https://github.com/madmax983/USearch (branch: fix/rust-move-semantics)
+- usearch crate: https://crates.io/crates/usearch
