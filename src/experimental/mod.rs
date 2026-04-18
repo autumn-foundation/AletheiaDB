@@ -88,21 +88,21 @@
 //! ```
 
 #[cfg(feature = "semantic-reasoning")]
-mod reasoning;
+pub mod reasoning;
 #[cfg(feature = "semantic-reasoning")]
 pub use reasoning::*;
 
 #[cfg(feature = "semantic-temporal")]
-mod temporal;
+pub mod temporal;
 #[cfg(feature = "semantic-temporal")]
 pub use temporal::*;
 
 #[cfg(feature = "semantic-diagnostics")]
-mod diagnostics;
+pub mod diagnostics;
 #[cfg(feature = "semantic-diagnostics")]
 pub use diagnostics::*;
 
 #[cfg(feature = "semantic-characterization")]
-mod characterization;
+pub mod characterization;
 #[cfg(feature = "semantic-characterization")]
 pub use characterization::*;
