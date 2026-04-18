@@ -28,6 +28,10 @@ pub use results::{EntityId, EntityResult, QueryResults, QueryRow};
 
 /// Configuration for query execution.
 ///
+/// Provides fine-grained control over how the database processes queries.
+/// It exists to allow developers to balance memory usage and execution speed,
+/// preventing runaway queries from exhausting system resources.
+///
 /// # Examples
 ///
 /// ```rust
@@ -110,6 +114,16 @@ impl Default for ExecutionConfig {
 /// # Ok(())
 /// # }
 /// ```
+///
+/// # Design
+///
+/// `QueryExecutor` exists to bridge the gap between abstract query plans and concrete physical
+/// storage implementations. It traverses the execution tree, lazily initializing iterators.
+///
+/// ## Panics
+///
+/// This struct itself does not panic upon creation, but execution of invalid query plans
+/// may result in runtime panics if assertions fail or invariants are broken internally.
 pub struct QueryExecutor {
     /// Reference to current storage
     current: Arc<CurrentStorage>,

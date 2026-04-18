@@ -223,6 +223,32 @@ impl QueryRow {
 ///
 /// You can consume the stream item by item using the `Iterator` trait,
 /// or use convenience methods like `collect_all()` to exhaust it immediately.
+///
+/// ## Examples
+///
+/// ```rust
+/// use aletheiadb::query::executor::{QueryRow, EntityResult, QueryResults};
+/// use aletheiadb::core::id::NodeId;
+///
+/// # // We can't easily construct a real QueryResults iterator in a doctest without full DB setup,
+/// # // so this example focuses on what the consumption pattern looks like.
+/// # fn mock_consume(mut results: QueryResults) -> aletheiadb::core::error::Result<usize> {
+/// // 1. Stream results to avoid loading millions into memory
+/// let mut count = 0;
+/// while let Some(row) = results.next() {
+///     let row = row?;
+///     if let EntityResult::Node(node) = row.entity {
+///         count += 1;
+///     }
+/// }
+/// Ok(count)
+/// # }
+/// ```
+///
+/// ## Panics
+///
+/// The struct itself does not panic, but individual iterator implementations
+/// underlying this stream may panic if internal storage invariants are violated.
 pub struct QueryResults {
     iterator: Box<dyn ResultIterator>,
 }
