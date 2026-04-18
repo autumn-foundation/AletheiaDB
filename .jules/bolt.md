@@ -61,5 +61,5 @@
 **Learning:** Using `iterator.chain()` to iterate over neighbors in BFS traversal instead of allocating intermediate arrays reduces heap allocations without compromising performance or logic.
 **Action:** When finding multiple `.collect::<Vec<_>>()` and `.extend()` combinations, use `.chain()` whenever possible to eliminate allocations.
 **[Optimize Vec::contains inside retain closures]**
-**Learning:** When applying large deletions in Rust using `retain()` (e.g., removing deleted nodes/edges from an index by cross-referencing an exclusion list), calling `Vec::contains()` repeatedly inside the `retain` closure causes an O(M*N) performance bottleneck.
-**Action:** Convert the exclusion `Vec` into a `HashSet` before the loop. `HashSet::contains()` reduces the algorithmic complexity to O(M), significantly improving performance during delta application for large updates.
+**Learning:** When applying large deletions in Rust using `retain()` (e.g., removing deleted nodes/edges from an index by cross-referencing an exclusion list), calling `Vec::contains()` repeatedly inside the `retain` closure causes an O(N*M) performance bottleneck.
+**Action:** Convert the exclusion `Vec` into a `HashSet` before the loop. `HashSet::contains()` reduces the algorithmic complexity from O(N*M) to O(N+M), significantly improving performance during delta application for large updates.

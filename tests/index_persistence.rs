@@ -1190,7 +1190,7 @@ fn test_delta_encoding_reduces_incremental_save_size() {
     // Phase 4: Reconstruct from delta and verify ALL changes applied
     // ========================================================================
 
-    let reconstructed_data = load_graph_index_with_delta(&base_path, &delta_path).unwrap();
+    let reconstructed_data = load_graph_index_with_delta(&base_path, &delta_path, None).unwrap();
 
     // Verify counts
     assert_eq!(reconstructed_data.node_count, modified_data.node_count);
