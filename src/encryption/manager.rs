@@ -105,6 +105,7 @@ impl EncryptionManager {
     /// use aletheiadb::encryption::manager::EncryptionManager;
     /// use aletheiadb::encryption::config::EncryptionConfig;
     /// use aletheiadb::encryption::key_provider::FileKeyProvider;
+    /// use aletheiadb::encryption::cipher::Cipher;
     ///
     /// let dir = tempfile::tempdir().unwrap();
     /// let key_path = dir.path().join("test.key");
@@ -131,6 +132,7 @@ impl EncryptionManager {
     /// use aletheiadb::encryption::manager::EncryptionManager;
     /// use aletheiadb::encryption::config::EncryptionConfig;
     /// use aletheiadb::encryption::key_provider::FileKeyProvider;
+    /// use aletheiadb::encryption::cipher::Cipher;
     ///
     /// let dir = tempfile::tempdir().unwrap();
     /// let key_path = dir.path().join("test.key");
@@ -158,6 +160,7 @@ impl EncryptionManager {
     /// use aletheiadb::encryption::manager::EncryptionManager;
     /// use aletheiadb::encryption::config::EncryptionConfig;
     /// use aletheiadb::encryption::key_provider::FileKeyProvider;
+    /// use aletheiadb::encryption::cipher::Cipher;
     ///
     /// let dir = tempfile::tempdir().unwrap();
     /// let key_path = dir.path().join("test.key");
@@ -185,6 +188,7 @@ impl EncryptionManager {
     /// use aletheiadb::encryption::manager::EncryptionManager;
     /// use aletheiadb::encryption::config::EncryptionConfig;
     /// use aletheiadb::encryption::key_provider::FileKeyProvider;
+    /// use aletheiadb::encryption::cipher::Cipher;
     ///
     /// let dir = tempfile::tempdir().unwrap();
     /// let key_path = dir.path().join("test.key");
