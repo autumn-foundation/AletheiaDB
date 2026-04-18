@@ -14,7 +14,7 @@
 //! # Example
 //! ```rust,no_run
 //! use aletheiadb::AletheiaDB;
-//! use aletheiadb::experimental::janus::JanusDetector;
+//! use aletheiadb::semantic_search::janus::JanusDetector;
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let db = AletheiaDB::new()?;

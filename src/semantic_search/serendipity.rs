@@ -24,7 +24,7 @@
 //! ```rust
 //! // Requires features = ["nova"]
 //! use aletheiadb::AletheiaDB;
-//! use aletheiadb::experimental::serendipity::SerendipityEngine;
+//! use aletheiadb::semantic_search::serendipity::SerendipityEngine;
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let db = AletheiaDB::new()?;
@@ -195,7 +195,7 @@ impl<'a> SerendipityEngine<'a> {
     }
 }
 
-#[cfg(not(feature = "nova"))]
+#[cfg(not(feature = "semantic-search"))]
 impl<'a> SerendipityEngine<'a> {
     /// Create a new SerendipityEngine instance.
     pub fn new(_db: &'a AletheiaDB) -> Self {
@@ -216,7 +216,7 @@ impl<'a> SerendipityEngine<'a> {
     }
 }
 
-#[cfg(all(test, feature = "nova"))]
+#[cfg(all(test, feature = "semantic-search"))]
 mod tests {
     use super::*;
     use crate::core::property::PropertyMapBuilder;
@@ -328,7 +328,7 @@ mod tests {
     }
 }
 
-#[cfg(all(test, not(feature = "nova")))]
+#[cfg(all(test, not(feature = "semantic-search")))]
 mod stub_tests {
     use super::*;
 

@@ -35,7 +35,7 @@ pub struct Papyrus<'a> {
     db: &'a AletheiaDB,
 }
 
-#[cfg(feature = "nova")]
+#[cfg(feature = "semantic-characterization")]
 impl<'a> Papyrus<'a> {
     /// Create a new Papyrus exporter.
     pub fn new(db: &'a AletheiaDB) -> Self {
@@ -161,7 +161,7 @@ impl<'a> Papyrus<'a> {
     }
 }
 
-#[cfg(all(test, feature = "nova"))]
+#[cfg(all(test, feature = "semantic-characterization"))]
 mod tests {
     use super::*;
     use crate::core::property::PropertyMapBuilder;

@@ -20,7 +20,7 @@
 //! ```rust
 //! # use aletheiadb::AletheiaDB;
 //! # use aletheiadb::core::property::PropertyMapBuilder;
-//! # use aletheiadb::experimental::semantic_navigator::SemanticNavigator;
+//! # use aletheiadb::semantic_search::semantic_navigator::SemanticNavigator;
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! // 1. Setup database
 //! let db = AletheiaDB::new()?;

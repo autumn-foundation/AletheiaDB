@@ -113,7 +113,7 @@ pub enum ShardingStrategy {
 /// # Examples
 ///
 /// ```rust
-/// # #[cfg(feature = "nova")]
+/// # #[cfg(feature = "semantic-search")]
 /// # fn main() {
 /// use aletheiadb::index::vector::sharded::ShardStats;
 ///
@@ -123,7 +123,7 @@ pub enum ShardingStrategy {
 ///     imbalance_ratio: 1.66,
 /// };
 /// # }
-/// # #[cfg(not(feature = "nova"))]
+/// # #[cfg(not(feature = "semantic-search"))]
 /// # fn main() {}
 /// ```
 #[derive(Debug, Default, Clone)]
@@ -145,7 +145,7 @@ pub struct ShardStats {
 /// # Examples
 ///
 /// ```rust
-/// # #[cfg(feature = "nova")]
+/// # #[cfg(feature = "semantic-search")]
 /// # fn main() {
 /// use aletheiadb::index::vector::sharded::RebalanceConfig;
 ///
@@ -153,7 +153,7 @@ pub struct ShardStats {
 ///     .with_imbalance_threshold(1.5)
 ///     .with_batch_size(2000);
 /// # }
-/// # #[cfg(not(feature = "nova"))]
+/// # #[cfg(not(feature = "semantic-search"))]
 /// # fn main() {}
 /// ```
 #[derive(Debug, Clone)]
@@ -201,7 +201,7 @@ impl RebalanceConfig {
 /// # Examples
 ///
 /// ```rust
-/// # #[cfg(feature = "nova")]
+/// # #[cfg(feature = "semantic-search")]
 /// # fn main() {
 /// use aletheiadb::index::vector::sharded::{ShardedVectorConfig, ShardingStrategy};
 /// use aletheiadb::index::vector::{HnswConfig, DistanceMetric};
@@ -211,7 +211,7 @@ impl RebalanceConfig {
 ///     .with_strategy(ShardingStrategy::HashBased)
 ///     .with_hnsw_config(hnsw_cfg);
 /// # }
-/// # #[cfg(not(feature = "nova"))]
+/// # #[cfg(not(feature = "semantic-search"))]
 /// # fn main() {}
 /// ```
 #[derive(Debug, Clone)]
@@ -279,7 +279,7 @@ impl Default for ShardedVectorConfig {
 /// # Examples
 ///
 /// ```rust
-/// # #[cfg(feature = "nova")]
+/// # #[cfg(feature = "semantic-search")]
 /// # fn main() -> aletheiadb::core::error::Result<()> {
 /// use aletheiadb::index::vector::sharded::{ShardedVectorIndex, ShardedVectorConfig, ShardingStrategy};
 /// use aletheiadb::index::vector::{HnswConfig, DistanceMetric, VectorIndex};
@@ -297,7 +297,7 @@ impl Default for ShardedVectorConfig {
 /// assert_eq!(index.len(), 1);
 /// # Ok(())
 /// # }
-/// # #[cfg(not(feature = "nova"))]
+/// # #[cfg(not(feature = "semantic-search"))]
 /// # fn main() {}
 /// ```
 pub struct ShardedVectorIndex {

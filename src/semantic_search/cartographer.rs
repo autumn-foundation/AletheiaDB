@@ -18,7 +18,7 @@
 //! ```rust
 //! # use aletheiadb::{AletheiaDB, PropertyMapBuilder};
 //! # use aletheiadb::index::vector::{HnswConfig, DistanceMetric};
-//! # use aletheiadb::experimental::cartographer::Cartographer;
+//! # use aletheiadb::semantic_search::cartographer::Cartographer;
 //! #
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! // 1. Setup database and vectors

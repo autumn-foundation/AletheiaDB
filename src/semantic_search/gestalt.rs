@@ -63,7 +63,7 @@ pub struct PatternEdge {
 /// Building a pattern to find a specific sub-graph structure:
 ///
 /// ```
-/// use aletheiadb::experimental::gestalt::Pattern;
+/// use aletheiadb::semantic_search::gestalt::Pattern;
 ///
 /// # fn main() {
 /// let mut pattern = Pattern::new();

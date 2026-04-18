@@ -11,7 +11,7 @@
 //!
 //! ```rust,no_run
 //! use aletheiadb::AletheiaDB;
-//! use aletheiadb::experimental::concept_algebra::ConceptAlgebra;
+//! use aletheiadb::semantic_search::concept_algebra::ConceptAlgebra;
 //! use aletheiadb::core::id::NodeId;
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -109,7 +109,7 @@ impl<'a> ConceptAlgebra<'a> {
     ///
     /// ```rust,no_run
     /// # use aletheiadb::AletheiaDB;
-    /// # use aletheiadb::experimental::concept_algebra::ConceptAlgebra;
+    /// # use aletheiadb::semantic_search::concept_algebra::ConceptAlgebra;
     /// # use aletheiadb::core::id::NodeId;
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// # let db = AletheiaDB::new()?;
@@ -154,7 +154,7 @@ impl<'a> ConceptAlgebra<'a> {
     ///
     /// ```rust,no_run
     /// # use aletheiadb::AletheiaDB;
-    /// # use aletheiadb::experimental::concept_algebra::ConceptAlgebra;
+    /// # use aletheiadb::semantic_search::concept_algebra::ConceptAlgebra;
     /// # use aletheiadb::core::id::NodeId;
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// # let db = AletheiaDB::new()?;
@@ -198,7 +198,7 @@ impl<'a> ConceptAlgebra<'a> {
     ///
     /// ```rust,no_run
     /// # use aletheiadb::AletheiaDB;
-    /// # use aletheiadb::experimental::concept_algebra::ConceptAlgebra;
+    /// # use aletheiadb::semantic_search::concept_algebra::ConceptAlgebra;
     /// # use aletheiadb::core::id::NodeId;
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// # let db = AletheiaDB::new()?;
@@ -252,7 +252,7 @@ impl<'a> ConceptAlgebra<'a> {
     ///
     /// ```rust,no_run
     /// # use aletheiadb::AletheiaDB;
-    /// # use aletheiadb::experimental::concept_algebra::ConceptAlgebra;
+    /// # use aletheiadb::semantic_search::concept_algebra::ConceptAlgebra;
     /// # use aletheiadb::core::id::NodeId;
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// # let db = AletheiaDB::new()?;

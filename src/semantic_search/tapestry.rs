@@ -9,7 +9,7 @@
 //! # Example
 //! ```rust,no_run
 //! use aletheiadb::AletheiaDB;
-//! use aletheiadb::experimental::tapestry::TapestryEngine;
+//! use aletheiadb::semantic_search::tapestry::TapestryEngine;
 //! use aletheiadb::core::id::NodeId;
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -30,7 +30,7 @@
 use crate::AletheiaDB;
 use crate::core::error::{Error, Result};
 use crate::core::id::NodeId;
-use crate::experimental::semantic_navigator::SemanticNavigator;
+use crate::semantic_search::semantic_navigator::SemanticNavigator;
 
 /// The Tapestry Engine for waypoint-based semantic pathfinding.
 pub struct TapestryEngine<'a> {
