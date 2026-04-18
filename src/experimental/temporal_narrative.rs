@@ -157,28 +157,23 @@ impl<'a> NarrativeGenerator<'a> {
 impl<'a> NarrativeGenerator<'a> {
     /// Create a new narrative generator.
     ///
-    /// # Panics
-    ///
-    /// This method panics if the `nova` feature is not enabled.
+    /// # Why?
+    /// This is a fallback implementation that allows code to compile when the `nova` feature
+    /// is not enabled. It provides a dummy instance that will gracefully return an error
+    /// when its methods are called, rather than panicking upon initialization.
     #[allow(unused_variables)]
-    #[track_caller]
     pub fn new(db: &'a AletheiaDB) -> Self {
-        panic!(
-            "NarrativeGenerator requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
-        );
+        Self {
+            _marker: std::marker::PhantomData,
+        }
     }
 
     /// Generate a narrative for a specific node.
-    ///
-    /// # Panics
-    ///
-    /// This method panics if the `nova` feature is not enabled.
     #[allow(unused_variables)]
-    #[track_caller]
     pub fn generate_node_narrative(&self, node_id: NodeId) -> Result<Vec<NarrativeEvent>> {
-        panic!(
-            "NarrativeGenerator requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
-        );
+        Err(crate::core::error::Error::other(
+            "NarrativeGenerator requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml.",
+        ))
     }
 }
 
@@ -306,27 +301,20 @@ mod stub_tests {
     use super::*;
 
     #[test]
-    #[should_panic(
-        expected = "NarrativeGenerator requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
-    )]
-    fn test_stub_panic_on_new() {
+    fn test_stub_new() {
         let db = AletheiaDB::new().unwrap();
-        // This should panic
+        // This should not panic
         let _ = NarrativeGenerator::new(&db);
     }
 
     #[test]
-    #[should_panic(
-        expected = "NarrativeGenerator requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
-    )]
-    fn test_stub_panic_on_generate() {
-        // Construct a fake NarrativeGenerator to test method panic
-        // Safety: NarrativeGenerator is a ZST with PhantomData, so it's valid to transmute from unit or zeroed.
-        // We just need it to call the method.
-        let generator: NarrativeGenerator<'_> = NarrativeGenerator {
-            _marker: std::marker::PhantomData,
-        };
-        // This should panic
-        let _ = generator.generate_node_narrative(NodeId::new(0).unwrap());
+    fn test_stub_generate_error() {
+        let db = AletheiaDB::new().unwrap();
+        let generator = NarrativeGenerator::new(&db);
+        let res = generator.generate_node_narrative(NodeId::new(0).unwrap());
+
+        assert!(res.is_err());
+        let err_msg = res.unwrap_err().to_string();
+        assert!(err_msg.contains("NarrativeGenerator requires the 'nova' feature"));
     }
 }
