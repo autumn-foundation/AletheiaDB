@@ -302,22 +302,9 @@ impl<'a> GravitySimulator<'a> {
 /// Calculate Cosine Distance (1.0 - Cosine Similarity).
 /// Range: [0.0, 2.0]. 0.0 = identical, 1.0 = orthogonal, 2.0 = opposite.
 fn cosine_distance(a: &[f32], b: &[f32]) -> f32 {
-    if a.len() != b.len() {
-        return 1.0;
-    }
-
-    let dot: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();
-    let norm_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
-    let norm_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
-
-    if norm_a == 0.0 || norm_b == 0.0 {
-        return 1.0;
-    }
-
-    let similarity = dot / (norm_a * norm_b);
-    // Clamp to handle potential float precision issues
-    let similarity = similarity.clamp(-1.0, 1.0);
-    1.0 - similarity
+    crate::core::vector::cosine_similarity(a, b)
+        .map(|sim| 1.0 - sim)
+        .unwrap_or(1.0)
 }
 
 #[cfg(test)]

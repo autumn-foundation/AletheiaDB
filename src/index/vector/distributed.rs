@@ -1083,7 +1083,11 @@ impl<C: VectorNodeClient + 'static> DistributedVectorIndex<C> {
             1.0
         };
 
-        let target_per_node = total_vectors.checked_div(node_count).unwrap_or(0);
+        let target_per_node = if node_count > 0 {
+            total_vectors.checked_div(node_count).unwrap_or(0)
+        } else {
+            0
+        };
 
         let vectors_to_move: usize = sizes
             .iter()
