@@ -500,7 +500,15 @@ impl<'a> CypherLexer<'a> {
     // -----------------------------------------------------------------------
 
     fn read_string(&mut self, start: usize) -> Result<Token, CypherError> {
-        let (_, quote) = self.advance().unwrap(); // consume opening quote
+        let (_, quote) = match self.advance() {
+            Some(res) => res,
+            None => {
+                return Err(CypherError::LexError {
+                    position: start,
+                    message: "Unexpected EOF at start of string literal".to_string(),
+                });
+            }
+        }; // consume opening quote
         let mut value = String::new();
 
         loop {
@@ -694,6 +702,19 @@ impl<'a> CypherLexer<'a> {
 #[cfg(test)]
 mod unit_tests {
     use super::*;
+
+    #[test]
+    fn string_literal_unexpected_eof_start() {
+        // Technically, `read_string` should only be called if `advance()` has peeking chars,
+        // but testing the resilient error path prevents panics.
+        let mut lexer = CypherLexer {
+            input: "",
+            chars: "".char_indices().peekable(),
+            position: 0,
+        };
+        let result = lexer.read_string(0);
+        assert!(matches!(result, Err(CypherError::LexError { .. })));
+    }
 
     #[test]
     fn keyword_lookup_exhaustive() {

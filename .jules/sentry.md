@@ -34,3 +34,7 @@
 ## ProjectIterator try_insert unwrapping
 **Learning:** `unwrap()` inside iterator implementations (like `ProjectIterator::next`) poses a significant panic risk when handling properties, especially dynamically sized ones where recursion depth limits can be exceeded or insertion errors can occur. In a database context, panics inside iterators will crash the entire query process rather than just returning an error to the client.
 **Action:** Always gracefully handle property insertion errors using `match` or `?` and propagate them down the iterator pipeline instead of unwrapping, allowing the query to fail safely. Added tests mocking a `try_insert` failure by using an invalid property state.
+
+## Cypher Lexer Panic on Unexpected EOF
+**Learning:** `unwrap()` inside the `CypherLexer::read_string` method poses a panic risk if `advance()` returns `None` after a quote is seemingly expected (e.g., if lexer state changes or during fuzzing). This bypasses the resilient `CypherError` error handling path.
+**Action:** Replaced `unwrap()` with a `match` block that gracefully returns `CypherError::LexError` on EOF. Always ensure that lexer/parser read functions use proper error propagation instead of panicking on unexpected input ends, even if internal invariants supposedly guarantee character presence.
