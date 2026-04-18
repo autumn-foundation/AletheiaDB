@@ -310,8 +310,7 @@ mod tests {
         let embedding = service.embed("test").await.unwrap();
 
         // Check that embedding is normalized (magnitude ≈ 1.0)
-        let magnitude: f32 = crate::core::vector::magnitude(&embedding);
-        assert!((magnitude - 1.0).abs() < 1e-6);
+        assert!(crate::core::vector::is_normalized(&embedding));
     }
 
     #[tokio::test]
