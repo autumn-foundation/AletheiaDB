@@ -63,4 +63,4 @@
 
 **SIMD optimization for vector math**
 **Learning:** Manual iterator combinations for vector math (e.g., zip().map().sum() and sqrt()) do not reliably auto-vectorize and miss out on SIMD extensions like AVX2/FMA. This is a common performance bottleneck in hot paths (like in Prophet's vector similarity calculation).
-**Action:** Replaced the manual cosine similarity calculation with `cosine_similarity` from `crate::core::vector`. The measured speedup for 1536-dimensional vectors is roughly 20x (from ~6.90us to ~342ns per call).
+**Action:** Use SIMD-optimized functions from crate::core::vector (such as cosine_similarity) instead of manual iterator-based math for vector operations in hot paths. This can yield significant performance gains (e.g., ~20x speedup for 1536-dimensional vectors).
