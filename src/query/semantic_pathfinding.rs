@@ -59,12 +59,12 @@
 //! This module does not intentionally panic. If any node has a vector that differs in dimension from the `query_embedding`,
 //! it treats the cost as infinite (effectively blocking the path) instead of panicking.
 
+use crate::AletheiaDB;
 use crate::core::error::Result;
 use crate::core::hasher::IdentityHasher;
 use crate::core::id::NodeId;
 use crate::core::temporal::Timestamp;
 use crate::core::vector::cosine_similarity;
-use crate::AletheiaDB;
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap};
 use std::hash::BuildHasherDefault;

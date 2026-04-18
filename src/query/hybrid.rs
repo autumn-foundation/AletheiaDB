@@ -27,10 +27,10 @@
 //! }
 //! ```
 
+use crate::AletheiaDB;
 use crate::core::error::Result;
 use crate::core::id::NodeId;
 use crate::core::vector::{cosine_similarity, validate_vector};
-use crate::AletheiaDB;
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashSet};
 
