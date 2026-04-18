@@ -29,6 +29,23 @@ pub struct KeyGenResult {
 /// Creates a cryptographically random 256-bit key at the given path, encoded as
 /// 64 hex characters. Parent directories are created automatically.
 ///
+/// # Why?
+/// Exposes a convenient CLI command so database administrators can provision secure
+/// keys without needing external tools like `openssl rand -hex 32`.
+///
+/// ## Examples
+/// ```
+/// use aletheiadb::encryption::cli::generate_key;
+/// use std::path::Path;
+///
+/// let temp_dir = tempfile::tempdir().unwrap();
+/// let key_path = temp_dir.path().join("master.key");
+///
+/// let result = generate_key(&key_path).unwrap();
+/// assert_eq!(result.key_length, 32);
+/// assert!(key_path.exists());
+/// ```
+///
 /// # Errors
 ///
 /// Returns [`KeyProviderError`] if directory creation or file writing fails.
@@ -57,6 +74,21 @@ pub struct EncryptionStatus {
 /// Get encryption status from configuration.
 ///
 /// Extracts human-readable status information from an [`EncryptionConfig`].
+///
+/// # Why?
+/// Centralizes the logic mapping internal configuration states (like `Algorithm::Auto`)
+/// into human-readable strings for the `encryption status` CLI command.
+///
+/// ## Examples
+/// ```
+/// use aletheiadb::encryption::config::EncryptionConfig;
+/// use aletheiadb::encryption::cli::get_encryption_status;
+///
+/// let config = EncryptionConfig::disabled();
+/// let status = get_encryption_status(&config);
+///
+/// assert!(!status.enabled);
+/// ```
 #[must_use]
 pub fn get_encryption_status(config: &EncryptionConfig) -> EncryptionStatus {
     if !config.enabled {
@@ -92,6 +124,24 @@ pub fn get_encryption_status(config: &EncryptionConfig) -> EncryptionStatus {
 /// Attempts to load and parse the key from the given path. Returns `Ok(())`
 /// if the key is valid, or an error describing the problem.
 ///
+/// # Why?
+/// Allows administrators to verify their keys are syntactically valid and accessible
+/// to the AletheiaDB process before starting the full database node, preventing crash loops.
+///
+/// ## Examples
+/// ```
+/// use aletheiadb::encryption::cli::{generate_key, validate_key_file};
+/// use std::path::Path;
+///
+/// let temp_dir = tempfile::tempdir().unwrap();
+/// let key_path = temp_dir.path().join("valid.key");
+///
+/// generate_key(&key_path).unwrap();
+///
+/// // Verify it is readable and valid
+/// assert!(validate_key_file(&key_path).is_ok());
+/// ```
+///
 /// # Errors
 ///
 /// Returns [`KeyProviderError`] if the file does not exist, cannot be read,
@@ -102,6 +152,25 @@ pub fn validate_key_file(path: &Path) -> Result<(), KeyProviderError> {
 }
 
 /// Display encryption status as formatted text.
+///
+/// # Why?
+/// Decouples the presentation layer (formatting a string with ASCII borders)
+/// from the logic layer (`EncryptionStatus`), making it easier to test formatting logic.
+///
+/// ## Examples
+/// ```
+/// use aletheiadb::encryption::cli::{EncryptionStatus, format_encryption_status};
+///
+/// let status = EncryptionStatus {
+///     enabled: false,
+///     algorithm: None,
+///     provider_type: None,
+///     provider_detail: None,
+/// };
+///
+/// let formatted = format_encryption_status(&status);
+/// assert!(formatted.contains("DISABLED"));
+/// ```
 #[must_use]
 pub fn format_encryption_status(status: &EncryptionStatus) -> String {
     let mut out = String::new();

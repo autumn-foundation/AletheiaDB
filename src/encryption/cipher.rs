@@ -58,6 +58,20 @@ const AES_TAG_SIZE: usize = 16;
 
 impl Aes256GcmCipher {
     /// Create a new AES-256-GCM cipher from a 32-byte key.
+    ///
+    /// # Why?
+    /// Automatically leverages hardware acceleration (AES-NI) on x86_64 architectures,
+    /// providing line-rate encryption for high-throughput components like the WAL.
+    ///
+    /// ## Examples
+    /// ```
+    /// use aletheiadb::encryption::cipher::{Aes256GcmCipher, Cipher};
+    /// use zeroize::Zeroizing;
+    ///
+    /// let key = Zeroizing::new([0u8; 32]);
+    /// let cipher = Aes256GcmCipher::new(&key);
+    /// assert_eq!(cipher.algorithm_name(), "AES-256-GCM");
+    /// ```
     pub fn new(key: &Zeroizing<[u8; 32]>) -> Self {
         let inner = Aes256Gcm::new_from_slice(key.as_ref())
             .expect("32-byte key is always valid for AES-256");
@@ -149,6 +163,20 @@ const CHACHA_TAG_SIZE: usize = 16;
 
 impl ChaCha20Poly1305Cipher {
     /// Create a new ChaCha20-Poly1305 cipher from a 32-byte key.
+    ///
+    /// # Why?
+    /// Serves as the high-performance fallback for ARM/Edge deployments where AES-NI
+    /// hardware acceleration might not be available, ensuring predictable performance.
+    ///
+    /// ## Examples
+    /// ```
+    /// use aletheiadb::encryption::cipher::{ChaCha20Poly1305Cipher, Cipher};
+    /// use zeroize::Zeroizing;
+    ///
+    /// let key = Zeroizing::new([0u8; 32]);
+    /// let cipher = ChaCha20Poly1305Cipher::new(&key);
+    /// assert_eq!(cipher.algorithm_name(), "ChaCha20-Poly1305");
+    /// ```
     pub fn new(key: &Zeroizing<[u8; 32]>) -> Self {
         let inner = ChaChaInner::new_from_slice(key.as_ref())
             .expect("32-byte key is always valid for ChaCha20");

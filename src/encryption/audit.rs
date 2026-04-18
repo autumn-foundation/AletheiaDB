@@ -82,6 +82,18 @@ pub struct EncryptionAuditLogger {
 
 impl EncryptionAuditLogger {
     /// Create a new audit logger with the given level and instance identifier.
+    ///
+    /// # Why?
+    /// The `instance_id` allows centralized logging platforms to differentiate
+    /// encryption events coming from multiple database nodes in a clustered environment.
+    ///
+    /// ## Examples
+    /// ```
+    /// use aletheiadb::encryption::audit::{EncryptionAuditLogger, AuditLevel};
+    ///
+    /// let logger = EncryptionAuditLogger::new(AuditLevel::KeyEvents, "node-1");
+    /// assert_eq!(logger.level(), AuditLevel::KeyEvents);
+    /// ```
     #[must_use]
     pub fn new(level: AuditLevel, instance_id: impl Into<String>) -> Self {
         Self {
@@ -91,18 +103,59 @@ impl EncryptionAuditLogger {
     }
 
     /// Create a disabled audit logger that swallows all events.
+    ///
+    /// # Why?
+    /// Provides a zero-cost abstraction for configurations where audit logging
+    /// is disabled, avoiding `Option` unwrapping on every database operation.
+    ///
+    /// ## Examples
+    /// ```
+    /// use aletheiadb::encryption::audit::{EncryptionAuditLogger, AuditLevel};
+    ///
+    /// let logger = EncryptionAuditLogger::disabled();
+    /// assert_eq!(logger.level(), AuditLevel::None);
+    /// ```
     #[must_use]
     pub fn disabled() -> Self {
         Self::new(AuditLevel::None, "")
     }
 
     /// Get the configured audit level.
+    ///
+    /// # Why?
+    /// Allows external components (like the query planner) to check if detailed
+    /// logging is active, potentially optimizing away expensive telemetry data generation.
+    ///
+    /// ## Examples
+    /// ```
+    /// use aletheiadb::encryption::audit::{EncryptionAuditLogger, AuditLevel};
+    ///
+    /// let logger = EncryptionAuditLogger::disabled();
+    /// assert_eq!(logger.level(), AuditLevel::None);
+    /// ```
     #[must_use]
     pub fn level(&self) -> AuditLevel {
         self.level
     }
 
     /// Log an audit event if the configured level permits it.
+    ///
+    /// # Why?
+    /// Centralizes all the filtering and formatting logic, ensuring that sensitive
+    /// keys are never accidentally logged, and that log structures remain consistent.
+    ///
+    /// ## Examples
+    /// ```
+    /// use aletheiadb::encryption::audit::{EncryptionAuditLogger, AuditLevel, AuditEvent};
+    ///
+    /// let logger = EncryptionAuditLogger::new(AuditLevel::KeyEvents, "node-1");
+    /// let event = AuditEvent::KeyLoaded {
+    ///     provider: "file".to_string(),
+    ///     key_version: 1,
+    /// };
+    ///
+    /// logger.log(&event);
+    /// ```
     pub fn log(&self, event: &AuditEvent) {
         let required_level = match event {
             AuditEvent::KeyLoaded { .. }
