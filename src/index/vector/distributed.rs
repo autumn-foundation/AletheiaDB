@@ -1084,7 +1084,7 @@ impl<C: VectorNodeClient + 'static> DistributedVectorIndex<C> {
         };
 
         let target_per_node = if node_count > 0 {
-            total_vectors.checked_div(node_count).unwrap_or(0)
+            total_vectors / node_count
         } else {
             0
         };
@@ -1331,12 +1331,12 @@ impl MockVectorNodeClient {
 
     fn compute_similarity(&self, a: &[f32], b: &[f32]) -> f32 {
         match self.metric {
-            DistanceMetric::Cosine => crate::core::vector::cosine_similarity(a, b).unwrap_or(0.0),
+            DistanceMetric::Cosine => crate::core::vector::cosine_similarity(a, b).unwrap_or(f32::NEG_INFINITY),
             DistanceMetric::Euclidean => {
-                let dist = crate::core::vector::euclidean_distance(a, b).unwrap_or(0.0);
+                let dist = crate::core::vector::euclidean_distance(a, b).unwrap_or(f32::INFINITY);
                 -dist // Negate so higher is better
             }
-            DistanceMetric::DotProduct => crate::core::vector::dot_product(a, b).unwrap_or(0.0),
+            DistanceMetric::DotProduct => crate::core::vector::dot_product(a, b).unwrap_or(f32::NEG_INFINITY),
             other => panic!(
                 "MockVectorNodeClient does not support {:?} distance metric",
                 other

@@ -95,136 +95,30 @@ impl EncryptionManager {
     }
 
     /// Cipher for WAL encryption/decryption.
-    ///
-    /// # Why?
-    /// Each component gets its own derived key (DEK) to limit the blast radius if a single
-    /// component's key is compromised. The WAL cipher is specifically for the write-ahead log.
-    ///
-    /// ## Examples
-    /// ```
-    /// use aletheiadb::encryption::manager::EncryptionManager;
-    /// use aletheiadb::encryption::config::EncryptionConfig;
-    /// use aletheiadb::encryption::key_provider::FileKeyProvider;
-    /// use aletheiadb::encryption::cipher::Cipher;
-    ///
-    /// let dir = tempfile::tempdir().unwrap();
-    /// let key_path = dir.path().join("test.key");
-    /// FileKeyProvider::generate_key_file(&key_path).unwrap();
-    ///
-    /// let config = EncryptionConfig::file_based(&key_path);
-    /// let manager = EncryptionManager::from_config(&config).unwrap();
-    ///
-    /// let encrypted = manager.wal_cipher().encrypt(b"data", b"aad").unwrap();
-    /// ```
     #[must_use]
     pub fn wal_cipher(&self) -> &Arc<dyn Cipher> {
         &self.wal_cipher
     }
 
     /// Cipher for index persistence encryption/decryption.
-    ///
-    /// # Why?
-    /// The index cipher uses a separate derived key from the WAL and cold storage to ensure
-    /// cryptographic isolation between the vector search indexes and core database data.
-    ///
-    /// ## Examples
-    /// ```
-    /// use aletheiadb::encryption::manager::EncryptionManager;
-    /// use aletheiadb::encryption::config::EncryptionConfig;
-    /// use aletheiadb::encryption::key_provider::FileKeyProvider;
-    /// use aletheiadb::encryption::cipher::Cipher;
-    ///
-    /// let dir = tempfile::tempdir().unwrap();
-    /// let key_path = dir.path().join("test.key");
-    /// FileKeyProvider::generate_key_file(&key_path).unwrap();
-    ///
-    /// let config = EncryptionConfig::file_based(&key_path);
-    /// let manager = EncryptionManager::from_config(&config).unwrap();
-    ///
-    /// let encrypted = manager.index_cipher().encrypt(b"data", b"aad").unwrap();
-    /// ```
     #[must_use]
     pub fn index_cipher(&self) -> &Arc<dyn Cipher> {
         &self.index_cipher
     }
 
     /// Cipher for cold storage encryption/decryption.
-    ///
-    /// # Why?
-    /// Cold storage files might be archived to untrusted cloud storage (like S3). Using a
-    /// dedicated key ensures that even if an attacker obtains an archive, they cannot decrypt
-    /// it without this specific DEK.
-    ///
-    /// ## Examples
-    /// ```
-    /// use aletheiadb::encryption::manager::EncryptionManager;
-    /// use aletheiadb::encryption::config::EncryptionConfig;
-    /// use aletheiadb::encryption::key_provider::FileKeyProvider;
-    /// use aletheiadb::encryption::cipher::Cipher;
-    ///
-    /// let dir = tempfile::tempdir().unwrap();
-    /// let key_path = dir.path().join("test.key");
-    /// FileKeyProvider::generate_key_file(&key_path).unwrap();
-    ///
-    /// let config = EncryptionConfig::file_based(&key_path);
-    /// let manager = EncryptionManager::from_config(&config).unwrap();
-    ///
-    /// let encrypted = manager.cold_cipher().encrypt(b"data", b"aad").unwrap();
-    /// ```
     #[must_use]
     pub fn cold_cipher(&self) -> &Arc<dyn Cipher> {
         &self.cold_cipher
     }
 
     /// Cipher for checkpoint encryption/decryption.
-    ///
-    /// # Why?
-    /// Checkpoint files contain complete database snapshots. Isolating their encryption
-    /// from active WAL segments prevents attackers from exploiting potential nonce-reuse
-    /// vulnerabilities across different snapshot versions.
-    ///
-    /// ## Examples
-    /// ```
-    /// use aletheiadb::encryption::manager::EncryptionManager;
-    /// use aletheiadb::encryption::config::EncryptionConfig;
-    /// use aletheiadb::encryption::key_provider::FileKeyProvider;
-    /// use aletheiadb::encryption::cipher::Cipher;
-    ///
-    /// let dir = tempfile::tempdir().unwrap();
-    /// let key_path = dir.path().join("test.key");
-    /// FileKeyProvider::generate_key_file(&key_path).unwrap();
-    ///
-    /// let config = EncryptionConfig::file_based(&key_path);
-    /// let manager = EncryptionManager::from_config(&config).unwrap();
-    ///
-    /// let encrypted = manager.checkpoint_cipher().encrypt(b"data", b"aad").unwrap();
-    /// ```
     #[must_use]
     pub fn checkpoint_cipher(&self) -> &Arc<dyn Cipher> {
         &self.checkpoint_cipher
     }
 
     /// Human-readable name of the key provider backend (e.g., `"file"`, `"env"`).
-    ///
-    /// # Why?
-    /// This is used exclusively for diagnostic logging and telemetry, allowing operators
-    /// to see where the master key was sourced without exposing the key itself.
-    ///
-    /// ## Examples
-    /// ```
-    /// use aletheiadb::encryption::manager::EncryptionManager;
-    /// use aletheiadb::encryption::config::EncryptionConfig;
-    /// use aletheiadb::encryption::key_provider::FileKeyProvider;
-    ///
-    /// let dir = tempfile::tempdir().unwrap();
-    /// let key_path = dir.path().join("test.key");
-    /// FileKeyProvider::generate_key_file(&key_path).unwrap();
-    ///
-    /// let config = EncryptionConfig::file_based(&key_path);
-    /// let manager = EncryptionManager::from_config(&config).unwrap();
-    ///
-    /// assert_eq!(manager.provider_name(), "file");
-    /// ```
     #[must_use]
     pub fn provider_name(&self) -> &str {
         &self.provider_name
