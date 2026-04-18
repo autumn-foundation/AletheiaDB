@@ -16,7 +16,7 @@
 //!
 //! ```rust,no_run
 //! use aletheiadb::AletheiaDB;
-//! use aletheiadb::experimental::spectre::{Spectre, Lens};
+//! use aletheiadb::semantic_search::spectre::{Spectre, Lens};
 //! use aletheiadb::core::id::NodeId;
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {

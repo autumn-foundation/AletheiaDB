@@ -30,14 +30,14 @@
 //! // [dependencies]
 //! // aletheiadb = { version = "0.1", features = ["nova"] }
 //!
-//! # #[cfg(feature = "nova")]
+//! # #[cfg(feature = "nova-reasoning")]
 //! use aletheiadb::AletheiaDB;
-//! # #[cfg(feature = "nova")]
+//! # #[cfg(feature = "nova-reasoning")]
 //! use aletheiadb::experimental::prophet::Prophet;
-//! # #[cfg(feature = "nova")]
+//! # #[cfg(feature = "nova-reasoning")]
 //! use aletheiadb::core::property::PropertyMapBuilder;
 //!
-//! # #[cfg(feature = "nova")]
+//! # #[cfg(feature = "nova-reasoning")]
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let db = AletheiaDB::new()?;
 //!
@@ -60,7 +60,7 @@
 //! }
 //! # Ok(())
 //! # }
-//! # #[cfg(not(feature = "nova"))]
+//! # #[cfg(not(feature = "nova-reasoning"))]
 //! # fn main() {}
 //! ```
 
@@ -82,19 +82,19 @@ use std::collections::HashSet;
 /// # Examples
 ///
 /// ```rust
-/// # #[cfg(feature = "nova")]
+/// # #[cfg(feature = "nova-reasoning")]
 /// use aletheiadb::AletheiaDB;
-/// # #[cfg(feature = "nova")]
+/// # #[cfg(feature = "nova-reasoning")]
 /// use aletheiadb::experimental::prophet::Prophet;
 ///
-/// # #[cfg(feature = "nova")]
+/// # #[cfg(feature = "nova-reasoning")]
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let db = AletheiaDB::new()?;
 /// // Initialize the prophet engine attached to the database
 /// let prophet = Prophet::new(&db);
 /// # Ok(())
 /// # }
-/// # #[cfg(not(feature = "nova"))]
+/// # #[cfg(not(feature = "nova-reasoning"))]
 /// # fn main() {}
 /// ```
 pub struct Prophet<'a> {
@@ -113,18 +113,18 @@ impl<'a> Prophet<'a> {
     /// # Examples
     ///
     /// ```rust
-    /// # #[cfg(feature = "nova")]
+    /// # #[cfg(feature = "nova-reasoning")]
     /// use aletheiadb::AletheiaDB;
-    /// # #[cfg(feature = "nova")]
+    /// # #[cfg(feature = "nova-reasoning")]
     /// use aletheiadb::experimental::prophet::Prophet;
     ///
-    /// # #[cfg(feature = "nova")]
+    /// # #[cfg(feature = "nova-reasoning")]
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// let db = AletheiaDB::new()?;
     /// let prophet = Prophet::new(&db);
     /// # Ok(())
     /// # }
-    /// # #[cfg(not(feature = "nova"))]
+    /// # #[cfg(not(feature = "nova-reasoning"))]
     /// # fn main() {}
     /// ```
     pub fn new(db: &'a AletheiaDB) -> Self {
@@ -142,19 +142,19 @@ impl<'a> Prophet<'a> {
     /// # Examples
     ///
     /// ```rust
-    /// # #[cfg(feature = "nova")]
+    /// # #[cfg(feature = "nova-reasoning")]
     /// use aletheiadb::AletheiaDB;
-    /// # #[cfg(feature = "nova")]
+    /// # #[cfg(feature = "nova-reasoning")]
     /// use aletheiadb::experimental::prophet::Prophet;
     ///
-    /// # #[cfg(feature = "nova")]
+    /// # #[cfg(feature = "nova-reasoning")]
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// let db = AletheiaDB::new()?;
     /// // Force the prophet to only consider the "bio_embedding" property for similarity
     /// let prophet = Prophet::new(&db).with_property("bio_embedding");
     /// # Ok(())
     /// # }
-    /// # #[cfg(not(feature = "nova"))]
+    /// # #[cfg(not(feature = "nova-reasoning"))]
     /// # fn main() {}
     /// ```
     pub fn with_property(mut self, name: impl Into<String>) -> Self {
@@ -268,14 +268,14 @@ impl<'a> Prophet<'a> {
     /// # Examples
     ///
     /// ```rust
-    /// # #[cfg(feature = "nova")]
+    /// # #[cfg(feature = "nova-reasoning")]
     /// use aletheiadb::AletheiaDB;
-    /// # #[cfg(feature = "nova")]
+    /// # #[cfg(feature = "nova-reasoning")]
     /// use aletheiadb::experimental::prophet::Prophet;
-    /// # #[cfg(feature = "nova")]
+    /// # #[cfg(feature = "nova-reasoning")]
     /// use aletheiadb::core::property::PropertyMapBuilder;
     ///
-    /// # #[cfg(feature = "nova")]
+    /// # #[cfg(feature = "nova-reasoning")]
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// let db = AletheiaDB::new()?;
     /// # let props = PropertyMapBuilder::new().build();
@@ -295,7 +295,7 @@ impl<'a> Prophet<'a> {
     /// }
     /// # Ok(())
     /// # }
-    /// # #[cfg(not(feature = "nova"))]
+    /// # #[cfg(not(feature = "nova-reasoning"))]
     /// # fn main() {}
     /// ```
     pub fn predict_links(&self, target: NodeId, k: usize) -> Result<Vec<(NodeId, f32)>> {

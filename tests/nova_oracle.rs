@@ -1,4 +1,4 @@
-#![cfg(feature = "nova")]
+#![cfg(feature = "nova-reasoning")]
 
 use aletheiadb::AletheiaDB;
 use aletheiadb::core::property::PropertyMapBuilder;

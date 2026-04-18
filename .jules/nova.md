@@ -1,6 +1,6 @@
 ## Semantic Pathfinding (Semantic Navigator)
 **Concept:** A pathfinding algorithm (A*) that uses vector similarity as the heuristic cost.
-**Fate:** Merged (Experimental)
+**Fate:** Merged (Stable, `semantic-search`) — graduated from `nova` in 0.1.
 **Lesson:**
 - Connecting graph topology with vector embeddings creates powerful "conceptual navigation".
 - Time-travel pathfinding is tricky without a historical adjacency index (deleted edges are lost to `get_outgoing_edges`), highlighting a future architectural need.
@@ -17,7 +17,7 @@
 
 ## Associative Retrieval (Fishing)
 **Concept:** A search algorithm that "casts" a vector query to find similar nodes, then "spreads a net" to their neighbors, scoring results by a combination of vector similarity, graph proximity, and temporal freshness.
-**Fate:** Merged (Experimental)
+**Fate:** Merged (Stable, `semantic-search`) — graduated from `nova` in 0.1.
 **Lesson:**
 - Combining Vector + Graph + Time creates a rich "associative memory" feel.
 - `VersionMetadata` allows for easy "freshness" boosting.
@@ -33,7 +33,7 @@
 
 ## The Cartographer
 **Concept:** A semantic clustering engine that analyzes node vectors to discover natural clusters and reifies them as "Region" nodes in the graph.
-**Fate:** Merged (Experimental)
+**Fate:** Merged (Stable, `semantic-search`) — graduated from `nova` in 0.1.
 **Lesson:**
 - Combining `scan(None)` with batch processing enables powerful global graph analysis.
 - Reifying analysis results back into the graph ("Region" nodes) makes the structure queryable by other tools.

@@ -17,11 +17,11 @@ use aletheiadb::{
     WriteOps, query::semantic_pathfinding::SemanticPathfinder,
 };
 
-#[cfg(feature = "nova")]
+#[cfg(all(feature = "semantic-search", feature = "nova-reasoning"))]
 use aletheiadb::{
-    experimental::concept_algebra::ConceptAlgebra,
-    experimental::fishing::{Bait, FishingRod, FishingTrip},
     experimental::prophet::Prophet,
+    semantic_search::concept_algebra::ConceptAlgebra,
+    semantic_search::fishing::{Bait, FishingRod, FishingTrip},
 };
 use rustyline::completion::{Completer, Pair};
 use rustyline::error::ReadlineError;
@@ -200,7 +200,7 @@ impl RussianLitCompleter {
             "exit".to_string(),
         ];
 
-        #[cfg(feature = "nova")]
+        #[cfg(all(feature = "semantic-search", feature = "nova-reasoning"))]
         {
             commands.push("fish".to_string());
             commands.push("analogy".to_string());
@@ -2108,7 +2108,7 @@ fn find_semantic_path(
     Ok(())
 }
 
-#[cfg(feature = "nova")]
+#[cfg(all(feature = "semantic-search", feature = "nova-reasoning"))]
 fn enrich_provenance(
     db: &AletheiaDB,
     _source_id: NodeId,
@@ -2161,7 +2161,7 @@ fn enrich_provenance(
     enriched
 }
 
-#[cfg(feature = "nova")]
+#[cfg(all(feature = "semantic-search", feature = "nova-reasoning"))]
 fn go_fishing(demo: &DemoData, entity_name: &str) -> Result<()> {
     // Find any entity as the starting point
     let entity_result = find_any_entity(demo, entity_name);
@@ -2246,7 +2246,7 @@ fn go_fishing(demo: &DemoData, entity_name: &str) -> Result<()> {
     Ok(())
 }
 
-#[cfg(feature = "nova")]
+#[cfg(all(feature = "semantic-search", feature = "nova-reasoning"))]
 fn literary_analogy(demo: &DemoData, a_name: &str, b_name: &str, c_name: &str) -> Result<()> {
     // Find all three entities
     let a_result = find_any_entity(demo, a_name);
@@ -2580,7 +2580,7 @@ fn show_personality_evolution(demo: &DemoData, book_title: &str) -> Result<()> {
 }
 
 /// Predict missing links using Prophet (topology + semantics).
-#[cfg(feature = "nova")]
+#[cfg(all(feature = "semantic-search", feature = "nova-reasoning"))]
 fn predict_missing_links(demo: &DemoData, args: &str) -> Result<()> {
     // Parse arguments: handle quoted entity names and optional k parameter
     // Examples: "Dostoevsky", "Fyodor Dostoevsky" 5, Tolstoy 10
@@ -3069,7 +3069,7 @@ Examples:
 "#
     );
 
-    #[cfg(feature = "nova")]
+    #[cfg(all(feature = "semantic-search", feature = "nova-reasoning"))]
     {
         println!(
             r#"
@@ -3084,10 +3084,10 @@ Examples:
         );
     }
 
-    #[cfg(not(feature = "nova"))]
+    #[cfg(not(all(feature = "semantic-search", feature = "nova-reasoning")))]
     {
         println!(
-            "\n💡 Experimental features available with: cargo run --example russian_writers --features nova"
+            "\n💡 Experimental features available with: cargo run --example russian_writers --features semantic-search,nova-reasoning"
         );
     }
 }
@@ -3298,7 +3298,7 @@ fn main() -> Result<()> {
                     show_personality_evolution(&demo, args)?;
                 }
             }
-            #[cfg(feature = "nova")]
+            #[cfg(all(feature = "semantic-search", feature = "nova-reasoning"))]
             "predict" => {
                 if args.is_empty() {
                     println!("Usage: predict <entity_name> [k]");
@@ -3404,7 +3404,7 @@ fn main() -> Result<()> {
                     }
                 }
             }
-            #[cfg(feature = "nova")]
+            #[cfg(all(feature = "semantic-search", feature = "nova-reasoning"))]
             "fish" => {
                 if args.is_empty() {
                     println!("Usage: fish <entity>");
@@ -3417,7 +3417,7 @@ fn main() -> Result<()> {
                     go_fishing(&demo, args)?;
                 }
             }
-            #[cfg(feature = "nova")]
+            #[cfg(all(feature = "semantic-search", feature = "nova-reasoning"))]
             "analogy" => {
                 let parts = parse_quoted_args(args);
                 if parts.len() < 3 {

@@ -1,82 +1,74 @@
 //! Experimental features ("Nova" playground).
 //!
-//! This module contains experimental features that are not yet part of the core API.
-//! They are gated behind the `nova` feature flag.
+//! This module hosts experimental features whose APIs are not yet stable.
+//! Modules are organized into category subfolders, each gated by its own
+//! feature flag so users can opt into a slice of experimentation rather than
+//! the whole blob.
 //!
 //! # The "Nova" Philosophy 🌟
 //!
-//! "Nova" is AletheiaDB's R&D playground. It's where we test radical new ideas like
-//! semantic physics, narrative generation, and counterfactual graph analysis.
+//! "Nova" is AletheiaDB's R&D playground — radical ideas like semantic physics,
+//! narrative generation, and counterfactual graph analysis live here while we
+//! validate them.
 //!
 //! **These features are:**
 //! - 🧪 **Experimental**: APIs may change or break without warning.
 //! - 🚀 **Innovative**: Cutting-edge features for AI/LLM integration.
 //! - 🚩 **Opt-in**: You must explicitly enable them.
 //!
+//! Once a category proves itself, it graduates to a top-level stable feature
+//! (see [`crate::semantic_search`] for the first graduation).
+//!
 //! # Enabling Nova
 //!
-//! Add the `nova` feature to your `Cargo.toml`:
+//! Flip the umbrella flag to enable every category:
 //!
 //! ```toml
 //! [dependencies]
 //! aletheiadb = { version = "0.1", features = ["nova"] }
 //! ```
 //!
-//! # Module Inventory
+//! Or pick a single category:
 //!
-//! | Module | Code Name | Description |
-//! |--------|-----------|-------------|
-//! | `sherlock` | **Sherlock** | Temporal Pattern Matching. "Did X happen before Y within 5 mins?" |
-//! | `dreamer` | **Dreamer** | Semantic Trajectory Extrapolation. "Where is this vector going?" |
-//! | `aura` | **Aura** | Semantic Essence over Time. "What is your long-term identity?" |
-//! | `thermos` | **Thermos** | Semantic Volatility Gauge. "Is this data heating up?" |
-//! | `hindsight` | **Hindsight** | Counterfactual Analysis. "What if this edge didn't exist?" |
-//! | `janus` | **Janus** | Semantic Bridge Detection. "Who connects these two worlds?" |
-//! | `prism` | **Prism** | Semantic Spectroscopy. Decompose vectors into conceptual components. |
-//! | `horizon` | **Horizon** | Semantic Event Horizon. "Where does a concept end?" |
-//! | `chronos` | **Chronos** | Temporal Pathfinding. "Find a path that respects time travel." |
-//! | `ariadne` | **Ariadne** | Semantic Thread Weaver. Connect disparate concepts via narrative threads. |
-//! | `echo` | **Echo** | Temporal Resonance. Find nodes with similar activity patterns. |
-//! | `kaleidoscope` | **Kaleidoscope** | Semantic Force-Directed Layout. Visualize vector spaces. |
-//! | `sentinel` | **Sentinel** | Semantic Firewall. Validate data insertion against rules. |
-//! | `sybil` | **Sybil** | Memetic Propagation. "How far does this idea spread?" |
-//! | `synapse` | **Synapse** | Adaptive Graph Hebbian Learning. "Cells that fire together, wire together." |
-//! | `gravity` | **Gravity** | Semantic Mass and Orbit Analysis. "Who are the real influencers?" |
-//! | `gestalt` | **Gestalt** | Semantic Subgraph Matching. "Find this pattern, but fuzzier." |
-//! | `mnemosyne` | **Mnemosyne** | Semantic Memory Consolidation. "What matters is what changed." |
-//! | `chimera` | **Chimera** | Hybrid Entity Synthesis. "What if we merged these two concepts?" |
-//! | `oracle` | **Oracle** | Probabilistic Graph Reasoning. "Who is the most relevant node to X?" |
-//! | `spectre` | **Spectre** | Semantic Perspective Engine. "Subjective graph traversal." |
-//! | `luna` | **Luna** | Semantic Subgraph Synthesis. "Materialize the core concept bridging these ideas." |
-//! | `serendipity` | **Serendipity** | Scenic Route Finder. "Find paths that maximize semantic divergence." |
-//! | `tremor` | **Tremor** | Semantic Earthquake Detector. "Did the global semantic state suddenly shift?" |
+//! ```toml
+//! [dependencies]
+//! aletheiadb = { version = "0.1", features = ["nova-temporal"] }
+//! ```
+//!
+//! > ⚠️ **Breaking change in 0.1:** the `nova` umbrella no longer enables the
+//! > graduated semantic-search cohort. Add `"semantic-search"` alongside `"nova"`
+//! > if you want every former-nova module compiled.
+//!
+//! # Categories
+//!
+//! | Flag | What it gates | Modules |
+//! |------|---------------|---------|
+//! | [`reasoning`] (`nova-reasoning`) | Prediction, synthesis, counterfactuals | prophet, dreamer, omen, oracle, hindsight, muse, luna, metaphor, synergy, chimera, alchemy |
+//! | [`temporal`] (`nova-temporal`) | Bi-temporal + semantic | sherlock, chronos, echo, kairos, temporal_narrative, temporal_diff, aura, mnemosyne, ariadne |
+//! | [`diagnostics`] (`nova-diagnostics`) | Anomaly, validation, health | dissonance, sentinel, fossil, tremor, polygraph, wormhole, ripple, entanglement, thermos, paradox |
+//! | [`characterization`] (`nova-characterization`) | Describe concepts + export | archetype, prism, gravity, sybil, synapse, kaleidoscope, papyrus, graph_context, wildfire |
+//!
+//! For convenience, every submodule is re-exported at this module's path —
+//! existing code using `aletheiadb::experimental::sherlock::Sherlock` keeps
+//! working as long as the corresponding category flag is enabled.
 //!
 //! # Example: Detecting Suspicious Patterns with Sherlock
 //!
-//! > ⚠️ **REQUIRES FEATURE 'NOVA'**
-//! >
-//! > This feature is experimental and requires the `nova` feature flag.
-//! > Add `features = ["nova"]` to your `Cargo.toml`.
-//!
 //! ```rust,no_run
-//! // [dependencies]
-//! // aletheiadb = { version = "0.1", features = ["nova"] }
-//!
-//! # #[cfg(feature = "nova")]
+//! # #[cfg(feature = "nova-temporal")]
 //! use aletheiadb::AletheiaDB;
-//! # #[cfg(feature = "nova")]
+//! # #[cfg(feature = "nova-temporal")]
 //! use aletheiadb::experimental::sherlock::{Sherlock, Mystery, Clue};
-//! # #[cfg(feature = "nova")]
+//! # #[cfg(feature = "nova-temporal")]
 //! use aletheiadb::core::property::PropertyValue;
-//! # #[cfg(feature = "nova")]
+//! # #[cfg(feature = "nova-temporal")]
 //! use std::time::Duration;
 //!
-//! # #[cfg(feature = "nova")]
+//! # #[cfg(feature = "nova-temporal")]
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let db = AletheiaDB::new()?;
 //! # let node_id = db.create_node("User", Default::default())?;
 //!
-//! // Define a mystery: User logs in, then deletes file within 1 second
 //! let mystery = Mystery::new(Duration::from_secs(1))
 //!     .add_clue(Clue::PropertyState {
 //!         key: "status".to_string(),
@@ -88,180 +80,29 @@
 //!     });
 //!
 //! let sherlock = Sherlock::new(&db);
-//! let detections = sherlock.investigate(node_id, &mystery)?;
-//!
-//! if !detections.is_empty() {
-//!     println!("🕵️ Sherlock found {} suspicious sequences!", detections.len());
-//! }
+//! let _detections = sherlock.investigate(node_id, &mystery)?;
 //! # Ok(())
 //! # }
-//! # #[cfg(not(feature = "nova"))]
+//! # #[cfg(not(feature = "nova-temporal"))]
 //! # fn main() {}
 //! ```
 
-#[cfg(feature = "nova")]
-/// Alchemy: Semantic Graph Transformation Engine.
-pub mod alchemy;
-#[cfg(feature = "nova")]
-/// Archetype: Semantic concept extraction and purity scoring.
-pub mod archetype;
-#[cfg(feature = "nova")]
-/// Ariadne: Semantic Thread Weaver.
-pub mod ariadne;
-#[cfg(feature = "nova")]
-/// Aura: Semantic Essence over Time.
-pub mod aura;
-#[cfg(feature = "nova")]
-/// Semantic graph clustering ("Cartographer").
-pub mod cartographer;
-#[cfg(feature = "nova")]
-/// Chameleon: Context-Aware Faceted Search.
-pub mod chameleon;
-#[cfg(feature = "nova")]
-/// Chimera: Hybrid Entity Synthesis Engine.
-pub mod chimera;
-#[cfg(feature = "nova")]
-/// Chronos: Temporal Graph Analysis & Pathfinding.
-pub mod chronos;
-#[cfg(feature = "nova")]
-/// Concept Algebra for semantic vector arithmetic.
-pub mod concept_algebra;
-#[cfg(feature = "nova")]
-/// Dissonance: Semantic Stress Detector.
-pub mod dissonance;
-#[cfg(feature = "nova")]
-/// Semantic Trajectory Extrapolation ("Dreamer").
-pub mod dreamer;
-#[cfg(feature = "nova")]
-/// Temporal Resonance Engine ("Echo") for finding nodes with similar activity patterns.
-pub mod echo;
-#[cfg(feature = "nova")]
-/// Entanglement: Detecting Quantum Entanglement in the Graph.
-pub mod entanglement;
-#[cfg(feature = "nova")]
-/// Associative retrieval ("Fishing") module.
-pub mod fishing;
-#[cfg(feature = "nova")]
-/// Fossil: Semantic Stagnation Detector.
-pub mod fossil;
-#[cfg(feature = "nova")]
-/// Graph context exporter for LLM integration.
-pub mod graph_context;
-#[cfg(feature = "nova")]
-/// Highlander: Semantic Entity Resolution.
-pub mod highlander;
-#[cfg(feature = "nova")]
-/// Hindsight: Counterfactual Graph Analysis Engine.
-pub mod hindsight;
-#[cfg(feature = "nova")]
-/// Horizon: Semantic Event Horizon.
-pub mod horizon;
-#[cfg(feature = "nova")]
-/// Janus: Semantic Bridge Detector.
-pub mod janus;
-#[cfg(feature = "nova")]
-/// Kairos: Semantic Event Detection & History Summarization.
-pub mod kairos;
-#[cfg(feature = "nova")]
-/// Kaleidoscope: Semantic Force-Directed Layout Engine.
-pub mod kaleidoscope;
-#[cfg(feature = "nova")]
-/// Prism: Semantic Spectroscopy for Vectors.
-pub mod prism;
-#[cfg(feature = "nova")]
-pub mod prophet;
-#[cfg(feature = "nova")]
-/// Ripple: Semantic Causality Detector.
-pub mod ripple;
-#[cfg(feature = "nova")]
-/// Semantic Navigator for vector-guided pathfinding.
-pub mod semantic_navigator;
-#[cfg(feature = "nova")]
-/// Sherlock: Temporal Pattern Matching Engine.
-pub mod sherlock;
-#[cfg(feature = "nova")]
-/// Sybil: Memetic Propagation Engine.
-pub mod sybil;
-#[cfg(feature = "nova")]
-/// Synapse: Adaptive Graph Hebbian Learning.
-pub mod synapse;
-#[cfg(feature = "nova")]
-pub mod synergy;
-#[cfg(feature = "nova")]
-/// Telepathy: Semantic Spreading Activation Engine.
-pub mod telepathy;
-#[cfg(feature = "nova")]
-/// Temporal Diff Engine for computing snapshot differences.
-pub mod temporal_diff;
-#[cfg(feature = "nova")]
-/// Temporal narrative generator for natural language history logs.
-pub mod temporal_narrative;
+#[cfg(feature = "nova-reasoning")]
+mod reasoning;
+#[cfg(feature = "nova-reasoning")]
+pub use reasoning::*;
 
-#[cfg(feature = "nova")]
-/// Thermos: Semantic Temperature & Volatility Gauge.
-pub mod thermos;
+#[cfg(feature = "nova-temporal")]
+mod temporal;
+#[cfg(feature = "nova-temporal")]
+pub use temporal::*;
 
-#[cfg(feature = "nova")]
-/// Sentinel: Semantic Firewall for validating data insertion.
-pub mod sentinel;
+#[cfg(feature = "nova-diagnostics")]
+mod diagnostics;
+#[cfg(feature = "nova-diagnostics")]
+pub use diagnostics::*;
 
-#[cfg(feature = "nova")]
-/// Wormhole: Detecting Semantic-Structural Gaps.
-pub mod wormhole;
-
-#[cfg(feature = "nova")]
-/// Tapestry: Semantic Path Weaving Engine.
-pub mod tapestry;
-
-#[cfg(feature = "nova")]
-/// Gestalt: Semantic Subgraph Matching Engine.
-pub mod gestalt;
-
-#[cfg(feature = "nova")]
-/// Gravity: Semantic Mass and Orbit Analysis.
-pub mod gravity;
-
-#[cfg(feature = "nova")]
-/// Metaphor: Semantic Graph Alignment Engine.
-pub mod metaphor;
-
-#[cfg(feature = "nova")]
-/// Mnemosyne: Semantic Memory Consolidation.
-pub mod mnemosyne;
-
-#[cfg(feature = "nova")]
-/// Muse: The Semantic Ideator.
-pub mod muse;
-
-#[cfg(feature = "nova")]
-pub mod omen;
-#[cfg(feature = "nova")]
-/// Oracle: Probabilistic Graph Reasoning.
-pub mod oracle;
-#[cfg(feature = "nova")]
-/// Papyrus: Semantic Graph to Mermaid JS Exporter.
-pub mod papyrus;
-
-#[cfg(feature = "nova")]
-/// Luna: Semantic Subgraph Synthesis.
-pub mod luna;
-
-#[cfg(feature = "nova")]
-/// Spectre: Semantic Perspective Engine.
-pub mod spectre;
-
-#[cfg(feature = "nova")]
-/// Voyager: Maximal Novelty Traversal Engine.
-pub mod voyager;
-
-#[cfg(feature = "nova")]
-/// Serendipity: The Scenic Route Finder.
-pub mod serendipity;
-
-#[cfg(feature = "nova")]
-/// Tremor: Semantic Earthquake Detector.
-pub mod tremor;
-
-#[cfg(feature = "nova")]
-/// Polygraph: Semantic-Structural Consistency Checker.
-pub mod polygraph;
+#[cfg(feature = "nova-characterization")]
+mod characterization;
+#[cfg(feature = "nova-characterization")]
+pub use characterization::*;

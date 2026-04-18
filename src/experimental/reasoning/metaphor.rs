@@ -20,9 +20,9 @@
 use crate::AletheiaDB;
 use crate::core::error::Result;
 use crate::core::id::NodeId;
-#[cfg(feature = "nova")]
+#[cfg(feature = "nova-reasoning")]
 use crate::core::vector::cosine_similarity;
-#[cfg(feature = "nova")]
+#[cfg(feature = "nova-reasoning")]
 use std::collections::{HashMap, HashSet};
 
 /// A single mapping in the alignment.
@@ -83,7 +83,7 @@ pub struct Alignment {
 /// # Examples
 ///
 /// ```rust
-/// # #[cfg(feature = "nova")]
+/// # #[cfg(feature = "nova-reasoning")]
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// use aletheiadb::AletheiaDB;
 /// use aletheiadb::experimental::metaphor::Metaphor;
@@ -107,7 +107,7 @@ pub struct Alignment {
 /// assert_eq!(alignment.mappings[0].target, node_x);
 /// # Ok(())
 /// # }
-/// # #[cfg(not(feature = "nova"))]
+/// # #[cfg(not(feature = "nova-reasoning"))]
 /// # fn main() {}
 /// ```
 pub struct Metaphor<'a> {
@@ -115,7 +115,7 @@ pub struct Metaphor<'a> {
     db: &'a AletheiaDB,
 }
 
-#[cfg(feature = "nova")]
+#[cfg(feature = "nova-reasoning")]
 impl<'a> Metaphor<'a> {
     /// Create a new Metaphor engine.
     pub fn new(db: &'a AletheiaDB) -> Self {
@@ -316,7 +316,7 @@ impl<'a> Metaphor<'a> {
     }
 }
 
-#[cfg(not(feature = "nova"))]
+#[cfg(not(feature = "nova-reasoning"))]
 impl<'a> Metaphor<'a> {
     /// Create a new Metaphor engine.
     pub fn new(_db: &'a AletheiaDB) -> Self {
@@ -342,13 +342,13 @@ impl<'a> Metaphor<'a> {
     }
 }
 
-#[cfg(feature = "nova")]
+#[cfg(feature = "nova-reasoning")]
 struct NodeData {
     vector: Option<Vec<f32>>,
     neighbors: Vec<NodeId>,
 }
 
-#[cfg(feature = "nova")]
+#[cfg(feature = "nova-reasoning")]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -491,7 +491,7 @@ mod tests {
     }
 }
 
-#[cfg(not(feature = "nova"))]
+#[cfg(not(feature = "nova-reasoning"))]
 #[cfg(test)]
 mod stub_tests {
     use super::*;

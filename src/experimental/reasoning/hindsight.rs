@@ -94,7 +94,7 @@ pub struct HindsightDiff {
 /// # Examples
 ///
 /// ```rust
-/// # #[cfg(feature = "nova")]
+/// # #[cfg(feature = "nova-reasoning")]
 /// # fn main() -> aletheiadb::core::error::Result<()> {
 /// use aletheiadb::AletheiaDB;
 /// use aletheiadb::experimental::hindsight::Hindsight;
@@ -111,7 +111,7 @@ pub struct HindsightDiff {
 /// let node = engine.get_node(v_id)?;
 /// # Ok(())
 /// # }
-/// # #[cfg(not(feature = "nova"))]
+/// # #[cfg(not(feature = "nova-reasoning"))]
 /// # fn main() {}
 /// ```
 pub struct Hindsight<'a> {

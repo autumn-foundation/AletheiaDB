@@ -21,7 +21,7 @@
 //! ```rust,no_run
 //! // Requires features = ["nova"]
 //! use aletheiadb::AletheiaDB;
-//! use aletheiadb::experimental::horizon::HorizonEngine;
+//! use aletheiadb::semantic_search::horizon::HorizonEngine;
 //! use aletheiadb::core::id::NodeId;
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {

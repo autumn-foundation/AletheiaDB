@@ -7,7 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking
+
+- **Experimental "Nova" feature split into category flags**
+  ([ADR-0050](docs/adr/0050-experimental-feature-categorization.md)).
+  The single `nova = []` flag has been replaced with five category flags:
+  - `semantic-search` (graduated to **stable**)
+  - `nova-reasoning`
+  - `nova-temporal`
+  - `nova-diagnostics`
+  - `nova-characterization`
+
+  The `nova` umbrella now enables only the four `nova-*` flags. It **no longer
+  enables the semantic-search cohort** — add `"semantic-search"` alongside
+  `"nova"` in your `features` list to keep prior behaviour:
+  ```toml
+  aletheiadb = { version = "0.1", features = ["nova", "semantic-search"] }
+  ```
+
+- **Path change for graduated modules**: 14 search-cohort modules moved from
+  `aletheiadb::experimental::*` to `aletheiadb::semantic_search::*`. Affected
+  modules: `fishing`, `gestalt`, `cartographer`, `highlander`, `janus`,
+  `chameleon`, `semantic_navigator`, `concept_algebra`, `serendipity`,
+  `voyager`, `spectre`, `telepathy`, `tapestry`, `horizon`. Update imports:
+  ```rust
+  // Before
+  use aletheiadb::experimental::fishing::FishingRod;
+  // After
+  use aletheiadb::semantic_search::fishing::FishingRod;
+  ```
+
+### Stabilized
+
+- **Semantic search cohort graduates from experimental** to stable under the
+  new `semantic-search` feature flag. Includes 14 modules covering associative
+  retrieval, fuzzy pattern matching, clustering, entity resolution, and
+  vector-guided traversal. The remaining "Nova" categories continue under
+  `nova-*` flags.
+
 ### Added
+
+- `just check-features` recipe verifies each Nova/semantic-search category
+  compiles standalone.
 
 #### Phase 2: Hybrid Logical Clock Integration (2026-01-20)
 

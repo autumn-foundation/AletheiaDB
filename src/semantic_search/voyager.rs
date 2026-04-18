@@ -55,7 +55,7 @@ impl<'a> Voyager<'a> {
     /// ```rust,no_run
     /// # fn run() -> Result<(), Box<dyn std::error::Error>> {
     /// use aletheiadb::AletheiaDB;
-    /// use aletheiadb::experimental::voyager::Voyager;
+    /// use aletheiadb::semantic_search::voyager::Voyager;
     /// use aletheiadb::core::id::NodeId;
     ///
     /// let db = AletheiaDB::new()?;

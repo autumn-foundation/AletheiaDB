@@ -25,7 +25,7 @@
 //! > ⚠️ **REQUIRES FEATURE 'NOVA'**
 //!
 //! ```rust
-//! # #[cfg(feature = "nova")]
+//! # #[cfg(feature = "nova-temporal")]
 //! # {
 //! use aletheiadb::{AletheiaDB, properties, ReadOps, WriteOps, Error};
 //! use aletheiadb::core::temporal::time;
@@ -75,7 +75,7 @@
 //! # Ok(())
 //! # }
 //! # }
-//! # #[cfg(not(feature = "nova"))]
+//! # #[cfg(not(feature = "nova-temporal"))]
 //! # fn main() {}
 //! ```
 
@@ -83,16 +83,16 @@ use crate::AletheiaDB;
 use crate::core::error::Result;
 use crate::core::id::{EdgeId, NodeId};
 use crate::core::temporal::{TimeRange, Timestamp};
-#[cfg(feature = "nova")]
+#[cfg(feature = "nova-temporal")]
 use std::collections::{HashSet, VecDeque};
 
-#[cfg(feature = "nova")]
+#[cfg(feature = "nova-temporal")]
 /// The Time Lord of the Graph.
 pub struct Chronos<'a> {
     db: &'a AletheiaDB,
 }
 
-#[cfg(not(feature = "nova"))]
+#[cfg(not(feature = "nova-temporal"))]
 /// The Time Lord of the Graph.
 #[deprecated(
     note = "Chronos requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
@@ -101,7 +101,7 @@ pub struct Chronos<'a> {
     _marker: std::marker::PhantomData<&'a AletheiaDB>,
 }
 
-#[cfg(feature = "nova")]
+#[cfg(feature = "nova-temporal")]
 impl<'a> Chronos<'a> {
     /// Create a new Chronos instance.
     pub fn new(db: &'a AletheiaDB) -> Self {
@@ -321,7 +321,7 @@ impl<'a> Chronos<'a> {
     }
 }
 
-#[cfg(not(feature = "nova"))]
+#[cfg(not(feature = "nova-temporal"))]
 #[allow(deprecated)]
 impl<'a> Chronos<'a> {
     /// Create a new Chronos instance.
@@ -383,7 +383,7 @@ impl<'a> Chronos<'a> {
     }
 }
 
-#[cfg(all(test, feature = "nova"))]
+#[cfg(all(test, feature = "nova-temporal"))]
 mod tests {
     use super::*;
     use crate::api::transaction::WriteOps;
@@ -475,7 +475,7 @@ mod tests {
     }
 }
 
-#[cfg(all(test, not(feature = "nova")))]
+#[cfg(all(test, not(feature = "nova-temporal")))]
 #[allow(deprecated)]
 mod stub_tests {
     use super::*;

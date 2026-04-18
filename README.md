@@ -168,23 +168,41 @@ aletheiadb = { version = "0.1", features = ["sharding-rpc"] }
 |---------|-------------|--------------|
 | `sharding-rpc` | RPC client for sharding coordination | `reqwest`, `serde` |
 
-### Experimental Features
+### Semantic & Experimental Features
+
+The former monolithic `nova` flag was split in 0.1 into a stable `semantic-search`
+flag and four narrower experimental categories under `nova-*`. Pick the cohort you
+need, or enable the `nova` umbrella for everything still in R&D.
+
 ```toml
 [dependencies]
-aletheiadb = { version = "0.1", features = ["nova"] }
+# Stable semantic search (graduated 0.1)
+aletheiadb = { version = "0.1", features = ["semantic-search"] }
+
+# Or opt into a single experimental category
+aletheiadb = { version = "0.1", features = ["nova-temporal"] }
+
+# Or enable every experimental cohort
+aletheiadb = { version = "0.1", features = ["nova", "semantic-search"] }
 ```
 
-| Feature | Description |
-|---------|-------------|
-| `nova` | Experimental features (Sherlock, Chronos, Narrative Generator, Fishing, Semantic Pathfinding) |
+| Feature | Status | What it gates |
+|---------|--------|---------------|
+| `semantic-search` | **Stable** | Fishing, Gestalt, Cartographer, Highlander, Janus, Chameleon, Semantic Navigator, Concept Algebra, Serendipity, Voyager, Spectre, Telepathy, Tapestry, Horizon |
+| `nova` | Experimental umbrella | Enables every `nova-*` flag below (does **not** include `semantic-search`) |
+| `nova-reasoning` | Experimental | Prophet, Dreamer, Omen, Oracle, Hindsight, Muse, Luna, Metaphor, Synergy, Chimera, Alchemy |
+| `nova-temporal` | Experimental | Sherlock, Chronos, Echo, Kairos, Temporal Narrative, Temporal Diff, Aura, Mnemosyne, Ariadne |
+| `nova-diagnostics` | Experimental | Dissonance, Sentinel, Fossil, Tremor, Polygraph, Wormhole, Ripple, Entanglement, Thermos |
+| `nova-characterization` | Experimental | Archetype, Prism, Gravity, Sybil, Synapse, Kaleidoscope, Papyrus, GraphContext |
 
-### Key Experimental Modules (`nova`)
+### Highlighted Modules
 
-| Module | Description |
-|--------|-------------|
-| **Sherlock** | Temporal Pattern Matching. "Did X happen before Y within 5 mins?" |
-| **Chronos** | Temporal Pathfinding. "Find a path that respects time travel." |
-| **Bard** | Narrative Generator. "Tell me the story of this node." |
+| Module | Cohort | Description |
+|--------|--------|-------------|
+| **Fishing** | `semantic-search` | Associative retrieval (vector + graph + freshness) |
+| **Sherlock** | `nova-temporal` | Temporal Pattern Matching. "Did X happen before Y within 5 mins?" |
+| **Chronos** | `nova-temporal` | Temporal Pathfinding. "Find a path that respects time travel." |
+| **Bard** | `nova-temporal` | Narrative Generator. "Tell me the story of this node." |
 
 Note: Tiered storage with Redb cold storage backend is included by default (no feature flag needed).
 

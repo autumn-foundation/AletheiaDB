@@ -17,12 +17,12 @@
 //! # Example
 //!
 //! ```rust,no_run
-//! # #[cfg(feature = "nova")]
+//! # #[cfg(feature = "nova-temporal")]
 //! use aletheiadb::AletheiaDB;
-//! # #[cfg(feature = "nova")]
+//! # #[cfg(feature = "nova-temporal")]
 //! use aletheiadb::experimental::kairos::Kairos;
 //!
-//! # #[cfg(feature = "nova")]
+//! # #[cfg(feature = "nova-temporal")]
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let db = AletheiaDB::new()?;
 //! let kairos = Kairos::new(&db);
@@ -36,7 +36,7 @@
 //! }
 //! # Ok(())
 //! # }
-//! # #[cfg(not(feature = "nova"))]
+//! # #[cfg(not(feature = "nova-temporal"))]
 //! # fn main() {}
 //! ```
 

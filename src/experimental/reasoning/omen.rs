@@ -21,7 +21,7 @@
 //! # Examples
 //!
 //! ```rust
-//! # #[cfg(feature = "nova")]
+//! # #[cfg(feature = "nova-reasoning")]
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! use aletheiadb::AletheiaDB;
 //! use aletheiadb::experimental::omen::Omen;
@@ -42,7 +42,7 @@
 //! }
 //! # Ok(())
 //! # }
-//! # #[cfg(not(feature = "nova"))]
+//! # #[cfg(not(feature = "nova-reasoning"))]
 //! # fn main() {}
 //! ```
 

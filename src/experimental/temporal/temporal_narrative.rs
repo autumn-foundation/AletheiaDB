@@ -1,13 +1,13 @@
 use crate::AletheiaDB;
-#[cfg(feature = "nova")]
+#[cfg(feature = "nova-temporal")]
 use crate::core::GLOBAL_INTERNER;
 use crate::core::error::Result;
-#[cfg(feature = "nova")]
+#[cfg(feature = "nova-temporal")]
 use crate::core::history::{VersionDiff, VersionInfo};
 use crate::core::id::NodeId;
-#[cfg(feature = "nova")]
+#[cfg(feature = "nova-temporal")]
 use crate::core::interning::InternedString;
-#[cfg(feature = "nova")]
+#[cfg(feature = "nova-temporal")]
 use crate::core::temporal::time;
 
 /// A single event in the narrative history of an entity.
@@ -24,7 +24,7 @@ pub struct NarrativeEvent {
 }
 
 /// Generator for creating natural language narratives from temporal history.
-#[cfg(feature = "nova")]
+#[cfg(feature = "nova-temporal")]
 /// Generates human-readable summaries of temporal graph mutations.
 ///
 /// # Why?
@@ -35,7 +35,7 @@ pub struct NarrativeGenerator<'a> {
     db: &'a AletheiaDB,
 }
 
-#[cfg(not(feature = "nova"))]
+#[cfg(not(feature = "nova-temporal"))]
 /// Generator for creating natural language narratives from temporal history.
 #[deprecated(
     note = "NarrativeGenerator requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
@@ -50,7 +50,7 @@ pub struct NarrativeGenerator<'a> {
     _marker: std::marker::PhantomData<&'a AletheiaDB>,
 }
 
-#[cfg(feature = "nova")]
+#[cfg(feature = "nova-temporal")]
 impl<'a> NarrativeGenerator<'a> {
     /// Create a new narrative generator.
     pub fn new(db: &'a AletheiaDB) -> Self {
@@ -152,7 +152,7 @@ impl<'a> NarrativeGenerator<'a> {
     }
 }
 
-#[cfg(not(feature = "nova"))]
+#[cfg(not(feature = "nova-temporal"))]
 #[allow(deprecated)]
 impl<'a> NarrativeGenerator<'a> {
     /// Create a new narrative generator.
@@ -182,7 +182,7 @@ impl<'a> NarrativeGenerator<'a> {
     }
 }
 
-#[cfg(all(test, feature = "nova"))]
+#[cfg(all(test, feature = "nova-temporal"))]
 mod tests {
     use super::*;
     use crate::api::transaction::WriteOps;
@@ -300,7 +300,7 @@ mod tests {
     }
 }
 
-#[cfg(all(test, not(feature = "nova")))]
+#[cfg(all(test, not(feature = "nova-temporal")))]
 #[allow(deprecated)]
 mod stub_tests {
     use super::*;
