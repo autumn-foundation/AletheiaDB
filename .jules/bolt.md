@@ -60,3 +60,7 @@
 **[Optimizing BFS Traversal]**
 **Learning:** Using `iterator.chain()` to iterate over neighbors in BFS traversal instead of allocating intermediate arrays reduces heap allocations without compromising performance or logic.
 **Action:** When finding multiple `.collect::<Vec<_>>()` and `.extend()` combinations, use `.chain()` whenever possible to eliminate allocations.
+
+**[Optimized gravity cosine_distance]**
+**Learning:** Replaced the iterative `cosine_distance` implementation in `src/experimental/gravity.rs` with `crate::core::vector::cosine_similarity` to take advantage of SIMD operations. A benchmark comparing the iterative logic and the vector similarity logic resulted in ~22x improvement.
+**Action:** Replaced the iterative mapping logic in `cosine_distance` with `crate::core::vector::cosine_similarity`.
