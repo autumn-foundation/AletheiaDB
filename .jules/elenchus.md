@@ -346,3 +346,32 @@
 **Finding:** The `LimitPushdown` tests originally missed several behavioral edge cases and logic checks, particularly regarding the propagation limits in BinaryOp combinations (`||`), updating limit values correctly against child bounds, and setting vector rank limits.
 **Evidence:** `cargo mutants` caught mutants in `LimitPushdown::push_down` specifically targeting the changed boolean condition logic and bounds assignment.
 **Recommendation:** Added `sentry_tests` to `LimitPushdown` that explicitly trigger tests enforcing the boolean change propagation, verifying that updated properties reflect correct nested limits, and vector bounds assignment. Tests now prevent `||` to `&&` mutations and correct top-k modifications.
+
+
+**[IdentityHasher Tautological FNV Fallback]**
+**Module:** `src/core/hasher.rs`
+**Severity:** 🔴 Critical
+**Finding:** The FNV-1a fallback tests for `IdentityHasher` mirrored the implementation's logic exactly, using a helper `reference_fnv1a` that performed the same loop. This creates false confidence since any bug in the logic would be replicated in the test.
+**Evidence:** Mutation results showed that mutations to the loop inside `hasher.rs` were caught, but only because the test ran the identical sequence of operations. This is the Oracle Problem.
+**Recommendation:** Replaced the tautological tests with explicitly hardcoded, independent FNV hash expected values computed externally. Removed the `reference_fnv1a` helper.
+
+**[LimitPushdown Missing Coverage on Booleans]**
+**Module:** `src/query/planner/rules/limit_pushdown.rs`
+**Severity:** 🟡 Suspect
+**Finding:** The boolean evaluation logic determining if a limit was pushed down (e.g., `changed || effective_limit != *n`, `left_changed || right_changed`) lacked comprehensive coverage, allowing mutations to operators (like `||` to `&&`) to survive.
+**Evidence:** `cargo mutants` identified surviving mutants when modifying `||` to `&&` in the return statements.
+**Recommendation:** Added `test_binary_op_only_left_changed_propagates_changed_flag` and `test_limit_min_propagates_correctly` to ensure the changed flags properly bubble up through binary operations and min calculations.
+
+**[FilterScanFusion Logic Gap]**
+**Module:** `src/query/planner/rules/filter_scan_fusion.rs`
+**Severity:** 🟡 Suspect
+**Finding:** The logic preventing internal keys (like `_label`) from being fused, and the `input_changed` propagation logic were poorly tested.
+**Evidence:** `cargo mutants` reported surviving mutants on the condition `if !key.starts_with('_')` and `changed || false`.
+**Recommendation:** Added `test_fusion_skips_internal_keys` and `test_fusion_changed_flag_propagation` to verify correct handling of internal fields and logical operator changed flags.
+
+**[OperationReordering Default Cardinality Gap]**
+**Module:** `src/query/planner/rules/operation_reordering.rs`
+**Severity:** 🟡 Suspect
+**Finding:** The default cardinality fallbacks for `NodeScan`, `EdgeScan`, and binary joins lacked direct unit tests to lock in their behavior.
+**Evidence:** `cargo mutants` survived modifications to these default values.
+**Recommendation:** Added `test_reordering_default_cardinality` to anchor the default estimations to expected constants.

@@ -542,4 +542,78 @@ mod sentry_tests {
             panic!("Expected VectorRank");
         }
     }
+
+    #[test]
+    fn test_binary_op_only_left_changed_propagates_changed_flag() {
+        let rule = LimitPushdown;
+        let left = LogicalOp::unary(
+            UnaryOp::Limit(10),
+            LogicalOp::unary(
+                UnaryOp::Limit(20),
+                LogicalOp::Scan(crate::query::plan::ScanOp::NodeLookup(vec![
+                    crate::core::NodeId::new(1).unwrap(),
+                ])),
+            ),
+        );
+        let right = LogicalOp::Scan(crate::query::plan::ScanOp::NodeLookup(vec![
+            crate::core::NodeId::new(2).unwrap(),
+        ]));
+        let op = LogicalOp::binary(crate::query::plan::BinaryOp::Union, left, right);
+
+        let (_, changed) = rule.push_down(&op, None).unwrap();
+        assert!(
+            changed,
+            "Expected left_changed to propagate to binary op changed flag"
+        );
+    }
+
+    #[test]
+    fn test_limit_min_propagates_correctly() {
+        let rule = LimitPushdown;
+
+        // n is smaller than new limit
+        let op = LogicalOp::unary(
+            UnaryOp::Limit(2),
+            LogicalOp::Scan(crate::query::plan::ScanOp::NodeLookup(vec![
+                crate::core::NodeId::new(1).unwrap(),
+            ])),
+        );
+        let (new_op, changed) = rule.push_down(&op, Some(5)).unwrap();
+        assert!(
+            !changed,
+            "n is smaller, so limit doesn't shrink, changed=false"
+        );
+        if let LogicalOp::Unary {
+            op: UnaryOp::Limit(n),
+            ..
+        } = new_op
+        {
+            assert_eq!(n, 2);
+        } else {
+            panic!("Expected limit");
+        }
+
+        // Vector rank min test
+        let op = LogicalOp::unary(
+            UnaryOp::VectorRank {
+                embedding: vec![0.1f32].into(),
+                top_k: Some(10),
+                property_key: None,
+            },
+            LogicalOp::Scan(crate::query::plan::ScanOp::NodeLookup(vec![
+                crate::core::NodeId::new(1).unwrap(),
+            ])),
+        );
+        let (new_op, changed) = rule.push_down(&op, Some(5)).unwrap();
+        assert!(changed, "Expected limit to be shrunk to 5 for VectorRank");
+        if let LogicalOp::Unary {
+            op: UnaryOp::VectorRank { top_k: Some(n), .. },
+            ..
+        } = new_op
+        {
+            assert_eq!(n, 5);
+        } else {
+            panic!("Expected limit");
+        }
+    }
 }

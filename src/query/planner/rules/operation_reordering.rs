@@ -1185,4 +1185,49 @@ mod tests {
             Predicate::Or(vec![Predicate::eq("a", 1), Predicate::eq("b", 2)])
         );
     }
+
+    #[test]
+    fn test_reordering_default_cardinality() {
+        let rule = OperationReordering;
+
+        let op_node = LogicalOp::Scan(crate::query::plan::ScanOp::NodeScan {
+            label: None,
+            estimated_rows: None,
+        });
+        assert_eq!(
+            rule.estimate_cardinality(&op_node),
+            super::DEFAULT_NODE_SCAN_CARDINALITY
+        );
+
+        let op_edge = LogicalOp::Scan(crate::query::plan::ScanOp::EdgeScan {
+            edge_type: None,
+            estimated_rows: None,
+        });
+        assert_eq!(
+            rule.estimate_cardinality(&op_edge),
+            super::DEFAULT_EDGE_SCAN_CARDINALITY
+        );
+
+        // Binary card: left * right * DEFAULT_JOIN_SELECTIVITY
+        let left = LogicalOp::Scan(crate::query::plan::ScanOp::NodeLookup(vec![
+            crate::core::NodeId::new(1).unwrap(),
+            crate::core::NodeId::new(2).unwrap(),
+        ]));
+        let right = LogicalOp::Scan(crate::query::plan::ScanOp::NodeLookup(vec![
+            crate::core::NodeId::new(3).unwrap(),
+            crate::core::NodeId::new(4).unwrap(),
+            crate::core::NodeId::new(5).unwrap(),
+        ]));
+        let binary_op = LogicalOp::binary(
+            crate::query::plan::BinaryOp::Join {
+                left_key: "id".to_string(),
+                right_key: "id".to_string(),
+            },
+            left,
+            right,
+        );
+
+        let expected = (2.0 * 3.0 * super::DEFAULT_JOIN_SELECTIVITY) as usize;
+        assert_eq!(rule.estimate_cardinality(&binary_op), expected);
+    }
 }
