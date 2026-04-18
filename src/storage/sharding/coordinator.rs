@@ -777,8 +777,6 @@ impl ShardCoordinator {
             });
         }
 
-        drop(connections);
-
         // All committed successfully - log completion (clears pending state)
         {
             let log = self

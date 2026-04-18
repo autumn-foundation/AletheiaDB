@@ -67,7 +67,6 @@
 use crate::AletheiaDB;
 use crate::core::error::Result;
 use crate::core::id::NodeId;
-use crate::core::vector::cosine_similarity;
 use std::collections::HashSet;
 
 /// The engine for predicting missing or future connections in the graph.
@@ -239,7 +238,19 @@ impl<'a> Prophet<'a> {
         };
 
         // Cosine Similarity
-        cosine_similarity(&vec_a, &vec_b).unwrap_or(0.0)
+        if vec_a.len() != vec_b.len() {
+            return 0.0;
+        }
+
+        let dot: f32 = vec_a.iter().zip(vec_b.iter()).map(|(x, y)| x * y).sum();
+        let mag_a: f32 = vec_a.iter().map(|x| x * x).sum::<f32>().sqrt();
+        let mag_b: f32 = vec_b.iter().map(|x| x * x).sum::<f32>().sqrt();
+
+        if mag_a == 0.0 || mag_b == 0.0 {
+            0.0
+        } else {
+            dot / (mag_a * mag_b)
+        }
     }
 
     /// Predicts the most likely new connections for the given target node.

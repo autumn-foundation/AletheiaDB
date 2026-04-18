@@ -80,18 +80,6 @@ pub struct FileKeyProvider {
 
 impl FileKeyProvider {
     /// Create a new file-based key provider.
-    ///
-    /// # Why?
-    /// Serves as the primary way for containerized deployments (using mounted secrets) to
-    /// pass the master key to the database process.
-    ///
-    /// ## Examples
-    /// ```
-    /// use aletheiadb::encryption::key_provider::{FileKeyProvider, KeyProvider};
-    ///
-    /// let provider = FileKeyProvider::new("/etc/keys/master.key");
-    /// assert_eq!(provider.provider_name(), "file");
-    /// ```
     pub fn new(path: impl Into<PathBuf>) -> Self {
         Self { path: path.into() }
     }
@@ -177,18 +165,6 @@ pub struct EnvKeyProvider {
 
 impl EnvKeyProvider {
     /// Create a new environment-variable key provider.
-    ///
-    /// # Why?
-    /// Supports 12-factor application deployments where secrets are injected directly
-    /// into the environment space, avoiding the need for ephemeral disk mounts.
-    ///
-    /// ## Examples
-    /// ```
-    /// use aletheiadb::encryption::key_provider::{EnvKeyProvider, KeyProvider};
-    ///
-    /// let provider = EnvKeyProvider::new("MY_MASTER_KEY");
-    /// assert_eq!(provider.provider_name(), "env");
-    /// ```
     pub fn new(var_name: impl Into<String>) -> Self {
         Self {
             var_name: var_name.into(),

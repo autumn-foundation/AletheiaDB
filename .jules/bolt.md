@@ -63,10 +63,3 @@
 **Optimize Vector Magnitude Calculation**
 **Learning:** Iterative mapping `embedding.iter().map(|x| x * x).sum::<f32>().sqrt()` is significantly slower than native SIMD implementations for vector math, even in tests.
 **Action:** Replaced iterative magnitude calculations with the SIMD-accelerated `crate::core::vector::magnitude` function. Benchmarking showed up to 15x speedup for 384d vectors and 10x speedup for 1536d vectors.
-
-**[Optimized gravity cosine_distance]**
-**Learning:** Replaced the iterative `cosine_distance` implementation in `src/experimental/gravity.rs` with `crate::core::vector::cosine_similarity` to take advantage of SIMD operations. A benchmark comparing the iterative logic and the vector similarity logic resulted in ~22x improvement.
-**Action:** Replaced the iterative mapping logic in `cosine_distance` with `crate::core::vector::cosine_similarity`.
-**SIMD optimization for vector math**
-**Learning:** Manual iterator combinations for vector math (e.g., zip().map().sum() and sqrt()) do not reliably auto-vectorize and miss out on SIMD extensions like AVX2/FMA. This is a common performance bottleneck in hot paths (like in Prophet's vector similarity calculation).
-**Action:** Use SIMD-optimized functions from crate::core::vector (such as cosine_similarity) instead of manual iterator-based math for vector operations in hot paths. This can yield significant performance gains (e.g., ~20x speedup for 1536-dimensional vectors).

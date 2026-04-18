@@ -310,7 +310,8 @@ mod tests {
         let embedding = service.embed("test").await.unwrap();
 
         // Check that embedding is normalized (magnitude ≈ 1.0)
-        assert!(crate::core::vector::is_normalized(&embedding));
+        let magnitude: f32 = crate::core::vector::magnitude(&embedding);
+        assert!((magnitude - 1.0).abs() < 1e-6);
     }
 
     #[tokio::test]
@@ -571,10 +572,10 @@ mod tests {
 
         // Service should not double-normalize, so the vector should remain un-normalized
         // as returned by the mock provider (which doesn't actually normalize).
+        let magnitude: f32 = crate::core::vector::magnitude(&embedding);
         assert!(
-            !crate::core::vector::is_normalized(&embedding),
+            (magnitude - 1.0).abs() > 1e-6,
             "Service should not normalize if provider claims to have already done so"
-        );
         );
     }
 
@@ -594,7 +595,8 @@ mod tests {
 
         // All embeddings should be normalized
         for embedding in embeddings {
-            assert!(crate::core::vector::is_normalized(&embedding));
+            let magnitude: f32 = crate::core::vector::magnitude(&embedding);
+            assert!((magnitude - 1.0).abs() < 1e-6);
         }
     }
 }
