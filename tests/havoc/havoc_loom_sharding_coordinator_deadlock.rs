@@ -36,9 +36,7 @@ mod loom_test {
             }
 
             // Then connection read lock to send prepare requests
-            let connections = self.connections.read().unwrap();
-
-            drop(connections); // the fix
+            let _connections = self.connections.read().unwrap();
 
             let _tx_guard = self.active_transactions.write().unwrap();
         }
@@ -54,9 +52,7 @@ mod loom_test {
                 // let _tx_guard = self.active_transactions.write().unwrap();
             }
 
-            let connections = self.connections.read().unwrap();
-
-            drop(connections); // the fix
+            let _connections = self.connections.read().unwrap();
 
             // reinsert_transaction
             let _tx_guard = self.active_transactions.write().unwrap();
