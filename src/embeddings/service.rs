@@ -594,8 +594,7 @@ mod tests {
 
         // All embeddings should be normalized
         for embedding in embeddings {
-            let magnitude: f32 = crate::core::vector::magnitude(&embedding);
-            assert!((magnitude - 1.0).abs() < 1e-6);
+            assert!(crate::core::vector::is_normalized(&embedding));
         }
     }
 }
