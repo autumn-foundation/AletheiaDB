@@ -571,10 +571,10 @@ mod tests {
 
         // Service should not double-normalize, so the vector should remain un-normalized
         // as returned by the mock provider (which doesn't actually normalize).
-        let magnitude: f32 = crate::core::vector::magnitude(&embedding);
         assert!(
-            (magnitude - 1.0).abs() > 1e-6,
+            !crate::core::vector::is_normalized(&embedding),
             "Service should not normalize if provider claims to have already done so"
+        );
         );
     }
 
