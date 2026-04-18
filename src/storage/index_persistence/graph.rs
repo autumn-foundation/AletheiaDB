@@ -688,10 +688,17 @@ pub fn load_graph_index_with_delta(base_path: &Path, delta_path: &Path) -> Resul
     // Apply delta changes
 
     // 1. Handle deletions first (remove from base)
+    // Use HashSets to turn O(M*N) Vec::contains() into O(M) HashSet::contains()
+    // This significantly improves performance when thousands of nodes are deleted.
+    let deleted_node_set: std::collections::HashSet<_> =
+        delta.deleted_node_ids.into_iter().collect();
+    let deleted_edge_set: std::collections::HashSet<_> =
+        delta.deleted_edge_ids.into_iter().collect();
+
     base.nodes
-        .retain(|node| !delta.deleted_node_ids.contains(&node.id));
+        .retain(|node| !deleted_node_set.contains(&node.id));
     base.edges
-        .retain(|edge| !delta.deleted_edge_ids.contains(&edge.id));
+        .retain(|edge| !deleted_edge_set.contains(&edge.id));
 
     // 2. Handle modifications (update existing entries)
     for modified_node in &delta.modified_nodes {
