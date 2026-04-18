@@ -43,6 +43,29 @@ mod sentry_tests {
     }
 
     #[test]
+    fn test_tanimoto_distance_zero_vector_vs_tiny_nonzero_is_max_distance() {
+        let zero = [0.0f32; 4];
+        let tiny = [1.0e-5f32, 0.0, 0.0, 0.0];
+
+        assert_eq!(tanimoto_distance(&zero, &tiny), 1.0);
+        assert_eq!(tanimoto_distance(&tiny, &zero), 1.0);
+    }
+
+    #[test]
+    fn test_tanimoto_distance_preserves_tiny_identical_vectors() {
+        let tiny = vec![1.0e-5f32; 1536];
+
+        assert_eq!(tanimoto_distance(&tiny, &tiny), 0.0);
+    }
+
+    #[test]
+    fn test_tanimoto_distance_exact_zero_vectors_are_identical() {
+        let zero = [0.0f32; 4];
+
+        assert_eq!(tanimoto_distance(&zero, &zero), 0.0);
+    }
+
+    #[test]
     fn test_hnsw_config_serialization_round_trip() {
         let config = HnswConfig {
             dimensions: 128,

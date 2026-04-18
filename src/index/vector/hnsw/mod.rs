@@ -115,27 +115,26 @@ fn validate_metric_quantization(config: &HnswConfig) -> Result<()> {
 }
 
 fn tanimoto_distance(a: &[f32], b: &[f32]) -> f32 {
-    let mut dot = 0.0f32;
-    let mut norm_a = 0.0f32;
-    let mut norm_b = 0.0f32;
+    let mut dot = 0.0f64;
+    let mut norm_a = 0.0f64;
+    let mut norm_b = 0.0f64;
 
     for (&left, &right) in a.iter().zip(b.iter()) {
+        let left = f64::from(left);
+        let right = f64::from(right);
         dot += left * right;
         norm_a += left * left;
         norm_b += right * right;
     }
 
     let denominator = norm_a + norm_b - dot;
-    if denominator.abs() <= f32::EPSILON {
-        return if dot.abs() <= f32::EPSILON { 0.0 } else { 1.0 };
-    }
-    if !denominator.is_finite() {
-        return f32::MAX;
+    if denominator <= 0.0 {
+        return 0.0;
     }
 
     let similarity = dot / denominator;
     if similarity.is_finite() {
-        1.0 - similarity.clamp(0.0, 1.0)
+        (1.0 - similarity.clamp(0.0, 1.0)) as f32
     } else {
         f32::MAX
     }
