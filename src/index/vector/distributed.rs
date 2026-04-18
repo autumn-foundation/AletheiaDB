@@ -2539,3 +2539,23 @@ mod tests {
         Ok(())
     }
 }
+
+    #[test]
+    fn test_mock_client_euclidean_search() -> Result<()> {
+        let client = MockVectorNodeClient::new(0, 4, DistanceMetric::Euclidean);
+
+        let node = NodeId::new(1).unwrap();
+        client.add(node, &[1.0, 0.0, 0.0, 0.0])?;
+
+        let results = client.search(&[1.0, 0.0, 0.0, 0.0], 10)?;
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, node);
+        assert_eq!(results[0].1, 0.0);
+
+        let results_far = client.search(&[-1.0, 0.0, 0.0, 0.0], 10)?;
+        assert_eq!(results_far.len(), 1);
+        assert_eq!(results_far[0].0, node);
+        assert!(results_far[0].1 < 0.0);
+
+        Ok(())
+    }
