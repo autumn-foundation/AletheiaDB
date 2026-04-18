@@ -35,19 +35,19 @@ an umbrella for genuine R&D only.
 | Flag | Status | Cohort |
 |------|--------|--------|
 | `semantic-search` | Stable | Retrieval, matching, clustering, traversal, entity resolution |
-| `nova-reasoning` | Experimental | Prediction, synthesis, counterfactual simulation |
-| `nova-temporal` | Experimental | Bi-temporal + semantic analysis |
-| `nova-diagnostics` | Experimental | Anomaly detection, validation, health monitoring |
-| `nova-characterization` | Experimental | Concept characterization + LLM/visualization export |
-| `nova` | Umbrella | Enables all four `nova-*` flags (but **not** `semantic-search`) |
+| `semantic-reasoning` | Experimental | Prediction, synthesis, counterfactual simulation |
+| `semantic-temporal` | Experimental | Bi-temporal + semantic analysis |
+| `semantic-diagnostics` | Experimental | Anomaly detection, validation, health monitoring |
+| `semantic-characterization` | Experimental | Concept characterization + LLM/visualization export |
+| `nova` | Umbrella | Enables all four `semantic-*` cohorts (but **not** `semantic-search`) |
 
 ### Cargo.toml dependencies
 
 Two cross-category code dependencies require explicit Cargo feature deps so a
 single category flag still compiles standalone:
 
-- `nova-reasoning = ["nova-diagnostics"]` — `alchemy` imports `wormhole`.
-- `nova-characterization = ["nova-temporal"]` — `graph_context` imports
+- `semantic-reasoning = ["semantic-diagnostics"]` — `alchemy` imports `wormhole`.
+- `semantic-characterization = ["semantic-temporal"]` — `graph_context` imports
   `temporal_narrative`.
 
 ### Directory layout
@@ -70,16 +70,25 @@ callers don't break (as long as they enable the matching category flag).
 
 ### Graduation pattern (template for future categories)
 
+Because the experimental categories share the stable `semantic-*` flag prefix,
+graduation is almost entirely a documentation + file-move change — no flag
+rename, no churn for callers already opting into a single cohort.
+
 When an experimental cohort reaches stable quality:
 
-1. Create a top-level `src/<cohort>/` directory.
-2. `git mv` the modules out of `src/experimental/<category>/`.
-3. Declare a non-`nova-*` feature flag in `Cargo.toml` (no `nova` prefix).
-4. Add a top-level `#[cfg(feature = "<cohort>")] pub mod <cohort>;` to
-   `src/lib.rs` (mirror the `mcp` pattern at `src/lib.rs:76-77`).
-5. Remove the cohort from the `nova` umbrella's dependency list.
-6. Update doc-comment paths in the moved modules.
-7. Document the breaking path change in `CHANGELOG.md`.
+1. Remove the cohort from the `nova` umbrella's dependency list in `Cargo.toml`.
+2. `git mv` the modules from `src/experimental/<category>/` to a top-level
+   `src/<cohort>/` directory.
+3. Replace the gated `mod <category>; pub use <category>::*;` in
+   `src/experimental/mod.rs` with a top-level
+   `#[cfg(feature = "<flag>")] pub mod <cohort>;` in `src/lib.rs`.
+4. Update doc-comment paths in the moved modules (search-cohort example:
+   `aletheiadb::experimental::fishing` → `aletheiadb::semantic_search::fishing`).
+5. Document the graduation and any path changes in `CHANGELOG.md`.
+
+The feature flag name stays the same — a caller already opting into
+`semantic-reasoning` today keeps working after graduation; only the `nova`
+umbrella shrinks.
 
 Reference implementation: this ADR's accompanying PR (semantic-search graduation).
 
@@ -99,8 +108,8 @@ is tracked as follow-up work.
 - **Granular opt-in**: a caller wanting only Fishing pays for one cohort, not 54.
 - **Clear graduation path**: the search-cohort migration documents the
   template; future graduations follow the same recipe.
-- **Path stability for nova-***: the `pub use` re-export trick means existing
-  `aletheiadb::experimental::<module>` paths keep working.
+- **Path stability for experimental modules**: the `pub use` re-export trick
+  means existing `aletheiadb::experimental::<module>` paths keep working.
 - **Discoverability**: category names map directly to use cases in the README
   and ADRs.
 
@@ -120,10 +129,10 @@ is tracked as follow-up work.
 ### Verification
 
 - `just check-features` compiles each category flag in isolation.
-- `cargo test --features nova-reasoning --test nova_oracle` exercises Oracle.
-- `cargo run --features nova-temporal --example story_demo` exercises
+- `cargo test --features semantic-reasoning --test nova_oracle` exercises Oracle.
+- `cargo run --features semantic-temporal --example story_demo` exercises
   Temporal Narrative.
-- `cargo run --features semantic-search,nova-reasoning --example russian_writers`
+- `cargo run --features semantic-search,semantic-reasoning --example russian_writers`
   exercises a mixed-category flow.
 
 ## References

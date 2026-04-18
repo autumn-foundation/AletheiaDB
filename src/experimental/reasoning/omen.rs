@@ -21,7 +21,7 @@
 //! # Examples
 //!
 //! ```rust
-//! # #[cfg(feature = "nova-reasoning")]
+//! # #[cfg(feature = "semantic-reasoning")]
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! use aletheiadb::AletheiaDB;
 //! use aletheiadb::experimental::omen::Omen;
@@ -42,7 +42,7 @@
 //! }
 //! # Ok(())
 //! # }
-//! # #[cfg(not(feature = "nova-reasoning"))]
+//! # #[cfg(not(feature = "semantic-reasoning"))]
 //! # fn main() {}
 //! ```
 

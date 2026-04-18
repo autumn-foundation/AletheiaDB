@@ -5,7 +5,7 @@
 //! formats consumed by downstream tools (Mermaid, force-directed layouts,
 //! Markdown for LLM context).
 //!
-//! Experimental — gated by `features = ["nova-characterization"]` (or the `nova` umbrella).
+//! Experimental — gated by `features = ["semantic-characterization"]` (or the `nova` umbrella).
 
 pub mod archetype;
 pub mod graph_context;

@@ -4,7 +4,7 @@
 //! reconstruct narratives, and reason over how the graph (and its semantics)
 //! evolves through time.
 //!
-//! Experimental — gated by `features = ["nova-temporal"]` (or the `nova` umbrella).
+//! Experimental — gated by `features = ["semantic-temporal"]` (or the `nova` umbrella).
 
 pub mod ariadne;
 pub mod aura;

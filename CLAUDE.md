@@ -428,11 +428,11 @@ need one slice.
 | Flag | Status | Cohort |
 |------|--------|--------|
 | `semantic-search` | **Stable** | Retrieval, matching, clustering, traversal, entity resolution (Fishing, Gestalt, Cartographer, Highlander, Janus, Chameleon, Semantic Navigator, Concept Algebra, Serendipity, Voyager, Spectre, Telepathy, Tapestry, Horizon) |
-| `nova-reasoning` | Experimental | Prediction & synthesis (Prophet, Dreamer, Omen, Oracle, Hindsight, Muse, Luna, Metaphor, Synergy, Chimera, Alchemy) |
-| `nova-temporal` | Experimental | Bi-temporal + semantic (Sherlock, Chronos, Echo, Kairos, Temporal Narrative, Temporal Diff, Aura, Mnemosyne, Ariadne) |
-| `nova-diagnostics` | Experimental | Anomaly & validation (Dissonance, Sentinel, Fossil, Tremor, Polygraph, Wormhole, Ripple, Entanglement, Thermos) |
-| `nova-characterization` | Experimental | Concept characterization + export (Archetype, Prism, Gravity, Sybil, Synapse, Kaleidoscope, Papyrus, GraphContext) |
-| `nova` | Umbrella | Enables every `nova-*` flag (does **not** include `semantic-search`) |
+| `semantic-reasoning` | Experimental | Prediction & synthesis (Prophet, Dreamer, Omen, Oracle, Hindsight, Muse, Luna, Metaphor, Synergy, Chimera, Alchemy) |
+| `semantic-temporal` | Experimental | Bi-temporal + semantic (Sherlock, Chronos, Echo, Kairos, Temporal Narrative, Temporal Diff, Aura, Mnemosyne, Ariadne) |
+| `semantic-diagnostics` | Experimental | Anomaly & validation (Dissonance, Sentinel, Fossil, Tremor, Polygraph, Wormhole, Ripple, Entanglement, Thermos) |
+| `semantic-characterization` | Experimental | Concept characterization + export (Archetype, Prism, Gravity, Sybil, Synapse, Kaleidoscope, Papyrus, GraphContext) |
+| `nova` | Umbrella | Enables every `semantic-*` cohort still in R&D (does **not** include `semantic-search`) |
 
 Verify each flag still compiles standalone with `just check-features`.
 

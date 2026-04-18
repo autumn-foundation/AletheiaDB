@@ -171,7 +171,7 @@ aletheiadb = { version = "0.1", features = ["sharding-rpc"] }
 ### Semantic & Experimental Features
 
 The former monolithic `nova` flag was split in 0.1 into a stable `semantic-search`
-flag and four narrower experimental categories under `nova-*`. Pick the cohort you
+flag and four narrower experimental categories under `semantic-*`. Pick the cohort you
 need, or enable the `nova` umbrella for everything still in R&D.
 
 ```toml
@@ -180,7 +180,7 @@ need, or enable the `nova` umbrella for everything still in R&D.
 aletheiadb = { version = "0.1", features = ["semantic-search"] }
 
 # Or opt into a single experimental category
-aletheiadb = { version = "0.1", features = ["nova-temporal"] }
+aletheiadb = { version = "0.1", features = ["semantic-temporal"] }
 
 # Or enable every experimental cohort
 aletheiadb = { version = "0.1", features = ["nova", "semantic-search"] }
@@ -189,20 +189,20 @@ aletheiadb = { version = "0.1", features = ["nova", "semantic-search"] }
 | Feature | Status | What it gates |
 |---------|--------|---------------|
 | `semantic-search` | **Stable** | Fishing, Gestalt, Cartographer, Highlander, Janus, Chameleon, Semantic Navigator, Concept Algebra, Serendipity, Voyager, Spectre, Telepathy, Tapestry, Horizon |
-| `nova` | Experimental umbrella | Enables every `nova-*` flag below (does **not** include `semantic-search`) |
-| `nova-reasoning` | Experimental | Prophet, Dreamer, Omen, Oracle, Hindsight, Muse, Luna, Metaphor, Synergy, Chimera, Alchemy |
-| `nova-temporal` | Experimental | Sherlock, Chronos, Echo, Kairos, Temporal Narrative, Temporal Diff, Aura, Mnemosyne, Ariadne |
-| `nova-diagnostics` | Experimental | Dissonance, Sentinel, Fossil, Tremor, Polygraph, Wormhole, Ripple, Entanglement, Thermos |
-| `nova-characterization` | Experimental | Archetype, Prism, Gravity, Sybil, Synapse, Kaleidoscope, Papyrus, GraphContext |
+| `nova` | Experimental umbrella | Enables every `semantic-*` cohort still in R&D below (does **not** include `semantic-search`) |
+| `semantic-reasoning` | Experimental | Prophet, Dreamer, Omen, Oracle, Hindsight, Muse, Luna, Metaphor, Synergy, Chimera, Alchemy |
+| `semantic-temporal` | Experimental | Sherlock, Chronos, Echo, Kairos, Temporal Narrative, Temporal Diff, Aura, Mnemosyne, Ariadne |
+| `semantic-diagnostics` | Experimental | Dissonance, Sentinel, Fossil, Tremor, Polygraph, Wormhole, Ripple, Entanglement, Thermos |
+| `semantic-characterization` | Experimental | Archetype, Prism, Gravity, Sybil, Synapse, Kaleidoscope, Papyrus, GraphContext |
 
 ### Highlighted Modules
 
 | Module | Cohort | Description |
 |--------|--------|-------------|
 | **Fishing** | `semantic-search` | Associative retrieval (vector + graph + freshness) |
-| **Sherlock** | `nova-temporal` | Temporal Pattern Matching. "Did X happen before Y within 5 mins?" |
-| **Chronos** | `nova-temporal` | Temporal Pathfinding. "Find a path that respects time travel." |
-| **Bard** | `nova-temporal` | Narrative Generator. "Tell me the story of this node." |
+| **Sherlock** | `semantic-temporal` | Temporal Pattern Matching. "Did X happen before Y within 5 mins?" |
+| **Chronos** | `semantic-temporal` | Temporal Pathfinding. "Find a path that respects time travel." |
+| **Bard** | `semantic-temporal` | Narrative Generator. "Tell me the story of this node." |
 
 Note: Tiered storage with Redb cold storage backend is included by default (no feature flag needed).
 

@@ -26,7 +26,7 @@ pub struct Luna<'a> {
     db: &'a AletheiaDB,
 }
 
-#[cfg(feature = "nova-reasoning")]
+#[cfg(feature = "semantic-reasoning")]
 impl<'a> Luna<'a> {
     /// Create a new Luna instance.
     pub fn new(db: &'a AletheiaDB) -> Self {
@@ -110,7 +110,7 @@ impl<'a> Luna<'a> {
     }
 }
 
-#[cfg(all(test, feature = "nova-reasoning"))]
+#[cfg(all(test, feature = "semantic-reasoning"))]
 mod tests {
     use super::*;
     use crate::index::vector::{DistanceMetric, HnswConfig};

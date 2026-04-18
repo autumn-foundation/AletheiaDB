@@ -17,12 +17,12 @@
 //! # Example
 //!
 //! ```rust,no_run
-//! # #[cfg(feature = "nova-temporal")]
+//! # #[cfg(feature = "semantic-temporal")]
 //! use aletheiadb::AletheiaDB;
-//! # #[cfg(feature = "nova-temporal")]
+//! # #[cfg(feature = "semantic-temporal")]
 //! use aletheiadb::experimental::kairos::Kairos;
 //!
-//! # #[cfg(feature = "nova-temporal")]
+//! # #[cfg(feature = "semantic-temporal")]
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let db = AletheiaDB::new()?;
 //! let kairos = Kairos::new(&db);
@@ -36,7 +36,7 @@
 //! }
 //! # Ok(())
 //! # }
-//! # #[cfg(not(feature = "nova-temporal"))]
+//! # #[cfg(not(feature = "semantic-temporal"))]
 //! # fn main() {}
 //! ```
 

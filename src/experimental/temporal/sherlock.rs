@@ -47,13 +47,13 @@ pub enum Clue {
     // Future: Edge addition/removal, etc.
 }
 
-#[cfg(feature = "nova-temporal")]
+#[cfg(feature = "semantic-temporal")]
 /// A Mystery defines the pattern to search for.
 ///
 /// # Examples
 ///
 /// ```rust
-/// # #[cfg(feature = "nova-temporal")]
+/// # #[cfg(feature = "semantic-temporal")]
 /// # fn main() {
 /// use aletheiadb::experimental::sherlock::{Mystery, Clue};
 /// use aletheiadb::core::property::PropertyValue;
@@ -65,7 +65,7 @@ pub enum Clue {
 ///         value: Some(PropertyValue::from("Pending")),
 ///     });
 /// # }
-/// # #[cfg(not(feature = "nova-temporal"))]
+/// # #[cfg(not(feature = "semantic-temporal"))]
 /// # fn main() {}
 /// ```
 #[derive(Debug, Clone)]
@@ -82,7 +82,7 @@ pub struct Mystery {
     pub time_window: Duration,
 }
 
-#[cfg(not(feature = "nova-temporal"))]
+#[cfg(not(feature = "semantic-temporal"))]
 /// A Mystery defines the pattern to search for.
 #[deprecated(
     note = "Mystery requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
@@ -97,7 +97,7 @@ pub struct Mystery {
     _marker: std::marker::PhantomData<Duration>,
 }
 
-#[cfg(feature = "nova-temporal")]
+#[cfg(feature = "semantic-temporal")]
 impl Mystery {
     /// Create a new Mystery builder.
     pub fn new(time_window: Duration) -> Self {
@@ -114,7 +114,7 @@ impl Mystery {
     }
 }
 
-#[cfg(not(feature = "nova-temporal"))]
+#[cfg(not(feature = "semantic-temporal"))]
 #[allow(deprecated)]
 impl Mystery {
     /// Create a new Mystery builder.
@@ -166,13 +166,13 @@ pub struct Deduction {
     pub event_times: Vec<Timestamp>,
 }
 
-#[cfg(feature = "nova-temporal")]
+#[cfg(feature = "semantic-temporal")]
 /// The Sherlock Engine.
 ///
 /// # Examples
 ///
 /// ```rust
-/// # #[cfg(feature = "nova-temporal")]
+/// # #[cfg(feature = "semantic-temporal")]
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// use aletheiadb::AletheiaDB;
 /// use aletheiadb::experimental::sherlock::{Sherlock, Mystery, Clue};
@@ -207,7 +207,7 @@ pub struct Deduction {
 /// assert_eq!(deductions.len(), 1);
 /// # Ok(())
 /// # }
-/// # #[cfg(not(feature = "nova-temporal"))]
+/// # #[cfg(not(feature = "semantic-temporal"))]
 /// # fn main() {}
 /// ```
 /// The deductive reasoning engine for AletheiaDB.
@@ -221,7 +221,7 @@ pub struct Sherlock<'a> {
     db: &'a AletheiaDB,
 }
 
-#[cfg(not(feature = "nova-temporal"))]
+#[cfg(not(feature = "semantic-temporal"))]
 /// The Sherlock Engine.
 #[deprecated(
     note = "Sherlock requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
@@ -236,7 +236,7 @@ pub struct Sherlock<'a> {
     _marker: std::marker::PhantomData<&'a AletheiaDB>,
 }
 
-#[cfg(feature = "nova-temporal")]
+#[cfg(feature = "semantic-temporal")]
 impl<'a> Sherlock<'a> {
     /// Create a new Sherlock instance.
     pub fn new(db: &'a AletheiaDB) -> Self {
@@ -351,7 +351,7 @@ impl<'a> Sherlock<'a> {
     }
 }
 
-#[cfg(not(feature = "nova-temporal"))]
+#[cfg(not(feature = "semantic-temporal"))]
 #[allow(deprecated)]
 impl<'a> Sherlock<'a> {
     /// Create a new Sherlock instance.
@@ -381,7 +381,7 @@ impl<'a> Sherlock<'a> {
     }
 }
 
-#[cfg(all(test, feature = "nova-temporal"))]
+#[cfg(all(test, feature = "semantic-temporal"))]
 mod tests {
     use super::*;
     use crate::api::transaction::WriteOps;
@@ -502,7 +502,7 @@ mod tests {
     }
 }
 
-#[cfg(all(test, not(feature = "nova-temporal")))]
+#[cfg(all(test, not(feature = "semantic-temporal")))]
 #[allow(deprecated)]
 mod stub_tests {
     use super::*;

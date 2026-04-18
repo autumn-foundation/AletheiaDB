@@ -26,7 +26,7 @@ use crate::core::temporal::time;
 /// # Examples
 ///
 /// ```
-/// # #[cfg(feature = "nova-temporal")]
+/// # #[cfg(feature = "semantic-temporal")]
 /// # fn main() {
 /// use aletheiadb::experimental::echo::TemporalFingerprint;
 ///
@@ -40,7 +40,7 @@ use crate::core::temporal::time;
 /// // fp1 and fp3 are identical
 /// assert!(fp1.similarity(&fp3) > 0.99);
 /// # }
-/// # #[cfg(not(feature = "nova-temporal"))]
+/// # #[cfg(not(feature = "semantic-temporal"))]
 /// # fn main() {}
 /// ```
 #[derive(Debug, Clone)]
@@ -96,7 +96,7 @@ pub trait Resonator {
 /// # Examples
 ///
 /// ```
-/// # #[cfg(feature = "nova-temporal")]
+/// # #[cfg(feature = "semantic-temporal")]
 /// # fn main() {
 /// use aletheiadb::experimental::echo::{ActivityDensityResonator, Resonator};
 ///
@@ -105,7 +105,7 @@ pub trait Resonator {
 ///     num_bins: 60,                     // 1 minute resolution
 /// };
 /// # }
-/// # #[cfg(not(feature = "nova-temporal"))]
+/// # #[cfg(not(feature = "semantic-temporal"))]
 /// # fn main() {}
 /// ```
 pub struct ActivityDensityResonator {
@@ -167,7 +167,7 @@ impl Resonator for ActivityDensityResonator {
     }
 }
 
-#[cfg(feature = "nova-temporal")]
+#[cfg(feature = "semantic-temporal")]
 /// The Echo Chamber finds resonant nodes.
 ///
 /// # The Details
@@ -177,7 +177,7 @@ impl Resonator for ActivityDensityResonator {
 /// # Examples
 ///
 /// ```
-/// # #[cfg(feature = "nova-temporal")]
+/// # #[cfg(feature = "semantic-temporal")]
 /// # fn main() {
 /// use aletheiadb::AletheiaDB;
 /// use aletheiadb::experimental::echo::EchoChamber;
@@ -191,7 +191,7 @@ impl Resonator for ActivityDensityResonator {
 ///
 /// // chamber.find_echoes(target_node, &candidates);
 /// # }
-/// # #[cfg(not(feature = "nova-temporal"))]
+/// # #[cfg(not(feature = "semantic-temporal"))]
 /// # fn main() {}
 /// ```
 /// A simulator for testing semantic drift and reinforcement loops.
@@ -205,7 +205,7 @@ pub struct EchoChamber<'a> {
     resonator: Box<dyn Resonator>,
 }
 
-#[cfg(not(feature = "nova-temporal"))]
+#[cfg(not(feature = "semantic-temporal"))]
 /// The Echo Chamber finds resonant nodes.
 ///
 /// # The Details
@@ -215,7 +215,7 @@ pub struct EchoChamber<'a> {
 /// # Examples
 ///
 /// ```
-/// # #[cfg(feature = "nova-temporal")]
+/// # #[cfg(feature = "semantic-temporal")]
 /// # fn main() {
 /// use aletheiadb::AletheiaDB;
 /// use aletheiadb::experimental::echo::EchoChamber;
@@ -229,7 +229,7 @@ pub struct EchoChamber<'a> {
 ///
 /// // chamber.find_echoes(target_node, &candidates);
 /// # }
-/// # #[cfg(not(feature = "nova-temporal"))]
+/// # #[cfg(not(feature = "semantic-temporal"))]
 /// # fn main() {}
 /// ```
 #[deprecated(
@@ -245,7 +245,7 @@ pub struct EchoChamber<'a> {
     _marker: std::marker::PhantomData<&'a AletheiaDB>,
 }
 
-#[cfg(feature = "nova-temporal")]
+#[cfg(feature = "semantic-temporal")]
 impl<'a> EchoChamber<'a> {
     /// Create a new EchoChamber with default settings.
     pub fn new(db: &'a AletheiaDB) -> Self {
@@ -295,7 +295,7 @@ impl<'a> EchoChamber<'a> {
     }
 }
 
-#[cfg(not(feature = "nova-temporal"))]
+#[cfg(not(feature = "semantic-temporal"))]
 #[allow(deprecated)]
 impl<'a> EchoChamber<'a> {
     /// Create a new EchoChamber with default settings.
@@ -338,7 +338,7 @@ impl<'a> EchoChamber<'a> {
     }
 }
 
-#[cfg(all(test, feature = "nova-temporal"))]
+#[cfg(all(test, feature = "semantic-temporal"))]
 mod tests {
     use super::*;
     use crate::api::transaction::WriteOps;
@@ -459,7 +459,7 @@ mod tests {
     }
 }
 
-#[cfg(all(test, not(feature = "nova-temporal")))]
+#[cfg(all(test, not(feature = "semantic-temporal")))]
 #[allow(deprecated)]
 mod stub_tests {
     use super::*;

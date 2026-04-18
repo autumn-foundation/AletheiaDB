@@ -4,7 +4,7 @@
 //! gaps, drift, hallucination, contradictions — and guard data quality at the
 //! boundary.
 //!
-//! Experimental — gated by `features = ["nova-diagnostics"]` (or the `nova` umbrella).
+//! Experimental — gated by `features = ["semantic-diagnostics"]` (or the `nova` umbrella).
 
 pub mod dissonance;
 pub mod entanglement;

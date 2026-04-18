@@ -4,7 +4,7 @@
 //! extrapolating trajectories, simulating counterfactuals, and synthesising
 //! novel concepts from existing graph state.
 //!
-//! Experimental — gated by `features = ["nova-reasoning"]` (or the `nova` umbrella).
+//! Experimental — gated by `features = ["semantic-reasoning"]` (or the `nova` umbrella).
 
 pub mod alchemy;
 pub mod chimera;

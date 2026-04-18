@@ -52,10 +52,10 @@ lint:
 # Verify each Nova/semantic-search category compiles standalone
 check-features:
     @echo "=== semantic-search ===" && cargo check --features semantic-search
-    @echo "=== nova-reasoning ===" && cargo check --features nova-reasoning
-    @echo "=== nova-temporal ===" && cargo check --features nova-temporal
-    @echo "=== nova-diagnostics ===" && cargo check --features nova-diagnostics
-    @echo "=== nova-characterization ===" && cargo check --features nova-characterization
+    @echo "=== semantic-reasoning ===" && cargo check --features semantic-reasoning
+    @echo "=== semantic-temporal ===" && cargo check --features semantic-temporal
+    @echo "=== semantic-diagnostics ===" && cargo check --features semantic-diagnostics
+    @echo "=== semantic-characterization ===" && cargo check --features semantic-characterization
     @echo "=== nova umbrella ===" && cargo check --features nova
     @echo "=== nova + semantic-search ===" && cargo check --features nova,semantic-search
 

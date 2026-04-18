@@ -32,7 +32,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! aletheiadb = { version = "0.1", features = ["nova-temporal"] }
+//! aletheiadb = { version = "0.1", features = ["semantic-temporal"] }
 //! ```
 //!
 //! > ⚠️ **Breaking change in 0.1:** the `nova` umbrella no longer enables the
@@ -43,10 +43,10 @@
 //!
 //! | Flag | What it gates | Modules |
 //! |------|---------------|---------|
-//! | [`reasoning`] (`nova-reasoning`) | Prediction, synthesis, counterfactuals | prophet, dreamer, omen, oracle, hindsight, muse, luna, metaphor, synergy, chimera, alchemy |
-//! | [`temporal`] (`nova-temporal`) | Bi-temporal + semantic | sherlock, chronos, echo, kairos, temporal_narrative, temporal_diff, aura, mnemosyne, ariadne |
-//! | [`diagnostics`] (`nova-diagnostics`) | Anomaly, validation, health | dissonance, sentinel, fossil, tremor, polygraph, wormhole, ripple, entanglement, thermos, paradox |
-//! | [`characterization`] (`nova-characterization`) | Describe concepts + export | archetype, prism, gravity, sybil, synapse, kaleidoscope, papyrus, graph_context, wildfire |
+//! | [`reasoning`] (`semantic-reasoning`) | Prediction, synthesis, counterfactuals | prophet, dreamer, omen, oracle, hindsight, muse, luna, metaphor, synergy, chimera, alchemy |
+//! | [`temporal`] (`semantic-temporal`) | Bi-temporal + semantic | sherlock, chronos, echo, kairos, temporal_narrative, temporal_diff, aura, mnemosyne, ariadne |
+//! | [`diagnostics`] (`semantic-diagnostics`) | Anomaly, validation, health | dissonance, sentinel, fossil, tremor, polygraph, wormhole, ripple, entanglement, thermos, paradox |
+//! | [`characterization`] (`semantic-characterization`) | Describe concepts + export | archetype, prism, gravity, sybil, synapse, kaleidoscope, papyrus, graph_context, wildfire |
 //!
 //! For convenience, every submodule is re-exported at this module's path —
 //! existing code using `aletheiadb::experimental::sherlock::Sherlock` keeps
@@ -55,16 +55,16 @@
 //! # Example: Detecting Suspicious Patterns with Sherlock
 //!
 //! ```rust,no_run
-//! # #[cfg(feature = "nova-temporal")]
+//! # #[cfg(feature = "semantic-temporal")]
 //! use aletheiadb::AletheiaDB;
-//! # #[cfg(feature = "nova-temporal")]
+//! # #[cfg(feature = "semantic-temporal")]
 //! use aletheiadb::experimental::sherlock::{Sherlock, Mystery, Clue};
-//! # #[cfg(feature = "nova-temporal")]
+//! # #[cfg(feature = "semantic-temporal")]
 //! use aletheiadb::core::property::PropertyValue;
-//! # #[cfg(feature = "nova-temporal")]
+//! # #[cfg(feature = "semantic-temporal")]
 //! use std::time::Duration;
 //!
-//! # #[cfg(feature = "nova-temporal")]
+//! # #[cfg(feature = "semantic-temporal")]
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let db = AletheiaDB::new()?;
 //! # let node_id = db.create_node("User", Default::default())?;
@@ -83,26 +83,26 @@
 //! let _detections = sherlock.investigate(node_id, &mystery)?;
 //! # Ok(())
 //! # }
-//! # #[cfg(not(feature = "nova-temporal"))]
+//! # #[cfg(not(feature = "semantic-temporal"))]
 //! # fn main() {}
 //! ```
 
-#[cfg(feature = "nova-reasoning")]
+#[cfg(feature = "semantic-reasoning")]
 mod reasoning;
-#[cfg(feature = "nova-reasoning")]
+#[cfg(feature = "semantic-reasoning")]
 pub use reasoning::*;
 
-#[cfg(feature = "nova-temporal")]
+#[cfg(feature = "semantic-temporal")]
 mod temporal;
-#[cfg(feature = "nova-temporal")]
+#[cfg(feature = "semantic-temporal")]
 pub use temporal::*;
 
-#[cfg(feature = "nova-diagnostics")]
+#[cfg(feature = "semantic-diagnostics")]
 mod diagnostics;
-#[cfg(feature = "nova-diagnostics")]
+#[cfg(feature = "semantic-diagnostics")]
 pub use diagnostics::*;
 
-#[cfg(feature = "nova-characterization")]
+#[cfg(feature = "semantic-characterization")]
 mod characterization;
-#[cfg(feature = "nova-characterization")]
+#[cfg(feature = "semantic-characterization")]
 pub use characterization::*;
