@@ -90,3 +90,18 @@
 ## 2026-06-21 - Splitting Redb Cold Storage Blob
 **Tangle:** `src/storage/redb_cold_storage.rs` was over 4100 lines long, a "Blob" module holding both core cold storage logic and over 2000 lines of tests. It made navigation and understanding the core operations difficult.
 **Blueprint:** Refactored into a `src/storage/redb_cold_storage/` module. Kept the core data definitions and implementation in `mod.rs` (reduced to ~2000 lines) and moved all tests to `tests.rs` (~2000 lines), maintaining the `#[cfg(test)]` block functionality but with better physical separation.
+## 2026-06-21 - Splitting Query Executor Blob
+**Tangle:** `src/query/executor/mod.rs` was over 1500 lines long, a "Blob" module holding both core executor implementation and over 1000 lines of tests. It made navigation and understanding the core operations difficult.
+**Blueprint:** Split tests into `src/query/executor/tests.rs` (~1000 lines), maintaining the `#[cfg(test)]` block functionality but with better physical separation.
+## 2026-06-21 - Splitting Iterator Blob
+**Tangle:** `src/query/executor/iterators.rs` was nearly 3500 lines long, a "Blob" module holding both core iterator implementations and over 1800 lines of tests. It made navigation and understanding the core operations difficult.
+**Blueprint:** Refactored into `src/query/executor/iterators/` module directory. Split tests into `src/query/executor/iterators/tests.rs` (~1800 lines), maintaining the `#[cfg(test)]` block functionality but with better physical separation.
+## 2026-06-21 - Splitting Vector Temporal Mod Blob
+**Tangle:** `src/index/vector/temporal/mod.rs` was nearly 3800 lines long, a "Blob" module holding both core index implementations and over 2300 lines of tests. It made navigation and understanding the core operations difficult.
+**Blueprint:** Split tests into `src/index/vector/temporal/tests.rs` (~2300 lines), maintaining the `#[cfg(test)]` block functionality but with better physical separation.
+## 2026-06-21 - Splitting Storage Checkpoint Blob
+**Tangle:** `src/storage/checkpoint.rs` was over 3100 lines long, a "Blob" module holding both core checkpoint implementations and nearly 1900 lines of tests. It made navigation and understanding the core operations difficult.
+**Blueprint:** Refactored into `src/storage/checkpoint/` module directory. Split tests into `src/storage/checkpoint/tests.rs` (~1900 lines), maintaining the `#[cfg(test)]` block functionality but with better physical separation.
+## 2026-06-21 - Splitting Storage Migration Blob
+**Tangle:** `src/storage/migration.rs` was over 3100 lines long, a "Blob" module holding both core migration implementations and nearly 1700 lines of tests. It made navigation and understanding the core operations difficult.
+**Blueprint:** Refactored into `src/storage/migration/` module directory. Split tests into `src/storage/migration/tests.rs` (~1700 lines), maintaining the `#[cfg(test)]` block functionality but with better physical separation.
