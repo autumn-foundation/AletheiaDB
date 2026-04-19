@@ -911,7 +911,7 @@ impl MigrationService {
             });
         } else {
             // Age mode: sort by age (oldest first) to prioritize older versions
-            candidates.sort_by_key(|b| std::cmp::Reverse(b.age));
+            candidates.sort_by_key(|candidate| std::cmp::Reverse(candidate.age));
         }
     }
 

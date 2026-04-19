@@ -17,6 +17,7 @@ use std::thread;
 /// Result: Vector exists in usearch but has no mapping. It is invisible to search
 /// (filtered out) but consumes memory and capacity.
 #[test]
+#[serial_test::serial]
 fn havoc_race_phantom_vector() {
     let index = Arc::new(
         HnswIndexBuilder::new(128, DistanceMetric::Cosine)

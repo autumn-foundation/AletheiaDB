@@ -6,6 +6,27 @@
 use usearch::{Index, IndexOptions, MetricKind, ScalarKind};
 
 #[test]
+fn test_usearch_constructor_does_not_preallocate_member_capacity() {
+    let options = IndexOptions {
+        dimensions: 8,
+        metric: MetricKind::Cos,
+        quantization: ScalarKind::F32,
+        connectivity: 16,
+        expansion_add: 128,
+        expansion_search: 64,
+        multi: false,
+    };
+
+    let index = Index::new(&options).unwrap();
+
+    assert_eq!(
+        index.capacity(),
+        0,
+        "usearch constructors must preserve upstream move-safe reserve semantics"
+    );
+}
+
+#[test]
 fn test_usearch_raw_duplicate_key_behavior() {
     // Create a usearch index directly (bypassing our wrapper)
     let options = IndexOptions {

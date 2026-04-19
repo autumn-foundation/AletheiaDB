@@ -84,12 +84,71 @@ fn to_usearch_metric(metric: DistanceMetric) -> MetricKind {
     }
 }
 
+fn to_usearch_index_metric(metric: DistanceMetric) -> MetricKind {
+    match metric {
+        DistanceMetric::Tanimoto => MetricKind::Cos,
+        _ => to_usearch_metric(metric),
+    }
+}
+
 /// Convert our Quantization to usearch's ScalarKind
 fn to_usearch_scalar(quantization: Quantization) -> ScalarKind {
     match quantization {
         Quantization::F32 => ScalarKind::F32,
         Quantization::F16 => ScalarKind::F16,
         Quantization::I8 => ScalarKind::I8,
+    }
+}
+
+fn validate_metric_quantization(config: &HnswConfig) -> Result<()> {
+    if config.metric == DistanceMetric::Tanimoto && config.quantization != Quantization::F32 {
+        return Err(Error::Vector(VectorError::InvalidVector {
+            reason: format!(
+                "Tanimoto metric requires F32 quantization because it uses an F32 callback \
+                 distance (requested {:?})",
+                config.quantization
+            ),
+        }));
+    }
+
+    Ok(())
+}
+
+fn tanimoto_distance(a: &[f32], b: &[f32]) -> f32 {
+    let mut dot = 0.0f64;
+    let mut norm_a = 0.0f64;
+    let mut norm_b = 0.0f64;
+
+    for (&left, &right) in a.iter().zip(b.iter()) {
+        let left = f64::from(left);
+        let right = f64::from(right);
+        dot += left * right;
+        norm_a += left * left;
+        norm_b += right * right;
+    }
+
+    let denominator = norm_a + norm_b - dot;
+    if denominator <= 0.0 {
+        return 0.0;
+    }
+
+    let similarity = dot / denominator;
+    if similarity.is_finite() {
+        (1.0 - similarity.clamp(0.0, 1.0)) as f32
+    } else {
+        f32::MAX
+    }
+}
+
+fn install_runtime_metric(index: &mut Index, config: &HnswConfig) {
+    if let Some(ref custom) = config.custom_metric {
+        let dims = config.dimensions;
+        let distance_fn = Arc::clone(&custom.distance_fn);
+        let metric_wrapper = create_metric_wrapper(dims, distance_fn);
+        index.change_metric(metric_wrapper);
+    } else if config.metric == DistanceMetric::Tanimoto {
+        let metric_wrapper = create_metric_wrapper(config.dimensions, Arc::new(tanimoto_distance));
+        index.change_metric(metric_wrapper);
     }
 }
 
@@ -222,7 +281,7 @@ pub struct HnswIndex {
 // References:
 // - usearch thread safety docs: https://unum-cloud.github.io/usearch/cpp/index.html
 // - usearch C++ uses per-node locks for graph modifications
-// - This fork: https://github.com/madmax983/USearch (pinned revision in Cargo.toml)
+// - Rust crate: https://crates.io/crates/usearch (version pinned in Cargo.toml)
 unsafe impl Send for HnswIndex {}
 unsafe impl Sync for HnswIndex {}
 
@@ -304,9 +363,11 @@ impl HnswIndex {
             }));
         }
 
+        validate_metric_quantization(&config)?;
+
         let options = IndexOptions {
             dimensions: config.dimensions,
-            metric: to_usearch_metric(config.metric),
+            metric: to_usearch_index_metric(config.metric),
             quantization: to_usearch_scalar(config.quantization),
             connectivity: config.m,
             expansion_add: config.ef_construction,
@@ -333,12 +394,7 @@ impl HnswIndex {
             )))
         })?;
 
-        if let Some(ref custom) = config.custom_metric {
-            let dims = config.dimensions;
-            let distance_fn = Arc::clone(&custom.distance_fn);
-            let metric_wrapper = create_metric_wrapper(dims, distance_fn);
-            index.change_metric(metric_wrapper);
-        }
+        install_runtime_metric(&mut index, &config);
 
         if let StorageMode::MemoryMapped { ref path } = config.storage {
             index
@@ -475,11 +531,13 @@ impl HnswIndex {
             }));
         }
 
+        validate_metric_quantization(&config)?;
+
         verify_index_header(path, config.dimensions, config.quantization)?;
 
         let options = IndexOptions {
             dimensions: config.dimensions,
-            metric: to_usearch_metric(config.metric),
+            metric: to_usearch_index_metric(config.metric),
             quantization: to_usearch_scalar(config.quantization),
             connectivity: config.m,
             expansion_add: config.ef_construction,
@@ -515,12 +573,7 @@ impl HnswIndex {
             ))));
         }
 
-        if let Some(ref custom) = config.custom_metric {
-            let dims = config.dimensions;
-            let distance_fn = Arc::clone(&custom.distance_fn);
-            let metric_wrapper = create_metric_wrapper(dims, distance_fn);
-            index.change_metric(metric_wrapper);
-        }
+        install_runtime_metric(&mut index, &config);
 
         let mappings_path = path.with_extension("usearch.mappings");
         let (id_mapping, reverse_mapping, max_key, metadata) =
@@ -563,7 +616,7 @@ impl HnswIndex {
     /// - OS fails to map the file.
     /// - Index metadata (header) is invalid.
     pub fn open_mmap(path: &Path) -> Result<Self> {
-        let index = Index::new(&IndexOptions::default()).map_err(|e| {
+        let mut index = Index::new(&IndexOptions::default()).map_err(|e| {
             Error::Vector(VectorError::IndexError(format!(
                 "Failed to create index: {}",
                 e
@@ -612,19 +665,22 @@ impl HnswIndex {
         };
 
         verify_index_header(path, dimensions, quantization)?;
+        let config = HnswConfig {
+            dimensions,
+            m: connectivity,
+            quantization,
+            metric,
+            storage: StorageMode::MemoryMapped {
+                path: path.to_path_buf(),
+            },
+            ..Default::default()
+        };
+        validate_metric_quantization(&config)?;
+        install_runtime_metric(&mut index, &config);
 
         Ok(HnswIndex {
             inner: Arc::new(RwLock::new(index)),
-            config: HnswConfig {
-                dimensions,
-                m: connectivity,
-                quantization,
-                metric,
-                storage: StorageMode::MemoryMapped {
-                    path: path.to_path_buf(),
-                },
-                ..Default::default()
-            },
+            config,
             id_mapping: Arc::new(id_mapping),
             reverse_mapping: Arc::new(reverse_mapping),
             next_key: AtomicU64::new(max_key + 1),

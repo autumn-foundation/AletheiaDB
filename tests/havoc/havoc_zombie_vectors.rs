@@ -25,6 +25,7 @@ use std::thread;
 /// Result: Index on disk has V, but Mappings file does not.
 /// When loaded, V is a "Zombie" - it exists in the graph but cannot be mapped back to a NodeId.
 #[test]
+#[serial_test::serial]
 fn test_havoc_zombie_vectors() {
     // Run multiple iterations to increase probability of hitting the race window.
     // The window is small (between collecting mappings and acquiring read lock).

@@ -2,6 +2,7 @@ use aletheiadb::core::id::NodeId;
 use aletheiadb::index::vector::{DistanceMetric, HnswIndexBuilder, VectorIndex};
 
 #[test]
+#[serial_test::serial]
 fn test_reentrant_search_returns_error() {
     let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine)
         .build()
@@ -37,6 +38,7 @@ fn test_reentrant_search_returns_error() {
 }
 
 #[test]
+#[serial_test::serial]
 fn test_reentrant_search_with_filter_returns_error() {
     let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine)
         .build()

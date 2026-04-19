@@ -6,6 +6,7 @@ use std::thread;
 use std::time::Duration;
 
 #[test]
+#[serial_test::serial]
 fn havoc_deadlock_save_vs_add() {
     let (tx, rx) = std::sync::mpsc::channel();
 

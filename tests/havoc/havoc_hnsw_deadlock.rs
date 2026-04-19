@@ -5,6 +5,7 @@ use std::thread;
 use std::time::Duration;
 
 #[test]
+#[serial_test::serial]
 fn test_hnsw_reentrant_deadlock_prevented() {
     let index = Arc::new(
         HnswIndexBuilder::new(4, DistanceMetric::Cosine)

@@ -348,6 +348,18 @@ fn test_tanimoto_metric() {
     assert!(results[0].1 > results[1].1); // First result should have higher similarity
 }
 
+#[test]
+fn test_tanimoto_metric_rejects_quantized_storage() {
+    let result = HnswIndexBuilder::new(4, DistanceMetric::Tanimoto)
+        .quantization(Quantization::I8)
+        .build();
+
+    assert!(
+        result.is_err(),
+        "Tanimoto uses an F32 callback metric and must reject quantized storage"
+    );
+}
+
 // ============================================================================
 // Quantization tests
 // ============================================================================
