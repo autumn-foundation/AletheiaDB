@@ -95,3 +95,39 @@ fn test_open_mmap_index() {
     let results = mmap_index.search(&[1.0, 0.0, 0.0, 0.0], 2).unwrap();
     assert!(!results.is_empty());
 }
+
+#[test]
+fn test_open_mmap_preserves_tanimoto_metric() {
+    let temp_dir = TempDir::new().unwrap();
+    let index_path = temp_dir.path().join("tanimoto_mmap.usearch");
+    let close_magnitude = NodeId::new(1).unwrap();
+    let wrong_magnitude = NodeId::new(2).unwrap();
+    let query = [1.0, 0.0];
+
+    {
+        let index = HnswIndexBuilder::new(2, DistanceMetric::Tanimoto)
+            .build()
+            .unwrap();
+
+        index.add(close_magnitude, &[1.0, 0.1]).unwrap();
+        index.add(wrong_magnitude, &[10.0, 0.0]).unwrap();
+        index.save(&index_path).unwrap();
+    }
+
+    let loaded = HnswIndex::load(&index_path, HnswConfig::new(2, DistanceMetric::Tanimoto))
+        .unwrap()
+        .search(&query, 2)
+        .unwrap();
+    let mmap = HnswIndex::open_mmap(&index_path)
+        .unwrap()
+        .search(&query, 2)
+        .unwrap();
+
+    assert_eq!(loaded[0].0, close_magnitude);
+    assert_eq!(mmap[0].0, close_magnitude);
+    assert!(
+        mmap[0].1 > 0.9,
+        "mmap Tanimoto score should stay high for close-magnitude vector, got {:?}",
+        mmap
+    );
+}

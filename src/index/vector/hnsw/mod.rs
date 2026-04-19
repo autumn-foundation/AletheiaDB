@@ -616,7 +616,7 @@ impl HnswIndex {
     /// - OS fails to map the file.
     /// - Index metadata (header) is invalid.
     pub fn open_mmap(path: &Path) -> Result<Self> {
-        let index = Index::new(&IndexOptions::default()).map_err(|e| {
+        let mut index = Index::new(&IndexOptions::default()).map_err(|e| {
             Error::Vector(VectorError::IndexError(format!(
                 "Failed to create index: {}",
                 e
@@ -665,19 +665,22 @@ impl HnswIndex {
         };
 
         verify_index_header(path, dimensions, quantization)?;
+        let config = HnswConfig {
+            dimensions,
+            m: connectivity,
+            quantization,
+            metric,
+            storage: StorageMode::MemoryMapped {
+                path: path.to_path_buf(),
+            },
+            ..Default::default()
+        };
+        validate_metric_quantization(&config)?;
+        install_runtime_metric(&mut index, &config);
 
         Ok(HnswIndex {
             inner: Arc::new(RwLock::new(index)),
-            config: HnswConfig {
-                dimensions,
-                m: connectivity,
-                quantization,
-                metric,
-                storage: StorageMode::MemoryMapped {
-                    path: path.to_path_buf(),
-                },
-                ..Default::default()
-            },
+            config,
             id_mapping: Arc::new(id_mapping),
             reverse_mapping: Arc::new(reverse_mapping),
             next_key: AtomicU64::new(max_key + 1),
