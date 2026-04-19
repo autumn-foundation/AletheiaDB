@@ -10,7 +10,6 @@ const VECTOR_DIM: usize = 384;
 const NUM_SEARCHERS: usize = 4;
 const NUM_ADDERS_VACANT: usize = 2;
 const NUM_ADDERS_OCCUPIED: usize = 2;
-const NUM_SAVERS: usize = 1;
 
 fn is_ci() -> bool {
     std::env::var("CI").is_ok()
@@ -38,9 +37,13 @@ fn test_timeout_secs() -> u64 {
 /// - `add` (Vacant): Locks `id_mapping` -> `inner` -> `reverse_mapping`
 /// - `add` (Occupied): Locks `id_mapping` -> `inner`
 /// - `search_with_filter`: Locks `inner` -> `reverse_mapping`
-/// - `save`: Locks `id_mapping` (iter) -> `inner` (read)
 ///
 /// Without proper lock ordering (PR #751), these operations would deadlock.
+///
+/// Save/search concurrency is covered by `regression_save_concurrency` and
+/// save-specific havoc tests. This stress test stays scoped to in-memory
+/// add/search lock ordering so upstream persistence behavior cannot obscure the
+/// deadlock signal.
 #[test]
 #[serial_test::serial]
 fn havoc_deadlock_stress_test() {
@@ -48,18 +51,30 @@ fn havoc_deadlock_stress_test() {
 
     // Run the actual test in a separate thread to enable timeout enforcement
     thread::spawn(move || {
-        run_deadlock_stress_test();
-        tx.send(()).unwrap();
+        let result =
+            std::panic::catch_unwind(run_deadlock_stress_test).map_err(panic_payload_to_string);
+        let _ = tx.send(result);
     });
 
     // Watchdog: If test takes longer than timeout, it's likely deadlocked
     let timeout = test_timeout_secs();
     match rx.recv_timeout(Duration::from_secs(timeout)) {
-        Ok(_) => (), // Success
+        Ok(Ok(())) => (), // Success
+        Ok(Err(message)) => panic!("Deadlock stress worker panicked: {message}"),
         Err(_) => panic!(
             "Deadlock detected or test too slow: Timed out after {}s",
             timeout
         ),
+    }
+}
+
+fn panic_payload_to_string(payload: Box<dyn std::any::Any + Send>) -> String {
+    if let Some(message) = payload.downcast_ref::<&str>() {
+        (*message).to_string()
+    } else if let Some(message) = payload.downcast_ref::<String>() {
+        message.clone()
+    } else {
+        "non-string panic payload".to_string()
     }
 }
 
@@ -86,7 +101,7 @@ fn run_deadlock_stress_test() {
 
     // 3. Threads
     let barrier = Arc::new(Barrier::new(
-        NUM_SEARCHERS + NUM_ADDERS_VACANT + NUM_ADDERS_OCCUPIED + NUM_SAVERS,
+        NUM_SEARCHERS + NUM_ADDERS_VACANT + NUM_ADDERS_OCCUPIED,
     ));
 
     let mut handles = vec![];
@@ -153,28 +168,6 @@ fn run_deadlock_stress_test() {
                     Err(e) => eprintln!("Add (occupied) error: {}", e),
                 }
                 thread::yield_now(); // Prevent starvation
-            }
-        }));
-    }
-
-    // Savers (iterates id_mapping)
-    for _ in 0..NUM_SAVERS {
-        let index = index.clone();
-        let barrier = barrier.clone();
-        let counter = success_count.clone();
-        handles.push(thread::spawn(move || {
-            let dir = tempfile::tempdir().unwrap();
-            let path = dir.path().join("index.usearch");
-            barrier.wait();
-            for _ in 0..iterations().min(10) {
-                match index.save(&path) {
-                    Ok(_) => {
-                        counter.fetch_add(1, Ordering::Relaxed);
-                    }
-                    Err(e) => eprintln!("Save error: {}", e),
-                }
-                // Sleep slightly to allow other threads to make progress and create different lock states
-                thread::sleep(Duration::from_millis(5));
             }
         }));
     }
