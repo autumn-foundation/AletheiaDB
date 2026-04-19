@@ -80,3 +80,10 @@ test_output_*.txt
 mutants.out/
 mutants.out.old/
 echo_project/
+
+#jules artifacts
+*.py
+*.sh
+*.txt
+plan.md
+pr_description.md
