@@ -57,7 +57,7 @@ fn test_delta_additions() {
     save_graph_index_delta(&base_data, &modified_data, &delta_path, 3).unwrap();
 
     // Load with delta
-    let loaded = load_graph_index_with_delta(&base_path, &delta_path).unwrap();
+    let loaded = load_graph_index_with_delta(&base_path, &delta_path, None).unwrap();
 
     assert_eq!(loaded.node_count, 2);
     assert_eq!(loaded.nodes.len(), 2);
@@ -87,7 +87,7 @@ fn test_delta_deletions() {
     save_graph_index_delta(&base_data, &modified_data, &delta_path, 3).unwrap();
 
     // Load with delta
-    let loaded = load_graph_index_with_delta(&base_path, &delta_path).unwrap();
+    let loaded = load_graph_index_with_delta(&base_path, &delta_path, None).unwrap();
 
     assert_eq!(loaded.node_count, 1);
     assert_eq!(loaded.nodes.len(), 1);
@@ -116,7 +116,7 @@ fn test_delta_modifications() {
     save_graph_index_delta(&base_data, &modified_data, &delta_path, 3).unwrap();
 
     // Load with delta
-    let loaded = load_graph_index_with_delta(&base_path, &delta_path).unwrap();
+    let loaded = load_graph_index_with_delta(&base_path, &delta_path, None).unwrap();
 
     assert_eq!(loaded.node_count, 1);
     assert_eq!(loaded.nodes[0].version_id, 102);
@@ -157,7 +157,7 @@ fn test_delta_mixed_operations() {
     save_graph_index_delta(&base_data, &modified_data, &delta_path, 3).unwrap();
 
     // Load with delta
-    let loaded = load_graph_index_with_delta(&base_path, &delta_path).unwrap();
+    let loaded = load_graph_index_with_delta(&base_path, &delta_path, None).unwrap();
 
     assert_eq!(loaded.node_count, 3);
     assert_eq!(loaded.nodes.len(), 3);
@@ -198,7 +198,7 @@ fn test_delta_empty() {
     let modified_data = base_data.clone();
 
     save_graph_index_delta(&base_data, &modified_data, &delta_path, 3).unwrap();
-    let loaded = load_graph_index_with_delta(&base_path, &delta_path).unwrap();
+    let loaded = load_graph_index_with_delta(&base_path, &delta_path, None).unwrap();
 
     assert_eq!(loaded.nodes.len(), 1);
     assert_eq!(loaded.nodes[0], base_data.nodes[0]);
@@ -246,7 +246,7 @@ fn test_delta_uncompressed_loads_correctly() {
     std::fs::write(&delta_path, &file_data).unwrap();
 
     // Load must succeed — the loader should detect no zstd magic and skip decompression
-    let loaded = load_graph_index_with_delta(&base_path, &delta_path).unwrap();
+    let loaded = load_graph_index_with_delta(&base_path, &delta_path, None).unwrap();
 
     assert_eq!(loaded.node_count, 2);
     assert_eq!(loaded.nodes.len(), 2);
