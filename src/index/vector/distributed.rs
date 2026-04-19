@@ -238,7 +238,7 @@ pub enum CircuitState {
 /// # Examples
 ///
 /// ```rust
-/// # #[cfg(feature = "nova")]
+/// # #[cfg(feature = "semantic-search")]
 /// # fn main() {
 /// use aletheiadb::index::vector::distributed::CircuitBreakerConfig;
 /// use std::time::Duration;
@@ -249,7 +249,7 @@ pub enum CircuitState {
 ///     success_threshold: 3,
 /// };
 /// # }
-/// # #[cfg(not(feature = "nova"))]
+/// # #[cfg(not(feature = "semantic-search"))]
 /// # fn main() {}
 /// ```
 #[derive(Debug, Clone)]
@@ -282,7 +282,7 @@ impl Default for CircuitBreakerConfig {
 /// # Examples
 ///
 /// ```rust
-/// # #[cfg(feature = "nova")]
+/// # #[cfg(feature = "semantic-search")]
 /// # fn main() {
 /// use aletheiadb::index::vector::distributed::{CircuitBreakerConfig, NodeCircuitBreaker, CircuitState};
 ///
@@ -293,7 +293,7 @@ impl Default for CircuitBreakerConfig {
 /// assert_eq!(breaker.state(), CircuitState::Closed);
 /// assert!(breaker.should_allow());
 /// # }
-/// # #[cfg(not(feature = "nova"))]
+/// # #[cfg(not(feature = "semantic-search"))]
 /// # fn main() {}
 /// ```
 #[derive(Debug)]
@@ -468,7 +468,7 @@ impl NodeCircuitBreaker {
 /// # Examples
 ///
 /// ```rust
-/// # #[cfg(feature = "nova")]
+/// # #[cfg(feature = "semantic-search")]
 /// # fn main() {
 /// use aletheiadb::index::vector::distributed::{
 ///     MockVectorNodeClient, NodeConnection, CircuitBreakerConfig
@@ -482,7 +482,7 @@ impl NodeCircuitBreaker {
 /// assert_eq!(connection.node_id(), 0);
 /// assert!(connection.is_available());
 /// # }
-/// # #[cfg(not(feature = "nova"))]
+/// # #[cfg(not(feature = "semantic-search"))]
 /// # fn main() {}
 /// ```
 pub struct NodeConnection<C: VectorNodeClient> {
@@ -584,7 +584,7 @@ impl<C: VectorNodeClient> NodeConnection<C> {
 /// # Examples
 ///
 /// ```rust
-/// # #[cfg(feature = "nova")]
+/// # #[cfg(feature = "semantic-search")]
 /// # fn main() {
 /// use aletheiadb::index::vector::distributed::{NodeConnectionStats, CircuitState};
 ///
@@ -597,7 +597,7 @@ impl<C: VectorNodeClient> NodeConnection<C> {
 ///
 /// assert_eq!(stats.success_rate(), 0.98);
 /// # }
-/// # #[cfg(not(feature = "nova"))]
+/// # #[cfg(not(feature = "semantic-search"))]
 /// # fn main() {}
 /// ```
 #[derive(Debug, Clone)]
@@ -635,7 +635,7 @@ impl NodeConnectionStats {
 /// # Examples
 ///
 /// ```rust
-/// # #[cfg(feature = "nova")]
+/// # #[cfg(feature = "semantic-search")]
 /// # fn main() {
 /// use aletheiadb::index::vector::distributed::VectorNodeConfig;
 /// use std::time::Duration;
@@ -645,7 +645,7 @@ impl NodeConnectionStats {
 ///
 /// assert_eq!(node_config.node_id, 1);
 /// # }
-/// # #[cfg(not(feature = "nova"))]
+/// # #[cfg(not(feature = "semantic-search"))]
 /// # fn main() {}
 /// ```
 #[derive(Debug, Clone)]
@@ -703,7 +703,7 @@ pub enum RoutingStrategy {
 /// # Examples
 ///
 /// ```rust
-/// # #[cfg(feature = "nova")]
+/// # #[cfg(feature = "semantic-search")]
 /// # fn main() {
 /// use aletheiadb::index::vector::distributed::{DistributedVectorConfig, VectorNodeConfig};
 /// use aletheiadb::index::vector::DistanceMetric;
@@ -714,7 +714,7 @@ pub enum RoutingStrategy {
 ///
 /// assert!(config.validate().is_ok());
 /// # }
-/// # #[cfg(not(feature = "nova"))]
+/// # #[cfg(not(feature = "semantic-search"))]
 /// # fn main() {}
 /// ```
 #[derive(Debug, Clone)]
@@ -811,7 +811,7 @@ impl DistributedVectorConfig {
 /// # Examples
 ///
 /// ```rust
-/// # #[cfg(feature = "nova")]
+/// # #[cfg(feature = "semantic-search")]
 /// # fn main() {
 /// use aletheiadb::index::vector::distributed::{DistributedIndexStats, NodeConnectionStats, CircuitState};
 ///
@@ -822,7 +822,7 @@ impl DistributedVectorConfig {
 ///     node_stats: vec![], // Would contain actual node stats
 /// };
 /// # }
-/// # #[cfg(not(feature = "nova"))]
+/// # #[cfg(not(feature = "semantic-search"))]
 /// # fn main() {}
 /// ```
 #[derive(Debug, Clone)]
@@ -846,7 +846,7 @@ pub struct DistributedIndexStats {
 /// # Examples
 ///
 /// ```rust
-/// # #[cfg(feature = "nova")]
+/// # #[cfg(feature = "semantic-search")]
 /// # fn main() {
 /// use aletheiadb::index::vector::distributed::RebalanceStats;
 ///
@@ -860,7 +860,7 @@ pub struct DistributedIndexStats {
 ///     node_sizes: vec![(0, 50), (1, 150)],
 /// };
 /// # }
-/// # #[cfg(not(feature = "nova"))]
+/// # #[cfg(not(feature = "semantic-search"))]
 /// # fn main() {}
 /// ```
 #[derive(Debug, Clone)]
@@ -893,7 +893,7 @@ pub struct RebalanceStats {
 /// # Examples
 ///
 /// ```rust
-/// # #[cfg(feature = "nova")]
+/// # #[cfg(feature = "semantic-search")]
 /// # fn main() -> aletheiadb::core::error::Result<()> {
 /// use std::sync::Arc;
 /// use aletheiadb::index::vector::distributed::{
@@ -910,7 +910,7 @@ pub struct RebalanceStats {
 /// assert_eq!(index.node_count(), 1);
 /// # Ok(())
 /// # }
-/// # #[cfg(not(feature = "nova"))]
+/// # #[cfg(not(feature = "semantic-search"))]
 /// # fn main() {}
 /// ```
 pub struct DistributedVectorIndex<C: VectorNodeClient> {
@@ -1268,7 +1268,7 @@ impl<C: VectorNodeClient + 'static> VectorIndex for DistributedVectorIndex<C> {
 /// # Examples
 ///
 /// ```rust
-/// # #[cfg(feature = "nova")]
+/// # #[cfg(feature = "semantic-search")]
 /// # fn main() -> aletheiadb::core::error::Result<()> {
 /// use aletheiadb::index::vector::distributed::{MockVectorNodeClient, VectorNodeClient};
 /// use aletheiadb::index::vector::DistanceMetric;
@@ -1283,7 +1283,7 @@ impl<C: VectorNodeClient + 'static> VectorIndex for DistributedVectorIndex<C> {
 /// assert_eq!(client.len()?, 1);
 /// # Ok(())
 /// # }
-/// # #[cfg(not(feature = "nova"))]
+/// # #[cfg(not(feature = "semantic-search"))]
 /// # fn main() {}
 /// ```
 #[derive(Debug)]

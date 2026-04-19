@@ -39,7 +39,7 @@ pub struct Muse<'a> {
     db: &'a AletheiaDB,
 }
 
-#[cfg(feature = "nova")]
+#[cfg(feature = "semantic-reasoning")]
 impl<'a> Muse<'a> {
     /// Create a new Muse instance.
     pub fn new(db: &'a AletheiaDB) -> Self {
@@ -143,7 +143,7 @@ impl<'a> Muse<'a> {
     }
 }
 
-#[cfg(not(feature = "nova"))]
+#[cfg(not(feature = "semantic-reasoning"))]
 impl<'a> Muse<'a> {
     /// Create a new Muse instance.
     pub fn new(_db: &'a AletheiaDB) -> Self {
@@ -171,7 +171,7 @@ impl<'a> Muse<'a> {
     }
 }
 
-#[cfg(all(test, feature = "nova"))]
+#[cfg(all(test, feature = "semantic-reasoning"))]
 mod tests {
     use super::*;
     use crate::core::property::PropertyMapBuilder;
@@ -253,7 +253,7 @@ mod tests {
     }
 }
 
-#[cfg(all(test, not(feature = "nova")))]
+#[cfg(all(test, not(feature = "semantic-reasoning")))]
 mod stub_tests {
     use super::*;
     use crate::AletheiaDB;

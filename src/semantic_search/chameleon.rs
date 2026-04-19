@@ -25,7 +25,7 @@
 //!
 //! ```rust,no_run
 //! use aletheiadb::AletheiaDB;
-//! use aletheiadb::experimental::chameleon::Chameleon;
+//! use aletheiadb::semantic_search::chameleon::Chameleon;
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let db = AletheiaDB::new()?;

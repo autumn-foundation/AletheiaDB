@@ -124,7 +124,7 @@ impl<'a> Ariadne<'a> {
     ///
     /// # Examples
     /// ```rust
-    /// # #[cfg(feature = "nova")]
+    /// # #[cfg(feature = "semantic-temporal")]
     /// # fn main() {
     /// #   use aletheiadb::AletheiaDB;
     /// #   use aletheiadb::core::property::PropertyMapBuilder;
@@ -156,7 +156,7 @@ impl<'a> Ariadne<'a> {
     /// #   assert_eq!(path.first().unwrap().node_id, a);
     /// #   assert_eq!(path.last().unwrap().node_id, c);
     /// # }
-    /// # #[cfg(not(feature = "nova"))]
+    /// # #[cfg(not(feature = "semantic-temporal"))]
     /// # fn main() {}
     /// ```
     pub fn weave(

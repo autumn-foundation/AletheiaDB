@@ -23,7 +23,7 @@ use crate::{Error, Result, StorageError};
 ///
 /// ```rust,no_run
 /// use aletheiadb::AletheiaDB;
-/// use aletheiadb::experimental::highlander::HighlanderDetector;
+/// use aletheiadb::semantic_search::highlander::HighlanderDetector;
 ///
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let db = AletheiaDB::new()?;

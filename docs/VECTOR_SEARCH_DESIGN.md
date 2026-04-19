@@ -2,8 +2,15 @@
 
 > **Status**: Phase 4 Complete (VS-072)
 > **Created**: 2024-12-30
-> **Updated**: 2026-01-14
+> **Updated**: 2026-04-18
 > **Goal**: Position AletheiaDB as SUPERRAG - Graph + Vector + Bi-temporal
+>
+> **0.1 update:** the associative-retrieval / pattern-matching / clustering /
+> entity-resolution layer (Fishing, Gestalt, Cartographer, Highlander, Janus,
+> Chameleon, Semantic Navigator, Concept Algebra, Serendipity, Voyager,
+> Spectre, Telepathy, Tapestry, Horizon) has graduated from `experimental`
+> ("Nova") to a stable `semantic-search` feature flag. See
+> [ADR-0050](adr/0050-experimental-feature-categorization.md).
 >
 > ## Implementation Progress
 >

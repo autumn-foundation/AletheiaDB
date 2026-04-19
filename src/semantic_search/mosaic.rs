@@ -27,7 +27,7 @@
 use crate::AletheiaDB;
 use crate::core::error::{Error, Result};
 use crate::core::id::NodeId;
-#[cfg(feature = "nova")]
+#[cfg(feature = "semantic-search")]
 use crate::core::vector::ops::magnitude;
 
 /// A single piece of the semantic mosaic.

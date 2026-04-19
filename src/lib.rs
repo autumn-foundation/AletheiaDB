@@ -64,6 +64,9 @@ pub mod encryption;
 pub mod index;
 pub mod query;
 pub mod storage;
+// Semantic search cohort (graduated from "Nova" in 0.1).
+#[cfg(feature = "semantic-search")]
+pub mod semantic_search;
 // Experimental features ("Nova")
 pub mod experimental;
 // Optional embedding generation module
