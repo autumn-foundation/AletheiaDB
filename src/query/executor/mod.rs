@@ -16,6 +16,7 @@ use crate::storage::historical::HistoricalStorage;
 
 use super::planner::physical::{PhysicalOp, PhysicalPlan};
 
+pub use iterators::EmptyIterator;
 #[doc(hidden)]
 pub use iterators::NodeScanIterator;
 pub use iterators::ResultIterator;
@@ -24,9 +25,15 @@ pub use iterators::{
     BatchTemporalNodeIterator, FilterIterator, LimitIterator, ProjectIterator,
     ProvenanceFilterIterator, TemporalNodeIterator, VectorRerankIterator, VectorResultIterator,
 };
+pub use iterators::{PropertyScanIterator, TraversalIterator};
 pub use results::{EntityId, EntityResult, QueryResults, QueryRow};
 
 /// Configuration for query execution.
+///
+/// # Why?
+/// Defines boundaries and optimizations for the executor pipeline. Includes parameters
+/// that influence backpressure (buffer limits), whether parallel execution is allowed
+/// (for operators that support it), and execution timeouts to prevent runaway queries.
 ///
 /// # Examples
 ///
@@ -65,9 +72,10 @@ impl Default for ExecutionConfig {
 
 /// Query executor that runs physical plans against storage.
 ///
+/// # Why?
 /// The executor converts a `PhysicalPlan` into a pipeline of iterators (`ResultIterator`).
 /// It manages access to both `CurrentStorage` (for recent data) and `HistoricalStorage`
-/// (for temporal data).
+/// (for temporal data), orchestrating the pull-based query execution.
 ///
 /// # Example
 ///
