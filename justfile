@@ -49,6 +49,16 @@ check:
 lint:
     cargo clippy --all-targets --all-features -- -D warnings
 
+# Verify each Nova/semantic-search category compiles standalone
+check-features:
+    @echo "=== semantic-search ===" && cargo check --features semantic-search
+    @echo "=== semantic-reasoning ===" && cargo check --features semantic-reasoning
+    @echo "=== semantic-temporal ===" && cargo check --features semantic-temporal
+    @echo "=== semantic-diagnostics ===" && cargo check --features semantic-diagnostics
+    @echo "=== semantic-characterization ===" && cargo check --features semantic-characterization
+    @echo "=== nova umbrella ===" && cargo check --features nova
+    @echo "=== nova + semantic-search ===" && cargo check --features nova,semantic-search
+
 # Format code
 fmt:
     cargo fmt --all

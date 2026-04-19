@@ -105,8 +105,46 @@ loom = { version = "0.7.2", features = ["checkpoint"] }
 rand = "0.8"
 
 [features]
-# Nova experimental features
-nova = []
+# Stable: Semantic search cohort (graduated 0.1).
+# Retrieval, matching, clustering, traversal, entity resolution.
+# Modules: fishing, gestalt, cartographer, highlander, janus, chameleon,
+# semantic_navigator, concept_algebra, serendipity, voyager, spectre,
+# telepathy, tapestry, horizon, mosaic.
+semantic-search = []
+
+# Experimental: prediction, synthesis, counterfactual simulation.
+# Modules: prophet, dreamer, omen, oracle, hindsight, muse, luna, metaphor,
+# synergy, chimera, alchemy.
+# Depends on semantic-diagnostics (alchemy uses wormhole).
+semantic-reasoning = ["semantic-diagnostics"]
+
+# Experimental: bi-temporal + semantic analysis.
+# Modules: sherlock, chronos, echo, kairos, temporal_narrative, temporal_diff,
+# aura, mnemosyne, ariadne.
+semantic-temporal = []
+
+# Experimental: anomaly detection, validation, health monitoring.
+# Modules: dissonance, sentinel, fossil, tremor, polygraph, wormhole, ripple,
+# entanglement, thermos, paradox.
+semantic-diagnostics = []
+
+# Experimental: concept characterization + LLM/visualization export.
+# Modules: archetype, prism, gravity, sybil, synapse, kaleidoscope, papyrus,
+# graph_context, wildfire.
+# Depends on semantic-temporal (graph_context uses temporal_narrative).
+semantic-characterization = ["semantic-temporal"]
+
+# Experimental "Nova" R&D umbrella.
+# Enables every semantic-* cohort that is still marked experimental. Removing a
+# cohort from this list is how we "graduate" it — the flag itself stays, so
+# downstream callers opting into the cohort directly keep working.
+# The graduated `semantic-search` cohort is NOT included.
+nova = [
+    "semantic-reasoning",
+    "semantic-temporal",
+    "semantic-diagnostics",
+    "semantic-characterization",
+]
 
 # Enable Tracy profiling (use with: cargo build --release --features tracy)
 tracy = ["tracy-client/enable"]
@@ -412,4 +450,8 @@ required-features = []
 # Experimental features
 [[example]]
 name = "story_demo"
-required-features = ["nova"]
+required-features = ["semantic-temporal"]
+
+[[example]]
+name = "russian_writers"
+required-features = ["semantic-search", "semantic-reasoning"]

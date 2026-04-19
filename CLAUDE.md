@@ -419,6 +419,25 @@ Optional embedding providers via feature flags (OpenAI, HuggingFace, Ollama, ONN
 
 **See [docs/EMBEDDINGS.md](docs/EMBEDDINGS.md) for comprehensive user guide.**
 
+### Feature Flags: Stable vs Experimental
+
+Semantic features are split between a stable cohort and four experimental
+("Nova") cohorts. Pick a category flag rather than the umbrella when you only
+need one slice.
+
+| Flag | Status | Cohort |
+|------|--------|--------|
+| `semantic-search` | **Stable** | Retrieval, matching, clustering, traversal, entity resolution (Fishing, Gestalt, Cartographer, Highlander, Janus, Chameleon, Semantic Navigator, Concept Algebra, Serendipity, Voyager, Spectre, Telepathy, Tapestry, Horizon) |
+| `semantic-reasoning` | Experimental | Prediction & synthesis (Prophet, Dreamer, Omen, Oracle, Hindsight, Muse, Luna, Metaphor, Synergy, Chimera, Alchemy) |
+| `semantic-temporal` | Experimental | Bi-temporal + semantic (Sherlock, Chronos, Echo, Kairos, Temporal Narrative, Temporal Diff, Aura, Mnemosyne, Ariadne) |
+| `semantic-diagnostics` | Experimental | Anomaly & validation (Dissonance, Sentinel, Fossil, Tremor, Polygraph, Wormhole, Ripple, Entanglement, Thermos) |
+| `semantic-characterization` | Experimental | Concept characterization + export (Archetype, Prism, Gravity, Sybil, Synapse, Kaleidoscope, Papyrus, GraphContext) |
+| `nova` | Umbrella | Enables every `semantic-*` cohort still in R&D (does **not** include `semantic-search`) |
+
+Verify each flag still compiles standalone with `just check-features`.
+
+**See [docs/adr/0050-experimental-feature-categorization.md](docs/adr/0050-experimental-feature-categorization.md) for the categorization rationale and graduation pattern.**
+
 ## Configuration
 
 AletheiaDB uses a unified configuration system for WAL, historical storage, vector indexes, and persistence.

@@ -1,0 +1,555 @@
+//! Sherlock: Temporal Pattern Matching Engine.
+//!
+//! "It is a capital mistake to theorize before one has data."
+//!
+//! Sherlock allows you to define "Mysteries" (Temporal Patterns) and investigate
+//! the graph history to find "Deductions" (Matches).
+//!
+//! It answers questions like:
+//! - "Find all instances where a node's status changed from 'OK' to 'Warning' and then to 'Error' within 5 minutes."
+//! - "Did a User log in and then immediately delete a file?"
+//!
+//! # Concepts
+//! - **Clue**: A specific condition to look for (e.g., Property Change).
+//! - **Mystery**: A sequence of Clues with time constraints.
+//! - **Deduction**: A concrete sequence of events that matches the Mystery.
+
+use crate::AletheiaDB;
+use crate::core::error::Result;
+use crate::core::id::NodeId;
+use crate::core::property::PropertyValue;
+use crate::core::temporal::Timestamp;
+use std::time::Duration;
+
+/// A Clue represents a specific event or state change to look for.
+///
+/// # Examples
+///
+/// ```rust
+/// use aletheiadb::experimental::sherlock::Clue;
+/// use aletheiadb::core::property::PropertyValue;
+///
+/// let clue = Clue::PropertyState {
+///     key: "status".to_string(),
+///     value: Some(PropertyValue::from("Pending")),
+/// };
+/// ```
+#[derive(Debug, Clone)]
+pub enum Clue {
+    /// A property has a specific value at this version.
+    /// If value is None, matches any existing value for that key.
+    PropertyState {
+        /// The property key to check.
+        key: String,
+        /// The expected value (None for existence check).
+        value: Option<PropertyValue>,
+    },
+    // Future: Edge addition/removal, etc.
+}
+
+#[cfg(feature = "semantic-temporal")]
+/// A Mystery defines the pattern to search for.
+///
+/// # Examples
+///
+/// ```rust
+/// # #[cfg(feature = "semantic-temporal")]
+/// # fn main() {
+/// use aletheiadb::experimental::sherlock::{Mystery, Clue};
+/// use aletheiadb::core::property::PropertyValue;
+/// use std::time::Duration;
+///
+/// let mystery = Mystery::new(Duration::from_secs(60))
+///     .add_clue(Clue::PropertyState {
+///         key: "status".to_string(),
+///         value: Some(PropertyValue::from("Pending")),
+///     });
+/// # }
+/// # #[cfg(not(feature = "semantic-temporal"))]
+/// # fn main() {}
+/// ```
+#[derive(Debug, Clone)]
+/// A deductive reasoning task over the graph topology.
+///
+/// # Why?
+/// Sherlock allows for programmatic hypothesis testing on graph structures,
+/// determining if a specific path or subgraph matches a complex logical pattern
+/// (e.g., "Is there a cycle of trust between these 5 accounts?").
+pub struct Mystery {
+    /// The sequence of clues to find.
+    pub clues: Vec<Clue>,
+    /// Maximum time allowed between the first and last clue.
+    pub time_window: Duration,
+}
+
+#[cfg(not(feature = "semantic-temporal"))]
+/// A Mystery defines the pattern to search for.
+#[deprecated(
+    note = "Mystery requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
+)]
+/// A deductive reasoning task over the graph topology.
+///
+/// # Why?
+/// Sherlock allows for programmatic hypothesis testing on graph structures,
+/// determining if a specific path or subgraph matches a complex logical pattern
+/// (e.g., "Is there a cycle of trust between these 5 accounts?").
+pub struct Mystery {
+    _marker: std::marker::PhantomData<Duration>,
+}
+
+#[cfg(feature = "semantic-temporal")]
+impl Mystery {
+    /// Create a new Mystery builder.
+    pub fn new(time_window: Duration) -> Self {
+        Self {
+            clues: Vec::new(),
+            time_window,
+        }
+    }
+
+    /// Add a clue to the sequence.
+    pub fn add_clue(mut self, clue: Clue) -> Self {
+        self.clues.push(clue);
+        self
+    }
+}
+
+#[cfg(not(feature = "semantic-temporal"))]
+#[allow(deprecated)]
+impl Mystery {
+    /// Create a new Mystery builder.
+    ///
+    /// # Panics
+    ///
+    /// This method panics if the `nova` feature is not enabled.
+    #[allow(unused_variables)]
+    #[track_caller]
+    pub fn new(time_window: Duration) -> Self {
+        panic!(
+            "Mystery requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
+        );
+    }
+
+    /// Add a clue to the sequence.
+    ///
+    /// # Panics
+    ///
+    /// This method panics if the `nova` feature is not enabled.
+    #[allow(unused_variables)]
+    #[track_caller]
+    pub fn add_clue(self, clue: Clue) -> Self {
+        panic!(
+            "Mystery requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
+        );
+    }
+}
+
+/// A Deduction represents a successful match.
+///
+/// # Examples
+///
+/// ```rust
+/// use aletheiadb::experimental::sherlock::Deduction;
+/// use aletheiadb::core::id::NodeId;
+/// use aletheiadb::core::temporal::time;
+///
+/// let deduction = Deduction {
+///     node_id: NodeId::new(1).unwrap(),
+///     event_times: vec![time::now()],
+/// };
+/// ```
+#[derive(Debug, Clone)]
+pub struct Deduction {
+    /// The node where the pattern was found.
+    pub node_id: NodeId,
+    /// The timestamps of each matched clue.
+    pub event_times: Vec<Timestamp>,
+}
+
+#[cfg(feature = "semantic-temporal")]
+/// The Sherlock Engine.
+///
+/// # Examples
+///
+/// ```rust
+/// # #[cfg(feature = "semantic-temporal")]
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// use aletheiadb::AletheiaDB;
+/// use aletheiadb::experimental::sherlock::{Sherlock, Mystery, Clue};
+/// use aletheiadb::core::property::{PropertyValue, PropertyMapBuilder};
+/// use aletheiadb::api::transaction::WriteOps;
+/// use std::time::Duration;
+///
+/// let db = AletheiaDB::new()?;
+///
+/// // Create a node
+/// let props = PropertyMapBuilder::new().insert("status", "Pending").build();
+/// let node_id = db.write(|tx| tx.create_node("Task", props))?;
+///
+/// // Update the node
+/// db.write(|tx| tx.update_node(
+///     node_id,
+///     PropertyMapBuilder::new().insert("status", "Completed").build()
+/// ))?;
+///
+/// let sherlock = Sherlock::new(&db);
+/// let mystery = Mystery::new(Duration::from_secs(60))
+///     .add_clue(Clue::PropertyState {
+///         key: "status".to_string(),
+///         value: Some(PropertyValue::from("Pending")),
+///     })
+///     .add_clue(Clue::PropertyState {
+///         key: "status".to_string(),
+///         value: Some(PropertyValue::from("Completed")),
+///     });
+///
+/// let deductions = sherlock.investigate(node_id, &mystery)?;
+/// assert_eq!(deductions.len(), 1);
+/// # Ok(())
+/// # }
+/// # #[cfg(not(feature = "semantic-temporal"))]
+/// # fn main() {}
+/// ```
+/// The deductive reasoning engine for AletheiaDB.
+///
+/// # Why?
+/// This struct orchestrates the evaluation of `Mystery` constraints against
+/// the current state of the database, utilizing a backtracking algorithm
+/// to find subgraphs that satisfy complex topological rules.
+pub struct Sherlock<'a> {
+    #[allow(dead_code)]
+    db: &'a AletheiaDB,
+}
+
+#[cfg(not(feature = "semantic-temporal"))]
+/// The Sherlock Engine.
+#[deprecated(
+    note = "Sherlock requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
+)]
+/// The deductive reasoning engine for AletheiaDB.
+///
+/// # Why?
+/// This struct orchestrates the evaluation of `Mystery` constraints against
+/// the current state of the database, utilizing a backtracking algorithm
+/// to find subgraphs that satisfy complex topological rules.
+pub struct Sherlock<'a> {
+    _marker: std::marker::PhantomData<&'a AletheiaDB>,
+}
+
+#[cfg(feature = "semantic-temporal")]
+impl<'a> Sherlock<'a> {
+    /// Create a new Sherlock instance.
+    pub fn new(db: &'a AletheiaDB) -> Self {
+        Self { db }
+    }
+
+    /// Investigate a specific node for the given Mystery.
+    pub fn investigate(&self, node_id: NodeId, mystery: &Mystery) -> Result<Vec<Deduction>> {
+        let history = self.db.get_node_history(node_id)?;
+        let mut deductions = Vec::new();
+
+        // If no clues, nothing to find.
+        if mystery.clues.is_empty() {
+            return Ok(deductions);
+        }
+
+        // We need to find a sequence of versions that match the clues.
+        // This is a simplified backtracking or iterative search.
+        // Since history is linear time-wise (transaction time), but we care about valid time
+        // for temporal pattern matching, we MUST sort by valid time.
+        // Otherwise, backdated updates could break detection.
+
+        // Clone and sort versions by valid_time start
+        let mut versions = history.versions.clone();
+        versions.sort_by_key(|v| v.temporal.valid_time().start());
+
+        // Strategy: Find all occurrences of Clue 0.
+        // For each, look ahead for Clue 1, then Clue 2...
+        // Constraints:
+        // 1. Order must be preserved (v[i].time < v[j].time).
+        // 2. Total duration (v[last].time - v[first].time) <= time_window.
+
+        for (i, version) in versions.iter().enumerate() {
+            if self.matches_clue(version, &mystery.clues[0]) {
+                // Found potential start.
+                let mut current_sequence = vec![version.temporal.valid_time().start()];
+                let start_time = current_sequence[0];
+                let mut current_version_idx = i;
+                let mut matched_so_far = true;
+
+                for next_clue_idx in 1..mystery.clues.len() {
+                    let mut found_next = false;
+                    let prev_event_time = *current_sequence.last().unwrap();
+
+                    // Search forward from the next index (saturating to avoid overflow edge cases).
+                    for (j, candidate) in versions
+                        .iter()
+                        .enumerate()
+                        .skip(current_version_idx.saturating_add(1))
+                    {
+                        let candidate_time = candidate.temporal.valid_time().start();
+
+                        // Enforce strictly increasing time (if required) or just monotonic?
+                        // "Sequence of events" usually implies strict ordering if distinct events.
+                        // But let's assume valid time is monotonic since we sorted.
+                        // We still check strictly greater to avoid matching the same instant if multiple versions exist?
+                        // Or if we want strict temporal progression.
+                        if candidate_time <= prev_event_time {
+                            continue;
+                        }
+
+                        // Check time window constraint relative to START
+                        let elapsed_micros = candidate_time.wallclock() - start_time.wallclock();
+                        if elapsed_micros > mystery.time_window.as_micros() as i64 {
+                            // Exceeded window. Since versions are sorted by valid time,
+                            // all subsequent versions will also exceed the window.
+                            // So we can safely break this inner loop.
+                            break;
+                        }
+
+                        if self.matches_clue(candidate, &mystery.clues[next_clue_idx]) {
+                            current_sequence.push(candidate_time);
+                            current_version_idx = j;
+                            found_next = true;
+                            break; // Move to next clue
+                        }
+                    }
+
+                    if !found_next {
+                        matched_so_far = false;
+                        break;
+                    }
+                }
+
+                if matched_so_far {
+                    deductions.push(Deduction {
+                        node_id,
+                        event_times: current_sequence,
+                    });
+                }
+            }
+        }
+
+        Ok(deductions)
+    }
+
+    // Helper: Does a version match a clue?
+    fn matches_clue(&self, version: &crate::core::history::VersionInfo, clue: &Clue) -> bool {
+        match clue {
+            Clue::PropertyState { key, value } => {
+                if let Some(prop_val) = version.properties.get(key) {
+                    if let Some(target_val) = value {
+                        prop_val == target_val
+                    } else {
+                        true // Key exists, value doesn't matter
+                    }
+                } else {
+                    false // Key missing
+                }
+            }
+        }
+    }
+}
+
+#[cfg(not(feature = "semantic-temporal"))]
+#[allow(deprecated)]
+impl<'a> Sherlock<'a> {
+    /// Create a new Sherlock instance.
+    ///
+    /// # Panics
+    ///
+    /// This method panics if the `nova` feature is not enabled.
+    #[allow(unused_variables)]
+    #[track_caller]
+    pub fn new(db: &'a AletheiaDB) -> Self {
+        panic!(
+            "Sherlock requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
+        );
+    }
+
+    /// Investigate a specific node for the given Mystery.
+    ///
+    /// # Panics
+    ///
+    /// This method panics if the `nova` feature is not enabled.
+    #[allow(unused_variables)]
+    #[track_caller]
+    pub fn investigate(&self, node_id: NodeId, mystery: &Mystery) -> Result<Vec<Deduction>> {
+        panic!(
+            "Sherlock requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
+        );
+    }
+}
+
+#[cfg(all(test, feature = "semantic-temporal"))]
+mod tests {
+    use super::*;
+    use crate::api::transaction::WriteOps;
+    use crate::core::property::PropertyMapBuilder;
+    use crate::core::temporal::time;
+
+    #[test]
+    fn test_sherlock_detects_sequence() {
+        let db = AletheiaDB::new().unwrap();
+        let t0 = time::from_millis(1_000);
+        let t1 = time::from_millis(1_050);
+        let t2 = time::from_millis(1_100);
+
+        // 1. Create Node (Status: Pending)
+        let props = PropertyMapBuilder::new()
+            .insert("status", "Pending")
+            .build();
+        let node_id = db
+            .write(|tx| tx.create_node_with_valid_time("Order", props, Some(t0)))
+            .unwrap();
+
+        // 2. Update to "Shipped" at explicit valid time.
+        db.write(|tx| {
+            let p = PropertyMapBuilder::new()
+                .insert("status", "Shipped")
+                .build();
+            tx.update_node_with_valid_time(node_id, p, Some(t1))
+        })
+        .unwrap();
+
+        // 3. Update to "Delivered" at explicit valid time.
+        db.write(|tx| {
+            let p = PropertyMapBuilder::new()
+                .insert("status", "Delivered")
+                .build();
+            tx.update_node_with_valid_time(node_id, p, Some(t2))
+        })
+        .unwrap();
+
+        let sherlock = Sherlock::new(&db);
+
+        // Mystery: Pending -> Delivered (skipping Shipped is allowed if order preserved? No, we just look for A then B)
+        // Let's look for Pending -> Shipped -> Delivered
+        let mystery = Mystery::new(Duration::from_secs(1))
+            .add_clue(Clue::PropertyState {
+                key: "status".to_string(),
+                value: Some(PropertyValue::from("Pending")),
+            })
+            .add_clue(Clue::PropertyState {
+                key: "status".to_string(),
+                value: Some(PropertyValue::from("Shipped")),
+            })
+            .add_clue(Clue::PropertyState {
+                key: "status".to_string(),
+                value: Some(PropertyValue::from("Delivered")),
+            });
+
+        let results = sherlock.investigate(node_id, &mystery).unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].node_id, node_id);
+        assert_eq!(results[0].event_times, vec![t0, t1, t2]);
+    }
+
+    #[test]
+    fn test_sherlock_time_window_constraint() {
+        let db = AletheiaDB::new().unwrap();
+        let t0 = time::from_millis(10_000);
+        let t1 = time::from_millis(10_100); // 100ms after t0
+
+        // 1. Create Node (State A)
+        let props = PropertyMapBuilder::new().insert("state", "A").build();
+        let node_id = db
+            .write(|tx| tx.create_node_with_valid_time("Machine", props, Some(t0)))
+            .unwrap();
+
+        // 3. Update to State B
+        db.write(|tx| {
+            let p = PropertyMapBuilder::new().insert("state", "B").build();
+            tx.update_node_with_valid_time(node_id, p, Some(t1))
+        })
+        .unwrap();
+
+        let sherlock = Sherlock::new(&db);
+
+        // Mystery: A -> B within 10ms (Should Fail)
+        let impossible_mystery = Mystery::new(Duration::from_millis(10))
+            .add_clue(Clue::PropertyState {
+                key: "state".to_string(),
+                value: Some(PropertyValue::from("A")),
+            })
+            .add_clue(Clue::PropertyState {
+                key: "state".to_string(),
+                value: Some(PropertyValue::from("B")),
+            });
+
+        let results = sherlock.investigate(node_id, &impossible_mystery).unwrap();
+        assert!(
+            results.is_empty(),
+            "Should not match due to time constraint"
+        );
+
+        // Mystery: A -> B within 500ms (Should Pass)
+        let possible_mystery = Mystery::new(Duration::from_millis(500))
+            .add_clue(Clue::PropertyState {
+                key: "state".to_string(),
+                value: Some(PropertyValue::from("A")),
+            })
+            .add_clue(Clue::PropertyState {
+                key: "state".to_string(),
+                value: Some(PropertyValue::from("B")),
+            });
+
+        let results_pass = sherlock.investigate(node_id, &possible_mystery).unwrap();
+        assert_eq!(results_pass.len(), 1, "Should match within 500ms");
+        assert_eq!(results_pass[0].node_id, node_id);
+        assert_eq!(results_pass[0].event_times, vec![t0, t1]);
+    }
+}
+
+#[cfg(all(test, not(feature = "semantic-temporal")))]
+#[allow(deprecated)]
+mod stub_tests {
+    use super::*;
+
+    #[test]
+    #[should_panic(
+        expected = "Sherlock requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
+    )]
+    fn test_stub_panic_on_new() {
+        let db = AletheiaDB::new().unwrap();
+        let _ = Sherlock::new(&db);
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "Mystery requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
+    )]
+    fn test_stub_panic_on_mystery() {
+        let _ = Mystery::new(Duration::from_secs(1));
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "Mystery requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
+    )]
+    fn test_stub_panic_on_add_clue() {
+        let mystery = Mystery {
+            _marker: std::marker::PhantomData,
+        };
+        let clue = Clue::PropertyState {
+            key: "test".to_string(),
+            value: None,
+        };
+        let _ = mystery.add_clue(clue);
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "Sherlock requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
+    )]
+    fn test_stub_panic_on_investigate() {
+        let sherlock = Sherlock {
+            _marker: std::marker::PhantomData,
+        };
+        let mystery = Mystery {
+            _marker: std::marker::PhantomData,
+        };
+        let _ = sherlock.investigate(NodeId::new(0).unwrap(), &mystery);
+    }
+}

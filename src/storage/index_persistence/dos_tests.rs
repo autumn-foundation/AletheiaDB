@@ -58,7 +58,7 @@ fn test_graph_index_delta_size_limit_exceeded() {
     file.set_len(MAX_GRAPH_INDEX_FILE_SIZE + 1).unwrap();
 
     // Attempt to load
-    let result = load_graph_index_with_delta(&base_path, &delta_path);
+    let result = load_graph_index_with_delta(&base_path, &delta_path, None);
 
     assert!(result.is_err());
     match result {
