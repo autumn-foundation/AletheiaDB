@@ -346,3 +346,31 @@
 **Finding:** The `LimitPushdown` tests originally missed several behavioral edge cases and logic checks, particularly regarding the propagation limits in BinaryOp combinations (`||`), updating limit values correctly against child bounds, and setting vector rank limits.
 **Evidence:** `cargo mutants` caught mutants in `LimitPushdown::push_down` specifically targeting the changed boolean condition logic and bounds assignment.
 **Recommendation:** Added `sentry_tests` to `LimitPushdown` that explicitly trigger tests enforcing the boolean change propagation, verifying that updated properties reflect correct nested limits, and vector bounds assignment. Tests now prevent `||` to `&&` mutations and correct top-k modifications.
+
+## [TimeRange Construct and Boundary Testing]
+**Module:** `src/core/temporal.rs`
+**Severity:** 🔴 Critical
+**Finding:** `TimeRange::from` and `TimeRange::at` lack strict tests asserting the specific shape of the created ranges, allowing mutations returning defaults to survive. Similarly, boundary conditions like `MAX_VALID_TIMESTAMP` logic in `from` and `at` have surviving conditional logic mutants.
+**Evidence:** Mutants returning `Default::default()` or changing boundary operators (`>` to `>=`, etc.) survive.
+**Recommendation:** Add exact structural checks to `TimeRange::from` and `TimeRange::at` tests ensuring the correct `start` and `end` bounds are set (e.g. `TIMESTAMP_MAX`). Ensure boundary limit conditionals assert explicitly on exact maximums.
+
+## [TimeRange Semantic Booleans (is_empty, overlaps, contains)]
+**Module:** `src/core/temporal.rs`
+**Severity:** 🟡 Suspect
+**Finding:** Semantic methods returning boolean logic have surviving mutants that alter logic or invert logic operators (`&&` to `||`).
+**Evidence:** `is_empty`, `overlaps`, `contains`, `contains_or_after`, `contains_range` all exhibit multiple surviving logic mutations.
+**Recommendation:** Enforce all boolean path branches via test matrices matching exactly the bounds needed, catching condition operator swaps.
+
+## [BiTemporalInterval Semantic Booleans]
+**Module:** `src/core/temporal.rs`
+**Severity:** 🟡 Suspect
+**Finding:** Similar to `TimeRange`, boolean semantic methods on `BiTemporalInterval` (`is_currently_valid`, `is_currently_recorded`, `is_current`, `is_valid_at`, `is_recorded_at`, `is_visible_at`) lack complete branch coverage, allowing boolean swap mutations and operator replacement to survive.
+**Evidence:** Mutants returning constants `true`/`false` and operator replacements (`&&` to `||`) survive.
+**Recommendation:** Construct instances that strictly fail/pass on exactly the logic tested, asserting explicitly for true and false branches to eliminate constant-return mutants.
+
+## [Time Conversion Math]
+**Module:** `src/core/temporal.rs`
+**Severity:** 🔴 Critical
+**Finding:** The `time::to_iso8601`, `time::to_secs`, and `time::to_millis` functions have surviving math operator mutants (e.g., `/` to `%` or `*` to `/`).
+**Evidence:** The mutant `replace / with % in time::to_secs` and `replace * with + in time::to_iso8601` survive. The `to_secs` test is currently susceptible to the math mutant returning 0 if checked against a small enough value.
+**Recommendation:** Use values in tests that explicitly produce distinct failures across `+`, `-`, `*`, `/`, `%` operations (e.g., using larger primes rather than easily-factorable constants where one mutant result might match the expected result by accident).

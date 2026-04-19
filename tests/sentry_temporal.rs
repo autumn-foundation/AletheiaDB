@@ -1294,3 +1294,151 @@ fn test_bitemporal_deserialize_mutants() {
         "Should succeed on == 48"
     );
 }
+
+#[test]
+fn test_time_math_mutants_strict() {
+    use aletheiadb::core::temporal::time;
+    // Use prime/uneven numbers so that +, -, *, /, % never collide with the expected result.
+    // 5_000_003 is a prime number.
+    let input_us: i64 = 5_000_003;
+    let expected_secs = 5;
+    let ts_secs = time::from_secs(expected_secs);
+
+    assert_eq!(time::to_secs(input_us.into()), 5);
+
+    // Explicitly test mutant: to_secs returning 0, 1, -1
+    let secs = time::to_secs(input_us.into());
+    assert_ne!(secs, 0, "Mutant returned 0");
+    assert_ne!(secs, 1, "Mutant returned 1");
+    assert_ne!(secs, -1, "Mutant returned -1");
+
+    // Test from_secs math mutants
+    // if * becomes /, 5 / 1000000 = 0.
+    assert_eq!(ts_secs.wallclock(), 5_000_000);
+    assert_ne!(ts_secs.wallclock(), 0);
+
+    let expected_millis = 5_000;
+    assert_eq!(time::to_millis(input_us.into()), expected_millis);
+
+    // Explicitly test mutant: to_millis returning 0, 1, -1
+    let millis = time::to_millis(input_us.into());
+    assert_ne!(millis, 0, "Mutant returned 0");
+    assert_ne!(millis, 1, "Mutant returned 1");
+    assert_ne!(millis, -1, "Mutant returned -1");
+
+    let ts_millis = time::from_millis(expected_millis);
+    assert_eq!(ts_millis.wallclock(), 5_000_000);
+    assert_ne!(ts_millis.wallclock(), 0);
+}
+
+#[test]
+fn test_timerange_construct_mutants_strict() {
+    use aletheiadb::core::hlc::HybridTimestamp;
+    use aletheiadb::core::temporal::{MAX_VALID_TIMESTAMP, TIMESTAMP_MAX, TimeRange};
+
+    let start = HybridTimestamp::new(100, 0).unwrap();
+    let range_from = TimeRange::from(start);
+
+    // Mutant: replace TimeRange::from with Default::default()
+    // Default start would be 0, not 100.
+    assert_eq!(range_from.start(), start);
+    // Mutant: replace end with Default
+    assert_eq!(range_from.end(), TIMESTAMP_MAX);
+
+    let range_at = TimeRange::at(start);
+    assert_eq!(range_at.start(), start);
+    assert_eq!(range_at.end(), start);
+
+    // Mutant: replace > with >= in bounds check
+    let exact_max = HybridTimestamp::new(MAX_VALID_TIMESTAMP, 0).unwrap();
+    let _ = TimeRange::from(exact_max); // Should NOT panic
+    let _ = TimeRange::at(exact_max); // Should NOT panic
+}
+
+#[test]
+fn test_timerange_boolean_mutants_strict() {
+    use aletheiadb::core::hlc::HybridTimestamp;
+    use aletheiadb::core::temporal::{TimeRange};
+
+    let start = HybridTimestamp::new(100, 0).unwrap();
+    let end = HybridTimestamp::new(200, 0).unwrap();
+    let closed = TimeRange::new(start, end).unwrap();
+    let current = TimeRange::from(start);
+
+    // Mutant: replace is_current with true/false, replace == with !=
+    assert!(!closed.is_current());
+    assert!(current.is_current());
+
+    // Mutant: replace is_closed with true/false, replace < with ==
+    assert!(closed.is_closed());
+    assert!(!current.is_closed());
+
+    // Mutant: replace is_empty with true/false, replace == with !=
+    let point = TimeRange::at(start);
+    assert!(point.is_empty());
+    assert!(!closed.is_empty());
+}
+
+#[test]
+fn test_timerange_contains_overlaps_mutants_strict() {
+    use aletheiadb::core::temporal::TimeRange;
+
+    let base = TimeRange::new(100.into(), 200.into()).unwrap();
+
+    // contains
+    assert!(base.contains(100.into())); // >= start
+    assert!(base.contains(199.into())); // < end
+    assert!(!base.contains(99.into())); // Mutant: replace >= with <
+    assert!(!base.contains(200.into())); // Mutant: replace < with ==
+
+    // contains_or_after
+    assert!(base.contains_or_after(100.into())); // >= start
+    assert!(base.contains_or_after(200.into()));
+    assert!(!base.contains_or_after(99.into())); // Mutant: replace >= with <
+
+    // overlaps
+    let early = TimeRange::new(50.into(), 100.into()).unwrap();
+    assert!(!base.overlaps(&early)); // other.end (100) not > self.start (100)
+
+    let touching_early = TimeRange::new(50.into(), 101.into()).unwrap();
+    assert!(base.overlaps(&touching_early));
+
+    let touching_late = TimeRange::new(199.into(), 250.into()).unwrap();
+    assert!(base.overlaps(&touching_late));
+
+    let late = TimeRange::new(200.into(), 250.into()).unwrap();
+    assert!(!base.overlaps(&late)); // other.start (200) not < self.end (200)
+}
+
+#[test]
+fn test_bitemporal_boolean_mutants_strict() {
+    use aletheiadb::core::hlc::HybridTimestamp;
+    use aletheiadb::core::temporal::{BiTemporalInterval};
+
+    let start = HybridTimestamp::new(100, 0).unwrap();
+    let current = BiTemporalInterval::current(start);
+
+    assert!(current.is_currently_valid());
+    assert!(current.is_currently_recorded());
+    assert!(current.is_current());
+
+    let closed_valid = current.close_valid_time(200.into()).unwrap();
+    assert!(!closed_valid.is_currently_valid());
+    assert!(closed_valid.is_currently_recorded());
+    assert!(!closed_valid.is_current()); // Mutant: && to ||
+
+    let closed_tx = current.close_transaction_time(200.into()).unwrap();
+    assert!(closed_tx.is_currently_valid());
+    assert!(!closed_tx.is_currently_recorded());
+    assert!(!closed_tx.is_current());
+
+    assert!(current.is_valid_at(150.into()));
+    assert!(!current.is_valid_at(99.into()));
+
+    assert!(current.is_recorded_at(150.into()));
+    assert!(!current.is_recorded_at(99.into()));
+
+    assert!(current.is_visible_at(150.into(), 150.into()));
+    assert!(!current.is_visible_at(99.into(), 150.into())); // Mutant: && to ||
+    assert!(!current.is_visible_at(150.into(), 99.into())); // Mutant: && to ||
+}
