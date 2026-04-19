@@ -168,11 +168,11 @@ config-toml = ["dep:serde", "dep:toml"]
 embeddings = ["dep:tokio", "dep:async-trait"]
 
 # Individual provider features (each implies 'embeddings')
-embedding-openai = ["embeddings", "dep:reqwest"]
-embedding-huggingface = ["embeddings", "dep:reqwest"]
+embedding-openai = ["embeddings", "dep:reqwest", "dep:serde"]
+embedding-huggingface = ["embeddings", "dep:reqwest", "dep:serde"]
 # IMPORTANT: ONNX provider is currently a PLACEHOLDER - returns errors, not functional
 embedding-onnx = ["embeddings", "dep:ort", "dep:tokenizers", "dep:num_cpus"]
-embedding-ollama = ["embeddings", "dep:reqwest"]
+embedding-ollama = ["embeddings", "dep:reqwest", "dep:serde"]
 
 # Enable all embedding providers
 embedding-all = [
