@@ -82,7 +82,8 @@ impl Default for ExecutionConfig {
 /// # fn run() -> Result<(), Box<dyn std::error::Error>> {
 /// // 1. Setup storage
 /// let current = Arc::new(CurrentStorage::new());
-/// let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
+/// use aletheiadb::core::version::AnchorConfig;
+/// let historical = Arc::new(RwLock::new(HistoricalStorage::with_config(AnchorConfig::default())));
 ///
 /// // 2. Create executor
 /// let executor = QueryExecutor::new(current, historical);
@@ -168,7 +169,8 @@ impl QueryExecutor {
     ///
     /// // 1. Setup storage and executor
     /// let current = Arc::new(CurrentStorage::new());
-    /// let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
+    /// use aletheiadb::core::version::AnchorConfig;
+    /// let historical = Arc::new(RwLock::new(HistoricalStorage::with_config(AnchorConfig::default())));
     /// let executor = QueryExecutor::new(current, historical);
     ///
     /// // 2. Create a physical plan (usually done by planner)

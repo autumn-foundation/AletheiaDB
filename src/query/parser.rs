@@ -81,6 +81,19 @@ const UNBOUNDED_MAX_DEPTH: usize = usize::MAX / 2;
 /// assert!(error.message.contains("Expected ("));
 /// ```
 #[derive(Debug, Clone, PartialEq)]
+///
+/// ## Examples
+///
+/// ```rust
+/// # use aletheiadb::query::parser::ParseError;
+/// let error = ParseError {
+///     message: "Unexpected token".to_string(),
+///     position: 5,
+///     expected: None,
+///     found: None,
+/// };
+/// assert_eq!(error.position, 5);
+/// ```
 pub struct ParseError {
     /// A descriptive error message explaining the failure.
     pub message: String,
@@ -126,6 +139,15 @@ impl From<LexerError> for ParseError {
 ///
 /// The `Parser` maintains state (tokens and current position) as it walks through
 /// the input stream. It is designed to be used via the static [`Parser::parse`] method.
+///
+/// Use `Parser::parse` to parse a query string.
+///
+/// ## Examples
+///
+/// ```rust
+/// # use aletheiadb::query::parser::Parser;
+/// let ast = Parser::parse("MATCH (n)").unwrap();
+/// ```
 pub struct Parser {
     tokens: Vec<Token>,
     position: usize,
@@ -156,6 +178,13 @@ impl Parser {
     ///     Ok(ast) => println!("Successfully parsed query: {:?}", ast),
     ///     Err(e) => eprintln!("Parse error: {}", e),
     /// }
+    /// ```
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// # use aletheiadb::query::parser::Parser;
+    /// let ast = Parser::parse("MATCH (n)").unwrap();
     /// ```
     pub fn parse(input: &str) -> Result<QueryAst, ParseError> {
         let tokens = Lexer::tokenize(input)?;

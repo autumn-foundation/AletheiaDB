@@ -20,9 +20,25 @@
 //!
 //! To see how physical plans are structured, you can call `.explain()` on a plan:
 //!
-//! ```rust,ignore
-//! let plan = planner.plan(&db, query)?;
+//! ```rust
+//! # use std::sync::Arc;
+//! # use aletheiadb::query::planner::{QueryPlanner, Statistics};
+//! # use aletheiadb::storage::CurrentStorage;
+//! # use aletheiadb::query::builder::QueryBuilder;
+//! # use aletheiadb::core::NodeId;
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let storage = Arc::new(CurrentStorage::new());
+//! let stats = Arc::new(Statistics::default());
+//! let planner = QueryPlanner::new(stats, storage);
+//!
+//! let query = QueryBuilder::new()
+//!     .start(NodeId::new(1)?)
+//!     .build();
+//!
+//! let plan = planner.plan(query)?;
 //! println!("{}", plan.explain());
+//! # Ok(())
+//! # }
 //! ```
 
 use std::sync::Arc;
