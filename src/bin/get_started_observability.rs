@@ -9,7 +9,7 @@ fn main() {
     let config = observability::Config::from_env();
     observability::init(config);
 
-    let db = aletheiadb::AletheiaDB::new().unwrap();
+    let _db = aletheiadb::AletheiaDB::new().unwrap();
 
     // Metrics automatically collected
     // Check for critical errors
