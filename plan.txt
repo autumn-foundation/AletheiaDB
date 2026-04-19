@@ -1,0 +1,5 @@
+Let's see if we can do coverage for `CypherError` to `Error` which also has match arms.
+Wait, `CypherError` is in `cypher/error.rs`.
+
+Let's do coverage for `sql::SqlError` to `Error` and `cypher::CypherError` to `Error`.
+These both use large `match` arms on the respective enums!
