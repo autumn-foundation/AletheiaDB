@@ -1277,7 +1277,8 @@ impl MigrationService {
     ) -> Vec<MigrationCandidate> {
         // Track how many candidates we've selected per node
         let mut candidates_per_node: FastHashMap<NodeId, usize> = FastHashMap::default();
-        let mut all_candidates = Vec::new();
+        // ⚡ Bolt Optimization: Pre-allocate vectors using known capacity to avoid intermediate heap reallocations during migration.
+        let mut all_candidates = Vec::with_capacity(versions.len());
 
         // Get current wallclock time in milliseconds since UNIX epoch
         let current_wallclock_ms = SystemTime::now()
@@ -1314,7 +1315,8 @@ impl MigrationService {
         self.sort_candidates_by_policy(&mut all_candidates);
 
         // Filter candidates to ensure min_hot_versions remain
-        let mut final_candidates = Vec::new();
+        // ⚡ Bolt Optimization: Pre-allocate vectors using known capacity to avoid intermediate heap reallocations during migration.
+        let mut final_candidates = Vec::with_capacity(all_candidates.len());
         for candidate in all_candidates {
             // Get node_id from the original version
             let node_id = versions.get(&candidate.version_id).map(|v| v.node_id);
@@ -1359,7 +1361,8 @@ impl MigrationService {
     ) -> Vec<MigrationCandidate> {
         // Track how many candidates we've selected per edge
         let mut candidates_per_edge: FastHashMap<EdgeId, usize> = FastHashMap::default();
-        let mut all_candidates = Vec::new();
+        // ⚡ Bolt Optimization: Pre-allocate vectors using known capacity to avoid intermediate heap reallocations during migration.
+        let mut all_candidates = Vec::with_capacity(versions.len());
 
         // Get current wallclock time in milliseconds since UNIX epoch
         let current_wallclock_ms = SystemTime::now()
@@ -1395,7 +1398,8 @@ impl MigrationService {
         self.sort_candidates_by_policy(&mut all_candidates);
 
         // Filter candidates to ensure min_hot_versions remain
-        let mut final_candidates = Vec::new();
+        // ⚡ Bolt Optimization: Pre-allocate vectors using known capacity to avoid intermediate heap reallocations during migration.
+        let mut final_candidates = Vec::with_capacity(all_candidates.len());
         for candidate in all_candidates {
             let edge_id = versions.get(&candidate.version_id).map(|v| v.edge_id);
             if let Some(edge_id) = edge_id {
