@@ -1358,7 +1358,7 @@ fn test_timerange_construct_mutants_strict() {
 #[test]
 fn test_timerange_boolean_mutants_strict() {
     use aletheiadb::core::hlc::HybridTimestamp;
-    use aletheiadb::core::temporal::{TimeRange};
+    use aletheiadb::core::temporal::TimeRange;
 
     let start = HybridTimestamp::new(100, 0).unwrap();
     let end = HybridTimestamp::new(200, 0).unwrap();
@@ -1413,7 +1413,7 @@ fn test_timerange_contains_overlaps_mutants_strict() {
 #[test]
 fn test_bitemporal_boolean_mutants_strict() {
     use aletheiadb::core::hlc::HybridTimestamp;
-    use aletheiadb::core::temporal::{BiTemporalInterval};
+    use aletheiadb::core::temporal::BiTemporalInterval;
 
     let start = HybridTimestamp::new(100, 0).unwrap();
     let current = BiTemporalInterval::current(start);
