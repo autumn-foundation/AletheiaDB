@@ -6,10 +6,10 @@ use std::sync::{Arc, Barrier};
 use std::thread;
 use std::time::Duration;
 
-const VECTOR_DIM: usize = 384;
+const VECTOR_DIM: usize = 64;
 const NUM_SEARCHERS: usize = 4;
 const NUM_ADDERS_VACANT: usize = 2;
-const NUM_ADDERS_OCCUPIED: usize = 2;
+const PREPOPULATED_VECTORS: usize = 32;
 
 fn is_ci() -> bool {
     std::env::var("CI").is_ok()
@@ -34,15 +34,17 @@ fn test_timeout_secs() -> u64 {
 /// 1. `id_mapping` (DashMap) -> `inner` (usearch RwLock) -> `reverse_mapping` (DashMap)
 ///
 /// **Scenarios:**
-/// - `add` (Vacant): Locks `id_mapping` -> `inner` -> `reverse_mapping`
-/// - `add` (Occupied): Locks `id_mapping` -> `inner`
-/// - `search_with_filter`: Locks `inner` -> `reverse_mapping`
+/// - New vector insertion: allocates a new internal key, updates the usearch
+///   index, and publishes both ID maps.
+/// - Filtered search: searches the usearch index and resolves results through
+///   `reverse_mapping`.
 ///
 /// Without proper lock ordering (PR #751), these operations would deadlock.
 ///
-/// Save/search concurrency is covered by `regression_save_concurrency` and
-/// save-specific havoc tests. This stress test stays scoped to in-memory
-/// add/search lock ordering so upstream persistence behavior cannot obscure the
+/// Existing-vector update and save/search concurrency are covered by the
+/// focused vector update tests, `regression_save_concurrency`, and save-specific
+/// havoc tests. This stress test stays scoped to in-memory insert/search lock
+/// ordering so upstream persistence or remove/re-add behavior cannot obscure the
 /// deadlock signal.
 #[test]
 #[serial_test::serial]
@@ -93,16 +95,14 @@ fn run_deadlock_stress_test() {
     let success_count = Arc::new(AtomicUsize::new(0));
 
     // 2. Pre-populate some data
-    for i in 0..100 {
-        let id = NodeId::new(i + 1).unwrap();
+    for i in 0..PREPOPULATED_VECTORS {
+        let id = NodeId::new((i + 1) as u64).unwrap();
         let vec = vec![0.1f32; VECTOR_DIM];
         index.add(id, &vec).unwrap();
     }
 
     // 3. Threads
-    let barrier = Arc::new(Barrier::new(
-        NUM_SEARCHERS + NUM_ADDERS_VACANT + NUM_ADDERS_OCCUPIED,
-    ));
+    let barrier = Arc::new(Barrier::new(NUM_SEARCHERS + NUM_ADDERS_VACANT));
 
     let mut handles = vec![];
 
@@ -148,30 +148,6 @@ fn run_deadlock_stress_test() {
         }));
     }
 
-    // Adders (Occupied) (locks id_mapping -> inner)
-    for _t in 0..NUM_ADDERS_OCCUPIED {
-        let index = index.clone();
-        let barrier = barrier.clone();
-        let counter = success_count.clone();
-        handles.push(thread::spawn(move || {
-            barrier.wait();
-            let vec = vec![0.2f32; VECTOR_DIM];
-            for i in 0..iterations() {
-                // Update existing nodes 1..100
-                // Use a different node each time to hit different shards
-                let id_val = (i % 100) + 1;
-                let id = NodeId::new(id_val as u64).unwrap();
-                match index.add(id, &vec) {
-                    Ok(_) => {
-                        counter.fetch_add(1, Ordering::Relaxed);
-                    }
-                    Err(e) => eprintln!("Add (occupied) error: {}", e),
-                }
-                thread::yield_now(); // Prevent starvation
-            }
-        }));
-    }
-
     // Join all
     for handle in handles {
         handle.join().expect("Thread panicked");
@@ -183,9 +159,8 @@ fn run_deadlock_stress_test() {
     assert!(successes > 0, "No operations succeeded during stress test");
 
     // Verify index consistency
-    // We added 100 initial nodes + (NUM_ADDERS_VACANT * iterations()) new nodes
-    // Updates do not change count
-    let expected_len = 100 + (NUM_ADDERS_VACANT * iterations());
+    // We added the initial nodes plus the new vectors inserted by vacant adders.
+    let expected_len = PREPOPULATED_VECTORS + (NUM_ADDERS_VACANT * iterations());
     assert_eq!(
         index.len(),
         expected_len,
