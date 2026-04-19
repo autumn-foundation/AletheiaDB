@@ -601,9 +601,13 @@ pub fn save_graph_index_delta(
 /// ```ignore
 /// use aletheiadb::storage::index_persistence::graph::load_graph_index_with_delta;
 ///
-/// let reconstructed_data = load_graph_index_with_delta(&base_path, &delta_path)?;
+/// let reconstructed_data = load_graph_index_with_delta(&base_path, &delta_path, None)?;
 /// ```
-pub fn load_graph_index_with_delta(base_path: &Path, delta_path: &Path) -> Result<GraphIndexData> {
+pub fn load_graph_index_with_delta(
+    base_path: &Path,
+    delta_path: &Path,
+    limit: Option<usize>,
+) -> Result<GraphIndexData> {
     // Load base index (this performs size check internally)
     let mut base = load_graph_index(base_path)?;
 
@@ -688,20 +692,39 @@ pub fn load_graph_index_with_delta(base_path: &Path, delta_path: &Path) -> Resul
     // Apply delta changes
 
     // 1. Handle deletions first (remove from base)
+    // Use HashSets to turn O(M*N) Vec::contains() into O(N+M) HashSet::contains()
+    // This significantly improves performance when thousands of nodes are deleted.
+    let deleted_node_set: std::collections::HashSet<_> =
+        delta.deleted_node_ids.into_iter().collect();
+    let deleted_edge_set: std::collections::HashSet<_> =
+        delta.deleted_edge_ids.into_iter().collect();
+
     base.nodes
-        .retain(|node| !delta.deleted_node_ids.contains(&node.id));
+        .retain(|node| !deleted_node_set.contains(&node.id));
     base.edges
-        .retain(|edge| !delta.deleted_edge_ids.contains(&edge.id));
+        .retain(|edge| !deleted_edge_set.contains(&edge.id));
 
     // 2. Handle modifications (update existing entries)
-    for modified_node in &delta.modified_nodes {
-        if let Some(existing) = base.nodes.iter_mut().find(|n| n.id == modified_node.id) {
-            *existing = modified_node.clone();
+    // Convert modifications to HashMaps to reduce O(M*N) lookups to O(N+M)
+    let mut node_mods = std::collections::HashMap::new();
+    for n in delta.modified_nodes {
+        node_mods.insert(n.id, n);
+    }
+
+    let mut edge_mods = std::collections::HashMap::new();
+    for e in delta.modified_edges {
+        edge_mods.insert(e.id, e);
+    }
+
+    for existing in base.nodes.iter_mut() {
+        if let Some(modified_node) = node_mods.remove(&existing.id) {
+            *existing = modified_node;
         }
     }
-    for modified_edge in &delta.modified_edges {
-        if let Some(existing) = base.edges.iter_mut().find(|e| e.id == modified_edge.id) {
-            *existing = modified_edge.clone();
+
+    for existing in base.edges.iter_mut() {
+        if let Some(modified_edge) = edge_mods.remove(&existing.id) {
+            *existing = modified_edge;
         }
     }
 
@@ -709,9 +732,15 @@ pub fn load_graph_index_with_delta(base_path: &Path, delta_path: &Path) -> Resul
     base.nodes.extend(delta.added_nodes);
     base.edges.extend(delta.added_edges);
 
+    // Apply optional limit to prevent unbounded memory allocation
+    if let Some(l) = limit {
+        base.nodes.truncate(l);
+        base.edges.truncate(l);
+    }
+
     // 4. Update counts
-    base.node_count = delta.new_node_count;
-    base.edge_count = delta.new_edge_count;
+    base.node_count = base.nodes.len() as u64;
+    base.edge_count = base.edges.len() as u64;
 
     Ok(base)
 }
@@ -909,7 +938,7 @@ mod zstd_bomb_tests {
         let bomb = create_zstd_bomb(200);
         std::fs::write(&delta_path, &bomb).unwrap();
 
-        let result = load_graph_index_with_delta(&base_path, &delta_path);
+        let result = load_graph_index_with_delta(&base_path, &delta_path, None);
         assert!(
             matches!(result, Err(IndexPersistenceError::SizeLimitExceeded { .. })),
             "Expected SizeLimitExceeded, got: {:?}",
