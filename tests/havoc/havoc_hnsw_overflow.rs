@@ -5,6 +5,7 @@ use aletheiadb::index::vector::{
 use tempfile::tempdir;
 
 #[test]
+#[serial_test::serial]
 fn test_hnsw_custom_metric_persistence() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("custom_metric.index");
@@ -69,6 +70,7 @@ fn test_hnsw_custom_metric_persistence() {
 }
 
 #[test]
+#[serial_test::serial]
 fn test_hnsw_dimension_mismatch_rejected() {
     // Test that loading an index with mismatched dimensions is properly rejected
 

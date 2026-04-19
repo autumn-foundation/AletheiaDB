@@ -8,6 +8,7 @@ use std::time::Duration;
 const VECTOR_DIM: usize = 4;
 
 #[test]
+#[serial_test::serial]
 fn havoc_callback_deadlock_repro() {
     let (tx, rx) = std::sync::mpsc::channel();
 

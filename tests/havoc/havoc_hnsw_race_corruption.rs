@@ -17,6 +17,7 @@ use std::thread;
 /// This test reproduces the race by spawning two threads that attempt to add the
 /// same NodeId simultaneously.
 #[test]
+#[serial_test::serial]
 fn test_hnsw_race_corruption() {
     let index = Arc::new(
         HnswIndexBuilder::new(4, DistanceMetric::Cosine)
