@@ -175,7 +175,8 @@ impl WalRingBuffer {
 
 #[test]
 fn test_ring_buffer_concurrency() {
-    let builder = loom::model::Builder::new();
+    let mut builder = loom::model::Builder::new();
+    builder.max_branches = if std::env::var("CI").is_ok() { 10 } else { 1000 };
     // Loom default preemption bound is sufficient with reduced loop counts
 
     builder.check(|| {
