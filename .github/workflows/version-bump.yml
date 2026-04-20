@@ -31,7 +31,9 @@ jobs:
           fetch-depth: 0  # Need full history for auto detection
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
 
       - name: Install cargo-edit
         run: cargo install cargo-edit
@@ -134,7 +136,7 @@ jobs:
           reviewers: ${{ github.actor }}
 
       - name: Comment with instructions
-        uses: actions/github-script@v7
+        uses: actions/github-script@v6
         with:
           script: |
             const newVersion = '${{ steps.bump.outputs.new_version }}';
