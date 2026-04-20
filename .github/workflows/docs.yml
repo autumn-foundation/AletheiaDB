@@ -51,7 +51,7 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/trunk'
     steps:
       - name: Download documentation artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: documentation
           path: ./docs
