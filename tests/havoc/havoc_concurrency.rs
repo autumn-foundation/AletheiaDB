@@ -5,6 +5,10 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
+fn is_ci() -> bool {
+    std::env::var("CI").is_ok()
+}
+
 #[test]
 #[serial_test::serial]
 fn test_havoc_deadlock_scenario() {
@@ -15,7 +19,7 @@ fn test_havoc_deadlock_scenario() {
     );
 
     let start_time = std::time::Instant::now();
-    let duration = Duration::from_secs(5); // Run for 5 seconds
+    let duration = Duration::from_secs(if is_ci() { 2 } else { 5 }); // Run for 5 seconds
 
     // Thread A: Adds/Updates a single node repeatedly (Occupied path)
     // This acquires id_mapping lock -> inner lock

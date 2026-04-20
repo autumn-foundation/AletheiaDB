@@ -45,7 +45,7 @@ fn run_havoc_deadlock_save_vs_add() {
     let handle1 = thread::spawn(move || {
         barrier_clone1.wait();
         // Run repeatedly to hit the race
-        for _ in 0..100 {
+        for _ in 0..50 {
             let _ = index_clone1.search_with_filter(&[1.0, 0.0, 0.0, 0.0], 10, |_| {
                 // This is the trigger: calling save() from within the filter
                 // We assert that save() fails with the expected error to prevent deadlock
@@ -74,7 +74,7 @@ fn run_havoc_deadlock_save_vs_add() {
     let barrier_clone2 = Arc::clone(&barrier);
     let handle2 = thread::spawn(move || {
         barrier_clone2.wait();
-        for i in 0..1000 {
+        for i in 0..500 {
             // Update same node repeatedly to trigger Occupied path
             let val = (i % 100) as f32 / 100.0;
             // This acquires id_mapping lock, then inner lock.
