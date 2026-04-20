@@ -601,6 +601,12 @@ impl<'a> CypherLexer<'a> {
             .unwrap_or(self.input.len());
         let text = &self.input[start..end];
 
+        // Ensure that a number doesn't immediately flow into an alphabetic
+        // character unless it's a known suffix (which Cypher doesn't currently use)
+        if let Some(&(_, ch)) = self.chars.peek().filter(|&&(_, ch)| ch.is_alphabetic()) {
+            return Err(self.lex_error(end, format!("Unexpected character: '{}'", ch)));
+        }
+
         let kind = if is_float {
             TokenKind::FloatLiteral
         } else {
@@ -745,5 +751,58 @@ mod unit_tests {
                 "{kw} should be a keyword, not an identifier"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests_sentry {
+    use super::*;
+
+    #[test]
+    fn test_lexer_unterminated_string() {
+        let err = CypherLexer::tokenize("\"unterminated").unwrap_err();
+        assert!(err.to_string().contains("Unterminated string literal"));
+        let err = CypherLexer::tokenize("'unterminated").unwrap_err();
+        assert!(err.to_string().contains("Unterminated string literal"));
+    }
+
+    #[test]
+    fn test_lexer_bang_without_equals() {
+        let err = CypherLexer::tokenize("!").unwrap_err();
+        assert!(err.to_string().contains("Expected '=' after '!'"));
+        let err = CypherLexer::tokenize("! ").unwrap_err();
+        assert!(err.to_string().contains("Expected '=' after '!'"));
+    }
+
+    #[test]
+    fn test_lexer_empty_parameter() {
+        let err = CypherLexer::tokenize("$").unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Expected parameter name after '$'")
+        );
+        let err = CypherLexer::tokenize("$ ").unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Expected parameter name after '$'")
+        );
+    }
+
+    #[test]
+    fn test_lexer_escape_sequence_unterminated() {
+        let err = CypherLexer::tokenize("\"test\\").unwrap_err();
+        assert!(err.to_string().contains("Unterminated string literal"));
+    }
+
+    #[test]
+    fn test_lexer_invalid_character() {
+        let err = CypherLexer::tokenize("~").unwrap_err();
+        assert!(err.to_string().contains("Unexpected character: '~'"));
+    }
+
+    #[test]
+    fn test_lexer_number_invalid() {
+        let err = CypherLexer::tokenize("1a").unwrap_err();
+        assert!(err.to_string().contains("Unexpected character: 'a'"));
     }
 }

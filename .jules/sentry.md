@@ -34,3 +34,6 @@
 ## ProjectIterator try_insert unwrapping
 **Learning:** `unwrap()` inside iterator implementations (like `ProjectIterator::next`) poses a significant panic risk when handling properties, especially dynamically sized ones where recursion depth limits can be exceeded or insertion errors can occur. In a database context, panics inside iterators will crash the entire query process rather than just returning an error to the client.
 **Action:** Always gracefully handle property insertion errors using `match` or `?` and propagate them down the iterator pipeline instead of unwrapping, allowing the query to fail safely. Added tests mocking a `try_insert` failure by using an invalid property state.
+**[Lexer Safety and Edge Cases]**
+**Learning:** Found multiple unteminated or invalid token edge cases in `cypher/lexer.rs` that were missing tests (e.g. `! ` instead of `!=`, unterminated strings, invalid numerical characters like `1a`). Also noted that numbers parsed as floats immediately followed by letters without space could panic further down. Added checks `filter(|&&(_, ch)| ch.is_alphabetic())` directly within the numbers match block to fix.
+**Action:** Always write failure cases for parsers and lexers to ensure `unwrap_err` states match expected errors without panics or OOB string slices.
