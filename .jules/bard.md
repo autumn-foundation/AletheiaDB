@@ -103,3 +103,7 @@
 ## 2025-03-05 - The Danger of Tautological Documentation
 **Confusion:** The instruction to explain *what* and *why* for public functions was misinterpreted as "add a comment to everything", resulting in tautological noise (e.g., `/// Creates a new TraversalIterator.` for `TraversalIterator::new()`).
 **Clarification:** Strict adherence to the `🚫 Never do: Write comments that simply repeat the function name` rule is required. When documenting basic constructor methods, instead of writing "Creates X", always include a `# Why?` section explaining the architectural context (e.g., "Why? This is used for `NodeLookup` physical operations where the query planner has already resolved exact node IDs").
+
+## 2025-03-08 - Fixing Intra-doc links to non-existent features
+**Confusion:** There were `rustdoc::broken_intra_doc_links` warnings in `src/experimental/mod.rs` because of `[`crate::semantic_search`]` and `[`reasoning`]`, etc.
+**Clarification:** You should use backticks (`` `crate::semantic_search` ``) when the item does not exist in the path due to feature flags or graduation, to prevent rustdoc from trying to resolve the link and failing.
