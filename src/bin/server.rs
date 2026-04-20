@@ -94,8 +94,8 @@ fn parse_cors_config() -> CorsConfig {
     }
 }
 
-#[actix_web::main]
-async fn main() -> std::io::Result<()> {
+#[autumn_web::main]
+async fn main() {
     let port = parse_port();
     let host = parse_host();
     let cors = parse_cors_config();
@@ -106,5 +106,8 @@ async fn main() -> std::io::Result<()> {
         .cors(cors)
         .build();
 
-    run_server(config).await
+    if let Err(e) = run_server(config).await {
+        eprintln!("aletheia-server failed: {e}");
+        std::process::exit(1);
+    }
 }

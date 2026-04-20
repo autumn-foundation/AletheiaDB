@@ -69,7 +69,7 @@ AletheiaDB is currently a "Library Database" (embedded). This is great for perfo
 
 ### Non-Functional Requirements
 -   **Performance**: Overhead of HTTP/JSON serialization should be < 5ms per request for small payloads.
--   **Concurrency**: Must handle concurrent requests using the underlying `actix-web` async runtime.
+-   **Concurrency**: Must handle concurrent requests on the underlying Tokio async runtime. Blocking database operations are offloaded to `tokio::task::spawn_blocking` so heavy scans cannot starve the HTTP event loop.
 
 ## 4. 🚫 Out of Scope (Phase 1)
 
