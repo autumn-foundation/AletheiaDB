@@ -605,10 +605,24 @@ mod tests {
         });
 
         // Error for epoch 5
-        coord.finish_flush(5, Err(Error::Storage(StorageError::WalError { reason: "err5".to_string() }))).unwrap();
+        coord
+            .finish_flush(
+                5,
+                Err(Error::Storage(StorageError::WalError {
+                    reason: "err5".to_string(),
+                })),
+            )
+            .unwrap();
 
         // Error for epoch 10
-        coord.finish_flush(10, Err(Error::Storage(StorageError::WalError { reason: "err10".to_string() }))).unwrap();
+        coord
+            .finish_flush(
+                10,
+                Err(Error::Storage(StorageError::WalError {
+                    reason: "err10".to_string(),
+                })),
+            )
+            .unwrap();
 
         // Now recent_errors has ONLY epoch 10.
         // oldest_error_epoch is 5 + 1 = 6.
@@ -619,7 +633,11 @@ mod tests {
         let result = coord.wait_for_flush(6);
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(err.to_string().contains("timeout") || err.to_string().contains("Timeout") || err.to_string().contains("Group commit timeout"));
+        assert!(
+            err.to_string().contains("timeout")
+                || err.to_string().contains("Timeout")
+                || err.to_string().contains("Group commit timeout")
+        );
     }
 
     #[test]
