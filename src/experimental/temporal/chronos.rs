@@ -88,6 +88,12 @@ use std::collections::{HashSet, VecDeque};
 
 #[cfg(feature = "semantic-temporal")]
 /// The Time Lord of the Graph.
+/// An experimental engine for advanced temporal analytics.
+///
+/// # The Spark
+/// While AletheiaDB provides basic `valid_time` filtering, the `Chronos` module
+/// explores complex temporal patterns, such as finding nodes that were connected
+/// *only* during specific overlapping windows.
 pub struct Chronos<'a> {
     db: &'a AletheiaDB,
 }
@@ -97,6 +103,12 @@ pub struct Chronos<'a> {
 #[deprecated(
     note = "Chronos requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
 )]
+/// An experimental engine for advanced temporal analytics.
+///
+/// # The Spark
+/// While AletheiaDB provides basic `valid_time` filtering, the `Chronos` module
+/// explores complex temporal patterns, such as finding nodes that were connected
+/// *only* during specific overlapping windows.
 pub struct Chronos<'a> {
     _marker: std::marker::PhantomData<&'a AletheiaDB>,
 }

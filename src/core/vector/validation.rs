@@ -1,3 +1,5 @@
+//! Utility functions for validating vector dimensionality and normalization.
+
 use crate::core::error::{Error, Result, VectorError};
 
 // ============================================================================

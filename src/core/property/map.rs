@@ -1,3 +1,5 @@
+//! Defines the `PropertyMap` collection used to associate keys with `PropertyValue`s.
+
 use super::*;
 use crate::core::error::{Result, StorageError};
 use crate::core::hasher::IdentityHasher;

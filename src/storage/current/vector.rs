@@ -1,3 +1,5 @@
+//! Manages in-memory vector embeddings for the current state.
+
 use crate::index::vector::DistanceMetric;
 use crate::index::vector::hnsw::{HnswConfig, HnswIndex};
 use crate::index::vector::temporal::{TemporalVectorConfig, TemporalVectorIndex};

@@ -1,3 +1,5 @@
+//! Provides statistics and metrics for the current (hot) storage engine.
+
 /// Statistics about current storage
 #[derive(Debug, Clone)]
 pub struct CurrentStats {

@@ -1,3 +1,5 @@
+//! Defines core traits used throughout the query execution engine.
+
 use crate::core::error::Result;
 use crate::core::graph::{Edge, Node};
 use crate::core::id::{EdgeId, NodeId};

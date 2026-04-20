@@ -226,6 +226,11 @@ impl StringInterner {
     /// - **When an owned Arc is needed**: Use this method (`resolve`).
     ///
     /// Resolves an interned string to an owned `Arc<str>`.
+    ///
+    /// # Why?
+    /// If you absolutely need an owned copy of the string (e.g., to send across threads),
+    /// this function will retrieve it. However, prefer `resolve_with` to avoid cloning
+    /// the Arc if you only need temporary read access.
     #[deprecated(
         since = "0.1.0",
         note = "Use resolve_with() for read-only access; use resolve() only when an owned Arc<str> is strictly required"

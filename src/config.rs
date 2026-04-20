@@ -50,6 +50,12 @@ use crate::storage::version::AnchorConfig;
 ///
 /// Controls buffer sizes, stripe configuration, flush behavior, and durability settings.
 /// This consolidates all WAL-related configuration in one place.
+/// Configuration options for the Write-Ahead Log (WAL).
+///
+/// # The Spark
+/// The WAL is the backbone of durability in AletheiaDB. This struct allows you to tune
+/// its behavior, such as concurrency (stripes), sync intervals, and directory paths,
+/// to balance between latency and throughput.
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "config-toml", derive(Serialize, Deserialize))]
 #[cfg_attr(feature = "config-toml", serde(default))]
@@ -314,6 +320,12 @@ impl Default for WalConfigBuilder {
 /// Configuration for historical storage.
 ///
 /// Controls versioning, reconstruction limits, and caching behavior.
+/// Configuration options for Historical Storage.
+///
+/// # The Spark
+/// To support time-travel queries, AletheiaDB keeps past versions of nodes and edges.
+/// This configuration dictates how those versions are managed, including pruning
+/// thresholds and the directory where historical data is stored on disk.
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "config-toml", derive(Serialize, Deserialize))]
 #[cfg_attr(feature = "config-toml", serde(default))]
@@ -608,6 +620,12 @@ impl Default for HistoricalConfigBuilder {
 /// Configuration for vector index system.
 ///
 /// Controls limits for k-NN queries and HNSW index structure.
+/// Configuration options for Vector Indexing (HNSW).
+///
+/// # The Spark
+/// Vector search requires careful tuning of the HNSW algorithm. This struct lets you
+/// configure parameters like the number of layers, connections per node, and memory
+/// limits to optimize the recall-vs-latency tradeoff.
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "config-toml", derive(Serialize, Deserialize))]
 #[cfg_attr(feature = "config-toml", serde(default))]
@@ -706,6 +724,12 @@ impl Default for VectorIndexConfigBuilder {
 ///
 /// This consolidates all configuration settings for the database,
 /// making it easy to tune for different deployment scenarios.
+/// The root configuration structure for AletheiaDB.
+///
+/// # The Spark
+/// This is the master configuration object that aggregates all subsystem configs
+/// (WAL, Historical, Vector, Persistence). It acts as the single source of truth
+/// when bootstrapping a new database instance.
 #[derive(Debug, Clone, PartialEq, Default)]
 #[cfg_attr(feature = "config-toml", derive(Serialize, Deserialize))]
 #[cfg_attr(feature = "config-toml", serde(default))]

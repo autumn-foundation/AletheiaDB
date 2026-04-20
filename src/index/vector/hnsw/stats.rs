@@ -1,3 +1,5 @@
+//! Statistics and metrics tracking for the HNSW vector index.
+
 use std::sync::atomic::AtomicU64;
 
 /// Statistics for index operations.

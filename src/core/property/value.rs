@@ -1,3 +1,5 @@
+//! Defines the strongly-typed `PropertyValue` enum used to store dynamic properties.
+
 use super::*;
 use crate::core::error::{Result, StorageError};
 use crate::core::vector::SparseVec;

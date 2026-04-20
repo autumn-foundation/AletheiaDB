@@ -1,3 +1,5 @@
+//! Configuration options for tuning HNSW index performance and memory usage.
+
 use crate::core::error::{Error, Result, VectorError};
 use crate::core::property::MAX_VECTOR_DIMENSIONS;
 use crate::index::vector::{CustomMetric, DistanceMetric, Quantization, StorageMode};

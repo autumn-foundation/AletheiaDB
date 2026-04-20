@@ -21,6 +21,19 @@ use std::sync::atomic::{AtomicU64, Ordering};
 pub const MAX_VALID_ID: u64 = u64::MAX - 1000;
 
 /// Unique identifier for a node in the graph.
+///
+/// # The Spark
+/// Graph databases run on connections, and every connection needs an anchor.
+/// `NodeId` acts as this unique anchor. We strongly type this instead of using a
+/// raw `u64` so that you cannot accidentally pass an edge ID to a function
+/// expecting a node ID.
+///
+/// # Examples
+/// ```
+/// use aletheiadb::core::NodeId;
+/// let node_id = NodeId::new(42).unwrap();
+/// assert_eq!(node_id.as_u64(), 42);
+/// ```
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, bytemuck::Pod, bytemuck::Zeroable,
 )]
@@ -287,6 +300,21 @@ impl From<EdgeId> for EntityId {
 /// Atomic ID generator for creating unique IDs.
 ///
 /// This is thread-safe and can be used concurrently without external synchronization.
+/// A thread-safe generator for strictly increasing element IDs (nodes/edges).
+///
+/// # The Spark
+/// When creating new nodes or edges, we need a way to assign them unique identifiers
+/// safely across multiple threads. `IdGenerator` handles this via atomic counters.
+///
+/// # Examples
+/// ```
+/// use aletheiadb::core::IdGenerator;
+/// let generator = IdGenerator::new();
+/// let first_id = generator.next().unwrap();
+/// let second_id = generator.next().unwrap();
+/// assert_eq!(first_id, 0);
+/// assert_eq!(second_id, 1);
+/// ```
 pub struct IdGenerator {
     next_id: AtomicU64,
 }
@@ -1526,6 +1554,19 @@ mod proptests {
 /// Transaction ID - globally unique identifier for transactions
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(transparent)]
+/// Unique identifier for a transaction in the database.
+///
+/// # The Spark
+/// To track bi-temporal state correctly, AletheiaDB needs to know not only *when*
+/// a change occurred, but *who* made it. The `TxId` provides this context, linking
+/// specific versions of graph elements back to the logical transaction that created them.
+///
+/// # Examples
+/// ```
+/// use aletheiadb::TxId;
+/// let tx_id = TxId::new(100);
+/// assert_eq!(tx_id.as_u64(), 100);
+/// ```
 pub struct TxId(u64);
 
 impl TxId {
@@ -1549,6 +1590,22 @@ impl std::fmt::Display for TxId {
 /// Global transaction ID generator
 ///
 /// Generates monotonically increasing transaction IDs using atomic operations.
+/// A thread-safe generator for strictly increasing transaction IDs.
+///
+/// # The Spark
+/// Multiple concurrent writers need unique transaction IDs. The `TxIdGenerator` uses
+/// atomic operations to ensure that every transaction receives a unique, monotonically
+/// increasing ID without requiring locks.
+///
+/// # Examples
+/// ```
+/// use aletheiadb::core::id::TxIdGenerator;
+/// let generator = TxIdGenerator::new();
+/// let first_tx = generator.next();
+/// let second_tx = generator.next();
+/// assert_eq!(first_tx.as_u64(), 1);
+/// assert_eq!(second_tx.as_u64(), 2);
+/// ```
 pub struct TxIdGenerator {
     counter: AtomicU64,
 }
