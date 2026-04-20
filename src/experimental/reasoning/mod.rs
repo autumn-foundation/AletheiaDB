@@ -11,7 +11,9 @@ pub mod chimera;
 pub mod dreamer;
 pub mod hindsight;
 pub mod luna;
+#[cfg(feature = "semantic-reasoning")]
 pub mod metaphor;
+#[cfg(feature = "semantic-reasoning")]
 pub mod muse;
 pub mod omen;
 pub mod oracle;

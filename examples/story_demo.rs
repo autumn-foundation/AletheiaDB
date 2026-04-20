@@ -30,7 +30,7 @@ use aletheiadb::WriteOps;
 use aletheiadb::experimental::temporal_narrative::NarrativeGenerator;
 use aletheiadb::properties;
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let db = AletheiaDB::new()?;
 
     // 1. Create Node
