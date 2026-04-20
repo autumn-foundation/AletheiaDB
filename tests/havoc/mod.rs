@@ -1,5 +1,6 @@
 mod concurrency;
 mod config;
+pub mod havoc_group_commit_error;
 mod havoc_loom_sharding_commit_log_deadlock;
 mod havoc_loom_sharding_coordinator_deadlock;
 pub mod havoc_visibility_race;

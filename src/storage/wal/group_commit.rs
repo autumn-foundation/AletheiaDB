@@ -231,6 +231,14 @@ impl GroupCommitCoordinator {
         // EPOCH SEMANTICS: flushed_epoch = N means "epoch N has been flushed".
         // Transaction at epoch E waits while flushed_epoch < E (i.e., E has not been flushed yet).
         while state.flushed_epoch < epoch {
+            if state.oldest_error_epoch <= epoch {
+                for (err_epoch, err_msg) in &state.recent_errors {
+                    if *err_epoch <= epoch {
+                        return Err(Error::Storage(StorageError::IoError(err_msg.clone())));
+                    }
+                }
+            }
+
             let now = std::time::Instant::now();
             let remaining = if now >= deadline {
                 Duration::from_secs(0)
