@@ -98,6 +98,12 @@ fn sync_metrics_to_prometheus() {
 }
 
 #[cfg(not(feature = "observability-prometheus"))]
+/// A metrics backend that exports telemetry to Prometheus.
+///
+/// # The Spark
+/// To monitor AletheiaDB in production, we need a way to scrape metrics. This backend
+/// hooks into our internal `MetricsRegistry` and exposes standard Prometheus counters,
+/// gauges, and histograms.
 pub struct PrometheusBackend;
 
 #[cfg(not(feature = "observability-prometheus"))]

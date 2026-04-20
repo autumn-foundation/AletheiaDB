@@ -434,6 +434,11 @@ impl TemporalContext {
     ///
     /// **Deprecated**: Use `valid_time_between()` or `transaction_time_between()` for clarity.
     /// Sets the temporal context to query data valid between the specified `TimeRange`.
+    /// Creates a query step that filters elements valid between two timestamps.
+    ///
+    /// # Why?
+    /// This was the original API for basic temporal filtering. It has been superseded
+    /// by more explicit methods that distinguish between valid time and transaction time.
     #[must_use]
     #[deprecated(
         since = "0.1.0",

@@ -1,3 +1,5 @@
+//! General arithmetic operations and transformations for vectors.
+
 use super::constants::SQUARED_MAGNITUDE_THRESHOLD;
 use super::simd::{
     dot_and_magnitudes, dot_product_sum, scale_and_copy, scale_in_place, squared_diff_sum,

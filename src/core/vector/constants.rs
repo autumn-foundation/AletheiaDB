@@ -1,3 +1,5 @@
+//! Defines global constants and limits used in vector math and indexing.
+
 use super::types::VectorDimension;
 
 // ============================================================================

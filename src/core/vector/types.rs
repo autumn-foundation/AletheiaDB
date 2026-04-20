@@ -1,3 +1,5 @@
+//! Defines core vector types and type aliases used in vector search.
+
 use super::constants::MAX_VECTOR_DIMENSIONS;
 use std::fmt;
 
