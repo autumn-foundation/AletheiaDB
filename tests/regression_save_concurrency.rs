@@ -26,7 +26,11 @@ fn regression_save_allows_concurrent_search() {
     // Populate with significant data (100k vectors)
     // This makes save take non-trivial time
     println!("Populating index with 100k vectors...");
-    let count = if std::env::var("CI").is_ok() { 5_000 } else { 5_000 };
+    let count = if std::env::var("CI").is_ok() {
+        5_000
+    } else {
+        5_000
+    };
     let vector = vec![0.1f32; 384];
 
     // Batch add to speed up setup
