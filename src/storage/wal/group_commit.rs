@@ -567,6 +567,25 @@ mod tests {
     }
 
     #[test]
+    fn test_wait_for_flush_cascading_error_propagation() {
+        let coord = GroupCommitCoordinator::new(100, 100);
+
+        let (_epoch1, _) = coord.register_transaction().unwrap();
+        let epoch1_flush = coord.start_flush().unwrap();
+
+        let (epoch2, _) = coord.register_transaction().unwrap();
+
+        coord.finish_flush(epoch1_flush, Err(Error::Storage(StorageError::WalError {
+            reason: "disk failure".to_string(),
+        }))).unwrap();
+
+        let result = coord.wait_for_flush(epoch2);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("disk failure"));
+    }
+
+    #[test]
     fn test_wait_for_flush_timeout() {
         // Use a config with very short timeout for testing
         let config = GroupCommitConfig {
