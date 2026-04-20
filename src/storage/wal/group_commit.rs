@@ -575,14 +575,51 @@ mod tests {
 
         let (epoch2, _) = coord.register_transaction().unwrap();
 
-        coord.finish_flush(epoch1_flush, Err(Error::Storage(StorageError::WalError {
-            reason: "disk failure".to_string(),
-        }))).unwrap();
+        coord
+            .finish_flush(
+                epoch1_flush,
+                Err(Error::Storage(StorageError::WalError {
+                    reason: "disk failure".to_string(),
+                })),
+            )
+            .unwrap();
 
         let result = coord.wait_for_flush(epoch2);
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.to_string().contains("disk failure"));
+    }
+
+    #[test]
+    fn test_wait_for_flush_evicted_error_not_applicable() {
+        // We want oldest_error_epoch <= epoch, but no recent errors <= epoch
+        use crate::storage::wal::group_commit::GroupCommitConfig;
+        let coord = GroupCommitCoordinator::with_config(GroupCommitConfig {
+            max_delay_ms: 10,
+            max_batch_size: 100,
+            timeout_base_ms: 10,
+            timeout_multiplier: 1,
+            timeout_min_ms: 10,
+            timeout_max_ms: 100,
+            recent_errors_capacity: 1,
+        });
+
+        // Error for epoch 5
+        coord.finish_flush(5, Err(Error::Storage(StorageError::WalError { reason: "err5".to_string() }))).unwrap();
+
+        // Error for epoch 10
+        coord.finish_flush(10, Err(Error::Storage(StorageError::WalError { reason: "err10".to_string() }))).unwrap();
+
+        // Now recent_errors has ONLY epoch 10.
+        // oldest_error_epoch is 5 + 1 = 6.
+
+        // Wait for epoch 6. oldest_error_epoch (6) <= epoch (6).
+        // It loops over recent_errors (only 10). 10 <= 6 is false.
+        // So it continues the wait loop, hits the timeout, and returns Timeout.
+        let result = coord.wait_for_flush(6);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("timeout") || err.to_string().contains("Timeout") || err.to_string().contains("Group commit timeout"));
     }
 
     #[test]
