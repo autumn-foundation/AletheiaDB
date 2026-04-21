@@ -73,3 +73,7 @@
 **[Optimize Migration Candidates Vec Pre-allocation]**
 **Learning:** In `identify_node_candidates` and `identify_edge_candidates`, initializing `all_candidates` and `final_candidates` with `Vec::new()` causes unnecessary intermediate heap reallocations during large data migrations because the maximum required capacity is already known from the `versions` map and the filtered `all_candidates` vector.
 **Action:** Always pre-allocate vectors using `Vec::with_capacity(n)` when the target collection size or its upper bound is known in advance, particularly on hot paths like data migration.
+
+**[Semantic Search HashMap IdentityHasher]
+**Learning:** Using `HashMap::new()` relies on the default SipHash algorithm. When dealing with `NodeId`s (which are structurally small integers acting as distinct unique identifiers), SipHash introduces a major, unnecessary cryptographic hashing overhead on intensive paths like A* traversals or spreading activation.
+**Action:** Swapped `HashMap::new()` for `HashMap::with_hasher(BuildHasherDefault::default())` using `crate::core::hasher::IdentityHasher` inside `semantic_search/semantic_navigator.rs`, `telepathy.rs`, `fishing.rs`, and `cartographer.rs` to enforce O(1) hash complexity for graph algorithm lookups.
