@@ -1,100 +1,47 @@
-//! Application state for HTTP server
+//! Shared application state for the HTTP server.
 //!
-//! This module provides `AppState` for sharing AletheiaDB across actix-web handlers.
-//! Following the pattern established in the MCP server, we use `Arc<AletheiaDB>`
-//! without an outer RwLock since AletheiaDB already provides interior mutability.
+//! `AppState` wraps `Arc<AletheiaDB>` for type-safe sharing across handlers.
+//! AletheiaDB is already thread-safe via interior mutability (DashMap, RwLock,
+//! striped WAL locks), so no outer mutex is needed.
 //!
-//! # Thread Safety
+//! # Wiring
 //!
-//! AletheiaDB is designed for concurrent access:
-//! - Core collections use DashMap (lock-free concurrent HashMap)
-//! - Indexes use RwLock for read-heavy workloads
-//! - WAL uses striped locking for write throughput
-//!
-//! Therefore, wrapping in `Arc<RwLock<AletheiaDB>>` would add unnecessary
-//! global contention and reduce performance.
-//!
-//! # Example
-//!
-//! ```ignore
-//! use aletheiadb::{AletheiaDB, http::AppState};
-//! use actix_web::{web, App, HttpServer, HttpResponse};
-//! use std::sync::Arc;
-//!
-//! async fn create_node(
-//!     state: web::Data<AppState>,
-//!     /* body: web::Json<CreateNodeRequest> */
-//! ) -> HttpResponse {
-//!     // properties: PropertyMap from request
-//!     let node_id = state.db().create_node("Person", properties).unwrap();
-//!     HttpResponse::Ok().json(node_id)
-//! }
-//!
-//! #[actix_web::main]
-//! async fn main() -> std::io::Result<()> {
-//!     let db = Arc::new(AletheiaDB::new().unwrap());
-//!     let app_state = AppState::new(db);
-//!
-//!     HttpServer::new(move || {
-//!         App::new()
-//!             .app_data(web::Data::new(app_state.clone()))
-//!             .route("/nodes", web::post().to(create_node))
-//!     })
-//!     .bind("127.0.0.1:8080")?
-//!     .run()
-//!     .await
-//! }
-//! ```
+//! Install state once at startup via
+//! [`autumn_web::app().on_startup(...)`](autumn_web::prelude::app) and an
+//! [`AppState::insert_extension`](autumn_web::prelude::AppState::insert_extension)
+//! call. Handlers then receive it through the [`AppState`] extractor defined
+//! in this module, which reads the extension out of autumn's own state.
 
 use crate::AletheiaDB;
+use crate::http::error::AletheiaHttpError;
+use axum::extract::FromRequestParts;
+use axum::http::request::Parts;
 use std::sync::Arc;
 
-/// Application state shared across actix-web handlers
+/// Application state shared across HTTP handlers.
 ///
-/// Wraps `Arc<AletheiaDB>` for type-safe sharing. AletheiaDB is already
-/// thread-safe via interior mutability (DashMap, RwLock, Mutex), so no
-/// additional locking is needed.
-///
-/// # Example
-/// ```
-/// use aletheiadb::{AletheiaDB, http::AppState};
-/// use std::sync::Arc;
-///
-/// let db = Arc::new(AletheiaDB::new().unwrap());
-/// let state = AppState::new(db);
-///
-/// // Clone for sharing across handlers
-/// let state2 = state.clone();
-/// ```
+/// Holds an `Arc<AletheiaDB>` and exposes it via [`db`](Self::db) and
+/// [`db_arc`](Self::db_arc). Cheap to clone (a single `Arc` bump).
 #[derive(Clone)]
 pub struct AppState {
     db: Arc<AletheiaDB>,
 }
 
 impl AppState {
-    /// Create new application state with the given database
+    /// Create new application state wrapping the given database.
+    #[must_use]
     pub fn new(db: Arc<AletheiaDB>) -> Self {
         Self { db }
     }
 
-    /// Get a reference to the database
-    ///
-    /// Returns a reference to the AletheiaDB instance, dereferencing the Arc
-    /// for convenient method calls in HTTP handlers.
-    ///
-    /// # Design Note
-    ///
-    /// This returns `&AletheiaDB` rather than `&Arc<AletheiaDB>` (unlike
-    /// `AletheiaMcpServer::db()`). Both approaches work due to `Deref` coercion,
-    /// but this design is more ergonomic for HTTP handlers where direct method
-    /// calls are common. Use `db_arc()` if you need the `Arc` itself.
+    /// Borrow the database for direct method calls.
+    #[must_use]
     pub fn db(&self) -> &AletheiaDB {
         &self.db
     }
 
-    /// Get the `Arc<AletheiaDB>` directly
-    ///
-    /// Useful when you need to clone the Arc or pass it to other components.
+    /// Clone the `Arc<AletheiaDB>` for passing into blocking tasks.
+    #[must_use]
     pub fn db_arc(&self) -> Arc<AletheiaDB> {
         self.db.clone()
     }
@@ -106,25 +53,39 @@ impl From<Arc<AletheiaDB>> for AppState {
     }
 }
 
+// `AppState` as an axum extractor: pulls the installed `Arc<AppState>`
+// out of autumn's `AppState.extensions` bag. Returns `StateMissing` (HTTP 500)
+// if the extension was never installed — a boot-time invariant.
+impl FromRequestParts<autumn_web::prelude::AppState> for AppState {
+    type Rejection = AletheiaHttpError;
+
+    async fn from_request_parts(
+        _parts: &mut Parts,
+        state: &autumn_web::prelude::AppState,
+    ) -> Result<Self, Self::Rejection> {
+        state
+            .extension::<AppState>()
+            .map(|arc| (*arc).clone())
+            .ok_or(AletheiaHttpError::StateMissing)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn test_app_state_clone_shares_db() {
+    fn app_state_clone_shares_db() {
         let db = Arc::new(AletheiaDB::new().unwrap());
         let state = AppState::new(db.clone());
         let state2 = state.clone();
-
-        // Both should point to the same Arc
         assert!(Arc::ptr_eq(&state.db_arc(), &state2.db_arc()));
     }
 
     #[test]
-    fn test_from_impl() {
+    fn from_arc_db_works() {
         let db = Arc::new(AletheiaDB::new().unwrap());
         let state: AppState = db.clone().into();
-
         assert!(Arc::ptr_eq(&db, &state.db_arc()));
     }
 }

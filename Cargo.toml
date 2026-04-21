@@ -49,11 +49,15 @@ metrics-exporter-prometheus = { version = "0.17", optional = true }
 rmcp = { version = "1.4", features = ["server", "transport-io"], optional = true }
 base64 = { version = "0.22", optional = true }
 
-# HTTP server support (optional)
-actix-web = { version = "4.9", optional = true }
-actix-cors = { version = "0.7", optional = true }
-actix-rt = { version = "2.10", optional = true }
-actix-governor = { version = "0.10", optional = true }
+# HTTP server support (optional) — built on autumn-web (Axum-based).
+# default-features disabled: autumn's defaults pull in Postgres+Diesel, Maud, htmx,
+# Tailwind, Moka cache — most irrelevant to a JSON API on top of an embedded DB.
+# `maud` is kept because autumn-web 0.2.0 has a bug where `error_pages` imports
+# maud unconditionally; see ADR 0055 for details.
+autumn-web = { version = "0.2", optional = true, default-features = false, features = ["maud"] }
+axum = { version = "0.8", optional = true }
+tower = { version = "0.5", optional = true }
+tower-http = { version = "0.6", optional = true, features = ["cors", "trace", "set-header"] }
 
 # Embedding generation dependencies (all optional via feature flags)
 # Async runtime for API-based embedding providers
@@ -194,8 +198,15 @@ sql = ["dep:sqlparser"]
 # Cypher query language support
 cypher = []
 
-# HTTP server support (Issue #465)
-http-server = ["dep:actix-web", "dep:actix-cors", "dep:actix-rt", "dep:tokio", "dep:serde", "dep:actix-governor"]
+# HTTP server support (Issue #465) — built on autumn-web.
+http-server = [
+    "dep:autumn-web",
+    "dep:axum",
+    "dep:tower",
+    "dep:tower-http",
+    "dep:tokio",
+    "dep:serde",
+]
 
 # MVCC snapshot-focused integration tests
 mvcc-snapshots-tdd = []
