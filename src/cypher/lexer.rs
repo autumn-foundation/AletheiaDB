@@ -500,7 +500,9 @@ impl<'a> CypherLexer<'a> {
     // -----------------------------------------------------------------------
 
     fn read_string(&mut self, start: usize) -> Result<Token, CypherError> {
-        let (_, quote) = self.advance().unwrap(); // consume opening quote
+        let (_, quote) = self
+            .advance()
+            .expect("string literal must start with quote"); // consume opening quote
         let mut value = String::new();
 
         loop {
@@ -738,7 +740,7 @@ mod unit_tests {
             "VALID_TIME",
         ];
         for kw in keywords {
-            let tokens = CypherLexer::tokenize(kw).unwrap();
+            let tokens = CypherLexer::tokenize(kw).expect("keyword parsing failed");
             assert_ne!(
                 tokens[0].kind,
                 TokenKind::Identifier,

@@ -1428,3 +1428,31 @@ fn test_parse_where_ends_with() {
         panic!("Expected ENDS WITH");
     }
 }
+
+#[test]
+fn test_sentry_lex_bang_without_equal() {
+    let result = CypherLexer::tokenize("!");
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    match err {
+        CypherError::LexError { message, .. } => {
+            assert!(
+                message.contains("Expected '=' after '!'"),
+                "expected error message about missing '=', got: {message}"
+            );
+        }
+        _ => panic!("Expected LexError, got {:?}", err),
+    }
+}
+
+#[test]
+fn test_sentry_lex_invalid_alphanumeric_boundary() {
+    let result = CypherLexer::tokenize("1a");
+    // Verify it tokenizes as Integer(1) then Identifier(a) based on the current lexer implementation.
+    // The parser will likely reject it, but the lexer just splits them.
+    let tokens = result.unwrap();
+    assert_eq!(tokens[0].kind, TokenKind::IntegerLiteral);
+    assert_eq!(tokens[0].text, "1");
+    assert_eq!(tokens[1].kind, TokenKind::Identifier);
+    assert_eq!(tokens[1].text, "a");
+}
