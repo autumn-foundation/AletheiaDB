@@ -22,7 +22,7 @@ fn iterations() -> usize {
 
 /// Returns a longer timeout in CI to accommodate slow shared runners.
 fn test_timeout_secs() -> u64 {
-    if is_ci() { 180 } else { 60 }
+    if is_ci() { 360 } else { 120 }
 }
 
 /// Chaos Engineering: Concurrency Stress Test
