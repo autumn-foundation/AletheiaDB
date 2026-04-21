@@ -232,8 +232,12 @@ async fn handle_find_node(
             .execute(&db)
             .map_err(|e| AletheiaHttpError::Internal(e.to_string()))?;
 
+        // NOTE: explicit `row_result?` rather than `.flatten()` so storage
+        // errors mid-scan propagate as 500 instead of being silently dropped
+        // and producing a partial `success: true` response.
         let mut nodes = Vec::new();
-        for row in results.flatten() {
+        for row_result in results {
+            let row = row_result.map_err(|e| AletheiaHttpError::Internal(e.to_string()))?;
             if let crate::query::executor::EntityResult::Node(node) = row.entity {
                 let props_json =
                     property_map_to_json(&node.properties).map_err(AletheiaHttpError::Internal)?;

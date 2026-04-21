@@ -96,29 +96,29 @@ pub async fn run_server(config: ServerConfig) -> std::io::Result<()> {
         );
     }
 
-    // Point autumn at our host/port. Autumn's default ConfigLoader reads
-    // AUTUMN_SERVER__HOST / AUTUMN_SERVER__PORT; translating from our env vars
-    // keeps all downstream ops-facing config surface unchanged.
+    // Bridge our ServerConfig into autumn's config via its AUTUMN_*__* env
+    // vars. Autumn 0.2.0 doesn't yet expose `with_config_loader` publicly
+    // (that lands in 0.3 on trunk), so this is the supported path for now.
     //
-    // SAFETY: set_var is unsafe in edition 2024 because concurrent reads from
-    // other threads are UB. This call happens before autumn spawns any
-    // tasks, and `run_server` is the single caller of autumn bootstrap in
-    // this process. The write is racy only against explicit env reads by
-    // other code running in parallel at startup — AletheiaDB performs no
-    // such reads here.
+    // TODO(autumn-0.3): replace this env-var bridge with a custom
+    // `ConfigLoader` impl — it's cleaner, retires the `unsafe` block, and
+    // is the idiomatic autumn extension point.
+    //
+    // SAFETY: `set_var` is unsafe in edition 2024 because concurrent reads
+    // from other threads are UB. These calls happen before any autumn code
+    // runs (autumn's own startup reads env only inside `.run()`), and
+    // AletheiaDB performs no env reads on other threads during this window.
     unsafe {
-        std::env::set_var("AUTUMN_SERVER__HOST", config.host());
-        std::env::set_var("AUTUMN_SERVER__PORT", config.port().to_string());
+        apply_autumn_env(&config);
     }
 
     // TODO(autumn-0.3): wire per-IP rate limiting here when autumn ships it
     // natively. See the module-level doc.
     //
-    // CORS, security headers, request tracing, and metrics are provided by
-    // autumn's own middleware stack (see autumn docs for config env vars).
-    // Attempting to layer our own copies here runs into autumn's sealed
-    // `IntoAppLayer` bound and is not worth a short-lived shim when autumn
-    // already provides them.
+    // Request tracing, metrics, and security headers are provided by autumn's
+    // baseline middleware. CORS is driven by the AUTUMN_CORS__* env vars set
+    // in `apply_autumn_env` above, so operator-facing `ALETHEIADB_CORS_*`
+    // settings flow end-to-end into autumn's CorsLayer.
 
     autumn_web::app()
         .on_startup(move |autumn_state| {
@@ -133,6 +133,42 @@ pub async fn run_server(config: ServerConfig) -> std::io::Result<()> {
         .await;
 
     Ok(())
+}
+
+/// Set the `AUTUMN_SERVER__*` and `AUTUMN_CORS__*` environment variables
+/// autumn's config loader reads, based on our [`ServerConfig`].
+///
+/// # Safety
+///
+/// Calls [`std::env::set_var`], which is `unsafe` under Rust edition 2024
+/// because concurrent reads from other threads result in UB. Callers must
+/// ensure no other thread is reading environment variables concurrently.
+/// [`run_server`] calls this exactly once, before handing control to autumn.
+unsafe fn apply_autumn_env(config: &ServerConfig) {
+    // SAFETY: see function-level docs; ordering is the caller's responsibility.
+    unsafe {
+        std::env::set_var("AUTUMN_SERVER__HOST", config.host());
+        std::env::set_var("AUTUMN_SERVER__PORT", config.port().to_string());
+
+        let cors = config.cors();
+        // `permissive` maps to wildcard origin. `restrictive` with zero explicit
+        // origins would disable CORS entirely, which is fine.
+        let origins: Vec<&str> = if cors.is_permissive() {
+            vec!["*"]
+        } else {
+            cors.allowed_origins().iter().map(String::as_str).collect()
+        };
+        std::env::set_var("AUTUMN_CORS__ALLOWED_ORIGINS", origins.join(","));
+        std::env::set_var(
+            "AUTUMN_CORS__ALLOWED_METHODS",
+            cors.get_allowed_methods().join(","),
+        );
+        std::env::set_var(
+            "AUTUMN_CORS__ALLOWED_HEADERS",
+            cors.get_allowed_headers().join(","),
+        );
+        std::env::set_var("AUTUMN_CORS__MAX_AGE_SECS", cors.get_max_age().to_string());
+    }
 }
 
 /// Build a fully-wired `axum::Router` suitable for integration tests.
