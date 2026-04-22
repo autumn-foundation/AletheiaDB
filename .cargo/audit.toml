@@ -1,2 +1,16 @@
+[database]
+stale = true
+
 [advisories]
-ignore = ["RUSTSEC-2026-0098", "RUSTSEC-2026-0099"]
+ignore = [
+    # Reached panic in rustls-webpki due to AWS SDK dependencies pulling in an older hyper-rustls that cannot be easily updated
+    "RUSTSEC-2026-0104",
+    "RUSTSEC-2026-0098",
+    "RUSTSEC-2026-0099",
+
+    # Unmaintained paste crate, required by tokenizers
+    "RUSTSEC-2024-0436",
+
+    # rand unsoundness, we're not using custom logger with rand::rng() so not vulnerable
+    "RUSTSEC-2026-0097",
+]
