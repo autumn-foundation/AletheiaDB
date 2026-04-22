@@ -636,18 +636,16 @@ impl QueryResults {
     /// ⚡ Bolt Optimization: Pre-allocates vector based on iterator's lower size bound
     /// to reduce heap allocations during collection of structured results.
     pub fn collect_structured(mut self) -> Result<QueryResult> {
-        // First pass: collect all rows
         let (lower, _) = self.iterator.size_hint();
         let mut rows = Vec::with_capacity(lower);
-        while let Some(row) = self.iterator.next() {
-            rows.push(row?);
-        }
 
-        // Determine which fields we have (single pass)
         let (mut has_any_scores, mut has_any_paths, mut has_any_versions, mut has_any_nodes) =
             (false, false, false, false);
         let mut node_count = 0usize;
-        for row in &rows {
+
+        // First pass: collect all rows and determine which fields we have
+        while let Some(row) = self.iterator.next() {
+            let row = row?;
             has_any_scores = has_any_scores || row.score.is_some();
             has_any_paths = has_any_paths || row.path.is_some();
             has_any_versions = has_any_versions || row.timestamp.is_some();
@@ -655,6 +653,7 @@ impl QueryResults {
                 has_any_nodes = true;
                 node_count += 1;
             }
+            rows.push(row);
         }
 
         // Second pass: extract data with padding
