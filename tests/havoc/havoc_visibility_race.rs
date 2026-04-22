@@ -34,7 +34,11 @@ use std::thread;
 fn havoc_visibility_non_repeatable_read() {
     let manager = Arc::new(TxVisibilityManager::new());
 
-    let iterations = if std::env::var("CI").is_ok() { 10000 } else { 100000 };
+    let iterations = if std::env::var("CI").is_ok() {
+        10000
+    } else {
+        100000
+    };
     let mut race_detected = false;
 
     for i in 0..iterations {

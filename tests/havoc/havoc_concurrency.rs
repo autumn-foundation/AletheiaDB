@@ -4,7 +4,9 @@ use aletheiadb::index::vector::{DistanceMetric, HnswIndexBuilder};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
-fn is_ci() -> bool { std::env::var("CI").is_ok() }
+fn is_ci() -> bool {
+    std::env::var("CI").is_ok()
+}
 
 #[test]
 #[serial_test::serial]
