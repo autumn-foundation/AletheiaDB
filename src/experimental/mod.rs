@@ -17,7 +17,7 @@
 //! - 🚩 **Opt-in**: You must explicitly enable them.
 //!
 //! Once a category proves itself, it graduates to a top-level stable feature
-//! (see [`crate::semantic_search`] for the first graduation).
+//! (see `` `crate::semantic_search` `` for the first graduation).
 //!
 //! # Enabling Nova
 //!
@@ -43,10 +43,10 @@
 //!
 //! | Flag | What it gates | Modules |
 //! |------|---------------|---------|
-//! | [`reasoning`] (`semantic-reasoning`) | Prediction, synthesis, counterfactuals | prophet, dreamer, omen, oracle, hindsight, muse, luna, metaphor, synergy, chimera, alchemy |
-//! | [`temporal`] (`semantic-temporal`) | Bi-temporal + semantic | sherlock, chronos, echo, kairos, temporal_narrative, temporal_diff, aura, mnemosyne, ariadne |
-//! | [`diagnostics`] (`semantic-diagnostics`) | Anomaly, validation, health | dissonance, sentinel, fossil, tremor, polygraph, wormhole, ripple, entanglement, thermos, paradox |
-//! | [`characterization`] (`semantic-characterization`) | Describe concepts + export | archetype, prism, gravity, sybil, synapse, kaleidoscope, papyrus, graph_context, wildfire |
+//! | `reasoning` (`semantic-reasoning`) | Prediction, synthesis, counterfactuals | prophet, dreamer, omen, oracle, hindsight, muse, luna, metaphor, synergy, chimera, alchemy |
+//! | `temporal` (`semantic-temporal`) | Bi-temporal + semantic | sherlock, chronos, echo, kairos, temporal_narrative, temporal_diff, aura, mnemosyne, ariadne |
+//! | `diagnostics` (`semantic-diagnostics`) | Anomaly, validation, health | dissonance, sentinel, fossil, tremor, polygraph, wormhole, ripple, entanglement, thermos, paradox |
+//! | `characterization` (`semantic-characterization`) | Describe concepts + export | archetype, prism, gravity, sybil, synapse, kaleidoscope, papyrus, graph_context, wildfire |
 //!
 //! For convenience, every submodule is re-exported at this module's path —
 //! existing code using `aletheiadb::experimental::sherlock::Sherlock` keeps

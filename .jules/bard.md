@@ -106,3 +106,6 @@
 ## 2025-03-05 - Formatting Doc Comments with Attributes
 **Confusion:** When using text replacement scripts to inject `///` doc comments into files, placing the `///` comment immediately above the struct definition but below procedural macros like `#[derive(...)]` causes poor code style and triggers `cargo fmt` to reorder them incorrectly or create ugly blocks.
 **Clarification:** Always ensure that `///` doc comments are placed *above* all `#[...]` attributes for a given item. This ensures proper rendering in rustdoc and maintains a clean codebase when formatted with `cargo fmt`.
+## 2025-03-05 - The Danger of Broken Intra-Doc Links in Experimental Module
+**Confusion:** The `src/experimental/mod.rs` documentation contained broken intra-doc links such as `[`crate::semantic_search`]` and `[`reasoning`]` which caused `rustdoc::broken_intra_doc_links` warnings during doc generation.
+**Clarification:** Changed the broken intra-doc links to backticks instead, e.g., `crate::semantic_search` and `reasoning` to fix the warnings and clean up the doc compilation process.
