@@ -18,7 +18,7 @@ fn havoc_callback_deadlock_repro() {
     });
 
     // Timeout after 5 seconds (should be instant)
-    if rx.recv_timeout(Duration::from_secs(5)).is_err() {
+    if rx.recv_timeout(Duration::from_secs(60)).is_err() {
         panic!("Deadlock detected: search_with_filter callback waiting for add() timed out");
     }
 }

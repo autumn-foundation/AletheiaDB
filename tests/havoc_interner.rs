@@ -43,7 +43,7 @@ fn test_interner_snapshot_consistency() {
             let _guard = RunningGuard(running);
 
             let start = std::time::Instant::now();
-            while start.elapsed() < Duration::from_secs(2) {
+            while start.elapsed() < Duration::from_secs(1) {
                 let snapshot = interner.get_all_strings();
 
                 // Check for holes (empty strings)

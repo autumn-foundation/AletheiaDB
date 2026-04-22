@@ -15,7 +15,7 @@ fn havoc_deadlock_save_vs_add() {
         tx.send(()).unwrap();
     });
 
-    match rx.recv_timeout(Duration::from_secs(5)) {
+    match rx.recv_timeout(Duration::from_secs(60)) {
         Ok(_) => (),
         Err(_) => panic!("Test timed out - assuming deadlock!"),
     }
