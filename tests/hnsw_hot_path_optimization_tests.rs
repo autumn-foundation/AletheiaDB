@@ -147,11 +147,15 @@ fn test_search_large_k_without_validation_overhead() {
     // Insert many vectors
     for i in 0..num_nodes {
         let node_id = NodeId::new(i as u64).expect("Valid node ID");
-        let vector: Vec<f32> = (0..dimensions).map(|_| rng.random_range(0.0..1.0)).collect();
+        let vector: Vec<f32> = (0..dimensions)
+            .map(|_| rng.random_range(0.0..1.0))
+            .collect();
         index.add(node_id, &vector).expect("Failed to add vector");
     }
 
-    let query: Vec<f32> = (0..dimensions).map(|_| rng.random_range(0.0..1.0)).collect();
+    let query: Vec<f32> = (0..dimensions)
+        .map(|_| rng.random_range(0.0..1.0))
+        .collect();
 
     // Request a large k to exercise the result conversion path
     let k = 100;
@@ -254,11 +258,15 @@ fn test_search_with_filter_performance_sanity_check() {
     // Insert many nodes
     for i in 0..num_nodes {
         let node_id = NodeId::new(i as u64).expect("Valid node ID");
-        let vector: Vec<f32> = (0..dimensions).map(|_| rng.random_range(0.0..1.0)).collect();
+        let vector: Vec<f32> = (0..dimensions)
+            .map(|_| rng.random_range(0.0..1.0))
+            .collect();
         index.add(node_id, &vector).expect("Failed to add vector");
     }
 
-    let query: Vec<f32> = (0..dimensions).map(|_| rng.random_range(0.0..1.0)).collect();
+    let query: Vec<f32> = (0..dimensions)
+        .map(|_| rng.random_range(0.0..1.0))
+        .collect();
 
     // Perform multiple searches to amortize any startup costs
     let num_searches = 10;
