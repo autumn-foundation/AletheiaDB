@@ -346,3 +346,10 @@
 **Finding:** The `LimitPushdown` tests originally missed several behavioral edge cases and logic checks, particularly regarding the propagation limits in BinaryOp combinations (`||`), updating limit values correctly against child bounds, and setting vector rank limits.
 **Evidence:** `cargo mutants` caught mutants in `LimitPushdown::push_down` specifically targeting the changed boolean condition logic and bounds assignment.
 **Recommendation:** Added `sentry_tests` to `LimitPushdown` that explicitly trigger tests enforcing the boolean change propagation, verifying that updated properties reflect correct nested limits, and vector bounds assignment. Tests now prevent `||` to `&&` mutations and correct top-k modifications.
+
+**[Error Formatting Coverage Gaps]**
+**Module:** `src/core/error.rs`
+**Severity:** 🟡 Suspect
+**Finding:** The `format_index_not_found` and `format_clock_skew` formatting functions had mutants surviving. `format_index_not_found` completely lacked tests, and `format_clock_skew` lacked tests covering positive drift.
+**Evidence:** `cargo mutants` revealed mutations returning default strings survived for `format_index_not_found`, and conditional modifications survived for `format_clock_skew`.
+**Recommendation:** Added `test_query_error_index_not_found_display` and `test_clock_skew_display_positive_drift_is_forward` to fully exercise all formatting branches.

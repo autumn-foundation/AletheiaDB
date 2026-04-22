@@ -1376,4 +1376,42 @@ mod tests {
         assert!(!msg.contains("backward"));
         assert!(msg.contains("by 0"));
     }
+
+    #[test]
+    fn test_query_error_index_not_found_display() {
+        let err_with_hint = QueryError::IndexNotFound {
+            index_type: "Vector".to_string(),
+            property_name: "embedding".to_string(),
+            hint: Some("Use db.vector_index(\"embedding\")".to_string()),
+        };
+        let msg = format!("{}", err_with_hint);
+        assert!(msg.contains("Query requires Vector index on 'embedding' property"));
+        assert!(msg.contains("Hint: Use db.vector_index(\"embedding\")"));
+
+        let err_without_hint = QueryError::IndexNotFound {
+            index_type: "Temporal".to_string(),
+            property_name: "valid_time".to_string(),
+            hint: None,
+        };
+        let msg2 = format!("{}", err_without_hint);
+        assert!(msg2.contains("Query requires Temporal index on 'valid_time' property"));
+        assert!(!msg2.contains("Hint:"));
+    }
+
+    #[test]
+    fn test_clock_skew_display_positive_drift_is_forward() {
+        let err = TransactionError::ClockSkew {
+            wallclock: 1_200,
+            previous: 1_000,
+            drift_us: 200,
+            max_allowed: 100,
+        };
+
+        let msg = format!("{}", err);
+        assert!(msg.contains("Clock skew too large"));
+        assert!(msg.contains("forward"));
+        assert!(!msg.contains("backward"));
+        assert!(msg.contains("200"));
+        assert!(msg.contains("max allowed: 100"));
+    }
 }
