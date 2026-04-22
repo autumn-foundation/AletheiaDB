@@ -321,7 +321,7 @@ mod tests {
 
     #[test]
     fn test_shard_id_try_from_u16() {
-        let id: ShardId = 42u16.try_into().unwrap();
+        let id: ShardId = 42u16.try_into().expect("42 is a valid shard id");
         assert_eq!(id.as_u16(), 42);
 
         // Invalid ID should fail

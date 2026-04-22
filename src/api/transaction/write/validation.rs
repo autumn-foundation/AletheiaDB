@@ -110,3 +110,70 @@ pub(crate) fn validate(tx: &WriteTransaction) -> Result<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::hlc::HybridTimestamp;
+    use crate::core::temporal::time;
+
+    #[test]
+    fn should_return_error_when_valid_from_too_far_in_future() {
+        let current = time::now();
+        // 10 years in the future is > MAX_VALID_TIME_FUTURE_OFFSET_US (which is usually a few hours or days)
+        let future_time = current.wallclock() + (MAX_VALID_TIME_FUTURE_OFFSET_US * 2);
+        let valid_from =
+            HybridTimestamp::new(future_time, 0).expect("should create future timestamp");
+
+        let result = validate_valid_from_future(valid_from);
+        assert!(
+            result.is_err(),
+            "Expected error when valid_from is too far in future"
+        );
+        if let Err(e) = result {
+            assert!(
+                e.to_string().contains("too far in future"),
+                "{}",
+                e.to_string()
+            );
+        }
+    }
+
+    #[test]
+    fn should_succeed_when_valid_from_is_now() {
+        let current = time::now();
+        let result = validate_valid_from_future(current);
+        assert!(result.is_ok(), "Expected success for current time");
+    }
+
+    #[test]
+    fn should_return_error_when_valid_from_is_before_creation() {
+        let creation_time = HybridTimestamp::new(2000, 0).expect("should create timestamp");
+        let valid_from = HybridTimestamp::new(1000, 0).expect("should create timestamp");
+
+        let result = validate_valid_from_not_before_creation("node1", creation_time, valid_from);
+        assert!(
+            result.is_err(),
+            "Expected error when valid_from is before creation time"
+        );
+        if let Err(e) = result {
+            assert!(
+                e.to_string().contains("before entity creation"),
+                "{}",
+                e.to_string()
+            );
+        }
+    }
+
+    #[test]
+    fn should_succeed_when_valid_from_is_after_creation() {
+        let creation_time = HybridTimestamp::new(1000, 0).expect("should create timestamp");
+        let valid_from = HybridTimestamp::new(2000, 0).expect("should create timestamp");
+
+        let result = validate_valid_from_not_before_creation("node1", creation_time, valid_from);
+        assert!(
+            result.is_ok(),
+            "Expected success when valid_from is after creation time"
+        );
+    }
+}
