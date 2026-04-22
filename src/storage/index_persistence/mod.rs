@@ -263,7 +263,7 @@ pub(crate) fn atomic_write(path: &std::path::Path, data: &[u8]) -> Result<()> {
     use std::io::Write;
 
     // Generate a random suffix to prevent collisions between concurrent writers
-    let suffix: u32 = rand::thread_rng().r#gen();
+    let suffix: u32 = rand::rng().random();
     let extension = match path.extension() {
         Some(ext) => format!("{}.{}.tmp", ext.to_string_lossy(), suffix),
         None => format!("{}.tmp", suffix),
