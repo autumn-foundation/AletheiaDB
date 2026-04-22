@@ -16,4 +16,5 @@ pub mod muse;
 pub mod omen;
 pub mod oracle;
 pub mod prophet;
+pub mod pulse;
 pub mod synergy;
