@@ -1,2 +1,11 @@
 [advisories]
-ignore = ["RUSTSEC-2026-0098", "RUSTSEC-2026-0099"]
+ignore = [
+    # rustls-webpki 0.101.7 is a deeply nested dependency of aws-sdk-kms
+    # it only affects Certificate Revocation Lists which we don't use
+    # directly or expose untrusted CRL parsing.
+    "RUSTSEC-2026-0104",
+    # Similar deeply nested rustls-webpki 0.101.7 cert name constraints issues
+    # that are not exploitable via our AWS SDK KMS usage pattern.
+    "RUSTSEC-2026-0098",
+    "RUSTSEC-2026-0099"
+]
