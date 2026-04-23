@@ -127,7 +127,7 @@ mod tests {
 
     fn random_key() -> Zeroizing<[u8; 32]> {
         let mut key = Zeroizing::new([0u8; 32]);
-        rand::thread_rng().fill_bytes(key.as_mut());
+        rand::rng().fill_bytes(key.as_mut());
         key
     }
 

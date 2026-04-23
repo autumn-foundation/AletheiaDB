@@ -83,7 +83,7 @@ impl Cipher for Aes256GcmCipher {
     fn encrypt(&self, plaintext: &[u8], aad: &[u8]) -> Result<Vec<u8>, EncryptionError> {
         // Generate random 12-byte nonce
         let mut nonce_bytes = [0u8; AES_NONCE_SIZE];
-        rand::thread_rng().fill_bytes(&mut nonce_bytes);
+        rand::rng().fill_bytes(&mut nonce_bytes);
         let nonce = AesNonce::from_slice(&nonce_bytes);
 
         // Build AAD payload
@@ -187,7 +187,7 @@ impl ChaCha20Poly1305Cipher {
 impl Cipher for ChaCha20Poly1305Cipher {
     fn encrypt(&self, plaintext: &[u8], aad: &[u8]) -> Result<Vec<u8>, EncryptionError> {
         let mut nonce_bytes = [0u8; CHACHA_NONCE_SIZE];
-        rand::thread_rng().fill_bytes(&mut nonce_bytes);
+        rand::rng().fill_bytes(&mut nonce_bytes);
         let nonce = ChaChaNonce::from_slice(&nonce_bytes);
 
         let payload = chacha20poly1305::aead::Payload {
@@ -246,7 +246,7 @@ mod tests {
 
     fn test_key() -> Zeroizing<[u8; 32]> {
         let mut key = Zeroizing::new([0u8; 32]);
-        rand::thread_rng().fill_bytes(key.as_mut());
+        rand::rng().fill_bytes(key.as_mut());
         key
     }
 

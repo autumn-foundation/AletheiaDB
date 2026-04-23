@@ -106,7 +106,7 @@ impl FileKeyProvider {
         }
 
         let mut key = Zeroizing::new([0u8; 32]);
-        rand::thread_rng().fill_bytes(key.as_mut());
+        rand::rng().fill_bytes(key.as_mut());
 
         let hex = bytes_to_hex(key.as_ref());
         std::fs::write(path, format!("{hex}\n"))?;
@@ -226,7 +226,7 @@ mod tests {
 
     fn hex_key_string() -> (String, Zeroizing<[u8; 32]>) {
         let mut key = Zeroizing::new([0u8; 32]);
-        rand::thread_rng().fill_bytes(key.as_mut());
+        rand::rng().fill_bytes(key.as_mut());
         (bytes_to_hex(key.as_ref()), key)
     }
 
@@ -262,7 +262,7 @@ mod tests {
         let path = dir.path().join("key.bin");
 
         let mut expected = Zeroizing::new([0u8; 32]);
-        rand::thread_rng().fill_bytes(expected.as_mut());
+        rand::rng().fill_bytes(expected.as_mut());
         std::fs::write(&path, expected.as_ref()).unwrap();
 
         let provider = FileKeyProvider::new(&path);

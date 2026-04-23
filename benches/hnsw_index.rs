@@ -24,8 +24,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// Generate a random f32 vector of given dimensions
 fn generate_random_vector(dimensions: usize) -> Vec<f32> {
     use rand::Rng as _;
-    let mut rng = rand::thread_rng();
-    (0..dimensions).map(|_| rng.gen_range(0.0..1.0)).collect()
+    let mut rng = rand::rng();
+    (0..dimensions).map(|_| rng.random_range(0.0..1.0)).collect()
 }
 
 /// Generate a batch of random vectors

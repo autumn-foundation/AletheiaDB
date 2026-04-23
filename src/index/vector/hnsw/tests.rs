@@ -227,13 +227,13 @@ mod functional_tests {
 
         // Add random vectors
         use rand::Rng;
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         for i in 1..=100 {
-            let vec: Vec<f32> = (0..4).map(|_| rng.r#gen()).collect();
+            let vec: Vec<f32> = (0..4).map(|_| rng.random()).collect();
             index.add(NodeId::new(i).unwrap(), &vec)?;
         }
 
-        let query: Vec<f32> = (0..4).map(|_| rng.r#gen()).collect();
+        let query: Vec<f32> = (0..4).map(|_| rng.random()).collect();
         let results = index.search(&query, 20)?;
 
         for i in 0..results.len().saturating_sub(1) {
