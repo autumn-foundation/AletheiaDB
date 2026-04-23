@@ -461,8 +461,10 @@ fn split_args(args: &str) -> Result<Vec<String>, SqlError> {
 /// Remove surrounding single or double quotes from a string literal.
 fn unquote_string(s: &str) -> Result<String, SqlError> {
     let s = s.trim();
-    if s.len() >= 2 && ((s.starts_with('\'') && s.ends_with('\'')) || (s.starts_with('"') && s.ends_with('"'))) {
-        Ok(s[1..s.len() - 1].to_string())
+    if let Some(inner) = s.strip_prefix('\'').and_then(|s| s.strip_suffix('\''))
+        .or_else(|| s.strip_prefix('"').and_then(|s| s.strip_suffix('"')))
+    {
+        Ok(inner.to_string())
     } else {
         Err(SqlError::ParseError(format!(
             "Expected quoted string, got: '{}'",
