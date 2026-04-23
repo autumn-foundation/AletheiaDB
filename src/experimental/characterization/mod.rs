@@ -19,3 +19,8 @@ pub mod synapse;
 // `wildfire` is a stub awaiting revival — see CHANGELOG / ADR-0050.
 // pub mod wildfire;
 pub mod starlight;
+
+#[cfg(feature = "semantic-characterization")]
+pub mod hologram;
+#[cfg(feature = "semantic-characterization")]
+pub use hologram::*;
