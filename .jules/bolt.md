@@ -73,3 +73,7 @@
 **[Optimize Migration Candidates Vec Pre-allocation]**
 **Learning:** In `identify_node_candidates` and `identify_edge_candidates`, initializing `all_candidates` and `final_candidates` with `Vec::new()` causes unnecessary intermediate heap reallocations during large data migrations because the maximum required capacity is already known from the `versions` map and the filtered `all_candidates` vector.
 **Action:** Always pre-allocate vectors using `Vec::with_capacity(n)` when the target collection size or its upper bound is known in advance, particularly on hot paths like data migration.
+
+**[Optimize split_args parsing by slicing string instead of allocating per character]
+**Learning:** `split_args` inside `src/sql/vector_parser.rs` previously copied substrings by creating a `String::new()` and pushing characters one-by-one inside a loop. This caused numerous heap allocations per parsed argument. By switching to `char_indices()` and slicing the original `&str`, we can drastically reduce allocations.
+**Action:** When parsing strings inside loops, track string indices with `char_indices()` and slice `&str` instead of dynamically accumulating characters into a new `String`.

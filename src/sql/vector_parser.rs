@@ -416,13 +416,12 @@ fn find_matching_paren(sql: &str, open_pos: usize) -> Option<usize> {
 /// Split function arguments by comma, respecting parentheses and string literals.
 fn split_args(args: &str) -> Result<Vec<String>, SqlError> {
     let mut result = Vec::new();
-    let mut current = String::new();
+    let mut start = 0;
     let mut depth = 0;
     let mut in_string = false;
 
-    for ch in args.chars() {
+    for (i, ch) in args.char_indices() {
         if in_string {
-            current.push(ch);
             if ch == '\'' {
                 in_string = false;
             }
@@ -432,27 +431,26 @@ fn split_args(args: &str) -> Result<Vec<String>, SqlError> {
         match ch {
             '\'' => {
                 in_string = true;
-                current.push(ch);
             }
             '(' => {
                 depth += 1;
-                current.push(ch);
             }
             ')' => {
                 depth -= 1;
-                current.push(ch);
             }
             ',' if depth == 0 => {
-                result.push(current.trim().to_string());
-                current = String::new();
+                result.push(args[start..i].trim().to_string());
+                start = i + ch.len_utf8();
             }
-            _ => current.push(ch),
+            _ => {}
         }
     }
 
-    let trimmed = current.trim().to_string();
-    if !trimmed.is_empty() {
-        result.push(trimmed);
+    if start <= args.len() {
+        let trimmed = args[start..].trim().to_string();
+        if !trimmed.is_empty() {
+            result.push(trimmed);
+        }
     }
 
     Ok(result)
