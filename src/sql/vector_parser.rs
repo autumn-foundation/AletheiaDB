@@ -461,7 +461,7 @@ fn split_args(args: &str) -> Result<Vec<String>, SqlError> {
 /// Remove surrounding single or double quotes from a string literal.
 fn unquote_string(s: &str) -> Result<String, SqlError> {
     let s = s.trim();
-    if (s.starts_with('\'') && s.ends_with('\'')) || (s.starts_with('"') && s.ends_with('"')) {
+    if s.len() >= 2 && ((s.starts_with('\'') && s.ends_with('\'')) || (s.starts_with('"') && s.ends_with('"'))) {
         Ok(s[1..s.len() - 1].to_string())
     } else {
         Err(SqlError::ParseError(format!(
@@ -509,7 +509,7 @@ fn parse_vector_literal(s: &str) -> Result<Vec<f32>, SqlError> {
     };
 
     // Strip surrounding single quotes
-    let s = if s.starts_with('\'') && s.ends_with('\'') {
+    let s = if s.starts_with('\'') && s.ends_with('\'') && s.len() >= 2 {
         &s[1..s.len() - 1]
     } else {
         s
@@ -796,6 +796,7 @@ mod tests {
             extract_vector_clauses("SELECT * FROM Documents WHERE SIMILAR_TO(embedding, $query)");
         assert!(result.is_err());
     }
+
 
     // ========================================================================
     // No Vector Clauses
