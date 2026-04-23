@@ -51,7 +51,7 @@ use crate::http::state::AppState;
 /// Run the HTTP server to completion.
 ///
 /// Creates a fresh `AletheiaDB`, wires it into shared state, assembles the
-/// autumn app, and hands control to [`autumn_web::app`](autumn_web::prelude::app)
+/// autumn app, and hands control to `autumn_web::app`
 /// — which handles the TCP listener, graceful shutdown on SIGINT/SIGTERM, and
 /// startup/shutdown tracing. Returns only after the server exits cleanly.
 ///
