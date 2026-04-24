@@ -183,3 +183,88 @@ async fn pagination_and_neighbor_deduplication() {
         .count();
     assert_eq!(n2_count, 1, "neighbor should appear exactly once");
 }
+
+#[tokio::test]
+async fn bulk_crud_and_bulk_query_endpoints_work() {
+    let (client, db) = client_with_db();
+
+    let (status, body) = post_query(
+        &client,
+        &json!({
+            "operation": "bulk_create_nodes",
+            "nodes": [
+                { "label": "Person", "properties": { "name": "Alice" } },
+                { "label": "Person", "properties": { "name": "Bob" } }
+            ]
+        }),
+    )
+    .await;
+    assert_eq!(status, 200, "bulk_create_nodes failed: {body}");
+    let created = body["data"].as_array().expect("created array");
+    assert_eq!(created.len(), 2);
+    let alice_id = created[0]["id"].as_u64().expect("alice id");
+    let bob_id = created[1]["id"].as_u64().expect("bob id");
+
+    let (status, body) = post_query(
+        &client,
+        &json!({
+            "operation": "bulk_get_nodes",
+            "node_ids": [alice_id, bob_id, 999_999_u64]
+        }),
+    )
+    .await;
+    assert_eq!(status, 200, "bulk_get_nodes failed: {body}");
+    assert_eq!(body["data"]["nodes"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        body["data"]["missing_node_ids"].as_array().unwrap().len(),
+        1
+    );
+
+    let (status, body) = post_query(
+        &client,
+        &json!({
+            "operation": "bulk_update_nodes",
+            "updates": [
+                { "node_id": alice_id, "properties": { "name": "Alice Updated", "age": 30 } },
+                { "node_id": bob_id, "properties": { "name": "Bob Updated" } }
+            ]
+        }),
+    )
+    .await;
+    assert_eq!(status, 200, "bulk_update_nodes failed: {body}");
+    let updated = body["data"].as_array().unwrap();
+    assert_eq!(updated.len(), 2);
+    assert_eq!(updated[0]["properties"]["name"], "Alice Updated");
+
+    let (status, body) = post_query(
+        &client,
+        &json!({
+            "operation": "bulk_execute_query",
+            "queries": [
+                { "query": "MATCH (n:Person) RETURN n" },
+                { "query": "MATCH (n:Person) WHERE n.name = \"Alice Updated\" RETURN n" }
+            ]
+        }),
+    )
+    .await;
+    assert_eq!(status, 200, "bulk_execute_query failed: {body}");
+    let grouped = body["data"].as_array().unwrap();
+    assert_eq!(grouped.len(), 2);
+    assert!(grouped[0]["rows"].as_array().unwrap().len() >= 2);
+
+    let (status, body) = post_query(
+        &client,
+        &json!({
+            "operation": "bulk_delete_nodes",
+            "node_ids": [alice_id, bob_id]
+        }),
+    )
+    .await;
+    assert_eq!(status, 200, "bulk_delete_nodes failed: {body}");
+    assert_eq!(body["data"]["deleted_count"], 2);
+
+    assert!(
+        db.get_node(aletheiadb::core::NodeId::new(alice_id).unwrap())
+            .is_err()
+    );
+}
