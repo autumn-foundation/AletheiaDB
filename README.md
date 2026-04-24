@@ -66,7 +66,7 @@ just test
 > Add this to your `Cargo.toml` to use them:
 > ```toml
 > [dependencies]
-> aletheiadb = { version = "0.1", features = ["nova"] }
+> aletheiadb = { version = "0.1", features = ["semantic-temporal"] }
 > ```
 >
 > If you see a compiler error saying "unresolved import" or "item is gated behind the `nova` feature", this is why!
@@ -580,25 +580,25 @@ for (node_id, drift_score) in drifted_nodes {
 
 ### Narrative Generation (Experimental)
 
-> ⚠️ **IMPORTANT: REQUIRES FEATURE 'NOVA'**
+> ⚠️ **IMPORTANT: REQUIRES FEATURE 'SEMANTIC-TEMPORAL'**
 >
-> Experimental features like **Narrative Generation** require the `nova` feature flag.
+> Experimental features like **Narrative Generation** require the `semantic-temporal` feature flag.
 > **You MUST add this to your `Cargo.toml` or the code will not compile:**
 >
 > ```toml
 > [dependencies]
-> aletheiadb = { version = "0.1", features = ["nova"] }
+> aletheiadb = { version = "0.1", features = ["semantic-temporal"] }
 > ```
 >
 > Run the demo:
 > ```bash
-> cargo run --example story_demo --features nova
+> cargo run --example story_demo --features semantic-temporal
 > ```
 
 ```rust
-// ⚠️ REQUIRES FEATURE: nova
+// ⚠️ REQUIRES FEATURE: semantic-temporal
 // [dependencies]
-// aletheiadb = { version = "0.1", features = ["nova"] }
+// aletheiadb = { version = "0.1", features = ["semantic-temporal"] }
 
 use aletheiadb::prelude::*;
 use aletheiadb::experimental::temporal_narrative::NarrativeGenerator;
@@ -1005,7 +1005,7 @@ See `docs/adr/` for all architectural decisions.
 **Other Examples:**
 - `examples/observability_demo.rs` - Production observability features
 - `examples/doctor_who_demo.rs` - Temporal graph modeling example
-- `examples/story_demo.rs` - Narrative generation example (Run: `cargo run --example story_demo --features nova`)
+- `examples/story_demo.rs` - Narrative generation example (Run: `cargo run --example story_demo --features semantic-temporal`)
 
 ## Use Cases
 
