@@ -346,3 +346,14 @@
 **Finding:** The `LimitPushdown` tests originally missed several behavioral edge cases and logic checks, particularly regarding the propagation limits in BinaryOp combinations (`||`), updating limit values correctly against child bounds, and setting vector rank limits.
 **Evidence:** `cargo mutants` caught mutants in `LimitPushdown::push_down` specifically targeting the changed boolean condition logic and bounds assignment.
 **Recommendation:** Added `sentry_tests` to `LimitPushdown` that explicitly trigger tests enforcing the boolean change propagation, verifying that updated properties reflect correct nested limits, and vector bounds assignment. Tests now prevent `||` to `&&` mutations and correct top-k modifications.
+**[LimitPushdown Test Audit]**
+**Module:** src::query::planner::rules::limit_pushdown
+**Severity:** 🔴 Critical
+**Finding:** A pattern of weak assertions and missing edge case coverage. Tests were using `assert!(result.is_none())` or `assert!(result.is_some())` rather than `assert_eq!`, meaning they proved existence of a change, but not that the change was correct. The tests also did not assert anything about the plan structure without manually unrolling enums, making them hard to read and prone to missing structural errors.
+**Evidence:**
+- `cargo mutants` run discovered several viable mutations around `changed || effective_limit != *n` and `input_changed || new_top_k != *top_k`.
+- Review of test implementations revealed broad use of `is_some()` and manual `unwrap()` chains rather than testing output equivalence structurally.
+**Recommendation:**
+- Replace `is_none()` and `is_some()` with `assert_eq!`.
+- Construct explicit expected `LogicalPlan` trees to test `is_some()` cases (like `test_combine_consecutive_limits` and `test_propagate_limit_to_vector_rank`).
+- Add tests to trigger `changed=true` but limit doesn't change, and `input_changed=true` but `top_k` doesn't change to satisfy the boolean conditions.

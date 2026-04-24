@@ -255,20 +255,11 @@ mod tests {
         ));
 
         let result = rule.apply(&plan, &stats).unwrap();
-        assert!(result.is_some());
-
-        let new_plan = result.unwrap();
-        // Should be Limit(5, Scan) - no nested limit
-        match &new_plan.root {
-            LogicalOp::Unary {
-                op: UnaryOp::Limit(n),
-                input,
-            } => {
-                assert_eq!(*n, 5);
-                assert!(matches!(input.as_ref(), LogicalOp::Scan(_)));
-            }
-            _ => panic!("Expected Limit"),
-        }
+        let expected_plan = LogicalPlan::new(LogicalOp::unary(
+            UnaryOp::Limit(5),
+            LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(1).unwrap()])),
+        ));
+        assert_eq!(result, Some(expected_plan));
     }
 
     #[test]
@@ -290,25 +281,18 @@ mod tests {
         ));
 
         let result = rule.apply(&plan, &stats).unwrap();
-        assert!(result.is_some());
-
-        let new_plan = result.unwrap();
-        // VectorRank should have top_k=5 now
-        match &new_plan.root {
-            LogicalOp::Unary {
-                op: UnaryOp::Limit(_),
-                input,
-            } => match input.as_ref() {
-                LogicalOp::Unary {
-                    op: UnaryOp::VectorRank { top_k, .. },
-                    ..
-                } => {
-                    assert_eq!(*top_k, Some(5));
-                }
-                _ => panic!("Expected VectorRank"),
-            },
-            _ => panic!("Expected Limit"),
-        }
+        let expected_plan = LogicalPlan::new(LogicalOp::unary(
+            UnaryOp::Limit(5),
+            LogicalOp::unary(
+                UnaryOp::VectorRank {
+                    embedding: Arc::from([0.1f32; 4].as_slice()),
+                    top_k: Some(5),
+                    property_key: None,
+                },
+                LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(1).unwrap()])),
+            ),
+        ));
+        assert_eq!(result, Some(expected_plan));
     }
 
     #[test]
@@ -322,7 +306,7 @@ mod tests {
         ));
 
         let result = rule.apply(&plan, &stats).unwrap();
-        assert!(result.is_none()); // No change needed
+        assert_eq!(result, None); // No change needed
     }
 
     #[test]
@@ -345,7 +329,7 @@ mod tests {
         ));
 
         let result = rule.apply(&plan, &stats).unwrap();
-        assert!(result.is_none()); // We shouldn't push the limit down through a filter
+        assert_eq!(result, None); // We shouldn't push the limit down through a filter
     }
 
     #[test]
@@ -364,7 +348,17 @@ mod tests {
         ));
 
         let result = rule.apply(&plan, &stats).unwrap();
-        assert!(result.is_some());
+        let expected_plan = LogicalPlan::new(LogicalOp::unary(
+            UnaryOp::Limit(5),
+            LogicalOp::unary(
+                UnaryOp::Project(vec!["name".to_string()]),
+                LogicalOp::unary(
+                    UnaryOp::Limit(5),
+                    LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(1).unwrap()])),
+                ),
+            ),
+        ));
+        assert_eq!(result, Some(expected_plan));
     }
 
     #[test]
@@ -386,7 +380,7 @@ mod tests {
             ),
         ));
         let result = rule.apply(&plan, &stats).unwrap();
-        assert!(result.is_none());
+        assert_eq!(result, None);
     }
 
     #[test]
@@ -405,7 +399,15 @@ mod tests {
             LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(2).unwrap()])),
         ));
         let result = rule.apply(&plan, &stats).unwrap();
-        assert!(result.is_some());
+        let expected_plan = LogicalPlan::new(LogicalOp::binary(
+            crate::query::plan::BinaryOp::Union,
+            LogicalOp::unary(
+                UnaryOp::Limit(10),
+                LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(1).unwrap()])),
+            ),
+            LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(2).unwrap()])),
+        ));
+        assert_eq!(result, Some(expected_plan));
     }
 
     #[test]
@@ -424,7 +426,7 @@ mod tests {
             ),
         ));
         let result = rule.apply(&plan, &stats).unwrap();
-        assert!(result.is_none());
+        assert_eq!(result, None);
     }
 
     #[test]
@@ -446,7 +448,7 @@ mod tests {
         ));
 
         let result = rule.apply(&plan, &stats).unwrap();
-        assert!(result.is_none()); // Sort requires all elements to sort them before limiting
+        assert_eq!(result, None); // Sort requires all elements to sort them before limiting
     }
 }
 
@@ -541,5 +543,81 @@ mod sentry_tests {
         } else {
             panic!("Expected VectorRank");
         }
+    }
+
+    #[test]
+    fn test_limit_over_changing_child() {
+        let rule = LimitPushdown;
+
+        // Limit(5, Project(Limit(10, Scan))) -> Limit(5, Project(Limit(5, Scan)))
+        // In this case, for the top limit:
+        // * effective_limit = min(None, 5) = 5
+        // * input is Project(Limit(10, Scan))
+        // * input_changed = true (because Limit(10) shrinks to Limit(5))
+        // * effective_limit == *n (5 == 5)
+        // But changed MUST be true because input_changed is true.
+        let op = LogicalOp::unary(
+            UnaryOp::Limit(5),
+            LogicalOp::unary(
+                UnaryOp::Project(vec!["name".to_string()]),
+                LogicalOp::unary(
+                    UnaryOp::Limit(10),
+                    LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(1).unwrap()])),
+                ),
+            ),
+        );
+
+        let (new_op, changed) = rule.push_down(&op, None).unwrap();
+        assert!(changed, "Expected changed=true because child optimized");
+
+        let expected_op = LogicalOp::unary(
+            UnaryOp::Limit(5),
+            LogicalOp::unary(
+                UnaryOp::Project(vec!["name".to_string()]),
+                LogicalOp::unary(
+                    UnaryOp::Limit(5),
+                    LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(1).unwrap()])),
+                ),
+            ),
+        );
+        assert_eq!(new_op, expected_op);
+    }
+
+    #[test]
+    fn test_vector_rank_over_changing_child() {
+        let rule = LimitPushdown;
+
+        // VectorRank(top_k=5, Limit(10, Limit(20, Scan))) -> VectorRank(top_k=5, Limit(10, Scan))
+        // Top K doesn't change, but input changes because consecutive limits combine.
+        let op = LogicalOp::unary(
+            UnaryOp::VectorRank {
+                embedding: vec![0.1f32].into(),
+                top_k: Some(5),
+                property_key: None,
+            },
+            LogicalOp::unary(
+                UnaryOp::Limit(10),
+                LogicalOp::unary(
+                    UnaryOp::Limit(20),
+                    LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(1).unwrap()])),
+                ),
+            ),
+        );
+
+        let (new_op, changed) = rule.push_down(&op, Some(5)).unwrap();
+        assert!(changed, "Expected changed=true because child optimized");
+
+        let expected_op = LogicalOp::unary(
+            UnaryOp::VectorRank {
+                embedding: vec![0.1f32].into(),
+                top_k: Some(5),
+                property_key: None,
+            },
+            LogicalOp::unary(
+                UnaryOp::Limit(10),
+                LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(1).unwrap()])),
+            ),
+        );
+        assert_eq!(new_op, expected_op);
     }
 }
