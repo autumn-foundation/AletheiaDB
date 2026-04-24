@@ -2198,4 +2198,37 @@ mod sentry_tests {
             msg
         );
     }
+
+    #[test]
+    fn test_sentry_deserialize_node_id_invalid() {
+        // 🛡️ Sentry Test: Verify deserialize_node_id safely rejects invalid IDs (e.g., u64::MAX)
+        // instead of panicking or silently returning incorrect IDs.
+        let mut buffer = Vec::new();
+        buffer.extend_from_slice(&u64::MAX.to_le_bytes()); // Invalid ID
+
+        let result = super::deserialize_node_id(&buffer, 0, "TestContext");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        if let Error::Storage(StorageError::CorruptedData(msg)) = err {
+            assert!(msg.contains("Invalid node ID in WAL TestContext"));
+        } else {
+            panic!("Expected CorruptedData error, got {:?}", err);
+        }
+    }
+
+    #[test]
+    fn test_sentry_deserialize_node_id_out_of_bounds() {
+        // 🛡️ Sentry Test: Verify deserialize_node_id safely rejects out-of-bounds offset
+        // instead of panicking.
+        let buffer = vec![0u8; 4]; // Only 4 bytes
+
+        let result = super::deserialize_node_id(&buffer, 0, "TestContext");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        if let Error::Storage(StorageError::CorruptedData(msg)) = err {
+            assert!(msg.contains("Insufficient buffer size for NodeId in TestContext"));
+        } else {
+            panic!("Expected CorruptedData error, got {:?}", err);
+        }
+    }
 }
