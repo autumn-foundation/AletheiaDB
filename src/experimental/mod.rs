@@ -17,7 +17,7 @@
 //! - 🚩 **Opt-in**: You must explicitly enable them.
 //!
 //! Once a category proves itself, it graduates to a top-level stable feature
-//! (see `crate::semantic_search` for the first graduation).
+//! (see [crate::semantic_search] for the first graduation).
 //!
 //! # Enabling Nova
 //!
