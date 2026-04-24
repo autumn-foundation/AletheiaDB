@@ -11,37 +11,23 @@
 
 use std::sync::Arc;
 
-use aletheiadb::config::{AletheiaDBConfig, WalConfigBuilder};
 use aletheiadb::core::PropertyMapBuilder;
 use aletheiadb::http::{AppState, ServerConfig, build_test_router};
-use aletheiadb::storage::index_persistence::PersistenceConfig;
-use aletheiadb::storage::wal::DurabilityMode;
-use aletheiadb::{AletheiaDB, NodeId};
+use aletheiadb::{AletheiaDB, AletheiaDBConfig, NodeId};
 use autumn_web::test::TestApp;
 use serde_json::{Value, json};
 
-/// Build a unified config that matches what `run_server` constructs when
-/// `ServerConfig::data_dir` is `Some(_)`. Kept in sync with
-/// `src/http/server.rs::build_database` — if that shape drifts, this test
-/// should drift with it.
+/// Build the unified config the production server would use for this
+/// `data_dir`. Delegating to `ServerConfig::to_unified_config` instead of
+/// hand-rolling the builder call is the whole point of that method —
+/// otherwise this helper would drift out of sync with the real wiring
+/// in `src/http/server.rs::build_database`.
 fn unified_config(data_dir: &std::path::Path) -> AletheiaDBConfig {
-    AletheiaDBConfig::builder()
-        .wal(
-            WalConfigBuilder::new()
-                .wal_dir(data_dir.join("wal"))
-                .durability_mode(DurabilityMode::GroupCommit {
-                    max_delay_ms: 10,
-                    max_batch_size: 200,
-                })
-                .build(),
-        )
-        .persistence(PersistenceConfig {
-            enabled: true,
-            data_dir: data_dir.join("indexes"),
-            load_on_startup: true,
-            ..Default::default()
-        })
+    ServerConfig::builder()
+        .data_dir(data_dir)
         .build()
+        .to_unified_config()
+        .expect("data_dir set => Some(config)")
 }
 
 #[tokio::test]

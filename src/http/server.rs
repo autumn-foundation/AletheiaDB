@@ -167,41 +167,16 @@ pub async fn run_server(config: ServerConfig) -> std::io::Result<()> {
 
 /// Construct the [`AletheiaDB`] instance the HTTP server will share.
 ///
-/// When [`ServerConfig::data_dir`] is `Some(path)`, durable storage is wired
-/// up: WAL (GroupCommit durability, 10ms / 200-op batching) under
-/// `{path}/wal` and index persistence under `{path}/indexes`. Both
-/// directories are created by [`AletheiaDB::with_unified_config`] if
-/// they don't exist. When `data_dir` is `None`, the database is in-memory
-/// and state is lost on shutdown (useful for demos and tests).
+/// Delegates to [`ServerConfig::to_unified_config`] — `None` means
+/// in-memory, `Some(cfg)` means durable WAL + index persistence. Keeping
+/// the config construction on `ServerConfig` itself means integration
+/// tests exercise the identical config shape the production binary uses
+/// (no hand-maintained duplicate to drift out of sync).
 fn build_database(config: &ServerConfig) -> std::io::Result<AletheiaDB> {
-    use crate::config::{AletheiaDBConfig, WalConfigBuilder};
-    use crate::storage::index_persistence::PersistenceConfig;
-    use crate::storage::wal::DurabilityMode;
-
-    match config.data_dir() {
+    match config.to_unified_config() {
         None => AletheiaDB::new().map_err(|e| std::io::Error::other(e.to_string())),
-        Some(data_dir) => {
-            let unified = AletheiaDBConfig::builder()
-                .wal(
-                    WalConfigBuilder::new()
-                        .wal_dir(data_dir.join("wal"))
-                        .durability_mode(DurabilityMode::GroupCommit {
-                            max_delay_ms: 10,
-                            max_batch_size: 200,
-                        })
-                        .build(),
-                )
-                .persistence(PersistenceConfig {
-                    enabled: true,
-                    data_dir: data_dir.join("indexes"),
-                    load_on_startup: true,
-                    ..Default::default()
-                })
-                .build();
-
-            AletheiaDB::with_unified_config(unified)
-                .map_err(|e| std::io::Error::other(e.to_string()))
-        }
+        Some(unified) => AletheiaDB::with_unified_config(unified)
+            .map_err(|e| std::io::Error::other(e.to_string())),
     }
 }
 
