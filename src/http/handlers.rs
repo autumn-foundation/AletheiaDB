@@ -15,6 +15,7 @@
 //! }
 //! ```
 
+use crate::api::transaction::WriteOps;
 use crate::core::NodeId;
 use crate::http::converters::{
     interned_to_string, json_to_parameter_map, json_to_property_map, property_map_to_json,
@@ -37,6 +38,8 @@ use std::sync::Arc;
 const MAX_DEEP_PAGINATION: usize = 10_000;
 const MAX_NEIGHBOR_LIMIT: usize = 1_000;
 const MAX_EXEC_RESULTS: usize = 10_000;
+const MAX_BULK_ITEMS: usize = 1_000;
+const MAX_BULK_EXEC_TOTAL_ROWS: usize = 20_000;
 
 /// Health check response.
 #[derive(Debug, Serialize)]
@@ -75,6 +78,18 @@ pub enum QueryRequest {
         label: String,
         properties: Option<HashMap<String, Value>>,
     },
+    /// Create many nodes atomically in one transaction.
+    BulkCreateNodes { nodes: Vec<CreateNodeInput> },
+    /// Fetch many nodes by ID.
+    BulkGetNodes { node_ids: Vec<u64> },
+    /// Update many nodes atomically in one transaction.
+    BulkUpdateNodes { updates: Vec<UpdateNodeInput> },
+    /// Delete many nodes atomically in one transaction.
+    BulkDeleteNodes {
+        node_ids: Vec<u64>,
+        #[serde(default)]
+        cascade: bool,
+    },
     /// Find neighbors (either direction) of a node. Paginated, deduped.
     FindNeighbors {
         node_id: u64,
@@ -88,6 +103,29 @@ pub enum QueryRequest {
         query: String,
         parameters: Option<HashMap<String, Value>>,
     },
+    /// Execute many AQL queries in sequence and return per-query rows.
+    BulkExecuteQuery { queries: Vec<ExecuteQueryInput> },
+}
+
+/// Payload for node creation inside a bulk request.
+#[derive(Debug, Deserialize)]
+pub struct CreateNodeInput {
+    label: String,
+    properties: Option<HashMap<String, Value>>,
+}
+
+/// Payload for node update inside a bulk request.
+#[derive(Debug, Deserialize)]
+pub struct UpdateNodeInput {
+    node_id: u64,
+    properties: Option<HashMap<String, Value>>,
+}
+
+/// Payload for query execution inside a bulk request.
+#[derive(Debug, Deserialize)]
+pub struct ExecuteQueryInput {
+    query: String,
+    parameters: Option<HashMap<String, Value>>,
 }
 
 /// Wrapper for all JSON responses: `{ success: bool, data?: ..., error?: ... }`.
@@ -337,6 +375,200 @@ async fn handle_execute_query(
     .await
 }
 
+fn convert_node_for_response(node: crate::core::graph::Node) -> Result<Value, AletheiaHttpError> {
+    let props_json = property_map_to_json(&node.properties).map_err(AletheiaHttpError::Internal)?;
+    Ok(json!({
+        "id": node.id.as_u64(),
+        "label": interned_to_string(node.label),
+        "properties": props_json,
+    }))
+}
+
+fn validate_bulk_size<T>(items: &[T], name: &str) -> Result<(), AletheiaHttpError> {
+    if items.is_empty() {
+        return Err(AletheiaHttpError::BadRequest(format!(
+            "{name} cannot be empty"
+        )));
+    }
+    if items.len() > MAX_BULK_ITEMS {
+        return Err(AletheiaHttpError::BadRequest(format!(
+            "{name} exceeds max size of {MAX_BULK_ITEMS}"
+        )));
+    }
+    Ok(())
+}
+
+async fn handle_bulk_create_nodes(
+    db: Arc<crate::AletheiaDB>,
+    nodes: Vec<CreateNodeInput>,
+) -> Result<Value, AletheiaHttpError> {
+    validate_bulk_size(&nodes, "nodes")?;
+    blocking(move || {
+        let created_ids = db
+            .write(|tx| {
+                let mut ids = Vec::with_capacity(nodes.len());
+                for node in &nodes {
+                    let props = match &node.properties {
+                        Some(p) => json_to_property_map(p)
+                            .map_err(|e| crate::core::error::Error::other(e.to_string()))?,
+                        None => crate::core::PropertyMap::new(),
+                    };
+                    ids.push(tx.create_node(&node.label, props)?);
+                }
+                Ok::<_, crate::core::error::Error>(ids)
+            })
+            .map_err(|e| AletheiaHttpError::BadRequest(e.to_string()))?;
+
+        let mut created = Vec::with_capacity(created_ids.len());
+        for id in created_ids {
+            let node = db
+                .get_node(id)
+                .map_err(|e| AletheiaHttpError::Internal(e.to_string()))?;
+            created.push(convert_node_for_response(node)?);
+        }
+        Ok(Value::Array(created))
+    })
+    .await
+}
+
+async fn handle_bulk_get_nodes(
+    db: Arc<crate::AletheiaDB>,
+    node_ids: Vec<u64>,
+) -> Result<Value, AletheiaHttpError> {
+    validate_bulk_size(&node_ids, "node_ids")?;
+    blocking(move || {
+        let mut found = Vec::with_capacity(node_ids.len());
+        let mut missing = Vec::new();
+
+        for node_id in node_ids {
+            let nid =
+                NodeId::new(node_id).map_err(|e| AletheiaHttpError::BadRequest(e.to_string()))?;
+            match db.get_node(nid) {
+                Ok(node) => found.push(convert_node_for_response(node)?),
+                Err(_) => missing.push(node_id),
+            }
+        }
+
+        Ok(json!({
+            "nodes": found,
+            "missing_node_ids": missing,
+        }))
+    })
+    .await
+}
+
+async fn handle_bulk_update_nodes(
+    db: Arc<crate::AletheiaDB>,
+    updates: Vec<UpdateNodeInput>,
+) -> Result<Value, AletheiaHttpError> {
+    validate_bulk_size(&updates, "updates")?;
+    blocking(move || {
+        let updated_ids = db
+            .write(|tx| {
+                let mut ids = Vec::with_capacity(updates.len());
+                for update in &updates {
+                    let node_id = NodeId::new(update.node_id)?;
+                    let props = match &update.properties {
+                        Some(p) => json_to_property_map(p)
+                            .map_err(|e| crate::core::error::Error::other(e.to_string()))?,
+                        None => crate::core::PropertyMap::new(),
+                    };
+                    tx.update_node(node_id, props)?;
+                    ids.push(node_id);
+                }
+                Ok::<_, crate::core::error::Error>(ids)
+            })
+            .map_err(|e| AletheiaHttpError::BadRequest(e.to_string()))?;
+
+        let mut updated = Vec::with_capacity(updated_ids.len());
+        for id in updated_ids {
+            let node = db
+                .get_node(id)
+                .map_err(|e| AletheiaHttpError::Internal(e.to_string()))?;
+            updated.push(convert_node_for_response(node)?);
+        }
+        Ok(Value::Array(updated))
+    })
+    .await
+}
+
+async fn handle_bulk_delete_nodes(
+    db: Arc<crate::AletheiaDB>,
+    node_ids: Vec<u64>,
+    cascade: bool,
+) -> Result<Value, AletheiaHttpError> {
+    validate_bulk_size(&node_ids, "node_ids")?;
+    blocking(move || {
+        let deleted_count = db
+            .write(|tx| {
+                for node_id in &node_ids {
+                    let nid = NodeId::new(*node_id)?;
+                    if cascade {
+                        tx.delete_node_cascade(nid)?;
+                    } else {
+                        tx.delete_node(nid)?;
+                    }
+                }
+                Ok::<_, crate::core::error::Error>(node_ids.len())
+            })
+            .map_err(|e| AletheiaHttpError::BadRequest(e.to_string()))?;
+
+        Ok(json!({
+            "deleted_count": deleted_count,
+            "cascade": cascade,
+        }))
+    })
+    .await
+}
+
+async fn handle_bulk_execute_query(
+    db: Arc<crate::AletheiaDB>,
+    queries: Vec<ExecuteQueryInput>,
+) -> Result<Value, AletheiaHttpError> {
+    validate_bulk_size(&queries, "queries")?;
+    blocking(move || {
+        let mut all_results = Vec::with_capacity(queries.len());
+        let mut total_rows = 0usize;
+        for (idx, query_item) in queries.into_iter().enumerate() {
+            let parsed_query = if let Some(params_json) = query_item.parameters {
+                let params =
+                    json_to_parameter_map(&params_json).map_err(AletheiaHttpError::BadRequest)?;
+                parse_query_with_params(&query_item.query, params)
+                    .map_err(|e| AletheiaHttpError::QueryParse(e.to_string()))?
+            } else {
+                parse_query(&query_item.query).map_err(|e| classify_query_error(e.to_string()))?
+            };
+
+            let rows = db
+                .execute_query(parsed_query)
+                .map_err(|e| classify_query_error(e.to_string()))?
+                .take(MAX_EXEC_RESULTS)
+                .map(|row_result| {
+                    let row = row_result.map_err(|e| AletheiaHttpError::Internal(e.to_string()))?;
+                    query_row_to_json(row).map_err(AletheiaHttpError::Internal)
+                })
+                .collect::<Result<Vec<_>, AletheiaHttpError>>()?;
+
+            total_rows = total_rows.saturating_add(rows.len());
+            if total_rows > MAX_BULK_EXEC_TOTAL_ROWS {
+                return Err(AletheiaHttpError::BadRequest(format!(
+                    "Bulk query result budget exceeded at query {}: total rows {} > {}",
+                    idx + 1,
+                    total_rows,
+                    MAX_BULK_EXEC_TOTAL_ROWS
+                )));
+            }
+
+            all_results.push(json!({
+                "query": query_item.query,
+                "rows": rows,
+            }));
+        }
+        Ok(Value::Array(all_results))
+    })
+    .await
+}
+
 /// Heuristic: parser errors → 400, everything else → 500.
 fn classify_query_error(msg: String) -> AletheiaHttpError {
     let lowered = msg.to_lowercase();
@@ -360,6 +592,12 @@ pub async fn handle_query(
             handle_create_node(db, label, properties).await?
         }
         QueryRequest::GetNode { node_id } => handle_get_node(db, node_id).await?,
+        QueryRequest::BulkCreateNodes { nodes } => handle_bulk_create_nodes(db, nodes).await?,
+        QueryRequest::BulkGetNodes { node_ids } => handle_bulk_get_nodes(db, node_ids).await?,
+        QueryRequest::BulkUpdateNodes { updates } => handle_bulk_update_nodes(db, updates).await?,
+        QueryRequest::BulkDeleteNodes { node_ids, cascade } => {
+            handle_bulk_delete_nodes(db, node_ids, cascade).await?
+        }
         QueryRequest::FindNode {
             label,
             properties,
@@ -373,6 +611,9 @@ pub async fn handle_query(
         } => handle_find_neighbors(db, node_id, limit, offset).await?,
         QueryRequest::ExecuteQuery { query, parameters } => {
             handle_execute_query(db, query, parameters).await?
+        }
+        QueryRequest::BulkExecuteQuery { queries } => {
+            handle_bulk_execute_query(db, queries).await?
         }
     };
 
