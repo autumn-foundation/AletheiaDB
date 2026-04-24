@@ -1,3 +1,6 @@
 ## 2024-04-07 - [The Missing Documentation of the WAL internals]
 **Confusion:** Many core public functions and structures within the `src/storage/wal` submodules were completely undocumented. Since the internals of the Write-Ahead Log are deeply nuanced (stripe concurrency, lock-free allocations, background flush threads), a developer trying to extend or debug this sub-system would be met with an opaque wall of uncommented signatures.
 **Clarification:** I added structured `///` documentation for all un-commented public structs and functions across `stripe.rs`, `lsn_allocator.rs`, `ring_buffer.rs`, `flush_coordinator.rs`, `concurrent.rs`, `durability.rs`, and `group_commit.rs`. Specifically, I utilized the `# Why?` convention to articulate exactly why a particular structural unit or function is publicly exposed.
+## 2024-04-24 - [Intra-doc Links Broken for Cargo Doc]
+**Confusion:** The `experimental/mod.rs` documentation generated 5 broken intra-doc link warnings during `cargo doc` due to `#[warn(rustdoc::broken_intra_doc_links)]` and features not being directly resolvable when `cargo doc` doesn't build with all nested features.
+**Clarification:** Modified `[`crate::semantic_search`]` and other intra-doc links to use standard code formatting backticks `` `item` ``. This ensures code documentation retains formatting without breaking doc generation links.
