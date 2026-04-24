@@ -73,3 +73,7 @@
 **[Optimize Migration Candidates Vec Pre-allocation]**
 **Learning:** In `identify_node_candidates` and `identify_edge_candidates`, initializing `all_candidates` and `final_candidates` with `Vec::new()` causes unnecessary intermediate heap reallocations during large data migrations because the maximum required capacity is already known from the `versions` map and the filtered `all_candidates` vector.
 **Action:** Always pre-allocate vectors using `Vec::with_capacity(n)` when the target collection size or its upper bound is known in advance, particularly on hot paths like data migration.
+
+**[Optimize WAL segment parsing Vec Pre-allocation]**
+**Learning:** When parsing log entries from a memory-mapped WAL segment in `src/storage/wal/segment_reader.rs`, initializing the `entries` vector with `Vec::new()` causes unnecessary intermediate heap reallocations as the vector grows dynamically to accommodate thousands of entries.
+**Action:** Use `Vec::with_capacity(buffer.len() / 128)` when reading WAL segments, leveraging the known size of the memory-mapped buffer and the average entry size (roughly 128 bytes) to calculate a reasonable capacity hint upfront and eliminate reallocations.

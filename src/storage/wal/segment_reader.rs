@@ -274,7 +274,9 @@ pub fn read_segment_with_cipher(
     // Use the memory-mapped region as a byte slice
     let buffer = &mmap[..];
 
-    let mut entries = Vec::new();
+    // ⚡ Bolt Optimization: Pre-allocate vector capacity based on average WAL entry size (64-128 bytes)
+    // to prevent unnecessary heap reallocations when parsing entries from memory-mapped segments.
+    let mut entries = Vec::with_capacity(buffer.len() / 128);
 
     // Detect WAL format version
     let (version, mut offset) = if buffer.len() >= WAL_HEADER_SIZE && buffer[0..4] == WAL_MAGIC {
