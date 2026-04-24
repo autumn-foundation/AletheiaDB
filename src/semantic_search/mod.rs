@@ -34,7 +34,7 @@
 //! | [`telepathy`] | Spreading activation engine |
 //! | [`tapestry`] | Semantic path weaving |
 //! | [`horizon`] | Concept boundary / semantic event horizon |
-//! | [`mosaic`] | Compositional search (build target from a set of nodes) |
+//! | `mosaic` | Compositional search (build target from a set of nodes) |
 
 pub mod cartographer;
 pub mod chameleon;
