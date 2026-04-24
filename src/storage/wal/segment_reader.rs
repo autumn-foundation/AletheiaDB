@@ -274,7 +274,12 @@ pub fn read_segment_with_cipher(
     // Use the memory-mapped region as a byte slice
     let buffer = &mmap[..];
 
-    let mut entries = Vec::new();
+    // ⚡ Bolt Optimization: Pre-allocate `entries` Vec based on segment file size.
+    // Average entry size is roughly 64-128 bytes. Using a conservative estimate of
+    // 128 bytes per entry prevents ~19 reallocations (and data copies) for large 64MB segments,
+    // while keeping over-allocation minimal.
+    let capacity_hint = buffer.len() / 128;
+    let mut entries = Vec::with_capacity(capacity_hint);
 
     // Detect WAL format version
     let (version, mut offset) = if buffer.len() >= WAL_HEADER_SIZE && buffer[0..4] == WAL_MAGIC {
