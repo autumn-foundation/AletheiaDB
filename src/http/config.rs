@@ -159,19 +159,25 @@ pub struct ServerConfig {
     host: String,
     cors: CorsConfig,
     rate_limit: RateLimitConfig,
+    /// When `Some`, WAL + index persistence are written under this directory
+    /// so restarts preserve state. When `None`, the server runs on an in-memory
+    /// `AletheiaDB::new()` (useful for tests and ephemeral demos).
+    data_dir: Option<std::path::PathBuf>,
 }
 
 impl ServerConfig {
     /// Create a new server config with the specified port.
     ///
     /// Uses default host of "0.0.0.0" (all interfaces), restrictive CORS,
-    /// and default rate limiting (10 req/s, 20 burst).
+    /// default rate limiting (10 req/s, 20 burst), and **no** data directory
+    /// (database is in-memory).
     pub fn new(port: u16) -> Self {
         Self {
             port,
             host: "0.0.0.0".to_string(),
             cors: CorsConfig::default(),
             rate_limit: RateLimitConfig::default(),
+            data_dir: None,
         }
     }
 
@@ -195,6 +201,15 @@ impl ServerConfig {
         &self.rate_limit
     }
 
+    /// Get the configured data directory, if any.
+    ///
+    /// When `Some(path)`, the server will create `{path}/wal` and
+    /// `{path}/indexes` for durable storage. When `None`, the server runs
+    /// on an in-memory database.
+    pub fn data_dir(&self) -> Option<&std::path::Path> {
+        self.data_dir.as_deref()
+    }
+
     /// Get the bind address as "host:port".
     pub fn bind_address(&self) -> String {
         format!("{}:{}", self.host, self.port)
@@ -213,6 +228,7 @@ impl Default for ServerConfig {
             host: "0.0.0.0".to_string(),
             cors: CorsConfig::default(),
             rate_limit: RateLimitConfig::default(),
+            data_dir: None,
         }
     }
 }
@@ -224,6 +240,7 @@ pub struct ServerConfigBuilder {
     host: Option<String>,
     cors: Option<CorsConfig>,
     rate_limit: Option<RateLimitConfig>,
+    data_dir: Option<std::path::PathBuf>,
 }
 
 impl ServerConfigBuilder {
@@ -270,6 +287,16 @@ impl ServerConfigBuilder {
         self
     }
 
+    /// Set a data directory for durable WAL + index persistence.
+    ///
+    /// The server will create `{path}/wal` and `{path}/indexes` on startup.
+    /// If `None` (the default), the database is in-memory and everything is
+    /// lost on shutdown.
+    pub fn data_dir(mut self, path: impl Into<std::path::PathBuf>) -> Self {
+        self.data_dir = Some(path.into());
+        self
+    }
+
     /// Build the server configuration.
     pub fn build(self) -> ServerConfig {
         ServerConfig {
@@ -277,6 +304,7 @@ impl ServerConfigBuilder {
             host: self.host.unwrap_or_else(|| "0.0.0.0".to_string()),
             cors: self.cors.unwrap_or_default(),
             rate_limit: self.rate_limit.unwrap_or_default(),
+            data_dir: self.data_dir,
         }
     }
 }
