@@ -93,9 +93,31 @@ pub struct EntityHistory {
 }
 
 impl EntityHistory {
-    /// Returns the total number of versions in this entity's history.
+    /// Counts the total number of historical states recorded for this entity.
     ///
-    /// This is useful for understanding the update frequency or lifespan of a node or edge.
+    /// # Why?
+    /// Tracking the volume of versions is essential for understanding the volatility of a node or edge.
+    /// A high version count might indicate a frequently updated fact (like a stock price), while a count of 1
+    /// indicates a static fact. This helps downstream algorithms determine cache TTLs or trigger compaction.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::core::history::{EntityHistory, VersionInfo};
+    /// use aletheiadb::core::temporal::{BiTemporalInterval, time};
+    /// use aletheiadb::core::{VersionId, PropertyMap};
+    ///
+    /// let now = time::now();
+    /// let v1 = VersionInfo {
+    ///     version_number: 1,
+    ///     version_id: VersionId::new(1).unwrap(),
+    ///     temporal: BiTemporalInterval::current(now),
+    ///     properties: PropertyMap::new(),
+    ///     label: "Person".to_string(),
+    /// };
+    /// let history = EntityHistory { versions: vec![v1] };
+    /// assert_eq!(history.version_count(), 1);
+    /// ```
     /// A high version count might indicate a highly volatile fact, while a count of 1
     /// indicates a fact that has never been modified since its creation.
     ///
@@ -122,9 +144,13 @@ impl EntityHistory {
         self.versions.len()
     }
 
-    /// Returns the most recent version of this entity.
+    /// Retrieves the most recent active state of this entity.
     ///
-    /// Retrieves the latest state of the entity (the version with the highest `version_number`).
+    /// # Why?
+    /// In a bi-temporal database, querying the "current" state is the most common operation.
+    /// This method provides O(1) access to the latest valid state (highest `version_number`)
+    /// without requiring a full temporal scan. If the entity was logically deleted, this
+    /// points to the tombstone version.
     /// This is typically the active version, unless the entity has been logically deleted.
     /// Returns `None` if the history is completely empty.
     ///
@@ -151,9 +177,12 @@ impl EntityHistory {
         self.versions.last()
     }
 
-    /// Returns the initial version of this entity when it was first created.
+    /// Retrieves the original genesis state of this entity.
     ///
-    /// Retrieves the first state of the entity. This is useful for provenance tracking
+    /// # Why?
+    /// Accessing the genesis version is critical for data provenance and audit trails.
+    /// By comparing the `first_version()` to the `current_version()`, reasoning engines
+    /// can determine exactly how an entity's semantic embedding has drifted since its inception.
     /// to see how and when an entity originated.
     /// Returns `None` if the history is empty.
     ///
