@@ -59,7 +59,7 @@ use crate::http::state::AppState;
 ///
 /// | Name | Purpose | Default |
 /// |------|---------|---------|
-/// | `ALETHEIADB_PORT` | Listening port | `8080` |
+/// | `ALETHEIADB_PORT` | Listening port | `1963` (in honor of the first Doctor Who broadcast, 23 Nov 1963) |
 /// | `ALETHEIADB_HOST` | Bind address | `0.0.0.0` |
 /// | `ALETHEIADB_CORS_PERMISSIVE` | Allow any origin | `false` |
 /// | `ALETHEIADB_CORS_ORIGINS` | Comma-separated CORS allow-list | — |
@@ -81,14 +81,22 @@ pub async fn run_server(config: ServerConfig) -> std::io::Result<()> {
         .validate()
         .map_err(std::io::Error::other)?;
 
-    let db = Arc::new(AletheiaDB::new().map_err(|e| std::io::Error::other(e.to_string()))?);
+    let db = Arc::new(build_database(&config)?);
     let our_state = AppState::new(db);
-    let hook_state = our_state.clone();
+    let startup_state = our_state.clone();
+    let shutdown_state = our_state.clone();
+    let persist_on_shutdown = config.data_dir().is_some();
 
     eprintln!(
         "Starting AletheiaDB HTTP server on {}",
         config.bind_address()
     );
+    match config.data_dir() {
+        Some(path) => eprintln!("Data directory: {}", path.display()),
+        None => eprintln!(
+            "WARNING: no data directory configured — running in-memory; state is lost on shutdown."
+        ),
+    }
     if config.cors().is_permissive() {
         eprintln!(
             "WARNING: CORS is configured in permissive mode (any origin allowed). \
@@ -122,10 +130,32 @@ pub async fn run_server(config: ServerConfig) -> std::io::Result<()> {
 
     autumn_web::app()
         .on_startup(move |autumn_state| {
-            let installed = hook_state.clone();
+            let installed = startup_state.clone();
             async move {
                 autumn_state.insert_extension(installed);
                 Ok(())
+            }
+        })
+        // Graceful-shutdown checkpoint. Without this, SIGTERM leaves the
+        // string interner and index state behind at the last
+        // mutation-threshold snapshot (defaults: 500 new strings / 5-10
+        // minute cadence). A Docker-style stop/start workflow would lose
+        // label strings until a checkpoint happened organically, which
+        // manifests as `label: "<unknown:N>"` after restart. Flushing on
+        // shutdown makes restart semantics feel like postgres: stop, start,
+        // your data is exactly as you left it.
+        .on_shutdown(move || {
+            let db = shutdown_state.db_arc();
+            let should_persist = persist_on_shutdown;
+            async move {
+                if !should_persist {
+                    return;
+                }
+                match tokio::task::spawn_blocking(move || db.persist_indexes()).await {
+                    Ok(Ok(())) => eprintln!("Shutdown: indexes persisted."),
+                    Ok(Err(e)) => eprintln!("Shutdown: persist_indexes failed: {e}"),
+                    Err(e) => eprintln!("Shutdown: persist_indexes task panicked: {e}"),
+                }
             }
         })
         .routes(all_routes())
@@ -133,6 +163,21 @@ pub async fn run_server(config: ServerConfig) -> std::io::Result<()> {
         .await;
 
     Ok(())
+}
+
+/// Construct the [`AletheiaDB`] instance the HTTP server will share.
+///
+/// Delegates to [`ServerConfig::to_unified_config`] — `None` means
+/// in-memory, `Some(cfg)` means durable WAL + index persistence. Keeping
+/// the config construction on `ServerConfig` itself means integration
+/// tests exercise the identical config shape the production binary uses
+/// (no hand-maintained duplicate to drift out of sync).
+fn build_database(config: &ServerConfig) -> std::io::Result<AletheiaDB> {
+    match config.to_unified_config() {
+        None => AletheiaDB::new().map_err(|e| std::io::Error::other(e.to_string())),
+        Some(unified) => AletheiaDB::with_unified_config(unified)
+            .map_err(|e| std::io::Error::other(e.to_string())),
+    }
 }
 
 /// Set the `AUTUMN_SERVER__*` and `AUTUMN_CORS__*` environment variables
@@ -168,6 +213,16 @@ unsafe fn apply_autumn_env(config: &ServerConfig) {
             cors.get_allowed_headers().join(","),
         );
         std::env::set_var("AUTUMN_CORS__MAX_AGE_SECS", cors.get_max_age().to_string());
+
+        // Disable CSRF protection. autumn's `prod` profile enables it by
+        // default (appropriate for session-authenticated browser forms),
+        // but AletheiaDB's `/query` endpoint is a token-less JSON API —
+        // no sessions, no forms, nothing a cross-site POST could
+        // impersonate. CSRF protection adds no security here and only
+        // breaks legitimate POSTs. When the dashboard PR lands with
+        // session-backed routes, it should re-enable CSRF scoped to those
+        // routes rather than flipping this flag globally.
+        std::env::set_var("AUTUMN_SECURITY__CSRF__ENABLED", "false");
     }
 }
 

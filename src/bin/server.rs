@@ -6,7 +6,7 @@
 //! # Usage
 //!
 //! ```bash
-//! # Run with default settings (port 8080, restrictive CORS)
+//! # Run with default settings (port 1963, restrictive CORS)
 //! cargo run --bin aletheia-server --features http-server
 //!
 //! # Run with custom port
@@ -16,15 +16,18 @@
 //! ALETHEIADB_CORS_PERMISSIVE=true cargo run --bin aletheia-server --features http-server
 //!
 //! # Health check
-//! curl http://localhost:8080/status
+//! curl http://localhost:1963/status
 //! ```
 //!
 //! # Environment Variables
 //!
-//! - `ALETHEIADB_PORT`: Port to listen on (default: 8080)
+//! - `ALETHEIADB_PORT`: Port to listen on (default: 1963)
 //! - `ALETHEIADB_HOST`: Host to bind to (default: 0.0.0.0)
 //! - `ALETHEIADB_CORS_PERMISSIVE`: Set to "true" to allow any origin (default: false)
 //! - `ALETHEIADB_CORS_ORIGINS`: Comma-separated list of allowed origins
+//! - `ALETHEIADB_DATA_DIR`: Directory for WAL + index persistence. When set,
+//!   the server persists state across restarts. When unset, runs in-memory
+//!   (ephemeral — useful for demos, useless for production).
 //!
 //! # Endpoints
 //!
@@ -43,6 +46,7 @@
 
 use aletheiadb::http::{CorsConfig, ServerConfig, run_server};
 use std::env;
+use std::path::PathBuf;
 
 /// Parse port from environment variable with warning on invalid values.
 fn parse_port() -> u16 {
@@ -51,13 +55,13 @@ fn parse_port() -> u16 {
             Ok(port) => port,
             Err(e) => {
                 eprintln!(
-                    "WARNING: Invalid ALETHEIADB_PORT '{}': {}. Using default port 8080.",
+                    "WARNING: Invalid ALETHEIADB_PORT '{}': {}. Using default port 1963.",
                     port_str, e
                 );
-                8080
+                1963
             }
         },
-        Err(_) => 8080,
+        Err(_) => 1963,
     }
 }
 
@@ -94,17 +98,30 @@ fn parse_cors_config() -> CorsConfig {
     }
 }
 
+/// Parse the data directory env var into an optional `PathBuf`.
+///
+/// Unset or empty → `None` (in-memory mode). Any non-empty value is taken
+/// as a path literal; `AletheiaDB::with_unified_config` creates the directory
+/// structure on startup.
+fn parse_data_dir() -> Option<PathBuf> {
+    env::var("ALETHEIADB_DATA_DIR")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .map(PathBuf::from)
+}
+
 #[autumn_web::main]
 async fn main() {
     let port = parse_port();
     let host = parse_host();
     let cors = parse_cors_config();
+    let data_dir = parse_data_dir();
 
-    let config = ServerConfig::builder()
-        .port(port)
-        .host(host)
-        .cors(cors)
-        .build();
+    let mut builder = ServerConfig::builder().port(port).host(host).cors(cors);
+    if let Some(path) = data_dir {
+        builder = builder.data_dir(path);
+    }
+    let config = builder.build();
 
     if let Err(e) = run_server(config).await {
         eprintln!("aletheia-server failed: {e}");

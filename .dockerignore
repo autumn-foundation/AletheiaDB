@@ -1,0 +1,43 @@
+# Don't ship build artefacts, VCS metadata, or dev-only directories into the
+# Docker build context. This is the main lever for keeping `docker build`
+# fast and the builder image small.
+
+# Build output
+target/
+**/*.rs.bk
+
+# VCS
+.git/
+.gitignore
+.gitattributes
+
+# Worktrees — the whole point of `agents/` is parallel branches, and
+# shipping them into every image build would be catastrophic.
+agents/
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Claude / tooling metadata
+.claude/
+.jules/
+
+# Coverage artefacts
+*.profraw
+*.profdata
+*.lcov
+tarpaulin-report.*
+coverage/
+
+# Docker's own outputs shouldn't feed back in
+Dockerfile.*
+docker-compose.override.yml
+
+# Docs don't affect the binary
+docs/
+README.md
+CHANGELOG.md
+TESTING.md

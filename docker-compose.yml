@@ -1,0 +1,37 @@
+# AletheiaDB local dev stack — `docker compose up -d` to get a persistent
+# graph database listening on localhost:1963, in the same shape as
+# `postgres:16` behind a named volume.
+#
+# Named volume keeps WAL + indexes between `docker compose down` runs; use
+# `docker compose down -v` to wipe.
+
+services:
+  aletheiadb:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: aletheiadb:dev
+    container_name: aletheiadb
+    restart: unless-stopped
+    ports:
+      - "${ALETHEIADB_HOST_PORT:-1963}:1963"
+    volumes:
+      - aletheiadb_data:/var/lib/aletheiadb
+    environment:
+      ALETHEIADB_PORT: "1963"
+      ALETHEIADB_HOST: "0.0.0.0"
+      ALETHEIADB_DATA_DIR: "/var/lib/aletheiadb"
+      # Override for remote clients during development. Leave unset (or set
+      # to false) for production — restrictive CORS is the default.
+      ALETHEIADB_CORS_PERMISSIVE: "${ALETHEIADB_CORS_PERMISSIVE:-false}"
+      ALETHEIADB_CORS_ORIGINS: "${ALETHEIADB_CORS_ORIGINS:-}"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "--show-error", "http://127.0.0.1:1963/status"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+
+volumes:
+  aletheiadb_data:
+    name: aletheiadb_data

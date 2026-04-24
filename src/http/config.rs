@@ -159,19 +159,25 @@ pub struct ServerConfig {
     host: String,
     cors: CorsConfig,
     rate_limit: RateLimitConfig,
+    /// When `Some`, WAL + index persistence are written under this directory
+    /// so restarts preserve state. When `None`, the server runs on an in-memory
+    /// `AletheiaDB::new()` (useful for tests and ephemeral demos).
+    data_dir: Option<std::path::PathBuf>,
 }
 
 impl ServerConfig {
     /// Create a new server config with the specified port.
     ///
     /// Uses default host of "0.0.0.0" (all interfaces), restrictive CORS,
-    /// and default rate limiting (10 req/s, 20 burst).
+    /// default rate limiting (10 req/s, 20 burst), and **no** data directory
+    /// (database is in-memory).
     pub fn new(port: u16) -> Self {
         Self {
             port,
             host: "0.0.0.0".to_string(),
             cors: CorsConfig::default(),
             rate_limit: RateLimitConfig::default(),
+            data_dir: None,
         }
     }
 
@@ -195,6 +201,61 @@ impl ServerConfig {
         &self.rate_limit
     }
 
+    /// Get the configured data directory, if any.
+    ///
+    /// When `Some(path)`, the server will create `{path}/wal` and
+    /// `{path}/indexes` for durable storage. When `None`, the server runs
+    /// on an in-memory database.
+    pub fn data_dir(&self) -> Option<&std::path::Path> {
+        self.data_dir.as_deref()
+    }
+
+    /// Materialize the [`AletheiaDBConfig`] this server config implies.
+    ///
+    /// Returns `None` when no [`data_dir`](Self::data_dir) is set — that
+    /// signals in-memory mode, and the caller should construct the DB via
+    /// [`AletheiaDB::new`](crate::AletheiaDB::new) instead.
+    ///
+    /// Returns `Some(cfg)` with WAL (GroupCommit durability, 10ms /
+    /// 200-op batching) under `{data_dir}/wal` and index persistence
+    /// under `{data_dir}/indexes` when a data directory is configured.
+    /// Both subdirectories are created on startup by
+    /// [`AletheiaDB::with_unified_config`](crate::AletheiaDB::with_unified_config).
+    ///
+    /// The durability parameters are intentionally not exposed as
+    /// per-server-binary env vars: library consumers that need to tune
+    /// them build their own [`AletheiaDBConfig`] directly via
+    /// [`AletheiaDBConfig::builder`](crate::AletheiaDBConfig::builder).
+    /// The server binary uses conservative production-safe defaults.
+    #[must_use]
+    pub fn to_unified_config(&self) -> Option<crate::AletheiaDBConfig> {
+        use crate::config::{AletheiaDBConfig, WalConfigBuilder};
+        use crate::storage::index_persistence::PersistenceConfig;
+        use crate::storage::wal::DurabilityMode;
+
+        let data_dir = self.data_dir.as_deref()?;
+
+        Some(
+            AletheiaDBConfig::builder()
+                .wal(
+                    WalConfigBuilder::new()
+                        .wal_dir(data_dir.join("wal"))
+                        .durability_mode(DurabilityMode::GroupCommit {
+                            max_delay_ms: 10,
+                            max_batch_size: 200,
+                        })
+                        .build(),
+                )
+                .persistence(PersistenceConfig {
+                    enabled: true,
+                    data_dir: data_dir.join("indexes"),
+                    load_on_startup: true,
+                    ..Default::default()
+                })
+                .build(),
+        )
+    }
+
     /// Get the bind address as "host:port".
     pub fn bind_address(&self) -> String {
         format!("{}:{}", self.host, self.port)
@@ -209,10 +270,11 @@ impl ServerConfig {
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
-            port: 8080,
+            port: 1963,
             host: "0.0.0.0".to_string(),
             cors: CorsConfig::default(),
             rate_limit: RateLimitConfig::default(),
+            data_dir: None,
         }
     }
 }
@@ -224,6 +286,7 @@ pub struct ServerConfigBuilder {
     host: Option<String>,
     cors: Option<CorsConfig>,
     rate_limit: Option<RateLimitConfig>,
+    data_dir: Option<std::path::PathBuf>,
 }
 
 impl ServerConfigBuilder {
@@ -255,7 +318,7 @@ impl ServerConfigBuilder {
     /// use aletheiadb::http::{ServerConfig, CorsConfig};
     ///
     /// let config = ServerConfig::builder()
-    ///     .port(8080)
+    ///     .port(1963)
     ///     .cors(CorsConfig::restrictive().allow_origin("https://myapp.com"))
     ///     .build();
     /// ```
@@ -270,13 +333,24 @@ impl ServerConfigBuilder {
         self
     }
 
+    /// Set a data directory for durable WAL + index persistence.
+    ///
+    /// The server will create `{path}/wal` and `{path}/indexes` on startup.
+    /// If `None` (the default), the database is in-memory and everything is
+    /// lost on shutdown.
+    pub fn data_dir(mut self, path: impl Into<std::path::PathBuf>) -> Self {
+        self.data_dir = Some(path.into());
+        self
+    }
+
     /// Build the server configuration.
     pub fn build(self) -> ServerConfig {
         ServerConfig {
-            port: self.port.unwrap_or(8080),
+            port: self.port.unwrap_or(1963),
             host: self.host.unwrap_or_else(|| "0.0.0.0".to_string()),
             cors: self.cors.unwrap_or_default(),
             rate_limit: self.rate_limit.unwrap_or_default(),
+            data_dir: self.data_dir,
         }
     }
 }
@@ -288,7 +362,7 @@ mod tests {
     #[test]
     fn test_default_config() {
         let config = ServerConfig::default();
-        assert_eq!(config.port(), 8080);
+        assert_eq!(config.port(), 1963);
         assert_eq!(config.host(), "0.0.0.0");
         assert!(!config.cors().is_permissive());
     }
@@ -309,8 +383,8 @@ mod tests {
 
     #[test]
     fn test_bind_address() {
-        let config = ServerConfig::builder().port(8080).host("localhost").build();
-        assert_eq!(config.bind_address(), "localhost:8080");
+        let config = ServerConfig::builder().port(1963).host("localhost").build();
+        assert_eq!(config.bind_address(), "localhost:1963");
     }
 
     #[test]
@@ -339,7 +413,7 @@ mod tests {
     #[test]
     fn test_builder_with_cors() {
         let config = ServerConfig::builder()
-            .port(8080)
+            .port(1963)
             .cors(CorsConfig::permissive())
             .build();
         assert!(config.cors().is_permissive());

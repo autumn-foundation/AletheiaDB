@@ -711,7 +711,7 @@ cargo run --bin aletheia -- edge create 1 2 KNOWS --properties '{"since":2024}'
 cargo run --bin aletheia -- traverse 1 KNOWS --direction both
 
 # Manage the HTTP server as a background daemon
-cargo run --bin aletheia -- daemon start --host 127.0.0.1 --port 8080
+cargo run --bin aletheia -- daemon start --host 127.0.0.1 --port 1963
 cargo run --bin aletheia -- daemon status
 cargo run --bin aletheia -- daemon stop
 ```
