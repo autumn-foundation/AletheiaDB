@@ -268,3 +268,41 @@ async fn bulk_crud_and_bulk_query_endpoints_work() {
             .is_err()
     );
 }
+
+#[tokio::test]
+async fn bulk_execute_query_enforces_total_row_budget() {
+    let (client, db) = client_with_db();
+
+    for i in 0..40_i64 {
+        db.create_node(
+            "BudgetTest",
+            aletheiadb::core::PropertyMapBuilder::new()
+                .insert("idx", i)
+                .build(),
+        )
+        .unwrap();
+    }
+
+    let mut queries = Vec::new();
+    for _ in 0..600 {
+        queries.push(json!({ "query": "MATCH (n:BudgetTest) RETURN n" }));
+    }
+
+    let (status, body) = post_query(
+        &client,
+        &json!({
+            "operation": "bulk_execute_query",
+            "queries": queries
+        }),
+    )
+    .await;
+
+    assert_eq!(status, 400, "expected request-level row budget rejection");
+    assert_eq!(body["success"], false);
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("result budget exceeded")
+    );
+}

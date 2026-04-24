@@ -39,6 +39,7 @@ const MAX_DEEP_PAGINATION: usize = 10_000;
 const MAX_NEIGHBOR_LIMIT: usize = 1_000;
 const MAX_EXEC_RESULTS: usize = 10_000;
 const MAX_BULK_ITEMS: usize = 1_000;
+const MAX_BULK_EXEC_TOTAL_ROWS: usize = 20_000;
 
 /// Health check response.
 #[derive(Debug, Serialize)]
@@ -527,7 +528,8 @@ async fn handle_bulk_execute_query(
     validate_bulk_size(&queries, "queries")?;
     blocking(move || {
         let mut all_results = Vec::with_capacity(queries.len());
-        for query_item in queries {
+        let mut total_rows = 0usize;
+        for (idx, query_item) in queries.into_iter().enumerate() {
             let parsed_query = if let Some(params_json) = query_item.parameters {
                 let params =
                     json_to_parameter_map(&params_json).map_err(AletheiaHttpError::BadRequest)?;
@@ -546,6 +548,16 @@ async fn handle_bulk_execute_query(
                     query_row_to_json(row).map_err(AletheiaHttpError::Internal)
                 })
                 .collect::<Result<Vec<_>, AletheiaHttpError>>()?;
+
+            total_rows = total_rows.saturating_add(rows.len());
+            if total_rows > MAX_BULK_EXEC_TOTAL_ROWS {
+                return Err(AletheiaHttpError::BadRequest(format!(
+                    "Bulk query result budget exceeded at query {}: total rows {} > {}",
+                    idx + 1,
+                    total_rows,
+                    MAX_BULK_EXEC_TOTAL_ROWS
+                )));
+            }
 
             all_results.push(json!({
                 "query": query_item.query,
