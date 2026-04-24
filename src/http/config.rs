@@ -224,7 +224,7 @@ impl ServerConfig {
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
-            port: 8080,
+            port: 1963,
             host: "0.0.0.0".to_string(),
             cors: CorsConfig::default(),
             rate_limit: RateLimitConfig::default(),
@@ -272,7 +272,7 @@ impl ServerConfigBuilder {
     /// use aletheiadb::http::{ServerConfig, CorsConfig};
     ///
     /// let config = ServerConfig::builder()
-    ///     .port(8080)
+    ///     .port(1963)
     ///     .cors(CorsConfig::restrictive().allow_origin("https://myapp.com"))
     ///     .build();
     /// ```
@@ -300,7 +300,7 @@ impl ServerConfigBuilder {
     /// Build the server configuration.
     pub fn build(self) -> ServerConfig {
         ServerConfig {
-            port: self.port.unwrap_or(8080),
+            port: self.port.unwrap_or(1963),
             host: self.host.unwrap_or_else(|| "0.0.0.0".to_string()),
             cors: self.cors.unwrap_or_default(),
             rate_limit: self.rate_limit.unwrap_or_default(),
@@ -316,7 +316,7 @@ mod tests {
     #[test]
     fn test_default_config() {
         let config = ServerConfig::default();
-        assert_eq!(config.port(), 8080);
+        assert_eq!(config.port(), 1963);
         assert_eq!(config.host(), "0.0.0.0");
         assert!(!config.cors().is_permissive());
     }
@@ -337,8 +337,8 @@ mod tests {
 
     #[test]
     fn test_bind_address() {
-        let config = ServerConfig::builder().port(8080).host("localhost").build();
-        assert_eq!(config.bind_address(), "localhost:8080");
+        let config = ServerConfig::builder().port(1963).host("localhost").build();
+        assert_eq!(config.bind_address(), "localhost:1963");
     }
 
     #[test]
@@ -367,7 +367,7 @@ mod tests {
     #[test]
     fn test_builder_with_cors() {
         let config = ServerConfig::builder()
-            .port(8080)
+            .port(1963)
             .cors(CorsConfig::permissive())
             .build();
         assert!(config.cors().is_permissive());

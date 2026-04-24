@@ -52,10 +52,10 @@ USER aletheia
 WORKDIR /var/lib/aletheiadb
 
 ENV ALETHEIADB_HOST=0.0.0.0 \
-    ALETHEIADB_PORT=8080 \
+    ALETHEIADB_PORT=1963 \
     ALETHEIADB_DATA_DIR=/var/lib/aletheiadb
 
-EXPOSE 8080
+EXPOSE 1963
 VOLUME ["/var/lib/aletheiadb"]
 
 HEALTHCHECK --interval=10s --timeout=3s --start-period=5s --retries=3 \

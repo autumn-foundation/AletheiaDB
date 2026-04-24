@@ -42,7 +42,7 @@ Currently, interacting with AletheiaDB requires either writing Rust code (embedd
 
 1.  **Global Flags**:
     -   `--host`: Server address (default: `127.0.0.1`).
-    -   `--port`: Server port (default: `8080`).
+    -   `--port`: Server port (default: `1963`).
     -   `--json`: Force JSON output for all commands.
 
 2.  **Commands**:

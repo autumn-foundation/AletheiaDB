@@ -81,7 +81,7 @@ async fn cors_headers_present() {
 
 #[tokio::test]
 async fn server_config_default_port() {
-    assert_eq!(ServerConfig::default().port(), 8080);
+    assert_eq!(ServerConfig::default().port(), 1963);
 }
 
 #[tokio::test]

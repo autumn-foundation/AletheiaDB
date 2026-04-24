@@ -6,7 +6,7 @@
 //! # Usage
 //!
 //! ```bash
-//! # Run with default settings (port 8080, restrictive CORS)
+//! # Run with default settings (port 1963, restrictive CORS)
 //! cargo run --bin aletheia-server --features http-server
 //!
 //! # Run with custom port
@@ -16,12 +16,12 @@
 //! ALETHEIADB_CORS_PERMISSIVE=true cargo run --bin aletheia-server --features http-server
 //!
 //! # Health check
-//! curl http://localhost:8080/status
+//! curl http://localhost:1963/status
 //! ```
 //!
 //! # Environment Variables
 //!
-//! - `ALETHEIADB_PORT`: Port to listen on (default: 8080)
+//! - `ALETHEIADB_PORT`: Port to listen on (default: 1963)
 //! - `ALETHEIADB_HOST`: Host to bind to (default: 0.0.0.0)
 //! - `ALETHEIADB_CORS_PERMISSIVE`: Set to "true" to allow any origin (default: false)
 //! - `ALETHEIADB_CORS_ORIGINS`: Comma-separated list of allowed origins
@@ -55,13 +55,13 @@ fn parse_port() -> u16 {
             Ok(port) => port,
             Err(e) => {
                 eprintln!(
-                    "WARNING: Invalid ALETHEIADB_PORT '{}': {}. Using default port 8080.",
+                    "WARNING: Invalid ALETHEIADB_PORT '{}': {}. Using default port 1963.",
                     port_str, e
                 );
-                8080
+                1963
             }
         },
-        Err(_) => 8080,
+        Err(_) => 1963,
     }
 }
 

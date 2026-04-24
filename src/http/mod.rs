@@ -15,7 +15,7 @@
 //!
 //! #[autumn_web::main]
 //! async fn main() -> std::io::Result<()> {
-//!     let config = ServerConfig::builder().port(8080).build();
+//!     let config = ServerConfig::builder().port(1963).build();
 //!     run_server(config).await
 //! }
 //! ```

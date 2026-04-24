@@ -18,7 +18,7 @@ use aletheiadb::{
 const DEFAULT_PID_FILE: &str = ".aletheia/daemon.pid";
 const DEFAULT_LOG_FILE: &str = ".aletheia/daemon.log";
 const DEFAULT_HOST: &str = "127.0.0.1";
-const DEFAULT_PORT: u16 = 8080;
+const DEFAULT_PORT: u16 = 1963;
 const SERVER_BIN_NAME: &str = "aletheia-server";
 
 #[derive(Debug, Clone)]
@@ -463,7 +463,7 @@ fn ensure_parent_dir(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Extracts the value of a specific command-line flag (e.g., `--port 8080`).
+/// Extracts the value of a specific command-line flag (e.g., `--port 1963`).
 fn arg_value(args: &[String], flag: &str) -> Option<String> {
     let mut iter = args.iter();
     while let Some(token) = iter.next() {

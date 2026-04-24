@@ -59,7 +59,7 @@ use crate::http::state::AppState;
 ///
 /// | Name | Purpose | Default |
 /// |------|---------|---------|
-/// | `ALETHEIADB_PORT` | Listening port | `8080` |
+/// | `ALETHEIADB_PORT` | Listening port | `1963` (in honor of the first Doctor Who broadcast, 23 Nov 1963) |
 /// | `ALETHEIADB_HOST` | Bind address | `0.0.0.0` |
 /// | `ALETHEIADB_CORS_PERMISSIVE` | Allow any origin | `false` |
 /// | `ALETHEIADB_CORS_ORIGINS` | Comma-separated CORS allow-list | — |
