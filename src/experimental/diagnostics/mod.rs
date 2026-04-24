@@ -17,4 +17,6 @@ pub mod tremor;
 pub mod wormhole;
 
 // `paradox` is a stub awaiting revival — see CHANGELOG / ADR-0050.
+pub mod mirage;
+
 // pub mod paradox;
