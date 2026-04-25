@@ -465,38 +465,17 @@ mod tests {
         ));
 
         let result = rule.apply(&plan, &stats).unwrap();
-        assert!(result.is_some(), "Should reorder filters by selectivity");
-
-        let optimized = result.unwrap();
-        // The outermost filter should be the LESS selective one (rare_property)
-        // The innermost/deepest filter should be the MORE selective one (common_property)
-        match &optimized.root {
-            LogicalOp::Unary {
-                op: UnaryOp::Filter(predicate),
-                input,
-            } => {
-                // Root filter should be rare (less selective, applied last)
-                assert!(matches!(
-                    predicate,
-                    Predicate::Eq { key, .. } if key == "rare_property"
-                ));
-
-                // Inner filter should be common (more selective, applied first)
-                match input.as_ref() {
-                    LogicalOp::Unary {
-                        op: UnaryOp::Filter(inner_pred),
-                        ..
-                    } => {
-                        assert!(matches!(
-                            inner_pred,
-                            Predicate::Eq { key, .. } if key == "common_property"
-                        ));
-                    }
-                    _ => panic!("Expected inner filter"),
-                }
-            }
-            _ => panic!("Expected Filter at root"),
-        }
+        let expected_plan = LogicalPlan::new(LogicalOp::unary(
+            UnaryOp::Filter(Predicate::eq("rare_property", "value")),
+            LogicalOp::unary(
+                UnaryOp::Filter(Predicate::eq("common_property", "value")),
+                LogicalOp::Scan(ScanOp::NodeScan {
+                    label: None,
+                    estimated_rows: Some(1000),
+                }),
+            ),
+        ));
+        assert_eq!(result, Some(expected_plan));
     }
 
     #[test]
@@ -519,10 +498,7 @@ mod tests {
 
         let result = rule.apply(&plan, &stats).unwrap();
         // Should return None since already optimal
-        assert!(
-            result.is_none(),
-            "Should not reorder already optimal filters"
-        );
+        assert_eq!(result, None, "Should not reorder already optimal filters");
     }
 
     #[test]
@@ -550,7 +526,20 @@ mod tests {
         ));
 
         let result = rule.apply(&plan, &stats).unwrap();
-        assert!(result.is_some(), "Should reorder three filters");
+        let expected_plan = LogicalPlan::new(LogicalOp::unary(
+            UnaryOp::Filter(Predicate::eq("rare_property", "value")),
+            LogicalOp::unary(
+                UnaryOp::Filter(Predicate::eq("medium_property", "value")),
+                LogicalOp::unary(
+                    UnaryOp::Filter(Predicate::eq("common_property", "value")),
+                    LogicalOp::Scan(ScanOp::NodeScan {
+                        label: None,
+                        estimated_rows: Some(1000),
+                    }),
+                ),
+            ),
+        ));
+        assert_eq!(result, Some(expected_plan));
     }
 
     // ==================== Join Reordering Tests ====================

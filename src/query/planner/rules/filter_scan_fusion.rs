@@ -174,16 +174,12 @@ mod tests {
         ));
 
         let result = rule.apply(&plan, &stats).unwrap();
-        assert!(result.is_some(), "Should fuse Filter+NodeScan");
-
-        let new_plan = result.unwrap();
-        match &new_plan.root {
-            LogicalOp::Scan(ScanOp::PropertyScan { label, key, .. }) => {
-                assert_eq!(label, "Person");
-                assert_eq!(key, "name");
-            }
-            other => panic!("Expected PropertyScan, got {:?}", other),
-        }
+        let expected_plan = LogicalPlan::new(LogicalOp::Scan(ScanOp::PropertyScan {
+            label: "Person".to_string(),
+            key: "name".to_string(),
+            value: crate::query::ir::PredicateValue::String("Alice".to_string()),
+        }));
+        assert_eq!(result, Some(expected_plan));
     }
 
     #[test]
@@ -201,7 +197,7 @@ mod tests {
         ));
 
         let result = rule.apply(&plan, &stats).unwrap();
-        assert!(result.is_none(), "Should not fuse without label");
+        assert_eq!(result, None, "Should not fuse without label");
     }
 
     #[test]
@@ -219,7 +215,7 @@ mod tests {
         ));
 
         let result = rule.apply(&plan, &stats).unwrap();
-        assert!(result.is_none(), "Should not fuse non-Eq filter");
+        assert_eq!(result, None, "Should not fuse non-Eq filter");
     }
 
     #[test]
@@ -239,7 +235,30 @@ mod tests {
         .with_temporal_context(TemporalContext::default());
 
         let result = rule.apply(&plan, &stats).unwrap();
-        assert!(result.is_some());
-        assert!(result.unwrap().temporal_context.is_some());
+        let expected_plan = LogicalPlan::new(LogicalOp::Scan(ScanOp::PropertyScan {
+            label: "Person".to_string(),
+            key: "name".to_string(),
+            value: crate::query::ir::PredicateValue::String("Alice".to_string()),
+        }))
+        .with_temporal_context(TemporalContext::default());
+        assert_eq!(result, Some(expected_plan));
+    }
+
+    #[test]
+    fn test_no_fusion_internal_property() {
+        let rule = FilterScanFusion;
+        let stats = test_stats();
+
+        // NodeScan with a property starting with '_' - should not fuse
+        let plan = LogicalPlan::new(LogicalOp::unary(
+            UnaryOp::Filter(Predicate::eq("_internal", "Alice")),
+            LogicalOp::Scan(ScanOp::NodeScan {
+                label: Some("Person".to_string()),
+                estimated_rows: None,
+            }),
+        ));
+
+        let result = rule.apply(&plan, &stats).unwrap();
+        assert_eq!(result, None, "Should not fuse internal properties");
     }
 }

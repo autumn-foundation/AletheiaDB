@@ -296,7 +296,7 @@ mod tests {
         ));
 
         let result = rule.apply(&plan, &stats).unwrap();
-        assert!(result.is_none()); // No change needed
+        assert_eq!(result, None); // No change needed
     }
 
     #[test]
@@ -356,7 +356,7 @@ mod tests {
 
         let result = rule.apply(&plan, &stats).unwrap();
         // Should return None because pushdown was blocked
-        assert!(result.is_none());
+        assert_eq!(result, None);
     }
 
     #[test]
@@ -373,7 +373,7 @@ mod tests {
 
         let result = rule.apply(&plan, &stats).unwrap();
         // Should return None because pushdown was blocked by Scan
-        assert!(result.is_none());
+        assert_eq!(result, None);
     }
 
     #[test]
@@ -397,7 +397,7 @@ mod tests {
 
         let result = rule.apply(&plan, &stats).unwrap();
         // Should return None because pushdown was blocked
-        assert!(result.is_none());
+        assert_eq!(result, None);
     }
 
     #[test]
@@ -561,7 +561,7 @@ mod sentry_tests {
             NodeId::new(1).unwrap(),
         ])));
         let result = rule.apply(&plan, &stats).unwrap();
-        assert!(result.is_none());
+        assert_eq!(result, None);
     }
 
     #[test]
@@ -579,7 +579,17 @@ mod sentry_tests {
             ),
         ));
         let result = rule.apply(&plan, &stats).unwrap();
-        assert!(result.is_some());
+        let expected_plan = LogicalPlan::new(LogicalOp::unary(
+            UnaryOp::Sort {
+                key: SortKey::Property("a".to_string()),
+                descending: true,
+            },
+            LogicalOp::unary(
+                UnaryOp::Filter(Predicate::eq("a", 1)),
+                LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(1).unwrap()])),
+            ),
+        ));
+        assert_eq!(result, Some(expected_plan));
     }
 
     #[test]
@@ -601,7 +611,7 @@ mod sentry_tests {
 
         let result = rule.apply(&plan, &stats).unwrap();
         // Filter cannot push past Traverse
-        assert!(result.is_none());
+        assert_eq!(result, None);
     }
     #[test]
     fn test_pushdown_unsupported_unary_op() {
@@ -622,7 +632,7 @@ mod sentry_tests {
         // Since Filter is directly above Scan, it doesn't change.
         // Limit -> Filter -> Scan
         // push_down(Limit(Filter(Scan))) -> Limit(push_down(Filter(Scan))) -> Limit(Filter(Scan))
-        assert!(result.is_none());
+        assert_eq!(result, None);
 
         let plan2 = LogicalPlan::new(LogicalOp::unary(
             UnaryOp::Filter(Predicate::eq("a", 1)),
