@@ -18,9 +18,109 @@ fn matches_label(label_id: InternedString, label: &str) -> bool {
 }
 
 /// A node in the current state of the graph.
+/// By separating the "hot path" current state from the historical delta chains,
+/// AletheiaDB achieves zero-overhead traversals for current queries.
+///
+/// ## Examples
+///
+/// ```rust
+/// use aletheiadb::core::{Node, NodeId, VersionId, PropertyMapBuilder};
+/// use aletheiadb::core::interning::GLOBAL_INTERNER;
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let label = GLOBAL_INTERNER.intern("Person")?;
+/// let properties = PropertyMapBuilder::new().insert("name", "Alice").build();
+///
+/// let node = Node::new(
+///     NodeId::new(1).unwrap(),
+///     label,
+///     properties,
+///     VersionId::new(1).unwrap()
+/// );
+///
+/// assert_eq!(node.id, NodeId::new(1).unwrap());
+/// assert!(node.has_label_str("Person"));
+/// # Ok(())
+/// # }
+/// ```
 ///
 /// This represents the current version of a node, optimized for fast access.
 /// Historical versions are stored separately in the temporal storage layer.
+/// By separating the "hot path" current state from the historical delta chains,
+/// AletheiaDB achieves zero-overhead traversals for current queries.
+///
+/// ## Examples
+///
+/// ```rust
+/// use aletheiadb::core::{Node, NodeId, VersionId, PropertyMapBuilder};
+/// use aletheiadb::core::interning::GLOBAL_INTERNER;
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let label = GLOBAL_INTERNER.intern("Person")?;
+/// let properties = PropertyMapBuilder::new().insert("name", "Alice").build();
+///
+/// let node = Node::new(
+///     NodeId::new(1).unwrap(),
+///     label,
+///     properties,
+///     VersionId::new(1).unwrap()
+/// );
+///
+/// assert_eq!(node.id, NodeId::new(1).unwrap());
+/// assert!(node.has_label_str("Person"));
+/// # Ok(())
+/// # }
+/// ```
+/// By separating the "hot path" current state from the historical delta chains,
+/// AletheiaDB achieves zero-overhead traversals for current queries.
+///
+/// ## Examples
+///
+/// ```rust
+/// use aletheiadb::core::{Node, NodeId, VersionId, PropertyMapBuilder};
+/// use aletheiadb::core::interning::GLOBAL_INTERNER;
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let label = GLOBAL_INTERNER.intern("Person")?;
+/// let properties = PropertyMapBuilder::new().insert("name", "Alice").build();
+///
+/// let node = Node::new(
+///     NodeId::new(1).unwrap(),
+///     label,
+///     properties,
+///     VersionId::new(1).unwrap()
+/// );
+///
+/// assert_eq!(node.id, NodeId::new(1).unwrap());
+/// assert!(node.has_label_str("Person"));
+/// # Ok(())
+/// # }
+/// ```
+/// By separating the "hot path" current state from the historical delta chains,
+/// AletheiaDB achieves zero-overhead traversals for current queries.
+///
+/// ## Examples
+///
+/// ```rust
+/// use aletheiadb::core::{Node, NodeId, VersionId, PropertyMapBuilder};
+/// use aletheiadb::core::interning::GLOBAL_INTERNER;
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let label = GLOBAL_INTERNER.intern("Person")?;
+/// let properties = PropertyMapBuilder::new().insert("name", "Alice").build();
+///
+/// let node = Node::new(
+///     NodeId::new(1).unwrap(),
+///     label,
+///     properties,
+///     VersionId::new(1).unwrap()
+/// );
+///
+/// assert_eq!(node.id, NodeId::new(1).unwrap());
+/// assert!(node.has_label_str("Person"));
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Clone, PartialEq)]
 pub struct Node {
     /// Unique identifier for this node.
@@ -37,6 +137,160 @@ pub struct Node {
 
 impl Node {
     /// Create a new node with the given ID, label, and properties.
+    ///
+    /// This constructor is intended for creating fresh nodes or loading existing
+    /// nodes where explicit transaction metadata is not required. It automatically
+    /// assigns default (empty) `VersionMetadata`.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::core::{Node, NodeId, VersionId, PropertyMapBuilder};
+    /// use aletheiadb::core::interning::GLOBAL_INTERNER;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let label = GLOBAL_INTERNER.intern("Document")?;
+    /// let node = Node::new(
+    ///     NodeId::new(100).unwrap(),
+    ///     label,
+    ///     PropertyMapBuilder::new().build(),
+    ///     VersionId::new(1).unwrap()
+    /// );
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// This constructor is intended for creating fresh nodes or loading existing
+    /// nodes where explicit transaction metadata is not required. It automatically
+    /// assigns default (empty) `VersionMetadata`.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::core::{Node, NodeId, VersionId, PropertyMapBuilder};
+    /// use aletheiadb::core::interning::GLOBAL_INTERNER;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let label = GLOBAL_INTERNER.intern("Document")?;
+    /// let node = Node::new(
+    ///     NodeId::new(100).unwrap(),
+    ///     label,
+    ///     PropertyMapBuilder::new().build(),
+    ///     VersionId::new(1).unwrap()
+    /// );
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// This constructor is intended for creating fresh nodes or loading existing
+    /// nodes where explicit transaction metadata is not required. It automatically
+    /// assigns default (empty) `VersionMetadata`.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::core::{Node, NodeId, VersionId, PropertyMapBuilder};
+    /// use aletheiadb::core::interning::GLOBAL_INTERNER;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let label = GLOBAL_INTERNER.intern("Document")?;
+    /// let node = Node::new(
+    ///     NodeId::new(100).unwrap(),
+    ///     label,
+    ///     PropertyMapBuilder::new().build(),
+    ///     VersionId::new(1).unwrap()
+    /// );
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// This constructor is intended for creating fresh nodes or loading existing
+    /// nodes where explicit transaction metadata is not required. It automatically
+    /// assigns default (empty) `VersionMetadata`.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::core::{Node, NodeId, VersionId, PropertyMapBuilder};
+    /// use aletheiadb::core::interning::GLOBAL_INTERNER;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let label = GLOBAL_INTERNER.intern("Document")?;
+    /// let node = Node::new(
+    ///     NodeId::new(100).unwrap(),
+    ///     label,
+    ///     PropertyMapBuilder::new().build(),
+    ///     VersionId::new(1).unwrap()
+    /// );
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// This constructor is intended for creating fresh nodes or loading existing
+    /// nodes where explicit transaction metadata is not required. It automatically
+    /// assigns default (empty) `VersionMetadata`.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::core::{Node, NodeId, VersionId, PropertyMapBuilder};
+    /// use aletheiadb::core::interning::GLOBAL_INTERNER;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let label = GLOBAL_INTERNER.intern("Document")?;
+    /// let node = Node::new(
+    ///     NodeId::new(100).unwrap(),
+    ///     label,
+    ///     PropertyMapBuilder::new().build(),
+    ///     VersionId::new(1).unwrap()
+    /// );
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// This constructor is intended for creating fresh nodes or loading existing
+    /// nodes where explicit transaction metadata is not required. It automatically
+    /// assigns default (empty) `VersionMetadata`.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::core::{Node, NodeId, VersionId, PropertyMapBuilder};
+    /// use aletheiadb::core::interning::GLOBAL_INTERNER;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let label = GLOBAL_INTERNER.intern("Document")?;
+    /// let node = Node::new(
+    ///     NodeId::new(100).unwrap(),
+    ///     label,
+    ///     PropertyMapBuilder::new().build(),
+    ///     VersionId::new(1).unwrap()
+    /// );
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// This constructor is intended for creating fresh nodes or loading existing
+    /// nodes where explicit transaction metadata is not required. It automatically
+    /// assigns default (empty) `VersionMetadata`.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::core::{Node, NodeId, VersionId, PropertyMapBuilder};
+    /// use aletheiadb::core::interning::GLOBAL_INTERNER;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let label = GLOBAL_INTERNER.intern("Document")?;
+    /// let node = Node::new(
+    ///     NodeId::new(100).unwrap(),
+    ///     label,
+    ///     PropertyMapBuilder::new().build(),
+    ///     VersionId::new(1).unwrap()
+    /// );
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn new(
         id: NodeId,
         label: InternedString,
@@ -53,6 +307,216 @@ impl Node {
     }
 
     /// Create a new node with explicit metadata (for transactions).
+    ///
+    /// This constructor is crucial for the Write-Ahead Log (WAL) and recovery
+    /// subsystems, where nodes must carry exact transaction provenance (like
+    /// the `TxId` that created them) to uphold Snapshot Isolation.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::core::{Node, NodeId, VersionId, PropertyMapBuilder};
+    /// use aletheiadb::TxId;
+    /// use aletheiadb::core::temporal::Timestamp;
+    /// use aletheiadb::core::version::VersionMetadata;
+    /// use aletheiadb::core::interning::GLOBAL_INTERNER;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let label = GLOBAL_INTERNER.intern("User")?;
+    /// let metadata = VersionMetadata::new(TxId::new(42), Timestamp::from(100));
+    ///
+    /// let node = Node::with_metadata(
+    ///     NodeId::new(1).unwrap(),
+    ///     label,
+    ///     PropertyMapBuilder::new().build(),
+    ///     VersionId::new(1).unwrap(),
+    ///     metadata
+    /// );
+    ///
+    /// assert_eq!(node.metadata.created_by_tx, TxId::new(42));
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// This constructor is crucial for the Write-Ahead Log (WAL) and recovery
+    /// subsystems, where nodes must carry exact transaction provenance (like
+    /// the `TxId` that created them) to uphold Snapshot Isolation.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::core::{Node, NodeId, VersionId, PropertyMapBuilder};
+    /// use aletheiadb::TxId;
+    /// use aletheiadb::core::temporal::Timestamp;
+    /// use aletheiadb::core::version::VersionMetadata;
+    /// use aletheiadb::core::interning::GLOBAL_INTERNER;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let label = GLOBAL_INTERNER.intern("User")?;
+    /// let metadata = VersionMetadata::new(TxId::new(42), Timestamp::from(100));
+    ///
+    /// let node = Node::with_metadata(
+    ///     NodeId::new(1).unwrap(),
+    ///     label,
+    ///     PropertyMapBuilder::new().build(),
+    ///     VersionId::new(1).unwrap(),
+    ///     metadata
+    /// );
+    ///
+    /// assert_eq!(node.metadata.created_by_tx, TxId::new(42));
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// This constructor is crucial for the Write-Ahead Log (WAL) and recovery
+    /// subsystems, where nodes must carry exact transaction provenance (like
+    /// the `TxId` that created them) to uphold Snapshot Isolation.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::core::{Node, NodeId, VersionId, PropertyMapBuilder};
+    /// use aletheiadb::core::id::TxId;
+    /// use aletheiadb::core::temporal::Timestamp;
+    /// use aletheiadb::core::version::VersionMetadata;
+    /// use aletheiadb::core::interning::GLOBAL_INTERNER;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let label = GLOBAL_INTERNER.intern("User")?;
+    /// let metadata = VersionMetadata::new(TxId::new(42), Timestamp::from(100));
+    ///
+    /// let node = Node::with_metadata(
+    ///     NodeId::new(1).unwrap(),
+    ///     label,
+    ///     PropertyMapBuilder::new().build(),
+    ///     VersionId::new(1).unwrap(),
+    ///     metadata
+    /// );
+    ///
+    /// assert_eq!(node.metadata.created_by_tx, TxId::new(42));
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// This constructor is crucial for the Write-Ahead Log (WAL) and recovery
+    /// subsystems, where nodes must carry exact transaction provenance (like
+    /// the `TxId` that created them) to uphold Snapshot Isolation.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::core::{Node, NodeId, VersionId, PropertyMapBuilder};
+    /// use aletheiadb::TxId;
+    /// use aletheiadb::core::temporal::Timestamp;
+    /// use aletheiadb::core::version::VersionMetadata;
+    /// use aletheiadb::core::interning::GLOBAL_INTERNER;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let label = GLOBAL_INTERNER.intern("User")?;
+    /// let metadata = VersionMetadata::new(TxId::new(42), Timestamp::from(100));
+    ///
+    /// let node = Node::with_metadata(
+    ///     NodeId::new(1).unwrap(),
+    ///     label,
+    ///     PropertyMapBuilder::new().build(),
+    ///     VersionId::new(1).unwrap(),
+    ///     metadata
+    /// );
+    ///
+    /// assert_eq!(node.metadata.created_by_tx, TxId::new(42));
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// This constructor is crucial for the Write-Ahead Log (WAL) and recovery
+    /// subsystems, where nodes must carry exact transaction provenance (like
+    /// the `TxId` that created them) to uphold Snapshot Isolation.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::core::{Node, NodeId, VersionId, PropertyMapBuilder};
+    /// use aletheiadb::TxId;
+    /// use aletheiadb::core::temporal::Timestamp;
+    /// use aletheiadb::core::version::VersionMetadata;
+    /// use aletheiadb::core::interning::GLOBAL_INTERNER;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let label = GLOBAL_INTERNER.intern("User")?;
+    /// let metadata = VersionMetadata::new(TxId::new(42), Timestamp::from(100));
+    ///
+    /// let node = Node::with_metadata(
+    ///     NodeId::new(1).unwrap(),
+    ///     label,
+    ///     PropertyMapBuilder::new().build(),
+    ///     VersionId::new(1).unwrap(),
+    ///     metadata
+    /// );
+    ///
+    /// assert_eq!(node.metadata.created_by_tx, TxId::new(42));
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// This constructor is crucial for the Write-Ahead Log (WAL) and recovery
+    /// subsystems, where nodes must carry exact transaction provenance (like
+    /// the `TxId` that created them) to uphold Snapshot Isolation.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::core::{Node, NodeId, VersionId, PropertyMapBuilder};
+    /// use aletheiadb::TxId;
+    /// use aletheiadb::core::temporal::Timestamp;
+    /// use aletheiadb::core::version::VersionMetadata;
+    /// use aletheiadb::core::interning::GLOBAL_INTERNER;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let label = GLOBAL_INTERNER.intern("User")?;
+    /// let metadata = VersionMetadata::new(TxId::new(42), Timestamp::from(100));
+    ///
+    /// let node = Node::with_metadata(
+    ///     NodeId::new(1).unwrap(),
+    ///     label,
+    ///     PropertyMapBuilder::new().build(),
+    ///     VersionId::new(1).unwrap(),
+    ///     metadata
+    /// );
+    ///
+    /// assert_eq!(node.metadata.created_by_tx, TxId::new(42));
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// This constructor is crucial for the Write-Ahead Log (WAL) and recovery
+    /// subsystems, where nodes must carry exact transaction provenance (like
+    /// the `TxId` that created them) to uphold Snapshot Isolation.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::core::{Node, NodeId, VersionId, PropertyMapBuilder};
+    /// use aletheiadb::TxId;
+    /// use aletheiadb::core::temporal::Timestamp;
+    /// use aletheiadb::core::version::VersionMetadata;
+    /// use aletheiadb::core::interning::GLOBAL_INTERNER;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let label = GLOBAL_INTERNER.intern("User")?;
+    /// let metadata = VersionMetadata::new(TxId::new(42), Timestamp::from(100));
+    ///
+    /// let node = Node::with_metadata(
+    ///     NodeId::new(1).unwrap(),
+    ///     label,
+    ///     PropertyMapBuilder::new().build(),
+    ///     VersionId::new(1).unwrap(),
+    ///     metadata
+    /// );
+    ///
+    /// assert_eq!(node.metadata.created_by_tx, TxId::new(42));
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn with_metadata(
         id: NodeId,
         label: InternedString,
@@ -70,12 +534,537 @@ impl Node {
     }
 
     /// Get a property value by key.
+    ///
+    /// Returns a reference to the underlying `PropertyValue`. Lookups are fast
+    /// and allocate zero memory because property values are stored immutably inside an `Arc`.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::core::{Edge, EdgeId, NodeId, VersionId, PropertyMapBuilder};
+    /// use aletheiadb::core::interning::GLOBAL_INTERNER;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let props = PropertyMapBuilder::new().insert::<i32>("since", 2023).build();
+    /// let edge = Edge::new(
+    ///     EdgeId::new(1).unwrap(),
+    ///     GLOBAL_INTERNER.intern("KNOWS")?,
+    ///     NodeId::new(10).unwrap(),
+    ///     NodeId::new(20).unwrap(),
+    ///     props,
+    ///     VersionId::new(1).unwrap()
+    /// );
+    ///
+    /// assert_eq!(edge.get_property("since").and_then(|v| v.as_int()), Some(2023));
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// Returns a reference to the `PropertyValue` if the key exists. Because properties
+    /// are shared via `Arc` across multiple temporal versions, this operation is
+    /// extremely fast and avoids cloning the underlying data.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::core::{Node, NodeId, VersionId, PropertyMapBuilder};
+    /// use aletheiadb::core::interning::GLOBAL_INTERNER;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let props = PropertyMapBuilder::new().insert::<i32>("age", 30).build();
+    /// let node = Node::new(
+    ///     NodeId::new(1).unwrap(),
+    ///     GLOBAL_INTERNER.intern("Person")?,
+    ///     props,
+    ///     VersionId::new(1).unwrap()
+    /// );
+    ///
+    /// assert_eq!(node.get_property("age").and_then(|v| v.as_int()), Some(30));
+    /// assert!(node.get_property("unknown").is_none());
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// Returns a reference to the underlying `PropertyValue`. Lookups are fast
+    /// and allocate zero memory because property values are stored immutably inside an `Arc`.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::core::{Edge, EdgeId, NodeId, VersionId, PropertyMapBuilder};
+    /// use aletheiadb::core::interning::GLOBAL_INTERNER;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let props = PropertyMapBuilder::new().insert::<i32>("since", 2023).build();
+    /// let edge = Edge::new(
+    ///     EdgeId::new(1).unwrap(),
+    ///     GLOBAL_INTERNER.intern("KNOWS")?,
+    ///     NodeId::new(10).unwrap(),
+    ///     NodeId::new(20).unwrap(),
+    ///     props,
+    ///     VersionId::new(1).unwrap()
+    /// );
+    ///
+    /// assert_eq!(edge.get_property("since").and_then(|v| v.as_int()), Some(2023));
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// Returns a reference to the `PropertyValue` if the key exists. Because properties
+    /// are shared via `Arc` across multiple temporal versions, this operation is
+    /// extremely fast and avoids cloning the underlying data.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::core::{Node, NodeId, VersionId, PropertyMapBuilder};
+    /// use aletheiadb::core::interning::GLOBAL_INTERNER;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let props = PropertyMapBuilder::new().insert::<i32>("age", 30).build();
+    /// let node = Node::new(
+    ///     NodeId::new(1).unwrap(),
+    ///     GLOBAL_INTERNER.intern("Person")?,
+    ///     props,
+    ///     VersionId::new(1).unwrap()
+    /// );
+    ///
+    /// assert_eq!(node.get_property("age").and_then(|v| v.as_int()), Some(30));
+    /// assert!(node.get_property("unknown").is_none());
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// Returns a reference to the underlying `PropertyValue`. Lookups are fast
+    /// and allocate zero memory because property values are stored immutably inside an `Arc`.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::core::{Edge, EdgeId, NodeId, VersionId, PropertyMapBuilder};
+    /// use aletheiadb::core::interning::GLOBAL_INTERNER;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let props = PropertyMapBuilder::new().insert::<i32>("since", 2023).build();
+    /// let edge = Edge::new(
+    ///     EdgeId::new(1).unwrap(),
+    ///     GLOBAL_INTERNER.intern("KNOWS")?,
+    ///     NodeId::new(10).unwrap(),
+    ///     NodeId::new(20).unwrap(),
+    ///     props,
+    ///     VersionId::new(1).unwrap()
+    /// );
+    ///
+    /// assert_eq!(edge.get_property("since").and_then(|v| v.as_int()), Some(2023));
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// Returns a reference to the `PropertyValue` if the key exists. Because properties
+    /// are shared via `Arc` across multiple temporal versions, this operation is
+    /// extremely fast and avoids cloning the underlying data.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::core::{Node, NodeId, VersionId, PropertyMapBuilder};
+    /// use aletheiadb::core::interning::GLOBAL_INTERNER;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let props = PropertyMapBuilder::new().insert::<i32>("age", 30).build();
+    /// let node = Node::new(
+    ///     NodeId::new(1).unwrap(),
+    ///     GLOBAL_INTERNER.intern("Person")?,
+    ///     props,
+    ///     VersionId::new(1).unwrap()
+    /// );
+    ///
+    /// assert_eq!(node.get_property("age").and_then(|v| v.as_int()), Some(30));
+    /// assert!(node.get_property("unknown").is_none());
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// Returns a reference to the underlying `PropertyValue`. Lookups are fast
+    /// and allocate zero memory because property values are stored immutably inside an `Arc`.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::core::{Edge, EdgeId, NodeId, VersionId, PropertyMapBuilder};
+    /// use aletheiadb::core::interning::GLOBAL_INTERNER;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let props = PropertyMapBuilder::new().insert("since", 2023).build();
+    /// let edge = Edge::new(
+    ///     EdgeId::new(1).unwrap(),
+    ///     GLOBAL_INTERNER.intern("KNOWS")?,
+    ///     NodeId::new(10).unwrap(),
+    ///     NodeId::new(20).unwrap(),
+    ///     props,
+    ///     VersionId::new(1).unwrap()
+    /// );
+    ///
+    /// assert_eq!(edge.get_property("since").and_then(|v| v.as_int()), Some(2023));
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// Returns a reference to the `PropertyValue` if the key exists. Because properties
+    /// are shared via `Arc` across multiple temporal versions, this operation is
+    /// extremely fast and avoids cloning the underlying data.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::core::{Node, NodeId, VersionId, PropertyMapBuilder};
+    /// use aletheiadb::core::interning::GLOBAL_INTERNER;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let props = PropertyMapBuilder::new().insert("age", 30).build();
+    /// let node = Node::new(
+    ///     NodeId::new(1).unwrap(),
+    ///     GLOBAL_INTERNER.intern("Person")?,
+    ///     props,
+    ///     VersionId::new(1).unwrap()
+    /// );
+    ///
+    /// assert_eq!(node.get_property("age").and_then(|v| v.as_int()), Some(30));
+    /// assert!(node.get_property("unknown").is_none());
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// Returns a reference to the underlying `PropertyValue`. Lookups are fast
+    /// and allocate zero memory because property values are stored immutably inside an `Arc`.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::core::{Edge, EdgeId, NodeId, VersionId, PropertyMapBuilder};
+    /// use aletheiadb::core::interning::GLOBAL_INTERNER;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let props = PropertyMapBuilder::new().insert("since", 2023).build();
+    /// let edge = Edge::new(
+    ///     EdgeId::new(1).unwrap(),
+    ///     GLOBAL_INTERNER.intern("KNOWS")?,
+    ///     NodeId::new(10).unwrap(),
+    ///     NodeId::new(20).unwrap(),
+    ///     props,
+    ///     VersionId::new(1).unwrap()
+    /// );
+    ///
+    /// assert_eq!(edge.get_property("since").and_then(|v| v.as_int()), Some(2023));
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// Returns a reference to the `PropertyValue` if the key exists. Because properties
+    /// are shared via `Arc` across multiple temporal versions, this operation is
+    /// extremely fast and avoids cloning the underlying data.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::core::{Node, NodeId, VersionId, PropertyMapBuilder};
+    /// use aletheiadb::core::interning::GLOBAL_INTERNER;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let props = PropertyMapBuilder::new().insert("age", 30).build();
+    /// let node = Node::new(
+    ///     NodeId::new(1).unwrap(),
+    ///     GLOBAL_INTERNER.intern("Person")?,
+    ///     props,
+    ///     VersionId::new(1).unwrap()
+    /// );
+    ///
+    /// assert_eq!(node.get_property("age").and_then(|v| v.as_int()), Some(30));
+    /// assert!(node.get_property("unknown").is_none());
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// Returns a reference to the underlying `PropertyValue`. Lookups are fast
+    /// and allocate zero memory because property values are stored immutably inside an `Arc`.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::core::{Edge, EdgeId, NodeId, VersionId, PropertyMapBuilder};
+    /// use aletheiadb::core::interning::GLOBAL_INTERNER;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let props = PropertyMapBuilder::new().insert("since", 2023).build();
+    /// let edge = Edge::new(
+    ///     EdgeId::new(1).unwrap(),
+    ///     GLOBAL_INTERNER.intern("KNOWS")?,
+    ///     NodeId::new(10).unwrap(),
+    ///     NodeId::new(20).unwrap(),
+    ///     props,
+    ///     VersionId::new(1).unwrap()
+    /// );
+    ///
+    /// assert_eq!(edge.get_property("since").and_then(|v| v.as_int()), Some(2023));
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// Returns a reference to the `PropertyValue` if the key exists. Because properties
+    /// are shared via `Arc` across multiple temporal versions, this operation is
+    /// extremely fast and avoids cloning the underlying data.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::core::{Node, NodeId, VersionId, PropertyMapBuilder};
+    /// use aletheiadb::core::interning::GLOBAL_INTERNER;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let props = PropertyMapBuilder::new().insert("age", 30).build();
+    /// let node = Node::new(
+    ///     NodeId::new(1).unwrap(),
+    ///     GLOBAL_INTERNER.intern("Person")?,
+    ///     props,
+    ///     VersionId::new(1).unwrap()
+    /// );
+    ///
+    /// assert_eq!(node.get_property("age").and_then(|v| v.as_int()), Some(30));
+    /// assert!(node.get_property("unknown").is_none());
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// Returns a reference to the underlying `PropertyValue`. Lookups are fast
+    /// and allocate zero memory because property values are stored immutably inside an `Arc`.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::core::{Edge, EdgeId, NodeId, VersionId, PropertyMapBuilder};
+    /// use aletheiadb::core::interning::GLOBAL_INTERNER;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let props = PropertyMapBuilder::new().insert("since", 2023).build();
+    /// let edge = Edge::new(
+    ///     EdgeId::new(1).unwrap(),
+    ///     GLOBAL_INTERNER.intern("KNOWS")?,
+    ///     NodeId::new(10).unwrap(),
+    ///     NodeId::new(20).unwrap(),
+    ///     props,
+    ///     VersionId::new(1).unwrap()
+    /// );
+    ///
+    /// assert_eq!(edge.get_property("since").and_then(|v| v.as_int()), Some(2023));
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// Returns a reference to the `PropertyValue` if the key exists. Because properties
+    /// are shared via `Arc` across multiple temporal versions, this operation is
+    /// extremely fast and avoids cloning the underlying data.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::core::{Node, NodeId, VersionId, PropertyMapBuilder};
+    /// use aletheiadb::core::interning::GLOBAL_INTERNER;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let props = PropertyMapBuilder::new().insert("age", 30).build();
+    /// let node = Node::new(
+    ///     NodeId::new(1).unwrap(),
+    ///     GLOBAL_INTERNER.intern("Person")?,
+    ///     props,
+    ///     VersionId::new(1).unwrap()
+    /// );
+    ///
+    /// assert_eq!(node.get_property("age").and_then(|v| v.as_int()), Some(30));
+    /// assert!(node.get_property("unknown").is_none());
+    /// # Ok(())
+    /// # }
+    /// ```
     #[inline]
     pub fn get_property(&self, key: &str) -> Option<&crate::core::property::PropertyValue> {
         self.properties.get(key)
     }
 
     /// Check if this node has a specific label.
+    ///
+    /// This is the most performant way to check a node's label because it
+    /// relies on a simple u32 integer comparison (the `InternedString` ID)
+    /// rather than string matching.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::core::{Node, NodeId, VersionId, PropertyMapBuilder};
+    /// use aletheiadb::core::interning::GLOBAL_INTERNER;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let person_label = GLOBAL_INTERNER.intern("Person")?;
+    /// let node = Node::new(
+    ///     NodeId::new(1).unwrap(),
+    ///     person_label,
+    ///     PropertyMapBuilder::new().build(),
+    ///     VersionId::new(1).unwrap()
+    /// );
+    ///
+    /// // Fast path comparison:
+    /// assert!(node.has_label(person_label));
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// This is the most performant way to check a node's label because it
+    /// relies on a simple u32 integer comparison (the `InternedString` ID)
+    /// rather than string matching.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::core::{Node, NodeId, VersionId, PropertyMapBuilder};
+    /// use aletheiadb::core::interning::GLOBAL_INTERNER;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let person_label = GLOBAL_INTERNER.intern("Person")?;
+    /// let node = Node::new(
+    ///     NodeId::new(1).unwrap(),
+    ///     person_label,
+    ///     PropertyMapBuilder::new().build(),
+    ///     VersionId::new(1).unwrap()
+    /// );
+    ///
+    /// // Fast path comparison:
+    /// assert!(node.has_label(person_label));
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// This is the most performant way to check a node's label because it
+    /// relies on a simple u32 integer comparison (the `InternedString` ID)
+    /// rather than string matching.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::core::{Node, NodeId, VersionId, PropertyMapBuilder};
+    /// use aletheiadb::core::interning::GLOBAL_INTERNER;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let person_label = GLOBAL_INTERNER.intern("Person")?;
+    /// let node = Node::new(
+    ///     NodeId::new(1).unwrap(),
+    ///     person_label,
+    ///     PropertyMapBuilder::new().build(),
+    ///     VersionId::new(1).unwrap()
+    /// );
+    ///
+    /// // Fast path comparison:
+    /// assert!(node.has_label(person_label));
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// This is the most performant way to check a node's label because it
+    /// relies on a simple u32 integer comparison (the `InternedString` ID)
+    /// rather than string matching.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::core::{Node, NodeId, VersionId, PropertyMapBuilder};
+    /// use aletheiadb::core::interning::GLOBAL_INTERNER;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let person_label = GLOBAL_INTERNER.intern("Person")?;
+    /// let node = Node::new(
+    ///     NodeId::new(1).unwrap(),
+    ///     person_label,
+    ///     PropertyMapBuilder::new().build(),
+    ///     VersionId::new(1).unwrap()
+    /// );
+    ///
+    /// // Fast path comparison:
+    /// assert!(node.has_label(person_label));
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// This is the most performant way to check a node's label because it
+    /// relies on a simple u32 integer comparison (the `InternedString` ID)
+    /// rather than string matching.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::core::{Node, NodeId, VersionId, PropertyMapBuilder};
+    /// use aletheiadb::core::interning::GLOBAL_INTERNER;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let person_label = GLOBAL_INTERNER.intern("Person")?;
+    /// let node = Node::new(
+    ///     NodeId::new(1).unwrap(),
+    ///     person_label,
+    ///     PropertyMapBuilder::new().build(),
+    ///     VersionId::new(1).unwrap()
+    /// );
+    ///
+    /// // Fast path comparison:
+    /// assert!(node.has_label(person_label));
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// This is the most performant way to check a node's label because it
+    /// relies on a simple u32 integer comparison (the `InternedString` ID)
+    /// rather than string matching.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::core::{Node, NodeId, VersionId, PropertyMapBuilder};
+    /// use aletheiadb::core::interning::GLOBAL_INTERNER;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let person_label = GLOBAL_INTERNER.intern("Person")?;
+    /// let node = Node::new(
+    ///     NodeId::new(1).unwrap(),
+    ///     person_label,
+    ///     PropertyMapBuilder::new().build(),
+    ///     VersionId::new(1).unwrap()
+    /// );
+    ///
+    /// // Fast path comparison:
+    /// assert!(node.has_label(person_label));
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// This is the most performant way to check a node's label because it
+    /// relies on a simple u32 integer comparison (the `InternedString` ID)
+    /// rather than string matching.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::core::{Node, NodeId, VersionId, PropertyMapBuilder};
+    /// use aletheiadb::core::interning::GLOBAL_INTERNER;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let person_label = GLOBAL_INTERNER.intern("Person")?;
+    /// let node = Node::new(
+    ///     NodeId::new(1).unwrap(),
+    ///     person_label,
+    ///     PropertyMapBuilder::new().build(),
+    ///     VersionId::new(1).unwrap()
+    /// );
+    ///
+    /// // Fast path comparison:
+    /// assert!(node.has_label(person_label));
+    /// # Ok(())
+    /// # }
+    /// ```
     #[inline]
     pub fn has_label(&self, label: InternedString) -> bool {
         self.label == label
@@ -99,7 +1088,7 @@ impl Node {
     /// # use aletheiadb::core::interning::GLOBAL_INTERNER;
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// # let label = GLOBAL_INTERNER.intern("Person")?;
-    /// # let node = Node::new(NodeId::new(1)?, label, PropertyMap::new(), VersionId::new(1)?);
+    /// # let node = Node::new(NodeId::new(1).unwrap(), label, PropertyMap::new(), VersionId::new(1).unwrap());
     /// // Convenient for one-off checks
     /// if node.has_label_str("Person") {
     ///     // ...
@@ -139,6 +1128,180 @@ impl std::fmt::Debug for Node {
 
 /// An edge in the current state of the graph.
 ///
+/// Edges connect a `source` node to a `target` node and carry their own properties.
+/// Like `Node`, this struct represents the current version of the relationship,
+/// keeping traversal latency in the nanosecond range.
+///
+/// ## Examples
+///
+/// ```rust
+/// use aletheiadb::core::{Edge, EdgeId, NodeId, VersionId, PropertyMapBuilder};
+/// use aletheiadb::core::interning::GLOBAL_INTERNER;
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let label = GLOBAL_INTERNER.intern("KNOWS")?;
+/// let properties = PropertyMapBuilder::new().insert::<f64>("weight", 0.8).build();
+///
+/// let edge = Edge::new(
+///     EdgeId::new(1).unwrap(),
+///     label,
+///     NodeId::new(10).unwrap(), // Source
+///     NodeId::new(20).unwrap(), // Target
+///     properties,
+///     VersionId::new(1).unwrap()
+/// );
+///
+/// assert_eq!(edge.source, NodeId::new(10).unwrap());
+/// assert!(edge.has_label_str("KNOWS"));
+/// # Ok(())
+/// # }
+/// ```
+///
+/// Edges connect a `source` node to a `target` node and carry their own properties.
+/// Like `Node`, this struct represents the current version of the relationship,
+/// keeping traversal latency in the nanosecond range.
+///
+/// ## Examples
+///
+/// ```rust
+/// use aletheiadb::core::{Edge, EdgeId, NodeId, VersionId, PropertyMapBuilder};
+/// use aletheiadb::core::interning::GLOBAL_INTERNER;
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let label = GLOBAL_INTERNER.intern("KNOWS")?;
+/// let properties = PropertyMapBuilder::new().insert::<f64>("weight", 0.8).build();
+///
+/// let edge = Edge::new(
+///     EdgeId::new(1).unwrap(),
+///     label,
+///     NodeId::new(10).unwrap(), // Source
+///     NodeId::new(20).unwrap(), // Target
+///     properties,
+///     VersionId::new(1).unwrap()
+/// );
+///
+/// assert_eq!(edge.source, NodeId::new(10).unwrap());
+/// assert!(edge.has_label_str("KNOWS"));
+/// # Ok(())
+/// # }
+/// ```
+///
+/// Edges connect a `source` node to a `target` node and carry their own properties.
+/// Like `Node`, this struct represents the current version of the relationship,
+/// keeping traversal latency in the nanosecond range.
+///
+/// ## Examples
+///
+/// ```rust
+/// use aletheiadb::core::{Edge, EdgeId, NodeId, VersionId, PropertyMapBuilder};
+/// use aletheiadb::core::interning::GLOBAL_INTERNER;
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let label = GLOBAL_INTERNER.intern("KNOWS")?;
+/// let properties = PropertyMapBuilder::new().insert("weight", 0.8).build();
+///
+/// let edge = Edge::new(
+///     EdgeId::new(1).unwrap(),
+///     label,
+///     NodeId::new(10).unwrap(), // Source
+///     NodeId::new(20).unwrap(), // Target
+///     properties,
+///     VersionId::new(1).unwrap()
+/// );
+///
+/// assert_eq!(edge.source, NodeId::new(10).unwrap());
+/// assert!(edge.has_label_str("KNOWS"));
+/// # Ok(())
+/// # }
+/// ```
+///
+/// Edges connect a `source` node to a `target` node and carry their own properties.
+/// Like `Node`, this struct represents the current version of the relationship,
+/// keeping traversal latency in the nanosecond range.
+///
+/// ## Examples
+///
+/// ```rust
+/// use aletheiadb::core::{Edge, EdgeId, NodeId, VersionId, PropertyMapBuilder};
+/// use aletheiadb::core::interning::GLOBAL_INTERNER;
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let label = GLOBAL_INTERNER.intern("KNOWS")?;
+/// let properties = PropertyMapBuilder::new().insert("weight", 0.8).build();
+///
+/// let edge = Edge::new(
+///     EdgeId::new(1).unwrap(),
+///     label,
+///     NodeId::new(10).unwrap(), // Source
+///     NodeId::new(20).unwrap(), // Target
+///     properties,
+///     VersionId::new(1).unwrap()
+/// );
+///
+/// assert_eq!(edge.source, NodeId::new(10).unwrap());
+/// assert!(edge.has_label_str("KNOWS"));
+/// # Ok(())
+/// # }
+/// ```
+///
+/// Edges connect a `source` node to a `target` node and carry their own properties.
+/// Like `Node`, this struct represents the current version of the relationship,
+/// keeping traversal latency in the nanosecond range.
+///
+/// ## Examples
+///
+/// ```rust
+/// use aletheiadb::core::{Edge, EdgeId, NodeId, VersionId, PropertyMapBuilder};
+/// use aletheiadb::core::interning::GLOBAL_INTERNER;
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let label = GLOBAL_INTERNER.intern("KNOWS")?;
+/// let properties = PropertyMapBuilder::new().insert("weight", 0.8).build();
+///
+/// let edge = Edge::new(
+///     EdgeId::new(1).unwrap(),
+///     label,
+///     NodeId::new(10).unwrap(), // Source
+///     NodeId::new(20).unwrap(), // Target
+///     properties,
+///     VersionId::new(1).unwrap()
+/// );
+///
+/// assert_eq!(edge.source, NodeId::new(10).unwrap());
+/// assert!(edge.has_label_str("KNOWS"));
+/// # Ok(())
+/// # }
+/// ```
+///
+/// Edges connect a `source` node to a `target` node and carry their own properties.
+/// Like `Node`, this struct represents the current version of the relationship,
+/// keeping traversal latency in the nanosecond range.
+///
+/// ## Examples
+///
+/// ```rust
+/// use aletheiadb::core::{Edge, EdgeId, NodeId, VersionId, PropertyMapBuilder};
+/// use aletheiadb::core::interning::GLOBAL_INTERNER;
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let label = GLOBAL_INTERNER.intern("KNOWS")?;
+/// let properties = PropertyMapBuilder::new().insert("weight", 0.8).build();
+///
+/// let edge = Edge::new(
+///     EdgeId::new(1).unwrap(),
+///     label,
+///     NodeId::new(10).unwrap(), // Source
+///     NodeId::new(20).unwrap(), // Target
+///     properties,
+///     VersionId::new(1).unwrap()
+/// );
+///
+/// assert_eq!(edge.source, NodeId::new(10).unwrap());
+/// assert!(edge.has_label_str("KNOWS"));
+/// # Ok(())
+/// # }
+/// ```
+///
 /// Edges are directed relationships between nodes with properties.
 /// This represents the current version, optimized for fast traversals.
 #[derive(Clone, PartialEq)]
@@ -161,6 +1324,174 @@ pub struct Edge {
 
 impl Edge {
     /// Create a new edge with the given parameters.
+    ///
+    /// This constructor automatically initializes `VersionMetadata` to default values.
+    /// Use this when creating ephemeral edges or in tests where precise provenance
+    /// is not required.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::core::{Edge, EdgeId, NodeId, VersionId, PropertyMapBuilder};
+    /// use aletheiadb::core::interning::GLOBAL_INTERNER;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let label = GLOBAL_INTERNER.intern("LIKES")?;
+    /// let edge = Edge::new(
+    ///     EdgeId::new(1).unwrap(),
+    ///     label,
+    ///     NodeId::new(10).unwrap(),
+    ///     NodeId::new(20).unwrap(),
+    ///     PropertyMapBuilder::new().build(),
+    ///     VersionId::new(1).unwrap()
+    /// );
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// This constructor automatically initializes `VersionMetadata` to default values.
+    /// Use this when creating ephemeral edges or in tests where precise provenance
+    /// is not required.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::core::{Edge, EdgeId, NodeId, VersionId, PropertyMapBuilder};
+    /// use aletheiadb::core::interning::GLOBAL_INTERNER;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let label = GLOBAL_INTERNER.intern("LIKES")?;
+    /// let edge = Edge::new(
+    ///     EdgeId::new(1).unwrap(),
+    ///     label,
+    ///     NodeId::new(10).unwrap(),
+    ///     NodeId::new(20).unwrap(),
+    ///     PropertyMapBuilder::new().build(),
+    ///     VersionId::new(1).unwrap()
+    /// );
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// This constructor automatically initializes `VersionMetadata` to default values.
+    /// Use this when creating ephemeral edges or in tests where precise provenance
+    /// is not required.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::core::{Edge, EdgeId, NodeId, VersionId, PropertyMapBuilder};
+    /// use aletheiadb::core::interning::GLOBAL_INTERNER;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let label = GLOBAL_INTERNER.intern("LIKES")?;
+    /// let edge = Edge::new(
+    ///     EdgeId::new(1).unwrap(),
+    ///     label,
+    ///     NodeId::new(10).unwrap(),
+    ///     NodeId::new(20).unwrap(),
+    ///     PropertyMapBuilder::new().build(),
+    ///     VersionId::new(1).unwrap()
+    /// );
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// This constructor automatically initializes `VersionMetadata` to default values.
+    /// Use this when creating ephemeral edges or in tests where precise provenance
+    /// is not required.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::core::{Edge, EdgeId, NodeId, VersionId, PropertyMapBuilder};
+    /// use aletheiadb::core::interning::GLOBAL_INTERNER;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let label = GLOBAL_INTERNER.intern("LIKES")?;
+    /// let edge = Edge::new(
+    ///     EdgeId::new(1).unwrap(),
+    ///     label,
+    ///     NodeId::new(10).unwrap(),
+    ///     NodeId::new(20).unwrap(),
+    ///     PropertyMapBuilder::new().build(),
+    ///     VersionId::new(1).unwrap()
+    /// );
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// This constructor automatically initializes `VersionMetadata` to default values.
+    /// Use this when creating ephemeral edges or in tests where precise provenance
+    /// is not required.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::core::{Edge, EdgeId, NodeId, VersionId, PropertyMapBuilder};
+    /// use aletheiadb::core::interning::GLOBAL_INTERNER;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let label = GLOBAL_INTERNER.intern("LIKES")?;
+    /// let edge = Edge::new(
+    ///     EdgeId::new(1).unwrap(),
+    ///     label,
+    ///     NodeId::new(10).unwrap(),
+    ///     NodeId::new(20).unwrap(),
+    ///     PropertyMapBuilder::new().build(),
+    ///     VersionId::new(1).unwrap()
+    /// );
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// This constructor automatically initializes `VersionMetadata` to default values.
+    /// Use this when creating ephemeral edges or in tests where precise provenance
+    /// is not required.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::core::{Edge, EdgeId, NodeId, VersionId, PropertyMapBuilder};
+    /// use aletheiadb::core::interning::GLOBAL_INTERNER;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let label = GLOBAL_INTERNER.intern("LIKES")?;
+    /// let edge = Edge::new(
+    ///     EdgeId::new(1).unwrap(),
+    ///     label,
+    ///     NodeId::new(10).unwrap(),
+    ///     NodeId::new(20).unwrap(),
+    ///     PropertyMapBuilder::new().build(),
+    ///     VersionId::new(1).unwrap()
+    /// );
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// This constructor automatically initializes `VersionMetadata` to default values.
+    /// Use this when creating ephemeral edges or in tests where precise provenance
+    /// is not required.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::core::{Edge, EdgeId, NodeId, VersionId, PropertyMapBuilder};
+    /// use aletheiadb::core::interning::GLOBAL_INTERNER;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let label = GLOBAL_INTERNER.intern("LIKES")?;
+    /// let edge = Edge::new(
+    ///     EdgeId::new(1).unwrap(),
+    ///     label,
+    ///     NodeId::new(10).unwrap(),
+    ///     NodeId::new(20).unwrap(),
+    ///     PropertyMapBuilder::new().build(),
+    ///     VersionId::new(1).unwrap()
+    /// );
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn new(
         id: EdgeId,
         label: InternedString,
@@ -181,6 +1512,209 @@ impl Edge {
     }
 
     /// Create a new edge with explicit metadata (for transactions).
+    ///
+    /// Ensures that relationships maintain exact transaction provenance when
+    /// replayed from the WAL or serialized to index persistence layer.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::core::{Edge, EdgeId, NodeId, VersionId, PropertyMapBuilder};
+    /// use aletheiadb::TxId;
+    /// use aletheiadb::core::temporal::Timestamp;
+    /// use aletheiadb::core::version::VersionMetadata;
+    /// use aletheiadb::core::interning::GLOBAL_INTERNER;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let label = GLOBAL_INTERNER.intern("FOLLOWS")?;
+    /// let metadata = VersionMetadata::new(TxId::new(100), Timestamp::from(100));
+    ///
+    /// let edge = Edge::with_metadata(
+    ///     EdgeId::new(1).unwrap(),
+    ///     label,
+    ///     NodeId::new(10).unwrap(),
+    ///     NodeId::new(20).unwrap(),
+    ///     PropertyMapBuilder::new().build(),
+    ///     VersionId::new(1).unwrap(),
+    ///     metadata
+    /// );
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// Ensures that relationships maintain exact transaction provenance when
+    /// replayed from the WAL or serialized to index persistence layer.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::core::{Edge, EdgeId, NodeId, VersionId, PropertyMapBuilder};
+    /// use aletheiadb::TxId;
+    /// use aletheiadb::core::temporal::Timestamp;
+    /// use aletheiadb::core::version::VersionMetadata;
+    /// use aletheiadb::core::interning::GLOBAL_INTERNER;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let label = GLOBAL_INTERNER.intern("FOLLOWS")?;
+    /// let metadata = VersionMetadata::new(TxId::new(100), Timestamp::from(100));
+    ///
+    /// let edge = Edge::with_metadata(
+    ///     EdgeId::new(1).unwrap(),
+    ///     label,
+    ///     NodeId::new(10).unwrap(),
+    ///     NodeId::new(20).unwrap(),
+    ///     PropertyMapBuilder::new().build(),
+    ///     VersionId::new(1).unwrap(),
+    ///     metadata
+    /// );
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// Ensures that relationships maintain exact transaction provenance when
+    /// replayed from the WAL or serialized to index persistence layer.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::core::{Edge, EdgeId, NodeId, VersionId, PropertyMapBuilder};
+    /// use aletheiadb::core::id::TxId;
+    /// use aletheiadb::core::temporal::Timestamp;
+    /// use aletheiadb::core::version::VersionMetadata;
+    /// use aletheiadb::core::interning::GLOBAL_INTERNER;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let label = GLOBAL_INTERNER.intern("FOLLOWS")?;
+    /// let metadata = VersionMetadata::new(TxId::new(100), Timestamp::from(100));
+    ///
+    /// let edge = Edge::with_metadata(
+    ///     EdgeId::new(1).unwrap(),
+    ///     label,
+    ///     NodeId::new(10).unwrap(),
+    ///     NodeId::new(20).unwrap(),
+    ///     PropertyMapBuilder::new().build(),
+    ///     VersionId::new(1).unwrap(),
+    ///     metadata
+    /// );
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// Ensures that relationships maintain exact transaction provenance when
+    /// replayed from the WAL or serialized to index persistence layer.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::core::{Edge, EdgeId, NodeId, VersionId, PropertyMapBuilder};
+    /// use aletheiadb::TxId;
+    /// use aletheiadb::core::temporal::Timestamp;
+    /// use aletheiadb::core::version::VersionMetadata;
+    /// use aletheiadb::core::interning::GLOBAL_INTERNER;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let label = GLOBAL_INTERNER.intern("FOLLOWS")?;
+    /// let metadata = VersionMetadata::new(TxId::new(100), Timestamp::from(100));
+    ///
+    /// let edge = Edge::with_metadata(
+    ///     EdgeId::new(1).unwrap(),
+    ///     label,
+    ///     NodeId::new(10).unwrap(),
+    ///     NodeId::new(20).unwrap(),
+    ///     PropertyMapBuilder::new().build(),
+    ///     VersionId::new(1).unwrap(),
+    ///     metadata
+    /// );
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// Ensures that relationships maintain exact transaction provenance when
+    /// replayed from the WAL or serialized to index persistence layer.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::core::{Edge, EdgeId, NodeId, VersionId, PropertyMapBuilder};
+    /// use aletheiadb::TxId;
+    /// use aletheiadb::core::temporal::Timestamp;
+    /// use aletheiadb::core::version::VersionMetadata;
+    /// use aletheiadb::core::interning::GLOBAL_INTERNER;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let label = GLOBAL_INTERNER.intern("FOLLOWS")?;
+    /// let metadata = VersionMetadata::new(TxId::new(100), Timestamp::from(100));
+    ///
+    /// let edge = Edge::with_metadata(
+    ///     EdgeId::new(1).unwrap(),
+    ///     label,
+    ///     NodeId::new(10).unwrap(),
+    ///     NodeId::new(20).unwrap(),
+    ///     PropertyMapBuilder::new().build(),
+    ///     VersionId::new(1).unwrap(),
+    ///     metadata
+    /// );
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// Ensures that relationships maintain exact transaction provenance when
+    /// replayed from the WAL or serialized to index persistence layer.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::core::{Edge, EdgeId, NodeId, VersionId, PropertyMapBuilder};
+    /// use aletheiadb::TxId;
+    /// use aletheiadb::core::temporal::Timestamp;
+    /// use aletheiadb::core::version::VersionMetadata;
+    /// use aletheiadb::core::interning::GLOBAL_INTERNER;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let label = GLOBAL_INTERNER.intern("FOLLOWS")?;
+    /// let metadata = VersionMetadata::new(TxId::new(100), Timestamp::from(100));
+    ///
+    /// let edge = Edge::with_metadata(
+    ///     EdgeId::new(1).unwrap(),
+    ///     label,
+    ///     NodeId::new(10).unwrap(),
+    ///     NodeId::new(20).unwrap(),
+    ///     PropertyMapBuilder::new().build(),
+    ///     VersionId::new(1).unwrap(),
+    ///     metadata
+    /// );
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// Ensures that relationships maintain exact transaction provenance when
+    /// replayed from the WAL or serialized to index persistence layer.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::core::{Edge, EdgeId, NodeId, VersionId, PropertyMapBuilder};
+    /// use aletheiadb::TxId;
+    /// use aletheiadb::core::temporal::Timestamp;
+    /// use aletheiadb::core::version::VersionMetadata;
+    /// use aletheiadb::core::interning::GLOBAL_INTERNER;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let label = GLOBAL_INTERNER.intern("FOLLOWS")?;
+    /// let metadata = VersionMetadata::new(TxId::new(100), Timestamp::from(100));
+    ///
+    /// let edge = Edge::with_metadata(
+    ///     EdgeId::new(1).unwrap(),
+    ///     label,
+    ///     NodeId::new(10).unwrap(),
+    ///     NodeId::new(20).unwrap(),
+    ///     PropertyMapBuilder::new().build(),
+    ///     VersionId::new(1).unwrap(),
+    ///     metadata
+    /// );
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn with_metadata(
         id: EdgeId,
         label: InternedString,
@@ -208,6 +1742,188 @@ impl Edge {
     }
 
     /// Check if this edge has a specific label.
+    ///
+    /// This method performs an ultra-fast integer comparison on the `InternedString`.
+    /// Use this inside heavy traversal loops (like `traverse_and_rank`) to avoid
+    /// string allocations and hash lookups.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::core::{Edge, EdgeId, NodeId, VersionId, PropertyMapBuilder};
+    /// use aletheiadb::core::interning::GLOBAL_INTERNER;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let knows_label = GLOBAL_INTERNER.intern("KNOWS")?;
+    /// let edge = Edge::new(
+    ///     EdgeId::new(1).unwrap(),
+    ///     knows_label,
+    ///     NodeId::new(10).unwrap(),
+    ///     NodeId::new(20).unwrap(),
+    ///     PropertyMapBuilder::new().build(),
+    ///     VersionId::new(1).unwrap()
+    /// );
+    ///
+    /// assert!(edge.has_label(knows_label));
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// This method performs an ultra-fast integer comparison on the `InternedString`.
+    /// Use this inside heavy traversal loops (like `traverse_and_rank`) to avoid
+    /// string allocations and hash lookups.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::core::{Edge, EdgeId, NodeId, VersionId, PropertyMapBuilder};
+    /// use aletheiadb::core::interning::GLOBAL_INTERNER;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let knows_label = GLOBAL_INTERNER.intern("KNOWS")?;
+    /// let edge = Edge::new(
+    ///     EdgeId::new(1).unwrap(),
+    ///     knows_label,
+    ///     NodeId::new(10).unwrap(),
+    ///     NodeId::new(20).unwrap(),
+    ///     PropertyMapBuilder::new().build(),
+    ///     VersionId::new(1).unwrap()
+    /// );
+    ///
+    /// assert!(edge.has_label(knows_label));
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// This method performs an ultra-fast integer comparison on the `InternedString`.
+    /// Use this inside heavy traversal loops (like `traverse_and_rank`) to avoid
+    /// string allocations and hash lookups.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::core::{Edge, EdgeId, NodeId, VersionId, PropertyMapBuilder};
+    /// use aletheiadb::core::interning::GLOBAL_INTERNER;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let knows_label = GLOBAL_INTERNER.intern("KNOWS")?;
+    /// let edge = Edge::new(
+    ///     EdgeId::new(1).unwrap(),
+    ///     knows_label,
+    ///     NodeId::new(10).unwrap(),
+    ///     NodeId::new(20).unwrap(),
+    ///     PropertyMapBuilder::new().build(),
+    ///     VersionId::new(1).unwrap()
+    /// );
+    ///
+    /// assert!(edge.has_label(knows_label));
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// This method performs an ultra-fast integer comparison on the `InternedString`.
+    /// Use this inside heavy traversal loops (like `traverse_and_rank`) to avoid
+    /// string allocations and hash lookups.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::core::{Edge, EdgeId, NodeId, VersionId, PropertyMapBuilder};
+    /// use aletheiadb::core::interning::GLOBAL_INTERNER;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let knows_label = GLOBAL_INTERNER.intern("KNOWS")?;
+    /// let edge = Edge::new(
+    ///     EdgeId::new(1).unwrap(),
+    ///     knows_label,
+    ///     NodeId::new(10).unwrap(),
+    ///     NodeId::new(20).unwrap(),
+    ///     PropertyMapBuilder::new().build(),
+    ///     VersionId::new(1).unwrap()
+    /// );
+    ///
+    /// assert!(edge.has_label(knows_label));
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// This method performs an ultra-fast integer comparison on the `InternedString`.
+    /// Use this inside heavy traversal loops (like `traverse_and_rank`) to avoid
+    /// string allocations and hash lookups.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::core::{Edge, EdgeId, NodeId, VersionId, PropertyMapBuilder};
+    /// use aletheiadb::core::interning::GLOBAL_INTERNER;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let knows_label = GLOBAL_INTERNER.intern("KNOWS")?;
+    /// let edge = Edge::new(
+    ///     EdgeId::new(1).unwrap(),
+    ///     knows_label,
+    ///     NodeId::new(10).unwrap(),
+    ///     NodeId::new(20).unwrap(),
+    ///     PropertyMapBuilder::new().build(),
+    ///     VersionId::new(1).unwrap()
+    /// );
+    ///
+    /// assert!(edge.has_label(knows_label));
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// This method performs an ultra-fast integer comparison on the `InternedString`.
+    /// Use this inside heavy traversal loops (like `traverse_and_rank`) to avoid
+    /// string allocations and hash lookups.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::core::{Edge, EdgeId, NodeId, VersionId, PropertyMapBuilder};
+    /// use aletheiadb::core::interning::GLOBAL_INTERNER;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let knows_label = GLOBAL_INTERNER.intern("KNOWS")?;
+    /// let edge = Edge::new(
+    ///     EdgeId::new(1).unwrap(),
+    ///     knows_label,
+    ///     NodeId::new(10).unwrap(),
+    ///     NodeId::new(20).unwrap(),
+    ///     PropertyMapBuilder::new().build(),
+    ///     VersionId::new(1).unwrap()
+    /// );
+    ///
+    /// assert!(edge.has_label(knows_label));
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// This method performs an ultra-fast integer comparison on the `InternedString`.
+    /// Use this inside heavy traversal loops (like `traverse_and_rank`) to avoid
+    /// string allocations and hash lookups.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::core::{Edge, EdgeId, NodeId, VersionId, PropertyMapBuilder};
+    /// use aletheiadb::core::interning::GLOBAL_INTERNER;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let knows_label = GLOBAL_INTERNER.intern("KNOWS")?;
+    /// let edge = Edge::new(
+    ///     EdgeId::new(1).unwrap(),
+    ///     knows_label,
+    ///     NodeId::new(10).unwrap(),
+    ///     NodeId::new(20).unwrap(),
+    ///     PropertyMapBuilder::new().build(),
+    ///     VersionId::new(1).unwrap()
+    /// );
+    ///
+    /// assert!(edge.has_label(knows_label));
+    /// # Ok(())
+    /// # }
+    /// ```
     #[inline]
     pub fn has_label(&self, label: InternedString) -> bool {
         self.label == label
@@ -231,7 +1947,7 @@ impl Edge {
     /// # use aletheiadb::core::interning::GLOBAL_INTERNER;
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// # let label = GLOBAL_INTERNER.intern("KNOWS")?;
-    /// # let edge = Edge::new(EdgeId::new(1)?, label, NodeId::new(1)?, NodeId::new(2)?, PropertyMap::new(), VersionId::new(1)?);
+    /// # let edge = Edge::new(EdgeId::new(1).unwrap(), label, NodeId::new(1).unwrap(), NodeId::new(2)?, PropertyMap::new(), VersionId::new(1).unwrap());
     /// // Convenient for one-off checks
     /// if edge.has_label_str("KNOWS") {
     ///     // ...
