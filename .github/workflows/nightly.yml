@@ -7,6 +7,7 @@ on:
   workflow_dispatch: # Allow manual trigger
 
 env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
 
@@ -54,6 +55,7 @@ jobs:
         run: cargo miri test --lib
         continue-on-error: true
         env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
           # Flags are loaded from .mirirc, but we can override here if needed
           RUST_BACKTRACE: 1
 
@@ -61,6 +63,7 @@ jobs:
         run: cargo miri test --tests
         continue-on-error: true
         env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
           RUST_BACKTRACE: 1
 
   performance-profile:

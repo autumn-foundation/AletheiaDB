@@ -37,6 +37,7 @@ jobs:
             echo "should_run=true" >> $GITHUB_OUTPUT
           fi
         env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
           GH_TOKEN: ${{ github.token }}
 
       - name: Find eligible issue
@@ -64,6 +65,7 @@ jobs:
           echo "Selected issue #$ISSUE_NUMBER"
           echo "issue_number=$ISSUE_NUMBER" >> $GITHUB_OUTPUT
         env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
           GH_TOKEN: ${{ github.token }}
 
       - name: Manual issue override
@@ -213,4 +215,5 @@ jobs:
             gh issue comment "$ISSUE_NUM" --body "🤖 Autonomous developer attempted this issue but encountered an error. A human should review the workflow logs."
           fi
         env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
           GH_TOKEN: ${{ github.token }}

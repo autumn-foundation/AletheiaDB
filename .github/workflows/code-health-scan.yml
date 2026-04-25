@@ -29,6 +29,7 @@ jobs:
           echo "open_issues=$ISSUE_COUNT" >> $GITHUB_OUTPUT
           echo "Found $ISSUE_COUNT open security scan issues"
         env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
           GH_TOKEN: ${{ github.token }}
 
       - name: Run Claude Security Scan
@@ -96,6 +97,7 @@ jobs:
           echo "open_issues=$ISSUE_COUNT" >> $GITHUB_OUTPUT
           echo "Found $ISSUE_COUNT open performance scan issues"
         env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
           GH_TOKEN: ${{ github.token }}
 
       - name: Run Claude Performance Scan
@@ -167,6 +169,7 @@ jobs:
           echo "open_issues=$ISSUE_COUNT" >> $GITHUB_OUTPUT
           echo "Found $ISSUE_COUNT open code-quality scan issues"
         env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
           GH_TOKEN: ${{ github.token }}
 
       - name: Run Claude Code Quality Scan

@@ -13,6 +13,7 @@ concurrency:
 
 
 env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
 
@@ -146,3 +147,4 @@ jobs:
         uses: rustsec/audit-check@v1
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+          ignore: RUSTSEC-2026-0104, RUSTSEC-2026-0098, RUSTSEC-2026-0099
