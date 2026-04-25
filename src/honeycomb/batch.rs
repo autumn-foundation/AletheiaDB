@@ -193,6 +193,18 @@ impl BatchBuffer {
     ///
     /// Returns `true` if there are events in the buffer and the timeout has expired.
     pub fn is_timeout_expired(&self) -> bool {
+        // 👺 HAVOC FIX: Lock ordering is `events` then `batch_start`
+        // We acquire `events` first to avoid deadlocks.
+        let events_guard = match self.events.lock() {
+            Ok(guard) => guard,
+            Err(_) => return false,
+        };
+
+        // Return early if no events are pending
+        if events_guard.is_empty() {
+            return false;
+        }
+
         let batch_start = match self.batch_start.lock() {
             Ok(guard) => guard,
             Err(_) => return false,
