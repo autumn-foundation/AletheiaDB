@@ -12,3 +12,7 @@
 **Bloat:** `StorageSnapshot` and `FieldHolder` traits.
 **Cut:** Deleted single-implementation traits `StorageSnapshot` (implemented only by `CurrentStorageSnapshot`) and `FieldHolder` (implemented only by `Event`, unused except in tests). Moved methods directly to structs.
 **Saved:** ~50 lines of boilerplate + cognitive load of unnecessary abstraction layers.
+## [Reduction]
+**Bloat:** Abstracted builders/traits used exactly once (YAGNI).
+**Cut:** Deleted single-use abstractions (`Resonator`, `GraphContextBuilder`, `SemanticRule`). Flattened hierarchies and avoided `Box<dyn>`.
+**Saved:** Unnecessary boilerplates and mental overhead.
