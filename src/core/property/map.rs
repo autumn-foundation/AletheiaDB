@@ -558,6 +558,7 @@ impl PropertyMapBuilder {
                     // This should be unreachable if the PropertyKey is valid (which it should be).
                     // In debug builds, we panic to catch this state corruption.
                     // In release, we fallback to a safe estimate (256 bytes) to avoid crashing.
+                    // Instead of debug_assert!, let's just make it panic in debug builds, or just return 256.
                     debug_assert!(false, "PropertyKey {} missing from interner", key.as_u32());
                     256
                 });

@@ -646,6 +646,46 @@ mod tests {
     use crate::core::temporal::Timestamp;
 
     #[test]
+    #[should_panic(expected = "internal error: entered unreachable code")]
+    fn test_extract_temporal_clause_from_tokens_unreachable_time_name_test() {
+        let tokens = vec![
+            (0, Token::For),
+            (4, Token::Other("something".to_string())), // Invalid time_type_token
+        ];
+        // Note: the private function is extract_temporal_clause_from_tokens
+        let _ = extract_temporal_clause_from_tokens(&tokens, Token::Other("something".to_string()));
+    }
+
+    #[test]
+    #[should_panic(expected = "internal error: entered unreachable code")]
+    fn test_extract_temporal_clause_from_tokens_unreachable_as_of_test() {
+        let tokens = vec![
+            (0, Token::For),
+            (4, Token::Other("something".to_string())), // Invalid time_type_token, but let's test AS OF unreachable
+            (10, Token::AsOf),
+            (16, Token::Timestamp),
+            (26, Token::QuotedValue("1000".to_string())),
+        ];
+        let _ = extract_temporal_clause_from_tokens(&tokens, Token::Other("something".to_string()));
+    }
+
+    #[test]
+    #[should_panic(expected = "internal error: entered unreachable code")]
+    fn test_extract_temporal_clause_from_tokens_unreachable_between_test() {
+        let tokens = vec![
+            (0, Token::For),
+            (4, Token::Other("something".to_string())), // Invalid time_type_token
+            (10, Token::Between),
+            (18, Token::Timestamp),
+            (28, Token::QuotedValue("1000".to_string())),
+            (34, Token::And),
+            (38, Token::Timestamp),
+            (48, Token::QuotedValue("2000".to_string())),
+        ];
+        let _ = extract_temporal_clause_from_tokens(&tokens, Token::Other("something".to_string()));
+    }
+
+    #[test]
     fn test_tokenize_keywords() {
         let sql = "SELECT * FROM nodes FOR SYSTEM_TIME AS OF TIMESTAMP '1000'";
         let tokens = tokenize_temporal_keywords(sql);

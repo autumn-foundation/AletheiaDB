@@ -1105,6 +1105,32 @@ mod tests {
     // ========================================================================
 
     #[test]
+    #[should_panic(expected = "convert_logic_predicate called on non-logic expr")]
+    fn test_convert_logic_predicate_unreachable() {
+        let converter = AstConverter::new();
+        // Pass a non-logic predicate to convert_logic_predicate
+        use crate::query::ast::{PredicateExpr, PropertyAccess};
+        let non_logic = PredicateExpr::Exists(PropertyAccess {
+            variable: "n".to_string(),
+            property: "prop".to_string(),
+        });
+        let _ = converter.convert_logic_predicate(&non_logic);
+    }
+
+    #[test]
+    #[should_panic(expected = "convert_string_predicate called on non-string expr")]
+    fn test_convert_string_predicate_unreachable() {
+        let converter = AstConverter::new();
+        // Pass a non-string predicate to convert_string_predicate
+        use crate::query::ast::{PredicateExpr, PropertyAccess};
+        let non_string = PredicateExpr::Exists(PropertyAccess {
+            variable: "n".to_string(),
+            property: "prop".to_string(),
+        });
+        let _ = converter.convert_string_predicate(&non_string);
+    }
+
+    #[test]
     fn test_convert_simple_match() {
         // MATCH (n:Person) RETURN n
         let ast = Parser::parse("MATCH (n:Person) RETURN n").unwrap();

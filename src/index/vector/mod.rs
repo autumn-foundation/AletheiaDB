@@ -664,6 +664,26 @@ mod tests {
     // - Use Box<dyn Fn> for the predicate (runtime cost)
 
     #[test]
+    fn test_ordered_float() {
+        use std::cmp::Ordering;
+        let a = OrderedFloat(1.0);
+        let b = OrderedFloat(1.0);
+        assert_eq!(a.cmp(&b), Ordering::Equal);
+
+        let c = OrderedFloat(2.0);
+        assert_eq!(a.cmp(&c), Ordering::Less);
+
+        let nan1 = OrderedFloat(f32::NAN);
+        let nan2 = OrderedFloat(f32::NAN);
+
+        // NaNs should be equal to each other
+        assert_eq!(nan1.cmp(&nan2), Ordering::Equal);
+
+        // NaNs should be less than any other float
+        assert_eq!(nan1.cmp(&a), Ordering::Less);
+        assert_eq!(a.cmp(&nan1), Ordering::Greater);
+    }
+    #[test]
     fn test_distance_metric_debug() {
         // Verify DistanceMetric derives work correctly
         let metric = DistanceMetric::Cosine;
