@@ -146,3 +146,4 @@ jobs:
         uses: rustsec/audit-check@v1
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+          ignore: RUSTSEC-2026-0104 # Cannot update rustls-webpki to 0.103+ due to transitive dependency locks
