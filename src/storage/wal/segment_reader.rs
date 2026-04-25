@@ -274,7 +274,11 @@ pub fn read_segment_with_cipher(
     // Use the memory-mapped region as a byte slice
     let buffer = &mmap[..];
 
-    let mut entries = Vec::new();
+    // ⚡ Bolt Optimization: Pre-allocate vector based on buffer size.
+    // Assuming an average WAL entry is ~128 bytes, this prevents numerous
+    // heap reallocations when reading large segments.
+    let capacity_hint = (buffer.len() / 128).max(1);
+    let mut entries = Vec::with_capacity(capacity_hint);
 
     // Detect WAL format version
     let (version, mut offset) = if buffer.len() >= WAL_HEADER_SIZE && buffer[0..4] == WAL_MAGIC {
@@ -2196,6 +2200,33 @@ mod sentry_tests {
             msg.contains("Unknown WAL operation type"),
             "Should read op type and fail validation. Got: {}",
             msg
+        );
+    }
+
+    #[test]
+    fn test_bolt_pre_allocate_segment_capacity() {
+        use std::io::Write;
+        let dir = tempfile::TempDir::new().unwrap();
+        let file_path = dir.path().join("1.log");
+        let mut file = std::fs::File::create(&file_path).unwrap();
+
+        // Write magic header and some dummy data to make buffer large enough
+        let mut buffer = Vec::new();
+        buffer.extend_from_slice(&super::WAL_MAGIC);
+        buffer.push(super::WAL_VERSION); // Version
+
+        // Add padding to make the file size larger (e.g., 1024 bytes)
+        buffer.extend(vec![0; 1024 - buffer.len()]);
+        file.write_all(&buffer).unwrap();
+        file.sync_all().unwrap();
+
+        let entries = read_segment(&file_path, crate::storage::LSN(1)).unwrap();
+
+        // 1024 / 128 = 8. Since we expect capacity_hint = buffer.len() / 128
+        assert!(
+            entries.capacity() >= 8,
+            "⚡ Bolt: Vector should be pre-allocated with capacity based on file size. Capacity was {}",
+            entries.capacity()
         );
     }
 }
