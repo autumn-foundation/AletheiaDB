@@ -244,7 +244,9 @@ enum Token {
     And,
     Timestamp,
     QuotedValue(String),
-    Other(String),
+    /// Other uninteresting tokens.
+    /// ⚡ Bolt Optimization: Eliminated `String` payload to avoid O(N) heap allocations for every word.
+    Other,
 }
 
 /// Simple tokenizer for temporal clause extraction.
@@ -352,7 +354,7 @@ fn tokenize_temporal_keywords(sql: &str) -> Vec<(usize, Token)> {
                     chars = lookahead;
                     Token::AsOf
                 } else {
-                    Token::Other(word.to_string())
+                    Token::Other
                 }
             } else if word.eq_ignore_ascii_case("BETWEEN") {
                 Token::Between
@@ -361,7 +363,7 @@ fn tokenize_temporal_keywords(sql: &str) -> Vec<(usize, Token)> {
             } else if word.eq_ignore_ascii_case("TIMESTAMP") {
                 Token::Timestamp
             } else {
-                Token::Other(word.to_string())
+                Token::Other
             };
             tokens.push((byte_idx, token));
             continue;
