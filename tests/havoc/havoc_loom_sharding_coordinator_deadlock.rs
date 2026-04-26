@@ -21,9 +21,11 @@ mod loom_test {
 
         fn recover_pending_transactions(&self) {
             let _log_guard = self.commit_log.read().unwrap();
+            drop(_log_guard);
 
             // Reinserting recovered txns
             let _tx_guard = self.active_transactions.write().unwrap();
+            drop(_tx_guard);
 
             // Getting connections to send commits
             let _conn_guard = self.connections.read().unwrap();
