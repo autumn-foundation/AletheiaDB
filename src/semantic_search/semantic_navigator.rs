@@ -49,10 +49,10 @@
 //! ```
 
 use crate::AletheiaDB;
-use crate::core::version::FastHashMap;
 use crate::core::error::{Error, Result};
 use crate::core::id::NodeId;
 use crate::core::vector::cosine_similarity;
+use crate::core::version::FastHashMap;
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 

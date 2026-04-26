@@ -13,10 +13,10 @@
 //! - **Freshness**: Preferring recently updated information.
 
 use crate::AletheiaDB;
-use crate::core::version::FastHashMap;
 use crate::core::error::{Error, Result};
 use crate::core::id::NodeId;
 use crate::core::temporal::time;
+use crate::core::version::FastHashMap;
 
 /// Configuration for a fishing trip.
 #[derive(Debug, Clone)]
