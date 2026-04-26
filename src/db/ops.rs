@@ -214,13 +214,55 @@ impl AletheiaDB {
         self.current.get_outgoing_edges_with_label(node_id, label)
     }
 
-    /// Get the number of nodes in the current state.
+    /// Get the approximate number of nodes in the database.
+    ///
+    /// # Consistency Note
+    ///
+    /// This returns the **current** count of committed nodes in the storage engine.
+    /// Unlike `get_node()`, this count is **NOT snapshot-isolated**. It may include
+    /// nodes created by transactions that committed after this read transaction started.
+    ///
+    /// This design choice enables O(1) performance without scanning the entire
+    /// database to filter visibility for every node.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # use aletheiadb::AletheiaDB;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// let count = db.node_count();
+    /// println!("Database contains {} nodes", count);
+    /// # Ok(())
+    /// # }
+    /// ```
     #[inline]
     pub fn node_count(&self) -> usize {
         self.current.node_count()
     }
 
-    /// Get the number of edges in the current state.
+    /// Get the approximate number of edges in the database.
+    ///
+    /// # Consistency Note
+    ///
+    /// This returns the **current** count of committed edges in the storage engine.
+    /// Unlike `get_edge()`, this count is **NOT snapshot-isolated**. It may include
+    /// edges created by transactions that committed after this read transaction started.
+    ///
+    /// This design choice enables O(1) performance without scanning the entire
+    /// database to filter visibility for every edge.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # use aletheiadb::AletheiaDB;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// let count = db.edge_count();
+    /// println!("Database contains {} edges", count);
+    /// # Ok(())
+    /// # }
+    /// ```
     #[inline]
     pub fn edge_count(&self) -> usize {
         self.current.edge_count()
