@@ -13,6 +13,7 @@ pub mod hindsight;
 pub mod luna;
 pub mod metaphor;
 pub mod muse;
+pub mod odyssey;
 pub mod omen;
 pub mod oracle;
 pub mod prophet;
