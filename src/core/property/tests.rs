@@ -194,6 +194,7 @@ fn test_property_map_builder() {
         .build();
 
     assert_eq!(map.len(), 3);
+    assert!(!map.is_empty());
     assert_eq!(
         map.get("name").and_then(|v: &PropertyValue| v.as_str()),
         Some("Alice")
@@ -254,6 +255,7 @@ fn test_properties_macro() {
     };
 
     assert_eq!(map.len(), 3);
+    assert!(!map.is_empty());
     assert_eq!(
         map.get("name").and_then(|v: &PropertyValue| v.as_str()),
         Some("Bob")
@@ -1562,6 +1564,7 @@ fn test_concurrent_property_map_creation() {
 
                 let map = builder.build();
                 assert_eq!(map.len(), 3);
+                assert!(!map.is_empty());
                 assert_eq!(
                     map.get("shared_key_1")
                         .and_then(|v: &PropertyValue| v.as_str()),

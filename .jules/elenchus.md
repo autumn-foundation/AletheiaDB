@@ -346,3 +346,10 @@
 **Finding:** The `LimitPushdown` tests originally missed several behavioral edge cases and logic checks, particularly regarding the propagation limits in BinaryOp combinations (`||`), updating limit values correctly against child bounds, and setting vector rank limits.
 **Evidence:** `cargo mutants` caught mutants in `LimitPushdown::push_down` specifically targeting the changed boolean condition logic and bounds assignment.
 **Recommendation:** Added `sentry_tests` to `LimitPushdown` that explicitly trigger tests enforcing the boolean change propagation, verifying that updated properties reflect correct nested limits, and vector bounds assignment. Tests now prevent `||` to `&&` mutations and correct top-k modifications.
+
+**[PropertyMap isEmpty Coverage Gap]**
+**Module:** `src/core/property.rs`
+**Severity:** 🟡 Suspect
+**Finding:** The `PropertyMap::is_empty` method was tested with `assert!(map.is_empty())` on newly created maps, but there were no assertions verifying that `!map.is_empty()` after inserting items. This allowed a mutant replacing `is_empty` with `return true;` to survive the test suite.
+**Evidence:** `cargo mutants` revealed that `replace PropertyMap::is_empty -> bool with true` survived.
+**Recommendation:** Added `assert!(!map.is_empty());` in `test_property_map_builder` after populating the map to ensure the implementation is not tautologically returning `true`.
