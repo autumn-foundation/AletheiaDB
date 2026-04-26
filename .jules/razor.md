@@ -12,3 +12,8 @@
 **Bloat:** `StorageSnapshot` and `FieldHolder` traits.
 **Cut:** Deleted single-implementation traits `StorageSnapshot` (implemented only by `CurrentStorageSnapshot`) and `FieldHolder` (implemented only by `Event`, unused except in tests). Moved methods directly to structs.
 **Saved:** ~50 lines of boilerplate + cognitive load of unnecessary abstraction layers.
+
+## [Reduction]
+**Bloat:** Single-implementation traits (`Resonator` in `echo.rs` and `SemanticRule` in `sentinel.rs`) wrapping concrete types in `Box<dyn Trait>` unnecessarily, creating dynamic dispatch overhead and complex lifetimes.
+**Cut:** Removed the `Resonator` trait entirely, calling methods directly on `ActivityDensityResonator`. Replaced the `SemanticRule` trait with a concrete enum containing its two implementations.
+**Saved:** Multiple lines of trait boilerplate, two heap allocations per instance (from Box), dynamic dispatch overhead, and cognitive load for the reader.
