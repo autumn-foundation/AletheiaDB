@@ -431,4 +431,171 @@ mod tests {
 
         assert!(!provider.normalized_by_default()); // Non sentence-transformers
     }
+
+    use wiremock::matchers::{header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[tokio::test]
+    async fn test_huggingface_provider_success() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/models/test-model"))
+            .and(header("Authorization", "Bearer test-token"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(vec![vec![0.1_f32, 0.2_f32, 0.3_f32]]),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let config = HuggingFaceConfig::new("test-token".to_string(), "test-model".to_string(), 3)
+            .with_base_url(mock_server.uri());
+
+        let provider = HuggingFaceProvider::new(config).unwrap();
+        let result = provider.embed("test text").await;
+
+        assert!(result.is_ok());
+        let embedding = result.unwrap();
+        assert_eq!(embedding.len(), 3);
+        assert_eq!(embedding, vec![0.1_f32, 0.2_f32, 0.3_f32]);
+    }
+
+    #[tokio::test]
+    async fn test_huggingface_provider_auth_failed() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/models/test-model"))
+            .respond_with(ResponseTemplate::new(401).set_body_string("Unauthorized"))
+            .mount(&mock_server)
+            .await;
+
+        let config =
+            HuggingFaceConfig::new("invalid-token".to_string(), "test-model".to_string(), 3)
+                .with_base_url(mock_server.uri());
+
+        let provider = HuggingFaceProvider::new(config).unwrap();
+        let result = provider.embed("test text").await;
+
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            EmbeddingError::AuthenticationFailed { provider, reason } => {
+                assert_eq!(provider, "HuggingFace");
+                assert_eq!(reason, "Invalid API token");
+            }
+            e => panic!("Expected AuthenticationFailed, got {:?}", e),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_huggingface_provider_rate_limit() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/models/test-model"))
+            .respond_with(ResponseTemplate::new(429).set_body_string("Too Many Requests"))
+            .mount(&mock_server)
+            .await;
+
+        let config = HuggingFaceConfig::new("test-token".to_string(), "test-model".to_string(), 3)
+            .with_base_url(mock_server.uri());
+
+        let provider = HuggingFaceProvider::new(config).unwrap();
+        let result = provider.embed("test text").await;
+
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            EmbeddingError::RateLimitExceeded { provider, .. } => {
+                assert_eq!(provider, "HuggingFace");
+            }
+            e => panic!("Expected RateLimitExceeded, got {:?}", e),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_huggingface_provider_model_not_found() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/models/test-model"))
+            .respond_with(ResponseTemplate::new(404).set_body_string("Not Found"))
+            .mount(&mock_server)
+            .await;
+
+        let config = HuggingFaceConfig::new("test-token".to_string(), "test-model".to_string(), 3)
+            .with_base_url(mock_server.uri());
+
+        let provider = HuggingFaceProvider::new(config).unwrap();
+        let result = provider.embed("test text").await;
+
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            EmbeddingError::ModelNotFound { model, provider } => {
+                assert_eq!(model, "test-model");
+                assert_eq!(provider, "HuggingFace");
+            }
+            e => panic!("Expected ModelNotFound, got {:?}", e),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_huggingface_provider_internal_server_error() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/models/test-model"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("Internal Server Error"))
+            .mount(&mock_server)
+            .await;
+
+        let config = HuggingFaceConfig::new("test-token".to_string(), "test-model".to_string(), 3)
+            .with_base_url(mock_server.uri());
+
+        let provider = HuggingFaceProvider::new(config).unwrap();
+        let result = provider.embed("test text").await;
+
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            EmbeddingError::ProviderError {
+                provider,
+                message,
+                status_code,
+            } => {
+                assert_eq!(provider, "HuggingFace");
+                assert_eq!(message, "Internal Server Error");
+                assert_eq!(status_code, Some(500));
+            }
+            e => panic!("Expected ProviderError, got {:?}", e),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_huggingface_provider_dimension_mismatch() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/models/test-model"))
+            // Server returns 4 dimensions, but we expect 3
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(vec![vec![0.1_f32, 0.2_f32, 0.3_f32, 0.4_f32]]),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let config = HuggingFaceConfig::new("test-token".to_string(), "test-model".to_string(), 3)
+            .with_base_url(mock_server.uri());
+
+        let provider = HuggingFaceProvider::new(config).unwrap();
+        let result = provider.embed("test text").await;
+
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            EmbeddingError::DimensionMismatch { expected, actual } => {
+                assert_eq!(expected, 3);
+                assert_eq!(actual, 4);
+            }
+            e => panic!("Expected DimensionMismatch, got {:?}", e),
+        }
+    }
 }

@@ -34,3 +34,7 @@
 ## ProjectIterator try_insert unwrapping
 **Learning:** `unwrap()` inside iterator implementations (like `ProjectIterator::next`) poses a significant panic risk when handling properties, especially dynamically sized ones where recursion depth limits can be exceeded or insertion errors can occur. In a database context, panics inside iterators will crash the entire query process rather than just returning an error to the client.
 **Action:** Always gracefully handle property insertion errors using `match` or `?` and propagate them down the iterator pipeline instead of unwrapping, allowing the query to fail safely. Added tests mocking a `try_insert` failure by using an invalid property state.
+
+**Testing HuggingFace API using Wiremock**
+**Learning:** Using `wiremock` is extremely effective for testing `reqwest`-based external API clients in Rust. It spins up a local mock server and allows us to test how our provider logic handles various HTTP status codes (401, 429, 404, 500) and edge cases without mocking internal code details or hitting actual rate limits on the external API.
+**Action:** When testing external HTTP integrations in the future, use `wiremock` to setup realistic external HTTP boundaries and simulate failure states (e.g., authentication failure, rate-limits) to verify that the internal error mapping logic is correct and robust.

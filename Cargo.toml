@@ -107,6 +107,7 @@ rustyline = "18.0"
 # Loom for concurrency testing
 loom = { version = "0.7.2", features = ["checkpoint"] }
 rand = "0.8"
+wiremock = "0.6.5"
 
 [features]
 # Stable: Semantic search cohort (graduated 0.1).
