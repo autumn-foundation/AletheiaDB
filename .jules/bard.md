@@ -4,3 +4,6 @@
 ## 2024-04-10 - [Intra-doc links for conditionally-compiled or non-existent items]
 **Confusion:** Using standard intra-doc links (`[item]`) for items that are either conditionally compiled (like feature-gated experimental modules) or don't resolve properly in the dependency tree causes `rustdoc::broken_intra_doc_links` warnings.
 **Clarification:** Changed intra-doc links to standard markdown backticks (`` `item` ``) for items like `` `crate::semantic_search` ``, `` `reasoning` ``, `` `temporal` ``, `` `diagnostics` ``, `` `characterization` ``, `` `mosaic` ``, and `` `autumn_web::prelude::app` `` to satisfy rustdoc while still keeping the documentation clean and readable.
+## 2024-05-18 - [Missing examples for has_label in core graph]
+**Confusion:** The core `Node::has_label` and `Edge::has_label` methods use `InternedString`, which might be confusing for new developers because they often try to pass `&str` and get compiler errors. While `has_label_str` existed and had examples, the base methods lacked explicit examples showing proper `GLOBAL_INTERNER.intern("...")` usage.
+**Clarification:** I added clear executable `## Examples` doctests directly to `Node::has_label` and `Edge::has_label` demonstrating how to intern strings and query the graph, ensuring developers immediately see the interner integration without hunting through other functions.

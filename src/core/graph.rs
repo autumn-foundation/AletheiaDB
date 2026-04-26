@@ -76,6 +76,23 @@ impl Node {
     }
 
     /// Check if this node has a specific label.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # use aletheiadb::core::{Node, NodeId, VersionId, PropertyMap};
+    /// # use aletheiadb::core::interning::GLOBAL_INTERNER;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let label = GLOBAL_INTERNER.intern("Person")?;
+    /// let other_label = GLOBAL_INTERNER.intern("Company")?;
+    ///
+    /// let node = Node::new(NodeId::new(1)?, label, PropertyMap::new(), VersionId::new(1)?);
+    ///
+    /// assert!(node.has_label(label));
+    /// assert!(!node.has_label(other_label));
+    /// # Ok(())
+    /// # }
+    /// ```
     #[inline]
     pub fn has_label(&self, label: InternedString) -> bool {
         self.label == label
@@ -208,6 +225,30 @@ impl Edge {
     }
 
     /// Check if this edge has a specific label.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # use aletheiadb::core::{Edge, EdgeId, NodeId, VersionId, PropertyMap};
+    /// # use aletheiadb::core::interning::GLOBAL_INTERNER;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let label = GLOBAL_INTERNER.intern("KNOWS")?;
+    /// let other_label = GLOBAL_INTERNER.intern("LIKES")?;
+    ///
+    /// let edge = Edge::new(
+    ///     EdgeId::new(1)?,
+    ///     label,
+    ///     NodeId::new(1)?,
+    ///     NodeId::new(2)?,
+    ///     PropertyMap::new(),
+    ///     VersionId::new(1)?
+    /// );
+    ///
+    /// assert!(edge.has_label(label));
+    /// assert!(!edge.has_label(other_label));
+    /// # Ok(())
+    /// # }
+    /// ```
     #[inline]
     pub fn has_label(&self, label: InternedString) -> bool {
         self.label == label
