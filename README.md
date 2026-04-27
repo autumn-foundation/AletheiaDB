@@ -830,7 +830,7 @@ use aletheiadb::prelude::*;
 
 // Explicit write transaction with multiple operations
 let db = AletheiaDB::new().unwrap();
-let (node1_id, _) = db.write(|tx| -> Result<(NodeId, NodeId), aletheiadb::Error> {
+let (node1_id, _) = db.write(|tx| -> aletheiadb::Result<(NodeId, NodeId)> {
     let node1 = tx.create_node("Event", PropertyMap::new())?;
     let node2 = tx.create_node("Event", PropertyMap::new())?;
     tx.create_edge(node1, node2, "FOLLOWS", PropertyMap::new())?;
@@ -838,7 +838,7 @@ let (node1_id, _) = db.write(|tx| -> Result<(NodeId, NodeId), aletheiadb::Error>
 })?;
 
 // Explicit read transaction
-let _result = db.read(|tx| -> Result<aletheiadb::InternedString, aletheiadb::Error> {
+let _result = db.read(|tx| -> aletheiadb::Result<aletheiadb::InternedString> {
     tx.get_node(node1_id).map(|node| node.label.clone())
 })?;
 ```
