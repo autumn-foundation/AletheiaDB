@@ -919,4 +919,5 @@ mod sentry_tests {
 
         // Element 1 is the relationship
         assert_eq!(patterns[0].elements[1], expected_rel);
-    }}
+}
+}
