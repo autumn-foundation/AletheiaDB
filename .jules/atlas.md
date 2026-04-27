@@ -90,3 +90,18 @@
 ## 2026-06-21 - Splitting Redb Cold Storage Blob
 **Tangle:** `src/storage/redb_cold_storage.rs` was over 4100 lines long, a "Blob" module holding both core cold storage logic and over 2000 lines of tests. It made navigation and understanding the core operations difficult.
 **Blueprint:** Refactored into a `src/storage/redb_cold_storage/` module. Kept the core data definitions and implementation in `mod.rs` (reduced to ~2000 lines) and moved all tests to `tests.rs` (~2000 lines), maintaining the `#[cfg(test)]` block functionality but with better physical separation.
+## 2026-06-21 - Splitting Blob Modules
+**Tangle:**
+Several modules had grown into "Blob" anti-patterns, containing thousands of lines of both core logic and tests in a single file, making navigation and maintenance difficult:
+1. `src/query/parser.rs` (2300+ lines)
+2. `src/storage/current/mod.rs` (2200+ lines)
+3. `src/storage/wal/segment_reader.rs` (2200+ lines)
+4. `src/query/converter.rs` (2100+ lines)
+
+**Blueprint:**
+Refactored these files into their own module directories, extracting their `mod tests { ... }` blocks into separate `tests.rs` files:
+1. `src/query/parser/mod.rs` and `src/query/parser/tests.rs`
+2. `src/storage/current/mod.rs` and `src/storage/current/tests.rs` (migrated `coverage_tests` into the existing `tests.rs`)
+3. `src/storage/wal/segment_reader/mod.rs` and `src/storage/wal/segment_reader/tests.rs`
+4. `src/query/converter/mod.rs` and `src/query/converter/tests.rs`
+This physically separates the test logic from the core implementation, improving readability and enforcing clear module boundaries without changing the underlying architecture.
