@@ -33,10 +33,14 @@ impl AletheiaDB {
     ///
     /// # Example
     ///
-    /// ```ignore
-    /// let db = AletheiaDB::new();
+    /// ```rust,no_run
+    /// # use aletheiadb::AletheiaDB;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let db = AletheiaDB::new()?;
     /// // ... add data ...
     /// db.persist_indexes()?; // Save indexes to disk
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn persist_indexes(&self) -> Result<()> {
         let result = (|| {
@@ -144,11 +148,16 @@ impl AletheiaDB {
     ///
     /// # Example
     ///
-    /// ```ignore
-    /// let db = AletheiaDB::new();
+    /// ```rust,no_run
+    /// # use aletheiadb::{AletheiaDB, PropertyMap};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let db = AletheiaDB::new()?;
+    /// # let properties = PropertyMap::new();
     /// db.create_node("Person", properties)?;
     /// let lsn = db.__test_current_wal_lsn();
     /// assert!(lsn > 0); // LSN advances after operations
+    /// # Ok(())
+    /// # }
     /// ```
     #[doc(hidden)]
     pub fn __test_current_wal_lsn(&self) -> u64 {
@@ -205,12 +214,18 @@ impl AletheiaDB {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```rust,no_run
+    /// # use aletheiadb::AletheiaDB;
+    /// # use aletheiadb::index::vector::HnswConfig;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// let db = AletheiaDB::new()?;
-    /// db.enable_vector_index("embedding", config)?;
+    /// # let config = HnswConfig::default();
+    /// db.vector_index("embedding").hnsw(config).enable()?;
     /// // ... create nodes and perform searches ...
     /// let (count, candidates, results) = db.__test_get_filter_stats("Person").unwrap();
     /// assert_eq!(count, 10); // 10 searches performed
+    /// # Ok(())
+    /// # }
     /// ```
     #[doc(hidden)]
     pub fn __test_get_filter_stats(&self, label: &str) -> Option<(u64, u64, u64)> {
@@ -242,17 +257,24 @@ impl AletheiaDB {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```rust,no_run
+    /// # use aletheiadb::{AletheiaDB, PropertyMap};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # let documents: Vec<PropertyMap> = vec![];
     /// // After bulk import
-    /// for doc in documents {
-    ///     db.create_node("Document", doc.properties)?;
+    /// for props in documents {
+    ///     db.create_node("Document", props)?;
     /// }
     ///
     /// // Refresh statistics for optimal query planning
     /// db.refresh_statistics();
     ///
     /// // Now queries will use accurate statistics
+    /// # let query = db.query().build();
     /// let results = db.execute_query(query)?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn refresh_statistics(&self) {
         // Collect statistics from current storage
@@ -317,14 +339,20 @@ impl AletheiaDB {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```rust,no_run
+    /// # use aletheiadb::{AletheiaDB, PropertyMap};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # let props = PropertyMap::new();
     /// // After bulk import
     /// for i in 0..100000 {
-    ///     db.create_node("Node", props)?;
+    ///     db.create_node("Node", props.clone())?;
     /// }
     ///
     /// // Compress commit log to free memory
     /// db.compress_commit_log();
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn compress_commit_log(&self) {
         self.visibility_manager.compress_commit_log();
@@ -357,10 +385,15 @@ impl AletheiaDB {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```rust,no_run
+    /// # use aletheiadb::AletheiaDB;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
     /// let stats = db.get_compression_stats();
     /// println!("Compression ratio: {}x", stats.compression_ratio);
     /// println!("Memory saved: {} bytes", stats.memory_saved_bytes);
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn get_compression_stats(&self) -> CompressionStats {
         self.visibility_manager.get_compression_stats()
@@ -381,11 +414,16 @@ impl AletheiaDB {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```rust,no_run
+    /// # use aletheiadb::AletheiaDB;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
     /// // After bulk import, compress if using > 10MB
     /// if db.should_compress_commit_log(10 * 1024 * 1024) {
     ///     db.compress_commit_log();
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn should_compress_commit_log(&self, threshold_bytes: usize) -> bool {
         self.visibility_manager
@@ -407,11 +445,16 @@ impl AletheiaDB {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```rust,no_run
+    /// # use aletheiadb::AletheiaDB;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
     /// // Compress every 50K commits
     /// if db.should_compress_by_exception_count(50_000) {
     ///     db.compress_commit_log();
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn should_compress_by_exception_count(&self, threshold_exceptions: usize) -> bool {
         self.visibility_manager
