@@ -23,8 +23,9 @@ fn test_evaluate_clock_skew_exact_boundaries() {
 
     // Should be OK (exact boundary allowed)
     let result = evaluate_clock_skew(current, frontier_exact, None, false);
-    assert!(
-        result.is_ok(),
+    assert_eq!(
+        result.as_ref().map(|d| d.drift_us),
+        Ok(-300_000_000),
         "Exact backward drift limit should be allowed, got {:?}",
         result
     );
@@ -46,8 +47,9 @@ fn test_evaluate_clock_skew_exact_boundaries() {
     let frontier_forward_exact = current - max_forward;
 
     let result = evaluate_clock_skew(current, frontier_forward_exact, Some(max_forward), false);
-    assert!(
-        result.is_ok(),
+    assert_eq!(
+        result.as_ref().map(|d| d.drift_us),
+        Ok(100_000),
         "Exact forward jump limit should be allowed, got {:?}",
         result
     );
@@ -67,11 +69,11 @@ fn test_evaluate_clock_skew_exact_boundaries() {
 fn test_new_validates_wallclock() {
     // Valid wallclock should succeed
     let valid = HybridTimestamp::new(1_000_000, 0);
-    assert!(valid.is_ok());
+    assert_eq!(valid.map(|t| (t.wallclock(), t.logical())), Ok((1_000_000, 0)));
 
     // MAX_VALID_TIMESTAMP should succeed
     let at_max = HybridTimestamp::new(MAX_VALID_TIMESTAMP, 0);
-    assert!(at_max.is_ok());
+    assert_eq!(at_max.map(|t| (t.wallclock(), t.logical())), Ok((MAX_VALID_TIMESTAMP, 0)));
 
     // Wallclock exceeding MAX_VALID_TIMESTAMP should fail
     let invalid = HybridTimestamp::new(MAX_VALID_TIMESTAMP + 1, 0);
@@ -183,8 +185,9 @@ fn test_deserialize_validates_wallclock() {
     valid_buffer.extend_from_slice(&logical.to_le_bytes());
 
     let result = HybridTimestamp::deserialize(&valid_buffer);
-    assert!(
-        result.is_ok(),
+    assert_eq!(
+        result.map(|(t, _)| t.wallclock()),
+        Ok(MAX_VALID_TIMESTAMP),
         "deserialize should accept wallclock <= MAX_VALID_TIMESTAMP"
     );
 
@@ -206,8 +209,9 @@ fn test_deserialize_validates_wallclock() {
     sentinel_buffer_zero.extend_from_slice(&0u32.to_le_bytes());
 
     let result = HybridTimestamp::deserialize(&sentinel_buffer_zero);
-    assert!(
-        result.is_ok(),
+    assert_eq!(
+        result.map(|(t, _)| (t.wallclock(), t.logical())),
+        Ok((i64::MAX, 0)),
         "deserialize should accept i64::MAX with zero logical counter as TIMESTAMP_MAX sentinel"
     );
 }

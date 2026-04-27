@@ -346,3 +346,10 @@
 **Finding:** The `LimitPushdown` tests originally missed several behavioral edge cases and logic checks, particularly regarding the propagation limits in BinaryOp combinations (`||`), updating limit values correctly against child bounds, and setting vector rank limits.
 **Evidence:** `cargo mutants` caught mutants in `LimitPushdown::push_down` specifically targeting the changed boolean condition logic and bounds assignment.
 **Recommendation:** Added `sentry_tests` to `LimitPushdown` that explicitly trigger tests enforcing the boolean change propagation, verifying that updated properties reflect correct nested limits, and vector bounds assignment. Tests now prevent `||` to `&&` mutations and correct top-k modifications.
+
+**[Assertion Weakness Class]**
+**Module:** `tests/generic_error_types.rs`, `tests/hlc_tests.rs`
+**Severity:** 🟡 Suspect
+**Finding:** A recurring class of weak assertions `assert!(result.is_ok())` without directly asserting the result structure/values. This proves existence but not correctness, allowing mutations returning incorrect but OK values to pass.
+**Evidence:** Found 7 instances in `generic_error_types.rs` checking `result.is_ok()` separately from `result.unwrap()`, and instances in `hlc_tests.rs` doing the same.
+**Recommendation:** Refactored these tests to use `assert_eq!(result, Ok(expected))` for strong, single-step structural equality checks.
