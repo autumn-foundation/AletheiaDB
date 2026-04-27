@@ -15,5 +15,6 @@ pub mod metaphor;
 pub mod muse;
 pub mod omen;
 pub mod oracle;
+pub mod pathfinder;
 pub mod prophet;
 pub mod synergy;
