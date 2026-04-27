@@ -149,17 +149,46 @@ mod tests {
             // n1 [0.0, 0.0] -> n2 [0.5, 0.0] -> n3 [0.8, 0.8]
             // We also add a distractor n4 [-1.0, 1.0] connected to n1
 
-            n1 = tx.create_node("Concept", PropertyMapBuilder::new().insert_vector("vec", &[0.0, 0.0]).build()).unwrap();
-            n2 = tx.create_node("Concept", PropertyMapBuilder::new().insert_vector("vec", &[0.5, 0.0]).build()).unwrap();
-            n3 = tx.create_node("Concept", PropertyMapBuilder::new().insert_vector("vec", &[0.8, 0.8]).build()).unwrap();
-            n4 = tx.create_node("Concept", PropertyMapBuilder::new().insert_vector("vec", &[-1.0, 1.0]).build()).unwrap();
+            n1 = tx
+                .create_node(
+                    "Concept",
+                    PropertyMapBuilder::new()
+                        .insert_vector("vec", &[0.0, 0.0])
+                        .build(),
+                )
+                .unwrap();
+            n2 = tx
+                .create_node(
+                    "Concept",
+                    PropertyMapBuilder::new()
+                        .insert_vector("vec", &[0.5, 0.0])
+                        .build(),
+                )
+                .unwrap();
+            n3 = tx
+                .create_node(
+                    "Concept",
+                    PropertyMapBuilder::new()
+                        .insert_vector("vec", &[0.8, 0.8])
+                        .build(),
+                )
+                .unwrap();
+            n4 = tx
+                .create_node(
+                    "Concept",
+                    PropertyMapBuilder::new()
+                        .insert_vector("vec", &[-1.0, 1.0])
+                        .build(),
+                )
+                .unwrap();
 
             tx.create_edge(n1, n2, "NEXT", Default::default()).unwrap();
             tx.create_edge(n1, n4, "NEXT", Default::default()).unwrap();
             tx.create_edge(n2, n3, "NEXT", Default::default()).unwrap();
 
             Ok::<(), crate::core::error::Error>(())
-        }).unwrap();
+        })
+        .unwrap();
 
         let pathfinder = SemanticPathfinder::new(&db);
         let target = vec![1.0, 1.0];
