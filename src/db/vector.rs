@@ -1,3 +1,9 @@
+//! Vector index operations.
+//!
+//! This module provides methods to configure and manage vector indexes.
+//! It allows enabling vector indexing on specific properties for similarity
+//! searches, optionally integrating with temporal features for drift tracking.
+
 use crate::core::error::{Result, ResultExt};
 use crate::core::id::NodeId;
 use crate::core::temporal::Timestamp;

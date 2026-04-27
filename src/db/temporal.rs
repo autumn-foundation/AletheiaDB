@@ -1,3 +1,9 @@
+//! Temporal query operations.
+//!
+//! This module provides methods to query the historical state of the graph.
+//! It supports retrieving node and edge histories, and executing point-in-time
+//! (as-of) queries to see what the graph looked like at a specific moment.
+
 use crate::core::error::{Result, ResultExt};
 use crate::core::graph::{Edge, Node};
 use crate::core::id::{EdgeId, NodeId, VersionId};

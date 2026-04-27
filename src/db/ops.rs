@@ -1,3 +1,9 @@
+//! Basic graph operations (CRUD).
+//!
+//! This module provides the core CRUD (Create, Read, Update, Delete) methods
+//! for nodes and edges directly on `AletheiaDB`. These are convenience methods
+//! that internally manage a write transaction for single operations.
+
 use crate::api::transaction::WriteOps;
 use crate::core::error::{Result, ResultExt};
 use crate::core::graph::{Edge, Node};

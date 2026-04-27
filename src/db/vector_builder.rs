@@ -1,3 +1,9 @@
+//! Vector index builder pattern.
+//!
+//! This module provides a fluent builder API (`VectorIndexBuilder`) for configuring
+//! and enabling vector indexes on database properties, ensuring all necessary
+//! configuration is provided before the index is created.
+
 use crate::core::error::{Error, Result};
 use crate::db::AletheiaDB;
 use crate::index::vector::hnsw::HnswConfig;

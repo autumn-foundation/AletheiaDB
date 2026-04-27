@@ -1,3 +1,10 @@
+//! Configuration and initialization.
+//!
+//! This module handles the configuration options for `AletheiaDB` and
+//! provides the `AletheiaDBBuilder` for instantiating the database with
+//! custom settings such as durability modes, background flush intervals,
+//! and storage paths.
+
 use crate::api::transaction::TxVisibilityManager;
 use crate::config::AletheiaDBConfig;
 use crate::core::error::{Result, ResultExt, StorageError};

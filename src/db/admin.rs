@@ -1,3 +1,8 @@
+//! Administrative and maintenance operations.
+//!
+//! This module provides administrative commands for database maintenance,
+//! such as retrieving historical storage statistics.
+
 use crate::api::transaction::visibility::CompressionStats;
 use crate::core::error::{PersistenceErrorKind, Result, ResultExt, StorageError};
 use crate::core::temporal::Timestamp;

@@ -1,3 +1,9 @@
+//! Transaction management.
+//!
+//! This module provides methods for initiating and committing read and write
+//! transactions, ensuring ACID compliance and proper interaction with the
+//! Write-Ahead Log (WAL) and storage engines.
+
 use crate::api::transaction::{ReadTransaction, WriteTransaction};
 use crate::core::error::{Result, ResultExt, TransactionError};
 use crate::core::hlc::HybridTimestamp;
