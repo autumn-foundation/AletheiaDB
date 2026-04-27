@@ -17,11 +17,16 @@ impl AletheiaDB {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```rust,no_run
+    /// # use aletheiadb::AletheiaDB;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
     /// let results = db.execute_aql("MATCH (n:Person {name: 'Alice'}) RETURN n")?;
     /// for row in results {
     ///     println!("{:?}", row);
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn execute_aql(&self, query_string: &str) -> Result<QueryResults> {
         let query = crate::query::parse_query(query_string)?;
@@ -35,21 +40,33 @@ impl AletheiaDB {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```rust,no_run
+    /// # use aletheiadb::AletheiaDB;
+    /// # use aletheiadb::core::NodeId;
+    /// # use aletheiadb::core::temporal::Timestamp;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # let alice_id = NodeId::new(1)?;
+    /// # let bob_embedding = vec![0.1, 0.2, 0.3];
+    /// # let embedding = vec![0.1, 0.2, 0.3];
+    /// # let timestamp_2023 = Timestamp::from(1672531200000000);
+    /// # let tx_time = Timestamp::from(1672531200000000);
     /// // Graph + Vector: "Who does Alice know that's similar to Bob?"
-    /// let results = db.query()
+    /// let query1 = db.query()
     ///     .start(alice_id)
     ///     .traverse("KNOWS")
     ///     .rank_by_similarity(&bob_embedding, 10)
     ///     .build();
     ///
-    /// let results = db.execute_query(query)?;
+    /// let results1 = db.execute_query(query1)?;
     ///
     /// // Temporal + Vector: "What was similar in 2023?"
-    /// let query = db.query()
+    /// let query2 = db.query()
     ///     .as_of(timestamp_2023, tx_time)
     ///     .find_similar(&embedding, 10)
     ///     .build();
+    /// # Ok(())
+    /// # }
     /// ```
     #[must_use]
     pub fn query(&self) -> QueryBuilder<Initial> {
@@ -68,7 +85,13 @@ impl AletheiaDB {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```rust,no_run
+    /// # use aletheiadb::AletheiaDB;
+    /// # use aletheiadb::core::NodeId;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # let alice_id = NodeId::new(1)?;
+    /// # let embedding = vec![0.1, 0.2, 0.3];
     /// let query = db.query()
     ///     .start(alice_id)
     ///     .traverse("KNOWS")
@@ -79,6 +102,8 @@ impl AletheiaDB {
     /// for row in results {
     ///     println!("{:?}", row);
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn execute_query(&self, query: Query) -> Result<QueryResults> {
         let result = (|| {
@@ -113,7 +138,13 @@ impl AletheiaDB {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```rust,no_run
+    /// # use aletheiadb::AletheiaDB;
+    /// # use aletheiadb::core::NodeId;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # let alice_id = NodeId::new(1)?;
+    /// # let bob_embedding = vec![0.1, 0.2, 0.3];
     /// // "Who does Alice know that's similar to Bob?"
     /// let results = db.traverse_and_rank(
     ///     alice_id,
@@ -123,8 +154,10 @@ impl AletheiaDB {
     /// )?;
     ///
     /// for row in results {
-    ///     println!("Found: {:?}", row.node_id);
+    ///     println!("Found: {:?}", row?.entity.id());
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn traverse_and_rank(
         &self,
@@ -160,7 +193,13 @@ impl AletheiaDB {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```rust,no_run
+    /// # use aletheiadb::AletheiaDB;
+    /// # use aletheiadb::core::temporal::Timestamp;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # let query_embedding = vec![0.1, 0.2, 0.3];
+    /// # let timestamp_2023 = Timestamp::from(1672531200000000);
     /// // "What concepts were similar to this in 2023?"
     /// let results = db.find_similar_at_time(
     ///     &query_embedding,
@@ -168,6 +207,8 @@ impl AletheiaDB {
     ///     timestamp_2023,
     ///     timestamp_2023
     /// )?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn find_similar_at_time(
         &self,
@@ -204,7 +245,15 @@ impl AletheiaDB {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```rust,no_run
+    /// # use aletheiadb::AletheiaDB;
+    /// # use aletheiadb::core::NodeId;
+    /// # use aletheiadb::core::temporal::Timestamp;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # let alice_id = NodeId::new(1)?;
+    /// # let bob_embedding = vec![0.1, 0.2, 0.3];
+    /// # let timestamp_2023 = Timestamp::from(1672531200000000);
     /// // "Who did Alice know in 2023 that was similar to Bob?"
     /// let results = db.traverse_and_rank_at_time(
     ///     alice_id,
@@ -214,6 +263,11 @@ impl AletheiaDB {
     ///     timestamp_2023,
     ///     timestamp_2023
     /// )?;
+    /// for row in results {
+    ///     println!("Found: {:?}", row?.entity.id());
+    /// }
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn traverse_and_rank_at_time(
         &self,
@@ -256,11 +310,16 @@ impl AletheiaDB {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```rust,no_run
+    /// # use aletheiadb::AletheiaDB;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
     /// let results = db.execute_cypher("MATCH (n:Person {name: 'Alice'}) RETURN n")?;
     /// for row in results {
     ///     println!("{:?}", row);
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn execute_cypher(&self, query_string: &str) -> Result<QueryResults> {
         let query = crate::cypher::parse_cypher(query_string)?;
@@ -279,10 +338,13 @@ impl AletheiaDB {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```rust,no_run
+    /// # use aletheiadb::AletheiaDB;
     /// use std::collections::HashMap;
     /// use aletheiadb::cypher::CypherParameterValue;
     ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
     /// let mut params = HashMap::new();
     /// params.insert("name".to_string(), CypherParameterValue::String("Alice".into()));
     ///
@@ -293,6 +355,8 @@ impl AletheiaDB {
     /// for row in results {
     ///     println!("{:?}", row);
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn execute_cypher_with_params(
         &self,

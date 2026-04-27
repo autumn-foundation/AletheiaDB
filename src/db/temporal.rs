@@ -172,18 +172,28 @@ impl AletheiaDB {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```rust,no_run
+    /// # use aletheiadb::AletheiaDB;
+    /// # use aletheiadb::core::NodeId;
+    /// # use aletheiadb::core::temporal::Timestamp;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # let node1 = NodeId::new(1)?;
+    /// # let valid_time = Timestamp::from(0);
+    /// # let tx_time = Timestamp::from(0);
     /// // Query 100 nodes at a historical point with single lock acquisition
-    /// let node_ids = vec![node1, node2, /* ... */, node100];
+    /// let node_ids = vec![node1];
     /// let results = db.get_nodes_at_time(&node_ids, valid_time, tx_time)?;
     ///
     /// for (node_id, node_opt) in results {
     ///     if let Some(node) = node_opt {
-    ///         println!("Node {} existed with properties: {:?}", node_id, node.properties());
+    ///         println!("Node {} existed with properties: {:?}", node_id, node.properties);
     ///     } else {
     ///         println!("Node {} did not exist at this time", node_id);
     ///     }
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn get_nodes_at_time(
         &self,
@@ -247,9 +257,17 @@ impl AletheiaDB {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```rust,no_run
+    /// # use aletheiadb::AletheiaDB;
+    /// # use aletheiadb::core::EdgeId;
+    /// # use aletheiadb::core::temporal::Timestamp;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # let edge1 = EdgeId::new(1)?;
+    /// # let valid_time = Timestamp::from(0);
+    /// # let tx_time = Timestamp::from(0);
     /// // Query multiple edges at a historical point with single lock acquisition
-    /// let edge_ids = vec![edge1, edge2, edge3];
+    /// let edge_ids = vec![edge1];
     /// let results = db.get_edges_at_time(&edge_ids, valid_time, tx_time)?;
     ///
     /// for (edge_id, edge_opt) in results {
@@ -259,6 +277,8 @@ impl AletheiaDB {
     ///         println!("Edge {} did not exist at this time", edge_id);
     ///     }
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn get_edges_at_time(
         &self,
@@ -286,9 +306,18 @@ impl AletheiaDB {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```rust,no_run
+    /// # use aletheiadb::AletheiaDB;
+    /// # use aletheiadb::core::NodeId;
+    /// # use aletheiadb::core::temporal::Timestamp;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # let alice_id = NodeId::new(1)?;
+    /// # let jan_15 = Timestamp::from(0);
     /// // "What were Alice's properties on January 15th?"
     /// let node = db.get_node_at_valid_time(alice_id, jan_15)?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn get_node_at_valid_time(&self, node_id: NodeId, valid_time: Timestamp) -> Result<Node> {
         let tx_time = time::now();
@@ -302,9 +331,18 @@ impl AletheiaDB {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```rust,no_run
+    /// # use aletheiadb::AletheiaDB;
+    /// # use aletheiadb::core::NodeId;
+    /// # use aletheiadb::core::temporal::Timestamp;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # let alice_id = NodeId::new(1)?;
+    /// # let feb_1 = Timestamp::from(0);
     /// // "What did we know about Alice on February 1st?"
     /// let node = db.get_node_at_transaction_time(alice_id, feb_1)?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn get_node_at_transaction_time(
         &self,
@@ -321,9 +359,16 @@ impl AletheiaDB {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```rust,no_run
+    /// # use aletheiadb::AletheiaDB;
+    /// # use aletheiadb::core::NodeId;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # let alice_id = NodeId::new(1)?;
     /// let history = db.get_node_history(alice_id)?;
     /// println!("Alice has {} versions", history.version_count());
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn get_node_history(&self, node_id: NodeId) -> Result<EntityHistory> {
         self.historical
@@ -338,9 +383,16 @@ impl AletheiaDB {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```rust,no_run
+    /// # use aletheiadb::AletheiaDB;
+    /// # use aletheiadb::core::NodeId;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # let alice_id = NodeId::new(1)?;
     /// let v1 = db.get_node_at_version(alice_id, 1)?;  // Original version
     /// let v2 = db.get_node_at_version(alice_id, 2)?;  // After first update
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn get_node_at_version(&self, node_id: NodeId, version_number: u64) -> Result<Node> {
         self.historical
@@ -355,7 +407,12 @@ impl AletheiaDB {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```rust,no_run
+    /// # use aletheiadb::AletheiaDB;
+    /// # use aletheiadb::core::NodeId;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # let alice_id = NodeId::new(1)?;
     /// let history = db.get_node_history(alice_id)?;
     /// let v1 = history.first_version().unwrap().version_id;
     /// let v2 = history.current_version().unwrap().version_id;
@@ -364,6 +421,8 @@ impl AletheiaDB {
     /// if diff.has_changes() {
     ///     println!("Properties changed: {}", diff.change_count());
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn diff_node_versions(
         &self,

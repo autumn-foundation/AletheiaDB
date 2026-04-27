@@ -541,10 +541,17 @@ impl AletheiaDB {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```rust,no_run
+    /// # use aletheiadb::AletheiaDB;
+    /// # use aletheiadb::core::temporal::Timestamp;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # let query_embedding = vec![0.1, 0.2, 0.3];
     /// // Find documents similar to a query at a specific point in time
-    /// let timestamp_2023 = 1672531200000000; // 2023-01-01 in microseconds
+    /// let timestamp_2023 = Timestamp::from(1672531200000000); // 2023-01-01 in microseconds
     /// let results = db.find_similar_as_of(&query_embedding, 10, timestamp_2023)?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn find_similar_as_of(
         &self,
@@ -582,15 +589,22 @@ impl AletheiaDB {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```rust,no_run
+    /// # use aletheiadb::AletheiaDB;
+    /// # use aletheiadb::core::temporal::Timestamp;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # let query_embedding = vec![0.1, 0.2, 0.3];
     /// // Find documents similar to a query at a specific point in time
-    /// let timestamp_2023 = 1672531200000000; // 2023-01-01 in microseconds
+    /// let timestamp_2023 = Timestamp::from(1672531200000000); // 2023-01-01 in microseconds
     /// let results = db.find_similar_as_of_in(
     ///     "content_embedding",
     ///     &query_embedding,
     ///     10,
     ///     timestamp_2023
     /// )?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn find_similar_as_of_in(
         &self,
@@ -634,9 +648,15 @@ impl AletheiaDB {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```rust,no_run
+    /// # use aletheiadb::AletheiaDB;
+    /// # use aletheiadb::core::NodeId;
     /// use aletheiadb::core::temporal::TimeRange;
     ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # let node_id = NodeId::new(1)?;
+    /// # let original_embedding = vec![0.1, 0.2, 0.3];
     /// // Track how a document's embedding changed from its original version
     /// let time_range = TimeRange::new(0.into(), i64::MAX.into()).unwrap();
     /// let drift = db.track_drift_in(
@@ -647,8 +667,10 @@ impl AletheiaDB {
     /// )?;
     ///
     /// for (timestamp, distance) in drift {
-    ///     println!("At {}: drift = {:.3}", timestamp, distance);
+    ///     println!("At {:?}: drift = {:.3}", timestamp, distance);
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn track_drift_in(
         &self,
@@ -690,15 +712,22 @@ impl AletheiaDB {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```rust,no_run
+    /// # use aletheiadb::AletheiaDB;
+    /// # use aletheiadb::core::NodeId;
     /// use aletheiadb::core::temporal::TimeRange;
     ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # let node_id = NodeId::new(1)?;
     /// let time_range = TimeRange::new(0.into(), i64::MAX.into()).unwrap();
     /// let evolution = db.semantic_evolution_in("content_embedding", node_id, time_range)?;
     ///
     /// for (timestamp, embedding) in evolution {
-    ///     println!("At {}: {} dimensions", timestamp, embedding.len());
+    ///     println!("At {:?}: {} dimensions", timestamp, embedding.len());
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn semantic_evolution_in(
         &self,
@@ -741,10 +770,15 @@ impl AletheiaDB {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```rust,no_run
+    /// # use aletheiadb::AletheiaDB;
     /// use aletheiadb::core::temporal::TimeRange;
     /// use aletheiadb::index::vector::temporal::DriftMetric;
     ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # let start_ts = 0;
+    /// # let end_ts = i64::MAX;
     /// let time_range = TimeRange::new(start_ts.into(), end_ts.into()).unwrap();
     /// let drifted = db.find_drift_in(
     ///     "content_embedding",
@@ -756,6 +790,8 @@ impl AletheiaDB {
     /// for (node_id, drift) in drifted {
     ///     println!("Node {} drifted by {:.3}", node_id, drift);
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn find_drift_in(
         &self,
