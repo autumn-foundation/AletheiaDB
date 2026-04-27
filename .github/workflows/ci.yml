@@ -61,6 +61,8 @@ jobs:
 
       - name: Run tests
         run: cargo test --verbose --features "config-toml,mcp-server,sharding-rpc"
+        env:
+          CARGO_TEST_TIMEOUT: 1200 # prevent internal cargo timeout if applicable
 
       - name: Run doc tests
         run: cargo test --doc --verbose
@@ -71,6 +73,13 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
+
+      - name: Free Disk Space (Ubuntu)
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /opt/ghc
+          sudo rm -rf "/usr/local/share/boost"
+          sudo rm -rf "$AGENT_TOOLSDIRECTORY"
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
