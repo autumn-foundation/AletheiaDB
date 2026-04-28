@@ -579,7 +579,17 @@ mod sentry_tests {
             ),
         ));
         let result = rule.apply(&plan, &stats).unwrap();
-        assert!(result.is_some());
+        let expected_plan = LogicalPlan::new(LogicalOp::unary(
+            UnaryOp::Sort {
+                key: SortKey::Property("a".to_string()),
+                descending: true,
+            },
+            LogicalOp::unary(
+                UnaryOp::Filter(Predicate::eq("a", 1)),
+                LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(1).unwrap()])),
+            ),
+        ));
+        assert_eq!(result, Some(expected_plan));
     }
 
     #[test]
