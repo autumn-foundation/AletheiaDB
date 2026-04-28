@@ -10,7 +10,7 @@
 //! - `BAAI/bge-small-en-v1.5` (384 dimensions)
 //! - `BAAI/bge-large-en-v1.5` (1024 dimensions)
 //!
-//! # Example
+//! ## Examples
 //!
 //! ```ignore
 //! use aletheiadb::embeddings::{EmbeddingService, providers::huggingface::*};
@@ -70,7 +70,7 @@ impl HuggingFaceConfig {
     ///
     /// Returns `EmbeddingError::ConfigError` if HF_TOKEN is not set.
     ///
-    /// # Example
+    /// ## Examples
     ///
     /// ```ignore
     /// let config = HuggingFaceConfig::from_env(
@@ -106,7 +106,7 @@ impl HuggingFaceConfig {
 
     /// Create config with explicit API token.
     ///
-    /// # Example
+    /// ## Examples
     ///
     /// ```ignore
     /// let config = HuggingFaceConfig::new(
@@ -128,12 +128,24 @@ impl HuggingFaceConfig {
     /// Set a custom API base URL.
     ///
     /// Useful for self-hosted inference endpoints.
+    /// ## Examples
+    ///
+    /// ```ignore
+    /// let config = HuggingFaceConfig::all_minilm_l6_v2().unwrap()
+    ///     .with_base_url("https://my-hf-endpoint.com".to_string());
+    /// ```
     pub fn with_base_url(mut self, base_url: String) -> Self {
         self.base_url = Some(base_url);
         self
     }
 
     /// Set a custom timeout in seconds.
+    /// ## Examples
+    ///
+    /// ```ignore
+    /// let config = HuggingFaceConfig::all_minilm_l6_v2().unwrap()
+    ///     .with_timeout(120);
+    /// ```
     pub fn with_timeout(mut self, timeout_secs: u64) -> Self {
         self.timeout_secs = timeout_secs;
         self
@@ -148,7 +160,7 @@ impl HuggingFaceConfig {
 
     /// Create a config for the popular all-MiniLM-L6-v2 model (384 dimensions).
     ///
-    /// # Example
+    /// ## Examples
     ///
     /// ```ignore
     /// let config = HuggingFaceConfig::all_minilm_l6_v2()?;
@@ -159,7 +171,7 @@ impl HuggingFaceConfig {
 
     /// Create a config for the all-mpnet-base-v2 model (768 dimensions).
     ///
-    /// # Example
+    /// ## Examples
     ///
     /// ```ignore
     /// let config = HuggingFaceConfig::all_mpnet_base_v2()?;
@@ -182,7 +194,7 @@ impl HuggingFaceProvider {
     ///
     /// Returns `EmbeddingError::ConfigError` if the HTTP client cannot be created.
     ///
-    /// # Example
+    /// ## Examples
     ///
     /// ```ignore
     /// let config = HuggingFaceConfig::from_env(

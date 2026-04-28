@@ -5,7 +5,7 @@
 //! - `text-embedding-3-large` (3072 dimensions, $0.13/1M tokens)
 //! - `text-embedding-ada-002` (1536 dimensions, legacy)
 //!
-//! # Example
+//! ## Examples
 //!
 //! ```ignore
 //! use aletheiadb::embeddings::{EmbeddingService, providers::openai::*};
@@ -93,7 +93,7 @@ impl OpenAIConfig {
     ///
     /// Returns `EmbeddingError::ConfigError` if the environment variable is not set.
     ///
-    /// # Example
+    /// ## Examples
     ///
     /// ```ignore
     /// let config = OpenAIConfig::from_env(OpenAIModel::TextEmbedding3Small)?;
@@ -124,7 +124,7 @@ impl OpenAIConfig {
 
     /// Create config with explicit API key.
     ///
-    /// # Example
+    /// ## Examples
     ///
     /// ```ignore
     /// let config = OpenAIConfig::new(
@@ -144,12 +144,24 @@ impl OpenAIConfig {
     /// Set a custom API base URL.
     ///
     /// Useful for Azure OpenAI or other OpenAI-compatible endpoints.
+    /// ## Examples
+    ///
+    /// ```ignore
+    /// let config = OpenAIConfig::new("key".to_string(), OpenAIModel::TextEmbedding3Small)
+    ///     .with_base_url("https://custom.openai.com/v1".to_string());
+    /// ```
     pub fn with_base_url(mut self, base_url: String) -> Self {
         self.base_url = Some(base_url);
         self
     }
 
     /// Set a custom timeout in seconds.
+    /// ## Examples
+    ///
+    /// ```ignore
+    /// let config = OpenAIConfig::new("key".to_string(), OpenAIModel::TextEmbedding3Small)
+    ///     .with_timeout(120);
+    /// ```
     pub fn with_timeout(mut self, timeout_secs: u64) -> Self {
         self.timeout_secs = timeout_secs;
         self
@@ -176,7 +188,7 @@ impl OpenAIProvider {
     ///
     /// Returns `EmbeddingError::ConfigError` if the HTTP client cannot be created.
     ///
-    /// # Example
+    /// ## Examples
     ///
     /// ```ignore
     /// let config = OpenAIConfig::from_env(OpenAIModel::TextEmbedding3Small)?;

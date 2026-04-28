@@ -17,7 +17,7 @@
 //! 2. Pull a model: `ollama pull nomic-embed-text`
 //! 3. Ollama server runs on `localhost:11434` by default
 //!
-//! # Example
+//! ## Examples
 //!
 //! ```ignore
 //! use aletheiadb::embeddings::{EmbeddingService, providers::ollama::*};
@@ -51,7 +51,7 @@ pub struct OllamaConfig {
 impl OllamaConfig {
     /// Create a new config with the specified model and dimensions.
     ///
-    /// # Example
+    /// ## Examples
     ///
     /// ```ignore
     /// let config = OllamaConfig::new("nomic-embed-text".to_string(), 768);
@@ -69,7 +69,7 @@ impl OllamaConfig {
     ///
     /// High quality embeddings with good performance.
     ///
-    /// # Example
+    /// ## Examples
     ///
     /// ```ignore
     /// let config = OllamaConfig::nomic_embed_text();
@@ -82,7 +82,7 @@ impl OllamaConfig {
     ///
     /// Highest quality embeddings, slower inference.
     ///
-    /// # Example
+    /// ## Examples
     ///
     /// ```ignore
     /// let config = OllamaConfig::mxbai_embed_large();
@@ -95,7 +95,7 @@ impl OllamaConfig {
     ///
     /// Fast, lightweight embeddings.
     ///
-    /// # Example
+    /// ## Examples
     ///
     /// ```ignore
     /// let config = OllamaConfig::all_minilm();
@@ -108,7 +108,7 @@ impl OllamaConfig {
     ///
     /// Useful for remote Ollama instances or custom ports.
     ///
-    /// # Example
+    /// ## Examples
     ///
     /// ```ignore
     /// let config = OllamaConfig::nomic_embed_text()
@@ -120,6 +120,12 @@ impl OllamaConfig {
     }
 
     /// Set a custom timeout in seconds.
+    /// ## Examples
+    ///
+    /// ```ignore
+    /// let config = OllamaConfig::nomic_embed_text()
+    ///     .with_timeout(120);
+    /// ```
     pub fn with_timeout(mut self, timeout_secs: u64) -> Self {
         self.timeout_secs = timeout_secs;
         self
@@ -139,7 +145,7 @@ impl OllamaProvider {
     ///
     /// Returns `EmbeddingError::ConfigError` if the HTTP client cannot be created.
     ///
-    /// # Example
+    /// ## Examples
     ///
     /// ```ignore
     /// let config = OllamaConfig::nomic_embed_text();
