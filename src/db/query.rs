@@ -1,7 +1,7 @@
 //! Query builder and executor hooks.
 //!
 //! This module contains methods for creating and executing queries against the
-//! database. It provides entry points for executing raw AQL strings and using
+//! database. It provides entry points for using
 //! the fluent query builder API for hybrid (graph + vector + temporal) searches.
 
 use crate::core::error::{Result, ResultExt};
