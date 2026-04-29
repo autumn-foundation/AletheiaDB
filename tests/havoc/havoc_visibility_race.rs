@@ -1,5 +1,5 @@
-use aletheiadb::api::transaction::types::TxId;
 use aletheiadb::api::transaction::visibility::TxVisibilityManager;
+use aletheiadb::core::id::TxId;
 use std::sync::{Arc, Barrier};
 use std::thread;
 

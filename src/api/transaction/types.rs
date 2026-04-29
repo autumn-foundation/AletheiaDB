@@ -9,9 +9,9 @@
 //! 2.  `Preparing`: The transaction is validating operations before commit.
 //! 3.  `Committed` or `Aborted`: Terminal states indicating success or failure.
 
+use crate::core::id::TxId;
 use crate::core::temporal::Timestamp;
 // Re-export TxId from core to break dependency cycles
-pub use crate::core::id::TxId;
 
 /// Transaction state
 ///

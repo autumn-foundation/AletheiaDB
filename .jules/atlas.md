@@ -90,3 +90,6 @@
 ## 2026-06-21 - Splitting Redb Cold Storage Blob
 **Tangle:** `src/storage/redb_cold_storage.rs` was over 4100 lines long, a "Blob" module holding both core cold storage logic and over 2000 lines of tests. It made navigation and understanding the core operations difficult.
 **Blueprint:** Refactored into a `src/storage/redb_cold_storage/` module. Kept the core data definitions and implementation in `mod.rs` (reduced to ~2000 lines) and moved all tests to `tests.rs` (~2000 lines), maintaining the `#[cfg(test)]` block functionality but with better physical separation.
+## 2026-06-25 - Breaking TxId Dependency Cycle
+**Tangle:** The `api` module depended on `core::id::TxId`, but re-exported it from `api::transaction::types::TxId`. Code across the repository, including tests, was importing the `api` version instead of the `core` domain primitive. This violated strict layering and created tight coupling between `core` types and `api` representations.
+**Blueprint:** Removed `TxId` re-export from `api::transaction::types` entirely. Updated `api::transaction::mod` to explicitly re-export `crate::core::id::TxId` instead of routing through `types`. Refactored tests like `havoc_visibility_race.rs` to import the core domain primitive directly.

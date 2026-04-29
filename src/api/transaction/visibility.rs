@@ -4,7 +4,7 @@
 //! which ensures that each transaction sees a consistent snapshot of the database
 //! from the time it started.
 
-use crate::api::transaction::types::TxId;
+use crate::core::id::TxId;
 use crate::core::temporal::Timestamp;
 use std::collections::{BTreeMap, HashSet};
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
