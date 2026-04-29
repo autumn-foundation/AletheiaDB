@@ -235,6 +235,20 @@ impl StringInterner {
         since = "0.1.0",
         note = "Use resolve_with() for read-only access; use resolve() only when an owned Arc<str> is strictly required"
     )]
+    /// Resolves an interned string ID back to its string representation.
+    ///
+    /// This provides O(1) lookup to retrieve the original string value.
+    /// Returns None if the ID is not found in the interner.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// # use aletheiadb::core::interning::StringInterner;
+    /// let interner = StringInterner::new();
+    /// let id = interner.intern("hello").unwrap();
+    /// let s = interner.resolve(id).unwrap();
+    /// assert_eq!(&*s, "hello");
+    /// ```
     pub fn resolve(&self, id: InternedString) -> Option<Arc<str>> {
         self.id_to_string
             .get(&id)
@@ -439,7 +453,7 @@ impl StringInterner {
     /// The performance impact is minimal and only affects the initial access cost
     /// for each string. Subsequent accesses remain efficient with O(1) lookups.
     ///
-    /// # Example
+    /// ## Examples
     ///
     /// ```
     /// use aletheiadb::core::interning::StringInterner;
@@ -470,7 +484,7 @@ impl Default for StringInterner {
 /// This can be used throughout the application for interning labels,
 /// property keys, and other frequently repeated strings.
 ///
-/// # Example
+/// ## Examples
 ///
 /// ```ignore
 /// use aletheiadb::core::interning::GLOBAL_INTERNER;

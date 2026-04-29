@@ -12,9 +12,9 @@ impl AletheiaDB {
     /// This is a convenience method that internally uses a write transaction.
     /// For multiple operations, prefer using `write()` or `write_transaction()`.
     ///
-    /// # Example
+    /// ## Examples
     ///
-    /// ```rust,no_run
+    /// ```rust
     /// # use aletheiadb::{AletheiaDB, PropertyMapBuilder};
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// # let db = AletheiaDB::new()?;
@@ -40,14 +40,14 @@ impl AletheiaDB {
     /// This is a convenience method that internally uses a write transaction.
     /// For multiple operations, prefer using `write()` or `write_transaction()`.
     ///
-    /// # Example
+    /// ## Examples
     ///
-    /// ```rust,no_run
+    /// ```rust
     /// # use aletheiadb::{AletheiaDB, PropertyMapBuilder, core::NodeId};
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// # let db = AletheiaDB::new()?;
-    /// # let source_id = NodeId::new(1)?;
-    /// # let target_id = NodeId::new(2)?;
+    /// # let source_id = db.create_node("Person", PropertyMapBuilder::new().build())?;
+    /// # let target_id = db.create_node("Person", PropertyMapBuilder::new().build())?;
     /// let edge_id = db.create_edge(
     ///     source_id,
     ///     target_id,
@@ -104,6 +104,31 @@ impl AletheiaDB {
     }
 
     /// Get the current state of an edge.
+    ///
+    /// This uses the fast path (current storage) for O(1) lookup.
+    ///
+    /// # Arguments
+    ///
+    /// * `edge_id` - The ID of the edge to retrieve.
+    ///
+    /// # Returns
+    ///
+    /// The `Edge` if found, or an error if the edge does not exist.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// # use aletheiadb::{AletheiaDB, PropertyMapBuilder, core::NodeId, core::EdgeId};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # let source_id = db.create_node("Person", PropertyMapBuilder::new().build())?;
+    /// # let target_id = db.create_node("Person", PropertyMapBuilder::new().build())?;
+    /// # let edge_id = db.create_edge(source_id, target_id, "KNOWS", PropertyMapBuilder::new().build())?;
+    /// let edge = db.get_edge(edge_id)?;
+    /// println!("Edge label: {:?}", edge.label);
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn get_edge(&self, edge_id: EdgeId) -> Result<Edge> {
         self.current.get_edge(edge_id).record_error_metric()
     }
@@ -129,7 +154,7 @@ impl AletheiaDB {
     ///
     /// # Examples
     ///
-    /// ```rust,no_run
+    /// ```rust
     /// # use aletheiadb::AletheiaDB;
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// # let db = AletheiaDB::new()?;
@@ -181,35 +206,173 @@ impl AletheiaDB {
     }
 
     /// Get outgoing edges from a node (current state).
+    ///
+    /// Returns a vector of all outgoing edge IDs from the specified node.
+    ///
+    /// # Arguments
+    ///
+    /// * `node_id` - The ID of the source node.
+    ///
+    /// # Returns
+    ///
+    /// A `Vec<EdgeId>` containing all outgoing edges.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// # use aletheiadb::{AletheiaDB, PropertyMapBuilder, core::NodeId};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # let alice_id = db.create_node("Person", PropertyMapBuilder::new().build())?;
+    /// let edges = db.get_outgoing_edges(alice_id);
+    /// println!("Alice has {} outgoing edges", edges.len());
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn get_outgoing_edges(&self, node_id: NodeId) -> Vec<EdgeId> {
         self.current.get_outgoing_edges(node_id)
     }
 
     /// Get outgoing edges from a node as an iterator (current state).
     ///
-    /// This provides zero-allocation traversal.
+    /// This provides zero-allocation traversal over outgoing edges.
+    ///
+    /// # Arguments
+    ///
+    /// * `node_id` - The ID of the source node.
+    ///
+    /// # Returns
+    ///
+    /// An iterator yielding outgoing `EdgeId`s.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// # use aletheiadb::{AletheiaDB, PropertyMapBuilder, core::NodeId};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # let alice_id = db.create_node("Person", PropertyMapBuilder::new().build())?;
+    /// for edge_id in db.get_outgoing_edges_iter(alice_id) {
+    ///     println!("Found outgoing edge: {:?}", edge_id);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn get_outgoing_edges_iter(&self, node_id: NodeId) -> OutgoingEdgesIter<'_> {
         self.current.get_outgoing_edges_iter(node_id)
     }
 
     /// Get incoming edges to a node (current state).
+    ///
+    /// Returns a vector of all incoming edge IDs to the specified node.
+    ///
+    /// # Arguments
+    ///
+    /// * `node_id` - The ID of the target node.
+    ///
+    /// # Returns
+    ///
+    /// A `Vec<EdgeId>` containing all incoming edges.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// # use aletheiadb::{AletheiaDB, PropertyMapBuilder, core::NodeId};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # let alice_id = db.create_node("Person", PropertyMapBuilder::new().build())?;
+    /// let edges = db.get_incoming_edges(alice_id);
+    /// println!("Alice has {} incoming edges", edges.len());
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn get_incoming_edges(&self, node_id: NodeId) -> Vec<EdgeId> {
         self.current.get_incoming_edges(node_id)
     }
 
     /// Get incoming edges to a node as an iterator (current state).
     ///
-    /// This provides zero-allocation traversal.
+    /// This provides zero-allocation traversal over incoming edges.
+    ///
+    /// # Arguments
+    ///
+    /// * `node_id` - The ID of the target node.
+    ///
+    /// # Returns
+    ///
+    /// An iterator yielding incoming `EdgeId`s.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// # use aletheiadb::{AletheiaDB, PropertyMapBuilder, core::NodeId};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # let alice_id = db.create_node("Person", PropertyMapBuilder::new().build())?;
+    /// for edge_id in db.get_incoming_edges_iter(alice_id) {
+    ///     println!("Found incoming edge: {:?}", edge_id);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn get_incoming_edges_iter(&self, node_id: NodeId) -> IncomingEdgesIter<'_> {
         self.current.get_incoming_edges_iter(node_id)
     }
 
     /// Get incoming edges with a specific label (current state).
+    ///
+    /// Returns a vector of incoming edge IDs that match the given label.
+    ///
+    /// # Arguments
+    ///
+    /// * `node_id` - The ID of the target node.
+    /// * `label` - The edge label to filter by.
+    ///
+    /// # Returns
+    ///
+    /// A `Vec<EdgeId>` containing the matching incoming edges.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// # use aletheiadb::{AletheiaDB, PropertyMapBuilder, core::NodeId};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # let alice_id = db.create_node("Person", PropertyMapBuilder::new().build())?;
+    /// let known_by = db.get_incoming_edges_with_label(alice_id, "KNOWS");
+    /// println!("Alice is known by {} people", known_by.len());
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn get_incoming_edges_with_label(&self, node_id: NodeId, label: &str) -> Vec<EdgeId> {
         self.current.get_incoming_edges_with_label(node_id, label)
     }
 
     /// Get outgoing edges with a specific label (current state).
+    ///
+    /// Returns a vector of outgoing edge IDs that match the given label.
+    ///
+    /// # Arguments
+    ///
+    /// * `node_id` - The ID of the source node.
+    /// * `label` - The edge label to filter by.
+    ///
+    /// # Returns
+    ///
+    /// A `Vec<EdgeId>` containing the matching outgoing edges.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// # use aletheiadb::{AletheiaDB, PropertyMapBuilder, core::NodeId};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # let alice_id = db.create_node("Person", PropertyMapBuilder::new().build())?;
+    /// let knows = db.get_outgoing_edges_with_label(alice_id, "KNOWS");
+    /// println!("Alice knows {} people", knows.len());
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn get_outgoing_edges_with_label(&self, node_id: NodeId, label: &str) -> Vec<EdgeId> {
         self.current.get_outgoing_edges_with_label(node_id, label)
     }

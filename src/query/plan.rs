@@ -338,7 +338,7 @@ pub struct TemporalContext {
 impl TemporalContext {
     /// Create a point-in-time context for both dimensions (traditional bi-temporal query).
     ///
-    /// # Example
+    /// ## Examples
     /// ```ignore
     /// // "What did we know at tx_time about what was valid at valid_time?"
     /// let ctx = TemporalContext::as_of(valid_time, tx_time);
@@ -358,7 +358,7 @@ impl TemporalContext {
     ///
     /// Transaction time defaults to "now" (most recent recorded state).
     ///
-    /// # Example
+    /// ## Examples
     /// ```ignore
     /// // "What was valid/true at this time?" (using current database state)
     /// let ctx = TemporalContext::as_of_valid_time(timestamp);
@@ -378,7 +378,7 @@ impl TemporalContext {
     ///
     /// Valid time defaults to "now" (current validity).
     ///
-    /// # Example
+    /// ## Examples
     /// ```ignore
     /// // "What did we know/record at this time?" (database state as of tx_time)
     /// let ctx = TemporalContext::as_of_transaction_time(timestamp);
@@ -396,7 +396,7 @@ impl TemporalContext {
 
     /// Create a context for querying a valid_time range.
     ///
-    /// # Example
+    /// ## Examples
     /// ```ignore
     /// // "What was valid between start and end?"
     /// let ctx = TemporalContext::valid_time_between(range);
@@ -414,7 +414,7 @@ impl TemporalContext {
 
     /// Create a context for querying a transaction_time range.
     ///
-    /// # Example
+    /// ## Examples
     /// ```ignore
     /// // "What did we record between start and end?"
     /// let ctx = TemporalContext::transaction_time_between(range);
@@ -444,6 +444,20 @@ impl TemporalContext {
         since = "0.1.0",
         note = "Use valid_time_between() or transaction_time_between() instead"
     )]
+    /// Creates a time predicate that matches times within a specific range.
+    ///
+    /// The range is inclusive of the start time and exclusive of the end time [start, end).
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::core::temporal::{Timestamp, TimeRange};
+    /// use aletheiadb::query::plan::TemporalContext;
+    /// # use std::str::FromStr;
+    /// let start = Timestamp::from(100);
+    /// let end = Timestamp::from(200);
+    /// let ctx = TemporalContext::between(TimeRange::new(start, end).unwrap());
+    /// ```
     pub fn between(range: TimeRange) -> Self {
         Self::valid_time_between(range)
     }
@@ -464,7 +478,7 @@ impl TemporalContext {
     /// - Missing `valid_time_as_of` → `time::now()`
     /// - Missing `transaction_time_as_of` → `time::now()`
     ///
-    /// # Example
+    /// ## Examples
     /// ```ignore
     /// let ctx = TemporalContext::as_of_valid_time(ts);
     /// let (vt, tt) = ctx.resolve_now();
