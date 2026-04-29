@@ -1,3 +1,9 @@
+//! Parser Fuzzing for Denial of Service and Panics
+//!
+//! # HAVOC: PARSER DOS
+//! We use proptest to throw random noise at the parsers to verify they
+//! fail safely with `Result::Err` instead of panicking or infinite looping.
+
 use proptest::prelude::*;
 
 proptest! {
