@@ -12,3 +12,13 @@
 **Bloat:** `StorageSnapshot` and `FieldHolder` traits.
 **Cut:** Deleted single-implementation traits `StorageSnapshot` (implemented only by `CurrentStorageSnapshot`) and `FieldHolder` (implemented only by `Event`, unused except in tests). Moved methods directly to structs.
 **Saved:** ~50 lines of boilerplate + cognitive load of unnecessary abstraction layers.
+
+## [Reduction]
+**Bloat:** `Resonator` trait (Single-implementation abstraction used only by `ActivityDensityResonator`).
+**Cut:** Deleted the `Resonator` trait. Refactored `EchoChamber` to use the concrete `ActivityDensityResonator` struct directly.
+**Saved:** ~10 lines of boilerplate + removed dynamic dispatch and generic boundaries overhead.
+
+## [Reduction]
+**Bloat:** `GraphView` trait (Single-implementation abstraction over the main `AletheiaDB` struct).
+**Cut:** Deleted the `GraphView` trait and `graph_view.rs` module. Refactored `hybrid.rs` and `semantic_pathfinding.rs` to take `&AletheiaDB` directly instead of a generic `<G: GraphView + ?Sized>` implementation.
+**Saved:** ~120 lines of code (mostly delegating methods in `graph_view.rs`) + cognitive load of unnecessary abstraction layer.
