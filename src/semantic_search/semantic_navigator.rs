@@ -53,7 +53,8 @@ use crate::core::error::{Error, Result};
 use crate::core::id::NodeId;
 use crate::core::vector::cosine_similarity;
 use std::cmp::Ordering;
-use std::collections::{BinaryHeap, HashMap};
+use std::collections::BinaryHeap;
+use crate::core::version::FastHashMap;
 
 /// A navigator that finds semantically meaningful paths through the graph.
 ///
@@ -157,11 +158,11 @@ impl<'a> SemanticNavigator<'a> {
             node: start,
         });
 
-        let mut came_from: HashMap<NodeId, NodeId> = HashMap::new();
-        let mut g_score: HashMap<NodeId, f32> = HashMap::new();
+        let mut came_from: FastHashMap<NodeId, NodeId> = FastHashMap::default();
+        let mut g_score: FastHashMap<NodeId, f32> = FastHashMap::default();
         g_score.insert(start, 0.0);
 
-        let mut f_score: HashMap<NodeId, f32> = HashMap::new();
+        let mut f_score: FastHashMap<NodeId, f32> = FastHashMap::default();
         // h(start) = 1.0 - sim(start, end)
         // We know start has a vector.
         let h_start = 1.0 - cosine_similarity(&_start_vec, &end_vec)?;
@@ -238,7 +239,7 @@ impl<'a> SemanticNavigator<'a> {
 
     fn reconstruct_path(
         &self,
-        came_from: HashMap<NodeId, NodeId>,
+        came_from: FastHashMap<NodeId, NodeId>,
         mut current: NodeId,
     ) -> Vec<NodeId> {
         let mut total_path = vec![current];
@@ -345,5 +346,44 @@ mod tests {
             result.is_err(),
             "Should fail if start/end nodes lack vectors"
         );
+    }
+
+    #[test]
+    fn test_semantic_path_cycle() {
+        let (db, _dir) = create_test_db();
+
+        // Vectors:
+        // A: [1.0, 0.0]
+        // B: [0.707, 0.707]
+        // C: [0.0, 1.0]
+
+        let props_a = PropertyMapBuilder::new()
+            .insert_vector("vec", &[1.0, 0.0])
+            .build();
+        let a = db.create_node("Node", props_a).unwrap();
+
+        let props_b = PropertyMapBuilder::new()
+            .insert_vector("vec", &[0.707, 0.707])
+            .build();
+        let b = db.create_node("Node", props_b).unwrap();
+
+        let props_c = PropertyMapBuilder::new()
+            .insert_vector("vec", &[0.0, 1.0])
+            .build();
+        let c = db.create_node("Node", props_c).unwrap();
+
+        // Create a cycle: A -> B -> A
+        db.create_edge(a, b, "NEXT", PropertyMapBuilder::new().build())
+            .unwrap();
+        db.create_edge(b, a, "NEXT", PropertyMapBuilder::new().build())
+            .unwrap();
+        // Path to target: B -> C
+        db.create_edge(b, c, "NEXT", PropertyMapBuilder::new().build())
+            .unwrap();
+
+        let nav = SemanticNavigator::new(&db);
+        let path = nav.find_path(a, c, "vec").unwrap();
+
+        assert_eq!(path, vec![a, b, c], "Should find shortest path ignoring the cycle");
     }
 }
