@@ -54,3 +54,6 @@
 - Combining `Chronos` (history) and `ConceptAlgebra` (vector math) creates a powerful predictive capability.
 - Validating time-windows for history extraction is critical; gaps in history need careful handling (currently assumes linear velocity).
 - This unlocks "Future Search" use cases (e.g., predicting user interests).
+**Planetarium 3D HTML Exporter**
+**Learning:** Raw JSON strings interpolated into inline HTML `<script>` tags must be sanitized (e.g., escaping `<` as `\u003c`) to prevent Local File XSS vulnerabilities, especially when exporting database content. Also, module-level doctests must be correctly feature-gated (using `#![cfg(feature = "...")]` at the file level or `#[cfg(feature = "...")] pub mod` at the module declaration) to avoid breaking standard `cargo test` builds that don't enable the feature.
+**Action:** Implemented the Planetarium exporter with HTML injection prevention and added `#![cfg(feature = "semantic-characterization")]` to the top of the file to protect the doctest.
