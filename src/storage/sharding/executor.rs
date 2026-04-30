@@ -432,11 +432,7 @@ impl<C: ShardClient> QueryExecutor<C> {
         let query_id = self.next_query_id();
         let query_data = self.serialize_traversal_plan(&plan);
 
-        let target_shards: Vec<_> = plan
-            .involved_shards
-            .iter()
-            .copied()
-            .collect();
+        let target_shards: Vec<_> = plan.involved_shards.iter().copied().collect();
 
         let query = DistributedQuery::new(query_id, query_data)
             .with_shards(target_shards)
