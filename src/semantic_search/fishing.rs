@@ -16,7 +16,7 @@ use crate::AletheiaDB;
 use crate::core::error::{Error, Result};
 use crate::core::id::NodeId;
 use crate::core::temporal::time;
-use std::collections::HashMap;
+use crate::core::version::FastHashMap;
 
 /// Configuration for a fishing trip.
 #[derive(Debug, Clone)]
@@ -135,8 +135,8 @@ impl<'a> FishingRod<'a> {
             }
         };
 
-        let mut candidate_scores: HashMap<NodeId, f32> = HashMap::new();
-        let mut provenance: HashMap<NodeId, String> = HashMap::new();
+        let mut candidate_scores: FastHashMap<NodeId, f32> = FastHashMap::default();
+        let mut provenance: FastHashMap<NodeId, String> = FastHashMap::default();
 
         // Add the "school" (vector matches) to candidates
         for (node_id, similarity) in school.iter() {

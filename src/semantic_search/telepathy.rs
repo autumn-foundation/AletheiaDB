@@ -23,7 +23,7 @@ use crate::AletheiaDB;
 use crate::core::error::Result;
 use crate::core::id::NodeId;
 use crate::core::vector::ops::cosine_similarity;
-use std::collections::HashMap;
+use crate::core::version::FastHashMap;
 
 /// Configuration for the Telepathy engine.
 #[derive(Debug, Clone)]
@@ -82,12 +82,12 @@ impl<'a> TelepathyEngine<'a> {
     ///
     /// # Returns
     /// A map of NodeId -> Activation Strength, sorted by strength (descending).
-    pub fn propagate(&self, seeds: &HashMap<NodeId, f32>) -> Result<Vec<(NodeId, f32)>> {
+    pub fn propagate(&self, seeds: &FastHashMap<NodeId, f32>) -> Result<Vec<(NodeId, f32)>> {
         let mut activations = seeds.clone();
 
         // Cache vectors to avoid repeated DB lookups
         // Map<NodeId, Option<Vec<f32>>>
-        let mut vector_cache: HashMap<NodeId, Option<Vec<f32>>> = HashMap::new();
+        let mut vector_cache: FastHashMap<NodeId, Option<Vec<f32>>> = FastHashMap::default();
 
         // Helper to get vector (cached)
         let mut get_vector = |node_id: NodeId| -> Result<Option<Vec<f32>>> {
@@ -238,11 +238,11 @@ mod tests {
             missing_vector_weight: 0.0,
         });
 
-        let mut seeds = HashMap::new();
+        let mut seeds = FastHashMap::default();
         seeds.insert(a, 1.0);
 
         let results = engine.propagate(&seeds).unwrap();
-        let results_map: HashMap<NodeId, f32> = results.into_iter().collect();
+        let results_map: FastHashMap<NodeId, f32> = results.into_iter().collect();
 
         // B should be activated (1.0 * 1.0 * 1.0 = 1.0)
         // C should not be activated (1.0 * 0.0 * 1.0 = 0.0)
@@ -285,11 +285,11 @@ mod tests {
             missing_vector_weight: 0.0,
         });
 
-        let mut seeds = HashMap::new();
+        let mut seeds = FastHashMap::default();
         seeds.insert(a, 1.0);
 
         let results = engine.propagate(&seeds).unwrap();
-        let results_map: HashMap<NodeId, f32> = results.into_iter().collect();
+        let results_map: FastHashMap<NodeId, f32> = results.into_iter().collect();
 
         // A = 1.0
         // B = 1.0 * 1.0 * 0.5 = 0.5

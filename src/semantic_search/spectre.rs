@@ -43,8 +43,9 @@ use crate::AletheiaDB;
 use crate::core::error::{Error, Result};
 use crate::core::id::NodeId;
 use crate::core::vector::ops::normalize;
+use crate::core::version::FastHashMap;
 use std::cmp::Ordering;
-use std::collections::{BinaryHeap, HashMap};
+use std::collections::BinaryHeap;
 
 /// A semantic lens defining a perspective.
 #[derive(Debug, Clone)]
@@ -146,10 +147,10 @@ impl<'a> Spectre<'a> {
             node: start,
         });
 
-        let mut dist = HashMap::new();
+        let mut dist: FastHashMap<_, _> = FastHashMap::default();
         dist.insert(start, 0.0);
 
-        let mut came_from = HashMap::new();
+        let mut came_from: FastHashMap<_, _> = FastHashMap::default();
 
         while let Some(State { cost, node }) = pq.pop() {
             if node == end {
@@ -187,7 +188,11 @@ impl<'a> Spectre<'a> {
         Ok(Vec::new()) // No path found
     }
 
-    fn reconstruct_path(&self, came_from: HashMap<NodeId, NodeId>, current: NodeId) -> Vec<NodeId> {
+    fn reconstruct_path(
+        &self,
+        came_from: FastHashMap<NodeId, NodeId>,
+        current: NodeId,
+    ) -> Vec<NodeId> {
         let mut path = vec![current];
         let mut curr = current;
         while let Some(&prev) = came_from.get(&curr) {

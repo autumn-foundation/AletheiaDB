@@ -73,3 +73,6 @@
 **[Optimize Migration Candidates Vec Pre-allocation]**
 **Learning:** In `identify_node_candidates` and `identify_edge_candidates`, initializing `all_candidates` and `final_candidates` with `Vec::new()` causes unnecessary intermediate heap reallocations during large data migrations because the maximum required capacity is already known from the `versions` map and the filtered `all_candidates` vector.
 **Action:** Always pre-allocate vectors using `Vec::with_capacity(n)` when the target collection size or its upper bound is known in advance, particularly on hot paths like data migration.
+**[Semantic Search HashMap Optimization]
+**Learning:** In AletheiaDB, `HashMap` instances keyed by `NodeId` can incur significant hashing overhead with the default `SipHash` implementation. This is particularly costly in graph traversal algorithms like A* where maps like `came_from`, `dist`, and `g_score` are queried and updated extensively in hot loops.
+**Action:** Replace `HashMap::new()` with `FastHashMap::default()` from `crate::core::version::FastHashMap` for maps where keys are purely integer IDs like `NodeId`. This switches the underlying hasher to an IdentityHasher, acting essentially as a no-op hash for integers, which measurably accelerates data structures inside pathfinding algorithms.

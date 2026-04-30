@@ -55,8 +55,8 @@
 //! ```
 
 use crate::core::NodeId;
+use crate::core::version::FastHashMap;
 use crate::{AletheiaDB, PropertyMapBuilder, WriteOps};
-use std::collections::HashMap;
 
 /// The result of a clustering operation.
 #[derive(Debug, Clone)]
@@ -64,7 +64,7 @@ pub struct ClusteringResult {
     /// The centroids of the clusters.
     pub centroids: Vec<Vec<f32>>,
     /// Mapping of node ID to cluster index.
-    pub assignments: HashMap<NodeId, usize>,
+    pub assignments: FastHashMap<NodeId, usize>,
 }
 
 /// The Cartographer maps the semantic landscape of the graph.
@@ -198,7 +198,7 @@ impl KMeans {
         if data.is_empty() {
             return ClusteringResult {
                 centroids: Vec::new(),
-                assignments: HashMap::new(),
+                assignments: FastHashMap::default(),
             };
         }
 
@@ -217,11 +217,11 @@ impl KMeans {
             }
         }
 
-        let mut assignments: HashMap<NodeId, usize> = HashMap::new();
+        let mut assignments: FastHashMap<NodeId, usize> = FastHashMap::default();
 
         for _iteration in 0..self.max_iterations {
             let mut changes = 0;
-            let mut new_assignments: HashMap<NodeId, usize> = HashMap::new();
+            let mut new_assignments: FastHashMap<NodeId, usize> = FastHashMap::default();
             let mut sums = vec![vec![0.0; dimensions]; effective_k];
             let mut counts = vec![0; effective_k];
 
