@@ -1,3 +1,8 @@
+//! Configuration and initialization for the AletheiaDB database.
+//!
+//! This module provides the configuration builders and initialization routines
+//! necessary to bootstrap the database with various features enabled.
+
 use crate::api::transaction::TxVisibilityManager;
 use crate::config::AletheiaDBConfig;
 use crate::core::error::{Result, ResultExt, StorageError};

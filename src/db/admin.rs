@@ -1,3 +1,8 @@
+//! Administrative and maintenance operations for the database.
+//!
+//! This module provides methods for system administration, performance tuning,
+//! and monitoring database internals like MVCC commit logs and statistics.
+
 use crate::api::transaction::visibility::CompressionStats;
 use crate::core::error::{PersistenceErrorKind, Result, ResultExt, StorageError};
 use crate::core::temporal::Timestamp;

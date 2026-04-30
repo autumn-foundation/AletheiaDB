@@ -1,3 +1,8 @@
+//! Transaction management and execution.
+//!
+//! This module provides the write transaction API, allowing for atomic
+//! batched operations and custom durability configurations.
+
 use crate::api::transaction::{ReadTransaction, WriteTransaction};
 use crate::core::error::{Result, ResultExt, TransactionError};
 use crate::core::hlc::HybridTimestamp;

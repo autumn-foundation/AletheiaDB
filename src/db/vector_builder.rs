@@ -1,3 +1,8 @@
+//! Builder pattern for configuring vector indexes.
+//!
+//! This module provides a fluent API for setting up HNSW vector indexes
+//! with optional temporal indexing support.
+
 use crate::core::error::{Error, Result};
 use crate::db::AletheiaDB;
 use crate::index::vector::hnsw::HnswConfig;

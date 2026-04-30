@@ -1,3 +1,8 @@
+//! Core graph operations for creating and accessing nodes and edges.
+//!
+//! This module provides the primary CRUD (Create, Read, Update, Delete)
+//! interface for interacting with the graph's current state.
+
 use crate::api::transaction::WriteOps;
 use crate::core::error::{Result, ResultExt};
 use crate::core::graph::{Edge, Node};

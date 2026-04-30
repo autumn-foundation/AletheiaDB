@@ -1,3 +1,8 @@
+//! Temporal and historical graph operations.
+//!
+//! This module provides methods to query the graph state at specific points
+//! in time (valid time and transaction time) and to retrieve version histories.
+
 use crate::core::error::{Result, ResultExt};
 use crate::core::graph::{Edge, Node};
 use crate::core::id::{EdgeId, NodeId, VersionId};

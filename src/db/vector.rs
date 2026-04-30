@@ -1,3 +1,8 @@
+//! Vector search and embedding operations.
+//!
+//! This module provides the API for querying the vector index, including
+//! similarity search, temporal vector queries, and semantic drift tracking.
+
 use crate::core::error::{Result, ResultExt};
 use crate::core::id::NodeId;
 use crate::core::temporal::Timestamp;

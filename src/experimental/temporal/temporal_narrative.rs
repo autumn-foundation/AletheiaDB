@@ -1,3 +1,9 @@
+//! Human-readable narrative generation for temporal data.
+//!
+//! This module translates raw, discrete `VersionMetadata` events into a
+//! cohesive, chronological narrative. This helps users understand the lifecycle
+//! and sequence of property changes (creation, updates, deletions) over time.
+
 use crate::AletheiaDB;
 #[cfg(feature = "semantic-temporal")]
 use crate::core::GLOBAL_INTERNER;

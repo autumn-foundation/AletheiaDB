@@ -1,3 +1,8 @@
+//! Query builder and execution interface.
+//!
+//! This module provides the fluent query API and the Cypher/AQL execution
+//! methods for retrieving data from the graph.
+
 use crate::core::error::{Result, ResultExt};
 use crate::core::id::NodeId;
 use crate::core::temporal::Timestamp;
