@@ -432,13 +432,7 @@ impl<C: ShardClient> QueryExecutor<C> {
         let query_id = self.next_query_id();
         let query_data = self.serialize_traversal_plan(&plan);
 
-        let target_shards: Vec<_> = plan
-            .steps
-            .iter()
-            .map(|s| s.shard_id)
-            .collect::<std::collections::HashSet<_>>()
-            .into_iter()
-            .collect();
+        let target_shards: Vec<_> = plan.involved_shards.iter().copied().collect();
 
         let query = DistributedQuery::new(query_id, query_data)
             .with_shards(target_shards)
@@ -1114,5 +1108,30 @@ mod tests {
         assert_eq!(id1, 1);
         assert_eq!(id2, 2);
         assert_eq!(id3, 3);
+    }
+
+    #[test]
+    fn test_execute_traversal() {
+        // 🛡️ Sentry test: This tests that `execute_traversal` correctly populates `target_shards`
+        // from the `TraversalPlan::involved_shards`. Previously, this would crash with `NoShardsAvailable`
+        // because it erroneously read from `plan.steps` which is intentionally empty for multi-shard plans.
+        let router = test_router();
+        let config = ExecutorConfig::default();
+        let mut executor = QueryExecutor::new(config, router);
+
+        let shard0 = make_shard_id(0);
+        let shard1 = make_shard_id(1);
+
+        executor.register_client(shard0, Arc::new(MockShardClient::new(shard0)));
+        executor.register_client(shard1, Arc::new(MockShardClient::new(shard1)));
+
+        let start_node = NodeId::new(42).unwrap();
+        // Person maps to shard0. Place maps to shard1. Company is not in test_config, so it won't map to anything and route_node probably hashes it or falls back?
+        // Let's use "Place" to ensure we hit shard1 as well.
+        let result = executor
+            .execute_traversal(start_node, "Person", &["Place"])
+            .unwrap();
+
+        assert_eq!(result.shards_queried, 2);
     }
 }

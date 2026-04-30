@@ -34,3 +34,6 @@
 ## ProjectIterator try_insert unwrapping
 **Learning:** `unwrap()` inside iterator implementations (like `ProjectIterator::next`) poses a significant panic risk when handling properties, especially dynamically sized ones where recursion depth limits can be exceeded or insertion errors can occur. In a database context, panics inside iterators will crash the entire query process rather than just returning an error to the client.
 **Action:** Always gracefully handle property insertion errors using `match` or `?` and propagate them down the iterator pipeline instead of unwrapping, allowing the query to fail safely. Added tests mocking a `try_insert` failure by using an invalid property state.
+**[Fix `execute_traversal` target shards bug]**
+**Learning:** `plan.steps` from `route_traversal` returns empty list, and we need `involved_shards`
+**Action:** Replace `steps` with `involved_shards` and update the test.
