@@ -1,7 +1,7 @@
-use std::sync::Arc;
-use std::time::{Duration, Instant};
-use std::thread;
 use aletheiadb::storage::wal::flush_coordinator::FlushSignal;
+use std::sync::Arc;
+use std::thread;
+use std::time::{Duration, Instant};
 
 #[test]
 fn havoc_wal_spurious_wakeup() {
@@ -30,9 +30,15 @@ fn havoc_wal_spurious_wakeup() {
 
     // Because wait_for_request doesn't loop, it wakes up from the condvar, checks `requested` (which is false), and returns false immediately!
     // It should have slept for ~2 seconds.
-    assert!(!was_requested, "Spurious wakeup correctly resulted in false");
+    assert!(
+        !was_requested,
+        "Spurious wakeup correctly resulted in false"
+    );
 
     if elapsed < Duration::from_secs(1) {
-        panic!("👺 HAVOC SUCCESS: Spurious wakeup caused premature return! Elapsed: {:?}. The condvar didn't loop until timeout.", elapsed);
+        panic!(
+            "👺 HAVOC SUCCESS: Spurious wakeup caused premature return! Elapsed: {:?}. The condvar didn't loop until timeout.",
+            elapsed
+        );
     }
 }

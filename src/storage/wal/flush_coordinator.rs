@@ -892,9 +892,7 @@ impl FlushSignal {
 
         let (_guard, _result) = self
             .condvar
-            .wait_timeout_while(guard, timeout, |_| {
-                !self.requested.load(Ordering::Acquire)
-            })
+            .wait_timeout_while(guard, timeout, |_| !self.requested.load(Ordering::Acquire))
             .unwrap_or_else(|e| e.into_inner());
 
         // Only return true if actually requested, regardless of spurious wakeups
