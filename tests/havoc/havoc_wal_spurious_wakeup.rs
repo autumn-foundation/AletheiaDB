@@ -1,7 +1,7 @@
-use aletheiadb::storage::wal::flush_coordinator::FlushSignal;
 use std::sync::Arc;
-use std::thread;
 use std::time::{Duration, Instant};
+use std::thread;
+use aletheiadb::storage::wal::flush_coordinator::FlushSignal;
 
 #[test]
 fn havoc_wal_spurious_wakeup() {
