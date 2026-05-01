@@ -18,4 +18,6 @@ pub mod synapse;
 
 // `wildfire` is a stub awaiting revival — see CHANGELOG / ADR-0050.
 // pub mod wildfire;
+/// Hologram 3D HTML Exporter.
+pub mod hologram;
 pub mod starlight;
