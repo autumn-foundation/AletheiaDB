@@ -19,16 +19,20 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```no_run
 //! use aletheiadb::embeddings::{EmbeddingService, providers::onnx::*};
 //! use std::sync::Arc;
 //!
+//! # #[tokio::main]
+//! # async fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let config = OnnxConfig::default(); // Uses all-MiniLM-L6-v2
 //! let provider = Arc::new(OnnxProvider::new(config)?);
 //! let service = EmbeddingService::new(provider);
 //!
 //! let embedding = service.embed("Hello, world!").await?;
 //! assert_eq!(embedding.len(), 384);
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! # Note
@@ -118,9 +122,10 @@ impl OnnxConfig {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```
+    /// # use aletheiadb::embeddings::providers::onnx::OnnxConfig;
     /// let config = OnnxConfig::default()
-    ///     .with_custom_model("path/to/model.onnx", 512);
+    ///     .with_custom_model("path/to/model.onnx".to_string(), 512);
     /// ```
     pub fn with_custom_model(mut self, path: String, dimensions: usize) -> Self {
         self.custom_model_path = Some(path);
@@ -167,9 +172,13 @@ impl OnnxProvider {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # use aletheiadb::embeddings::providers::onnx::{OnnxConfig, OnnxProvider};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// let config = OnnxConfig::default();
     /// let provider = OnnxProvider::new(config)?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn new(config: OnnxConfig) -> Result<Self, EmbeddingError> {
         let dimensions = config

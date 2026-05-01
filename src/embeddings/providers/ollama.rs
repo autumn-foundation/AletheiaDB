@@ -19,16 +19,20 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```no_run
 //! use aletheiadb::embeddings::{EmbeddingService, providers::ollama::*};
 //! use std::sync::Arc;
 //!
+//! # #[tokio::main]
+//! # async fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let config = OllamaConfig::nomic_embed_text();
 //! let provider = Arc::new(OllamaProvider::new(config)?);
 //! let service = EmbeddingService::new(provider);
 //!
 //! let embedding = service.embed("Hello, world!").await?;
 //! assert_eq!(embedding.len(), 768);
+//! # Ok(())
+//! # }
 //! ```
 
 use super::super::{EmbeddingError, EmbeddingProvider};
@@ -53,7 +57,8 @@ impl OllamaConfig {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```
+    /// # use aletheiadb::embeddings::providers::ollama::OllamaConfig;
     /// let config = OllamaConfig::new("nomic-embed-text".to_string(), 768);
     /// ```
     pub fn new(model: String, dimensions: usize) -> Self {
@@ -71,7 +76,8 @@ impl OllamaConfig {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```
+    /// # use aletheiadb::embeddings::providers::ollama::OllamaConfig;
     /// let config = OllamaConfig::nomic_embed_text();
     /// ```
     pub fn nomic_embed_text() -> Self {
@@ -84,7 +90,8 @@ impl OllamaConfig {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```
+    /// # use aletheiadb::embeddings::providers::ollama::OllamaConfig;
     /// let config = OllamaConfig::mxbai_embed_large();
     /// ```
     pub fn mxbai_embed_large() -> Self {
@@ -97,7 +104,8 @@ impl OllamaConfig {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```
+    /// # use aletheiadb::embeddings::providers::ollama::OllamaConfig;
     /// let config = OllamaConfig::all_minilm();
     /// ```
     pub fn all_minilm() -> Self {
@@ -110,7 +118,8 @@ impl OllamaConfig {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```
+    /// # use aletheiadb::embeddings::providers::ollama::OllamaConfig;
     /// let config = OllamaConfig::nomic_embed_text()
     ///     .with_base_url("http://192.168.1.100:11434".to_string());
     /// ```
@@ -141,9 +150,13 @@ impl OllamaProvider {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # use aletheiadb::embeddings::providers::ollama::{OllamaConfig, OllamaProvider};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// let config = OllamaConfig::nomic_embed_text();
     /// let provider = OllamaProvider::new(config)?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn new(config: OllamaConfig) -> Result<Self, EmbeddingError> {
         let client = reqwest::Client::builder()

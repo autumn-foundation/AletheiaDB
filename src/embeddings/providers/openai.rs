@@ -7,16 +7,20 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```no_run
 //! use aletheiadb::embeddings::{EmbeddingService, providers::openai::*};
 //! use std::sync::Arc;
 //!
+//! # #[tokio::main]
+//! # async fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let config = OpenAIConfig::from_env(OpenAIModel::TextEmbedding3Small)?;
 //! let provider = Arc::new(OpenAIProvider::new(config)?);
 //! let service = EmbeddingService::new(provider);
 //!
 //! let embedding = service.embed("Hello, world!").await?;
 //! assert_eq!(embedding.len(), 1536);
+//! # Ok(())
+//! # }
 //! ```
 
 use super::super::{EmbeddingError, EmbeddingProvider};
@@ -95,8 +99,12 @@ impl OpenAIConfig {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # use aletheiadb::embeddings::providers::openai::{OpenAIConfig, OpenAIModel};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// let config = OpenAIConfig::from_env(OpenAIModel::TextEmbedding3Small)?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn from_env(model: OpenAIModel) -> Result<Self, EmbeddingError> {
         Self::from_env_with_provider(model, |k| std::env::var(k))
@@ -126,7 +134,8 @@ impl OpenAIConfig {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```
+    /// # use aletheiadb::embeddings::providers::openai::{OpenAIConfig, OpenAIModel};
     /// let config = OpenAIConfig::new(
     ///     "sk-...".to_string(),
     ///     OpenAIModel::TextEmbedding3Small
@@ -178,9 +187,13 @@ impl OpenAIProvider {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # use aletheiadb::embeddings::providers::openai::{OpenAIConfig, OpenAIModel, OpenAIProvider};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// let config = OpenAIConfig::from_env(OpenAIModel::TextEmbedding3Small)?;
     /// let provider = OpenAIProvider::new(config)?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn new(config: OpenAIConfig) -> Result<Self, EmbeddingError> {
         let client = reqwest::Client::builder()

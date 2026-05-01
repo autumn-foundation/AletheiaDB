@@ -37,9 +37,15 @@ impl EmbeddingService {
     ///
     /// # Example
     ///
-    /// ```ignore
-    /// use std::sync::Arc;
-    /// let service = EmbeddingService::new(Arc::new(provider));
+    /// ```
+    /// # use std::sync::Arc;
+    /// # use aletheiadb::embeddings::{EmbeddingService, providers::onnx::{OnnxConfig, OnnxProvider}};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let config = OnnxConfig::default();
+    /// # let provider = Arc::new(OnnxProvider::new(config)?);
+    /// let service = EmbeddingService::new(provider);
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn new(provider: Arc<dyn EmbeddingProvider>) -> Self {
         Self {
@@ -59,9 +65,16 @@ impl EmbeddingService {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```
+    /// # use std::sync::Arc;
+    /// # use aletheiadb::embeddings::{EmbeddingService, providers::onnx::{OnnxConfig, OnnxProvider}};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let config = OnnxConfig::default();
+    /// # let provider = Arc::new(OnnxProvider::new(config)?);
     /// let service = EmbeddingService::new(provider)
     ///     .with_normalization(true);  // Always normalize
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn with_normalization(mut self, normalize: bool) -> Self {
         self.normalize = Some(normalize);
@@ -87,9 +100,18 @@ impl EmbeddingService {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # use std::sync::Arc;
+    /// # use aletheiadb::embeddings::{EmbeddingService, providers::onnx::{OnnxConfig, OnnxProvider}};
+    /// # #[tokio::main]
+    /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let config = OnnxConfig::default();
+    /// # let provider = Arc::new(OnnxProvider::new(config)?);
+    /// # let service = EmbeddingService::new(provider);
     /// let embedding = service.embed("AletheiaDB is a bi-temporal graph database").await?;
     /// println!("Generated {}-dimensional embedding", embedding.len());
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn embed(&self, text: &str) -> Result<Vec<f32>, EmbeddingError> {
         // Validate text length
@@ -155,10 +177,19 @@ impl EmbeddingService {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # use std::sync::Arc;
+    /// # use aletheiadb::embeddings::{EmbeddingService, providers::onnx::{OnnxConfig, OnnxProvider}};
+    /// # #[tokio::main]
+    /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let config = OnnxConfig::default();
+    /// # let provider = Arc::new(OnnxProvider::new(config)?);
+    /// # let service = EmbeddingService::new(provider);
     /// let texts = vec!["first document", "second document", "third document"];
     /// let embeddings = service.embed_batch(&texts).await?;
     /// assert_eq!(embeddings.len(), 3);
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, EmbeddingError> {
         // Validate all text lengths
@@ -217,8 +248,16 @@ impl EmbeddingService {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```
+    /// # use std::sync::Arc;
+    /// # use aletheiadb::embeddings::{EmbeddingService, providers::onnx::{OnnxConfig, OnnxProvider}};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let config = OnnxConfig::default();
+    /// # let provider = Arc::new(OnnxProvider::new(config)?);
+    /// # let service = EmbeddingService::new(provider);
     /// println!("Embeddings will have {} dimensions", service.dimensions());
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn dimensions(&self) -> usize {
         self.provider.dimensions()
@@ -230,8 +269,16 @@ impl EmbeddingService {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```
+    /// # use std::sync::Arc;
+    /// # use aletheiadb::embeddings::{EmbeddingService, providers::onnx::{OnnxConfig, OnnxProvider}};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let config = OnnxConfig::default();
+    /// # let provider = Arc::new(OnnxProvider::new(config)?);
+    /// # let service = EmbeddingService::new(provider);
     /// println!("Using provider: {}", service.provider_name());
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn provider_name(&self) -> &str {
         self.provider.name()

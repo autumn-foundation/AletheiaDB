@@ -12,10 +12,12 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```no_run
 //! use aletheiadb::embeddings::{EmbeddingService, providers::huggingface::*};
 //! use std::sync::Arc;
 //!
+//! # #[tokio::main]
+//! # async fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let config = HuggingFaceConfig::from_env(
 //!     "sentence-transformers/all-MiniLM-L6-v2".to_string(),
 //!     384
@@ -25,6 +27,8 @@
 //!
 //! let embedding = service.embed("Hello, world!").await?;
 //! assert_eq!(embedding.len(), 384);
+//! # Ok(())
+//! # }
 //! ```
 
 use super::super::{EmbeddingError, EmbeddingProvider};
@@ -72,11 +76,15 @@ impl HuggingFaceConfig {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # use aletheiadb::embeddings::providers::huggingface::HuggingFaceConfig;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// let config = HuggingFaceConfig::from_env(
     ///     "sentence-transformers/all-MiniLM-L6-v2".to_string(),
     ///     384
     /// )?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn from_env(model_id: String, dimensions: usize) -> Result<Self, EmbeddingError> {
         Self::from_env_with_provider(model_id, dimensions, |k| std::env::var(k))
@@ -108,7 +116,8 @@ impl HuggingFaceConfig {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```
+    /// # use aletheiadb::embeddings::providers::huggingface::HuggingFaceConfig;
     /// let config = HuggingFaceConfig::new(
     ///     "hf_...".to_string(),
     ///     "sentence-transformers/all-MiniLM-L6-v2".to_string(),
@@ -150,8 +159,12 @@ impl HuggingFaceConfig {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # use aletheiadb::embeddings::providers::huggingface::HuggingFaceConfig;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// let config = HuggingFaceConfig::all_minilm_l6_v2()?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn all_minilm_l6_v2() -> Result<Self, EmbeddingError> {
         Self::from_env("sentence-transformers/all-MiniLM-L6-v2".to_string(), 384)
@@ -161,8 +174,12 @@ impl HuggingFaceConfig {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # use aletheiadb::embeddings::providers::huggingface::HuggingFaceConfig;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// let config = HuggingFaceConfig::all_mpnet_base_v2()?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn all_mpnet_base_v2() -> Result<Self, EmbeddingError> {
         Self::from_env("sentence-transformers/all-mpnet-base-v2".to_string(), 768)
@@ -184,12 +201,16 @@ impl HuggingFaceProvider {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # use aletheiadb::embeddings::providers::huggingface::{HuggingFaceConfig, HuggingFaceProvider};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// let config = HuggingFaceConfig::from_env(
     ///     "sentence-transformers/all-MiniLM-L6-v2".to_string(),
     ///     384
     /// )?;
     /// let provider = HuggingFaceProvider::new(config)?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn new(config: HuggingFaceConfig) -> Result<Self, EmbeddingError> {
         let client = reqwest::Client::builder()
