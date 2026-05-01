@@ -706,12 +706,13 @@ pub fn load_graph_index_with_delta(
 
     // 2. Handle modifications (update existing entries)
     // Convert modifications to HashMaps to reduce O(M*N) lookups to O(N+M)
-    let mut node_mods = std::collections::HashMap::new();
+    // ⚡ Bolt Optimization: Pre-allocate HashMaps to avoid re-allocations during delta recovery.
+    let mut node_mods = std::collections::HashMap::with_capacity(delta.modified_nodes.len());
     for n in delta.modified_nodes {
         node_mods.insert(n.id, n);
     }
 
-    let mut edge_mods = std::collections::HashMap::new();
+    let mut edge_mods = std::collections::HashMap::with_capacity(delta.modified_edges.len());
     for e in delta.modified_edges {
         edge_mods.insert(e.id, e);
     }
