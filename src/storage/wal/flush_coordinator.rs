@@ -890,13 +890,11 @@ impl FlushSignal {
     pub fn wait_for_request(&self, timeout: Duration) -> bool {
         let guard = self.mutex.lock().unwrap_or_else(|e| e.into_inner());
 
-        if self.requested.load(Ordering::Acquire) {
-            return true;
-        }
-
         let (_guard, _result) = self
             .condvar
-            .wait_timeout(guard, timeout)
+            .wait_timeout_while(guard, timeout, |_| {
+                !self.requested.load(Ordering::Acquire)
+            })
             .unwrap_or_else(|e| e.into_inner());
 
         // Only return true if actually requested, regardless of spurious wakeups
