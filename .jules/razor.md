@@ -12,3 +12,13 @@
 **Bloat:** `StorageSnapshot` and `FieldHolder` traits.
 **Cut:** Deleted single-implementation traits `StorageSnapshot` (implemented only by `CurrentStorageSnapshot`) and `FieldHolder` (implemented only by `Event`, unused except in tests). Moved methods directly to structs.
 **Saved:** ~50 lines of boilerplate + cognitive load of unnecessary abstraction layers.
+
+## [Reduction]
+**Bloat:** `Resonator` trait (Single-implementation abstraction used only by `ActivityDensityResonator`).
+**Cut:** Deleted the `Resonator` trait and refactored `EchoChamber` to use the concrete `ActivityDensityResonator` struct directly, removing generic type parameters.
+**Saved:** ~20 lines of trait definition + cognitive load of unnecessary abstraction layers + generic parameter bloat across the module.
+
+## [Reduction]
+**Bloat:** `SemanticRule` trait (Abstraction causing `Box<dyn SemanticRule>` allocations and dynamic dispatch for just two rule types).
+**Cut:** Converted `SemanticRule` from a trait into an enum with `VectorBan` and `NumericRange` variants, moving the `validate` implementations to the concrete structs.
+**Saved:** Removed dynamic dispatch overhead + simplified `Sentinel` to hold `Vec<SemanticRule>` instead of boxed trait objects.
