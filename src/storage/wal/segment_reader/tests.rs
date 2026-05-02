@@ -1302,3 +1302,67 @@ mod cipher_tests {
     }
 
 }
+
+#[cfg(test)]
+mod extra_coverage_tests {
+    use super::*;
+    use std::fs::File;
+    use std::io::Write;
+    use tempfile::TempDir;
+
+    #[test]
+    fn test_parse_entry_at_invalid_magic() {
+        let dir = TempDir::new().unwrap();
+        let segment_path = dir.path().join("invalid_magic.log");
+        let mut file = File::create(&segment_path).unwrap();
+
+        file.write_all(&[0x00, 0x00, 0x00, 0x00]).unwrap();
+        file.write_all(&[WAL_VERSION]).unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+
+        let result = read_segment(&segment_path, LSN(1));
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("Invalid WAL segment: missing GWAL magic header"));
+    }
+
+    #[test]
+    fn test_parse_entry_at_unsupported_version() {
+        let dir = TempDir::new().unwrap();
+        let segment_path = dir.path().join("unsupported_version.log");
+        let mut file = File::create(&segment_path).unwrap();
+
+        file.write_all(&WAL_MAGIC).unwrap();
+        file.write_all(&[0xFF]).unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+
+        let result = read_segment(&segment_path, LSN(1));
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("Unsupported WAL version"));
+    }
+
+    #[test]
+    fn test_read_segment_with_cipher_encrypted_truncated() {
+        let dir = TempDir::new().unwrap();
+        let segment_path = dir.path().join("truncated_encrypted.log");
+        let mut file = File::create(&segment_path).unwrap();
+
+        file.write_all(&WAL_MAGIC).unwrap();
+        file.write_all(&[WAL_VERSION_ENCRYPTED]).unwrap();
+        let len: u32 = 100;
+        file.write_all(&len.to_le_bytes()).unwrap();
+        file.write_all(&[0xAA, 0xBB]).unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+
+        let cipher_key = zeroize::Zeroizing::new([42u8; 32]);
+        let cipher = std::sync::Arc::new(crate::encryption::cipher::Aes256GcmCipher::new(&cipher_key)) as std::sync::Arc<dyn crate::encryption::cipher::Cipher>;
+
+        let result = read_segment_with_cipher(&segment_path, LSN(1), Some(&cipher));
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_empty());
+    }
+}
