@@ -71,11 +71,10 @@ use crate::core::error::{Error, StorageError};
 /// # Examples
 ///
 /// ```
-/// use aletheiadb::storage::wal::group_commit::{GroupCommitCoordinator, GroupCommitConfig};
+/// use aletheiadb::storage::wal::group_commit::GroupCommitCoordinator;
 /// use std::sync::Arc;
 /// use std::thread;
 ///
-/// let config = GroupCommitConfig::default();
 /// let coordinator = Arc::new(GroupCommitCoordinator::new(10, 100));
 ///
 /// // Transaction 1
@@ -84,9 +83,10 @@ use crate::core::error::{Error, StorageError};
 /// // Background Flush Thread
 /// let flush_coord = Arc::clone(&coordinator);
 /// thread::spawn(move || {
+///     let epoch = flush_coord.start_flush().unwrap();
 ///     // Flush writes to disk here...
 ///     // Then notify waiting transactions
-///     flush_coord.mark_flushed(Ok(())).unwrap();
+///     flush_coord.finish_flush(epoch, Ok(())).unwrap();
 /// });
 ///
 /// // Transaction 1 waits for flush
