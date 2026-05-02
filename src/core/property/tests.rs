@@ -2578,4 +2578,25 @@ mod sentry_tests {
             "semantically_equal should treat NaN as equal"
         );
     }
+
+    #[test]
+    fn test_property_map_empty_shares_allocation() {
+        let map1 = PropertyMap::empty();
+        let map2 = PropertyMap::empty();
+        let map3 = PropertyMap::default();
+
+        // ⚡ Bolt Optimization test: verify that empty maps share the same Arc allocation
+        assert!(
+            Arc::ptr_eq(&map1.inner, &map2.inner),
+            "PropertyMap::empty() should share the same Arc allocation"
+        );
+        assert!(
+            Arc::ptr_eq(&map1.inner, &map3.inner),
+            "PropertyMap::default() should share the same Arc allocation as empty()"
+        );
+
+        assert_eq!(map1.len(), 0);
+        assert_eq!(map2.len(), 0);
+        assert_eq!(map3.len(), 0);
+    }
 }

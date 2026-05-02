@@ -7,7 +7,9 @@ use crate::core::property::value::PropertyValue;
 use std::collections::HashMap;
 use std::fmt;
 use std::hash::BuildHasherDefault;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
+
+static EMPTY_PROPERTY_MAP: OnceLock<PropertyMap> = OnceLock::new();
 
 ///
 /// The underlying HashMap is wrapped in an Arc, making clones very cheap
@@ -38,6 +40,19 @@ pub struct PropertyMap {
 }
 
 impl PropertyMap {
+    /// Returns a globally shared empty property map.
+    ///
+    /// ⚡ Bolt Optimization: Using this instead of `PropertyMap::new()` or `Default::default()`
+    /// avoids allocating a new `Arc<HashMap>` on the heap for empty property maps.
+    pub fn empty() -> Self {
+        EMPTY_PROPERTY_MAP
+            .get_or_init(|| PropertyMap {
+                inner: Arc::new(HashMap::with_hasher(BuildHasherDefault::default())),
+                cached_size: 4, // 4 bytes for the count field (0)
+            })
+            .clone()
+    }
+
     /// Create a new empty property map.
     pub fn new() -> Self {
         PropertyMap {
@@ -425,7 +440,7 @@ impl fmt::Debug for PropertyMap {
 
 impl Default for PropertyMap {
     fn default() -> Self {
-        Self::new()
+        Self::empty()
     }
 }
 
