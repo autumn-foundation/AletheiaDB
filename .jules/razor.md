@@ -12,3 +12,8 @@
 **Bloat:** `StorageSnapshot` and `FieldHolder` traits.
 **Cut:** Deleted single-implementation traits `StorageSnapshot` (implemented only by `CurrentStorageSnapshot`) and `FieldHolder` (implemented only by `Event`, unused except in tests). Moved methods directly to structs.
 **Saved:** ~50 lines of boilerplate + cognitive load of unnecessary abstraction layers.
+
+## [Reduction]
+**Bloat:** `GraphView` trait (Single-implementation abstraction used only by `AletheiaDB` for graph access).
+**Cut:** Deleted the `GraphView` trait, `graph_view.rs` module, and `tests/graph_view_coverage.rs`. Replaced generic trait bounds `<G: GraphView>` with concrete `&AletheiaDB` in `hybrid.rs` and `semantic_pathfinding.rs`.
+**Saved:** ~250 lines of boilerplate (trait definitions, wrapper methods, duplicate imports) + removed unnecessary generic abstractions.

@@ -64,7 +64,7 @@ use crate::core::hasher::IdentityHasher;
 use crate::core::id::NodeId;
 use crate::core::temporal::Timestamp;
 use crate::core::vector::cosine_similarity;
-use crate::query::traits::GraphView;
+use crate::db::AletheiaDB;
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap};
 use std::hash::BuildHasherDefault;
@@ -109,12 +109,12 @@ impl PartialOrd for State {
 }
 
 /// A pathfinder that uses semantic similarity as a heuristic/cost.
-pub struct SemanticPathfinder<'a, G: GraphView + ?Sized> {
-    db: &'a G,
+pub struct SemanticPathfinder<'a> {
+    db: &'a AletheiaDB,
     vector_property: String,
 }
 
-impl<'a, G: GraphView + ?Sized> SemanticPathfinder<'a, G> {
+impl<'a> SemanticPathfinder<'a> {
     /// Creates a new [`SemanticPathfinder`].
     ///
     /// # Arguments
@@ -133,7 +133,7 @@ impl<'a, G: GraphView + ?Sized> SemanticPathfinder<'a, G> {
     /// # Ok(())
     /// # }
     /// ```
-    pub fn new(db: &'a G, vector_property: &str) -> Self {
+    pub fn new(db: &'a AletheiaDB, vector_property: &str) -> Self {
         Self {
             db,
             vector_property: vector_property.to_string(),
