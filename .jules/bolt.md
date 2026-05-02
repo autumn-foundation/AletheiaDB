@@ -73,3 +73,6 @@
 **[Optimize Migration Candidates Vec Pre-allocation]**
 **Learning:** In `identify_node_candidates` and `identify_edge_candidates`, initializing `all_candidates` and `final_candidates` with `Vec::new()` causes unnecessary intermediate heap reallocations during large data migrations because the maximum required capacity is already known from the `versions` map and the filtered `all_candidates` vector.
 **Action:** Always pre-allocate vectors using `Vec::with_capacity(n)` when the target collection size or its upper bound is known in advance, particularly on hot paths like data migration.
+**Pre-allocating Vecs for transaction state**
+**Learning:** Collecting iterators into `Vec` inside a hot transaction path like `apply.rs` can cause multiple allocations due to organic resizing.
+**Action:** Use `Vec::with_capacity(n)` and an explicit loop when the size `n` is known upfront, especially if handling `Result` mapping across an iterator.
