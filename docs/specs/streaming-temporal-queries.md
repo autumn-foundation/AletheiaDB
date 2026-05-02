@@ -18,5 +18,5 @@ Looking at the market, temporal databases like XTDB and Datomic excel at histori
 
 ## 🚫 Out of Scope
 - **Streaming Current-State Queries:** This feature is strictly focused on temporal queries (historical changes). Streaming standard graph traversals over the current state is not part of this specification.
-- **Complex Aggregation Functions:** Initially, the streaming results will be individual events or change records. Complex windowed aggregations (like moving averages over time) processed server-side are deferred to a later phase.
+- **Complex Aggregation Functions:** Initially, the streaming results will be individual change records (deltas) or versioned snapshots. Complex windowed aggregations (like moving averages over time) processed server-side are deferred to a later phase.
 - **Push-based Publish/Subscribe (Pub/Sub):** This specification covers pulling historical data as a stream in response to a query, not real-time push subscriptions to ongoing live changes.
