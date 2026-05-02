@@ -720,7 +720,7 @@ impl TxVisibilityManager {
     /// let stats = visibility_manager.get_compression_stats();
     ///
     /// println!("Compression ratio: {:.2}x", stats.compression_ratio);
-    /// println!("Memory savings: {} bytes", stats.memory_savings_bytes);
+    /// println!("Memory savings: {} bytes", stats.memory_saved_bytes);
     /// ```
     pub fn get_compression_stats(&self) -> CompressionStats {
         let committed = self

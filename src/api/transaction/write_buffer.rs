@@ -327,12 +327,21 @@ impl WriteBuffer {
     ///
     /// ```rust
     /// # use aletheiadb::api::transaction::{WriteBuffer, BufferedWrite};
-    /// # use aletheiadb::core::NodeId;
+    /// # use aletheiadb::core::{NodeId, VersionId};
     /// # use aletheiadb::core::property::PropertyMapBuilder;
+    /// # use aletheiadb::core::interning::InternedString;
+    /// # use aletheiadb::core::temporal::time;
     /// let mut buffer = WriteBuffer::new();
     /// let node_id = NodeId::new(1).unwrap();
+    /// let version_id = VersionId::new(1).unwrap();
     /// let props = PropertyMapBuilder::new().insert("name", "Alice").build();
-    /// buffer.add(BufferedWrite::CreateNode { id: node_id, label: "Person".to_string(), properties: props }).unwrap();
+    /// buffer.add(BufferedWrite::CreateNode {
+    ///     node_id,
+    ///     version_id,
+    ///     label: InternedString::from_raw(1),
+    ///     properties: props,
+    ///     valid_from: time::now()
+    /// }).unwrap();
     ///
     /// let write = buffer.get_node_write(node_id);
     /// assert!(write.is_some());
@@ -348,14 +357,25 @@ impl WriteBuffer {
     ///
     /// ```rust
     /// # use aletheiadb::api::transaction::{WriteBuffer, BufferedWrite};
-    /// # use aletheiadb::core::{EdgeId, NodeId};
+    /// # use aletheiadb::core::{EdgeId, NodeId, VersionId};
     /// # use aletheiadb::core::property::PropertyMapBuilder;
+    /// # use aletheiadb::core::interning::InternedString;
+    /// # use aletheiadb::core::temporal::time;
     /// let mut buffer = WriteBuffer::new();
     /// let edge_id = EdgeId::new(1).unwrap();
+    /// let version_id = VersionId::new(1).unwrap();
     /// let source = NodeId::new(10).unwrap();
     /// let target = NodeId::new(20).unwrap();
     /// let props = PropertyMapBuilder::new().insert("weight", 0.5).build();
-    /// buffer.add(BufferedWrite::CreateEdge { id: edge_id, source, target, label: "KNOWS".to_string(), properties: props }).unwrap();
+    /// buffer.add(BufferedWrite::CreateEdge {
+    ///     edge_id,
+    ///     version_id,
+    ///     source,
+    ///     target,
+    ///     label: InternedString::from_raw(2),
+    ///     properties: props,
+    ///     valid_from: time::now()
+    /// }).unwrap();
     ///
     /// let write = buffer.get_edge_write(edge_id);
     /// assert!(write.is_some());
