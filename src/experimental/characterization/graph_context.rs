@@ -267,6 +267,7 @@ mod tests {
     use crate::core::property::PropertyMapBuilder;
 
     #[test]
+    #[cfg(feature = "semantic-characterization")]
     fn test_graph_context_generation() {
         let db = AletheiaDB::new().unwrap();
 

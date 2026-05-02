@@ -39,7 +39,7 @@ use crate::core::error::Result;
 use crate::core::id::NodeId;
 use crate::core::interning::GLOBAL_INTERNER;
 use crate::core::property::PropertyMapBuilder;
-use crate::experimental::wormhole::WormholeDetector;
+use crate::experimental::diagnostics::wormhole::WormholeDetector;
 
 /// The Alchemist engine for graph transformation.
 pub struct Alchemist<'a> {
