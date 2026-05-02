@@ -114,14 +114,26 @@ impl LsnAllocator {
     ///
     /// * `count` - Number of LSNs to allocate (must be > 0)
     ///
+    /// # Examples
+    ///
+    /// ```
+    /// use aletheiadb::storage::wal::lsn_allocator::LsnAllocator;
+    /// use aletheiadb::storage::wal::entry::LSN;
+    ///
+    /// let allocator = LsnAllocator::new();
+    /// let (first, last) = allocator.allocate_batch(5);
+    /// assert_eq!(first, LSN(1));
+    /// assert_eq!(last, LSN(5));
+    /// ```
+    ///
     /// # Returns
     ///
     /// A tuple of (first_lsn, last_lsn) representing the allocated range.
     ///
     /// # Panics
     ///
-    /// Panics if `count` is 0.
-    /// Panics if the allocation would cause LSN overflow.
+    /// - Panics if `count` is 0.
+    /// - Panics if the allocation would cause LSN overflow past `u64::MAX`.
     #[inline]
     pub fn allocate_batch(&self, count: u64) -> (LSN, LSN) {
         assert!(count > 0, "Cannot allocate 0 LSNs");

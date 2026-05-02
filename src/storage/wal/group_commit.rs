@@ -43,6 +43,15 @@ use crate::core::error::{Error, StorageError};
 ///
 /// This allows ACID durability with amortized fsync cost across many transactions.
 ///
+/// # Why?
+///
+/// Group commit is a crucial performance optimization for a database's Write-Ahead Log.
+/// Fsync operations on modern NVMe drives can still take ~1-2ms. If every transaction
+/// synchronously blocks on an fsync, throughput is capped at ~500-1000 tx/sec. By
+/// batching multiple concurrent transactions into a single "epoch" and performing one
+/// fsync for all of them, throughput can scale to hundreds of thousands of tx/sec while
+/// still maintaining strict ACID durability.
+///
 /// # Epoch Model
 ///
 /// ```text
@@ -58,6 +67,31 @@ use crate::core::error::{Error, StorageError};
 ///
 /// If a flush fails, the error is stored and propagated to all waiting transactions.
 /// This ensures no transaction incorrectly believes its data is durable.
+///
+/// # Examples
+///
+/// ```
+/// use aletheiadb::storage::wal::group_commit::{GroupCommitCoordinator, GroupCommitConfig};
+/// use std::sync::Arc;
+/// use std::thread;
+///
+/// let config = GroupCommitConfig::default();
+/// let coordinator = Arc::new(GroupCommitCoordinator::new(10, 100));
+///
+/// // Transaction 1
+/// let (epoch1, _) = coordinator.register_transaction().unwrap();
+///
+/// // Background Flush Thread
+/// let flush_coord = Arc::clone(&coordinator);
+/// thread::spawn(move || {
+///     // Flush writes to disk here...
+///     // Then notify waiting transactions
+///     flush_coord.mark_flushed(Ok(())).unwrap();
+/// });
+///
+/// // Transaction 1 waits for flush
+/// coordinator.wait_for_flush(epoch1).unwrap();
+/// ```
 pub struct GroupCommitCoordinator {
     /// State protected by mutex
     state: Mutex<GroupCommitState>,
