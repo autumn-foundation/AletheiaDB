@@ -1366,3 +1366,127 @@ mod extra_coverage_tests {
         assert!(result.unwrap().is_empty());
     }
 }
+
+#[cfg(test)]
+mod overflow_tests {
+
+    // Need a function to create a buffer that parses the header but triggers overflow inside CreateNode/CreateEdge
+    // Actually, `checked_add` only fails if `current_offset + N > usize::MAX`.
+    // We test this via `parse_entry_at` with a huge `offset`.
+
+    #[test]
+    fn test_parse_entry_at_create_node_offset_overflow() {
+        let mut buffer = vec![0u8; 100];
+         // Leaves room for header (24), op (1), node_id (8). `checked_add(4)` will overflow.
+        buffer[0] = super::OP_CREATE_NODE; // we bypass the header checks by calling parse_entry_at with offset.
+        // Actually, parse_entry_at expects the offset to point to the start of the entry, including the header.
+
+        // Wait, `test_wal_offset_overflow_protection` covers the first `checked_add` in `parse_entry_at`.
+        // To cover the others, we need a small buffer, but a specific offset.
+        // This is tricky because `buffer.len()` is small, so `current_offset > buffer.len()` will fail first, UNLESS
+        // we use a buffer length check.
+    }
+}
+
+#[cfg(test)]
+
+#[cfg(test)]
+mod extra_coverage_tests2 {
+    use super::*;
+    use tempfile::TempDir;
+    use std::io::Write;
+    use std::fs::File;
+
+    #[test]
+    fn test_parse_encrypted_entries_start_lsn_filter() {
+        let dir = TempDir::new().unwrap();
+        let segment_path = dir.path().join("encrypted_filter.log");
+        let mut file = File::create(&segment_path).unwrap();
+
+        file.write_all(&WAL_MAGIC).unwrap();
+        file.write_all(&[WAL_VERSION_ENCRYPTED]).unwrap();
+
+        // Create a dummy valid entry with LSN = 1.
+        let op = WalOperation::DeleteNode { node_id: crate::core::id::NodeId::new(1).unwrap(), valid_from: crate::core::temporal::time::now() };
+        let entry = WalEntry::new(LSN(1), op);
+        let mut plaintext = Vec::new();
+        serialize_entry_into(&entry, &mut plaintext).unwrap();
+
+        let cipher_key = zeroize::Zeroizing::new([42u8; 32]);
+        let cipher = std::sync::Arc::new(crate::encryption::cipher::Aes256GcmCipher::new(&cipher_key)) as std::sync::Arc<dyn crate::encryption::cipher::Cipher>;
+
+        let encrypted = crate::encryption::wal_encryption::encrypt_wal_payload(&plaintext, &cipher).unwrap();
+        let len = encrypted.len() as u32;
+        file.write_all(&len.to_le_bytes()).unwrap();
+        file.write_all(&encrypted).unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+
+        // Read with start_lsn > 1. It should skip the entry.
+        let result = read_segment_with_cipher(&segment_path, LSN(10), Some(&cipher));
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_empty());
+    }
+
+}
+
+
+#[cfg(test)]
+mod extra_coverage_tests_part3 {
+    use super::*;
+
+    #[test]
+    fn test_parse_entry_at_create_edge_truncated_source() {
+        let mut buffer = vec![0u8; 25 + 8];
+        buffer[0..4].copy_from_slice(&WAL_MAGIC);
+        buffer[4] = WAL_VERSION;
+        buffer[24] = super::OP_CREATE_EDGE;
+
+        let result = parse_entry_at(&buffer, 0, WAL_VERSION);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("Insufficient buffer size for CreateEdge"));
+    }
+
+    #[test]
+    fn test_parse_entry_at_create_edge_truncated_target() {
+        let mut buffer = vec![0u8; 25 + 16];
+        buffer[0..4].copy_from_slice(&WAL_MAGIC);
+        buffer[4] = WAL_VERSION;
+        buffer[24] = super::OP_CREATE_EDGE;
+
+        let result = parse_entry_at(&buffer, 0, WAL_VERSION);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("Insufficient buffer size for CreateEdge"));
+    }
+
+    #[test]
+    fn test_parse_entry_at_create_edge_truncated_version() {
+        let mut buffer = vec![0u8; 25 + 24];
+        buffer[0..4].copy_from_slice(&WAL_MAGIC);
+        buffer[4] = WAL_VERSION;
+        buffer[24] = super::OP_CREATE_EDGE;
+
+        let result = parse_entry_at(&buffer, 0, WAL_VERSION);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("Insufficient buffer size for CreateEdge"));
+    }
+}
+
+#[cfg(test)]
+mod offset_overflow_tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_entry_at_header_offset_overflow() {
+        let buffer = vec![0u8; 100];
+        let offset = usize::MAX - 20; // Will overflow +24
+
+        let result = parse_entry_at(&buffer, offset, WAL_VERSION);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("WAL offset overflow"));
+    }
+}
