@@ -563,7 +563,9 @@ impl<C: ShardClient> QueryExecutor<C> {
         if plan.steps.is_empty() {
             // If steps is empty, we serialize the involved shards instead as virtual steps.
             // This handles the multi-shard plan case where only target labels are known.
-            let capacity = STEP_COUNT_SIZE + plan.involved_shards.len() * (SHARD_ID_SIZE + LABEL_COUNT_SIZE + CROSS_SHARD_FLAG_SIZE);
+            let capacity = STEP_COUNT_SIZE
+                + plan.involved_shards.len()
+                    * (SHARD_ID_SIZE + LABEL_COUNT_SIZE + CROSS_SHARD_FLAG_SIZE);
             let mut data = Vec::with_capacity(capacity);
             data.extend_from_slice(&(plan.involved_shards.len() as u32).to_le_bytes());
             for shard_id in &plan.involved_shards {
@@ -1155,7 +1157,13 @@ mod tests {
         let query_data_0 = client0.get_last_query_data();
         let query_data_1 = client1.get_last_query_data();
 
-        assert!(!query_data_0.is_empty(), "Query data sent to shard 0 should not be empty");
-        assert!(!query_data_1.is_empty(), "Query data sent to shard 1 should not be empty");
+        assert!(
+            !query_data_0.is_empty(),
+            "Query data sent to shard 0 should not be empty"
+        );
+        assert!(
+            !query_data_1.is_empty(),
+            "Query data sent to shard 1 should not be empty"
+        );
     }
 }
