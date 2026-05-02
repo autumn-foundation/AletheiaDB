@@ -11,7 +11,7 @@ Looking at the market, temporal databases like XTDB and Datomic excel at histori
 "As a Data Analyst building real-time compliance dashboards, I want to stream historical changes to financial entities over time, so that I can process massive audit logs incrementally without exhausting memory or waiting minutes for a single monolithic query to return."
 
 ## ✅ Acceptance Criteria
-- **Incremental Delivery:** The database must be able to return temporal query results as a stream of events rather than a single batch response.
+- **Incremental Delivery:** The database must be able to return temporal query results as a stream of events rather than a single batch response. Results must be delivered in strictly chronological order based on transaction time.
 - **Memory Efficiency:** The memory footprint on the database node for a streaming query should remain relatively constant, regardless of the time window size.
 - **Cancellation & Backpressure:** The streaming API must support cancellation by the client and backpressure, ensuring the database doesn't generate events faster than the client can consume them.
 - **Latency Success Metric:** Time-to-first-event for a streaming temporal query must be under 50ms, with sustained event delivery maintaining sub-millisecond per-event generation overhead.
