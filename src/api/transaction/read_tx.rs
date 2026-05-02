@@ -603,4 +603,145 @@ mod tests {
         );
         assert!(results.is_empty());
     }
+
+    #[test]
+    fn test_read_transaction_historical_node_and_edge() {
+        use crate::api::transaction::WriteOps;
+        use crate::api::transaction::WriteTransaction;
+        use crate::core::id::{IdGenerator, TxIdGenerator};
+        use crate::index::temporal::TemporalIndexes;
+        use crate::storage::wal::concurrent_system::{
+            ConcurrentWalSystem, ConcurrentWalSystemConfig,
+        };
+        use std::sync::Mutex;
+        use tempfile::TempDir;
+
+        // Setup common storage components
+        let current = Arc::new(CurrentStorage::new());
+        let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
+        let temporal_indexes = Arc::new(TemporalIndexes::new());
+        let visibility_manager = Arc::new(TxVisibilityManager::new());
+
+        let temp_dir = TempDir::new().unwrap();
+        let wal_config = ConcurrentWalSystemConfig::new(temp_dir.path());
+        let wal = Arc::new(ConcurrentWalSystem::new(wal_config).unwrap());
+
+        let current_timestamp = Arc::new(Mutex::new(time::now()));
+        let commit_clock_observed_at = Arc::new(Mutex::new(std::time::Instant::now()));
+        let node_id_gen = Arc::new(IdGenerator::new());
+        let edge_id_gen = Arc::new(IdGenerator::new());
+        let version_id_gen = Arc::new(IdGenerator::new());
+        let tx_id_gen = TxIdGenerator::new();
+
+        // Transaction 1: Create a node and an edge
+        let tx1_id = tx_id_gen.next();
+        let snapshot1 = TransactionSnapshot {
+            snapshot_timestamp: time::now(),
+            active_transactions: Arc::new(HashSet::new()),
+        };
+        let mut tx1 = WriteTransaction::new_with_clock_observed_at(
+            tx1_id,
+            snapshot1,
+            Arc::clone(&current),
+            Arc::clone(&historical),
+            Arc::clone(&temporal_indexes),
+            Arc::clone(&wal),
+            Arc::clone(&current_timestamp),
+            Arc::clone(&commit_clock_observed_at),
+            Arc::clone(&visibility_manager),
+            Arc::clone(&node_id_gen),
+            Arc::clone(&edge_id_gen),
+            Arc::clone(&version_id_gen),
+        );
+
+        let node_a = tx1
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "Alice").build(),
+            )
+            .unwrap();
+        let node_b = tx1
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "Bob").build(),
+            )
+            .unwrap();
+        let edge_id = tx1
+            .create_edge(
+                node_a,
+                node_b,
+                "KNOWS",
+                PropertyMapBuilder::new().insert("since", 2020i64).build(),
+            )
+            .unwrap();
+        tx1.commit().unwrap();
+
+        // Advance time to ensure distinct snapshots
+        std::thread::sleep(std::time::Duration::from_millis(5));
+
+        // Capture snapshot after tx1 but before tx2
+        let snapshot_between = TransactionSnapshot {
+            snapshot_timestamp: time::now(),
+            active_transactions: Arc::new(HashSet::new()),
+        };
+
+        std::thread::sleep(std::time::Duration::from_millis(5));
+
+        // Transaction 2: Update the node and delete the edge
+        let tx2_id = tx_id_gen.next();
+        let snapshot2 = TransactionSnapshot {
+            snapshot_timestamp: time::now(),
+            active_transactions: Arc::new(HashSet::new()),
+        };
+        let mut tx2 = WriteTransaction::new_with_clock_observed_at(
+            tx2_id,
+            snapshot2,
+            Arc::clone(&current),
+            Arc::clone(&historical),
+            Arc::clone(&temporal_indexes),
+            Arc::clone(&wal),
+            Arc::clone(&current_timestamp),
+            Arc::clone(&commit_clock_observed_at),
+            Arc::clone(&visibility_manager),
+            Arc::clone(&node_id_gen),
+            Arc::clone(&edge_id_gen),
+            Arc::clone(&version_id_gen),
+        );
+
+        tx2.update_node(
+            node_a,
+            PropertyMapBuilder::new()
+                .insert("name", "Alice Updated")
+                .build(),
+        )
+        .unwrap();
+        tx2.delete_edge(edge_id).unwrap();
+        tx2.commit().unwrap();
+
+        // ReadTransaction with snapshot_between (from before tx2)
+        // This transaction should see the original state of the node and edge by falling back to historical storage.
+        let read_tx = ReadTransaction::new(
+            TxId::new(999),
+            snapshot_between,
+            Arc::clone(&current),
+            Arc::clone(&visibility_manager),
+            Arc::clone(&historical),
+        );
+
+        // Verify Node fallback to historical
+        let old_node = read_tx.get_node(node_a).unwrap();
+        assert_eq!(old_node.id, node_a);
+        assert_eq!(
+            old_node.get_property("name").and_then(|v| v.as_str()),
+            Some("Alice")
+        );
+
+        // Verify Edge fallback to historical
+        let old_edge = read_tx.get_edge(edge_id).unwrap();
+        assert_eq!(old_edge.id, edge_id);
+        assert_eq!(
+            old_edge.get_property("since").and_then(|v| v.as_int()),
+            Some(2020)
+        );
+    }
 }

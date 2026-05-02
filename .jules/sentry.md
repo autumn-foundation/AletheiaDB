@@ -37,3 +37,6 @@
 **[Fix `execute_traversal` target shards bug]**
 **Learning:** `plan.steps` from `route_traversal` returns empty list, and we need `involved_shards`
 **Action:** Replace `steps` with `involved_shards` and update the test.
+**[ReadTransaction Historical Fallback]**
+**Learning:** The methods `get_node_from_historical` and `get_edge_from_historical` provide critical correctness checks for Snapshot Isolation, ensuring that transactions read the correct point-in-time value even when entities are subsequently updated or deleted. These are easily missed by tests if a transaction isn't purposely interleaved or delayed to see an older snapshot.
+**Action:** When adding logic around snapshot readers, ensure tests explicitly set up an environment where newer commits exist beyond the transaction's snapshot boundary, thus forcing the system to read from the historical archive and validating its serialization/reconstruction logic.
