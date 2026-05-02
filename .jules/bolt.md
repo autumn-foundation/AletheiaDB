@@ -73,3 +73,6 @@
 **[Optimize Migration Candidates Vec Pre-allocation]**
 **Learning:** In `identify_node_candidates` and `identify_edge_candidates`, initializing `all_candidates` and `final_candidates` with `Vec::new()` causes unnecessary intermediate heap reallocations during large data migrations because the maximum required capacity is already known from the `versions` map and the filtered `all_candidates` vector.
 **Action:** Always pre-allocate vectors using `Vec::with_capacity(n)` when the target collection size or its upper bound is known in advance, particularly on hot paths like data migration.
+**[Single-pass dynamic padding in structurization]**
+**Learning:** `collect_structured` allocated an intermediate Vec bounded by `size_hint` before a second pass to populate vectors, padding properties based on presence anywhere. By switching to a single-pass loop that initializes and pads optional vectors dynamically upon first sighting using `nodes.len()`, we completely remove an `O(N)` heap allocation step and the secondary iteration, significantly accelerating row formatting.
+**Action:** In operations transforming iterators into Struct of Arrays (SoA), use dynamic padding based on array lengths to avoid multiple passes and intermediate allocations.

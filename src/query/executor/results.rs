@@ -1555,4 +1555,57 @@ mod tests {
         assert_eq!(versions[1], VersionId::new(0).unwrap()); // Clamped
         assert_eq!(versions[2], VersionId::new(0).unwrap());
     }
+
+    #[test]
+    fn test_collect_structured_delayed_optional_fields() {
+        let row1 = QueryRow::from_entity(EntityResult::NodeId(NodeId::new(1).unwrap()));
+        let row2 = QueryRow::from_entity(EntityResult::NodeId(NodeId::new(2).unwrap()));
+
+        let path3 = vec![EntityId::Node(NodeId::new(3).unwrap())];
+        let mut row3 = QueryRow::with_score(
+            EntityResult::Node(crate::core::graph::Node::new(
+                NodeId::new(3).unwrap(),
+                crate::core::interning::InternedString::from_raw(1),
+                PropertyMapBuilder::new().build(),
+                VersionId::new(300).unwrap(),
+            )),
+            0.95,
+        );
+        row3.path = Some(path3.clone());
+        row3.timestamp = Some(crate::core::hlc::HybridTimestamp::new(300, 0).unwrap());
+
+        let rows = vec![row1, row2, row3];
+        let results = QueryResults::new(Box::new(MockIterator::new(rows)));
+
+        let structured = results.collect_structured().unwrap();
+        assert_eq!(structured.len(), 3);
+
+        // Check properties backfilled
+        let props = structured.properties.unwrap();
+        assert_eq!(props.len(), 3);
+        assert_eq!(props[0], PropertyMapBuilder::new().build());
+        assert_eq!(props[1], PropertyMapBuilder::new().build());
+        assert_eq!(props[2], PropertyMapBuilder::new().build());
+
+        // Check scores backfilled
+        let scores = structured.scores.unwrap();
+        assert_eq!(scores.len(), 3);
+        assert_eq!(scores[0], 0.0);
+        assert_eq!(scores[1], 0.0);
+        assert_eq!(scores[2], 0.95);
+
+        // Check paths backfilled
+        let paths = structured.paths.unwrap();
+        assert_eq!(paths.len(), 3);
+        assert_eq!(paths[0], Vec::<EntityId>::new());
+        assert_eq!(paths[1], Vec::<EntityId>::new());
+        assert_eq!(paths[2], path3);
+
+        // Check versions backfilled
+        let versions = structured.versions.unwrap();
+        assert_eq!(versions.len(), 3);
+        assert_eq!(versions[0], VersionId::new(0).unwrap());
+        assert_eq!(versions[1], VersionId::new(0).unwrap());
+        assert_eq!(versions[2], VersionId::new(300).unwrap());
+    }
 }
