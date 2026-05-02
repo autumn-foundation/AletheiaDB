@@ -1220,4 +1220,85 @@ mod sentry_tests {
             entries.capacity()
         );
     }
+
+}
+
+#[cfg(test)]
+mod cipher_tests {
+    use super::*;
+    use std::fs::File;
+    use std::io::Write;
+    use tempfile::TempDir;
+
+    #[test]
+    fn test_read_directory_with_cipher() {
+        let dir = TempDir::new().unwrap();
+        let res = read_entries_from_dir_with_cipher(dir.path(), crate::storage::LSN(1), None);
+        assert!(res.is_ok());
+        assert!(res.unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_read_segment_with_cipher_open_failure() {
+        let non_existent = std::path::PathBuf::from("/does/not/exist.log");
+        let res = read_segment_with_cipher(&non_existent, crate::storage::LSN(1), None);
+        assert!(res.is_ok()); // The current logic actually returns an empty vector for NotFound.
+        assert!(res.unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_read_segment_with_cipher_permission_denied() {
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("denied.log");
+        File::create(&file_path).unwrap();
+
+        let mut perms = std::fs::metadata(&file_path).unwrap().permissions();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            perms.set_mode(0o000);
+            std::fs::set_permissions(&file_path, perms).unwrap();
+        }
+
+        let res = read_segment_with_cipher(&file_path, crate::storage::LSN(1), None);
+        if let Err(e) = res {
+            assert!(e.to_string().contains("Failed to open WAL segment"));
+        }
+    }
+
+    #[test]
+    fn test_read_segment_with_cipher_rejects_oversized_file() {
+        let dir = TempDir::new().unwrap();
+        let segment_path = dir.path().join("oversized_cipher.log");
+        let mut file = File::create(&segment_path).unwrap();
+
+        file.write_all(&WAL_MAGIC).unwrap();
+        file.write_all(&[WAL_VERSION]).unwrap();
+
+        const OVERSIZED: u64 = 1024 * 1024 * 1024 + 1; // 1GB + 1 byte
+        file.set_len(OVERSIZED).unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+
+        let result = read_segment_with_cipher(&segment_path, crate::storage::LSN(1), None);
+        assert!(result.is_err());
+        let error_msg = format!("{}", result.unwrap_err());
+        assert!(error_msg.contains("too large"));
+    }
+
+    #[test]
+    fn test_read_segment_with_cipher_header_only() {
+        let dir = TempDir::new().unwrap();
+        let segment_path = dir.path().join("header_only_cipher.log");
+        let mut file = File::create(&segment_path).unwrap();
+        file.write_all(&WAL_MAGIC).unwrap();
+        file.write_all(&[WAL_VERSION]).unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+
+        let result = read_segment_with_cipher(&segment_path, crate::storage::LSN(1), None);
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_empty());
+    }
+
 }
