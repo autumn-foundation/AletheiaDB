@@ -323,6 +323,20 @@ impl WriteBuffer {
     }
 
     /// Get the buffered write for a node, if any
+    /// # Example
+    ///
+    /// ```rust
+    /// # use aletheiadb::api::transaction::{WriteBuffer, BufferedWrite};
+    /// # use aletheiadb::core::NodeId;
+    /// # use aletheiadb::core::property::PropertyMapBuilder;
+    /// let mut buffer = WriteBuffer::new();
+    /// let node_id = NodeId::new(1).unwrap();
+    /// let props = PropertyMapBuilder::new().insert("name", "Alice").build();
+    /// buffer.add(BufferedWrite::CreateNode { id: node_id, label: "Person".to_string(), properties: props }).unwrap();
+    ///
+    /// let write = buffer.get_node_write(node_id);
+    /// assert!(write.is_some());
+    /// ```
     pub fn get_node_write(&self, node_id: NodeId) -> Option<&BufferedWrite> {
         self.modified_nodes
             .get(&node_id)
@@ -330,6 +344,22 @@ impl WriteBuffer {
     }
 
     /// Get the buffered write for an edge, if any
+    /// # Example
+    ///
+    /// ```rust
+    /// # use aletheiadb::api::transaction::{WriteBuffer, BufferedWrite};
+    /// # use aletheiadb::core::{EdgeId, NodeId};
+    /// # use aletheiadb::core::property::PropertyMapBuilder;
+    /// let mut buffer = WriteBuffer::new();
+    /// let edge_id = EdgeId::new(1).unwrap();
+    /// let source = NodeId::new(10).unwrap();
+    /// let target = NodeId::new(20).unwrap();
+    /// let props = PropertyMapBuilder::new().insert("weight", 0.5).build();
+    /// buffer.add(BufferedWrite::CreateEdge { id: edge_id, source, target, label: "KNOWS".to_string(), properties: props }).unwrap();
+    ///
+    /// let write = buffer.get_edge_write(edge_id);
+    /// assert!(write.is_some());
+    /// ```
     pub fn get_edge_write(&self, edge_id: EdgeId) -> Option<&BufferedWrite> {
         self.modified_edges
             .get(&edge_id)

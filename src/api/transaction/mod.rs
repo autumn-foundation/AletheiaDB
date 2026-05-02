@@ -191,6 +191,22 @@ pub trait ReadOps {
     ///
     /// - **Time**: O(degree) to collect visible edges
     /// - **Space**: Allocates a new `Vec` containing all edge IDs
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use aletheiadb::{AletheiaDB, core::NodeId, api::transaction::ReadOps};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # let tx = db.read_transaction()?;
+    /// # let node_id = NodeId::new(1)?;
+    /// let edges = tx.get_incoming_edges(node_id);
+    /// for edge_id in edges {
+    ///     let edge = tx.get_edge(edge_id)?;
+    ///     println!("<- {}", edge.source);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
     fn get_incoming_edges(&self, node_id: NodeId) -> Vec<EdgeId>;
 
     /// Get outgoing edges with a specific label.
@@ -206,6 +222,22 @@ pub trait ReadOps {
     ///
     /// - **Time**: O(degree) scan with label filtering
     /// - **Space**: Allocates a new `Vec` containing matching edge IDs
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use aletheiadb::{AletheiaDB, core::NodeId, api::transaction::ReadOps};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # let tx = db.read_transaction()?;
+    /// # let node_id = NodeId::new(1)?;
+    /// let edges = tx.get_outgoing_edges_with_label(node_id, "KNOWS");
+    /// for edge_id in edges {
+    ///     let edge = tx.get_edge(edge_id)?;
+    ///     println!("Knows -> {}", edge.target);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
     fn get_outgoing_edges_with_label(&self, node_id: NodeId, label: &str) -> Vec<EdgeId>;
 
     /// Get the approximate number of nodes in the database.

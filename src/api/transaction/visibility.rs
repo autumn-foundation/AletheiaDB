@@ -711,6 +711,17 @@ impl TxVisibilityManager {
     ///
     /// This provides detailed information about compression ratio,
     /// memory usage, and memory savings.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// # use aletheiadb::api::transaction::TxVisibilityManager;
+    /// let visibility_manager = TxVisibilityManager::new();
+    /// let stats = visibility_manager.get_compression_stats();
+    ///
+    /// println!("Compression ratio: {:.2}x", stats.compression_ratio);
+    /// println!("Memory savings: {} bytes", stats.memory_savings_bytes);
+    /// ```
     pub fn get_compression_stats(&self) -> CompressionStats {
         let committed = self
             .committed
