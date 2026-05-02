@@ -560,48 +560,34 @@ impl<C: ShardClient> QueryExecutor<C> {
         const LABEL_LEN_SIZE: usize = size_of::<u32>();
         const CROSS_SHARD_FLAG_SIZE: usize = size_of::<u8>();
 
-        if plan.steps.is_empty() {
-            // If steps is empty, we serialize the involved shards instead as virtual steps.
-            // This handles the multi-shard plan case where only target labels are known.
-            let capacity = STEP_COUNT_SIZE + plan.involved_shards.len() * (SHARD_ID_SIZE + LABEL_COUNT_SIZE + CROSS_SHARD_FLAG_SIZE);
-            let mut data = Vec::with_capacity(capacity);
-            data.extend_from_slice(&(plan.involved_shards.len() as u32).to_le_bytes());
-            for shard_id in &plan.involved_shards {
-                data.extend_from_slice(&shard_id.as_u16().to_le_bytes());
-                data.extend_from_slice(&(0u32).to_le_bytes()); // 0 labels
-                data.push(0); // false
-            }
-            data
-        } else {
-            let capacity = STEP_COUNT_SIZE
-                + plan
-                    .steps
-                    .iter()
-                    .map(|step| {
-                        SHARD_ID_SIZE
-                            + LABEL_COUNT_SIZE
-                            + step
-                                .edge_labels
-                                .iter()
-                                .map(|label| LABEL_LEN_SIZE + label.len())
-                                .sum::<usize>()
-                            + CROSS_SHARD_FLAG_SIZE
-                    })
-                    .sum::<usize>();
+        let capacity = STEP_COUNT_SIZE
+            + plan
+                .steps
+                .iter()
+                .map(|step| {
+                    SHARD_ID_SIZE
+                        + LABEL_COUNT_SIZE
+                        + step
+                            .edge_labels
+                            .iter()
+                            .map(|label| LABEL_LEN_SIZE + label.len())
+                            .sum::<usize>()
+                        + CROSS_SHARD_FLAG_SIZE
+                })
+                .sum::<usize>();
 
-            let mut data = Vec::with_capacity(capacity);
-            data.extend_from_slice(&(plan.steps.len() as u32).to_le_bytes());
-            for step in &plan.steps {
-                data.extend_from_slice(&step.shard_id.as_u16().to_le_bytes());
-                data.extend_from_slice(&(step.edge_labels.len() as u32).to_le_bytes());
-                for label in &step.edge_labels {
-                    data.extend_from_slice(&(label.len() as u32).to_le_bytes());
-                    data.extend_from_slice(label.as_bytes());
-                }
-                data.push(if step.may_cross_shard { 1 } else { 0 });
+        let mut data = Vec::with_capacity(capacity);
+        data.extend_from_slice(&(plan.steps.len() as u32).to_le_bytes());
+        for step in &plan.steps {
+            data.extend_from_slice(&step.shard_id.as_u16().to_le_bytes());
+            data.extend_from_slice(&(step.edge_labels.len() as u32).to_le_bytes());
+            for label in &step.edge_labels {
+                data.extend_from_slice(&(label.len() as u32).to_le_bytes());
+                data.extend_from_slice(label.as_bytes());
             }
-            data
+            data.push(if step.may_cross_shard { 1 } else { 0 });
         }
+        data
     }
 }
 
@@ -1136,11 +1122,8 @@ mod tests {
         let shard0 = make_shard_id(0);
         let shard1 = make_shard_id(1);
 
-        let client0 = Arc::new(MockShardClient::new(shard0));
-        let client1 = Arc::new(MockShardClient::new(shard1));
-
-        executor.register_client(shard0, client0.clone());
-        executor.register_client(shard1, client1.clone());
+        executor.register_client(shard0, Arc::new(MockShardClient::new(shard0)));
+        executor.register_client(shard1, Arc::new(MockShardClient::new(shard1)));
 
         let start_node = NodeId::new(42).unwrap();
         // Person maps to shard0. Place maps to shard1. Company is not in test_config, so it won't map to anything and route_node probably hashes it or falls back?
@@ -1150,12 +1133,5 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.shards_queried, 2);
-
-        // The query data should not be empty (must contain at least the number of involved shards / steps).
-        let query_data_0 = client0.get_last_query_data();
-        let query_data_1 = client1.get_last_query_data();
-
-        assert!(!query_data_0.is_empty(), "Query data sent to shard 0 should not be empty");
-        assert!(!query_data_1.is_empty(), "Query data sent to shard 1 should not be empty");
     }
 }

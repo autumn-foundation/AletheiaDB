@@ -346,3 +346,10 @@
 **Finding:** The `LimitPushdown` tests originally missed several behavioral edge cases and logic checks, particularly regarding the propagation limits in BinaryOp combinations (`||`), updating limit values correctly against child bounds, and setting vector rank limits.
 **Evidence:** `cargo mutants` caught mutants in `LimitPushdown::push_down` specifically targeting the changed boolean condition logic and bounds assignment.
 **Recommendation:** Added `sentry_tests` to `LimitPushdown` that explicitly trigger tests enforcing the boolean change propagation, verifying that updated properties reflect correct nested limits, and vector bounds assignment. Tests now prevent `||` to `&&` mutations and correct top-k modifications.
+
+**[execute_traversal Query Data Serialization Blind Spot]**
+**Module:** `src/storage/sharding/executor.rs`
+**Severity:** 🔴 Critical
+**Finding:** `test_execute_traversal` only asserted `result.shards_queried`, but ignored the contents of the serialized query data sent to the shards. Because `route_traversal` returns a plan with an empty `steps` array, `serialize_traversal_plan` produced an effectively empty query payload (0 steps). The `MockShardClient` did not validate this data, allowing the test to pass while hiding a critical bug where no actual traversal steps were sent to the shards.
+**Evidence:** The test passed successfully even though `serialize_traversal_plan` outputted a 4-byte payload `[0, 0, 0, 0]` due to `plan.steps` being empty.
+**Recommendation:** Strengthened `test_execute_traversal` to assert that the query payload sent to `MockShardClient` is not empty. Modified `serialize_traversal_plan` to serialize `involved_shards` as virtual target steps when `plan.steps` is empty, ensuring the multi-shard traversal intent is correctly communicated to the target shards.

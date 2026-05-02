@@ -675,7 +675,6 @@ impl MockShardClient {
             commit_response: RwLock::new(Some(CommitResponse { success: true })),
             abort_response: RwLock::new(Some(AbortResponse { acknowledged: true })),
             query_response: RwLock::new(Vec::new()),
-            last_query_data: RwLock::new(Vec::new()),
             state: RwLock::new(ShardState::new(shard_id)),
             latency: RwLock::new(Duration::from_micros(100)),
             fail_next: RwLock::new(None),
