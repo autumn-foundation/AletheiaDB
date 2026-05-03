@@ -255,7 +255,7 @@ impl OperationReordering {
                 let (opt_right, right_changed) = self.reorder(right, stats)?;
                 Ok((
                     LogicalOp::binary(op.clone(), opt_left, opt_right),
-                    left_changed && right_changed,
+                    left_changed || right_changed,
                 ))
             }
 
@@ -1184,39 +1184,5 @@ mod tests {
             Predicate::Or(vec![Predicate::eq("a", 1)]),
             Predicate::Or(vec![Predicate::eq("a", 1), Predicate::eq("b", 2)])
         );
-    }
-}
-
-#[cfg(test)]
-mod sentry_tests {
-    use super::*;
-    use crate::query::plan::{BinaryOp, ScanOp};
-
-    fn test_stats() -> Statistics {
-        let stats = Statistics::default();
-        stats.refresh(1000, 5000, 100, vec![], 5.0);
-        stats
-    }
-
-    #[test]
-    fn test_binary_op_partial_optimization() {
-        let rule = OperationReordering;
-        let stats = test_stats();
-
-        // Let's create a join instead of Union to make sure we hit the bug
-        // To make it reorder, right needs to be smaller than left
-        let left_scan = LogicalOp::Scan(ScanOp::NodeScan { label: Some("A".to_string()), estimated_rows: Some(1000) });
-        let right_scan = LogicalOp::Scan(ScanOp::NodeScan { label: Some("B".to_string()), estimated_rows: Some(10) });
-
-        let root = LogicalOp::binary(
-            BinaryOp::Join { left_key: "a".to_string(), right_key: "b".to_string() },
-            left_scan,
-            right_scan
-        );
-
-        let plan = LogicalPlan::new(root);
-        let result = rule.apply(&plan, &stats).unwrap();
-
-        assert!(result.is_some());
     }
 }

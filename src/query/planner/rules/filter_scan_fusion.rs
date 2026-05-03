@@ -243,3 +243,36 @@ mod tests {
         assert!(result.unwrap().temporal_context.is_some());
     }
 }
+
+#[cfg(test)]
+mod sentry_tests {
+    use super::*;
+    use crate::core::NodeId;
+    use crate::query::ir::{Predicate, PredicateValue};
+    use crate::query::plan::{BinaryOp, ScanOp, UnaryOp};
+
+    #[test]
+    fn test_binary_op_partial_optimization() {
+        let rule = FilterScanFusion;
+        let stats = Statistics::default();
+
+        let left = LogicalOp::unary(
+            UnaryOp::Filter(Predicate::eq("a", 1)),
+            LogicalOp::Scan(ScanOp::NodeScan { label: Some("Person".to_string()), estimated_rows: None }),
+        );
+        let right = LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(2).unwrap()]));
+
+        let root = LogicalOp::binary(BinaryOp::Union, left, right);
+        let plan = LogicalPlan::new(root);
+
+        let result = rule.apply(&plan, &stats).unwrap();
+
+        let expected_plan = LogicalPlan::new(LogicalOp::binary(
+            BinaryOp::Union,
+            LogicalOp::Scan(ScanOp::PropertyScan { label: "Person".to_string(), key: "a".to_string(), value: PredicateValue::Int(1) }),
+            LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(2).unwrap()])),
+        ));
+
+        assert_eq!(result, Some(expected_plan));
+    }
+}

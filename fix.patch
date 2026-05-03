@@ -1,0 +1,10 @@
+--- src/query/planner/rules/filter_scan_fusion.rs
++++ src/query/planner/rules/filter_scan_fusion.rs
+@@ -139,7 +139,7 @@
+                 let (opt_right, right_changed) = self.fuse(right)?;
+                 Ok((
+                     LogicalOp::binary(op.clone(), opt_left, opt_right),
+-                    left_changed || right_changed,
++                    left_changed && right_changed,
+                 ))
+             }
