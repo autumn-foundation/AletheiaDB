@@ -845,6 +845,16 @@ let _result = db.read(|tx| {
 
 ### Embedding Generation (Optional)
 
+> ⚠️ **IMPORTANT: REQUIRES FEATURE 'embedding-openai'**
+>
+> Experimental features like **Embedding Generation** require the `embedding-openai` feature flag.
+> **You MUST add this to your `Cargo.toml` or the code will not compile:**
+>
+> ```toml
+> [dependencies]
+> aletheiadb = { version = "0.1", features = ["embedding-openai"] }
+> ```
+
 AletheiaDB includes an optional embedding generation system for semantic search:
 
 ```rust
