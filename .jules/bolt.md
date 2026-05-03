@@ -73,3 +73,7 @@
 **[Optimize Migration Candidates Vec Pre-allocation]**
 **Learning:** In `identify_node_candidates` and `identify_edge_candidates`, initializing `all_candidates` and `final_candidates` with `Vec::new()` causes unnecessary intermediate heap reallocations during large data migrations because the maximum required capacity is already known from the `versions` map and the filtered `all_candidates` vector.
 **Action:** Always pre-allocate vectors using `Vec::with_capacity(n)` when the target collection size or its upper bound is known in advance, particularly on hot paths like data migration.
+
+**Optimize PropertyMapBuilder Pre-allocation**
+**Learning:** Initializing `PropertyMapBuilder::new()` without specifying capacity and then inserting multiple properties sequentially (e.g. in `ProjectIterator`) triggers unnecessary intermediate hashmap reallocations as properties are projected.
+**Action:** Added `PropertyMapBuilder::with_capacity(capacity)` and replaced `PropertyMapBuilder::new()` in mapping projections where the target property length (`self.properties.len()`) is known in advance, preventing hashmap rehashing overhead during large query result projections.

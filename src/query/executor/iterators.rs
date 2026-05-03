@@ -1500,7 +1500,8 @@ impl ResultIterator for ProjectIterator {
         match self.input.next() {
             Some(Ok(mut row)) => {
                 if let Some(node) = row.entity.as_node() {
-                    let mut new_props = crate::core::PropertyMapBuilder::new();
+                    let mut new_props =
+                        crate::core::PropertyMapBuilder::with_capacity(self.properties.len());
                     for prop in &self.properties {
                         if let Some(val) = node.properties.get(prop) {
                             new_props = match new_props.try_insert(prop, val.clone()) {
