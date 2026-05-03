@@ -1,6 +1,7 @@
 # AletheiaDB
 
 [![CI](https://github.com/madmax983/AletheiaDB/actions/workflows/ci.yml/badge.svg)](https://github.com/madmax983/AletheiaDB/actions/workflows/ci.yml) [![codecov](https://codecov.io/gh/madmax983/AletheiaDB/branch/trunk/graph/badge.svg)](https://codecov.io/gh/madmax983/AletheiaDB) [![Security Policy](https://img.shields.io/badge/security-policy-blue.svg)](SECURITY.md) [![Documentation](https://img.shields.io/badge/docs-GitHub%20Pages-blue.svg)](https://madmax983.github.io/AletheiaDB/)
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/madmax983/AletheiaDB)
 
 A high-performance bi-temporal graph database in Rust, designed for LLM integration and temporal reasoning.
 
