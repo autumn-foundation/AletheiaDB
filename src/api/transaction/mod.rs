@@ -134,6 +134,32 @@ pub trait ReadOps {
     /// # Ok(())
     /// # }
     /// ```
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use aletheiadb::{AletheiaDB, core::EdgeId, api::transaction::ReadOps};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # let tx = db.read_transaction()?;
+    /// # let edge_id = EdgeId::new(1)?;
+    /// let edge = tx.get_edge(edge_id)?;
+    /// println!("Edge label: {:?}", edge.label);
+    /// # Ok(())
+    /// # }
+    /// ```
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use aletheiadb::{AletheiaDB, core::EdgeId, api::transaction::ReadOps};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # let tx = db.read_transaction()?;
+    /// # let edge_id = EdgeId::new(1)?;
+    /// let edge = tx.get_edge(edge_id)?;
+    /// println!("Edge label: {:?}", edge.label);
+    /// # Ok(())
+    /// # }
+    /// ```
     fn get_edge(&self, id: EdgeId) -> Result<Edge>;
 
     /// Get outgoing edges from a node.
@@ -172,6 +198,22 @@ pub trait ReadOps {
     /// # Ok(())
     /// # }
     /// ```
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use aletheiadb::{AletheiaDB, core::NodeId, api::transaction::ReadOps};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # let tx = db.read_transaction()?;
+    /// # let node_id = NodeId::new(1)?;
+    /// let edges = tx.get_outgoing_edges(node_id);
+    /// for edge_id in edges {
+    ///     let edge = tx.get_edge(edge_id)?;
+    ///     println!("-> {}", edge.target);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
     fn get_outgoing_edges(&self, node_id: NodeId) -> Vec<EdgeId>;
 
     /// Get incoming edges to a node.
@@ -191,6 +233,38 @@ pub trait ReadOps {
     ///
     /// - **Time**: O(degree) to collect visible edges
     /// - **Space**: Allocates a new `Vec` containing all edge IDs
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use aletheiadb::{AletheiaDB, core::NodeId, api::transaction::ReadOps};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # let tx = db.read_transaction()?;
+    /// # let node_id = NodeId::new(1)?;
+    /// let edges = tx.get_incoming_edges(node_id);
+    /// for edge_id in edges {
+    ///     let edge = tx.get_edge(edge_id)?;
+    ///     println!("<- {}", edge.source);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use aletheiadb::{AletheiaDB, core::NodeId, api::transaction::ReadOps};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # let tx = db.read_transaction()?;
+    /// # let node_id = NodeId::new(1)?;
+    /// let edges = tx.get_incoming_edges(node_id);
+    /// for edge_id in edges {
+    ///     let edge = tx.get_edge(edge_id)?;
+    ///     println!("<- {}", edge.source);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
     fn get_incoming_edges(&self, node_id: NodeId) -> Vec<EdgeId>;
 
     /// Get outgoing edges with a specific label.
@@ -206,6 +280,38 @@ pub trait ReadOps {
     ///
     /// - **Time**: O(degree) scan with label filtering
     /// - **Space**: Allocates a new `Vec` containing matching edge IDs
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use aletheiadb::{AletheiaDB, core::NodeId, api::transaction::ReadOps};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # let tx = db.read_transaction()?;
+    /// # let node_id = NodeId::new(1)?;
+    /// let edges = tx.get_outgoing_edges_with_label(node_id, "KNOWS");
+    /// for edge_id in edges {
+    ///     let edge = tx.get_edge(edge_id)?;
+    ///     println!("-[KNOWS]-> {}", edge.target);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use aletheiadb::{AletheiaDB, core::NodeId, api::transaction::ReadOps};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # let tx = db.read_transaction()?;
+    /// # let node_id = NodeId::new(1)?;
+    /// let edges = tx.get_outgoing_edges_with_label(node_id, "KNOWS");
+    /// for edge_id in edges {
+    ///     let edge = tx.get_edge(edge_id)?;
+    ///     println!("-[KNOWS]-> {}", edge.target);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
     fn get_outgoing_edges_with_label(&self, node_id: NodeId, label: &str) -> Vec<EdgeId>;
 
     /// Get the approximate number of nodes in the database.
@@ -219,6 +325,30 @@ pub trait ReadOps {
     /// This design choice enables O(1) performance without scanning the entire
     /// database to filter visibility for every node.
     ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use aletheiadb::{AletheiaDB, api::transaction::ReadOps};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # let tx = db.read_transaction()?;
+    /// let count = tx.node_count();
+    /// println!("Database contains {} nodes", count);
+    /// # Ok(())
+    /// # }
+    /// ```
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use aletheiadb::{AletheiaDB, api::transaction::ReadOps};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # let tx = db.read_transaction()?;
+    /// let count = tx.node_count();
+    /// println!("Database contains {} nodes", count);
+    /// # Ok(())
+    /// # }
+    /// ```
     /// # Example
     ///
     /// ```rust,no_run
@@ -256,6 +386,18 @@ pub trait ReadOps {
     /// # Ok(())
     /// # }
     /// ```
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use aletheiadb::{AletheiaDB, api::transaction::ReadOps};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # let tx = db.read_transaction()?;
+    /// let count = tx.edge_count();
+    /// println!("Database contains {} edges", count);
+    /// # Ok(())
+    /// # }
+    /// ```
     fn edge_count(&self) -> usize;
 
     /// Find nodes by label and property value.
@@ -267,6 +409,36 @@ pub trait ReadOps {
     ///
     /// - **Time**: O(N) where N = nodes with the given label
     /// - **Space**: O(M) where M = number of matching nodes
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use aletheiadb::{AletheiaDB, core::property::PropertyValue, api::transaction::ReadOps};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # let tx = db.read_transaction()?;
+    /// let val = PropertyValue::from("Alice");
+    /// let nodes = tx.find_nodes_by_property("Person", "name", &val);
+    /// for node_id in nodes {
+    ///     println!("Found Alice: {}", node_id);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use aletheiadb::{AletheiaDB, core::property::PropertyValue, api::transaction::ReadOps};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # let tx = db.read_transaction()?;
+    /// let val = PropertyValue::from("Alice");
+    /// let nodes = tx.find_nodes_by_property("Person", "name", &val);
+    /// for node_id in nodes {
+    ///     println!("Found Alice: {}", node_id);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
     fn find_nodes_by_property(
         &self,
         label: &str,
