@@ -313,6 +313,41 @@ fn build_cors_layer(cors: &CorsConfig) -> CorsLayer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
+    #[test]
+    #[serial]
+    fn test_apply_autumn_env_sets_variables() {
+        let cors = CorsConfig::restrictive()
+            .allow_origin("https://example.com")
+            .allow_origin("https://another.com");
+
+        let config = ServerConfig::builder()
+            .host("127.0.0.1")
+            .port(8080)
+            .cors(cors)
+            .build();
+
+        unsafe {
+            apply_autumn_env(&config);
+        }
+
+        assert_eq!(std::env::var("AUTUMN_SERVER__HOST").unwrap(), "127.0.0.1");
+        assert_eq!(std::env::var("AUTUMN_SERVER__PORT").unwrap(), "8080");
+        assert_eq!(
+            std::env::var("AUTUMN_CORS__ALLOWED_ORIGINS").unwrap(),
+            "https://example.com,https://another.com"
+        );
+        assert_eq!(
+            std::env::var("AUTUMN_CORS__ALLOWED_METHODS").unwrap(),
+            "GET"
+        );
+        assert_eq!(
+            std::env::var("AUTUMN_CORS__ALLOWED_HEADERS").unwrap(),
+            "content-type"
+        );
+        assert_eq!(std::env::var("AUTUMN_CORS__MAX_AGE").unwrap(), "3600");
+    }
+
     use crate::http::config::RateLimitConfig;
 
     #[test]

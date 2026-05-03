@@ -641,17 +641,20 @@ impl<S: QueryState> QueryBuilder<S> {
     /// ```ignore
     /// // "Who did Alice know during Q1 2024?"
     /// let results = db.query()
-    ///     .valid_time_between(jan_1, mar_31)
+    ///     .valid_time_between(jan_1, mar_31)?
     ///     .start(alice_id)
     ///     .traverse("KNOWS")
     ///     .execute(&db)?;
     /// ```
-    #[must_use]
-    pub fn valid_time_between(mut self, start: Timestamp, end: Timestamp) -> Self {
+    pub fn valid_time_between(
+        mut self,
+        start: Timestamp,
+        end: Timestamp,
+    ) -> Result<Self, crate::core::error::TemporalError> {
         let mut ctx = self.temporal_context.take().unwrap_or_default();
-        ctx.valid_time_between = Some(TimeRange::between(start, end).unwrap());
+        ctx.valid_time_between = Some(TimeRange::between(start, end)?);
         self.temporal_context = Some(ctx);
-        self
+        Ok(self)
     }
 
     /// Set temporal context: query across a transaction time range.
@@ -669,16 +672,19 @@ impl<S: QueryState> QueryBuilder<S> {
     /// ```ignore
     /// // "What did we learn about Alice during Q1 2024?"
     /// let results = db.query()
-    ///     .transaction_time_between(jan_1, mar_31)
+    ///     .transaction_time_between(jan_1, mar_31)?
     ///     .start(alice_id)
     ///     .execute(&db)?;
     /// ```
-    #[must_use]
-    pub fn transaction_time_between(mut self, start: Timestamp, end: Timestamp) -> Self {
+    pub fn transaction_time_between(
+        mut self,
+        start: Timestamp,
+        end: Timestamp,
+    ) -> Result<Self, crate::core::error::TemporalError> {
         let mut ctx = self.temporal_context.take().unwrap_or_default();
-        ctx.transaction_time_between = Some(TimeRange::between(start, end).unwrap());
+        ctx.transaction_time_between = Some(TimeRange::between(start, end)?);
         self.temporal_context = Some(ctx);
-        self
+        Ok(self)
     }
 
     /// Set temporal context: query across a valid time range.
@@ -690,8 +696,11 @@ impl<S: QueryState> QueryBuilder<S> {
     ///
     /// Prefer using [`valid_time_between()`](Self::valid_time_between) or
     /// [`transaction_time_between()`](Self::transaction_time_between) for clarity.
-    #[must_use]
-    pub fn between(self, start: Timestamp, end: Timestamp) -> Self {
+    pub fn between(
+        self,
+        start: Timestamp,
+        end: Timestamp,
+    ) -> Result<Self, crate::core::error::TemporalError> {
         self.valid_time_between(start, end)
     }
 
@@ -1111,6 +1120,26 @@ impl FindSimilarBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::AletheiaDB;
+    use crate::core::hlc::HybridTimestamp;
+    #[test]
+    fn test_valid_time_between_errors_on_invalid_range() {
+        let db = AletheiaDB::new().unwrap();
+        let ts1 = HybridTimestamp::new(2000, 0).unwrap();
+        let ts2 = HybridTimestamp::new(1000, 0).unwrap();
+        let res = db.query().valid_time_between(ts1, ts2);
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn test_transaction_time_between_errors_on_invalid_range() {
+        let db = AletheiaDB::new().unwrap();
+        let ts1 = HybridTimestamp::new(2000, 0).unwrap();
+        let ts2 = HybridTimestamp::new(1000, 0).unwrap();
+        let res = db.query().transaction_time_between(ts1, ts2);
+        assert!(res.is_err());
+    }
+
     use crate::core::NodeId;
 
     fn test_node_id() -> NodeId {
@@ -1181,6 +1210,7 @@ mod tests {
     fn test_temporal_between() {
         let query = QueryBuilder::new()
             .between(1000.into(), 2000.into())
+            .unwrap()
             .start(test_node_id())
             .build();
 
@@ -1581,6 +1611,7 @@ mod tests {
 
         let query = QueryBuilder::new()
             .valid_time_between(start, end)
+            .unwrap()
             .start(test_node_id())
             .build();
 
@@ -1603,6 +1634,7 @@ mod tests {
 
         let query = QueryBuilder::new()
             .transaction_time_between(start, end)
+            .unwrap()
             .start(test_node_id())
             .build();
 
@@ -1704,6 +1736,7 @@ mod tests {
         let query = QueryBuilder::new()
             .as_of_valid_time(point_ts)
             .transaction_time_between(range_start, range_end)
+            .unwrap()
             .start(test_node_id())
             .build();
 

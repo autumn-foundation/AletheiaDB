@@ -37,3 +37,11 @@
 **[Fix `execute_traversal` target shards bug]**
 **Learning:** `plan.steps` from `route_traversal` returns empty list, and we need `involved_shards`
 **Action:** Replace `steps` with `involved_shards` and update the test.
+
+## QueryBuilder valid_time_between panic
+**Learning:** Fluent builder APIs (like `QueryBuilder::valid_time_between`) often hide `.unwrap()` calls to maintain a clean `-> Self` signature. However, when these methods process dynamic user input (like timestamps), this introduces a severe panic risk.
+**Action:** Always inspect builder methods that accept dynamic bounds or parameters. Refactor them to return `Result<Self, Error>` instead of panicking, and add `#[should_panic]` or `assert!(res.is_err())` test cases to verify the boundary conditions.
+
+## HTTP server apply_autumn_env unsafe block
+**Learning:** Setup functions that bridge configuration into environment variables often use `unsafe { std::env::set_var(...) }` to avoid UB in newer Rust editions. These blocks are critical and often lack test coverage because they touch global state.
+**Action:** Write unit tests for environment manipulation logic, using the `#[serial]` macro (from `serial_test`) to ensure parallel test runners do not suffer from race conditions or flaky failures.

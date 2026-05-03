@@ -638,7 +638,12 @@ mod temporal_vector_tests {
         let end_time = now();
 
         // Query using between() range
-        let query = db.query().between(start_time, end_time).start(node).build();
+        let query = db
+            .query()
+            .between(start_time, end_time)
+            .unwrap()
+            .start(node)
+            .build();
 
         assert!(query.is_temporal(), "Query should have temporal context");
 
