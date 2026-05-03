@@ -1,3 +1,6 @@
+//! Vector index management and search operations.
+//!
+//! Methods for creating vector indexes, semantic search, and similarity tracking.
 use crate::core::error::{Result, ResultExt};
 use crate::core::id::NodeId;
 use crate::core::temporal::Timestamp;

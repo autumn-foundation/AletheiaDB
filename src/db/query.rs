@@ -1,3 +1,6 @@
+//! Query builder and execution entry points.
+//!
+//! Provides access to the query planner, AQL execution, and hybrid search methods.
 use crate::core::error::{Result, ResultExt};
 use crate::core::id::NodeId;
 use crate::core::temporal::Timestamp;

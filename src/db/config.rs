@@ -1,3 +1,6 @@
+//! Database configuration and initialization.
+//!
+//! Provides the `AletheiaDB::new()` and `with_config` entry points for the database.
 use crate::api::transaction::TxVisibilityManager;
 use crate::config::AletheiaDBConfig;
 use crate::core::error::{Result, ResultExt, StorageError};

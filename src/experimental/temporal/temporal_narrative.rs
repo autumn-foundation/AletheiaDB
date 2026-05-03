@@ -1,3 +1,6 @@
+//! Experimental module for generating human-readable narratives from temporal history.
+//!
+//! Converts raw graph mutations into readable event summaries.
 use crate::AletheiaDB;
 #[cfg(feature = "semantic-temporal")]
 use crate::core::GLOBAL_INTERNER;

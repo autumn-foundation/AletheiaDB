@@ -1,3 +1,6 @@
+//! Builder pattern for creating vector indexes.
+//!
+//! Provides `VectorIndexBuilder` to configure HNSW and temporal vector indexes.
 use crate::core::error::{Error, Result};
 use crate::db::AletheiaDB;
 use crate::index::vector::hnsw::HnswConfig;

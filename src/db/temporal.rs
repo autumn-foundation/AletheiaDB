@@ -1,3 +1,6 @@
+//! Temporal query operations for bi-temporal data.
+//!
+//! Methods for querying historical states of the graph using valid and transaction times.
 use crate::core::error::{Result, ResultExt};
 use crate::core::graph::{Edge, Node};
 use crate::core::id::{EdgeId, NodeId, VersionId};
