@@ -24,6 +24,27 @@ use super::ring_buffer::{
 ///
 /// Each stripe has its own ring buffer and metrics. Writers are assigned
 /// to stripes to distribute contention across multiple buffers.
+///
+/// # Why?
+///
+/// A single monolithic ring buffer becomes a bottleneck when multiple threads attempt
+/// to append WAL entries concurrently. By sharding the incoming entries into multiple "stripes",
+/// we dramatically reduce lock contention and allow parallel serialization and buffering.
+///
+/// # Examples
+///
+/// ```
+/// use aletheiadb::storage::wal::stripe::WalStripe;
+/// use aletheiadb::storage::wal::entry::LSN;
+///
+/// let stripe = WalStripe::new(0);
+///
+/// // Append an entry asynchronously
+/// stripe.append_async(LSN(1), vec![1, 2, 3]).unwrap();
+///
+/// assert_eq!(stripe.pending_count(), 1);
+/// assert_eq!(stripe.total_bytes(), 3);
+/// ```
 pub struct WalStripe {
     /// The stripe's unique identifier (0-indexed).
     id: usize,
