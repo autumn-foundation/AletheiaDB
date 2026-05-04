@@ -24,7 +24,9 @@
 
 use aletheiadb::core::id::NodeId;
 use aletheiadb::core::property::PropertyMapBuilder;
-use aletheiadb::{AletheiaDB, BiTemporalInterval, Error, TimeRange, Timestamp, WriteOps, time};
+use aletheiadb::{
+    AletheiaDB, BiTemporalInterval, Error, TimeRange, Timestamp, WriteOps, WriteTransaction, time,
+};
 use proptest::prelude::*;
 
 // ============================================================================
@@ -440,22 +442,23 @@ fn exhaustive_three_operation_orderings() {
     // --- Multiple updates spanning the anchor boundary ---
     {
         let db = AletheiaDB::new().unwrap();
-        let id = db
+
+        // Use commit_with_timestamp() so each checkpoint is exactly the HLC
+        // time of the write — no sleep required, cross-platform safe.
+        let mut create_tx: WriteTransaction = db.write_transaction().unwrap();
+        let id = create_tx
             .create_node("N", PropertyMapBuilder::new().insert("v", 0i64).build())
             .unwrap();
-
-        let mut checkpoints: Vec<(i64, Timestamp)> = vec![(0, time::now())];
+        let ts0 = create_tx.commit_with_timestamp().unwrap();
+        let mut checkpoints: Vec<(i64, Timestamp)> = vec![(0, ts0)];
 
         // 15 updates → crosses the default anchor_interval of 10
         for i in 1..=15i64 {
-            std::thread::sleep(std::time::Duration::from_micros(10));
-            db.write(|tx| {
-                tx.update_node(id, PropertyMapBuilder::new().insert("v", i).build())?;
-                Ok::<_, Error>(())
-            })
-            .unwrap();
-            std::thread::sleep(std::time::Duration::from_micros(10));
-            checkpoints.push((i, time::now()));
+            let mut tx: WriteTransaction = db.write_transaction().unwrap();
+            tx.update_node(id, PropertyMapBuilder::new().insert("v", i).build())
+                .unwrap();
+            let ts = tx.commit_with_timestamp().unwrap();
+            checkpoints.push((i, ts));
         }
 
         assert!(check_tx_time_monotonicity(&db, id), "anchor-span: inv 1");
@@ -641,20 +644,19 @@ fn check_all_eight_temporal_invariants() {
     // Inv 7 & 8: Anchor/Delta Completeness – reconstruction across anchor boundary
     {
         let db = AletheiaDB::new().unwrap();
-        let id = db
+        let mut create_tx: WriteTransaction = db.write_transaction().unwrap();
+        let id = create_tx
             .create_node("N", PropertyMapBuilder::new().insert("v", 0i64).build())
             .unwrap();
+        let ts0 = create_tx.commit_with_timestamp().unwrap();
 
-        let mut checkpoints: Vec<(i64, Timestamp)> = vec![(0, time::now())];
+        let mut checkpoints: Vec<(i64, Timestamp)> = vec![(0, ts0)];
         for i in 1..=15i64 {
-            std::thread::sleep(std::time::Duration::from_micros(10));
-            db.write(|tx| {
-                tx.update_node(id, PropertyMapBuilder::new().insert("v", i).build())?;
-                Ok::<_, Error>(())
-            })
-            .unwrap();
-            std::thread::sleep(std::time::Duration::from_micros(10));
-            checkpoints.push((i, time::now()));
+            let mut tx: WriteTransaction = db.write_transaction().unwrap();
+            tx.update_node(id, PropertyMapBuilder::new().insert("v", i).build())
+                .unwrap();
+            let ts = tx.commit_with_timestamp().unwrap();
+            checkpoints.push((i, ts));
         }
 
         for (expected, ts) in &checkpoints {
