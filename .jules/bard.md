@@ -4,3 +4,6 @@
 ## 2024-04-10 - [Intra-doc links for conditionally-compiled or non-existent items]
 **Confusion:** Using standard intra-doc links (`[item]`) for items that are either conditionally compiled (like feature-gated experimental modules) or don't resolve properly in the dependency tree causes `rustdoc::broken_intra_doc_links` warnings.
 **Clarification:** Changed intra-doc links to standard markdown backticks (`` `item` ``) for items like `` `crate::semantic_search` ``, `` `reasoning` ``, `` `temporal` ``, `` `diagnostics` ``, `` `characterization` ``, `` `mosaic` ``, and `` `autumn_web::prelude::app` `` to satisfy rustdoc while still keeping the documentation clean and readable.
+## 2025-02-12 - [Formatting Documentation with Derive Attributes]
+**Confusion:** When adding documentation to an existing struct or enum that has a `#[derive(...)]` attribute, inserting the `///` comments after the `#[derive(...)]` macro splits the documentation block in the source code. While `rustdoc` concatenates them, it creates messy source files.
+**Clarification:** Always ensure that all `///` doc comments are placed strictly *above* any `#[...]` attributes on structs, enums, or functions to maintain clean and readable source hygiene.

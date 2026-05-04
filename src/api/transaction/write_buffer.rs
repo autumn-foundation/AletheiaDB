@@ -23,6 +23,24 @@ type FastHashMap<K, V> = HashMap<K, V, BuildHasherDefault<IdentityHasher>>;
 /// true bi-temporal semantics where valid_time can be backdated independently
 /// of when the transaction commits.
 #[derive(Debug, Clone)]
+///
+/// ## Examples
+///
+/// ```rust,no_run
+/// # use aletheiadb::api::transaction::BufferedWrite;
+/// # use aletheiadb::core::NodeId;
+/// # use aletheiadb::core::id::VersionId;
+/// # use aletheiadb::core::temporal::time;
+/// # use aletheiadb::core::property::PropertyMapBuilder;
+/// # use aletheiadb::core::interning::{InternedString, GLOBAL_INTERNER};
+/// let write = BufferedWrite::CreateNode {
+///     node_id: NodeId::new(1).unwrap(),
+///     version_id: VersionId::new(1).unwrap(),
+///     label: GLOBAL_INTERNER.intern("Person").unwrap(),
+///     properties: PropertyMapBuilder::new().build(),
+///     valid_from: time::now(),
+/// };
+/// ```
 pub enum BufferedWrite {
     /// Create a new node
     CreateNode {
@@ -165,6 +183,13 @@ pub const DEFAULT_MAX_OPERATIONS: usize = 50_000;
 ///
 /// Buffers all write operations in a transaction until commit time,
 /// enabling atomicity and validation before applying changes.
+///
+/// ## Examples
+///
+/// ```rust,no_run
+/// # use aletheiadb::api::transaction::WriteBuffer;
+/// let buffer = WriteBuffer::new();
+/// ```
 pub struct WriteBuffer {
     /// Buffered operations in order
     operations: Vec<BufferedWrite>,

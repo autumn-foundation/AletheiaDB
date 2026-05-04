@@ -238,6 +238,19 @@ impl WriteTransaction {
     }
 
     /// Get transaction metadata.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust,no_run
+    /// # use aletheiadb::{AletheiaDB, api::transaction::WriteOps};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// let tx = db.write_transaction()?;
+    /// let metadata = tx.metadata();
+    /// println!("Transaction ID: {:?}", metadata.tx_id);
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn metadata(&self) -> TxMetadata {
         TxMetadata {
             tx_id: self.tx_id,
@@ -249,6 +262,18 @@ impl WriteTransaction {
     }
 
     /// Get transaction ID.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust,no_run
+    /// # use aletheiadb::{AletheiaDB, api::transaction::WriteOps};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// let tx = db.write_transaction()?;
+    /// println!("Transaction ID: {:?}", tx.tx_id());
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn tx_id(&self) -> TxId {
         self.tx_id
     }
@@ -331,6 +356,20 @@ impl WriteTransaction {
     /// - **Async**: Returns after flush to OS cache (background thread syncs)
     /// - **GroupCommit**: Waits for batch fsync (ACID + high throughput)
     /// - **AsyncBatched**: Returns after flush to OS cache, batched fsync in background (<100µs latency)
+    ///
+    /// ## Examples
+    ///
+    /// ```rust,no_run
+    /// # use aletheiadb::{AletheiaDB, properties, api::transaction::WriteOps};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// let mut tx = db.write_transaction()?;
+    /// tx.create_node("Person", properties! { "name" => "Alice" })?;
+    /// let ts = tx.commit_with_timestamp()?;
+    /// println!("Committed at: {:?}", ts);
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn commit_with_timestamp(mut self) -> Result<Timestamp> {
         self.commit_with_timestamp_inner().record_error_metric()
     }

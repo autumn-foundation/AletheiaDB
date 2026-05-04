@@ -22,6 +22,23 @@ use std::sync::{Arc, Mutex, PoisonError, RwLock};
 /// a HashSet containing N elements on every transaction creation was creating
 /// quadratic scaling. Arc allows cheap snapshot captures (just Arc clone).
 #[derive(Debug, Clone)]
+///
+/// ## Examples
+///
+/// ```rust,no_run
+/// # use aletheiadb::core::temporal::time;
+/// # use aletheiadb::api::transaction::TxId;
+/// # use aletheiadb::api::transaction::TransactionSnapshot;
+/// # use std::sync::Arc;
+/// # use std::collections::HashSet;
+/// let mut active_txs = HashSet::new();
+/// active_txs.insert(TxId::new(1));
+///
+/// let snapshot = TransactionSnapshot {
+///     snapshot_timestamp: time::now(),
+///     active_transactions: Arc::new(active_txs),
+/// };
+/// ```
 pub struct TransactionSnapshot {
     /// Timestamp when snapshot was taken
     pub snapshot_timestamp: Timestamp,
@@ -46,6 +63,24 @@ impl TransactionSnapshot {
     ///
     /// # Returns
     /// `true` if the version is visible in this snapshot, `false` otherwise
+    ///
+    /// ## Examples
+    ///
+    /// ```rust,no_run
+    /// # use aletheiadb::core::temporal::time;
+    /// # use aletheiadb::api::transaction::TxId;
+    /// # use aletheiadb::api::transaction::TransactionSnapshot;
+    /// # use std::sync::Arc;
+    /// # use std::collections::HashSet;
+    /// # let mut active_txs = HashSet::new();
+    /// # active_txs.insert(TxId::new(1));
+    /// # let snapshot = TransactionSnapshot {
+    /// #     snapshot_timestamp: time::now(),
+    /// #     active_transactions: Arc::new(active_txs),
+    /// # };
+    /// let created_tx = TxId::new(2);
+    /// let is_vis = snapshot.is_visible(created_tx, Some(time::now()));
+    /// ```
     pub fn is_visible(&self, created_by_tx: TxId, commit_timestamp: Option<Timestamp>) -> bool {
         match commit_timestamp {
             None => false, // Uncommitted version - not visible
@@ -161,6 +196,20 @@ impl EpochRange {
 
 /// Statistics about commit log compression.
 #[derive(Debug, Clone)]
+///
+/// ## Examples
+///
+/// ```rust,no_run
+/// # use aletheiadb::api::transaction::CompressionStats;
+/// let stats = CompressionStats {
+///     total_transactions: 100,
+///     epoch_count: 5,
+///     exception_count: 2,
+///     memory_usage_bytes: 1024,
+///     memory_saved_bytes: 512,
+///     compression_ratio: 0.9,
+/// };
+/// ```
 pub struct CompressionStats {
     /// Total number of transactions tracked
     pub total_transactions: usize,
@@ -476,6 +525,13 @@ impl CompressedCommitLog {
 /// The `committed` field now uses `CompressedCommitLog` which applies epoch-based
 /// compression to reduce memory usage from ~24 bytes per transaction to ~0.24 bytes
 /// per transaction (100x compression) for sequential workloads.
+///
+/// ## Examples
+///
+/// ```rust,no_run
+/// # use aletheiadb::api::transaction::TxVisibilityManager;
+/// let visibility_manager = TxVisibilityManager::new();
+/// ```
 pub struct TxVisibilityManager {
     /// Currently active transactions, wrapped in Arc for efficient snapshot capture.
     ///

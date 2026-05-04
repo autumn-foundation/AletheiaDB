@@ -80,6 +80,21 @@ use crate::core::property::{PropertyMap, PropertyValue};
 use crate::core::temporal::Timestamp;
 
 /// Common read operations available in all transaction types
+///
+/// ## Examples
+///
+/// ```rust,no_run
+/// # use aletheiadb::{AletheiaDB, core::NodeId, api::transaction::ReadOps};
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// # let db = AletheiaDB::new()?;
+/// let tx = db.read_transaction()?;
+/// let node_id = NodeId::new(1)?;
+/// if let Ok(node) = tx.get_node(node_id) {
+///     println!("Found node with label: {}", node.label);
+/// }
+/// # Ok(())
+/// # }
+/// ```
 pub trait ReadOps {
     /// Get a node by ID.
     ///
@@ -276,6 +291,19 @@ pub trait ReadOps {
 }
 
 /// Write operations (only available in write transactions)
+///
+/// ## Examples
+///
+/// ```rust,no_run
+/// # use aletheiadb::{AletheiaDB, properties, api::transaction::WriteOps};
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// # let db = AletheiaDB::new()?;
+/// let mut tx = db.write_transaction()?;
+/// let node_id = tx.create_node("Person", properties! { "name" => "Alice" })?;
+/// tx.commit()?;
+/// # Ok(())
+/// # }
+/// ```
 pub trait WriteOps: ReadOps {
     /// Create a new node with optional backdated valid_from time.
     ///

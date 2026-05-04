@@ -96,6 +96,19 @@ impl ReadTransaction {
     /// # Ok(())
     /// # }
     /// ```
+    ///
+    /// ## Examples
+    ///
+    /// ```rust,no_run
+    /// # use aletheiadb::{AletheiaDB, api::transaction::ReadOps};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// let tx = db.read_transaction()?;
+    /// let metadata = tx.metadata();
+    /// println!("Transaction ID: {:?}", metadata.tx_id);
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn metadata(&self) -> TxMetadata {
         TxMetadata {
             tx_id: self.tx_id,
@@ -120,6 +133,18 @@ impl ReadTransaction {
     /// let id = tx.tx_id();
     ///
     /// println!("Running in transaction context: {:?}", id);
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// ## Examples
+    ///
+    /// ```rust,no_run
+    /// # use aletheiadb::{AletheiaDB, api::transaction::ReadOps};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// let tx = db.read_transaction()?;
+    /// println!("Transaction ID: {:?}", tx.tx_id());
     /// # Ok(())
     /// # }
     /// ```
