@@ -65,13 +65,6 @@ impl TemporalAdjacencyModel {
         out.push(edge_id);
     }
 
-    /// Insert another edge A→B (same direction, contending with insert_a_to_b).
-    fn insert_a_to_b_second(&self, edge_id: u64) {
-        let mut out = self.outgoing_a.lock().unwrap();
-        let mut inc = self.incoming_b.lock().unwrap();
-        out.push(edge_id);
-        inc.push(edge_id);
-    }
 }
 
 /// Two threads inserting edges in *opposite* directions must not deadlock.
@@ -112,7 +105,7 @@ fn test_same_direction_edges_no_deadlock() {
         });
 
         let t2 = thread::spawn(move || {
-            i2.insert_a_to_b_second(2);
+            i2.insert_a_to_b(2);
         });
 
         t1.join().unwrap();
@@ -138,7 +131,7 @@ fn test_three_way_edge_insertion_no_deadlock() {
         });
 
         let t3 = thread::spawn(move || {
-            i3.insert_a_to_b_second(3);
+            i3.insert_a_to_b(3);
         });
 
         t1.join().unwrap();
