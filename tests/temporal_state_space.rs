@@ -465,11 +465,16 @@ fn exhaustive_three_operation_orderings() {
         );
         assert!(check_time_range_validity(&db, id), "anchor-span: inv 3");
 
-        // Every historical value must be reconstructable via anchor + delta chain.
+        // Every historical value must be reconstructable via anchor + delta chain,
+        // and the reconstructed node must carry the exact expected property value.
         for (expected, ts) in &checkpoints {
-            assert!(
-                db.get_node_at_time(id, *ts, *ts).is_ok(),
-                "anchor-span: v={expected} not reconstructable at its snapshot time"
+            let node = db
+                .get_node_at_time(id, *ts, *ts)
+                .unwrap_or_else(|_| panic!("anchor-span: v={expected} not reconstructable"));
+            assert_eq!(
+                node.get_property("v").and_then(|v| v.as_int()),
+                Some(*expected),
+                "anchor-span: v={expected} reconstructed with wrong value"
             );
         }
     }
@@ -653,9 +658,13 @@ fn check_all_eight_temporal_invariants() {
         }
 
         for (expected, ts) in &checkpoints {
-            assert!(
-                db.get_node_at_time(id, *ts, *ts).is_ok(),
-                "inv 7/8: v={expected} must be reconstructable across anchor/delta boundary"
+            let node = db
+                .get_node_at_time(id, *ts, *ts)
+                .unwrap_or_else(|_| panic!("inv 7/8: v={expected} not reconstructable"));
+            assert_eq!(
+                node.get_property("v").and_then(|v| v.as_int()),
+                Some(*expected),
+                "inv 7/8: v={expected} reconstructed with wrong value"
             );
         }
     }
