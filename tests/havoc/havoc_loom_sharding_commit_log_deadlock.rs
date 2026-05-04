@@ -18,10 +18,13 @@ mod loom_test {
         }
 
         fn commit_distributed_transaction(&self) {
-            let _connections = self.connections.read().unwrap();
+            let connections = self.connections.read().unwrap();
 
-            // THE FIX: drop connections before acquiring commit_log
-            // drop(connections); // Commented out to verify it fails
+            // Drop connections BEFORE acquiring commit_log to match the canonical ordering
+            // (connections always released before commit_log write) and prevent the
+            // connections.read + commit_log.write / commit_log.write + connections.write
+            // cycle that arises in the full coordinator under write-preferring RwLock.
+            drop(connections);
 
             let _log = self.commit_log.read().unwrap();
         }
