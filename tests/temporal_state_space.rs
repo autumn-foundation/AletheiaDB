@@ -1,24 +1,26 @@
 //! State space exploration tests for temporal invariants (issue #153).
 //!
-//! Implements property-based testing and exhaustive small-n enumeration to
-//! verify the 8 core temporal invariants of AletheiaDB beyond line coverage.
+//! Supplements line/branch coverage with property-based and exhaustive
+//! small-n enumeration to verify AletheiaDB's 8 core temporal invariants
+//! across a wide range of operation sequences and timestamp combinations.
 //!
-//! # TDD Structure
-//! - **RED phase** (this commit): invariant checkers are stubs that `todo!()`,
-//!   causing every test to fail.
-//! - **GREEN phase** (next commit): invariant checkers fully implemented;
-//!   all tests pass.
-//! - **REFACTOR phase**: code organisation and edge-case expansion.
+//! # Phase 1 – Property-based tests (proptest)
+//! Each test exercises one or more invariants over randomly-generated
+//! inputs, ensuring correctness across thousands of state combinations.
 //!
-//! # Invariants under test
-//! 1. **Transaction Time Monotonicity** – `tx_time(v_n) >= tx_time(v_{n-1})`
-//! 2. **Version Number Ordering** – `version_number(v_n) > version_number(v_{n-1})`
-//! 3. **Time Range Validity** – `start <= end` for every stored range
-//! 4. **Visibility Consistency** – `visible_at(vt, tt) ⟺ valid_at(vt) ∧ recorded_at(tt)`
-//! 5. **Overlap Symmetry** – `r1.overlaps(r2) == r2.overlaps(r1)`
-//! 6. **Contains-Range Reflexivity** – `r.contains_range(r) == true`
-//! 7. **Half-Open Interval Semantics** – end is exclusive
-//! 8. **Temporal Isolation** – time-travel sees consistent snapshot values
+//! # Phase 2 – Exhaustive small-n enumeration
+//! Deterministically exercises every semantically distinct lifecycle
+//! ordering for a single entity and all relevant timestamp orderings.
+//!
+//! # Invariants verified
+//! 1. **Tx-time monotonicity** – `tx_time(v_n) >= tx_time(v_{n-1})`
+//! 2. **Version number ordering** – `version_number(v_n) > version_number(v_{n-1})`
+//! 3. **Time range validity** – `start <= end` for every stored range
+//! 4. **Visibility consistency** – `visible_at(vt,tt) ⟺ valid_at(vt) ∧ recorded_at(tt)`
+//! 5. **Overlap symmetry** – `r1.overlaps(r2) == r2.overlaps(r1)`
+//! 6. **Contains-range reflexivity** – `r.contains_range(r) == true`
+//! 7. **Half-open interval semantics** – end timestamp is always exclusive
+//! 8. **Temporal isolation** – time-travel yields consistent snapshot values
 
 use aletheiadb::core::id::NodeId;
 use aletheiadb::core::property::PropertyMapBuilder;
@@ -30,6 +32,8 @@ use proptest::prelude::*;
 // ============================================================================
 
 /// A post-creation operation that can be applied to a node in sequence.
+///
+/// Used by proptest strategies to generate realistic node lifecycles.
 #[derive(Debug, Clone)]
 enum TemporalOperation {
     Update { value: i64 },
@@ -44,95 +48,65 @@ fn temporal_operation_strategy() -> impl Strategy<Value = TemporalOperation> {
 }
 
 /// Generates a non-empty sequence of operations to apply after an initial Create.
-///
-/// The sequence always starts with at least one Update, and may optionally end
-/// with a Delete.  This mirrors the realistic node lifecycle.
 fn operation_sequence(max_ops: usize) -> impl Strategy<Value = Vec<TemporalOperation>> {
     proptest::collection::vec(temporal_operation_strategy(), 1..=max_ops)
 }
 
 // ============================================================================
-// Invariant checkers
-// GREEN phase: fully implemented.
+// Invariant checker functions
+//
+// Each function embodies one or more of the 8 invariants and returns `true`
+// when the invariant holds.  `get_node_history` errors (e.g., after deletion)
+// are treated as an empty history: invariants are trivially satisfied.
 // ============================================================================
 
 /// Invariant 1 – Transaction time is monotonically non-decreasing across versions.
-///
-/// For every consecutive pair of versions (older, newer) returned by
-/// `get_node_history`, the transaction_time start of newer must be ≥ that of older.
 fn check_tx_time_monotonicity(db: &AletheiaDB, node_id: NodeId) -> bool {
     let history = match db.get_node_history(node_id) {
         Ok(h) => h,
-        Err(_) => return true, // no history to check; trivially satisfied
+        Err(_) => return true,
     };
-    if history.versions.len() < 2 {
-        return true;
-    }
-    for pair in history.versions.windows(2) {
+    history.versions.windows(2).all(|pair| {
         let prev_tx = pair[0].temporal.transaction_time().start();
         let curr_tx = pair[1].temporal.transaction_time().start();
-        if curr_tx < prev_tx {
-            return false;
-        }
-    }
-    true
+        curr_tx >= prev_tx
+    })
 }
 
 /// Invariant 2 – Version numbers are strictly increasing.
-///
-/// Each successive version must have a strictly greater `version_number`.
 fn check_version_numbers_increasing(db: &AletheiaDB, node_id: NodeId) -> bool {
     let history = match db.get_node_history(node_id) {
         Ok(h) => h,
         Err(_) => return true,
     };
-    if history.versions.len() < 2 {
-        return true;
-    }
-    for pair in history.versions.windows(2) {
-        if pair[1].version_number <= pair[0].version_number {
-            return false;
-        }
-    }
-    true
+    history
+        .versions
+        .windows(2)
+        .all(|pair| pair[1].version_number > pair[0].version_number)
 }
 
-/// Invariant 3 – All stored time ranges satisfy start <= end.
-///
-/// Every version's valid_time and transaction_time must be structurally
-/// valid: `range.start() <= range.end()`.
+/// Invariant 3 – All stored time ranges satisfy `start <= end`.
 fn check_time_range_validity(db: &AletheiaDB, node_id: NodeId) -> bool {
     let history = match db.get_node_history(node_id) {
         Ok(h) => h,
         Err(_) => return true,
     };
-    for v in &history.versions {
+    history.versions.iter().all(|v| {
         let vt = v.temporal.valid_time();
         let tt = v.temporal.transaction_time();
-        if vt.start() > vt.end() || tt.start() > tt.end() {
-            return false;
-        }
-    }
-    true
+        vt.start() <= vt.end() && tt.start() <= tt.end()
+    })
 }
 
 /// Invariant 4 – Visibility is consistent with individual dimension checks.
 ///
-/// `visible_at(vt, tt)  ⟺  is_valid_at(vt) AND is_recorded_at(tt)`
-///
-/// This is the fundamental bi-temporal visibility law: a fact is only visible
-/// at a query point (valid_time=vt, tx_time=tt) when *both* dimensions are
-/// simultaneously satisfied.
+/// `visible_at(vt, tt)  ⟺  is_valid_at(vt) ∧ is_recorded_at(tt)`
 fn check_visibility_consistency(
     interval: BiTemporalInterval,
     vt: Timestamp,
     tt: Timestamp,
 ) -> bool {
-    let visible = interval.is_visible_at(vt, tt);
-    let valid = interval.is_valid_at(vt);
-    let recorded = interval.is_recorded_at(tt);
-    // Bi-conditional: visible iff (valid AND recorded)
-    visible == (valid && recorded)
+    interval.is_visible_at(vt, tt) == (interval.is_valid_at(vt) && interval.is_recorded_at(tt))
 }
 
 // ============================================================================
@@ -142,18 +116,17 @@ fn check_visibility_consistency(
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(200))]
 
-    // Invariant 1 & 2 – after N updates, tx_time is monotone and versions are ordered
+    /// Invariants 1 & 2: After N updates, tx_time is monotone and versions are ordered.
     #[test]
     fn prop_tx_time_monotonicity_after_updates(update_count in 1usize..=8) {
         let db = AletheiaDB::new().unwrap();
-
-        let props = PropertyMapBuilder::new().insert("v", 0i64).build();
-        let node_id = db.create_node("TestNode", props).unwrap();
+        let node_id = db
+            .create_node("N", PropertyMapBuilder::new().insert("v", 0i64).build())
+            .unwrap();
 
         for i in 1..=(update_count as i64) {
-            let p = PropertyMapBuilder::new().insert("v", i).build();
             db.write(|tx| {
-                tx.update_node(node_id, p)?;
+                tx.update_node(node_id, PropertyMapBuilder::new().insert("v", i).build())?;
                 Ok::<_, Error>(())
             })
             .unwrap();
@@ -161,28 +134,27 @@ proptest! {
 
         prop_assert!(
             check_tx_time_monotonicity(&db, node_id),
-            "Invariant 1 violated after {} updates",
+            "Inv 1 violated after {} updates",
             update_count
         );
         prop_assert!(
             check_version_numbers_increasing(&db, node_id),
-            "Invariant 2 violated after {} updates",
+            "Inv 2 violated after {} updates",
             update_count
         );
     }
 
-    // Invariant 3 – time ranges stored by the database are always valid
+    /// Invariant 3: Every stored time range satisfies start <= end.
     #[test]
     fn prop_time_ranges_always_valid(update_count in 1usize..=6) {
         let db = AletheiaDB::new().unwrap();
-
-        let props = PropertyMapBuilder::new().insert("v", 0i64).build();
-        let node_id = db.create_node("N", props).unwrap();
+        let node_id = db
+            .create_node("N", PropertyMapBuilder::new().insert("v", 0i64).build())
+            .unwrap();
 
         for i in 1..=(update_count as i64) {
-            let p = PropertyMapBuilder::new().insert("v", i).build();
             db.write(|tx| {
-                tx.update_node(node_id, p)?;
+                tx.update_node(node_id, PropertyMapBuilder::new().insert("v", i).build())?;
                 Ok::<_, Error>(())
             })
             .unwrap();
@@ -190,12 +162,12 @@ proptest! {
 
         prop_assert!(
             check_time_range_validity(&db, node_id),
-            "Invariant 3 violated after {} updates",
+            "Inv 3 violated after {} updates",
             update_count
         );
     }
 
-    // Invariant 4 – BiTemporalInterval visibility ⟺ both dimensions satisfied
+    /// Invariant 4: BiTemporalInterval visibility ⟺ both dimensions satisfied.
     #[test]
     fn prop_visibility_consistency(
         s1 in 1_000_000i64..=400_000_000i64,
@@ -205,6 +177,7 @@ proptest! {
         qv in 1_000_000i64..=400_000_000i64,
         qt in 1_000_000i64..=400_000_000i64,
     ) {
+        // Ensure start <= end for both ranges.
         let (s1, e1) = if s1 <= e1 { (s1, e1) } else { (e1, s1) };
         let (s2, e2) = if s2 <= e2 { (s2, e2) } else { (e2, s2) };
 
@@ -221,14 +194,14 @@ proptest! {
 
         prop_assert!(
             check_visibility_consistency(interval, qv.into(), qt.into()),
-            "Invariant 4 violated: visible={}, valid_at={}, recorded_at={}",
+            "Inv 4 violated: visible={}, valid_at={}, recorded_at={}",
             interval.is_visible_at(qv.into(), qt.into()),
             interval.is_valid_at(qv.into()),
             interval.is_recorded_at(qt.into())
         );
     }
 
-    // Invariant 5 – TimeRange.overlaps() is symmetric
+    /// Invariant 5: TimeRange.overlaps() is symmetric.
     #[test]
     fn prop_overlap_symmetry(
         s1 in 1_000_000i64..=400_000_000i64,
@@ -251,13 +224,13 @@ proptest! {
         prop_assert_eq!(
             r1.overlaps(&r2),
             r2.overlaps(&r1),
-            "Invariant 5 violated: overlap not symmetric for {:?} vs {:?}",
+            "Inv 5 violated: overlap not symmetric for {:?} vs {:?}",
             r1,
             r2
         );
     }
 
-    // Invariant 6 – TimeRange.contains_range() is reflexive
+    /// Invariant 6: TimeRange.contains_range() is reflexive.
     #[test]
     fn prop_contains_range_reflexivity(
         s in 1_000_000i64..=400_000_000i64,
@@ -272,12 +245,12 @@ proptest! {
 
         prop_assert!(
             range.contains_range(&range),
-            "Invariant 6 violated: range does not contain itself: {:?}",
+            "Inv 6 violated: range does not contain itself: {:?}",
             range
         );
     }
 
-    // Invariant 7 – Half-open interval: end is exclusive, end-1 is inclusive
+    /// Invariant 7: End of a TimeRange is always exclusive.
     #[test]
     fn prop_closed_range_excludes_end(
         s in 1_000_000i64..=100_000_000i64,
@@ -287,33 +260,32 @@ proptest! {
 
         prop_assert!(
             !range.contains(e.into()),
-            "Invariant 7 violated: range {:?} contains its exclusive end {}",
-            range, e
+            "Inv 7 violated: range {:?} contains its exclusive end",
+            range
         );
         prop_assert!(
             range.contains((e - 1).into()),
-            "Invariant 7 violated: range {:?} does not contain end-1={}",
-            range,
-            e - 1
+            "Inv 7 violated: range {:?} does not contain end-1",
+            range
         );
     }
 
-    // Invariant 8 – Temporal isolation: operation sequences preserve invariants
+    /// Invariants 1–3: Any operation sequence preserves version chain invariants.
     #[test]
-    fn prop_operation_sequence_preserves_invariants(
-        ops in operation_sequence(6)
-    ) {
+    fn prop_operation_sequence_preserves_invariants(ops in operation_sequence(6)) {
         let db = AletheiaDB::new().unwrap();
-
-        let props = PropertyMapBuilder::new().insert("v", 0i64).build();
-        let node_id = db.create_node("N", props).unwrap();
+        let node_id = db
+            .create_node("N", PropertyMapBuilder::new().insert("v", 0i64).build())
+            .unwrap();
 
         for op in &ops {
             match op {
                 TemporalOperation::Update { value } => {
-                    let p = PropertyMapBuilder::new().insert("v", *value).build();
                     let _ = db.write(|tx| {
-                        tx.update_node(node_id, p)?;
+                        tx.update_node(
+                            node_id,
+                            PropertyMapBuilder::new().insert("v", *value).build(),
+                        )?;
                         Ok::<_, Error>(())
                     });
                 }
@@ -326,20 +298,19 @@ proptest! {
             }
         }
 
-        // After any combination of operations, the version chain invariants must hold.
         prop_assert!(
             check_tx_time_monotonicity(&db, node_id),
-            "Invariant 1 violated after sequence {:?}",
+            "Inv 1 violated after sequence {:?}",
             ops
         );
         prop_assert!(
             check_version_numbers_increasing(&db, node_id),
-            "Invariant 2 violated after sequence {:?}",
+            "Inv 2 violated after sequence {:?}",
             ops
         );
         prop_assert!(
             check_time_range_validity(&db, node_id),
-            "Invariant 3 violated after sequence {:?}",
+            "Inv 3 violated after sequence {:?}",
             ops
         );
     }
@@ -351,47 +322,32 @@ proptest! {
 
 /// Exhaustively tests all semantically distinct 3-operation lifecycle orderings.
 ///
-/// For a single entity, the possible sequences that matter are:
-///   Create → Update           (normal update)
-///   Create → Delete           (immediate delete)
-///   Create → Update → Delete  (full lifecycle)
-///   Create → Update × N       (multiple versions, spanning anchor boundary)
+/// Covers:
+/// - Create → Update
+/// - Create → Delete
+/// - Create → Update → Delete (full lifecycle)
+/// - Create → Update × 15 (multiple versions, spanning the default anchor boundary)
 #[test]
 fn exhaustive_three_operation_orderings() {
     // --- Create then Update ---
     {
         let db = AletheiaDB::new().unwrap();
         let id = db
-            .create_node(
-                "N",
-                PropertyMapBuilder::new().insert("v", 1i64).build(),
-            )
+            .create_node("N", PropertyMapBuilder::new().insert("v", 1i64).build())
             .unwrap();
 
         db.write(|tx| {
-            tx.update_node(
-                id,
-                PropertyMapBuilder::new().insert("v", 2i64).build(),
-            )?;
+            tx.update_node(id, PropertyMapBuilder::new().insert("v", 2i64).build())?;
             Ok::<_, Error>(())
         })
         .unwrap();
 
-        assert!(
-            check_tx_time_monotonicity(&db, id),
-            "Create→Update: tx_time monotonicity (inv 1)"
-        );
-        assert!(
-            check_version_numbers_increasing(&db, id),
-            "Create→Update: version numbers increasing (inv 2)"
-        );
-        assert!(
-            check_time_range_validity(&db, id),
-            "Create→Update: time range validity (inv 3)"
-        );
+        assert!(check_tx_time_monotonicity(&db, id), "C→U: inv 1");
+        assert!(check_version_numbers_increasing(&db, id), "C→U: inv 2");
+        assert!(check_time_range_validity(&db, id), "C→U: inv 3");
 
         let history = db.get_node_history(id).unwrap();
-        assert_eq!(history.versions.len(), 2, "Create→Update: expected 2 versions");
+        assert_eq!(history.versions.len(), 2, "C→U: expected 2 versions");
         assert_eq!(
             history
                 .versions
@@ -401,7 +357,7 @@ fn exhaustive_three_operation_orderings() {
                 .get("v")
                 .and_then(|v| v.as_int()),
             Some(2),
-            "Create→Update: latest version should carry v=2"
+            "C→U: latest version should carry v=2"
         );
     }
 
@@ -409,10 +365,7 @@ fn exhaustive_three_operation_orderings() {
     {
         let db = AletheiaDB::new().unwrap();
         let id = db
-            .create_node(
-                "N",
-                PropertyMapBuilder::new().insert("v", 1i64).build(),
-            )
+            .create_node("N", PropertyMapBuilder::new().insert("v", 1i64).build())
             .unwrap();
 
         std::thread::sleep(std::time::Duration::from_micros(100));
@@ -425,15 +378,14 @@ fn exhaustive_three_operation_orderings() {
         })
         .unwrap();
 
-        // Current query must fail after deletion.
         assert!(
             db.get_node(id).is_err(),
-            "Create→Delete: node should not be accessible after deletion"
+            "C→D: node inaccessible after deletion"
         );
-        // Time-travel to before deletion must succeed.
         assert!(
-            db.get_node_at_time(id, t_after_create, t_after_create).is_ok(),
-            "Create→Delete: time-travel before deletion should succeed"
+            db.get_node_at_time(id, t_after_create, t_after_create)
+                .is_ok(),
+            "C→D: time-travel before deletion succeeds"
         );
     }
 
@@ -441,10 +393,7 @@ fn exhaustive_three_operation_orderings() {
     {
         let db = AletheiaDB::new().unwrap();
         let id = db
-            .create_node(
-                "N",
-                PropertyMapBuilder::new().insert("v", 1i64).build(),
-            )
+            .create_node("N", PropertyMapBuilder::new().insert("v", 1i64).build())
             .unwrap();
 
         std::thread::sleep(std::time::Duration::from_micros(100));
@@ -452,10 +401,7 @@ fn exhaustive_three_operation_orderings() {
         std::thread::sleep(std::time::Duration::from_micros(100));
 
         db.write(|tx| {
-            tx.update_node(
-                id,
-                PropertyMapBuilder::new().insert("v", 2i64).build(),
-            )?;
+            tx.update_node(id, PropertyMapBuilder::new().insert("v", 2i64).build())?;
             Ok::<_, Error>(())
         })
         .unwrap();
@@ -470,24 +416,23 @@ fn exhaustive_three_operation_orderings() {
         })
         .unwrap();
 
-        // Current query fails.
         assert!(
             db.get_node(id).is_err(),
-            "C→U→D: node should not exist after deletion"
+            "C→U→D: node inaccessible after deletion"
         );
-        // Time-travel to after create (before update) → v=1.
+
         let node_v1 = db.get_node_at_time(id, t_v1, t_v1).unwrap();
         assert_eq!(
             node_v1.get_property("v").and_then(|v| v.as_int()),
             Some(1),
-            "C→U→D: time-travel before update should give v=1"
+            "C→U→D: time-travel before update yields v=1"
         );
-        // Time-travel to after update (before delete) → v=2.
+
         let node_v2 = db.get_node_at_time(id, t_v2, t_v2).unwrap();
         assert_eq!(
             node_v2.get_property("v").and_then(|v| v.as_int()),
             Some(2),
-            "C→U→D: time-travel after update should give v=2"
+            "C→U→D: time-travel after update yields v=2"
         );
     }
 
@@ -495,10 +440,7 @@ fn exhaustive_three_operation_orderings() {
     {
         let db = AletheiaDB::new().unwrap();
         let id = db
-            .create_node(
-                "N",
-                PropertyMapBuilder::new().insert("v", 0i64).build(),
-            )
+            .create_node("N", PropertyMapBuilder::new().insert("v", 0i64).build())
             .unwrap();
 
         let mut checkpoints: Vec<(i64, Timestamp)> = vec![(0, time::now())];
@@ -506,9 +448,8 @@ fn exhaustive_three_operation_orderings() {
         // 15 updates → crosses the default anchor_interval of 10
         for i in 1..=15i64 {
             std::thread::sleep(std::time::Duration::from_micros(10));
-            let p = PropertyMapBuilder::new().insert("v", i).build();
             db.write(|tx| {
-                tx.update_node(id, p)?;
+                tx.update_node(id, PropertyMapBuilder::new().insert("v", i).build())?;
                 Ok::<_, Error>(())
             })
             .unwrap();
@@ -516,108 +457,96 @@ fn exhaustive_three_operation_orderings() {
             checkpoints.push((i, time::now()));
         }
 
-        assert!(
-            check_tx_time_monotonicity(&db, id),
-            "Multi-update: tx_time monotonicity across anchor boundary (inv 1)"
-        );
+        assert!(check_tx_time_monotonicity(&db, id), "anchor-span: inv 1");
         assert!(
             check_version_numbers_increasing(&db, id),
-            "Multi-update: version numbers increasing (inv 2)"
+            "anchor-span: inv 2"
         );
-        assert!(
-            check_time_range_validity(&db, id),
-            "Multi-update: time range validity (inv 3)"
-        );
+        assert!(check_time_range_validity(&db, id), "anchor-span: inv 3");
 
-        // Verify reconstruction of every version via anchor + delta chain.
+        // Every historical value must be reconstructable via anchor + delta chain.
         for (expected, ts) in &checkpoints {
-            let node = db.get_node_at_time(id, *ts, *ts);
             assert!(
-                node.is_ok(),
-                "Multi-update: version v={} not reconstructable at its snapshot time",
-                expected
+                db.get_node_at_time(id, *ts, *ts).is_ok(),
+                "anchor-span: v={expected} not reconstructable at its snapshot time"
             );
         }
     }
 }
 
 /// Exhaustively tests all timestamp-ordering cases for BiTemporalInterval visibility.
+///
+/// Uses three ordered reference points t1 < t2 < t3 and checks all
+/// combinations of (valid_time_query, tx_time_query) against an interval
+/// with valid time [t1, t3) and transaction time [t2, ∞).
 #[test]
 fn exhaustive_timestamp_visibility_orderings() {
-    // Reference timestamps: t1 < t2 < t3 (seconds since epoch)
     let t1 = time::from_secs(100);
     let t2 = time::from_secs(200);
     let t3 = time::from_secs(300);
     let before_t1 = time::from_secs(50);
 
-    // Interval valid from t1..t3, recorded from t2..current
-    let interval = BiTemporalInterval::new(
-        TimeRange::new(t1, t3).unwrap(),
-        TimeRange::from(t2),
-    );
+    let interval = BiTemporalInterval::new(TimeRange::new(t1, t3).unwrap(), TimeRange::from(t2));
 
-    // Before valid time start → not visible regardless of tx_time
+    // Before valid time start — not visible regardless of tx_time.
     assert!(
         !interval.is_visible_at(before_t1, t3),
-        "Not visible before valid time start"
+        "not visible before valid-time start"
     );
-    // Valid time ok, but before transaction time start → not visible
+
+    // Valid time ok, but before transaction time start — not visible.
     assert!(
         !interval.is_visible_at(t2, t1),
-        "Not visible when tx_time before recording start"
+        "not visible when tx_time precedes recording"
     );
-    // Both dimensions satisfied → visible
+
+    // Both dimensions satisfied — visible.
     assert!(
         interval.is_visible_at(t2, t3),
-        "Visible when both dimensions satisfied"
+        "visible when both dimensions satisfied"
     );
     assert!(
         interval.is_visible_at(t1, t3),
-        "Visible at valid time start when tx_time satisfied"
-    );
-    // End of valid range is exclusive → not visible
-    assert!(
-        !interval.is_visible_at(t3, t3),
-        "Not visible at exclusive valid-time end"
+        "visible at valid-time start when tx satisfied"
     );
 
-    // Open interval (current in both dimensions)
+    // End of valid range is exclusive — not visible at t3.
+    assert!(
+        !interval.is_visible_at(t3, t3),
+        "exclusive valid-time end not visible"
+    );
+
+    // Open-ended interval (both dimensions current from t1).
     let open = BiTemporalInterval::current(t1);
     assert!(
         open.is_visible_at(t2, t2),
-        "Open interval: visible at any future point"
+        "open interval: visible at any future point"
     );
     assert!(
         !open.is_visible_at(before_t1, before_t1),
-        "Open interval: not visible before start"
+        "open interval: not visible before start"
     );
 }
 
-/// Systematically verifies all 8 temporal invariants with concrete scenarios.
+/// Systematically verifies all 8 temporal invariants with targeted scenarios.
 #[test]
 fn check_all_eight_temporal_invariants() {
     // Inv 1: Transaction Time Monotonicity
     {
         let db = AletheiaDB::new().unwrap();
         let id = db
-            .create_node(
-                "N",
-                PropertyMapBuilder::new().insert("v", 0i64).build(),
-            )
+            .create_node("N", PropertyMapBuilder::new().insert("v", 0i64).build())
             .unwrap();
         for i in 1..=5i64 {
             db.write(|tx| {
-                tx.update_node(
-                    id,
-                    PropertyMapBuilder::new().insert("v", i).build(),
-                )?;
+                tx.update_node(id, PropertyMapBuilder::new().insert("v", i).build())?;
                 Ok::<_, Error>(())
             })
             .unwrap();
         }
         assert!(
             check_tx_time_monotonicity(&db, id),
-            "Inv 1: tx_time monotonicity"
+            "inv 1: tx_time monotonicity"
         );
     }
 
@@ -625,24 +554,18 @@ fn check_all_eight_temporal_invariants() {
     {
         let db = AletheiaDB::new().unwrap();
         let id = db
-            .create_node(
-                "N",
-                PropertyMapBuilder::new().insert("v", 0i64).build(),
-            )
+            .create_node("N", PropertyMapBuilder::new().insert("v", 0i64).build())
             .unwrap();
         for i in 1..=5i64 {
             db.write(|tx| {
-                tx.update_node(
-                    id,
-                    PropertyMapBuilder::new().insert("v", i).build(),
-                )?;
+                tx.update_node(id, PropertyMapBuilder::new().insert("v", i).build())?;
                 Ok::<_, Error>(())
             })
             .unwrap();
         }
         assert!(
             check_version_numbers_increasing(&db, id),
-            "Inv 2: version number ordering"
+            "inv 2: version number ordering"
         );
     }
 
@@ -650,24 +573,18 @@ fn check_all_eight_temporal_invariants() {
     {
         let db = AletheiaDB::new().unwrap();
         let id = db
-            .create_node(
-                "N",
-                PropertyMapBuilder::new().insert("v", 0i64).build(),
-            )
+            .create_node("N", PropertyMapBuilder::new().insert("v", 0i64).build())
             .unwrap();
         for i in 1..=5i64 {
             db.write(|tx| {
-                tx.update_node(
-                    id,
-                    PropertyMapBuilder::new().insert("v", i).build(),
-                )?;
+                tx.update_node(id, PropertyMapBuilder::new().insert("v", i).build())?;
                 Ok::<_, Error>(())
             })
             .unwrap();
         }
         assert!(
             check_time_range_validity(&db, id),
-            "Inv 3: all stored time ranges valid"
+            "inv 3: all stored time ranges valid"
         );
     }
 
@@ -689,7 +606,7 @@ fn check_all_eight_temporal_invariants() {
         let tx_now = time::now();
         assert!(
             db.get_node_at_time(id, before_valid, tx_now).is_err(),
-            "Inv 4: entity not visible before valid_from"
+            "inv 4: entity not visible before valid_from"
         );
     }
 
@@ -697,10 +614,7 @@ fn check_all_eight_temporal_invariants() {
     {
         let db = AletheiaDB::new().unwrap();
         let id = db
-            .create_node(
-                "N",
-                PropertyMapBuilder::new().insert("v", 1i64).build(),
-            )
+            .create_node("N", PropertyMapBuilder::new().insert("v", 1i64).build())
             .unwrap();
 
         std::thread::sleep(std::time::Duration::from_micros(100));
@@ -715,15 +629,15 @@ fn check_all_eight_temporal_invariants() {
 
         assert!(
             db.get_node_at_time(id, t_alive, t_alive).is_ok(),
-            "Inv 5: time-travel before deletion must succeed"
+            "inv 5: time-travel before deletion must succeed"
         );
         assert!(
             db.get_node(id).is_err(),
-            "Inv 5: current access after deletion must fail"
+            "inv 5: current access after deletion must fail"
         );
     }
 
-    // Inv 6: Visibility Consistency (direct BiTemporalInterval checks)
+    // Inv 6: Visibility Consistency – direct BiTemporalInterval checks
     {
         let vt_start = time::from_secs(100);
         let vt_end = time::from_secs(200);
@@ -740,11 +654,11 @@ fn check_all_eight_temporal_invariants() {
 
         assert!(
             check_visibility_consistency(interval, vt_inside, tt_satisfied),
-            "Inv 6: visibility consistent when both dims satisfied"
+            "inv 6: consistent when both dims satisfied"
         );
         assert!(
             check_visibility_consistency(interval, vt_inside, tt_before),
-            "Inv 6: visibility consistent when tx_time not satisfied"
+            "inv 6: consistent when tx_time not satisfied"
         );
     }
 
@@ -752,20 +666,14 @@ fn check_all_eight_temporal_invariants() {
     {
         let db = AletheiaDB::new().unwrap();
         let id = db
-            .create_node(
-                "N",
-                PropertyMapBuilder::new().insert("v", 0i64).build(),
-            )
+            .create_node("N", PropertyMapBuilder::new().insert("v", 0i64).build())
             .unwrap();
 
         let mut checkpoints: Vec<(i64, Timestamp)> = vec![(0, time::now())];
         for i in 1..=15i64 {
             std::thread::sleep(std::time::Duration::from_micros(10));
             db.write(|tx| {
-                tx.update_node(
-                    id,
-                    PropertyMapBuilder::new().insert("v", i).build(),
-                )?;
+                tx.update_node(id, PropertyMapBuilder::new().insert("v", i).build())?;
                 Ok::<_, Error>(())
             })
             .unwrap();
@@ -774,11 +682,9 @@ fn check_all_eight_temporal_invariants() {
         }
 
         for (expected, ts) in &checkpoints {
-            let node = db.get_node_at_time(id, *ts, *ts);
             assert!(
-                node.is_ok(),
-                "Inv 7/8: version v={} should be reconstructable across anchor/delta boundary",
-                expected
+                db.get_node_at_time(id, *ts, *ts).is_ok(),
+                "inv 7/8: v={expected} must be reconstructable across anchor/delta boundary"
             );
         }
     }
