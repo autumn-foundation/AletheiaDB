@@ -1,3 +1,6 @@
+//! Basic graph operations for creating and reading nodes and edges.
+//!
+//! Contains convenience methods for the most common graph operations.
 use crate::api::transaction::WriteOps;
 use crate::core::error::{Result, ResultExt};
 use crate::core::graph::{Edge, Node};

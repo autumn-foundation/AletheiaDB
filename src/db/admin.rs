@@ -1,3 +1,6 @@
+//! Administrative and test-only helper methods.
+//!
+//! Provides internal statistics, test visibility, and database maintenance operations.
 use crate::api::transaction::visibility::CompressionStats;
 use crate::core::error::{PersistenceErrorKind, Result, ResultExt, StorageError};
 use crate::core::temporal::Timestamp;

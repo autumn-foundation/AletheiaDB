@@ -1,3 +1,6 @@
+//! Transaction management methods.
+//!
+//! Provides closures and manual transaction control for both read and write operations.
 use crate::api::transaction::{ReadTransaction, WriteTransaction};
 use crate::core::error::{Result, ResultExt, TransactionError};
 use crate::core::hlc::HybridTimestamp;

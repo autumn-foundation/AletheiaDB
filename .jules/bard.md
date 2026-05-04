@@ -4,3 +4,6 @@
 ## 2024-04-10 - [Intra-doc links for conditionally-compiled or non-existent items]
 **Confusion:** Using standard intra-doc links (`[item]`) for items that are either conditionally compiled (like feature-gated experimental modules) or don't resolve properly in the dependency tree causes `rustdoc::broken_intra_doc_links` warnings.
 **Clarification:** Changed intra-doc links to standard markdown backticks (`` `item` ``) for items like `` `crate::semantic_search` ``, `` `reasoning` ``, `` `temporal` ``, `` `diagnostics` ``, `` `characterization` ``, `` `mosaic` ``, and `` `autumn_web::prelude::app` `` to satisfy rustdoc while still keeping the documentation clean and readable.
+## 2024-05-03 - [The Missing Documentations of the db internals]
+**Confusion:** Many core public functions and structures within the `src/db` submodules were missing module level documentation (`//!`), making it hard for users to quickly get the concept of what each file does.
+**Clarification:** I added module-level `//!` documentation to all files under `src/db` that were missing them (`admin.rs`, `config.rs`, `ops.rs`, `query.rs`, `temporal.rs`, `transaction.rs`, `vector.rs`, `vector_builder.rs`) as well as `src/experimental/temporal/temporal_narrative.rs`. This provides a "Abstract" of what the file does before listing "how".
