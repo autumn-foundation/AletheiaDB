@@ -50,7 +50,7 @@ pub struct Metrics {
 }
 ```
 
-**Honeycomb Query Examples**:
+**APM Query Examples**:
 ```
 # Alert on critical errors only
 WHERE error_severity = "Critical" | COUNT

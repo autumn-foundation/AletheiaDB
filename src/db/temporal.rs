@@ -96,7 +96,7 @@ impl AletheiaDB {
         transaction_time: Timestamp,
     ) -> Result<Node> {
         #[cfg(feature = "observability")]
-        let _span = tracing::info_span!("get_node_at_time").entered();
+        let _span = crate::observability::temporal_query_span("get_node_at_time").entered();
 
         self.historical
             .read()
@@ -115,7 +115,7 @@ impl AletheiaDB {
         transaction_time: Timestamp,
     ) -> Result<Edge> {
         #[cfg(feature = "observability")]
-        let _span = tracing::info_span!("get_edge_at_time").entered();
+        let _span = crate::observability::temporal_query_span("get_edge_at_time").entered();
 
         self.historical
             .read()
@@ -205,7 +205,7 @@ impl AletheiaDB {
         transaction_time: Timestamp,
     ) -> Result<Vec<(NodeId, Option<Node>)>> {
         #[cfg(feature = "observability")]
-        let _span = tracing::info_span!("get_nodes_at_time").entered();
+        let _span = crate::observability::temporal_query_span("get_nodes_at_time").entered();
 
         self.historical
             .read()
@@ -290,7 +290,7 @@ impl AletheiaDB {
         transaction_time: Timestamp,
     ) -> Result<Vec<(EdgeId, Option<Edge>)>> {
         #[cfg(feature = "observability")]
-        let _span = tracing::info_span!("get_edges_at_time").entered();
+        let _span = crate::observability::temporal_query_span("get_edges_at_time").entered();
 
         self.historical
             .read()

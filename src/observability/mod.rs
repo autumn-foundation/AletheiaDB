@@ -1,383 +1,322 @@
-//! Production observability infrastructure for AletheiaDB.
+//! Backend-agnostic observability contract for AletheiaDB.
 //!
-//! This module provides comprehensive instrumentation for production deployments,
-//! including structured logging, metrics collection, and tracing integration.
-//!
-//! # Feature Flags
-//!
-//! Observability is **opt-in** via feature flags to ensure zero runtime cost when disabled:
-//!
-//! - `observability`: Core observability infrastructure (tracing + metrics)
-//! - `observability-tracy`: Tracy profiler integration for CPU profiling
-//!
-//! # Quick Start
-//!
-//! ```ignore
-//! use aletheiadb::observability;
-//!
-//! // Initialize observability (call once at application startup)
-//! observability::init(observability::Config::default());
-//!
-//! // Metrics are automatically collected
-//! let db = AletheiaDB::new();
-//!
-//! // Periodically check for critical errors
-//! let metrics = aletheiadb::metrics();
-//! if metrics.has_critical_errors() {
-//!     panic!("Data corruption detected!");
-//! }
-//! ```
-//!
-//! # Architecture
-//!
-//! Observability infrastructure is designed to be:
-//!
-//! 1. **Zero-cost when disabled**: Feature-gated compilation removes all instrumentation
-//! 2. **Low overhead when enabled**: <5% performance impact on critical paths
-//! 3. **Pluggable backends**: Support for multiple backends (logs, Prometheus, Tracy)
-//! 4. **Library-friendly**: Consumers control configuration via API
-//!
-//! # Critical Metrics
-//!
-//! The following metrics should **NEVER** be non-zero in production:
-//!
-//! - **Lock poisoning** (`lock_poison_count`): Thread panicked while holding lock
-//! - **Timestamp violations** (`timestamp_violations`): Transaction time not monotonic
-//! - **WAL checksum failures** (`wal_checksum_failures`): Durability log corrupted
-//!
-//! See [`metrics`](metrics/index.html) module for full documentation.
+//! AletheiaDB emits OpenTelemetry-compatible spans through [`tracing`] and
+//! reports bounded-cardinality metrics through [`MetricsRecorder`]. The crate
+//! deliberately does not own exporters, collectors, HTTP scrape endpoints, or
+//! vendor clients. Applications install their preferred `tracing` subscriber
+//! and, when desired, enable the `metrics-rs` feature to forward metric samples
+//! into the [`metrics`](https://docs.rs/metrics) facade.
 
-pub mod backends;
 pub mod metrics;
 
-// Re-export key types
-pub use metrics::{METRICS, Metrics, MetricsSnapshot};
+#[cfg(feature = "metrics-rs")]
+pub mod metrics_rs_adapter;
 
-// Re-export backend configs (conditional on features)
-#[cfg(feature = "observability-honeycomb")]
-pub use backends::honeycomb::HoneycombConfig;
+use arc_swap::ArcSwap;
+use std::sync::{Arc, LazyLock};
 
-#[cfg(not(feature = "observability-honeycomb"))]
-/// Honeycomb configuration (placeholder when feature is disabled)
-#[derive(Debug, Clone)]
-pub struct HoneycombConfig {
-    /// Honeycomb API key
-    pub api_key: String,
-    /// Dataset name
-    pub dataset: String,
-    /// Service name
-    pub service_name: String,
+pub use metrics::{
+    CriticalEvent, ErrorCategory, METRIC_CRITICAL_EVENTS, METRIC_ERRORS, METRIC_LABEL_CATEGORY,
+    METRIC_LABEL_DURABILITY_MODE, METRIC_LABEL_EVENT, METRIC_LABEL_STATUS,
+    METRIC_TRANSACTION_COMMIT_DURATION, METRIC_TRANSACTION_COMMITS, METRIC_TRANSACTION_OPERATIONS,
+    METRIC_WRITE_CONFLICTS, METRICS, Metrics, MetricsRecorder, MetricsSnapshot, NoOpMetrics,
+};
+
+/// Stable database system name used in OTel attributes.
+pub const DB_SYSTEM_NAME: &str = "aletheiadb";
+
+/// Span: parses, plans, or executes an AletheiaDB query.
+pub const SPAN_QUERY_EXECUTE: &str = "aletheiadb.query.execute";
+
+/// Span: combines graph traversal, vector ranking, or temporal query work.
+pub const SPAN_QUERY_HYBRID: &str = "aletheiadb.query.hybrid";
+
+/// Span: mutates vector index configuration or metadata.
+pub const SPAN_VECTOR_INDEX: &str = "aletheiadb.vector.index";
+
+/// Span: executes a vector similarity search.
+pub const SPAN_VECTOR_SEARCH: &str = "aletheiadb.vector.search";
+
+/// Span: reconstructs or queries temporal state.
+pub const SPAN_TEMPORAL_QUERY: &str = "aletheiadb.temporal.query";
+
+/// Span: reads historical storage directly.
+pub const SPAN_STORAGE_HISTORICAL_QUERY: &str = "aletheiadb.storage.historical.query";
+
+/// Span: commits a write transaction.
+pub const SPAN_TRANSACTION_COMMIT: &str = "aletheiadb.transaction.commit";
+
+/// OTel semantic attribute: database system name.
+pub const ATTR_DB_SYSTEM_NAME: &str = "db.system.name";
+
+/// OTel semantic attribute: database operation name.
+pub const ATTR_DB_OPERATION_NAME: &str = "db.operation.name";
+
+/// AletheiaDB attribute: query family such as `aql`, `hybrid`, or `temporal`.
+pub const ATTR_QUERY_KIND: &str = "aletheiadb.query.kind";
+
+/// AletheiaDB attribute: vector property being indexed or searched.
+pub const ATTR_VECTOR_PROPERTY: &str = "aletheiadb.vector.property";
+
+/// AletheiaDB attribute: durability mode for a committed transaction.
+pub const ATTR_DURABILITY_MODE: &str = "aletheiadb.durability.mode";
+
+/// AletheiaDB attribute: transaction identifier.
+pub const ATTR_TRANSACTION_ID: &str = "aletheiadb.transaction.id";
+
+/// AletheiaDB attribute: bounded error category.
+pub const ATTR_ERROR_CATEGORY: &str = "aletheiadb.error.category";
+
+/// AletheiaDB attribute: bounded operation status.
+pub const ATTR_STATUS: &str = "aletheiadb.status";
+
+static METRICS_RECORDER: LazyLock<ArcSwap<SharedMetricsRecorder>> =
+    LazyLock::new(|| ArcSwap::from_pointee(SharedMetricsRecorder::new(Arc::new(NoOpMetrics))));
+
+struct SharedMetricsRecorder {
+    inner: Arc<dyn MetricsRecorder>,
 }
 
-#[cfg(feature = "observability-prometheus")]
-pub use backends::prometheus::PrometheusConfig;
-
-#[cfg(not(feature = "observability-prometheus"))]
-/// Prometheus configuration (placeholder when feature is disabled)
-#[derive(Debug, Clone)]
-pub struct PrometheusConfig {
-    /// Bind address for HTTP server
-    pub bind_addr: String,
+impl SharedMetricsRecorder {
+    fn new(inner: Arc<dyn MetricsRecorder>) -> Self {
+        Self { inner }
+    }
 }
 
-use std::sync::{Mutex, Once};
+impl MetricsRecorder for SharedMetricsRecorder {
+    fn record_error(&self, category: ErrorCategory) {
+        self.inner.record_error(category);
+    }
 
-static INIT: Once = Once::new();
-#[allow(dead_code)] // Used only when observability-honeycomb or observability-prometheus features are enabled
-static WORKER_HANDLES: Mutex<Vec<std::thread::JoinHandle<()>>> = Mutex::new(Vec::new());
+    fn record_write_conflict(&self) {
+        self.inner.record_write_conflict();
+    }
 
-/// Observability configuration.
-///
-/// This controls how observability data is collected and exported.
-///
-/// # Backend Support
-///
-/// - **Stdout logging**: Always available with `observability` feature
-/// - **Honeycomb**: Requires `observability-honeycomb` feature + API key
-/// - **Prometheus**: Requires `observability-prometheus` feature + bind address
-/// - **Tracy**: Requires `observability-tracy` feature
-///
-/// # Configuration
-///
-/// Use `Config::from_env()` to auto-configure from environment variables:
-/// - `HONEYCOMB_API_KEY`: Enable Honeycomb integration
-/// - `HONEYCOMB_DATASET`: Dataset name (default: "aletheiadb")
-/// - `PROMETHEUS_BIND_ADDR`: Prometheus HTTP endpoint (e.g., "127.0.0.1:9090")
-#[derive(Debug, Clone)]
-pub struct Config {
-    /// Enable structured logging to stdout.
-    ///
-    /// Default: `true` when observability feature is enabled.
-    pub enable_logging: bool,
+    fn record_critical_event(&self, event: CriticalEvent) {
+        self.inner.record_critical_event(event);
+    }
 
-    /// Enable Tracy profiler integration.
-    ///
-    /// Default: `true` when `observability-tracy` feature is enabled.
-    pub enable_tracy: bool,
-
-    /// Honeycomb configuration (optional).
-    ///
-    /// When set, spans will be sent to Honeycomb for distributed tracing.
-    /// Requires the `observability-honeycomb` feature.
-    pub honeycomb: Option<HoneycombConfig>,
-
-    /// Prometheus configuration (optional).
-    ///
-    /// When set, an HTTP server will expose metrics at /metrics.
-    /// Requires the `observability-prometheus` feature.
-    pub prometheus: Option<PrometheusConfig>,
+    fn record_transaction_commit(
+        &self,
+        duration_secs: f64,
+        operations_count: u64,
+        durability_mode: &str,
+        status: &str,
+    ) {
+        self.inner.record_transaction_commit(
+            duration_secs,
+            operations_count,
+            durability_mode,
+            status,
+        );
+    }
 }
 
-impl Default for Config {
+/// Bundle of telemetry dependencies supplied by the embedding application.
+///
+/// `TelemetryConfig::default()` keeps metrics disabled. Spans are emitted via
+/// `tracing` call sites and are controlled by whichever subscriber the
+/// application installs.
+#[derive(Clone)]
+pub struct TelemetryConfig {
+    /// Service name applications can stamp onto their subscriber/resource.
+    pub service_name: Arc<str>,
+
+    /// Metrics sink for contract-defined samples.
+    pub metrics: Arc<dyn MetricsRecorder>,
+}
+
+impl std::fmt::Debug for TelemetryConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TelemetryConfig")
+            .field("service_name", &self.service_name)
+            .field("metrics", &std::any::type_name_of_val(&*self.metrics))
+            .finish()
+    }
+}
+
+impl Default for TelemetryConfig {
     fn default() -> Self {
         Self {
-            enable_logging: true,
-            #[cfg(feature = "observability-tracy")]
-            enable_tracy: true,
-            #[cfg(not(feature = "observability-tracy"))]
-            enable_tracy: false,
-            honeycomb: None,
-            prometheus: None,
+            service_name: Arc::from(DB_SYSTEM_NAME),
+            metrics: Arc::new(NoOpMetrics),
         }
     }
 }
 
-impl Config {
-    /// Create a configuration from environment variables.
-    ///
-    /// This automatically detects available backends based on environment variables:
-    ///
-    /// - `HONEYCOMB_API_KEY`: Enables Honeycomb (requires `observability-honeycomb` feature)
-    /// - `HONEYCOMB_DATASET`: Dataset name (default: "aletheiadb")
-    /// - `PROMETHEUS_BIND_ADDR`: Prometheus HTTP server address (requires `observability-prometheus` feature)
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// use aletheiadb::observability;
-    ///
-    /// // Set environment variables
-    /// std::env::set_var("HONEYCOMB_API_KEY", "your-api-key");
-    /// std::env::set_var("PROMETHEUS_BIND_ADDR", "127.0.0.1:9090");
-    ///
-    /// // Auto-configure from environment
-    /// let config = observability::Config::from_env();
-    /// observability::init(config);
-    /// ```
-    pub fn from_env() -> Self {
-        Self {
-            enable_logging: true,
-            #[cfg(feature = "observability-tracy")]
-            enable_tracy: true,
-            #[cfg(not(feature = "observability-tracy"))]
-            enable_tracy: false,
-            honeycomb: std::env::var("HONEYCOMB_API_KEY")
-                .ok()
-                .map(|api_key| HoneycombConfig {
-                    api_key,
-                    dataset: std::env::var("HONEYCOMB_DATASET")
-                        .unwrap_or_else(|_| "aletheiadb".to_string()),
-                    service_name: "aletheiadb".to_string(),
-                }),
-            prometheus: std::env::var("PROMETHEUS_BIND_ADDR")
-                .ok()
-                .map(|bind_addr| PrometheusConfig { bind_addr }),
+impl TelemetryConfig {
+    /// Start a builder with safe no-op defaults.
+    #[must_use]
+    pub fn builder() -> TelemetryConfigBuilder {
+        TelemetryConfigBuilder::default()
+    }
+}
+
+/// Fluent builder for [`TelemetryConfig`].
+#[derive(Default)]
+pub struct TelemetryConfigBuilder {
+    service_name: Option<Arc<str>>,
+    metrics: Option<Arc<dyn MetricsRecorder>>,
+}
+
+impl TelemetryConfigBuilder {
+    /// Override the service name.
+    #[must_use]
+    pub fn service_name(mut self, service_name: impl Into<Arc<str>>) -> Self {
+        self.service_name = Some(service_name.into());
+        self
+    }
+
+    /// Register a metrics recorder.
+    #[must_use]
+    pub fn metrics(mut self, metrics: Arc<dyn MetricsRecorder>) -> Self {
+        self.metrics = Some(metrics);
+        self
+    }
+
+    /// Finalize the configuration.
+    #[must_use]
+    pub fn build(self) -> TelemetryConfig {
+        TelemetryConfig {
+            service_name: self
+                .service_name
+                .unwrap_or_else(|| Arc::from(DB_SYSTEM_NAME)),
+            metrics: self.metrics.unwrap_or_else(|| Arc::new(NoOpMetrics)),
         }
     }
 }
 
-/// Initialize the observability system.
+/// Install process-wide telemetry hooks for AletheiaDB metrics.
 ///
-/// This sets up structured logging and tracing infrastructure with support for
-/// multiple backends via Registry-based layer composition. It should be called
-/// **once** at application startup before creating any AletheiaDB instances.
-///
-/// # Backends
-///
-/// Based on the configuration, the following backends may be enabled:
-/// - **Stdout logging**: Structured logs to stdout (when `enable_logging` is true)
-/// - **Honeycomb**: Distributed tracing (when `honeycomb` config is set)
-/// - **Prometheus**: HTTP metrics endpoint (when `prometheus` config is set)
-/// - **Tracy**: CPU profiling (when `enable_tracy` is true)
-///
-/// # Thread Safety
-///
-/// This function is idempotent and thread-safe. Subsequent calls are ignored.
-///
-/// # Example
-///
-/// ```ignore
-/// use aletheiadb::observability;
-///
-/// fn main() {
-///     // Initialize with environment-based config
-///     observability::init(observability::Config::from_env());
-///
-///     // Or customize manually
-///     let config = observability::Config {
-///         enable_logging: true,
-///         enable_tracy: false,
-///         honeycomb: Some(HoneycombConfig {
-///             api_key: "your-api-key".to_string(),
-///             dataset: "aletheiadb".to_string(),
-///             service_name: "aletheiadb".to_string(),
-///         }),
-///         prometheus: None,
-///     };
-///     observability::init(config);
-///
-///     // Create database
-///     let db = aletheiadb::AletheiaDB::new();
-/// }
-/// ```
-///
-/// # Environment Variables
-///
-/// The following environment variables control observability behavior:
-///
-/// - `RUST_LOG`: Filter logs by level (e.g., `aletheiadb=trace`, `aletheiadb=warn`)
-/// - `HONEYCOMB_API_KEY`: Enable Honeycomb integration
-/// - `HONEYCOMB_DATASET`: Honeycomb dataset name (default: "aletheiadb")
-/// - `PROMETHEUS_BIND_ADDR`: Prometheus HTTP server address (e.g., "127.0.0.1:9090")
-///
-/// # Panics
-///
-/// This function will not panic. If initialization fails, errors are logged
-/// but execution continues (fail-open for observability).
-pub fn init(config: Config) {
-    INIT.call_once(|| {
-        #[cfg(feature = "observability")]
-        {
-            use tracing_subscriber::{EnvFilter, Registry, fmt, layer::SubscriberExt};
+/// This intentionally does not install a `tracing` subscriber. Subscriber and
+/// exporter ownership remains with the application.
+pub fn install(config: TelemetryConfig) {
+    METRICS_RECORDER.store(Arc::new(SharedMetricsRecorder::new(config.metrics)));
+}
 
-            let env_filter = EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new("aletheiadb=info"));
+/// Get a snapshot of the built-in atomic metric mirror.
+#[must_use]
+pub fn metrics() -> MetricsSnapshot {
+    METRICS.snapshot()
+}
 
-            // Build subscriber with Registry and add layers conditionally using Option<Layer>
-            let subscriber = Registry::default().with(env_filter);
+/// Record an error against both the atomic mirror and an installed recorder.
+pub fn record_error(category: ErrorCategory) {
+    METRICS.record_error(category);
+    with_installed_recorder(|recorder| recorder.record_error(category));
+}
 
-            // Layer 1: Stdout logging (optional)
-            let fmt_layer = if config.enable_logging {
-                Some(
-                    fmt::layer()
-                        .with_target(true)
-                        .with_thread_ids(true)
-                        .with_file(false)
-                        .with_line_number(false)
-                        .compact(),
-                )
-            } else {
-                None
-            };
-            let subscriber = subscriber.with(fmt_layer);
+/// Record a write conflict.
+pub fn record_write_conflict() {
+    METRICS.record_write_conflict();
+    with_installed_recorder(|recorder| recorder.record_write_conflict());
+}
 
-            // Layer 2: Honeycomb (optional, feature-gated)
-            #[cfg(feature = "observability-honeycomb")]
-            let subscriber = if let Some(ref honeycomb_config) = config.honeycomb {
-                match backends::honeycomb::create_layer(honeycomb_config.clone()) {
-                    Ok(hc_layer) => subscriber.with(Some(hc_layer)),
-                    Err(e) => {
-                        eprintln!("Failed to initialize Honeycomb: {}", e);
-                        subscriber.with(None)
-                    }
-                }
-            } else {
-                subscriber.with(None)
-            };
+/// Record a critical event.
+pub fn record_critical_event(event: CriticalEvent) {
+    METRICS.record_critical_event(event);
+    with_installed_recorder(|recorder| recorder.record_critical_event(event));
+}
 
-            #[cfg(not(feature = "observability-honeycomb"))]
-            let subscriber = {
-                if config.honeycomb.is_some() {
-                    eprintln!(
-                        "Honeycomb config provided but observability-honeycomb feature not enabled"
-                    );
-                }
-                subscriber
-            };
-
-            // Layer 3: Tracy (optional, feature-gated)
-            #[cfg(feature = "observability-tracy")]
-            let subscriber = {
-                let tracy_layer = if config.enable_tracy {
-                    Some(tracing_tracy::TracyLayer::default())
-                } else {
-                    None
-                };
-                subscriber.with(tracy_layer)
-            };
-
-            #[cfg(not(feature = "observability-tracy"))]
-            let subscriber = {
-                if config.enable_tracy {
-                    eprintln!(
-                        "Tracy enabled in config but observability-tracy feature not enabled"
-                    );
-                }
-                subscriber
-            };
-
-            // Set the global subscriber
-            if let Err(e) = tracing::subscriber::set_global_default(subscriber) {
-                eprintln!("Failed to set global tracing subscriber: {}", e);
-            }
-
-            // Start Prometheus HTTP server (separate from tracing layers)
-            #[cfg(feature = "observability-prometheus")]
-            if let Some(ref prometheus_config) = config.prometheus {
-                match backends::prometheus::PrometheusBackend::new(prometheus_config.clone())
-                    .start()
-                {
-                    Ok(handle) => {
-                        if let Ok(mut handles) = WORKER_HANDLES.lock() {
-                            handles.push(handle);
-                        }
-                    }
-                    Err(e) => eprintln!("Failed to start Prometheus server: {}", e),
-                }
-            }
-
-            #[cfg(not(feature = "observability-prometheus"))]
-            if config.prometheus.is_some() {
-                eprintln!(
-                    "Prometheus config provided but observability-prometheus feature not enabled"
-                );
-            }
-
-            tracing::info!(
-                version = env!("CARGO_PKG_VERSION"),
-                honeycomb_enabled = config.honeycomb.is_some(),
-                prometheus_enabled = config.prometheus.is_some(),
-                tracy_enabled = config.enable_tracy,
-                "AletheiaDB observability initialized"
-            );
-        }
-
-        #[cfg(not(feature = "observability"))]
-        {
-            let _ = config; // Suppress unused variable warning
-        }
+/// Record a transaction commit.
+pub fn record_transaction_commit(
+    duration_secs: f64,
+    operations_count: u64,
+    durability_mode: &str,
+    status: &str,
+) {
+    METRICS.record_transaction_commit(duration_secs, operations_count, durability_mode, status);
+    with_installed_recorder(|recorder| {
+        recorder.record_transaction_commit(
+            duration_secs,
+            operations_count,
+            durability_mode,
+            status,
+        );
     });
 }
 
-/// Get a snapshot of current metrics.
-///
-/// This is a convenience function that delegates to [`METRICS`]'s `snapshot()` method.
-///
-/// # Example
-///
-/// ```ignore
-/// use aletheiadb::observability;
-///
-/// let metrics = observability::metrics();
-/// println!("Lock poisons: {}", metrics.lock_poison_count);
-/// println!("Write conflicts: {}", metrics.write_conflicts);
-///
-/// if metrics.has_critical_errors() {
-///     eprintln!("CRITICAL: Data corruption detected!");
-/// }
-/// ```
-pub fn metrics() -> MetricsSnapshot {
-    METRICS.snapshot()
+fn with_installed_recorder(f: impl FnOnce(&dyn MetricsRecorder)) {
+    let recorder = METRICS_RECORDER.load();
+    f(&**recorder);
+}
+
+/// Create the standard query execution span.
+#[must_use]
+pub fn query_execute_span(operation_name: &str, query_kind: &str) -> tracing::Span {
+    tracing::info_span!(
+        SPAN_QUERY_EXECUTE,
+        "db.system.name" = DB_SYSTEM_NAME,
+        "db.operation.name" = operation_name,
+        "aletheiadb.query.kind" = query_kind,
+    )
+}
+
+/// Create the standard hybrid query span.
+#[must_use]
+pub fn hybrid_query_span(operation_name: &str) -> tracing::Span {
+    tracing::info_span!(
+        SPAN_QUERY_HYBRID,
+        "db.system.name" = DB_SYSTEM_NAME,
+        "db.operation.name" = operation_name,
+        "aletheiadb.query.kind" = "hybrid",
+    )
+}
+
+/// Create the standard vector index span.
+#[must_use]
+pub fn vector_index_span(operation_name: &str, property_name: &str) -> tracing::Span {
+    tracing::info_span!(
+        SPAN_VECTOR_INDEX,
+        "db.system.name" = DB_SYSTEM_NAME,
+        "db.operation.name" = operation_name,
+        "aletheiadb.vector.property" = property_name,
+    )
+}
+
+/// Create the standard vector search span.
+#[must_use]
+pub fn vector_search_span(operation_name: &str, property_name: &str) -> tracing::Span {
+    tracing::info_span!(
+        SPAN_VECTOR_SEARCH,
+        "db.system.name" = DB_SYSTEM_NAME,
+        "db.operation.name" = operation_name,
+        "aletheiadb.vector.property" = property_name,
+    )
+}
+
+/// Create the standard temporal query span.
+#[must_use]
+pub fn temporal_query_span(operation_name: &str) -> tracing::Span {
+    tracing::info_span!(
+        SPAN_TEMPORAL_QUERY,
+        "db.system.name" = DB_SYSTEM_NAME,
+        "db.operation.name" = operation_name,
+        "aletheiadb.query.kind" = "temporal",
+    )
+}
+
+/// Create the standard historical-storage query span.
+#[must_use]
+pub fn historical_storage_query_span(operation_name: &str) -> tracing::Span {
+    tracing::info_span!(
+        SPAN_STORAGE_HISTORICAL_QUERY,
+        "db.system.name" = DB_SYSTEM_NAME,
+        "db.operation.name" = operation_name,
+        "aletheiadb.query.kind" = "temporal",
+    )
+}
+
+/// Create the standard transaction commit span.
+#[must_use]
+pub fn transaction_commit_span(tx_id: &str, durability_mode: &str) -> tracing::Span {
+    tracing::info_span!(
+        SPAN_TRANSACTION_COMMIT,
+        "db.system.name" = DB_SYSTEM_NAME,
+        "db.operation.name" = "transaction.commit",
+        "aletheiadb.transaction.id" = tx_id,
+        "aletheiadb.durability.mode" = durability_mode,
+    )
 }
 
 #[cfg(test)]
@@ -385,29 +324,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_config_default() {
-        let config = Config::default();
-        assert!(config.enable_logging);
-        // Tracy enabled only if feature is enabled
-        #[cfg(feature = "observability-tracy")]
-        assert!(config.enable_tracy);
-        #[cfg(not(feature = "observability-tracy"))]
-        assert!(!config.enable_tracy);
+    fn default_telemetry_is_noop() {
+        let telemetry = TelemetryConfig::default();
+        assert_eq!(&*telemetry.service_name, DB_SYSTEM_NAME);
+        telemetry.metrics.record_error(ErrorCategory::Other);
     }
 
     #[test]
-    fn test_init_idempotent() {
-        // Should be safe to call multiple times
-        init(Config::default());
-        init(Config::default());
-        init(Config::default());
-    }
-
-    #[test]
-    fn test_metrics_function() {
-        let snapshot = metrics();
-        // Should return a valid snapshot (values depend on test execution order)
-        let _ = snapshot.lock_poison_count;
-        let _ = snapshot.write_conflicts;
+    fn install_accepts_replacement_config() {
+        install(TelemetryConfig::default());
+        install(
+            TelemetryConfig::builder()
+                .service_name("test-service")
+                .build(),
+        );
+        record_error(ErrorCategory::Query);
     }
 }

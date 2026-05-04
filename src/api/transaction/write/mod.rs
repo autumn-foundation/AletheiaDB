@@ -337,14 +337,20 @@ impl WriteTransaction {
 
     fn commit_with_timestamp_inner(&mut self) -> Result<Timestamp> {
         #[cfg(feature = "observability")]
-        let _span = tracing::info_span!(
-            "transaction_commit",
-            tx_id = %self.tx_id
-        )
-        .entered();
+        let tx_id = self.tx_id.to_string();
+
+        #[cfg(feature = "observability")]
+        let durability_mode = format!("{:?}", self.durability_mode);
+
+        #[cfg(feature = "observability")]
+        let _span =
+            crate::observability::transaction_commit_span(&tx_id, &durability_mode).entered();
 
         #[cfg(feature = "observability")]
         let commit_start = std::time::Instant::now();
+
+        #[cfg(feature = "observability")]
+        let operations_count = self.buffer.operations().len();
 
         // Check transaction state
         if self.state != TxState::Active {
@@ -519,7 +525,7 @@ impl WriteTransaction {
 
             #[cfg(feature = "observability")]
             {
-                // Record detailed breakdown for Honeycomb
+                // Record detailed breakdown for tracing and metrics.
                 let ts_lock_wait_us =
                     ts_lock_acquired.duration_since(ts_lock_start).as_micros() as u64;
                 let wal_log_us = wal_logged.duration_since(wal_start).as_micros() as u64;
@@ -529,10 +535,7 @@ impl WriteTransaction {
                     .duration_since(ts_lock_start)
                     .as_micros() as u64;
 
-                // Calculate total commit duration for Honeycomb queries
                 let total_commit_us = commit_start.elapsed().as_micros() as u64;
-                let operations_count = self.buffer.operations().len();
-
                 tracing::info!(
                     ts_lock_wait_us,
                     wal_log_us,
@@ -568,6 +571,12 @@ impl WriteTransaction {
         #[cfg(feature = "observability")]
         {
             let total_commit_us = commit_start.elapsed().as_micros() as u64;
+            crate::observability::record_transaction_commit(
+                commit_start.elapsed().as_secs_f64(),
+                operations_count as u64,
+                &durability_mode,
+                "committed",
+            );
             tracing::debug!(
                 total_commit_us,
                 tx_id = %self.tx_id,

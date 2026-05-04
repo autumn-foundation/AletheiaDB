@@ -3,7 +3,7 @@
 ## 👤 User Story
 **As an** SRE or DevOps Engineer operating AletheiaDB in production,
 **I want to** categorize database errors by their severity (e.g., Expected, Warning, Critical),
-**so that** I can configure my observability platforms (like Honeycomb or Prometheus) to page me only for genuine critical issues (like data corruption) and avoid alert fatigue from expected operational errors (like `NodeNotFound`).
+**so that** I can configure my observability platform to page me only for genuine critical issues (like data corruption) and avoid alert fatigue from expected operational errors (like `NodeNotFound`).
 
 ## 🧐 The "So What?" Ask
 **What business problem does this solve?**
@@ -22,7 +22,7 @@ Currently, AletheiaDB logs all errors with equal severity and categorizes them m
 - Must introduce severity classification levels (Expected, Warning, Critical) to the observability layer.
 - Must categorize all existing error types into these severity buckets (e.g., `NodeNotFound` -> Expected, `QueryTimeout` -> Warning, `CorruptedData` -> Critical).
 - Must expose severity counters alongside existing category counters in the metrics API.
-- Must ensure severity labels are included in tracing spans exported to Honeycomb.
+- Must ensure severity labels are included in tracing spans and bounded metrics labels.
 
 ## 🚫 Out of Scope
 - Automatic remediation (e.g., automatically restarting the database on Critical errors).

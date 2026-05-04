@@ -1837,7 +1837,8 @@ impl HistoricalStorage {
         transaction_time: Timestamp,
     ) -> Result<Node> {
         #[cfg(feature = "observability")]
-        let _span = tracing::info_span!("get_node_at_time").entered();
+        let _span =
+            crate::observability::historical_storage_query_span("get_node_at_time").entered();
 
         let version_id = self
             .find_node_version_at_time(node_id, valid_time, transaction_time)
@@ -1869,7 +1870,8 @@ impl HistoricalStorage {
         transaction_time: Timestamp,
     ) -> Result<Edge> {
         #[cfg(feature = "observability")]
-        let _span = tracing::info_span!("get_edge_at_time").entered();
+        let _span =
+            crate::observability::historical_storage_query_span("get_edge_at_time").entered();
 
         let version_id = self
             .find_edge_version_at_time(edge_id, valid_time, transaction_time)
@@ -1903,7 +1905,8 @@ impl HistoricalStorage {
         transaction_time: Timestamp,
     ) -> Result<Vec<(NodeId, Option<Node>)>> {
         #[cfg(feature = "observability")]
-        let _span = tracing::info_span!("get_nodes_at_time").entered();
+        let _span =
+            crate::observability::historical_storage_query_span("get_nodes_at_time").entered();
 
         let mut results = Vec::with_capacity(node_ids.len());
 
@@ -1956,7 +1959,8 @@ impl HistoricalStorage {
         transaction_time: Timestamp,
     ) -> Result<Vec<(EdgeId, Option<Edge>)>> {
         #[cfg(feature = "observability")]
-        let _span = tracing::info_span!("get_edges_at_time").entered();
+        let _span =
+            crate::observability::historical_storage_query_span("get_edges_at_time").entered();
 
         let mut results = Vec::with_capacity(edge_ids.len());
 
@@ -2005,7 +2009,8 @@ impl HistoricalStorage {
     /// Returns all versions in chronological order (oldest first).
     pub fn get_node_history(&self, node_id: NodeId) -> Result<EntityHistory> {
         #[cfg(feature = "observability")]
-        let _span = tracing::info_span!("get_node_history").entered();
+        let _span =
+            crate::observability::historical_storage_query_span("get_node_history").entered();
 
         // Get the current version ID
         let current_version_id = self
@@ -2050,7 +2055,8 @@ impl HistoricalStorage {
     /// Version numbers are 1-indexed (1 = first version, 2 = second version, etc.).
     pub fn get_node_at_version(&self, node_id: NodeId, version_number: u64) -> Result<Node> {
         #[cfg(feature = "observability")]
-        let _span = tracing::info_span!("get_node_at_version").entered();
+        let _span =
+            crate::observability::historical_storage_query_span("get_node_at_version").entered();
 
         // Get the current version ID
         let current_version_id = self
@@ -2104,7 +2110,8 @@ impl HistoricalStorage {
         to_version: VersionId,
     ) -> Result<VersionDiff> {
         #[cfg(feature = "observability")]
-        let _span = tracing::info_span!("diff_node_versions").entered();
+        let _span =
+            crate::observability::historical_storage_query_span("diff_node_versions").entered();
 
         // Validate that both versions belong to the requested node
         let from_ver = self
@@ -2151,7 +2158,8 @@ impl HistoricalStorage {
     /// Returns all versions in chronological order (oldest first).
     pub fn get_edge_history(&self, edge_id: EdgeId) -> Result<EntityHistory> {
         #[cfg(feature = "observability")]
-        let _span = tracing::info_span!("get_edge_history").entered();
+        let _span =
+            crate::observability::historical_storage_query_span("get_edge_history").entered();
 
         // Get the current version ID
         let current_version_id = self
@@ -2201,7 +2209,8 @@ impl HistoricalStorage {
         to_version: VersionId,
     ) -> Result<VersionDiff> {
         #[cfg(feature = "observability")]
-        let _span = tracing::info_span!("diff_edge_versions").entered();
+        let _span =
+            crate::observability::historical_storage_query_span("diff_edge_versions").entered();
 
         // Validate that both versions belong to the requested edge
         let from_ver = self

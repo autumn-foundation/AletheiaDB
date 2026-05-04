@@ -1,29 +1,32 @@
-# 🔭 Vantage: Spec for Comprehensive Prometheus Metrics Suite
+# Vantage: Spec for Metrics Contract Coverage
 
-## 👤 User Story
-**As an** SRE / DevOps Engineer maintaining a production AletheiaDB cluster,
-**I want** a comprehensive suite of Prometheus metrics covering query performance, vector search latencies, temporal index health, and resource utilization,
-**so that** I can build reliable Grafana dashboards, set up alerts for degradations, and pinpoint whether performance regressions stem from graph traversal, vector similarity, or temporal operations.
+## User Story
 
-## 🧐 The "So What?" Ask
-**What business problem does this solve?**
-Currently, AletheiaDB has a stub Prometheus implementation that only exports high-level application state. In production, customers need granular visibility into specific database subsystems to run safely at scale. Without rich metrics, troubleshooting a slow query involves manual log analysis and profiling, which is untenable in high-throughput enterprise environments.
+**As a** production operator,
+**I want** comprehensive bounded-cardinality metrics covering query performance,
+vector search latencies, temporal index health, and resource utilization,
+**so that** I can operate AletheiaDB safely at scale using my own metrics
+exporter and dashboard stack.
 
-**Metric Definition:**
-- **Visibility:** Over 90% of database subsystem operations (WAL, HNSW Index, Graph Traversal, Current/Historical Storage) are instrumented with Prometheus counters/histograms.
-- **Latency:** Exporting metrics via the HTTP endpoint must add `<1ms` of overhead per request under a load of 1,000 scrapes/second.
+## Background
 
-**Gap Analysis:**
-Looking at the market, industry standard graph databases (like Neo4j) and vector databases (like Qdrant or Milvus) provide extensive, out-of-the-box Prometheus metrics that track query latency histograms, cache hit ratios, and memory allocation down to the subsystem level. We currently fall short of this enterprise standard, leaving operations teams blind during traffic spikes.
+AletheiaDB now exposes a backend-agnostic metrics contract. The core crate
+should define metric names, label sets, and call sites; the host process owns
+exporters through `metrics-rs`, OpenTelemetry, or another adapter.
 
-## ✅ Acceptance Criteria
-- Must replace the existing Prometheus stub with a fully integrated metrics endpoint.
-- Must expose Histograms for: Graph Traversal Latency, Vector Similarity Search Latency, and Hybrid Query execution times.
-- Must expose Counters for: Read/Write transactions, Lock Poisons, WAL Checksum Failures, Cache Hits/Misses, and HNSW Node Insertions.
-- Must expose Gauges for: Current Node Count, Historical Node Versions Count, Edge Count, Memory Allocation, and Active Transactions.
-- Must be configurable (e.g., binding address, enabled/disabled state) via the standard configuration files.
+## Acceptance Criteria
 
-## 🚫 Out of Scope
-- OpenTelemetry (OTLP) exporting — this spec is strictly focused on Prometheus format.
-- Built-in AlertManager integration — alerts will be configured externally by users within Prometheus/Grafana.
-- Creating the actual Grafana JSON dashboards (though an example dashboard is highly encouraged later).
+- Over 90% of database subsystem operations (WAL, HNSW index, graph traversal,
+  current storage, historical storage) have contract-defined counters or
+  histograms where instrumentation overhead is acceptable.
+- Metric labels remain bounded. Node IDs, edge IDs, transaction IDs, and version
+  IDs are forbidden as metric labels.
+- The `metrics-rs` adapter forwards all contract samples without changing names
+  or label sets.
+- Exporter setup stays outside the core crate.
+
+## Out of Scope
+
+- Built-in scrape endpoints.
+- Vendor-specific exporters.
+- Alert manager configuration.

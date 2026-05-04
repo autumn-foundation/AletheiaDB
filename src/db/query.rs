@@ -111,7 +111,8 @@ impl AletheiaDB {
     pub fn execute_query(&self, query: Query) -> Result<QueryResults> {
         let result = (|| {
             #[cfg(feature = "observability")]
-            let _span = tracing::info_span!("execute_query").entered();
+            let _span =
+                crate::observability::query_execute_span("query.execute", "hybrid").entered();
 
             // Use cached statistics for cost-based optimization
             // Statistics are shared across all queries for this database instance
@@ -170,7 +171,7 @@ impl AletheiaDB {
         k: usize,
     ) -> Result<QueryResults> {
         #[cfg(feature = "observability")]
-        let _span = tracing::info_span!("traverse_and_rank").entered();
+        let _span = crate::observability::hybrid_query_span("traverse_and_rank").entered();
 
         let query = self
             .query()
@@ -221,7 +222,7 @@ impl AletheiaDB {
         transaction_time: Timestamp,
     ) -> Result<QueryResults> {
         #[cfg(feature = "observability")]
-        let _span = tracing::info_span!("find_similar_at_time").entered();
+        let _span = crate::observability::hybrid_query_span("find_similar_at_time").entered();
 
         let query = self
             .query()
@@ -282,7 +283,7 @@ impl AletheiaDB {
         transaction_time: Timestamp,
     ) -> Result<QueryResults> {
         #[cfg(feature = "observability")]
-        let _span = tracing::info_span!("traverse_and_rank_at_time").entered();
+        let _span = crate::observability::hybrid_query_span("traverse_and_rank_at_time").entered();
 
         let query = self
             .query()
