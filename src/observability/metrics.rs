@@ -7,6 +7,9 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
+const METRIC_READ_ORDERING: Ordering = Ordering::Acquire;
+const METRIC_WRITE_ORDERING: Ordering = Ordering::Release;
+
 /// Counter: errors by bounded category.
 pub const METRIC_ERRORS: &str = "aletheiadb.errors";
 
@@ -204,36 +207,37 @@ impl Metrics {
     #[must_use]
     pub fn snapshot(&self) -> MetricsSnapshot {
         MetricsSnapshot {
-            lock_poison_count: self.lock_poison_count.load(Ordering::Relaxed),
-            timestamp_violations: self.timestamp_violations.load(Ordering::Relaxed),
-            wal_checksum_failures: self.wal_checksum_failures.load(Ordering::Relaxed),
-            write_conflicts: self.write_conflicts.load(Ordering::Relaxed),
-            error_storage_total: self.error_storage_total.load(Ordering::Relaxed),
-            error_temporal_total: self.error_temporal_total.load(Ordering::Relaxed),
-            error_query_total: self.error_query_total.load(Ordering::Relaxed),
-            error_transaction_total: self.error_transaction_total.load(Ordering::Relaxed),
-            error_vector_total: self.error_vector_total.load(Ordering::Relaxed),
-            error_io_total: self.error_io_total.load(Ordering::Relaxed),
-            error_other_total: self.error_other_total.load(Ordering::Relaxed),
-            transaction_commits_total: self.transaction_commits_total.load(Ordering::Relaxed),
+            lock_poison_count: self.lock_poison_count.load(METRIC_READ_ORDERING),
+            timestamp_violations: self.timestamp_violations.load(METRIC_READ_ORDERING),
+            wal_checksum_failures: self.wal_checksum_failures.load(METRIC_READ_ORDERING),
+            write_conflicts: self.write_conflicts.load(METRIC_READ_ORDERING),
+            error_storage_total: self.error_storage_total.load(METRIC_READ_ORDERING),
+            error_temporal_total: self.error_temporal_total.load(METRIC_READ_ORDERING),
+            error_query_total: self.error_query_total.load(METRIC_READ_ORDERING),
+            error_transaction_total: self.error_transaction_total.load(METRIC_READ_ORDERING),
+            error_vector_total: self.error_vector_total.load(METRIC_READ_ORDERING),
+            error_io_total: self.error_io_total.load(METRIC_READ_ORDERING),
+            error_other_total: self.error_other_total.load(METRIC_READ_ORDERING),
+            transaction_commits_total: self.transaction_commits_total.load(METRIC_READ_ORDERING),
         }
     }
 
     /// Reset all counters to zero. Intended for tests only.
     #[cfg(test)]
     pub fn reset(&self) {
-        self.lock_poison_count.store(0, Ordering::Relaxed);
-        self.timestamp_violations.store(0, Ordering::Relaxed);
-        self.wal_checksum_failures.store(0, Ordering::Relaxed);
-        self.write_conflicts.store(0, Ordering::Relaxed);
-        self.error_storage_total.store(0, Ordering::Relaxed);
-        self.error_temporal_total.store(0, Ordering::Relaxed);
-        self.error_query_total.store(0, Ordering::Relaxed);
-        self.error_transaction_total.store(0, Ordering::Relaxed);
-        self.error_vector_total.store(0, Ordering::Relaxed);
-        self.error_io_total.store(0, Ordering::Relaxed);
-        self.error_other_total.store(0, Ordering::Relaxed);
-        self.transaction_commits_total.store(0, Ordering::Relaxed);
+        self.lock_poison_count.store(0, METRIC_WRITE_ORDERING);
+        self.timestamp_violations.store(0, METRIC_WRITE_ORDERING);
+        self.wal_checksum_failures.store(0, METRIC_WRITE_ORDERING);
+        self.write_conflicts.store(0, METRIC_WRITE_ORDERING);
+        self.error_storage_total.store(0, METRIC_WRITE_ORDERING);
+        self.error_temporal_total.store(0, METRIC_WRITE_ORDERING);
+        self.error_query_total.store(0, METRIC_WRITE_ORDERING);
+        self.error_transaction_total.store(0, METRIC_WRITE_ORDERING);
+        self.error_vector_total.store(0, METRIC_WRITE_ORDERING);
+        self.error_io_total.store(0, METRIC_WRITE_ORDERING);
+        self.error_other_total.store(0, METRIC_WRITE_ORDERING);
+        self.transaction_commits_total
+            .store(0, METRIC_WRITE_ORDERING);
     }
 }
 
@@ -248,11 +252,11 @@ impl MetricsRecorder for Metrics {
             ErrorCategory::Io => &self.error_io_total,
             ErrorCategory::Other => &self.error_other_total,
         };
-        counter.fetch_add(1, Ordering::Relaxed);
+        counter.fetch_add(1, METRIC_WRITE_ORDERING);
     }
 
     fn record_write_conflict(&self) {
-        self.write_conflicts.fetch_add(1, Ordering::Relaxed);
+        self.write_conflicts.fetch_add(1, METRIC_WRITE_ORDERING);
     }
 
     fn record_critical_event(&self, event: CriticalEvent) {
@@ -261,7 +265,7 @@ impl MetricsRecorder for Metrics {
             CriticalEvent::TimestampViolation => &self.timestamp_violations,
             CriticalEvent::WalChecksumFailure => &self.wal_checksum_failures,
         };
-        counter.fetch_add(1, Ordering::Relaxed);
+        counter.fetch_add(1, METRIC_WRITE_ORDERING);
     }
 
     fn record_transaction_commit(
@@ -272,7 +276,7 @@ impl MetricsRecorder for Metrics {
         _status: &str,
     ) {
         self.transaction_commits_total
-            .fetch_add(1, Ordering::Relaxed);
+            .fetch_add(1, METRIC_WRITE_ORDERING);
     }
 }
 

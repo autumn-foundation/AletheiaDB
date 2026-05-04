@@ -12,7 +12,8 @@ pub mod metrics;
 #[cfg(feature = "metrics-rs")]
 pub mod metrics_rs_adapter;
 
-use std::sync::{Arc, RwLock};
+use arc_swap::ArcSwap;
+use std::sync::{Arc, LazyLock};
 
 pub use metrics::{
     CriticalEvent, ErrorCategory, METRIC_CRITICAL_EVENTS, METRIC_ERRORS, METRIC_LABEL_CATEGORY,
@@ -69,7 +70,47 @@ pub const ATTR_ERROR_CATEGORY: &str = "aletheiadb.error.category";
 /// AletheiaDB attribute: bounded operation status.
 pub const ATTR_STATUS: &str = "aletheiadb.status";
 
-static TELEMETRY: RwLock<Option<TelemetryConfig>> = RwLock::new(None);
+static METRICS_RECORDER: LazyLock<ArcSwap<SharedMetricsRecorder>> =
+    LazyLock::new(|| ArcSwap::from_pointee(SharedMetricsRecorder::new(Arc::new(NoOpMetrics))));
+
+struct SharedMetricsRecorder {
+    inner: Arc<dyn MetricsRecorder>,
+}
+
+impl SharedMetricsRecorder {
+    fn new(inner: Arc<dyn MetricsRecorder>) -> Self {
+        Self { inner }
+    }
+}
+
+impl MetricsRecorder for SharedMetricsRecorder {
+    fn record_error(&self, category: ErrorCategory) {
+        self.inner.record_error(category);
+    }
+
+    fn record_write_conflict(&self) {
+        self.inner.record_write_conflict();
+    }
+
+    fn record_critical_event(&self, event: CriticalEvent) {
+        self.inner.record_critical_event(event);
+    }
+
+    fn record_transaction_commit(
+        &self,
+        duration_secs: f64,
+        operations_count: u64,
+        durability_mode: &str,
+        status: &str,
+    ) {
+        self.inner.record_transaction_commit(
+            duration_secs,
+            operations_count,
+            durability_mode,
+            status,
+        );
+    }
+}
 
 /// Bundle of telemetry dependencies supplied by the embedding application.
 ///
@@ -150,9 +191,7 @@ impl TelemetryConfigBuilder {
 /// This intentionally does not install a `tracing` subscriber. Subscriber and
 /// exporter ownership remains with the application.
 pub fn install(config: TelemetryConfig) {
-    if let Ok(mut current) = TELEMETRY.write() {
-        *current = Some(config);
-    }
+    METRICS_RECORDER.store(Arc::new(SharedMetricsRecorder::new(config.metrics)));
 }
 
 /// Get a snapshot of the built-in atomic metric mirror.
@@ -198,13 +237,8 @@ pub fn record_transaction_commit(
 }
 
 fn with_installed_recorder(f: impl FnOnce(&dyn MetricsRecorder)) {
-    let recorder = TELEMETRY
-        .read()
-        .ok()
-        .and_then(|current| current.as_ref().map(|config| Arc::clone(&config.metrics)));
-    if let Some(recorder) = recorder {
-        f(&*recorder);
-    }
+    let recorder = METRICS_RECORDER.load();
+    f(&**recorder);
 }
 
 /// Create the standard query execution span.
