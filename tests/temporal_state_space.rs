@@ -53,33 +53,86 @@ fn operation_sequence(max_ops: usize) -> impl Strategy<Value = Vec<TemporalOpera
 
 // ============================================================================
 // Invariant checkers
-// RED phase: each function calls `todo!()` so tests fail until implemented.
+// GREEN phase: fully implemented.
 // ============================================================================
 
 /// Invariant 1 – Transaction time is monotonically non-decreasing across versions.
-fn check_tx_time_monotonicity(_db: &AletheiaDB, _node_id: NodeId) -> bool {
-    todo!("RED – tx_time monotonicity checker not yet implemented")
+///
+/// For every consecutive pair of versions (older, newer) returned by
+/// `get_node_history`, the transaction_time start of newer must be ≥ that of older.
+fn check_tx_time_monotonicity(db: &AletheiaDB, node_id: NodeId) -> bool {
+    let history = match db.get_node_history(node_id) {
+        Ok(h) => h,
+        Err(_) => return true, // no history to check; trivially satisfied
+    };
+    if history.versions.len() < 2 {
+        return true;
+    }
+    for pair in history.versions.windows(2) {
+        let prev_tx = pair[0].temporal.transaction_time().start();
+        let curr_tx = pair[1].temporal.transaction_time().start();
+        if curr_tx < prev_tx {
+            return false;
+        }
+    }
+    true
 }
 
 /// Invariant 2 – Version numbers are strictly increasing.
-fn check_version_numbers_increasing(_db: &AletheiaDB, _node_id: NodeId) -> bool {
-    todo!("RED – version number ordering checker not yet implemented")
+///
+/// Each successive version must have a strictly greater `version_number`.
+fn check_version_numbers_increasing(db: &AletheiaDB, node_id: NodeId) -> bool {
+    let history = match db.get_node_history(node_id) {
+        Ok(h) => h,
+        Err(_) => return true,
+    };
+    if history.versions.len() < 2 {
+        return true;
+    }
+    for pair in history.versions.windows(2) {
+        if pair[1].version_number <= pair[0].version_number {
+            return false;
+        }
+    }
+    true
 }
 
 /// Invariant 3 – All stored time ranges satisfy start <= end.
-fn check_time_range_validity(_db: &AletheiaDB, _node_id: NodeId) -> bool {
-    todo!("RED – time range validity checker not yet implemented")
+///
+/// Every version's valid_time and transaction_time must be structurally
+/// valid: `range.start() <= range.end()`.
+fn check_time_range_validity(db: &AletheiaDB, node_id: NodeId) -> bool {
+    let history = match db.get_node_history(node_id) {
+        Ok(h) => h,
+        Err(_) => return true,
+    };
+    for v in &history.versions {
+        let vt = v.temporal.valid_time();
+        let tt = v.temporal.transaction_time();
+        if vt.start() > vt.end() || tt.start() > tt.end() {
+            return false;
+        }
+    }
+    true
 }
 
 /// Invariant 4 – Visibility is consistent with individual dimension checks.
 ///
 /// `visible_at(vt, tt)  ⟺  is_valid_at(vt) AND is_recorded_at(tt)`
+///
+/// This is the fundamental bi-temporal visibility law: a fact is only visible
+/// at a query point (valid_time=vt, tx_time=tt) when *both* dimensions are
+/// simultaneously satisfied.
 fn check_visibility_consistency(
-    _interval: BiTemporalInterval,
-    _vt: Timestamp,
-    _tt: Timestamp,
+    interval: BiTemporalInterval,
+    vt: Timestamp,
+    tt: Timestamp,
 ) -> bool {
-    todo!("RED – visibility consistency checker not yet implemented")
+    let visible = interval.is_visible_at(vt, tt);
+    let valid = interval.is_valid_at(vt);
+    let recorded = interval.is_recorded_at(tt);
+    // Bi-conditional: visible iff (valid AND recorded)
+    visible == (valid && recorded)
 }
 
 // ============================================================================
