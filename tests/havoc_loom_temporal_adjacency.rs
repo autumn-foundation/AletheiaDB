@@ -64,7 +64,6 @@ impl TemporalAdjacencyModel {
         inc.push(edge_id);
         out.push(edge_id);
     }
-
 }
 
 /// Two threads inserting edges in *opposite* directions must not deadlock.
