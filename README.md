@@ -853,10 +853,10 @@ use aletheiadb::{AletheiaDB, properties};
 use aletheiadb::embeddings::{EmbeddingService, providers::openai::*};
 use std::sync::Arc;
 
-// Note: Requires `tokio` dependency in Cargo.toml
+// Note: Requires `tokio = { version = "1", features = ["full"] }` in Cargo.toml
 #[tokio::main]
 async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
-    // Enable in Cargo.toml: features = ["embedding-openai"]
+    // Enable in Cargo.toml: aletheiadb = { version = "0.1", features = ["embedding-openai"] }
 
     // 1. Create embedding service
     let config = OpenAIConfig::from_env(OpenAIModel::TextEmbedding3Small)?;
