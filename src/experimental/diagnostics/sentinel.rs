@@ -18,7 +18,7 @@
 //! // Rule: Ban anything semantically similar to "Hate Speech" (vector: [1.0, 0.0])
 //! let mut ban_rule = VectorBanRule::new("embedding", 0.9);
 //! ban_rule.add_banned_vector(vec![1.0, 0.0]).unwrap();
-//! sentinel.add_rule(Box::new(ban_rule));
+//! sentinel.add_rule(SemanticRule::VectorBan(ban_rule));
 //!
 //! // This should fail validation
 //! let toxic_props = PropertyMapBuilder::new()
@@ -33,15 +33,26 @@ use crate::core::property::PropertyMap;
 use crate::core::vector::cosine_similarity;
 
 /// A rule that validates a PropertyMap.
-pub trait SemanticRule {
+pub enum SemanticRule {
+    /// A rule that bans specific vectors.
+    VectorBan(VectorBanRule),
+    /// A rule that enforces a numeric range.
+    NumericRange(NumericRangeRule),
+}
+
+impl SemanticRule {
     /// Validate the given properties.
-    /// Returns Ok if valid, Err with a reason if invalid.
-    fn validate(&self, props: &PropertyMap) -> Result<()>;
+    pub fn validate(&self, props: &PropertyMap) -> Result<()> {
+        match self {
+            Self::VectorBan(rule) => rule.validate(props),
+            Self::NumericRange(rule) => rule.validate(props),
+        }
+    }
 }
 
 /// The Sentinel validates data against a set of rules.
 pub struct Sentinel {
-    rules: Vec<Box<dyn SemanticRule>>,
+    rules: Vec<SemanticRule>,
 }
 
 impl Sentinel {
@@ -51,11 +62,11 @@ impl Sentinel {
     }
 
     /// Add a rule to the Sentinel.
-    pub fn add_rule(&mut self, rule: Box<dyn SemanticRule>) {
+    pub fn add_rule(&mut self, rule: SemanticRule) {
         self.rules.push(rule);
     }
 
-    /// Validate a PropertyMap against all rules.
+    /// Validate the given properties.
     pub fn validate(&self, props: &PropertyMap) -> Result<()> {
         for rule in &self.rules {
             rule.validate(props)?;
@@ -106,8 +117,9 @@ impl VectorBanRule {
     }
 }
 
-impl SemanticRule for VectorBanRule {
-    fn validate(&self, props: &PropertyMap) -> Result<()> {
+impl VectorBanRule {
+    /// Validate the given properties.
+    pub fn validate(&self, props: &PropertyMap) -> Result<()> {
         // If the property doesn't exist or isn't a vector, we skip validation (or should we fail?)
         // Let's be lenient: if no vector is provided, the rule doesn't apply.
         // Unless it's a required field, which is a different rule (SchemaRule).
@@ -188,8 +200,9 @@ impl NumericRangeRule {
     }
 }
 
-impl SemanticRule for NumericRangeRule {
-    fn validate(&self, props: &PropertyMap) -> Result<()> {
+impl NumericRangeRule {
+    /// Validate the given properties.
+    pub fn validate(&self, props: &PropertyMap) -> Result<()> {
         let val = match props.get(&self.property_name) {
             Some(v) => v,
             None => return Ok(()),
@@ -329,11 +342,11 @@ mod tests {
         // Rule 1: Ban toxic vectors
         let mut ban_rule = VectorBanRule::new("embedding", 0.8);
         ban_rule.add_banned_vector(vec![1.0, 0.0]).unwrap();
-        sentinel.add_rule(Box::new(ban_rule));
+        sentinel.add_rule(SemanticRule::VectorBan(ban_rule));
 
         // Rule 2: Age must be >= 18
         let range_rule = NumericRangeRule::new("age").min(18.0);
-        sentinel.add_rule(Box::new(range_rule));
+        sentinel.add_rule(SemanticRule::NumericRange(range_rule));
 
         // Valid Insert
         let valid = PropertyMapBuilder::new()
