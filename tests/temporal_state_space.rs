@@ -279,22 +279,23 @@ proptest! {
             .unwrap();
 
         for op in &ops {
-            match op {
-                TemporalOperation::Update { value } => {
-                    let _ = db.write(|tx| {
-                        tx.update_node(
-                            node_id,
-                            PropertyMapBuilder::new().insert("v", *value).build(),
-                        )?;
-                        Ok::<_, Error>(())
-                    });
-                }
-                TemporalOperation::Delete => {
-                    let _ = db.write(|tx| {
-                        tx.delete_node(node_id)?;
-                        Ok::<_, Error>(())
-                    });
-                }
+            let res = match op {
+                TemporalOperation::Update { value } => db.write(|tx| {
+                    tx.update_node(
+                        node_id,
+                        PropertyMapBuilder::new().insert("v", *value).build(),
+                    )?;
+                    Ok::<_, Error>(())
+                }),
+                TemporalOperation::Delete => db.write(|tx| {
+                    tx.delete_node(node_id)?;
+                    Ok::<_, Error>(())
+                }),
+            };
+            if res.is_err() {
+                // Expected for sequences like update-after-delete; stop here and
+                // check invariants on the state reached before the failure.
+                break;
             }
         }
 
@@ -531,7 +532,7 @@ fn exhaustive_timestamp_visibility_orderings() {
 /// Systematically verifies all 8 temporal invariants with targeted scenarios.
 #[test]
 fn check_all_eight_temporal_invariants() {
-    // Inv 1: Transaction Time Monotonicity
+    // Inv 1, 2 & 3: Transaction Time Monotonicity, Version Number Ordering, Time Range Validity
     {
         let db = AletheiaDB::new().unwrap();
         let id = db
@@ -548,40 +549,10 @@ fn check_all_eight_temporal_invariants() {
             check_tx_time_monotonicity(&db, id),
             "inv 1: tx_time monotonicity"
         );
-    }
-
-    // Inv 2: Version Number Ordering
-    {
-        let db = AletheiaDB::new().unwrap();
-        let id = db
-            .create_node("N", PropertyMapBuilder::new().insert("v", 0i64).build())
-            .unwrap();
-        for i in 1..=5i64 {
-            db.write(|tx| {
-                tx.update_node(id, PropertyMapBuilder::new().insert("v", i).build())?;
-                Ok::<_, Error>(())
-            })
-            .unwrap();
-        }
         assert!(
             check_version_numbers_increasing(&db, id),
             "inv 2: version number ordering"
         );
-    }
-
-    // Inv 3: Time Range Validity
-    {
-        let db = AletheiaDB::new().unwrap();
-        let id = db
-            .create_node("N", PropertyMapBuilder::new().insert("v", 0i64).build())
-            .unwrap();
-        for i in 1..=5i64 {
-            db.write(|tx| {
-                tx.update_node(id, PropertyMapBuilder::new().insert("v", i).build())?;
-                Ok::<_, Error>(())
-            })
-            .unwrap();
-        }
         assert!(
             check_time_range_validity(&db, id),
             "inv 3: all stored time ranges valid"
