@@ -14,7 +14,7 @@ bytemuck = { version = "1.25.0", features = ["extern_crate_alloc", "derive"] }
 dashmap = "6.1"
 crc32fast = "1.4"
 parking_lot = "0.12"
-usearch = "2.25.1"
+usearch = "2.25.2"
 arc-swap = "1.9"
 quick_cache = "0.6"
 crossbeam-channel = "0.5"
