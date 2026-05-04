@@ -70,18 +70,18 @@ impl Error {
     pub fn record_metric(&self) {
         #[cfg(feature = "observability")]
         {
-            let counter = match self {
-                Error::Storage(_) => &crate::observability::METRICS.error_storage_total,
-                Error::Temporal(_) => &crate::observability::METRICS.error_temporal_total,
-                Error::Query(_) => &crate::observability::METRICS.error_query_total,
-                Error::Transaction(_) => &crate::observability::METRICS.error_transaction_total,
-                Error::Vector(_) => &crate::observability::METRICS.error_vector_total,
-                Error::Io(_) => &crate::observability::METRICS.error_io_total,
+            let category = match self {
+                Error::Storage(_) => crate::observability::ErrorCategory::Storage,
+                Error::Temporal(_) => crate::observability::ErrorCategory::Temporal,
+                Error::Query(_) => crate::observability::ErrorCategory::Query,
+                Error::Transaction(_) => crate::observability::ErrorCategory::Transaction,
+                Error::Vector(_) => crate::observability::ErrorCategory::Vector,
+                Error::Io(_) => crate::observability::ErrorCategory::Io,
                 Error::NotImplemented { .. } | Error::Other(_) => {
-                    &crate::observability::METRICS.error_other_total
+                    crate::observability::ErrorCategory::Other
                 }
             };
-            counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            crate::observability::record_error(category);
         }
     }
 

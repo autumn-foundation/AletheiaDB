@@ -127,10 +127,8 @@ aletheiadb = { version = "0.1", features = ["observability"] }
 
 | Feature | Description | Dependencies |
 |---------|-------------|--------------|
-| `observability` | Core observability (tracing + metrics) | `tracing`, `tracing-subscriber` |
-| `observability-tracy` | Tracy CPU profiling integration | `tracing-tracy`, `tracy-client` |
-| `observability-honeycomb` | Honeycomb distributed tracing | `tracing-honeycomb`, `libhoney-rust` |
-| `observability-prometheus` | Prometheus metrics HTTP server | `metrics`, `metrics-exporter-prometheus` |
+| `observability` | OpenTelemetry-compatible `tracing` span and metrics contract | `tracing` |
+| `metrics-rs` | Adapter from AletheiaDB's metrics contract to the `metrics` facade | `tracing`, `metrics` |
 
 ### Embedding Provider Features
 ```toml
@@ -281,10 +279,9 @@ Benchmarks are automatically run on every push to trunk and published to GitHub 
 - [x] Direct functions, builder API, and convenience methods
 
 ### Observability (Complete ✅)
-- [x] Structured logging with `tracing`
-- [x] Tracy profiler integration for CPU profiling
-- [x] Honeycomb distributed tracing (via git dependency - [see #271](https://github.com/madmax983/AletheiaDB/issues/271))
-- [x] Prometheus metrics HTTP server (stub - [see #272](https://github.com/madmax983/AletheiaDB/issues/272))
+- [x] OpenTelemetry-compatible span contract emitted with `tracing`
+- [x] Backend-agnostic metrics contract with no-op defaults
+- [x] `metrics-rs` adapter for applications that use the `metrics` facade
 - [x] Critical error detection (lock poisons, timestamp violations, WAL checksum failures)
 - [x] Error categorization metrics
 
@@ -324,8 +321,8 @@ Benchmarks are automatically run on every push to trunk and published to GitHub 
 
 ### In Progress / Planned
 - [ ] Vector Search Phase 5: Streaming and incremental updates
-- [ ] Custom Honeycomb client wrapper ([#271](https://github.com/madmax983/AletheiaDB/issues/271))
-- [ ] Comprehensive Prometheus metrics suite ([#272](https://github.com/madmax983/AletheiaDB/issues/272))
+- [ ] Broader span coverage for remaining storage/index hot spots
+- [ ] Dashboard/exporter recipes built outside the core crate
 - [ ] GraphQL/REST API layer
 - [ ] Distributed replication
 
@@ -896,15 +893,15 @@ See **[docs/EMBEDDINGS.md](docs/EMBEDDINGS.md)** for complete documentation.
 
 ### Production Observability (Optional)
 
-AletheiaDB includes comprehensive observability features for production deployments:
+AletheiaDB exposes a backend-agnostic observability contract. The crate emits
+named `tracing` spans and records bounded-cardinality metrics; applications own
+their OpenTelemetry subscriber, metrics exporter, and dashboards.
 
 ```bash
 # Enable in Cargo.toml:
 features = [
-    "observability",              # Core: structured logging + metrics
-    "observability-tracy",        # Tracy CPU profiling
-    "observability-honeycomb",    # Honeycomb distributed tracing
-    "observability-prometheus",   # Prometheus metrics HTTP server
+    "observability",              # tracing span + metrics contract
+    "metrics-rs",                 # optional metrics facade adapter
 ]
 ```
 
@@ -916,16 +913,17 @@ features = [
 // aletheiadb = { version = "0.1", features = ["observability"] }
 
 use aletheiadb::observability;
+use std::sync::Arc;
 
 fn main() {
-    // Initialize observability (call once at startup)
-    let config = observability::Config::from_env();
-    observability::init(config);
+    observability::install(
+        observability::TelemetryConfig::builder()
+            .metrics(Arc::new(observability::NoOpMetrics))
+            .build()
+    );
 
     let db = aletheiadb::AletheiaDB::new().unwrap();
 
-    // Metrics automatically collected
-    // Check for critical errors
     let metrics = observability::metrics();
     if metrics.has_critical_errors() {
         panic!("Data corruption detected!");
@@ -933,28 +931,21 @@ fn main() {
 }
 ```
 
-**Environment Variables:**
-- `RUST_LOG`: Control log level (e.g., `aletheiadb=debug`)
-- `HONEYCOMB_API_KEY`: Enable Honeycomb tracing
-- `HONEYCOMB_DATASET`: Dataset name (default: "aletheiadb")
-- `PROMETHEUS_BIND_ADDR`: Prometheus HTTP endpoint (e.g., "127.0.0.1:9090")
+**Application-owned setup:**
+- Install your own `tracing` subscriber, for example with `tracing-opentelemetry`.
+- Enable `metrics-rs` and install any `metrics` exporter in the host process.
+- Keep exporter/vendor configuration outside this library crate.
 
 **Critical Metrics** (should NEVER be >0):
 - `lock_poison_count`: Thread panicked while holding lock
 - `timestamp_violations`: Transaction time not monotonic
 - `wal_checksum_failures`: WAL corruption detected
 
-**Backends:**
-- **Stdout**: Structured JSON logging (always available)
-- **Tracy**: CPU profiling with flamegraphs and zone tracking
-- **Honeycomb**: Distributed tracing for span analysis (⚠️ uses git dependency, [see #271](https://github.com/madmax983/AletheiaDB/issues/271))
-- **Prometheus**: `/metrics` HTTP endpoint (⚠️ stub implementation, [see #272](https://github.com/madmax983/AletheiaDB/issues/272))
 
 Run the demo:
 ```bash
-export HONEYCOMB_API_KEY="your-key"
-export PROMETHEUS_BIND_ADDR="127.0.0.1:9090"
-cargo run --example observability_demo --all-features
+cargo run --example observability_demo --features observability
+cargo run --example observability_demo --features metrics-rs
 ```
 
 ## Documentation
@@ -972,6 +963,7 @@ cargo run --example observability_demo --all-features
 - **[docs/VECTOR_SEARCH_DESIGN.md](docs/VECTOR_SEARCH_DESIGN.md)** - Vector search architecture (Phases 1-5)
 - **[docs/EMBEDDINGS.md](docs/EMBEDDINGS.md)** - Embedding generation guide (optional providers)
 - **[docs/WAL.md](docs/WAL.md)** - Write-Ahead Log format and architecture
+- **[docs/OBSERVABILITY.md](docs/OBSERVABILITY.md)** - Span and metrics contract
 - **[docs/query-language-design.md](docs/query-language-design.md)** - Query language grammar and semantics
 
 ### User Guides

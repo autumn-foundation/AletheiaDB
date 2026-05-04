@@ -1,30 +1,10 @@
-//! Observability Demo
+//! Observability contract demo.
 //!
-//! Demonstrates AletheiaDB's production observability features including:
-//! - Honeycomb integration for distributed tracing
-//! - Error categorization and metrics
-//! - Critical error detection
-//!
-//! # Running with Honeycomb
+//! Run with:
 //!
 //! ```bash
-//! export HONEYCOMB_API_KEY="your-api-key"
-//! export HONEYCOMB_DATASET="aletheiadb-demo"
-//! export RUST_LOG=aletheiadb=info
-//! cargo run --example observability_demo --features observability-honeycomb
-//! ```
-//!
-//! # Running with Tracy (CPU profiling)
-//!
-//! ```bash
-//! cargo run --example observability_demo --features observability-tracy
-//! ```
-//!
-//! # Running with basic logging
-//!
-//! ```bash
-//! export RUST_LOG=aletheiadb=info
 //! cargo run --example observability_demo --features observability
+//! cargo run --example observability_demo --features metrics-rs
 //! ```
 
 use aletheiadb::Error;
@@ -33,43 +13,30 @@ use aletheiadb::{AletheiaDB, PropertyMapBuilder, WriteOps};
 #[cfg(feature = "observability")]
 use aletheiadb::observability;
 
+#[cfg(feature = "metrics-rs")]
+use aletheiadb::observability::metrics_rs_adapter::MetricsRsRecorder;
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Initialize observability (only compiled with 'observability' feature)
     #[cfg(feature = "observability")]
     {
-        let config = observability::Config::from_env();
-        observability::init(config.clone());
-        println!("📊 Observability initialized");
+        let recorder = telemetry_recorder();
+        observability::install(
+            observability::TelemetryConfig::builder()
+                .service_name("aletheiadb-demo")
+                .metrics(recorder)
+                .build(),
+        );
 
-        #[cfg(feature = "observability-honeycomb")]
-        {
-            if config.honeycomb.is_some() {
-                println!("🐝 Honeycomb integration active");
-            } else {
-                println!("⚠️  HONEYCOMB_API_KEY not set - falling back to stdout logging");
-            }
-        }
-
-        #[cfg(feature = "observability-prometheus")]
-        {
-            if let Some(ref prom_config) = config.prometheus {
-                println!(
-                    "📈 Prometheus metrics available at http://{}/metrics",
-                    prom_config.bind_addr
-                );
-            }
-        }
+        let span = observability::query_execute_span("observability_demo", "example");
+        let _entered = span.enter();
+        println!("Observability contract installed");
     }
 
     #[cfg(not(feature = "observability"))]
-    println!("ℹ️  Running without observability (zero overhead mode)");
+    println!("Running without observability. Enable the `observability` feature for spans.");
 
-    println!("\n🚀 Creating AletheiaDB instance...");
     let db = AletheiaDB::new()?;
 
-    println!("📝 Creating sample nodes and edges...");
-
-    // Create some nodes
     let alice_id = db.create_node(
         "Person",
         PropertyMapBuilder::new()
@@ -86,7 +53,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .build(),
     )?;
 
-    // Create edge
     let edge_id = db.create_edge(
         alice_id,
         bob_id,
@@ -94,61 +60,39 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         PropertyMapBuilder::new().insert("since", 2020).build(),
     )?;
 
-    println!(
-        "✓ Created nodes: Alice ({:?}), Bob ({:?})",
-        alice_id, bob_id
-    );
-    println!("✓ Created edge: KNOWS ({:?})", edge_id);
+    println!("Created Alice={alice_id:?}, Bob={bob_id:?}, edge={edge_id:?}");
 
-    // Demonstrate transactions (these are instrumented)
-    println!("\n🔄 Running transaction workload...");
     for i in 0..5 {
         db.write(|tx| {
             let node_id = tx.create_node(
                 "Document",
                 PropertyMapBuilder::new()
-                    .insert("title", format!("Doc {}", i))
+                    .insert("title", format!("Doc {i}"))
                     .insert("version", i)
                     .build(),
             )?;
-            println!("  Transaction {}: Created document {:?}", i, node_id);
+            println!("Transaction {i}: created {node_id:?}");
             Ok::<_, Error>(())
         })?;
     }
 
-    // Check metrics (only available with observability feature)
     #[cfg(feature = "observability")]
     {
-        println!("\n📈 Checking metrics...");
         let metrics = observability::metrics();
-
-        println!("  Lock poison count: {}", metrics.lock_poison_count);
-        println!("  Timestamp violations: {}", metrics.timestamp_violations);
-        println!("  WAL checksum failures: {}", metrics.wal_checksum_failures);
-        println!("  Write conflicts: {}", metrics.write_conflicts);
-
-        println!("\n📊 Error categorization:");
-        println!("  Storage errors: {}", metrics.error_storage_total);
-        println!("  Temporal errors: {}", metrics.error_temporal_total);
-        println!("  Query errors: {}", metrics.error_query_total);
-        println!("  Transaction errors: {}", metrics.error_transaction_total);
-        println!("  Vector errors: {}", metrics.error_vector_total);
-        println!("  I/O errors: {}", metrics.error_io_total);
-        println!("  Other errors: {}", metrics.error_other_total);
-
-        if metrics.has_critical_errors() {
-            println!("\n❌ CRITICAL: Data corruption detected!");
-            println!("   This should NEVER happen in production.");
-            return Err("Critical errors detected".into());
-        } else {
-            println!("\n✅ No critical errors detected - database is healthy");
-        }
+        println!("Transaction commits: {}", metrics.transaction_commits_total);
+        println!("Storage errors: {}", metrics.error_storage_total);
+        println!("Critical errors: {}", metrics.has_critical_errors());
     }
 
-    println!("\n🎉 Demo complete!");
-
-    #[cfg(feature = "observability-honeycomb")]
-    println!("\n💡 Check your Honeycomb dashboard to see traces and metrics!");
-
     Ok(())
+}
+
+#[cfg(all(feature = "observability", feature = "metrics-rs"))]
+fn telemetry_recorder() -> std::sync::Arc<dyn observability::MetricsRecorder> {
+    std::sync::Arc::new(MetricsRsRecorder)
+}
+
+#[cfg(all(feature = "observability", not(feature = "metrics-rs")))]
+fn telemetry_recorder() -> std::sync::Arc<dyn observability::MetricsRecorder> {
+    std::sync::Arc::new(observability::NoOpMetrics)
 }

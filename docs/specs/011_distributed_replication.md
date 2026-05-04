@@ -85,4 +85,4 @@ AletheiaDB currently runs as a single-node database. While it is highly performa
 2.  **Follower State Machine**: Implement a process on the Follower that applies incoming WAL records to its local storage.
 3.  **Read-Only Mode**: Ensure the storage layer can be started in a strictly read-only mode for Followers.
 4.  **Configuration & Setup**: Add CLI flags and TOML configuration options for clustering (e.g., `role = "follower"`, `leader_addr = "..."`).
-5.  **Metrics Integration**: Wire up replication lag metrics to the existing Prometheus/tracing infrastructure.
+5.  **Metrics Integration**: Wire up replication lag metrics to the metrics-rs/tracing contract.

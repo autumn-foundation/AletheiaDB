@@ -108,7 +108,7 @@ Error categorization adds atomic counter increments on error paths. Since errors
 
 1. **Critical workload paths**: <10% overhead (actual: -1.0% to 9.1%)
 2. **Query hot paths**: 0% overhead (not instrumented)
-3. **Production-ready**: Validated for deployment with Honeycomb
+3. **Production-ready**: Validated for application-owned OpenTelemetry and metrics exporters
 
 The observability infrastructure provides comprehensive production visibility while maintaining AletheiaDB's performance targets for bi-temporal graph operations.
 

@@ -32,7 +32,8 @@ impl AletheiaDB {
     /// Returns an error if vector indexing is already enabled.
     pub fn enable_vector_index(&self, property_name: &str, config: HnswConfig) -> Result<()> {
         #[cfg(feature = "observability")]
-        let _span = tracing::info_span!("enable_vector_index").entered();
+        let _span =
+            crate::observability::vector_index_span("enable_vector_index", property_name).entered();
         self.current
             .enable_vector_index(property_name, config)
             .record_error_metric()
@@ -115,7 +116,11 @@ impl AletheiaDB {
             }
 
             #[cfg(feature = "observability")]
-            let _span = tracing::info_span!("enable_temporal_vector_index").entered();
+            let _span = crate::observability::vector_index_span(
+                "enable_temporal_vector_index",
+                property_name,
+            )
+            .entered();
 
             // Create a resolved config with the hnsw_config set
             let resolved_config = TemporalVectorConfig {
@@ -293,7 +298,8 @@ impl AletheiaDB {
         k: usize,
     ) -> Result<Vec<(NodeId, f32)>> {
         #[cfg(feature = "observability")]
-        let _span = tracing::info_span!("find_similar_in").entered();
+        let _span =
+            crate::observability::vector_search_span("find_similar_in", property_name).entered();
         self.current
             .find_similar_in(property_name, query_node_id, k)
             .record_error_metric()
@@ -330,7 +336,8 @@ impl AletheiaDB {
         k: usize,
     ) -> Result<Vec<(NodeId, f32)>> {
         #[cfg(feature = "observability")]
-        let _span = tracing::info_span!("search_vectors_in").entered();
+        let _span =
+            crate::observability::vector_search_span("search_vectors_in", property_name).entered();
         self.current
             .search_vectors_in(property_name, embedding, k)
             .record_error_metric()
@@ -364,7 +371,7 @@ impl AletheiaDB {
     /// - Query node does not have the indexed vector property
     pub fn find_similar(&self, query_node_id: NodeId, k: usize) -> Result<Vec<(NodeId, f32)>> {
         #[cfg(feature = "observability")]
-        let _span = tracing::info_span!("find_similar").entered();
+        let _span = crate::observability::vector_search_span("find_similar", "").entered();
         self.current
             .find_similar(query_node_id, k)
             .record_error_metric()
@@ -394,7 +401,8 @@ impl AletheiaDB {
         k: usize,
     ) -> Result<Vec<(NodeId, f32)>> {
         #[cfg(feature = "observability")]
-        let _span = tracing::info_span!("find_similar_with_label").entered();
+        let _span =
+            crate::observability::vector_search_span("find_similar_with_label", "").entered();
         self.current
             .find_similar_with_label(query_node_id, label, k)
             .record_error_metric()
@@ -437,7 +445,8 @@ impl AletheiaDB {
         k: usize,
     ) -> Result<Vec<(NodeId, f32)>> {
         #[cfg(feature = "observability")]
-        let _span = tracing::info_span!("find_similar_by_embedding").entered();
+        let _span =
+            crate::observability::vector_search_span("find_similar_by_embedding", "").entered();
         self.current
             .find_similar_by_embedding(embedding, k)
             .record_error_metric()
@@ -483,7 +492,9 @@ impl AletheiaDB {
         k: usize,
     ) -> Result<Vec<(NodeId, f32)>> {
         #[cfg(feature = "observability")]
-        let _span = tracing::info_span!("find_similar_by_embedding_with_label").entered();
+        let _span =
+            crate::observability::vector_search_span("find_similar_by_embedding_with_label", "")
+                .entered();
         self.current
             .find_similar_by_embedding_with_label(embedding, label, k)
             .record_error_metric()
@@ -512,7 +523,8 @@ impl AletheiaDB {
         F: Fn(&NodeId) -> bool + Send + Sync,
     {
         #[cfg(feature = "observability")]
-        let _span = tracing::info_span!("find_similar_with_predicate").entered();
+        let _span =
+            crate::observability::vector_search_span("find_similar_with_predicate", "").entered();
         self.current
             .find_similar_with_predicate(property_name, query_vector, k, predicate)
             .record_error_metric()
@@ -560,7 +572,7 @@ impl AletheiaDB {
         timestamp: Timestamp,
     ) -> Result<Vec<(NodeId, f32)>> {
         #[cfg(feature = "observability")]
-        let _span = tracing::info_span!("find_similar_as_of").entered();
+        let _span = crate::observability::vector_search_span("find_similar_as_of", "").entered();
         self.current
             .find_similar_as_of(embedding, k, timestamp)
             .record_error_metric()
@@ -615,7 +627,8 @@ impl AletheiaDB {
     ) -> Result<Vec<(NodeId, f32)>> {
         #[cfg(feature = "observability")]
         let _span =
-            tracing::info_span!("find_similar_as_of_in", property = property_name).entered();
+            crate::observability::vector_search_span("find_similar_as_of_in", property_name)
+                .entered();
         self.current
             .find_similar_as_of_in(property_name, embedding, k, timestamp)
             .record_error_metric()
@@ -681,8 +694,7 @@ impl AletheiaDB {
     ) -> Result<Vec<(Timestamp, f32)>> {
         #[cfg(feature = "observability")]
         let _span =
-            tracing::info_span!("track_drift_in", property = property_name, node = ?node_id)
-                .entered();
+            crate::observability::vector_search_span("track_drift_in", property_name).entered();
         self.current
             .track_drift_in(property_name, node_id, reference_embedding, time_range)
             .record_error_metric()
@@ -737,7 +749,7 @@ impl AletheiaDB {
     ) -> Result<Vec<(Timestamp, std::sync::Arc<[f32]>)>> {
         #[cfg(feature = "observability")]
         let _span =
-            tracing::info_span!("semantic_evolution_in", property = property_name, node = ?node_id)
+            crate::observability::vector_search_span("semantic_evolution_in", property_name)
                 .entered();
         self.current
             .semantic_evolution_in(property_name, node_id, time_range)
@@ -801,12 +813,8 @@ impl AletheiaDB {
         metric: crate::index::vector::temporal::DriftMetric,
     ) -> Result<Vec<(NodeId, f32)>> {
         #[cfg(feature = "observability")]
-        let _span = tracing::info_span!(
-            "find_drift_in",
-            property = property_name,
-            threshold = threshold
-        )
-        .entered();
+        let _span =
+            crate::observability::vector_search_span("find_drift_in", property_name).entered();
         self.current
             .find_drift_in(property_name, threshold, time_range, metric)
             .record_error_metric()

@@ -96,8 +96,9 @@ classDiagram
         class RedbColdStorage
     }
     namespace Observability {
-        class HoneycombClient {
-            +send_batch()
+        class TelemetryContract {
+            +tracing_spans()
+            +metrics_recorder()
         }
     }
 

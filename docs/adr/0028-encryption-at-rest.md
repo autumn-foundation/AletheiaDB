@@ -766,7 +766,7 @@ checkpoints = true
 
 ### Metrics and Observability
 
-**Encryption Metrics (exposed via Prometheus):**
+**Encryption Metrics (exposed via the metrics contract):**
 
 ```rust
 /// Metrics for encryption operations
