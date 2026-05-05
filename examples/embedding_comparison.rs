@@ -3,9 +3,7 @@
 //! Run with:
 //! `cargo run --example embedding_comparison --features embedding-all`
 
-#![cfg(feature = "embedding-all")]
-
-use aletheiadb::embeddings::{Embedder, EmbedderBuilder, EmbeddingResult};
+use aletheiadb::embeddings::{Embedder, EmbedderBuilder, embed_data_to_dense_iter, embed_query};
 use std::time::{Duration, Instant};
 
 #[tokio::main]
@@ -32,30 +30,16 @@ async fn time_embed(
     text: &str,
 ) -> Result<(Duration, usize), Box<dyn std::error::Error>> {
     let start = Instant::now();
-    let results = embedder.embed(&[text], Some(1), None).await?;
-    let dims = dense_embeddings(results)?
-        .first()
-        .map(Vec::len)
+    let data = embed_query(&[text], embedder, None).await?;
+    let dimensions = embed_data_to_dense_iter(data, Some(1))
+        .next()
+        .transpose()?
+        .map(|item| item.embedding.len())
         .unwrap_or_default();
 
-    Ok((start.elapsed(), dims))
-}
-
-fn dense_embeddings(
-    results: Vec<EmbeddingResult>,
-) -> Result<Vec<Vec<f32>>, Box<dyn std::error::Error>> {
-    results
-        .iter()
-        .map(EmbeddingResult::to_dense)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(Into::into)
+    Ok((start.elapsed(), dimensions))
 }
 
 fn report(name: &str, (duration, dimensions): (Duration, usize)) {
     println!("{name}: {duration:?}, {dimensions} dimensions");
-}
-
-#[cfg(not(feature = "embedding-all"))]
-fn main() {
-    eprintln!("This example requires the 'embedding-all' feature.");
 }
