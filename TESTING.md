@@ -13,6 +13,9 @@ cargo install cargo-llvm-cov
 # Install just for running commands
 cargo install just
 
+# Install cargo-fuzz for coverage-guided fuzzing
+cargo install cargo-fuzz
+
 # Install criterion for benchmarks (included in dev-dependencies)
 # Already included when you run cargo build
 
@@ -37,6 +40,9 @@ just coverage-check
 
 # Run all pre-commit checks (format, lint, test)
 just pre-commit
+
+# Run one fuzz target for 60 seconds
+cargo +nightly fuzz run wal_entry_parsing -- -max_total_time=60
 
 # Full check including coverage
 just check-all
@@ -96,6 +102,60 @@ proptest! {
     }
 }
 ```
+
+## Fuzz Testing
+
+AletheiaDB uses `cargo-fuzz` for coverage-guided fuzzing of crash recovery and
+temporal reconstruction paths. The fuzz package lives in `fuzz/` and is not part
+of normal builds; it enables the crate's internal `fuzzing` feature to access
+small parser hooks and Arbitrary implementations.
+
+### Fuzz Targets
+
+| Target | Focus |
+|--------|-------|
+| `wal_entry_parsing` | Raw WAL entry parser, checksums, malformed/truncated entries |
+| `wal_replay` | Structured WAL mutation streams and crash-recovery replay |
+| `temporal_reconstruction` | Anchor/delta version reconstruction and visibility lookups |
+| `property_serialization` | PropertyMap and PropertyValue serialization/deserialization |
+| `timestamp_arithmetic` | HLC ordering, TimeRange, and BiTemporalInterval boundaries |
+
+### Running Locally
+
+```bash
+# Install once
+cargo install cargo-fuzz
+
+# List targets
+cargo fuzz list
+
+# Run individual targets
+cargo +nightly fuzz run wal_entry_parsing -- -max_total_time=60
+cargo +nightly fuzz run wal_replay -- -max_total_time=60
+cargo +nightly fuzz run temporal_reconstruction -- -max_total_time=60
+cargo +nightly fuzz run property_serialization -- -max_total_time=60
+cargo +nightly fuzz run timestamp_arithmetic -- -max_total_time=60
+
+# Convenience wrappers
+just fuzz wal_entry_parsing 60
+just fuzz-smoke 30
+```
+
+Use sanitizers when investigating memory or concurrency failures:
+
+```bash
+cargo +nightly fuzz run wal_entry_parsing --sanitizer address -- -max_total_time=300
+cargo +nightly fuzz run wal_replay --sanitizer leak -- -max_total_time=300
+cargo +nightly fuzz run temporal_reconstruction --sanitizer thread -- -max_total_time=300
+```
+
+Nightly CI runs the initial target set and writes a per-target summary to the
+GitHub Actions job summary. Treat any crash artifact under `fuzz/artifacts/` as
+a required regression test before landing the fix.
+
+On Windows/MSVC, sanitizer-backed fuzzing may require the matching sanitizer
+runtime DLL in `PATH`; the CI fuzz job runs on Ubuntu to avoid that local toolchain
+trap.
 
 ## Code Coverage
 

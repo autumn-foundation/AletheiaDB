@@ -96,6 +96,10 @@ pub mod test_utils;
 #[cfg(feature = "simulation")]
 pub mod simulation;
 
+// Internal cargo-fuzz hooks and Arbitrary implementations (issue #155).
+#[cfg(any(fuzzing, feature = "fuzzing"))]
+pub mod fuzzing;
+
 /// Prelude for convenient imports of common types and traits.
 pub mod prelude;
 

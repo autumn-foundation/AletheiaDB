@@ -1,0 +1,20 @@
+#![no_main]
+
+use libfuzzer_sys::fuzz_target;
+
+fuzz_target!(|data: &[u8]| {
+    if let Ok((entry, consumed)) = aletheiadb::fuzzing::wal::parse_current_entry(data) {
+        assert!(consumed <= data.len());
+
+        let canonical = aletheiadb::fuzzing::wal::serialize_entry(&entry)
+            .expect("parsed WAL entry must serialize");
+        let (roundtrip, roundtrip_consumed) =
+            aletheiadb::fuzzing::wal::parse_current_entry(&canonical)
+                .expect("serialized WAL entry must parse");
+
+        assert_eq!(roundtrip_consumed, canonical.len());
+        assert_eq!(roundtrip.lsn, entry.lsn);
+        assert_eq!(roundtrip.timestamp, entry.timestamp);
+        assert_eq!(roundtrip.operation, entry.operation);
+    }
+});

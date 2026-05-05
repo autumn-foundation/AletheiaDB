@@ -22,8 +22,8 @@
 //! let db = AletheiaDB::new()?;
 //! let tremor = TremorEngine::new(&db);
 //!
-//! let t1 = time::now() - 3600 * 1_000_000 * 24 * 7; // Last week
 //! let t2 = time::now(); // Now
+//! let t1 = (t2.wallclock() - 3600 * 1_000_000 * 24 * 7).into(); // Last week
 //!
 //! let score = tremor.detect_shift(t1, t2, "embedding")?;
 //! println!("Semantic Shift Magnitude: {:.4}", score.shift_magnitude);

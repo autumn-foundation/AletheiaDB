@@ -26,12 +26,11 @@
 //!
 //! ```rust
 //! # #[cfg(feature = "semantic-temporal")]
-//! # {
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! use aletheiadb::{AletheiaDB, properties, ReadOps, WriteOps, Error};
 //! use aletheiadb::core::temporal::time;
 //! use aletheiadb::experimental::chronos::Chronos;
 //!
-//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let db = AletheiaDB::new()?;
 //!
 //! // 1. Establish the scene
@@ -73,7 +72,6 @@
 //!
 //! println!("🕵️ Chronos confirmed: The connection existed in the past!");
 //! # Ok(())
-//! # }
 //! # }
 //! # #[cfg(not(feature = "semantic-temporal"))]
 //! # fn main() {}

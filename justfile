@@ -123,6 +123,28 @@ pre-commit: fmt-check lint test
 ci: fmt-check lint test coverage-ci
     @echo "✓ CI checks passed!"
 
+# === Fuzz Testing ===
+
+# Install cargo-fuzz
+fuzz-install:
+    cargo install cargo-fuzz
+
+# List cargo-fuzz targets
+fuzz-list:
+    cargo fuzz list
+
+# Run one fuzz target for TIME seconds
+fuzz TARGET="wal_entry_parsing" TIME="60":
+    cargo +nightly fuzz run {{TARGET}} -- -max_total_time={{TIME}}
+
+# Smoke-test the issue #155 fuzz target set
+fuzz-smoke TIME="30":
+    cargo +nightly fuzz run wal_entry_parsing -- -max_total_time={{TIME}}
+    cargo +nightly fuzz run wal_replay -- -max_total_time={{TIME}}
+    cargo +nightly fuzz run temporal_reconstruction -- -max_total_time={{TIME}}
+    cargo +nightly fuzz run property_serialization -- -max_total_time={{TIME}}
+    cargo +nightly fuzz run timestamp_arithmetic -- -max_total_time={{TIME}}
+
 # === Documentation ===
 
 # Build and open documentation

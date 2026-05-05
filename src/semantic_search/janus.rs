@@ -14,11 +14,13 @@
 //! # Example
 //! ```rust,no_run
 //! use aletheiadb::AletheiaDB;
+//! use aletheiadb::core::id::NodeId;
 //! use aletheiadb::semantic_search::janus::JanusDetector;
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let db = AletheiaDB::new()?;
 //! let janus = JanusDetector::new(&db);
+//! let node_id = NodeId::new(123).unwrap();
 //!
 //! let score = janus.analyze_node(node_id, "embedding")?;
 //!

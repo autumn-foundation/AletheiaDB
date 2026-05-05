@@ -22,14 +22,24 @@
 //! # Example
 //! ```rust
 //! // Requires features = ["nova"]
-//! use aletheiadb::AletheiaDB;
+//! use aletheiadb::{AletheiaDB, PropertyMapBuilder};
 //! use aletheiadb::experimental::synergy::Synergy;
-//! use aletheiadb::core::id::NodeId;
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let db = AletheiaDB::new()?;
-//! // ... setup graph ...
-//! # let nodes = vec![];
+//! let a = db.create_node(
+//!     "Concept",
+//!     PropertyMapBuilder::new()
+//!         .insert_vector("embedding", &[1.0, 0.0])
+//!         .build(),
+//! )?;
+//! let b = db.create_node(
+//!     "Concept",
+//!     PropertyMapBuilder::new()
+//!         .insert_vector("embedding", &[0.0, 1.0])
+//!         .build(),
+//! )?;
+//! let nodes = vec![a, b];
 //!
 //! let synergy = Synergy::new(&db);
 //! let score = synergy.calculate_synergy(&nodes, "embedding")?;

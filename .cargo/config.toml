@@ -1,0 +1,5 @@
+[target.x86_64-pc-windows-msvc]
+# esaxx-rs enables /MT on Windows while cxx/usearch otherwise default to /MD.
+# Keep the whole MSVC build on one CRT so all-features doctests can link the
+# optional embedding stack without destabilizing native usearch tests.
+rustflags = ["-Ctarget-feature=+crt-static"]

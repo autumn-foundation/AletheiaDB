@@ -52,6 +52,12 @@ agents/
 # Proptest regression files
 proptest-regressions/
 
+# cargo-fuzz generated state
+/fuzz/artifacts/
+/fuzz/coverage/
+/fuzz/corpus/
+/fuzz/target/
+
 # Python
 __pycache__/
 *.pyc
