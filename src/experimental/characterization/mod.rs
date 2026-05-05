@@ -18,4 +18,6 @@ pub mod synapse;
 
 // `wildfire` is a stub awaiting revival — see CHANGELOG / ADR-0050.
 // pub mod wildfire;
+/// Obsidian Markdown exporter.
+pub mod obsidian;
 pub mod starlight;
