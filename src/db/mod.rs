@@ -108,6 +108,17 @@ pub use vector_builder::VectorIndexBuilder;
 pub struct AletheiaDB {
     /// Current state storage (hot path) - Arc-wrapped for sharing across transactions
     pub(crate) current: Arc<CurrentStorage>,
+    // Lock ordering for write-path primitives:
+    // 1. `current_timestamp`
+    // 2. `wal`
+    // 3. `historical`
+    // 4. `temporal_indexes`
+    // 5. `id generators`
+    // 6. `outgoing`
+    // 7. `incoming`
+    //
+    // Some entries are currently lock-free or internally sharded, but future
+    // explicit locks must preserve this order to avoid deadlocks.
     /// Historical version storage (temporal path) - RwLock-protected for concurrent reads
     pub(crate) historical: Arc<RwLock<HistoricalStorage>>,
     /// Temporal indexes for efficient time-based queries - Uses DashMap internally for fine-grained locking

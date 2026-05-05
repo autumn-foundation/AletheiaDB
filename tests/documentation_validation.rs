@@ -130,3 +130,96 @@ fn test_claude_md_recovery_content_complete() {
         );
     }
 }
+
+fn extract_numbered_lock_order(section: &str) -> Vec<String> {
+    let mut entries = Vec::new();
+
+    for line in section.lines() {
+        let trimmed = line.trim();
+        let without_comment = trimmed
+            .strip_prefix("//!")
+            .or_else(|| trimmed.strip_prefix("//"))
+            .unwrap_or(trimmed)
+            .trim();
+
+        let Some((number, entry)) = without_comment.split_once(". ") else {
+            if !entries.is_empty() && !without_comment.is_empty() {
+                break;
+            }
+            continue;
+        };
+
+        if number.is_empty() || !number.chars().all(|c| c.is_ascii_digit()) {
+            if !entries.is_empty() && !without_comment.is_empty() {
+                break;
+            }
+            continue;
+        }
+
+        entries.push(entry.trim().trim_matches('`').to_string());
+    }
+
+    entries
+}
+
+/// Test that the lock acquisition order is documented for future write-path changes.
+#[test]
+fn test_lock_acquisition_order_documented() {
+    let claude = fs::read_to_string("CLAUDE.md").expect("Failed to read CLAUDE.md");
+    let write_apply = fs::read_to_string("src/api/transaction/write/apply.rs")
+        .expect("Failed to read write apply module");
+    let db_mod = fs::read_to_string("src/db/mod.rs").expect("Failed to read db module");
+
+    let expected_order: Vec<String> = [
+        "current_timestamp",
+        "wal",
+        "historical",
+        "temporal_indexes",
+        "id generators",
+        "outgoing",
+        "incoming",
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect();
+
+    let claude_section = claude
+        .split("### Lock Acquisition Order")
+        .nth(1)
+        .expect("CLAUDE.md should include a lock acquisition order section");
+    let write_apply_section = write_apply
+        .split("//! # Lock Acquisition Order")
+        .nth(1)
+        .expect("write apply module should include a lock acquisition order comment");
+    let db_mod_section = db_mod
+        .split("// Lock ordering for write-path primitives:")
+        .nth(1)
+        .expect("db module should include a lock acquisition order comment");
+
+    for (name, section) in [
+        ("CLAUDE.md", claude_section),
+        ("write apply module", write_apply_section),
+        ("db module", db_mod_section),
+    ] {
+        assert!(
+            !section.contains("outgoing/incoming"),
+            "{name} should document `outgoing` and `incoming` as separate ordered entries"
+        );
+        assert!(
+            !section.contains("either order"),
+            "{name} should not allow outgoing and incoming adjacency indexes in either order"
+        );
+    }
+
+    for (name, section) in [
+        ("CLAUDE.md", claude_section),
+        ("write apply module", write_apply_section),
+        ("db module", db_mod_section),
+    ] {
+        assert_eq!(
+            extract_numbered_lock_order(section),
+            expected_order,
+            "{name} should document the lock acquisition order as a numbered list"
+        );
+    }
+}
