@@ -109,8 +109,13 @@ pub struct AletheiaDB {
     /// Current state storage (hot path) - Arc-wrapped for sharing across transactions
     pub(crate) current: Arc<CurrentStorage>,
     // Lock ordering for write-path primitives:
-    // `current_timestamp` -> `wal` -> `historical` -> `temporal_indexes` ->
-    // `id generators` -> `outgoing` -> `incoming`.
+    // 1. `current_timestamp`
+    // 2. `wal`
+    // 3. `historical`
+    // 4. `temporal_indexes`
+    // 5. `id generators`
+    // 6. `outgoing`
+    // 7. `incoming`
     //
     // Some entries are currently lock-free or internally sharded, but future
     // explicit locks must preserve this order to avoid deadlocks.

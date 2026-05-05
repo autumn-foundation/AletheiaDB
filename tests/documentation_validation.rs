@@ -131,6 +131,37 @@ fn test_claude_md_recovery_content_complete() {
     }
 }
 
+fn extract_numbered_lock_order(section: &str) -> Vec<String> {
+    let mut entries = Vec::new();
+
+    for line in section.lines() {
+        let trimmed = line.trim();
+        let without_comment = trimmed
+            .strip_prefix("//!")
+            .or_else(|| trimmed.strip_prefix("//"))
+            .unwrap_or(trimmed)
+            .trim();
+
+        let Some((number, entry)) = without_comment.split_once(". ") else {
+            if !entries.is_empty() && !without_comment.is_empty() {
+                break;
+            }
+            continue;
+        };
+
+        if number.is_empty() || !number.chars().all(|c| c.is_ascii_digit()) {
+            if !entries.is_empty() && !without_comment.is_empty() {
+                break;
+            }
+            continue;
+        }
+
+        entries.push(entry.trim().trim_matches('`').to_string());
+    }
+
+    entries
+}
+
 /// Test that the lock acquisition order is documented for future write-path changes.
 #[test]
 fn test_lock_acquisition_order_documented() {
@@ -139,7 +170,7 @@ fn test_lock_acquisition_order_documented() {
         .expect("Failed to read write apply module");
     let db_mod = fs::read_to_string("src/db/mod.rs").expect("Failed to read db module");
 
-    let required_order = [
+    let expected_order: Vec<String> = [
         "current_timestamp",
         "wal",
         "historical",
@@ -147,7 +178,10 @@ fn test_lock_acquisition_order_documented() {
         "id generators",
         "outgoing",
         "incoming",
-    ];
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect();
 
     let claude_section = claude
         .split("### Lock Acquisition Order")
@@ -177,35 +211,15 @@ fn test_lock_acquisition_order_documented() {
         );
     }
 
-    let mut last_claude_index = 0;
-    let mut last_write_apply_index = 0;
-    let mut last_db_mod_index = 0;
-    for required in required_order {
-        let claude_index = claude_section
-            .find(required)
-            .unwrap_or_else(|| panic!("CLAUDE.md should document lock-order entry: {required}"));
-        let write_apply_index = write_apply_section.find(required).unwrap_or_else(|| {
-            panic!("write apply module should document lock-order entry: {required}")
-        });
-        let db_mod_index = db_mod_section
-            .find(required)
-            .unwrap_or_else(|| panic!("db module should document lock-order entry: {required}"));
-
-        assert!(
-            claude_index >= last_claude_index,
-            "CLAUDE.md should document lock-order entry in order: {required}"
+    for (name, section) in [
+        ("CLAUDE.md", claude_section),
+        ("write apply module", write_apply_section),
+        ("db module", db_mod_section),
+    ] {
+        assert_eq!(
+            extract_numbered_lock_order(section),
+            expected_order,
+            "{name} should document the lock acquisition order as a numbered list"
         );
-        assert!(
-            write_apply_index >= last_write_apply_index,
-            "write apply module should document lock-order entry in order: {required}"
-        );
-        assert!(
-            db_mod_index >= last_db_mod_index,
-            "db module should document lock-order entry in order: {required}"
-        );
-
-        last_claude_index = claude_index;
-        last_write_apply_index = write_apply_index;
-        last_db_mod_index = db_mod_index;
     }
 }
