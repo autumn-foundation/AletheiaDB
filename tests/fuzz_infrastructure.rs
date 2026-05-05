@@ -70,11 +70,11 @@ fn testing_docs_describe_local_and_ci_fuzzing_workflow() {
 
     for required in [
         "cargo install cargo-fuzz",
-        "cargo fuzz run wal_entry_parsing",
-        "cargo fuzz run wal_replay",
-        "cargo fuzz run temporal_reconstruction",
-        "cargo fuzz run property_serialization",
-        "cargo fuzz run timestamp_arithmetic",
+        "cargo +nightly fuzz run wal_entry_parsing",
+        "cargo +nightly fuzz run wal_replay",
+        "cargo +nightly fuzz run temporal_reconstruction",
+        "cargo +nightly fuzz run property_serialization",
+        "cargo +nightly fuzz run timestamp_arithmetic",
     ] {
         assert!(
             testing.contains(required),
@@ -87,5 +87,34 @@ fn testing_docs_describe_local_and_ci_fuzzing_workflow() {
         workflow_path.exists(),
         "nightly fuzzing workflow is missing at {}",
         workflow_path.display()
+    );
+
+    let workflow = fs::read_to_string(workflow_path).expect("read fuzz workflow");
+    for required_path in [
+        "src/fuzzing.rs",
+        "src/lib.rs",
+        "Cargo.toml",
+        "Cargo.lock",
+        "tests/fuzz_infrastructure.rs",
+    ] {
+        assert!(
+            workflow.contains(required_path),
+            "fuzz workflow pull_request.paths must include `{required_path}`"
+        );
+    }
+}
+
+#[test]
+fn wal_replay_fuzz_target_fails_loudly_on_setup_errors() {
+    let target =
+        fs::read_to_string("fuzz/fuzz_targets/wal_replay.rs").expect("read wal_replay fuzz target");
+
+    assert!(
+        !target.contains("tempfile::tempdir().ok()"),
+        "wal_replay fuzz target must not ignore tempdir setup errors"
+    );
+    assert!(
+        !target.contains("ConcurrentWalSystem::new(config) else"),
+        "wal_replay fuzz target must not ignore WAL initialization errors"
     );
 }

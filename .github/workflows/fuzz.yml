@@ -12,11 +12,16 @@ on:
   pull_request:
     paths:
       - "fuzz/**"
+      - "src/fuzzing.rs"
+      - "src/lib.rs"
       - "src/core/hlc.rs"
       - "src/core/property/**"
       - "src/core/temporal.rs"
       - "src/storage/historical/**"
       - "src/storage/wal/**"
+      - "tests/fuzz_infrastructure.rs"
+      - "Cargo.toml"
+      - "Cargo.lock"
       - ".github/workflows/fuzz.yml"
 
 permissions:

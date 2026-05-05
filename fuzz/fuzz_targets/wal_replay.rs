@@ -27,15 +27,11 @@ struct WalReplayCase {
 }
 
 fuzz_target!(|case: WalReplayCase| {
-    let Some(tempdir) = tempfile::tempdir().ok() else {
-        return;
-    };
+    let tempdir = tempfile::tempdir().expect("fuzz tempdir must be created");
     let wal_dir = tempdir.path().join("wal");
     let checkpoint_dir = tempdir.path().join("checkpoint");
     let config = ConcurrentWalSystemConfig::new(&wal_dir).with_flush_interval_ms(60_000);
-    let Ok(mut wal) = ConcurrentWalSystem::new(config) else {
-        return;
-    };
+    let mut wal = ConcurrentWalSystem::new(config).expect("fuzz WAL system must initialize");
 
     let label = intern_label("FuzzNode");
     let mut expected_nodes = BTreeMap::<u64, i64>::new();
