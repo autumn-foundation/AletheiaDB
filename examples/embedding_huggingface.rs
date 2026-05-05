@@ -1,55 +1,28 @@
-//! Example: Using HuggingFace embeddings with AletheiaDB
+//! Example: local Hugging Face embeddings through embed_anything.
 //!
-//! This example demonstrates using the HuggingFace Inference API for embeddings.
-//!
-//! # Setup
-//!
-//! Set your HuggingFace token:
-//! ```bash
-//! export HF_TOKEN=hf_...
-//! ```
-//!
-//! # Run
-//!
-//! ```bash
-//! cargo run --example embedding_huggingface --features embedding-huggingface
-//! ```
+//! Run with:
+//! `cargo run --example embedding_huggingface --features embedding-huggingface`
 
 #![cfg(feature = "embedding-huggingface")]
 
-use aletheiadb::embeddings::EmbeddingService;
-use aletheiadb::embeddings::providers::huggingface::*;
+use aletheiadb::embeddings::{EmbedderBuilder, EmbeddingResult};
 use aletheiadb::{AletheiaDB, PropertyMapBuilder};
-use std::sync::Arc;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    println!("🤗 HuggingFace Embeddings Example\n");
+    let embedder = EmbedderBuilder::new()
+        .model_architecture("bert")
+        .model_id(Some("sentence-transformers/all-MiniLM-L6-v2"))
+        .from_pretrained_hf()?;
 
-    // 1. Setup HuggingFace provider with all-MiniLM model
-    println!("📝 Setting up HuggingFace provider...");
-    let config = HuggingFaceConfig::all_minilm_l6_v2()?;
-    let provider = Arc::new(HuggingFaceProvider::new(config)?);
-    let embedding_service = EmbeddingService::new(provider);
-
-    println!("✅ Provider: {}", embedding_service.provider_name());
-    println!("✅ Dimensions: {}\n", embedding_service.dimensions());
-
-    // 2. Generate embeddings for technical documents
-    println!("🔮 Generating embeddings...");
-    let documents = vec![
+    let documents = [
         "Rust is a systems programming language",
-        "Python is great for data science",
-        "JavaScript powers the web",
+        "Python is common in data science",
+        "JavaScript powers browser applications",
     ];
+    let embeddings = dense_embeddings(embedder.embed(&documents, Some(32), None).await?)?;
 
-    let embeddings = embedding_service.embed_batch(&documents).await?;
-    println!("✅ Generated {} embeddings\n", embeddings.len());
-
-    // 3. Store in AletheiaDB
-    println!("💾 Storing in AletheiaDB...");
     let db = AletheiaDB::new()?;
-
     for (doc, embedding) in documents.iter().zip(embeddings.iter()) {
         db.create_node(
             "TechDoc",
@@ -58,18 +31,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .insert_vector("embedding", embedding)
                 .build(),
         )?;
-        println!("✅ Stored: {}", doc);
     }
 
-    println!("\n✨ Example complete!");
     Ok(())
+}
+
+fn dense_embeddings(
+    results: Vec<EmbeddingResult>,
+) -> Result<Vec<Vec<f32>>, Box<dyn std::error::Error>> {
+    results
+        .iter()
+        .map(EmbeddingResult::to_dense)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(Into::into)
 }
 
 #[cfg(not(feature = "embedding-huggingface"))]
 fn main() {
     eprintln!("This example requires the 'embedding-huggingface' feature.");
-    eprintln!(
-        "Run with: cargo run --example embedding_huggingface --features embedding-huggingface"
-    );
     std::process::exit(1);
 }
