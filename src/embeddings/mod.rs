@@ -90,9 +90,7 @@ fn embed_data_to_dense(data: EmbedData) -> Result<DenseEmbedData, DenseEmbedding
     })
 }
 
-fn embedding_result_to_dense(
-    result: EmbeddingResult,
-) -> Result<Vec<f32>, DenseEmbeddingError> {
+fn embedding_result_to_dense(result: EmbeddingResult) -> Result<Vec<f32>, DenseEmbeddingError> {
     match result {
         EmbeddingResult::DenseVector(vector) => Ok(vector),
         EmbeddingResult::MultiVector(_) => Err(DenseEmbeddingError::NotDense),
