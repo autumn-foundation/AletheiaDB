@@ -64,7 +64,7 @@ What other options were evaluated?
 | [ADR-0010](0010-dashmap-current-indexes.md) | DashMap for Current Indexes | 2024-12-31 | index, concurrency |
 | [ADR-0011](0011-vector-search-integration.md) | Vector Search Integration (SUPERRAG) | 2024-12-31 | index, vector |
 | [ADR-0015](0015-cicd-automation-workflow.md) | CI/CD Automation Workflow | 2026-01-03 | devops, automation |
-| [ADR-0016](0016-embedding-providers.md) | Embedding Providers Architecture | 2026-01-04 | embeddings, api |
+| [ADR-0016](0016-embedding-providers.md) | Delegate Embedding Generation to embed_anything | 2026-05-04 | embeddings, api |
 | [ADR-0017](0017-temporal-vector-strategy.md) | Temporal Vector Strategy | 2026-01-05 | vector, temporal |
 | [ADR-0018](0018-temporal-vector-historical-integration.md) | Temporal Vector-Historical Integration | 2026-01-08 | vector, temporal, storage |
 | [ADR-0019](0019-hybrid-query-planner.md) | Hybrid Query Planner | 2026-01-09 | query-engine, performance |
