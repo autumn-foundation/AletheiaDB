@@ -266,3 +266,30 @@ impl AletheiaDB {
             .find_nodes_by_property(label, property_key, property_value)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::PropertyMapBuilder;
+    use crate::test_utils::create_test_db;
+
+    #[test]
+    fn get_all_node_ids_empty_db() {
+        let (_tmp, db) = create_test_db().unwrap();
+        assert!(db.get_all_node_ids().is_empty());
+    }
+
+    #[test]
+    fn get_all_node_ids_returns_created_nodes() {
+        let (_tmp, db) = create_test_db().unwrap();
+        let a = db
+            .create_node("X", PropertyMapBuilder::new().build())
+            .unwrap();
+        let b = db
+            .create_node("X", PropertyMapBuilder::new().build())
+            .unwrap();
+        let ids = db.get_all_node_ids();
+        assert_eq!(ids.len(), 2);
+        assert!(ids.contains(&a));
+        assert!(ids.contains(&b));
+    }
+}
