@@ -468,6 +468,17 @@ impl FromIterator<(PropertyKey, PropertyValue)> for PropertyMap {
 }
 
 /// Builder for creating or modifying property maps with copy-on-write semantics.
+///
+/// ## Examples
+///
+/// ```rust
+/// use aletheiadb::core::property::PropertyMapBuilder;
+/// let map = PropertyMapBuilder::new()
+///     .insert("name", "Alice")
+///     .insert("age", 30)
+///     .build();
+/// assert_eq!(map.get("name").unwrap().as_str().unwrap(), "Alice");
+/// ```
 pub struct PropertyMapBuilder {
     pub(crate) map: HashMap<PropertyKey, PropertyValue, BuildHasherDefault<IdentityHasher>>,
     current_size: usize,

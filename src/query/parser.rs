@@ -126,6 +126,14 @@ impl From<LexerError> for ParseError {
 ///
 /// The `Parser` maintains state (tokens and current position) as it walks through
 /// the input stream. It is designed to be used via the static [`Parser::parse`] method.
+///
+/// ## Examples
+///
+/// ```rust
+/// use aletheiadb::query::parser::Parser;
+/// let ast = Parser::parse("MATCH (n:Person) RETURN n").unwrap();
+/// assert_eq!(ast.statements.len(), 1);
+/// ```
 pub struct Parser {
     tokens: Vec<Token>,
     position: usize,

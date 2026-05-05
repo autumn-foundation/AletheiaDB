@@ -476,6 +476,18 @@ impl CompressedCommitLog {
 /// The `committed` field now uses `CompressedCommitLog` which applies epoch-based
 /// compression to reduce memory usage from ~24 bytes per transaction to ~0.24 bytes
 /// per transaction (100x compression) for sequential workloads.
+///
+/// ## Examples
+///
+/// ```rust
+/// use aletheiadb::api::transaction::visibility::TxVisibilityManager;
+/// use aletheiadb::api::transaction::TxId;
+/// let manager = TxVisibilityManager::new();
+/// let tx_id = TxId::new(1);
+/// manager.mark_active(tx_id);
+/// let snapshot = manager.capture_snapshot();
+/// assert!(!snapshot.is_visible(tx_id)); // Active transactions are not visible
+/// ```
 pub struct TxVisibilityManager {
     /// Currently active transactions, wrapped in Arc for efficient snapshot capture.
     ///

@@ -105,6 +105,17 @@ pub use vector_builder::VectorIndexBuilder;
 /// # Ok(())
 /// # }
 /// ```
+///
+/// ## Examples
+///
+/// ```rust
+/// use aletheiadb::AletheiaDB;
+/// // Initialize the database
+/// let db = AletheiaDB::new().unwrap();
+/// let node_id = db.create_node("Person", aletheiadb::properties! { "name" => "Alice" }).unwrap();
+/// let node = db.get_node(node_id).unwrap();
+/// assert_eq!(node.label(), Some("Person"));
+/// ```
 pub struct AletheiaDB {
     /// Current state storage (hot path) - Arc-wrapped for sharing across transactions
     pub(crate) current: Arc<CurrentStorage>,

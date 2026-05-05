@@ -7,3 +7,6 @@
 ## 2024-05-03 - [The Missing Documentations of the db internals]
 **Confusion:** Many core public functions and structures within the `src/db` submodules were missing module level documentation (`//!`), making it hard for users to quickly get the concept of what each file does.
 **Clarification:** I added module-level `//!` documentation to all files under `src/db` that were missing them (`admin.rs`, `config.rs`, `ops.rs`, `query.rs`, `temporal.rs`, `transaction.rs`, `vector.rs`, `vector_builder.rs`) as well as `src/experimental/temporal/temporal_narrative.rs`. This provides a "Abstract" of what the file does before listing "how".
+## 2024-05-04 - [The Missing `## Examples` doctests in core structs]
+**Confusion:** Some of the most crucial core structures like `StringInterner`, `PropertyMapBuilder`, `WriteBuffer`, `TxVisibilityManager`, `Parser`, and `AletheiaDB` itself were lacking `## Examples` doctests in their struct-level documentation, meaning users looking at their doc pages wouldn't immediately see a minimal working example of how to instantiate and use them.
+**Clarification:** I added `/// ## Examples` code blocks containing executable `rust` doctests right above the `pub struct` declaration for these fundamental types, bridging the gap between their conceptual descriptions and actual usage.

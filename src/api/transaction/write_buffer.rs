@@ -165,6 +165,17 @@ pub const DEFAULT_MAX_OPERATIONS: usize = 50_000;
 ///
 /// Buffers all write operations in a transaction until commit time,
 /// enabling atomicity and validation before applying changes.
+///
+/// ## Examples
+///
+/// ```rust
+/// use aletheiadb::api::transaction::write_buffer::WriteBuffer;
+/// use aletheiadb::core::id::NodeId;
+/// let mut buffer = WriteBuffer::new();
+/// let node_id = NodeId::new(1).unwrap();
+/// buffer.buffer_node_creation(node_id, "Person");
+/// assert_eq!(buffer.len(), 1);
+/// ```
 pub struct WriteBuffer {
     /// Buffered operations in order
     operations: Vec<BufferedWrite>,

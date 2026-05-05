@@ -99,6 +99,17 @@ impl fmt::Debug for InternedString {
 /// - ID → String: For resolving interned strings
 ///
 /// The interner is designed to be used as a singleton (via lazy_static or similar).
+///
+/// ## Examples
+///
+/// ```rust
+/// use aletheiadb::core::interning::StringInterner;
+/// let interner = StringInterner::new();
+/// let id1 = interner.intern("user_id");
+/// let id2 = interner.intern("user_id");
+/// assert_eq!(id1, id2); // Same string gets the same ID
+/// assert_eq!(interner.get("user_id"), Some(id1));
+/// ```
 pub struct StringInterner {
     /// Maps strings to their IDs.
     string_to_id: DashMap<Arc<str>, InternedString>,
