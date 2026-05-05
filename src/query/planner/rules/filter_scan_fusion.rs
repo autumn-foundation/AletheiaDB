@@ -242,4 +242,104 @@ mod tests {
         assert!(result.is_some());
         assert!(result.unwrap().temporal_context.is_some());
     }
+
+    #[test]
+    fn test_filter_scan_fusion_binary_op_recursion() {
+        use crate::query::ir::Predicate;
+        use crate::query::plan::BinaryOp;
+        let rule = FilterScanFusion;
+        let stats = test_stats();
+
+        // Left branch: Filter(Eq) over NodeScan (can be fused)
+        let left_op = LogicalOp::unary(
+            UnaryOp::Filter(Predicate::eq("name", "Alice")),
+            LogicalOp::Scan(ScanOp::NodeScan {
+                label: Some("Person".to_string()),
+                estimated_rows: None,
+            }),
+        );
+
+        // Right branch: Scan (cannot be fused)
+        let right_op = LogicalOp::Scan(ScanOp::NodeScan {
+            label: Some("Company".to_string()),
+            estimated_rows: None,
+        });
+
+        let plan = LogicalPlan::new(LogicalOp::binary(BinaryOp::Union, left_op, right_op));
+        let result = rule.apply(&plan, &stats).unwrap();
+
+        assert!(result.is_some());
+        let optimized_plan = result.unwrap();
+
+        match &optimized_plan.root {
+            LogicalOp::Binary { op: BinaryOp::Union, left, right } => {
+                // Left should be fused
+                assert!(matches!(
+                    left.as_ref(),
+                    LogicalOp::Scan(ScanOp::PropertyScan { label, key, .. }) if label == "Person" && key == "name"
+                ));
+                // Right should be unchanged
+                assert!(matches!(
+                    right.as_ref(),
+                    LogicalOp::Scan(ScanOp::NodeScan { label: Some(l), .. }) if l == "Company"
+                ));
+            }
+            _ => panic!("Expected Binary(Union)"),
+        }
+    }
+
+    #[test]
+    fn test_filter_scan_fusion_preserves_pseudo_keys() {
+        use crate::query::ir::Predicate;
+        let rule = FilterScanFusion;
+        let stats = test_stats();
+
+        let plan = LogicalPlan::new(LogicalOp::unary(
+            UnaryOp::Filter(Predicate::eq("_label", "Person")),
+            LogicalOp::Scan(ScanOp::NodeScan {
+                label: Some("Person".to_string()),
+                estimated_rows: None,
+            }),
+        ));
+
+        let result = rule.apply(&plan, &stats).unwrap();
+        assert!(result.is_none(), "Should not fuse pseudo-keys starting with _");
+    }
+
+    #[test]
+    fn test_filter_scan_fusion_recursively_fuses_input() {
+        use crate::query::ir::Predicate;
+        let rule = FilterScanFusion;
+        let stats = test_stats();
+
+        // Let's create a plan: Filter(name=Alice) -> Filter(age=30) -> NodeScan(Person)
+        // Only the inner Filter can be fused with NodeScan.
+        let plan = LogicalPlan::new(LogicalOp::unary(
+            UnaryOp::Filter(Predicate::eq("name", "Alice")),
+            LogicalOp::unary(
+                UnaryOp::Filter(Predicate::eq("age", 30)),
+                LogicalOp::Scan(ScanOp::NodeScan {
+                    label: Some("Person".to_string()),
+                    estimated_rows: None,
+                }),
+            ),
+        ));
+
+        let result = rule.apply(&plan, &stats).unwrap();
+        assert!(result.is_some());
+
+        let new_plan = result.unwrap();
+
+        match &new_plan.root {
+            LogicalOp::Unary { op: UnaryOp::Filter(Predicate::Eq { key, .. }), input } => {
+                assert_eq!(key, "name"); // The outer filter is preserved
+                assert!(matches!(
+                    input.as_ref(),
+                    LogicalOp::Scan(ScanOp::PropertyScan { label, key, .. }) if label == "Person" && key == "age"
+                )); // The inner filter is fused
+            }
+            _ => panic!("Expected Filter(PropertyScan)"),
+        }
+    }
+
 }
