@@ -1,7 +1,7 @@
 //! Example: OpenAI embeddings through embed_anything.
 //!
 //! Run with:
-//! `cargo run --example embedding_openai --features embedding-openai`
+//! `cargo run --example embedding_openai --features embeddings`
 
 use aletheiadb::embeddings::{Embedder, embed_data_to_dense_iter, embed_query};
 use aletheiadb::{AletheiaDB, PropertyMapBuilder};
