@@ -1,7 +1,7 @@
 //! Example: local Hugging Face embeddings through embed_anything.
 //!
 //! Run with:
-//! `cargo run --example embedding_huggingface --features embedding-huggingface`
+//! `cargo run --example embedding_huggingface --features embeddings`
 
 use aletheiadb::embeddings::{EmbedderBuilder, embed_data_to_dense_iter, embed_query};
 use aletheiadb::{AletheiaDB, PropertyMapBuilder};
