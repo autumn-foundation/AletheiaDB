@@ -154,6 +154,20 @@ struct GroupCommitState {
 
 impl GroupCommitCoordinator {
     /// Create a new GroupCommitCoordinator with the given configuration.
+    ///
+    /// # Arguments
+    ///
+    /// * `max_delay_ms` - Maximum time to wait for more transactions before flushing.
+    /// * `max_batch_size` - Maximum transactions to batch before forcing a flush.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use aletheiadb::storage::wal::group_commit::GroupCommitCoordinator;
+    ///
+    /// // Batches up to 100 transactions, waiting at most 10ms
+    /// let coordinator = GroupCommitCoordinator::new(10, 100);
+    /// ```
     pub fn new(max_delay_ms: u64, max_batch_size: usize) -> Self {
         Self::with_config(GroupCommitConfig {
             max_delay_ms,
@@ -164,6 +178,19 @@ impl GroupCommitCoordinator {
     }
 
     /// Create a new GroupCommitCoordinator with the given full configuration.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use aletheiadb::storage::wal::group_commit::{GroupCommitCoordinator, GroupCommitConfig};
+    ///
+    /// let config = GroupCommitConfig {
+    ///     max_delay_ms: 10,
+    ///     max_batch_size: 100,
+    ///     ..GroupCommitConfig::default()
+    /// };
+    /// let coordinator = GroupCommitCoordinator::with_config(config);
+    /// ```
     pub fn with_config(config: GroupCommitConfig) -> Self {
         Self {
             state: Mutex::new(GroupCommitState {
@@ -180,6 +207,14 @@ impl GroupCommitCoordinator {
     }
 
     /// Create a new GroupCommitCoordinator with default configuration.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use aletheiadb::storage::wal::group_commit::GroupCommitCoordinator;
+    ///
+    /// let coordinator = GroupCommitCoordinator::with_defaults();
+    /// ```
     pub fn with_defaults() -> Self {
         let config = GroupCommitConfig::default();
         Self::new(config.max_delay_ms, config.max_batch_size)
@@ -428,11 +463,22 @@ impl GroupCommitCoordinator {
 
     /// Get the current batch size.
     ///
-    /// Useful for monitoring and testing.
+    /// Useful for monitoring and testing to see how many transactions are currently
+    /// waiting in the active epoch to be flushed.
     ///
     /// # Errors
     ///
     /// Returns `StorageError::LockPoisoned` if the coordinator lock is poisoned.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use aletheiadb::storage::wal::group_commit::GroupCommitCoordinator;
+    ///
+    /// let coordinator = GroupCommitCoordinator::with_defaults();
+    /// let size = coordinator.current_batch_size().unwrap();
+    /// assert_eq!(size, 0);
+    /// ```
     pub fn current_batch_size(&self) -> Result<usize, Error> {
         let state = self.state.lock().map_err(|_| {
             Error::Storage(StorageError::LockPoisoned {
@@ -444,11 +490,22 @@ impl GroupCommitCoordinator {
 
     /// Get the current epoch.
     ///
-    /// Useful for monitoring and testing.
+    /// Useful for monitoring and testing to determine which epoch incoming
+    /// transactions will be assigned to.
     ///
     /// # Errors
     ///
     /// Returns `StorageError::LockPoisoned` if the coordinator lock is poisoned.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use aletheiadb::storage::wal::group_commit::GroupCommitCoordinator;
+    ///
+    /// let coordinator = GroupCommitCoordinator::with_defaults();
+    /// let epoch = coordinator.current_epoch().unwrap();
+    /// assert_eq!(epoch, 1); // Starts at 1
+    /// ```
     pub fn current_epoch(&self) -> Result<u64, Error> {
         let state = self.state.lock().map_err(|_| {
             Error::Storage(StorageError::LockPoisoned {
@@ -460,11 +517,22 @@ impl GroupCommitCoordinator {
 
     /// Get the last flushed epoch.
     ///
-    /// Useful for monitoring and testing.
+    /// Useful for monitoring and testing to see how far along the durability
+    /// frontier has advanced.
     ///
     /// # Errors
     ///
     /// Returns `StorageError::LockPoisoned` if the coordinator lock is poisoned.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use aletheiadb::storage::wal::group_commit::GroupCommitCoordinator;
+    ///
+    /// let coordinator = GroupCommitCoordinator::with_defaults();
+    /// let flushed = coordinator.flushed_epoch().unwrap();
+    /// assert_eq!(flushed, 0); // Nothing flushed yet
+    /// ```
     pub fn flushed_epoch(&self) -> Result<u64, Error> {
         let state = self.state.lock().map_err(|_| {
             Error::Storage(StorageError::LockPoisoned {
@@ -476,11 +544,22 @@ impl GroupCommitCoordinator {
 
     /// Check if a flush should be triggered based on batch size.
     ///
-    /// Called by the flush thread to check if the batch is full.
+    /// Called by the flush thread to check if the batch is full and should be flushed
+    /// immediately, ignoring the `max_delay_ms` timeout.
     ///
     /// # Errors
     ///
     /// Returns `StorageError::LockPoisoned` if the coordinator lock is poisoned.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use aletheiadb::storage::wal::group_commit::GroupCommitCoordinator;
+    ///
+    /// let coordinator = GroupCommitCoordinator::with_defaults();
+    /// let flush_now = coordinator.should_flush().unwrap();
+    /// assert_eq!(flush_now, false);
+    /// ```
     pub fn should_flush(&self) -> Result<bool, Error> {
         let state = self.state.lock().map_err(|_| {
             Error::Storage(StorageError::LockPoisoned {
@@ -491,6 +570,18 @@ impl GroupCommitCoordinator {
     }
 
     /// Get the maximum delay for this coordinator.
+    ///
+    /// Returns the configured `max_delay_ms` as a `Duration`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use aletheiadb::storage::wal::group_commit::GroupCommitCoordinator;
+    /// use std::time::Duration;
+    ///
+    /// let coordinator = GroupCommitCoordinator::new(10, 100);
+    /// assert_eq!(coordinator.max_delay(), Duration::from_millis(10));
+    /// ```
     pub fn max_delay(&self) -> Duration {
         Duration::from_millis(self.config.max_delay_ms)
     }
