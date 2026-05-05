@@ -55,18 +55,12 @@ tower = { version = "0.5", optional = true }
 tower-http = { version = "0.6", optional = true, features = ["cors", "trace", "set-header"] }
 
 # Embedding generation dependencies (all optional via feature flags)
-# Async runtime for API-based embedding providers
 tokio = { version = "1.52", features = ["rt-multi-thread", "macros"], optional = true }
-async-trait = { version = "0.1", optional = true }
+embed_anything = { version = "0.6.7", optional = true }
 
-# HTTP client for API-based providers (OpenAI, HuggingFace, Ollama) and sharding RPC
+# HTTP client for sharding RPC and optional integrations
 reqwest = { version = "0.12", features = ["json", "blocking", "rustls-tls"], default-features = false, optional = true }
 serde_json = { version = "1.0", optional = false }
-
-# ONNX runtime for local model inference
-ort = { version = "2.0.0-rc.0", optional = true }
-tokenizers = { version = "0.23", optional = true }
-num_cpus = { version = "1.16", optional = true }
 
 # Redb for tiered cold storage (pure Rust, ADR-0025)
 redb = "4.1"
@@ -162,14 +156,13 @@ tokio = ["dep:tokio"]
 config-toml = ["dep:serde", "dep:toml"]
 
 # Embedding generation features
-embeddings = ["dep:tokio", "dep:async-trait"]
+embeddings = ["dep:tokio", "dep:embed_anything"]
 
-# Individual provider features (each implies 'embeddings')
-embedding-openai = ["embeddings", "dep:reqwest"]
-embedding-huggingface = ["embeddings", "dep:reqwest"]
-# IMPORTANT: ONNX provider is currently a PLACEHOLDER - returns errors, not functional
-embedding-onnx = ["embeddings", "dep:ort", "dep:tokenizers", "dep:num_cpus"]
-embedding-ollama = ["embeddings", "dep:reqwest"]
+# Legacy provider feature aliases. Provider/model ownership lives in embed_anything.
+embedding-openai = ["embeddings"]
+embedding-huggingface = ["embeddings"]
+embedding-onnx = ["embeddings", "embed_anything/ort"]
+embedding-ollama = ["embeddings"]
 
 # Enable all embedding providers
 embedding-all = [
