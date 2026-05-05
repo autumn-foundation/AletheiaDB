@@ -789,10 +789,11 @@ impl CypherParser {
             }
             TokenKind::FloatLiteral => {
                 let f: f64 = self
-                    .advance()
+                    .peek()
                     .text
                     .parse()
                     .map_err(|_| self.error("invalid float literal"))?;
+                self.advance();
                 Ok(CypherValue::Float(f))
             }
             TokenKind::StringLiteral => {
