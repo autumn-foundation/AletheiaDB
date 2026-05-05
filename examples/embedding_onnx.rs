@@ -4,7 +4,7 @@
 //! repository before running.
 //!
 //! Run with:
-//! `cargo run --example embedding_onnx --features embedding-onnx`
+//! `cargo run --example embedding_onnx --features embeddings-onnx`
 
 use aletheiadb::embeddings::{Dtype, Embedder, embed_data_to_dense_iter, embed_query};
 use aletheiadb::{AletheiaDB, PropertyMapBuilder};
