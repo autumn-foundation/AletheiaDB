@@ -44,8 +44,10 @@ New code should generally use `embeddings`. The provider-specific feature names 
 
 ## Basic Flow
 
+Use `EmbedData`-based APIs when storing generated embeddings. `EmbedData` keeps the produced vector attached to the text chunk and metadata that generated it, which matters once file parsing or splitting produces more chunks than original input documents.
+
 ```rust,ignore
-use aletheiadb::embeddings::{Embedder, EmbeddingResult};
+use aletheiadb::embeddings::{embed_data_to_dense_iter, embed_query, Embedder};
 use aletheiadb::{AletheiaDB, PropertyMapBuilder};
 
 #[tokio::main]
@@ -59,33 +61,74 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "Embeddings support semantic retrieval",
     ];
 
-    let results = embedder.embed(&documents, Some(32), None).await?;
-    let embeddings = dense_embeddings(results)?;
+    let data = embed_query(&documents, &embedder, None).await?;
 
     let db = AletheiaDB::new()?;
-    for (doc, embedding) in documents.iter().zip(embeddings.iter()) {
-        db.create_node(
-            "Document",
-            PropertyMapBuilder::new()
-                .insert("content", *doc)
-                .insert_vector("embedding", embedding)
-                .build(),
-        )?;
+    for item in embed_data_to_dense_iter(data, None) {
+        let item = item?;
+        if let Some(content) = item.text {
+            db.create_node(
+                "Document",
+                PropertyMapBuilder::new()
+                    .insert("content", content)
+                    .insert_vector("embedding", &item.embedding)
+                    .build(),
+            )?;
+        }
     }
 
     Ok(())
 }
-
-fn dense_embeddings(
-    results: Vec<EmbeddingResult>,
-) -> Result<Vec<Vec<f32>>, Box<dyn std::error::Error>> {
-    results
-        .iter()
-        .map(EmbeddingResult::to_dense)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(Into::into)
-}
 ```
+
+Avoid converting to `Vec<Vec<f32>>` and zipping back to the original documents for file, web, or chunked text workflows. Chunking can increase result cardinality; zipping silently drops extra chunks or associates vectors with the wrong source text.
+
+## Chunked Input
+
+For already-chunked text, use the re-exported `process_chunks` API so metadata stays attached through embedding generation:
+
+```rust,ignore
+use std::{collections::HashMap, sync::Arc};
+
+use aletheiadb::embeddings::{embed_data_to_dense_iter, process_chunks, Embedder};
+use aletheiadb::{AletheiaDB, PropertyMapBuilder};
+
+# async fn example(embedder: Embedder) -> Result<(), Box<dyn std::error::Error>> {
+let chunks = vec![
+    "AletheiaDB stores temporal graph facts".to_string(),
+    "Embeddings support semantic retrieval".to_string(),
+];
+let metadata = chunks
+    .iter()
+    .enumerate()
+    .map(|(index, _)| {
+        let mut metadata = HashMap::new();
+        metadata.insert("document_id".to_string(), "doc-1".to_string());
+        metadata.insert("chunk_index".to_string(), index.to_string());
+        Some(metadata)
+    })
+    .collect::<Vec<_>>();
+
+let data = process_chunks(&chunks, &metadata, &Arc::new(embedder), Some(32), None).await?;
+
+let db = AletheiaDB::new()?;
+for item in embed_data_to_dense_iter(data.iter().cloned(), Some(10_000)) {
+    let item = item?;
+    if let Some(content) = item.text {
+        db.create_node(
+            "DocumentChunk",
+            PropertyMapBuilder::new()
+                .insert("content", content)
+                .insert_vector("embedding", &item.embedding)
+                .build(),
+        )?;
+    }
+}
+# Ok(())
+# }
+```
+
+The optional limit on `embed_data_to_dense_iter` and `to_dense_iter` bounds conversion work for large embedding batches.
 
 ## Re-Exported Surface
 
@@ -94,9 +137,13 @@ AletheiaDB exposes the upstream crate namespace and the most common types/functi
 ```rust,ignore
 use aletheiadb::embeddings::{
     embed_anything,
+    embed_data_to_dense_iter,
     embed_file,
     embed_files_batch,
     embed_query,
+    to_dense_iter,
+    DenseEmbedData,
+    DenseEmbeddingError,
     EmbedData,
     Embedder,
     EmbedderBuilder,
