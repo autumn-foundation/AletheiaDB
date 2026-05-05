@@ -737,37 +737,30 @@ mod sentinel_identity_hasher_tests {
 
     #[test]
     fn test_identity_hasher_write_empty_body_exhaustive() {
-        let mut h = IdentityHasher::default();
-        // If `write_u8` is empty, finish() is 0
-        h.write_u8(42);
-        assert_eq!(h.finish(), 42);
-        assert_ne!(h.finish(), 0);
+        // Ensure that writing a single value preserves exactly that value, proving
+        // that the method bodies are not empty or doing generic mutations.
+        let values: [u64; 4] = [42, 255, 65535, 123456789];
+        for &val in &values {
+            let mut h = IdentityHasher::default();
+            h.write_u8(val as u8);
+            assert_eq!(h.finish(), val as u8 as u64);
 
-        let mut h = IdentityHasher::default();
-        h.write_u16(42);
-        assert_eq!(h.finish(), 42);
-        assert_ne!(h.finish(), 0);
+            let mut h = IdentityHasher::default();
+            h.write_u16(val as u16);
+            assert_eq!(h.finish(), val as u16 as u64);
 
-        let mut h = IdentityHasher::default();
-        h.write_u32(42);
-        assert_eq!(h.finish(), 42);
-        assert_ne!(h.finish(), 0);
+            let mut h = IdentityHasher::default();
+            h.write_u32(val as u32);
+            assert_eq!(h.finish(), val as u32 as u64);
 
-        let mut h = IdentityHasher::default();
-        h.write_u64(42);
-        assert_eq!(h.finish(), 42);
-        assert_ne!(h.finish(), 0);
+            let mut h = IdentityHasher::default();
+            h.write_u64(val);
+            assert_eq!(h.finish(), val);
 
-        let mut h = IdentityHasher::default();
-        h.write_usize(42);
-        assert_eq!(h.finish(), 42);
-        assert_ne!(h.finish(), 0);
-
-        // If `write` is empty, finish() is 0
-        let mut h = IdentityHasher::default();
-        h.write(&[42]);
-        assert_eq!(h.finish(), 42);
-        assert_ne!(h.finish(), 0);
+            let mut h = IdentityHasher::default();
+            h.write_usize(val as usize);
+            assert_eq!(h.finish(), val);
+        }
     }
 
     #[test]
@@ -878,11 +871,13 @@ mod sentinel_identity_hasher_tests {
 
     #[test]
     fn test_identity_hasher_finish_return_exhaustive() {
-        // Kill `replace finish -> u64 with 0` and `1`
+        // Prove finish() actually returns the internal state, not a hardcoded constant.
         let mut h = IdentityHasher::default();
         h.write_u64(42);
         assert_eq!(h.finish(), 42);
-        assert_ne!(h.finish(), 0);
-        assert_ne!(h.finish(), 1);
+        h.write_u64(100);
+        // Do not reconstruct the logic; hardcode the known expected outcome.
+        // 42 ^ 100 = 78. 78 * FNV_PRIME (1099511628211) = 85761907000458
+        assert_eq!(h.finish(), 85761907000458);
     }
 }

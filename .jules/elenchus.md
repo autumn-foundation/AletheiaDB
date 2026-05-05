@@ -346,3 +346,17 @@
 **Finding:** The `LimitPushdown` tests originally missed several behavioral edge cases and logic checks, particularly regarding the propagation limits in BinaryOp combinations (`||`), updating limit values correctly against child bounds, and setting vector rank limits.
 **Evidence:** `cargo mutants` caught mutants in `LimitPushdown::push_down` specifically targeting the changed boolean condition logic and bounds assignment.
 **Recommendation:** Added `sentry_tests` to `LimitPushdown` that explicitly trigger tests enforcing the boolean change propagation, verifying that updated properties reflect correct nested limits, and vector bounds assignment. Tests now prevent `||` to `&&` mutations and correct top-k modifications.
+
+**[IdentityHasher Empty Writes]**
+**Module:** aletheiadb::core::hasher
+**Severity:** 🔴 Critical
+**Finding:** The exhaustive empty body tests (`test_identity_hasher_write_empty_body_exhaustive`) assert that writing a value gives a result different from 0, but this doesn't ensure correctness (any other number would pass), making the test weak against mutations returning a constant.
+**Evidence:** The test uses `assert_ne!(h.finish(), 0)` and `assert_eq!(h.finish(), 42)`. While `assert_eq` is fine, the structure is repetitive and doesn't test the core invariant of identity hashing efficiently against mutation.
+**Recommendation:** Clean up these tests and ensure they actually test the pass-through property.
+
+**[LimitPushdown Partial Branch Propagation]**
+**Module:** aletheiadb::query::planner::rules::limit_pushdown
+**Severity:** 🔴 Critical
+**Finding:** `test_pushdown_binary_partial_change` sets up a test case where a limit pushdown changes the left branch. But `test_binary_op_limit_pushdown_children` ensures limits do NOT propagate down children. The current test just validates that if the left branch changed, the whole binary operation signals it changed. It's tautological to the code structure and tests no logical planner property.
+**Evidence:** The test constructs a tree, manually mimics what `push_down` does, and uses `assert_eq!`. Any mutation in the planner logic that isn't a direct break of binary traversal will pass.
+**Recommendation:** Add tests that actually verify limits do not incorrectly propagate from the top of a binary op to its children (e.g. testing `Union` doesn't apply the limit to both children).

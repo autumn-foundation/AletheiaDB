@@ -463,7 +463,6 @@ mod sentry_tests {
     #[test]
     fn test_pushdown_binary_partial_change() {
         let rule = LimitPushdown;
-        let stats = test_stats();
 
         // Left: Limit(10, Limit(20, Scan)) -> Limit(10, Scan) [changed = true]
         let left = LogicalOp::unary(
@@ -477,23 +476,77 @@ mod sentry_tests {
         // Right: Scan -> Scan [changed = false]
         let right = LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(2).unwrap()]));
 
-        let plan = LogicalPlan::new(LogicalOp::binary(BinaryOp::Union, left, right));
+        let op = LogicalOp::binary(BinaryOp::Union, left, right);
+
+        let (new_op, changed) = rule.push_down(&op, None).unwrap();
+
+        assert!(changed, "Expected limit pushdown to flag change");
+
+        match new_op {
+            LogicalOp::Binary { left, right, .. } => {
+                // Verify left side was changed and right side was not touched.
+                match *left {
+                    LogicalOp::Unary {
+                        op: UnaryOp::Limit(n),
+                        input,
+                    } => {
+                        assert_eq!(n, 10);
+                        assert!(matches!(*input, LogicalOp::Scan(_)));
+                    }
+                    _ => panic!("Expected Limit on left side"),
+                }
+
+                assert!(matches!(*right, LogicalOp::Scan(_)));
+            }
+            _ => panic!("Expected BinaryOp"),
+        }
+    }
+
+    #[test]
+    fn test_sentry_binary_op_does_not_propagate_limit_to_children() {
+        let rule = LimitPushdown;
+        let stats = test_stats();
+
+        // Limit(5) over a Union(Scan, Scan)
+        // Limits should NOT be pushed down into both branches of a Union,
+        // because we only want a total of 5, not 5 from each branch.
+        let left = LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(1).unwrap()]));
+        let right = LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(2).unwrap()]));
+        let union_op = LogicalOp::binary(BinaryOp::Union, left, right);
+
+        let plan = LogicalPlan::new(LogicalOp::unary(UnaryOp::Limit(5), union_op));
 
         let result = rule.apply(&plan, &stats).unwrap();
-        let expected_plan = LogicalPlan::new(LogicalOp::binary(
-            BinaryOp::Union,
-            LogicalOp::unary(
-                UnaryOp::Limit(10),
-                LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(1).unwrap()])),
-            ),
-            LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(2).unwrap()])),
-        ));
+        // Since we don't push limits through BinaryOps, the plan should not change
+        // Or if it processes it, the BinaryOp children must not gain the Limit(5).
 
-        assert_eq!(
-            result,
-            Some(expected_plan),
-            "Partial optimization in left branch should propagate with exact limit structure"
-        );
+        match result {
+            None => { /* No change is correct behavior for Union limit pushdown */ }
+            Some(new_plan) => {
+                match new_plan.root {
+                    LogicalOp::Unary {
+                        op: UnaryOp::Limit(5),
+                        input,
+                    } => {
+                        match *input {
+                            LogicalOp::Binary { left, right, .. } => {
+                                // Neither left nor right should have the Limit(5)
+                                assert!(
+                                    matches!(*left, LogicalOp::Scan(_)),
+                                    "Left child incorrectly gained limit"
+                                );
+                                assert!(
+                                    matches!(*right, LogicalOp::Scan(_)),
+                                    "Right child incorrectly gained limit"
+                                );
+                            }
+                            _ => panic!("Expected BinaryOp under Limit"),
+                        }
+                    }
+                    _ => panic!("Expected outer Limit(5) to remain"),
+                }
+            }
+        }
     }
 
     #[test]
