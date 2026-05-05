@@ -130,3 +130,52 @@ fn test_claude_md_recovery_content_complete() {
         );
     }
 }
+
+/// Test that the lock acquisition order is documented for future write-path changes.
+#[test]
+fn test_lock_acquisition_order_documented() {
+    let claude = fs::read_to_string("CLAUDE.md").expect("Failed to read CLAUDE.md");
+    let write_apply = fs::read_to_string("src/api/transaction/write/apply.rs")
+        .expect("Failed to read write apply module");
+
+    let required_order = [
+        "current_timestamp",
+        "wal",
+        "historical",
+        "temporal_indexes",
+        "id generators",
+        "outgoing/incoming",
+    ];
+
+    let claude_section = claude
+        .split("### Lock Acquisition Order")
+        .nth(1)
+        .expect("CLAUDE.md should include a lock acquisition order section");
+    let write_apply_section = write_apply
+        .split("//! # Lock Acquisition Order")
+        .nth(1)
+        .expect("write apply module should include a lock acquisition order comment");
+
+    let mut last_claude_index = 0;
+    let mut last_write_apply_index = 0;
+    for required in required_order {
+        let claude_index = claude_section
+            .find(required)
+            .unwrap_or_else(|| panic!("CLAUDE.md should document lock-order entry: {required}"));
+        let write_apply_index = write_apply_section.find(required).unwrap_or_else(|| {
+            panic!("write apply module should document lock-order entry: {required}")
+        });
+
+        assert!(
+            claude_index >= last_claude_index,
+            "CLAUDE.md should document lock-order entry in order: {required}"
+        );
+        assert!(
+            write_apply_index >= last_write_apply_index,
+            "write apply module should document lock-order entry in order: {required}"
+        );
+
+        last_claude_index = claude_index;
+        last_write_apply_index = write_apply_index;
+    }
+}

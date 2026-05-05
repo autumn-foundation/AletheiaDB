@@ -17,6 +17,23 @@
 //! - **Valid Time**: Controlled by the user (or defaults to commit time).
 //! - **Transaction Time**: Controlled by the system (always commit time).
 //! - **Tombstones**: Deletions create "tombstone" versions that close the valid time interval.
+//!
+//! # Lock Acquisition Order
+//!
+//! Write commits acquire synchronization in this order:
+//! 1. `current_timestamp`
+//! 2. `wal`
+//! 3. `historical`
+//! 4. `temporal_indexes`
+//! 5. `id generators`
+//! 6. `outgoing/incoming`
+//!
+//! `commit()` handles `current_timestamp` and `wal` before entering this module.
+//! `apply_changes()` then acquires `historical` once for the whole batch. The
+//! current `temporal_indexes`, `id generators`, and `outgoing/incoming` adjacency
+//! storage use atomic or fine-grained internal synchronization, but the ordering is
+//! still the contract for future explicit locks: do not acquire an earlier entry
+//! while holding a later one.
 
 use super::WriteTransaction;
 use crate::core::error::{Result, StorageError};

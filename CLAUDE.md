@@ -67,6 +67,21 @@ Recovery Flow:
 
 **Critical**: IDs exceeding `MAX_VALID_ID` (u64::MAX - 1000) are rejected to prevent DoS attacks.
 
+### Lock Acquisition Order
+
+When code needs more than one AletheiaDB write-path synchronization primitive, always acquire them in this order to prevent deadlocks:
+
+1. `current_timestamp`
+2. `wal`
+3. `historical`
+4. `temporal_indexes`
+5. `id generators`
+6. `outgoing/incoming`
+
+Current implementation notes: `wal` is a `ConcurrentWalSystem`, `temporal_indexes` uses internal DashMap sharding, and `node_id_gen`, `edge_id_gen`, and `version_id_gen` are atomic `IdGenerator`s rather than Mutexes. The order still defines the contract for future changes: never acquire an earlier primitive while holding a later one.
+
+The `outgoing/incoming` adjacency indexes may be acquired in either order among themselves and must not call back into `historical`, `wal`, or `current_timestamp`.
+
 ## Testing Requirements
 
 **See [TESTING.md](TESTING.md) for detailed testing instructions.**
