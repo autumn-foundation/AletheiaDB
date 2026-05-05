@@ -221,8 +221,8 @@ impl CypherParser {
         self.expect(TokenKind::LParen)?;
 
         let variable = if self.at(TokenKind::Identifier) {
-            let tok = self.advance().clone();
-            Some(tok.text)
+            let tok = self.advance();
+            Some(tok.text.clone())
         } else {
             None
         };
@@ -266,8 +266,8 @@ impl CypherParser {
         self.expect(TokenKind::LBracket)?;
 
         let variable = if self.at(TokenKind::Identifier) {
-            let tok = self.advance().clone();
-            Some(tok.text)
+            let tok = self.advance();
+            Some(tok.text.clone())
         } else {
             None
         };
@@ -539,7 +539,7 @@ impl CypherParser {
     /// primary := value | var '.' prop | '(' expr ')' | func_call | var
     /// ```
     fn parse_primary_expr(&mut self) -> Result<CypherExpr, CypherError> {
-        match self.peek().kind.clone() {
+        match self.peek().kind {
             // Parenthesized sub-expression
             TokenKind::LParen => {
                 self.advance();
@@ -551,8 +551,8 @@ impl CypherParser {
             // Identifier: could be variable, property access, dot-qualified function call,
             // or simple function call
             TokenKind::Identifier => {
-                let name_tok = self.advance().clone();
-                let name = name_tok.text;
+                let name_tok = self.advance();
+                let name = name_tok.text.clone();
 
                 if self.at(TokenKind::Dot) {
                     // Could be property access: var.prop
@@ -597,7 +597,7 @@ impl CypherParser {
             | TokenKind::Sum
             | TokenKind::Min
             | TokenKind::Max => {
-                let name_tok = self.advance().clone();
+                let name_tok = self.advance();
                 let name = name_tok.text.to_uppercase();
                 self.expect(TokenKind::LParen)?;
                 let args = self.parse_function_args()?;
@@ -777,26 +777,26 @@ impl CypherParser {
 
     /// Parse a single literal value or parameter.
     fn parse_value(&mut self) -> Result<CypherValue, CypherError> {
-        match self.peek().kind.clone() {
+        match self.peek().kind {
             TokenKind::IntegerLiteral => {
-                let tok = self.advance().clone();
-                let n: i64 = tok
+                let n: i64 = self
+                    .advance()
                     .text
                     .parse()
                     .map_err(|_| self.error("invalid integer literal"))?;
                 Ok(CypherValue::Int(n))
             }
             TokenKind::FloatLiteral => {
-                let tok = self.advance().clone();
-                let f: f64 = tok
+                let f: f64 = self
+                    .advance()
                     .text
                     .parse()
                     .map_err(|_| self.error("invalid float literal"))?;
                 Ok(CypherValue::Float(f))
             }
             TokenKind::StringLiteral => {
-                let tok = self.advance().clone();
-                Ok(CypherValue::String(tok.text))
+                let tok = self.advance();
+                Ok(CypherValue::String(tok.text.clone()))
             }
             TokenKind::True => {
                 self.advance();
@@ -811,8 +811,8 @@ impl CypherParser {
                 Ok(CypherValue::Null)
             }
             TokenKind::Parameter => {
-                let tok = self.advance().clone();
-                Ok(CypherValue::Parameter(tok.text))
+                let tok = self.advance();
+                Ok(CypherValue::Parameter(tok.text.clone()))
             }
             _ => Err(self.error(&format!("expected value, found {:?}", self.peek().kind))),
         }

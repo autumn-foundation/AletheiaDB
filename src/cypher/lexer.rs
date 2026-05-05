@@ -21,7 +21,8 @@ use super::CypherError;
 ///
 /// Covers keywords, operators, symbols, literals, parameters, identifiers,
 /// and the end-of-input marker.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// ⚡ Bolt: Derived `Copy` to avoid cloning token kinds during parsing.
 pub enum TokenKind {
     // -- Keywords: clauses --------------------------------------------------
     /// `MATCH`
