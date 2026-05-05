@@ -1,55 +1,39 @@
-//! Example: Using ONNX local embeddings with AletheiaDB
+//! Example: ONNX embeddings through embed_anything.
 //!
-//! This example demonstrates using ONNX models for local embedding generation.
+//! Set `EMBED_ANYTHING_ONNX_PATH` to the model path inside the Hugging Face
+//! repository before running.
 //!
-//! # Setup
-//!
-//! Note: This is a placeholder implementation. A full implementation would require:
-//! 1. Download ONNX models (e.g., from HuggingFace with optimum)
-//! 2. Place them in the models/ directory
-//!
-//! # Run
-//!
-//! ```bash
-//! cargo run --example embedding_onnx --features embedding-onnx
-//! ```
+//! Run with:
+//! `cargo run --example embedding_onnx --features embedding-onnx`
 
 #![cfg(feature = "embedding-onnx")]
 
-use aletheiadb::embeddings::EmbeddingService;
-use aletheiadb::embeddings::providers::onnx::*;
+use aletheiadb::embeddings::{Dtype, Embedder, EmbeddingResult};
 use aletheiadb::{AletheiaDB, PropertyMapBuilder};
-use std::sync::Arc;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    println!("⚡ ONNX Embeddings Example\n");
+    let model_id = std::env::var("EMBED_ANYTHING_ONNX_MODEL")
+        .unwrap_or_else(|_| "sentence-transformers/all-MiniLM-L6-v2".to_string());
+    let path_in_repo = std::env::var("EMBED_ANYTHING_ONNX_PATH")?;
 
-    // 1. Setup ONNX provider
-    println!("📝 Setting up ONNX provider...");
-    let config = OnnxConfig::default(); // Uses all-MiniLM-L6-v2
-    let provider = Arc::new(OnnxProvider::new(config)?);
-    let embedding_service = EmbeddingService::new(provider);
+    let embedder = Embedder::from_pretrained_onnx(
+        "bert",
+        None,
+        None,
+        Some(&model_id),
+        Some(Dtype::F32),
+        Some(&path_in_repo),
+    )?;
 
-    println!("✅ Provider: {}", embedding_service.provider_name());
-    println!("✅ Dimensions: {}", embedding_service.dimensions());
-    println!("⚠️  Note: This is a placeholder implementation\n");
-
-    // 2. Generate embeddings (placeholder)
-    println!("🔮 Generating embeddings...");
-    let documents = vec![
+    let documents = [
         "ONNX enables cross-platform inference",
         "Local models provide privacy and low latency",
         "Embedding models can run on CPU or GPU",
     ];
+    let embeddings = dense_embeddings(embedder.embed(&documents, Some(32), None).await?)?;
 
-    let embeddings = embedding_service.embed_batch(&documents).await?;
-    println!("✅ Generated {} placeholder embeddings\n", embeddings.len());
-
-    // 3. Store in AletheiaDB
-    println!("💾 Storing in AletheiaDB...");
     let db = AletheiaDB::new()?;
-
     for (doc, embedding) in documents.iter().zip(embeddings.iter()) {
         db.create_node(
             "Document",
@@ -58,20 +42,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .insert_vector("embedding", embedding)
                 .build(),
         )?;
-        println!("✅ Stored: {}", doc);
     }
 
-    println!("\n✨ Example complete!");
-    println!("💡 Note: Full ONNX implementation would require:");
-    println!("   - ONNX model files");
-    println!("   - Tokenizer implementation");
-    println!("   - Tensor processing");
     Ok(())
+}
+
+fn dense_embeddings(
+    results: Vec<EmbeddingResult>,
+) -> Result<Vec<Vec<f32>>, Box<dyn std::error::Error>> {
+    results
+        .iter()
+        .map(EmbeddingResult::to_dense)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(Into::into)
 }
 
 #[cfg(not(feature = "embedding-onnx"))]
 fn main() {
     eprintln!("This example requires the 'embedding-onnx' feature.");
-    eprintln!("Run with: cargo run --example embedding_onnx --features embedding-onnx");
     std::process::exit(1);
 }
