@@ -637,7 +637,7 @@ pub mod time {
     /// Returns HybridTimestamp with current wallclock and logical counter = 0.
     /// For monotonic HLC generation with causality, use HLC's send() method.
     ///
-    /// When the `simulation` feature is active and a [`SimulatedClock`] injection
+    /// When the `simulation` feature is active and a `` `SimulatedClock` `` injection
     /// guard is live on the current thread, returns the simulated time instead.
     ///
     /// # Panics

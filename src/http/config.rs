@@ -210,7 +210,7 @@ impl ServerConfig {
         self.data_dir.as_deref()
     }
 
-    /// Materialize the [`AletheiaDBConfig`] this server config implies.
+    /// Materialize the [`AletheiaDBConfig`](crate::AletheiaDBConfig) this server config implies.
     ///
     /// Returns `None` when no [`data_dir`](Self::data_dir) is set — that
     /// signals in-memory mode, and the caller should construct the DB via
@@ -224,7 +224,7 @@ impl ServerConfig {
     ///
     /// The durability parameters are intentionally not exposed as
     /// per-server-binary env vars: library consumers that need to tune
-    /// them build their own [`AletheiaDBConfig`] directly via
+    /// them build their own [`AletheiaDBConfig`](crate::AletheiaDBConfig) directly via
     /// [`AletheiaDBConfig::builder`](crate::AletheiaDBConfig::builder).
     /// The server binary uses conservative production-safe defaults.
     #[must_use]

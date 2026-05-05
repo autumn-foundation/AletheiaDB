@@ -7,3 +7,6 @@
 ## 2024-05-03 - [The Missing Documentations of the db internals]
 **Confusion:** Many core public functions and structures within the `src/db` submodules were missing module level documentation (`//!`), making it hard for users to quickly get the concept of what each file does.
 **Clarification:** I added module-level `//!` documentation to all files under `src/db` that were missing them (`admin.rs`, `config.rs`, `ops.rs`, `query.rs`, `temporal.rs`, `transaction.rs`, `vector.rs`, `vector_builder.rs`) as well as `src/experimental/temporal/temporal_narrative.rs`. This provides a "Abstract" of what the file does before listing "how".
+## 2024-05-05 - [Fixing intra-doc links warnings in rustdoc]
+**Confusion:** Rustdoc throws "unresolved link" warnings for intra-doc links like `[SimulatedClock]`, `[AletheiaDBConfig]`, `[autumn_web::prelude::app]`, and `[jump_to]` that are either in another crate, not in scope, or conditionally compiled.
+**Clarification:** I fixed the unresolved intra-doc links across the project by either providing the full crate path (`[AletheiaDBConfig](crate::AletheiaDBConfig)`) or replacing them with standard markdown backticks (`` `SimulatedClock` ``, `` `autumn_web::app().on_startup(...)` ``, `` `jump_to` ``) as per the Bard convention.
