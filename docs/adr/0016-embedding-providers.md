@@ -44,20 +44,17 @@ AletheiaDB remains responsible for:
 ## Feature Flags
 
 ```toml
-embeddings = ["dep:tokio", "dep:embed_anything"]
-embedding-openai = ["embeddings"]
-embedding-huggingface = ["embeddings"]
-embedding-ollama = ["embeddings"]
-embedding-onnx = ["embeddings", "embed_anything/ort"]
-embedding-all = [
-    "embedding-openai",
-    "embedding-huggingface",
-    "embedding-onnx",
-    "embedding-ollama",
+embeddings = [
+    "dep:tokio",
+    "dep:embed_anything",
+    "dep:candle-core",
+    "dep:candle-nn",
+    "dep:candle-transformers",
 ]
+embeddings-onnx = ["embeddings", "embed_anything/ort"]
 ```
 
-The provider-specific feature names are retained as compatibility aliases. New code should use `embeddings` unless it needs `embedding-onnx`.
+`embeddings` is the primary feature. `embeddings-onnx` exists only to opt into `embed_anything`'s optional ONNX runtime backend. The old provider-specific AletheiaDB feature aliases are not retained because this crate has not been released yet.
 
 ## Consequences
 
