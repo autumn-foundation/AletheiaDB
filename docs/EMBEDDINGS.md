@@ -34,13 +34,9 @@ aletheiadb = { version = "0.1", features = ["embeddings"] }
 | Feature | Purpose |
 |---------|---------|
 | `embeddings` | Enables the `embed_anything` dependency and AletheiaDB re-exports |
-| `embedding-openai` | Compatibility alias for `embeddings` |
-| `embedding-huggingface` | Compatibility alias for `embeddings` |
-| `embedding-ollama` | Compatibility alias for `embeddings` |
-| `embedding-onnx` | Enables `embeddings` plus `embed_anything/ort` |
-| `embedding-all` | Enables all compatibility aliases |
+| `embeddings-onnx` | Enables `embeddings` plus `embed_anything/ort` for ONNX backends |
 
-New code should generally use `embeddings`. The provider-specific feature names remain so downstream manifests do not break just because we stopped feeding the maintenance monster.
+New code should use `embeddings`. Use `embeddings-onnx` only when the application needs `embed_anything`'s ONNX runtime path.
 
 ## Basic Flow
 
