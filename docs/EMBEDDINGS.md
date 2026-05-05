@@ -109,7 +109,8 @@ let metadata = chunks
     })
     .collect::<Vec<_>>();
 
-let data = process_chunks(&chunks, &metadata, &Arc::new(embedder), Some(32), None).await?;
+let embedder = Arc::new(embedder);
+let data = process_chunks(&chunks, &metadata, &embedder, Some(32), None).await?;
 
 let db = AletheiaDB::new()?;
 for item in embed_data_to_dense_iter(data.iter().cloned(), Some(10_000)) {
