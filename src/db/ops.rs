@@ -223,6 +223,16 @@ impl AletheiaDB {
         self.current.node_count()
     }
 
+    /// Get all node IDs currently in the database.
+    ///
+    /// Returns a snapshot of all live node IDs. For large graphs prefer
+    /// [`scan_nodes_by_label`](Self::scan_nodes_by_label) to avoid loading
+    /// the full set into memory.
+    #[inline]
+    pub fn get_all_node_ids(&self) -> Vec<NodeId> {
+        self.current.get_all_node_ids()
+    }
+
     /// Get the number of edges in the current state.
     #[inline]
     pub fn edge_count(&self) -> usize {
@@ -254,5 +264,32 @@ impl AletheiaDB {
     ) -> Vec<NodeId> {
         self.current
             .find_nodes_by_property(label, property_key, property_value)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::PropertyMapBuilder;
+    use crate::test_utils::create_test_db;
+
+    #[test]
+    fn get_all_node_ids_empty_db() {
+        let (_tmp, db) = create_test_db().unwrap();
+        assert!(db.get_all_node_ids().is_empty());
+    }
+
+    #[test]
+    fn get_all_node_ids_returns_created_nodes() {
+        let (_tmp, db) = create_test_db().unwrap();
+        let a = db
+            .create_node("X", PropertyMapBuilder::new().build())
+            .unwrap();
+        let b = db
+            .create_node("X", PropertyMapBuilder::new().build())
+            .unwrap();
+        let ids = db.get_all_node_ids();
+        assert_eq!(ids.len(), 2);
+        assert!(ids.contains(&a));
+        assert!(ids.contains(&b));
     }
 }
