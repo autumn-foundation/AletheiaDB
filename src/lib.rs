@@ -87,9 +87,14 @@ pub mod cypher;
 // Optional HTTP server module
 #[cfg(feature = "http-server")]
 pub mod http;
-// Test utilities (only available in tests)
-#[cfg(test)]
+// Test utilities: available in unit tests and when the simulation feature is enabled
+// (integration tests under `--features simulation` need create_test_db).
+#[cfg(any(test, feature = "simulation"))]
 pub mod test_utils;
+
+// Deterministic Simulation Testing framework (issue #154)
+#[cfg(feature = "simulation")]
+pub mod simulation;
 
 /// Prelude for convenient imports of common types and traits.
 pub mod prelude;
