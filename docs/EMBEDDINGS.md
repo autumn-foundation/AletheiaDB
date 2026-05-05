@@ -142,6 +142,7 @@ use aletheiadb::embeddings::{
     embed_file,
     embed_files_batch,
     embed_query,
+    process_chunks,
     to_dense_iter,
     DenseEmbedData,
     DenseEmbeddingError,
