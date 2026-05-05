@@ -26,14 +26,15 @@
 //! 3. `historical`
 //! 4. `temporal_indexes`
 //! 5. `id generators`
-//! 6. `outgoing/incoming`
+//! 6. `outgoing`
+//! 7. `incoming`
 //!
 //! `commit()` handles `current_timestamp` and `wal` before entering this module.
 //! `apply_changes()` then acquires `historical` once for the whole batch. The
-//! current `temporal_indexes`, `id generators`, and `outgoing/incoming` adjacency
-//! storage use atomic or fine-grained internal synchronization, but the ordering is
-//! still the contract for future explicit locks: do not acquire an earlier entry
-//! while holding a later one.
+//! current `temporal_indexes`, `id generators`, `outgoing`, and `incoming`
+//! adjacency storage use atomic or fine-grained internal synchronization, but the
+//! ordering is still the contract for future explicit locks: do not acquire an
+//! earlier entry while holding a later one.
 
 use super::WriteTransaction;
 use crate::core::error::{Result, StorageError};

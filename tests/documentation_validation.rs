@@ -137,6 +137,7 @@ fn test_lock_acquisition_order_documented() {
     let claude = fs::read_to_string("CLAUDE.md").expect("Failed to read CLAUDE.md");
     let write_apply = fs::read_to_string("src/api/transaction/write/apply.rs")
         .expect("Failed to read write apply module");
+    let db_mod = fs::read_to_string("src/db/mod.rs").expect("Failed to read db module");
 
     let required_order = [
         "current_timestamp",
@@ -144,7 +145,8 @@ fn test_lock_acquisition_order_documented() {
         "historical",
         "temporal_indexes",
         "id generators",
-        "outgoing/incoming",
+        "outgoing",
+        "incoming",
     ];
 
     let claude_section = claude
@@ -155,9 +157,29 @@ fn test_lock_acquisition_order_documented() {
         .split("//! # Lock Acquisition Order")
         .nth(1)
         .expect("write apply module should include a lock acquisition order comment");
+    let db_mod_section = db_mod
+        .split("// Lock ordering for write-path primitives:")
+        .nth(1)
+        .expect("db module should include a lock acquisition order comment");
+
+    for (name, section) in [
+        ("CLAUDE.md", claude_section),
+        ("write apply module", write_apply_section),
+        ("db module", db_mod_section),
+    ] {
+        assert!(
+            !section.contains("outgoing/incoming"),
+            "{name} should document `outgoing` and `incoming` as separate ordered entries"
+        );
+        assert!(
+            !section.contains("either order"),
+            "{name} should not allow outgoing and incoming adjacency indexes in either order"
+        );
+    }
 
     let mut last_claude_index = 0;
     let mut last_write_apply_index = 0;
+    let mut last_db_mod_index = 0;
     for required in required_order {
         let claude_index = claude_section
             .find(required)
@@ -165,6 +187,9 @@ fn test_lock_acquisition_order_documented() {
         let write_apply_index = write_apply_section.find(required).unwrap_or_else(|| {
             panic!("write apply module should document lock-order entry: {required}")
         });
+        let db_mod_index = db_mod_section
+            .find(required)
+            .unwrap_or_else(|| panic!("db module should document lock-order entry: {required}"));
 
         assert!(
             claude_index >= last_claude_index,
@@ -174,8 +199,13 @@ fn test_lock_acquisition_order_documented() {
             write_apply_index >= last_write_apply_index,
             "write apply module should document lock-order entry in order: {required}"
         );
+        assert!(
+            db_mod_index >= last_db_mod_index,
+            "db module should document lock-order entry in order: {required}"
+        );
 
         last_claude_index = claude_index;
         last_write_apply_index = write_apply_index;
+        last_db_mod_index = db_mod_index;
     }
 }

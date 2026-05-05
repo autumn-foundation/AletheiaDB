@@ -76,11 +76,12 @@ When code needs more than one AletheiaDB write-path synchronization primitive, a
 3. `historical`
 4. `temporal_indexes`
 5. `id generators`
-6. `outgoing/incoming`
+6. `outgoing`
+7. `incoming`
 
 Current implementation notes: `wal` is a `ConcurrentWalSystem`, `temporal_indexes` uses internal DashMap sharding, and `node_id_gen`, `edge_id_gen`, and `version_id_gen` are atomic `IdGenerator`s rather than Mutexes. The order still defines the contract for future changes: never acquire an earlier primitive while holding a later one.
 
-The `outgoing/incoming` adjacency indexes may be acquired in either order among themselves and must not call back into `historical`, `wal`, or `current_timestamp`.
+If code must acquire both adjacency indexes, acquire `outgoing` before `incoming`. Neither adjacency index may call back into `historical`, `wal`, or `current_timestamp` while held.
 
 ## Testing Requirements
 
