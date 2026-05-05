@@ -22,8 +22,8 @@
 //! # let node_id = db.create_node("Node", Default::default())?;
 //! let detector = FossilDetector::new(&db);
 //!
-//! let start = time::now() - 3600 * 1_000_000 * 24 * 7; // Last week
 //! let end = time::now(); // Now
+//! let start = (end.wallclock() - 3600 * 1_000_000 * 24 * 7).into(); // Last week
 //! let window = TimeRange::new(start, end).unwrap();
 //!
 //! let result = detector.detect_fossil(node_id, window, "embedding")?;

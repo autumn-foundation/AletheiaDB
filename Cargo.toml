@@ -24,6 +24,7 @@ memmap2 = "0.9"
 thiserror = "2.0"
 smallvec = "1.13"
 chrono = "0.4"
+arbitrary = { version = "1.4", features = ["derive"], optional = true }
 
 # Force native-tls to 0.2.16 to avoid build breakage in 0.2.17
 native-tls = "=0.2.18"
@@ -118,6 +119,11 @@ semantic-search = []
 # and the Simulator orchestrator for testing temporal consistency under
 # controlled fault conditions.
 simulation = ["dep:tempfile"]
+
+# Internal fuzzing support for cargo-fuzz targets (issue #155).
+# This exposes cfg-gated parser hooks and Arbitrary implementations without
+# changing the normal public API surface.
+fuzzing = ["dep:arbitrary", "simulation"]
 
 # Experimental: prediction, synthesis, counterfactual simulation.
 # Modules: prophet, dreamer, omen, oracle, hindsight, muse, luna, metaphor,
@@ -253,7 +259,7 @@ exclude = [
 ]
 
 [lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)', 'cfg(fuzzing)'] }
 
 # Examples with required features
 # Embedding examples require their respective feature flags

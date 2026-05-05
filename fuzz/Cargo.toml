@@ -1,0 +1,52 @@
+[package]
+name = "aletheiadb-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+arbitrary = { version = "1.4", features = ["derive"] }
+libfuzzer-sys = "0.4"
+tempfile = "3.27"
+
+[dependencies.aletheiadb]
+path = ".."
+features = ["fuzzing"]
+
+[[bin]]
+name = "wal_entry_parsing"
+path = "fuzz_targets/wal_entry_parsing.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "wal_replay"
+path = "fuzz_targets/wal_replay.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "temporal_reconstruction"
+path = "fuzz_targets/temporal_reconstruction.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "property_serialization"
+path = "fuzz_targets/property_serialization.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "timestamp_arithmetic"
+path = "fuzz_targets/timestamp_arithmetic.rs"
+test = false
+doc = false
+bench = false

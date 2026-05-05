@@ -24,14 +24,17 @@
 //! # Example
 //! ```rust
 //! // Requires features = ["nova"]
-//! use aletheiadb::AletheiaDB;
+//! use aletheiadb::{AletheiaDB, PropertyMapBuilder};
 //! use aletheiadb::experimental::aura::AuraEngine;
-//! use aletheiadb::core::id::NodeId;
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let db = AletheiaDB::new()?;
-//! // ... setup temporal graph ...
-//! # let subject_node = NodeId::new(0).unwrap();
+//! let subject_node = db.create_node(
+//!     "Subject",
+//!     PropertyMapBuilder::new()
+//!         .insert_vector("embedding", &[1.0, 0.0])
+//!         .build(),
+//! )?;
 //!
 //! let engine = AuraEngine::new(&db);
 //! // Calculate the Aura using a half-life of 7 days
