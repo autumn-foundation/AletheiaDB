@@ -1,7 +1,7 @@
 //! Example: compare embed_anything construction paths.
 //!
 //! Run with:
-//! `cargo run --example embedding_comparison --features embedding-all`
+//! `cargo run --example embedding_comparison --features embeddings`
 
 use aletheiadb::embeddings::{Embedder, EmbedderBuilder, embed_data_to_dense_iter, embed_query};
 use std::time::{Duration, Instant};
