@@ -37,3 +37,6 @@
 **[Fix `execute_traversal` target shards bug]**
 **Learning:** `plan.steps` from `route_traversal` returns empty list, and we need `involved_shards`
 **Action:** Replace `steps` with `involved_shards` and update the test.
+**[Iterator False Security and Node Indexing]**
+**Learning:** Some tests (like `PropertyScanIterator`) assumed that the first node created via `CurrentStorage::create_node` receives `NodeId::new(1)`. However, the ID generator actually starts at 0, causing the test to panic. Additionally, internal module paths for `PredicateValue` and `Direction` had shifted (e.g., `PredicateValue` moved to `query::ir` and `Direction` to `crate::Direction`), which breaks test compilation if copied from older examples.
+**Action:** Always check the actual starting index of `NodeId` when using mock storage (usually `NodeId::new(0)`). Always verify the correct import paths for core enum types in tests rather than assuming they reside in `planner::physical` or `core::graph`.
