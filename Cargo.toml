@@ -160,7 +160,7 @@ tokio = ["dep:tokio"]
 # Configuration file support (TOML)
 config-toml = ["dep:serde", "dep:toml"]
 
-# Embedding generation features
+# Embedding generation via embed_anything.
 embeddings = [
     "dep:tokio",
     "dep:embed_anything",
@@ -169,19 +169,8 @@ embeddings = [
     "dep:candle-transformers",
 ]
 
-# Legacy provider feature aliases. Provider/model ownership lives in embed_anything.
-embedding-openai = ["embeddings"]
-embedding-huggingface = ["embeddings"]
-embedding-onnx = ["embeddings", "embed_anything/ort"]
-embedding-ollama = ["embeddings"]
-
-# Enable all embedding providers
-embedding-all = [
-    "embedding-openai",
-    "embedding-huggingface",
-    "embedding-onnx",
-    "embedding-ollama"
-]
+# ONNX embedding support pulls in embed_anything's ort backend.
+embeddings-onnx = ["embeddings", "embed_anything/ort"]
 
 # MCP server support
 mcp-server = ["dep:rmcp", "dep:tokio", "dep:serde", "dep:base64"]
@@ -261,23 +250,19 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }
 # Embedding examples require their respective feature flags
 [[example]]
 name = "embedding_openai"
-required-features = ["embedding-openai"]
+required-features = ["embeddings"]
 
 [[example]]
 name = "embedding_huggingface"
-required-features = ["embedding-huggingface"]
-
-[[example]]
-name = "embedding_ollama"
-required-features = ["embedding-ollama"]
+required-features = ["embeddings"]
 
 [[example]]
 name = "embedding_onnx"
-required-features = ["embedding-onnx"]
+required-features = ["embeddings-onnx"]
 
 [[example]]
 name = "embedding_comparison"
-required-features = ["embedding-all"]
+required-features = ["embeddings"]
 
 # Recovery examples demonstrating database recovery functionality
 [[example]]
