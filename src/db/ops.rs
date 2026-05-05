@@ -223,6 +223,16 @@ impl AletheiaDB {
         self.current.node_count()
     }
 
+    /// Get all node IDs currently in the database.
+    ///
+    /// Returns a snapshot of all live node IDs. For large graphs prefer
+    /// [`scan_nodes_by_label`](Self::scan_nodes_by_label) to avoid loading
+    /// the full set into memory.
+    #[inline]
+    pub fn get_all_node_ids(&self) -> Vec<NodeId> {
+        self.current.get_all_node_ids()
+    }
+
     /// Get the number of edges in the current state.
     #[inline]
     pub fn edge_count(&self) -> usize {

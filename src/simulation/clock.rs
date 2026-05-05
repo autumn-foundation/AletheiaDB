@@ -102,21 +102,31 @@ impl SimulatedClock {
 
     /// Intercept `time::now()` on the current thread.
     ///
-    /// Returns a guard that restores the real clock when dropped.
+    /// Returns a guard that restores the **previous** thread-local value when dropped,
+    /// making nested injections safe. If no outer injection is active, dropping the
+    /// guard reverts to the real wall clock.
     pub fn inject(&self) -> ClockInjectionGuard {
+        let previous = thread_local_now();
         set_thread_local(Some(self.current_micros));
-        ClockInjectionGuard
+        ClockInjectionGuard { previous }
     }
 }
 
-/// RAII guard that restores the real clock when dropped.
-#[must_use = "dropping this guard immediately would restore the real clock at once"]
+/// RAII guard that restores the previous simulated-clock value when dropped.
+///
+/// Dropping this guard restores whatever `time::now()` returned before the
+/// corresponding [`SimulatedClock::inject`] call, enabling safe nesting of
+/// multiple injections on the same thread.
+#[must_use = "dropping this guard immediately would restore the clock override at once"]
 #[derive(Debug)]
-pub struct ClockInjectionGuard;
+pub struct ClockInjectionGuard {
+    /// The thread-local value that was active before this guard was created.
+    previous: Option<i64>,
+}
 
 impl Drop for ClockInjectionGuard {
     fn drop(&mut self) {
-        set_thread_local(None);
+        set_thread_local(self.previous);
     }
 }
 
@@ -159,7 +169,23 @@ mod tests {
             let c = SimulatedClock::new(1);
             let _g = c.inject();
         }
-        // After drop, thread-local must be cleared
+        // After drop, thread-local must be cleared (no outer injection was active).
         assert!(thread_local_now().is_none());
+    }
+
+    #[test]
+    fn nested_injections_restore_outer_on_inner_drop() {
+        let outer = SimulatedClock::new(1_000);
+        let inner = SimulatedClock::new(2_000);
+
+        let _outer_guard = outer.inject();
+        assert_eq!(time::now().wallclock(), 1_000);
+
+        {
+            let _inner_guard = inner.inject();
+            assert_eq!(time::now().wallclock(), 2_000);
+        }
+        // Inner guard dropped — outer value is restored, not None.
+        assert_eq!(time::now().wallclock(), 1_000);
     }
 }

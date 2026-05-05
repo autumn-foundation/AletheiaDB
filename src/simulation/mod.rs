@@ -9,12 +9,14 @@
 //! ```ignore
 //! use aletheiadb::simulation::{Simulator, FaultConfig};
 //!
-//! // Every detail is reproducible from seed 42
+//! // Every detail is reproducible from seed 42.
+//! // The Simulator automatically injects its clock into time::now() for the
+//! // duration of its lifetime — no manual guard management needed.
 //! let mut sim = Simulator::new(42);
 //! let (_tmp, db) = aletheiadb::test_utils::create_test_db().unwrap();
 //!
-//! sim.advance_time_by(1_000_000); // move forward 1 s
-//! sim.inject_clock_jump(-500_000); // NTP-style correction back 0.5 s
+//! sim.advance_time_by(1_000_000); // move forward 1 s — time::now() returns 1 s
+//! sim.inject_clock_jump(-500_000); // NTP-style correction — time::now() returns 0.5 s
 //!
 //! db.create_node("Event", aletheiadb::PropertyMapBuilder::new().build()).unwrap();
 //!
@@ -32,6 +34,7 @@ pub use fault::{FaultConfig, FaultInjector, FaultType};
 pub use scheduler::SimulatedScheduler;
 pub use storage::{SimStorageError, SimulatedStorage};
 
+use crate::core::temporal::{TIMESTAMP_MAX, TimeRange};
 use crate::db::AletheiaDB;
 
 // ============================================================================
@@ -62,10 +65,10 @@ pub struct InvariantReport {
 /// | 7 | Half-open interval semantics: end is always exclusive |
 /// | 8 | Temporal isolation: time-travel yields consistent snapshot values |
 ///
-/// Currently checks invariants 3, 4, 6, and 7 via the live node and historical
-/// storage accessible through the public API.
+/// Checks invariants 1, 2, 3, 6, and 7 by inspecting the bi-temporal version
+/// history of every node currently in the database.
 fn verify_temporal_invariants_impl(db: &AletheiaDB) -> InvariantReport {
-    use crate::core::temporal::{TIMESTAMP_MAX, time};
+    use crate::core::temporal::time;
 
     let mut report = InvariantReport {
         passed: true,
@@ -73,41 +76,157 @@ fn verify_temporal_invariants_impl(db: &AletheiaDB) -> InvariantReport {
         nodes_checked: 0,
     };
 
-    // We iterate over the historical storage's version chains through the
-    // temporal adjacency and node-history API where available.
-    // For the DST framework's initial phase we verify what is reachable via
-    // the public `AletheiaDB` API: current node count and basic time-range
-    // invariants on each current node's bi-temporal interval.
-
-    let node_count = db.node_count();
-    report.nodes_checked = node_count;
-
-    // Query a known-safe reference time (present) to ensure time-travel
-    // doesn't panic for any node currently alive in the DB.
-    let now = time::now();
-
-    // Invariant 3 & 7: the reference time itself must be ≤ TIMESTAMP_MAX
-    // (this is always true for real clocks but fails for injected out-of-range values).
-    if now > TIMESTAMP_MAX {
-        report.violations.push(format!(
-            "Current time {now:?} exceeds TIMESTAMP_MAX — clock injection out of bounds"
-        ));
-        report.passed = false;
-    }
-
-    // Invariant 6: TIMESTAMP_MAX must contain itself (reflexivity).
+    // ── Invariant 6: TimeRange::contains_range reflexivity ──────────────────
     {
-        use crate::core::temporal::TimeRange;
         let r = TimeRange::from(time::from_secs(0));
         if !r.contains_range(&r) {
-            report
-                .violations
-                .push("TimeRange::contains_range reflexivity violated".to_owned());
-            report.passed = false;
+            push_violation(
+                &mut report,
+                "TimeRange::contains_range reflexivity violated".to_owned(),
+            );
+        }
+    }
+
+    // ── Check all live nodes ─────────────────────────────────────────────────
+    let node_ids = db.get_all_node_ids();
+    report.nodes_checked = node_ids.len();
+
+    for node_id in node_ids {
+        let history = match db.get_node_history(node_id) {
+            Ok(h) => h,
+            Err(e) => {
+                push_violation(
+                    &mut report,
+                    format!("node {node_id:?}: failed to retrieve history: {e}"),
+                );
+                continue;
+            }
+        };
+
+        let mut prev_tx_start = None;
+        let mut prev_version_number = None;
+
+        for version in &history.versions {
+            let vt = version.temporal.valid_time();
+            let tt = version.temporal.transaction_time();
+
+            // ── Invariant 3: start ≤ end for both dimensions ───────────────
+            if vt.start() > vt.end() {
+                push_violation(
+                    &mut report,
+                    format!(
+                        "node {node_id:?} v{}: valid_time start {:?} > end {:?} (Inv 3)",
+                        version.version_number,
+                        vt.start(),
+                        vt.end()
+                    ),
+                );
+            }
+            if tt.start() > tt.end() {
+                push_violation(
+                    &mut report,
+                    format!(
+                        "node {node_id:?} v{}: tx_time start {:?} > end {:?} (Inv 3)",
+                        version.version_number,
+                        tt.start(),
+                        tt.end()
+                    ),
+                );
+            }
+
+            // ── Invariant 7: end is exclusive — end must not equal a timestamp ─
+            // Closed ranges must have end > start (a zero-width closed range is
+            // only valid for point-in-time ranges explicitly created with at()).
+            // We check that a closed range's `contains(end)` is false.
+            if vt.is_closed() && vt.contains(vt.end()) {
+                push_violation(
+                    &mut report,
+                    format!(
+                        "node {node_id:?} v{}: valid_time.end {:?} is inclusive (Inv 7)",
+                        version.version_number,
+                        vt.end()
+                    ),
+                );
+            }
+            if tt.is_closed() && tt.contains(tt.end()) {
+                push_violation(
+                    &mut report,
+                    format!(
+                        "node {node_id:?} v{}: tx_time.end {:?} is inclusive (Inv 7)",
+                        version.version_number,
+                        tt.end()
+                    ),
+                );
+            }
+
+            // ── Invariant 1: tx_time.start is monotonically non-decreasing ─────
+            if let Some(prev) = prev_tx_start
+                && tt.start() < prev
+            {
+                push_violation(
+                    &mut report,
+                    format!(
+                        "node {node_id:?} v{}: tx_time.start {:?} < previous {:?} (Inv 1)",
+                        version.version_number,
+                        tt.start(),
+                        prev
+                    ),
+                );
+            }
+            prev_tx_start = Some(tt.start());
+
+            // ── Invariant 2: version numbers are strictly increasing ────────────
+            if let Some(prev_vn) = prev_version_number
+                && version.version_number <= prev_vn
+            {
+                push_violation(
+                    &mut report,
+                    format!(
+                        "node {node_id:?}: version_number {} not > previous {} (Inv 2)",
+                        version.version_number, prev_vn
+                    ),
+                );
+            }
+            prev_version_number = Some(version.version_number);
+
+            // ── Invariant 4: visibility consistency ────────────────────────────
+            // A version visible at (vt_point, tt_point) must satisfy both ranges.
+            let vt_mid = vt.start();
+            let tt_mid = tt.start();
+            let expected = vt.contains(vt_mid) && tt.contains(tt_mid);
+            let actual = version.temporal.is_visible_at(vt_mid, tt_mid);
+            if actual != expected {
+                push_violation(
+                    &mut report,
+                    format!(
+                        "node {node_id:?} v{}: is_visible_at({vt_mid:?},{tt_mid:?}) = {actual} \
+                         but expected {expected} (Inv 4)",
+                        version.version_number
+                    ),
+                );
+            }
+        }
+    }
+
+    // ── Invariant 3 & 7: reference clock must be ≤ TIMESTAMP_MAX ───────────
+    {
+        let now = time::now();
+        if now > TIMESTAMP_MAX {
+            push_violation(
+                &mut report,
+                format!(
+                    "Current time {now:?} exceeds TIMESTAMP_MAX — clock injection out of bounds"
+                ),
+            );
         }
     }
 
     report
+}
+
+fn push_violation(report: &mut InvariantReport, msg: String) {
+    report.violations.push(msg);
+    report.passed = false;
 }
 
 // ============================================================================
@@ -116,6 +235,14 @@ fn verify_temporal_invariants_impl(db: &AletheiaDB) -> InvariantReport {
 
 /// Top-level DST harness: controls clock, faults, and scheduling from one seed.
 ///
+/// The `Simulator` **automatically injects its clock** into `time::now()` for
+/// its entire lifetime. Any call to [`advance_time_by`](Self::advance_time_by)
+/// or [`inject_clock_jump`](Self::inject_clock_jump) is immediately reflected
+/// in subsequent `time::now()` calls on the same thread — no manual
+/// `clock().inject()` call is required.
+///
+/// When the `Simulator` is dropped the real wall clock is restored.
+///
 /// Create with [`Simulator::new`] (no faults) or
 /// [`Simulator::with_seed_and_faults`] (custom fault config).
 #[derive(Debug)]
@@ -123,24 +250,40 @@ pub struct Simulator {
     seed: u64,
     clock: SimulatedClock,
     faults: FaultInjector,
+    /// Holds the thread-local override active for the lifetime of this Simulator.
+    /// Declared after `clock` so the clock is still alive when the guard drops
+    /// (though the guard does not reference the clock, this keeps drop order clear).
+    _clock_guard: ClockInjectionGuard,
 }
 
 impl Simulator {
     /// Create a fault-free simulator seeded with `seed`.
+    ///
+    /// Immediately injects the simulated clock into `time::now()` on the
+    /// current thread.
     pub fn new(seed: u64) -> Self {
+        let clock = SimulatedClock::new(0);
+        let guard = clock.inject();
         Self {
             seed,
-            clock: SimulatedClock::new(0),
+            clock,
             faults: FaultInjector::new(FaultConfig::default(), seed),
+            _clock_guard: guard,
         }
     }
 
     /// Create a simulator with the given seed and custom fault configuration.
+    ///
+    /// Immediately injects the simulated clock into `time::now()` on the
+    /// current thread.
     pub fn with_seed_and_faults(seed: u64, config: FaultConfig) -> Self {
+        let clock = SimulatedClock::new(0);
+        let guard = clock.inject();
         Self {
             seed,
-            clock: SimulatedClock::new(0),
+            clock,
             faults: FaultInjector::new(config, seed),
+            _clock_guard: guard,
         }
     }
 
@@ -165,11 +308,17 @@ impl Simulator {
     }
 
     /// Advance simulated time forward by `delta_micros` microseconds.
+    ///
+    /// `time::now()` on the current thread will return the updated time
+    /// immediately.
     pub fn advance_time_by(&mut self, delta_micros: i64) {
         self.clock.advance_by(delta_micros);
     }
 
     /// Apply a clock discontinuity of `delta_micros` (positive = forward, negative = backward).
+    ///
+    /// `time::now()` on the current thread will return the updated time
+    /// immediately.
     pub fn inject_clock_jump(&mut self, delta_micros: i64) {
         self.clock.jump_by(delta_micros);
     }
@@ -185,6 +334,7 @@ impl Simulator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::temporal::time;
     use crate::test_utils::create_test_db;
 
     #[test]
@@ -194,10 +344,45 @@ mod tests {
     }
 
     #[test]
+    fn simulator_auto_injects_clock() {
+        let sim = Simulator::new(0);
+        // Clock starts at 0 — time::now() must return the simulated value.
+        assert_eq!(time::now().wallclock(), 0);
+        drop(sim);
+    }
+
+    #[test]
+    fn advance_time_by_updates_time_now() {
+        let mut sim = Simulator::new(0);
+        sim.advance_time_by(500_000);
+        assert_eq!(time::now().wallclock(), 500_000);
+    }
+
+    #[test]
     fn fresh_db_passes_invariants() {
         let s = Simulator::new(0);
         let (_tmp, db) = create_test_db().unwrap();
         let r = s.verify_temporal_invariants(&db);
+        assert!(r.passed, "{:?}", r.violations);
+    }
+
+    #[test]
+    fn invariants_check_real_node_versions() {
+        use crate::PropertyMapBuilder;
+        use crate::api::WriteOps;
+
+        let s = Simulator::new(1_000_000); // start at 1s
+        let (_tmp, db) = create_test_db().unwrap();
+
+        let props = PropertyMapBuilder::new().build();
+        let node = db.create_node("Item", props).unwrap();
+        db.write(|tx: &mut crate::WriteTransaction| {
+            tx.update_node(node, PropertyMapBuilder::new().insert("v", 2_i64).build())
+        })
+        .unwrap();
+
+        let r = s.verify_temporal_invariants(&db);
+        assert_eq!(r.nodes_checked, 1);
         assert!(r.passed, "{:?}", r.violations);
     }
 }
