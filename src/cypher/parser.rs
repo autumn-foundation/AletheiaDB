@@ -780,10 +780,11 @@ impl CypherParser {
         match self.peek().kind {
             TokenKind::IntegerLiteral => {
                 let n: i64 = self
-                    .advance()
+                    .peek()
                     .text
                     .parse()
                     .map_err(|_| self.error("invalid integer literal"))?;
+                self.advance();
                 Ok(CypherValue::Int(n))
             }
             TokenKind::FloatLiteral => {
