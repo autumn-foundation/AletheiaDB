@@ -2579,3 +2579,123 @@ mod sentry_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod sentry_value_tests {
+    use super::*;
+    use crate::core::error::StorageError;
+
+    /// 🎯 Target: PropertyValue::deserialize
+    /// 💣 Risk: Missing bounds check for Float.
+    /// 🧪 Strategy: Serialize a Float tag without enough bytes.
+    /// 🔬 Verification: Try to deserialize it and assert we get a CorruptedData error.
+    #[test]
+    fn test_deserialize_float_buffer_too_short() {
+        let mut bytes = vec![TAG_FLOAT]; // Tag for Float
+        bytes.extend_from_slice(&[1, 2, 3]); // only 3 bytes, need 8
+
+        let result = PropertyValue::deserialize(&bytes);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            crate::core::error::Error::Storage(StorageError::CorruptedData(msg)) => {
+                assert!(msg.contains("Buffer too short"));
+            }
+            _ => panic!("Expected StorageError::CorruptedData"),
+        }
+    }
+
+    /// 🎯 Target: PropertyValue::deserialize
+    /// 💣 Risk: Missing bounds check for Int.
+    /// 🧪 Strategy: Serialize an Int tag without enough bytes.
+    /// 🔬 Verification: Try to deserialize it and assert we get a CorruptedData error.
+    #[test]
+    fn test_deserialize_int_buffer_too_short() {
+        let mut bytes = vec![TAG_INT]; // Tag for Int
+        bytes.extend_from_slice(&[1, 2, 3]); // only 3 bytes, need 8
+
+        let result = PropertyValue::deserialize(&bytes);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            crate::core::error::Error::Storage(StorageError::CorruptedData(msg)) => {
+                assert!(msg.contains("Buffer too short"));
+            }
+            _ => panic!("Expected StorageError::CorruptedData"),
+        }
+    }
+
+    /// 🎯 Target: PropertyValue::deserialize
+    /// 💣 Risk: Missing bounds check for Bool.
+    /// 🧪 Strategy: Serialize a Bool tag without enough bytes.
+    /// 🔬 Verification: Try to deserialize it and assert we get a CorruptedData error.
+    #[test]
+    fn test_deserialize_bool_buffer_too_short() {
+        let bytes = vec![TAG_BOOL]; // Tag for Bool, missing 1 byte value
+
+        let result = PropertyValue::deserialize(&bytes);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            crate::core::error::Error::Storage(StorageError::CorruptedData(msg)) => {
+                assert!(msg.contains("Buffer too short"));
+            }
+            _ => panic!("Expected StorageError::CorruptedData"),
+        }
+    }
+
+    /// 🎯 Target: PropertyValue::deserialize
+    /// 💣 Risk: Missing bounds check on String length.
+    /// 🧪 Strategy: Serialize a String tag with a length that is longer than the remaining buffer.
+    /// 🔬 Verification: Try to deserialize it and assert we get a CorruptedData error.
+    #[test]
+    fn test_deserialize_string_length_overflow() {
+        let mut bytes = vec![TAG_STRING]; // Tag for String
+        bytes.extend_from_slice(&100u32.to_le_bytes()); // length: 100 bytes, but buffer is only 5 bytes
+
+        let result = PropertyValue::deserialize(&bytes);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            crate::core::error::Error::Storage(StorageError::CorruptedData(msg)) => {
+                assert!(msg.contains("Buffer too short"));
+            }
+            _ => panic!("Expected StorageError::CorruptedData"),
+        }
+    }
+
+    /// 🎯 Target: PropertyValue::deserialize
+    /// 💣 Risk: Missing bounds check on Bytes length.
+    /// 🧪 Strategy: Serialize a Bytes tag with a length that is longer than the remaining buffer.
+    /// 🔬 Verification: Try to deserialize it and assert we get a CorruptedData error.
+    #[test]
+    fn test_deserialize_bytes_length_overflow() {
+        let mut bytes = vec![TAG_BYTES]; // Tag for Bytes
+        bytes.extend_from_slice(&100u32.to_le_bytes()); // length: 100 bytes, but buffer is only 5 bytes
+
+        let result = PropertyValue::deserialize(&bytes);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            crate::core::error::Error::Storage(StorageError::CorruptedData(msg)) => {
+                assert!(msg.contains("Buffer too short"));
+            }
+            _ => panic!("Expected StorageError::CorruptedData"),
+        }
+    }
+
+    /// 🎯 Target: PropertyValue::deserialize
+    /// 💣 Risk: Invalid UTF-8 in String deserialization could be unhandled.
+    /// 🧪 Strategy: Serialize a valid String tag + length, but with invalid UTF-8 bytes payload.
+    /// 🔬 Verification: Try to deserialize it and assert we get a CorruptedData error about invalid UTF-8.
+    #[test]
+    fn test_deserialize_string_invalid_utf8() {
+        let mut bytes = vec![TAG_STRING]; // Tag for String
+        bytes.extend_from_slice(&2u32.to_le_bytes()); // length: 2 bytes
+        bytes.extend_from_slice(&[0xFF, 0xFF]); // Invalid UTF-8 bytes
+
+        let result = PropertyValue::deserialize(&bytes);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            crate::core::error::Error::Storage(StorageError::CorruptedData(msg)) => {
+                assert!(msg.contains("Invalid UTF-8"));
+            }
+            _ => panic!("Expected StorageError::CorruptedData"),
+        }
+    }
+}
