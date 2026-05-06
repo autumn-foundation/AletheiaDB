@@ -689,6 +689,22 @@ impl CurrentStorage {
         Ok(())
     }
 
+    /// Finalize the commit timestamp on a stored node after successful `apply_changes`.
+    ///
+    /// During `apply_changes`, nodes are written with `commit_timestamp: None` (pending).
+    /// This method is called after the full apply succeeds to atomically mark the node
+    /// as committed, making it visible to future snapshot readers.
+    pub fn set_node_commit_timestamp(&self, node_id: NodeId, ts: Timestamp) {
+        self.indexes
+            .with_node_mut(node_id, |n| n.metadata.commit_timestamp = Some(ts));
+    }
+
+    /// Finalize the commit timestamp on a stored edge after successful `apply_changes`.
+    pub fn set_edge_commit_timestamp(&self, edge_id: EdgeId, ts: Timestamp) {
+        self.indexes
+            .with_edge_mut(edge_id, |e| e.metadata.commit_timestamp = Some(ts));
+    }
+
     /// Update an edge directly (used by WriteTransaction).
     pub fn update_edge_direct(&self, edge: Edge) -> Result<()> {
         // Synchronize with snapshot creation

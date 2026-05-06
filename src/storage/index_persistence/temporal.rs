@@ -326,6 +326,7 @@ pub fn restore_node_version(entry: &NodeVersionEntry) -> Result<NodeVersion> {
     Ok(NodeVersion {
         id: version_id,
         node_id,
+        commit_timestamp: temporal.transaction_time().start(),
         temporal,
         label,
         data,
@@ -430,6 +431,7 @@ pub fn restore_edge_version(entry: &EdgeVersionEntry) -> Result<EdgeVersion> {
     Ok(EdgeVersion {
         id: version_id,
         edge_id,
+        commit_timestamp: temporal.transaction_time().start(),
         temporal,
         label,
         source,
@@ -631,13 +633,15 @@ mod tests {
 
         let label = GLOBAL_INTERNER.intern("Person").unwrap();
 
+        let temporal_636 = BiTemporalInterval::new(
+            TimeRange::new(1000.into(), 2000.into()).unwrap(),
+            TimeRange::new(1000.into(), crate::core::temporal::TIMESTAMP_MAX).unwrap(),
+        );
         let version = NodeVersion {
             id: VersionId::new(1).unwrap(),
             node_id: NodeId::new(1).unwrap(),
-            temporal: BiTemporalInterval::new(
-                TimeRange::new(1000.into(), 2000.into()).unwrap(),
-                TimeRange::new(1000.into(), crate::core::temporal::TIMESTAMP_MAX).unwrap(),
-            ),
+            commit_timestamp: temporal_636.transaction_time().start(),
+            temporal: temporal_636,
             label,
             data: VersionData::Anchor {
                 properties: props.clone(),
@@ -672,13 +676,15 @@ mod tests {
 
         let label = GLOBAL_INTERNER.intern("Person").unwrap();
 
+        let temporal_677 = BiTemporalInterval::new(
+            TimeRange::new(2000.into(), 3000.into()).unwrap(),
+            TimeRange::new(2000.into(), crate::core::temporal::TIMESTAMP_MAX).unwrap(),
+        );
         let version = NodeVersion {
             id: VersionId::new(2).unwrap(),
             node_id: NodeId::new(1).unwrap(),
-            temporal: BiTemporalInterval::new(
-                TimeRange::new(2000.into(), 3000.into()).unwrap(),
-                TimeRange::new(2000.into(), crate::core::temporal::TIMESTAMP_MAX).unwrap(),
-            ),
+            commit_timestamp: temporal_677.transaction_time().start(),
+            temporal: temporal_677,
             label,
             data: VersionData::Delta { delta },
             next_version: None,
@@ -710,13 +716,15 @@ mod tests {
 
         let label = GLOBAL_INTERNER.intern("KNOWS").unwrap();
 
+        let temporal_715 = BiTemporalInterval::new(
+            TimeRange::new(1000.into(), 2000.into()).unwrap(),
+            TimeRange::new(1000.into(), crate::core::temporal::TIMESTAMP_MAX).unwrap(),
+        );
         let version = EdgeVersion {
             id: VersionId::new(100).unwrap(),
             edge_id: EdgeId::new(10).unwrap(),
-            temporal: BiTemporalInterval::new(
-                TimeRange::new(1000.into(), 2000.into()).unwrap(),
-                TimeRange::new(1000.into(), crate::core::temporal::TIMESTAMP_MAX).unwrap(),
-            ),
+            commit_timestamp: temporal_715.transaction_time().start(),
+            temporal: temporal_715,
             label,
             source: NodeId::new(1).unwrap(),
             target: NodeId::new(2).unwrap(),
@@ -968,13 +976,15 @@ mod tests {
         );
 
         let label = GLOBAL_INTERNER.intern("Document").unwrap();
+        let temporal_973 = BiTemporalInterval::new(
+            TimeRange::new(2000.into(), 3000.into()).unwrap(),
+            TimeRange::new(2000.into(), crate::core::temporal::TIMESTAMP_MAX).unwrap(),
+        );
         let version = NodeVersion {
             id: VersionId::new(2).unwrap(),
             node_id: NodeId::new(1).unwrap(),
-            temporal: BiTemporalInterval::new(
-                TimeRange::new(2000.into(), 3000.into()).unwrap(),
-                TimeRange::new(2000.into(), crate::core::temporal::TIMESTAMP_MAX).unwrap(),
-            ),
+            commit_timestamp: temporal_973.transaction_time().start(),
+            temporal: temporal_973,
             label,
             data: VersionData::Delta { delta },
             next_version: None,
@@ -1006,13 +1016,15 @@ mod tests {
         );
 
         let label = GLOBAL_INTERNER.intern("Document").unwrap();
+        let temporal_1011 = BiTemporalInterval::new(
+            TimeRange::new(2000.into(), 3000.into()).unwrap(),
+            TimeRange::new(2000.into(), crate::core::temporal::TIMESTAMP_MAX).unwrap(),
+        );
         let version = NodeVersion {
             id: VersionId::new(2).unwrap(),
             node_id: NodeId::new(1).unwrap(),
-            temporal: BiTemporalInterval::new(
-                TimeRange::new(2000.into(), 3000.into()).unwrap(),
-                TimeRange::new(2000.into(), crate::core::temporal::TIMESTAMP_MAX).unwrap(),
-            ),
+            commit_timestamp: temporal_1011.transaction_time().start(),
+            temporal: temporal_1011,
             label,
             data: VersionData::Delta { delta },
             next_version: None,
@@ -1145,13 +1157,15 @@ mod tests {
 
         // Create version with materialized delta
         let label = GLOBAL_INTERNER.intern("Document").unwrap();
+        let temporal_1150 = BiTemporalInterval::new(
+            TimeRange::new(2000.into(), 3000.into()).unwrap(),
+            TimeRange::new(2000.into(), crate::core::temporal::TIMESTAMP_MAX).unwrap(),
+        );
         let version = NodeVersion {
             id: VersionId::new(2).unwrap(),
             node_id: NodeId::new(1).unwrap(),
-            temporal: BiTemporalInterval::new(
-                TimeRange::new(2000.into(), 3000.into()).unwrap(),
-                TimeRange::new(2000.into(), crate::core::temporal::TIMESTAMP_MAX).unwrap(),
-            ),
+            commit_timestamp: temporal_1150.transaction_time().start(),
+            temporal: temporal_1150,
             label,
             data: VersionData::Delta { delta },
             next_version: None,
@@ -1192,6 +1206,7 @@ mod tests {
         let version = NodeVersion {
             id: VersionId::new(2).unwrap(),
             node_id: NodeId::new(1).unwrap(),
+            commit_timestamp: temporal.transaction_time().start(),
             temporal,
             label,
             data: VersionData::Delta { delta },
@@ -1250,6 +1265,7 @@ mod tests {
         let version = NodeVersion {
             id: VersionId::new(1).unwrap(),
             node_id: NodeId::new(1).unwrap(),
+            commit_timestamp: temporal.transaction_time().start(),
             temporal,
             label,
             data: VersionData::Anchor {

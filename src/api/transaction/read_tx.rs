@@ -184,10 +184,13 @@ impl ReadTransaction {
     /// to filter in-place and avoid allocating a new `Vec`.
     fn filter_visible_edges(&self, mut edge_ids: Vec<EdgeId>) -> Vec<EdgeId> {
         edge_ids.retain(|&edge_id| {
-            // Check if edge is visible in our snapshot
+            // Use embedded commit_timestamp for visibility check (Issue #238).
             if let Ok(edge) = self.current.get_edge(edge_id) {
-                self.visibility_manager
-                    .is_visible(&self.snapshot, edge.metadata.created_by_tx)
+                self.visibility_manager.is_visible_with_embedded_ts(
+                    &self.snapshot,
+                    edge.metadata.created_by_tx,
+                    edge.metadata.commit_timestamp,
+                )
             } else {
                 // Edge doesn't exist or was deleted - not visible
                 false
@@ -250,11 +253,13 @@ impl ReadTransaction {
 impl ReadOps for ReadTransaction {
     fn get_node(&self, id: NodeId) -> Result<Node> {
         let result = if let Ok(current_node) = self.current.get_node(id) {
-            // Check if current version is visible in our snapshot
-            if self
-                .visibility_manager
-                .is_visible(&self.snapshot, current_node.metadata.created_by_tx)
-            {
+            // Use embedded commit_timestamp for visibility check (HyPer/TiDB pattern, Issue #238).
+            // Bypasses the TxVisibilityManager::committed map lock for the common fast path.
+            if self.visibility_manager.is_visible_with_embedded_ts(
+                &self.snapshot,
+                current_node.metadata.created_by_tx,
+                current_node.metadata.commit_timestamp,
+            ) {
                 Ok(current_node)
             } else {
                 // If not visible, fall through to the slow path.
@@ -271,11 +276,12 @@ impl ReadOps for ReadTransaction {
 
     fn get_edge(&self, id: EdgeId) -> Result<Edge> {
         let result = if let Ok(current_edge) = self.current.get_edge(id) {
-            // Check if current version is visible in our snapshot
-            if self
-                .visibility_manager
-                .is_visible(&self.snapshot, current_edge.metadata.created_by_tx)
-            {
+            // Use embedded commit_timestamp for visibility check (HyPer/TiDB pattern, Issue #238).
+            if self.visibility_manager.is_visible_with_embedded_ts(
+                &self.snapshot,
+                current_edge.metadata.created_by_tx,
+                current_edge.metadata.commit_timestamp,
+            ) {
                 Ok(current_edge)
             } else {
                 // If not visible, fall through to the slow path.
@@ -334,8 +340,12 @@ impl ReadOps for ReadTransaction {
             self.current
                 .get_node(*node_id)
                 .map(|node| {
-                    self.visibility_manager
-                        .is_visible(&self.snapshot, node.metadata.created_by_tx)
+                    // Use embedded commit_timestamp for visibility check (Issue #238).
+                    self.visibility_manager.is_visible_with_embedded_ts(
+                        &self.snapshot,
+                        node.metadata.created_by_tx,
+                        node.metadata.commit_timestamp,
+                    )
                 })
                 .unwrap_or(false)
         });

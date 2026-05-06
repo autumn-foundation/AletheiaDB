@@ -552,7 +552,8 @@ impl WriteTransaction {
             commit
         };
 
-        // Apply all changes atomically
+        // Apply all changes atomically.
+        // Nodes/edges are written with commit_timestamp: None during this phase.
         apply::apply_changes(self, commit_timestamp)?;
 
         // Notify temporal vector index of transaction completion (for snapshot creation)
@@ -561,9 +562,13 @@ impl WriteTransaction {
             self.current.on_temporal_vector_transaction()?;
         }
 
+        // Finalize commit timestamps in current storage.
+        // Only reached on the success path — sets commit_timestamp: Some(T) on all
+        // written nodes/edges, making them visible to future snapshot readers.
+        apply::finalize_current_commit_timestamps(self, commit_timestamp);
+
         // Register commit with visibility manager
-        self.visibility_manager
-            .register_commit(self.tx_id, commit_timestamp);
+        self.visibility_manager.register_commit(self.tx_id);
 
         // Mark as committed
         self.state = TxState::Committed;
@@ -721,12 +726,12 @@ impl ReadOps for WriteTransaction {
             // Fall back to snapshot-isolated read from storage
             match self.current.get_node(id) {
                 Ok(node) => {
-                    // Check if this version is visible in our snapshot
-                    if !self
-                        .visibility_manager
-                        .is_visible(&self.snapshot, node.metadata.created_by_tx)
-                    {
-                        // Version not visible - return NodeNotFound
+                    // Use embedded commit_timestamp for visibility check (Issue #238).
+                    if !self.visibility_manager.is_visible_with_embedded_ts(
+                        &self.snapshot,
+                        node.metadata.created_by_tx,
+                        node.metadata.commit_timestamp,
+                    ) {
                         Err(StorageError::NodeNotFound(id).into())
                     } else {
                         Ok(node)
@@ -796,12 +801,12 @@ impl ReadOps for WriteTransaction {
             // Fall back to snapshot-isolated read from storage
             match self.current.get_edge(id) {
                 Ok(edge) => {
-                    // Check if this version is visible in our snapshot
-                    if !self
-                        .visibility_manager
-                        .is_visible(&self.snapshot, edge.metadata.created_by_tx)
-                    {
-                        // Version not visible - return EdgeNotFound
+                    // Use embedded commit_timestamp for visibility check (Issue #238).
+                    if !self.visibility_manager.is_visible_with_embedded_ts(
+                        &self.snapshot,
+                        edge.metadata.created_by_tx,
+                        edge.metadata.commit_timestamp,
+                    ) {
                         Err(StorageError::EdgeNotFound(id).into())
                     } else {
                         Ok(edge)
@@ -853,8 +858,12 @@ impl ReadOps for WriteTransaction {
                 self.current
                     .get_node(*node_id)
                     .map(|node| {
-                        self.visibility_manager
-                            .is_visible(&self.snapshot, node.metadata.created_by_tx)
+                        // Use embedded commit_timestamp for visibility check (Issue #238).
+                        self.visibility_manager.is_visible_with_embedded_ts(
+                            &self.snapshot,
+                            node.metadata.created_by_tx,
+                            node.metadata.commit_timestamp,
+                        )
                     })
                     .unwrap_or(false)
             }

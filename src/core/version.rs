@@ -772,6 +772,13 @@ impl VersionData {
 }
 
 /// A version of a node at a specific point in time.
+///
+/// # Embedded Commit Timestamp (Issue #238)
+///
+/// Follows the HyPer/TiDB architectural pattern: the commit timestamp is
+/// embedded directly in the version struct so visibility checks can be
+/// performed with a single comparison (`version.commit_timestamp < snapshot_ts`)
+/// without acquiring the `TxVisibilityManager::committed` map lock.
 #[derive(Debug, Clone)]
 pub struct NodeVersion {
     /// Unique version identifier
@@ -784,6 +791,11 @@ pub struct NodeVersion {
     pub label: InternedString,
     /// Version data (anchor or delta)
     pub data: VersionData,
+    /// Commit timestamp embedded directly in the version (HyPer/TiDB pattern, Issue #238).
+    ///
+    /// Equals `temporal.transaction_time().start()`. Stored explicitly so that
+    /// visibility checks bypass the `TxVisibilityManager::committed` map.
+    pub commit_timestamp: Timestamp,
     /// Link to the next version in the chain (None if this is the latest)
     pub next_version: Option<VersionId>,
     /// Link to the previous version (for reverse traversal)
@@ -799,12 +811,14 @@ impl NodeVersion {
         label: InternedString,
         properties: PropertyMap,
     ) -> Self {
+        let commit_timestamp = temporal.transaction_time().start();
         NodeVersion {
             id,
             node_id,
             temporal,
             label,
             data: VersionData::anchor(properties),
+            commit_timestamp,
             next_version: None,
             prev_version: None,
         }
@@ -820,12 +834,14 @@ impl NodeVersion {
         new_properties: &PropertyMap,
         prev_version: VersionId,
     ) -> Self {
+        let commit_timestamp = temporal.transaction_time().start();
         NodeVersion {
             id,
             node_id,
             temporal,
             label,
             data: VersionData::delta_from_diff(old_properties, new_properties),
+            commit_timestamp,
             next_version: None,
             prev_version: Some(prev_version),
         }
@@ -863,6 +879,12 @@ impl TemporalVersion for NodeVersion {
 }
 
 /// A version of an edge at a specific point in time.
+///
+/// # Embedded Commit Timestamp (Issue #238)
+///
+/// Follows the HyPer/TiDB architectural pattern: the commit timestamp is
+/// embedded directly in the version struct so visibility checks can be
+/// performed with a single comparison without a committed-map lookup.
 #[derive(Debug, Clone)]
 pub struct EdgeVersion {
     /// Unique version identifier
@@ -879,6 +901,11 @@ pub struct EdgeVersion {
     pub target: NodeId,
     /// Version data (anchor or delta)
     pub data: VersionData,
+    /// Commit timestamp embedded directly in the version (HyPer/TiDB pattern, Issue #238).
+    ///
+    /// Equals `temporal.transaction_time().start()`. Stored explicitly so that
+    /// visibility checks bypass the `TxVisibilityManager::committed` map.
+    pub commit_timestamp: Timestamp,
     /// Link to the next version in the chain
     pub next_version: Option<VersionId>,
     /// Link to the previous version
@@ -896,6 +923,7 @@ impl EdgeVersion {
         target: NodeId,
         properties: PropertyMap,
     ) -> Self {
+        let commit_timestamp = temporal.transaction_time().start();
         EdgeVersion {
             id,
             edge_id,
@@ -904,6 +932,7 @@ impl EdgeVersion {
             source,
             target,
             data: VersionData::anchor(properties),
+            commit_timestamp,
             next_version: None,
             prev_version: None,
         }
@@ -922,6 +951,7 @@ impl EdgeVersion {
         new_properties: &PropertyMap,
         prev_version: VersionId,
     ) -> Self {
+        let commit_timestamp = temporal.transaction_time().start();
         EdgeVersion {
             id,
             edge_id,
@@ -930,6 +960,7 @@ impl EdgeVersion {
             source,
             target,
             data: VersionData::delta_from_diff(old_properties, new_properties),
+            commit_timestamp,
             next_version: None,
             prev_version: Some(prev_version),
         }
@@ -2892,5 +2923,139 @@ mod mutant_kill_tests {
             VectorDelta::from_diff(&v1, &v4).is_none(),
             "Difference < EPSILON should be considered equal"
         );
+    }
+}
+
+// ============================================================================
+// RED PHASE: Tests for embedded commit timestamps in versions (Issue #238)
+// HyPer/TiDB approach: embed commit timestamp directly in version data
+// so visibility checks can bypass the TxVisibilityManager::committed map.
+// ============================================================================
+#[cfg(test)]
+mod embedded_commit_timestamp_tests {
+    use super::*;
+    use crate::core::interning::GLOBAL_INTERNER;
+    use crate::core::property::PropertyMapBuilder;
+
+    #[test]
+    fn test_node_version_anchor_has_embedded_commit_timestamp() {
+        // NodeVersion must expose commit_timestamp directly (HyPer/TiDB pattern).
+        // This enables visibility checks without a separate committed-map lookup.
+        let commit_ts: Timestamp = 500.into();
+        let temporal = BiTemporalInterval::now(100.into(), commit_ts);
+        let version = NodeVersion::new_anchor(
+            VersionId::new(1).unwrap(),
+            NodeId::new(1).unwrap(),
+            temporal,
+            GLOBAL_INTERNER.intern("TestLabel").unwrap(),
+            PropertyMapBuilder::new().build(),
+        );
+        assert_eq!(
+            version.commit_timestamp, commit_ts,
+            "NodeVersion must embed commit_timestamp equal to transaction_time start"
+        );
+    }
+
+    #[test]
+    fn test_node_version_delta_has_embedded_commit_timestamp() {
+        let first_ts: Timestamp = 100.into();
+        let second_ts: Timestamp = 200.into();
+        let node_id = NodeId::new(1).unwrap();
+        let label = GLOBAL_INTERNER.intern("TestLabel").unwrap();
+        let old_props = PropertyMapBuilder::new().insert("x", 1i64).build();
+        let new_props = PropertyMapBuilder::new().insert("x", 2i64).build();
+
+        let delta = NodeVersion::new_delta(
+            VersionId::new(2).unwrap(),
+            node_id,
+            BiTemporalInterval::now(50.into(), second_ts),
+            label,
+            &old_props,
+            &new_props,
+            VersionId::new(1).unwrap(),
+        );
+        assert_eq!(
+            delta.commit_timestamp, second_ts,
+            "NodeVersion delta must embed commit_timestamp from transaction_time start"
+        );
+        // Earlier anchor at first_ts should still have its own commit_timestamp
+        let anchor = NodeVersion::new_anchor(
+            VersionId::new(1).unwrap(),
+            node_id,
+            BiTemporalInterval::now(50.into(), first_ts),
+            label,
+            old_props,
+        );
+        assert_eq!(anchor.commit_timestamp, first_ts);
+    }
+
+    #[test]
+    fn test_edge_version_anchor_has_embedded_commit_timestamp() {
+        let commit_ts: Timestamp = 750.into();
+        let temporal = BiTemporalInterval::now(200.into(), commit_ts);
+        let version = EdgeVersion::new_anchor(
+            VersionId::new(10).unwrap(),
+            EdgeId::new(5).unwrap(),
+            temporal,
+            GLOBAL_INTERNER.intern("KNOWS").unwrap(),
+            NodeId::new(1).unwrap(),
+            NodeId::new(2).unwrap(),
+            PropertyMapBuilder::new().build(),
+        );
+        assert_eq!(
+            version.commit_timestamp, commit_ts,
+            "EdgeVersion must embed commit_timestamp equal to transaction_time start"
+        );
+    }
+
+    #[test]
+    fn test_edge_version_delta_has_embedded_commit_timestamp() {
+        let commit_ts: Timestamp = 900.into();
+        let edge_id = EdgeId::new(5).unwrap();
+        let label = GLOBAL_INTERNER.intern("KNOWS").unwrap();
+        let old_props = PropertyMapBuilder::new().insert("w", 1i64).build();
+        let new_props = PropertyMapBuilder::new().insert("w", 2i64).build();
+
+        let delta = EdgeVersion::new_delta(
+            VersionId::new(11).unwrap(),
+            edge_id,
+            BiTemporalInterval::now(200.into(), commit_ts),
+            label,
+            NodeId::new(1).unwrap(),
+            NodeId::new(2).unwrap(),
+            &old_props,
+            &new_props,
+            VersionId::new(10).unwrap(),
+        );
+        assert_eq!(
+            delta.commit_timestamp, commit_ts,
+            "EdgeVersion delta must embed commit_timestamp from transaction_time start"
+        );
+    }
+
+    #[test]
+    fn test_commit_timestamp_enables_direct_visibility_check() {
+        // The core HyPer/TiDB pattern: given a version and a snapshot timestamp,
+        // visibility can be determined with a single comparison — no map lookup.
+        let commit_ts: Timestamp = 50.into();
+        let snapshot_ts: Timestamp = 100.into();
+        let version = NodeVersion::new_anchor(
+            VersionId::new(1).unwrap(),
+            NodeId::new(1).unwrap(),
+            BiTemporalInterval::now(10.into(), commit_ts),
+            GLOBAL_INTERNER.intern("N").unwrap(),
+            PropertyMapBuilder::new().build(),
+        );
+        // Committed before snapshot → visible
+        assert!(version.commit_timestamp < snapshot_ts);
+        // Committed after snapshot → not visible
+        let late_version = NodeVersion::new_anchor(
+            VersionId::new(2).unwrap(),
+            NodeId::new(1).unwrap(),
+            BiTemporalInterval::now(10.into(), 150.into()),
+            GLOBAL_INTERNER.intern("N").unwrap(),
+            PropertyMapBuilder::new().build(),
+        );
+        assert!(late_version.commit_timestamp > snapshot_ts);
     }
 }
