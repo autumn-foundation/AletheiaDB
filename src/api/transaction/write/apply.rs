@@ -85,8 +85,9 @@ pub(crate) fn apply_node_write(
     commit_timestamp: Timestamp,
     historical: &mut HistoricalStorage,
 ) -> Result<()> {
-    // Create node with proper transaction metadata
-    let metadata = VersionMetadata::new(tx.tx_id, commit_timestamp);
+    // Create node with pending metadata (commit_timestamp finalized after full apply_changes).
+    // Using uncommitted here prevents phantom visibility if apply_changes fails partway through.
+    let metadata = VersionMetadata::uncommitted(tx.tx_id);
     let node = Node::with_metadata(node_id, label, properties.clone(), version_id, metadata);
 
     // Insert or update in current storage
@@ -143,8 +144,8 @@ pub(crate) fn apply_edge_write(
     commit_timestamp: Timestamp,
     historical: &mut HistoricalStorage,
 ) -> Result<()> {
-    // Create edge with proper transaction metadata
-    let metadata = VersionMetadata::new(tx.tx_id, commit_timestamp);
+    // Create edge with pending metadata (commit_timestamp finalized after full apply_changes).
+    let metadata = VersionMetadata::uncommitted(tx.tx_id);
     let edge = Edge::with_metadata(
         edge_id,
         label,
@@ -487,4 +488,37 @@ pub(crate) fn apply_changes(tx: &WriteTransaction, commit_timestamp: Timestamp) 
     // via merged reads. Background compaction handles delta->frozen promotion.
 
     Ok(())
+}
+
+/// Finalize commit timestamps in current storage after a successful `apply_changes`.
+///
+/// During `apply_changes`, nodes and edges are written to current storage with
+/// `commit_timestamp: None` (via `VersionMetadata::uncommitted`).  This prevents
+/// phantom visibility if `apply_changes` fails partway through: an aborted
+/// transaction's partial writes stay invisible because `is_visible_with_embedded_ts`
+/// treats `None` as uncommitted.
+///
+/// This function is called only on the success path, just before `register_commit`.
+/// It sets `commit_timestamp: Some(T)` on every node/edge written in this
+/// transaction, making them visible to snapshots taken after the commit.
+pub(crate) fn finalize_current_commit_timestamps(
+    tx: &WriteTransaction,
+    commit_timestamp: Timestamp,
+) {
+    for write in tx.buffer.operations() {
+        match write {
+            crate::api::transaction::BufferedWrite::CreateNode { node_id, .. }
+            | crate::api::transaction::BufferedWrite::UpdateNode { node_id, .. } => {
+                tx.current
+                    .set_node_commit_timestamp(*node_id, commit_timestamp);
+            }
+            crate::api::transaction::BufferedWrite::CreateEdge { edge_id, .. }
+            | crate::api::transaction::BufferedWrite::UpdateEdge { edge_id, .. } => {
+                tx.current
+                    .set_edge_commit_timestamp(*edge_id, commit_timestamp);
+            }
+            // Deletes remove the node/edge from current storage; no finalization needed.
+            _ => {}
+        }
+    }
 }

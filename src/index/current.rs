@@ -224,6 +224,26 @@ impl CurrentIndexes {
         self.nodes.get(&id).map(|entry| f(entry.value()))
     }
 
+    /// Mutably access a node without replacing it, executing a closure on mutable node data.
+    pub fn with_node_mut<F>(&self, id: NodeId, f: F)
+    where
+        F: FnOnce(&mut Node),
+    {
+        if let Some(mut entry) = self.nodes.get_mut(&id) {
+            f(entry.value_mut());
+        }
+    }
+
+    /// Mutably access an edge without replacing it.
+    pub fn with_edge_mut<F>(&self, id: EdgeId, f: F)
+    where
+        F: FnOnce(&mut Edge),
+    {
+        if let Some(mut entry) = self.edges.get_mut(&id) {
+            f(entry.value_mut());
+        }
+    }
+
     /// Access an edge without cloning, executing a closure on the edge data.
     ///
     /// This method provides zero-copy read access to edge data for hot paths

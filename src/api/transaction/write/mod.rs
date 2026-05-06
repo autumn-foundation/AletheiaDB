@@ -552,7 +552,8 @@ impl WriteTransaction {
             commit
         };
 
-        // Apply all changes atomically
+        // Apply all changes atomically.
+        // Nodes/edges are written with commit_timestamp: None during this phase.
         apply::apply_changes(self, commit_timestamp)?;
 
         // Notify temporal vector index of transaction completion (for snapshot creation)
@@ -560,6 +561,11 @@ impl WriteTransaction {
         if self.buffer.has_vector_operations() {
             self.current.on_temporal_vector_transaction()?;
         }
+
+        // Finalize commit timestamps in current storage.
+        // Only reached on the success path — sets commit_timestamp: Some(T) on all
+        // written nodes/edges, making them visible to future snapshot readers.
+        apply::finalize_current_commit_timestamps(self, commit_timestamp);
 
         // Register commit with visibility manager
         self.visibility_manager.register_commit(self.tx_id);

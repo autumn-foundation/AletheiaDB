@@ -1026,10 +1026,11 @@ impl CheckpointManager {
                 use crate::core::hlc::HybridTimestamp;
                 use crate::core::temporal::{TIMESTAMP_MAX, TimeRange};
 
-                let valid_start = HybridTimestamp::new_unchecked(entry.valid_from, 0);
+                let valid_start =
+                    HybridTimestamp::new_unchecked(entry.valid_from, entry.valid_from_logical);
                 let valid_end = entry
                     .valid_to
-                    .map(|t| HybridTimestamp::new_unchecked(t, 0))
+                    .map(|t| HybridTimestamp::new_unchecked(t, entry.valid_to_logical.unwrap_or(0)))
                     .unwrap_or(TIMESTAMP_MAX);
                 let valid_time = TimeRange::new(valid_start, valid_end).map_err(|e| {
                     StorageError::CheckpointError {
@@ -1037,7 +1038,7 @@ impl CheckpointManager {
                     }
                 })?;
 
-                let tx_start = HybridTimestamp::new_unchecked(entry.tx_time, 0);
+                let tx_start = HybridTimestamp::new_unchecked(entry.tx_time, entry.tx_time_logical);
                 let tx_time = TimeRange::from(tx_start);
 
                 let temporal = crate::core::temporal::BiTemporalInterval::new(valid_time, tx_time);
@@ -1096,10 +1097,11 @@ impl CheckpointManager {
                 use crate::core::hlc::HybridTimestamp;
                 use crate::core::temporal::{TIMESTAMP_MAX, TimeRange};
 
-                let valid_start = HybridTimestamp::new_unchecked(entry.valid_from, 0);
+                let valid_start =
+                    HybridTimestamp::new_unchecked(entry.valid_from, entry.valid_from_logical);
                 let valid_end = entry
                     .valid_to
-                    .map(|t| HybridTimestamp::new_unchecked(t, 0))
+                    .map(|t| HybridTimestamp::new_unchecked(t, entry.valid_to_logical.unwrap_or(0)))
                     .unwrap_or(TIMESTAMP_MAX);
                 let valid_time = TimeRange::new(valid_start, valid_end).map_err(|e| {
                     StorageError::CheckpointError {
@@ -1107,7 +1109,7 @@ impl CheckpointManager {
                     }
                 })?;
 
-                let tx_start = HybridTimestamp::new_unchecked(entry.tx_time, 0);
+                let tx_start = HybridTimestamp::new_unchecked(entry.tx_time, entry.tx_time_logical);
                 let tx_time = TimeRange::from(tx_start);
 
                 let temporal = crate::core::temporal::BiTemporalInterval::new(valid_time, tx_time);
