@@ -71,7 +71,7 @@ See the [Hybrid Query guide](docs/guides/hybrid-query-guide.md).
 ## Performance
 
 Benchmarks run on every push to trunk.
-[📊 Latest results](https://madmax983.github.io/AletheiaDB/benchmarks/) · [📈 Historical trends](https://madmax983.github.io/AletheiaDB/dev/bench/)
+[📊 Latest results](https://madmax983.github.io/AletheiaDB/benchmarks/)
 
 Averages across 30–212 datapoints of continuous CI runs:
 
