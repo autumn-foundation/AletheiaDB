@@ -562,8 +562,7 @@ impl WriteTransaction {
         }
 
         // Register commit with visibility manager
-        self.visibility_manager
-            .register_commit(self.tx_id, commit_timestamp);
+        self.visibility_manager.register_commit(self.tx_id);
 
         // Mark as committed
         self.state = TxState::Committed;
