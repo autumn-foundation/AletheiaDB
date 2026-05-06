@@ -211,7 +211,7 @@ db.query()
 
 **Version:** 0.1.0
 **Rust Version:** 1.92+
-**License:** MIT
+**License:** MIT OR Apache-2.0
 
 **Test Coverage:**
 - Library tests: 1,327 passing
