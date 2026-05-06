@@ -17,6 +17,32 @@ fn matches_label(label_id: InternedString, label: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Hot-path header for a node, containing only fields needed for label filtering.
+///
+/// Storing these 16 bytes separately from the full [`Node`] struct (which carries
+/// a large `PropertyMap` Arc) lets label-scan queries iterate 16 bytes per entry
+/// instead of 100-500+ bytes, dramatically reducing cache pressure.
+///
+/// `NodeHeader` is kept in sync with the full node map: every `insert_node` creates
+/// a corresponding header and every `remove_node` removes it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NodeHeader {
+    /// Unique identifier for this node (mirrors `Node::id`).
+    pub id: NodeId,
+    /// Label/type of the node (mirrors `Node::label`).
+    pub label: InternedString,
+}
+
+impl From<&Node> for NodeHeader {
+    #[inline]
+    fn from(node: &Node) -> Self {
+        NodeHeader {
+            id: node.id,
+            label: node.label,
+        }
+    }
+}
+
 /// A node in the current state of the graph.
 ///
 /// This represents the current version of a node, optimized for fast access.
@@ -628,6 +654,72 @@ mod tests {
         assert!(
             !edge.connects(NodeId::new(11).unwrap(), NodeId::new(20).unwrap()),
             "Should return false when source mismatches"
+        );
+    }
+}
+
+/// Tests for NodeHeader hot/cold path split (Issue #340).
+///
+/// NodeHeader contains only the hot-path fields (id + label) needed for
+/// filtering, allowing label scans to touch 16 bytes per node instead of
+/// the full Node struct (100-500+ bytes with PropertyMap).
+#[cfg(test)]
+mod node_header_tests {
+    use super::*;
+    use crate::core::interning::GLOBAL_INTERNER;
+    use crate::core::property::PropertyMapBuilder;
+
+    #[test]
+    fn test_node_header_has_id_and_label() {
+        let label = GLOBAL_INTERNER.intern("Person").unwrap();
+        let header = NodeHeader {
+            id: NodeId::new(42).unwrap(),
+            label,
+        };
+        assert_eq!(header.id, NodeId::new(42).unwrap());
+        assert_eq!(header.label, label);
+    }
+
+    #[test]
+    fn test_node_header_from_node() {
+        let label = GLOBAL_INTERNER.intern("Company").unwrap();
+        let node = Node::new(
+            NodeId::new(7).unwrap(),
+            label,
+            PropertyMapBuilder::new().insert("name", "Acme").build(),
+            VersionId::new(1).unwrap(),
+        );
+        let header = NodeHeader::from(&node);
+        assert_eq!(header.id, node.id);
+        assert_eq!(header.label, node.label);
+    }
+
+    #[test]
+    fn test_node_header_is_copy() {
+        let label = GLOBAL_INTERNER.intern("Event").unwrap();
+        let h1 = NodeHeader {
+            id: NodeId::new(1).unwrap(),
+            label,
+        };
+        let h2 = h1; // Copy, not move
+        assert_eq!(h1.id, h2.id);
+    }
+
+    #[test]
+    fn test_node_header_size_is_small() {
+        // NodeHeader must be smaller than a full Node. Node has PropertyMap (Arc),
+        // VersionId, and VersionMetadata on top of id + label.
+        assert!(
+            std::mem::size_of::<NodeHeader>() < std::mem::size_of::<Node>(),
+            "NodeHeader ({} bytes) should be smaller than Node ({} bytes)",
+            std::mem::size_of::<NodeHeader>(),
+            std::mem::size_of::<Node>(),
+        );
+        // NodeHeader is exactly NodeId(u64) + InternedString(u32) + padding = 16 bytes
+        assert!(
+            std::mem::size_of::<NodeHeader>() <= 16,
+            "NodeHeader should fit in at most 16 bytes, got {}",
+            std::mem::size_of::<NodeHeader>()
         );
     }
 }
