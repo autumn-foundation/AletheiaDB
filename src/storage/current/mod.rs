@@ -2203,13 +2203,8 @@ impl CurrentStorage {
             let mut results = Vec::with_capacity(candidate_count);
 
             for (node_id, similarity) in candidate_results {
-                // HOT PATH: Use zero-copy label lookup to avoid cloning entire Node
-                if self
-                    .indexes
-                    .get_node_label(node_id)
-                    .map(|l| l == label_id)
-                    .unwrap_or(false)
-                {
+                // HOT PATH: check_node_label avoids cloning Node and Option overhead (Issue #339)
+                if self.indexes.check_node_label(node_id, label_id) {
                     results.push((node_id, similarity));
                 }
             }
