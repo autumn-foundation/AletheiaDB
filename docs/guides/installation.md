@@ -31,21 +31,18 @@ This gives you the core database with TOML config support. Feature flags are add
 | `config-toml` | Load config from `.toml` files | Default; remove to trim deps |
 | `observability` | OpenTelemetry-compatible tracing spans and metrics | Production deployments |
 | `metrics-rs` | Adapter from AletheiaDB metrics to the `metrics` facade | If your app already uses `metrics` |
-| `embedding-openai` | OpenAI embedding provider | Semantic search via OpenAI API |
-| `embedding-huggingface` | HuggingFace embedding provider | Open-source model API |
-| `embedding-ollama` | Ollama local embedding provider | Local inference, privacy-first |
-| `embedding-onnx` | ONNX local inference | Ultra-fast local (requires setup) |
-| `embedding-all` | All embedding providers | |
+| `embeddings` | Embedding generation system (OpenAI, HuggingFace, Ollama providers) | Semantic search with external providers |
+| `embeddings-onnx` | ONNX local inference backend | Ultra-fast local embeddings (requires setup) |
 | `mcp-server` | MCP server binary for LLM integration | Claude / MCP tool use |
 | `sharding-rpc` | RPC client for distributed sharding | Horizontal scaling |
 | `semantic-search` | Stable semantic modules (Fishing, Gestalt, etc.) | Production semantic search |
 | `nova` | All experimental semantic modules | R&D / experimental use |
 
-**Example: MCP server + observability + OpenAI embeddings**
+**Example: MCP server + observability + embeddings**
 
 ```toml
 [dependencies]
-aletheiadb = { version = "0.1", features = ["mcp-server", "observability", "embedding-openai"] }
+aletheiadb = { version = "0.1", features = ["mcp-server", "observability", "embeddings"] }
 ```
 
 **Example: Minimal — core database only, no extras**

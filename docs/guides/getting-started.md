@@ -10,8 +10,6 @@ By the end you'll have a working mental model of how AletheiaDB works day-to-day
 
 ## 1. Create a Database
 
-The simplest way to create a database — in-memory, no config required:
-
 ```rust
 use aletheiadb::prelude::*;
 
@@ -22,12 +20,15 @@ fn main() -> Result<()> {
 }
 ```
 
-`AletheiaDB::new()` creates an in-memory database. Data does not survive process
-restart. For persistent storage, see [Persistence Guide](PERSISTENCE.md).
+`AletheiaDB::new()` creates a **disk-backed** database in `./aletheiadb/wal`
+(relative to the current working directory) with Group Commit durability. Data
+survives process restart. For a different path, in-memory testing, or custom
+durability settings, use `AletheiaDB::with_unified_config()` — see
+[Persistence Guide](PERSISTENCE.md).
 
 > **Note on leftover state**: If you run examples in the same directory repeatedly,
-> you may see `InvalidTimeRange` errors from previous runs. Use a temp directory or
-> clear `./aletheiadb` between runs, or configure a fresh path via `AletheiaDBConfig`.
+> you may see `InvalidTimeRange` errors from previous runs. Clear `./aletheiadb`
+> between runs, or point each run at its own directory via `AletheiaDBConfig`.
 
 ---
 
@@ -83,9 +84,10 @@ println!("Name: {:?}", alice.properties.get("name"));        // Some("Alice")
 let edge = db.get_edge(edge_id)?;
 println!("From: {:?}, To: {:?}", edge.source, edge.target);
 
-// Traverse: get all edges going out from a node
-let outgoing = db.get_outgoing_edges(alice_id, "KNOWS")?;
-for e in outgoing {
+// Traverse: get edge IDs for a specific relationship type, then fetch each edge
+let edge_ids = db.get_outgoing_edges_with_label(alice_id, "KNOWS");
+for eid in edge_ids {
+    let e = db.get_edge(eid)?;
     println!("Alice knows node: {:?}", e.target);
 }
 ```
@@ -229,13 +231,13 @@ See [Hybrid Query Guide](hybrid-query-guide.md) for the full API.
 
 ```rust
 // Delete a specific edge
-db.delete_edge(edge_id)?;
+db.write(|tx| tx.delete_edge(edge_id))?;
 
 // Delete a node AND all its connected edges (recommended)
-db.delete_node_cascade(alice_id)?;
+db.write(|tx| tx.delete_node_cascade(alice_id))?;
 
 // Delete node only (leaves orphaned edges — use carefully)
-// db.delete_node(alice_id)?;
+// db.write(|tx| tx.delete_node(alice_id))?;
 ```
 
 Prefer `delete_node_cascade` to avoid orphaned edges. See [Known Limitations](../../README.md#known-limitations).
