@@ -308,8 +308,7 @@ impl CurrentIndexes {
     pub fn check_node_label(&self, id: NodeId, expected: InternedString) -> bool {
         self.nodes
             .get(&id)
-            .map(|entry| entry.value().label == expected)
-            .unwrap_or(false)
+            .is_some_and(|entry| entry.value().label == expected)
     }
 
     /// Get the endpoints (source, target) of an edge without cloning.
