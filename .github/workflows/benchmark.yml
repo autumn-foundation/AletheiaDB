@@ -93,7 +93,9 @@ jobs:
 
           # Run benchmarks with configured timing parameters
           # BENCH_SAMPLE_SIZE, BENCH_MEASUREMENT_TIME, and BENCH_WARMUP_TIME are read from env
-          cargo bench --all-features $BENCH_TARGETS | tee output.txt
+          # Explicit feature set: embeddings-onnx is excluded because ort-sys requires a native
+          # C++ ONNX Runtime library not available in CI runners, and no benchmark uses it.
+          cargo bench --features "config-toml,observability,semantic-search,embeddings" $BENCH_TARGETS | tee output.txt
 
           # Verify that Criterion generated output
           if [ ! -d "target/criterion" ]; then
