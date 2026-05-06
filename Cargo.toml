@@ -60,7 +60,7 @@ tokio = { version = "1.52", features = ["rt-multi-thread", "macros"], optional =
 embed_anything = { version = "0.6.7", optional = true }
 # embed_anything 0.6.7 accepts candle ^0.9.1 but does not build against 0.9.2's
 # wider CpuStorage enum yet. Keep these pins until upstream handles the new variants.
-candle-core = { version = "=0.9.1", optional = true }
+candle-core = { version = "=0.10.2", optional = true }
 candle-nn = { version = "=0.9.1", optional = true }
 candle-transformers = { version = "=0.10.2", optional = true }
 
