@@ -1,3 +1,8 @@
+//! Unit tests and test helpers for this module.
+//!
+//! # Why?
+//! Provides test coverage for the associated module's logic.
+
 #[cfg(test)]
 mod tests {
     use crate::core::vector::simd;

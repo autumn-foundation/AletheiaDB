@@ -1,3 +1,8 @@
+//! Unit tests and test helpers for this module.
+//!
+//! # Why?
+//! Provides test coverage for the associated module's logic.
+
 use super::*;
 use crate::core::id::{EdgeId, NodeId};
 use crate::core::interning::GLOBAL_INTERNER;
