@@ -1073,6 +1073,7 @@ impl CheckpointManager {
                 let version = crate::core::version::NodeVersion {
                     id: version_id,
                     node_id,
+                    commit_timestamp: temporal.transaction_time().start(),
                     temporal,
                     label,
                     data,
@@ -1143,6 +1144,7 @@ impl CheckpointManager {
                     edge_id,
                     source,
                     target,
+                    commit_timestamp: temporal.transaction_time().start(),
                     temporal,
                     label,
                     data,

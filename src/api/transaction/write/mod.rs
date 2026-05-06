@@ -721,12 +721,12 @@ impl ReadOps for WriteTransaction {
             // Fall back to snapshot-isolated read from storage
             match self.current.get_node(id) {
                 Ok(node) => {
-                    // Check if this version is visible in our snapshot
-                    if !self
-                        .visibility_manager
-                        .is_visible(&self.snapshot, node.metadata.created_by_tx)
-                    {
-                        // Version not visible - return NodeNotFound
+                    // Use embedded commit_timestamp for visibility check (Issue #238).
+                    if !self.visibility_manager.is_visible_with_embedded_ts(
+                        &self.snapshot,
+                        node.metadata.created_by_tx,
+                        node.metadata.commit_timestamp,
+                    ) {
                         Err(StorageError::NodeNotFound(id).into())
                     } else {
                         Ok(node)
@@ -796,12 +796,12 @@ impl ReadOps for WriteTransaction {
             // Fall back to snapshot-isolated read from storage
             match self.current.get_edge(id) {
                 Ok(edge) => {
-                    // Check if this version is visible in our snapshot
-                    if !self
-                        .visibility_manager
-                        .is_visible(&self.snapshot, edge.metadata.created_by_tx)
-                    {
-                        // Version not visible - return EdgeNotFound
+                    // Use embedded commit_timestamp for visibility check (Issue #238).
+                    if !self.visibility_manager.is_visible_with_embedded_ts(
+                        &self.snapshot,
+                        edge.metadata.created_by_tx,
+                        edge.metadata.commit_timestamp,
+                    ) {
                         Err(StorageError::EdgeNotFound(id).into())
                     } else {
                         Ok(edge)
@@ -853,8 +853,12 @@ impl ReadOps for WriteTransaction {
                 self.current
                     .get_node(*node_id)
                     .map(|node| {
-                        self.visibility_manager
-                            .is_visible(&self.snapshot, node.metadata.created_by_tx)
+                        // Use embedded commit_timestamp for visibility check (Issue #238).
+                        self.visibility_manager.is_visible_with_embedded_ts(
+                            &self.snapshot,
+                            node.metadata.created_by_tx,
+                            node.metadata.commit_timestamp,
+                        )
                     })
                     .unwrap_or(false)
             }

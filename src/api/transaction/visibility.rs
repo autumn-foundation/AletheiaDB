@@ -651,6 +651,34 @@ impl TxVisibilityManager {
         }
     }
 
+    /// Check version visibility using the commit timestamp embedded in the version
+    /// (HyPer/TiDB pattern, Issue #238).
+    ///
+    /// Unlike [`is_visible`], this method does NOT acquire the `committed` map lock
+    /// or perform a map lookup.  The caller supplies the commit timestamp that was
+    /// recorded directly on the version struct (`NodeVersion::commit_timestamp` or
+    /// `EdgeVersion::commit_timestamp`), so the check reduces to a single comparison.
+    ///
+    /// # Arguments
+    /// * `snapshot` - The transaction's snapshot
+    /// * `created_by_tx` - The transaction that created the version
+    /// * `commit_timestamp` - The commit timestamp embedded in the version, or `None` if uncommitted
+    ///
+    /// # Returns
+    /// `true` if the version is visible, `false` otherwise
+    pub fn is_visible_with_embedded_ts(
+        &self,
+        snapshot: &TransactionSnapshot,
+        created_by_tx: TxId,
+        commit_timestamp: Option<Timestamp>,
+    ) -> bool {
+        // Special case: TxId(0) is pre-existing data, always visible.
+        if created_by_tx.as_u64() == 0 {
+            return true;
+        }
+        snapshot.is_visible(created_by_tx, commit_timestamp)
+    }
+
     /// Get the number of active transactions.
     ///
     /// This is primarily useful for testing and monitoring.
@@ -1295,6 +1323,104 @@ mod tests {
         assert!(
             !manager.should_compress_by_exception_count(10),
             "Should not need compression immediately after compressing"
+        );
+    }
+}
+
+// ============================================================================
+// RED PHASE: Tests for embedded-timestamp visibility (Issue #238)
+// HyPer/TiDB approach: visibility checks use commit_timestamp embedded in
+// the version struct, bypassing the TxVisibilityManager::committed map.
+// ============================================================================
+#[cfg(test)]
+mod embedded_timestamp_visibility_tests {
+    use super::*;
+
+    #[test]
+    fn test_is_visible_with_embedded_ts_committed_before_snapshot() {
+        let manager = TxVisibilityManager::new();
+        let snapshot = manager.capture_snapshot(100.into());
+
+        // commit_timestamp < snapshot_timestamp → visible (no committed-map lookup)
+        assert!(
+            manager.is_visible_with_embedded_ts(&snapshot, TxId::new(1), Some(50.into())),
+            "Version committed before snapshot should be visible via embedded timestamp"
+        );
+    }
+
+    #[test]
+    fn test_is_visible_with_embedded_ts_committed_after_snapshot() {
+        let manager = TxVisibilityManager::new();
+        let snapshot = manager.capture_snapshot(100.into());
+
+        // commit_timestamp >= snapshot_timestamp → not visible
+        assert!(
+            !manager.is_visible_with_embedded_ts(&snapshot, TxId::new(1), Some(150.into())),
+            "Version committed after snapshot should not be visible"
+        );
+    }
+
+    #[test]
+    fn test_is_visible_with_embedded_ts_concurrent_transaction() {
+        let manager = TxVisibilityManager::new();
+        manager.register_active(TxId::new(1));
+
+        // Snapshot while tx1 is still active
+        let snapshot = manager.capture_snapshot(100.into());
+        manager.register_commit(TxId::new(1), 90.into());
+
+        // Even though commit_ts < snapshot_ts, tx1 was active at snapshot → not visible
+        assert!(
+            !manager.is_visible_with_embedded_ts(&snapshot, TxId::new(1), Some(90.into())),
+            "Version from concurrent transaction should not be visible"
+        );
+    }
+
+    #[test]
+    fn test_is_visible_with_embedded_ts_tx_zero_always_visible() {
+        let manager = TxVisibilityManager::new();
+        let snapshot = manager.capture_snapshot(100.into());
+
+        // TxId(0) is reserved for pre-existing data and is always visible
+        assert!(
+            manager.is_visible_with_embedded_ts(&snapshot, TxId::new(0), Some(0.into())),
+            "TxId(0) pre-existing data must always be visible"
+        );
+    }
+
+    #[test]
+    fn test_is_visible_with_embedded_ts_matches_map_based_check() {
+        // Both methods must agree: embedded-ts path and committed-map path
+        let manager = TxVisibilityManager::new();
+        manager.register_active(TxId::new(1));
+        manager.register_commit(TxId::new(1), 50.into());
+
+        let snapshot = manager.capture_snapshot(100.into());
+
+        let map_result = manager.is_visible(&snapshot, TxId::new(1));
+        let embedded_result =
+            manager.is_visible_with_embedded_ts(&snapshot, TxId::new(1), Some(50.into()));
+
+        assert_eq!(
+            map_result, embedded_result,
+            "Embedded-ts visibility must produce identical results to committed-map lookup"
+        );
+    }
+
+    #[test]
+    fn test_is_visible_with_embedded_ts_no_committed_map_required() {
+        // The key property: is_visible_with_embedded_ts works even when
+        // the transaction is NOT registered in the committed map.
+        // This demonstrates the architecture: versions are self-describing.
+        let manager = TxVisibilityManager::new();
+        let snapshot = manager.capture_snapshot(100.into());
+
+        // TxId(42) never registered — committed map has no entry for it.
+        // But with an embedded commit_timestamp, visibility is still deterministic.
+        let commit_ts: Option<Timestamp> = Some(50.into());
+        assert!(
+            manager.is_visible_with_embedded_ts(&snapshot, TxId::new(42), commit_ts),
+            "Embedded-ts check must work without a committed-map entry"
         );
     }
 }

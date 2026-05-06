@@ -1810,6 +1810,7 @@ pub fn decode_node_version(data: &[u8]) -> Result<NodeVersion> {
             .map_err(|e| StorageError::corruption(format!("Invalid version ID: {}", e)))?,
         node_id: NodeId::new(serializable.node_id)
             .map_err(|e| StorageError::corruption(format!("Invalid node ID: {}", e)))?,
+        commit_timestamp: tx_time.start(),
         temporal: BiTemporalInterval::new(valid_time, tx_time),
         label: GLOBAL_INTERNER
             .intern(&serializable.label)
@@ -1888,6 +1889,7 @@ pub fn decode_edge_version(data: &[u8]) -> Result<EdgeVersion> {
             .map_err(|e| StorageError::corruption(format!("Invalid version ID: {}", e)))?,
         edge_id: EdgeId::new(serializable.edge_id)
             .map_err(|e| StorageError::corruption(format!("Invalid edge ID: {}", e)))?,
+        commit_timestamp: tx_time.start(),
         temporal: BiTemporalInterval::new(valid_time, tx_time),
         label: GLOBAL_INTERNER
             .intern(&serializable.label)

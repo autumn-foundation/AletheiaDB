@@ -1976,13 +1976,15 @@ fn test_temporal_version_round_trip() {
         .insert("age", 30i64)
         .build();
 
+    let node_temporal = BiTemporalInterval::new(
+        TimeRange::new(1000.into(), 2000.into()).unwrap(),
+        TimeRange::from(1000.into()),
+    );
     let node_version = NodeVersion {
         id: VersionId::new(1000).unwrap(),
         node_id: NodeId::new(1).unwrap(),
-        temporal: BiTemporalInterval::new(
-            TimeRange::new(1000.into(), 2000.into()).unwrap(),
-            TimeRange::from(1000.into()),
-        ),
+        commit_timestamp: node_temporal.transaction_time().start(),
+        temporal: node_temporal,
         label: person_label,
         data: VersionData::Anchor {
             properties: node_props,
@@ -1995,13 +1997,15 @@ fn test_temporal_version_round_trip() {
     // Create edge anchor version
     let edge_props = PropertyMapBuilder::new().insert("weight", 1.5f64).build();
 
+    let edge_temporal = BiTemporalInterval::new(
+        TimeRange::new(1000.into(), 2000.into()).unwrap(),
+        TimeRange::from(1000.into()),
+    );
     let edge_version = EdgeVersion {
         id: VersionId::new(1001).unwrap(),
         edge_id: EdgeId::new(100).unwrap(),
-        temporal: BiTemporalInterval::new(
-            TimeRange::new(1000.into(), 2000.into()).unwrap(),
-            TimeRange::from(1000.into()),
-        ),
+        commit_timestamp: edge_temporal.transaction_time().start(),
+        temporal: edge_temporal,
         label: knows_label,
         source: NodeId::new(1).unwrap(),
         target: NodeId::new(2).unwrap(),
@@ -2321,10 +2325,12 @@ fn test_delta_removed_properties_persistence() {
         .insert("city", "Seattle")
         .build();
 
+    let anchor_temporal = BiTemporalInterval::now(1000i64.into(), 2000i64.into());
     let _anchor_version = NodeVersion {
         id: VersionId::new(1).unwrap(),
         node_id: NodeId::new(100).unwrap(),
-        temporal: BiTemporalInterval::now(1000i64.into(), 2000i64.into()),
+        commit_timestamp: anchor_temporal.transaction_time().start(),
+        temporal: anchor_temporal,
         label: person_label,
         data: VersionData::Anchor {
             properties: anchor_props,
@@ -2344,10 +2350,12 @@ fn test_delta_removed_properties_persistence() {
         .removed
         .insert(GLOBAL_INTERNER.intern("city").unwrap());
 
+    let delta_temporal = BiTemporalInterval::now(1000i64.into(), 3000i64.into());
     let delta_version = NodeVersion {
         id: VersionId::new(2).unwrap(),
         node_id: NodeId::new(100).unwrap(),
-        temporal: BiTemporalInterval::now(1000i64.into(), 3000i64.into()),
+        commit_timestamp: delta_temporal.transaction_time().start(),
+        temporal: delta_temporal,
         label: person_label,
         data: VersionData::Delta {
             delta: delta.clone(),
