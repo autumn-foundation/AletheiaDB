@@ -6,11 +6,12 @@ This is the entry point for AletheiaDB documentation. If you're new, start here.
 
 | Step | Guide | What You'll Learn |
 |------|-------|-------------------|
+| 0 | [Why AletheiaDB](why-aletheiadb.md) | The problem it solves and why the three dimensions matter together |
 | 1 | [Core Concepts](core-concepts.md) | What bi-temporal means, how nodes/edges/time work |
 | 2 | [Installation](installation.md) | Prerequisites, adding to Cargo.toml, building |
 | 3 | [Getting Started](getting-started.md) | Create a database, nodes, edges, run your first queries |
 
-After those three, pick the guides relevant to what you're building.
+After those four, pick the guides relevant to what you're building.
 
 ---
 
@@ -39,7 +40,7 @@ After those three, pick the guides relevant to what you're building.
 ## By Role
 
 **I'm building an LLM integration (MCP, RAG, Claude):**
-→ [Core Concepts](core-concepts.md) → [Getting Started](getting-started.md) → [Hybrid Query Guide](hybrid-query-guide.md)
+→ [Why AletheiaDB](why-aletheiadb.md) → [Getting Started](getting-started.md) → [Hybrid Query Guide](hybrid-query-guide.md)
 
 **I'm embedding AletheiaDB as a Rust library:**
 → [Installation](installation.md) → [Getting Started](getting-started.md) → [Persistence Guide](PERSISTENCE.md)
