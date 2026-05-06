@@ -20,9 +20,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// restricting the ID space (you can still have ~18 quintillion valid IDs).
 pub const MAX_VALID_ID: u64 = u64::MAX - 1000;
 
-/// Unique identifier for a node in the graph.
+/// Unique identifier for a Node in the graph.
 ///
-/// # The Spark
+/// # Why?
 /// Graph databases run on connections, and every connection needs an anchor.
 /// `NodeId` acts as this unique anchor. We strongly type this instead of using a
 /// raw `u64` so that you cannot accidentally pass an edge ID to a function

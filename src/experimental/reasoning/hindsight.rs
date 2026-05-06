@@ -27,7 +27,26 @@ use std::collections::{HashMap, HashSet, VecDeque};
 ///
 /// This structure holds all the virtual modifications (additions, updates, deletions)
 /// that are applied as an overlay on top of the base database state.
-
+///
+/// # Why?
+/// Scenarios allow developers to simulate changes (like "What if Node A was deleted?")
+/// without committing them to the persistent graph, enabling speculative reasoning or
+/// "what-if" analysis.
+///
+/// # Examples
+/// ```rust,no_run
+/// use aletheiadb::AletheiaDB;
+/// use aletheiadb::experimental::reasoning::hindsight::Hindsight;
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let db = AletheiaDB::new()?;
+/// let mut hs = Hindsight::new(&db);
+///
+/// // Make virtual changes
+/// // hs.add_node(...);
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Debug, Clone)]
 pub struct Scenario {
     /// Nodes added in this scenario.
@@ -77,7 +96,25 @@ impl Scenario {
 ///
 /// This allows you to inspect exactly what changes would be made if the scenario
 /// were committed to the actual database.
-
+///
+/// # Why?
+/// After running a complex `Scenario`, developers need to know exactly what the
+/// hypothetical outcome is before applying the changes permanently.
+///
+/// # Examples
+/// ```rust,no_run
+/// use aletheiadb::AletheiaDB;
+/// use aletheiadb::experimental::reasoning::hindsight::Hindsight;
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let db = AletheiaDB::new()?;
+/// let mut hs = Hindsight::new(&db);
+/// // ... modify scenario ...
+/// let diff = hs.diff()?;
+/// println!("Added nodes: {}", diff.added_nodes.len());
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Debug, Clone)]
 pub struct HindsightDiff {
     /// Nodes added in this scenario.

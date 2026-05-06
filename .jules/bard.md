@@ -7,3 +7,6 @@
 ## 2024-05-03 - [The Missing Documentations of the db internals]
 **Confusion:** Many core public functions and structures within the `src/db` submodules were missing module level documentation (`//!`), making it hard for users to quickly get the concept of what each file does.
 **Clarification:** I added module-level `//!` documentation to all files under `src/db` that were missing them (`admin.rs`, `config.rs`, `ops.rs`, `query.rs`, `temporal.rs`, `transaction.rs`, `vector.rs`, `vector_builder.rs`) as well as `src/experimental/temporal/temporal_narrative.rs`. This provides a "Abstract" of what the file does before listing "how".
+## 2024-05-06 - [Undocumented Structs and Broken Intra-doc Links]
+**Confusion:** Several core items lacked documentation, such as `NodeId`, `Scenario`, `HindsightDiff`, and `TxVisibilityManager::is_visible_with_embedded_ts` triggering the missing docs and broken links warnings.
+**Clarification:** I added the missing `///` documentation to `NodeId`, `Scenario`, `HindsightDiff` and fixed the broken intra-doc links for `is_visible_with_embedded_ts` and `SimulatedClock`. I also properly provided Examples and Why sections to newly documented structs.
