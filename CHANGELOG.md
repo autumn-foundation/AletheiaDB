@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-05-06
+
 ### Breaking
 
 - **Experimental "Nova" feature split into category flags**
@@ -207,8 +209,8 @@ db.query()
 
 ## Project Status
 
-**Version:** 0.1.0 (Pre-release)
-**Rust Version:** 1.83+
+**Version:** 0.1.0
+**Rust Version:** 1.92+
 **License:** MIT OR Apache-2.0
 
 **Test Coverage:**
@@ -217,13 +219,13 @@ db.query()
 - Property tests: Included
 - Total: 1,400+ tests passing
 
-**Performance Targets:**
-- Single-hop traversal: <1µs ✓
-- 3-hop traversal: <100µs ✓
-- Temporal reconstruction: <10ms ✓
-- Vector k-NN (1M vectors): <10ms ✓
-
-**Production Readiness:** Not yet production-ready. Under active development.
+**Performance** (historical averages across 30–212 CI datapoints):
+- Node/edge lookup: 25.7 ns / 25.4 ns ✓ (target <1µs)
+- Single-hop traversal: 185.8 ns ✓ (target <1µs)
+- 3-hop traversal: 24.0 µs ✓ (target <100µs)
+- Time-travel reconstruction: 82.8 ns ✓ (target <10ms)
+- k-NN search k=10, 10K vectors: 127.2 µs ✓ (target <10ms)
+- Graph + vector hybrid k=10: 22.5 µs ✓ (target <20ms)
 
 ---
 

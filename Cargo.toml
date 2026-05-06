@@ -2,12 +2,16 @@
 name = "aletheiadb"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.92"
 authors = ["AletheiaDB Contributors"]
 description = "A high-performance bi-temporal graph database for LLM integration"
-license = "MIT"
+license = "MIT OR Apache-2.0"
 repository = "https://github.com/madmax983/AletheiaDB"
+homepage = "https://madmax983.github.io/AletheiaDB/"
+documentation = "https://docs.rs/aletheiadb"
+readme = "README.md"
 keywords = ["database", "graph", "temporal", "bitemporal", "llm"]
-categories = ["database-implementations"]
+categories = ["database-implementations", "data-structures"]
 
 [dependencies]
 bytemuck = { version = "1.25.0", features = ["extern_crate_alloc", "derive"] }

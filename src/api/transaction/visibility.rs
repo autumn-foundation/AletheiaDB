@@ -70,7 +70,7 @@ impl TransactionSnapshot {
 /// Previously, a `committed: BTreeMap<TxId, Timestamp>` grew without bound as
 /// transactions completed.  After Issue #238 embedded commit timestamps in version
 /// structs, visibility checks use those timestamps directly via
-/// [`is_visible_with_embedded_ts`], so the map is unnecessary.
+/// [`Self::is_visible_with_embedded_ts`], so the map is unnecessary.
 ///
 /// # Concurrency
 ///
