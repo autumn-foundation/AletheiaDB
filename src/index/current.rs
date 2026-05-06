@@ -296,6 +296,21 @@ impl CurrentIndexes {
         self.nodes.get(&id).map(|entry| entry.value().label)
     }
 
+    /// Check whether a node's label equals the given interned string, without cloning.
+    ///
+    /// This is the preferred hot-path API for label-filtered vector search (Issue #339).
+    /// It avoids the `Option`-wrapping overhead of `get_node_label` when only a boolean
+    /// answer is needed, saving a branch and keeping the closure passed to the HNSW
+    /// filter as minimal as possible.
+    ///
+    /// Returns `false` if the node does not exist.
+    #[inline]
+    pub fn check_node_label(&self, id: NodeId, expected: InternedString) -> bool {
+        self.nodes
+            .get(&id)
+            .is_some_and(|entry| entry.value().label == expected)
+    }
+
     /// Get the endpoints (source, target) of an edge without cloning.
     ///
     /// This is a convenience method for the common case of getting an edge's
@@ -2022,5 +2037,68 @@ mod zero_copy_access_tests {
         assert_eq!(ids.len(), 2);
         assert!(ids.contains(&EdgeId::new(1).unwrap()));
         assert!(ids.contains(&EdgeId::new(2).unwrap()));
+    }
+
+    // ========================================================================
+    // Tests for check_node_label (Issue #339)
+    // ========================================================================
+
+    /// check_node_label returns true when the node exists and its label matches.
+    #[test]
+    fn test_check_node_label_matches() {
+        let indexes = CurrentIndexes::new();
+        let node = create_test_node(1, "Person");
+        indexes.insert_node(node);
+
+        let person_label = GLOBAL_INTERNER.intern("Person").unwrap();
+        assert!(indexes.check_node_label(NodeId::new(1).unwrap(), person_label));
+    }
+
+    /// check_node_label returns false when the node exists but its label differs.
+    #[test]
+    fn test_check_node_label_mismatch() {
+        let indexes = CurrentIndexes::new();
+        let node = create_test_node(1, "Person");
+        indexes.insert_node(node);
+
+        let company_label = GLOBAL_INTERNER.intern("Company").unwrap();
+        assert!(!indexes.check_node_label(NodeId::new(1).unwrap(), company_label));
+    }
+
+    /// check_node_label returns false for a node that does not exist.
+    #[test]
+    fn test_check_node_label_nonexistent() {
+        let indexes = CurrentIndexes::new();
+
+        let person_label = GLOBAL_INTERNER.intern("Person").unwrap();
+        assert!(!indexes.check_node_label(NodeId::new(999).unwrap(), person_label));
+    }
+
+    /// check_node_label is consistent with get_node_label for the same node.
+    #[test]
+    fn test_check_node_label_consistent_with_get_node_label() {
+        let indexes = CurrentIndexes::new();
+        let node = create_test_node(5, "Document");
+        indexes.insert_node(node);
+
+        let doc_label = GLOBAL_INTERNER.intern("Document").unwrap();
+        let other_label = GLOBAL_INTERNER.intern("Article").unwrap();
+
+        // check_node_label should agree with manual get_node_label comparison
+        let node_id = NodeId::new(5).unwrap();
+        let via_get = indexes
+            .get_node_label(node_id)
+            .map(|l| l == doc_label)
+            .unwrap_or(false);
+        assert_eq!(indexes.check_node_label(node_id, doc_label), via_get);
+
+        let via_get_other = indexes
+            .get_node_label(node_id)
+            .map(|l| l == other_label)
+            .unwrap_or(false);
+        assert_eq!(
+            indexes.check_node_label(node_id, other_label),
+            via_get_other
+        );
     }
 }
