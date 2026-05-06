@@ -239,12 +239,20 @@ impl CurrentIndexes {
     }
 
     /// Mutably access a node without replacing it, executing a closure on mutable node data.
+    ///
+    /// After the closure runs, the [`NodeHeader`] is refreshed so that
+    /// `get_node_header` and `filter_nodes_by_label` reflect any label change
+    /// made inside the closure.
     pub fn with_node_mut<F>(&self, id: NodeId, f: F)
     where
         F: FnOnce(&mut Node),
     {
         if let Some(mut entry) = self.nodes.get_mut(&id) {
             f(entry.value_mut());
+            // Refresh the header while still holding the write lock so that
+            // label changes are immediately visible to filter_nodes_by_label.
+            let header = NodeHeader::from(entry.value());
+            self.node_headers.insert(id, header);
         }
     }
 
@@ -521,11 +529,15 @@ impl CurrentIndexes {
 
     /// Remove a node from the indexes.
     ///
-    /// Also removes the corresponding [`NodeHeader`] to keep the hot-path
-    /// header map in sync.
+    /// Removes from the primary node map first, then removes the header only
+    /// if the node was actually present. This avoids a brief window where the
+    /// header is absent but the node still exists, which could cause a
+    /// label-filter miss under concurrent reads.
     pub fn remove_node(&self, id: NodeId) -> Option<Node> {
-        self.node_headers.remove(&id);
-        self.nodes.remove(&id).map(|(_, node)| node)
+        self.nodes.remove(&id).map(|(_, node)| {
+            self.node_headers.remove(&id);
+            node
+        })
     }
 
     /// Get the hot-path header for a node by ID.
@@ -540,24 +552,26 @@ impl CurrentIndexes {
         self.node_headers.get(&id).map(|entry| *entry.value())
     }
 
-    /// Return the IDs of all nodes whose label matches `label`.
+    /// Return an iterator over the IDs of all nodes whose label matches `label`.
     ///
     /// Scans the compact header map (16 bytes per entry) instead of the full
     /// node map, reducing memory bandwidth by ~10-30x for large property maps.
+    /// No allocation occurs until the caller collects the iterator.
+    ///
+    /// To limit results, chain `.take(n)` on the returned iterator.
     ///
     /// # Performance
     ///
     /// - Reads 16 bytes per candidate (header) vs 100-500+ bytes (full node)
-    /// - No allocation per entry during scan
-    /// - Result vec is allocated once with `with_capacity` hinting
-    pub fn filter_nodes_by_label(&self, label: InternedString) -> Vec<NodeId> {
-        let mut result = Vec::new();
-        for entry in self.node_headers.iter() {
-            if entry.value().label == label {
-                result.push(*entry.key());
-            }
-        }
-        result
+    /// - Zero allocation during scan; caller controls when/whether to collect
+    pub fn filter_nodes_by_label(
+        &self,
+        label: InternedString,
+    ) -> impl Iterator<Item = NodeId> + '_ {
+        self.node_headers
+            .iter()
+            .filter(move |entry| entry.value().label == label)
+            .map(|entry| *entry.key())
     }
 
     /// Remove an edge from the indexes.
@@ -2129,7 +2143,7 @@ mod node_header_index_tests {
         indexes.insert_node(create_test_node(3, "Company"));
 
         let person_label = GLOBAL_INTERNER.intern("Person").unwrap();
-        let mut ids = indexes.filter_nodes_by_label(person_label);
+        let mut ids: Vec<_> = indexes.filter_nodes_by_label(person_label).collect();
         ids.sort();
 
         assert_eq!(ids.len(), 2);
@@ -2143,8 +2157,7 @@ mod node_header_index_tests {
         indexes.insert_node(create_test_node(1, "Person"));
 
         let company_label = GLOBAL_INTERNER.intern("Company").unwrap();
-        let ids = indexes.filter_nodes_by_label(company_label);
-        assert!(ids.is_empty());
+        assert_eq!(indexes.filter_nodes_by_label(company_label).count(), 0);
     }
 
     #[test]
@@ -2155,15 +2168,14 @@ mod node_header_index_tests {
         }
 
         let event_label = GLOBAL_INTERNER.intern("Event").unwrap();
-        let ids = indexes.filter_nodes_by_label(event_label);
-        assert_eq!(ids.len(), 5);
+        assert_eq!(indexes.filter_nodes_by_label(event_label).count(), 5);
     }
 
     #[test]
     fn test_filter_nodes_by_label_empty_index() {
         let indexes = CurrentIndexes::new();
         let label = GLOBAL_INTERNER.intern("Anything").unwrap();
-        assert!(indexes.filter_nodes_by_label(label).is_empty());
+        assert_eq!(indexes.filter_nodes_by_label(label).count(), 0);
     }
 
     #[test]
@@ -2176,5 +2188,36 @@ mod node_header_index_tests {
 
         assert_eq!(header.id, node.id);
         assert_eq!(header.label, node.label);
+    }
+
+    #[test]
+    fn test_header_updated_after_label_mutation_via_with_node_mut() {
+        let indexes = CurrentIndexes::new();
+        indexes.insert_node(create_test_node(20, "Person"));
+
+        let user_label = GLOBAL_INTERNER.intern("User").unwrap();
+        indexes.with_node_mut(NodeId::new(20).unwrap(), |n| {
+            n.label = user_label;
+        });
+
+        // Header must reflect the new label immediately
+        let header = indexes.get_node_header(NodeId::new(20).unwrap()).unwrap();
+        assert_eq!(
+            header.label, user_label,
+            "header must reflect mutated label"
+        );
+
+        // filter_nodes_by_label must use updated header
+        let person_label = GLOBAL_INTERNER.intern("Person").unwrap();
+        assert_eq!(
+            indexes.filter_nodes_by_label(person_label).count(),
+            0,
+            "old label should no longer match"
+        );
+        assert_eq!(
+            indexes.filter_nodes_by_label(user_label).count(),
+            1,
+            "new label should match"
+        );
     }
 }
