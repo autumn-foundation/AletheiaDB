@@ -219,11 +219,13 @@ db.query()
 - Property tests: Included
 - Total: 1,400+ tests passing
 
-**Performance:**
-- Single-hop traversal: ~22ns ✓ (target <1µs)
-- 3-hop traversal: ~158ns ✓ (target <100µs)
-- Temporal reconstruction: <10ms ✓
-- Vector k-NN (1M vectors): ~4-8ms ✓ (target <10ms)
+**Performance** (historical averages across 30–212 CI datapoints):
+- Node/edge lookup: 25.7 ns / 25.4 ns ✓ (target <1µs)
+- Single-hop traversal: 185.8 ns ✓ (target <1µs)
+- 3-hop traversal: 24.0 µs ✓ (target <100µs)
+- Time-travel reconstruction: 82.8 ns ✓ (target <10ms)
+- k-NN search k=10, 10K vectors: 127.2 µs ✓ (target <10ms)
+- Graph + vector hybrid k=10: 22.5 µs ✓ (target <20ms)
 
 ---
 

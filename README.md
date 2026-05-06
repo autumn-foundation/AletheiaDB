@@ -73,14 +73,18 @@ See the [Hybrid Query guide](docs/guides/hybrid-query-guide.md).
 Benchmarks run on every push to trunk.
 [📊 Latest results](https://madmax983.github.io/AletheiaDB/benchmarks/) · [📈 Historical trends](https://madmax983.github.io/AletheiaDB/dev/bench/)
 
-| Operation | Measured | Target |
-|-----------|----------|--------|
-| Single-hop traversal | ~19 ns | < 1 µs |
-| 3-hop traversal | ~158 ns | < 100 µs |
-| Time-travel (at anchor) | ~192 ns | < 10 ms |
-| Time-travel (9 deltas, worst case) | ~201 ns | < 10 ms |
-| k-NN search (k=10, 1M vectors) | ~4–8 ms | < 10 ms |
-| Graph + vector hybrid query | ~15 ms | < 20 ms |
+Averages across 30–212 datapoints of continuous CI runs:
+
+| Operation | Historical avg | Target |
+|-----------|---------------|--------|
+| Node lookup (current state) | 25.7 ns | < 1 µs |
+| Edge lookup (current state) | 25.4 ns | < 1 µs |
+| Single-hop traversal | 185.8 ns | < 1 µs |
+| 3-hop traversal | 24.0 µs | < 100 µs |
+| Time-travel reconstruction | 82.8 ns | < 10 ms |
+| k-NN search (k=10, 1K vectors) | 55.3 µs | < 10 ms |
+| k-NN search (k=10, 10K vectors) | 127.2 µs | < 10 ms |
+| Graph + vector hybrid (k=10) | 22.5 µs | < 20 ms |
 | WAL throughput (GroupCommit) | ~100K ops/sec | — |
 
 ---
