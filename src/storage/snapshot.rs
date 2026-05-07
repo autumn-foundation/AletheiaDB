@@ -191,18 +191,20 @@ impl ExactSizeIterator for CurrentEdgeIterator {
 pub struct HistoricalStorageSnapshot {
     /// LSN at which snapshot was taken
     lsn: LSN,
-    /// Arc references to node versions
-    node_versions: Vec<Arc<NodeVersion>>,
-    /// Arc references to edge versions
-    edge_versions: Vec<Arc<EdgeVersion>>,
+    /// Arc references to node versions.
+    /// Wrapped in an Arc to prevent O(N) allocation overhead when creating iterators.
+    node_versions: Arc<Vec<Arc<NodeVersion>>>,
+    /// Arc references to edge versions.
+    /// Wrapped in an Arc to prevent O(N) allocation overhead when creating iterators.
+    edge_versions: Arc<Vec<Arc<EdgeVersion>>>,
 }
 
 impl HistoricalStorageSnapshot {
     /// Create a new historical snapshot.
     pub fn new(
         lsn: LSN,
-        node_versions: Vec<Arc<NodeVersion>>,
-        edge_versions: Vec<Arc<EdgeVersion>>,
+        node_versions: Arc<Vec<Arc<NodeVersion>>>,
+        edge_versions: Arc<Vec<Arc<EdgeVersion>>>,
     ) -> Self {
         Self {
             lsn,
@@ -245,7 +247,7 @@ impl HistoricalStorageSnapshot {
 
 /// Iterator over node versions in HistoricalStorageSnapshot.
 pub struct HistoricalNodeVersionIterator {
-    versions: Vec<Arc<NodeVersion>>,
+    versions: Arc<Vec<Arc<NodeVersion>>>,
     index: usize,
 }
 
@@ -276,7 +278,7 @@ impl ExactSizeIterator for HistoricalNodeVersionIterator {
 
 /// Iterator over edge versions in HistoricalStorageSnapshot.
 pub struct HistoricalEdgeVersionIterator {
-    versions: Vec<Arc<EdgeVersion>>,
+    versions: Arc<Vec<Arc<EdgeVersion>>>,
     index: usize,
 }
 

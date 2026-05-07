@@ -73,3 +73,6 @@
 **[Optimize Migration Candidates Vec Pre-allocation]**
 **Learning:** In `identify_node_candidates` and `identify_edge_candidates`, initializing `all_candidates` and `final_candidates` with `Vec::new()` causes unnecessary intermediate heap reallocations during large data migrations because the maximum required capacity is already known from the `versions` map and the filtered `all_candidates` vector.
 **Action:** Always pre-allocate vectors using `Vec::with_capacity(n)` when the target collection size or its upper bound is known in advance, particularly on hot paths like data migration.
+**[HistoricalStorageSnapshot Arc Vec Optimization]**
+**Learning:** Changing a collection of Arc references (`Vec<Arc<T>>`) into an Arc reference of a collection (`Arc<Vec<Arc<T>>>`) when read-only sharing is required drastically reduces allocator overhead during iterator creation. Iteration overhead remains similar (or improves due to cache locality), but thousands of individual heap allocations and atomic refcount operations during creation are entirely eliminated.
+**Action:** When capturing large graph structures for snapshots, prefer contiguous vectors wrapped in a single Arc rather than owned collections of individual Arc allocations inside iterators.

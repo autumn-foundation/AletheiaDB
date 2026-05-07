@@ -2922,7 +2922,7 @@ impl HistoricalStorage {
                 .map(|version| Arc::new(version.clone())),
         );
 
-        HistoricalStorageSnapshot::new(lsn, node_versions, edge_versions)
+        HistoricalStorageSnapshot::new(lsn, Arc::new(node_versions), Arc::new(edge_versions))
     }
 
     /// **Test-only helper**: Remove a node version from hot storage.
