@@ -552,7 +552,6 @@ fn parse_create_node_op(
     version: u8,
     tx_timestamp: HybridTimestamp,
 ) -> Result<WalOperation> {
-    require_bytes(buffer, *offset, 12, "CreateNode")?;
     let node_id = deserialize_node_id(buffer, *offset, "CreateNode")?;
     advance(offset, 8)?;
     let label = read_label(buffer, offset, "CreateNode label")?;
@@ -572,7 +571,6 @@ fn parse_create_edge_op(
     version: u8,
     tx_timestamp: HybridTimestamp,
 ) -> Result<WalOperation> {
-    require_bytes(buffer, *offset, 28, "CreateEdge")?;
     let edge_id = deserialize_edge_id(buffer, *offset, "CreateEdge")?;
     advance(offset, 8)?;
     let source = deserialize_node_id(buffer, *offset, "CreateEdge source")?;
@@ -598,7 +596,6 @@ fn parse_update_node_op(
     version: u8,
     tx_timestamp: HybridTimestamp,
 ) -> Result<WalOperation> {
-    require_bytes(buffer, *offset, 16, "UpdateNode")?;
     let node_id = deserialize_node_id(buffer, *offset, "UpdateNode")?;
     advance(offset, 8)?;
     let version_id = deserialize_version_id(buffer, *offset, "UpdateNode")?;
@@ -629,7 +626,9 @@ fn parse_update_edge_op(
     version: u8,
     tx_timestamp: HybridTimestamp,
 ) -> Result<WalOperation> {
-    // V0: 16 bytes (EdgeId + VersionId); V1+: 20 bytes (EdgeId + VersionId + LabelId)
+    // Upfront check is required: for V1 it pre-validates EdgeId+VersionId+LabelId (20 bytes)
+    // as a unit, producing the "UpdateEdge" error message that tests assert on.
+    // Removing it would shift the failure to read_label with a different message.
     let required = if version >= WAL_VERSION { 20 } else { 16 };
     require_bytes(buffer, *offset, required, "UpdateEdge")?;
     let edge_id = deserialize_edge_id(buffer, *offset, "UpdateEdge")?;
@@ -662,7 +661,6 @@ fn parse_delete_node_op(
     version: u8,
     tx_timestamp: HybridTimestamp,
 ) -> Result<WalOperation> {
-    require_bytes(buffer, *offset, 8, "DeleteNode")?;
     let node_id = deserialize_node_id(buffer, *offset, "DeleteNode")?;
     advance(offset, 8)?;
     let valid_from = if version >= WAL_VERSION {
@@ -684,7 +682,6 @@ fn parse_delete_edge_op(
     version: u8,
     tx_timestamp: HybridTimestamp,
 ) -> Result<WalOperation> {
-    require_bytes(buffer, *offset, 8, "DeleteEdge")?;
     let edge_id = deserialize_edge_id(buffer, *offset, "DeleteEdge")?;
     advance(offset, 8)?;
     let valid_from = if version >= WAL_VERSION {
