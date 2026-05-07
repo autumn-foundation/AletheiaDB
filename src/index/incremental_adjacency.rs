@@ -611,7 +611,7 @@ impl<'a> MergedAdjacencyGuard<'a> {
         }
     }
 
-    /// Get the frozen adjacency slice for this node (O(1)).
+    /// Get the frozen adjacency slice for this node (O(log V), binary search over CSR node_ids).
     #[inline]
     pub fn frozen_slice(&self) -> &[AdjacencyEntry] {
         self.frozen.get_adjacency(self.node)
