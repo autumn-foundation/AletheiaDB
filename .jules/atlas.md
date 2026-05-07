@@ -90,3 +90,6 @@
 ## 2026-06-21 - Splitting Redb Cold Storage Blob
 **Tangle:** `src/storage/redb_cold_storage.rs` was over 4100 lines long, a "Blob" module holding both core cold storage logic and over 2000 lines of tests. It made navigation and understanding the core operations difficult.
 **Blueprint:** Refactored into a `src/storage/redb_cold_storage/` module. Kept the core data definitions and implementation in `mod.rs` (reduced to ~2000 lines) and moved all tests to `tests.rs` (~2000 lines), maintaining the `#[cfg(test)]` block functionality but with better physical separation.
+## 2026-06-25 - Splitting Config Blob
+**Tangle:** `src/config.rs` was almost 1600 lines long, a "Blob" module holding both core config definitions and logic as well as over 600 lines of tests. It made navigation and understanding the configuration options difficult.
+**Blueprint:** Refactored into a `src/config/` module. Extracted `src/config.rs` into `src/config/mod.rs` containing the core config functionality, and moved tests into a newly created `src/config/tests.rs` (~660 lines) file, maintaining the `#[cfg(test)]` block functionality but with better physical separation.
