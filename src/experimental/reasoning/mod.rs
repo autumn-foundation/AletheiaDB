@@ -17,3 +17,5 @@ pub mod omen;
 pub mod oracle;
 pub mod prophet;
 pub mod synergy;
+
+pub mod voyager;
