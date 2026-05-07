@@ -39,7 +39,7 @@ pub mod vector;
 
 // Re-export commonly used types for convenience
 pub use error::{Error, Result, StorageError, TemporalError};
-pub use graph::{Edge, Node};
+pub use graph::{Edge, Node, NodeHeader};
 pub use id::{EdgeId, EntityId, IdGenerator, NodeId, VersionId};
 pub use interning::{
     DEFAULT_MAX_INTERNED_STRINGS, GLOBAL_INTERNER, InternedString, MAX_INTERNED_STRINGS_ENV,
