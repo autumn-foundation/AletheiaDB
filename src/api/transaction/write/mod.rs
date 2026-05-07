@@ -299,6 +299,7 @@ impl WriteTransaction {
     /// # Ok(())
     /// # }
     /// ```
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn commit(self) -> Result<()> {
         self.commit_with_timestamp().map(|_| ())
     }
@@ -331,6 +332,7 @@ impl WriteTransaction {
     /// - **Async**: Returns after flush to OS cache (background thread syncs)
     /// - **GroupCommit**: Waits for batch fsync (ACID + high throughput)
     /// - **AsyncBatched**: Returns after flush to OS cache, batched fsync in background (<100µs latency)
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn commit_with_timestamp(mut self) -> Result<Timestamp> {
         self.commit_with_timestamp_inner().record_error_metric()
     }
@@ -613,6 +615,7 @@ impl WriteTransaction {
     /// # Ok(())
     /// # }
     /// ```
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn rollback(mut self) -> Result<()> {
         if self.state == TxState::Committed {
             return Err(TransactionError::AlreadyCommitted {

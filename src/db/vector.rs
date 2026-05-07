@@ -33,6 +33,7 @@ impl AletheiaDB {
     /// # Errors
     ///
     /// Returns an error if vector indexing is already enabled.
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn enable_vector_index(&self, property_name: &str, config: HnswConfig) -> Result<()> {
         #[cfg(feature = "observability")]
         let _span =
@@ -80,6 +81,7 @@ impl AletheiaDB {
     /// Returns an error if:
     /// - Temporal vector indexing is already enabled
     /// - The historical storage lock is poisoned
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn enable_temporal_vector_index(
         &self,
         property_name: &str,
@@ -294,6 +296,7 @@ impl AletheiaDB {
     /// - No vector index is enabled for the specified property
     /// - Query node is not found
     /// - Query node does not have the specified vector property
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn find_similar_in(
         &self,
         property_name: &str,
@@ -332,6 +335,7 @@ impl AletheiaDB {
     /// Returns an error if:
     /// - No vector index is enabled for the specified property
     /// - Embedding dimensions don't match the index configuration
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn search_vectors_in(
         &self,
         property_name: &str,
@@ -372,6 +376,7 @@ impl AletheiaDB {
     /// - Vector index is not enabled
     /// - Query node is not found
     /// - Query node does not have the indexed vector property
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn find_similar(&self, query_node_id: NodeId, k: usize) -> Result<Vec<(NodeId, f32)>> {
         #[cfg(feature = "observability")]
         let _span = crate::observability::vector_search_span("find_similar", "").entered();
@@ -397,6 +402,7 @@ impl AletheiaDB {
     /// // Find similar Person nodes only
     /// let similar_people = db.find_similar_with_label(person_id, "Person", 10)?;
     /// ```
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn find_similar_with_label(
         &self,
         query_node_id: NodeId,
@@ -442,6 +448,7 @@ impl AletheiaDB {
     ///     println!("Node {:?} has similarity {}", node_id, similarity);
     /// }
     /// ```
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn find_similar_by_embedding(
         &self,
         embedding: &[f32],
@@ -488,6 +495,7 @@ impl AletheiaDB {
     ///     5
     /// )?;
     /// ```
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn find_similar_by_embedding_with_label(
         &self,
         embedding: &[f32],
@@ -515,6 +523,7 @@ impl AletheiaDB {
     /// * `query_vector` - The query embedding vector
     /// * `k` - Maximum number of results to return
     /// * `predicate` - A closure that takes a `NodeId` and returns `true` if the node should be included
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn find_similar_with_predicate<F>(
         &self,
         property_name: &str,
@@ -568,6 +577,7 @@ impl AletheiaDB {
     /// # Ok(())
     /// # }
     /// ```
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn find_similar_as_of(
         &self,
         embedding: &[f32],
@@ -621,6 +631,7 @@ impl AletheiaDB {
     /// # Ok(())
     /// # }
     /// ```
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn find_similar_as_of_in(
         &self,
         property_name: &str,
@@ -688,6 +699,7 @@ impl AletheiaDB {
     /// # Ok(())
     /// # }
     /// ```
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn track_drift_in(
         &self,
         property_name: &str,
@@ -744,6 +756,7 @@ impl AletheiaDB {
     /// # Ok(())
     /// # }
     /// ```
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn semantic_evolution_in(
         &self,
         property_name: &str,
@@ -808,6 +821,7 @@ impl AletheiaDB {
     /// # Ok(())
     /// # }
     /// ```
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn find_drift_in(
         &self,
         property_name: &str,

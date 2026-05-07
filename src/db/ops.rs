@@ -34,6 +34,7 @@ impl AletheiaDB {
     /// # See Also
     ///
     /// * [`write`](Self::write) - For batched write operations.
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn create_node(&self, label: &str, properties: PropertyMap) -> Result<NodeId> {
         self.write(|tx| tx.create_node(label, properties))
     }
@@ -64,6 +65,7 @@ impl AletheiaDB {
     /// # See Also
     ///
     /// * [`write`](Self::write) - For batched write operations.
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn create_edge(
         &self,
         source: NodeId,
@@ -77,6 +79,7 @@ impl AletheiaDB {
     /// Get the current state of a node.
     ///
     /// This uses the fast path (current storage) for O(1) lookup.
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn get_node(&self, node_id: NodeId) -> Result<Node> {
         self.current.get_node(node_id).record_error_metric()
     }
@@ -99,6 +102,7 @@ impl AletheiaDB {
     /// write lock on the same shard (e.g., `update_node`, `delete_node`) within the closure.
     /// Doing so will cause a deadlock (lock re-entrancy hazard).
     #[inline]
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn with_node<F, R>(&self, id: NodeId, f: F) -> Result<R>
     where
         F: FnOnce(&Node) -> R,
@@ -107,6 +111,7 @@ impl AletheiaDB {
     }
 
     /// Get the current state of an edge.
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn get_edge(&self, edge_id: EdgeId) -> Result<Edge> {
         self.current.get_edge(edge_id).record_error_metric()
     }
@@ -168,6 +173,7 @@ impl AletheiaDB {
     /// - **Zero-copy**: Only reads and returns the target NodeId (8 bytes)
     /// - **No allocation**: Does not clone Edge or PropertyMap
     #[inline]
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn get_edge_target(&self, edge_id: EdgeId) -> Result<NodeId> {
         self.current.get_edge_target(edge_id).record_error_metric()
     }
@@ -179,6 +185,7 @@ impl AletheiaDB {
     /// - **Zero-copy**: Only reads and returns the source NodeId (8 bytes)
     /// - **No allocation**: Does not clone Edge or PropertyMap
     #[inline]
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn get_edge_source(&self, edge_id: EdgeId) -> Result<NodeId> {
         self.current.get_edge_source(edge_id).record_error_metric()
     }

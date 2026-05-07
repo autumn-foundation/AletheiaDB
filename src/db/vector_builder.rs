@@ -36,6 +36,7 @@ use crate::index::vector::temporal::TemporalVectorConfig;
 /// # Ok(())
 /// # }
 /// ```
+#[must_use = "VectorIndexBuilder does nothing unless .enable() is called"]
 pub struct VectorIndexBuilder<'a> {
     db: &'a AletheiaDB,
     property_name: String,
@@ -146,6 +147,7 @@ impl<'a> VectorIndexBuilder<'a> {
     /// # Ok(())
     /// # }
     /// ```
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn enable(self) -> Result<()> {
         let hnsw_config = self
             .hnsw_config

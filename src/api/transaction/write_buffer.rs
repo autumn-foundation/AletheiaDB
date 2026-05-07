@@ -273,6 +273,7 @@ impl WriteBuffer {
     ///
     /// assert_eq!(buffer.len(), 1);
     /// ```
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn add(&mut self, write: BufferedWrite) -> Result<()> {
         // Check capacity limit (DoS protection)
         if self.operations.len() >= self.max_operations {
