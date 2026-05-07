@@ -516,12 +516,12 @@ impl FrozenAdjacencyView {
 /// excluding tombstones. The guard holds references to the frozen CSR and delta
 /// buffer, ensuring they remain valid during iteration.
 pub struct MergedAdjacencyGuard<'a> {
-    pub(crate) node: NodeId,
-    pub(crate) frozen: Guard<Arc<AdjacencyIndex>>,
-    pub(crate) delta: Option<Ref<'a, NodeId, SmallVec<[AdjacencyEntry; 8]>>>,
-    pub(crate) tombstones: &'a DashMap<EdgeId, Tombstone>,
+    node: NodeId,
+    frozen: Guard<Arc<AdjacencyIndex>>,
+    delta: Option<Ref<'a, NodeId, SmallVec<[AdjacencyEntry; 8]>>>,
+    tombstones: &'a DashMap<EdgeId, Tombstone>,
     /// Fast path flag: if true, skip per-edge tombstone checks (delta & tombstones are empty)
-    pub(crate) fast_path: bool,
+    fast_path: bool,
 }
 
 impl<'a> MergedAdjacencyGuard<'a> {
@@ -609,6 +609,28 @@ impl<'a> MergedAdjacencyGuard<'a> {
         } else {
             None
         }
+    }
+
+    /// Get the frozen adjacency slice for this node (O(1)).
+    #[inline]
+    pub fn frozen_slice(&self) -> &[AdjacencyEntry] {
+        self.frozen.get_adjacency(self.node)
+    }
+
+    /// Get the delta adjacency slice for this node (O(1)).
+    ///
+    /// Returns an empty slice when no delta entries exist.
+    #[inline]
+    pub fn delta_slice(&self) -> &[AdjacencyEntry] {
+        self.delta.as_ref().map(|d| d.as_slice()).unwrap_or(&[])
+    }
+
+    /// Check if an edge has been tombstoned (deleted) (O(1)).
+    ///
+    /// Returns `false` when in fast path (tombstones are known to be empty).
+    #[inline]
+    pub fn is_tombstoned(&self, edge_id: EdgeId) -> bool {
+        !self.fast_path && self.tombstones.contains_key(&edge_id)
     }
 }
 
