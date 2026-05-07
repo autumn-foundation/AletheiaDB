@@ -69,8 +69,8 @@ macro_rules! impl_edge_iter {
             fn next(&mut self) -> Option<Self::Item> {
                 // HOT PATH: Use direct slice access to avoid O(n^2) traversal.
                 // MergedAdjacencyGuard::get() is O(n), so calling it in a loop is O(n^2).
-                let frozen_slice = self.guard.frozen.get_adjacency(self.guard.node);
-                let delta_slice = self.guard.delta.as_ref().map(|d| d.as_slice()).unwrap_or(&[]);
+                let frozen_slice = self.guard.frozen_slice();
+                let delta_slice = self.guard.delta_slice();
 
                 while self.index < frozen_slice.len() + delta_slice.len() {
                     let entry = if self.index < frozen_slice.len() {
@@ -82,7 +82,7 @@ macro_rules! impl_edge_iter {
                     self.index += 1;
 
                     // Filter tombstones
-                    if self.guard.fast_path || !self.guard.tombstones.contains_key(&entry.edge_id) {
+                    if !self.guard.is_tombstoned(entry.edge_id) {
                         return Some(entry.edge_id);
                     }
                 }
@@ -165,8 +165,8 @@ macro_rules! impl_edge_iter_with_label {
                 // Linear scan with manual indexing - O(n) total complexity.
                 // We access frozen and delta slices directly to avoid O(n^2) indexing
                 // through the MergedAdjacencyGuard.
-                let frozen_slice = self.guard.frozen.get_adjacency(self.guard.node);
-                let delta_slice = self.guard.delta.as_ref().map(|d| d.as_slice()).unwrap_or(&[]);
+                let frozen_slice = self.guard.frozen_slice();
+                let delta_slice = self.guard.delta_slice();
 
                 while self.index < frozen_slice.len() + delta_slice.len() {
                     let entry = if self.index < frozen_slice.len() {
@@ -178,9 +178,7 @@ macro_rules! impl_edge_iter_with_label {
                     self.index += 1;
 
                     // Filter by label AND tombstones
-                    if entry.label == label_id
-                        && (self.guard.fast_path || !self.guard.tombstones.contains_key(&entry.edge_id))
-                    {
+                    if entry.label == label_id && !self.guard.is_tombstoned(entry.edge_id) {
                         return Some(entry.edge_id);
                     }
                 }

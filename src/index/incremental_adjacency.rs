@@ -516,12 +516,12 @@ impl FrozenAdjacencyView {
 /// excluding tombstones. The guard holds references to the frozen CSR and delta
 /// buffer, ensuring they remain valid during iteration.
 pub struct MergedAdjacencyGuard<'a> {
-    pub(crate) node: NodeId,
-    pub(crate) frozen: Guard<Arc<AdjacencyIndex>>,
-    pub(crate) delta: Option<Ref<'a, NodeId, SmallVec<[AdjacencyEntry; 8]>>>,
-    pub(crate) tombstones: &'a DashMap<EdgeId, Tombstone>,
+    node: NodeId,
+    frozen: Guard<Arc<AdjacencyIndex>>,
+    delta: Option<Ref<'a, NodeId, SmallVec<[AdjacencyEntry; 8]>>>,
+    tombstones: &'a DashMap<EdgeId, Tombstone>,
     /// Fast path flag: if true, skip per-edge tombstone checks (delta & tombstones are empty)
-    pub(crate) fast_path: bool,
+    fast_path: bool,
 }
 
 impl<'a> MergedAdjacencyGuard<'a> {
@@ -609,6 +609,28 @@ impl<'a> MergedAdjacencyGuard<'a> {
         } else {
             None
         }
+    }
+
+    /// Get the frozen adjacency slice for this node (O(log V), binary search over CSR node_ids).
+    #[inline]
+    pub fn frozen_slice(&self) -> &[AdjacencyEntry] {
+        self.frozen.get_adjacency(self.node)
+    }
+
+    /// Get the delta adjacency slice for this node (O(1)).
+    ///
+    /// Returns an empty slice when no delta entries exist.
+    #[inline]
+    pub fn delta_slice(&self) -> &[AdjacencyEntry] {
+        self.delta.as_ref().map(|d| d.as_slice()).unwrap_or(&[])
+    }
+
+    /// Check if an edge has been tombstoned (deleted) (O(1)).
+    ///
+    /// Returns `false` when in fast path (tombstones are known to be empty).
+    #[inline]
+    pub fn is_tombstoned(&self, edge_id: EdgeId) -> bool {
+        !self.fast_path && self.tombstones.contains_key(&edge_id)
     }
 }
 
@@ -852,5 +874,73 @@ mod tests {
             assert_eq!(guard.capacity_hint(), 1); // capacity_hint is upper bound, doesn't account for tombstones
             assert_eq!(guard.fast_len(), None); // Not fast path anymore because tombstones exist
         }
+    }
+
+    #[test]
+    fn test_guard_frozen_slice() {
+        use crate::core::interning::InternedString;
+        let index = IncrementalAdjacencyIndex::new();
+        let node = NodeId::new(1).unwrap();
+
+        // Empty index: frozen_slice returns empty slice
+        let guard = index.get_adjacency(node);
+        assert!(guard.frozen_slice().is_empty());
+        drop(guard);
+
+        // Insert and compact so the entry lands in the frozen layer
+        let edge = EdgeId::new(1).unwrap();
+        let entry = AdjacencyEntry::new(NodeId::new(2).unwrap(), edge, InternedString::from_raw(1));
+        index.insert(node, entry);
+        index.compact();
+
+        let guard = index.get_adjacency(node);
+        assert_eq!(guard.frozen_slice().len(), 1);
+        assert_eq!(guard.frozen_slice()[0].edge_id, edge);
+    }
+
+    #[test]
+    fn test_guard_delta_slice() {
+        use crate::core::interning::InternedString;
+        let index = IncrementalAdjacencyIndex::new();
+        let node = NodeId::new(1).unwrap();
+
+        // No delta yet: delta_slice returns empty slice (unwrap_or path)
+        let guard = index.get_adjacency(node);
+        assert!(guard.delta_slice().is_empty());
+        drop(guard);
+
+        // After insert (before compact): delta_slice returns the entry
+        let edge = EdgeId::new(1).unwrap();
+        let entry = AdjacencyEntry::new(NodeId::new(2).unwrap(), edge, InternedString::from_raw(1));
+        index.insert(node, entry);
+
+        let guard = index.get_adjacency(node);
+        assert_eq!(guard.delta_slice().len(), 1);
+        assert_eq!(guard.delta_slice()[0].edge_id, edge);
+    }
+
+    #[test]
+    fn test_guard_is_tombstoned() {
+        use crate::core::interning::InternedString;
+        let index = IncrementalAdjacencyIndex::new();
+        let node = NodeId::new(1).unwrap();
+        let edge = EdgeId::new(1).unwrap();
+        let other_edge = EdgeId::new(2).unwrap();
+
+        let entry = AdjacencyEntry::new(NodeId::new(2).unwrap(), edge, InternedString::from_raw(1));
+        index.insert(node, entry);
+        index.compact();
+
+        // Fast path: no tombstones, is_tombstoned always returns false
+        let guard = index.get_adjacency(node);
+        assert!(!guard.is_tombstoned(edge));
+        drop(guard);
+
+        // Delete the edge: now is_tombstoned returns true for that edge
+        index.delete(edge);
+
+        let guard = index.get_adjacency(node);
+        assert!(guard.is_tombstoned(edge));
+        assert!(!guard.is_tombstoned(other_edge));
     }
 }
