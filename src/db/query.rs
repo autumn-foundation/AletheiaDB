@@ -31,6 +31,7 @@ impl AletheiaDB {
     /// # Ok(())
     /// # }
     /// ```
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn execute_aql(&self, query_string: &str) -> Result<QueryResults> {
         let query = crate::query::parse_query(query_string)?;
         self.execute_query(query)
@@ -108,6 +109,7 @@ impl AletheiaDB {
     /// # Ok(())
     /// # }
     /// ```
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn execute_query(&self, query: Query) -> Result<QueryResults> {
         let result = (|| {
             #[cfg(feature = "observability")]
@@ -163,6 +165,7 @@ impl AletheiaDB {
     /// # Ok(())
     /// # }
     /// ```
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn traverse_and_rank(
         &self,
         source: NodeId,
@@ -214,6 +217,7 @@ impl AletheiaDB {
     /// # Ok(())
     /// # }
     /// ```
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn find_similar_at_time(
         &self,
         embedding: &[f32],
@@ -273,6 +277,7 @@ impl AletheiaDB {
     /// # Ok(())
     /// # }
     /// ```
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn traverse_and_rank_at_time(
         &self,
         source: NodeId,
@@ -325,6 +330,7 @@ impl AletheiaDB {
     /// # Ok(())
     /// # }
     /// ```
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn execute_cypher(&self, query_string: &str) -> Result<QueryResults> {
         let query = crate::cypher::parse_cypher(query_string)?;
         self.execute_query(query)
@@ -362,6 +368,7 @@ impl AletheiaDB {
     /// # Ok(())
     /// # }
     /// ```
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn execute_cypher_with_params(
         &self,
         query_string: &str,

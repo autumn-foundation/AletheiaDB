@@ -89,6 +89,7 @@ impl AletheiaDB {
     ///
     /// Uses the temporal index for O(log n) candidate lookup, then verifies
     /// visibility with historical storage (handles closed intervals from deletions).
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn get_node_at_time(
         &self,
         node_id: NodeId,
@@ -108,6 +109,7 @@ impl AletheiaDB {
     ///
     /// Uses the temporal index for O(log n) candidate lookup, then verifies
     /// visibility with historical storage (handles closed intervals from deletions).
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn get_edge_at_time(
         &self,
         edge_id: EdgeId,
@@ -198,6 +200,7 @@ impl AletheiaDB {
     /// # Ok(())
     /// # }
     /// ```
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn get_nodes_at_time(
         &self,
         node_ids: &[NodeId],
@@ -283,6 +286,7 @@ impl AletheiaDB {
     /// # Ok(())
     /// # }
     /// ```
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn get_edges_at_time(
         &self,
         edge_ids: &[EdgeId],
@@ -322,6 +326,7 @@ impl AletheiaDB {
     /// # Ok(())
     /// # }
     /// ```
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn get_node_at_valid_time(&self, node_id: NodeId, valid_time: Timestamp) -> Result<Node> {
         let tx_time = time::now();
         self.get_node_at_time(node_id, valid_time, tx_time)
@@ -347,6 +352,7 @@ impl AletheiaDB {
     /// # Ok(())
     /// # }
     /// ```
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn get_node_at_transaction_time(
         &self,
         node_id: NodeId,
@@ -373,6 +379,7 @@ impl AletheiaDB {
     /// # Ok(())
     /// # }
     /// ```
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn get_node_history(&self, node_id: NodeId) -> Result<EntityHistory> {
         self.historical
             .read()
@@ -397,6 +404,7 @@ impl AletheiaDB {
     /// # Ok(())
     /// # }
     /// ```
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn get_node_at_version(&self, node_id: NodeId, version_number: u64) -> Result<Node> {
         self.historical
             .read()
@@ -427,6 +435,7 @@ impl AletheiaDB {
     /// # Ok(())
     /// # }
     /// ```
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn diff_node_versions(
         &self,
         node_id: NodeId,
@@ -442,6 +451,7 @@ impl AletheiaDB {
     /// Get an edge at a specific valid time.
     ///
     /// Query by valid time only (transaction time defaults to now).
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn get_edge_at_valid_time(&self, edge_id: EdgeId, valid_time: Timestamp) -> Result<Edge> {
         let transaction_time = time::now();
         self.get_edge_at_time(edge_id, valid_time, transaction_time)
@@ -450,6 +460,7 @@ impl AletheiaDB {
     /// Get an edge at a specific transaction time.
     ///
     /// Query by transaction time only (valid time defaults to now).
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn get_edge_at_transaction_time(
         &self,
         edge_id: EdgeId,
@@ -462,6 +473,7 @@ impl AletheiaDB {
     /// Get the complete version history of an edge.
     ///
     /// Returns all versions in chronological order (oldest first).
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn get_edge_history(&self, edge_id: EdgeId) -> Result<EntityHistory> {
         self.historical
             .read()
@@ -472,6 +484,7 @@ impl AletheiaDB {
     /// Compute the difference between two versions of an edge.
     ///
     /// Shows which properties were added, removed, or modified.
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn diff_edge_versions(
         &self,
         edge_id: EdgeId,

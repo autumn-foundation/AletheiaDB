@@ -17,6 +17,7 @@ use std::sync::Arc;
 
 impl AletheiaDB {
     /// Get statistics about the historical storage.
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn historical_stats(&self) -> Result<HistoricalStats> {
         Ok(self.historical.read().stats())
     }
@@ -44,6 +45,7 @@ impl AletheiaDB {
     /// # Ok(())
     /// # }
     /// ```
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn persist_indexes(&self) -> Result<()> {
         let result = (|| {
             use crate::storage::index_persistence::formats::IndexManifest;

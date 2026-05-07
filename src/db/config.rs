@@ -111,6 +111,7 @@ impl AletheiaDB {
     /// # Errors
     ///
     /// Returns an error if WAL initialization fails (e.g., cannot create WAL directory).
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn new() -> Result<Self> {
         Self::with_config(AnchorConfig::default())
     }
@@ -120,6 +121,7 @@ impl AletheiaDB {
     /// # Errors
     ///
     /// Returns an error if WAL initialization fails (e.g., cannot create WAL directory).
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn with_config(config: AnchorConfig) -> Result<Self> {
         Self::with_full_config(config, crate::config::WalConfig::default())
     }
@@ -149,6 +151,7 @@ impl AletheiaDB {
     ///     .build();
     /// let db = AletheiaDB::with_wal_config(wal_config)?;
     /// ```
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn with_wal_config(wal_config: crate::config::WalConfig) -> Result<Self> {
         Self::with_full_config(AnchorConfig::default(), wal_config)
     }
@@ -175,6 +178,7 @@ impl AletheiaDB {
     ///
     /// let db = AletheiaDB::with_unified_config(config)?;
     /// ```
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn with_unified_config(config: AletheiaDBConfig) -> Result<Self> {
         let result = (|| {
             let durability_mode = config.wal.durability_mode;
@@ -398,6 +402,7 @@ impl AletheiaDB {
     /// # Errors
     ///
     /// Returns an error if WAL initialization fails (e.g., cannot create WAL directory).
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn with_full_config(
         anchor_config: AnchorConfig,
         wal_config: crate::config::WalConfig,

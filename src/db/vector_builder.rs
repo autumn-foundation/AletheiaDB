@@ -146,6 +146,7 @@ impl<'a> VectorIndexBuilder<'a> {
     /// # Ok(())
     /// # }
     /// ```
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn enable(self) -> Result<()> {
         let hnsw_config = self
             .hnsw_config

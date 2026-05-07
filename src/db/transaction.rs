@@ -104,6 +104,7 @@ impl AletheiaDB {
     /// # Ok(())
     /// # }
     /// ```
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn read_transaction(&self) -> Result<ReadTransaction> {
         let result = (|| {
             let tx_id = self.tx_id_gen.next();
@@ -207,6 +208,7 @@ impl AletheiaDB {
     /// # Ok(())
     /// # }
     /// ```
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn write_transaction(&self) -> Result<WriteTransaction> {
         let result = (|| {
             let tx_id = self.tx_id_gen.next();
@@ -435,6 +437,7 @@ impl AletheiaDB {
     /// # Ok(())
     /// # }
     /// ```
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn write_transaction_with_options(
         &self,
         options: WriteOptions,

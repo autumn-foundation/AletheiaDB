@@ -196,6 +196,7 @@ impl CurrentStorage {
     /// // Index body embeddings (1536 dimensions) - different property, OK!
     /// storage.enable_vector_index("body_embedding", config_1536)?;
     /// ```
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn enable_vector_index(&self, property_name: &str, config: HnswConfig) -> Result<()> {
         // Check property limit before attempting to add
         if self.vector_indexes.len() >= DEFAULT_MAX_VECTOR_PROPERTIES {
@@ -419,6 +420,7 @@ impl CurrentStorage {
     /// Create a node with the given label and properties.
     ///
     /// Returns the ID of the newly created node.
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn create_node(&self, label: &str, properties: PropertyMap) -> Result<NodeId> {
         // Synchronize with snapshot creation
         let _lock = self.snapshot_lock.read();
@@ -440,6 +442,7 @@ impl CurrentStorage {
     /// Create an edge between two nodes.
     ///
     /// Returns the ID of the newly created edge.
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn create_edge(
         &self,
         source: NodeId,
@@ -478,6 +481,7 @@ impl CurrentStorage {
     }
 
     /// Get a node by ID.
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn get_node(&self, id: NodeId) -> Result<Node> {
         self.indexes
             .get_node(id)
@@ -502,6 +506,7 @@ impl CurrentStorage {
     /// write lock on the same shard (e.g., `update_node`, `delete_node`) within the closure.
     /// Doing so will cause a deadlock (lock re-entrancy hazard).
     #[inline]
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn with_node<F, R>(&self, id: NodeId, f: F) -> Result<R>
     where
         F: FnOnce(&Node) -> R,
@@ -512,6 +517,7 @@ impl CurrentStorage {
     }
 
     /// Get an edge by ID.
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn get_edge(&self, id: EdgeId) -> Result<Edge> {
         self.indexes
             .get_edge(id)
@@ -533,6 +539,7 @@ impl CurrentStorage {
     /// - **Zero-copy**: Only reads and returns the target NodeId (8 bytes)
     /// - **No allocation**: Does not clone Edge or PropertyMap
     #[inline]
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn get_edge_target(&self, id: EdgeId) -> Result<NodeId> {
         self.indexes
             .get_edge_target(id)
@@ -546,6 +553,7 @@ impl CurrentStorage {
     /// - **Zero-copy**: Only reads and returns the source NodeId (8 bytes)
     /// - **No allocation**: Does not clone Edge or PropertyMap
     #[inline]
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn get_edge_source(&self, id: EdgeId) -> Result<NodeId> {
         self.indexes
             .get_edge_source(id)
@@ -559,6 +567,7 @@ impl CurrentStorage {
     /// - **Zero-copy**: Only reads and returns two NodeIds (16 bytes)
     /// - **No allocation**: Does not clone Edge or PropertyMap
     #[inline]
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn get_edge_endpoints(&self, id: EdgeId) -> Result<(NodeId, NodeId)> {
         self.indexes
             .get_edge_endpoints(id)
@@ -572,6 +581,7 @@ impl CurrentStorage {
     /// - **Zero-copy**: Only reads and returns the label (8 bytes)
     /// - **No allocation**: Does not clone Edge or PropertyMap
     #[inline]
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn get_edge_label(&self, id: EdgeId) -> Result<InternedString> {
         self.indexes
             .get_edge_label(id)
@@ -585,6 +595,7 @@ impl CurrentStorage {
     /// - **Zero-copy**: Only reads and returns the label (8 bytes)
     /// - **No allocation**: Does not clone Node or PropertyMap
     #[inline]
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn get_node_label(&self, id: NodeId) -> Result<InternedString> {
         self.indexes
             .get_node_label(id)
@@ -602,6 +613,7 @@ impl CurrentStorage {
     ///
     /// Only use this method if you explicitly need to preserve edges for some
     /// specialized use case (e.g., maintaining edge history for audit purposes).
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn delete_node(&self, id: NodeId) -> Result<Node> {
         // Synchronize with snapshot creation
         let _lock = self.snapshot_lock.read();
@@ -621,6 +633,7 @@ impl CurrentStorage {
     }
 
     /// Delete an edge.
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn delete_edge(&self, id: EdgeId) -> Result<Edge> {
         // Synchronize with snapshot creation
         let _lock = self.snapshot_lock.read();
@@ -640,6 +653,7 @@ impl CurrentStorage {
 
     /// Insert a node directly (used by WriteTransaction).
     /// Does not generate IDs - caller must provide them.
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn insert_node_direct(&self, node: Node, timestamp: Timestamp) -> Result<()> {
         // Synchronize with snapshot creation
         let _lock = self.snapshot_lock.read();
@@ -660,6 +674,7 @@ impl CurrentStorage {
 
     /// Insert an edge directly (used by WriteTransaction).
     /// Does not generate IDs or rebuild adjacency - caller must handle.
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn insert_edge_direct(&self, edge: Edge) -> Result<()> {
         // Synchronize with snapshot creation
         let _lock = self.snapshot_lock.read();
@@ -668,6 +683,7 @@ impl CurrentStorage {
     }
 
     /// Update a node directly (used by WriteTransaction).
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn update_node_direct(&self, node: Node, timestamp: Timestamp) -> Result<()> {
         // Synchronize with snapshot creation
         let _lock = self.snapshot_lock.read();
@@ -706,6 +722,7 @@ impl CurrentStorage {
     }
 
     /// Update an edge directly (used by WriteTransaction).
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn update_edge_direct(&self, edge: Edge) -> Result<()> {
         // Synchronize with snapshot creation
         let _lock = self.snapshot_lock.read();
@@ -715,6 +732,7 @@ impl CurrentStorage {
     }
 
     /// Delete a node directly (used by WriteTransaction).
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn delete_node_direct(&self, id: NodeId, timestamp: Timestamp) -> Result<()> {
         // Synchronize with snapshot creation
         let _lock = self.snapshot_lock.read();
@@ -732,6 +750,7 @@ impl CurrentStorage {
     }
 
     /// Delete an edge directly (used by WriteTransaction).
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn delete_edge_direct(&self, id: EdgeId) -> Result<()> {
         // Synchronize with snapshot creation
         let _lock = self.snapshot_lock.read();
@@ -1140,6 +1159,7 @@ impl CurrentStorage {
     /// - Query node is not found
     /// - Query node does not have the indexed vector property
     /// - The property is not a vector
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn find_similar(&self, query_node_id: NodeId, k: usize) -> Result<Vec<(NodeId, f32)>> {
         let (prop_name, index, _) = self.get_vector_index_internal(None)?;
         let query_vector = self.get_node_vector(query_node_id, &prop_name)?;
@@ -1150,6 +1170,7 @@ impl CurrentStorage {
     ///
     /// Returns a list of (NodeId, score) pairs sorted by similarity (highest first).
     /// Only nodes with the specified label are returned. The query node is excluded.
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn find_similar_with_label(
         &self,
         query_node_id: NodeId,
@@ -1180,6 +1201,7 @@ impl CurrentStorage {
     /// Returns an error if:
     /// - Vector index is not enabled
     /// - Embedding dimensions don't match the indexed property
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn find_similar_by_embedding(
         &self,
         embedding: &[f32],
@@ -1211,6 +1233,7 @@ impl CurrentStorage {
     /// Returns an error if:
     /// - Vector index is not enabled
     /// - Embedding dimensions don't match the indexed property
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn find_similar_by_embedding_with_label(
         &self,
         embedding: &[f32],
@@ -1242,6 +1265,7 @@ impl CurrentStorage {
     /// Returns an error if:
     /// - No vector index is enabled for the specified property
     /// - Embedding dimensions don't match the indexed property
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn find_similar_by_embedding_in(
         &self,
         property_name: &str,
@@ -1263,6 +1287,7 @@ impl CurrentStorage {
     /// * `embedding` - The query embedding vector
     /// * `label` - Only return nodes with this label
     /// * `k` - Maximum number of results to return
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn find_similar_by_embedding_in_with_label(
         &self,
         property_name: &str,
@@ -1286,6 +1311,7 @@ impl CurrentStorage {
     /// * `query` - The query embedding vector
     /// * `k` - Maximum number of results to return
     /// * `predicate` - A closure that takes a `NodeId` and returns `true` if the node should be included
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn find_similar_with_predicate<F>(
         &self,
         property_name: &str,
@@ -1338,6 +1364,7 @@ impl CurrentStorage {
     /// // Search body embeddings (different property, potentially different results)
     /// let similar_body = storage.find_similar_in("body_embedding", node_id, 10)?;
     /// ```
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn find_similar_in(
         &self,
         property_name: &str,
@@ -1353,6 +1380,7 @@ impl CurrentStorage {
     /// Search a specific property's vector index with a raw embedding.
     ///
     /// Equivalent to [`find_similar_by_embedding_in`](Self::find_similar_by_embedding_in).
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn search_vectors_in(
         &self,
         property_name: &str,
@@ -1390,6 +1418,7 @@ impl CurrentStorage {
     /// let temporal_config = TemporalVectorConfig::default_with_hnsw(hnsw_config);
     /// storage.enable_temporal_vector_index("embedding", temporal_config)?;
     /// ```
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn enable_temporal_vector_index(
         &self,
         property_name: &str,
@@ -1497,6 +1526,7 @@ impl CurrentStorage {
     /// let timestamp = 1234567890000000; // microseconds since epoch
     /// let results = storage.find_similar_as_of(&query_embedding, 10, timestamp)?;
     /// ```
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn find_similar_as_of(
         &self,
         embedding: &[f32],
@@ -1543,6 +1573,7 @@ impl CurrentStorage {
     /// let timestamp = 1234567890000000;
     /// let results = storage.find_similar_as_of_in("content_embedding", &query_embedding, 10, timestamp)?;
     /// ```
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn find_similar_as_of_in(
         &self,
         property_name: &str,
@@ -1590,6 +1621,7 @@ impl CurrentStorage {
     /// - Temporal vector index is not enabled
     /// - The property name doesn't match the indexed property
     /// - Reference embedding dimensions don't match
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn track_drift_in(
         &self,
         property_name: &str,
@@ -1616,6 +1648,7 @@ impl CurrentStorage {
     /// Get the semantic evolution of a node's embedding over time in a specific property.
     ///
     /// Returns the actual embedding vectors at each snapshot timestamp.
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn semantic_evolution_in(
         &self,
         property_name: &str,
@@ -1642,6 +1675,7 @@ impl CurrentStorage {
     ///
     /// Scans all nodes and identifies those whose embeddings have changed
     /// by more than the specified threshold over the time range.
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn find_drift_in(
         &self,
         property_name: &str,
@@ -1693,6 +1727,7 @@ impl CurrentStorage {
     ///     println!("At timestamp {}: {} similar nodes", timestamp, similar_nodes.len());
     /// }
     /// ```
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn find_similar_in_range(
         &self,
         embedding: &[f32],
@@ -1714,6 +1749,7 @@ impl CurrentStorage {
     ///
     /// This should be called after committing a transaction to trigger snapshot
     /// creation based on the configured strategy.
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn on_temporal_vector_transaction(&self) -> Result<()> {
         let state = self.temporal_vector_index_state.read();
         if let Some(index) = &state.index {
