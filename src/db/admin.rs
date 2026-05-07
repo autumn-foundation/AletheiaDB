@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 impl AletheiaDB {
     /// Get statistics about the historical storage.
-    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
+    #[must_use = "the historical statistics value must be used"]
     pub fn historical_stats(&self) -> Result<HistoricalStats> {
         Ok(self.historical.read().stats())
     }

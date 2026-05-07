@@ -36,6 +36,7 @@ use crate::index::vector::temporal::TemporalVectorConfig;
 /// # Ok(())
 /// # }
 /// ```
+#[must_use = "VectorIndexBuilder does nothing unless .enable() is called"]
 pub struct VectorIndexBuilder<'a> {
     db: &'a AletheiaDB,
     property_name: String,
