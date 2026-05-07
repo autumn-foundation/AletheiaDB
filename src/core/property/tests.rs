@@ -2579,3 +2579,13 @@ mod sentry_tests {
         );
     }
 }
+
+#[test]
+fn test_property_map_builder_with_capacity() {
+    let builder = PropertyMapBuilder::with_capacity(10);
+    assert!(builder.map.capacity() >= 10);
+
+    let builder = builder.insert("key1", 42i64);
+    let map = builder.build();
+    assert_eq!(map.get("key1").unwrap(), &PropertyValue::Int(42));
+}

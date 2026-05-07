@@ -519,7 +519,7 @@ fn json_to_property_map(raw: &str) -> Result<PropertyMap, String> {
         .as_object()
         .ok_or_else(|| "properties JSON must be an object".to_string())?;
 
-    let mut map = PropertyMapBuilder::new();
+    let mut map = PropertyMapBuilder::with_capacity(object.len());
     for (key, value) in object {
         let converted = json_to_property_value(value)?;
         map = map.insert(key, converted);

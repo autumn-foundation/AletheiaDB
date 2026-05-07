@@ -135,7 +135,7 @@ fn property_value_to_json_recursive(
 pub fn json_to_property_map(
     json: &HashMap<String, serde_json::Value>,
 ) -> Result<PropertyMap, String> {
-    let mut builder = PropertyMapBuilder::new();
+    let mut builder = PropertyMapBuilder::with_capacity(json.len());
     for (key, value) in json {
         let pv = json_to_property_value(value)?;
         builder = builder

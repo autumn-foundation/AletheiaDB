@@ -476,8 +476,16 @@ pub struct PropertyMapBuilder {
 impl PropertyMapBuilder {
     /// Create a new builder with an empty map.
     pub fn new() -> Self {
+        Self::with_capacity(0)
+    }
+
+    /// Create a new builder with a pre-allocated capacity.
+    ///
+    /// ⚡ Bolt: Pre-allocating the HashMap avoids multiple reallocation and rehashing
+    /// operations when building a PropertyMap where the number of properties is known.
+    pub fn with_capacity(capacity: usize) -> Self {
         PropertyMapBuilder {
-            map: HashMap::with_hasher(BuildHasherDefault::default()),
+            map: HashMap::with_capacity_and_hasher(capacity, BuildHasherDefault::default()),
             current_size: 4, // Count field
         }
     }
