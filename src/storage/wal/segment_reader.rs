@@ -1910,6 +1910,138 @@ mod tests {
         //
         // The overflow branch (inside `ok_or_else`) might remain uncovered, but that's fine if the main path is covered.
     }
+
+    // Cover the advance() overflow branch directly (can't be reached via parse_entry_at
+    // because require_bytes always validates bounds first).
+    #[test]
+    fn test_advance_overflow_protection() {
+        let mut offset = usize::MAX;
+        let result = advance(&mut offset, 1);
+        assert!(result.is_err());
+        match result {
+            Err(Error::Storage(StorageError::CorruptedData(msg))) => {
+                assert_eq!(msg, "WAL offset overflow");
+            }
+            _ => panic!("Expected WAL offset overflow error, got: {:?}", result),
+        }
+    }
+
+    // Cover V0 (legacy) else-branches in parse_delete_node_op / parse_delete_edge_op /
+    // parse_update_node_op / parse_update_edge_op.
+
+    fn make_v0_buffer(
+        op_byte: u8,
+        op_data: &[u8],
+        timestamp: crate::core::hlc::HybridTimestamp,
+    ) -> Vec<u8> {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&1u64.to_le_bytes()); // LSN
+        timestamp.serialize_into(&mut buf); // 12-byte timestamp
+        let checksum_off = buf.len();
+        buf.extend_from_slice(&0u32.to_le_bytes()); // checksum placeholder
+        buf.push(op_byte);
+        buf.extend_from_slice(op_data);
+        let mut hasher = crc32fast::Hasher::new();
+        hasher.update(&buf[0..checksum_off]);
+        hasher.update(&buf[checksum_off + 4..]);
+        let cs = hasher.finalize();
+        buf[checksum_off..checksum_off + 4].copy_from_slice(&cs.to_le_bytes());
+        buf
+    }
+
+    #[test]
+    fn test_parse_entry_at_version_0_delete_node() {
+        let timestamp = time::now();
+        let node_id = NodeId::new(55).unwrap();
+        let buf = make_v0_buffer(6, &55u64.to_le_bytes(), timestamp); // OP_DELETE_NODE = 6
+        let (entry, consumed) = parse_entry_at(&buf, 0, 0).unwrap();
+        assert_eq!(consumed, buf.len());
+        match entry.operation {
+            WalOperation::DeleteNode {
+                node_id: parsed_id,
+                valid_from,
+            } => {
+                assert_eq!(parsed_id, node_id);
+                assert_eq!(valid_from, timestamp);
+            }
+            _ => panic!("Expected DeleteNode"),
+        }
+    }
+
+    #[test]
+    fn test_parse_entry_at_version_0_delete_edge() {
+        let timestamp = time::now();
+        let edge_id = EdgeId::new(200).unwrap();
+        let buf = make_v0_buffer(7, &200u64.to_le_bytes(), timestamp); // OP_DELETE_EDGE = 7
+        let (entry, consumed) = parse_entry_at(&buf, 0, 0).unwrap();
+        assert_eq!(consumed, buf.len());
+        match entry.operation {
+            WalOperation::DeleteEdge {
+                edge_id: parsed_id,
+                valid_from,
+            } => {
+                assert_eq!(parsed_id, edge_id);
+                assert_eq!(valid_from, timestamp);
+            }
+            _ => panic!("Expected DeleteEdge"),
+        }
+    }
+
+    #[test]
+    fn test_parse_entry_at_version_0_update_node() {
+        let timestamp = time::now();
+        let node_id = NodeId::new(42).unwrap();
+        let version_id = VersionId::new(7).unwrap();
+        let mut op_data = Vec::new();
+        op_data.extend_from_slice(&42u64.to_le_bytes());
+        op_data.extend_from_slice(&7u64.to_le_bytes());
+        let buf = make_v0_buffer(3, &op_data, timestamp); // OP_UPDATE_NODE = 3
+        let (entry, consumed) = parse_entry_at(&buf, 0, 0).unwrap();
+        assert_eq!(consumed, buf.len());
+        match entry.operation {
+            WalOperation::UpdateNode {
+                node_id: parsed_node,
+                version_id: parsed_ver,
+                properties,
+                valid_from,
+                ..
+            } => {
+                assert_eq!(parsed_node, node_id);
+                assert_eq!(parsed_ver, version_id);
+                assert!(properties.is_empty());
+                assert_eq!(valid_from, timestamp);
+            }
+            _ => panic!("Expected UpdateNode"),
+        }
+    }
+
+    #[test]
+    fn test_parse_entry_at_version_0_update_edge() {
+        let timestamp = time::now();
+        let edge_id = EdgeId::new(300).unwrap();
+        let version_id = VersionId::new(5).unwrap();
+        let mut op_data = Vec::new();
+        op_data.extend_from_slice(&300u64.to_le_bytes());
+        op_data.extend_from_slice(&5u64.to_le_bytes());
+        let buf = make_v0_buffer(4, &op_data, timestamp); // OP_UPDATE_EDGE = 4
+        let (entry, consumed) = parse_entry_at(&buf, 0, 0).unwrap();
+        assert_eq!(consumed, buf.len());
+        match entry.operation {
+            WalOperation::UpdateEdge {
+                edge_id: parsed_edge,
+                version_id: parsed_ver,
+                properties,
+                valid_from,
+                ..
+            } => {
+                assert_eq!(parsed_edge, edge_id);
+                assert_eq!(parsed_ver, version_id);
+                assert!(properties.is_empty());
+                assert_eq!(valid_from, timestamp);
+            }
+            _ => panic!("Expected UpdateEdge"),
+        }
+    }
 }
 
 #[cfg(test)]
