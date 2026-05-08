@@ -500,7 +500,9 @@ impl<'a> CypherLexer<'a> {
     // -----------------------------------------------------------------------
 
     fn read_string(&mut self, start: usize) -> Result<Token, CypherError> {
-        let (_, quote) = self.advance().unwrap(); // consume opening quote
+        let (_, quote) = self
+            .advance()
+            .ok_or_else(|| self.lex_error(start, "Expected opening quote".to_string()))?;
         let mut value = String::new();
 
         loop {
@@ -745,5 +747,23 @@ mod unit_tests {
                 "{kw} should be a keyword, not an identifier"
             );
         }
+    }
+    #[test]
+    fn test_read_string_unexpected_eof() {
+        // 🎯 Target: read_string EOF handling
+        // 💣 Risk: If read_string is called but advance() returns None for the quote, it used to unwrap and panic
+        let mut lexer = CypherLexer {
+            input: "",
+            chars: "".char_indices().peekable(),
+            position: 0,
+        };
+        let result = lexer.read_string(0);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .message
+                .contains("Expected opening quote")
+        );
     }
 }
