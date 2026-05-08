@@ -112,6 +112,8 @@ pub mod flush_coordinator;
 pub mod lsn_allocator;
 pub mod ring_buffer;
 pub mod segment_reader;
+#[cfg(test)]
+mod segment_reader_fuzz_tests;
 pub mod stripe;
 
 // New modules for data structures and serialization
