@@ -3556,16 +3556,17 @@ mod lock_poisoning_tests {
         assert!(poisoned_ts.is_poisoned());
 
         let num_threads = 4;
+        let harness = Arc::new(TestHarness::new());
         let barrier = Arc::new(Barrier::new(num_threads));
         let mut handles = Vec::new();
 
         for _ in 0..num_threads {
-            let harness = TestHarness::new();
+            let h = harness.clone();
             let ts = poisoned_ts.clone();
             let barrier = barrier.clone();
 
             handles.push(thread::spawn(move || {
-                let mut tx = harness.create_tx_with_timestamp(ts);
+                let mut tx = h.create_tx_with_timestamp(ts);
                 tx.create_node("Test", PropertyMapBuilder::new().insert("x", 1i64).build())
                     .unwrap();
                 barrier.wait();
