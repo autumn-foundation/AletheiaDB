@@ -68,6 +68,14 @@ impl Default for Scenario {
 
 impl Scenario {
     /// Create a new empty scenario.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::experimental::reasoning::hindsight::Scenario;
+    ///
+    /// let scenario = Scenario::new();
+    /// ```
     pub fn new() -> Self {
         Self::default()
     }

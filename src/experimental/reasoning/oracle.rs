@@ -26,6 +26,19 @@ pub struct Oracle<'a> {
 
 impl<'a> Oracle<'a> {
     /// Create a new Oracle instance.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use aletheiadb::AletheiaDB;
+    /// use aletheiadb::experimental::reasoning::oracle::Oracle;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let db = AletheiaDB::new()?;
+    /// let oracle = Oracle::new(&db);
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn new(db: &'a AletheiaDB) -> Self {
         Self { db }
     }
@@ -36,6 +49,22 @@ impl<'a> Oracle<'a> {
     /// At each step, the walk either:
     /// - Terminates with probability `alpha` (restart probability).
     /// - Moves to a random neighbor.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use aletheiadb::AletheiaDB;
+    /// use aletheiadb::experimental::reasoning::oracle::Oracle;
+    /// use aletheiadb::core::NodeId;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let db = AletheiaDB::new()?;
+    /// let oracle = Oracle::new(&db);
+    /// let start = NodeId::new(1).unwrap();
+    /// let ranks = oracle.personalized_page_rank(start, 0.15, 1000, 20)?;
+    /// # Ok(())
+    /// # }
+    /// ```
     ///
     /// # Arguments
     /// * `seed`: The starting node.
@@ -117,6 +146,23 @@ impl<'a> Oracle<'a> {
     }
 
     /// Estimate the probability of reaching `target` from `start` within `max_steps`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use aletheiadb::AletheiaDB;
+    /// use aletheiadb::experimental::reasoning::oracle::Oracle;
+    /// use aletheiadb::core::NodeId;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let db = AletheiaDB::new()?;
+    /// let oracle = Oracle::new(&db);
+    /// let start = NodeId::new(1).unwrap();
+    /// let target = NodeId::new(2).unwrap();
+    /// let prob = oracle.reachability_probability(start, target, 5, 1000)?;
+    /// # Ok(())
+    /// # }
+    /// ```
     ///
     /// # Arguments
     /// * `start`: Starting node.

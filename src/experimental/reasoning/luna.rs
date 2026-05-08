@@ -29,11 +29,40 @@ pub struct Luna<'a> {
 #[cfg(feature = "semantic-reasoning")]
 impl<'a> Luna<'a> {
     /// Create a new Luna instance.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use aletheiadb::AletheiaDB;
+    /// use aletheiadb::experimental::reasoning::luna::Luna;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let db = AletheiaDB::new()?;
+    /// let luna = Luna::new(&db);
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn new(db: &'a AletheiaDB) -> Self {
         Self { db }
     }
 
     /// Synthesize a core concept from a set of seed nodes.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use aletheiadb::AletheiaDB;
+    /// use aletheiadb::experimental::reasoning::luna::Luna;
+    /// use aletheiadb::core::NodeId;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let db = AletheiaDB::new()?;
+    /// let luna = Luna::new(&db);
+    /// let seeds = vec![NodeId::new(1).unwrap(), NodeId::new(2).unwrap()];
+    /// let core_id = luna.synthesize_core(&seeds, "embedding", "ConceptCore")?;
+    /// # Ok(())
+    /// # }
+    /// ```
     ///
     /// # Arguments
     /// * `seeds` - The source nodes to synthesize.

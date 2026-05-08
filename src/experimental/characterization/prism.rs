@@ -197,6 +197,22 @@ impl<'a> Prism<'a> {
     ///
     /// Priority is given to axes added earlier (they keep their direction).
     /// Later axes have the components of earlier axes removed from them.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use aletheiadb::AletheiaDB;
+    /// use aletheiadb::experimental::characterization::prism::Prism;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let db = AletheiaDB::new()?;
+    /// let mut prism = Prism::new(&db);
+    /// prism.add_axis("x", vec![1.0, 0.0, 0.0]);
+    /// prism.add_axis("xy", vec![1.0, 1.0, 0.0]); // Not orthogonal
+    /// prism.orthogonalize(); // Now "xy" becomes [0.0, 1.0, 0.0]
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn orthogonalize(&mut self) {
         let mut ortho_axes: Vec<Axis> = Vec::with_capacity(self.axes.len());
 

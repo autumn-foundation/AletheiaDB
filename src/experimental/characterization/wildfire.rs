@@ -56,11 +56,19 @@ pub struct WildfirePropagation {
 
 impl WildfirePropagation {
     /// Create a new WildfirePropagation model.
-    pub fn new(
-        temperatures: HashMap<NodeId, f32>,
-        base_alpha: f32,
-        temp_multiplier: f32,
-    ) -> Self {
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use aletheiadb::experimental::characterization::wildfire::WildfirePropagation;
+    /// use aletheiadb::core::NodeId;
+    /// use std::collections::HashMap;
+    ///
+    /// let mut temps = HashMap::new();
+    /// temps.insert(NodeId::new(1).unwrap(), 5.0);
+    /// let model = WildfirePropagation::new(temps, 0.1, 0.2);
+    /// ```
+    pub fn new(temperatures: HashMap<NodeId, f32>, base_alpha: f32, temp_multiplier: f32) -> Self {
         Self {
             temperatures,
             base_alpha: base_alpha.clamp(0.0, 1.0),

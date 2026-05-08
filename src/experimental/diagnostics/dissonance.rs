@@ -44,11 +44,39 @@ pub struct DissonanceEngine<'a> {
 
 impl<'a> DissonanceEngine<'a> {
     /// Create a new DissonanceEngine instance.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use aletheiadb::AletheiaDB;
+    /// use aletheiadb::experimental::diagnostics::dissonance::DissonanceEngine;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let db = AletheiaDB::new()?;
+    /// let engine = DissonanceEngine::new(&db);
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn new(db: &'a AletheiaDB) -> Self {
         Self { db }
     }
 
     /// Calculate the semantic dissonance of a node.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use aletheiadb::AletheiaDB;
+    /// use aletheiadb::experimental::diagnostics::dissonance::DissonanceEngine;
+    /// use aletheiadb::core::NodeId;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let db = AletheiaDB::new()?;
+    /// let engine = DissonanceEngine::new(&db);
+    /// let score = engine.calculate_dissonance(NodeId::new(1).unwrap(), "embedding")?;
+    /// # Ok(())
+    /// # }
+    /// ```
     ///
     /// # Arguments
     ///

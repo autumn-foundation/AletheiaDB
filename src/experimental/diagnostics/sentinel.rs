@@ -51,6 +51,15 @@ impl Sentinel {
     }
 
     /// Add a rule to the Sentinel.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::experimental::diagnostics::sentinel::{Sentinel, VectorNormRule};
+    ///
+    /// let mut sentinel = Sentinel::new();
+    /// sentinel.add_rule(Box::new(VectorNormRule::new("embedding")));
+    /// ```
     pub fn add_rule(&mut self, rule: Box<dyn SemanticRule>) {
         self.rules.push(rule);
     }

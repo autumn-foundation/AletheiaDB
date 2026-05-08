@@ -72,6 +72,18 @@ impl SynapseContext {
     }
 
     /// Get the raw usage count for an edge.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::experimental::characterization::synapse::SynapseContext;
+    /// use aletheiadb::core::EdgeId;
+    ///
+    /// let ctx = SynapseContext::new();
+    /// let edge_id = EdgeId::new(1).unwrap();
+    /// ctx.observe(edge_id);
+    /// assert_eq!(ctx.get_usage(edge_id), 1);
+    /// ```
     pub fn get_usage(&self, edge_id: EdgeId) -> u64 {
         match self.weights.get(&edge_id) {
             Some(val) => val.load(AtomicOrdering::Relaxed),
@@ -152,6 +164,23 @@ impl<'a> Synapse<'a> {
     }
 
     /// Record a traversal event.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use aletheiadb::AletheiaDB;
+    /// use aletheiadb::experimental::characterization::synapse::{SynapseContext, SynapticRouter};
+    /// use aletheiadb::core::EdgeId;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let db = AletheiaDB::new()?;
+    /// let ctx = SynapseContext::new();
+    /// let router = SynapticRouter::new(&db, &ctx);
+    /// let edge_id = EdgeId::new(1).unwrap();
+    /// router.observe(edge_id);
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn observe(&self, edge_id: EdgeId) {
         self.context.observe(edge_id);
     }

@@ -143,6 +143,24 @@ impl<'a> GraphContextBuilder<'a> {
     ///
     /// # Errors
     ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use aletheiadb::AletheiaDB;
+    /// use aletheiadb::experimental::characterization::graph_context::GraphContextBuilder;
+    /// use aletheiadb::core::NodeId;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let db = AletheiaDB::new()?;
+    /// let center = NodeId::new(1).unwrap();
+    /// let context = GraphContextBuilder::new(&db, center)
+    ///     .with_neighbor_limit(10)
+    ///     .build()?;
+    /// println!("{}", context);
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
     /// Returns an error if the `center_node` does not exist in the database.
     pub fn build(&self) -> Result<String> {
         let mut output = String::new();

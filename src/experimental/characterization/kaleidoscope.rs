@@ -29,6 +29,16 @@ impl Point {
     }
 
     /// Calculate Euclidean distance to another point.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::experimental::characterization::kaleidoscope::Point;
+    ///
+    /// let p1 = Point::new(0.0, 0.0);
+    /// let p2 = Point::new(3.0, 4.0);
+    /// assert_eq!(p1.distance(&p2), 5.0);
+    /// ```
     pub fn distance(&self, other: &Point) -> f32 {
         ((self.x - other.x).powi(2) + (self.y - other.y).powi(2)).sqrt()
     }
@@ -203,6 +213,20 @@ impl LayoutEngine {
     }
 
     /// Run the simulation.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use aletheiadb::experimental::characterization::kaleidoscope::{LayoutEngine, LayoutConfig};
+    /// use aletheiadb::core::NodeId;
+    ///
+    /// let mut engine = LayoutEngine::new(LayoutConfig::default());
+    /// engine.add_node(NodeId::new(1).unwrap());
+    /// engine.add_node(NodeId::new(2).unwrap());
+    /// engine.add_edge(NodeId::new(1).unwrap(), NodeId::new(2).unwrap());
+    /// engine.run();
+    /// let positions = engine.get_positions();
+    /// ```
     pub fn run(&mut self) {
         for _ in 0..self.config.iterations {
             self.step();

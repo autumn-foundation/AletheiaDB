@@ -56,6 +56,19 @@ pub struct NarrativeGenerator<'a> {
 #[cfg(feature = "semantic-temporal")]
 impl<'a> NarrativeGenerator<'a> {
     /// Create a new narrative generator.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use aletheiadb::AletheiaDB;
+    /// use aletheiadb::experimental::temporal::temporal_narrative::NarrativeGenerator;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let db = AletheiaDB::new()?;
+    /// let generator = NarrativeGenerator::new(&db);
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn new(db: &'a AletheiaDB) -> Self {
         Self { db }
     }
@@ -71,6 +84,21 @@ impl<'a> NarrativeGenerator<'a> {
     ///
     /// This reconstructs the history of the node and generates a sequence of
     /// human-readable events describing how it evolved over time.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use aletheiadb::AletheiaDB;
+    /// use aletheiadb::experimental::temporal::temporal_narrative::NarrativeGenerator;
+    /// use aletheiadb::core::NodeId;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let db = AletheiaDB::new()?;
+    /// let generator = NarrativeGenerator::new(&db);
+    /// let events = generator.generate_node_narrative(NodeId::new(1).unwrap())?;
+    /// # Ok(())
+    /// # }
+    /// ```
     ///
     /// # Behavior for Empty History
     /// If a node has no history (e.g. invalid ID or deleted), this returns an empty vector

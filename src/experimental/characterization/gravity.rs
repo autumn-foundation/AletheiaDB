@@ -199,6 +199,22 @@ impl<'a> GravitySimulator<'a> {
 
     /// Simulate gravitational pull from a center node on its neighbors.
     ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use aletheiadb::AletheiaDB;
+    /// use aletheiadb::experimental::characterization::gravity::GravitySimulator;
+    /// use aletheiadb::core::NodeId;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let db = AletheiaDB::new()?;
+    /// let sim = GravitySimulator::new(&db);
+    /// let center = NodeId::new(1).unwrap();
+    /// let updates = sim.simulate_pull(center, "embedding", 10.0, 0.1)?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
     /// # Arguments
     ///
     /// * `center_id` - The node exerting the force.

@@ -131,14 +131,20 @@ impl<'a> ParadoxDetector<'a> {
         if let Ok(history) = self.db.get_node_history(node_id) {
             let mut latest_valid_version = None;
             for version in history.versions.iter() {
-                if version.temporal.valid_time().start() <= time && time <= version.temporal.valid_time().end() {
+                if version.temporal.valid_time().start() <= time
+                    && time <= version.temporal.valid_time().end()
+                {
                     if version.temporal.tx_time().start() <= time {
                         latest_valid_version = Some(version);
                     }
                 }
             }
             if let Some(v) = latest_valid_version {
-                vector_opt = v.properties.get(property_name).and_then(|p| p.as_vector()).map(|v| v.to_vec());
+                vector_opt = v
+                    .properties
+                    .get(property_name)
+                    .and_then(|p| p.as_vector())
+                    .map(|v| v.to_vec());
             }
         }
 
@@ -146,7 +152,10 @@ impl<'a> ParadoxDetector<'a> {
             // Fallback to fast path if it wasn't found in history
             let _ = self.db.read(|tx| {
                 if let Ok(node) = tx.get_node(node_id) {
-                     vector_opt = node.get_property(property_name).and_then(|p| p.as_vector()).map(|v| v.to_vec());
+                    vector_opt = node
+                        .get_property(property_name)
+                        .and_then(|p| p.as_vector())
+                        .map(|v| v.to_vec());
                 }
                 Ok::<(), Error>(())
             });
@@ -176,7 +185,14 @@ impl<'a> ParadoxDetector<'a> {
         let mut edges = Vec::new();
 
         // Try temporal query first
-        if let Ok(results) = self.db.query().as_of(time, time).start(node_id).traverse_all().execute(self.db) {
+        if let Ok(results) = self
+            .db
+            .query()
+            .as_of(time, time)
+            .start(node_id)
+            .traverse_all()
+            .execute(self.db)
+        {
             for row in results {
                 if let Ok(r) = row {
                     if let Some(neighbor) = r.entity.as_node() {
@@ -190,23 +206,29 @@ impl<'a> ParadoxDetector<'a> {
 
         // If temporal query returned nothing, fall back to current transaction state
         if edges.is_empty() {
-             let _ = self.db.read(|tx| {
-                 edges = tx.get_outgoing_edges(node_id).into_iter().filter_map(|eid| {
-                     if let Ok(edge) = tx.get_edge(eid) {
-                         Some(edge.target)
-                     } else {
-                         None
-                     }
-                 }).collect();
-                 Ok::<(), Error>(())
-             });
+            let _ = self.db.read(|tx| {
+                edges = tx
+                    .get_outgoing_edges(node_id)
+                    .into_iter()
+                    .filter_map(|eid| {
+                        if let Ok(edge) = tx.get_edge(eid) {
+                            Some(edge.target)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                Ok::<(), Error>(())
+            });
         }
 
         let mut total_sim = 0.0;
         let mut count = 0;
 
         for neighbor_id in edges {
-            let sim = self.get_semantic_similarity(neighbor_id, target_vector, property_name, time).unwrap_or(0.0);
+            let sim = self
+                .get_semantic_similarity(neighbor_id, target_vector, property_name, time)
+                .unwrap_or(0.0);
             if sim != 0.0 {
                 total_sim += sim;
                 count += 1;
@@ -250,6 +272,10 @@ mod tests {
         let raw_paradox = -(semantic_delta * structural_delta); // -(0.8 * -0.6) = 0.48
         let paradox_score = (raw_paradox * 4.0).clamp(-1.0, 1.0); // 0.48 * 4 = 1.92 -> 1.0
 
-        assert!(paradox_score > 0.0, "Expected a positive paradox score, got {}", paradox_score);
+        assert!(
+            paradox_score > 0.0,
+            "Expected a positive paradox score, got {}",
+            paradox_score
+        );
     }
 }

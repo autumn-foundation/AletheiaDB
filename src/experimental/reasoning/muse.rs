@@ -42,11 +42,40 @@ pub struct Muse<'a> {
 #[cfg(feature = "semantic-reasoning")]
 impl<'a> Muse<'a> {
     /// Create a new Muse instance.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use aletheiadb::AletheiaDB;
+    /// use aletheiadb::experimental::reasoning::muse::Muse;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let db = AletheiaDB::new()?;
+    /// let muse = Muse::new(&db);
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn new(db: &'a AletheiaDB) -> Self {
         Self { db }
     }
 
     /// Inspire a new concept based on the input nodes.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use aletheiadb::AletheiaDB;
+    /// use aletheiadb::experimental::reasoning::muse::Muse;
+    /// use aletheiadb::core::NodeId;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let db = AletheiaDB::new()?;
+    /// let muse = Muse::new(&db);
+    /// let nodes = vec![NodeId::new(1).unwrap(), NodeId::new(2).unwrap()];
+    /// let inspiration = muse.inspire(&nodes, Some("embedding"), 5)?;
+    /// # Ok(())
+    /// # }
+    /// ```
     ///
     /// # Arguments
     /// * `nodes` - The source nodes to combine.

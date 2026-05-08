@@ -152,6 +152,21 @@ impl<'a> Sybil<'a> {
 
     /// Run the simulation.
     ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use aletheiadb::AletheiaDB;
+    /// use aletheiadb::experimental::characterization::sybil::{Sybil, LinearPropagation};
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let db = AletheiaDB::new()?;
+    /// let sybil = Sybil::new(&db);
+    /// let model = LinearPropagation::new(0.5);
+    /// let state = sybil.simulate("opinion", &model, 5)?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
     /// # Arguments
     /// * `property_name` - The vector property to use as the "meme".
     /// * `model` - The propagation logic.

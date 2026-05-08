@@ -65,6 +65,23 @@ impl<'a> FossilDetector<'a> {
     }
 
     /// Detect if a node is a semantic fossil over a given time window.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use aletheiadb::AletheiaDB;
+    /// use aletheiadb::experimental::diagnostics::fossil::FossilDetector;
+    /// use aletheiadb::core::NodeId;
+    /// use aletheiadb::core::temporal::TimeRange;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let db = AletheiaDB::new()?;
+    /// let detector = FossilDetector::new(&db);
+    /// let window = TimeRange::new(0.into(), 100.into()).unwrap();
+    /// let result = detector.detect_fossil(NodeId::new(1).unwrap(), window, "embedding")?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn detect_fossil(
         &self,
         node_id: NodeId,
