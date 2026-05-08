@@ -304,6 +304,10 @@ impl SnapshotIndex {
         }
     }
 
+    /// Returns the number of dimensions stored in this Full index.
+    ///
+    /// # Why?
+    /// Necessary for validating incoming query vectors and allocating result arrays.
     pub(crate) fn len(&self) -> usize {
         match self {
             SnapshotIndex::Full(index) => index.len(),
@@ -314,6 +318,10 @@ impl SnapshotIndex {
         }
     }
 
+    /// Returns the dimensionality of the vectors in this timeline.
+    ///
+    /// # Why?
+    /// Ensures that incoming vectors match the schema size before insertion.
     pub(crate) fn dimensions(&self) -> usize {
         match self {
             SnapshotIndex::Full(index) => index.dimensions(),
@@ -424,6 +432,10 @@ pub(crate) struct SnapshotData {
 }
 
 impl SnapshotData {
+    /// Creates a new, empty map of node timelines.
+    ///
+    /// # Why?
+    /// Initializes the root structure for a property's temporal vector index.
     pub(crate) fn new() -> Self {
         Self {
             snapshots: BTreeMap::new(),
@@ -431,6 +443,10 @@ impl SnapshotData {
         }
     }
 
+    /// Inserts a new vector for a given node at a specific transaction time.
+    ///
+    /// # Why?
+    /// Updates the history of a node's embedding, maintaining time-travel capabilities.
     pub(crate) fn insert(
         &mut self,
         timestamp: Timestamp,
@@ -442,10 +458,18 @@ impl SnapshotData {
         self.vector_history.insert(timestamp, vectors);
     }
 
+    /// Returns the number of snapshots currently stored.
+    ///
+    /// # Why?
+    /// Used to determine when we exceed our configured temporal depth and need to evict.
     pub(crate) fn len(&self) -> usize {
         self.snapshots.len()
     }
 
+    /// Removes the oldest snapshot from the buffer to make room for new ones.
+    ///
+    /// # Why?
+    /// Keeps memory usage bounded when the temporal buffer reaches capacity.
     pub(crate) fn remove_oldest(&mut self) {
         if let Some(key) = self.snapshots.keys().next().copied() {
             self.snapshots.remove(&key);
@@ -480,6 +504,10 @@ pub(crate) struct SnapshotMetadata {
 }
 
 impl SnapshotMetadata {
+    /// Initializes the snapshot metadata tracker.
+    ///
+    /// # Why?
+    /// Sets up counters for determining when enough mutations have happened to justify a new snapshot.
     pub(crate) fn new(initial_time: Timestamp) -> Self {
         Self {
             total_snapshots: 0,
@@ -492,15 +520,28 @@ impl SnapshotMetadata {
         }
     }
 
+    /// Records that a node has been modified during the current transaction.
+    ///
+    /// # Why?
+    /// Tracks dirty nodes so their vectors can be indexed upon commit.
     pub(crate) fn record_change(&mut self, id: NodeId) {
         self.vectors_changed_since_snapshot.insert(id);
         self.changes_accumulated.insert(id);
     }
 
+    /// Increments the count of transactions processed since the last snapshot.
+    ///
+    /// # Why?
+    /// Used to trigger new snapshot generation when the mutation threshold is reached.
     pub(crate) fn record_transaction(&mut self) {
         self.transactions_since_snapshot += 1;
     }
 
+    /// Resets the tracker state after a snapshot is generated.
+    ///
+    /// # Why?
+    /// Clears the accumulated dirty nodes and transaction counters to prepare
+    /// for the next batch of writes.
     pub(crate) fn reset(&mut self, current_time: Timestamp, is_full: bool) {
         self.transactions_since_snapshot = 0;
         self.last_snapshot_time = current_time;
@@ -529,6 +570,10 @@ pub(crate) struct VectorState {
 }
 
 impl VectorState {
+    /// Initializes a new, empty vector state for a specific timestamp.
+    ///
+    /// # Why?
+    /// Represents the complete working set of embeddings valid at this point in time.
     pub(crate) fn new(initial_time: Timestamp) -> Self {
         Self {
             vectors: HashMap::with_hasher(BuildHasherDefault::default()),

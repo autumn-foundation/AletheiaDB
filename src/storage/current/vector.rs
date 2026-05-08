@@ -49,6 +49,10 @@ pub(crate) struct TemporalVectorIndexState {
 }
 
 impl TemporalVectorIndexState {
+    /// Creates a new, uninitialized state for a temporal vector index.
+    ///
+    /// # Why?
+    /// Provides a zero-state representation before an index is explicitly enabled on a property.
     pub(crate) fn new() -> Self {
         TemporalVectorIndexState {
             index: None,
@@ -58,6 +62,11 @@ impl TemporalVectorIndexState {
     }
 
     #[allow(dead_code)] // Kept for backward compatibility with legacy single-property API
+    /// Checks if the temporal vector index has been configured and built.
+    ///
+    /// # Why?
+    /// Allows the query planner to quickly short-circuit operations if no vector
+    /// capabilities are present for the given property.
     pub(crate) fn is_enabled(&self) -> bool {
         self.index.is_some()
     }

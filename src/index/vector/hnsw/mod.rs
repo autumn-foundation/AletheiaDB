@@ -158,6 +158,10 @@ pub(crate) fn is_retryable_usearch_error(error_msg: &str) -> bool {
 }
 
 // Helper to create the metric wrapper
+/// Wraps a standard metric function into a format compatible with the underlying C++ library.
+///
+/// # Why?
+/// Bridges Rust's FFI boundary so usearch can execute custom distance calculations safely.
 pub(crate) fn create_metric_wrapper<F>(
     dims: usize,
     distance_fn: Arc<F>,
@@ -482,6 +486,10 @@ impl HnswIndex {
         self.config.m
     }
 
+    /// Returns all internal mapping pairs between system NodeIds and internal usearch keys.
+    ///
+    /// # Why?
+    /// Allows the graph to reconstruct vector relationships when deserializing the index from disk.
     pub(crate) fn get_id_mappings(&self) -> Vec<(u64, u64)> {
         self.id_mapping
             .iter()
@@ -489,6 +497,10 @@ impl HnswIndex {
             .collect()
     }
 
+    /// Restores a single mapping between a NodeId and a usearch key.
+    ///
+    /// # Why?
+    /// Used during index loading to rebuild the bidirectional translation maps.
     pub(crate) fn restore_mapping(&self, node_id: crate::core::id::NodeId, usearch_key: u64) {
         self.id_mapping.insert(node_id, usearch_key);
         self.reverse_mapping.insert(usearch_key, node_id);
@@ -742,6 +754,11 @@ impl HnswIndex {
         unreachable!("Retry loop should always return")
     }
 
+    /// Ensures the underlying index has enough capacity for incoming vectors.
+    ///
+    /// # Why?
+    /// Usearch requires explicit resizing. Calling this prevents out-of-memory
+    /// errors or panics during bulk insertions.
     pub(crate) fn check_and_expand_capacity(&self, vectors_to_add: usize) -> Result<()> {
         #[cfg(test)]
         if TEST_SKIP_CAPACITY_CHECK.load(Ordering::Relaxed) {
@@ -767,6 +784,10 @@ impl HnswIndex {
         Ok(())
     }
 
+    /// Saves the raw usearch index to a file path.
+    ///
+    /// # Why?
+    /// Persists the index state to cold storage so it survives restarts.
     pub(crate) fn save_internal(&self, path: &Path) -> Result<()> {
         let _save_guard = self.save_lock.write();
         let index = self.inner.read();
@@ -805,6 +826,10 @@ impl HnswIndex {
         write_mappings_to_writer(&mut writer, mappings.into_iter(), count, &self.config)
     }
 
+    /// Converts raw usearch match results into graph NodeIds.
+    ///
+    /// # Why?
+    /// The rest of the database works with NodeIds, not usearch's internal u64 keys.
     pub(crate) fn convert_matches(&self, matches: Matches) -> Vec<(NodeId, f32)> {
         self.convert_matches_internal(matches, usize::MAX, |_| true)
     }

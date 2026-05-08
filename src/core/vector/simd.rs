@@ -577,6 +577,12 @@ pub(crate) mod x86_ops {
     all(any(target_arch = "x86", target_arch = "x86_64"), not(miri)),
     allow(dead_code)
 )]
+/// Computes the dot product and the squared magnitudes of both vectors simultaneously.
+///
+/// # Why?
+/// Calculating cosine distance requires both the dot product and magnitudes. Computing
+/// them in a single pass reduces memory bandwidth and cache misses compared to
+/// iterating over the vectors multiple times.
 pub(crate) fn dot_and_magnitudes_scalar(a: &[f32], b: &[f32]) -> (f32, f32, f32) {
     a.iter().zip(b.iter()).fold(
         (0.0f32, 0.0f32, 0.0f32),
@@ -592,6 +598,11 @@ pub(crate) fn dot_and_magnitudes_scalar(a: &[f32], b: &[f32]) -> (f32, f32, f32)
     all(any(target_arch = "x86", target_arch = "x86_64"), not(miri)),
     allow(dead_code)
 )]
+/// Computes the sum of squared differences between two vectors.
+///
+/// # Why?
+/// This is the core calculation for Euclidean distance, which is often used
+/// in nearest-neighbor search algorithms when magnitudes are normalized.
 pub(crate) fn squared_diff_sum_scalar(a: &[f32], b: &[f32]) -> f32 {
     a.iter()
         .zip(b.iter())
@@ -610,6 +621,11 @@ pub(crate) fn squared_diff_sum_scalar(a: &[f32], b: &[f32]) -> f32 {
     all(any(target_arch = "x86", target_arch = "x86_64"), not(miri)),
     allow(dead_code)
 )]
+/// Computes the dot product of two vectors using a scalar fallback.
+///
+/// # Why?
+/// Used as the inner product metric and acts as a fallback when AVX/NEON
+/// optimizations are not supported by the current hardware.
 pub(crate) fn dot_product_scalar(a: &[f32], b: &[f32]) -> f32 {
     a.iter().zip(b.iter()).map(|(&ai, &bi)| ai * bi).sum()
 }
@@ -620,6 +636,11 @@ pub(crate) fn dot_product_scalar(a: &[f32], b: &[f32]) -> f32 {
     all(any(target_arch = "x86", target_arch = "x86_64"), not(miri)),
     allow(dead_code)
 )]
+/// Computes the squared magnitude (L2 norm squared) of a single vector.
+///
+/// # Why?
+/// Frequently needed to normalize vectors before indexing or to calculate
+/// certain distance bounds efficiently.
 pub(crate) fn squared_magnitude_scalar(v: &[f32]) -> f32 {
     v.iter().map(|&x| x * x).sum()
 }
@@ -632,6 +653,11 @@ pub(crate) fn squared_magnitude_scalar(v: &[f32]) -> f32 {
     all(any(target_arch = "x86", target_arch = "x86_64"), not(miri)),
     allow(dead_code)
 )]
+/// Scales a vector in place by multiplying each element by a constant.
+///
+/// # Why?
+/// Used during vector normalization to modify the vector directly, saving
+/// memory allocations in the hot path.
 pub(crate) fn scale_in_place_scalar(v: &mut [f32], scalar: f32) {
     for x in v.iter_mut() {
         *x *= scalar;
@@ -644,6 +670,11 @@ pub(crate) fn scale_in_place_scalar(v: &mut [f32], scalar: f32) {
     all(any(target_arch = "x86", target_arch = "x86_64"), not(miri)),
     allow(dead_code)
 )]
+/// Scales a vector and copies the result into an uninitialized buffer.
+///
+/// # Why?
+/// Prevents double-initialization overhead when copying scaled embeddings
+/// into newly allocated storage blocks.
 pub(crate) fn scale_and_copy_scalar(src: &[f32], dst: &mut [MaybeUninit<f32>], scalar: f32) {
     assert_eq!(src.len(), dst.len());
     for (s, d) in src.iter().zip(dst.iter_mut()) {

@@ -17,6 +17,17 @@ use std::sync::Arc;
 
 impl AletheiaDB {
     /// Get statistics about the historical storage.
+    ///
+    /// # Examples
+    /// ```
+    /// # use aletheiadb::AletheiaDB;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// let stats = db.historical_stats()?;
+    /// println!("Stats: {:?}", stats);
+    /// # Ok(())
+    /// # }
+    /// ```
     #[must_use = "the historical statistics value must be used"]
     pub fn historical_stats(&self) -> Result<HistoricalStats> {
         Ok(self.historical.read().stats())
@@ -245,6 +256,16 @@ impl AletheiaDB {
     /// # Returns
     ///
     /// A reference to the shared statistics object.
+    ///
+    /// # Examples
+    /// ```
+    /// # use aletheiadb::AletheiaDB;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// let stats = db.statistics();
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn statistics(&self) -> &Arc<Statistics> {
         &self.stats
     }
@@ -319,6 +340,16 @@ impl AletheiaDB {
     ///
     /// Call this after schema changes to force re-collection of statistics
     /// on the next query. The statistics will be lazily refreshed when needed.
+    ///
+    /// # Examples
+    /// ```
+    /// # use aletheiadb::AletheiaDB;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// db.invalidate_statistics();
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn invalidate_statistics(&self) {
         self.stats.invalidate();
     }

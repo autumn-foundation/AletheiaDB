@@ -55,6 +55,11 @@ pub(crate) struct ClockSkewAutoHealTestGuard {
 
 #[cfg(test)]
 impl ClockSkewAutoHealTestGuard {
+    /// Force the clock skew self-heal mechanism for testing.
+    ///
+    /// # Why?
+    /// This allows tests to deterministically toggle the time recovery logic
+    /// without relying on actual system time drifts.
     pub(crate) fn force(enabled: bool) -> Self {
         let previous = CLOCK_SKEW_AUTO_HEAL_TEST_OVERRIDE.with(|cell| {
             let prev = cell.get();
