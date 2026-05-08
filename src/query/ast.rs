@@ -447,12 +447,14 @@ pub struct WhereClause {
 
 /// A predicate expression.
 #[derive(Debug, Clone, PartialEq)]
-#[allow(missing_docs)]
 pub enum PredicateExpr {
     /// Comparison: n.prop = value
     Comparison {
+        /// The left-hand side of the comparison.
         left: Expression,
+        /// The comparison operator.
         op: ComparisonOp,
+        /// The right-hand side of the comparison.
         right: Expression,
     },
     /// Existence check: EXISTS(n.prop)
@@ -463,22 +465,30 @@ pub enum PredicateExpr {
     IsNotNull(PropertyAccess),
     /// String contains: n.prop CONTAINS 'str'
     Contains {
+        /// The property access expression.
         property: PropertyAccess,
+        /// The substring.
         substring: String,
     },
     /// String starts with: n.prop STARTS WITH 'str'
     StartsWith {
+        /// The property access expression.
         property: PropertyAccess,
+        /// The prefix.
         prefix: String,
     },
     /// String ends with: n.prop ENDS WITH 'str'
     EndsWith {
+        /// The property access expression.
         property: PropertyAccess,
+        /// The suffix.
         suffix: String,
     },
     /// IN list: n.prop IN [1, 2, 3]
     In {
+        /// The property access expression.
         property: PropertyAccess,
+        /// The values.
         values: Vec<PropertyValue>,
     },
     /// Logical AND
@@ -553,7 +563,6 @@ pub enum ComparisonOp {
 
 /// An expression (used in comparisons and projections).
 #[derive(Debug, Clone, PartialEq)]
-#[allow(missing_docs)]
 pub enum Expression {
     /// Property access: n.prop
     Property(PropertyAccess),
@@ -564,7 +573,12 @@ pub enum Expression {
     /// Parameter: $param
     Parameter(String),
     /// Function call: func(args)
-    FunctionCall { name: String, args: Vec<Expression> },
+    FunctionCall {
+        /// The name of the function.
+        name: String,
+        /// The arguments.
+        args: Vec<Expression>,
+    },
 }
 
 impl Expression {

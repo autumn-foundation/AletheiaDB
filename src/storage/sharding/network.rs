@@ -17,19 +17,28 @@ use std::time::{Duration, Instant};
 
 /// Error types for network operations.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(missing_docs)]
 pub enum NetworkError {
     /// Connection failed.
-    ConnectionFailed { shard_id: ShardId, reason: String },
+    ConnectionFailed {
+        /// The shard ID that failed.
+        shard_id: ShardId,
+        /// The reason for failure.
+        reason: String,
+    },
     /// Request timed out.
     Timeout {
+        /// The shard ID that timed out.
         shard_id: ShardId,
+        /// The operation that timed out.
         operation: String,
+        /// The duration after which the timeout occurred.
         duration: Duration,
     },
     /// Circuit breaker is open.
     CircuitOpen {
+        /// The shard ID that is rate limited.
         shard_id: ShardId,
+        /// The remaining duration.
         remaining: Duration,
     },
     /// Shard is unavailable.
@@ -40,7 +49,9 @@ pub enum NetworkError {
     ProtocolError(String),
     /// Connection pool exhausted.
     PoolExhausted {
+        /// The shard ID whose connection pool is exhausted.
         shard_id: ShardId,
+        /// The maximum number of connections.
         max_connections: usize,
     },
 }
