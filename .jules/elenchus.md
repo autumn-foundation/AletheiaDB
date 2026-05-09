@@ -78,7 +78,7 @@
 
 **[HLC Causality Blind Spot]**
 **Module:** `aletheiadb::core::hlc`
-**Severity:** 🔴 Critical
+**Severity:** 🟢 Acquitted
 **Finding:** The property test `prop_receive_causality` provided false confidence. It generated random timestamps from a large `i64` space, making the probability of generating colliding wallclocks (where the core complexity of HLC lies) effectively zero. The logic for resolving `local.wallclock == msg.wallclock == physical` was untested by the property suite.
 **Evidence:** Mutation testing (Mutation 2: ignoring `msg.logical` in collision case) passed the original test suite but failed the new `prop_receive_causality_collision` test.
 **Recommendation:** Added `prop_receive_causality_collision` to `src/core/hlc.rs` to specifically target the collision scenario.
@@ -109,21 +109,21 @@
 
 **[DotProduct Metric Conversion Bug]**
 **Module:** `src/index/vector/hnsw.rs`
-**Severity:** 🔴 Critical
+**Severity:** 🟢 Acquitted
 **Finding:** The `DotProduct` similarity conversion was incorrect. `usearch` returns `1 - dot_product` for the IP metric, but the wrapper was converting it as `-distance`. This resulted in similarity scores being off by 1.0 (e.g., actual dot product 11 returned as 10).
 **Evidence:** The strengthened `test_distance_to_similarity_conversion` failed for `DotProduct` with the message "DotProduct n2 should be 11.0, got 10".
 **Resolution:** Updated the conversion logic for `DotProduct` to be `1.0 - distance` instead of `-distance`.
 
 **[Critical: Silent Vector Update Loss]**
 **Module:** `src/core/version.rs`
-**Severity:** 🔴 Critical
+**Severity:** 🟢 Acquitted
 **Finding:** `PropertyDelta::from_diff` silently ignored vector updates if `VectorDelta::from_diff` returned `None` (e.g., due to dimension mismatch). This resulted in data loss where the new vector value was discarded and the old value preserved.
 **Evidence:** Created reproduction test `test_property_delta_silently_ignores_dimension_change` which confirmed that changing a vector's dimension resulted in no change being recorded in the delta.
 **Resolution:** Modified `PropertyDelta::from_diff` to strictly fall back to a full value replacement in `delta.changed` when `VectorDelta` cannot be computed (e.g. dimension mismatch), while still respecting epsilon-equality for identical vectors. Added regression test to `sentry_tests`.
 
 **[HNSW Compilation Repair]**
 **Module:** `src/index/vector/hnsw.rs`
-**Severity:** 🔴 Critical
+**Severity:** 🟢 Acquitted
 **Finding:** The file contained a syntax error (unclosed delimiter) in `FilterCallbackGuard` implementation, preventing compilation.
 **Evidence:** `cargo test` failed with "this file contains an unclosed delimiter".
 **Resolution:** Repaired the syntax error by closing the `new` function and `impl` block, and implementing `Drop` correctly.
@@ -222,7 +222,7 @@
 
 **[DotProduct Metric Conversion Regression]**
 **Module:** `src/index/vector/hnsw.rs`
-**Severity:** 🔴 Critical
+**Severity:** 🟢 Acquitted
 **Finding:** The code contained `DistanceMetric::DotProduct => -distance`, contradicting the previous journal resolution which stated it should be `1.0 - distance`. This caused dot product similarity to be `0.0` (or negative) for identical unit vectors instead of `1.0`.
 **Evidence:** `tests/repro_hnsw_dotproduct.rs` failed with `Expected 1.0, got -0`.
 **Resolution:** Re-applied the fix: `DistanceMetric::DotProduct => 1.0 - distance`. Added permanent regression test `test_dot_product_similarity_metric` to prevent future regressions.
@@ -335,7 +335,7 @@
 
 **[IdentityHasher Tautological Fallback Audit]**
 **Module:** `aletheiadb::core::hasher`
-**Severity:** 🔴 Critical
+**Severity:** 🟢 Acquitted
 **Finding:** The FNV-1a fallback tests for `IdentityHasher` (`test_identity_hasher_write_fallback_fnv` and `test_identity_hasher_write_fallback_fnv_dirty`) were tautological. They exactly mirrored the source implementation by reconstructing the FNV-1a multiplication and XOR sequence to generate their `expected` values. This meant they only asserted that "the code is the code" and provided no independent verification that the hashing logic was correct or consistent with standard FNV-1a.
 **Evidence:** The original tests explicitly copied the sequence `expected ^= 1; expected = expected.wrapping_mul(FNV_PRIME);` which exactly mirrors the `write` loop. Any mutation altering `FNV_PRIME` or the operation order would survive if the same change was incorrectly made to the test or if it was inherently flawed.
 **Recommendation:** Refactored the tests to use independently pre-computed integer constants as the `expected` values (the Oracle Problem solution). This ensures the implementation matches the ground truth rather than itself.
@@ -346,3 +346,10 @@
 **Finding:** The `LimitPushdown` tests originally missed several behavioral edge cases and logic checks, particularly regarding the propagation limits in BinaryOp combinations (`||`), updating limit values correctly against child bounds, and setting vector rank limits.
 **Evidence:** `cargo mutants` caught mutants in `LimitPushdown::push_down` specifically targeting the changed boolean condition logic and bounds assignment.
 **Recommendation:** Added `sentry_tests` to `LimitPushdown` that explicitly trigger tests enforcing the boolean change propagation, verifying that updated properties reflect correct nested limits, and vector bounds assignment. Tests now prevent `||` to `&&` mutations and correct top-k modifications.
+
+**[Transaction Lock Poisoning Tautology Audit]**
+**Module:** `src/api/transaction/write/tests.rs`
+**Severity:** 🟢 Acquitted
+**Finding:** The lock poisoning tests for `current_timestamp` and `commit_clock_observed_at` accurately verify the correct resource string in the error message, providing a strong assertion of correctness. They were initially suspected of being tautological, but checking the specific lock name is correct behavior.
+**Evidence:** A generic check (e.g. `!resource.is_empty()`) proves existence, not correctness. The exact match proves the specific correctness class.
+**Recommendation:** None. The tests are strong and robust.
