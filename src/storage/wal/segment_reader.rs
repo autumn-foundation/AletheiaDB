@@ -121,7 +121,7 @@ pub fn read_entries_from_dir_with_cipher(
     let mut entries = Vec::new();
 
     // Find all WAL segments
-    let mut segments = Vec::new();
+    let mut segments = Vec::with_capacity(16); // ⚡ Bolt Optimization: Pre-allocate space for WAL segment paths to prevent small heap reallocations when reading directories.
     if let Ok(dir_entries) = std::fs::read_dir(wal_dir) {
         for entry in dir_entries.flatten() {
             if let Some(name) = entry.file_name().to_str()
