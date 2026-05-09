@@ -15,12 +15,39 @@ use std::sync::{Arc, Mutex, PoisonError};
 /// snapshot was taken. This is used to determine which versions are visible
 /// to a transaction using Snapshot Isolation.
 ///
+/// # Why?
+///
+/// To provide ACID Snapshot Isolation, a transaction must read from a consistent
+/// view of the database. This struct freezes the state of the active transactions
+/// and the timestamp, allowing transactions to safely evaluate version visibility.
+///
 /// # Performance (Issue #221)
 ///
 /// Uses `Arc<HashSet<TxId>>` instead of `HashSet<TxId>` to avoid O(N²) cloning
 /// overhead when capturing snapshots. With N concurrent transactions, cloning
 /// a HashSet containing N elements on every transaction creation was creating
 /// quadratic scaling. Arc allows cheap snapshot captures (just Arc clone).
+///
+/// ## Examples
+///
+/// ```rust
+/// use std::collections::HashSet;
+/// use std::sync::Arc;
+/// use aletheiadb::api::transaction::types::TxId;
+/// use aletheiadb::api::transaction::visibility::TransactionSnapshot;
+/// use aletheiadb::core::temporal::Timestamp;
+///
+/// let mut active_set = HashSet::new();
+/// active_set.insert(TxId::new(42));
+///
+/// let snapshot = TransactionSnapshot {
+///     snapshot_timestamp: Timestamp::from(100),
+///     active_transactions: Arc::new(active_set),
+/// };
+///
+/// // Tx 42 was active, so any versions it created aren't visible yet.
+/// assert!(!snapshot.is_visible(TxId::new(42), Some(Timestamp::from(90))));
+/// ```
 #[derive(Debug, Clone)]
 pub struct TransactionSnapshot {
     /// Timestamp when snapshot was taken
@@ -46,6 +73,27 @@ impl TransactionSnapshot {
     ///
     /// # Returns
     /// `true` if the version is visible in this snapshot, `false` otherwise
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// use std::collections::HashSet;
+    /// use std::sync::Arc;
+    /// use aletheiadb::api::transaction::types::TxId;
+    /// use aletheiadb::api::transaction::visibility::TransactionSnapshot;
+    /// use aletheiadb::core::temporal::Timestamp;
+    ///
+    /// let snapshot = TransactionSnapshot {
+    ///     snapshot_timestamp: Timestamp::from(200),
+    ///     active_transactions: Arc::new(HashSet::new()),
+    /// };
+    ///
+    /// // Uncommitted versions are never visible
+    /// assert!(!snapshot.is_visible(TxId::new(10), None));
+    ///
+    /// // Committed before our snapshot time -> visible!
+    /// assert!(snapshot.is_visible(TxId::new(10), Some(Timestamp::from(150))));
+    /// ```
     pub fn is_visible(&self, created_by_tx: TxId, commit_timestamp: Option<Timestamp>) -> bool {
         match commit_timestamp {
             None => false, // Uncommitted version - not visible
@@ -77,6 +125,27 @@ impl TransactionSnapshot {
 /// The `active` set uses `Arc`-wrapping with copy-on-write semantics (Issue #221):
 /// snapshot capture is O(1) (just an `Arc` clone), while mutations clone only when
 /// the `Arc` is shared.
+///
+/// ## Examples
+///
+/// ```rust
+/// use aletheiadb::api::transaction::visibility::TxVisibilityManager;
+/// use aletheiadb::api::transaction::types::TxId;
+/// use aletheiadb::core::temporal::Timestamp;
+///
+/// let manager = TxVisibilityManager::new();
+///
+/// // Tx 1 starts
+/// manager.register_active(TxId::new(1));
+///
+/// // Capture a snapshot right now
+/// let snapshot = manager.capture_snapshot(Timestamp::from(100));
+/// assert!(snapshot.active_transactions.contains(&TxId::new(1)));
+///
+/// // Tx 1 finishes
+/// manager.register_commit(TxId::new(1));
+/// assert_eq!(manager.active_count(), 0);
+/// ```
 pub struct TxVisibilityManager {
     /// Currently active (not yet committed or aborted) transactions.
     ///
@@ -87,6 +156,15 @@ pub struct TxVisibilityManager {
 
 impl TxVisibilityManager {
     /// Create a new visibility manager with an empty active-transaction set.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::api::transaction::visibility::TxVisibilityManager;
+    ///
+    /// let manager = TxVisibilityManager::new();
+    /// assert_eq!(manager.active_count(), 0);
+    /// ```
     pub fn new() -> Self {
         TxVisibilityManager {
             active: Mutex::new(Arc::new(HashSet::new())),
@@ -94,12 +172,34 @@ impl TxVisibilityManager {
     }
 
     /// Register a new active transaction.  Call when a transaction begins.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::api::transaction::visibility::TxVisibilityManager;
+    /// use aletheiadb::api::transaction::types::TxId;
+    ///
+    /// let manager = TxVisibilityManager::new();
+    /// manager.register_active(TxId::new(42));
+    /// assert_eq!(manager.active_count(), 1);
+    /// ```
     pub fn register_active(&self, tx_id: TxId) {
         let mut guard = self.active.lock().unwrap_or_else(PoisonError::into_inner);
         Arc::make_mut(&mut *guard).insert(tx_id);
     }
 
     /// Capture a snapshot for a transaction (O(1) — just an Arc clone).
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::api::transaction::visibility::TxVisibilityManager;
+    /// use aletheiadb::core::temporal::Timestamp;
+    ///
+    /// let manager = TxVisibilityManager::new();
+    /// let snapshot = manager.capture_snapshot(Timestamp::from(500));
+    /// assert_eq!(snapshot.snapshot_timestamp, Timestamp::from(500));
+    /// ```
     pub fn capture_snapshot(&self, snapshot_timestamp: Timestamp) -> TransactionSnapshot {
         let guard = self.active.lock().unwrap_or_else(PoisonError::into_inner);
         TransactionSnapshot {
@@ -112,12 +212,36 @@ impl TxVisibilityManager {
     ///
     /// Removes the transaction from the active set.  The commit timestamp is no
     /// longer stored here — it is embedded in each version struct (Issue #238).
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::api::transaction::visibility::TxVisibilityManager;
+    /// use aletheiadb::api::transaction::types::TxId;
+    ///
+    /// let manager = TxVisibilityManager::new();
+    /// manager.register_active(TxId::new(10));
+    /// manager.register_commit(TxId::new(10));
+    /// assert_eq!(manager.active_count(), 0);
+    /// ```
     pub fn register_commit(&self, tx_id: TxId) {
         let mut guard = self.active.lock().unwrap_or_else(PoisonError::into_inner);
         Arc::make_mut(&mut *guard).remove(&tx_id);
     }
 
     /// Register a transaction abort.  Removes the transaction from the active set.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::api::transaction::visibility::TxVisibilityManager;
+    /// use aletheiadb::api::transaction::types::TxId;
+    ///
+    /// let manager = TxVisibilityManager::new();
+    /// manager.register_active(TxId::new(99));
+    /// manager.register_abort(TxId::new(99));
+    /// assert_eq!(manager.active_count(), 0);
+    /// ```
     pub fn register_abort(&self, tx_id: TxId) {
         let mut guard = self.active.lock().unwrap_or_else(PoisonError::into_inner);
         Arc::make_mut(&mut *guard).remove(&tx_id);
@@ -133,6 +257,26 @@ impl TxVisibilityManager {
     /// * `snapshot` - The transaction's snapshot
     /// * `created_by_tx` - The transaction that created the version
     /// * `commit_timestamp` - Embedded commit timestamp, or `None` if uncommitted
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::api::transaction::visibility::TxVisibilityManager;
+    /// use aletheiadb::api::transaction::types::TxId;
+    /// use aletheiadb::core::temporal::Timestamp;
+    ///
+    /// let manager = TxVisibilityManager::new();
+    /// let snapshot = manager.capture_snapshot(Timestamp::from(100));
+    ///
+    /// // A version created by Tx 42 with a commit timestamp of 50 is visible,
+    /// // because 50 < 100 and Tx 42 was not active when the snapshot was taken.
+    /// let is_vis = manager.is_visible_with_embedded_ts(
+    ///     &snapshot,
+    ///     TxId::new(42),
+    ///     Some(Timestamp::from(50))
+    /// );
+    /// assert!(is_vis);
+    /// ```
     pub fn is_visible_with_embedded_ts(
         &self,
         snapshot: &TransactionSnapshot,
@@ -147,6 +291,15 @@ impl TxVisibilityManager {
     }
 
     /// Number of currently active (in-flight) transactions.  Useful for monitoring.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::api::transaction::visibility::TxVisibilityManager;
+    ///
+    /// let manager = TxVisibilityManager::new();
+    /// assert_eq!(manager.active_count(), 0);
+    /// ```
     pub fn active_count(&self) -> usize {
         let guard = self.active.lock().unwrap_or_else(PoisonError::into_inner);
         guard.len()

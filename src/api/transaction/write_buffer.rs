@@ -165,6 +165,21 @@ pub const DEFAULT_MAX_OPERATIONS: usize = 50_000;
 ///
 /// Buffers all write operations in a transaction until commit time,
 /// enabling atomicity and validation before applying changes.
+///
+/// # Why?
+///
+/// In ACID transactions, changes must be buffered in an isolated environment so that
+/// they can be rolled back if an error occurs. The `WriteBuffer` isolates writes from
+/// the main database storage until the transaction successfully commits.
+///
+/// ## Examples
+///
+/// ```rust
+/// use aletheiadb::api::transaction::WriteBuffer;
+///
+/// let mut buffer = WriteBuffer::new();
+/// assert!(buffer.is_empty());
+/// ```
 pub struct WriteBuffer {
     /// Buffered operations in order
     operations: Vec<BufferedWrite>,
@@ -213,6 +228,15 @@ impl WriteBuffer {
     }
 
     /// Create a write buffer with a custom maximum operations limit
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::api::transaction::WriteBuffer;
+    ///
+    /// let buffer = WriteBuffer::with_max_operations(100);
+    /// assert!(buffer.is_empty());
+    /// ```
     pub fn with_max_operations(max_operations: usize) -> Self {
         WriteBuffer {
             operations: Vec::new(),
@@ -228,6 +252,15 @@ impl WriteBuffer {
     ///
     /// Sets max_operations to the requested capacity to avoid confusing behavior
     /// where the buffer is pre-allocated but still enforces the default limit.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::api::transaction::WriteBuffer;
+    ///
+    /// let buffer = WriteBuffer::with_capacity(100);
+    /// assert!(buffer.is_empty());
+    /// ```
     pub fn with_capacity(capacity: usize) -> Self {
         WriteBuffer {
             operations: Vec::with_capacity(capacity),
