@@ -456,10 +456,13 @@ pub(crate) fn apply_changes(tx: &WriteTransaction, commit_timestamp: Timestamp) 
         .count();
 
     let mut tombstone_ids = if num_deletes > 0 {
-        let ids: Result<Vec<u64>> = (0..num_deletes)
-            .map(|_| tx.version_id_gen.next().map_err(Into::into))
-            .collect();
-        ids?.into_iter()
+        // ⚡ Bolt Optimization: Pre-allocate the vector for tombstone IDs to prevent
+        // intermediate heap reallocations during write transaction commits.
+        let mut ids = Vec::with_capacity(num_deletes);
+        for _ in 0..num_deletes {
+            ids.push(tx.version_id_gen.next()?);
+        }
+        ids.into_iter()
     } else {
         Vec::new().into_iter()
     };
