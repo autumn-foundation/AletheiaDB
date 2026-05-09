@@ -319,6 +319,22 @@ impl HybridTimestamp {
     /// - Returns `TemporalError::LogicalCounterOverflow` if the logical counter would exceed u32::MAX.
     ///   This theoretically requires 4+ billion events at the same microsecond, indicating severe
     ///   clock drift or pathological workload.
+    ///
+    /// # Examples
+    /// ```rust
+    /// # use aletheiadb::core::hlc::HybridTimestamp;
+    /// let hlc = HybridTimestamp::new(1000, 0).unwrap();
+    ///
+    /// // Wallclock advances: logical counter resets
+    /// let next = hlc.send(1001).unwrap();
+    /// assert_eq!(next.wallclock(), 1001);
+    /// assert_eq!(next.logical(), 0);
+    ///
+    /// // Wallclock lags: logical counter increments
+    /// let stalled = next.send(1000).unwrap();
+    /// assert_eq!(stalled.wallclock(), 1001);
+    /// assert_eq!(stalled.logical(), 1);
+    /// ```
     #[inline]
     pub fn send(&self, new_wallclock: i64) -> Result<Self, TemporalError> {
         // Validate new_wallclock to prevent invalid timestamps
