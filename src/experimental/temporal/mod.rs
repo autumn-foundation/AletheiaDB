@@ -16,3 +16,7 @@ pub mod sherlock;
 pub mod temporal_diff;
 /// Temporal narrative generator: natural-language history logs from version diffs.
 pub mod temporal_narrative;
+#[cfg(feature = "semantic-temporal")]
+pub mod storyboard;
+#[cfg(feature = "semantic-temporal")]
+pub use storyboard::*;
