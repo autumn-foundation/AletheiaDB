@@ -3406,3 +3406,218 @@ mod find_nodes_by_property_tests {
         assert!(results.is_empty());
     }
 }
+
+mod lock_poisoning_tests {
+    use super::*;
+    use crate::core::id::TxIdGenerator;
+    use crate::core::property::PropertyMapBuilder;
+    use crate::storage::wal::concurrent_system::ConcurrentWalSystemConfig;
+    use std::sync::Barrier;
+    use std::thread;
+    use std::time::Instant;
+    use tempfile::TempDir;
+
+    struct TestHarness {
+        current: Arc<CurrentStorage>,
+        historical: Arc<RwLock<HistoricalStorage>>,
+        temporal_indexes: Arc<TemporalIndexes>,
+        wal: Arc<ConcurrentWalSystem>,
+        current_timestamp: Arc<Mutex<Timestamp>>,
+        visibility_manager: Arc<TxVisibilityManager>,
+        node_id_gen: Arc<IdGenerator>,
+        edge_id_gen: Arc<IdGenerator>,
+        version_id_gen: Arc<IdGenerator>,
+        tx_id_gen: TxIdGenerator,
+        _temp_dir: TempDir,
+    }
+
+    impl TestHarness {
+        fn new() -> Self {
+            let current = Arc::new(CurrentStorage::new());
+            let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
+            let temporal_indexes = Arc::new(TemporalIndexes::new());
+            let temp_dir = TempDir::new().unwrap();
+            let wal_config = ConcurrentWalSystemConfig::new(temp_dir.path());
+            let wal = Arc::new(ConcurrentWalSystem::new(wal_config).unwrap());
+            let current_timestamp = Arc::new(Mutex::new(time::now()));
+            let node_id_gen = Arc::new(IdGenerator::new());
+            let edge_id_gen = Arc::new(IdGenerator::new());
+            let version_id_gen = Arc::new(IdGenerator::new());
+            let tx_id_gen = TxIdGenerator::new();
+            let visibility_manager = Arc::new(TxVisibilityManager::new());
+            TestHarness {
+                current,
+                historical,
+                temporal_indexes,
+                wal,
+                current_timestamp,
+                visibility_manager,
+                node_id_gen,
+                edge_id_gen,
+                version_id_gen,
+                tx_id_gen,
+                _temp_dir: temp_dir,
+            }
+        }
+
+        fn create_tx_with_timestamp(
+            &self,
+            current_timestamp: Arc<Mutex<Timestamp>>,
+        ) -> WriteTransaction {
+            let snapshot = TransactionSnapshot {
+                snapshot_timestamp: time::now(),
+                active_transactions: Arc::new(std::collections::HashSet::new()),
+            };
+            WriteTransaction::new(
+                self.tx_id_gen.next(),
+                snapshot,
+                self.current.clone(),
+                self.historical.clone(),
+                self.temporal_indexes.clone(),
+                self.wal.clone(),
+                current_timestamp,
+                self.visibility_manager.clone(),
+                self.node_id_gen.clone(),
+                self.edge_id_gen.clone(),
+                self.version_id_gen.clone(),
+            )
+        }
+
+        fn create_tx_with_clock(
+            &self,
+            current_timestamp: Arc<Mutex<Timestamp>>,
+            commit_clock_observed_at: Arc<Mutex<Instant>>,
+        ) -> WriteTransaction {
+            let snapshot = TransactionSnapshot {
+                snapshot_timestamp: time::now(),
+                active_transactions: Arc::new(std::collections::HashSet::new()),
+            };
+            WriteTransaction::new_with_clock_observed_at(
+                self.tx_id_gen.next(),
+                snapshot,
+                self.current.clone(),
+                self.historical.clone(),
+                self.temporal_indexes.clone(),
+                self.wal.clone(),
+                current_timestamp,
+                commit_clock_observed_at,
+                self.visibility_manager.clone(),
+                self.node_id_gen.clone(),
+                self.edge_id_gen.clone(),
+                self.version_id_gen.clone(),
+            )
+        }
+    }
+
+    fn poison_mutex<T: Send + 'static>(mutex: &Arc<Mutex<T>>) {
+        let clone = mutex.clone();
+        let _ = thread::spawn(move || {
+            let _guard = clone.lock().unwrap();
+            panic!("intentional panic to poison the lock");
+        })
+        .join();
+    }
+
+    /// Poisoning `current_timestamp` causes `commit()` to return `LockPoisoned`
+    /// instead of panicking.
+    #[test]
+    fn test_timestamp_lock_poisoning_during_commit() {
+        let harness = TestHarness::new();
+        let poisoned_ts: Arc<Mutex<Timestamp>> = Arc::new(Mutex::new(time::now()));
+        poison_mutex(&poisoned_ts);
+        assert!(poisoned_ts.is_poisoned());
+
+        let mut tx = harness.create_tx_with_timestamp(poisoned_ts);
+        tx.create_node("Test", PropertyMapBuilder::new().insert("x", 1i64).build())
+            .unwrap();
+
+        let result = tx.commit();
+        assert!(
+            result.is_err(),
+            "commit should fail with poisoned timestamp lock"
+        );
+        match result.unwrap_err() {
+            crate::core::error::Error::Transaction(TransactionError::LockPoisoned { resource }) => {
+                assert!(
+                    resource.contains("current_timestamp"),
+                    "expected current_timestamp in resource, got: {resource}"
+                );
+            }
+            err => panic!("expected LockPoisoned error, got: {err:?}"),
+        }
+    }
+
+    /// When multiple threads attempt concurrent commits against a poisoned lock,
+    /// each thread gets a `LockPoisoned` error rather than panicking.
+    #[test]
+    fn test_concurrent_commits_with_poisoned_lock() {
+        let poisoned_ts: Arc<Mutex<Timestamp>> = Arc::new(Mutex::new(time::now()));
+        poison_mutex(&poisoned_ts);
+        assert!(poisoned_ts.is_poisoned());
+
+        let num_threads = 4;
+        let harness = Arc::new(TestHarness::new());
+        let barrier = Arc::new(Barrier::new(num_threads));
+        let mut handles = Vec::new();
+
+        for _ in 0..num_threads {
+            let h = harness.clone();
+            let ts = poisoned_ts.clone();
+            let barrier = barrier.clone();
+
+            handles.push(thread::spawn(move || {
+                let mut tx = h.create_tx_with_timestamp(ts);
+                tx.create_node("Test", PropertyMapBuilder::new().insert("x", 1i64).build())
+                    .unwrap();
+                barrier.wait();
+                tx.commit()
+            }));
+        }
+
+        for handle in handles {
+            let result = handle.join().expect("thread should not panic");
+            assert!(result.is_err(), "commit should fail");
+            match result.unwrap_err() {
+                crate::core::error::Error::Transaction(TransactionError::LockPoisoned {
+                    resource,
+                }) => {
+                    assert!(
+                        resource.contains("current_timestamp"),
+                        "expected current_timestamp in resource, got: {resource}"
+                    );
+                }
+                err => panic!("expected LockPoisoned error, got: {err:?}"),
+            }
+        }
+    }
+
+    /// Poisoning `commit_clock_observed_at` causes `commit()` to return
+    /// `LockPoisoned` via the adaptive forward-jump guard, not a panic.
+    #[test]
+    fn test_commit_clock_observed_at_lock_poisoning() {
+        let harness = TestHarness::new();
+        let poisoned_clock: Arc<Mutex<Instant>> = Arc::new(Mutex::new(Instant::now()));
+        poison_mutex(&poisoned_clock);
+        assert!(poisoned_clock.is_poisoned());
+
+        let mut tx =
+            harness.create_tx_with_clock(harness.current_timestamp.clone(), poisoned_clock);
+        tx.create_node("Test", PropertyMapBuilder::new().insert("x", 1i64).build())
+            .unwrap();
+
+        let result = tx.commit();
+        assert!(
+            result.is_err(),
+            "commit should fail with poisoned clock lock"
+        );
+        match result.unwrap_err() {
+            crate::core::error::Error::Transaction(TransactionError::LockPoisoned { resource }) => {
+                assert!(
+                    resource.contains("commit_clock_observed_at"),
+                    "expected commit_clock_observed_at in resource, got: {resource}"
+                );
+            }
+            err => panic!("expected LockPoisoned error, got: {err:?}"),
+        }
+    }
+}
