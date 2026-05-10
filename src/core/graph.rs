@@ -25,6 +25,18 @@ fn matches_label(label_id: InternedString, label: &str) -> bool {
 ///
 /// `NodeHeader` is kept in sync with the full node map: every `insert_node` creates
 /// a corresponding header and every `remove_node` removes it.
+///
+/// # Examples
+/// ```
+/// use aletheiadb::core::id::NodeId;
+/// use aletheiadb::core::interning::InternedString;
+/// use aletheiadb::core::graph::NodeHeader;
+///
+/// let id = NodeId::new(42).unwrap();
+/// let label = InternedString::new(1);
+/// let header = NodeHeader { id, label };
+/// assert_eq!(header.id, id);
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NodeHeader {
     /// Unique identifier for this node (mirrors `Node::id`).
@@ -47,6 +59,32 @@ impl From<&Node> for NodeHeader {
 ///
 /// This represents the current version of a node, optimized for fast access.
 /// Historical versions are stored separately in the temporal storage layer.
+///
+/// # Examples
+/// ```
+/// use aletheiadb::core::id::{NodeId, VersionId, TxId};
+/// use aletheiadb::core::interning::InternedString;
+/// use aletheiadb::core::graph::Node;
+/// use aletheiadb::core::property::{PropertyMap, PropertyMapBuilder, PropertyValue};
+/// use aletheiadb::core::version::VersionMetadata;
+/// use aletheiadb::core::temporal::Timestamp;
+///
+/// let properties = PropertyMapBuilder::new()
+///     .insert("name", PropertyValue::String("Alice".into()))
+///     .build();
+///
+/// let node = Node {
+///     id: NodeId::new(42).unwrap(),
+///     label: InternedString::new(1),
+///     properties,
+///     current_version: VersionId::new(1).unwrap(),
+///     metadata: VersionMetadata {
+///         tx_id: TxId::new(10),
+///         valid_time: Timestamp::MIN,
+///     },
+/// };
+/// assert_eq!(node.properties.get("name").unwrap(), &PropertyValue::String("Alice".into()));
+/// ```
 #[derive(Clone, PartialEq)]
 pub struct Node {
     /// Unique identifier for this node.
@@ -167,6 +205,34 @@ impl std::fmt::Debug for Node {
 ///
 /// Edges are directed relationships between nodes with properties.
 /// This represents the current version, optimized for fast traversals.
+///
+/// # Examples
+/// ```
+/// use aletheiadb::core::id::{EdgeId, NodeId, VersionId, TxId};
+/// use aletheiadb::core::interning::InternedString;
+/// use aletheiadb::core::graph::Edge;
+/// use aletheiadb::core::property::{PropertyMap, PropertyMapBuilder, PropertyValue};
+/// use aletheiadb::core::version::VersionMetadata;
+/// use aletheiadb::core::temporal::Timestamp;
+///
+/// let properties = PropertyMapBuilder::new()
+///     .insert("weight", PropertyValue::Float(1.5))
+///     .build();
+///
+/// let edge = Edge {
+///     id: EdgeId::new(100).unwrap(),
+///     label: InternedString::new(2),
+///     source: NodeId::new(42).unwrap(),
+///     target: NodeId::new(43).unwrap(),
+///     properties,
+///     current_version: VersionId::new(1).unwrap(),
+///     metadata: VersionMetadata {
+///         tx_id: TxId::new(11),
+///         valid_time: Timestamp::MIN,
+///     },
+/// };
+/// assert_eq!(edge.source, NodeId::new(42).unwrap());
+/// ```
 #[derive(Clone, PartialEq)]
 pub struct Edge {
     /// Unique identifier for this edge.

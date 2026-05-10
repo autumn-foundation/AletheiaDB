@@ -21,6 +21,32 @@ use std::sync::{Arc, Mutex, PoisonError};
 /// overhead when capturing snapshots. With N concurrent transactions, cloning
 /// a HashSet containing N elements on every transaction creation was creating
 /// quadratic scaling. Arc allows cheap snapshot captures (just Arc clone).
+///
+/// # Examples
+/// ```
+/// use aletheiadb::api::transaction::visibility::TransactionSnapshot;
+/// use aletheiadb::api::transaction::types::TxId;
+/// use aletheiadb::core::temporal::Timestamp;
+/// use std::collections::HashSet;
+/// use std::sync::Arc;
+///
+/// let mut active = HashSet::new();
+/// active.insert(TxId::new(10));
+///
+/// let snapshot = TransactionSnapshot {
+///     snapshot_timestamp: Timestamp::new(100),
+///     active_transactions: Arc::new(active),
+/// };
+///
+/// // Version committed at t=50 by tx 5 is visible
+/// assert!(snapshot.is_version_visible(Timestamp::new(50), TxId::new(5)));
+///
+/// // Version committed at t=150 is NOT visible (in the future)
+/// assert!(!snapshot.is_version_visible(Timestamp::new(150), TxId::new(11)));
+///
+/// // Version committed at t=50 by active tx 10 is NOT visible
+/// assert!(!snapshot.is_version_visible(Timestamp::new(50), TxId::new(10)));
+/// ```
 #[derive(Debug, Clone)]
 pub struct TransactionSnapshot {
     /// Timestamp when snapshot was taken
@@ -77,6 +103,25 @@ impl TransactionSnapshot {
 /// The `active` set uses `Arc`-wrapping with copy-on-write semantics (Issue #221):
 /// snapshot capture is O(1) (just an `Arc` clone), while mutations clone only when
 /// the `Arc` is shared.
+///
+/// # Examples
+/// ```
+/// use aletheiadb::api::transaction::visibility::TxVisibilityManager;
+/// use aletheiadb::api::transaction::types::TxId;
+/// use aletheiadb::core::temporal::Timestamp;
+///
+/// let manager = TxVisibilityManager::new();
+///
+/// // Tx 1 starts
+/// manager.register_transaction(TxId::new(1));
+///
+/// // Take a snapshot for Tx 2
+/// let snapshot = manager.take_snapshot(Timestamp::new(100));
+/// assert!(snapshot.active_transactions.contains(&TxId::new(1)));
+///
+/// // Tx 1 commits
+/// manager.commit_transaction(TxId::new(1));
+/// ```
 pub struct TxVisibilityManager {
     /// Currently active (not yet committed or aborted) transactions.
     ///

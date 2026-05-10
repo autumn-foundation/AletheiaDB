@@ -13,6 +13,19 @@ use crate::index::vector::DistanceMetric;
 use super::ir::{Direction, Predicate, TraversalDepth};
 
 /// A logical query plan represented as a tree of operations.
+///
+/// # Examples
+/// ```
+/// use aletheiadb::core::interning::InternedString;
+/// use aletheiadb::query::plan::{LogicalPlan, LogicalOp};
+///
+/// let root_op = LogicalOp::Scan {
+///     label: Some(InternedString::new(1)),
+/// };
+/// let plan = LogicalPlan::new(root_op);
+///
+/// assert!(plan.temporal_context.is_none());
+/// ```
 #[derive(Debug, Clone, PartialEq)]
 pub struct LogicalPlan {
     /// Root operation of the plan tree
@@ -25,6 +38,17 @@ pub struct LogicalPlan {
 
 impl LogicalPlan {
     /// Create a new logical plan with the given root operation
+    ///
+    /// # Examples
+    /// ```
+    /// use aletheiadb::core::id::NodeId;
+    /// use aletheiadb::query::plan::{LogicalPlan, LogicalOp};
+    ///
+    /// let start_node = NodeId::new(42).unwrap();
+    /// let plan = LogicalPlan::new(LogicalOp::Start { id: start_node });
+    ///
+    /// assert!(matches!(plan.root, LogicalOp::Start { id: _ }));
+    /// ```
     #[must_use]
     pub fn new(root: LogicalOp) -> Self {
         LogicalPlan {
