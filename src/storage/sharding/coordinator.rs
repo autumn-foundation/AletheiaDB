@@ -560,12 +560,15 @@ impl ShardCoordinator {
             }
         };
 
+        let mut unavailable_shards = Vec::new();
+
         for shard_id in transaction.participant_shards() {
             if let Some(conn) = connections.get(&shard_id) {
                 match conn.prepare(tx_id, prepare_timestamp) {
                     Ok(()) => transaction.record_prepare_success(shard_id),
                     Err(DistributedTxError::ParticipantUnavailable { .. }) => {
                         transaction.record_unreachable(shard_id);
+                        unavailable_shards.push(shard_id);
                     }
                     Err(_) => {
                         transaction.record_prepare_failure(shard_id);
@@ -573,6 +576,7 @@ impl ShardCoordinator {
                 }
             } else {
                 transaction.record_unreachable(shard_id);
+                unavailable_shards.push(shard_id);
             }
         }
 
@@ -595,6 +599,10 @@ impl ShardCoordinator {
 
             transaction.abort("Prepare phase failed");
             drop(connections); // Prevent deadlock with active_transactions.write()
+
+            for shard_id in unavailable_shards {
+                self.mark_shard_unavailable(shard_id);
+            }
 
             // Re-insert the aborted transaction for tracking
             if let Ok(mut txns) = self.active_transactions.write() {
@@ -730,6 +738,8 @@ impl ShardCoordinator {
             }
         };
 
+        let mut unavailable_shards = Vec::new();
+
         for shard_id in transaction.participant_shards() {
             if let Some(conn) = connections.get(&shard_id) {
                 // Retry logic for commit with exponential backoff
@@ -749,12 +759,22 @@ impl ShardCoordinator {
                             retry_count += 1;
                             continue;
                         }
+                        Err(DistributedTxError::ParticipantUnavailable { .. }) => {
+                            transaction.record_unreachable(shard_id);
+                            unavailable_shards.push(shard_id);
+                            // Participant unavailable during commit is bad, but we must retry later
+                            // For now, break and let the transaction remain uncommitted
+                            break;
+                        }
                         Err(_) => {
                             // Exhausted retries - commit decision is logged, recovery will retry
                             break;
                         }
                     }
                 }
+            } else {
+                transaction.record_unreachable(shard_id);
+                unavailable_shards.push(shard_id);
             }
         }
 
@@ -765,6 +785,10 @@ impl ShardCoordinator {
             let uncommitted = transaction.uncommitted_participants();
             transaction.mark_failed();
             drop(connections); // Prevent deadlock with active_transactions.write()
+
+            for shard_id in unavailable_shards {
+                self.mark_shard_unavailable(shard_id);
+            }
 
             // Re-insert for recovery tracking
             if let Ok(mut txns) = self.active_transactions.write() {
