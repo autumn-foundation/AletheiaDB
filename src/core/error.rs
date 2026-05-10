@@ -294,6 +294,13 @@ impl From<&crate::storage::index_persistence::IndexPersistenceError> for Persist
 }
 
 /// Errors related to storage operations.
+///
+/// ## Recovery
+/// Storage errors typically indicate that the requested entity does not exist or that
+/// an invalid property was provided. To recover:
+/// - **NotFound:** Verify the entity ID before querying or handle `None` gracefully.
+/// - **DuplicateId:** Ensure you generate unique IDs or use `create_node`/`create_edge` safely.
+/// - **InvalidProperty:** Validate data schemas before insertion.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum StorageError {
     /// Node with the given ID was not found.
@@ -448,6 +455,12 @@ impl From<crate::encryption::KeyProviderError> for StorageError {
 }
 
 /// Errors related to temporal constraints and bi-temporal operations.
+///
+/// ## Recovery
+/// Temporal errors usually stem from clock skew or overflow. To recover:
+/// - **ClockSkew:** If skew is excessive, sync the system clock via NTP. The system auto-heals minor skew over time.
+/// - **InvalidTimestamp:** Do not construct `HybridTimestamp` values manually with out-of-bounds wallclocks.
+/// - **LogicalCounterOverflow:** Rate-limit operations within the same millisecond or wait for the physical clock to advance.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum TemporalError {
     /// Transaction time is not monotonically increasing.
@@ -585,6 +598,12 @@ pub enum TemporalError {
 }
 
 /// Errors related to query operations.
+///
+/// ## Recovery
+/// Query errors indicate malformed requests or type mismatches during execution. To recover:
+/// - **SyntaxError/PlanError:** Review the Cypher/SQL query syntax and ensure it conforms to supported grammar.
+/// - **TypeMismatch:** Check that functions and aggregations are applied to properties of the correct type (e.g., math on numbers).
+/// - **ExecutionError:** Ensure that query parameters map correctly to existing nodes and vectors.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum QueryError {
     /// Query syntax error.
@@ -664,6 +683,12 @@ fn format_index_not_found(index_type: &str, property_name: &str, hint: &Option<S
 }
 
 /// Errors related to transaction operations.
+///
+/// ## Recovery
+/// Transaction errors often arise from concurrency conflicts or incorrect usage. To recover:
+/// - **Conflict:** Retry the transaction, as another thread modified the same entity concurrently.
+/// - **InvalidState:** Ensure methods like `commit()` or `rollback()` are only called on an active transaction.
+/// - **LockPoisoned:** Restart the database instance, as a thread panicked while holding a critical internal lock.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum TransactionError {
     /// Transaction is not in the correct state for this operation.
@@ -766,6 +791,12 @@ fn format_clock_skew(wallclock: i64, previous: i64, drift_us: i64, max_allowed: 
 }
 
 /// Errors related to vector operations and validation.
+///
+/// ## Recovery
+/// Vector errors relate to embedding operations and index configurations. To recover:
+/// - **DimensionMismatch:** Verify the embedding model dimensions match the vector index configuration.
+/// - **IndexNotFound:** Ensure `vector_index("...").enable()?` is called before querying.
+/// - **ComputeError:** Check system memory limits if distance computation fails.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum VectorError {
     /// Vector dimensions do not match.

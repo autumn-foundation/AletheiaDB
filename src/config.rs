@@ -56,6 +56,18 @@ use crate::storage::version::AnchorConfig;
 /// The WAL is the backbone of durability in AletheiaDB. This struct allows you to tune
 /// its behavior, such as concurrency (stripes), sync intervals, and directory paths,
 /// to balance between latency and throughput.
+///
+/// ## Examples
+/// ```
+/// use aletheiadb::config::WalConfigBuilder;
+///
+/// let config = WalConfigBuilder::new()
+///     .num_stripes(8).unwrap()
+///     .stripe_capacity(2048).unwrap()
+///     .build();
+///
+/// assert_eq!(config.num_stripes, 8);
+/// ```
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "config-toml", derive(Serialize, Deserialize))]
 #[cfg_attr(feature = "config-toml", serde(default))]
@@ -117,6 +129,17 @@ impl Default for WalConfig {
 /// Builder for WAL configuration.
 ///
 /// Provides a fluent API for constructing WAL configuration with validation.
+///
+/// ## Examples
+/// ```
+/// use aletheiadb::config::WalConfigBuilder;
+///
+/// let config = WalConfigBuilder::new()
+///     .flush_interval_ms(50).unwrap()
+///     .build();
+///
+/// assert_eq!(config.flush_interval_ms, 50);
+/// ```
 #[must_use = "builders do nothing unless you call build()"]
 #[derive(Debug)]
 pub struct WalConfigBuilder {
@@ -326,6 +349,18 @@ impl Default for WalConfigBuilder {
 /// To support time-travel queries, AletheiaDB keeps past versions of nodes and edges.
 /// This configuration dictates how those versions are managed, including pruning
 /// thresholds and the directory where historical data is stored on disk.
+///
+/// ## Examples
+/// ```
+/// use aletheiadb::config::HistoricalConfigBuilder;
+///
+/// let config = HistoricalConfigBuilder::new()
+///     .max_versions_per_entity(500).unwrap()
+///     .max_reconstruction_depth(50).unwrap()
+///     .build();
+///
+/// assert_eq!(config.max_versions_per_entity, 500);
+/// ```
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "config-toml", derive(Serialize, Deserialize))]
 #[cfg_attr(feature = "config-toml", serde(default))]
@@ -394,6 +429,17 @@ impl Default for HistoricalConfig {
 /// Builder for historical storage configuration.
 ///
 /// Provides a fluent API for constructing historical storage configuration with validation.
+///
+/// ## Examples
+/// ```
+/// use aletheiadb::config::HistoricalConfigBuilder;
+///
+/// let config = HistoricalConfigBuilder::new()
+///     .max_delta_chain(100).unwrap()
+///     .build();
+///
+/// assert_eq!(config.max_delta_chain, 100);
+/// ```
 #[must_use = "builders do nothing unless you call build()"]
 #[derive(Debug)]
 pub struct HistoricalConfigBuilder {
