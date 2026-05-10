@@ -57,10 +57,16 @@ use super::{OptimizationRule, Statistics};
 /// let optimized_plan = rule.apply(&plan, &stats)?.unwrap(); // unwraps if `changed == true`
 ///
 /// // 3. The rule fuses them into a single PropertyScan
-/// assert!(matches!(
-///     optimized_plan.root,
-///     LogicalOp::Scan(ScanOp::PropertyScan { .. })
-/// ));
+/// let expected_plan = LogicalPlan {
+///     root: LogicalOp::Scan(ScanOp::PropertyScan {
+///         label: "Person".into(),
+///         key: "name".into(),
+///         value: PredicateValue::String("Alice".into()),
+///     }),
+///     temporal_context: None,
+///     hints: Default::default(),
+/// };
+/// assert_eq!(optimized_plan, expected_plan);
 /// # Ok(())
 /// # }
 /// ```
@@ -173,17 +179,14 @@ mod tests {
             }),
         ));
 
-        let result = rule.apply(&plan, &stats).unwrap();
-        assert!(result.is_some(), "Should fuse Filter+NodeScan");
+        let expected_plan = LogicalPlan::new(LogicalOp::Scan(ScanOp::PropertyScan {
+            label: "Person".to_string(),
+            key: "name".to_string(),
+            value: crate::query::ir::PredicateValue::String("Alice".to_string()),
+        }));
 
-        let new_plan = result.unwrap();
-        match &new_plan.root {
-            LogicalOp::Scan(ScanOp::PropertyScan { label, key, .. }) => {
-                assert_eq!(label, "Person");
-                assert_eq!(key, "name");
-            }
-            other => panic!("Expected PropertyScan, got {:?}", other),
-        }
+        let result = rule.apply(&plan, &stats).unwrap();
+        assert_eq!(result, Some(expected_plan), "Should fuse Filter+NodeScan");
     }
 
     #[test]

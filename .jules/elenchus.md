@@ -346,3 +346,10 @@
 **Finding:** The `LimitPushdown` tests originally missed several behavioral edge cases and logic checks, particularly regarding the propagation limits in BinaryOp combinations (`||`), updating limit values correctly against child bounds, and setting vector rank limits.
 **Evidence:** `cargo mutants` caught mutants in `LimitPushdown::push_down` specifically targeting the changed boolean condition logic and bounds assignment.
 **Recommendation:** Added `sentry_tests` to `LimitPushdown` that explicitly trigger tests enforcing the boolean change propagation, verifying that updated properties reflect correct nested limits, and vector bounds assignment. Tests now prevent `||` to `&&` mutations and correct top-k modifications.
+
+**[Query Planner Weak Assertions]**
+**Module:** `aletheiadb::query::planner::rules` (`filter_scan_fusion` and `limit_pushdown`)
+**Severity:** 🟡 Suspect
+**Finding:** The unit tests and doc tests for `FilterScanFusion` and `LimitPushdown` used weak assertions such as `assert!(result.is_some())` and `assert!(matches!(...))` that only verified the presence of an expected AST node type, but completely ignored the inner properties (e.g. `value` inside `PropertyScan` or the inner children of a propagated limit tree).
+**Evidence:** These were classic "Alibi Tests" - coverage showed them executing, but `cargo mutants` would have survived trivial changes to the implementation because the tests didn't assert full structural equality on the optimized tree.
+**Recommendation:** Refactored all tests in these modules to construct a full `expected_plan` manually and use `assert_eq!(result, Some(expected_plan))` for strict structural verification, eliminating the blind spots.
