@@ -8,6 +8,7 @@
 
 pub mod alchemy;
 pub mod chimera;
+pub mod crossroads;
 pub mod dreamer;
 pub mod hindsight;
 pub mod luna;
