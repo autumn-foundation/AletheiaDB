@@ -24,7 +24,7 @@ body = """
     ### {{ group | upper_first }}
     {% for commit in commits %}
         - {% if commit.scope %}**{{ commit.scope }}**: {% endif %}{{ commit.message | upper_first }}\
-          {% if commit.github.pr_number %} ([#{{ commit.github.pr_number }}]({{ commit.github.pr_url }})){% endif %}\
+          {% if commit.remote.pr_number %} ([#{{ commit.remote.pr_number }}]({{ commit.remote.pr_url }})){% endif %}\
     {% endfor %}
 {% endfor %}\n
 """
@@ -57,38 +57,40 @@ sort_commits = "oldest"
 # Limit the number of commits included in the changelog
 # limit_commits = 42
 
-[git.commit_preprocessors]
+commit_preprocessors = [
 # Remove issue numbers from commit messages
 # { pattern = '\((\w+\s)?#([0-9]+)\)', replace = "" }
+]
 
-[git.commit_parsers]
+commit_parsers = [
 # Breaking changes
-{ message = "^\\w+\\(.*\\)!:", group = "⚠️ BREAKING CHANGES" }
-{ body = ".*BREAKING[ -]CHANGE.*", group = "⚠️ BREAKING CHANGES" }
+{ message = "^\\w+\\(.*\\)!:", group = "⚠️ BREAKING CHANGES" },
+{ body = ".*BREAKING[ -]CHANGE.*", group = "⚠️ BREAKING CHANGES" },
 # New features
-{ message = "^feat", group = "✨ Features" }
+{ message = "^feat", group = "✨ Features" },
 # Bug fixes
-{ message = "^fix", group = "🐛 Bug Fixes" }
+{ message = "^fix", group = "🐛 Bug Fixes" },
 # Performance improvements
-{ message = "^perf", group = "⚡ Performance" }
+{ message = "^perf", group = "⚡ Performance" },
 # Documentation updates
-{ message = "^docs", group = "📚 Documentation" }
+{ message = "^docs", group = "📚 Documentation" },
 # Refactoring
-{ message = "^refactor", group = "♻️ Refactoring" }
+{ message = "^refactor", group = "♻️ Refactoring" },
 # Code style changes
-{ message = "^style", group = "🎨 Style" }
+{ message = "^style", group = "🎨 Style" },
 # Tests
-{ message = "^test", group = "✅ Testing" }
+{ message = "^test", group = "✅ Testing" },
 # Build system
-{ message = "^build", group = "🏗️ Build" }
+{ message = "^build", group = "🏗️ Build" },
 # CI/CD
-{ message = "^ci", group = "👷 CI/CD" }
+{ message = "^ci", group = "👷 CI/CD" },
 # Chores
-{ message = "^chore\\(release\\):", skip = true }
-{ message = "^chore\\(deps\\):", group = "⬆️ Dependencies" }
-{ message = "^chore", group = "🔧 Chores" }
+{ message = "^chore\\(release\\):", skip = true },
+{ message = "^chore\\(deps\\):", group = "⬆️ Dependencies" },
+{ message = "^chore", group = "🔧 Chores" },
 # Reverts
 { message = "^revert", group = "⏪ Reverts" }
+]
 
 [github]
 # GitHub integration for PRs and issues
