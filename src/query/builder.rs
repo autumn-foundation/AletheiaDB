@@ -649,7 +649,9 @@ impl<S: QueryState> QueryBuilder<S> {
     #[must_use]
     pub fn valid_time_between(mut self, start: Timestamp, end: Timestamp) -> Self {
         let mut ctx = self.temporal_context.take().unwrap_or_default();
-        ctx.valid_time_between = Some(TimeRange::between(start, end).unwrap());
+        // If the range is invalid, we silently clamp it to [start, start] instead of crashing the builder.
+        ctx.valid_time_between =
+            Some(TimeRange::between(start, end).unwrap_or_else(|_| TimeRange::at(start)));
         self.temporal_context = Some(ctx);
         self
     }
@@ -676,7 +678,9 @@ impl<S: QueryState> QueryBuilder<S> {
     #[must_use]
     pub fn transaction_time_between(mut self, start: Timestamp, end: Timestamp) -> Self {
         let mut ctx = self.temporal_context.take().unwrap_or_default();
-        ctx.transaction_time_between = Some(TimeRange::between(start, end).unwrap());
+        // If the range is invalid, we silently clamp it to [start, start] instead of crashing the builder.
+        ctx.transaction_time_between =
+            Some(TimeRange::between(start, end).unwrap_or_else(|_| TimeRange::at(start)));
         self.temporal_context = Some(ctx);
         self
     }
@@ -1573,33 +1577,51 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "InvalidTimeRange")]
-    fn test_valid_time_between_invalid_range_panics() {
+    fn test_valid_time_between_invalid_range_fallback() {
         use crate::core::hlc::HybridTimestamp;
 
         let start = HybridTimestamp::new(2000, 0).unwrap();
         let end = HybridTimestamp::new(1000, 0).unwrap();
 
-        // Should panic because start > end
-        let _ = QueryBuilder::new()
+        // Should gracefully fallback to point-in-time [start, start] instead of panicking
+        let query = QueryBuilder::new()
             .valid_time_between(start, end)
             .start(test_node_id())
             .build();
+
+        let range = query
+            .temporal_context
+            .as_ref()
+            .unwrap()
+            .valid_time_between
+            .as_ref()
+            .unwrap();
+        assert_eq!(range.start(), start);
+        assert_eq!(range.end(), start);
     }
 
     #[test]
-    #[should_panic(expected = "InvalidTimeRange")]
-    fn test_transaction_time_between_invalid_range_panics() {
+    fn test_transaction_time_between_invalid_range_fallback() {
         use crate::core::hlc::HybridTimestamp;
 
         let start = HybridTimestamp::new(2000, 0).unwrap();
         let end = HybridTimestamp::new(1000, 0).unwrap();
 
-        // Should panic because start > end
-        let _ = QueryBuilder::new()
+        // Should gracefully fallback to point-in-time [start, start] instead of panicking
+        let query = QueryBuilder::new()
             .transaction_time_between(start, end)
             .start(test_node_id())
             .build();
+
+        let range = query
+            .temporal_context
+            .as_ref()
+            .unwrap()
+            .transaction_time_between
+            .as_ref()
+            .unwrap();
+        assert_eq!(range.start(), start);
+        assert_eq!(range.end(), start);
     }
 
     #[test]
