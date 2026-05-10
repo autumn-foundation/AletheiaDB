@@ -7,3 +7,6 @@
 ## 2024-05-03 - [The Missing Documentations of the db internals]
 **Confusion:** Many core public functions and structures within the `src/db` submodules were missing module level documentation (`//!`), making it hard for users to quickly get the concept of what each file does.
 **Clarification:** I added module-level `//!` documentation to all files under `src/db` that were missing them (`admin.rs`, `config.rs`, `ops.rs`, `query.rs`, `temporal.rs`, `transaction.rs`, `vector.rs`, `vector_builder.rs`) as well as `src/experimental/temporal/temporal_narrative.rs`. This provides a "Abstract" of what the file does before listing "how".
+## 2024-05-14 - [Adding Examples to HLC and documenting src/main.rs]
+**Confusion:** The `src/main.rs` file was missing module-level documentation (`//!`), which triggers the `missing_docs` lint, but was hidden by the lint configurations inside `src/lib.rs` affecting `src/main.rs`. Also `HybridTimestamp::send` lacked an example showing the behavior of its logical counter.
+**Clarification:** Added `//! The AletheiaDB binary.` to `src/main.rs` and added an executable `## Examples` block to `HybridTimestamp::send` in `src/core/hlc.rs`.

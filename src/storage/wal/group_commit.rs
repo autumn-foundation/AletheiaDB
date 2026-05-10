@@ -275,6 +275,15 @@ impl GroupCommitCoordinator {
     /// Returns an error if:
     /// - The flush for this epoch failed
     /// - The wait times out (indicates a stuck flush thread or excessive system load)
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # use aletheiadb::storage::wal::group_commit::GroupCommitCoordinator;
+    /// # let coordinator = GroupCommitCoordinator::new(10, 100);
+    /// # let (epoch, _) = coordinator.register_transaction().unwrap();
+    /// coordinator.wait_for_flush(epoch).unwrap();
+    /// ```
     pub fn wait_for_flush(&self, epoch: u64) -> Result<(), Error> {
         let mut state = self.state.lock().map_err(|_| {
             Error::Storage(StorageError::LockPoisoned {
