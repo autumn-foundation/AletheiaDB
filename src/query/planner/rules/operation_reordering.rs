@@ -267,7 +267,7 @@ impl OperationReordering {
     /// Collect all consecutive filters from a filter chain.
     /// Returns (filters, base) where filters are in top-to-bottom order.
     fn collect_filters(&self, op: &LogicalOp) -> (Vec<Predicate>, LogicalOp) {
-        let mut filters = Vec::new();
+        let mut filters = Vec::with_capacity(4); // ⚡ Bolt Optimization: Pre-allocate capacity for query filter lists to prevent multiple reallocations during logical plan extraction.
         let mut current = op;
 
         while let LogicalOp::Unary {

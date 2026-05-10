@@ -586,7 +586,7 @@ impl FlushCoordinator {
     /// Returns a list of (segment_id, metadata) for all segments that have
     /// metadata files. Segments without metadata are not included.
     pub fn list_segments_with_metadata(&self) -> Vec<(u64, SegmentMetadata)> {
-        let mut segments = Vec::new();
+        let mut segments = Vec::with_capacity(16); // ⚡ Bolt Optimization: Pre-allocate space for WAL segment metadata to prevent small heap reallocations when reading directories.
 
         if let Ok(entries) = std::fs::read_dir(&self.config.wal_dir) {
             for entry in entries.flatten() {
