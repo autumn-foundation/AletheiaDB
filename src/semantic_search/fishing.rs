@@ -147,7 +147,9 @@ impl<'a> FishingRod<'a> {
 
         // Step 2: Spread the Net (Graph Traversal)
         if config.depth > 0 {
-            let mut neighbors: Vec<(NodeId, NodeId)> = Vec::new(); // (neighbor, source)
+            // ⚡ Bolt Optimization: Pre-allocate capacity for neighbors vector to prevent
+            // heap reallocations during graph traversal step of semantic search.
+            let mut neighbors: Vec<(NodeId, NodeId)> = Vec::with_capacity(school.len() * 4); // (neighbor, source)
 
             for (source_node, _) in school.iter() {
                 let edges = if let Some(ref labels) = config.edge_labels {
