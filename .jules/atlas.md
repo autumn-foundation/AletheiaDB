@@ -90,3 +90,8 @@
 ## 2026-06-21 - Splitting Redb Cold Storage Blob
 **Tangle:** `src/storage/redb_cold_storage.rs` was over 4100 lines long, a "Blob" module holding both core cold storage logic and over 2000 lines of tests. It made navigation and understanding the core operations difficult.
 **Blueprint:** Refactored into a `src/storage/redb_cold_storage/` module. Kept the core data definitions and implementation in `mod.rs` (reduced to ~2000 lines) and moved all tests to `tests.rs` (~2000 lines), maintaining the `#[cfg(test)]` block functionality but with better physical separation.
+## 2024-05-10 - Splitting Version God Module
+**Tangle:** `src/core/version.rs` was a 3061-line "God Module" containing both core domain data definitions for versioning (e.g. `NodeVersion`, `EdgeVersion`) and extensive tests (nearly 2000 lines), making it difficult to maintain.
+**Blueprint:** Refactored into `src/core/version/` directory.
+1. Extracted tests to `src/core/version/tests.rs` (1900+ lines).
+2. Left `mod.rs` with the core data definitions and implementation, significantly reducing module size and improving navigability.
