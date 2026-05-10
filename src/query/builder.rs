@@ -1573,6 +1573,36 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "InvalidTimeRange")]
+    fn test_valid_time_between_invalid_range_panics() {
+        use crate::core::hlc::HybridTimestamp;
+
+        let start = HybridTimestamp::new(2000, 0).unwrap();
+        let end = HybridTimestamp::new(1000, 0).unwrap();
+
+        // Should panic because start > end
+        let _ = QueryBuilder::new()
+            .valid_time_between(start, end)
+            .start(test_node_id())
+            .build();
+    }
+
+    #[test]
+    #[should_panic(expected = "InvalidTimeRange")]
+    fn test_transaction_time_between_invalid_range_panics() {
+        use crate::core::hlc::HybridTimestamp;
+
+        let start = HybridTimestamp::new(2000, 0).unwrap();
+        let end = HybridTimestamp::new(1000, 0).unwrap();
+
+        // Should panic because start > end
+        let _ = QueryBuilder::new()
+            .transaction_time_between(start, end)
+            .start(test_node_id())
+            .build();
+    }
+
+    #[test]
     fn test_valid_time_between_method() {
         use crate::core::hlc::HybridTimestamp;
 
