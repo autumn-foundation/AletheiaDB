@@ -752,18 +752,19 @@ impl ShardCoordinator {
                             transaction.record_commit_success(shard_id);
                             break;
                         }
-                        Err(DistributedTxError::ParticipantUnavailable { .. }) => {
-                            unavailable_shards.push(shard_id);
-                            // Participant unavailable during commit is bad, but we must retry later
-                            // For now, break and let the transaction remain uncommitted
-                            break;
-                        }
                         Err(_) if retry_count < max_retries => {
                             // Exponential backoff: 100ms, 200ms, 400ms
                             let backoff_ms = 100 * (1 << retry_count);
                             std::thread::sleep(Duration::from_millis(backoff_ms));
                             retry_count += 1;
                             continue;
+                        }
+                        Err(DistributedTxError::ParticipantUnavailable { .. }) => {
+                            transaction.record_unreachable(shard_id);
+                            unavailable_shards.push(shard_id);
+                            // Participant unavailable during commit is bad, but we must retry later
+                            // For now, break and let the transaction remain uncommitted
+                            break;
                         }
                         Err(_) => {
                             // Exhausted retries - commit decision is logged, recovery will retry
@@ -772,6 +773,7 @@ impl ShardCoordinator {
                     }
                 }
             } else {
+                transaction.record_unreachable(shard_id);
                 unavailable_shards.push(shard_id);
             }
         }
