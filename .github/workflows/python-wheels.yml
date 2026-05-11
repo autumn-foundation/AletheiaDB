@@ -41,6 +41,11 @@ jobs:
           target: ${{ matrix.target }}
           manylinux: 2_28
           rust-toolchain: stable
+          # usearch is a C++ crate; for aarch64 cross-compilation the manylinux
+          # container doesn't expose aarch64-linux-gnu-g++ where cc-rs looks.
+          # cargo-zigbuild uses Zig as a built-in C/C++ cross-compiler, avoiding
+          # the need for any native cross-toolchain.
+          zig: ${{ matrix.target == 'aarch64' }}
           args: --release --out dist -vv
       - uses: actions/upload-artifact@v4
         with:
