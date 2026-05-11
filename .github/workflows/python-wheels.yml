@@ -40,6 +40,7 @@ jobs:
           working-directory: python
           target: ${{ matrix.target }}
           manylinux: 2_28
+          rust-toolchain: stable
           args: --release --out dist -vv
       - uses: actions/upload-artifact@v4
         with:
