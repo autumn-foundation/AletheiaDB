@@ -34,6 +34,7 @@ ignore:
   - "tests/**/*"                       # Integration tests
   - "**/tests.rs"                      # Test modules
   - "**/test_*.rs"                     # Test files
+  - "python/**/*"                      # Python SDK Rust glue — exercised by pytest, not cargo test
 
 # Component tracking
 flag_management:
