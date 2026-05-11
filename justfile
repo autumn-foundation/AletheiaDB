@@ -360,12 +360,13 @@ py-build:
 py-dev:
     cd python && maturin develop --release
 
-# Run the Python SDK test suite (requires maturin develop or installed wheel)
+# Run the Python SDK test suite (requires maturin develop or installed wheel).
+# Runs pytest from a tmpdir so it imports the installed package, not the source dir.
 py-test:
-    cd /tmp && pytest /home/user/AletheiaDB/python/tests/ -v
+    cd {{justfile_directory()}} && cd $(mktemp -d) && pytest {{justfile_directory()}}/python/tests/ -v
 
-# Run all Python examples
+# Run all Python examples (requires maturin develop or installed wheel)
 py-examples:
-    cd /tmp && python /home/user/AletheiaDB/python/examples/quick_start.py
-    cd /tmp && python /home/user/AletheiaDB/python/examples/vector_quick_start.py
-    cd /tmp && python /home/user/AletheiaDB/python/examples/time_travel.py
+    cd $(mktemp -d) && python {{justfile_directory()}}/python/examples/quick_start.py
+    cd $(mktemp -d) && python {{justfile_directory()}}/python/examples/vector_quick_start.py
+    cd $(mktemp -d) && python {{justfile_directory()}}/python/examples/time_travel.py

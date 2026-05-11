@@ -1,6 +1,6 @@
 //! `AletheiaDB` Python wrapper.
 
-use crate::errors::{map_error, map_storage_error};
+use crate::errors::{ConfigErrorPy, map_error, map_storage_error};
 use crate::types::{
     PyEdge, PyNode, parse_timestamp, property_map_to_py_dict, py_dict_to_property_map,
 };
@@ -21,7 +21,11 @@ fn edge_id(id: u64) -> PyResult<EdgeId> {
 }
 
 /// In-process AletheiaDB instance.
-#[pyclass(name = "AletheiaDB", module = "aletheiadb._native", unsendable)]
+///
+/// The underlying Rust `AletheiaDB` is `Send + Sync` (it uses internal
+/// concurrent structures — DashMap, parking_lot locks, Arcs), so the Python
+/// wrapper can be shared across threads.
+#[pyclass(name = "AletheiaDB", module = "aletheiadb._native")]
 pub struct PyAletheiaDB {
     pub(crate) inner: Arc<RustDB>,
 }
@@ -46,7 +50,7 @@ impl PyAletheiaDB {
     fn open(config_path: &str) -> PyResult<Self> {
         use aletheiadb::AletheiaDBConfig;
         let config = AletheiaDBConfig::from_toml_file(config_path)
-            .map_err(|e| PyValueError::new_err(format!("Config error: {}", e)))?;
+            .map_err(|e| ConfigErrorPy::new_err(format!("Config error: {}", e)))?;
         let db = RustDB::with_unified_config(config).map_err(map_error)?;
         Ok(Self { inner: Arc::new(db) })
     }
@@ -131,12 +135,14 @@ impl PyAletheiaDB {
             .collect()
     }
 
-    /// Scan node ids by label.
-    fn nodes_by_label(&self, label: &str) -> Vec<u64> {
-        self.inner
-            .scan_nodes_by_label(label)
-            .map(|id| id.as_u64())
-            .collect()
+    /// Scan node ids by label. If `limit` is provided, return at most that many ids.
+    #[pyo3(signature = (label, limit=None))]
+    fn nodes_by_label(&self, label: &str, limit: Option<usize>) -> Vec<u64> {
+        let iter = self.inner.scan_nodes_by_label(label).map(|id| id.as_u64());
+        match limit {
+            Some(n) => iter.take(n).collect(),
+            None => iter.collect(),
+        }
     }
 
     // ---------- Edge CRUD ----------
