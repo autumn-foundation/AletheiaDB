@@ -349,3 +349,23 @@ worktree-pr TITLE BODY="":
     else
         bash scripts/worktree-pr.sh "{{TITLE}}" "{{BODY}}"
     fi
+
+# --- Python SDK ---
+
+# Build a release wheel for the Python SDK (output: python/target/wheels/)
+py-build:
+    cd python && maturin build --release
+
+# Install the Python SDK into the current venv via maturin develop
+py-dev:
+    cd python && maturin develop --release
+
+# Run the Python SDK test suite (requires maturin develop or installed wheel)
+py-test:
+    cd /tmp && pytest /home/user/AletheiaDB/python/tests/ -v
+
+# Run all Python examples
+py-examples:
+    cd /tmp && python /home/user/AletheiaDB/python/examples/quick_start.py
+    cd /tmp && python /home/user/AletheiaDB/python/examples/vector_quick_start.py
+    cd /tmp && python /home/user/AletheiaDB/python/examples/time_travel.py

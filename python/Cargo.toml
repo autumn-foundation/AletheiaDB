@@ -1,0 +1,20 @@
+[package]
+name = "aletheiadb-py"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+authors = ["AletheiaDB Contributors"]
+description = "Python bindings for AletheiaDB, a high-performance bi-temporal graph database"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/madmax983/AletheiaDB"
+publish = false
+
+[lib]
+name = "_native"
+crate-type = ["cdylib"]
+
+[dependencies]
+aletheiadb = { path = "..", default-features = false, features = ["config-toml", "cypher"] }
+pyo3 = { version = "0.22", features = ["extension-module", "abi3-py39"] }
+serde_json = "1.0"
+chrono = "0.4"
