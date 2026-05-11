@@ -2211,6 +2211,7 @@ fn poison_mutex<T>(mutex: &std::sync::Arc<std::sync::Mutex<T>>) {
 
 #[cfg(feature = "observability")]
 #[test]
+#[serial_test::serial]
 fn test_create_node_transaction_error_counted_once_when_lock_poisoned() {
     crate::observability::METRICS.reset();
     let db = AletheiaDB::new().unwrap();
@@ -2226,6 +2227,7 @@ fn test_create_node_transaction_error_counted_once_when_lock_poisoned() {
 
 #[cfg(feature = "observability")]
 #[test]
+#[serial_test::serial]
 fn test_vector_builder_duplicate_enable_counts_error_once() {
     use crate::index::vector::{DistanceMetric, HnswConfig};
 
@@ -2246,6 +2248,7 @@ fn test_vector_builder_duplicate_enable_counts_error_once() {
 
 #[cfg(feature = "observability")]
 #[test]
+#[serial_test::serial]
 fn test_read_closure_db_error_counts_once() {
     crate::observability::METRICS.reset();
     let db = AletheiaDB::new().unwrap();
@@ -2263,6 +2266,7 @@ fn test_read_closure_db_error_counts_once() {
 
 #[cfg(feature = "observability")]
 #[test]
+#[serial_test::serial]
 fn test_write_commit_error_counts_once() {
     crate::observability::METRICS.reset();
     let db = AletheiaDB::new().unwrap();

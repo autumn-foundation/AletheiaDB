@@ -255,7 +255,6 @@ fail-under-functions = 75.0
 
 # Exclude certain files from coverage
 exclude = [
-    "src/main.rs",
     "src/bin/**",
     "benches/**",
     "tests/**",

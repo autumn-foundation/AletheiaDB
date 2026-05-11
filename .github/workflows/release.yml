@@ -91,16 +91,19 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Build release binary
-        run: cargo build --release --target ${{ matrix.target }}
+        run: cargo build --release --bin aletheia --target ${{ matrix.target }}
 
       - name: Create archive
         shell: bash
         run: |
           if [ "${{ matrix.os }}" = "windows-latest" ]; then
-            7z a ${{ matrix.artifact_name }}.zip ./target/${{ matrix.target }}/release/aletheiadb.exe
+            archive_name="${{ matrix.artifact_name }}.zip"
+            7z a "$archive_name" ./target/${{ matrix.target }}/release/aletheia.exe
           else
-            tar czf ${{ matrix.artifact_name }}.tar.gz -C ./target/${{ matrix.target }}/release aletheiadb
+            archive_name="${{ matrix.artifact_name }}.tar.gz"
+            tar czf "$archive_name" -C ./target/${{ matrix.target }}/release aletheia
           fi
+          echo "ARCHIVE_NAME=$archive_name" >> "$GITHUB_ENV"
 
       - name: Upload Release Asset
         uses: actions/upload-release-asset@v1
@@ -108,8 +111,8 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           upload_url: ${{ needs.create-release.outputs.upload_url }}
-          asset_path: ./${{ matrix.artifact_name }}.*
-          asset_name: ${{ matrix.artifact_name }}
+          asset_path: ./${{ env.ARCHIVE_NAME }}
+          asset_name: ${{ env.ARCHIVE_NAME }}
           asset_content_type: application/octet-stream
 
   publish-crate:
@@ -125,4 +128,3 @@ jobs:
 
       - name: Publish to crates.io
         run: cargo publish --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        continue-on-error: true # Don't fail if already published

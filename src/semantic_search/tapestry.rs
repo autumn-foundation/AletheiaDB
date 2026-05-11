@@ -108,12 +108,20 @@ mod tests {
 
     fn create_test_db() -> (AletheiaDB, tempfile::TempDir) {
         let dir = tempdir().unwrap();
+        let wal_path = dir.path().join("wal");
+        let data_path = dir.path().join("data");
+        std::fs::create_dir_all(&wal_path).unwrap();
+        std::fs::create_dir_all(&data_path).unwrap();
+
+        let persistence_config = crate::storage::index_persistence::PersistenceConfig {
+            data_dir: data_path,
+            enabled: false,
+            ..Default::default()
+        };
+
         let config = AletheiaDBConfig::builder()
-            .wal(
-                WalConfigBuilder::new()
-                    .wal_dir(dir.path().join("wal"))
-                    .build(),
-            )
+            .wal(WalConfigBuilder::new().wal_dir(wal_path).build())
+            .persistence(persistence_config)
             .build();
         let db = AletheiaDB::with_unified_config(config).unwrap();
         (db, dir)
