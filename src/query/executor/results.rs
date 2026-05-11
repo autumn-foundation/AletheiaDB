@@ -79,7 +79,10 @@ pub enum EntityResult {
 }
 
 impl EntityResult {
-    /// Get the entity ID
+    /// Retrieves the unique identifier of the matched entity.
+    ///
+    /// This ID can be either a `NodeId` or `EdgeId`, allowing subsequent lookups
+    /// or graph traversals to originate from this result.
     #[must_use]
     pub fn id(&self) -> EntityId {
         match self {
@@ -453,7 +456,10 @@ impl QueryResult {
         self
     }
 
-    /// Get the number of results
+    /// Evaluates the total count of matched elements.
+    ///
+    /// This is particularly useful for verifying the success of operations or
+    /// pre-allocating buffers when consuming the entire result set.
     #[must_use]
     pub fn len(&self) -> usize {
         self.nodes.len()

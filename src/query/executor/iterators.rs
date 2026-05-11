@@ -29,7 +29,10 @@ use super::results::{EntityId, EntityResult, QueryRow};
 /// operator is implemented as an iterator. Calling `next()` pulls results
 /// sequentially through the pipeline.
 pub trait ResultIterator: Send {
-    /// Get the next result row
+    /// Advances the iterator to fetch the next materialized result row.
+    ///
+    /// Implementations handle the physical execution of pulling data from storage,
+    /// evaluating predicates, and materializing the requested properties.
     fn next(&mut self) -> Option<Result<QueryRow>>;
 
     /// Estimate the remaining results

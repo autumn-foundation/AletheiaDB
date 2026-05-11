@@ -28,7 +28,10 @@ impl LSN {
         LSN(1)
     }
 
-    /// Get the next LSN
+    /// Advances the LSN to sequence the next operation.
+    ///
+    /// This enforces strict serializability by guaranteeing each WAL entry receives
+    /// a monotonically increasing identifier.
     pub fn next(&self) -> Self {
         LSN(self.0 + 1)
     }

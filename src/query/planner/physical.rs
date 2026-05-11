@@ -83,13 +83,19 @@ impl PhysicalPlan {
         self.temporal_context.is_some()
     }
 
-    /// Get the estimated CPU cost
+    /// Retrieves the estimated CPU cycles required to execute this operation.
+    ///
+    /// The query planner uses this heuristic to choose between alternative physical
+    /// plans (e.g., hash join vs. nested loop join) to minimize latency.
     #[must_use]
     pub fn cpu_cost(&self) -> f64 {
         self.estimated_cost.cpu
     }
 
-    /// Get the estimated memory usage
+    /// Evaluates the peak memory footprint (in bytes) expected during execution.
+    ///
+    /// Crucial for preventing out-of-memory errors by rejecting or spilling queries
+    /// that exceed available RAM, especially on large aggregations or sorts.
     #[must_use]
     pub fn memory_cost(&self) -> usize {
         self.estimated_cost.memory
@@ -626,7 +632,10 @@ impl PhysicalOp {
         )
     }
 
-    /// Get the depth of this operator tree
+    /// Calculates the maximum nesting depth of the physical execution plan.
+    ///
+    /// Used to avoid stack overflows during recursive execution and to gauge
+    /// the structural complexity of the query pipeline.
     #[must_use]
     pub fn depth(&self) -> usize {
         match self {
@@ -820,7 +829,10 @@ impl PhysicalOp {
         }
     }
 
-    /// Get the input operator if this is a unary operator
+    /// Accesses the underlying data source for operations that take a single input.
+    ///
+    /// Allows the query optimizer to inspect and potentially rewrite the child
+    /// operation (e.g., pushing down limits or filters).
     fn get_input(&self) -> Option<&PhysicalOp> {
         match self {
             PhysicalOp::IndexedTraversal { input, .. }

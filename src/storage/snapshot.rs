@@ -83,17 +83,26 @@ impl CurrentStorageSnapshot {
         &self.edges
     }
 
-    /// Get the LSN at which this snapshot was taken
+    /// Retrieves the exact Log Sequence Number (LSN) representing the database state.
+    ///
+    /// Any operations in the WAL with an LSN greater than this value are guaranteed
+    /// to not be included in this snapshot, ensuring point-in-time consistency.
     pub fn lsn(&self) -> LSN {
         self.lsn
     }
 
-    /// Get the number of nodes in this snapshot
+    /// Evaluates the total number of valid nodes present at the time of the snapshot.
+    ///
+    /// Useful for telemetry, progress tracking during backup operations, or verifying
+    /// restoration integrity.
     pub fn node_count(&self) -> usize {
         self.nodes.len()
     }
 
-    /// Get the number of edges in this snapshot
+    /// Evaluates the total number of valid relationships present at the time of the snapshot.
+    ///
+    /// Combined with the node count, this indicates the density of the graph state
+    /// captured by this checkpoint.
     pub fn edge_count(&self) -> usize {
         self.edges.len()
     }

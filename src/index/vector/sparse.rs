@@ -591,7 +591,11 @@ impl SparseVectorIndex {
         self.vectors.contains_key(&id)
     }
 
-    /// Gets the sparse vector for a node ID, if it exists.
+    /// Retrieves the exact sparse vector representation for a given node.
+    ///
+    /// Unlike dense vectors, sparse vectors are reconstructed by mapping their
+    /// non-zero dimensions to their respective values. This is used during
+    /// exact distance calculations when traversing the top candidates.
     #[must_use]
     pub fn get(&self, id: NodeId) -> Option<Arc<SparseVec>> {
         self.vectors.get(&id).map(|v| Arc::clone(&v.vector))

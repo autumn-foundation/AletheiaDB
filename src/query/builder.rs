@@ -78,7 +78,10 @@ impl Query {
         self.temporal_context.is_some()
     }
 
-    /// Get the number of operations in this query
+    /// Evaluates the complexity of the query pipeline by counting its operations.
+    ///
+    /// This metric is utilized by the query planner to estimate initial costs and
+    /// allocate appropriate resources before physical execution begins.
     #[must_use]
     pub fn operation_count(&self) -> usize {
         self.ops.len()

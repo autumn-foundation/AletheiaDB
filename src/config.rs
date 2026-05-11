@@ -189,6 +189,13 @@ impl WalConfigBuilder {
     /// # Errors
     ///
     /// Returns `ConfigError::InvalidValue` if `num_stripes` is 0.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::config::WalConfigBuilder;
+    /// let builder = WalConfigBuilder::new().num_stripes(64).unwrap();
+    /// ```
     pub fn num_stripes(mut self, num_stripes: usize) -> Result<Self, ConfigError> {
         if num_stripes == 0 {
             return Err(ConfigError::InvalidValue(
@@ -213,6 +220,13 @@ impl WalConfigBuilder {
     /// # Errors
     ///
     /// Returns `ConfigError::InvalidValue` if `capacity` is 0.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::config::WalConfigBuilder;
+    /// let builder = WalConfigBuilder::new().stripe_capacity(16384).unwrap();
+    /// ```
     pub fn stripe_capacity(mut self, capacity: usize) -> Result<Self, ConfigError> {
         if capacity == 0 {
             return Err(ConfigError::InvalidValue(
@@ -228,6 +242,13 @@ impl WalConfigBuilder {
     /// # Errors
     ///
     /// Returns `ConfigError::InvalidValue` if `size` is 0.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::config::WalConfigBuilder;
+    /// let builder = WalConfigBuilder::new().write_buffer_size(200_000).unwrap();
+    /// ```
     pub fn write_buffer_size(mut self, size: usize) -> Result<Self, ConfigError> {
         if size == 0 {
             return Err(ConfigError::InvalidValue(
@@ -246,6 +267,13 @@ impl WalConfigBuilder {
     ///
     /// **Note**: While 512 bytes is allowed (for testing), production use should
     /// be at least 1MB for reasonable performance.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::config::WalConfigBuilder;
+    /// let builder = WalConfigBuilder::new().segment_size(512 * 1024 * 1024).unwrap();
+    /// ```
     pub fn segment_size(mut self, size: usize) -> Result<Self, ConfigError> {
         const MIN_SEGMENT_SIZE: usize = 512; // Allow small sizes for testing
         if size == 0 {
@@ -268,6 +296,13 @@ impl WalConfigBuilder {
     /// # Errors
     ///
     /// Returns `ConfigError::InvalidValue` if `ms` is 0.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::config::WalConfigBuilder;
+    /// let builder = WalConfigBuilder::new().flush_interval_ms(500).unwrap();
+    /// ```
     pub fn flush_interval_ms(mut self, ms: u64) -> Result<Self, ConfigError> {
         if ms == 0 {
             return Err(ConfigError::InvalidValue(
@@ -279,6 +314,14 @@ impl WalConfigBuilder {
     }
 
     /// Set the WAL directory path.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::config::WalConfigBuilder;
+    /// use std::path::PathBuf;
+    /// let builder = WalConfigBuilder::new().wal_dir(PathBuf::from("/data/wal"));
+    /// ```
     pub fn wal_dir(mut self, path: std::path::PathBuf) -> Self {
         self.config.wal_dir = path;
         self
@@ -289,6 +332,13 @@ impl WalConfigBuilder {
     /// # Errors
     ///
     /// Returns `ConfigError::InvalidValue` if `segments_to_retain` is 0.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::config::WalConfigBuilder;
+    /// let builder = WalConfigBuilder::new().segments_to_retain(10).unwrap();
+    /// ```
     pub fn segments_to_retain(mut self, segments: usize) -> Result<Self, ConfigError> {
         if segments == 0 {
             return Err(ConfigError::InvalidValue(
@@ -300,6 +350,14 @@ impl WalConfigBuilder {
     }
 
     /// Set the durability mode.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::config::WalConfigBuilder;
+    /// use aletheiadb::storage::wal::DurabilityMode;
+    /// let builder = WalConfigBuilder::new().durability_mode(DurabilityMode::Synchronous);
+    /// ```
     pub fn durability_mode(mut self, mode: crate::storage::wal::DurabilityMode) -> Self {
         self.config.durability_mode = mode;
         self
@@ -783,6 +841,14 @@ impl AletheiaDBConfigBuilder {
     }
 
     /// Set persistence configuration.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::config::AletheiaDBConfigBuilder;
+    /// use aletheiadb::storage::index_persistence::PersistenceConfig;
+    /// let config = AletheiaDBConfigBuilder::new().persistence(PersistenceConfig::default()).build();
+    /// ```
     pub fn persistence(mut self, persistence_config: PersistenceConfig) -> Self {
         self.config.persistence = persistence_config;
         self

@@ -1575,7 +1575,10 @@ impl TxId {
         TxId(id)
     }
 
-    /// Get the inner ID value
+    /// Extracts the raw numeric transaction ID.
+    ///
+    /// Useful when integrating with external systems or logging mechanisms
+    /// that do not understand the `TxId` newtype wrapper.
     pub fn as_u64(&self) -> u64 {
         self.0
     }

@@ -101,7 +101,10 @@ pub enum BufferedWrite {
 }
 
 impl BufferedWrite {
-    /// Return the node ID if this operation applies to a node
+    /// Extracts the target `NodeId` if this operation modifies a node.
+    ///
+    /// This is useful when routing operations to node-specific shards or validating
+    /// node-level constraints before committing the buffer.
     pub fn node_id(&self) -> Option<NodeId> {
         match self {
             Self::CreateNode { node_id, .. } => Some(*node_id),
@@ -111,7 +114,10 @@ impl BufferedWrite {
         }
     }
 
-    /// Return the edge ID if this operation applies to an edge
+    /// Extracts the target `EdgeId` if this operation modifies an edge.
+    ///
+    /// This is useful for identifying the specific edge being altered during
+    /// cascading deletes or edge-specific validations.
     pub fn edge_id(&self) -> Option<EdgeId> {
         match self {
             Self::CreateEdge { edge_id, .. } => Some(*edge_id),
@@ -323,14 +329,20 @@ impl WriteBuffer {
         self.modified_edges.contains_key(&edge_id)
     }
 
-    /// Get the buffered write for a node, if any
+    /// Retrieves pending modifications for a specific node before they are committed.
+    ///
+    /// This allows read-your-own-writes (RYOW) within a transaction, ensuring that
+    /// a transaction can see its own updates even before they hit the WAL.
     pub fn get_node_write(&self, node_id: NodeId) -> Option<&BufferedWrite> {
         self.modified_nodes
             .get(&node_id)
             .map(|&index| &self.operations[index])
     }
 
-    /// Get the buffered write for an edge, if any
+    /// Retrieves pending modifications for a specific edge before they are committed.
+    ///
+    /// Essential for maintaining consistent traversal state during complex
+    /// multi-step transactions that modify relationships.
     pub fn get_edge_write(&self, edge_id: EdgeId) -> Option<&BufferedWrite> {
         self.modified_edges
             .get(&edge_id)
@@ -346,7 +358,10 @@ impl WriteBuffer {
         self.has_edge_operations = false;
     }
 
-    /// Get the number of buffered operations
+    /// Evaluates the current size of the transaction's uncommitted footprint.
+    ///
+    /// Can be used to trigger early flushes or circuit breakers if a single
+    /// transaction attempts to buffer too many operations into memory.
     pub fn len(&self) -> usize {
         self.operations.len()
     }
