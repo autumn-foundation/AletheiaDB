@@ -18,3 +18,7 @@ aletheiadb = { path = "..", default-features = false, features = ["config-toml",
 pyo3 = { version = "0.22", features = ["extension-module", "abi3-py39"] }
 serde_json = "1.0"
 chrono = "0.4"
+# Vendor OpenSSL so CI wheel builds need no system openssl-devel on any platform/arch.
+# Cargo feature unification applies the vendored flag to the openssl crate pulled in
+# transitively by native-tls (an unconditional dep of the root aletheiadb crate).
+openssl = { version = "0.10", features = ["vendored"] }

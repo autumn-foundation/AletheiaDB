@@ -35,19 +35,12 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Set up QEMU (for aarch64 emulation)
-        if: matrix.target == 'aarch64'
-        uses: docker/setup-qemu-action@v3
-        with:
-          platforms: aarch64
       - uses: PyO3/maturin-action@v1
         with:
           working-directory: python
           target: ${{ matrix.target }}
           manylinux: 2_28
           rust-toolchain: stable
-          before-script-linux: |
-            yum install -y openssl-devel perl-IPC-Cmd
           args: --release --out dist -vv
       - uses: actions/upload-artifact@v4
         with:
