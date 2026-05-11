@@ -41,6 +41,8 @@ jobs:
           target: ${{ matrix.target }}
           manylinux: 2_28
           rust-toolchain: stable
+          before-script-linux: |
+            yum install -y openssl-devel perl-IPC-Cmd
           args: --release --out dist -vv
       - uses: actions/upload-artifact@v4
         with:
