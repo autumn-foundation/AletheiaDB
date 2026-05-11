@@ -41,6 +41,12 @@ jobs:
           target: ${{ matrix.target }}
           manylinux: 2_28
           rust-toolchain: stable
+          before-script-linux: |
+            if command -v yum >/dev/null 2>&1; then
+              yum install -y perl perl-Text-Template
+            elif command -v apt-get >/dev/null 2>&1; then
+              apt-get update -q && apt-get install -y perl libtext-template-perl
+            fi
           args: --release --out dist -vv
       - uses: actions/upload-artifact@v4
         with:
