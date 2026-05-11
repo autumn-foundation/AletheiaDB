@@ -901,6 +901,11 @@ pub enum ConfigError {
 /// durable data directory.
 pub const DATA_DIR_ENV: &str = "ALETHEIADB_DATA_DIR";
 
+/// Name of the environment variable that, when set, points all exposed binaries
+/// and the Python SDK at a TOML config file (loaded via
+/// [`AletheiaDBConfig::from_toml_file`]). Takes precedence over [`DATA_DIR_ENV`].
+pub const CONFIG_ENV: &str = "ALETHEIADB_CONFIG";
+
 /// Read the data directory from [`DATA_DIR_ENV`].
 ///
 /// Returns `Some(path)` when the variable is set to a non-empty value
@@ -909,6 +914,17 @@ pub const DATA_DIR_ENV: &str = "ALETHEIADB_DATA_DIR";
 #[must_use]
 pub fn data_dir_from_env() -> Option<std::path::PathBuf> {
     std::env::var(DATA_DIR_ENV)
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .map(std::path::PathBuf::from)
+}
+
+/// Read the TOML config path from [`CONFIG_ENV`].
+///
+/// Same semantics as [`data_dir_from_env`]: unset or empty → `None`.
+#[must_use]
+pub fn config_path_from_env() -> Option<std::path::PathBuf> {
+    std::env::var(CONFIG_ENV)
         .ok()
         .filter(|s| !s.trim().is_empty())
         .map(std::path::PathBuf::from)

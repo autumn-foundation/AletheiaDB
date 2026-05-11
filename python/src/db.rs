@@ -40,11 +40,13 @@ impl PyAletheiaDB {
 impl PyAletheiaDB {
     /// Create a new database.
     ///
-    /// If the `ALETHEIADB_DATA_DIR` environment variable is set, opens a
-    /// durable database rooted at that path (WAL + index persistence; prior
-    /// state is replayed on startup). Otherwise creates an ephemeral
-    /// in-memory database backed by a temporary directory that is cleaned up
-    /// when the object is garbage-collected.
+    /// Persistence is environment-driven (precedence order):
+    /// * `ALETHEIADB_CONFIG=/path/to/config.toml` — load the full TOML config.
+    /// * `ALETHEIADB_DATA_DIR=/path` — durable WAL + index persistence at that path.
+    /// * Neither set — ephemeral, backed by a temporary directory that is cleaned
+    ///   up when the object is garbage-collected.
+    ///
+    /// For per-call configuration, use [`AletheiaDB.open`] with a TOML path.
     #[new]
     fn new() -> PyResult<Self> {
         let db = RustDB::open_from_env().map_err(map_error)?;

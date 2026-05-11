@@ -167,12 +167,19 @@ pub async fn run_server(config: ServerConfig) -> std::io::Result<()> {
 
 /// Construct the [`AletheiaDB`] instance the HTTP server will share.
 ///
-/// Delegates to [`ServerConfig::to_unified_config`] — `None` means
-/// in-memory, `Some(cfg)` means durable WAL + index persistence. Keeping
-/// the config construction on `ServerConfig` itself means integration
-/// tests exercise the identical config shape the production binary uses
-/// (no hand-maintained duplicate to drift out of sync).
+/// Resolution order:
+/// 1. If `ALETHEIADB_CONFIG` or `ALETHEIADB_DATA_DIR` is set in the environment,
+///    delegate to [`AletheiaDB::open_from_env`] so the server picks up the same
+///    config the MCP server, CLI, and Python SDK do.
+/// 2. Otherwise use [`ServerConfig::to_unified_config`] — this is the path
+///    integration tests take when they pass `data_dir` programmatically without
+///    touching the environment.
 fn build_database(config: &ServerConfig) -> std::io::Result<AletheiaDB> {
+    if crate::config::config_path_from_env().is_some()
+        || crate::config::data_dir_from_env().is_some()
+    {
+        return AletheiaDB::open_from_env().map_err(|e| std::io::Error::other(e.to_string()));
+    }
     match config.to_unified_config() {
         None => AletheiaDB::new().map_err(|e| std::io::Error::other(e.to_string())),
         Some(unified) => AletheiaDB::with_unified_config(unified)

@@ -75,7 +75,9 @@ Usage:\n\
     );
 }
 
-/// Opens the AletheiaDB database, honouring `ALETHEIADB_DATA_DIR` for durability.
+/// Opens the AletheiaDB database, honouring environment-driven config:
+/// `ALETHEIADB_CONFIG` (TOML path) takes precedence over `ALETHEIADB_DATA_DIR`
+/// (canonical durable layout). With neither set the database is ephemeral.
 ///
 /// Converts underlying database errors into a clean string for CLI output.
 fn open_db() -> Result<AletheiaDB, String> {

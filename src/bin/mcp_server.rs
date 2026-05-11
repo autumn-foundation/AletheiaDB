@@ -56,9 +56,10 @@ use aletheiadb::mcp::AletheiaMcpServer;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    // Initialize the database. Set ALETHEIADB_DATA_DIR to point at a durable
-    // directory; otherwise the database is ephemeral (lives in a temp dir for
-    // the lifetime of this process).
+    // Initialize the database. Persistence is selected by environment:
+    //   ALETHEIADB_CONFIG=/path/to/config.toml   -> full TOML-driven config
+    //   ALETHEIADB_DATA_DIR=/path                -> canonical durable layout
+    //   (neither set)                            -> ephemeral tempdir-backed DB
     let db = AletheiaDB::open_from_env()?;
 
     // Create the MCP server

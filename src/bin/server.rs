@@ -25,9 +25,13 @@
 //! - `ALETHEIADB_HOST`: Host to bind to (default: 0.0.0.0)
 //! - `ALETHEIADB_CORS_PERMISSIVE`: Set to "true" to allow any origin (default: false)
 //! - `ALETHEIADB_CORS_ORIGINS`: Comma-separated list of allowed origins
+//! - `ALETHEIADB_CONFIG`: Path to a TOML config file consumed by
+//!   [`AletheiaDBConfig::from_toml_file`]. Takes precedence over
+//!   `ALETHEIADB_DATA_DIR`.
 //! - `ALETHEIADB_DATA_DIR`: Directory for WAL + index persistence. When set,
-//!   the server persists state across restarts. When unset, runs in-memory
-//!   (ephemeral — useful for demos, useless for production).
+//!   the server persists state across restarts. When unset (and `ALETHEIADB_CONFIG`
+//!   is also unset), runs in-memory (ephemeral — useful for demos, useless
+//!   for production).
 //!
 //! # Endpoints
 //!
