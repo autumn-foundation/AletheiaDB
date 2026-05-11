@@ -1119,6 +1119,7 @@ mod tests {
 
     #[cfg(feature = "observability")]
     #[test]
+    #[serial_test::serial]
     fn test_result_ext_records_storage_metric_once() {
         crate::observability::METRICS.reset();
 
