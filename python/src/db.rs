@@ -38,10 +38,16 @@ impl PyAletheiaDB {
 
 #[pymethods]
 impl PyAletheiaDB {
-    /// Create a new in-memory database.
+    /// Create a new database.
+    ///
+    /// If the `ALETHEIADB_DATA_DIR` environment variable is set, opens a
+    /// durable database rooted at that path (WAL + index persistence; prior
+    /// state is replayed on startup). Otherwise creates an ephemeral
+    /// in-memory database backed by a temporary directory that is cleaned up
+    /// when the object is garbage-collected.
     #[new]
     fn new() -> PyResult<Self> {
-        let db = RustDB::new().map_err(map_error)?;
+        let db = RustDB::open_from_env().map_err(map_error)?;
         Ok(Self { inner: Arc::new(db) })
     }
 

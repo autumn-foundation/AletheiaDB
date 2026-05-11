@@ -75,11 +75,11 @@ Usage:\n\
     );
 }
 
-/// Opens the AletheiaDB database using the default configuration.
+/// Opens the AletheiaDB database, honouring `ALETHEIADB_DATA_DIR` for durability.
 ///
 /// Converts underlying database errors into a clean string for CLI output.
 fn open_db() -> Result<AletheiaDB, String> {
-    AletheiaDB::new().map_err(|e| format!("failed to initialize database: {e}"))
+    AletheiaDB::open_from_env().map_err(|e| format!("failed to initialize database: {e}"))
 }
 
 /// Handles all subcommands under `aletheia node`.

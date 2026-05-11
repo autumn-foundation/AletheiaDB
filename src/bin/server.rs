@@ -102,12 +102,10 @@ fn parse_cors_config() -> CorsConfig {
 ///
 /// Unset or empty → `None` (in-memory mode). Any non-empty value is taken
 /// as a path literal; `AletheiaDB::with_unified_config` creates the directory
-/// structure on startup.
+/// structure on startup. Delegates to the shared helper so every exposed
+/// binary reads the same env var with the same semantics.
 fn parse_data_dir() -> Option<PathBuf> {
-    env::var("ALETHEIADB_DATA_DIR")
-        .ok()
-        .filter(|s| !s.trim().is_empty())
-        .map(PathBuf::from)
+    aletheiadb::config::data_dir_from_env()
 }
 
 #[autumn_web::main]

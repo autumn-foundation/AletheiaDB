@@ -216,44 +216,14 @@ impl ServerConfig {
     /// signals in-memory mode, and the caller should construct the DB via
     /// [`AletheiaDB::new`](crate::AletheiaDB::new) instead.
     ///
-    /// Returns `Some(cfg)` with WAL (GroupCommit durability, 10ms /
-    /// 200-op batching) under `{data_dir}/wal` and index persistence
-    /// under `{data_dir}/indexes` when a data directory is configured.
-    /// Both subdirectories are created on startup by
-    /// [`AletheiaDB::with_unified_config`](crate::AletheiaDB::with_unified_config).
-    ///
-    /// The durability parameters are intentionally not exposed as
-    /// per-server-binary env vars: library consumers that need to tune
-    /// them build their own [`AletheiaDBConfig`] directly via
-    /// [`AletheiaDBConfig::builder`](crate::AletheiaDBConfig::builder).
-    /// The server binary uses conservative production-safe defaults.
+    /// When set, delegates to [`crate::config::durable_config_for_data_dir`]
+    /// so every exposed binary (HTTP server, MCP server, CLI, Python SDK)
+    /// uses the same persistence shape.
     #[must_use]
     pub fn to_unified_config(&self) -> Option<crate::AletheiaDBConfig> {
-        use crate::config::{AletheiaDBConfig, WalConfigBuilder};
-        use crate::storage::index_persistence::PersistenceConfig;
-        use crate::storage::wal::DurabilityMode;
-
-        let data_dir = self.data_dir.as_deref()?;
-
-        Some(
-            AletheiaDBConfig::builder()
-                .wal(
-                    WalConfigBuilder::new()
-                        .wal_dir(data_dir.join("wal"))
-                        .durability_mode(DurabilityMode::GroupCommit {
-                            max_delay_ms: 10,
-                            max_batch_size: 200,
-                        })
-                        .build(),
-                )
-                .persistence(PersistenceConfig {
-                    enabled: true,
-                    data_dir: data_dir.join("indexes"),
-                    load_on_startup: true,
-                    ..Default::default()
-                })
-                .build(),
-        )
+        self.data_dir
+            .as_deref()
+            .map(crate::config::durable_config_for_data_dir)
     }
 
     /// Get the bind address as "host:port".

@@ -56,8 +56,10 @@ use aletheiadb::mcp::AletheiaMcpServer;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    // Initialize the database
-    let db = AletheiaDB::new()?;
+    // Initialize the database. Set ALETHEIADB_DATA_DIR to point at a durable
+    // directory; otherwise the database is ephemeral (lives in a temp dir for
+    // the lifetime of this process).
+    let db = AletheiaDB::open_from_env()?;
 
     // Create the MCP server
     let server = AletheiaMcpServer::new(Arc::new(db));
