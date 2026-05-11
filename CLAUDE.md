@@ -744,6 +744,9 @@ avoiding the edge scan.
 - **[TESTING.md](TESTING.md)** - Testing requirements and coverage
 - **[docs/MIRI.md](docs/MIRI.md)** - Undefined behavior detection for unsafe code
 
+### Language Bindings
+- **[python/README.md](python/README.md)** - Python SDK (PyO3 bindings, `pip install aletheiadb`)
+
 ### Feature Documentation
 - **[docs/WAL.md](docs/WAL.md)** - Write-ahead log internals
 - **[docs/VECTOR_SEARCH_DESIGN.md](docs/VECTOR_SEARCH_DESIGN.md)** - Vector search architecture and roadmap

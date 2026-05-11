@@ -156,6 +156,11 @@ pub struct AletheiaDB {
     pub(crate) persistence_thread_handle: Option<std::thread::JoinHandle<()>>,
     /// Encryption manager (if encryption at rest is enabled)
     pub(crate) encryption_manager: Option<Arc<crate::encryption::EncryptionManager>>,
+    /// Backing tempdir for ephemeral databases created via [`AletheiaDB::new`].
+    /// Declared last so it is dropped last (Rust drops struct fields in
+    /// declaration order); this guarantees the WAL/persistence file handles
+    /// above have already been closed before the directory is removed.
+    pub(crate) _tempdir: Option<tempfile::TempDir>,
 }
 
 impl std::fmt::Debug for AletheiaDB {

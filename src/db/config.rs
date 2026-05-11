@@ -97,23 +97,88 @@ fn wire_temporal_indexes(db: &AletheiaDB) {
 }
 
 impl AletheiaDB {
-    /// Create a new empty database with default configuration.
+    /// Create a new **ephemeral** in-memory database.
     ///
-    /// # Configuration
+    /// The WAL is backed by a freshly created temporary directory that is
+    /// removed automatically when the returned [`AletheiaDB`] is dropped. No
+    /// state survives the process; nothing is loaded from prior runs.
     ///
-    /// This creates a **disk-based** database with:
-    /// - **WAL directory**: `./aletheiadb/wal` (relative to current working directory)
-    /// - **Durability**: Group Commit (ACID compliant)
-    /// - **History**: Anchor interval 10
-    ///
-    /// To use a different path or in-memory storage (for testing), use [`with_unified_config`](Self::with_unified_config).
+    /// This is the right constructor for tests, scratch sessions, and quick
+    /// experiments. For durable storage that replays prior state on restart,
+    /// use [`Self::with_unified_config`] with a config built from
+    /// [`crate::config::durable_config_for_data_dir`], or call
+    /// [`Self::open_from_env`] to honor the `ALETHEIADB_DATA_DIR` environment
+    /// variable.
     ///
     /// # Errors
     ///
-    /// Returns an error if WAL initialization fails (e.g., cannot create WAL directory).
+    /// Returns an error if the temporary directory cannot be created or WAL
+    /// initialization fails inside it.
     #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn new() -> Result<Self> {
-        Self::with_config(AnchorConfig::default())
+        let tempdir = tempfile::Builder::new()
+            .prefix("aletheiadb-")
+            .tempdir()
+            .map_err(crate::core::error::Error::Io)?;
+        let wal_config = crate::config::WalConfigBuilder::new()
+            .wal_dir(tempdir.path().join("wal"))
+            .build();
+        let mut db = Self::with_full_config(AnchorConfig::default(), wal_config)?;
+        db._tempdir = Some(tempdir);
+        Ok(db)
+    }
+
+    /// Open a database honouring the `ALETHEIADB_CONFIG` and `ALETHEIADB_DATA_DIR`
+    /// environment variables.
+    ///
+    /// Precedence (first match wins):
+    ///
+    /// 1. `ALETHEIADB_CONFIG=/path/to/config.toml` — load the full
+    ///    [`AletheiaDBConfig`] from TOML. Requires the `config-toml` feature
+    ///    (enabled by default); without that feature this returns an error
+    ///    when the variable is set.
+    /// 2. `ALETHEIADB_DATA_DIR=/path` — open a durable database rooted at
+    ///    that path with the canonical config from
+    ///    [`crate::config::durable_config_for_data_dir`].
+    /// 3. Neither set — fall back to [`Self::new`] (ephemeral, tempdir-backed).
+    ///
+    /// This is the entry point every exposed binary (HTTP server, MCP server,
+    /// CLI, Python SDK) calls so the persistence story is consistent.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the TOML file cannot be read or parsed, if WAL
+    /// initialization fails, or if index loading fails.
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
+    pub fn open_from_env() -> Result<Self> {
+        if let Some(path) = crate::config::config_path_from_env() {
+            return Self::open_from_toml_path(&path);
+        }
+        if let Some(path) = crate::config::data_dir_from_env() {
+            return Self::with_unified_config(crate::config::durable_config_for_data_dir(path));
+        }
+        Self::new()
+    }
+
+    /// Load a TOML config and open the database with it. Used by
+    /// [`Self::open_from_env`] when `ALETHEIADB_CONFIG` is set.
+    #[cfg(feature = "config-toml")]
+    fn open_from_toml_path(path: &std::path::Path) -> Result<Self> {
+        let config = AletheiaDBConfig::from_toml_file(path).map_err(|e| {
+            crate::core::error::Error::Other(format!(
+                "failed to load TOML config from {}: {e}",
+                path.display()
+            ))
+        })?;
+        Self::with_unified_config(config)
+    }
+
+    #[cfg(not(feature = "config-toml"))]
+    fn open_from_toml_path(_path: &std::path::Path) -> Result<Self> {
+        Err(crate::core::error::Error::Other(format!(
+            "{} is set but the `config-toml` feature is not enabled in this build",
+            crate::config::CONFIG_ENV,
+        )))
     }
 
     /// Create a new database with custom anchor configuration.
@@ -260,6 +325,7 @@ impl AletheiaDB {
                 persistence_thread_stopped: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 persistence_thread_handle: None,
                 encryption_manager: encryption_manager.clone(),
+                _tempdir: None,
             };
 
             // Load indexes on startup if enabled
@@ -447,6 +513,7 @@ impl AletheiaDB {
                 persistence_thread_stopped: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 persistence_thread_handle: None,
                 encryption_manager: None,
+                _tempdir: None,
             };
             seed_startup_current_timestamp(&db)?;
             wire_temporal_indexes(&db);
@@ -469,5 +536,118 @@ impl AletheiaDB {
     /// Get a reference to the encryption manager, if encryption is enabled.
     pub fn encryption_manager(&self) -> Option<&Arc<crate::encryption::EncryptionManager>> {
         self.encryption_manager.as_ref()
+    }
+}
+
+#[cfg(test)]
+mod ephemeral_tests {
+    use super::*;
+
+    #[test]
+    fn new_uses_a_unique_tempdir_per_call() {
+        let db1 = AletheiaDB::new().expect("new should succeed");
+        let db2 = AletheiaDB::new().expect("new should succeed");
+        let dir1 = db1
+            ._tempdir
+            .as_ref()
+            .expect("new should attach a tempdir")
+            .path()
+            .to_path_buf();
+        let dir2 = db2
+            ._tempdir
+            .as_ref()
+            .expect("new should attach a tempdir")
+            .path()
+            .to_path_buf();
+        assert_ne!(dir1, dir2, "each new() must own a distinct tempdir");
+        assert!(
+            dir1.exists(),
+            "tempdir must exist while the database is alive"
+        );
+        assert!(dir2.exists());
+    }
+
+    #[test]
+    fn new_does_not_write_into_cwd() {
+        let cwd = std::env::current_dir().expect("cwd");
+        let db = AletheiaDB::new().expect("new should succeed");
+        let wal_dir = db._tempdir.as_ref().expect("tempdir attached").path();
+        assert!(
+            !wal_dir.starts_with(&cwd) || wal_dir.starts_with(std::env::temp_dir()),
+            "tempdir should live under the system temp root, not the cwd"
+        );
+    }
+
+    #[test]
+    fn tempdir_is_removed_when_db_drops() {
+        let path = {
+            let db = AletheiaDB::new().expect("new should succeed");
+            db._tempdir.as_ref().unwrap().path().to_path_buf()
+        };
+        assert!(!path.exists(), "tempdir should be cleaned up on drop");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn open_from_env_with_unset_var_is_ephemeral() {
+        // SAFETY: env access is single-threaded inside this serial test.
+        // remove_var is unsafe under Rust edition 2024.
+        unsafe {
+            std::env::remove_var(crate::config::DATA_DIR_ENV);
+            std::env::remove_var(crate::config::CONFIG_ENV);
+        }
+        let db = AletheiaDB::open_from_env().expect("open_from_env should fall back to new()");
+        assert!(
+            db._tempdir.is_some(),
+            "unset env must yield a tempdir-backed db"
+        );
+    }
+
+    #[cfg(feature = "config-toml")]
+    #[test]
+    #[serial_test::serial]
+    fn open_from_env_prefers_config_over_data_dir() {
+        let scratch = tempfile::tempdir().expect("scratch tempdir");
+        let config_path = scratch.path().join("config.toml");
+        let toml_data_dir = scratch.path().join("toml-data");
+        let env_data_dir = scratch.path().join("env-data");
+
+        // Minimal valid TOML pointing the WAL inside `toml-data/wal`.
+        // Use a TOML literal string (single quotes) so Windows backslashes
+        // in the path don't trigger basic-string escape processing.
+        std::fs::write(
+            &config_path,
+            format!(
+                "[wal]\nwal_dir = '{}'\n",
+                toml_data_dir.join("wal").display()
+            ),
+        )
+        .unwrap();
+
+        // SAFETY: serial test, single-threaded env access; required by edition 2024.
+        unsafe {
+            std::env::set_var(crate::config::CONFIG_ENV, &config_path);
+            std::env::set_var(crate::config::DATA_DIR_ENV, &env_data_dir);
+        }
+
+        let db = AletheiaDB::open_from_env().expect("config TOML should load");
+        assert!(
+            db._tempdir.is_none(),
+            "TOML-backed db is durable, not tempdir"
+        );
+        assert!(
+            toml_data_dir.join("wal").exists(),
+            "TOML's wal_dir must win over DATA_DIR"
+        );
+        assert!(
+            !env_data_dir.exists(),
+            "DATA_DIR should be ignored when CONFIG is set"
+        );
+
+        // SAFETY: see above.
+        unsafe {
+            std::env::remove_var(crate::config::CONFIG_ENV);
+            std::env::remove_var(crate::config::DATA_DIR_ENV);
+        }
     }
 }

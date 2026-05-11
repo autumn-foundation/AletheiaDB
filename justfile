@@ -349,3 +349,24 @@ worktree-pr TITLE BODY="":
     else
         bash scripts/worktree-pr.sh "{{TITLE}}" "{{BODY}}"
     fi
+
+# --- Python SDK ---
+
+# Build a release wheel for the Python SDK (output: python/target/wheels/)
+py-build:
+    cd python && maturin build --release
+
+# Install the Python SDK into the current venv via maturin develop
+py-dev:
+    cd python && maturin develop --release
+
+# Run the Python SDK test suite (requires maturin develop or installed wheel).
+# Runs pytest from a tmpdir so it imports the installed package, not the source dir.
+py-test:
+    cd {{justfile_directory()}} && cd $(mktemp -d) && pytest {{justfile_directory()}}/python/tests/ -v
+
+# Run all Python examples (requires maturin develop or installed wheel)
+py-examples:
+    cd $(mktemp -d) && python {{justfile_directory()}}/python/examples/quick_start.py
+    cd $(mktemp -d) && python {{justfile_directory()}}/python/examples/vector_quick_start.py
+    cd $(mktemp -d) && python {{justfile_directory()}}/python/examples/time_travel.py

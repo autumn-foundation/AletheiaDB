@@ -30,8 +30,9 @@ smallvec = "1.13"
 chrono = "0.4"
 arbitrary = { version = "1.4", features = ["derive"], optional = true }
 
-# Force native-tls to 0.2.16 to avoid build breakage in 0.2.17
-native-tls = "=0.2.18"
+# Pin native-tls only when features that pull reqwest are active.
+# Kept optional so the Python SDK build (no reqwest features) has no OpenSSL dep.
+native-tls = { version = "=0.2.18", optional = true }
 
 # Configuration support (optional TOML config files)
 serde = { version = "1.0", features = ["derive"], optional = true }
@@ -83,9 +84,9 @@ rayon = "1.12"
 comfy-table = "7.2.2"
 crossterm = "0.29.0"
 rand = { version = "0.8", features = ["small_rng"] }
-# tempfile is an optional dependency so the `simulation` feature can use
-# create_test_db in integration tests without requiring dev-dep hacks.
-tempfile = { version = "3.27", optional = true }
+# tempfile is needed at runtime: AletheiaDB::new() backs its WAL with a
+# temporary directory so the default constructor is truly ephemeral.
+tempfile = "3.27"
 
 # Encryption at rest (ADR-0028)
 aes-gcm = "0.10"
@@ -98,7 +99,6 @@ aws-sdk-kms = { version = "1.106.0", optional = true }
 [dev-dependencies]
 criterion = "0.8"
 proptest = "1.11"
-tempfile = "3.27"
 serial_test = "3.4"
 # Tokio for async tests
 tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "test-util"] }
@@ -122,7 +122,7 @@ semantic-search = []
 # Provides SimulatedClock, FaultInjector, SimulatedStorage, SimulatedScheduler,
 # and the Simulator orchestrator for testing temporal consistency under
 # controlled fault conditions.
-simulation = ["dep:tempfile"]
+simulation = []
 
 # Internal fuzzing support for cargo-fuzz targets (issue #155).
 # This exposes cfg-gated parser hooks and Arbitrary implementations without
@@ -195,7 +195,7 @@ embeddings-onnx = ["embeddings", "embed_anything/ort"]
 mcp-server = ["dep:rmcp", "dep:tokio", "dep:serde", "dep:base64"]
 
 # Sharding RPC client support (uses blocking reqwest)
-sharding-rpc = ["dep:reqwest", "dep:serde"]
+sharding-rpc = ["dep:reqwest", "dep:serde", "dep:native-tls"]
 
 # SQL:2011 temporal syntax support
 sql = ["dep:sqlparser"]
@@ -223,7 +223,7 @@ encryption = ["dep:serde"]
 encryption-aws-kms = ["encryption", "dep:tokio"]
 
 # HashiCorp Vault key provider (optional)
-encryption-vault = ["encryption", "dep:tokio", "dep:reqwest"]
+encryption-vault = ["encryption", "dep:tokio", "dep:reqwest", "dep:native-tls"]
 aws-sdk-kms = ["dep:aws-sdk-kms"]
 
 [profile.dev]

@@ -1,6 +1,17 @@
 # Rust build artifacts
 /target
 
+# Python SDK build artifacts
+/python/target
+/python/dist
+/python/*.egg-info
+/python/build
+__pycache__
+*.pyc
+.pytest_cache
+.mypy_cache
+.ruff_cache
+
 # Coverage reports
 /coverage
 /lcov.info
@@ -93,3 +104,6 @@ echo_project/
 *.txt
 plan.md
 pr_description.md
+
+# Re-include Python SDK sources (overrides "*.py" above)
+!python/**/*.py
