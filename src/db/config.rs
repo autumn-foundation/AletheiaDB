@@ -613,10 +613,12 @@ mod ephemeral_tests {
         let env_data_dir = scratch.path().join("env-data");
 
         // Minimal valid TOML pointing the WAL inside `toml-data/wal`.
+        // Use a TOML literal string (single quotes) so Windows backslashes
+        // in the path don't trigger basic-string escape processing.
         std::fs::write(
             &config_path,
             format!(
-                "[wal]\nwal_dir = \"{}\"\n",
+                "[wal]\nwal_dir = '{}'\n",
                 toml_data_dir.join("wal").display()
             ),
         )
