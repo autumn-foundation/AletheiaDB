@@ -5,28 +5,28 @@
 //!
 //! # Prerequisites
 //!
-//! This feature is experimental and requires the `nova` feature flag.
+//! This feature is experimental and requires the `semantic-temporal` feature flag.
 //!
 //! ## Running this example
 //!
 //! ```bash
-//! cargo run --features nova --example story_demo
+//! cargo run --features semantic-temporal --example story_demo
 //! ```
 //!
 //! ## Using in your project
 //!
-//! Add the `nova` feature to your `Cargo.toml`:
+//! Add the `semantic-temporal` feature to your `Cargo.toml`:
 //!
 //! ```toml
 //! [dependencies]
-//! aletheiadb = { version = "0.1", features = ["nova"] }
+//! aletheiadb = { version = "0.1", features = ["semantic-temporal"] }
 //! ```
 
 use aletheiadb::AletheiaDB;
 use aletheiadb::WriteOps;
-// ⚠️ REQUIRES FEATURE 'NOVA' IN CARGO.TOML
+// ⚠️ REQUIRES FEATURE 'SEMANTIC-TEMPORAL' IN CARGO.TOML
 // [dependencies]
-// aletheiadb = { version = "0.1", features = ["nova"] }
+// aletheiadb = { version = "0.1", features = ["semantic-temporal"] }
 use aletheiadb::experimental::temporal_narrative::NarrativeGenerator;
 use aletheiadb::properties;
 

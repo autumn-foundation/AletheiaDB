@@ -45,6 +45,11 @@ pub struct NarrativeGenerator<'a> {
 )]
 /// Generates human-readable summaries of temporal graph mutations.
 ///
+/// # Panics
+///
+/// This struct is a stub because the `semantic-temporal` feature is disabled.
+/// Attempting to use any of its methods will result in a runtime panic.
+///
 /// # Why?
 /// When analyzing a `BiTemporalInterval`, users often need to understand
 /// the sequence of events (e.g., "Alice liked the post, then Bob deleted it").
