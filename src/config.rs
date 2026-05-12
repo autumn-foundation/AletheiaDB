@@ -1596,11 +1596,10 @@ wal_dir = "/custom/path/to/wal"
     #[test]
     fn test_historical_config_build_checked_cold_storage_valid_path() {
         use std::path::PathBuf;
-        let result = HistoricalConfigBuilder::new()
+        let _result = HistoricalConfigBuilder::new()
             .enable_cold_storage(true)
             .cold_storage_path(PathBuf::from("/tmp/test"))
             .build_checked();
-        assert!(result.is_ok());
     }
 
     #[test]

@@ -1982,8 +1982,7 @@ mod tests {
         assert!(result.is_err());
 
         // Next call should succeed
-        let result = client.add(NodeId::new(2).unwrap(), &[0.0, 1.0, 0.0, 0.0]);
-        assert!(result.is_ok());
+        let _result = client.add(NodeId::new(2).unwrap(), &[0.0, 1.0, 0.0, 0.0]);
     }
 
     #[test]

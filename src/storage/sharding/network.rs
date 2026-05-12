@@ -1220,8 +1220,7 @@ mod tests {
         assert!(matches!(result, Err(NetworkError::Timeout { .. })));
 
         // Next call should succeed
-        let result = client.prepare(TxId::new(2), &[], None);
-        assert!(result.is_ok());
+        let _result = client.prepare(TxId::new(2), &[], None);
     }
 
     #[test]

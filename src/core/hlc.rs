@@ -636,7 +636,7 @@ mod tests {
 
         // Should NOT error if wallclock advances (logical resets)
         let result = ts.send(1001);
-        assert!(result.is_ok());
+
         assert_eq!(result.unwrap().logical(), 0);
     }
 

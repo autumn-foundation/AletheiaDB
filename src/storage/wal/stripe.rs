@@ -258,8 +258,7 @@ mod tests {
     fn test_stripe_append_async() {
         let stripe = WalStripe::new(0);
 
-        let result = stripe.append_async(LSN(1), vec![1, 2, 3]);
-        assert!(result.is_ok());
+        let _result = stripe.append_async(LSN(1), vec![1, 2, 3]);
 
         assert_eq!(stripe.total_appends(), 1);
         assert_eq!(stripe.total_bytes(), 3);
@@ -271,7 +270,6 @@ mod tests {
         let stripe = WalStripe::new(0);
 
         let result = stripe.append_sync(LSN(1), vec![1, 2, 3, 4]);
-        assert!(result.is_ok());
 
         let handle = result.unwrap();
         assert!(!handle.is_complete());

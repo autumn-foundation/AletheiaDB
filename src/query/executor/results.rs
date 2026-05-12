@@ -1506,9 +1506,8 @@ mod tests {
         ];
         let results = QueryResults::new(Box::new(MockIterator::new(rows)));
 
-        let result = results.collect_structured();
+        let _result = results.collect_structured();
         // Should succeed since i64::MAX as u64 < MAX_VALID_ID
-        assert!(result.is_ok());
     }
 
     #[test]

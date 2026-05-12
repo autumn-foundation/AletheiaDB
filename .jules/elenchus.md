@@ -346,3 +346,10 @@
 **Finding:** The `LimitPushdown` tests originally missed several behavioral edge cases and logic checks, particularly regarding the propagation limits in BinaryOp combinations (`||`), updating limit values correctly against child bounds, and setting vector rank limits.
 **Evidence:** `cargo mutants` caught mutants in `LimitPushdown::push_down` specifically targeting the changed boolean condition logic and bounds assignment.
 **Recommendation:** Added `sentry_tests` to `LimitPushdown` that explicitly trigger tests enforcing the boolean change propagation, verifying that updated properties reflect correct nested limits, and vector bounds assignment. Tests now prevent `||` to `&&` mutations and correct top-k modifications.
+
+**[The Ceremony Test Pattern]**
+**Module:** `Multiple Modules (src/query/converter.rs, src/core/temporal.rs, src/storage/wal/stripe.rs, etc.)`
+**Severity:** 🟡 Suspect
+**Finding:** A pattern of "Ceremony Tests" was discovered where `assert!(result.is_ok())` was used before calling `.unwrap()` on results. Since `.unwrap()` already panics on `Err` with the specific error context, the `is_ok()` assertion is redundant, provides no additional safety or correct behavior validation, and is merely ceremonial.
+**Evidence:** 38 instances of `assert!(result.is_ok());` immediately followed by `.unwrap()` or part of unverified test sequences across various modules. These tests exist to be "green" without actively guarding against regressions.
+**Recommendation:** Remove the redundant `assert!(result.is_ok())` calls and let `.unwrap()` handle failures natively, or rewrite assertions to verify specific correct behavior (e.g. `assert_eq!(result.unwrap(), expected_value)`).

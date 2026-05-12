@@ -806,7 +806,7 @@ mod tests {
             // (infinite cost), effectively blocking the path.
             // Since A->B is the only path, and B is incompatible, it should return Ok(None).
             let result = pathfinder.find_path(a, b, &query, 10, false);
-            assert!(result.is_ok());
+
             assert!(
                 result.unwrap().is_none(),
                 "Path should be blocked due to dimension mismatch"

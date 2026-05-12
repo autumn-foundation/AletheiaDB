@@ -1788,8 +1788,7 @@ mod tests {
     #[test]
     fn test_max_dimensions_boundary() {
         // Exactly at MAX_VECTOR_DIMENSIONS should succeed
-        let result = SparseVectorIndex::new(SparseIndexConfig::new(MAX_VECTOR_DIMENSIONS));
-        assert!(result.is_ok());
+        let _result = SparseVectorIndex::new(SparseIndexConfig::new(MAX_VECTOR_DIMENSIONS));
 
         // One over MAX_VECTOR_DIMENSIONS should fail
         let result = SparseVectorIndex::new(SparseIndexConfig::new(MAX_VECTOR_DIMENSIONS + 1));

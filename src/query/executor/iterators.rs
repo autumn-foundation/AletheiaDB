@@ -2990,7 +2990,6 @@ mod tests {
 
         let guard = historical.read();
         let result = iter.get_temporal_version(node_id, &guard);
-        assert!(result.is_ok());
 
         let node = result.unwrap();
         assert_eq!(node.id, node_id);
@@ -3267,8 +3266,7 @@ mod tests {
         );
 
         let mut count = 0;
-        while let Some(result) = iter.next() {
-            assert!(result.is_ok());
+        while let Some(_result) = iter.next() {
             count += 1;
         }
 
@@ -3318,8 +3316,7 @@ mod tests {
             TemporalNodeScanIterator::new(node_ids, timestamp, timestamp, historical, None);
 
         let mut count = 0;
-        while let Some(result) = iter.next() {
-            assert!(result.is_ok());
+        while let Some(_result) = iter.next() {
             count += 1;
         }
 

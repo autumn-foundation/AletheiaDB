@@ -911,7 +911,7 @@ mod tests {
     fn test_time_range_valid_returns_ok() {
         // TimeRange::new should return Ok for valid ranges
         let result = TimeRange::new(100.into(), 200.into());
-        assert!(result.is_ok());
+
         let range = result.unwrap();
         assert_eq!(range.start(), 100.into());
         assert_eq!(range.end(), 200.into());
@@ -921,7 +921,7 @@ mod tests {
     fn test_time_range_equal_start_end_returns_ok() {
         // TimeRange::new should return Ok when start == end (point-in-time)
         let result = TimeRange::new(100.into(), 100.into());
-        assert!(result.is_ok());
+
         let range = result.unwrap();
         assert_eq!(range.start(), 100.into());
         assert_eq!(range.end(), 100.into());

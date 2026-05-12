@@ -1657,7 +1657,7 @@ mod tests {
 
         // Should return Ok(empty vector), not an error
         let result = read_segment(&nonexistent, LSN(1));
-        assert!(result.is_ok());
+
         assert!(result.unwrap().is_empty());
     }
 

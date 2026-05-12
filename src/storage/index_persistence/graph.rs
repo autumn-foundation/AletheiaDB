@@ -854,7 +854,7 @@ mod tests {
         let persisted = PersistedPropertyValue::Vector(max_vector);
 
         let result = restore_property_value(&persisted);
-        assert!(result.is_ok());
+
         if let PropertyValue::Vector(ref v) = result.unwrap() {
             assert_eq!(v.len(), super::super::MAX_VECTOR_DIMENSIONS);
         } else {
