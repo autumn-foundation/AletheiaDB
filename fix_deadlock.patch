@@ -1,0 +1,16 @@
+--- src/storage/sharding/coordinator.rs
++++ src/storage/sharding/coordinator.rs
+@@ -601,6 +601,7 @@
+             drop(connections); // Prevent deadlock with active_transactions.write()
+
+             for shard_id in unavailable_shards {
+                 self.mark_shard_unavailable(shard_id);
+             }
+
+@@ -786,6 +787,7 @@
+             transaction.mark_failed();
+             drop(connections); // Prevent deadlock with active_transactions.write()
+
+             for shard_id in unavailable_shards {
+                 self.mark_shard_unavailable(shard_id);
+             }

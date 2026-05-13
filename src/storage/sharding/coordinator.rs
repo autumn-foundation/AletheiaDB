@@ -598,8 +598,8 @@ impl ShardCoordinator {
             }
 
             transaction.abort("Prepare phase failed");
-            drop(connections); // Prevent deadlock with active_transactions.write()
 
+            drop(connections); // Prevent deadlock with active_transactions.write() and self.mark_shard_unavailable()
             for shard_id in unavailable_shards {
                 self.mark_shard_unavailable(shard_id);
             }
@@ -784,8 +784,8 @@ impl ShardCoordinator {
             // Recovery process will retry
             let uncommitted = transaction.uncommitted_participants();
             transaction.mark_failed();
-            drop(connections); // Prevent deadlock with active_transactions.write()
 
+            drop(connections); // Prevent deadlock with active_transactions.write() and self.mark_shard_unavailable()
             for shard_id in unavailable_shards {
                 self.mark_shard_unavailable(shard_id);
             }
