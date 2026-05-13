@@ -87,6 +87,59 @@ See the [Hybrid Query guide](docs/guides/hybrid-query-guide.md).
 
 ---
 
+
+## Narrative Generation (Experimental)
+
+> ⚠️ **REQUIRES FEATURE NOVA:** To use experimental modules like `NarrativeGenerator`, you must enable the `nova` feature in your `Cargo.toml`:
+> `aletheiadb = { version = "0.1", features = ["nova"] }`
+
+```rust
+use aletheiadb::AletheiaDB;
+use aletheiadb::WriteOps;
+use aletheiadb::experimental::temporal_narrative::NarrativeGenerator;
+use aletheiadb::properties;
+
+fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
+    let db = AletheiaDB::new()?;
+
+    // 1. Create Node
+    let node_id = db.create_node(
+        "Person",
+        properties! {
+            "name" => "Alice",
+            "age" => 30,
+        },
+    )?;
+
+    // 2. Update Node
+    db.write(|tx| {
+        tx.update_node(
+            node_id,
+            properties! {
+                "name" => "Alice",
+                "age" => 31,
+                "city" => "London",
+            },
+        )
+    })?;
+
+    // 3. Generate Narrative
+    let generator = NarrativeGenerator::new(&db);
+    let narrative = generator.generate_node_narrative(node_id)?;
+
+    for event in narrative {
+        println!("Version {}: {}", event.version_number, event.description);
+        for change in event.changes {
+            println!("  - {}", change);
+        }
+    }
+
+    Ok(())
+}
+```
+
+---
+
 ## Performance
 
 Benchmarks run on every push to trunk.

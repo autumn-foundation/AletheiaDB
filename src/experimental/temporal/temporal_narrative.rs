@@ -159,27 +159,19 @@ impl<'a> NarrativeGenerator<'a> {
 #[allow(deprecated)]
 impl<'a> NarrativeGenerator<'a> {
     /// Create a new narrative generator.
-    ///
-    /// # Panics
-    ///
-    /// This method panics if the `nova` feature is not enabled.
     #[allow(unused_variables)]
     #[track_caller]
     pub fn new(db: &'a AletheiaDB) -> Self {
-        panic!(
+        unimplemented!(
             "NarrativeGenerator requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
         );
     }
 
     /// Generate a narrative for a specific node.
-    ///
-    /// # Panics
-    ///
-    /// This method panics if the `nova` feature is not enabled.
     #[allow(unused_variables)]
     #[track_caller]
     pub fn generate_node_narrative(&self, node_id: NodeId) -> Result<Vec<NarrativeEvent>> {
-        panic!(
+        unimplemented!(
             "NarrativeGenerator requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
         );
     }
