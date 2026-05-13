@@ -2317,8 +2317,11 @@ mod tests {
 
         // Should get error during skip phase
         let result = limit.next();
-        assert!(result.is_some());
-        assert!(result.unwrap().is_err());
+        match result {
+            Some(Err(_e)) => // mock iterator probably throws a different error string or type. Just match Err.
+(),
+            _ => panic!("Expected Some(Err)"),
+        }
     }
 
     #[test]
@@ -2354,8 +2357,10 @@ mod tests {
 
         // Should return error because no vector index is configured
         let result = rerank.next();
-        assert!(result.is_some());
-        assert!(result.unwrap().is_err());
+        match result {
+            Some(Err(e)) => assert!(matches!(e, crate::core::error::Error::Vector(_))),
+            _ => panic!("Expected Some(Err(VectorError))"),
+        }
     }
 
     #[test]
@@ -3137,10 +3142,10 @@ mod tests {
         let result = iter.filter_node(node_id, &guard);
 
         // Should return Some(Ok(QueryRow)) for matching node
-        assert!(result.is_some());
-        let query_row = result.unwrap();
-        assert!(query_row.is_ok());
-        assert_eq!(query_row.unwrap().entity.node_id(), Some(node_id));
+        match result {
+            Some(Ok(row)) => assert_eq!(row.entity.node_id(), Some(node_id)),
+            _ => panic!("Expected Some(Ok(QueryRow))"),
+        }
     }
 
     #[test]
@@ -3207,8 +3212,10 @@ mod tests {
         let result = iter.filter_node(node_id, &guard);
 
         // Should return Some(Err(...)) when node not found
-        assert!(result.is_some());
-        assert!(result.unwrap().is_err());
+        match result {
+            Some(Err(_)) => (),
+            _ => panic!("Expected Some(Err)"),
+        }
     }
 
     #[test]

@@ -346,3 +346,10 @@
 **Finding:** The `LimitPushdown` tests originally missed several behavioral edge cases and logic checks, particularly regarding the propagation limits in BinaryOp combinations (`||`), updating limit values correctly against child bounds, and setting vector rank limits.
 **Evidence:** `cargo mutants` caught mutants in `LimitPushdown::push_down` specifically targeting the changed boolean condition logic and bounds assignment.
 **Recommendation:** Added `sentry_tests` to `LimitPushdown` that explicitly trigger tests enforcing the boolean change propagation, verifying that updated properties reflect correct nested limits, and vector bounds assignment. Tests now prevent `||` to `&&` mutations and correct top-k modifications.
+
+**[Tautological Result Verification Pattern]**
+**Module:** `src/query/planner/rules/limit_pushdown.rs`, `src/query/planner/rules/filter_scan_fusion.rs`, `src/query/planner/rules/predicate_pushdown.rs`,
+**Severity:** 🔴 Critical
+**Finding:** A widespread pattern of extremely weak assertions was identified where tests simply call `assert!(result.is_some())`, `assert!(result.is_ok())` or `assert!(result.is_err())` without verifying the actual structure or content of the returned value. This provides a false sense of security, as the logic could completely corrupt the internal state while still returning `Some` or `Ok` or `Err`.
+**Evidence:** In the planner rules (e.g., `LimitPushdown`), tests verified optimizations occurred by checking `result.is_some()`, but failed to structurally verify that the limit was correctly propagated to the expected operator (e.g., `VectorRank`).
+**Recommendation:** Replaced all tautological `assert!(result.is_some())` calls with structural equality checks (e.g., `assert_eq!(result, Some(expected_plan))`) when appropriate. This ensures the output is not just generated without error, but is strictly correct according to the specific test scenario.

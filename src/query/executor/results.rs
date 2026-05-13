@@ -1508,7 +1508,10 @@ mod tests {
 
         let result = results.collect_structured();
         // Should succeed since i64::MAX as u64 < MAX_VALID_ID
-        assert!(result.is_ok());
+        match result {
+            Ok(res) => assert_eq!(res.nodes.len(), 1),
+            Err(_) => panic!("Expected Ok"),
+        }
     }
 
     #[test]
