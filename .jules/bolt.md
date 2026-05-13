@@ -77,3 +77,7 @@
 **Pre-allocating Vec Capacities in Hot Paths**
 **Learning:** Pre-allocating standard Rust `Vec` objects using `Vec::with_capacity` in hot-paths like parsers and query planners eliminates unnecessary heap reallocations (0 -> 4 -> 8 -> 16 etc.), without changing semantics or causing borrow checker issues. However, if the expected bounds are wildly incorrect it could lead to memory bloat. A small capacity for small collections minimizes performance impacts in hot loops.
 **Action:** When a loop dynamically pushes elements to a new empty Vector (especially in repeated execution domains like parsers and network/storage iterators), replace `Vec::new()` with `Vec::with_capacity(n)` if a typical or max size `n` is roughly known.
+
+**[Optimize Ring Buffer Drain with `Vec::with_capacity`]**
+**Learning:** In a lock-free ring buffer, the `drain()` method is continuously called by the consumer (flush thread) and dynamically collects `PendingEntry` items into a new `Vec`. Using `Vec::new()` causes multiple heap allocations depending on how many items are ready.
+**Action:** Use an existing `len_approx()` or similar unsynchronized counter to estimate the number of ready items, and use `Vec::with_capacity(approx_len)` to pre-allocate exact (or nearly exact) capacity. Fall back to `Vec::new()` when the estimated length is 0 to remain zero-allocation when empty.
