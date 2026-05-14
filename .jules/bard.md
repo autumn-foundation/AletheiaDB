@@ -10,3 +10,6 @@
 ## 2024-05-14 - [Adding Examples to HLC and documenting src/main.rs]
 **Confusion:** The `src/main.rs` file was missing module-level documentation (`//!`), which triggers the `missing_docs` lint, but was hidden by the lint configurations inside `src/lib.rs` affecting `src/main.rs`. Also `HybridTimestamp::send` lacked an example showing the behavior of its logical counter.
 **Clarification:** Added `//! The AletheiaDB binary.` to `src/main.rs` and added an executable `## Examples` block to `HybridTimestamp::send` in `src/core/hlc.rs`.
+## 2024-05-14 - [Adding missing documentation for core structs and functions]
+**Confusion:** Some public functions and structs in `src/core/interning.rs`, `src/query/plan.rs`, and `src/storage/current/iterators.rs` were missing either `///` documentation or `## Examples`. This makes it difficult for users to understand how to use these items and their purpose.
+**Clarification:** I added `///` documentation to `OutgoingEdgesIter` and other iterators, added `## Examples` executable doc tests for `InternedString::resolve` and `TemporalContext::valid_time_between`, and generally ensured these items conform to Bard's philosophy of having documented examples.

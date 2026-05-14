@@ -444,6 +444,12 @@ impl TemporalContext {
         since = "0.1.0",
         note = "Use valid_time_between() or transaction_time_between() instead"
     )]
+    ///
+    /// # Examples
+    /// ```
+    /// let range = aletheiadb::core::temporal::time::TimeRange::at(100.into());
+    /// let ctx = aletheiadb::query::plan::TemporalContext::between(range);
+    /// ```
     pub fn between(range: TimeRange) -> Self {
         Self::valid_time_between(range)
     }

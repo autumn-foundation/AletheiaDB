@@ -235,6 +235,15 @@ impl StringInterner {
         since = "0.1.0",
         note = "Use resolve_with() for read-only access; use resolve() only when an owned Arc<str> is strictly required"
     )]
+    ///
+    /// # Examples
+    /// ```
+    /// use aletheiadb::core::interning::{StringInterner, InternedString};
+    /// let interner = StringInterner::new();
+    /// let id = interner.intern("test_string").unwrap();
+    /// let arc_str = interner.resolve(id).unwrap();
+    /// assert_eq!(&*arc_str, "test_string");
+    /// ```
     pub fn resolve(&self, id: InternedString) -> Option<Arc<str>> {
         self.id_to_string
             .get(&id)
