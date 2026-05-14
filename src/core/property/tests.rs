@@ -2187,6 +2187,32 @@ mod sentry_tests {
         }
     }
 
+    /// 🎯 Target: PropertyValue::deserialize (Array pre-allocation check)
+    /// 💣 Risk: Large array counts with small buffers could trigger massive allocations (DoS).
+    /// 🧪 Strategy: Construct buffer with large valid array count but insufficient data length.
+    /// 🔬 Verification: Expect error "Insufficient buffer size for Array elements".
+    #[test]
+    fn test_property_value_array_deserialize_insufficient_buffer_preallocation() {
+        let mut bytes = Vec::new();
+        bytes.push(TAG_ARRAY);
+        let count = 50_000u32; // Valid count (< MAX_ARRAY_ELEMENTS) but requires 50KB data min
+        bytes.extend_from_slice(&count.to_le_bytes());
+        // No payload, so buffer is just 5 bytes
+
+        let result = PropertyValue::deserialize(&bytes);
+        assert!(result.is_err());
+        match result {
+            Err(crate::core::error::Error::Storage(StorageError::CorruptedData(msg))) => {
+                assert!(
+                    msg.contains("Insufficient buffer size for Array elements"),
+                    "Unexpected error message: {}",
+                    msg
+                );
+            }
+            _ => panic!("Expected CorruptedData error"),
+        }
+    }
+
     #[test]
     fn test_array_max_elements_boundary() {
         // Construct a buffer with exactly MAX_ARRAY_ELEMENTS
