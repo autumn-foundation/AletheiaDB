@@ -447,7 +447,8 @@ impl TemporalContext {
     ///
     /// # Examples
     /// ```
-    /// let range = aletheiadb::core::temporal::time::TimeRange::at(100.into());
+    /// let range = aletheiadb::core::temporal::TimeRange::at(100.into());
+    /// # #[allow(deprecated)]
     /// let ctx = aletheiadb::query::plan::TemporalContext::between(range);
     /// ```
     pub fn between(range: TimeRange) -> Self {
