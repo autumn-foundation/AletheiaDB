@@ -346,3 +346,10 @@
 **Finding:** The `LimitPushdown` tests originally missed several behavioral edge cases and logic checks, particularly regarding the propagation limits in BinaryOp combinations (`||`), updating limit values correctly against child bounds, and setting vector rank limits.
 **Evidence:** `cargo mutants` caught mutants in `LimitPushdown::push_down` specifically targeting the changed boolean condition logic and bounds assignment.
 **Recommendation:** Added `sentry_tests` to `LimitPushdown` that explicitly trigger tests enforcing the boolean change propagation, verifying that updated properties reflect correct nested limits, and vector bounds assignment. Tests now prevent `||` to `&&` mutations and correct top-k modifications.
+
+**[ProvenanceFilterIterator Missing Coverage]**
+**Module:** `src/query/executor/iterators.rs`
+**Severity:** 🟡 Suspect
+**Finding:** The `ProvenanceFilterIterator` implementation lacked test coverage completely. Mutations such as removing the `!` in `!self.include_provenance`, replacing `size_hint` values, and changing `next()` behavior went uncaught by the test suite.
+**Evidence:** `cargo mutants` output showed all mutations in `ProvenanceFilterIterator` survived.
+**Recommendation:** Added `test_provenance_filter_iterator_include_provenance`, `test_provenance_filter_iterator_exclude_provenance`, and `test_provenance_filter_iterator_size_hint` to `src/query/executor/iterators.rs` using `MockIterator` to verify correctly propagating or stripping provenance and correctly preserving size bounds.

@@ -2374,6 +2374,52 @@ mod tests {
         assert_eq!(upper, Some(5));
     }
 
+    // ==================== ProvenanceFilterIterator Tests ====================
+
+    #[test]
+    fn test_provenance_filter_iterator_include_provenance() {
+        let node = test_node(1, "Alice");
+        let mut row = QueryRow::from_entity(EntityResult::Node(node));
+        row.path = Some(crate::query::executor::results::Path::new());
+        row.timestamp = Some(crate::Timestamp::from(100));
+
+        let input = MockIterator::from_results(vec![Ok(row)]);
+        let mut filter = ProvenanceFilterIterator::new(Box::new(input), true);
+
+        let result = filter.next().unwrap().unwrap();
+        assert!(result.path.is_some());
+        assert!(result.timestamp.is_some());
+    }
+
+    #[test]
+    fn test_provenance_filter_iterator_exclude_provenance() {
+        let node = test_node(1, "Alice");
+        let mut row = QueryRow::from_entity(EntityResult::Node(node));
+        row.path = Some(crate::query::executor::results::Path::new());
+        row.timestamp = Some(crate::Timestamp::from(100));
+
+        let input = MockIterator::from_results(vec![Ok(row)]);
+        let mut filter = ProvenanceFilterIterator::new(Box::new(input), false);
+
+        let result = filter.next().unwrap().unwrap();
+        assert!(result.path.is_none());
+        assert!(result.timestamp.is_none());
+    }
+
+    #[test]
+    fn test_provenance_filter_iterator_size_hint() {
+        let node = test_node(1, "Alice");
+        let input = MockIterator::from_nodes(vec![node]);
+
+        let (lower, upper) = input.size_hint();
+
+        let filter = ProvenanceFilterIterator::new(Box::new(input), true);
+        let (filter_lower, filter_upper) = filter.size_hint();
+
+        assert_eq!(filter_lower, lower);
+        assert_eq!(filter_upper, upper);
+    }
+
     // ==================== ProjectIterator Tests ====================
 
     #[test]
