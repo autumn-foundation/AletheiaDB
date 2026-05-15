@@ -791,13 +791,14 @@ mod tests {
 
     // Mock iterator for testing QueryResults
     struct MockIterator {
-        items: std::vec::IntoIter<Result<QueryRow>>,
+        items: Box<dyn Iterator<Item = Result<QueryRow>> + Send>,
     }
 
+    /// ⚡ Bolt Optimization: Removed intermediate `.collect::<Vec<_>>()` allocation to return an iterator directly, saving a heap reallocation during test mock setup.
     impl MockIterator {
         fn new(rows: Vec<QueryRow>) -> Self {
             MockIterator {
-                items: rows.into_iter().map(Ok).collect::<Vec<_>>().into_iter(),
+                items: Box::new(rows.into_iter().map(Ok)),
             }
         }
 
@@ -817,7 +818,7 @@ mod tests {
                 )));
             }
             MockIterator {
-                items: results.into_iter(),
+                items: Box::new(results.into_iter()),
             }
         }
     }
