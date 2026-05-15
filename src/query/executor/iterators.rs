@@ -1480,18 +1480,33 @@ impl ResultIterator for ProvenanceFilterIterator {
 }
 
 /// Iterator for projecting specific properties from query results.
+use crate::core::property::PropertyKey;
+/// Iterator for projecting specific properties from query results.
 pub struct ProjectIterator {
     input: Box<dyn ResultIterator>,
-    properties: Vec<String>,
+    properties: Vec<PropertyKey>,
 }
 
 impl ProjectIterator {
     /// Create a new ProjectIterator that projects specific properties from the results.
+    ///
+    /// ⚡ Bolt Optimization: Properties are pre-interned during construction.
+    /// This eliminates repeated String -> InternedString lookups for every
+    /// property on every single row processed during projection.
     pub fn new(input: Box<dyn ResultIterator>, mut properties: Vec<String>) -> Self {
         // Deduplicate properties to prevent errors when projecting same property multiple times
         properties.sort();
         properties.dedup();
-        ProjectIterator { input, properties }
+
+        let interned_properties = properties
+            .into_iter()
+            .filter_map(|p| GLOBAL_INTERNER.intern(&p).ok())
+            .collect();
+
+        ProjectIterator {
+            input,
+            properties: interned_properties,
+        }
     }
 }
 
@@ -1501,9 +1516,9 @@ impl ResultIterator for ProjectIterator {
             Some(Ok(mut row)) => {
                 if let Some(node) = row.entity.as_node() {
                     let mut new_props = crate::core::PropertyMapBuilder::new();
-                    for prop in &self.properties {
-                        if let Some(val) = node.properties.get(prop) {
-                            new_props = match new_props.try_insert(prop, val.clone()) {
+                    for prop_key in &self.properties {
+                        if let Some(val) = node.properties.get_by_interned_key(prop_key) {
+                            new_props = match new_props.try_insert_by_key(*prop_key, val.clone()) {
                                 Ok(p) => p,
                                 Err(e) => return Some(Err(e)),
                             };
