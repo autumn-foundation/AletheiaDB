@@ -45,7 +45,7 @@ fn to_dense_iter_rejects_multi_vectors() {
         .collect::<Result<Vec<_>, _>>()
         .unwrap_err();
 
-    assert_eq!(error, DenseEmbeddingError::NotDense);
+    assert_eq!(error, DenseEmbeddingError);
 }
 
 #[test]

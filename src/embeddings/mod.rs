@@ -33,16 +33,11 @@ pub struct DenseEmbedData {
 
 /// Error returned when an upstream embedding result is not dense.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub enum DenseEmbeddingError {
-    /// A multi-vector embedding cannot be represented as a single dense vector.
-    NotDense,
-}
+pub struct DenseEmbeddingError;
 
 impl fmt::Display for DenseEmbeddingError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::NotDense => formatter.write_str("embedding result is not a dense vector"),
-        }
+        formatter.write_str("embedding result is not a dense vector")
     }
 }
 
@@ -93,6 +88,6 @@ fn embed_data_to_dense(data: EmbedData) -> Result<DenseEmbedData, DenseEmbedding
 fn embedding_result_to_dense(result: EmbeddingResult) -> Result<Vec<f32>, DenseEmbeddingError> {
     match result {
         EmbeddingResult::DenseVector(vector) => Ok(vector),
-        EmbeddingResult::MultiVector(_) => Err(DenseEmbeddingError::NotDense),
+        EmbeddingResult::MultiVector(_) => Err(DenseEmbeddingError),
     }
 }
