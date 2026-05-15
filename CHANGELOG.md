@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-05-12
+
+### Fixed
+
+- MCP server startup now uses `AletheiaDB::open_from_env()`, so stdio MCP
+  sessions honor `ALETHEIADB_CONFIG` and `ALETHEIADB_DATA_DIR` instead of
+  silently creating a fresh ephemeral database.
+
+### Added
+
+- Initial Python SDK package under `python/`, with PyO3 bindings for graph
+  CRUD, traversal, temporal queries, vector search, and Cypher/AQL execution.
+- Python wheel CI/release workflow for Linux, macOS, Windows, source
+  distributions, and Trusted Publishing to PyPI on `python-v*` tags.
+
+### Changed
+
+- `AletheiaDB::new()` is now explicitly tempdir-backed and ephemeral; durable
+  entry points should use `AletheiaDB::open_from_env()` or an explicit unified
+  config.
+- Updated the Python SDK's PyO3 dependency to `0.24`.
+- Excluded `python/**` from the root Rust crate package published to crates.io.
+
 ## [0.1.0] - 2026-05-06
 
 ### Breaking
