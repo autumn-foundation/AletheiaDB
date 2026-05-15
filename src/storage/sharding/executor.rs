@@ -48,24 +48,32 @@ use std::time::{Duration, Instant};
 
 /// Error types for query execution.
 #[derive(Debug, Clone)]
-#[allow(missing_docs)]
 pub enum ExecutorError {
     /// All target shards failed.
     AllShardsFailed {
+        /// The unique identifier of the executed query.
         query_id: u64,
+        /// The list of target shards and the network error that caused the failure.
         failures: Vec<(ShardId, NetworkError)>,
     },
     /// Query timed out.
     Timeout {
+        /// The unique identifier of the executed query.
         query_id: u64,
+        /// The specified timeout duration.
         timeout: Duration,
+        /// Shards that successfully responded before the timeout.
         responded: Vec<ShardId>,
+        /// Shards that were still pending when the timeout occurred.
         pending: Vec<ShardId>,
     },
     /// Partial failure (some shards succeeded, some failed).
     PartialFailure {
+        /// The unique identifier of the executed query.
         query_id: u64,
+        /// Shards that successfully responded.
         successes: Vec<ShardId>,
+        /// The list of target shards and the network error that caused the failure.
         failures: Vec<(ShardId, NetworkError)>,
     },
     /// No shards available for query.

@@ -447,12 +447,14 @@ pub struct WhereClause {
 
 /// A predicate expression.
 #[derive(Debug, Clone, PartialEq)]
-#[allow(missing_docs)]
 pub enum PredicateExpr {
     /// Comparison: n.prop = value
     Comparison {
+        /// The left-hand side expression to evaluate.
         left: Expression,
+        /// The operator used to compare the left and right sides.
         op: ComparisonOp,
+        /// The right-hand side expression to compare against.
         right: Expression,
     },
     /// Existence check: EXISTS(n.prop)
@@ -463,22 +465,30 @@ pub enum PredicateExpr {
     IsNotNull(PropertyAccess),
     /// String contains: n.prop CONTAINS 'str'
     Contains {
+        /// The property whose value is being searched.
         property: PropertyAccess,
+        /// The substring we expect to find within the property.
         substring: String,
     },
     /// String starts with: n.prop STARTS WITH 'str'
     StartsWith {
+        /// The property whose value is being checked.
         property: PropertyAccess,
+        /// The prefix we expect the property to begin with.
         prefix: String,
     },
     /// String ends with: n.prop ENDS WITH 'str'
     EndsWith {
+        /// The property whose value is being checked.
         property: PropertyAccess,
+        /// The suffix we expect the property to end with.
         suffix: String,
     },
     /// IN list: n.prop IN [1, 2, 3]
     In {
+        /// The property whose value is being checked.
         property: PropertyAccess,
+        /// The allowed list of values.
         values: Vec<PropertyValue>,
     },
     /// Logical AND
@@ -553,7 +563,6 @@ pub enum ComparisonOp {
 
 /// An expression (used in comparisons and projections).
 #[derive(Debug, Clone, PartialEq)]
-#[allow(missing_docs)]
 pub enum Expression {
     /// Property access: n.prop
     Property(PropertyAccess),
@@ -564,7 +573,12 @@ pub enum Expression {
     /// Parameter: $param
     Parameter(String),
     /// Function call: func(args)
-    FunctionCall { name: String, args: Vec<Expression> },
+    FunctionCall {
+        /// The name of the function to execute (e.g., 'count', 'avg').
+        name: String,
+        /// The arguments to pass to the function.
+        args: Vec<Expression>,
+    },
 }
 
 impl Expression {

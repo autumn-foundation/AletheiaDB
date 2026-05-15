@@ -53,24 +53,34 @@ pub struct RoutingToken {
 
 /// Error types for migration operations.
 #[derive(Debug, Clone)]
-#[allow(missing_docs)]
 pub enum MigrationError {
     /// Network error during migration.
     NetworkError(NetworkError),
     /// Checksum verification failed.
     ChecksumMismatch {
+        /// The sequence number of the affected batch.
         batch_number: u64,
+        /// The expected checksum evaluated from the source.
         expected: u64,
+        /// The actual checksum evaluated on the target.
         actual: u64,
     },
     /// Batch was rejected by target shard.
-    BatchRejected { batch_number: u64, reason: String },
+    BatchRejected {
+        /// The sequence number of the rejected batch.
+        batch_number: u64,
+        /// The reason the batch was rejected.
+        reason: String,
+    },
     /// Migration was cancelled.
     Cancelled(u64),
     /// Migration timed out.
     Timeout {
+        /// The unique identifier of the migration.
         migration_id: u64,
+        /// The migration phase that timed out.
         phase: MigrationState,
+        /// The elapsed duration before timing out.
         elapsed: Duration,
     },
     /// Source shard unavailable.
@@ -79,12 +89,20 @@ pub enum MigrationError {
     TargetUnavailable(ShardId),
     /// Invalid migration state.
     InvalidState {
+        /// The unique identifier of the migration.
         migration_id: u64,
+        /// The expected migration state.
         expected: MigrationState,
+        /// The actual current migration state.
         actual: MigrationState,
     },
     /// Verification failed.
-    VerificationFailed { migration_id: u64, reason: String },
+    VerificationFailed {
+        /// The unique identifier of the migration.
+        migration_id: u64,
+        /// The reason the verification failed.
+        reason: String,
+    },
 }
 
 impl fmt::Display for MigrationError {
