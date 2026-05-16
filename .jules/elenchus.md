@@ -346,3 +346,24 @@
 **Finding:** The `LimitPushdown` tests originally missed several behavioral edge cases and logic checks, particularly regarding the propagation limits in BinaryOp combinations (`||`), updating limit values correctly against child bounds, and setting vector rank limits.
 **Evidence:** `cargo mutants` caught mutants in `LimitPushdown::push_down` specifically targeting the changed boolean condition logic and bounds assignment.
 **Recommendation:** Added `sentry_tests` to `LimitPushdown` that explicitly trigger tests enforcing the boolean change propagation, verifying that updated properties reflect correct nested limits, and vector bounds assignment. Tests now prevent `||` to `&&` mutations and correct top-k modifications.
+
+**[NodeHeader Tautology Gap]**
+**Module:** `src/core/graph.rs`
+**Severity:** 🟡 Suspect
+**Finding:** The `test_node_header_from_node` test had assertions that were tautological. Mutants mutating `From<&Node>` implementation survived by just generating generic/default states.
+**Evidence:** `cargo mutants` caught mutants in `NodeHeader::from` logic.
+**Recommendation:** Refactored `test_node_header_from_node` to explicitly test conversion output properties directly.
+
+**[Graph Accessor Assertion Weakness]**
+**Module:** `src/core/graph.rs`
+**Severity:** 🟡 Suspect
+**Finding:** `has_label`, `has_label_str`, and `get_property` contained boolean tests lacking exact equality matching. Mutants injecting boolean inversions (`==` -> `!=`) survived.
+**Evidence:** The test returned passing for implicit states or weak `Option::None` checks.
+**Recommendation:** Refactored tests to `assert_eq!` directly for boolean values against hardcoded explicit truths, forcing mutants to die. Added stringent `assert_eq!(true, ...)` validations across the tests.
+
+**[Error Message Formatting Blind Spots]**
+**Module:** `src/core/error.rs`
+**Severity:** 🟡 Suspect
+**Finding:** `format_clock_skew` and `format_index_not_found` display logic returned partial matches containing words that made tests pass loosely.
+**Evidence:** Replacing `format_clock_skew` return payload passed tests merely expecting `.contains("clock")`.
+**Recommendation:** Completely rewrote formatting assertions to use exact string matching (`assert_eq!`) rather than partial payload validation.

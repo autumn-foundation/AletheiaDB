@@ -1354,12 +1354,10 @@ mod tests {
         };
 
         let msg = err.to_string();
-        assert!(msg.contains("Clock skew too large"));
-        assert!(msg.contains("backward"));
-        assert!(msg.contains("100"));
-        assert!(msg.contains("max allowed: 50"));
-        assert!(msg.contains("Wallclock: 1000"));
-        assert!(msg.contains("Previous: 1100"));
+        assert_eq!(
+            msg,
+            "Clock skew too large: system clock jumped backward by 100 \u{b5}s (max allowed: 50 \u{b5}s). Wallclock: 1000, Previous: 1100. This may indicate NTP adjustment or manual clock change."
+        );
     }
 
     #[test]
@@ -1372,9 +1370,9 @@ mod tests {
         };
 
         let msg = err.to_string();
-        assert!(msg.contains("Clock skew too large"));
-        assert!(msg.contains("forward"));
-        assert!(!msg.contains("backward"));
-        assert!(msg.contains("by 0"));
+        assert_eq!(
+            msg,
+            "Clock skew too large: system clock jumped forward by 0 \u{b5}s (max allowed: 25 \u{b5}s). Wallclock: 500, Previous: 500. This may indicate NTP adjustment or manual clock change."
+        );
     }
 }

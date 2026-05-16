@@ -692,6 +692,10 @@ mod node_header_tests {
         let header = NodeHeader::from(&node);
         assert_eq!(header.id, node.id);
         assert_eq!(header.label, node.label);
+
+        let header_into: NodeHeader = (&node).into();
+        assert_eq!(header_into.id, node.id);
+        assert_eq!(header_into.label, node.label);
     }
 
     #[test]
@@ -877,6 +881,7 @@ mod sentry_tests {
     }
 
     #[test]
+    #[allow(clippy::bool_assert_comparison)]
     fn test_has_label_behavior() {
         // 🛡️ Sentry Test: Kill mutants replacing `==` with `!=` or returning `true`/`false` in `has_label`.
         let label_a = GLOBAL_INTERNER.intern("TypeA").unwrap();
@@ -889,12 +894,14 @@ mod sentry_tests {
             VersionId::new(1).unwrap(),
         );
 
-        assert!(
+        assert_eq!(
             node.has_label(label_a),
+            true,
             "has_label must return true for exact match"
         );
-        assert!(
-            !node.has_label(label_b),
+        assert_eq!(
+            node.has_label(label_b),
+            false,
             "has_label must return false for mismatch"
         );
 
@@ -907,17 +914,20 @@ mod sentry_tests {
             VersionId::new(1).unwrap(),
         );
 
-        assert!(
+        assert_eq!(
             edge.has_label(label_a),
+            true,
             "Edge::has_label must return true for exact match"
         );
-        assert!(
-            !edge.has_label(label_b),
+        assert_eq!(
+            edge.has_label(label_b),
+            false,
             "Edge::has_label must return false for mismatch"
         );
     }
 
     #[test]
+    #[allow(clippy::bool_assert_comparison)]
     fn test_has_label_str_behavior() {
         // 🛡️ Sentry Test: Kill mutants returning `true`/`false` in `has_label_str`.
         let label = GLOBAL_INTERNER.intern("TargetLabel").unwrap();
@@ -929,12 +939,14 @@ mod sentry_tests {
             VersionId::new(1).unwrap(),
         );
 
-        assert!(
+        assert_eq!(
             node.has_label_str("TargetLabel"),
+            true,
             "has_label_str must return true for exact match"
         );
-        assert!(
-            !node.has_label_str("OtherLabel"),
+        assert_eq!(
+            node.has_label_str("OtherLabel"),
+            false,
             "has_label_str must return false for mismatch"
         );
 
@@ -947,12 +959,14 @@ mod sentry_tests {
             VersionId::new(1).unwrap(),
         );
 
-        assert!(
+        assert_eq!(
             edge.has_label_str("TargetLabel"),
+            true,
             "Edge::has_label_str must return true for exact match"
         );
-        assert!(
-            !edge.has_label_str("OtherLabel"),
+        assert_eq!(
+            edge.has_label_str("OtherLabel"),
+            false,
             "Edge::has_label_str must return false for mismatch"
         );
     }
