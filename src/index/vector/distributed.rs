@@ -182,38 +182,6 @@ impl std::error::Error for DistributedError {}
 // Distributed Vector Client Trait
 // ============================================================================
 
-/// Trait for communicating with remote vector index nodes.
-///
-/// This trait abstracts the network communication, allowing for different
-/// implementations (HTTP, gRPC, in-process mock for testing).
-pub trait VectorNodeClient: Send + Sync + fmt::Debug {
-    /// Get the node ID this client connects to.
-    fn node_id(&self) -> u16;
-
-    /// Check if the connection is healthy.
-    fn is_healthy(&self) -> bool;
-
-    /// Add a vector to the remote index.
-    fn add(&self, id: NodeId, vector: &[f32]) -> Result<()>;
-
-    /// Remove a vector from the remote index.
-    fn remove(&self, id: NodeId) -> Result<()>;
-
-    /// Search for k-nearest neighbors on the remote index.
-    fn search(&self, query: &[f32], k: usize) -> Result<Vec<(NodeId, f32)>>;
-
-    /// Get the number of vectors on the remote index.
-    fn len(&self) -> Result<usize>;
-
-    /// Check if the remote index is empty.
-    fn is_empty(&self) -> Result<bool> {
-        self.len().map(|len| len == 0)
-    }
-
-    /// Perform a health check.
-    fn health_check(&self) -> Result<()>;
-}
-
 // ============================================================================
 // Circuit Breaker for Nodes
 // ============================================================================
@@ -485,9 +453,9 @@ impl NodeCircuitBreaker {
 /// # #[cfg(not(feature = "semantic-search"))]
 /// # fn main() {}
 /// ```
-pub struct NodeConnection<C: VectorNodeClient> {
+pub struct NodeConnection {
     /// The client for this node.
-    client: Arc<C>,
+    client: Arc<MockVectorNodeClient>,
     /// Circuit breaker for this node.
     circuit_breaker: NodeCircuitBreaker,
     /// Total requests made to this node.
@@ -496,7 +464,7 @@ pub struct NodeConnection<C: VectorNodeClient> {
     failure_count: AtomicU64,
 }
 
-impl<C: VectorNodeClient> fmt::Debug for NodeConnection<C> {
+impl fmt::Debug for NodeConnection {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("NodeConnection")
             .field("node_id", &self.client.node_id())
@@ -507,9 +475,9 @@ impl<C: VectorNodeClient> fmt::Debug for NodeConnection<C> {
     }
 }
 
-impl<C: VectorNodeClient> NodeConnection<C> {
+impl NodeConnection {
     /// Create a new node connection.
-    pub fn new(client: Arc<C>, circuit_config: CircuitBreakerConfig) -> Self {
+    pub fn new(client: Arc<MockVectorNodeClient>, circuit_config: CircuitBreakerConfig) -> Self {
         Self {
             client,
             circuit_breaker: NodeCircuitBreaker::new(circuit_config),
@@ -519,6 +487,7 @@ impl<C: VectorNodeClient> NodeConnection<C> {
     }
 
     /// Get the node ID.
+    /// Get node ID.
     pub fn node_id(&self) -> u16 {
         self.client.node_id()
     }
@@ -536,7 +505,7 @@ impl<C: VectorNodeClient> NodeConnection<C> {
     /// Execute an operation with circuit breaker protection.
     pub fn execute<T, F>(&self, f: F) -> Result<T>
     where
-        F: FnOnce(&C) -> Result<T>,
+        F: FnOnce(&MockVectorNodeClient) -> Result<T>,
     {
         self.request_count.fetch_add(1, Ordering::Relaxed);
 
@@ -913,14 +882,14 @@ pub struct RebalanceStats {
 /// # #[cfg(not(feature = "semantic-search"))]
 /// # fn main() {}
 /// ```
-pub struct DistributedVectorIndex<C: VectorNodeClient> {
+pub struct DistributedVectorIndex {
     /// Configuration.
     config: DistributedVectorConfig,
     /// Node connections.
-    nodes: Vec<Arc<NodeConnection<C>>>,
+    nodes: Vec<Arc<NodeConnection>>,
 }
 
-impl<C: VectorNodeClient> fmt::Debug for DistributedVectorIndex<C> {
+impl fmt::Debug for DistributedVectorIndex {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("DistributedVectorIndex")
             .field("dimensions", &self.config.dimensions)
@@ -931,7 +900,7 @@ impl<C: VectorNodeClient> fmt::Debug for DistributedVectorIndex<C> {
     }
 }
 
-impl<C: VectorNodeClient + 'static> DistributedVectorIndex<C> {
+impl DistributedVectorIndex {
     /// Create a new distributed vector index from an existing list of clients.
     ///
     /// # Arguments
@@ -942,7 +911,10 @@ impl<C: VectorNodeClient + 'static> DistributedVectorIndex<C> {
     /// # Errors
     ///
     /// Returns an error if configuration is invalid.
-    pub fn new(config: DistributedVectorConfig, clients: Vec<Arc<C>>) -> Result<Self> {
+    pub fn new(
+        config: DistributedVectorConfig,
+        clients: Vec<Arc<MockVectorNodeClient>>,
+    ) -> Result<Self> {
         config.validate()?;
 
         if clients.len() != config.nodes.len() {
@@ -953,7 +925,7 @@ impl<C: VectorNodeClient + 'static> DistributedVectorIndex<C> {
             ))));
         }
 
-        let nodes: Vec<Arc<NodeConnection<C>>> = clients
+        let nodes: Vec<Arc<NodeConnection>> = clients
             .into_iter()
             .zip(config.nodes.iter())
             .map(|(client, node_config)| {
@@ -974,7 +946,10 @@ impl<C: VectorNodeClient + 'static> DistributedVectorIndex<C> {
 
     /// Get the number of available nodes.
     pub fn available_node_count(&self) -> usize {
-        self.nodes.iter().filter(|n| n.is_available()).count()
+        self.nodes
+            .iter()
+            .filter(|n| n.is_available())
+            .count()
     }
 
     /// Get the routing strategy.
@@ -1003,15 +978,23 @@ impl<C: VectorNodeClient + 'static> DistributedVectorIndex<C> {
     }
 
     /// Get a reference to a specific node connection.
-    pub fn get_node(&self, index: usize) -> Option<&Arc<NodeConnection<C>>> {
+    pub fn get_node(&self, index: usize) -> Option<&Arc<NodeConnection>> {
         self.nodes.get(index)
     }
 
     /// Get statistics about the distributed index.
     pub fn stats(&self) -> DistributedIndexStats {
-        let node_stats: Vec<NodeConnectionStats> = self.nodes.iter().map(|n| n.stats()).collect();
+        let node_stats: Vec<NodeConnectionStats> = self
+            .nodes
+            .iter()
+            .map(|n: &std::sync::Arc<NodeConnection>| n.stats())
+            .collect();
 
-        let available_nodes = self.nodes.iter().filter(|n| n.is_available()).count();
+        let available_nodes = self
+            .nodes
+            .iter()
+            .filter(|n| n.is_available())
+            .count();
 
         // Query all available nodes for their vector counts
         let total_vectors = self.len();
@@ -1027,7 +1010,8 @@ impl<C: VectorNodeClient + 'static> DistributedVectorIndex<C> {
     /// Reset all circuit breakers.
     pub fn reset_all_circuits(&self) {
         for node in &self.nodes {
-            node.reset_circuit();
+            let n: &std::sync::Arc<NodeConnection> = node;
+            n.reset_circuit();
         }
     }
 
@@ -1039,7 +1023,10 @@ impl<C: VectorNodeClient + 'static> DistributedVectorIndex<C> {
             .nodes
             .par_iter()
             .filter(|n| n.is_available())
-            .filter_map(|node| node.execute(|client| client.len()).ok())
+            .filter_map(|node| {
+                node.execute(|client| client.len())
+                    .ok()
+            })
             .collect();
 
         if sizes.is_empty() || sizes.len() < 2 {
@@ -1064,8 +1051,10 @@ impl<C: VectorNodeClient + 'static> DistributedVectorIndex<C> {
             .par_iter()
             .filter(|n| n.is_available())
             .filter_map(|node| {
-                node.execute(|client| client.len().map(|len| (client.node_id(), len)))
-                    .ok()
+                node.execute(|client| {
+                    client.len().map(|len| (client.node_id(), len))
+                })
+                .ok()
             })
             .collect();
 
@@ -1108,7 +1097,7 @@ impl<C: VectorNodeClient + 'static> DistributedVectorIndex<C> {
     }
 }
 
-impl<C: VectorNodeClient + 'static> VectorIndex for DistributedVectorIndex<C> {
+impl VectorIndex for DistributedVectorIndex {
     fn add(&self, id: NodeId, vector: &[f32]) -> Result<()> {
         validate_vector(vector)?;
 
@@ -1147,7 +1136,11 @@ impl<C: VectorNodeClient + 'static> VectorIndex for DistributedVectorIndex<C> {
         }
 
         // Check available nodes
-        let available_nodes: Vec<_> = self.nodes.iter().filter(|n| n.is_available()).collect();
+        let available_nodes: Vec<_> = self
+            .nodes
+            .iter()
+            .filter(|n| n.is_available())
+            .collect();
 
         if available_nodes.len() < self.config.min_nodes_for_search {
             return Err(Error::Vector(VectorError::IndexError(format!(
@@ -1160,7 +1153,9 @@ impl<C: VectorNodeClient + 'static> VectorIndex for DistributedVectorIndex<C> {
         // Search all available nodes in parallel
         let results: Vec<Result<Vec<(NodeId, f32)>>> = available_nodes
             .par_iter()
-            .map(|node| node.execute(|client| client.search(query, k)))
+            .map(|node: &&std::sync::Arc<NodeConnection>| {
+                node.execute(|client| client.search(query, k))
+            })
             .collect();
 
         // Collect successful results
@@ -1226,7 +1221,10 @@ impl<C: VectorNodeClient + 'static> VectorIndex for DistributedVectorIndex<C> {
         self.nodes
             .par_iter()
             .filter(|n| n.is_available())
-            .filter_map(|node| node.execute(|client| client.len()).ok())
+            .filter_map(|node| {
+                node.execute(|client| client.len())
+                    .ok()
+            })
             .sum()
     }
 
@@ -1241,8 +1239,7 @@ impl<C: VectorNodeClient + 'static> VectorIndex for DistributedVectorIndex<C> {
     fn memory_usage(&self) -> usize {
         // Memory usage is distributed across nodes
         // Return local metadata overhead only
-        std::mem::size_of::<Self>()
-            + self.nodes.len() * std::mem::size_of::<Arc<NodeConnection<C>>>()
+        std::mem::size_of::<Self>() + self.nodes.len() * std::mem::size_of::<Arc<NodeConnection>>()
     }
 
     fn quantization(&self) -> Quantization {
@@ -1256,7 +1253,7 @@ impl<C: VectorNodeClient + 'static> VectorIndex for DistributedVectorIndex<C> {
 
 /// Mock client for testing distributed vector operations.
 ///
-/// `MockVectorNodeClient` implements the [`VectorNodeClient`] trait in-memory
+/// `MockVectorNodeClient` implements an in-memory client
 /// without actually performing any network I/O. It tracks vectors in a local hash map
 /// and implements simple distance calculations, making it ideal for unit testing
 /// [`DistributedVectorIndex`] logic.
@@ -1266,7 +1263,7 @@ impl<C: VectorNodeClient + 'static> VectorIndex for DistributedVectorIndex<C> {
 /// ```rust
 /// # #[cfg(feature = "semantic-search")]
 /// # fn main() -> aletheiadb::core::error::Result<()> {
-/// use aletheiadb::index::vector::distributed::{MockVectorNodeClient, VectorNodeClient};
+/// use aletheiadb::index::vector::distributed::MockVectorNodeClient;
 /// use aletheiadb::index::vector::DistanceMetric;
 /// use aletheiadb::core::id::NodeId;
 ///
@@ -1353,18 +1350,18 @@ impl MockVectorNodeClient {
             ),
         }
     }
-}
-
-impl VectorNodeClient for MockVectorNodeClient {
-    fn node_id(&self) -> u16 {
+    /// Get node ID.
+    pub fn node_id(&self) -> u16 {
         self.node_id
     }
 
-    fn is_healthy(&self) -> bool {
+    /// Check if healthy.
+    pub fn is_healthy(&self) -> bool {
         self.healthy.load(Ordering::SeqCst)
     }
 
-    fn add(&self, id: NodeId, vector: &[f32]) -> Result<()> {
+    /// Add vector
+    pub fn add(&self, id: NodeId, vector: &[f32]) -> Result<()> {
         self.check_fail()?;
 
         if !self.is_healthy() {
@@ -1385,7 +1382,8 @@ impl VectorNodeClient for MockVectorNodeClient {
         Ok(())
     }
 
-    fn remove(&self, id: NodeId) -> Result<()> {
+    /// Remove vector
+    pub fn remove(&self, id: NodeId) -> Result<()> {
         self.check_fail()?;
 
         if !self.is_healthy() {
@@ -1399,7 +1397,8 @@ impl VectorNodeClient for MockVectorNodeClient {
         Ok(())
     }
 
-    fn search(&self, query: &[f32], k: usize) -> Result<Vec<(NodeId, f32)>> {
+    /// Search vectors
+    pub fn search(&self, query: &[f32], k: usize) -> Result<Vec<(NodeId, f32)>> {
         self.check_fail()?;
 
         if !self.is_healthy() {
@@ -1421,7 +1420,8 @@ impl VectorNodeClient for MockVectorNodeClient {
         Ok(results)
     }
 
-    fn len(&self) -> Result<usize> {
+    /// Get count.
+    pub fn len(&self) -> Result<usize> {
         self.check_fail()?;
 
         if !self.is_healthy() {
@@ -1434,7 +1434,12 @@ impl VectorNodeClient for MockVectorNodeClient {
         Ok(self.vectors.read().unwrap().len())
     }
 
-    fn health_check(&self) -> Result<()> {
+    /// Check if empty.
+    pub fn is_empty(&self) -> Result<bool> {
+        self.len().map(|l| l == 0)
+    }
+    /// Check health.
+    pub fn health_check(&self) -> Result<()> {
         self.check_fail()?;
 
         if self.is_healthy() {
@@ -1915,7 +1920,7 @@ mod tests {
 
     #[test]
     fn test_merge_results_empty() {
-        let results = DistributedVectorIndex::<MockVectorNodeClient>::merge_results(vec![], 10);
+        let results = DistributedVectorIndex::merge_results(vec![], 10);
         assert!(results.is_empty());
     }
 
@@ -1927,7 +1932,7 @@ mod tests {
             (NodeId::new(3).unwrap(), 0.7),
         ]];
 
-        let merged = DistributedVectorIndex::<MockVectorNodeClient>::merge_results(node_results, 2);
+        let merged = DistributedVectorIndex::merge_results(node_results, 2);
         assert_eq!(merged.len(), 2);
         assert_eq!(merged[0].0, NodeId::new(1).unwrap());
         assert_eq!(merged[1].0, NodeId::new(2).unwrap());
@@ -1946,7 +1951,7 @@ mod tests {
             ],
         ];
 
-        let merged = DistributedVectorIndex::<MockVectorNodeClient>::merge_results(node_results, 3);
+        let merged = DistributedVectorIndex::merge_results(node_results, 3);
         assert_eq!(merged.len(), 3);
         // Should be sorted: 0.9, 0.85, 0.7
         assert_eq!(merged[0].0, NodeId::new(1).unwrap());
