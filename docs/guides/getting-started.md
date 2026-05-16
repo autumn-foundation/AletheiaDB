@@ -13,7 +13,7 @@ By the end you'll have a working mental model of how AletheiaDB works day-to-day
 ```rust
 use aletheiadb::prelude::*;
 
-fn main() -> Result<()> {
+fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let db = AletheiaDB::new()?;
     // db is ready to use
     Ok(())

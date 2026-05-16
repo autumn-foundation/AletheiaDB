@@ -331,7 +331,7 @@ use aletheiadb::storage::index_persistence::PersistenceConfig;
 use aletheiadb::storage::wal::DurabilityMode;
 use std::time::Duration;
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let db_path = std::env::current_dir()?.join("my-app-data");
 
     let config = AletheiaDBConfig::builder()

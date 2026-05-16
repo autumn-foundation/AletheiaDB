@@ -47,7 +47,7 @@ use aletheiadb::embeddings::{embed_data_to_dense_iter, embed_query, Embedder};
 use aletheiadb::{AletheiaDB, PropertyMapBuilder};
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let api_key = std::env::var("OPENAI_API_KEY")?;
     let embedder =
         Embedder::from_pretrained_cloud("OpenAI", "text-embedding-3-small", Some(api_key))?;

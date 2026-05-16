@@ -31,7 +31,7 @@ aletheiadb = "0.1"
 use aletheiadb::{AletheiaDB, PropertyMapBuilder};
 use aletheiadb::index::vector::{HnswConfig, DistanceMetric};
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let db = AletheiaDB::new();
 
     // Enable vector indexing on "embedding" property
@@ -108,7 +108,7 @@ let similar_docs = db.find_similar_with_label(doc_id, "Document", 10)?;
 use aletheiadb::{AletheiaDB, PropertyMapBuilder};
 use aletheiadb::index::vector::{HnswConfig, DistanceMetric};
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     // 1. Create database and enable vector index
     let db = AletheiaDB::new();
 

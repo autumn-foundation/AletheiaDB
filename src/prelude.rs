@@ -8,6 +8,11 @@
 //! ```rust
 //! use aletheiadb::prelude::*;
 //! ```
+//!
+//! **Note on `Result`:** The prelude exports `aletheiadb::Result<T>`, which shadows
+//! the standard library's `std::result::Result<T, E>`. If your application entry point
+//! (`fn main()`) returns a generic error, use `std::result::Result<(), Box<dyn std::error::Error>>`
+//! instead of just `Result<(), Box<dyn std::error::Error>>` to avoid compilation errors.
 
 pub use crate::AletheiaDB;
 pub use crate::api::{ReadOps, ReadTransaction, WriteOps, WriteTransaction};

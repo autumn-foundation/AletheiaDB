@@ -11,7 +11,9 @@ pub mod chimera;
 pub mod dreamer;
 pub mod hindsight;
 pub mod luna;
+#[cfg(feature = "nova")]
 pub mod metaphor;
+#[cfg(feature = "nova")]
 pub mod muse;
 pub mod omen;
 pub mod oracle;

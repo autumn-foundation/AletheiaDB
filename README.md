@@ -28,7 +28,7 @@ Requires Rust 1.92+.
 ```rust
 use aletheiadb::prelude::*;
 
-fn main() -> Result<()> {
+fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let db = AletheiaDB::new()?;
 
     // Create nodes and a relationship
@@ -63,7 +63,7 @@ query with a consistent view of the data:
 use aletheiadb::prelude::*;
 use aletheiadb::HnswConfig;
 
-fn main() -> Result<()> {
+fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let db = AletheiaDB::new()?;
     db.vector_index("embedding").hnsw(HnswConfig { dimensions: 2, ..Default::default() }).enable()?;
 
