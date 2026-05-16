@@ -94,8 +94,8 @@ fn handle_node(args: Vec<String>) -> Result<(), String> {
                 return Err("usage: aletheia node create <label> [--properties JSON]".to_string());
             }
             let label = &args[1];
-            let properties = parse_optional_properties(&args[2..])?;
             let db = open_db()?;
+            let properties = parse_optional_properties(&args[2..])?;
             let node_id = db
                 .create_node(label, properties)
                 .map_err(|e| format!("create_node failed: {e}"))?;
@@ -132,8 +132,8 @@ fn handle_edge(args: Vec<String>) -> Result<(), String> {
             let source = parse_node_id(&args[1])?;
             let target = parse_node_id(&args[2])?;
             let label = &args[3];
-            let properties = parse_optional_properties(&args[4..])?;
             let db = open_db()?;
+            let properties = parse_optional_properties(&args[4..])?;
             let edge_id = db
                 .create_edge(source, target, label, properties)
                 .map_err(|e| format!("create_edge failed: {e}"))?;

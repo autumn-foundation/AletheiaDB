@@ -717,14 +717,14 @@ pub(crate) fn load_indexes_startup(
 
                 // Initialize ID generators BEFORE inserting entities to prevent collisions
                 // IdGenerator uses AtomicU64, so reset_to is lock-free and thread-safe.
-                if max_node_id > 0 {
+                if total_nodes > 0 {
                     node_id_gen.reset_to(max_node_id + 1);
                 }
-                if max_edge_id > 0 {
+                if total_edges > 0 {
                     edge_id_gen.reset_to(max_edge_id + 1);
                 }
                 // Initialize version ID generator from max persisted version_id
-                if max_version_id > 0 {
+                if total_nodes > 0 || total_edges > 0 {
                     version_id_gen.reset_to(max_version_id + 1);
                 }
 
