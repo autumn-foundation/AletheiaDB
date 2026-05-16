@@ -210,7 +210,7 @@ impl ServerConfig {
         self.data_dir.as_deref()
     }
 
-    /// Materialize the [`AletheiaDBConfig`] this server config implies.
+    /// Materialize the [`AletheiaDBConfig`](crate::AletheiaDBConfig) this server config implies.
     ///
     /// Returns `None` when no [`data_dir`](Self::data_dir) is set — that
     /// signals in-memory mode, and the caller should construct the DB via

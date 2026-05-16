@@ -71,7 +71,7 @@ impl SimulatedClock {
     /// Advance the clock by `delta_micros` (must be ≥ 0).
     ///
     /// # Panics
-    /// Panics if `delta_micros` is negative (use [`jump_to`] for backwards moves).
+    /// Panics if `delta_micros` is negative (use [`jump_to`](Self::jump_to) for backwards moves).
     pub fn advance_by(&mut self, delta_micros: i64) {
         assert!(
             delta_micros >= 0,
