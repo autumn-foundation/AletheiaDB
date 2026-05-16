@@ -6,6 +6,7 @@
 //!
 //! Experimental — gated by `features = ["semantic-diagnostics"]` (or the `nova` umbrella).
 
+pub mod dejavu;
 pub mod dissonance;
 pub mod entanglement;
 pub mod fossil;
