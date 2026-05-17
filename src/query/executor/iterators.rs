@@ -3469,3 +3469,144 @@ mod tests {
         assert!(iter.next().is_none());
     }
 }
+
+#[cfg(test)]
+mod sentry_tests {
+    use crate::AletheiaDB;
+    use crate::Direction;
+    use crate::query::executor::iterators::{ResultIterator, TraversalIterator};
+    use crate::query::executor::results::{EntityResult, QueryRow};
+
+    // Need a dummy iterator for input
+    struct DummyIterator {
+        nodes: std::vec::IntoIter<crate::core::NodeId>,
+    }
+
+    impl ResultIterator for DummyIterator {
+        fn next(&mut self) -> Option<crate::Result<QueryRow>> {
+            self.nodes.next().map(|id| {
+                let label = crate::core::interning::GLOBAL_INTERNER
+                    .intern("Test")
+                    .unwrap();
+                Ok(QueryRow {
+                    entity: EntityResult::Node(crate::core::Node {
+                        id,
+                        label: label.clone(),
+                        properties: crate::core::property::PropertyMap::default(),
+                        current_version: crate::core::VersionId::new_unchecked(0),
+                        metadata: crate::core::version::VersionMetadata {
+                            created_by_tx: crate::core::id::TxId::new(0),
+                            commit_timestamp: None,
+                        },
+                    }),
+                    path: None,
+                    score: None,
+                    timestamp: None,
+                })
+            })
+        }
+    }
+
+    #[test]
+    fn test_traversal_iterator_cycle_suppression() {
+        let db = AletheiaDB::new().unwrap();
+        let a_id = db
+            .create_node("Node", crate::PropertyMapBuilder::new().build())
+            .unwrap();
+        let b_id = db
+            .create_node("Node", crate::PropertyMapBuilder::new().build())
+            .unwrap();
+
+        db.create_edge(
+            a_id,
+            b_id,
+            "KNOWS",
+            crate::PropertyMapBuilder::new().build(),
+        )
+        .unwrap();
+        db.create_edge(
+            b_id,
+            a_id,
+            "KNOWS",
+            crate::PropertyMapBuilder::new().build(),
+        )
+        .unwrap();
+
+        let input = Box::new(DummyIterator {
+            nodes: vec![a_id].into_iter(),
+        });
+
+        let mut iter = TraversalIterator::new(
+            input,
+            Direction::Outgoing,
+            None,
+            2,
+            db.current.clone(),
+            db.historical.clone(),
+            None,
+        );
+
+        let mut results = Vec::new();
+        while let Some(Ok(row)) = iter.next() {
+            results.push(row.entity.node_id().unwrap());
+        }
+
+        // It's depth 2.
+        // from a_id (0) -> b_id (1) -> a_id is already visited.
+        // We only yield at target depth (2). Since depth 2 is empty, it returns 0 elements.
+        assert_eq!(results.len(), 0);
+    }
+
+    #[test]
+    fn test_traversal_iterator_input_isolation() {
+        let db = AletheiaDB::new().unwrap();
+        let a_id = db
+            .create_node("Node", crate::PropertyMapBuilder::new().build())
+            .unwrap();
+        let b_id = db
+            .create_node("Node", crate::PropertyMapBuilder::new().build())
+            .unwrap();
+        let c_id = db
+            .create_node("Node", crate::PropertyMapBuilder::new().build())
+            .unwrap();
+
+        db.create_edge(
+            a_id,
+            c_id,
+            "KNOWS",
+            crate::PropertyMapBuilder::new().build(),
+        )
+        .unwrap();
+        db.create_edge(
+            b_id,
+            c_id,
+            "KNOWS",
+            crate::PropertyMapBuilder::new().build(),
+        )
+        .unwrap();
+
+        // Input provides both A and B
+        let input = Box::new(DummyIterator {
+            nodes: vec![a_id, b_id].into_iter(),
+        });
+
+        let mut iter = TraversalIterator::new(
+            input,
+            Direction::Outgoing,
+            None,
+            1,
+            db.current.clone(),
+            db.historical.clone(),
+            None,
+        );
+
+        let mut results = Vec::new();
+        while let Some(Ok(row)) = iter.next() {
+            results.push(row.entity.node_id().unwrap());
+        }
+
+        // It should yield C twice (once for path from A, once for path from B).
+        // Since visited is cleared per input node.
+        assert_eq!(results.len(), 2);
+    }
+}

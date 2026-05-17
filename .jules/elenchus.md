@@ -346,3 +346,10 @@
 **Finding:** The `LimitPushdown` tests originally missed several behavioral edge cases and logic checks, particularly regarding the propagation limits in BinaryOp combinations (`||`), updating limit values correctly against child bounds, and setting vector rank limits.
 **Evidence:** `cargo mutants` caught mutants in `LimitPushdown::push_down` specifically targeting the changed boolean condition logic and bounds assignment.
 **Recommendation:** Added `sentry_tests` to `LimitPushdown` that explicitly trigger tests enforcing the boolean change propagation, verifying that updated properties reflect correct nested limits, and vector bounds assignment. Tests now prevent `||` to `&&` mutations and correct top-k modifications.
+
+**[TraversalIterator Missing Tests Addressed]**
+**Module:** `src/query/executor/iterators.rs`
+**Severity:** 🟢 Acquitted
+**Finding:** As noted previously, `TraversalIterator` lacked direct unit tests for cycle suppression and input isolation.
+**Evidence:** The implementation had complex BFS logic with node isomorphism (`self.visited.insert(target)`) that was only tested implicitly through integration tests.
+**Recommendation:** Added `sentry_tests` in `src/query/executor/iterators.rs` with `test_traversal_iterator_cycle_suppression` and `test_traversal_iterator_input_isolation` to explicitly verify the internal logic of the iterator.
