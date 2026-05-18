@@ -37,3 +37,6 @@
 **[Fix `execute_traversal` target shards bug]**
 **Learning:** `plan.steps` from `route_traversal` returns empty list, and we need `involved_shards`
 **Action:** Replace `steps` with `involved_shards` and update the test.
+## Panic Risks in Vector Unsafe blocks
+**Learning:** `src/core/vector/simd.rs` contains multiple unsafe operations that rely on length parity check (`assert_eq!(a.len(), b.len())`). While these were verified via `catch_unwind` tests, many of the specific panic-handling cases in the `test_simd_mismatched_lengths_safety` and `havoc_tests.rs` did not trigger or properly document full coverage of all methods.
+**Action:** Wrote exhaustive `catch_unwind` tests specifically verifying every AVX2 and SSE2 `unsafe fn` that processes two vectors or slice mutations correctly panics when length bounds do not match, before causing out-of-bounds UB.
