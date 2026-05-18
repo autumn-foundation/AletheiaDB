@@ -243,3 +243,32 @@ mod tests {
         assert!(result.unwrap().temporal_context.is_some());
     }
 }
+
+#[cfg(test)]
+mod elenchus_tests {
+    use super::*;
+    use crate::core::NodeId;
+    use crate::query::ir::Predicate;
+    use crate::query::plan::{BinaryOp, ScanOp, UnaryOp};
+
+    #[test]
+    fn test_filter_scan_fusion_right_changed() {
+        let rule = FilterScanFusion;
+
+        let left = LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(1).unwrap()]));
+        let right = LogicalOp::unary(
+            UnaryOp::Filter(Predicate::eq("name", "Alice")),
+            LogicalOp::Scan(ScanOp::NodeScan {
+                label: Some("Person".to_string()),
+                estimated_rows: Some(10),
+            }),
+        );
+
+        let op = LogicalOp::binary(BinaryOp::Union, left, right);
+        let (_new_op, changed) = rule.fuse(&op).unwrap();
+        assert!(
+            changed,
+            "Expected changed to be true due to right side fusion in Union"
+        );
+    }
+}

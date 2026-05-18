@@ -346,3 +346,10 @@
 **Finding:** The `LimitPushdown` tests originally missed several behavioral edge cases and logic checks, particularly regarding the propagation limits in BinaryOp combinations (`||`), updating limit values correctly against child bounds, and setting vector rank limits.
 **Evidence:** `cargo mutants` caught mutants in `LimitPushdown::push_down` specifically targeting the changed boolean condition logic and bounds assignment.
 **Recommendation:** Added `sentry_tests` to `LimitPushdown` that explicitly trigger tests enforcing the boolean change propagation, verifying that updated properties reflect correct nested limits, and vector bounds assignment. Tests now prevent `||` to `&&` mutations and correct top-k modifications.
+
+**[LogicalPlan Mutants - Boolean Logic Escapes]**
+**Module:** `src/query/planner/rules/limit_pushdown.rs`, `operation_reordering.rs`, `predicate_pushdown.rs`, `filter_scan_fusion.rs`
+**Severity:** 🟡 Suspect
+**Finding:** `cargo mutants` revealed missing test coverage for the boolean propagation logic `changed || other_condition` and `left_changed || right_changed` within the query optimizer's tree-walking `push_down`, `reorder`, and `fuse` methods. Specifically, changing `||` to `&&` in these statements survived, meaning tests weren't verifying scenarios where one child changed while the other didn't, or where an inner node changed but the outer node properties did not.
+**Evidence:** `replace || with && in LimitPushdown::push_down`, `replace || with && in OperationReordering::reorder`, `replace || with && in PredicatePushdown::push_down`, and `replace || with && in FilterScanFusion::fuse` all generated surviving mutants.
+**Recommendation:** Added exhaustive `elenchus_tests` modules to each file, specifically crafting scenarios that set exactly one side of the boolean OR conditions to true (e.g., `left_changed=false, right_changed=true`, or `input_changed=true, new_top_k==top_k`). These explicitly lock the required union boolean propagation behavior.

@@ -704,3 +704,37 @@ mod sentry_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod elenchus_tests {
+    use super::*;
+    use crate::core::NodeId;
+    use crate::query::ir::Predicate;
+    use crate::query::plan::{BinaryOp, ScanOp, UnaryOp};
+
+    #[test]
+    fn test_predicate_pushdown_right_changed() {
+        // We want to test `left_changed || right_changed` for BinaryOp.
+        // Let's make right_changed = true, left_changed = false.
+
+        let rule = PredicatePushdown;
+        let left = LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(1).unwrap()]));
+        let right = LogicalOp::unary(
+            UnaryOp::Filter(Predicate::eq("rare", "value")),
+            LogicalOp::unary(
+                UnaryOp::Sort {
+                    key: crate::query::plan::SortKey::Property("age".into()),
+                    descending: true,
+                },
+                LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(2).unwrap()])),
+            ),
+        );
+
+        let op = LogicalOp::binary(BinaryOp::Union, left, right);
+        let (_new_op, changed) = rule.push_down(&op).unwrap();
+        assert!(
+            changed,
+            "Expected changed to be true due to right side reordering in Union"
+        );
+    }
+}

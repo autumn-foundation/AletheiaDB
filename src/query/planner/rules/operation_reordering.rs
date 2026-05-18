@@ -1186,3 +1186,135 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod elenchus_tests {
+    use super::*;
+
+    use crate::query::ir::Predicate;
+    use crate::query::plan::{BinaryOp, ScanOp, UnaryOp};
+
+    #[test]
+    fn test_operation_reordering_changed_true_filters_equal_true() {
+        // We want to hit the mutant: replace || with && in OperationReordering::reorder
+        // In the binary join case: changed = left_changed || right_changed || swapped;
+        // Let's test left_changed = true, right_changed = false, swapped = false.
+
+        let rule = OperationReordering;
+        let stats = Statistics::default();
+
+        // Left: Filter(A) -> Filter(B) -> Scan (will be reordered to Filter(B) -> Filter(A) -> Scan)
+        // Right: Scan (no change)
+        // Left and Right sizes: Left is 1000 * 0.1 * 0.1 = 10, Right is 1000.
+        // wait, we don't want swapped=true. We want right_card >= left_card.
+        // 1000 >= 10, so swapped=false.
+
+        let left = LogicalOp::unary(
+            UnaryOp::Filter(Predicate::eq("rare", "value")),
+            LogicalOp::unary(
+                UnaryOp::Filter(Predicate::eq("common", "value")),
+                LogicalOp::Scan(ScanOp::NodeScan {
+                    label: None,
+                    estimated_rows: Some(10),
+                }),
+            ),
+        );
+        let right = LogicalOp::Scan(ScanOp::NodeScan {
+            label: None,
+            estimated_rows: Some(100),
+        });
+
+        // Setup stats to make sure "rare" is more selective than "common".
+        // rare: 0.1, common: 0.2
+        stats.update_property_stats("rare", 10);
+        stats.update_property_stats("common", 5);
+
+        let op = LogicalOp::binary(
+            BinaryOp::Join {
+                left_key: "id".to_string(),
+                right_key: "ref_id".to_string(),
+            },
+            left,
+            right,
+        );
+
+        let (_new_op, changed) = rule.reorder(&op, &stats).unwrap();
+        assert!(
+            changed,
+            "Expected changed to be true due to left side reordering"
+        );
+    }
+
+    #[test]
+    fn test_operation_reordering_right_changed() {
+        let rule = OperationReordering;
+        let stats = Statistics::default();
+
+        let left = LogicalOp::Scan(ScanOp::NodeScan {
+            label: None,
+            estimated_rows: Some(10),
+        });
+        let right = LogicalOp::unary(
+            UnaryOp::Filter(Predicate::eq("rare", "value")),
+            LogicalOp::unary(
+                UnaryOp::Filter(Predicate::eq("common", "value")),
+                LogicalOp::Scan(ScanOp::NodeScan {
+                    label: None,
+                    estimated_rows: Some(100),
+                }),
+            ),
+        );
+
+        stats.update_property_stats("rare", 10);
+        stats.update_property_stats("common", 5);
+
+        let op = LogicalOp::binary(
+            BinaryOp::Join {
+                left_key: "id".to_string(),
+                right_key: "ref_id".to_string(),
+            },
+            left,
+            right,
+        );
+
+        let (_new_op, changed) = rule.reorder(&op, &stats).unwrap();
+        assert!(
+            changed,
+            "Expected changed to be true due to right side reordering"
+        );
+    }
+
+    #[test]
+    fn test_binary_op_non_join_reordering() {
+        // Testing LogicalOp::Binary (non-join)
+        // returns changed = left_changed || right_changed
+
+        let rule = OperationReordering;
+        let stats = Statistics::default();
+
+        let left = LogicalOp::Scan(ScanOp::NodeScan {
+            label: None,
+            estimated_rows: Some(10),
+        });
+        let right = LogicalOp::unary(
+            UnaryOp::Filter(Predicate::eq("rare", "value")),
+            LogicalOp::unary(
+                UnaryOp::Filter(Predicate::eq("common", "value")),
+                LogicalOp::Scan(ScanOp::NodeScan {
+                    label: None,
+                    estimated_rows: Some(100),
+                }),
+            ),
+        );
+
+        stats.update_property_stats("rare", 10);
+        stats.update_property_stats("common", 5);
+
+        let op = LogicalOp::binary(BinaryOp::Union, left, right);
+        let (_new_op, changed) = rule.reorder(&op, &stats).unwrap();
+        assert!(
+            changed,
+            "Expected changed to be true due to right side reordering in Union"
+        );
+    }
+}

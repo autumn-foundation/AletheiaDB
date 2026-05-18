@@ -543,3 +543,87 @@ mod sentry_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod elenchus_tests {
+    use super::*;
+    use crate::core::NodeId;
+    use crate::query::plan::{BinaryOp, ScanOp, UnaryOp};
+
+    #[test]
+    fn test_limit_changed_true_effective_eq() {
+        let rule = LimitPushdown;
+
+        // Logical plan: Limit(10, VectorRank(None))
+        let op = LogicalOp::unary(
+            UnaryOp::Limit(10),
+            LogicalOp::unary(
+                UnaryOp::VectorRank {
+                    embedding: vec![0.1f32].into(),
+                    top_k: None,
+                    property_key: None,
+                },
+                LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(1).unwrap()])),
+            ),
+        );
+
+        let (_new_op, changed) = rule.push_down(&op, None).unwrap();
+        assert!(
+            changed,
+            "Expected changed to be true because inner VectorRank changed top_k from None to Some(10)"
+        );
+    }
+
+    #[test]
+    fn test_vector_rank_changed_true_top_k_eq() {
+        let rule = LimitPushdown;
+
+        // Logical plan: VectorRank(Some(10), VectorRank(None))
+        // The outer VectorRank has top_k = Some(10). Inner has None.
+        // wait, we can just do VectorRank(Some(10), Limit(10, Scan(..)) wait no, limit gets pushed down.
+        // Let's do VectorRank(Some(10), Binary( Union, Limit(10, Limit(20, Scan)), Scan ))
+        // Outer VectorRank top_k = Some(10). Inner changes.
+        let op = LogicalOp::unary(
+            UnaryOp::VectorRank {
+                embedding: vec![0.1f32].into(),
+                top_k: Some(10),
+                property_key: None,
+            },
+            LogicalOp::unary(
+                UnaryOp::Limit(10),
+                LogicalOp::unary(
+                    UnaryOp::Limit(20),
+                    LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(1).unwrap()])),
+                ),
+            ),
+        );
+        let (_new_op, changed) = rule.push_down(&op, None).unwrap();
+        assert!(
+            changed,
+            "Expected changed to be true because inner Limit was optimized"
+        );
+    }
+
+    #[test]
+    fn test_binary_op_right_changed() {
+        let rule = LimitPushdown;
+
+        // BinaryOp( Union, Scan, Limit(10, Limit(20, Scan)) )
+        // left_changed = false, right_changed = true.
+        let left = LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(1).unwrap()]));
+        let right = LogicalOp::unary(
+            UnaryOp::Limit(10),
+            LogicalOp::unary(
+                UnaryOp::Limit(20),
+                LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(2).unwrap()])),
+            ),
+        );
+
+        let op = LogicalOp::binary(BinaryOp::Union, left, right);
+        let (_new_op, changed) = rule.push_down(&op, None).unwrap();
+        assert!(
+            changed,
+            "Expected changed to be true because right child changed"
+        );
+    }
+}
