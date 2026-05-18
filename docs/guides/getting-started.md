@@ -122,6 +122,8 @@ let (carol_id, dave_id) = db.write(|tx| -> Result<(NodeId, NodeId)> {
     tx.create_edge(carol, dave, "WORKS_WITH", properties! {})?;
     Ok((carol, dave))
 })?;
+
+println!("Created Carol: {:?} and Dave: {:?}", carol_id, dave_id);
 ```
 
 ---
