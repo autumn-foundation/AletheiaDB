@@ -10,3 +10,6 @@
 ## 2024-05-14 - [Adding Examples to HLC and documenting src/main.rs]
 **Confusion:** The `src/main.rs` file was missing module-level documentation (`//!`), which triggers the `missing_docs` lint, but was hidden by the lint configurations inside `src/lib.rs` affecting `src/main.rs`. Also `HybridTimestamp::send` lacked an example showing the behavior of its logical counter.
 **Clarification:** Added `//! The AletheiaDB binary.` to `src/main.rs` and added an executable `## Examples` block to `HybridTimestamp::send` in `src/core/hlc.rs`.
+## 2024-06-25 - [Intra-doc links failing to resolve in `ServerConfig` and `SimulatedClock`]
+**Confusion:** Intra-doc links to `[`AletheiaDBConfig`]` in `src/http/config.rs` and `[`jump_to`]` in `src/simulation/clock.rs` caused `rustdoc::broken_intra_doc_links` warnings because they were not explicitly scoped. The compiler couldn't locate `AletheiaDBConfig` from the local scope, and `jump_to` wasn't correctly identified as an associated method of `SimulatedClock`.
+**Clarification:** I updated the intra-doc links to use explicit paths. `[`AletheiaDBConfig`]` was changed to `[`crate::config::AletheiaDBConfig`]` and `[`jump_to`]` was changed to `[`Self::jump_to`]`. This explicitly scopes the links and resolves the warnings.
