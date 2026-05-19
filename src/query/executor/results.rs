@@ -290,7 +290,11 @@ impl QueryResults {
     /// **Why?** When you only need a handful of answers from an unbounded traversal
     /// or massive dataset, this stops execution early.
     pub fn take_n(mut self, n: usize) -> Result<Vec<QueryRow>> {
-        let mut results = Vec::with_capacity(n);
+        // ⚡ Bolt Optimization: Bound the pre-allocated capacity by the iterator's size hint
+        // to prevent large allocations when taking many items from a small stream.
+        let (_, upper) = self.iterator.size_hint();
+        let capacity = n.min(upper.unwrap_or(n));
+        let mut results = Vec::with_capacity(capacity);
         for _ in 0..n {
             match self.iterator.next() {
                 Some(Ok(row)) => results.push(row),
