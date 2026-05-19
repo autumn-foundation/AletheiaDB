@@ -59,7 +59,7 @@ See `examples/echo_complaint.rs`.
 **Recommendation:** Add a comment directly in the code snippets in the README:
 ```rust
 // Requires "nova" feature in Cargo.toml
-use aletheiadb::experimental::temporal_narrative::NarrativeGenerator;
+use aletheiadb::experimental::temporal::temporal_narrative::NarrativeGenerator;
 ```
 This catches the eye during copy-paste more effectively than a blockquote above the block.
 
