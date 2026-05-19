@@ -1185,4 +1185,59 @@ mod tests {
             Predicate::Or(vec![Predicate::eq("a", 1), Predicate::eq("b", 2)])
         );
     }
+
+    #[test]
+    fn test_binary_op_recursion_logic() {
+        use crate::query::plan::BinaryOp;
+        let rule = OperationReordering;
+        let stats = Statistics::new();
+
+        let left_scan = LogicalOp::Scan(ScanOp::NodeScan {
+            label: Some("Large".to_string()),
+            estimated_rows: Some(10000),
+        });
+
+        let right_scan = LogicalOp::Scan(ScanOp::NodeScan {
+            label: Some("Small".to_string()),
+            estimated_rows: Some(100),
+        });
+
+        let join_op = LogicalOp::binary(
+            BinaryOp::Join {
+                left_key: "author".to_string(),
+                right_key: "id".to_string(),
+            },
+            left_scan.clone(),
+            right_scan.clone(),
+        );
+
+        let other_scan = LogicalOp::Scan(ScanOp::NodeScan {
+            label: Some("Other".to_string()),
+            estimated_rows: None,
+        });
+
+        let plan = LogicalPlan::new(LogicalOp::binary(
+            BinaryOp::Union,
+            join_op,
+            other_scan.clone(),
+        ));
+        let result = rule.apply(&plan, &stats).unwrap();
+
+        let expected_join = LogicalOp::binary(
+            BinaryOp::Join {
+                left_key: "id".to_string(), // Swapped keys
+                right_key: "author".to_string(),
+            },
+            right_scan.clone(),
+            left_scan.clone(),
+        );
+
+        let expected_plan = LogicalPlan::new(LogicalOp::binary(
+            BinaryOp::Union,
+            expected_join,
+            other_scan,
+        ));
+
+        assert_eq!(result, Some(expected_plan));
+    }
 }

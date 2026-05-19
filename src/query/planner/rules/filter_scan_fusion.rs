@@ -242,4 +242,42 @@ mod tests {
         assert!(result.is_some());
         assert!(result.unwrap().temporal_context.is_some());
     }
+
+    #[test]
+    fn test_binary_op_recursion_logic() {
+        use crate::query::plan::BinaryOp;
+        let rule = FilterScanFusion;
+        let stats = test_stats();
+
+        let left_op = LogicalOp::unary(
+            UnaryOp::Filter(Predicate::eq("name", "Alice")),
+            LogicalOp::Scan(ScanOp::NodeScan {
+                label: Some("Person".to_string()),
+                estimated_rows: None,
+            }),
+        );
+
+        let right_op = LogicalOp::Scan(ScanOp::NodeScan {
+            label: Some("Other".to_string()),
+            estimated_rows: None,
+        });
+
+        let plan = LogicalPlan::new(LogicalOp::binary(BinaryOp::Union, left_op, right_op));
+        let result = rule.apply(&plan, &stats).unwrap();
+
+        let expected_plan = LogicalPlan::new(LogicalOp::binary(
+            BinaryOp::Union,
+            LogicalOp::Scan(ScanOp::PropertyScan {
+                label: "Person".to_string(),
+                key: "name".to_string(),
+                value: crate::query::ir::PredicateValue::String("Alice".to_string()),
+            }),
+            LogicalOp::Scan(ScanOp::NodeScan {
+                label: Some("Other".to_string()),
+                estimated_rows: None,
+            }),
+        ));
+
+        assert_eq!(result, Some(expected_plan));
+    }
 }

@@ -346,3 +346,10 @@
 **Finding:** The `LimitPushdown` tests originally missed several behavioral edge cases and logic checks, particularly regarding the propagation limits in BinaryOp combinations (`||`), updating limit values correctly against child bounds, and setting vector rank limits.
 **Evidence:** `cargo mutants` caught mutants in `LimitPushdown::push_down` specifically targeting the changed boolean condition logic and bounds assignment.
 **Recommendation:** Added `sentry_tests` to `LimitPushdown` that explicitly trigger tests enforcing the boolean change propagation, verifying that updated properties reflect correct nested limits, and vector bounds assignment. Tests now prevent `||` to `&&` mutations and correct top-k modifications.
+
+**[Planner Rules BinaryOp Weak Assertions]**
+**Module:** `src/query/planner/rules/filter_scan_fusion.rs` and `src/query/planner/rules/operation_reordering.rs`
+**Severity:** 🟢 Acquitted (Strengthened)
+**Finding:** Both `FilterScanFusion` and `OperationReordering` had similar structural blindspots to `LimitPushdown` where `cargo mutants` could mutate the `left_changed || right_changed` logic in the `BinaryOp` match arm to `&&` and the tests would pass.
+**Evidence:** `cargo mutants` run against `FilterScanFusion` and `OperationReordering` showed that tests didn't explicitly check partial optimizations inside a `LogicalOp::Binary` branch propagating the `changed = true` flag.
+**Recommendation:** Added `test_binary_op_recursion_logic` sentry tests to both modules explicitly verifying that a `LogicalOp::Binary` returns a `changed = true` (by unwrapping the result appropriately in `apply` which checks `if changed`) when only one of its branches changes.
