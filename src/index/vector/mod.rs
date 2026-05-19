@@ -825,7 +825,7 @@ pub mod distributed;
 // Re-export distributed types for convenience
 pub use distributed::{
     CircuitBreakerConfig as DistributedCircuitBreakerConfig, CircuitState, DistributedError,
-    DistributedIndexStats, DistributedVectorConfig, DistributedVectorIndex, MockVectorNodeClient,
+    DistributedIndexStats, DistributedVectorConfig, DistributedVectorIndex, RemoteVectorNode,
     NodeCircuitBreaker, NodeConnection, NodeConnectionStats, RECOMMENDED_IMBALANCE_THRESHOLD,
-    RebalanceStats, RoutingStrategy, VectorNodeClient, VectorNodeConfig,
+    RebalanceStats, RoutingStrategy,  VectorNodeConfig,
 };
