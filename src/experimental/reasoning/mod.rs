@@ -10,6 +10,7 @@ pub mod alchemy;
 pub mod chimera;
 pub mod dreamer;
 pub mod hindsight;
+pub mod interpolation;
 pub mod luna;
 pub mod metaphor;
 pub mod muse;
