@@ -92,9 +92,7 @@ pub mod reasoning;
 #[cfg(feature = "semantic-reasoning")]
 pub use reasoning::*;
 
-#[cfg(feature = "semantic-temporal")]
 pub mod temporal;
-#[cfg(feature = "semantic-temporal")]
 pub use temporal::*;
 
 #[cfg(feature = "semantic-diagnostics")]

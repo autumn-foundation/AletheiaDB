@@ -110,6 +110,8 @@ Averages across 30–212 datapoints of continuous CI runs:
 
 ## Feature Flags
 
+> **⚠️ REQUIRES FEATURE NOVA**: Experimental modules like the Narrative Generator require the `nova` feature.
+
 All features are off by default except `config-toml`.
 
 | Flag | What it enables |
