@@ -338,9 +338,13 @@ pub struct TemporalContext {
 impl TemporalContext {
     /// Create a point-in-time context for both dimensions (traditional bi-temporal query).
     ///
-    /// # Example
-    /// ```ignore
-    /// // "What did we know at tx_time about what was valid at valid_time?"
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use aletheiadb::core::temporal::time;
+    /// use aletheiadb::query::plan::TemporalContext;
+    /// let valid_time = time::now();
+    /// let tx_time = time::now();
     /// let ctx = TemporalContext::as_of(valid_time, tx_time);
     /// ```
     #[must_use]
@@ -358,9 +362,12 @@ impl TemporalContext {
     ///
     /// Transaction time defaults to "now" (most recent recorded state).
     ///
-    /// # Example
-    /// ```ignore
-    /// // "What was valid/true at this time?" (using current database state)
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use aletheiadb::core::temporal::time;
+    /// use aletheiadb::query::plan::TemporalContext;
+    /// let timestamp = time::now();
     /// let ctx = TemporalContext::as_of_valid_time(timestamp);
     /// ```
     #[must_use]
@@ -378,9 +385,12 @@ impl TemporalContext {
     ///
     /// Valid time defaults to "now" (current validity).
     ///
-    /// # Example
-    /// ```ignore
-    /// // "What did we know/record at this time?" (database state as of tx_time)
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use aletheiadb::core::temporal::time;
+    /// use aletheiadb::query::plan::TemporalContext;
+    /// let timestamp = time::now();
     /// let ctx = TemporalContext::as_of_transaction_time(timestamp);
     /// ```
     #[must_use]
@@ -396,9 +406,14 @@ impl TemporalContext {
 
     /// Create a context for querying a valid_time range.
     ///
-    /// # Example
-    /// ```ignore
-    /// // "What was valid between start and end?"
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use aletheiadb::core::temporal::time;
+    /// use aletheiadb::core::temporal::TimeRange;
+    /// use aletheiadb::query::plan::TemporalContext;
+    /// let timestamp = time::now();
+    /// let range = TimeRange::from(timestamp);
     /// let ctx = TemporalContext::valid_time_between(range);
     /// ```
     #[must_use]
@@ -414,9 +429,14 @@ impl TemporalContext {
 
     /// Create a context for querying a transaction_time range.
     ///
-    /// # Example
-    /// ```ignore
-    /// // "What did we record between start and end?"
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use aletheiadb::core::temporal::time;
+    /// use aletheiadb::core::temporal::TimeRange;
+    /// use aletheiadb::query::plan::TemporalContext;
+    /// let timestamp = time::now();
+    /// let range = TimeRange::from(timestamp);
     /// let ctx = TemporalContext::transaction_time_between(range);
     /// ```
     #[must_use]

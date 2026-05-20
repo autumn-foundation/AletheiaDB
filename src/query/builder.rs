@@ -574,7 +574,26 @@ impl QueryBuilder<state::HasVectorResults> {
 
 // Methods available in any state
 impl<S: QueryState> QueryBuilder<S> {
-    /// Set temporal context: query as of a specific point in time
+    /// Set temporal context: query as of a specific point in time.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # use aletheiadb::AletheiaDB;
+    /// # use aletheiadb::core::NodeId;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # let node_id = NodeId::new(1)?;
+    /// use aletheiadb::core::temporal::time;
+    /// let valid_time = time::now();
+    /// let tx_time = time::now();
+    /// let results = db.query()
+    ///     .as_of(valid_time, tx_time)
+    ///     .start(node_id)
+    ///     .execute(&db)?;
+    /// # Ok(())
+    /// # }
+    /// ```
     #[must_use]
     pub fn as_of(mut self, valid_time: Timestamp, transaction_time: Timestamp) -> Self {
         self.temporal_context = Some(TemporalContext::as_of(valid_time, transaction_time));
@@ -586,15 +605,23 @@ impl<S: QueryState> QueryBuilder<S> {
     /// Transaction time will resolve to "now" during query execution.
     /// This enables querying "what was valid at time T" regardless of when it was recorded.
     ///
-    /// # Example
+    /// # Examples
     ///
-    /// ```ignore
-    /// // "Who did Alice know on 2024-01-15?"
+    /// ```rust,no_run
+    /// # use aletheiadb::AletheiaDB;
+    /// # use aletheiadb::core::NodeId;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # let alice_id = NodeId::new(1)?;
+    /// use aletheiadb::core::temporal::time;
+    /// let jan_15 = time::now();
     /// let results = db.query()
     ///     .as_of_valid_time(jan_15)
     ///     .start(alice_id)
     ///     .traverse("KNOWS")
     ///     .execute(&db)?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[must_use]
     pub fn as_of_valid_time(mut self, valid_time: Timestamp) -> Self {
@@ -609,14 +636,22 @@ impl<S: QueryState> QueryBuilder<S> {
     /// Valid time will resolve to "now" during query execution.
     /// This enables querying "what did we know at time T" regardless of when facts were valid.
     ///
-    /// # Example
+    /// # Examples
     ///
-    /// ```ignore
-    /// // "What did we know about Alice on 2024-01-15?"
+    /// ```rust,no_run
+    /// # use aletheiadb::AletheiaDB;
+    /// # use aletheiadb::core::NodeId;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # let alice_id = NodeId::new(1)?;
+    /// use aletheiadb::core::temporal::time;
+    /// let jan_15 = time::now();
     /// let results = db.query()
     ///     .as_of_transaction_time(jan_15)
     ///     .start(alice_id)
     ///     .execute(&db)?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[must_use]
     pub fn as_of_transaction_time(mut self, transaction_time: Timestamp) -> Self {
@@ -636,15 +671,24 @@ impl<S: QueryState> QueryBuilder<S> {
     /// * `start` - Start of the valid time range (inclusive)
     /// * `end` - End of the valid time range (inclusive)
     ///
-    /// # Example
+    /// # Examples
     ///
-    /// ```ignore
-    /// // "Who did Alice know during Q1 2024?"
+    /// ```rust,no_run
+    /// # use aletheiadb::AletheiaDB;
+    /// # use aletheiadb::core::NodeId;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # let alice_id = NodeId::new(1)?;
+    /// use aletheiadb::core::temporal::time;
+    /// let jan_1 = time::now();
+    /// let mar_31 = time::now();
     /// let results = db.query()
     ///     .valid_time_between(jan_1, mar_31)
     ///     .start(alice_id)
     ///     .traverse("KNOWS")
     ///     .execute(&db)?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[must_use]
     pub fn valid_time_between(mut self, start: Timestamp, end: Timestamp) -> Self {
