@@ -329,7 +329,7 @@ mod tests {
         let plan = router.route_traversal("Person", &["Place", "Event"]);
         assert!(plan.is_distributed);
         assert_eq!(plan.involved_shards.len(), 3);
-        assert!(plan.estimated_cost > 1.0); // Cross-shard has higher cost
+        assert_eq!(plan.estimated_cost, 5.0); // 1.0 + (3 - 1) * 2.0 = 5.0
     }
 
     #[test]

@@ -346,3 +346,17 @@
 **Finding:** The `LimitPushdown` tests originally missed several behavioral edge cases and logic checks, particularly regarding the propagation limits in BinaryOp combinations (`||`), updating limit values correctly against child bounds, and setting vector rank limits.
 **Evidence:** `cargo mutants` caught mutants in `LimitPushdown::push_down` specifically targeting the changed boolean condition logic and bounds assignment.
 **Recommendation:** Added `sentry_tests` to `LimitPushdown` that explicitly trigger tests enforcing the boolean change propagation, verifying that updated properties reflect correct nested limits, and vector bounds assignment. Tests now prevent `||` to `&&` mutations and correct top-k modifications.
+
+**Elenchus Audit: Sharding Router Traversal Cost**
+**Module:** src/storage/sharding/router.rs
+**Severity:** 🟡 Suspect
+**Finding:** `test_route_traversal_cross_shard` had a weak assertion (`plan.estimated_cost > 1.0`).
+**Evidence:** A mutation that modified `CROSS_SHARD_PENALTY` multiplication to `0.0` or changed the penalty logic might still result in a cost slightly above 1.0 if not careful, but more importantly, it failed to verify the actual calculation formula (`base_cost + (involved - 1) * penalty`).
+**Recommendation:** I changed it to an exact assertion `assert_eq!(plan.estimated_cost, 5.0)` to enforce the precise calculation logic.
+
+**Elenchus Audit: Sharding Executor Target Collection**
+**Module:** src/storage/sharding/executor.rs
+**Severity:** 🔴 Critical
+**Finding:** `test_execute_traversal` lacked assertions ensuring that the `target_shards` populated from the `TraversalPlan` were actually queried.
+**Evidence:** A mutation removing the population of `target_shards` would crash (caught by existing unwrap on result), but a mutation bypassing the execution loop completely, or just returning a static mocked `QueryResult` without actually calling the shards, could potentially slip through.
+**Recommendation:** Extracted `MockShardClient` creation into variables and added `assert_eq!(client0.call_count("query"), 1)` and `assert_eq!(client1.call_count("query"), 1)` to prove execution genuinely traverses the plan targets.

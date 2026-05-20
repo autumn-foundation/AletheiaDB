@@ -1122,8 +1122,11 @@ mod tests {
         let shard0 = make_shard_id(0);
         let shard1 = make_shard_id(1);
 
-        executor.register_client(shard0, Arc::new(MockShardClient::new(shard0)));
-        executor.register_client(shard1, Arc::new(MockShardClient::new(shard1)));
+        let client0 = Arc::new(MockShardClient::new(shard0));
+        let client1 = Arc::new(MockShardClient::new(shard1));
+
+        executor.register_client(shard0, Arc::clone(&client0));
+        executor.register_client(shard1, Arc::clone(&client1));
 
         let start_node = NodeId::new(42).unwrap();
         // Person maps to shard0. Place maps to shard1. Company is not in test_config, so it won't map to anything and route_node probably hashes it or falls back?
@@ -1133,5 +1136,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.shards_queried, 2);
+        assert_eq!(client0.call_count("query"), 1);
+        assert_eq!(client1.call_count("query"), 1);
     }
 }
