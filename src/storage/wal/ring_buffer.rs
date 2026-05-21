@@ -694,7 +694,15 @@ impl WalRingBuffer {
     /// A vector of pending entries ready for flushing. May be empty if
     /// no entries are available.
     pub fn drain(&self) -> Vec<PendingEntry> {
-        let mut entries = Vec::new();
+        // ⚡ Bolt Optimization: Replace Vec::new() with exact pre-allocation to prevent heap reallocations.
+        // We can safely over-estimate the capacity based on the difference between write_pos and read_pos,
+        // bounded by the ring buffer's capacity to handle wraparound edge cases.
+        let write_pos = self.write_pos.load(Ordering::Relaxed);
+        let read_pos = self.read_pos.load(Ordering::Relaxed);
+        let approx_len = write_pos.wrapping_sub(read_pos) as usize;
+        let expected_capacity = approx_len.min(self.capacity);
+
+        let mut entries = Vec::with_capacity(expected_capacity);
 
         loop {
             let pos = self.read_pos.load(Ordering::Relaxed);
@@ -1660,5 +1668,27 @@ mod sentry_tests {
         // Logic: store(expected_seq.wrapping_add(1)) -> MAX + 1 -> 0.
         let seq = buf.slots[slot_idx].sequence.load(Ordering::Relaxed);
         assert_eq!(seq, 0, "Sequence should wrap to 0 after write at boundary");
+    }
+}
+
+#[cfg(test)]
+mod capacity_tests {
+    use super::*;
+    use crate::storage::wal::LSN;
+    use crate::storage::wal::ring_buffer::PendingEntry;
+
+    #[test]
+    fn test_ring_buffer_drain_capacity() {
+        let buf = WalRingBuffer::new(16);
+
+        for i in 0..5 {
+            let entry = PendingEntry::new_async(LSN(i as u64), vec![i as u8]);
+            buf.try_append(entry).unwrap();
+        }
+
+        let drained = buf.drain();
+        assert_eq!(drained.len(), 5);
+        // Expect exact capacity match due to our optimization
+        assert_eq!(drained.capacity(), 5);
     }
 }
