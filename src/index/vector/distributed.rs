@@ -182,38 +182,6 @@ impl std::error::Error for DistributedError {}
 // Distributed Vector Client Trait
 // ============================================================================
 
-/// Trait for communicating with remote vector index nodes.
-///
-/// This trait abstracts the network communication, allowing for different
-/// implementations (HTTP, gRPC, in-process mock for testing).
-pub trait VectorNodeClient: Send + Sync + fmt::Debug {
-    /// Get the node ID this client connects to.
-    fn node_id(&self) -> u16;
-
-    /// Check if the connection is healthy.
-    fn is_healthy(&self) -> bool;
-
-    /// Add a vector to the remote index.
-    fn add(&self, id: NodeId, vector: &[f32]) -> Result<()>;
-
-    /// Remove a vector from the remote index.
-    fn remove(&self, id: NodeId) -> Result<()>;
-
-    /// Search for k-nearest neighbors on the remote index.
-    fn search(&self, query: &[f32], k: usize) -> Result<Vec<(NodeId, f32)>>;
-
-    /// Get the number of vectors on the remote index.
-    fn len(&self) -> Result<usize>;
-
-    /// Check if the remote index is empty.
-    fn is_empty(&self) -> Result<bool> {
-        self.len().map(|len| len == 0)
-    }
-
-    /// Perform a health check.
-    fn health_check(&self) -> Result<()>;
-}
-
 // ============================================================================
 // Circuit Breaker for Nodes
 // ============================================================================
@@ -471,12 +439,12 @@ impl NodeCircuitBreaker {
 /// # #[cfg(feature = "semantic-search")]
 /// # fn main() {
 /// use aletheiadb::index::vector::distributed::{
-///     MockVectorNodeClient, NodeConnection, CircuitBreakerConfig
+///     VectorNodeClient, NodeConnection, CircuitBreakerConfig
 /// };
 /// use aletheiadb::index::vector::DistanceMetric;
 /// use std::sync::Arc;
 ///
-/// let client = Arc::new(MockVectorNodeClient::new(0, 384, DistanceMetric::Cosine));
+/// let client = Arc::new(VectorNodeClient::new(0, 384, DistanceMetric::Cosine));
 /// let connection = NodeConnection::new(client, CircuitBreakerConfig::default());
 ///
 /// assert_eq!(connection.node_id(), 0);
@@ -485,9 +453,9 @@ impl NodeCircuitBreaker {
 /// # #[cfg(not(feature = "semantic-search"))]
 /// # fn main() {}
 /// ```
-pub struct NodeConnection<C: VectorNodeClient> {
+pub struct NodeConnection {
     /// The client for this node.
-    client: Arc<C>,
+    client: Arc<VectorNodeClient>,
     /// Circuit breaker for this node.
     circuit_breaker: NodeCircuitBreaker,
     /// Total requests made to this node.
@@ -496,7 +464,7 @@ pub struct NodeConnection<C: VectorNodeClient> {
     failure_count: AtomicU64,
 }
 
-impl<C: VectorNodeClient> fmt::Debug for NodeConnection<C> {
+impl fmt::Debug for NodeConnection {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("NodeConnection")
             .field("node_id", &self.client.node_id())
@@ -507,9 +475,9 @@ impl<C: VectorNodeClient> fmt::Debug for NodeConnection<C> {
     }
 }
 
-impl<C: VectorNodeClient> NodeConnection<C> {
+impl NodeConnection {
     /// Create a new node connection.
-    pub fn new(client: Arc<C>, circuit_config: CircuitBreakerConfig) -> Self {
+    pub fn new(client: Arc<VectorNodeClient>, circuit_config: CircuitBreakerConfig) -> Self {
         Self {
             client,
             circuit_breaker: NodeCircuitBreaker::new(circuit_config),
@@ -519,6 +487,7 @@ impl<C: VectorNodeClient> NodeConnection<C> {
     }
 
     /// Get the node ID.
+    /// Get the node ID this client connects to.
     pub fn node_id(&self) -> u16 {
         self.client.node_id()
     }
@@ -536,7 +505,7 @@ impl<C: VectorNodeClient> NodeConnection<C> {
     /// Execute an operation with circuit breaker protection.
     pub fn execute<T, F>(&self, f: F) -> Result<T>
     where
-        F: FnOnce(&C) -> Result<T>,
+        F: FnOnce(&VectorNodeClient) -> Result<T>,
     {
         self.request_count.fetch_add(1, Ordering::Relaxed);
 
@@ -897,14 +866,14 @@ pub struct RebalanceStats {
 /// # fn main() -> aletheiadb::core::error::Result<()> {
 /// use std::sync::Arc;
 /// use aletheiadb::index::vector::distributed::{
-///     DistributedVectorIndex, DistributedVectorConfig, VectorNodeConfig, MockVectorNodeClient
+///     DistributedVectorIndex, DistributedVectorConfig, VectorNodeConfig, VectorNodeClient
 /// };
 /// use aletheiadb::index::vector::DistanceMetric;
 ///
 /// let config = DistributedVectorConfig::new(128, DistanceMetric::Cosine)
 ///     .with_node(VectorNodeConfig::new(0, "node0:9000"));
 ///
-/// let client = Arc::new(MockVectorNodeClient::new(0, 128, DistanceMetric::Cosine));
+/// let client = Arc::new(VectorNodeClient::new(0, 128, DistanceMetric::Cosine));
 /// let index = DistributedVectorIndex::new(config, vec![client])?;
 ///
 /// assert_eq!(index.node_count(), 1);
@@ -913,14 +882,14 @@ pub struct RebalanceStats {
 /// # #[cfg(not(feature = "semantic-search"))]
 /// # fn main() {}
 /// ```
-pub struct DistributedVectorIndex<C: VectorNodeClient> {
+pub struct DistributedVectorIndex {
     /// Configuration.
     config: DistributedVectorConfig,
     /// Node connections.
-    nodes: Vec<Arc<NodeConnection<C>>>,
+    nodes: Vec<Arc<NodeConnection>>,
 }
 
-impl<C: VectorNodeClient> fmt::Debug for DistributedVectorIndex<C> {
+impl fmt::Debug for DistributedVectorIndex {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("DistributedVectorIndex")
             .field("dimensions", &self.config.dimensions)
@@ -931,7 +900,7 @@ impl<C: VectorNodeClient> fmt::Debug for DistributedVectorIndex<C> {
     }
 }
 
-impl<C: VectorNodeClient + 'static> DistributedVectorIndex<C> {
+impl DistributedVectorIndex {
     /// Create a new distributed vector index from an existing list of clients.
     ///
     /// # Arguments
@@ -942,7 +911,10 @@ impl<C: VectorNodeClient + 'static> DistributedVectorIndex<C> {
     /// # Errors
     ///
     /// Returns an error if configuration is invalid.
-    pub fn new(config: DistributedVectorConfig, clients: Vec<Arc<C>>) -> Result<Self> {
+    pub fn new(
+        config: DistributedVectorConfig,
+        clients: Vec<Arc<VectorNodeClient>>,
+    ) -> Result<Self> {
         config.validate()?;
 
         if clients.len() != config.nodes.len() {
@@ -953,7 +925,7 @@ impl<C: VectorNodeClient + 'static> DistributedVectorIndex<C> {
             ))));
         }
 
-        let nodes: Vec<Arc<NodeConnection<C>>> = clients
+        let nodes: Vec<Arc<NodeConnection>> = clients
             .into_iter()
             .zip(config.nodes.iter())
             .map(|(client, node_config)| {
@@ -1003,7 +975,7 @@ impl<C: VectorNodeClient + 'static> DistributedVectorIndex<C> {
     }
 
     /// Get a reference to a specific node connection.
-    pub fn get_node(&self, index: usize) -> Option<&Arc<NodeConnection<C>>> {
+    pub fn get_node(&self, index: usize) -> Option<&Arc<NodeConnection>> {
         self.nodes.get(index)
     }
 
@@ -1108,7 +1080,7 @@ impl<C: VectorNodeClient + 'static> DistributedVectorIndex<C> {
     }
 }
 
-impl<C: VectorNodeClient + 'static> VectorIndex for DistributedVectorIndex<C> {
+impl VectorIndex for DistributedVectorIndex {
     fn add(&self, id: NodeId, vector: &[f32]) -> Result<()> {
         validate_vector(vector)?;
 
@@ -1241,8 +1213,7 @@ impl<C: VectorNodeClient + 'static> VectorIndex for DistributedVectorIndex<C> {
     fn memory_usage(&self) -> usize {
         // Memory usage is distributed across nodes
         // Return local metadata overhead only
-        std::mem::size_of::<Self>()
-            + self.nodes.len() * std::mem::size_of::<Arc<NodeConnection<C>>>()
+        std::mem::size_of::<Self>() + self.nodes.len() * std::mem::size_of::<Arc<NodeConnection>>()
     }
 
     fn quantization(&self) -> Quantization {
@@ -1256,7 +1227,7 @@ impl<C: VectorNodeClient + 'static> VectorIndex for DistributedVectorIndex<C> {
 
 /// Mock client for testing distributed vector operations.
 ///
-/// `MockVectorNodeClient` implements the [`VectorNodeClient`] trait in-memory
+/// `VectorNodeClient` implements the [`VectorNodeClient`] trait in-memory
 /// without actually performing any network I/O. It tracks vectors in a local hash map
 /// and implements simple distance calculations, making it ideal for unit testing
 /// [`DistributedVectorIndex`] logic.
@@ -1266,11 +1237,11 @@ impl<C: VectorNodeClient + 'static> VectorIndex for DistributedVectorIndex<C> {
 /// ```rust
 /// # #[cfg(feature = "semantic-search")]
 /// # fn main() -> aletheiadb::core::error::Result<()> {
-/// use aletheiadb::index::vector::distributed::{MockVectorNodeClient, VectorNodeClient};
+/// use aletheiadb::index::vector::distributed::{VectorNodeClient, VectorNodeClient};
 /// use aletheiadb::index::vector::DistanceMetric;
 /// use aletheiadb::core::id::NodeId;
 ///
-/// let client = MockVectorNodeClient::new(0, 128, DistanceMetric::Cosine);
+/// let client = VectorNodeClient::new(0, 128, DistanceMetric::Cosine);
 ///
 /// let node_id = NodeId::new(42).unwrap();
 /// let vec = vec![0.1f32; 128];
@@ -1283,7 +1254,7 @@ impl<C: VectorNodeClient + 'static> VectorIndex for DistributedVectorIndex<C> {
 /// # fn main() {}
 /// ```
 #[derive(Debug)]
-pub struct MockVectorNodeClient {
+pub struct VectorNodeClient {
     node_id: u16,
     healthy: AtomicBool,
     vectors:
@@ -1293,7 +1264,110 @@ pub struct MockVectorNodeClient {
     fail_next: RwLock<Option<String>>,
 }
 
-impl MockVectorNodeClient {
+impl VectorNodeClient {
+    /// Get the node ID this client connects to.
+    pub fn node_id(&self) -> u16 {
+        self.node_id
+    }
+
+    /// Check if the connection is healthy.
+    pub fn is_healthy(&self) -> bool {
+        self.healthy.load(Ordering::SeqCst)
+    }
+
+    /// Add a vector to the remote index.
+    pub fn add(&self, id: NodeId, vector: &[f32]) -> Result<()> {
+        self.check_fail()?;
+
+        if !self.is_healthy() {
+            return Err(Error::Vector(VectorError::IndexError(format!(
+                "Node {} is unavailable",
+                self.node_id
+            ))));
+        }
+
+        if vector.len() != self.dimensions {
+            return Err(Error::Vector(VectorError::DimensionMismatch {
+                expected: self.dimensions,
+                actual: vector.len(),
+            }));
+        }
+
+        self.vectors.write().unwrap().insert(id, vector.to_vec());
+        Ok(())
+    }
+
+    /// Remove a vector from the remote index.
+    pub fn remove(&self, id: NodeId) -> Result<()> {
+        self.check_fail()?;
+
+        if !self.is_healthy() {
+            return Err(Error::Vector(VectorError::IndexError(format!(
+                "Node {} is unavailable",
+                self.node_id
+            ))));
+        }
+
+        self.vectors.write().unwrap().remove(&id);
+        Ok(())
+    }
+
+    /// Search for k-nearest neighbors on the remote index.
+    pub fn search(&self, query: &[f32], k: usize) -> Result<Vec<(NodeId, f32)>> {
+        self.check_fail()?;
+
+        if !self.is_healthy() {
+            return Err(Error::Vector(VectorError::IndexError(format!(
+                "Node {} is unavailable",
+                self.node_id
+            ))));
+        }
+
+        let vectors = self.vectors.read().unwrap();
+        let mut results: Vec<(NodeId, f32)> = vectors
+            .iter()
+            .map(|(id, vec)| (*id, self.compute_similarity(query, vec)))
+            .collect();
+
+        results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        results.truncate(k);
+
+        Ok(results)
+    }
+
+    /// Get the number of vectors on the remote index.
+    pub fn len(&self) -> Result<usize> {
+        self.check_fail()?;
+
+        if !self.is_healthy() {
+            return Err(Error::Vector(VectorError::IndexError(format!(
+                "Node {} is unavailable",
+                self.node_id
+            ))));
+        }
+
+        Ok(self.vectors.read().unwrap().len())
+    }
+
+    /// Check if the remote index is empty.
+    pub fn is_empty(&self) -> Result<bool> {
+        self.len().map(|len| len == 0)
+    }
+
+    /// Perform a health check.
+    pub fn health_check(&self) -> Result<()> {
+        self.check_fail()?;
+
+        if self.is_healthy() {
+            Ok(())
+        } else {
+            Err(Error::Vector(VectorError::IndexError(format!(
+                "Node {} is unavailable",
+                self.node_id
+            ))))
+        }
+    }
+
     /// Create a new mock client.
     pub fn new(node_id: u16, dimensions: usize, metric: DistanceMetric) -> Self {
         Self {
@@ -1348,102 +1422,9 @@ impl MockVectorNodeClient {
             }
             DistanceMetric::DotProduct => a.iter().zip(b.iter()).map(|(x, y)| x * y).sum(),
             other => panic!(
-                "MockVectorNodeClient does not support {:?} distance metric",
+                "VectorNodeClient does not support {:?} distance metric",
                 other
             ),
-        }
-    }
-}
-
-impl VectorNodeClient for MockVectorNodeClient {
-    fn node_id(&self) -> u16 {
-        self.node_id
-    }
-
-    fn is_healthy(&self) -> bool {
-        self.healthy.load(Ordering::SeqCst)
-    }
-
-    fn add(&self, id: NodeId, vector: &[f32]) -> Result<()> {
-        self.check_fail()?;
-
-        if !self.is_healthy() {
-            return Err(Error::Vector(VectorError::IndexError(format!(
-                "Node {} is unavailable",
-                self.node_id
-            ))));
-        }
-
-        if vector.len() != self.dimensions {
-            return Err(Error::Vector(VectorError::DimensionMismatch {
-                expected: self.dimensions,
-                actual: vector.len(),
-            }));
-        }
-
-        self.vectors.write().unwrap().insert(id, vector.to_vec());
-        Ok(())
-    }
-
-    fn remove(&self, id: NodeId) -> Result<()> {
-        self.check_fail()?;
-
-        if !self.is_healthy() {
-            return Err(Error::Vector(VectorError::IndexError(format!(
-                "Node {} is unavailable",
-                self.node_id
-            ))));
-        }
-
-        self.vectors.write().unwrap().remove(&id);
-        Ok(())
-    }
-
-    fn search(&self, query: &[f32], k: usize) -> Result<Vec<(NodeId, f32)>> {
-        self.check_fail()?;
-
-        if !self.is_healthy() {
-            return Err(Error::Vector(VectorError::IndexError(format!(
-                "Node {} is unavailable",
-                self.node_id
-            ))));
-        }
-
-        let vectors = self.vectors.read().unwrap();
-        let mut results: Vec<(NodeId, f32)> = vectors
-            .iter()
-            .map(|(id, vec)| (*id, self.compute_similarity(query, vec)))
-            .collect();
-
-        results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        results.truncate(k);
-
-        Ok(results)
-    }
-
-    fn len(&self) -> Result<usize> {
-        self.check_fail()?;
-
-        if !self.is_healthy() {
-            return Err(Error::Vector(VectorError::IndexError(format!(
-                "Node {} is unavailable",
-                self.node_id
-            ))));
-        }
-
-        Ok(self.vectors.read().unwrap().len())
-    }
-
-    fn health_check(&self) -> Result<()> {
-        self.check_fail()?;
-
-        if self.is_healthy() {
-            Ok(())
-        } else {
-            Err(Error::Vector(VectorError::IndexError(format!(
-                "Node {} is unavailable",
-                self.node_id
-            ))))
         }
     }
 }
@@ -1464,15 +1445,9 @@ mod tests {
         config
     }
 
-    fn create_test_clients(num_nodes: usize) -> Vec<Arc<MockVectorNodeClient>> {
+    fn create_test_clients(num_nodes: usize) -> Vec<Arc<VectorNodeClient>> {
         (0..num_nodes)
-            .map(|i| {
-                Arc::new(MockVectorNodeClient::new(
-                    i as u16,
-                    4,
-                    DistanceMetric::Cosine,
-                ))
-            })
+            .map(|i| Arc::new(VectorNodeClient::new(i as u16, 4, DistanceMetric::Cosine)))
             .collect()
     }
 
@@ -1530,7 +1505,7 @@ mod tests {
     fn test_create_distributed_index() -> Result<()> {
         let config = create_test_config(3);
         let clients = create_test_clients(3);
-        let clients: Vec<Arc<MockVectorNodeClient>> = clients.into_iter().collect();
+        let clients: Vec<Arc<VectorNodeClient>> = clients.into_iter().collect();
 
         let index = DistributedVectorIndex::new(config, clients)?;
 
@@ -1915,7 +1890,7 @@ mod tests {
 
     #[test]
     fn test_merge_results_empty() {
-        let results = DistributedVectorIndex::<MockVectorNodeClient>::merge_results(vec![], 10);
+        let results = DistributedVectorIndex::merge_results(vec![], 10);
         assert!(results.is_empty());
     }
 
@@ -1927,7 +1902,7 @@ mod tests {
             (NodeId::new(3).unwrap(), 0.7),
         ]];
 
-        let merged = DistributedVectorIndex::<MockVectorNodeClient>::merge_results(node_results, 2);
+        let merged = DistributedVectorIndex::merge_results(node_results, 2);
         assert_eq!(merged.len(), 2);
         assert_eq!(merged[0].0, NodeId::new(1).unwrap());
         assert_eq!(merged[1].0, NodeId::new(2).unwrap());
@@ -1946,7 +1921,7 @@ mod tests {
             ],
         ];
 
-        let merged = DistributedVectorIndex::<MockVectorNodeClient>::merge_results(node_results, 3);
+        let merged = DistributedVectorIndex::merge_results(node_results, 3);
         assert_eq!(merged.len(), 3);
         // Should be sorted: 0.9, 0.85, 0.7
         assert_eq!(merged[0].0, NodeId::new(1).unwrap());
@@ -1960,7 +1935,7 @@ mod tests {
 
     #[test]
     fn test_mock_client_add_search() -> Result<()> {
-        let client = MockVectorNodeClient::new(0, 4, DistanceMetric::Cosine);
+        let client = VectorNodeClient::new(0, 4, DistanceMetric::Cosine);
 
         let node = NodeId::new(1).unwrap();
         client.add(node, &[1.0, 0.0, 0.0, 0.0])?;
@@ -1975,7 +1950,7 @@ mod tests {
 
     #[test]
     fn test_mock_client_fail_next() {
-        let client = MockVectorNodeClient::new(0, 4, DistanceMetric::Cosine);
+        let client = VectorNodeClient::new(0, 4, DistanceMetric::Cosine);
         client.fail_next("Test error");
 
         let result = client.add(NodeId::new(1).unwrap(), &[1.0, 0.0, 0.0, 0.0]);
@@ -1988,7 +1963,7 @@ mod tests {
 
     #[test]
     fn test_mock_client_unhealthy() {
-        let client = MockVectorNodeClient::new(0, 4, DistanceMetric::Cosine);
+        let client = VectorNodeClient::new(0, 4, DistanceMetric::Cosine);
         client.set_healthy(false);
 
         let result = client.add(NodeId::new(1).unwrap(), &[1.0, 0.0, 0.0, 0.0]);
@@ -2247,7 +2222,7 @@ mod tests {
 
     #[test]
     fn test_mock_client_is_empty() -> Result<()> {
-        let client = MockVectorNodeClient::new(0, 4, DistanceMetric::Cosine);
+        let client = VectorNodeClient::new(0, 4, DistanceMetric::Cosine);
 
         assert!(client.is_empty()?);
 
@@ -2290,7 +2265,7 @@ mod tests {
 
     #[test]
     fn test_node_connection_execute_with_circuit_open() {
-        let client = Arc::new(MockVectorNodeClient::new(0, 4, DistanceMetric::Cosine));
+        let client = Arc::new(VectorNodeClient::new(0, 4, DistanceMetric::Cosine));
         let connection = NodeConnection::new(
             client,
             CircuitBreakerConfig {
@@ -2311,7 +2286,7 @@ mod tests {
 
     #[test]
     fn test_node_connection_debug() {
-        let client = Arc::new(MockVectorNodeClient::new(0, 4, DistanceMetric::Cosine));
+        let client = Arc::new(VectorNodeClient::new(0, 4, DistanceMetric::Cosine));
         let connection = NodeConnection::new(client, CircuitBreakerConfig::default());
 
         let debug_str = format!("{:?}", connection);
@@ -2344,7 +2319,7 @@ mod tests {
 
     #[test]
     fn test_mock_client_dimension_mismatch() {
-        let client = MockVectorNodeClient::new(0, 4, DistanceMetric::Cosine);
+        let client = VectorNodeClient::new(0, 4, DistanceMetric::Cosine);
 
         let result = client.add(NodeId::new(1).unwrap(), &[1.0, 0.0]); // Wrong dimensions
         assert!(result.is_err());
