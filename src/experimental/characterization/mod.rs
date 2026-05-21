@@ -13,6 +13,7 @@ pub mod gravity;
 pub mod kaleidoscope;
 pub mod papyrus;
 pub mod prism;
+pub mod scroll;
 pub mod sybil;
 pub mod synapse;
 
