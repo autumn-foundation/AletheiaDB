@@ -10,3 +10,6 @@
 ## 2024-05-14 - [Adding Examples to HLC and documenting src/main.rs]
 **Confusion:** The `src/main.rs` file was missing module-level documentation (`//!`), which triggers the `missing_docs` lint, but was hidden by the lint configurations inside `src/lib.rs` affecting `src/main.rs`. Also `HybridTimestamp::send` lacked an example showing the behavior of its logical counter.
 **Clarification:** Added `//! The AletheiaDB binary.` to `src/main.rs` and added an executable `## Examples` block to `HybridTimestamp::send` in `src/core/hlc.rs`.
+## 2024-05-21 - [The "Getters" of Graph Operations]
+**Confusion:** The `src/db/ops.rs` file contained many core graph interaction functions (`get_node`, `get_edge`, `node_count`) that only briefly described what they did, falling into the "getter noise" trap (e.g., "Gets the node"), without explaining *why* they existed or what performance characteristics they had. Furthermore, almost none of them had executable `## Examples` blocks.
+**Clarification:** I added `## Examples` doc tests to 20 undocumented functions in `src/db/ops.rs`. Additionally, I rewrote the standard "getter" descriptions for these operations to explain their purpose in the larger architecture (e.g., explaining that `get_edge_target` is a zero-copy operation used to optimize graph traversals without allocation overhead).

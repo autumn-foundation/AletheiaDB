@@ -199,7 +199,7 @@ impl AletheiaDB {
     ///
     /// Returns an error if WAL initialization fails (e.g., cannot create WAL directory).
     ///
-    /// # Example
+    /// ## Examples
     ///
     /// ```ignore
     /// use aletheiadb::{AletheiaDB, WalConfigBuilder, DurabilityMode};
@@ -230,7 +230,7 @@ impl AletheiaDB {
     ///
     /// Returns an error if WAL initialization fails (e.g., cannot create WAL directory).
     ///
-    /// # Example
+    /// ## Examples
     ///
     /// ```ignore
     /// use aletheiadb::{AletheiaDB, config::AletheiaDBConfig, config::WalConfigBuilder};

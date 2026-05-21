@@ -89,7 +89,7 @@ impl AletheiaDB {
     ///
     /// Returns an error if the timestamp lock is poisoned.
     ///
-    /// # Example
+    /// ## Examples
     ///
     /// ```rust,no_run
     /// # use aletheiadb::AletheiaDB;
@@ -131,7 +131,7 @@ impl AletheiaDB {
     /// The error type is generic, allowing you to use custom error types that implement
     /// `From<aletheiadb::Error>` for seamless error conversion with the `?` operator.
     ///
-    /// # Example
+    /// ## Examples
     ///
     /// ```rust,no_run
     /// # use aletheiadb::AletheiaDB;
@@ -190,7 +190,7 @@ impl AletheiaDB {
     ///
     /// Returns an error if the timestamp lock is poisoned.
     ///
-    /// # Example
+    /// ## Examples
     ///
     /// ```rust,no_run
     /// # use aletheiadb::{AletheiaDB, PropertyMapBuilder};
@@ -242,7 +242,7 @@ impl AletheiaDB {
     /// The error type is generic, allowing you to use custom error types that implement
     /// `From<aletheiadb::Error>` for seamless error conversion with the `?` operator.
     ///
-    /// # Example
+    /// ## Examples
     ///
     /// ```rust,no_run
     /// # use aletheiadb::{AletheiaDB, PropertyMapBuilder};
@@ -301,7 +301,7 @@ impl AletheiaDB {
     /// The error type is generic, allowing you to use custom error types that implement
     /// `From<aletheiadb::Error>` for seamless error conversion with the `?` operator.
     ///
-    /// # Example
+    /// ## Examples
     ///
     /// ```rust,no_run
     /// # use aletheiadb::{AletheiaDB, PropertyMapBuilder};
@@ -357,7 +357,7 @@ impl AletheiaDB {
     /// The error type is generic, allowing you to use custom error types that implement
     /// `From<aletheiadb::Error>` for seamless error conversion with the `?` operator.
     ///
-    /// # Example
+    /// ## Examples
     ///
     /// ```rust,no_run
     /// # use aletheiadb::{AletheiaDB, WriteOptions, DurabilityMode, PropertyMap};
@@ -420,7 +420,7 @@ impl AletheiaDB {
     /// durability settings. The transaction must be manually committed or
     /// rolled back.
     ///
-    /// # Example
+    /// ## Examples
     ///
     /// ```rust,no_run
     /// # use aletheiadb::{AletheiaDB, WriteOptions, DurabilityMode, PropertyMapBuilder};

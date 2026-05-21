@@ -26,7 +26,7 @@ impl AletheiaDB {
     /// A vector of edge IDs that were valid at the specified time. Returns an
     /// empty vector if no temporal adjacency index is configured.
     ///
-    /// # Example
+    /// ## Examples
     ///
     /// ```ignore
     /// use aletheiadb::AletheiaDB;
@@ -64,7 +64,7 @@ impl AletheiaDB {
     /// A vector of edge IDs that were valid at the specified time. Returns an
     /// empty vector if no temporal adjacency index is configured.
     ///
-    /// # Example
+    /// ## Examples
     ///
     /// ```ignore
     /// use aletheiadb::AletheiaDB;
@@ -175,7 +175,7 @@ impl AletheiaDB {
     /// could reduce lock hold time for better concurrency, at the cost of additional
     /// lock acquisitions.
     ///
-    /// # Example
+    /// ## Examples
     ///
     /// ```rust,no_run
     /// # use aletheiadb::AletheiaDB;
@@ -261,7 +261,7 @@ impl AletheiaDB {
     /// could reduce lock hold time for better concurrency, at the cost of additional
     /// lock acquisitions.
     ///
-    /// # Example
+    /// ## Examples
     ///
     /// ```rust,no_run
     /// # use aletheiadb::AletheiaDB;
@@ -311,7 +311,7 @@ impl AletheiaDB {
     /// Transaction time defaults to "now" - queries what was valid at the given time,
     /// based on the latest knowledge.
     ///
-    /// # Example
+    /// ## Examples
     ///
     /// ```rust,no_run
     /// # use aletheiadb::AletheiaDB;
@@ -337,7 +337,7 @@ impl AletheiaDB {
     /// Valid time defaults to "now" - queries what we knew at the given time,
     /// regardless of when facts were valid.
     ///
-    /// # Example
+    /// ## Examples
     ///
     /// ```rust,no_run
     /// # use aletheiadb::AletheiaDB;
@@ -366,7 +366,7 @@ impl AletheiaDB {
     ///
     /// Returns all versions in chronological order (oldest first).
     ///
-    /// # Example
+    /// ## Examples
     ///
     /// ```rust,no_run
     /// # use aletheiadb::AletheiaDB;
@@ -391,7 +391,7 @@ impl AletheiaDB {
     ///
     /// Version numbers are 1-indexed (1 = first version, 2 = second version, etc.).
     ///
-    /// # Example
+    /// ## Examples
     ///
     /// ```rust,no_run
     /// # use aletheiadb::AletheiaDB;
@@ -416,7 +416,7 @@ impl AletheiaDB {
     ///
     /// Shows which properties were added, removed, or modified.
     ///
-    /// # Example
+    /// ## Examples
     ///
     /// ```rust,no_run
     /// # use aletheiadb::AletheiaDB;

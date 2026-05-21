@@ -34,7 +34,7 @@ impl AletheiaDB {
     /// - Writing index files fails due to I/O errors
     /// - Index serialization fails
     ///
-    /// # Example
+    /// ## Examples
     ///
     /// ```rust,no_run
     /// # use aletheiadb::AletheiaDB;
@@ -150,7 +150,7 @@ impl AletheiaDB {
     ///
     /// The current LSN from the WAL system.
     ///
-    /// # Example
+    /// ## Examples
     ///
     /// ```rust,no_run
     /// # use aletheiadb::{AletheiaDB, PropertyMap};
@@ -216,7 +216,7 @@ impl AletheiaDB {
     /// Some((search_count, total_candidates, total_results)) if statistics exist,
     /// None otherwise.
     ///
-    /// # Example
+    /// ## Examples
     ///
     /// ```rust,no_run
     /// # use aletheiadb::AletheiaDB;
@@ -259,7 +259,7 @@ impl AletheiaDB {
     /// Statistics are automatically refreshed lazily on first query, so this
     /// method is typically only needed for benchmarking or after bulk imports.
     ///
-    /// # Example
+    /// ## Examples
     ///
     /// ```rust,no_run
     /// # use aletheiadb::{AletheiaDB, PropertyMap};

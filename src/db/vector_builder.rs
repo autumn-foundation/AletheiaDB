@@ -12,7 +12,7 @@ use crate::index::vector::temporal::TemporalVectorConfig;
 /// HNSW configuration and optional temporal indexing. The builder pattern
 /// ensures that required configuration (HNSW) is provided before enabling.
 ///
-/// # Example
+/// ## Examples
 ///
 /// ```rust,no_run
 /// use aletheiadb::AletheiaDB;
@@ -64,7 +64,7 @@ impl<'a> VectorIndexBuilder<'a> {
     ///
     /// * `config` - The HNSW index configuration
     ///
-    /// # Example
+    /// ## Examples
     ///
     /// ```rust,no_run
     /// # use aletheiadb::AletheiaDB;
@@ -92,7 +92,7 @@ impl<'a> VectorIndexBuilder<'a> {
     ///
     /// * `config` - The temporal vector index configuration
     ///
-    /// # Example
+    /// ## Examples
     ///
     /// ```rust,no_run
     /// # use aletheiadb::AletheiaDB;
@@ -129,7 +129,7 @@ impl<'a> VectorIndexBuilder<'a> {
     /// - A vector index already exists for this property
     /// - The temporal index configuration is invalid
     ///
-    /// # Example
+    /// ## Examples
     ///
     /// ```rust,no_run
     /// # use aletheiadb::AletheiaDB;

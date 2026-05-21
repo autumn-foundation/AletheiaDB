@@ -18,7 +18,7 @@ impl AletheiaDB {
     ///
     /// * `query_string` - The AQL query string to execute
     ///
-    /// # Example
+    /// ## Examples
     ///
     /// ```rust,no_run
     /// # use aletheiadb::AletheiaDB;
@@ -42,7 +42,7 @@ impl AletheiaDB {
     /// This is the entry point for the fluent query API that enables
     /// combining graph traversal, vector search, and temporal queries.
     ///
-    /// # Example
+    /// ## Examples
     ///
     /// ```rust,no_run
     /// # use aletheiadb::AletheiaDB;
@@ -87,7 +87,7 @@ impl AletheiaDB {
     ///
     /// * `query` - The query to execute
     ///
-    /// # Example
+    /// ## Examples
     ///
     /// ```rust,no_run
     /// # use aletheiadb::AletheiaDB;
@@ -142,7 +142,7 @@ impl AletheiaDB {
     /// * `embedding` - Target embedding to rank by similarity
     /// * `k` - Maximum number of results to return
     ///
-    /// # Example
+    /// ## Examples
     ///
     /// ```rust,no_run
     /// # use aletheiadb::AletheiaDB;
@@ -198,7 +198,7 @@ impl AletheiaDB {
     /// * `valid_time` - Valid time for the query
     /// * `transaction_time` - Transaction time for the query
     ///
-    /// # Example
+    /// ## Examples
     ///
     /// ```rust,no_run
     /// # use aletheiadb::AletheiaDB;
@@ -251,7 +251,7 @@ impl AletheiaDB {
     /// * `valid_time` - Valid time for the query
     /// * `transaction_time` - Transaction time for the query
     ///
-    /// # Example
+    /// ## Examples
     ///
     /// ```rust,no_run
     /// # use aletheiadb::AletheiaDB;
@@ -317,7 +317,7 @@ impl AletheiaDB {
     ///
     /// * `query_string` - A Cypher query string (e.g., `MATCH (n:Person) RETURN n`)
     ///
-    /// # Example
+    /// ## Examples
     ///
     /// ```rust,no_run
     /// # use aletheiadb::AletheiaDB;
@@ -346,7 +346,7 @@ impl AletheiaDB {
     /// * `query_string` - A Cypher query string with `$param` references
     /// * `params` - A map of parameter names to values
     ///
-    /// # Example
+    /// ## Examples
     ///
     /// ```rust,no_run
     /// # use aletheiadb::AletheiaDB;

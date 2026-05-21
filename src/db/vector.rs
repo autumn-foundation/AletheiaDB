@@ -21,7 +21,7 @@ impl AletheiaDB {
     /// * `property_name` - Name of the property containing vectors
     /// * `config` - HNSW index configuration (dimensions, metric, etc.)
     ///
-    /// # Example
+    /// ## Examples
     ///
     /// ```ignore
     /// use aletheiadb::index::vector::{HnswConfig, DistanceMetric};
@@ -65,7 +65,7 @@ impl AletheiaDB {
     /// * `property_name` - Name of the property containing vectors
     /// * `config` - Temporal vector index configuration
     ///
-    /// # Example
+    /// ## Examples
     ///
     /// ```ignore
     /// use aletheiadb::index::vector::temporal::{TemporalVectorConfig, SnapshotStrategy};
@@ -179,7 +179,7 @@ impl AletheiaDB {
     ///
     /// Returns a vector of property names that have temporal vector indexing configured.
     ///
-    /// # Example
+    /// ## Examples
     ///
     /// ```ignore
     /// let db = AletheiaDB::new();
@@ -205,7 +205,7 @@ impl AletheiaDB {
     ///
     /// * `property_name` - The property name that will contain vector embeddings
     ///
-    /// # Example
+    /// ## Examples
     ///
     /// ```ignore
     /// use aletheiadb::index::vector::{HnswConfig, DistanceMetric};
@@ -231,7 +231,7 @@ impl AletheiaDB {
     ///
     /// * `property_name` - The property name to check
     ///
-    /// # Example
+    /// ## Examples
     ///
     /// ```ignore
     /// db.vector_index("embedding")
@@ -250,7 +250,7 @@ impl AletheiaDB {
     /// Returns information about each configured vector index including
     /// the property name, dimensions, and distance metric.
     ///
-    /// # Example
+    /// ## Examples
     ///
     /// ```ignore
     /// db.vector_index("title_embedding")
@@ -280,7 +280,7 @@ impl AletheiaDB {
     /// * `query_node_id` - The node to find similar nodes for
     /// * `k` - Maximum number of results to return
     ///
-    /// # Example
+    /// ## Examples
     ///
     /// ```ignore
     /// // Search title embeddings for similar nodes
@@ -322,7 +322,7 @@ impl AletheiaDB {
     /// * `embedding` - The query embedding vector
     /// * `k` - Maximum number of results to return
     ///
-    /// # Example
+    /// ## Examples
     ///
     /// ```ignore
     /// // Search with external embedding
@@ -360,7 +360,7 @@ impl AletheiaDB {
     /// * `query_node_id` - The node to find similar nodes for
     /// * `k` - Maximum number of results to return
     ///
-    /// # Example
+    /// ## Examples
     ///
     /// ```ignore
     /// // Find the 5 most similar documents to a given document
@@ -396,7 +396,7 @@ impl AletheiaDB {
     /// * `label` - Only return nodes with this label
     /// * `k` - Maximum number of results to return
     ///
-    /// # Example
+    /// ## Examples
     ///
     /// ```ignore
     /// // Find similar Person nodes only
@@ -438,7 +438,7 @@ impl AletheiaDB {
     /// - Vector index is not enabled
     /// - Embedding dimensions don't match the indexed property
     ///
-    /// # Example
+    /// ## Examples
     ///
     /// ```ignore
     /// // Search with an embedding from external source (e.g., user query)
@@ -484,7 +484,7 @@ impl AletheiaDB {
     /// - Vector index is not enabled
     /// - Embedding dimensions don't match the indexed property
     ///
-    /// # Example
+    /// ## Examples
     ///
     /// ```ignore
     /// // Find similar documents only
@@ -563,7 +563,7 @@ impl AletheiaDB {
     /// - `Error::Vector(VectorError::*)` if the query embedding is invalid
     /// - `Error::Temporal(*)` if no snapshot exists at the given timestamp
     ///
-    /// # Example
+    /// ## Examples
     ///
     /// ```rust,no_run
     /// # use aletheiadb::AletheiaDB;
@@ -612,7 +612,7 @@ impl AletheiaDB {
     /// - Query embedding dimensions don't match
     /// - No snapshot exists at the given timestamp
     ///
-    /// # Example
+    /// ## Examples
     ///
     /// ```rust,no_run
     /// # use aletheiadb::AletheiaDB;
@@ -673,7 +673,7 @@ impl AletheiaDB {
     /// - The property name doesn't match the indexed property
     /// - Reference embedding dimensions don't match
     ///
-    /// # Example
+    /// ## Examples
     ///
     /// ```rust,no_run
     /// # use aletheiadb::AletheiaDB;
@@ -737,7 +737,7 @@ impl AletheiaDB {
     /// - Temporal vector index is not enabled
     /// - The property name doesn't match the indexed property
     ///
-    /// # Example
+    /// ## Examples
     ///
     /// ```rust,no_run
     /// # use aletheiadb::AletheiaDB;
@@ -796,7 +796,7 @@ impl AletheiaDB {
     /// - The property name doesn't match the indexed property
     /// - Threshold is NaN or infinite
     ///
-    /// # Example
+    /// ## Examples
     ///
     /// ```rust,no_run
     /// # use aletheiadb::AletheiaDB;
