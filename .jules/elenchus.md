@@ -346,3 +346,10 @@
 **Finding:** The `LimitPushdown` tests originally missed several behavioral edge cases and logic checks, particularly regarding the propagation limits in BinaryOp combinations (`||`), updating limit values correctly against child bounds, and setting vector rank limits.
 **Evidence:** `cargo mutants` caught mutants in `LimitPushdown::push_down` specifically targeting the changed boolean condition logic and bounds assignment.
 **Recommendation:** Added `sentry_tests` to `LimitPushdown` that explicitly trigger tests enforcing the boolean change propagation, verifying that updated properties reflect correct nested limits, and vector bounds assignment. Tests now prevent `||` to `&&` mutations and correct top-k modifications.
+
+**[LimitPushdown Mutants]**
+**Module:** `src/query/planner/rules/limit_pushdown.rs`
+**Severity:** 🔴 Critical
+**Finding:** Multiple mutants survived in boolean change propagation (e.g., `changed || effective_limit != *n` mutated to `&&` or `changed`) and early return optimizations (e.g., returning `Ok((Default::default(), true/false))` for leaf nodes). This indicated that tests were not verifying if properties correctly reflected nested limit bounds or handled false-positive structural changes.
+**Evidence:** Running `cargo mutants -f src/query/planner/rules/limit_pushdown.rs` yielded several surviving mutations where logical `||` was changed to `&&` in `BinaryOp`, `VectorRank`, and consecutive `Limit` node pushdowns. Additionally, the `Scan` and `Empty` nodes had no tests verifying they were correctly skipped without being overwritten by default struct instantiations.
+**Recommendation:** Wrote comprehensive unit tests and strengthened existing ones across the `LimitPushdown` rule to properly assert logical equality, verify boundary comparisons matching top-k modifications, ensure recursive logic appropriately bubbles up structural changes, and check that leaf nodes do not incorrectly undergo empty conversions.

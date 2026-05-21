@@ -494,6 +494,32 @@ mod sentry_tests {
             Some(expected_plan),
             "Partial optimization in left branch should propagate with exact limit structure"
         );
+
+        // Also test right branch changed
+        let right2 = LogicalOp::unary(
+            UnaryOp::Limit(10),
+            LogicalOp::unary(
+                UnaryOp::Limit(20),
+                LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(1).unwrap()])),
+            ),
+        );
+        let left2 = LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(2).unwrap()]));
+        let plan2 = LogicalPlan::new(LogicalOp::binary(BinaryOp::Union, left2, right2));
+
+        let result2 = rule.apply(&plan2, &stats).unwrap();
+        assert!(
+            result2.is_some(),
+            "Should propagate if right branch changed"
+        );
+        let expected_plan2 = LogicalPlan::new(LogicalOp::binary(
+            BinaryOp::Union,
+            LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(2).unwrap()])),
+            LogicalOp::unary(
+                UnaryOp::Limit(10),
+                LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(1).unwrap()])),
+            ),
+        ));
+        assert_eq!(result2, Some(expected_plan2));
     }
 
     #[test]
@@ -540,6 +566,26 @@ mod sentry_tests {
             assert_eq!(top_k, Some(5));
         } else {
             panic!("Expected VectorRank");
+        }
+
+        // Vector rank where top_k does not change
+        let op2 = LogicalOp::unary(
+            UnaryOp::VectorRank {
+                embedding: vec![0.1f32].into(),
+                top_k: Some(5),
+                property_key: None,
+            },
+            LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(1).unwrap()])),
+        );
+        let (new_op2, changed2) = rule.push_down(&op2, Some(5)).unwrap();
+        assert!(!changed2, "Should not change if top_k remains 5");
+        if let LogicalOp::Unary {
+            op: UnaryOp::VectorRank { top_k: Some(5), .. },
+            ..
+        } = new_op2
+        {
+        } else {
+            panic!("Expected VectorRank(5)");
         }
     }
 }
