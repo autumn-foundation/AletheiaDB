@@ -107,3 +107,5 @@ pr_description.md
 
 # Re-include Python SDK sources (overrides "*.py" above)
 !python/**/*.py
+temp_readme_run/
+test_project/

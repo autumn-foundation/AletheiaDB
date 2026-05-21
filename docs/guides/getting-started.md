@@ -122,6 +122,8 @@ let (carol_id, dave_id) = db.write(|tx| -> Result<(NodeId, NodeId)> {
     tx.create_edge(carol, dave, "WORKS_WITH", properties! {})?;
     Ok((carol, dave))
 })?;
+
+println!("Committed nodes: {:?}, {:?}", carol_id, dave_id);
 ```
 
 ---
@@ -166,6 +168,7 @@ AletheiaDB stores dense vector embeddings as node properties and indexes them
 with HNSW for fast k-NN search. Enable the index before inserting nodes.
 
 ```rust
+use aletheiadb::prelude::*;
 use aletheiadb::{AletheiaDB, HnswConfig, DistanceMetric};
 
 let db = AletheiaDB::new()?;
@@ -183,10 +186,12 @@ let doc1 = db.create_node("Document", properties! {
     "embedding" => &v1[..],
 })?;
 
-let _doc2 = db.create_node("Document", properties! {
+let doc2 = db.create_node("Document", properties! {
     "title"     => "Advanced Rust",
     "embedding" => &v2[..],
 })?;
+
+println!("Created documents: {:?}, {:?}", doc1, doc2);
 
 // Find the 10 nodes most similar to doc1
 // (doc1 itself is excluded from results)

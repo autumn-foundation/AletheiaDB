@@ -35,6 +35,7 @@ fn main() -> Result<()> {
     let alice = db.create_node("Person", properties! { "name" => "Alice" })?;
     let bob   = db.create_node("Person", properties! { "name" => "Bob"   })?;
     db.create_edge(alice, bob, "KNOWS", properties! {})?;
+    println!("Created nodes: {:?}, {:?}", alice, bob);
 
     // Snapshot the time before an update
     let before = aletheiadb::time::now();
@@ -45,6 +46,7 @@ fn main() -> Result<()> {
     // Time-travel: what did Alice look like before the update?
     let past = db.get_node_at_time(alice, before, before)?;
     assert!(past.properties.get("role").is_none());
+    println!("Alice's past state: {:?}", past.properties);
 
     Ok(())
 }
@@ -72,12 +74,16 @@ fn main() -> Result<()> {
     let valid_time = aletheiadb::time::now();
     let tx_time = aletheiadb::time::now();
 
-    let _results = db.query()
+    let results = db.query()
         .as_of(valid_time, tx_time)              // temporal: point-in-time snapshot
         .start(alice)                            // graph: starting node
         .traverse("KNOWS")                       // graph: follow edges
         .rank_by_similarity(&query_embedding, 10) // vector: re-rank by similarity
         .execute(&db)?;
+
+    for row in results {
+        println!("Result: {:?}", row?.entity);
+    }
 
     Ok(())
 }
