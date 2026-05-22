@@ -11,6 +11,7 @@ pub mod aura;
 pub mod chronos;
 pub mod echo;
 pub mod kairos;
+pub mod metamorphosis;
 pub mod mnemosyne;
 pub mod sherlock;
 pub mod temporal_diff;
