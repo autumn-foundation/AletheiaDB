@@ -1315,11 +1315,16 @@ impl MockVectorNodeClient {
 
     /// Make the next operation fail.
     pub fn fail_next(&self, error: impl Into<String>) {
-        *self.fail_next.write().unwrap() = Some(error.into());
+        let mut fail_guard = self.fail_next.write().unwrap_or_else(|e| e.into_inner());
+        *fail_guard = Some(error.into());
     }
 
     fn check_fail(&self) -> Result<()> {
-        if let Some(err) = self.fail_next.write().unwrap().take() {
+        let mut fail_guard = self
+            .fail_next
+            .write()
+            .map_err(|_| Error::Vector(VectorError::IndexError("Lock poisoned".into())))?;
+        if let Some(err) = fail_guard.take() {
             return Err(Error::Vector(VectorError::IndexError(err)));
         }
         Ok(())
@@ -1381,7 +1386,11 @@ impl VectorNodeClient for MockVectorNodeClient {
             }));
         }
 
-        self.vectors.write().unwrap().insert(id, vector.to_vec());
+        let mut vectors_guard = self
+            .vectors
+            .write()
+            .map_err(|_| Error::Vector(VectorError::IndexError("Lock poisoned".into())))?;
+        vectors_guard.insert(id, vector.to_vec());
         Ok(())
     }
 
@@ -1395,7 +1404,11 @@ impl VectorNodeClient for MockVectorNodeClient {
             ))));
         }
 
-        self.vectors.write().unwrap().remove(&id);
+        let mut vectors_guard = self
+            .vectors
+            .write()
+            .map_err(|_| Error::Vector(VectorError::IndexError("Lock poisoned".into())))?;
+        vectors_guard.remove(&id);
         Ok(())
     }
 
@@ -1409,7 +1422,10 @@ impl VectorNodeClient for MockVectorNodeClient {
             ))));
         }
 
-        let vectors = self.vectors.read().unwrap();
+        let vectors = self
+            .vectors
+            .read()
+            .map_err(|_| Error::Vector(VectorError::IndexError("Lock poisoned".into())))?;
         let mut results: Vec<(NodeId, f32)> = vectors
             .iter()
             .map(|(id, vec)| (*id, self.compute_similarity(query, vec)))
@@ -1431,7 +1447,11 @@ impl VectorNodeClient for MockVectorNodeClient {
             ))));
         }
 
-        Ok(self.vectors.read().unwrap().len())
+        Ok(self
+            .vectors
+            .read()
+            .map_err(|_| Error::Vector(VectorError::IndexError("Lock poisoned".into())))?
+            .len())
     }
 
     fn health_check(&self) -> Result<()> {
@@ -2547,5 +2567,55 @@ mod tests {
         assert!(!index.needs_rebalancing(RECOMMENDED_IMBALANCE_THRESHOLD));
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests_poisoning {
+    use super::*;
+
+    #[test]
+    fn test_mock_vector_node_client_poison_graceful_degradation() {
+        let client = MockVectorNodeClient::new(0, 128, DistanceMetric::Cosine);
+
+        // Intentionally poison the vectors lock
+        let _ = std::panic::catch_unwind(|| {
+            let _guard = client.vectors.write().unwrap();
+            panic!("Poisoning the vectors lock");
+        });
+
+        // Ensure methods mapped correctly without panicking
+        let id = NodeId::new(1).unwrap();
+        let vec = vec![0.1f32; 128];
+        let add_res = client.add(id, &vec);
+        assert!(
+            matches!(add_res, Err(Error::Vector(VectorError::IndexError(msg))) if msg == "Lock poisoned")
+        );
+
+        let remove_res = client.remove(id);
+        assert!(
+            matches!(remove_res, Err(Error::Vector(VectorError::IndexError(msg))) if msg == "Lock poisoned")
+        );
+
+        let search_res = client.search(&vec, 10);
+        assert!(
+            matches!(search_res, Err(Error::Vector(VectorError::IndexError(msg))) if msg == "Lock poisoned")
+        );
+
+        let len_res = client.len();
+        assert!(
+            matches!(len_res, Err(Error::Vector(VectorError::IndexError(msg))) if msg == "Lock poisoned")
+        );
+
+        // Intentionally poison the fail_next lock
+        let _ = std::panic::catch_unwind(|| {
+            let _guard = client.fail_next.write().unwrap();
+            panic!("Poisoning the fail_next lock");
+        });
+
+        let check_res = client.check_fail();
+        assert!(
+            matches!(check_res, Err(Error::Vector(VectorError::IndexError(msg))) if msg == "Lock poisoned")
+        );
     }
 }
