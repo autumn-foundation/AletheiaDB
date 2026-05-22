@@ -951,7 +951,7 @@ impl ShardCoordinator {
             let (tx_id, participants, commit_timestamp) =
                 (d.tx_id, d.participants, d.commit_timestamp);
             // Create a transaction in committing state for recovery
-            let mut tx = DistributedTransaction::new(tx_id, participants, self.transaction_timeout);
+            let mut tx = DistributedTransaction::new(tx_id, participants.clone(), self.transaction_timeout);
             tx.begin_prepare().ok();
             for shard_id in tx.participant_shards() {
                 tx.record_prepare_success(shard_id);
@@ -1008,6 +1008,12 @@ impl ShardCoordinator {
                             // Remove from active transactions to prevent unbounded growth
                             if let Ok(mut txns) = self.active_transactions.write() {
                                 txns.remove(&tx_id);
+                            }
+
+                            // We must log an abort for dead-lettered transactions
+                            // so they are not continuously retried on startup
+                            if let Ok(log) = self.commit_log.read() {
+                                let _ = log.log_abort(tx_id, participants.clone());
                             }
                         }
                     }

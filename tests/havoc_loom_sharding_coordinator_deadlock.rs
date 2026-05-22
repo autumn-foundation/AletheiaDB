@@ -5,12 +5,14 @@ use loom::thread;
 
 struct ShardCoordinatorModel {
     connections: RwLock<()>,
+    shard_states: RwLock<()>,
 }
 
 impl ShardCoordinatorModel {
     fn new() -> Arc<Self> {
         Arc::new(Self {
             connections: RwLock::new(()),
+            shard_states: RwLock::new(()),
         })
     }
 
@@ -28,8 +30,9 @@ impl ShardCoordinatorModel {
     }
 
     fn mark_shard_unavailable(&self) {
-        // This will no longer deadlock because the read lock was dropped
-        let _c = self.connections.write().unwrap();
+        // This simulates the actual ShardCoordinator which locks shard_states
+        // instead of connections, avoiding the self-deadlock.
+        let _s = self.shard_states.write().unwrap();
     }
 }
 
