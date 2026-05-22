@@ -51,6 +51,20 @@ impl Error for DenseEmbeddingError {}
 /// Converts upstream embedding results into dense vectors lazily.
 ///
 /// When `limit` is provided, at most that many results are converted.
+///
+/// # Examples
+///
+/// ```rust
+/// use aletheiadb::embeddings::{to_dense_iter, EmbeddingResult};
+///
+/// let results = vec![
+///     EmbeddingResult::DenseVector(vec![0.1, 0.2]),
+///     EmbeddingResult::DenseVector(vec![0.3, 0.4]),
+/// ];
+///
+/// let dense: Vec<_> = to_dense_iter(results, None).collect::<Result<_, _>>().unwrap();
+/// assert_eq!(dense, vec![vec![0.1, 0.2], vec![0.3, 0.4]]);
+/// ```
 pub fn to_dense_iter<I>(
     results: I,
     limit: Option<usize>,
@@ -68,6 +82,23 @@ where
 /// chunk text and metadata.
 ///
 /// When `limit` is provided, at most that many chunks are converted.
+///
+/// # Examples
+///
+/// ```rust
+/// use std::collections::HashMap;
+/// use aletheiadb::embeddings::{embed_data_to_dense_iter, EmbedData, EmbeddingResult};
+///
+/// let data = vec![EmbedData {
+///     text: Some("hello".to_string()),
+///     metadata: None,
+///     embedding: EmbeddingResult::DenseVector(vec![0.5, 0.6]),
+/// }];
+///
+/// let dense_data: Vec<_> = embed_data_to_dense_iter(data, None).collect::<Result<_, _>>().unwrap();
+/// assert_eq!(dense_data[0].embedding, vec![0.5, 0.6]);
+/// assert_eq!(dense_data[0].text.as_deref(), Some("hello"));
+/// ```
 pub fn embed_data_to_dense_iter<I>(
     data: I,
     limit: Option<usize>,
