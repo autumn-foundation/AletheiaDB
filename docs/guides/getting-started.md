@@ -166,33 +166,38 @@ AletheiaDB stores dense vector embeddings as node properties and indexes them
 with HNSW for fast k-NN search. Enable the index before inserting nodes.
 
 ```rust
-use aletheiadb::{AletheiaDB, HnswConfig, DistanceMetric};
+use aletheiadb::prelude::*;
+use aletheiadb::{HnswConfig, DistanceMetric};
 
-let db = AletheiaDB::new()?;
+fn main() -> Result<()> {
+    let db = AletheiaDB::new()?;
 
-// Enable HNSW indexing on the "embedding" property
-db.vector_index("embedding")
-    .hnsw(HnswConfig::new(384, DistanceMetric::Cosine))
-    .enable()?;
+    // Enable HNSW indexing on the "embedding" property
+    db.vector_index("embedding")
+        .hnsw(HnswConfig::new(384, DistanceMetric::Cosine))
+        .enable()?;
 
-let v1 = vec![0.1f32; 384];
-let v2 = vec![0.9f32; 384]; // very different from v1
+    let v1 = vec![0.1f32; 384];
+    let v2 = vec![0.9f32; 384]; // very different from v1
 
-let doc1 = db.create_node("Document", properties! {
-    "title"     => "Intro to Rust",
-    "embedding" => &v1[..],
-})?;
+    let doc1 = db.create_node("Document", properties! {
+        "title"     => "Intro to Rust",
+        "embedding" => &v1[..],
+    })?;
 
-let _doc2 = db.create_node("Document", properties! {
-    "title"     => "Advanced Rust",
-    "embedding" => &v2[..],
-})?;
+    let _doc2 = db.create_node("Document", properties! {
+        "title"     => "Advanced Rust",
+        "embedding" => &v2[..],
+    })?;
 
-// Find the 10 nodes most similar to doc1
-// (doc1 itself is excluded from results)
-let similar = db.find_similar(doc1, 10)?;
-for (node_id, score) in similar {
-    println!("Node {:?} similarity: {:.3}", node_id, score);
+    // Find the 10 nodes most similar to doc1
+    // (doc1 itself is excluded from results)
+    let similar = db.find_similar(doc1, 10)?;
+    for (node_id, score) in similar {
+        println!("Node {:?} similarity: {:.3}", node_id, score);
+    }
+
+    Ok(())
 }
 ```
 
@@ -203,23 +208,31 @@ for (node_id, score) in similar {
 All three dimensions can be combined in a single query:
 
 ```rust
+use aletheiadb::prelude::*;
 use aletheiadb::time;
 
-let query_embedding = vec![0.1f32; 384];
-let t = time::now();
+fn main() -> Result<()> {
+    let db = AletheiaDB::new()?;
+    let alice_id = db.create_node("Person", properties! { "name" => "Alice" })?;
 
-// "Who does Alice know (graph), ranked by semantic similarity to my embedding
-//  (vector), as of a specific point in time (temporal)?"
-let results = db.query()
-    .as_of(t, t)                                      // temporal
-    .start(alice_id)                                  // graph: start node
-    .traverse("KNOWS")                                // graph: hop
-    .rank_by_similarity(&query_embedding, 10)         // vector: re-rank
-    .execute(&db)?;
+    let query_embedding = vec![0.1f32; 384];
+    let t = time::now();
 
-for row in results {
-    let row = row?;
-    println!("Found {:?} with score {:?}", row.entity, row.score);
+    // "Who does Alice know (graph), ranked by semantic similarity to my embedding
+    //  (vector), as of a specific point in time (temporal)?"
+    let results = db.query()
+        .as_of(t, t)                                      // temporal
+        .start(alice_id)                                  // graph: start node
+        .traverse("KNOWS")                                // graph: hop
+        .rank_by_similarity(&query_embedding, 10)         // vector: re-rank
+        .execute(&db)?;
+
+    for row in results {
+        let row = row?;
+        println!("Found {:?} with score {:?}", row.entity, row.score);
+    }
+
+    Ok(())
 }
 ```
 
