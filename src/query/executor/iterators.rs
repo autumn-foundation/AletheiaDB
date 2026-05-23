@@ -822,72 +822,64 @@ impl TraversalIterator {
 
         match self.direction {
             Direction::Outgoing => {
-                // Use iterator methods to avoid intermediate Vec allocation (Issue #187)
                 if let Some(ref label) = self.label {
-                    self.current
-                        .get_outgoing_edges_with_label_iter(node_id, label)
-                        .filter_map(|edge_id| {
-                            if !self.edge_visible_at_time(edge_id, &historical_guard) {
-                                return None;
+                    let iter = self
+                        .current
+                        .get_outgoing_edges_with_label_iter(node_id, label);
+                    let mut neighbors = Vec::with_capacity(iter.size_hint().0);
+                    for edge_id in iter {
+                        if self.edge_visible_at_time(edge_id, &historical_guard) {
+                            let target = self.current.get_edge_target(edge_id);
+                            if let Ok(t) = target {
+                                neighbors.push((t, edge_id));
                             }
-                            // Zero-copy: only get target NodeId, not full Edge (Issue #190)
-                            self.current
-                                .get_edge_target(edge_id)
-                                .ok()
-                                .map(|target| (target, edge_id))
-                        })
-                        .collect()
+                        }
+                    }
+                    neighbors
                 } else {
-                    self.current
-                        .get_outgoing_edges_iter(node_id)
-                        .filter_map(|edge_id| {
-                            if !self.edge_visible_at_time(edge_id, &historical_guard) {
-                                return None;
+                    let iter = self.current.get_outgoing_edges_iter(node_id);
+                    let mut neighbors = Vec::with_capacity(iter.size_hint().0);
+                    for edge_id in iter {
+                        if self.edge_visible_at_time(edge_id, &historical_guard) {
+                            let target = self.current.get_edge_target(edge_id);
+                            if let Ok(t) = target {
+                                neighbors.push((t, edge_id));
                             }
-                            // Zero-copy: only get target NodeId, not full Edge (Issue #190)
-                            self.current
-                                .get_edge_target(edge_id)
-                                .ok()
-                                .map(|target| (target, edge_id))
-                        })
-                        .collect()
+                        }
+                    }
+                    neighbors
                 }
             }
             Direction::Incoming => {
-                // Use iterator methods to avoid intermediate Vec allocation (Issue #187)
                 if let Some(ref label) = self.label {
-                    self.current
-                        .get_incoming_edges_with_label_iter(node_id, label)
-                        .filter_map(|edge_id| {
-                            if !self.edge_visible_at_time(edge_id, &historical_guard) {
-                                return None;
+                    let iter = self
+                        .current
+                        .get_incoming_edges_with_label_iter(node_id, label);
+                    let mut neighbors = Vec::with_capacity(iter.size_hint().0);
+                    for edge_id in iter {
+                        if self.edge_visible_at_time(edge_id, &historical_guard) {
+                            let source = self.current.get_edge_source(edge_id);
+                            if let Ok(s) = source {
+                                neighbors.push((s, edge_id));
                             }
-                            // Zero-copy: only get source NodeId, not full Edge (Issue #190)
-                            self.current
-                                .get_edge_source(edge_id)
-                                .ok()
-                                .map(|source| (source, edge_id))
-                        })
-                        .collect()
+                        }
+                    }
+                    neighbors
                 } else {
-                    self.current
-                        .get_incoming_edges_iter(node_id)
-                        .filter_map(|edge_id| {
-                            if !self.edge_visible_at_time(edge_id, &historical_guard) {
-                                return None;
+                    let iter = self.current.get_incoming_edges_iter(node_id);
+                    let mut neighbors = Vec::with_capacity(iter.size_hint().0);
+                    for edge_id in iter {
+                        if self.edge_visible_at_time(edge_id, &historical_guard) {
+                            let source = self.current.get_edge_source(edge_id);
+                            if let Ok(s) = source {
+                                neighbors.push((s, edge_id));
                             }
-                            // Zero-copy: only get source NodeId, not full Edge (Issue #190)
-                            self.current
-                                .get_edge_source(edge_id)
-                                .ok()
-                                .map(|source| (source, edge_id))
-                        })
-                        .collect()
+                        }
+                    }
+                    neighbors
                 }
             }
             Direction::Both => {
-                // Use iterator methods to avoid intermediate Vec allocation (Issue #187)
-                // Helper closure to process edges and add to neighbors
                 // Zero-copy: only get target NodeId, not full Edge (Issue #190)
                 let process_outgoing =
                     |edge_id, neighbors: &mut Vec<(NodeId, crate::core::EdgeId)>| {
