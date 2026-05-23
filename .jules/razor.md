@@ -12,3 +12,8 @@
 **Bloat:** `StorageSnapshot` and `FieldHolder` traits.
 **Cut:** Deleted single-implementation traits `StorageSnapshot` (implemented only by `CurrentStorageSnapshot`) and `FieldHolder` (implemented only by `Event`, unused except in tests). Moved methods directly to structs.
 **Saved:** ~50 lines of boilerplate + cognitive load of unnecessary abstraction layers.
+
+## [Reduction]
+**Bloat:** `VectorNodeClient`, `Resonator`, and `GraphView` (Single-implementation traits that created unnecessary generic layers and dynamic dispatch).
+**Cut:** Deleted the traits and replaced them with their single concrete implementations (`MockVectorNodeClient` renamed to `VectorNodeClient`, `ActivityDensityResonator` renamed to `Resonator`, and `GraphView` replaced with `AletheiaDB`). Removed the generic `<C: VectorNodeClient>` from `DistributedVectorIndex` and `<G: GraphView>` from semantic query algorithms.
+**Saved:** ~100 lines of boilerplate (trait definitions, generic parameters, impl wrappers) + reduced cognitive load of chasing down trait implementations that only exist in one place.

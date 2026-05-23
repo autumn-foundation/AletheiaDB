@@ -81,12 +81,6 @@ impl TemporalFingerprint {
     }
 }
 
-/// Trait for generating temporal fingerprints from entity history.
-pub trait Resonator {
-    /// Generate a fingerprint from the given history.
-    fn resonate(&self, history: &EntityHistory) -> TemporalFingerprint;
-}
-
 /// A resonator that measures activity density over a fixed time window.
 ///
 /// # The Details
@@ -98,9 +92,9 @@ pub trait Resonator {
 /// ```
 /// # #[cfg(feature = "semantic-temporal")]
 /// # fn main() {
-/// use aletheiadb::experimental::echo::{ActivityDensityResonator, Resonator};
+/// use aletheiadb::experimental::echo::{Resonator};
 ///
-/// let resonator = ActivityDensityResonator {
+/// let resonator = Resonator {
 ///     window_size_us: 3600 * 1_000_000, // 1 hour
 ///     num_bins: 60,                     // 1 minute resolution
 /// };
@@ -108,14 +102,14 @@ pub trait Resonator {
 /// # #[cfg(not(feature = "semantic-temporal"))]
 /// # fn main() {}
 /// ```
-pub struct ActivityDensityResonator {
+pub struct Resonator {
     /// Total time window to consider (in microseconds).
     pub window_size_us: i64,
     /// Number of bins to divide the window into.
     pub num_bins: usize,
 }
 
-impl Default for ActivityDensityResonator {
+impl Default for Resonator {
     fn default() -> Self {
         Self {
             window_size_us: 3600 * 1_000_000, // 1 hour
@@ -124,8 +118,9 @@ impl Default for ActivityDensityResonator {
     }
 }
 
-impl Resonator for ActivityDensityResonator {
-    fn resonate(&self, history: &EntityHistory) -> TemporalFingerprint {
+impl Resonator {
+    /// Generate a fingerprint from the given history.
+    pub fn resonate(&self, history: &EntityHistory) -> TemporalFingerprint {
         let mut bins = vec![0.0; self.num_bins];
         let bin_size_us = self.window_size_us / self.num_bins as i64;
 
@@ -202,7 +197,7 @@ impl Resonator for ActivityDensityResonator {
 /// process over time to measure the degradation of content diversity.
 pub struct EchoChamber<'a> {
     db: &'a AletheiaDB,
-    resonator: Box<dyn Resonator>,
+    resonator: Resonator,
 }
 
 #[cfg(not(feature = "semantic-temporal"))]
@@ -251,13 +246,13 @@ impl<'a> EchoChamber<'a> {
     pub fn new(db: &'a AletheiaDB) -> Self {
         Self {
             db,
-            resonator: Box::new(ActivityDensityResonator::default()),
+            resonator: Resonator::default(),
         }
     }
 
     /// Configure the EchoChamber with a custom resonator.
-    pub fn with_resonator<R: Resonator + 'static>(mut self, resonator: R) -> Self {
-        self.resonator = Box::new(resonator);
+    pub fn with_resonator(mut self, resonator: Resonator) -> Self {
+        self.resonator = resonator;
         self
     }
 
@@ -318,7 +313,7 @@ impl<'a> EchoChamber<'a> {
     /// This method panics if the `nova` feature is not enabled.
     #[allow(unused_variables)]
     #[track_caller]
-    pub fn with_resonator<R: Resonator + 'static>(self, resonator: R) -> Self {
+    pub fn with_resonator(self, resonator: Resonator) -> Self {
         panic!(
             "EchoChamber requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
         );
@@ -423,7 +418,7 @@ mod tests {
         let node_c = create_node_with_history(vec![t_minus_20]);
 
         // Configure Resonator: 100s window, 10 bins (10s per bin)
-        let resonator = ActivityDensityResonator {
+        let resonator = Resonator {
             window_size_us: window,
             num_bins: 10,
         };
@@ -481,11 +476,11 @@ mod stub_tests {
         let chamber = EchoChamber {
             _marker: std::marker::PhantomData,
         };
-        // We need a dummy resonator. Since Resonator trait is public but ActivityDensityResonator is only stubbed out...
-        // Actually ActivityDensityResonator is not gated?
-        // Let's check the code above. ActivityDensityResonator struct definition is NOT gated.
+        // We need a dummy resonator. Since Resonator trait is public but Resonator is only stubbed out...
+        // Actually Resonator is not gated?
+        // Let's check the code above. Resonator struct definition is NOT gated.
         // So we can use it.
-        let resonator = ActivityDensityResonator::default();
+        let resonator = Resonator::default();
         let _ = chamber.with_resonator(resonator);
     }
 
