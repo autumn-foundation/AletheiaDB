@@ -2808,9 +2808,15 @@ mod tests {
     fn test_node_scan_iterator_size_hint() {
         let current = Arc::new(CurrentStorage::new());
         // Insert nodes to scan
-        current.create_node("Person", PropertyMapBuilder::new().build()).unwrap();
-        current.create_node("Person", PropertyMapBuilder::new().build()).unwrap();
-        current.create_node("Company", PropertyMapBuilder::new().build()).unwrap();
+        current
+            .create_node("Person", PropertyMapBuilder::new().build())
+            .unwrap();
+        current
+            .create_node("Person", PropertyMapBuilder::new().build())
+            .unwrap();
+        current
+            .create_node("Company", PropertyMapBuilder::new().build())
+            .unwrap();
 
         // 1. Uninitialized
         let iter_uninit = NodeScanIterator::new(None, current.clone());
@@ -2830,7 +2836,8 @@ mod tests {
         assert_eq!(upper, Some(3));
 
         // 3. Initialized with label filter
-        let mut iter_with_label = NodeScanIterator::new(Some("Person".to_string()), current.clone());
+        let mut iter_with_label =
+            NodeScanIterator::new(Some("Person".to_string()), current.clone());
         iter_with_label.initialize();
         let (lower, upper) = iter_with_label.size_hint();
         // Since label filter is present, lower bound is 0
