@@ -212,6 +212,19 @@ impl ResultIterator for NodeScanIterator {
             }
         }
     }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        if let Some(ref iter) = self.node_ids {
+            let (lower, upper) = iter.size_hint();
+            if self.label.is_some() {
+                (0, upper)
+            } else {
+                (lower, upper)
+            }
+        } else {
+            (0, None)
+        }
+    }
 }
 
 /// Iterator for vector search results.
@@ -1201,6 +1214,12 @@ impl ResultIterator for FilterIterator {
             }
         }
     }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let (_, upper) = self.input.size_hint();
+        // Filters only remove items, so upper bound remains valid
+        (0, upper)
+    }
 }
 
 /// Helper struct for maintaining query rows with similarity scores in a heap.
@@ -1598,6 +1617,17 @@ impl ResultIterator for PropertyScanIterator {
                 Err(e) => Some(Err(e)),
             },
             None => None,
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        if let Some(ref iter) = self.node_ids {
+            let (_, upper) = iter.size_hint();
+            // A matching node ID might not exist in current storage if it was deleted concurrently.
+            // Therefore, the lower bound is 0.
+            (0, upper)
+        } else {
+            (0, None)
         }
     }
 }
@@ -2647,6 +2677,19 @@ mod tests {
         assert!(!filter.evaluate(&node));
     }
 
+    #[test]
+    fn test_filter_iterator_size_hint() {
+        let current = Arc::new(CurrentStorage::new());
+        let node_ids = vec![NodeId::new(1).unwrap(), NodeId::new(2).unwrap()];
+        let input = Box::new(NodeLookupIterator::new(node_ids.clone(), current));
+        let predicate = Predicate::eq("name", "Alice");
+
+        let filter = FilterIterator::new(input, predicate);
+        let (lower, upper) = filter.size_hint();
+        assert_eq!(lower, 0);
+        assert_eq!(upper, Some(2));
+    }
+
     // ==================== NodeLookupIterator Tests ====================
 
     #[test]
@@ -2759,6 +2802,73 @@ mod tests {
 
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].entity.node_id(), Some(person));
+    }
+
+    #[test]
+    fn test_node_scan_iterator_size_hint() {
+        let current = Arc::new(CurrentStorage::new());
+        // Insert nodes to scan
+        current.create_node("Person", PropertyMapBuilder::new().build()).unwrap();
+        current.create_node("Person", PropertyMapBuilder::new().build()).unwrap();
+        current.create_node("Company", PropertyMapBuilder::new().build()).unwrap();
+
+        // 1. Uninitialized
+        let iter_uninit = NodeScanIterator::new(None, current.clone());
+        let (lower, upper) = iter_uninit.size_hint();
+        assert_eq!(lower, 0);
+        assert_eq!(upper, None);
+
+        // 2. Initialized without label filter
+        let mut iter_no_label = NodeScanIterator::new(None, current.clone());
+        iter_no_label.initialize();
+        let (lower, upper) = iter_no_label.size_hint();
+        // we have 3 nodes in total created in this test, but CurrentStorage is global-like
+        // Actually, it's a new instance per test. But wait! There's a problem: the tests might run
+        // concurrently and modify the storage? No, each test gets its own Arc<CurrentStorage::new()>
+        // Let's assert on the exactly known number.
+        assert_eq!(lower, 3);
+        assert_eq!(upper, Some(3));
+
+        // 3. Initialized with label filter
+        let mut iter_with_label = NodeScanIterator::new(Some("Person".to_string()), current.clone());
+        iter_with_label.initialize();
+        let (lower, upper) = iter_with_label.size_hint();
+        // Since label filter is present, lower bound is 0
+        // Upper bound is 2 because get_node_ids_by_label returns 2 items
+        assert_eq!(lower, 0);
+        assert_eq!(upper, Some(2));
+    }
+
+    #[test]
+    fn test_property_scan_iterator_size_hint() {
+        let current = Arc::new(CurrentStorage::new());
+        current
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "Alice").build(),
+            )
+            .unwrap();
+        current
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "Alice").build(),
+            )
+            .unwrap();
+
+        let mut iter = PropertyScanIterator::new(
+            "Person".to_string(),
+            "name".to_string(),
+            &PredicateValue::String("Alice".to_string()),
+            current.clone(),
+        );
+
+        // Before init
+        assert_eq!(iter.size_hint(), (0, None));
+
+        iter.initialize();
+        let (lower, upper) = iter.size_hint();
+        assert_eq!(lower, 0);
+        assert_eq!(upper, Some(2));
     }
 
     #[test]
