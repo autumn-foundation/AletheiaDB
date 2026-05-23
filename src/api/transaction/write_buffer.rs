@@ -22,6 +22,26 @@ type FastHashMap<K, V> = HashMap<K, V, BuildHasherDefault<IdentityHasher>>;
 /// but not `transaction_time` (which is only known at commit time). This enables
 /// true bi-temporal semantics where valid_time can be backdated independently
 /// of when the transaction commits.
+///
+/// # Examples
+///
+/// ```rust
+/// use aletheiadb::api::transaction::BufferedWrite;
+/// use aletheiadb::core::id::{NodeId, VersionId};
+/// use aletheiadb::core::property::PropertyMapBuilder;
+/// use aletheiadb::core::temporal::Timestamp;
+/// use aletheiadb::core::interning::GLOBAL_INTERNER;
+///
+/// let write = BufferedWrite::CreateNode {
+///     node_id: NodeId::new(1).unwrap(),
+///     version_id: VersionId::new(1).unwrap(),
+///     label: GLOBAL_INTERNER.intern("Person").unwrap(),
+///     properties: PropertyMapBuilder::new().build(),
+///     valid_from: Timestamp::from(100),
+/// };
+///
+/// assert!(write.is_node_operation());
+/// ```
 #[derive(Debug, Clone)]
 pub enum BufferedWrite {
     /// Create a new node
@@ -165,6 +185,30 @@ pub const DEFAULT_MAX_OPERATIONS: usize = 50_000;
 ///
 /// Buffers all write operations in a transaction until commit time,
 /// enabling atomicity and validation before applying changes.
+///
+/// # Examples
+///
+/// ```rust
+/// use aletheiadb::api::transaction::{WriteBuffer, BufferedWrite};
+/// use aletheiadb::core::id::{NodeId, VersionId};
+/// use aletheiadb::core::property::PropertyMapBuilder;
+/// use aletheiadb::core::temporal::Timestamp;
+/// use aletheiadb::core::interning::GLOBAL_INTERNER;
+///
+/// let mut buffer = WriteBuffer::new();
+///
+/// let write = BufferedWrite::CreateNode {
+///     node_id: NodeId::new(1).unwrap(),
+///     version_id: VersionId::new(1).unwrap(),
+///     label: GLOBAL_INTERNER.intern("Person").unwrap(),
+///     properties: PropertyMapBuilder::new().build(),
+///     valid_from: Timestamp::from(100),
+/// };
+///
+/// buffer.add(write).unwrap();
+/// assert_eq!(buffer.len(), 1);
+/// assert!(buffer.has_modified_node(NodeId::new(1).unwrap()));
+/// ```
 pub struct WriteBuffer {
     /// Buffered operations in order
     operations: Vec<BufferedWrite>,

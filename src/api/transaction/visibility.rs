@@ -21,6 +21,29 @@ use std::sync::{Arc, Mutex, PoisonError};
 /// overhead when capturing snapshots. With N concurrent transactions, cloning
 /// a HashSet containing N elements on every transaction creation was creating
 /// quadratic scaling. Arc allows cheap snapshot captures (just Arc clone).
+///
+/// # Examples
+///
+/// ```rust
+/// use aletheiadb::api::transaction::{TransactionSnapshot, TxId};
+/// use aletheiadb::core::temporal::Timestamp;
+/// use std::collections::HashSet;
+/// use std::sync::Arc;
+///
+/// let mut active = HashSet::new();
+/// active.insert(TxId::new(42));
+///
+/// let snapshot = TransactionSnapshot {
+///     snapshot_timestamp: Timestamp::from(100),
+///     active_transactions: Arc::new(active),
+/// };
+///
+/// // A version committed at timestamp 50 by TxId 10 is visible
+/// assert!(snapshot.is_visible(TxId::new(10), Some(Timestamp::from(50))));
+///
+/// // A version created by the active TxId 42 is not visible
+/// assert!(!snapshot.is_visible(TxId::new(42), Some(Timestamp::from(50))));
+/// ```
 #[derive(Debug, Clone)]
 pub struct TransactionSnapshot {
     /// Timestamp when snapshot was taken
@@ -77,6 +100,26 @@ impl TransactionSnapshot {
 /// The `active` set uses `Arc`-wrapping with copy-on-write semantics (Issue #221):
 /// snapshot capture is O(1) (just an `Arc` clone), while mutations clone only when
 /// the `Arc` is shared.
+///
+/// # Examples
+///
+/// ```rust
+/// use aletheiadb::api::transaction::{TxVisibilityManager, TxId};
+/// use aletheiadb::core::temporal::Timestamp;
+///
+/// let manager = TxVisibilityManager::new();
+///
+/// // Register a new active transaction
+/// manager.register_active(TxId::new(1));
+/// assert_eq!(manager.active_count(), 1);
+///
+/// // Capture a snapshot for a new transaction starting at timestamp 100
+/// let snapshot = manager.capture_snapshot(Timestamp::from(100));
+///
+/// // Register commit removes it from the active set
+/// manager.register_commit(TxId::new(1));
+/// assert_eq!(manager.active_count(), 0);
+/// ```
 pub struct TxVisibilityManager {
     /// Currently active (not yet committed or aborted) transactions.
     ///
