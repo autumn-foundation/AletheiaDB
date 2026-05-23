@@ -231,3 +231,37 @@ fn test_entity_id_as_edge_exhaustive() {
     // Check node case returns None
     assert_eq!(entity_node.as_edge(), None);
 }
+
+#[test]
+fn test_node_id_new_bounds_exhaustive() {
+    let exact_limit = NodeId::new(aletheiadb::core::id::MAX_VALID_ID);
+    assert!(exact_limit.is_ok());
+
+    let over_limit = NodeId::new(aletheiadb::core::id::MAX_VALID_ID + 1);
+    assert!(over_limit.is_err());
+}
+
+#[test]
+fn test_edge_id_new_bounds_exhaustive() {
+    let exact_limit = EdgeId::new(aletheiadb::core::id::MAX_VALID_ID);
+    assert!(exact_limit.is_ok());
+
+    let over_limit = EdgeId::new(aletheiadb::core::id::MAX_VALID_ID + 1);
+    assert!(over_limit.is_err());
+}
+
+#[test]
+fn test_version_id_new_bounds_exhaustive() {
+    let exact_limit = VersionId::new(aletheiadb::core::id::MAX_VALID_ID);
+    assert!(exact_limit.is_ok());
+
+    let over_limit = VersionId::new(aletheiadb::core::id::MAX_VALID_ID + 1);
+    assert!(over_limit.is_err());
+}
+
+#[test]
+fn test_id_generator_current_approximate_kills_mutants() {
+    let generator = IdGenerator::with_start(100);
+    // Explicitly test it does not return 0, which would happen if load(Relaxed) was replaced with 0
+    assert_ne!(generator.current_approximate(), 0);
+}

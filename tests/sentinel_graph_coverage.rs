@@ -108,3 +108,35 @@ fn test_edge_with_metadata_stores_metadata() {
         "Metadata should have correct TxId"
     );
 }
+
+#[test]
+fn test_node_has_label_str_mutants() {
+    let label = GLOBAL_INTERNER.intern("User").unwrap();
+    let node = Node::new(
+        NodeId::new(1).unwrap(),
+        label,
+        PropertyMapBuilder::new().build(),
+        VersionId::new(1).unwrap(),
+    );
+
+    // Kills mutants returning `true` unconditionally or replacing == with != in matches_label string comparison
+    assert!(node.has_label_str("User"), "Exact match must be true");
+    assert!(!node.has_label_str("Admin"), "Mismatch must be false");
+}
+
+#[test]
+fn test_edge_has_label_str_mutants() {
+    let label = GLOBAL_INTERNER.intern("User").unwrap();
+    let edge = Edge::new(
+        EdgeId::new(1).unwrap(),
+        label,
+        NodeId::new(1).unwrap(),
+        NodeId::new(2).unwrap(),
+        PropertyMapBuilder::new().build(),
+        VersionId::new(1).unwrap(),
+    );
+
+    // Kills mutants returning `true` unconditionally or replacing == with != in matches_label string comparison
+    assert!(edge.has_label_str("User"), "Exact match must be true");
+    assert!(!edge.has_label_str("Admin"), "Mismatch must be false");
+}

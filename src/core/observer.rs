@@ -698,4 +698,23 @@ mod sentry_tests {
             "Subsequent observer SHOULD be called despite previous error"
         );
     }
+
+    #[test]
+    fn test_sentry_notify_observers_on_event_called() {
+        let observer = Arc::new(TrackingObserver::new(true, false));
+        let observers: Vec<Observer> = vec![Arc::clone(&observer) as Observer];
+
+        let event = StorageEvent::NodeAnchorCreated {
+            version_id: VersionId::new(1).unwrap(),
+            node_id: NodeId::new(1).unwrap(),
+            timestamp: 1000.into(),
+        };
+
+        notify_observers(&observers, &event);
+        assert_eq!(
+            observer.count(),
+            1,
+            "on_event should be called exactly once"
+        );
+    }
 }

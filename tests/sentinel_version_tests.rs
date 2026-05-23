@@ -37,3 +37,20 @@ fn test_vector_delta_apply_dimension_mismatch_safe_fallback() {
         }
     }
 }
+
+#[test]
+fn test_version_metadata_new_kills_mutants() {
+    let tx_id = aletheiadb::core::id::TxId::new(999);
+    let ts = aletheiadb::core::temporal::Timestamp::from(888);
+    let metadata = aletheiadb::core::version::VersionMetadata::new(tx_id, ts);
+
+    // Explicitly verify it does not return Default::default()
+    let default_metadata = aletheiadb::core::version::VersionMetadata::default();
+    assert_ne!(
+        metadata, default_metadata,
+        "new() should not return default"
+    );
+
+    assert_eq!(metadata.created_by_tx, tx_id);
+    assert_eq!(metadata.commit_timestamp, Some(ts));
+}

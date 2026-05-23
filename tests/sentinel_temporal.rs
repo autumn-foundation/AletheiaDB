@@ -435,3 +435,63 @@ fn test_sentinel_bitemporal_is_valid_recorded_at_mutants() {
     assert!(!interval.is_visible_at(99.into(), 300.into()));
     assert!(interval.is_visible_at(100.into(), 300.into()));
 }
+
+#[test]
+fn test_time_range_at_max_valid_timestamp_exact() {
+    let ts = aletheiadb::core::temporal::Timestamp::from(
+        aletheiadb::core::temporal::MAX_VALID_TIMESTAMP,
+    );
+    // Should NOT panic or error when exactly at the boundary
+    let _range = aletheiadb::core::temporal::TimeRange::at(ts);
+}
+
+#[test]
+fn test_time_range_from_max_valid_timestamp_exact() {
+    let ts = aletheiadb::core::temporal::Timestamp::from(
+        aletheiadb::core::temporal::MAX_VALID_TIMESTAMP,
+    );
+    // Should NOT panic or error when exactly at the boundary
+    let _range = aletheiadb::core::temporal::TimeRange::from(ts);
+}
+
+#[test]
+fn test_bitemporal_interval_overlaps_exhaustive() {
+    let valid_range1 = aletheiadb::core::temporal::TimeRange::new(
+        aletheiadb::core::temporal::Timestamp::from(10),
+        aletheiadb::core::temporal::Timestamp::from(20),
+    )
+    .unwrap();
+    let tx_range1 = aletheiadb::core::temporal::TimeRange::new(
+        aletheiadb::core::temporal::Timestamp::from(100),
+        aletheiadb::core::temporal::Timestamp::from(200),
+    )
+    .unwrap();
+    let interval1 = aletheiadb::core::temporal::BiTemporalInterval::new(valid_range1, tx_range1);
+
+    // Both match -> true
+    assert!(
+        interval1.is_visible_at(
+            aletheiadb::core::temporal::Timestamp::from(15),
+            aletheiadb::core::temporal::Timestamp::from(150)
+        ),
+        "Should be visible"
+    );
+
+    // Mismatch on valid time -> false
+    assert!(
+        !interval1.is_visible_at(
+            aletheiadb::core::temporal::Timestamp::from(30),
+            aletheiadb::core::temporal::Timestamp::from(150)
+        ),
+        "Should not be visible if valid time doesn't match"
+    );
+
+    // Mismatch on transaction time -> false
+    assert!(
+        !interval1.is_visible_at(
+            aletheiadb::core::temporal::Timestamp::from(15),
+            aletheiadb::core::temporal::Timestamp::from(300)
+        ),
+        "Should not be visible if tx time doesn't match"
+    );
+}
