@@ -694,7 +694,12 @@ impl WalRingBuffer {
     /// A vector of pending entries ready for flushing. May be empty if
     /// no entries are available.
     pub fn drain(&self) -> Vec<PendingEntry> {
-        let mut entries = Vec::new();
+        // ⚡ Bolt Optimization: Pre-allocate capacity to avoid intermediate heap reallocations.
+        // read_pos MUST be loaded before write_pos to prevent integer underflow during concurrent drains.
+        let read_pos = self.read_pos.load(Ordering::Relaxed);
+        let write_pos = self.write_pos.load(Ordering::Relaxed);
+        let capacity = (write_pos.wrapping_sub(read_pos) as usize).min(self.capacity);
+        let mut entries = Vec::with_capacity(capacity);
 
         loop {
             let pos = self.read_pos.load(Ordering::Relaxed);
