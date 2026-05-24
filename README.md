@@ -129,6 +129,12 @@ All features are off by default except `config-toml`.
 aletheiadb = { version = "0.1", features = ["nova", "semantic-search"] }
 ```
 
+> ⚠️ **REQUIRES FEATURE NOVA** ⚠️
+> If you are trying to run experimental examples like `story_demo`, they will fail to compile unless you explicitly enable the `nova` feature:
+> ```bash
+> cargo run --example story_demo --features nova
+> ```
+
 ---
 
 ## Documentation
