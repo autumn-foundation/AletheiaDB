@@ -528,13 +528,65 @@ mod tests {
 
     #[test]
     fn test_event_timestamp() {
-        let event = StorageEvent::NodeAnchorCreated {
+        let events = vec![
+            StorageEvent::NodeAnchorCreated {
+                version_id: VersionId::new(1).unwrap(),
+                node_id: NodeId::new(1).unwrap(),
+                timestamp: 12345.into(),
+            },
+            StorageEvent::EdgeAnchorCreated {
+                version_id: VersionId::new(1).unwrap(),
+                edge_id: crate::core::id::EdgeId::new(1).unwrap(),
+                timestamp: 12345.into(),
+            },
+            StorageEvent::NodeVersionCreated {
+                version_id: VersionId::new(2).unwrap(),
+                node_id: NodeId::new(1).unwrap(),
+                timestamp: 12345.into(),
+                is_anchor: false,
+            },
+            StorageEvent::EdgeVersionCreated {
+                version_id: VersionId::new(2).unwrap(),
+                edge_id: crate::core::id::EdgeId::new(1).unwrap(),
+                timestamp: 12345.into(),
+                is_anchor: false,
+            },
+        ];
+
+        for event in events {
+            assert_eq!(event.timestamp().wallclock(), 12345);
+        }
+    }
+
+    #[test]
+    fn test_is_anchor_event() {
+        let anchor1 = StorageEvent::NodeAnchorCreated {
             version_id: VersionId::new(1).unwrap(),
             node_id: NodeId::new(1).unwrap(),
-            timestamp: 12345.into(),
+            timestamp: 1000.into(),
+        };
+        let anchor2 = StorageEvent::EdgeAnchorCreated {
+            version_id: VersionId::new(1).unwrap(),
+            edge_id: crate::core::id::EdgeId::new(1).unwrap(),
+            timestamp: 1000.into(),
+        };
+        let version1 = StorageEvent::NodeVersionCreated {
+            version_id: VersionId::new(2).unwrap(),
+            node_id: NodeId::new(1).unwrap(),
+            timestamp: 2000.into(),
+            is_anchor: false,
+        };
+        let version2 = StorageEvent::EdgeVersionCreated {
+            version_id: VersionId::new(2).unwrap(),
+            edge_id: crate::core::id::EdgeId::new(1).unwrap(),
+            timestamp: 2000.into(),
+            is_anchor: false,
         };
 
-        assert_eq!(event.timestamp().wallclock(), 12345);
+        assert!(anchor1.is_anchor_event());
+        assert!(anchor2.is_anchor_event());
+        assert!(!version1.is_anchor_event());
+        assert!(!version2.is_anchor_event());
     }
 
     #[test]
@@ -633,6 +685,54 @@ mod sentry_tests {
         fn interested_in(&self, _event: &StorageEvent) -> bool {
             self.interested
         }
+    }
+
+    struct VectorErrorObserver {
+        call_count: AtomicUsize,
+    }
+
+    impl StorageObserver for VectorErrorObserver {
+        fn on_event(&self, _event: &StorageEvent) -> Result<()> {
+            self.call_count.fetch_add(1, Ordering::SeqCst);
+            Err(crate::core::error::Error::Vector(
+                crate::core::error::VectorError::InvalidVector {
+                    reason: "Test vector error".to_string(),
+                },
+            ))
+        }
+    }
+
+    #[test]
+    fn test_sentry_vector_error_does_not_block_subsequent_observers() {
+        // 🛡️ Sentry Test: Verify that Vector errors specifically are handled gracefully
+        let vector_failing = Arc::new(VectorErrorObserver {
+            call_count: AtomicUsize::new(0),
+        });
+        let success = Arc::new(TrackingObserver::new(true, false));
+
+        let observers: Vec<Observer> = vec![
+            Arc::clone(&vector_failing) as Observer,
+            Arc::clone(&success) as Observer,
+        ];
+
+        let event = StorageEvent::NodeAnchorCreated {
+            version_id: VersionId::new(1).unwrap(),
+            node_id: NodeId::new(1).unwrap(),
+            timestamp: 1000.into(),
+        };
+
+        notify_observers(&observers, &event);
+
+        assert_eq!(
+            vector_failing.call_count.load(Ordering::SeqCst),
+            1,
+            "Failing vector observer should be called"
+        );
+        assert_eq!(
+            success.count(),
+            1,
+            "Subsequent observer SHOULD be called despite previous vector error"
+        );
     }
 
     #[test]

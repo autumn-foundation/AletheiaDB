@@ -37,3 +37,11 @@
 **[Fix `execute_traversal` target shards bug]**
 **Learning:** `plan.steps` from `route_traversal` returns empty list, and we need `involved_shards`
 **Action:** Replace `steps` with `involved_shards` and update the test.
+
+## StorageEvent Enum Variants Coverage Gap
+**Learning:** `test_event_timestamp` and `is_anchor_event` in `src/core/observer.rs` were only testing the `NodeAnchorCreated` variant, leaving `EdgeAnchorCreated`, `NodeVersionCreated`, and `EdgeVersionCreated` completely untested. This represents a significant coverage gap where refactoring the `StorageEvent` enum fields could easily break `timestamp()` or `is_anchor_event()` logic without triggering any test failures.
+**Action:** When writing tests for methods on an Enum (especially large match statements or macros like `matches!`), always ensure there is a table-driven or exhaustive test case that explicitly exercises every single variant, especially when the variants contain similar or overlapping data fields.
+
+## notify_observers Error Handling Gap
+**Learning:** The `notify_observers` function handles errors from observers by safely matching on `Error::Vector` and logging it differently than other errors. However, this specific error matching path was completely untested. `sentry_error_does_not_block_subsequent_observers` only used `Error::Other`.
+**Action:** When a function explicitly matches on and handles specific error variants differently (even just for logging), always write tests that intentionally return those exact error variants (like `VectorError::InvalidVector`) from mocks to ensure the error handling logic itself does not panic or misbehave, and that the execution loop continues as expected.
