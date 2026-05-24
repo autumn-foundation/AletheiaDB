@@ -255,7 +255,7 @@ mod tests {
         ));
 
         let result = rule.apply(&plan, &stats).unwrap();
-        assert!(result.is_some());
+        assert!(result.is_some(), "Expected optimization to produce a new plan");
 
         let new_plan = result.unwrap();
         // Should be Limit(5, Scan) - no nested limit
@@ -290,7 +290,7 @@ mod tests {
         ));
 
         let result = rule.apply(&plan, &stats).unwrap();
-        assert!(result.is_some());
+        assert!(result.is_some(), "Expected optimization to produce a new plan");
 
         let new_plan = result.unwrap();
         // VectorRank should have top_k=5 now
@@ -364,7 +364,7 @@ mod tests {
         ));
 
         let result = rule.apply(&plan, &stats).unwrap();
-        assert!(result.is_some());
+        assert!(result.is_some(), "Expected optimization to produce a new plan");
     }
 
     #[test]
@@ -405,7 +405,7 @@ mod tests {
             LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(2).unwrap()])),
         ));
         let result = rule.apply(&plan, &stats).unwrap();
-        assert!(result.is_some());
+        assert!(result.is_some(), "Expected optimization to produce a new plan");
     }
 
     #[test]

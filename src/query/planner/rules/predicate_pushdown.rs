@@ -579,7 +579,7 @@ mod sentry_tests {
             ),
         ));
         let result = rule.apply(&plan, &stats).unwrap();
-        assert!(result.is_some());
+        assert!(result.is_some(), "Expected optimization to produce a new plan");
     }
 
     #[test]
