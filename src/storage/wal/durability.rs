@@ -270,9 +270,9 @@ impl DurabilityMode {
         })
     }
 
-    /// Returns the default GroupCommit configuration (2ms, 200 transactions).
+    /// Retrieves the default GroupCommit configuration (2ms, 200 transactions).
     ///
-    /// This provides a good balance between latency and throughput for
+    /// Why? This provides a good balance between latency and throughput for
     /// typical OLTP workloads, offering ACID guarantees with much better
     /// performance than Synchronous mode.
     ///
@@ -347,9 +347,9 @@ impl DurabilityMode {
         })
     }
 
-    /// Returns the default AsyncBatched configuration (10ms, 100 transactions).
+    /// Retrieves the default AsyncBatched configuration (10ms, 100 transactions).
     ///
-    /// This provides very low latency (<100µs) with efficient batching,
+    /// Why? This provides very low latency (<100µs) with efficient batching,
     /// suitable for high-throughput applications that can tolerate a small
     /// data loss window on crash.
     ///

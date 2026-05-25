@@ -591,7 +591,27 @@ impl SparseVectorIndex {
         self.vectors.contains_key(&id)
     }
 
-    /// Gets the sparse vector for a node ID, if it exists.
+    /// Retrieves the sparse vector representation for a given node ID.
+    ///
+    /// Why? This is essential for operations that need to directly inspect or re-index
+    /// the exact non-zero dimensions and values of a node's sparse representation.
+    ///
+    /// ## Examples
+    /// ```rust
+    /// # use aletheiadb::core::id::NodeId;
+    /// # use aletheiadb::index::vector::sparse::{SparseVectorIndex, SparseIndexConfig};
+    /// # use aletheiadb::core::vector::SparseVec;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let config = SparseIndexConfig::new(100);
+    /// let index = SparseVectorIndex::new(config)?;
+    /// let doc = SparseVec::new(vec![0, 10], vec![1.0, 2.5], 100)?;
+    /// let node_id = NodeId::new(42)?;
+    /// index.add(node_id, &doc)?;
+    ///
+    /// let retrieved = index.get(node_id).expect("Vector should exist");
+    /// assert_eq!(retrieved.indices().len(), 2);
+    /// # Ok(()) }
+    /// ```
     #[must_use]
     pub fn get(&self, id: NodeId) -> Option<Arc<SparseVec>> {
         self.vectors.get(&id).map(|v| Arc::clone(&v.vector))

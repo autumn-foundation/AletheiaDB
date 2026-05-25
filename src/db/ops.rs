@@ -12,6 +12,9 @@ use crate::storage::current::{IncomingEdgesIter, OutgoingEdgesIter};
 impl AletheiaDB {
     /// Create a node with the given label and properties.
     ///
+    /// Why? This is the primary entry point for populating the database. It encapsulates the underlying
+    /// complexity of transaction management and ID generation so users can quickly store new entities.
+    ///
     /// This is a convenience method that internally uses a write transaction.
     /// For multiple operations, prefer using `write()` or `write_transaction()`.
     ///
@@ -40,6 +43,9 @@ impl AletheiaDB {
     }
 
     /// Create an edge between two nodes.
+    ///
+    /// Why? Relationships are fundamental to a graph database. This function provides a straightforward
+    /// way to establish connections between existing nodes without managing transaction boundaries manually.
     ///
     /// This is a convenience method that internally uses a write transaction.
     /// For multiple operations, prefer using `write()` or `write_transaction()`.
