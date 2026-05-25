@@ -256,7 +256,7 @@ for row in results {
 "What documents were similar to this query in 2023?"
 
 ```rust
-let timestamp_2023 = 1672531200000000; // 2023-01-01 in microseconds
+let timestamp_2023 = Timestamp::new(1672531200000000, 0).unwrap(); // 2023-01-01 in microseconds
 
 let results = db.query()
     .as_of(timestamp_2023, timestamp_2023)

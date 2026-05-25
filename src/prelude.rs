@@ -19,4 +19,5 @@ pub use crate::core::temporal::{BiTemporalInterval, TimeRange, Timestamp, time};
 // Re-export the properties! macro. It is exported at the crate root because of #[macro_export],
 // so we re-export it from there.
 pub use crate::properties;
+pub use crate::query::Predicate;
 pub use crate::storage::wal::{DurabilityMode, WriteOptions};
