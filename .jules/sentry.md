@@ -37,3 +37,6 @@
 **[Fix `execute_traversal` target shards bug]**
 **Learning:** `plan.steps` from `route_traversal` returns empty list, and we need `involved_shards`
 **Action:** Replace `steps` with `involved_shards` and update the test.
+## SIMD Remainder Loop Coverage Gap
+**Learning:** `unsafe` SIMD code (like AVX2/SSE2 mathematically intensive blocks) often masks bugs in the scalar "remainder" loop logic—the code responsible for processing trailing elements when the input array size is not a multiple of the SIMD register's lane width (e.g., 4 or 8 `f32`s). Missing coverage for sizes like 17 leaves the loop bounds and index alignment of trailing elements completely untested.
+**Action:** When testing SIMD or batch-processed logic, always use test input array lengths that are prime or non-multiples of the lane width (e.g., length 17) to guarantee that both the main vectorized loops and the scalar fallback loops are comprehensively exercised.

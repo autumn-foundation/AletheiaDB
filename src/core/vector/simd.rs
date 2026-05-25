@@ -906,4 +906,113 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn test_dot_product_sum_implementation_coverage() {
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        use crate::core::vector::simd::x86_ops;
+        use crate::core::vector::simd::{dot_product_scalar, dot_product_sum};
+
+        let a = vec![1.0f32; 17];
+        let b = vec![2.0f32; 17];
+        let expected = 34.0; // 17 * (1.0 * 2.0)
+
+        // 1. Unconditional Scalar coverage
+        let res_scalar = dot_product_scalar(&a, &b);
+        assert_eq!(res_scalar, expected, "Scalar implementation failed");
+
+        // 2. Conditional x86 SIMD coverage
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        {
+            // Try SSE2
+            if is_x86_feature_detected!("sse2") {
+                let res_sse2 = unsafe { x86_ops::dot_product_sse2(&a, &b) };
+                assert_eq!(res_sse2, expected, "SSE2 implementation failed");
+            }
+
+            // Try AVX2
+            if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
+                let res_avx2 = unsafe { x86_ops::dot_product_avx2(&a, &b) };
+                assert_eq!(res_avx2, expected, "AVX2 implementation failed");
+            }
+        }
+
+        // 3. Dispatcher
+        let res_dispatch = dot_product_sum(&a, &b);
+        assert_eq!(res_dispatch, expected, "Dispatcher failed");
+    }
+
+    #[test]
+    fn test_squared_diff_sum_implementation_coverage() {
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        use crate::core::vector::simd::x86_ops;
+        use crate::core::vector::simd::{squared_diff_sum, squared_diff_sum_scalar};
+
+        let a = vec![1.0f32; 17];
+        let b = vec![3.0f32; 17];
+        let expected = 68.0; // 17 * (1.0 - 3.0)^2 = 17 * 4.0
+
+        // 1. Unconditional Scalar coverage
+        let res_scalar = squared_diff_sum_scalar(&a, &b);
+        assert_eq!(res_scalar, expected, "Scalar implementation failed");
+
+        // 2. Conditional x86 SIMD coverage
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        {
+            // Try SSE2
+            if is_x86_feature_detected!("sse2") {
+                let res_sse2 = unsafe { x86_ops::squared_diff_sum_sse2(&a, &b) };
+                assert_eq!(res_sse2, expected, "SSE2 implementation failed");
+            }
+
+            // Try AVX2
+            if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
+                let res_avx2 = unsafe { x86_ops::squared_diff_sum_avx2(&a, &b) };
+                assert_eq!(res_avx2, expected, "AVX2 implementation failed");
+            }
+        }
+
+        // 3. Dispatcher
+        let res_dispatch = squared_diff_sum(&a, &b);
+        assert_eq!(res_dispatch, expected, "Dispatcher failed");
+    }
+
+    #[test]
+    fn test_dot_and_magnitudes_implementation_coverage() {
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        use crate::core::vector::simd::x86_ops;
+        use crate::core::vector::simd::{dot_and_magnitudes, dot_and_magnitudes_scalar};
+
+        let a = vec![2.0f32; 17];
+        let b = vec![3.0f32; 17];
+
+        let expected_dot = 102.0; // 17 * (2.0 * 3.0)
+        let expected_mag_a = 68.0; // 17 * (2.0 * 2.0)
+        let expected_mag_b = 153.0; // 17 * (3.0 * 3.0)
+        let expected = (expected_dot, expected_mag_a, expected_mag_b);
+
+        // 1. Unconditional Scalar coverage
+        let res_scalar = dot_and_magnitudes_scalar(&a, &b);
+        assert_eq!(res_scalar, expected, "Scalar implementation failed");
+
+        // 2. Conditional x86 SIMD coverage
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        {
+            // Try SSE2
+            if is_x86_feature_detected!("sse2") {
+                let res_sse2 = unsafe { x86_ops::dot_and_magnitudes_sse2(&a, &b) };
+                assert_eq!(res_sse2, expected, "SSE2 implementation failed");
+            }
+
+            // Try AVX2
+            if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
+                let res_avx2 = unsafe { x86_ops::dot_and_magnitudes_avx2(&a, &b) };
+                assert_eq!(res_avx2, expected, "AVX2 implementation failed");
+            }
+        }
+
+        // 3. Dispatcher
+        let res_dispatch = dot_and_magnitudes(&a, &b);
+        assert_eq!(res_dispatch, expected, "Dispatcher failed");
+    }
 }
