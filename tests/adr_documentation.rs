@@ -90,22 +90,22 @@ fn test_adr_0009_documents_memory_ordering() {
     // as long as they're clearly marked as such (e.g., with INCORRECT or NOT SUFFICIENT comments)
 }
 
-/// Test that ADR-0009 code examples align with actual implementation in src/core/id.rs
+/// Test that ADR-0009 code examples align with actual implementation in src/core/id/mod.rs
 #[test]
 fn test_adr_0009_matches_implementation() {
     let adr_path = Path::new("docs/adr/0009-strong-id-types.md");
-    let impl_path = Path::new("src/core/id.rs");
+    let impl_path = Path::new("src/core/id/mod.rs");
 
     assert!(adr_path.exists(), "ADR-0009 not found");
-    assert!(impl_path.exists(), "src/core/id.rs not found");
+    assert!(impl_path.exists(), "src/core/id/mod.rs not found");
 
     let adr_content = fs::read_to_string(adr_path).expect("Failed to read ADR-0009");
-    let impl_content = fs::read_to_string(impl_path).expect("Failed to read src/core/id.rs");
+    let impl_content = fs::read_to_string(impl_path).expect("Failed to read src/core/id/mod.rs");
 
     // Implementation uses SeqCst
     assert!(
         impl_content.contains("fetch_add(1, Ordering::SeqCst)"),
-        "Implementation in src/core/id.rs should use Ordering::SeqCst"
+        "Implementation in src/core/id/mod.rs should use Ordering::SeqCst"
     );
 
     // ADR should use SeqCst in the main implementation examples
