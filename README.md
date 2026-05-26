@@ -87,6 +87,43 @@ See the [Hybrid Query guide](docs/guides/hybrid-query-guide.md).
 
 ---
 
+## Narrative Generation (Story Feature)
+
+> ⚠️ **REQUIRES FEATURE: `nova`**
+>
+> You must update your `Cargo.toml` before trying to use this API:
+>
+> ```toml
+> [dependencies]
+> aletheiadb = { version = "0.1", features = ["nova"] }
+> ```
+
+Generate human-readable narratives from temporal history:
+
+```rust,ignore
+use aletheiadb::prelude::*;
+// Requires "nova" feature
+use aletheiadb::experimental::temporal_narrative::NarrativeGenerator;
+
+fn main() -> Result<()> {
+    let db = AletheiaDB::new()?;
+    let alice = db.create_node("Person", properties! { "name" => "Alice", "age" => 30 })?;
+
+    db.write(|tx| tx.update_node(alice, properties! { "age" => 31 }))?;
+
+    // Requires "nova" feature
+    let generator = NarrativeGenerator::new(&db);
+    let narrative = generator.generate_node_narrative(alice)?;
+
+    for event in narrative {
+        println!("Version {}: {}", event.version_number, event.description);
+    }
+
+    Ok(())
+}
+```
+
+
 ## Performance
 
 Benchmarks run on every push to trunk.
