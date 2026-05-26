@@ -694,7 +694,10 @@ impl WalRingBuffer {
     /// A vector of pending entries ready for flushing. May be empty if
     /// no entries are available.
     pub fn drain(&self) -> Vec<PendingEntry> {
-        let mut entries = Vec::new();
+        let read = self.read_pos.load(Ordering::Relaxed);
+        let write = self.write_pos.load(Ordering::Relaxed);
+        let approx_len = write.wrapping_sub(read).min(self.capacity as u64) as usize;
+        let mut entries = Vec::with_capacity(approx_len);
 
         loop {
             let pos = self.read_pos.load(Ordering::Relaxed);
@@ -773,9 +776,9 @@ impl WalRingBuffer {
     /// Use for monitoring only, not for correctness decisions.
     #[inline]
     pub fn len_approx(&self) -> usize {
-        let write = self.write_pos.load(Ordering::Relaxed);
         let read = self.read_pos.load(Ordering::Relaxed);
-        write.wrapping_sub(read) as usize
+        let write = self.write_pos.load(Ordering::Relaxed);
+        write.wrapping_sub(read).min(self.capacity as u64) as usize
     }
 
     /// Check if the buffer is approximately empty.
