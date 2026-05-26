@@ -7,8 +7,8 @@
 //! # Wiring
 //!
 //! Install state once at startup via
-//! [`autumn_web::app().on_startup(...)`](autumn_web::prelude::app) and an
-//! [`AppState::insert_extension`](autumn_web::prelude::AppState::insert_extension)
+//! `` `autumn_web::app().on_startup(...)` `` and an
+//! `` `AppState::insert_extension` ``
 //! call. Handlers then receive it through the [`AppState`] extractor defined
 //! in this module, which reads the extension out of autumn's own state.
 
