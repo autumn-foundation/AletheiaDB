@@ -694,7 +694,22 @@ impl WalRingBuffer {
     /// A vector of pending entries ready for flushing. May be empty if
     /// no entries are available.
     pub fn drain(&self) -> Vec<PendingEntry> {
-        let mut entries = Vec::new();
+        // ⚡ Bolt: Pre-allocate vector based on estimated number of available entries.
+        // This avoids multiple heap reallocations during bulk drains.
+        // Bounded by capacity.
+        let read_pos = self.read_pos.load(Ordering::Acquire);
+        let write_pos = self.write_pos.load(Ordering::Acquire);
+
+        let estimated_count = if write_pos >= read_pos {
+            std::cmp::min((write_pos - read_pos) as usize, self.capacity)
+        } else {
+            // Handle wraparound
+            let max_u64: u64 = u64::MAX;
+            let diff = (max_u64 - read_pos) + write_pos + 1;
+            std::cmp::min(diff as usize, self.capacity)
+        };
+
+        let mut entries = Vec::with_capacity(estimated_count);
 
         loop {
             let pos = self.read_pos.load(Ordering::Relaxed);
