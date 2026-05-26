@@ -378,7 +378,11 @@ impl AletheiaDB {
         self.execute_query(query)
     }
 }
-
+impl crate::query::traits::QueryExecutable for AletheiaDB {
+    fn execute_query(&self, query: crate::query::Query) -> crate::core::error::Result<crate::query::QueryResults> {
+        self.execute_query(query)
+    }
+}
 #[cfg(test)]
 mod tests_aql {
 

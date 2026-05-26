@@ -90,3 +90,7 @@
 ## 2026-06-21 - Splitting Redb Cold Storage Blob
 **Tangle:** `src/storage/redb_cold_storage.rs` was over 4100 lines long, a "Blob" module holding both core cold storage logic and over 2000 lines of tests. It made navigation and understanding the core operations difficult.
 **Blueprint:** Refactored into a `src/storage/redb_cold_storage/` module. Kept the core data definitions and implementation in `mod.rs` (reduced to ~2000 lines) and moved all tests to `tests.rs` (~2000 lines), maintaining the `#[cfg(test)]` block functionality but with better physical separation.
+
+**[Decoupling Query and DB Modules]
+**Tangle:** Circular dependency between `db` and `query`. `db` imported `query` for query types and `execute_query` implementation, while `query` imported `db::AletheiaDB` for `QueryBuilder::execute` to use as the database handle.
+**Blueprint:** Abstracted `AletheiaDB` out of `query` by introducing a `QueryExecutable` trait in `query::traits`. Made `QueryBuilder::execute` accept `&impl QueryExecutable`, and implemented this trait for `AletheiaDB` in `db/query.rs`.

@@ -263,7 +263,7 @@ mod tests {
     use crate::api::transaction::WriteOps;
     use crate::core::error::VectorError;
     use crate::core::property::PropertyMapBuilder;
-    use crate::db::AletheiaDB;
+    use crate::AletheiaDB;
     use crate::index::vector::{DistanceMetric, HnswConfig};
 
     /// Helper to create a test database with vector indexing enabled.

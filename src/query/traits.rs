@@ -76,3 +76,8 @@ pub trait GraphView {
         timestamp: Timestamp,
     ) -> Result<Vec<(NodeId, f32)>>;
 }
+/// A trait for executing queries.
+pub trait QueryExecutable {
+    /// Execute a query and return results.
+    fn execute_query(&self, query: crate::query::Query) -> Result<crate::query::QueryResults>;
+}
