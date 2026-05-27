@@ -132,7 +132,8 @@ impl<'a> Omen<'a> {
         let rel_vel: Vec<f32> = vel_b.iter().zip(vel_a.iter()).map(|(b, a)| b - a).collect();
 
         // Calculate dot products
-        let p_dot_v: f32 = rel_pos.iter().zip(rel_vel.iter()).map(|(p, v)| p * v).sum();
+        // ⚡ Bolt Optimization: Use SIMD-accelerated `dot_product` instead of manual iterator combinations.
+        let p_dot_v: f32 = crate::core::vector::dot_product(&rel_pos, &rel_vel).unwrap_or(0.0);
 
         let v_dot_v: f32 = rel_vel.iter().map(|v| v * v).sum();
 

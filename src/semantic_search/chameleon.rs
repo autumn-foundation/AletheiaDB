@@ -327,7 +327,8 @@ impl MiniKMeans {
 }
 
 fn dist_sq(a: &[f32], b: &[f32]) -> f32 {
-    a.iter().zip(b.iter()).map(|(x, y)| (x - y).powi(2)).sum()
+    // ⚡ Bolt Optimization: Use SIMD-accelerated `squared_euclidean_distance` instead of manual iterator combinations.
+    crate::core::vector::squared_euclidean_distance(a, b).unwrap_or(0.0)
 }
 
 #[cfg(test)]

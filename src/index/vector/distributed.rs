@@ -1328,25 +1328,15 @@ impl MockVectorNodeClient {
     fn compute_similarity(&self, a: &[f32], b: &[f32]) -> f32 {
         match self.metric {
             DistanceMetric::Cosine => {
-                let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
-                let mag_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
-                let mag_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
-                if mag_a > 0.0 && mag_b > 0.0 {
-                    dot / (mag_a * mag_b)
-                } else {
-                    0.0
-                }
+                // ⚡ Bolt Optimization: Use SIMD-accelerated `cosine_similarity`
+                crate::core::vector::cosine_similarity(a, b).unwrap_or(0.0)
             }
             DistanceMetric::Euclidean => {
-                let dist: f32 = a
-                    .iter()
-                    .zip(b.iter())
-                    .map(|(x, y)| (x - y).powi(2))
-                    .sum::<f32>()
-                    .sqrt();
+                // ⚡ Bolt Optimization: Use SIMD-accelerated `euclidean_distance`
+                let dist = crate::core::vector::euclidean_distance(a, b).unwrap_or(0.0);
                 -dist // Negate so higher is better
             }
-            DistanceMetric::DotProduct => a.iter().zip(b.iter()).map(|(x, y)| x * y).sum(),
+            DistanceMetric::DotProduct => crate::core::vector::dot_product(a, b).unwrap_or(0.0),
             other => panic!(
                 "MockVectorNodeClient does not support {:?} distance metric",
                 other

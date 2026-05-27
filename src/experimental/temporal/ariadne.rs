@@ -378,9 +378,8 @@ impl<'a> Ariadne<'a> {
             // HNSW usually returns similarity.
             // We need a cost.
             // Let's calculate manual cosine distance.
-            // AletheiaDB doesn't expose a raw math util easily here, so implement basic dot product
-            let dot: f32 = vec.iter().zip(goal.iter()).map(|(a, b)| a * b).sum();
-            // Assuming normalized vectors, cosine dist = 1 - dot
+            // ⚡ Bolt Optimization: Use SIMD-accelerated `dot_product` instead of manual iterator combinations for normalized vectors.
+            let dot = crate::core::vector::dot_product(vec, goal).unwrap_or(0.0);
             return (1.0 - dot).max(0.0);
         }
         0.0
