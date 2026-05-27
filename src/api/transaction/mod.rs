@@ -712,6 +712,7 @@ mod tests {
         // Both methods should work - IDs are generated successfully
         // Note: First ID may be 0 due to IdGenerator starting at 0 (known issue)
         assert!(id1.as_u64() < id2.as_u64(), "IDs should increment");
+        tx.commit().unwrap();
     }
 
     #[test]
@@ -727,6 +728,7 @@ mod tests {
         let node_id = tx
             .create_node_with_valid_time("Person", props, Some(valid_from))
             .unwrap();
+        tx.commit().unwrap();
 
         // Verify node was created with a valid ID (0 is valid!)
         assert!(node_id.as_u64() <= MAX_VALID_ID);

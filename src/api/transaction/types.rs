@@ -155,7 +155,10 @@ mod tests {
         // Collect all generated IDs
         let mut all_ids: Vec<TxId> = vec![];
         for handle in handles {
-            all_ids.extend(handle.join().unwrap());
+            match handle.join() {
+                Ok(ids) => all_ids.extend(ids),
+                Err(e) => std::panic::resume_unwind(e),
+            }
         }
 
         // All IDs should be unique

@@ -305,7 +305,9 @@ mod tests {
             .collect();
 
         for handle in handles {
-            handle.join().unwrap();
+            if let Err(e) = handle.join() {
+                std::panic::resume_unwind(e);
+            }
         }
     }
 }

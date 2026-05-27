@@ -663,7 +663,9 @@ mod tests {
         let result = coord.wait_for_flush(epoch);
         assert!(result.is_ok());
 
-        handle.join().unwrap();
+        if let Err(e) = handle.join() {
+            std::panic::resume_unwind(e);
+        }
     }
 
     #[test]
@@ -689,7 +691,9 @@ mod tests {
         let err = result.unwrap_err();
         assert!(err.to_string().contains("disk full"));
 
-        handle.join().unwrap();
+        if let Err(e) = handle.join() {
+            std::panic::resume_unwind(e);
+        }
     }
 
     #[test]
@@ -750,7 +754,10 @@ mod tests {
 
         // All should succeed
         for handle in handles {
-            let result = handle.join().unwrap();
+            let result = match handle.join() {
+                Ok(r) => r,
+                Err(e) => std::panic::resume_unwind(e),
+            };
             assert!(result.is_ok());
         }
     }
