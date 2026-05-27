@@ -34,6 +34,11 @@ pub const MAX_VALID_ID: u64 = u64::MAX - 1000;
 /// let node_id = NodeId::new(42).unwrap();
 /// assert_eq!(node_id.as_u64(), 42);
 /// ```
+///
+/// # Architecture
+/// It wraps a standard `u64` representing the offset within the memory or page store.
+/// This prevents users from manually injecting random u64s and allows the compiler
+/// to enforce type safety across the graph traversal boundaries.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, bytemuck::Pod, bytemuck::Zeroable,
 )]

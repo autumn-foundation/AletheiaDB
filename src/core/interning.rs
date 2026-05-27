@@ -213,24 +213,19 @@ impl StringInterner {
         })
     }
 
-    /// Resolve an interned string ID back to the original string.
+    /// Resolves an interned string ID back into its `Arc<str>` text representation.
     ///
     /// Returns None if the ID is not valid (was never interned).
     ///
-    /// # Performance Note
+    /// # The Spark
+    /// While graph traversal logic operates efficiently on `InternedString` IDs, eventual rendering,
+    /// logging, or serialization of properties requires the actual text string. This method provides
+    /// the reverse lookup.
     ///
-    /// This method clones the underlying `Arc<str>`, which involves atomic reference
-    /// counting operations.
-    ///
-    /// - **For read-only access**: Use [`resolve_with`](Self::resolve_with) to avoid Arc cloning.
-    /// - **When an owned Arc is needed**: Use this method (`resolve`).
-    ///
-    /// Resolves an interned string to an owned `Arc<str>`.
-    ///
-    /// # Why?
-    /// If you absolutely need an owned copy of the string (e.g., to send across threads),
-    /// this function will retrieve it. However, prefer `resolve_with` to avoid cloning
-    /// the Arc if you only need temporary read access.
+    /// # Note
+    /// In many scenarios (e.g. comparisons), you don't actually need to clone the underlying `Arc<str>`,
+    /// you merely need read access. In those cases, prefer [`StringInterner::resolve_with`] to avoid
+    /// reference counting overhead.
     #[deprecated(
         since = "0.1.0",
         note = "Use resolve_with() for read-only access; use resolve() only when an owned Arc<str> is strictly required"

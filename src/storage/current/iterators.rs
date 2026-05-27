@@ -37,6 +37,7 @@ macro_rules! impl_edge_iter {
         $direction:literal
     ) => {
         $(#[$meta])*
+        /// A lazy, zero-allocation iterator over edge connections for a specific node direction.
         #[doc = concat!(
             "\n\nThis iterator provides zero-allocation traversal of ", $direction, " edges,",
             "\navoiding the `Vec` allocation overhead of [`", $method_link, "`](crate::storage::CurrentStorage::", $method_link, ").",
@@ -47,7 +48,12 @@ macro_rules! impl_edge_iter {
             "\n\n# Issue #187",
             "\n\nThis iterator addresses the performance issue where edge traversal methods",
             "\nunnecessarily allocated a new `Vec<EdgeId>` on every call, adding 100-500ns",
-            "\noverhead per traversal."
+            "\noverhead per traversal.",
+            "\n\n# The Spark",
+            "\nGraph queries like 3-hop traversals instantiate thousands of neighbor collections.",
+            "\nPreviously, returning a `Vec<EdgeId>` added ~500ns of allocation overhead per step.",
+            "\nThis struct holds the underlying adjacency data guard and yields values lazily,",
+            "\ndriving overhead close to zero."
         )]
         pub struct $name<'a> {
             guard: MergedAdjacencyGuard<'a>,
@@ -125,6 +131,7 @@ macro_rules! impl_edge_iter_with_label {
         $method_link:literal,
         $direction:literal
     ) => {
+        /// A lazy, zero-allocation iterator over edge connections, filtered by a specific label.
         $(#[$meta])*
         #[doc = concat!(
             "\n\nThis iterator provides zero-allocation traversal of ", $direction, " edges",
@@ -134,7 +141,11 @@ macro_rules! impl_edge_iter_with_label {
             "\n\n- **Zero allocation**: Holds a `MergedAdjacencyGuard` and pre-resolved label ID",
             "\n- **Lazy evaluation**: Filters as you iterate",
             "\n- **O(n) complexity**: Single linear scan regardless of match distribution",
-            "\n- **Early termination**: If label doesn't exist, returns empty iterator"
+            "\n- **Early termination**: If label doesn't exist, returns empty iterator",
+            "\n\n# The Spark",
+            "\nSimilar to the unfiltered iterator, but provides an early termination short-circuit",
+            "\nif the target label does not exist. It filters out non-matching edges as it iterates,",
+            "\npreventing the need to realize all edges into memory before applying a predicate."
         )]
         pub struct $name<'a> {
             guard: MergedAdjacencyGuard<'a>,

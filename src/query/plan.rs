@@ -430,15 +430,15 @@ impl TemporalContext {
         }
     }
 
-    /// Create a time range context (backward compatibility - uses valid_time dimension).
+    /// Sets the temporal context to query data valid between the specified time range.
     ///
     /// **Deprecated**: Use `valid_time_between()` or `transaction_time_between()` for clarity.
-    /// Sets the temporal context to query data valid between the specified `TimeRange`.
     /// Creates a query step that filters elements valid between two timestamps.
     ///
-    /// # Why?
-    /// This was the original API for basic temporal filtering. It has been superseded
-    /// by more explicit methods that distinguish between valid time and transaction time.
+    /// # The Spark
+    /// Early versions of AletheiaDB only supported a single concept of "time". As the bi-temporal
+    /// model matured, this ambiguous method was superseded by explicit `valid_time` and
+    /// `transaction_time` filtering methods.
     #[must_use]
     #[deprecated(
         since = "0.1.0",
