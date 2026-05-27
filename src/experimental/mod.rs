@@ -92,9 +92,10 @@ pub mod reasoning;
 #[cfg(feature = "semantic-reasoning")]
 pub use reasoning::*;
 
-#[cfg(feature = "semantic-temporal")]
+// We always export temporal so that the stub implementations (e.g., NarrativeGenerator)
+// are visible without the feature flag. These stubs contain helpful runtime panics
+// that guide the user to enable the feature, instead of a confusing `unresolved import` error.
 pub mod temporal;
-#[cfg(feature = "semantic-temporal")]
 pub use temporal::*;
 
 #[cfg(feature = "semantic-diagnostics")]

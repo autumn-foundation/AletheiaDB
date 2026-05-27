@@ -15,4 +15,5 @@ pub mod mnemosyne;
 pub mod sherlock;
 pub mod temporal_diff;
 /// Temporal narrative generator: natural-language history logs from version diffs.
+/// Temporal narrative generator: natural-language history logs from version diffs.
 pub mod temporal_narrative;
