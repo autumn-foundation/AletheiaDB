@@ -101,3 +101,23 @@ fn test_scale_and_copy_large_vector() {
         assert_eq!(*val, (i as f32) * 2.0);
     }
 }
+
+#[test]
+fn test_scale_and_copy_panics_on_length_mismatch() {
+    let src = vec![1.0; 17];
+    let mut dst = vec![0.0; 17];
+
+    // Create a smaller dst slice
+    let small_dst = unsafe {
+        std::slice::from_raw_parts_mut(dst.as_mut_ptr() as *mut std::mem::MaybeUninit<f32>, 16)
+    };
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        scale_and_copy(&src, small_dst, 2.0);
+    }));
+
+    assert!(
+        result.is_err(),
+        "scale_and_copy should panic when src and dst lengths mismatch"
+    );
+}

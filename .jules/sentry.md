@@ -37,3 +37,7 @@
 **[Fix `execute_traversal` target shards bug]**
 **Learning:** `plan.steps` from `route_traversal` returns empty list, and we need `involved_shards`
 **Action:** Replace `steps` with `involved_shards` and update the test.
+
+**[SIMD scale_and_copy Bounds Check Panic]**
+**Learning:** `unsafe` SIMD functions that write to uninitialized memory slices (like `scale_and_copy`) must have explicit length checks (e.g., `assert_eq!(src.len(), dst.len())`). Missing explicit test coverage for these boundary panics leaves a gap where a regression could silently drop the check and cause memory corruption.
+**Action:** Always verify boundary checks for `unsafe` SIMD memory writes by creating a smaller `dst` slice using `unsafe { std::slice::from_raw_parts_mut(..., len) }` and executing the function inside `std::panic::catch_unwind` to guarantee the length mismatch panics before undefined behavior occurs.
