@@ -90,3 +90,16 @@
 ## 2026-06-21 - Splitting Redb Cold Storage Blob
 **Tangle:** `src/storage/redb_cold_storage.rs` was over 4100 lines long, a "Blob" module holding both core cold storage logic and over 2000 lines of tests. It made navigation and understanding the core operations difficult.
 **Blueprint:** Refactored into a `src/storage/redb_cold_storage/` module. Kept the core data definitions and implementation in `mod.rs` (reduced to ~2000 lines) and moved all tests to `tests.rs` (~2000 lines), maintaining the `#[cfg(test)]` block functionality but with better physical separation.
+
+## 2026-06-21 - Splitting Config God Module
+**Tangle:** `src/config.rs` was over 1600 lines long, a "God Module" containing configurations for WAL, Historical Storage, Vector Index, and the overall AletheiaDB config. This violated the Single Responsibility Principle and made navigation difficult.
+**Blueprint:** Refactored `src/config.rs` into a `src/config/` directory.
+1. Extracted configurations into cohesive submodules:
+   - `wal.rs`: WAL configuration.
+   - `historical.rs`: Historical configuration.
+   - `vector.rs`: Vector Index configuration.
+   - `db.rs`: AletheiaDB overall configuration.
+   - `error.rs`: Configuration errors.
+   - `env.rs`: Environment-based configuration parsing.
+2. Extracted tests to `tests.rs`.
+3. Kept `mod.rs` as a clean facade, using `pub use` to maintain the exact public API, preventing any upstream breakage.
