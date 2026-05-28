@@ -49,7 +49,7 @@ fn test_version_chain() {
     let label = GLOBAL_INTERNER.intern("Person").unwrap();
 
     // Create 5 versions
-    let mut version_ids = Vec::new();
+    let mut version_ids = Vec::with_capacity(5);
     for i in 0..5 {
         let version_id = VersionId::new(100 + i).unwrap();
         let temporal = BiTemporalInterval::current((1000 + (i as i64) * 100).into());
@@ -2822,7 +2822,7 @@ fn test_edge_version_chain() {
     let label = GLOBAL_INTERNER.intern("KNOWS").unwrap();
 
     // Create 5 versions
-    let mut version_ids = Vec::new();
+    let mut version_ids = Vec::with_capacity(5);
     for i in 0..5 {
         let version_id = VersionId::new(100 + i).unwrap();
         let temporal = BiTemporalInterval::current((1000 + (i as i64) * 100).into());
@@ -3100,8 +3100,8 @@ fn test_independent_node_edge_anchor_intervals() {
     // Create interleaved node and edge versions to ensure they don't interfere
     // Node pattern: anchor(0), delta(1), delta(2), anchor(3), delta(4)
     // Edge pattern: anchor(100), delta(101), delta(102), anchor(103), delta(104)
-    let mut node_version_ids = Vec::new();
-    let mut edge_version_ids = Vec::new();
+    let mut node_version_ids = Vec::with_capacity(5);
+    let mut edge_version_ids = Vec::with_capacity(5);
 
     for i in 0..5 {
         // Add node version
