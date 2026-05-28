@@ -265,7 +265,7 @@ fn test_get_nodes_at_time_mixed_results() {
     assert_eq!(results.len(), 3);
 
     // First result should be Some
-    assert!(results[0].1.is_some());
+    assert!(matches!(results[0].1, Some(_)));
     assert_eq!(results[0].0, node1);
 
     // Second result should be None (non-existent node)
@@ -273,7 +273,7 @@ fn test_get_nodes_at_time_mixed_results() {
     assert_eq!(results[1].0, non_existent);
 
     // Third result should be Some
-    assert!(results[2].1.is_some());
+    assert!(matches!(results[2].1, Some(_)));
     assert_eq!(results[2].0, node2);
 }
 
@@ -327,7 +327,7 @@ fn test_get_nodes_at_time_after_deletion() {
 
     assert_eq!(results.len(), 2);
     assert!(results[0].1.is_none()); // node1 was deleted
-    assert!(results[1].1.is_some()); // node2 still exists
+    assert!(matches!(results[1].1, Some(_))); // node2 still exists
 
     // Query at time before deletion - both should exist
     let results = db
@@ -335,8 +335,8 @@ fn test_get_nodes_at_time_after_deletion() {
         .unwrap();
 
     assert_eq!(results.len(), 2);
-    assert!(results[0].1.is_some()); // node1 existed
-    assert!(results[1].1.is_some()); // node2 existed
+    assert!(matches!(results[0].1, Some(_))); // node1 existed
+    assert!(matches!(results[1].1, Some(_))); // node2 existed
 }
 
 #[test]
@@ -460,7 +460,7 @@ fn test_get_edges_at_time_mixed_results() {
     assert_eq!(results.len(), 2);
 
     // First result should be Some
-    assert!(results[0].1.is_some());
+    assert!(matches!(results[0].1, Some(_)));
     assert_eq!(results[0].0, edge1);
 
     // Second result should be None (non-existent edge)
@@ -519,7 +519,7 @@ fn test_get_edges_at_time_after_deletion() {
 
     assert_eq!(results.len(), 2);
     assert!(results[0].1.is_none()); // edge1 was deleted
-    assert!(results[1].1.is_some()); // edge2 still exists
+    assert!(matches!(results[1].1, Some(_))); // edge2 still exists
 
     // Query at time before deletion - both should exist
     let results = db
@@ -527,8 +527,8 @@ fn test_get_edges_at_time_after_deletion() {
         .unwrap();
 
     assert_eq!(results.len(), 2);
-    assert!(results[0].1.is_some()); // edge1 existed
-    assert!(results[1].1.is_some()); // edge2 existed
+    assert!(matches!(results[0].1, Some(_))); // edge1 existed
+    assert!(matches!(results[1].1, Some(_))); // edge2 existed
 }
 
 #[test]
@@ -553,7 +553,7 @@ fn test_get_nodes_at_time_large_batch() {
 
     // All should exist
     assert_eq!(results.len(), 100);
-    assert!(results.iter().all(|(_, node)| node.is_some()));
+    assert!(results.iter().all(|(_, node)| matches!(node, Some(_))));
 
     // Verify order is preserved
     for (i, (id, _)) in results.iter().enumerate() {
@@ -619,7 +619,7 @@ fn test_get_edges_at_time_large_batch() {
 
     // All should exist
     assert_eq!(results.len(), 100);
-    assert!(results.iter().all(|(_, edge)| edge.is_some()));
+    assert!(results.iter().all(|(_, edge)| matches!(edge, Some(_))));
 
     // Verify order is preserved
     for (i, (id, _)) in results.iter().enumerate() {

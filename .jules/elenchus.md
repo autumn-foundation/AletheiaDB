@@ -346,3 +346,10 @@
 **Finding:** The `LimitPushdown` tests originally missed several behavioral edge cases and logic checks, particularly regarding the propagation limits in BinaryOp combinations (`||`), updating limit values correctly against child bounds, and setting vector rank limits.
 **Evidence:** `cargo mutants` caught mutants in `LimitPushdown::push_down` specifically targeting the changed boolean condition logic and bounds assignment.
 **Recommendation:** Added `sentry_tests` to `LimitPushdown` that explicitly trigger tests enforcing the boolean change propagation, verifying that updated properties reflect correct nested limits, and vector bounds assignment. Tests now prevent `||` to `&&` mutations and correct top-k modifications.
+
+**[assert!(result.is_ok()) and assert!(result.is_some()) are Ceremony Tests]**
+**Module:** `tests/*`
+**Severity:** 🔴 Critical
+**Finding:** A pattern of ceremony assertions exists across the test suite. Numerous tests use `assert!(result.is_ok())` or `assert!(result.is_some())` rather than explicitly checking the returned value against a concrete expectation via `assert_eq!(result, Ok(expected))`. This weakens the tests by verifying only the existence of a success case (the prayer) and not the correctness of the returned value.
+**Evidence:** The use of `assert!(result.is_ok()); let val = result.unwrap(); assert_eq!(val, expected);` or `assert!(result.is_some())` does not take full advantage of Rust's pattern matching or `assert_eq!` power to verify correctness in a single, robust step.
+**Recommendation:** Refactor tests to replace `assert!(result.is_ok())` combined with `unwrap()` and `assert_eq!` by a direct `assert_eq!(result, Ok(expected))` where practical. Replace `assert!(result.is_some())` with `matches!(result, Some(_))` or `assert_eq!(result, Some(expected))`.

@@ -201,8 +201,7 @@ mod phase2_read_path {
         let guard = index.get_adjacency(NodeId::new(0).unwrap());
 
         // Fast path: should return slice directly
-        assert!(guard.as_slice().is_some());
-        let slice = guard.as_slice().unwrap();
+        let slice = guard.as_slice().expect("Expected slice");
         assert_eq!(slice.len(), 1);
         assert_eq!(slice[0].target, NodeId::new(1).unwrap());
     }

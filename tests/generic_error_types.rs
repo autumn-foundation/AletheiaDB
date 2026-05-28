@@ -42,8 +42,7 @@ fn test_read_with_custom_error_type() {
             .ok_or(RepositoryError::NotFound) // Custom error
     });
 
-    assert!(result.is_ok());
-    assert_eq!(result.unwrap(), "Alice");
+    assert_eq!(result, Ok("Alice".to_string()));
 }
 
 #[test]
@@ -67,8 +66,7 @@ fn test_read_with_custom_error_not_found() {
             .ok_or(RepositoryError::NotFound)
     });
 
-    assert!(result.is_err());
-    assert_eq!(result.unwrap_err(), RepositoryError::NotFound);
+    assert_eq!(result, Err(RepositoryError::NotFound));
 }
 
 #[test]
@@ -101,8 +99,7 @@ fn test_write_with_custom_error_type() {
         Ok("Bob".to_string())
     });
 
-    assert!(result.is_ok());
-    assert_eq!(result.unwrap(), "Bob");
+    assert_eq!(result, Ok("Bob".to_string()));
 }
 
 #[test]
@@ -140,13 +137,7 @@ fn test_write_with_validation_error() {
             .to_string())
     });
 
-    assert!(result.is_err());
-    match result.unwrap_err() {
-        RepositoryError::ValidationFailed(msg) => {
-            assert_eq!(msg, "Must be at least 18");
-        }
-        _ => panic!("Expected ValidationFailed error"),
-    }
+    assert_eq!(result, Err(RepositoryError::ValidationFailed("Must be at least 18".to_string())));
 }
 
 #[test]
@@ -171,8 +162,7 @@ fn test_write_with_timestamp_error() {
         Ok(name)
     });
 
-    assert!(result.is_ok());
-    let (name, _timestamp) = result.unwrap();
+    let (name, _timestamp)  = result.unwrap();
     assert_eq!(name, "Diana");
 }
 
@@ -196,8 +186,7 @@ fn test_write_with_options_error() {
         Ok(10)
     });
 
-    assert!(result.is_ok());
-    assert_eq!(result.unwrap(), 10);
+    assert_eq!(result, Ok(10));
 }
 
 #[test]
@@ -212,7 +201,7 @@ fn test_default_error_type_with_turbofish() {
         Ok(count)
     });
 
-    assert!(result.is_ok());
+    result.expect("Expected Ok");
 
     let result = db.write::<_, _, Error>(|tx| {
         let node_id = tx.create_node(
@@ -222,7 +211,7 @@ fn test_default_error_type_with_turbofish() {
         Ok(node_id)
     });
 
-    assert!(result.is_ok());
+    result.expect("Expected Ok");
 }
 
 #[test]
@@ -279,8 +268,7 @@ fn test_chained_operations_with_custom_errors() {
         Ok((name.to_string(), age))
     });
 
-    assert!(result.is_ok());
-    let (name, age) = result.unwrap();
+    let (name, age)  = result.unwrap();
     assert_eq!(name, "Frank");
     assert_eq!(age, 30);
 }
