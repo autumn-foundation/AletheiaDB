@@ -54,7 +54,7 @@ impl VectorDimension {
         Self(value)
     }
 
-    /// Returns the dimension as a `usize`.
+    /// Retrieves the total number of dimensions for this vector layout.
     ///
     /// # Example
     ///

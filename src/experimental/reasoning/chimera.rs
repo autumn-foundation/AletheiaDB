@@ -291,7 +291,7 @@ impl<'a> ChimeraEngine<'a> {
         // If they are strings, we can compare strings.
         if let (Some(_sa), Some(_sb)) = (a.as_str(), b.as_str()) {
             // String comparison - fallback to A for now as 'op' is numeric only.
-            // TODO: Implement string comparison logic if needed.
+            // FUTURE: Implement string comparison logic if needed.
             return Some(a.clone());
         }
         self.merge_numeric(a, b, op, &SynthesisConfig::default())

@@ -258,7 +258,7 @@ impl SparseVec {
         Ok(())
     }
 
-    /// Returns the number of non-zero elements.
+    /// Calculates the count of populated dimensions, useful for sparsity analysis.
     ///
     /// # Example
     ///
@@ -273,7 +273,7 @@ impl SparseVec {
         self.indices.len()
     }
 
-    /// Returns the total dimension of the vector (including zeros).
+    /// Retrieves the full dimensionality of the vector space this sparse vector inhabits.
     ///
     /// # Example
     ///

@@ -555,7 +555,7 @@ impl SparseVectorIndex {
         Ok(results)
     }
 
-    /// Returns the number of vectors in the index.
+    /// Computes the total quantity of vectors currently managed by this index structure.
     #[must_use]
     pub fn len(&self) -> usize {
         self.count.load(AtomicOrdering::Acquire)
@@ -567,19 +567,19 @@ impl SparseVectorIndex {
         self.len() == 0
     }
 
-    /// Returns the configured dimensions.
+    /// Exposes the vector dimensionality configured for this index layer.
     #[must_use]
     pub fn dimensions(&self) -> usize {
         self.config.dimensions
     }
 
-    /// Returns the scoring method.
+    /// Retrieves the similarity scoring metric employed during nearest-neighbor search.
     #[must_use]
     pub fn scoring(&self) -> ScoringMethod {
         self.config.scoring
     }
 
-    /// Returns the configuration.
+    /// Provides access to the underlying vector indexing configuration parameters.
     #[must_use]
     pub fn config(&self) -> &SparseIndexConfig {
         &self.config
@@ -591,7 +591,9 @@ impl SparseVectorIndex {
         self.vectors.contains_key(&id)
     }
 
-    /// Gets the sparse vector for a node ID, if it exists.
+    /// Retrieves the sparse vector representation associated with the provided [`NodeId`].
+    ///
+    /// This is useful for similarity comparisons or examining the indexed features of a node.
     #[must_use]
     pub fn get(&self, id: NodeId) -> Option<Arc<SparseVec>> {
         self.vectors.get(&id).map(|v| Arc::clone(&v.vector))

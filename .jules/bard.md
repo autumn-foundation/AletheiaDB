@@ -10,3 +10,6 @@
 ## 2024-05-14 - [Adding Examples to HLC and documenting src/main.rs]
 **Confusion:** The `src/main.rs` file was missing module-level documentation (`//!`), which triggers the `missing_docs` lint, but was hidden by the lint configurations inside `src/lib.rs` affecting `src/main.rs`. Also `HybridTimestamp::send` lacked an example showing the behavior of its logical counter.
 **Clarification:** Added `//! The AletheiaDB binary.` to `src/main.rs` and added an executable `## Examples` block to `HybridTimestamp::send` in `src/core/hlc.rs`.
+## 2024-05-29 - [Eliminating Useless Getters Docs]
+**Confusion:** Various functions throughout the codebase simply reiterated their signatures or were extremely unhelpful (e.g. `Returns the X` or `Gets the Y`). These comments failed to tell the developer *why* a function might be called or *what* it actually conceptually achieves.
+**Clarification:** Rewrote numerous doc comments that matched the useless "Returns the..." or "Gets the..." pattern to instead explain *why* the function exists, using more descriptive language and adding proper [`intra-doc links`] where appropriate (e.g., `src/core/id.rs`, `src/index/vector/sparse.rs`, etc.). Also stripped out some TODOs inside public documentation that exposed implementation limits needlessly.

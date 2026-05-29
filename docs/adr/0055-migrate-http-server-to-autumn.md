@@ -48,7 +48,7 @@ Replace actix-web with `autumn-web` 0.2.0 for the `http-server` feature.
     `RateLimitConfig` is preserved in the public API; the HTTP layer
     simply does not attach a limiter. Operators can enforce rate limits at
     the reverse-proxy layer in the interim (nginx, Caddy, Envoy). See the
-    `TODO(autumn-0.3)` marker in `src/http/server.rs`.
+    `FUTURE(autumn-0.3)` marker in `src/http/server.rs`.
 -   **Custom middleware layers are deferred.** Similarly, the explicit
     security-header / CORS / tracing layers that the actix stack applied
     directly do not chain onto autumn's `AppBuilder` as freely as they
@@ -143,7 +143,7 @@ Replace actix-web with `autumn-web` 0.2.0 for the `http-server` feature.
 -   **Dashboard PR** — add `maud` + `htmx` features, add `/admin` routes,
     first real Maud page (status overview).
 -   **Retire `tower-governor`** when autumn 0.3 ships per-IP rate
-    limiting OOTB. The `TODO(autumn-0.3):` marker in
+    limiting OOTB. The `FUTURE(autumn-0.3):` marker in
     `src/http/server.rs` is the breadcrumb.
 -   **Custom `ConfigLoader`** replacing the `env::set_var` bridge in
     `run_server`, so ops-facing config stays `ALETHEIADB_*`-only without

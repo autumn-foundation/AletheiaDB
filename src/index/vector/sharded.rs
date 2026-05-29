@@ -367,7 +367,7 @@ impl ShardedVectorIndex {
         self.config.strategy
     }
 
-    /// Returns the configuration.
+    /// Provides access to the underlying vector indexing configuration parameters.
     pub fn config(&self) -> &ShardedVectorConfig {
         &self.config
     }

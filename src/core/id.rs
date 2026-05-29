@@ -257,7 +257,7 @@ impl EntityId {
         matches!(self, EntityId::Edge(_))
     }
 
-    /// Returns the inner NodeId if this is a node, None otherwise.
+    /// Extracts the underlying [`NodeId`] if this entity is a node, allowing for node-specific operations.
     #[inline]
     pub const fn as_node(&self) -> Option<NodeId> {
         match self {
@@ -266,7 +266,7 @@ impl EntityId {
         }
     }
 
-    /// Returns the inner EdgeId if this is an edge, None otherwise.
+    /// Extracts the underlying [`EdgeId`] if this entity is an edge, allowing for edge-specific operations.
     #[inline]
     pub const fn as_edge(&self) -> Option<EdgeId> {
         match self {

@@ -490,7 +490,7 @@ pub trait VectorIndex: Send + Sync {
     where
         F: Fn(&NodeId) -> bool + Send + Sync;
 
-    /// Returns the number of vectors currently in the index.
+    /// Computes the total quantity of vectors currently managed by this index.
     ///
     /// # Examples
     ///
@@ -506,7 +506,7 @@ pub trait VectorIndex: Send + Sync {
     #[must_use]
     fn len(&self) -> usize;
 
-    /// Returns the dimensionality of vectors in this index.
+    /// Exposes the specific dimensionality vectors must adhere to within this index.
     ///
     /// All vectors added to the index must have this many dimensions.
     ///
@@ -525,7 +525,7 @@ pub trait VectorIndex: Send + Sync {
     #[must_use]
     fn dimensions(&self) -> usize;
 
-    /// Returns the distance metric used by this index.
+    /// Exposes the distance metric (e.g. Cosine, Euclidean) driving the similarity calculations.
     ///
     /// The distance metric determines how similarity scores are computed and
     /// how to interpret the `f32` values returned by `search()` methods.
@@ -626,7 +626,7 @@ pub trait VectorIndex: Send + Sync {
         ))
     }
 
-    /// Returns the approximate memory usage of this index in bytes.
+    /// Estimates the runtime memory footprint (in bytes) currently consumed by this index.
     ///
     /// Default returns 0 (unknown).
     fn memory_usage(&self) -> usize {

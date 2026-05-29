@@ -93,7 +93,7 @@ pub struct EntityHistory {
 }
 
 impl EntityHistory {
-    /// Returns the total number of versions in this entity's history.
+    /// Computes the total number of historical revisions recorded for this entity.
     ///
     /// This is useful for understanding the update frequency or lifespan of a node or edge.
     /// A high version count might indicate a highly volatile fact, while a count of 1
@@ -122,7 +122,7 @@ impl EntityHistory {
         self.versions.len()
     }
 
-    /// Returns the most recent version of this entity.
+    /// Retrieves the most recent mutation applied to this entity.
     ///
     /// Retrieves the latest state of the entity (the version with the highest `version_number`).
     /// This is typically the active version, unless the entity has been logically deleted.
@@ -151,7 +151,7 @@ impl EntityHistory {
         self.versions.last()
     }
 
-    /// Returns the initial version of this entity when it was first created.
+    /// Retrieves the original state of this entity at its moment of creation.
     ///
     /// Retrieves the first state of the entity. This is useful for provenance tracking
     /// to see how and when an entity originated.
