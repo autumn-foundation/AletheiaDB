@@ -37,3 +37,6 @@
 **[Fix `execute_traversal` target shards bug]**
 **Learning:** `plan.steps` from `route_traversal` returns empty list, and we need `involved_shards`
 **Action:** Replace `steps` with `involved_shards` and update the test.
+**Vector validation gaps and sparse vector edge cases**
+**Learning:** Functions like `sparse_cosine_similarity` and `sparse_euclidean_distance` delegate dimension validation to their underlying dot-product or distance-sum functions but missed explicit unit test coverage of this propagation path in their respective wrapper functions. Similarly, `validate_vector_with_bounds` missed explicit standalone tests for `f32::NAN` and `f32::INFINITY` that didn't simultaneously test something else.
+**Action:** Wrote targeted `_sentry` unit tests directly covering the explicit error branches (`DimensionMismatch`, `ContainsNaN`, `ContainsInfinity`) for these wrapper functions to ensure their interface contracts are explicitly guarded.

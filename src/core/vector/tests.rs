@@ -3089,3 +3089,51 @@ fn test_sparse_squared_euclidean_distance_edge_cases() {
         );
     }
 }
+
+#[test]
+fn test_sparse_cosine_similarity_dimension_mismatch_sentry() {
+    let a = SparseVec::new(vec![0], vec![1.0], 5).unwrap();
+    let b = SparseVec::new(vec![0], vec![1.0], 10).unwrap();
+
+    let result = sparse_cosine_similarity(&a, &b);
+    assert!(result.is_err());
+    assert!(matches!(
+        result.unwrap_err(),
+        crate::core::error::Error::Vector(crate::core::error::VectorError::DimensionMismatch { .. })
+    ));
+}
+
+#[test]
+fn test_sparse_euclidean_distance_dimension_mismatch_sentry() {
+    let a = SparseVec::new(vec![0], vec![1.0], 5).unwrap();
+    let b = SparseVec::new(vec![0], vec![1.0], 10).unwrap();
+
+    let result = sparse_euclidean_distance(&a, &b);
+    assert!(result.is_err());
+    assert!(matches!(
+        result.unwrap_err(),
+        crate::core::error::Error::Vector(crate::core::error::VectorError::DimensionMismatch { .. })
+    ));
+}
+
+#[test]
+fn test_validate_vector_with_bounds_nan_only_sentry() {
+    let v = vec![1.0, f32::NAN];
+    let result = validate_vector_with_bounds(&v, 10);
+    assert!(result.is_err());
+    assert!(matches!(
+        result.unwrap_err(),
+        crate::core::error::Error::Vector(crate::core::error::VectorError::ContainsNaN { .. })
+    ));
+}
+
+#[test]
+fn test_validate_vector_with_bounds_inf_only_sentry() {
+    let v = vec![1.0, f32::INFINITY];
+    let result = validate_vector_with_bounds(&v, 10);
+    assert!(result.is_err());
+    assert!(matches!(
+        result.unwrap_err(),
+        crate::core::error::Error::Vector(crate::core::error::VectorError::ContainsInfinity { .. })
+    ));
+}
