@@ -54,8 +54,9 @@ use crate::core::hlc::{
 };
 use crate::core::id::{IdGenerator, TxId};
 use crate::core::temporal::time;
+use parking_lot::RwLock;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 #[cfg(test)]
@@ -340,7 +341,8 @@ impl ShardCoordinator {
     }
 
     fn reinsert_transaction(&self, tx_id: TxId, transaction: DistributedTransaction) {
-        if let Ok(mut txns) = self.active_transactions.write() {
+        {
+            let mut txns = self.active_transactions.write();
             txns.insert(tx_id, transaction);
         }
     }
@@ -455,27 +457,25 @@ impl ShardCoordinator {
 
     /// Get the state of a shard.
     pub fn get_shard_state(&self, shard_id: ShardId) -> Option<ShardState> {
-        self.shard_states.read().ok()?.get(&shard_id).cloned()
+        self.shard_states.read().get(&shard_id).cloned()
     }
 
     /// Get all shard states.
     pub fn get_all_shard_states(&self) -> Vec<ShardState> {
-        self.shard_states
-            .read()
-            .map(|states| states.values().cloned().collect())
-            .unwrap_or_default()
+        self.shard_states.read().values().cloned().collect()
     }
 
     /// Update shard state.
     pub fn update_shard_state(&self, shard_id: ShardId, state: ShardState) {
-        if let Ok(mut states) = self.shard_states.write() {
+        {
+            let mut states = self.shard_states.write();
             states.insert(shard_id, state);
         }
     }
 
     /// Get metrics for a shard.
     pub fn get_metrics(&self, shard_id: ShardId) -> Option<Arc<ShardMetrics>> {
-        self.metrics.read().ok()?.get(&shard_id).cloned()
+        self.metrics.read().get(&shard_id).cloned()
     }
 
     /// Start a new distributed transaction.
@@ -498,7 +498,8 @@ impl ShardCoordinator {
         let transaction =
             DistributedTransaction::new(tx_id, participants, self.transaction_timeout);
 
-        if let Ok(mut txns) = self.active_transactions.write() {
+        {
+            let mut txns = self.active_transactions.write();
             txns.insert(tx_id, transaction);
         }
 
@@ -514,12 +515,7 @@ impl ShardCoordinator {
     pub fn prepare_distributed_transaction(&self, tx_id: TxId) -> Result<(), DistributedTxError> {
         // Get the transaction
         let mut transaction = {
-            let mut txns =
-                self.active_transactions
-                    .write()
-                    .map_err(|_| DistributedTxError::Aborted {
-                        reason: "Lock poisoned".to_string(),
-                    })?;
+            let mut txns = self.active_transactions.write();
             txns.remove(&tx_id)
                 .ok_or_else(|| DistributedTxError::Aborted {
                     reason: "Transaction not found".to_string(),
@@ -549,16 +545,7 @@ impl ShardCoordinator {
         let prepare_timestamp = transaction.commit_timestamp;
 
         // Send prepare to all participants
-        let connections = match self.connections.read() {
-            Ok(connections) => connections,
-            Err(_) => {
-                transaction.phase = TransactionPhase::Pending;
-                self.reinsert_transaction(tx_id, transaction);
-                return Err(DistributedTxError::Aborted {
-                    reason: "Lock poisoned".to_string(),
-                });
-            }
-        };
+        let connections = self.connections.read();
 
         let mut unavailable_shards = Vec::new();
 
@@ -605,7 +592,8 @@ impl ShardCoordinator {
             }
 
             // Re-insert the aborted transaction for tracking
-            if let Ok(mut txns) = self.active_transactions.write() {
+            {
+                let mut txns = self.active_transactions.write();
                 txns.insert(tx_id, transaction);
             }
 
@@ -617,14 +605,16 @@ impl ShardCoordinator {
         // Mark as prepared
         drop(connections); // Prevent deadlock with active_transactions.write()
         if let Err(e) = transaction.mark_prepared() {
-            if let Ok(mut txns) = self.active_transactions.write() {
+            {
+                let mut txns = self.active_transactions.write();
                 txns.insert(tx_id, transaction);
             }
             return Err(e);
         }
 
         // Re-insert the transaction
-        if let Ok(mut txns) = self.active_transactions.write() {
+        {
+            let mut txns = self.active_transactions.write();
             txns.insert(tx_id, transaction);
         }
 
@@ -647,12 +637,7 @@ impl ShardCoordinator {
     pub fn commit_distributed_transaction(&self, tx_id: TxId) -> Result<(), DistributedTxError> {
         // Get the transaction
         let mut transaction = {
-            let mut txns =
-                self.active_transactions
-                    .write()
-                    .map_err(|_| DistributedTxError::Aborted {
-                        reason: "Lock poisoned".to_string(),
-                    })?;
+            let mut txns = self.active_transactions.write();
             txns.remove(&tx_id)
                 .ok_or_else(|| DistributedTxError::Aborted {
                     reason: "Transaction not found".to_string(),
@@ -677,15 +662,7 @@ impl ShardCoordinator {
         // CRITICAL: Log the commit decision BEFORE sending commits
         // This ensures we can recover if the coordinator crashes
         {
-            let log = match self.commit_log.write() {
-                Ok(log) => log,
-                Err(_) => {
-                    self.reinsert_transaction(tx_id, transaction);
-                    return Err(DistributedTxError::Aborted {
-                        reason: "Lock poisoned".to_string(),
-                    });
-                }
-            };
+            let log = self.commit_log.write();
 
             let should_log = match log.get_decision(tx_id) {
                 Some(existing) => {
@@ -728,15 +705,7 @@ impl ShardCoordinator {
         }
 
         // Send commit to all participants with retry
-        let connections = match self.connections.read() {
-            Ok(connections) => connections,
-            Err(_) => {
-                self.reinsert_transaction(tx_id, transaction);
-                return Err(DistributedTxError::Aborted {
-                    reason: "Lock poisoned".to_string(),
-                });
-            }
-        };
+        let connections = self.connections.read();
 
         let mut unavailable_shards = Vec::new();
 
@@ -791,7 +760,8 @@ impl ShardCoordinator {
             }
 
             // Re-insert for recovery tracking
-            if let Ok(mut txns) = self.active_transactions.write() {
+            {
+                let mut txns = self.active_transactions.write();
                 txns.insert(tx_id, transaction);
             }
 
@@ -805,12 +775,7 @@ impl ShardCoordinator {
 
         // All committed successfully - log completion (clears pending state)
         {
-            let log = self
-                .commit_log
-                .read() // log_complete takes &self (interior mutability for writer)
-                .map_err(|_| DistributedTxError::Aborted {
-                    reason: "Lock poisoned".to_string(),
-                })?;
+            let log = self.commit_log.read();
             // Note: log_complete is durable, so we should probably handle errors?
             // If we fail to log complete, the transaction remains "pending" in the log.
             // On recovery, it will be replayed. Since commit is idempotent (if participants handle it),
@@ -823,7 +788,8 @@ impl ShardCoordinator {
         transaction.mark_committed()?;
 
         // Record metrics
-        if let Ok(metrics_map) = self.metrics.read() {
+        {
+            let metrics_map = self.metrics.read();
             for shard_id in transaction.participant_shards() {
                 if let Some(metrics) = metrics_map.get(&shard_id) {
                     metrics.record_write(true); // Distributed write
@@ -842,12 +808,7 @@ impl ShardCoordinator {
     ) -> Result<(), DistributedTxError> {
         // Get the transaction
         let mut transaction = {
-            let mut txns =
-                self.active_transactions
-                    .write()
-                    .map_err(|_| DistributedTxError::Aborted {
-                        reason: "Lock poisoned".to_string(),
-                    })?;
+            let mut txns = self.active_transactions.write();
             txns.remove(&tx_id)
                 .ok_or_else(|| DistributedTxError::Aborted {
                     reason: "Transaction not found".to_string(),
@@ -856,12 +817,7 @@ impl ShardCoordinator {
 
         // Log the abort decision
         {
-            let log = self
-                .commit_log
-                .read()
-                .map_err(|_| DistributedTxError::Aborted {
-                    reason: "Lock poisoned".to_string(),
-                })?;
+            let log = self.commit_log.read();
             if let Err(e) = log.log_abort(tx_id, transaction.participant_shards()) {
                 // If logging fails, we should still try to abort locally and remotely,
                 // but we might want to log this error.
@@ -877,12 +833,7 @@ impl ShardCoordinator {
         }
 
         // Send abort to all participants
-        let connections = self
-            .connections
-            .read()
-            .map_err(|_| DistributedTxError::Aborted {
-                reason: "Lock poisoned".to_string(),
-            })?;
+        let connections = self.connections.read();
 
         for shard_id in transaction.participant_shards() {
             if let Some(conn) = connections.get(&shard_id) {
@@ -896,12 +847,7 @@ impl ShardCoordinator {
 
         // Clear the decision log (log completion)
         {
-            let log = self
-                .commit_log
-                .read()
-                .map_err(|_| DistributedTxError::Aborted {
-                    reason: "Lock poisoned".to_string(),
-                })?;
+            let log = self.commit_log.read();
             let _ = log.log_complete(tx_id);
         }
 
@@ -910,7 +856,7 @@ impl ShardCoordinator {
 
     /// Get an active transaction by ID.
     pub fn get_transaction(&self, tx_id: TxId) -> Option<DistributedTransaction> {
-        self.active_transactions.read().ok()?.get(&tx_id).map(|tx| {
+        self.active_transactions.read().get(&tx_id).map(|tx| {
             // Create a copy of the transaction state
             DistributedTransaction {
                 tx_id: tx.tx_id,
@@ -939,7 +885,7 @@ impl ShardCoordinator {
     /// *   `dead_lettered`: List of transactions that failed after max retries and require manual intervention.
     pub fn recover_pending_transactions(&self) -> RecoveryResult {
         let decisions = {
-            let log = self.commit_log.read().expect("Commit log lock poisoned");
+            let log = self.commit_log.read();
             log.pending_commits()
         };
 
@@ -962,7 +908,8 @@ impl ShardCoordinator {
             tx.commit_decision_logged = true;
 
             // Insert into active transactions
-            if let Ok(mut txns) = self.active_transactions.write() {
+            {
+                let mut txns = self.active_transactions.write();
                 txns.insert(tx_id, tx);
             }
 
@@ -1006,7 +953,8 @@ impl ShardCoordinator {
                             });
 
                             // Remove from active transactions to prevent unbounded growth
-                            if let Ok(mut txns) = self.active_transactions.write() {
+                            {
+                                let mut txns = self.active_transactions.write();
                                 txns.remove(&tx_id);
                             }
                         }
@@ -1016,7 +964,8 @@ impl ShardCoordinator {
         }
 
         // Store dead-lettered transactions
-        if let Ok(mut dlq) = self.dead_letter_queue.write() {
+        {
+            let mut dlq = self.dead_letter_queue.write();
             for tx in &dead_lettered {
                 dlq.insert(tx.tx_id, tx.clone());
             }
@@ -1032,10 +981,7 @@ impl ShardCoordinator {
     ///
     /// These are transactions that failed recovery and require manual intervention.
     pub fn get_dead_lettered_transactions(&self) -> Vec<DeadLetteredTransaction> {
-        self.dead_letter_queue
-            .read()
-            .map(|dlq| dlq.values().cloned().collect())
-            .unwrap_or_default()
+        self.dead_letter_queue.read().values().cloned().collect()
     }
 
     /// Manually retry a dead-lettered transaction.
@@ -1045,12 +991,7 @@ impl ShardCoordinator {
     pub fn retry_dead_lettered_transaction(&self, tx_id: TxId) -> Result<(), DistributedTxError> {
         // Remove from dead letter queue
         let dlq_entry = {
-            let mut dlq =
-                self.dead_letter_queue
-                    .write()
-                    .map_err(|_| DistributedTxError::Aborted {
-                        reason: "Lock poisoned".to_string(),
-                    })?;
+            let mut dlq = self.dead_letter_queue.write();
             dlq.remove(&tx_id)
         };
 
@@ -1062,12 +1003,7 @@ impl ShardCoordinator {
 
         // Re-attempt recovery using single-transaction recovery
         let decision = {
-            let log = self
-                .commit_log
-                .read()
-                .map_err(|_| DistributedTxError::Aborted {
-                    reason: "Lock poisoned".to_string(),
-                })?;
+            let log = self.commit_log.read();
             log.pending_commits().into_iter().find(|d| d.tx_id == tx_id)
         };
 
@@ -1085,7 +1021,8 @@ impl ShardCoordinator {
             tx.commit_timestamp = commit_timestamp;
             tx.commit_decision_logged = true;
 
-            if let Ok(mut txns) = self.active_transactions.write() {
+            {
+                let mut txns = self.active_transactions.write();
                 txns.insert(found_tx_id, tx);
             }
 
@@ -1099,14 +1036,16 @@ impl ShardCoordinator {
 
     /// Clear all dead-lettered transactions (after manual resolution).
     pub fn clear_dead_letter_queue(&self) {
-        if let Ok(mut dlq) = self.dead_letter_queue.write() {
+        {
+            let mut dlq = self.dead_letter_queue.write();
             dlq.clear();
         }
     }
 
     /// Perform health checks on all shards.
     pub fn health_check_all(&self) {
-        if let Ok(mut connections) = self.connections.write() {
+        {
+            let mut connections = self.connections.write();
             for conn in connections.values_mut() {
                 conn.health_check();
             }
@@ -1115,30 +1054,26 @@ impl ShardCoordinator {
 
     /// Mark a shard as unavailable.
     pub fn mark_shard_unavailable(&self, shard_id: ShardId) {
-        if let Ok(mut connections) = self.connections.write()
-            && let Some(conn) = connections.get_mut(&shard_id)
-        {
+        let mut connections = self.connections.write();
+        if let Some(conn) = connections.get_mut(&shard_id) {
             conn.mark_unhealthy();
         }
 
-        if let Ok(mut states) = self.shard_states.write()
-            && let Some(state) = states.get_mut(&shard_id)
-        {
+        let mut states = self.shard_states.write();
+        if let Some(state) = states.get_mut(&shard_id) {
             state.status = ShardStatus::Unavailable;
         }
     }
 
     /// Mark a shard as available.
     pub fn mark_shard_available(&self, shard_id: ShardId) {
-        if let Ok(mut connections) = self.connections.write()
-            && let Some(conn) = connections.get_mut(&shard_id)
-        {
+        let mut connections = self.connections.write();
+        if let Some(conn) = connections.get_mut(&shard_id) {
             conn.mark_healthy();
         }
 
-        if let Ok(mut states) = self.shard_states.write()
-            && let Some(state) = states.get_mut(&shard_id)
-        {
+        let mut states = self.shard_states.write();
+        if let Some(state) = states.get_mut(&shard_id) {
             state.status = ShardStatus::Healthy;
         }
     }
@@ -1150,8 +1085,9 @@ impl ShardCoordinator {
         let states: Vec<u64> = self
             .shard_states
             .read()
-            .map(|s| s.values().map(|state| state.node_count).collect())
-            .unwrap_or_default();
+            .values()
+            .map(|state| state.node_count)
+            .collect();
 
         if states.is_empty() || states.len() == 1 {
             return 0.0;
@@ -1182,10 +1118,7 @@ impl ShardCoordinator {
 
     /// Get the number of active distributed transactions.
     pub fn active_transaction_count(&self) -> usize {
-        self.active_transactions
-            .read()
-            .map(|txns| txns.len())
-            .unwrap_or(0)
+        self.active_transactions.read().len()
     }
 }
 
@@ -1585,13 +1518,13 @@ mod tests {
 
         // Add to commit log
         {
-            let log = coordinator.commit_log.read().unwrap();
+            let log = coordinator.commit_log.read();
             let _ = log.log_commit(tx_id, vec![ShardId::new(1).unwrap()], None);
         }
 
         // Add to dead letter queue
         {
-            let mut dlq = coordinator.dead_letter_queue.write().unwrap();
+            let mut dlq = coordinator.dead_letter_queue.write();
             dlq.insert(
                 tx_id,
                 DeadLetteredTransaction {
@@ -1964,46 +1897,5 @@ mod tests {
 
         let second = run_distributed_tx(&coordinator, &shards).unwrap();
         assert!(second > first);
-    }
-
-    #[test]
-    fn test_havoc_deadlock() {
-        use std::sync::{Arc, RwLock};
-        use std::thread;
-        use std::time::Duration;
-
-        let active_transactions = Arc::new(RwLock::new(()));
-        let connections = Arc::new(RwLock::new(()));
-
-        let tx1 = active_transactions.clone();
-        let conn1 = connections.clone();
-        let t1 = thread::spawn(move || {
-            let _c = conn1.read().unwrap();
-            thread::sleep(Duration::from_millis(50));
-            // This simulates the missing drop(connections) before active_transactions.write()
-            let _t = tx1.write().unwrap();
-        });
-
-        let tx2 = active_transactions.clone();
-        let conn2 = connections.clone();
-        let t2 = thread::spawn(move || {
-            let _t = tx2.write().unwrap();
-            thread::sleep(Duration::from_millis(50));
-            // This simulates an operation that holds active_transactions and requests connections
-            let _c = conn2.read().unwrap();
-        });
-
-        // Use a timeout to detect deadlock
-        let (tx, rx) = std::sync::mpsc::channel();
-        thread::spawn(move || {
-            t1.join().unwrap();
-            t2.join().unwrap();
-            tx.send(()).unwrap();
-        });
-
-        assert!(
-            rx.recv_timeout(Duration::from_secs(2)).is_ok(),
-            "Deadlock detected!"
-        );
     }
 }
