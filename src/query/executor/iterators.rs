@@ -1499,23 +1499,67 @@ impl ResultIterator for ProjectIterator {
     fn next(&mut self) -> Option<Result<QueryRow>> {
         match self.input.next() {
             Some(Ok(mut row)) => {
-                if let Some(node) = row.entity.as_node() {
-                    let mut new_props = crate::core::PropertyMapBuilder::new();
-                    for prop in &self.properties {
-                        if let Some(val) = node.properties.get(prop) {
-                            new_props = match new_props.try_insert(prop, val.clone()) {
-                                Ok(p) => p,
-                                Err(e) => return Some(Err(e)),
-                            };
+                // ⚡ Bolt Optimization: Destructure the row's entity directly instead of `as_node()`.
+                // If it's a Node, we consume it and consume the target properties without cloning
+                // the large inner vectors or arrays of the property map.
+                let entity = std::mem::replace(
+                    &mut row.entity,
+                    EntityResult::NodeId(crate::core::id::NodeId::new(0).unwrap()),
+                );
+                match entity {
+                    EntityResult::Node(node) => {
+                        let mut new_props = crate::core::PropertyMapBuilder::new();
+                        let node_id = node.id;
+                        let node_label = node.label;
+                        let node_current_version = node.current_version;
+
+                        let props_inner = node.properties.inner.clone();
+                        drop(node); // Drop node to release our reference to the Arc inside `node.properties`.
+
+                        // We extract the underlying HashMap from PropertyMap if we are the sole owner
+                        // using `Arc::into_inner`. If we can't get it by value, we fall back to clone.
+                        match std::sync::Arc::try_unwrap(props_inner) {
+                            Ok(mut map) => {
+                                for prop in &self.properties {
+                                    if let Some(key) =
+                                        crate::core::interning::GLOBAL_INTERNER.get_id(prop)
+                                        && let Some(val) = map.remove(&key)
+                                    {
+                                        new_props = match new_props.try_insert(prop, val) {
+                                            Ok(p) => p,
+                                            Err(e) => return Some(Err(e)),
+                                        };
+                                    }
+                                }
+                            }
+                            Err(shared_map) => {
+                                // Fallback if shared
+                                for prop in &self.properties {
+                                    if let Some(key) =
+                                        crate::core::interning::GLOBAL_INTERNER.get_id(prop)
+                                        && let Some(val) = shared_map.get(&key)
+                                    {
+                                        new_props = match new_props.try_insert(prop, val.clone()) {
+                                            Ok(p) => p,
+                                            Err(e) => return Some(Err(e)),
+                                        };
+                                    }
+                                }
+                            }
                         }
+
+                        let new_node = crate::core::graph::Node::new(
+                            node_id,
+                            node_label,
+                            new_props.build(),
+                            node_current_version,
+                        );
+                        row.entity = EntityResult::Node(new_node);
                     }
-                    let new_node = crate::core::graph::Node::new(
-                        node.id,
-                        node.label,
-                        new_props.build(),
-                        node.current_version,
-                    );
-                    row.entity = EntityResult::Node(new_node);
+                    other => {
+                        // Put it back if it's not a Node
+                        row.entity = other;
+                    }
                 }
                 Some(Ok(row))
             }

@@ -77,3 +77,7 @@
 **Pre-allocating Vec Capacities in Hot Paths**
 **Learning:** Pre-allocating standard Rust `Vec` objects using `Vec::with_capacity` in hot-paths like parsers and query planners eliminates unnecessary heap reallocations (0 -> 4 -> 8 -> 16 etc.), without changing semantics or causing borrow checker issues. However, if the expected bounds are wildly incorrect it could lead to memory bloat. A small capacity for small collections minimizes performance impacts in hot loops.
 **Action:** When a loop dynamically pushes elements to a new empty Vector (especially in repeated execution domains like parsers and network/storage iterators), replace `Vec::new()` with `Vec::with_capacity(n)` if a typical or max size `n` is roughly known.
+
+**[Optimize ProjectIterator Property Copying]**
+**Learning:** In query projections (`ProjectIterator::next`), using `.as_node()` and calling `val.clone()` on matched properties creates deep heap copies of large arrays/vectors for every returned row. The inner property map is wrapped in an `Arc`, but when a node is uniquely owned by the row, `Arc::try_unwrap` can be used to take ownership of the inner `HashMap`.
+**Action:** When destructuring an `EntityResult::Node`, use `mem::replace` to take ownership of the entity. Try to unwrap the underlying `Arc<HashMap>` using `Arc::try_unwrap`. If successful (the map is uniquely owned), use `map.remove()` to move properties without deep cloning. Fall back to `.clone()` only when `try_unwrap` fails (the map is shared).

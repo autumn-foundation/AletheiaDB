@@ -117,6 +117,15 @@ impl EntityResult {
             _ => None,
         }
     }
+
+    /// Extract the Node, consuming the EntityResult
+    #[must_use]
+    pub fn into_node(self) -> Option<Node> {
+        match self {
+            EntityResult::Node(n) => Some(n),
+            _ => None,
+        }
+    }
 }
 
 /// A single, multi-dimensional row yielded from a query execution.
