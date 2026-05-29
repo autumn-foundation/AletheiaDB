@@ -185,6 +185,17 @@ impl HttpShardClient {
     /// # Returns
     ///
     /// A new client instance, or an error if initialization fails.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use aletheiadb::storage::sharding::rpc_client::{HttpShardClient, RpcConfig};
+    /// use aletheiadb::storage::sharding::types::ShardId;
+    ///
+    /// let shard_id = ShardId::new(1).unwrap();
+    /// let config = RpcConfig::default();
+    /// let client = HttpShardClient::new(shard_id, config).unwrap();
+    /// ```
     #[cfg(feature = "sharding-rpc")]
     pub fn new(shard_id: ShardId, config: RpcConfig) -> NetworkResult<Self> {
         let http_client = reqwest::blocking::Client::builder()
@@ -209,6 +220,17 @@ impl HttpShardClient {
     }
 
     /// Create a new HTTP shard client (stub when feature not enabled).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use aletheiadb::storage::sharding::rpc_client::{HttpShardClient, RpcConfig};
+    /// use aletheiadb::storage::sharding::types::ShardId;
+    ///
+    /// let shard_id = ShardId::new(1).unwrap();
+    /// let config = RpcConfig::default();
+    /// let client = HttpShardClient::new(shard_id, config).unwrap();
+    /// ```
     #[cfg(not(feature = "sharding-rpc"))]
     pub fn new(shard_id: ShardId, config: RpcConfig) -> NetworkResult<Self> {
         Ok(Self {

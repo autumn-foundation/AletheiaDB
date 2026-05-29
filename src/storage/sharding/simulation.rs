@@ -367,6 +367,16 @@ impl ShardingSimulation {
     }
 
     /// Run the simulation with the specified strategy.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use aletheiadb::storage::sharding::simulation::{ShardingSimulation, ShardingStrategy};
+    ///
+    /// let simulator = ShardingSimulation::with_defaults();
+    /// let result = simulator.run(ShardingStrategy::HashBased);
+    /// assert_eq!(result.total_nodes, 100_000);
+    /// ```
     pub fn run(&self, strategy: ShardingStrategy) -> SimulationResult {
         let mut result = SimulationResult::new(
             self.config.num_nodes,

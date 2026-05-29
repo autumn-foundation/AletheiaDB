@@ -410,6 +410,18 @@ pub struct MigrationExecutor<C: ShardClient> {
 
 impl<C: ShardClient> MigrationExecutor<C> {
     /// Create a new migration executor.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use aletheiadb::storage::sharding::migration::{MigrationExecutor, MigrationConfig, DualWriteRouter};
+    /// use aletheiadb::storage::sharding::rpc_client::HttpShardClient;
+    /// use std::sync::Arc;
+    ///
+    /// let config = MigrationConfig::default();
+    /// let dual_write_router = Arc::new(DualWriteRouter::new());
+    /// let executor: MigrationExecutor<HttpShardClient> = MigrationExecutor::new(config, dual_write_router);
+    /// ```
     pub fn new(config: MigrationConfig, dual_write_router: Arc<DualWriteRouter>) -> Self {
         Self {
             config,

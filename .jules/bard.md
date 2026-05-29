@@ -10,3 +10,6 @@
 ## 2024-05-14 - [Adding Examples to HLC and documenting src/main.rs]
 **Confusion:** The `src/main.rs` file was missing module-level documentation (`//!`), which triggers the `missing_docs` lint, but was hidden by the lint configurations inside `src/lib.rs` affecting `src/main.rs`. Also `HybridTimestamp::send` lacked an example showing the behavior of its logical counter.
 **Clarification:** Added `//! The AletheiaDB binary.` to `src/main.rs` and added an executable `## Examples` block to `HybridTimestamp::send` in `src/core/hlc.rs`.
+## 2024-05-29 - [Missing Doc-tests in Sharding Submodule]
+**Confusion:** Several core public types in `src/storage/sharding` (`DistributedQuery`, `QueryExecutor`, `HttpShardClient`, `MigrationExecutor`, `DistributedTransaction`, `ShardingSimulation`) were missing executable examples (`## Examples`).
+**Clarification:** I added concrete, compilable doc-tests to these types' constructor functions to show how to properly initialize them, ensuring users don't have to guess or read source code.

@@ -177,6 +177,15 @@ pub struct DistributedQuery {
 
 impl DistributedQuery {
     /// Create a new distributed query.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use aletheiadb::storage::sharding::executor::{DistributedQuery, AggregationStrategy};
+    ///
+    /// let query = DistributedQuery::new(1, vec![1, 2, 3])
+    ///     .with_aggregation(AggregationStrategy::Concat);
+    /// ```
     pub fn new(id: u64, data: Vec<u8>) -> Self {
         Self {
             id,
@@ -290,6 +299,19 @@ pub struct QueryExecutor<C: ShardClient> {
 
 impl<C: ShardClient> QueryExecutor<C> {
     /// Create a new query executor.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use aletheiadb::storage::sharding::executor::{QueryExecutor, ExecutorConfig};
+    /// use aletheiadb::storage::sharding::router::ShardRouter;
+    /// use aletheiadb::storage::sharding::config::ShardConfig;
+    /// use aletheiadb::storage::sharding::rpc_client::HttpShardClient;
+    ///
+    /// let config = ShardConfig::default();
+    /// let router = ShardRouter::new(config);
+    /// let executor: QueryExecutor<HttpShardClient> = QueryExecutor::new(ExecutorConfig::default(), router);
+    /// ```
     pub fn new(config: ExecutorConfig, router: ShardRouter) -> Self {
         Self {
             config,
@@ -329,6 +351,24 @@ impl<C: ShardClient> QueryExecutor<C> {
     ///   are marked as `pending` in the timeout error (or silently omitted if results are returned).
     ///
     /// This means the order of `target_shards` matters: earlier shards are prioritized.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use aletheiadb::storage::sharding::executor::{QueryExecutor, ExecutorConfig, DistributedQuery, AggregationStrategy};
+    /// use aletheiadb::storage::sharding::router::ShardRouter;
+    /// use aletheiadb::storage::sharding::config::ShardConfig;
+    /// use aletheiadb::storage::sharding::rpc_client::HttpShardClient;
+    ///
+    /// let config = ShardConfig::default();
+    /// let router = ShardRouter::new(config);
+    /// let executor: QueryExecutor<HttpShardClient> = QueryExecutor::new(ExecutorConfig::default(), router);
+    ///
+    /// let query = DistributedQuery::new(1, vec![1, 2, 3])
+    ///     .with_aggregation(AggregationStrategy::Concat);
+    ///
+    /// let _result = executor.execute(query);
+    /// ```
     pub fn execute(&self, query: DistributedQuery) -> ExecutorResult<QueryResult> {
         let start = Instant::now();
         let timeout = query.timeout.unwrap_or(self.config.default_timeout);

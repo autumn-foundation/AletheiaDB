@@ -199,6 +199,25 @@ pub struct DistributedTransaction {
 
 impl DistributedTransaction {
     /// Create a new distributed transaction.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use aletheiadb::storage::sharding::transaction::DistributedTransaction;
+    /// use aletheiadb::storage::sharding::types::ShardId;
+    /// use aletheiadb::core::hlc::HybridTimestamp;
+    /// use std::time::Duration;
+    ///
+    /// let tx_id = aletheiadb::core::id::TxId::new(1);
+    /// let shard_1 = ShardId::new(1).unwrap();
+    /// let shard_2 = ShardId::new(2).unwrap();
+    ///
+    /// let tx = DistributedTransaction::new(
+    ///     tx_id,
+    ///     vec![shard_1, shard_2],
+    ///     Duration::from_secs(5),
+    /// );
+    /// ```
     pub fn new(tx_id: TxId, participants: Vec<ShardId>, timeout: Duration) -> Self {
         let mut participant_map = HashMap::new();
         for shard in participants {
