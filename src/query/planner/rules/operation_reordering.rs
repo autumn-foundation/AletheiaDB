@@ -465,7 +465,14 @@ mod tests {
         ));
 
         let result = rule.apply(&plan, &stats).unwrap();
-        assert!(result.is_some(), "Should reorder filters by selectivity");
+        let new_plan = result.as_ref().unwrap();
+        assert!(matches!(
+            &new_plan.root,
+            LogicalOp::Unary {
+                op: UnaryOp::Filter(_),
+                ..
+            }
+        ));
 
         let optimized = result.unwrap();
         // The outermost filter should be the LESS selective one (rare_property)
@@ -550,7 +557,14 @@ mod tests {
         ));
 
         let result = rule.apply(&plan, &stats).unwrap();
-        assert!(result.is_some(), "Should reorder three filters");
+        let new_plan = result.as_ref().unwrap();
+        assert!(matches!(
+            &new_plan.root,
+            LogicalOp::Unary {
+                op: UnaryOp::Filter(_),
+                ..
+            }
+        ));
     }
 
     // ==================== Join Reordering Tests ====================
@@ -582,7 +596,8 @@ mod tests {
         ));
 
         let result = rule.apply(&plan, &stats).unwrap();
-        assert!(result.is_some(), "Should reorder join operands");
+        let new_plan = result.as_ref().unwrap();
+        assert!(matches!(&new_plan.root, LogicalOp::Binary { .. }));
 
         let optimized = result.unwrap();
         // Small table should be on the left (build side)
@@ -665,7 +680,8 @@ mod tests {
         ));
 
         let result = rule.apply(&plan, &stats).unwrap();
-        assert!(result.is_some(), "Should optimize complex query");
+        let new_plan = result.as_ref().unwrap();
+        assert!(matches!(&new_plan.root, LogicalOp::Binary { .. }));
     }
 
     // ==================== Edge Cases ====================

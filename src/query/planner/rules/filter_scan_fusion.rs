@@ -150,7 +150,7 @@ impl FilterScanFusion {
 }
 
 #[cfg(test)]
-mod tests {
+mod sentry_tests {
     use super::*;
     use crate::query::ir::Predicate;
     use crate::query::plan::ScanOp;
@@ -158,6 +158,50 @@ mod tests {
 
     fn test_stats() -> Statistics {
         Statistics::default()
+    }
+    #[test]
+    fn test_fusion_binary_op() {
+        use crate::query::plan::BinaryOp;
+
+        let rule = FilterScanFusion;
+        let stats = test_stats();
+
+        // Left: Filter over NodeScan (Should fuse)
+        let left = LogicalOp::unary(
+            UnaryOp::Filter(Predicate::eq("a", 1)),
+            LogicalOp::Scan(ScanOp::NodeScan {
+                label: Some("LabelA".to_string()),
+                estimated_rows: None,
+            }),
+        );
+
+        // Right: NodeScan without filter (Should NOT change)
+        let right = LogicalOp::Scan(ScanOp::NodeScan {
+            label: Some("LabelB".to_string()),
+            estimated_rows: None,
+        });
+
+        let plan = LogicalPlan::new(LogicalOp::binary(BinaryOp::Union, left, right));
+
+        let result = rule.apply(&plan, &stats).unwrap();
+        let expected_plan = LogicalPlan::new(LogicalOp::binary(
+            BinaryOp::Union,
+            LogicalOp::Scan(ScanOp::PropertyScan {
+                label: "LabelA".to_string(),
+                key: "a".to_string(),
+                value: crate::query::ir::PredicateValue::Int(1),
+            }),
+            LogicalOp::Scan(ScanOp::NodeScan {
+                label: Some("LabelB".to_string()),
+                estimated_rows: None,
+            }),
+        ));
+
+        assert_eq!(
+            result,
+            Some(expected_plan),
+            "Partial optimization in left branch should propagate"
+        );
     }
 
     #[test]
@@ -239,7 +283,11 @@ mod tests {
         .with_temporal_context(TemporalContext::default());
 
         let result = rule.apply(&plan, &stats).unwrap();
-        assert!(result.is_some());
-        assert!(result.unwrap().temporal_context.is_some());
+        let new_plan = result.unwrap();
+        assert!(new_plan.temporal_context.is_some());
+        assert!(matches!(
+            new_plan.root,
+            LogicalOp::Scan(ScanOp::PropertyScan { .. })
+        ));
     }
 }

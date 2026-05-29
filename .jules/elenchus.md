@@ -346,3 +346,18 @@
 **Finding:** The `LimitPushdown` tests originally missed several behavioral edge cases and logic checks, particularly regarding the propagation limits in BinaryOp combinations (`||`), updating limit values correctly against child bounds, and setting vector rank limits.
 **Evidence:** `cargo mutants` caught mutants in `LimitPushdown::push_down` specifically targeting the changed boolean condition logic and bounds assignment.
 **Recommendation:** Added `sentry_tests` to `LimitPushdown` that explicitly trigger tests enforcing the boolean change propagation, verifying that updated properties reflect correct nested limits, and vector bounds assignment. Tests now prevent `||` to `&&` mutations and correct top-k modifications.
+
+
+**[FilterScanFusion Assertions]**
+**Module:** `src/query/planner/rules/filter_scan_fusion.rs`
+**Severity:** 🟢 Acquitted (Strengthened)
+**Finding:** `test_preserves_temporal_context` used `assert!(result.is_some())` followed by `assert!(result.unwrap().temporal_context.is_some())`, without fully verifying the structure of the returned plan. `FilterScanFusion` also lacked an explicit test for partial optimization in binary operators (`LogicalOp::Binary`).
+**Evidence:** `test_preserves_temporal_context` did not check the returned logical plan structure. Binary operations were handled in the implementation but lacking an explicit test case.
+**Recommendation:** Replaced weak assertions in `test_preserves_temporal_context` with explicit matches over the `root`. Added `test_fusion_binary_op` to explicitly test that left-side modifications correctly propagate up binary operator structures.
+
+**[OperationReordering Assertions]**
+**Module:** `src/query/planner/rules/operation_reordering.rs`
+**Severity:** 🟢 Acquitted (Strengthened)
+**Finding:** Many tests like `test_reorder_filters_by_selectivity` and `test_reorder_three_filters` only asserted `result.is_some()` instead of checking the resulting struct structure beyond that.
+**Evidence:** Weak assertions like `assert!(result.is_some(), "Should reorder three filters");` which didn't verify the actual outcome correctly.
+**Recommendation:** Upgraded `is_some` assertions to explicitly unwrap the option and use `assert!(matches!(&new_plan.root, ...))` to ensure structural checks on the root element.
