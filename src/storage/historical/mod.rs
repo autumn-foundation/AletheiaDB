@@ -1004,7 +1004,8 @@ impl HistoricalStorage {
     /// # Returns
     /// * `Ok(PropertyMap)` - Reconstructed properties
     /// * `Err(TemporalError::MaxDepthExceeded)` - Delta chain too deep (DoS protection)
-    /// * `Err(StorageError::VersionNotFound)` - Version not found
+    /// * `Err(StorageError::VersionNotFound)` - Requested version does not exist
+    /// * `Err(TemporalError::MissingAnchor)` - An ancestor in the chain was removed
     /// * `Err(TemporalError::CorruptedVersionChain)` - Invalid chain structure
     fn reconstruct_node_properties_iterative(&self, version_id: VersionId) -> Result<PropertyMap> {
         // Collect version IDs backwards from target to anchor
