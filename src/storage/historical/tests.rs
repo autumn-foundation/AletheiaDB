@@ -4629,6 +4629,16 @@ fn test_missing_anchor_detected_after_anchor_deletion() {
     storage.__test_remove_node_version(v0_id);
     storage.__test_clear_property_cache();
 
+    // Kill the anchor-cache-clear mutation: v0 is an anchor so add_node_version put it
+    // in node_anchor_cache. After __test_clear_property_cache, the anchor cache is empty.
+    // A mutant that makes node_anchor_cache.clear() a no-op leaves v0 in the cache;
+    // reconstruct_node_properties_with_depth would then return Ok via the anchor-cache
+    // fallback instead of falling through to the iterative path that discovers the gap.
+    assert!(
+        storage.reconstruct_node_properties(v0_id).is_err(),
+        "Anchor must not be reconstructable via cache after clear and deletion"
+    );
+
     let result = storage.reconstruct_node_properties(v1_id);
     assert!(result.is_err(), "Expected error when anchor is missing");
     match result.unwrap_err() {
@@ -4688,10 +4698,9 @@ fn test_edge_missing_anchor_detected_after_anchor_deletion() {
 
     assert!(storage.get_edge_version(e1_id).unwrap().is_delta());
 
-    // Pre-populate the edge reconstruction cache so the clear step is load-bearing.
-    // A mutant that turns __test_clear_edge_property_cache into a no-op would leave
-    // the cached Ok value in place; the subsequent reconstruct would return it instead
-    // of discovering MissingAnchor, causing the assertion below to fail.
+    // Pre-populate the edge reconstruction cache so the primary-cache clear is load-bearing.
+    // A mutant that makes edge_property_cache.clear() a no-op leaves the cached Ok for e1;
+    // the subsequent reconstruct would return it instead of discovering MissingAnchor.
     let warm = storage.reconstruct_edge_properties(e1_id).unwrap();
     assert_eq!(
         warm.get("weight").and_then(|v| v.as_int()),
@@ -4702,6 +4711,15 @@ fn test_edge_missing_anchor_detected_after_anchor_deletion() {
     // Remove the anchor
     storage.__test_remove_edge_version(e0_id);
     storage.__test_clear_edge_property_cache();
+
+    // Kill the anchor-cache-clear mutation: e0 is an anchor so add_edge_version put it
+    // in edge_anchor_cache. After __test_clear_edge_property_cache, the anchor cache is
+    // empty. A mutant that makes edge_anchor_cache.clear() a no-op leaves e0 there;
+    // reconstruct_edge_properties_with_depth would return Ok via the anchor-cache fallback.
+    assert!(
+        storage.reconstruct_edge_properties(e0_id).is_err(),
+        "Edge anchor must not be reconstructable via cache after clear and deletion"
+    );
 
     let result = storage.reconstruct_edge_properties(e1_id);
     assert!(
