@@ -186,10 +186,8 @@ impl<'a> FishingRod<'a> {
             let now_micros = time::now().wallclock();
 
             // We need to fetch nodes to check timestamps.
-            // Collect all candidate IDs
-            let all_candidates: Vec<NodeId> = candidate_scores.keys().cloned().collect();
-
-            for node_id in all_candidates {
+            // ⚡ Bolt Optimization: Use `iter_mut()` instead of allocating a temporary `Vec` and performing double-lookups.
+            for (node_id, score) in candidate_scores.iter_mut() {
                 // Not collapsing if to keep it simple and compatible with potentially older rust versions
                 // or just to be explicit. But clippy complained, so let's try to satisfy it without let_chains
                 // if they are experimental (as per memory), but `if let && let` is stable?
@@ -197,7 +195,7 @@ impl<'a> FishingRod<'a> {
                 // So I CANNOT collapse it using `if let ... && let ...`.
                 // I will suppress the lint.
                 #[allow(clippy::collapsible_if)]
-                if let Ok(node) = self.db.get_node(node_id) {
+                if let Ok(node) = self.db.get_node(*node_id) {
                     if let Some(ts) = node.metadata.commit_timestamp {
                         let age_micros = now_micros.saturating_sub(ts.wallclock());
                         let age_seconds = age_micros as f32 / 1_000_000.0;
@@ -205,9 +203,7 @@ impl<'a> FishingRod<'a> {
                         let age_hours = age_seconds / 3600.0;
                         let freshness_score = 1.0 / (1.0 + age_hours);
 
-                        candidate_scores.entry(node_id).and_modify(|s| {
-                            *s += freshness_score * config.freshness_weight;
-                        });
+                        *score += freshness_score * config.freshness_weight;
                     }
                 }
             }

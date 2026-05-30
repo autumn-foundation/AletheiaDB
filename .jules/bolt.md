@@ -77,3 +77,7 @@
 **Pre-allocating Vec Capacities in Hot Paths**
 **Learning:** Pre-allocating standard Rust `Vec` objects using `Vec::with_capacity` in hot-paths like parsers and query planners eliminates unnecessary heap reallocations (0 -> 4 -> 8 -> 16 etc.), without changing semantics or causing borrow checker issues. However, if the expected bounds are wildly incorrect it could lead to memory bloat. A small capacity for small collections minimizes performance impacts in hot loops.
 **Action:** When a loop dynamically pushes elements to a new empty Vector (especially in repeated execution domains like parsers and network/storage iterators), replace `Vec::new()` with `Vec::with_capacity(n)` if a typical or max size `n` is roughly known.
+
+**[Optimize HashMap lookups with iter_mut]**
+**Learning:** Extracting `keys()` into an intermediate `Vec` (like `candidate_scores.keys().cloned().collect()`) just to loop over them and mutate their associated values in the same map using `.entry().and_modify()` introduces an unnecessary heap allocation and causes an O(1) double-lookup inside the loop.
+**Action:** Iterate directly over the map using `iter_mut()` whenever mutating its values. This completely avoids the intermediate `Vec` allocation and grants direct mutable references to the values, eliding the need for redundant dictionary lookups.
