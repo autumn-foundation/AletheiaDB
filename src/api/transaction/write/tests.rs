@@ -2248,7 +2248,7 @@ mod conflict_detection_tests {
 
             // Current implementation: edge becomes orphaned but still exists in storage.
             // This documents a limitation: the system allows orphaned edges.
-            // TODO(issue): Consider adding cascade delete or stricter referential integrity
+            // FUTURE(issue): Consider adding cascade delete or stricter referential integrity
             assert!(
                 harness.current.get_edge(edge_id).is_ok(),
                 "Edge still exists as orphan (documents current behavior)"

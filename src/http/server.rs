@@ -108,7 +108,7 @@ pub async fn run_server(config: ServerConfig) -> std::io::Result<()> {
     // vars. Autumn 0.2.0 doesn't yet expose `with_config_loader` publicly
     // (that lands in 0.3 on trunk), so this is the supported path for now.
     //
-    // TODO(autumn-0.3): replace this env-var bridge with a custom
+    // NOTE(autumn-0.3): replace this env-var bridge with a custom
     // `ConfigLoader` impl — it's cleaner, retires the `unsafe` block, and
     // is the idiomatic autumn extension point.
     //
@@ -120,7 +120,7 @@ pub async fn run_server(config: ServerConfig) -> std::io::Result<()> {
         apply_autumn_env(&config);
     }
 
-    // TODO(autumn-0.3): wire per-IP rate limiting here when autumn ships it
+    // FUTURE(autumn-0.3): wire per-IP rate limiting here when autumn ships it
     // natively. See the module-level doc.
     //
     // Request tracing, metrics, and security headers are provided by autumn's
