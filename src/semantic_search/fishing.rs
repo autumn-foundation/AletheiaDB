@@ -187,9 +187,8 @@ impl<'a> FishingRod<'a> {
 
             // We need to fetch nodes to check timestamps.
             // Collect all candidate IDs
-            let all_candidates: Vec<NodeId> = candidate_scores.keys().cloned().collect();
-
-            for node_id in all_candidates {
+            // Iterate directly over mutable scores to avoid Vec allocation and double lookups
+            for (&node_id, score) in candidate_scores.iter_mut() {
                 // Not collapsing if to keep it simple and compatible with potentially older rust versions
                 // or just to be explicit. But clippy complained, so let's try to satisfy it without let_chains
                 // if they are experimental (as per memory), but `if let && let` is stable?
@@ -205,9 +204,7 @@ impl<'a> FishingRod<'a> {
                         let age_hours = age_seconds / 3600.0;
                         let freshness_score = 1.0 / (1.0 + age_hours);
 
-                        candidate_scores.entry(node_id).and_modify(|s| {
-                            *s += freshness_score * config.freshness_weight;
-                        });
+                        *score += freshness_score * config.freshness_weight;
                     }
                 }
             }
