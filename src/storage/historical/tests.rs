@@ -4614,6 +4614,17 @@ fn test_missing_anchor_detected_after_anchor_deletion() {
         Some(v0_id)
     );
 
+    // Pre-populate the reconstruction cache so that __test_clear_property_cache
+    // becomes load-bearing: a mutant that makes it a no-op would leave the cache
+    // populated and the second reconstruct call would return Ok (cached) instead
+    // of MissingAnchor, which would fail the test below.
+    let warm = storage.reconstruct_node_properties(v1_id).unwrap();
+    assert_eq!(
+        warm.get("name").and_then(|v| v.as_str()),
+        Some("Bob"),
+        "pre-deletion reconstruction must succeed"
+    );
+
     // Simulate anchor loss (e.g. migration to cold storage that is then unavailable)
     storage.__test_remove_node_version(v0_id);
     storage.__test_clear_property_cache();
@@ -4676,6 +4687,17 @@ fn test_edge_missing_anchor_detected_after_anchor_deletion() {
         .unwrap();
 
     assert!(storage.get_edge_version(e1_id).unwrap().is_delta());
+
+    // Pre-populate the edge reconstruction cache so the clear step is load-bearing.
+    // A mutant that turns __test_clear_edge_property_cache into a no-op would leave
+    // the cached Ok value in place; the subsequent reconstruct would return it instead
+    // of discovering MissingAnchor, causing the assertion below to fail.
+    let warm = storage.reconstruct_edge_properties(e1_id).unwrap();
+    assert_eq!(
+        warm.get("weight").and_then(|v| v.as_int()),
+        Some(2),
+        "pre-deletion reconstruction must succeed"
+    );
 
     // Remove the anchor
     storage.__test_remove_edge_version(e0_id);
