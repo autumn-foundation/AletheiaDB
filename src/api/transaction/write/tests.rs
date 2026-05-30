@@ -3433,6 +3433,86 @@ mod bitemporal_validation_tests {
             err => panic!("Expected ValidTimeTooFarInFuture, got: {err:?}"),
         }
     }
+
+    /// Test: Updating an edge with valid_time set more than 1 year in future is rejected.
+    #[test]
+    fn test_update_edge_rejects_far_future_valid_time() {
+        use crate::core::error::TemporalError;
+        use crate::core::hlc::HybridTimestamp;
+
+        let harness = TestHarness::new();
+
+        let mut tx = harness.begin_write();
+        let src = tx.create_node("Person", PropertyMap::new()).unwrap();
+        let tgt = tx.create_node("Person", PropertyMap::new()).unwrap();
+        tx.commit().unwrap();
+
+        let mut tx2 = harness.begin_write();
+        let edge_id = tx2
+            .create_edge(src, tgt, "KNOWS", PropertyMap::new())
+            .unwrap();
+        tx2.commit().unwrap();
+
+        let over_limit_wallclock =
+            time::now().wallclock() + super::super::MAX_VALID_TIME_FUTURE_OFFSET_US + 1_000_000;
+        let over_limit_ts = HybridTimestamp::new(over_limit_wallclock, 0).unwrap();
+
+        let mut tx3 = harness.begin_write();
+        let result = tx3.update_edge_with_valid_time(
+            edge_id,
+            PropertyMapBuilder::new().insert("strength", 5i64).build(),
+            Some(over_limit_ts),
+        );
+
+        assert!(
+            result.is_err(),
+            "Should reject valid_time beyond the 1-year limit"
+        );
+        match result.unwrap_err() {
+            crate::core::error::Error::Temporal(TemporalError::ValidTimeTooFarInFuture {
+                ..
+            }) => {}
+            err => panic!("Expected ValidTimeTooFarInFuture, got: {err:?}"),
+        }
+    }
+
+    /// Test: Deleting an edge with valid_time set more than 1 year in future is rejected.
+    #[test]
+    fn test_delete_edge_rejects_far_future_valid_time() {
+        use crate::core::error::TemporalError;
+        use crate::core::hlc::HybridTimestamp;
+
+        let harness = TestHarness::new();
+
+        let mut tx = harness.begin_write();
+        let src = tx.create_node("Person", PropertyMap::new()).unwrap();
+        let tgt = tx.create_node("Person", PropertyMap::new()).unwrap();
+        tx.commit().unwrap();
+
+        let mut tx2 = harness.begin_write();
+        let edge_id = tx2
+            .create_edge(src, tgt, "KNOWS", PropertyMap::new())
+            .unwrap();
+        tx2.commit().unwrap();
+
+        let over_limit_wallclock =
+            time::now().wallclock() + super::super::MAX_VALID_TIME_FUTURE_OFFSET_US + 1_000_000;
+        let over_limit_ts = HybridTimestamp::new(over_limit_wallclock, 0).unwrap();
+
+        let mut tx3 = harness.begin_write();
+        let result = tx3.delete_edge_with_valid_time(edge_id, Some(over_limit_ts));
+
+        assert!(
+            result.is_err(),
+            "Should reject valid_time beyond the 1-year limit"
+        );
+        match result.unwrap_err() {
+            crate::core::error::Error::Temporal(TemporalError::ValidTimeTooFarInFuture {
+                ..
+            }) => {}
+            err => panic!("Expected ValidTimeTooFarInFuture, got: {err:?}"),
+        }
+    }
 }
 
 mod find_nodes_by_property_tests {
