@@ -4645,9 +4645,12 @@ fn test_missing_anchor_detected_after_anchor_deletion() {
         crate::core::error::Error::Temporal(crate::core::error::TemporalError::MissingAnchor {
             entity_id,
         }) => {
+            // entity_id must come from the version's node_id field (via
+            // get_node_version_any_tier), not the generic "version V" fallback.
+            // This assertion kills the mutation that removes the .and_then() lookup.
             assert!(
-                !entity_id.is_empty(),
-                "MissingAnchor entity_id must not be empty"
+                entity_id.starts_with("Node("),
+                "MissingAnchor entity_id must identify the node, got: {entity_id}"
             );
         }
         err => panic!("Expected MissingAnchor, got: {err:?}"),
@@ -4730,7 +4733,12 @@ fn test_edge_missing_anchor_detected_after_anchor_deletion() {
         crate::core::error::Error::Temporal(crate::core::error::TemporalError::MissingAnchor {
             entity_id,
         }) => {
-            assert!(!entity_id.is_empty());
+            // entity_id must come from the version's edge_id field (via
+            // get_edge_version_any_tier), not the generic "version V" fallback.
+            assert!(
+                entity_id.starts_with("Edge("),
+                "MissingAnchor entity_id must identify the edge, got: {entity_id}"
+            );
         }
         err => panic!("Expected MissingAnchor, got: {err:?}"),
     }
@@ -4860,4 +4868,42 @@ fn test_competing_valid_times_stored_and_queried_by_bitemporal_interval() {
         Some(v2_id),
         "At tx_time=2500, v2 should be visible at valid_time=2500"
     );
+}
+
+#[test]
+fn test_reconstruct_nonexistent_node_version_returns_version_not_found() {
+    // When version_ids is empty (the very first lookup fails), the code must return
+    // StorageError::VersionNotFound, NOT TemporalError::MissingAnchor.
+    //
+    // A mutant that removes the `!version_ids.is_empty()` guard in the match arm would
+    // cause this call to return MissingAnchor for any missing version — this test
+    // catches that mutation by checking for the exact VersionNotFound error type.
+    let storage = HistoricalStorage::new();
+    let nonexistent = VersionId::new(9999).unwrap();
+    let result = storage.reconstruct_node_properties(nonexistent);
+    assert!(result.is_err(), "Non-existent version must return an error");
+    match result.unwrap_err() {
+        crate::core::error::Error::Storage(StorageError::VersionNotFound(_)) => {}
+        err => panic!("Expected VersionNotFound for a never-added version, got: {err:?}"),
+    }
+}
+
+#[test]
+fn test_reconstruct_nonexistent_edge_version_returns_version_not_found() {
+    // Mirror of test_reconstruct_nonexistent_node_version_returns_version_not_found
+    // for the edge reconstruction path.
+    //
+    // Kills the `!version_ids.is_empty()` guard mutation in
+    // reconstruct_edge_properties_iterative.
+    let storage = HistoricalStorage::new();
+    let nonexistent = VersionId::new(9998).unwrap();
+    let result = storage.reconstruct_edge_properties(nonexistent);
+    assert!(
+        result.is_err(),
+        "Non-existent edge version must return an error"
+    );
+    match result.unwrap_err() {
+        crate::core::error::Error::Storage(StorageError::VersionNotFound(_)) => {}
+        err => panic!("Expected VersionNotFound for a never-added edge version, got: {err:?}"),
+    }
 }
