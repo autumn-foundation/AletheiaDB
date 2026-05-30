@@ -23,8 +23,7 @@ use std::fs;
 fn module_docs(path: &str) -> String {
     let src = fs::read_to_string(path).unwrap_or_else(|e| panic!("Failed to read {path}: {e}"));
     src.lines()
-        .take_while(|l| l.starts_with("//!") || l.trim().is_empty() && false)
-        // keep only //! lines so we never accidentally match body code
+        .take_while(|l| l.starts_with("//!"))
         .filter(|l| l.starts_with("//!"))
         .collect::<Vec<_>>()
         .join("\n")

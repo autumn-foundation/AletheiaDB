@@ -13,7 +13,7 @@
 //!      ▼  (optimization rules applied — see `rules` module)
 //!  Optimized LogicalPlan
 //!      │
-//!      ▼  CostEstimator::estimate()   ← this module
+//!      ▼  CostModel::estimate()   ← this module
 //!  Cost { cpu, io, memory, network }
 //!      │
 //!      ▼  Planner::select_physical_plan()
