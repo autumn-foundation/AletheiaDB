@@ -37,3 +37,6 @@
 **[Fix `execute_traversal` target shards bug]**
 **Learning:** `plan.steps` from `route_traversal` returns empty list, and we need `involved_shards`
 **Action:** Replace `steps` with `involved_shards` and update the test.
+## LimitPushdown Mutants Propagation Coverage
+**Learning:** In optimization rule tests (like `LimitPushdown`), checking for `true/false` return values across `||` combinations in `BinaryOp` nodes (like Union) is essential to eliminate `cargo mutants` escapees. Specifically, if a boolean short-circuits or requires both sides to be evaluated, test suites must explicitly hit the `left_changed = false, right_changed = true` combination to prove the right branch actually propagates limits.
+**Action:** Wrote comprehensive structural test cases verifying limits propagating into right-hand branches correctly when the left hand does not change, and explicitly verified that identical `top_k` matches do not spuriously trigger boolean changes.

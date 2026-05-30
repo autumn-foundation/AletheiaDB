@@ -543,3 +543,68 @@ mod sentry_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod more_sentry_tests {
+    use super::*;
+    use crate::core::NodeId;
+    use crate::query::plan::{BinaryOp, ScanOp};
+
+    #[test]
+    fn test_pushdown_binary_partial_change_right() {
+        let rule = LimitPushdown;
+        let stats = Statistics::default();
+
+        // Left: Scan -> Scan [changed = false]
+        let left = LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(1).unwrap()]));
+
+        // Right: Limit(10, Limit(20, Scan)) -> Limit(10, Scan) [changed = true]
+        let right = LogicalOp::unary(
+            UnaryOp::Limit(10),
+            LogicalOp::unary(
+                UnaryOp::Limit(20),
+                LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(2).unwrap()])),
+            ),
+        );
+
+        let plan = LogicalPlan::new(LogicalOp::binary(BinaryOp::Union, left, right));
+
+        let result = rule.apply(&plan, &stats).unwrap();
+        let expected_plan = LogicalPlan::new(LogicalOp::binary(
+            BinaryOp::Union,
+            LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(1).unwrap()])),
+            LogicalOp::unary(
+                UnaryOp::Limit(10),
+                LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(2).unwrap()])),
+            ),
+        ));
+
+        assert_eq!(
+            result,
+            Some(expected_plan),
+            "Partial optimization in right branch should propagate"
+        );
+    }
+
+    #[test]
+    fn test_pushdown_vector_rank_equal_top_k() {
+        let rule = LimitPushdown;
+
+        let op = LogicalOp::unary(
+            UnaryOp::VectorRank {
+                embedding: vec![0.1f32].into(),
+                top_k: Some(5),
+                property_key: None,
+            },
+            LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(1).unwrap()])),
+        );
+        let (_new_op, changed) = rule.push_down(&op, Some(5)).unwrap();
+
+        // When top_k equals limit, it should NOT mark as changed,
+        // UNLESS the input itself changed.
+        assert!(
+            !changed,
+            "Vector rank should not apply new top_k if it's equal and input didn't change"
+        );
+    }
+}
