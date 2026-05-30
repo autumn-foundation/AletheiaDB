@@ -485,7 +485,7 @@ Predicate::gt("score", 0.5f64)        // f64
 ### Common Errors
 
 ```rust
-use aletheiadb::utils::error::{Error, StorageError, VectorError};
+use aletheiadb::core::error::{Error, StorageError, VectorError};
 
 match results.next() {
     Some(Ok(row)) => { /* process row */ }
