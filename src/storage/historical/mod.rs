@@ -1043,7 +1043,7 @@ impl HistoricalStorage {
                 {
                     let entity_id = version_ids
                         .first()
-                        .and_then(|&vid| self.node_versions.get(&vid))
+                        .and_then(|&vid| self.get_node_version_any_tier(vid).ok())
                         .map(|v| v.node_id.to_string())
                         .unwrap_or_else(|| format!("version {}", version_id));
                     return Err(TemporalError::MissingAnchor { entity_id }.into());
@@ -1157,7 +1157,7 @@ impl HistoricalStorage {
                 {
                     let entity_id = version_ids
                         .first()
-                        .and_then(|&vid| self.edge_versions.get(&vid))
+                        .and_then(|&vid| self.get_edge_version_any_tier(vid).ok())
                         .map(|v| v.edge_id.to_string())
                         .unwrap_or_else(|| format!("version {}", version_id));
                     return Err(TemporalError::MissingAnchor { entity_id }.into());

@@ -1104,12 +1104,14 @@ impl WriteOps for WriteTransaction {
             validation::validate_valid_from_future(valid_from)?;
 
             // Validate valid_from is not before the edge's own creation time
-            let historical = self.historical.read();
-            if let Some(current_version_id) = historical.get_current_edge_version(edge_id)
-                && let Some(current_version) = historical.get_edge_version(current_version_id)
-            {
-                let creation_time = current_version.temporal.valid_time().start();
-                drop(historical);
+            let creation_time = {
+                let historical = self.historical.read();
+                historical
+                    .get_current_edge_version(edge_id)
+                    .and_then(|vid| historical.get_edge_version(vid))
+                    .map(|v| v.temporal.valid_time().start())
+            };
+            if let Some(creation_time) = creation_time {
                 validation::validate_valid_from_not_before_creation(
                     &format!("edge:{}", edge_id.as_u64()),
                     creation_time,
@@ -1261,12 +1263,14 @@ impl WriteOps for WriteTransaction {
             validation::validate_valid_from_future(valid_from)?;
 
             // Validate valid_from is not before the edge's own creation time
-            let historical = self.historical.read();
-            if let Some(current_version_id) = historical.get_current_edge_version(edge_id)
-                && let Some(current_version) = historical.get_edge_version(current_version_id)
-            {
-                let creation_time = current_version.temporal.valid_time().start();
-                drop(historical);
+            let creation_time = {
+                let historical = self.historical.read();
+                historical
+                    .get_current_edge_version(edge_id)
+                    .and_then(|vid| historical.get_edge_version(vid))
+                    .map(|v| v.temporal.valid_time().start())
+            };
+            if let Some(creation_time) = creation_time {
                 validation::validate_valid_from_not_before_creation(
                     &format!("edge:{}", edge_id.as_u64()),
                     creation_time,
