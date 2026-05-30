@@ -3,6 +3,30 @@
 //! Provides cost estimation for physical operators, enabling the planner
 //! to choose the most efficient execution strategy.
 //!
+//! # Role in the Query Pipeline
+//!
+//! Cost estimation sits between the logical and physical planning layers:
+//!
+//! ```text
+//!  LogicalPlan
+//!      │
+//!      ▼  (optimization rules applied — see `rules` module)
+//!  Optimized LogicalPlan
+//!      │
+//!      ▼  CostModel::estimate()   ← this module
+//!  Cost { cpu, io, memory, network }
+//!      │
+//!      ▼  Planner::select_physical_plan()
+//!  PhysicalOp  (see `physical` module)
+//! ```
+//!
+//! [`CostModel`] reads cardinality and selectivity estimates from
+//! [`Statistics`] (see the `stats` module) and combines them with operator-
+//! specific cost factors to produce a [`Cost`] value.  The planner uses these
+//! values to compare candidate physical plans and select the cheapest one.
+//!
+//! # Calibration
+//!
 //! Cost values are calibrated from AletheiaDB benchmarks:
 //! - Node lookup: ~0.5µs
 //! - Single-hop traversal: ~1µs
