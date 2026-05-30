@@ -1,5 +1,4 @@
 use aletheiadb::core::temporal::time;
-use aletheiadb::query::traits::GraphView;
 use aletheiadb::{AletheiaDB, PropertyMapBuilder};
 
 #[test]
@@ -26,7 +25,7 @@ fn test_graph_view_trait_coverage() {
         .unwrap();
 
     // Use GraphView trait methods explicitly
-    let view: &dyn GraphView = &db;
+    let view: &aletheiadb::db::AletheiaDB = &db;
 
     // 1. get_node (already covered usually, but good to be explicit)
     let n1 = view.get_node(node1).unwrap();
