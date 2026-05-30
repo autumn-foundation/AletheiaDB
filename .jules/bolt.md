@@ -77,3 +77,7 @@
 **Pre-allocating Vec Capacities in Hot Paths**
 **Learning:** Pre-allocating standard Rust `Vec` objects using `Vec::with_capacity` in hot-paths like parsers and query planners eliminates unnecessary heap reallocations (0 -> 4 -> 8 -> 16 etc.), without changing semantics or causing borrow checker issues. However, if the expected bounds are wildly incorrect it could lead to memory bloat. A small capacity for small collections minimizes performance impacts in hot loops.
 **Action:** When a loop dynamically pushes elements to a new empty Vector (especially in repeated execution domains like parsers and network/storage iterators), replace `Vec::new()` with `Vec::with_capacity(n)` if a typical or max size `n` is roughly known.
+
+**Clamp on NaN Panic**
+**Learning:** `f32::clamp` panics if called on `NaN`. When performing math operations like vector similarity that might result in `NaN` or `Inf` (e.g., division by zero from zero-length vectors), you must guard against division by zero *before* clamping, or check `.is_finite()` first.
+**Action:** Always handle zero cases manually or verify `.is_finite()` before applying `.clamp(-1.0, 1.0)`.

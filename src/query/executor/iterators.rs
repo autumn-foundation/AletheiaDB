@@ -15,7 +15,7 @@ use crate::core::error::Result;
 use crate::core::graph::Node;
 use crate::core::interning::GLOBAL_INTERNER;
 use crate::core::property::PropertyValue;
-use crate::core::vector::cosine_similarity;
+use crate::core::vector::{dot_product, magnitude, normalize};
 use crate::core::{NodeId, Timestamp};
 use crate::query::ir::{Direction, Predicate, PredicateValue};
 use crate::storage::current::CurrentStorage;
@@ -1236,9 +1236,10 @@ impl Ord for ScoredRow {
 
 /// Iterator for vector reranking.
 pub struct VectorRerankIterator {
+    /// ⚡ Bolt optimization: Storing the normalized embedding avoids recomputing its magnitude for every candidate row.
+    normalized_embedding: Arc<[f32]>,
     sorted: Option<std::vec::IntoIter<Reverse<ScoredRow>>>,
     input: Option<Box<dyn ResultIterator>>,
-    embedding: Arc<[f32]>,
     k: usize,
     _current: Arc<CurrentStorage>,
     /// Vector property name, or None if no vector index is configured
@@ -1264,10 +1265,12 @@ impl VectorRerankIterator {
         // Use explicit property if provided, otherwise get default from storage
         let vector_property = property_key.or_else(|| current.get_vector_property_name());
 
+        let normalized_embedding = Arc::from(normalize(&embedding).into_boxed_slice());
+
         VectorRerankIterator {
             sorted: None,
             input: Some(input),
-            embedding,
+            normalized_embedding,
             k,
             _current: current,
             vector_property,
@@ -1281,10 +1284,14 @@ impl VectorRerankIterator {
         let PropertyValue::Vector(vec) = node.properties.get(vector_property)? else {
             return None;
         };
-        let similarity = cosine_similarity(&self.embedding, vec).ok()?;
+        let mag_vec = magnitude(vec);
+        if mag_vec == 0.0 {
+            return None; // Reject zero-length vectors
+        }
+        let similarity = dot_product(&self.normalized_embedding, vec).ok()? / mag_vec;
         // Reject NaN/Inf values - these indicate invalid input (e.g., zero-length vectors)
         if similarity.is_finite() {
-            Some(similarity)
+            Some(similarity.clamp(-1.0, 1.0))
         } else {
             #[cfg(feature = "observability")]
             tracing::debug!(

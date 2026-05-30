@@ -29,7 +29,7 @@
 
 use crate::core::error::Result;
 use crate::core::id::NodeId;
-use crate::core::vector::{cosine_similarity, validate_vector};
+use crate::core::vector::{dot_product, magnitude, normalize, validate_vector};
 use crate::query::traits::GraphView;
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashSet};
@@ -122,6 +122,9 @@ pub fn traverse_and_rank<G: GraphView + ?Sized>(
     // Validate target embedding
     validate_vector(target_embedding)?;
 
+    // ⚡ Bolt optimization: Pre-normalize target to avoid recomputing magnitude for every candidate
+    let normalized_target = normalize(target_embedding);
+
     // Check that start node exists
     let _start_node = db.get_node(start)?;
 
@@ -160,8 +163,14 @@ pub fn traverse_and_rank<G: GraphView + ?Sized>(
         };
 
         // Compute cosine similarity
-        match cosine_similarity(target_embedding, embedding) {
-            Ok(similarity) => {
+        let mag_vec = magnitude(embedding);
+        if mag_vec == 0.0 {
+            continue; // Skip zero-length vectors to match cosine_similarity NaN rejection
+        }
+
+        match dot_product(&normalized_target, embedding) {
+            Ok(dot) => {
+                let similarity = (dot / mag_vec).clamp(-1.0, 1.0);
                 let candidate = ScoredCandidate::new(target_id, similarity);
 
                 if top_k_heap.len() < k {
