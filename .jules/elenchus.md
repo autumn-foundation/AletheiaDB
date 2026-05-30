@@ -346,3 +346,17 @@
 **Finding:** The `LimitPushdown` tests originally missed several behavioral edge cases and logic checks, particularly regarding the propagation limits in BinaryOp combinations (`||`), updating limit values correctly against child bounds, and setting vector rank limits.
 **Evidence:** `cargo mutants` caught mutants in `LimitPushdown::push_down` specifically targeting the changed boolean condition logic and bounds assignment.
 **Recommendation:** Added `sentry_tests` to `LimitPushdown` that explicitly trigger tests enforcing the boolean change propagation, verifying that updated properties reflect correct nested limits, and vector bounds assignment. Tests now prevent `||` to `&&` mutations and correct top-k modifications.
+
+**[OperationReordering Mutants: Propagation and Estimations]**
+**Module:** `src/query/planner/rules/operation_reordering.rs`
+**Severity:** 🟡 Suspect
+**Finding:** Mutants survived replacing logical `||` with `&&` when propagating the `changed` boolean up the `LogicalOp` tree in both `Join` and other binary operations. The `apply` method's `Result::Ok` packaging was also not explicitly tested, and the `estimate_cardinality` method lacked structural coverage across all `ScanOp` variants and basic unary/empty operations.
+**Evidence:** `cargo mutants` output showed >30 surviving mutants centered on `changed` propagation (`left_changed || right_changed`), `apply` method returns, and `estimate_cardinality` math. The tests only implicitly checked high-level behavior, not structural propagation and estimation mapping.
+**Recommendation:** Added explicit tests verifying `changed` boolean propagation (`test_reorder_binary_changed_propagation`, `test_reorder_join_changed_propagation`), `apply()` returns (`test_apply_no_change_returns_none`), and `estimate_cardinality()` behavior across all variants to lock down expected logic.
+
+**[FilterScanFusion Mutants: Binary changed Propagation]**
+**Module:** `src/query/planner/rules/filter_scan_fusion.rs`
+**Severity:** 🟡 Suspect
+**Finding:** Similar to `OperationReordering`, `FilterScanFusion::fuse` failed to fail tests when replacing logical `||` with `&&` for the `changed` boolean propagation in `LogicalOp::Binary`. The `apply` method itself and `name` method also lacked explicit validation.
+**Evidence:** Tests checked specific fusions but not the propagation of state upwards through unmodified container structures like `BinaryOp::Union` when one side fused and the other didn't.
+**Recommendation:** Strengthened tests with `test_fuse_binary_changed_propagation` to explicitly assert the boolean logic for nested `LogicalOp::Binary` returns, as well as `apply` tests.

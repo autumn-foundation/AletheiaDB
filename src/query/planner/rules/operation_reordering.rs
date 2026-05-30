@@ -1185,4 +1185,300 @@ mod tests {
             Predicate::Or(vec![Predicate::eq("a", 1), Predicate::eq("b", 2)])
         );
     }
+
+    // ==================== Mutant Killers ====================
+    #[test]
+    fn test_operation_reordering_name() {
+        let rule = OperationReordering;
+        assert_eq!(rule.name(), "operation-reordering");
+    }
+
+    #[test]
+    fn test_apply_no_change_returns_none() {
+        let rule = OperationReordering;
+        let stats = test_stats();
+        let plan = LogicalPlan::new(LogicalOp::Empty);
+        let result = rule.apply(&plan, &stats).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_apply_with_change_returns_some() {
+        let rule = OperationReordering;
+        let stats = test_stats();
+        // A plan that WILL be optimized
+        let plan = LogicalPlan::new(LogicalOp::binary(
+            BinaryOp::Join {
+                left_key: "id".to_string(),
+                right_key: "ref_id".to_string(),
+            },
+            LogicalOp::Scan(ScanOp::NodeScan {
+                label: Some("LargeTable".to_string()),
+                estimated_rows: Some(10000),
+            }),
+            LogicalOp::Scan(ScanOp::NodeScan {
+                label: Some("SmallTable".to_string()),
+                estimated_rows: Some(100),
+            }),
+        ));
+        let result = rule.apply(&plan, &stats).unwrap();
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_estimate_cardinality_empty() {
+        let rule = OperationReordering;
+        assert_eq!(rule.estimate_cardinality(&LogicalOp::Empty), 0);
+    }
+
+    #[test]
+    fn test_estimate_cardinality_unary_limit() {
+        let rule = OperationReordering;
+        let op = LogicalOp::unary(UnaryOp::Limit(50), LogicalOp::Empty);
+        assert_eq!(rule.estimate_cardinality(&op), 50);
+    }
+
+    #[test]
+    fn test_estimate_cardinality_unary_other() {
+        let rule = OperationReordering;
+        let op = LogicalOp::unary(
+            UnaryOp::Skip(10),
+            LogicalOp::Scan(ScanOp::NodeScan {
+                label: None,
+                estimated_rows: Some(200),
+            }),
+        );
+        assert_eq!(rule.estimate_cardinality(&op), 200);
+    }
+
+    #[test]
+    fn test_estimate_cardinality_binary() {
+        let rule = OperationReordering;
+        let op = LogicalOp::binary(
+            BinaryOp::Union,
+            LogicalOp::Scan(ScanOp::NodeScan {
+                label: None,
+                estimated_rows: Some(100),
+            }),
+            LogicalOp::Scan(ScanOp::NodeScan {
+                label: None,
+                estimated_rows: Some(200),
+            }),
+        );
+        // (100 * 200 * 0.1) = 2000
+        assert_eq!(rule.estimate_cardinality(&op), 2000);
+    }
+
+    #[test]
+    fn test_estimate_cardinality_scans() {
+        let rule = OperationReordering;
+        assert_eq!(
+            rule.estimate_cardinality(&LogicalOp::Scan(ScanOp::NodeLookup(vec![
+                NodeId::new(1).unwrap()
+            ]))),
+            1
+        );
+        assert_eq!(
+            rule.estimate_cardinality(&LogicalOp::Scan(ScanOp::NodeScan {
+                label: None,
+                estimated_rows: None
+            })),
+            DEFAULT_NODE_SCAN_CARDINALITY
+        );
+        assert_eq!(
+            rule.estimate_cardinality(&LogicalOp::Scan(ScanOp::VectorSearch {
+                k: 15,
+                property_key: Some("".to_string()),
+                metric: crate::index::vector::DistanceMetric::Cosine,
+                label_filter: None,
+                embedding: vec![].into()
+            })),
+            15
+        );
+        assert_eq!(
+            rule.estimate_cardinality(&LogicalOp::Scan(ScanOp::TemporalNodeLookup {
+                node_ids: vec![NodeId::new(1).unwrap(), NodeId::new(2).unwrap()],
+                valid_time: 0.into(),
+                transaction_time: 0.into()
+            })),
+            2
+        );
+        assert_eq!(
+            rule.estimate_cardinality(&LogicalOp::Scan(ScanOp::TemporalVectorSearch {
+                k: 25,
+                property_key: Some("".to_string()),
+                timestamp: 0.into(),
+                embedding: vec![].into()
+            })),
+            25
+        );
+        assert_eq!(
+            rule.estimate_cardinality(&LogicalOp::Scan(ScanOp::SimilarToNode {
+                k: 35,
+                source_node: NodeId::new(1).unwrap(),
+                property_key: "".to_string(),
+                label_filter: None
+            })),
+            35
+        );
+        assert_eq!(
+            rule.estimate_cardinality(&LogicalOp::Scan(ScanOp::PropertyScan {
+                label: "".to_string(),
+                key: "".to_string(),
+                value: crate::query::ir::PredicateValue::Int(0)
+            })),
+            DEFAULT_PROPERTY_SCAN_CARDINALITY
+        );
+        assert_eq!(
+            rule.estimate_cardinality(&LogicalOp::Scan(ScanOp::EdgeScan {
+                edge_type: None,
+                estimated_rows: None
+            })),
+            DEFAULT_EDGE_SCAN_CARDINALITY
+        );
+    }
+
+    #[test]
+    fn test_reorder_binary_changed_propagation() {
+        let rule = OperationReordering;
+        let stats = test_stats();
+
+        let op = LogicalOp::binary(
+            BinaryOp::Union,
+            // Left child is a non-optimal join that WILL be changed
+            LogicalOp::binary(
+                BinaryOp::Join {
+                    left_key: "a".to_string(),
+                    right_key: "b".to_string(),
+                },
+                LogicalOp::Scan(ScanOp::NodeScan {
+                    label: None,
+                    estimated_rows: Some(1000),
+                }),
+                LogicalOp::Scan(ScanOp::NodeScan {
+                    label: None,
+                    estimated_rows: Some(10),
+                }),
+            ),
+            // Right child is optimal (Empty)
+            LogicalOp::Empty,
+        );
+        let (_, changed) = rule.reorder(&op, &stats).unwrap();
+        assert!(
+            changed,
+            "changed should propagate from left child in binary op"
+        );
+
+        let op2 = LogicalOp::binary(
+            BinaryOp::Union,
+            LogicalOp::Empty,
+            // Right child is a non-optimal join that WILL be changed
+            LogicalOp::binary(
+                BinaryOp::Join {
+                    left_key: "a".to_string(),
+                    right_key: "b".to_string(),
+                },
+                LogicalOp::Scan(ScanOp::NodeScan {
+                    label: None,
+                    estimated_rows: Some(1000),
+                }),
+                LogicalOp::Scan(ScanOp::NodeScan {
+                    label: None,
+                    estimated_rows: Some(10),
+                }),
+            ),
+        );
+        let (_, changed2) = rule.reorder(&op2, &stats).unwrap();
+        assert!(
+            changed2,
+            "changed should propagate from right child in binary op"
+        );
+    }
+
+    #[test]
+    fn test_reorder_join_changed_propagation() {
+        let rule = OperationReordering;
+        let stats = test_stats();
+
+        // Join where left child will change, but size is already optimal (left is small, right is large)
+        let op = LogicalOp::binary(
+            BinaryOp::Join {
+                left_key: "a".to_string(),
+                right_key: "b".to_string(),
+            },
+            // Left child will change
+            LogicalOp::binary(
+                BinaryOp::Join {
+                    left_key: "c".to_string(),
+                    right_key: "d".to_string(),
+                },
+                LogicalOp::Scan(ScanOp::NodeScan {
+                    label: None,
+                    estimated_rows: Some(10),
+                }),
+                LogicalOp::Scan(ScanOp::NodeScan {
+                    label: None,
+                    estimated_rows: Some(2),
+                }),
+            ),
+            // Right child is Large, so left < right and they don't swap
+            LogicalOp::Scan(ScanOp::NodeScan {
+                label: None,
+                estimated_rows: Some(10000),
+            }),
+        );
+
+        let (_, changed) = rule.reorder(&op, &stats).unwrap();
+        assert!(
+            changed,
+            "changed should propagate from left child in join op"
+        );
+
+        // Join where right child will change, but size is already optimal
+        let op2 = LogicalOp::binary(
+            BinaryOp::Join {
+                left_key: "a".to_string(),
+                right_key: "b".to_string(),
+            },
+            // Left child is small
+            LogicalOp::Scan(ScanOp::NodeScan {
+                label: None,
+                estimated_rows: Some(10),
+            }),
+            // Right child will change, and its size will still be larger than left
+            LogicalOp::binary(
+                BinaryOp::Join {
+                    left_key: "c".to_string(),
+                    right_key: "d".to_string(),
+                },
+                LogicalOp::Scan(ScanOp::NodeScan {
+                    label: None,
+                    estimated_rows: Some(10000),
+                }),
+                LogicalOp::Scan(ScanOp::NodeScan {
+                    label: None,
+                    estimated_rows: Some(2000),
+                }),
+            ),
+        );
+
+        let (_, changed2) = rule.reorder(&op2, &stats).unwrap();
+        assert!(
+            changed2,
+            "changed should propagate from right child in join op"
+        );
+    }
+
+    #[test]
+    fn test_filters_equal_method() {
+        let rule = OperationReordering;
+        let op1 = LogicalOp::Empty;
+        let op2 = LogicalOp::Empty;
+        let op3 = LogicalOp::Scan(ScanOp::NodeScan {
+            label: None,
+            estimated_rows: Some(10),
+        });
+        assert!(rule.filters_equal(&op1, &op2));
+        assert!(!rule.filters_equal(&op1, &op3));
+    }
 }

@@ -242,4 +242,72 @@ mod tests {
         assert!(result.is_some());
         assert!(result.unwrap().temporal_context.is_some());
     }
+
+    // ==================== Mutant Killers ====================
+    #[test]
+    fn test_filter_scan_fusion_name() {
+        let rule = FilterScanFusion;
+        assert_eq!(rule.name(), "filter-scan-fusion");
+    }
+
+    #[test]
+    fn test_apply_no_change_returns_none() {
+        let rule = FilterScanFusion;
+        let stats = Statistics::new();
+        let plan = LogicalPlan::new(LogicalOp::Empty);
+        let result = rule.apply(&plan, &stats).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_apply_with_change_returns_some() {
+        let rule = FilterScanFusion;
+        let stats = Statistics::new();
+        // A plan that WILL be optimized
+        let plan = LogicalPlan::new(LogicalOp::unary(
+            UnaryOp::Filter(Predicate::eq("id", 42)),
+            LogicalOp::Scan(ScanOp::NodeScan {
+                label: Some("User".to_string()),
+                estimated_rows: Some(100),
+            }),
+        ));
+        let result = rule.apply(&plan, &stats).unwrap();
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_fuse_binary_changed_propagation() {
+        let rule = FilterScanFusion;
+
+        let op = LogicalOp::binary(
+            crate::query::plan::BinaryOp::Union,
+            // Left child WILL change
+            LogicalOp::unary(
+                UnaryOp::Filter(Predicate::eq("id", 42)),
+                LogicalOp::Scan(ScanOp::NodeScan {
+                    label: Some("User".to_string()),
+                    estimated_rows: Some(100),
+                }),
+            ),
+            // Right child is Empty
+            LogicalOp::Empty,
+        );
+        let (_, changed) = rule.fuse(&op).unwrap();
+        assert!(changed);
+
+        let op2 = LogicalOp::binary(
+            crate::query::plan::BinaryOp::Union,
+            LogicalOp::Empty,
+            // Right child WILL change
+            LogicalOp::unary(
+                UnaryOp::Filter(Predicate::eq("id", 42)),
+                LogicalOp::Scan(ScanOp::NodeScan {
+                    label: Some("User".to_string()),
+                    estimated_rows: Some(100),
+                }),
+            ),
+        );
+        let (_, changed2) = rule.fuse(&op2).unwrap();
+        assert!(changed2);
+    }
 }
