@@ -2953,6 +2953,31 @@ impl HistoricalStorage {
         self.node_property_cache.clear();
         self.node_anchor_cache.clear();
     }
+
+    /// **Test-only helper**: Remove an edge version from hot storage.
+    ///
+    /// Used in tests to simulate version migration or corruption scenarios.
+    ///
+    /// # Safety
+    /// This method directly modifies internal state and should only be used
+    /// in tests. It does not update caches or notify observers.
+    #[doc(hidden)]
+    pub fn __test_remove_edge_version(&mut self, version_id: VersionId) {
+        self.edge_versions.remove(&version_id);
+    }
+
+    /// **Test-only helper**: Clear the edge property reconstruction cache.
+    ///
+    /// Used in tests to force actual property reconstruction for edge versions
+    /// instead of returning cached values.
+    ///
+    /// # Safety
+    /// This method clears caches and should only be used in tests.
+    #[doc(hidden)]
+    pub fn __test_clear_edge_property_cache(&self) {
+        self.edge_property_cache.clear();
+        self.edge_anchor_cache.clear();
+    }
 }
 
 impl Default for HistoricalStorage {

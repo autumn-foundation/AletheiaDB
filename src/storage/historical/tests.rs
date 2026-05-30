@@ -4491,3 +4491,319 @@ fn test_sentry_find_node_version_at_time_cycle_detection() {
         }
     }
 }
+
+// ============================================================================
+// Temporal Invariant Violation Tests (Issue #350)
+// ============================================================================
+//
+// These tests verify that temporal errors are detected and reported correctly.
+// They cover three categories:
+//
+// 1. Version chain corruption (CorruptedVersionChain, MissingAnchor)
+// 2. Temporal paradox detection (competing valid_time ranges)
+// 3. Historical reconstruction with broken chains
+
+#[test]
+fn test_corrupted_version_chain_delta_no_prev_version() {
+    // Verifies that a delta version with a None prev_version link is detected
+    // as a corrupted chain during property reconstruction.
+    //
+    // This exercises the error path in reconstruct_node_properties_iterative
+    // at the "Delta version has no previous version" check.
+    use crate::core::version::NodeVersion;
+
+    let mut storage = HistoricalStorage::new();
+    let node_id = NodeId::new(42).unwrap();
+    let label = GLOBAL_INTERNER.intern("CorruptTest").unwrap();
+
+    // Create a valid anchor version first
+    let v0_id = VersionId::new(1).unwrap();
+    storage
+        .add_node_version(
+            node_id,
+            v0_id,
+            1000.into(),
+            1000.into(),
+            label,
+            PropertyMapBuilder::new().insert("name", "Alice").build(),
+            false,
+        )
+        .unwrap();
+
+    // Manually create a delta version then corrupt it by setting prev_version = None.
+    // This simulates a broken chain where the delta has no link back to the anchor.
+    let v1_id = VersionId::new(2).unwrap();
+    let mut v1 = NodeVersion::new_delta(
+        v1_id,
+        node_id,
+        BiTemporalInterval::current(2000.into()),
+        label,
+        &PropertyMapBuilder::new().insert("name", "Alice").build(),
+        &PropertyMapBuilder::new().insert("name", "Bob").build(),
+        v0_id,
+    );
+    v1.prev_version = None; // Deliberately corrupt: remove backward link
+
+    storage.insert_restored_node_version(v1).unwrap();
+    storage.__test_clear_property_cache();
+
+    // Reconstruction of v1 must fail with a specific corruption error
+    let result = storage.reconstruct_node_properties(v1_id);
+    assert!(result.is_err(), "Expected error for corrupted chain");
+    match result.unwrap_err() {
+        crate::core::error::Error::Temporal(crate::core::error::TemporalError::CorruptedVersionChain {
+            reason,
+            ..
+        }) => {
+            assert!(
+                reason.contains("no previous version"),
+                "Expected 'no previous version' in reason, got: {reason}"
+            );
+        }
+        err => panic!("Expected CorruptedVersionChain, got: {err:?}"),
+    }
+}
+
+#[test]
+fn test_missing_anchor_detected_after_anchor_deletion() {
+    // Verifies that when the anchor version of a node's chain is removed from
+    // storage, attempting to reconstruct a downstream delta returns MissingAnchor
+    // rather than a generic VersionNotFound.
+    //
+    // MissingAnchor is semantically more informative: it tells the caller that
+    // the chain exists but the base snapshot is gone, which is distinct from
+    // the requested version never existing at all.
+    //
+    // Chain structure: v0 (anchor) ← v1 (delta)
+    // Action: remove v0 from hot storage
+    // Expected: reconstruct(v1) → MissingAnchor, not VersionNotFound
+
+    let mut storage = HistoricalStorage::new();
+    let node_id = NodeId::new(99).unwrap();
+    let label = GLOBAL_INTERNER.intern("Person").unwrap();
+
+    // Build anchor → delta chain
+    let v0_id = VersionId::new(10).unwrap();
+    storage
+        .add_node_version(
+            node_id,
+            v0_id,
+            1000.into(),
+            1000.into(),
+            label,
+            PropertyMapBuilder::new().insert("name", "Alice").build(),
+            false,
+        )
+        .unwrap();
+
+    let v1_id = VersionId::new(11).unwrap();
+    storage
+        .add_node_version(
+            node_id,
+            v1_id,
+            2000.into(),
+            2000.into(),
+            label,
+            PropertyMapBuilder::new().insert("name", "Bob").build(),
+            false,
+        )
+        .unwrap();
+
+    assert!(storage.get_node_version(v1_id).unwrap().is_delta());
+    assert_eq!(
+        storage.get_node_version(v1_id).unwrap().prev_version,
+        Some(v0_id)
+    );
+
+    // Simulate anchor loss (e.g. migration to cold storage that is then unavailable)
+    storage.__test_remove_node_version(v0_id);
+    storage.__test_clear_property_cache();
+
+    let result = storage.reconstruct_node_properties(v1_id);
+    assert!(result.is_err(), "Expected error when anchor is missing");
+    match result.unwrap_err() {
+        crate::core::error::Error::Temporal(crate::core::error::TemporalError::MissingAnchor {
+            entity_id,
+        }) => {
+            assert!(!entity_id.is_empty(), "MissingAnchor entity_id must not be empty");
+        }
+        err => panic!("Expected MissingAnchor, got: {err:?}"),
+    }
+}
+
+#[test]
+fn test_edge_missing_anchor_detected_after_anchor_deletion() {
+    // Mirrors test_missing_anchor_detected_after_anchor_deletion for edge versions.
+    //
+    // Chain: e0 (anchor) ← e1 (delta). Remove e0. Reconstruct(e1) → MissingAnchor.
+
+    let mut storage = HistoricalStorage::new();
+    let edge_id = crate::core::id::EdgeId::new(55).unwrap();
+    let source = NodeId::new(1).unwrap();
+    let target = NodeId::new(2).unwrap();
+    let label = GLOBAL_INTERNER.intern("KNOWS").unwrap();
+
+    let e0_id = VersionId::new(20).unwrap();
+    storage
+        .add_edge_version(
+            edge_id,
+            e0_id,
+            1000.into(),
+            1000.into(),
+            label,
+            source,
+            target,
+            PropertyMapBuilder::new().insert("weight", 1i64).build(),
+            false,
+        )
+        .unwrap();
+
+    let e1_id = VersionId::new(21).unwrap();
+    storage
+        .add_edge_version(
+            edge_id,
+            e1_id,
+            2000.into(),
+            2000.into(),
+            label,
+            source,
+            target,
+            PropertyMapBuilder::new().insert("weight", 2i64).build(),
+            false,
+        )
+        .unwrap();
+
+    assert!(storage.get_edge_version(e1_id).unwrap().is_delta());
+
+    // Remove the anchor
+    storage.__test_remove_edge_version(e0_id);
+    storage.__test_clear_edge_property_cache();
+
+    let result = storage.reconstruct_edge_properties(e1_id);
+    assert!(result.is_err(), "Expected error when edge anchor is missing");
+    match result.unwrap_err() {
+        crate::core::error::Error::Temporal(crate::core::error::TemporalError::MissingAnchor {
+            entity_id,
+        }) => {
+            assert!(!entity_id.is_empty());
+        }
+        err => panic!("Expected MissingAnchor, got: {err:?}"),
+    }
+}
+
+#[test]
+fn test_version_chain_reconstruction_multi_hop_deltas() {
+    // Verifies correct property reconstruction across a four-version chain:
+    // v0 (anchor: name=Alice) → v1 (delta: name=Bob) → v2 (delta: name=Carol) → v3 (delta: name=Dave)
+    //
+    // The anchor_interval is set to 10 so all updates create deltas rather than new anchors.
+    let mut storage = HistoricalStorage::with_config(AnchorConfig {
+        anchor_interval: 10,
+        max_delta_chain: 100,
+    });
+
+    let node_id = NodeId::new(1).unwrap();
+    let label = GLOBAL_INTERNER.intern("Person").unwrap();
+    let names = ["Alice", "Bob", "Carol", "Dave"];
+    let mut version_ids = Vec::new();
+
+    for (i, &name) in names.iter().enumerate() {
+        let vid = VersionId::new(100 + i as u64).unwrap();
+        storage
+            .add_node_version(
+                node_id,
+                vid,
+                (1000 + i as i64 * 100).into(),
+                (1000 + i as i64 * 100).into(),
+                label,
+                PropertyMapBuilder::new().insert("name", name).build(),
+                false,
+            )
+            .unwrap();
+        version_ids.push(vid);
+    }
+
+    // v0 is anchor, v1/v2/v3 are deltas (interval=10, only first is anchor)
+    assert!(storage.get_node_version(version_ids[0]).unwrap().is_anchor());
+    assert!(storage.get_node_version(version_ids[1]).unwrap().is_delta());
+    assert!(storage.get_node_version(version_ids[2]).unwrap().is_delta());
+    assert!(storage.get_node_version(version_ids[3]).unwrap().is_delta());
+
+    storage.__test_clear_property_cache();
+
+    for (i, &vid) in version_ids.iter().enumerate() {
+        let props = storage.reconstruct_node_properties(vid).unwrap();
+        assert_eq!(
+            props.get("name").and_then(|v| v.as_str()),
+            Some(names[i]),
+            "Version {i} should have name={}",
+            names[i]
+        );
+    }
+}
+
+#[test]
+fn test_competing_valid_times_stored_and_queried_by_bitemporal_interval() {
+    // Bi-temporal databases legitimately store versions with overlapping or
+    // "competing" valid_time ranges. The transaction_time dimension resolves
+    // which version was "known" at any given point.
+    //
+    // This test verifies that:
+    // 1. Two versions for the same node with different valid_from times can coexist.
+    // 2. Querying at each valid_time returns the correct version.
+    // 3. No error is returned for "competing" ranges — they are valid state.
+
+    let mut storage = HistoricalStorage::new();
+    let node_id = NodeId::new(7).unwrap();
+    let label = GLOBAL_INTERNER.intern("Event").unwrap();
+
+    // v1: valid_from=3000, recorded at tx_time=1000
+    let v1_id = VersionId::new(1).unwrap();
+    storage
+        .add_node_version(
+            node_id,
+            v1_id,
+            3000.into(), // valid_from: event started at t=3000
+            1000.into(), // tx_time: we recorded this at t=1000
+            label,
+            PropertyMapBuilder::new().insert("status", "scheduled").build(),
+            false,
+        )
+        .unwrap();
+
+    // v2: valid_from=2000, recorded at tx_time=2000 (later knowledge: event started earlier)
+    let v2_id = VersionId::new(2).unwrap();
+    storage
+        .add_node_version(
+            node_id,
+            v2_id,
+            2000.into(), // valid_from: corrected — event actually started at t=2000
+            2000.into(), // tx_time: we learned this at t=2000
+            label,
+            PropertyMapBuilder::new().insert("status", "started").build(),
+            false,
+        )
+        .unwrap();
+
+    // Both versions should exist without error
+    assert!(storage.get_node_version(v1_id).is_some());
+    assert!(storage.get_node_version(v2_id).is_some());
+
+    // As of tx_time=1500 (after v1 but before v2), only v1 was known.
+    // Query at valid_time=3500 should find v1.
+    let found = storage.find_node_version_at_time(node_id, 3500.into(), 1500.into());
+    assert_eq!(
+        found,
+        Some(v1_id),
+        "At tx_time=1500, only v1 was known for valid_time=3500"
+    );
+
+    // As of tx_time=2500 (after both versions), v2 is the latest knowledge.
+    // Query at valid_time=2500 should find v2 (valid_from=2000 covers this).
+    let found_v2 = storage.find_node_version_at_time(node_id, 2500.into(), 2500.into());
+    assert_eq!(
+        found_v2,
+        Some(v2_id),
+        "At tx_time=2500, v2 should be visible at valid_time=2500"
+    );
+}
