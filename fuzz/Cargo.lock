@@ -87,12 +87,10 @@ dependencies = [
 
 [[package]]
 name = "aletheiadb-fuzz"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "aletheiadb",
- "arbitrary",
  "libfuzzer-sys",
- "tempfile",
 ]
 
 [[package]]

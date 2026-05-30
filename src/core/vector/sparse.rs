@@ -564,6 +564,9 @@ pub fn sparse_cosine_similarity(a: &SparseVec, b: &SparseVec) -> Result<f32> {
     let similarity = dot / (sq_mag_a.sqrt() * sq_mag_b.sqrt());
 
     // Clamp to [-1, 1] to handle floating-point errors
+    if similarity.is_nan() {
+        return Ok(f32::NAN);
+    }
     Ok(similarity.clamp(-1.0, 1.0))
 }
 

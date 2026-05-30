@@ -50,3 +50,9 @@ path = "fuzz_targets/timestamp_arithmetic.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "vector_ops"
+path = "fuzz_targets/vector_ops.rs"
+test = false
+doc = false
