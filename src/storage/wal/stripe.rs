@@ -1,12 +1,46 @@
 //! WAL stripe - a single partition in the striped WAL architecture.
 //!
 //! Each stripe contains:
-//! - A lock-free ring buffer for pending entries
+//! - A lock-free [`WalRingBuffer`] (`ring_buffer` module) for pending entries
 //! - Per-stripe metrics for monitoring
 //!
 //! Writers are assigned to stripes using thread-local affinity to minimize
 //! cache contention. The flush coordinator drains all stripes and merges
 //! entries in LSN order.
+//!
+//! # Architecture
+//!
+//! A stripe is the unit of parallelism inside the concurrent WAL.  The
+//! [`ConcurrentWal`](super::concurrent::ConcurrentWal) maintains `N` stripes; each writer
+//! is pinned to one stripe via a thread-local index, which keeps cache lines
+//! hot and avoids false-sharing between writers on different cores.
+//!
+//! ```text
+//!  Writer threads
+//!   │   │   │   │
+//!   ▼   ▼   ▼   ▼   (thread-local stripe affinity)
+//! ┌──────────────────────────────────┐
+//! │  WalStripe (this module)         │
+//! │  ┌────────────────────────────┐  │
+//! │  │  WalRingBuffer (ring_buffer)│  │  ← lock-free MPSC buffer
+//! │  └────────────────────────────┘  │
+//! │  per-stripe metrics              │
+//! └──────────────────────────────────┘
+//!              │
+//!              ▼  (flush coordinator drains all stripes, sorts by LSN)
+//! ```
+//!
+//! See the [`ring_buffer`](super::ring_buffer) module for the lock-free
+//! buffer implementation, and
+//! [`flush_coordinator`](super::flush_coordinator) for how stripes are drained.
+//!
+//! # Performance
+//!
+//! - **Append latency**: ~50–100 ns (single CAS in the ring buffer)
+//! - **Contention**: Each stripe is independent, so `N` stripes give
+//!   near-linear scaling up to ~64 concurrent writers
+//! - **Memory**: `stripe_capacity × size_of::<PendingEntry>()` per stripe
+//!   (default 1 024 slots ≈ 40 KB/stripe)
 //!
 //! # Thread Safety
 //!

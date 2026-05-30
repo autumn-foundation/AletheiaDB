@@ -21,8 +21,7 @@ use std::fs;
 /// line that does not (i.e. the first `use`, `pub`, or blank separator
 /// line that ends the block).
 fn module_docs(path: &str) -> String {
-    let src = fs::read_to_string(path)
-        .unwrap_or_else(|e| panic!("Failed to read {path}: {e}"));
+    let src = fs::read_to_string(path).unwrap_or_else(|e| panic!("Failed to read {path}: {e}"));
     src.lines()
         .take_while(|l| l.starts_with("//!") || l.trim().is_empty() && false)
         // keep only //! lines so we never accidentally match body code

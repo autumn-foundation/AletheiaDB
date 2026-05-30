@@ -3,6 +3,34 @@
 //! This module provides standalone functions for reading WAL segments from disk
 //! for recovery purposes. It does not require any WAL writer state.
 //!
+//! # Segment Format
+//!
+//! Each segment file on disk has the following binary layout:
+//!
+//! ```text
+//!  Offset  Size  Field
+//!  ──────  ────  ──────────────────────────────────────────────────
+//!       0     4  Magic bytes: b"GWAL"  (WAL_MAGIC)
+//!       4     1  Format version: 1 (plaintext) or 2 (encrypted)
+//!       5     …  Entry frames (repeated until end of file)
+//! ```
+//!
+//! **Entry frame (version 1 – plaintext)**:
+//! ```text
+//!  [bincode-serialised WalEntry bytes]
+//! ```
+//! Entries are length-prefixed by `bincode` (8-byte little-endian usize).
+//!
+//! **Entry frame (version 2 – encrypted)**:
+//! ```text
+//!  [4-byte LE u32 entry length][encrypted entry bytes]
+//! ```
+//! The header (magic + version) is always plaintext; only the entry frames
+//! are encrypted in version 2.
+//!
+//! See the `WAL_MAGIC`, `WAL_VERSION`, `WAL_VERSION_ENCRYPTED`, and
+//! `WAL_HEADER_SIZE` constants defined below for the associated values.
+//!
 //! # Memory Efficiency
 //!
 //! This module uses memory-mapped I/O (`memmap2`) to read WAL segments efficiently.
