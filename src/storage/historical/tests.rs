@@ -4551,10 +4551,9 @@ fn test_corrupted_version_chain_delta_no_prev_version() {
     let result = storage.reconstruct_node_properties(v1_id);
     assert!(result.is_err(), "Expected error for corrupted chain");
     match result.unwrap_err() {
-        crate::core::error::Error::Temporal(crate::core::error::TemporalError::CorruptedVersionChain {
-            reason,
-            ..
-        }) => {
+        crate::core::error::Error::Temporal(
+            crate::core::error::TemporalError::CorruptedVersionChain { reason, .. },
+        ) => {
             assert!(
                 reason.contains("no previous version"),
                 "Expected 'no previous version' in reason, got: {reason}"
@@ -4625,7 +4624,10 @@ fn test_missing_anchor_detected_after_anchor_deletion() {
         crate::core::error::Error::Temporal(crate::core::error::TemporalError::MissingAnchor {
             entity_id,
         }) => {
-            assert!(!entity_id.is_empty(), "MissingAnchor entity_id must not be empty");
+            assert!(
+                !entity_id.is_empty(),
+                "MissingAnchor entity_id must not be empty"
+            );
         }
         err => panic!("Expected MissingAnchor, got: {err:?}"),
     }
@@ -4680,7 +4682,10 @@ fn test_edge_missing_anchor_detected_after_anchor_deletion() {
     storage.__test_clear_edge_property_cache();
 
     let result = storage.reconstruct_edge_properties(e1_id);
-    assert!(result.is_err(), "Expected error when edge anchor is missing");
+    assert!(
+        result.is_err(),
+        "Expected error when edge anchor is missing"
+    );
     match result.unwrap_err() {
         crate::core::error::Error::Temporal(crate::core::error::TemporalError::MissingAnchor {
             entity_id,
@@ -4724,7 +4729,12 @@ fn test_version_chain_reconstruction_multi_hop_deltas() {
     }
 
     // v0 is anchor, v1/v2/v3 are deltas (interval=10, only first is anchor)
-    assert!(storage.get_node_version(version_ids[0]).unwrap().is_anchor());
+    assert!(
+        storage
+            .get_node_version(version_ids[0])
+            .unwrap()
+            .is_anchor()
+    );
     assert!(storage.get_node_version(version_ids[1]).unwrap().is_delta());
     assert!(storage.get_node_version(version_ids[2]).unwrap().is_delta());
     assert!(storage.get_node_version(version_ids[3]).unwrap().is_delta());
@@ -4766,7 +4776,9 @@ fn test_competing_valid_times_stored_and_queried_by_bitemporal_interval() {
             3000.into(), // valid_from: event started at t=3000
             1000.into(), // tx_time: we recorded this at t=1000
             label,
-            PropertyMapBuilder::new().insert("status", "scheduled").build(),
+            PropertyMapBuilder::new()
+                .insert("status", "scheduled")
+                .build(),
             false,
         )
         .unwrap();
@@ -4780,7 +4792,9 @@ fn test_competing_valid_times_stored_and_queried_by_bitemporal_interval() {
             2000.into(), // valid_from: corrected — event actually started at t=2000
             2000.into(), // tx_time: we learned this at t=2000
             label,
-            PropertyMapBuilder::new().insert("status", "started").build(),
+            PropertyMapBuilder::new()
+                .insert("status", "started")
+                .build(),
             false,
         )
         .unwrap();

@@ -1030,7 +1030,25 @@ impl HistoricalStorage {
                 .into());
             }
 
-            let version = self.get_node_version_any_tier(current_id)?;
+            // After the first version is retrieved, a VersionNotFound on a subsequent
+            // lookup means the backward chain is broken: the ancestor (ultimately the
+            // anchor) has been removed. Return MissingAnchor rather than the generic
+            // VersionNotFound so callers can distinguish "version never existed" from
+            // "chain integrity was broken after creation".
+            let version = match self.get_node_version_any_tier(current_id) {
+                Ok(v) => v,
+                Err(crate::core::error::Error::Storage(StorageError::VersionNotFound(_)))
+                    if !version_ids.is_empty() =>
+                {
+                    let entity_id = version_ids
+                        .first()
+                        .and_then(|&vid| self.node_versions.get(&vid))
+                        .map(|v| v.node_id.to_string())
+                        .unwrap_or_else(|| format!("version {}", version_id));
+                    return Err(TemporalError::MissingAnchor { entity_id }.into());
+                }
+                Err(e) => return Err(e),
+            };
 
             let is_anchor = version.is_anchor();
             let prev_id = version.prev_version;
@@ -1128,7 +1146,23 @@ impl HistoricalStorage {
                 .into());
             }
 
-            let version = self.get_edge_version_any_tier(current_id)?;
+            // After the first version is retrieved, a VersionNotFound on a subsequent
+            // lookup means the backward chain is broken — the ancestor anchor has been
+            // removed. Return MissingAnchor rather than VersionNotFound.
+            let version = match self.get_edge_version_any_tier(current_id) {
+                Ok(v) => v,
+                Err(crate::core::error::Error::Storage(StorageError::VersionNotFound(_)))
+                    if !version_ids.is_empty() =>
+                {
+                    let entity_id = version_ids
+                        .first()
+                        .and_then(|&vid| self.edge_versions.get(&vid))
+                        .map(|v| v.edge_id.to_string())
+                        .unwrap_or_else(|| format!("version {}", version_id));
+                    return Err(TemporalError::MissingAnchor { entity_id }.into());
+                }
+                Err(e) => return Err(e),
+            };
 
             let is_anchor = version.is_anchor();
             let prev_id = version.prev_version;

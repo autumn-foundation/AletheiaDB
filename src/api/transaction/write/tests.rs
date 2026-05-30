@@ -2927,11 +2927,8 @@ mod timestamp_ordering_tests {
         // Build a transaction with work but drop it without committing (implicit rollback)
         {
             let mut tx = harness.create_tx();
-            tx.create_node(
-                "Test",
-                PropertyMapBuilder::new().insert("x", 1i64).build(),
-            )
-            .unwrap();
+            tx.create_node("Test", PropertyMapBuilder::new().insert("x", 1i64).build())
+                .unwrap();
             // tx is dropped here → rollback; current_timestamp must not change
         }
 
@@ -2943,11 +2940,8 @@ mod timestamp_ordering_tests {
 
         // A subsequent commit must produce a timestamp strictly greater than ts_before
         let mut tx2 = harness.create_tx();
-        tx2.create_node(
-            "Test",
-            PropertyMapBuilder::new().insert("x", 2i64).build(),
-        )
-        .unwrap();
+        tx2.create_node("Test", PropertyMapBuilder::new().insert("x", 2i64).build())
+            .unwrap();
         tx2.commit().unwrap();
 
         let ts_after_commit = *harness.current_timestamp.lock().unwrap();
@@ -2971,8 +2965,7 @@ mod timestamp_ordering_tests {
     #[test]
     fn test_concurrent_commits_never_produce_equal_timestamps() {
         let harness = Arc::new(TestHarness::new());
-        let node_ids: Arc<Mutex<Vec<crate::core::id::NodeId>>> =
-            Arc::new(Mutex::new(Vec::new()));
+        let node_ids: Arc<Mutex<Vec<crate::core::id::NodeId>>> = Arc::new(Mutex::new(Vec::new()));
 
         let threads: Vec<_> = (0..20)
             .map(|i| {
@@ -3327,7 +3320,10 @@ mod bitemporal_validation_tests {
             Some(before_creation),
         );
 
-        assert!(result.is_err(), "Should reject valid_time before edge creation");
+        assert!(
+            result.is_err(),
+            "Should reject valid_time before edge creation"
+        );
         match result.unwrap_err() {
             crate::core::error::Error::Temporal(TemporalError::ValidTimeBeforeEntityCreation {
                 ..
@@ -3417,16 +3413,19 @@ mod bitemporal_validation_tests {
         let harness = TestHarness::new();
 
         // Use exactly 1 year + 1 second past the allowed limit
-        let over_limit_wallclock = time::now().wallclock()
-            + super::super::MAX_VALID_TIME_FUTURE_OFFSET_US
-            + 1_000_000; // +1s over limit
+        let over_limit_wallclock =
+            time::now().wallclock() + super::super::MAX_VALID_TIME_FUTURE_OFFSET_US + 1_000_000; // +1s over limit
 
         let over_limit_ts = HybridTimestamp::new(over_limit_wallclock, 0).unwrap();
 
         let mut tx = harness.begin_write();
-        let result = tx.create_node_with_valid_time("Test", PropertyMap::new(), Some(over_limit_ts));
+        let result =
+            tx.create_node_with_valid_time("Test", PropertyMap::new(), Some(over_limit_ts));
 
-        assert!(result.is_err(), "Should reject valid_time beyond the 1-year limit");
+        assert!(
+            result.is_err(),
+            "Should reject valid_time beyond the 1-year limit"
+        );
         match result.unwrap_err() {
             crate::core::error::Error::Temporal(TemporalError::ValidTimeTooFarInFuture {
                 ..
