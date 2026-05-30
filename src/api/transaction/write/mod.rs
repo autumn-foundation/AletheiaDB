@@ -1100,6 +1100,25 @@ impl WriteOps for WriteTransaction {
             let timestamp = self.start_timestamp;
             let valid_from = valid_from.unwrap_or(timestamp);
 
+            // Validate valid_from is not too far in future
+            validation::validate_valid_from_future(valid_from)?;
+
+            // Validate valid_from is not before the edge's own creation time
+            let creation_time = {
+                let historical = self.historical.read();
+                historical
+                    .get_current_edge_version(edge_id)
+                    .and_then(|vid| historical.get_edge_version(vid))
+                    .map(|v| v.temporal.valid_time().start())
+            };
+            if let Some(creation_time) = creation_time {
+                validation::validate_valid_from_not_before_creation(
+                    &format!("edge:{}", edge_id.as_u64()),
+                    creation_time,
+                    valid_from,
+                )?;
+            }
+
             // Buffer the write with merged properties
             self.buffer.add(super::BufferedWrite::UpdateEdge {
                 edge_id,
@@ -1239,6 +1258,25 @@ impl WriteOps for WriteTransaction {
             // Get timestamp: use provided valid_from or default to transaction start time
             let timestamp = self.start_timestamp;
             let valid_from = valid_from.unwrap_or(timestamp);
+
+            // Validate valid_from is not too far in future
+            validation::validate_valid_from_future(valid_from)?;
+
+            // Validate valid_from is not before the edge's own creation time
+            let creation_time = {
+                let historical = self.historical.read();
+                historical
+                    .get_current_edge_version(edge_id)
+                    .and_then(|vid| historical.get_edge_version(vid))
+                    .map(|v| v.temporal.valid_time().start())
+            };
+            if let Some(creation_time) = creation_time {
+                validation::validate_valid_from_not_before_creation(
+                    &format!("edge:{}", edge_id.as_u64()),
+                    creation_time,
+                    valid_from,
+                )?;
+            }
 
             // Buffer the write
             self.buffer.add(super::BufferedWrite::DeleteEdge {

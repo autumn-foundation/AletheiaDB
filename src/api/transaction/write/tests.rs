@@ -2912,6 +2912,112 @@ mod timestamp_ordering_tests {
             Some(5)
         );
     }
+
+    /// Test: A rollback must not advance the shared current_timestamp.
+    ///
+    /// If an uncommitted transaction were to advance the HLC frontier during
+    /// rollback, subsequent commits would see an artificially high starting
+    /// timestamp, potentially conflicting with future clock ticks.
+    #[test]
+    fn test_rollback_does_not_advance_current_timestamp() {
+        let harness = TestHarness::new();
+
+        let ts_before = *harness.current_timestamp.lock().unwrap();
+
+        // Build a transaction with work but drop it without committing (implicit rollback)
+        {
+            let mut tx = harness.create_tx();
+            tx.create_node("Test", PropertyMapBuilder::new().insert("x", 1i64).build())
+                .unwrap();
+            // tx is dropped here → rollback; current_timestamp must not change
+        }
+
+        let ts_after_rollback = *harness.current_timestamp.lock().unwrap();
+        assert_eq!(
+            ts_before, ts_after_rollback,
+            "Rollback must not advance current_timestamp"
+        );
+
+        // A subsequent commit must produce a timestamp strictly greater than ts_before
+        let mut tx2 = harness.create_tx();
+        tx2.create_node("Test", PropertyMapBuilder::new().insert("x", 2i64).build())
+            .unwrap();
+        tx2.commit().unwrap();
+
+        let ts_after_commit = *harness.current_timestamp.lock().unwrap();
+        assert!(
+            ts_after_commit > ts_before,
+            "Commit after rollback must produce timestamp > pre-rollback timestamp \
+             (before={ts_before}, after_commit={ts_after_commit})"
+        );
+    }
+
+    /// Test: Concurrent transactions that collide on wallclock are still ordered
+    /// by the logical counter embedded in the HLC timestamp.
+    ///
+    /// Two threads commit back-to-back in < 1 µs (a common occurrence under
+    /// load). The HLC monotonic guarantee means each commit gets a unique,
+    /// strictly-increasing commit timestamp regardless of wallclock resolution.
+    ///
+    /// Note: the shared `current_timestamp` reflects the LAST committed value,
+    /// so we read each node's embedded commit timestamp instead — that is the
+    /// value sealed into every committed version record.
+    #[test]
+    fn test_concurrent_commits_never_produce_equal_timestamps() {
+        let harness = Arc::new(TestHarness::new());
+        let node_ids: Arc<Mutex<Vec<crate::core::id::NodeId>>> = Arc::new(Mutex::new(Vec::new()));
+
+        let threads: Vec<_> = (0..20)
+            .map(|i| {
+                let h = harness.clone();
+                let ids = node_ids.clone();
+                thread::spawn(move || {
+                    let mut tx = h.create_tx();
+                    let node_id = tx
+                        .create_node(
+                            "Test",
+                            PropertyMapBuilder::new().insert("i", i as i64).build(),
+                        )
+                        .unwrap();
+                    tx.commit().unwrap();
+
+                    ids.lock().unwrap().push(node_id);
+                })
+            })
+            .collect();
+
+        for t in threads {
+            t.join().unwrap();
+        }
+
+        // Read the actual commit timestamp embedded in each node at commit time.
+        // This is distinct from the shared current_timestamp which is updated by
+        // every commit — reading it concurrently would produce duplicates.
+        let ids = node_ids.lock().unwrap();
+        let mut commit_timestamps: Vec<Timestamp> = ids
+            .iter()
+            .map(|&nid| {
+                harness
+                    .current
+                    .get_node(nid)
+                    .unwrap()
+                    .metadata
+                    .commit_timestamp
+                    .unwrap()
+            })
+            .collect();
+        commit_timestamps.sort();
+
+        // All per-node commit timestamps must be unique
+        for i in 1..commit_timestamps.len() {
+            assert_ne!(
+                commit_timestamps[i],
+                commit_timestamps[i - 1],
+                "Concurrent commits produced duplicate commit timestamps at index {i}: {}",
+                commit_timestamps[i]
+            );
+        }
+    }
 }
 
 mod bitemporal_validation_tests {
@@ -3178,6 +3284,234 @@ mod bitemporal_validation_tests {
             result.is_err(),
             "Should reject valid_time before entity creation"
         );
+    }
+
+    /// Test: Updating an edge with valid_time before the edge's own creation is rejected.
+    ///
+    /// This exercises ValidTimeBeforeEntityCreation for edges, complementing the
+    /// existing node test. The edge's own valid_from (not the connected nodes') is
+    /// used as the lower bound.
+    #[test]
+    fn test_update_edge_rejects_valid_time_before_edge_creation() {
+        use crate::core::error::TemporalError;
+        use crate::core::hlc::HybridTimestamp;
+
+        let harness = TestHarness::new();
+
+        // Create source and target nodes, then an edge
+        let mut tx = harness.begin_write();
+        let src = tx.create_node("Person", PropertyMap::new()).unwrap();
+        let tgt = tx.create_node("Person", PropertyMap::new()).unwrap();
+        tx.commit().unwrap();
+
+        let mut tx2 = harness.begin_write();
+        let edge_id = tx2
+            .create_edge(src, tgt, "KNOWS", PropertyMap::new())
+            .unwrap();
+        tx2.commit().unwrap();
+
+        // Try to update the edge with a valid_time that predates its own creation
+        let before_creation = HybridTimestamp::new(1000, 0).unwrap();
+
+        let mut tx3 = harness.begin_write();
+        let result = tx3.update_edge_with_valid_time(
+            edge_id,
+            PropertyMapBuilder::new().insert("strength", 5i64).build(),
+            Some(before_creation),
+        );
+
+        assert!(
+            result.is_err(),
+            "Should reject valid_time before edge creation"
+        );
+        match result.unwrap_err() {
+            crate::core::error::Error::Temporal(TemporalError::ValidTimeBeforeEntityCreation {
+                ..
+            }) => {}
+            err => panic!("Expected ValidTimeBeforeEntityCreation, got: {err:?}"),
+        }
+    }
+
+    /// Test: Deleting an edge with valid_time before the edge's own creation is rejected.
+    #[test]
+    fn test_delete_edge_rejects_valid_time_before_edge_creation() {
+        use crate::core::hlc::HybridTimestamp;
+
+        let harness = TestHarness::new();
+
+        let mut tx = harness.begin_write();
+        let src = tx.create_node("Person", PropertyMap::new()).unwrap();
+        let tgt = tx.create_node("Person", PropertyMap::new()).unwrap();
+        tx.commit().unwrap();
+
+        let mut tx2 = harness.begin_write();
+        let edge_id = tx2
+            .create_edge(src, tgt, "KNOWS", PropertyMap::new())
+            .unwrap();
+        tx2.commit().unwrap();
+
+        let before_creation = HybridTimestamp::new(1000, 0).unwrap();
+
+        let mut tx3 = harness.begin_write();
+        let result = tx3.delete_edge_with_valid_time(edge_id, Some(before_creation));
+
+        assert!(
+            result.is_err(),
+            "Should reject valid_time before edge creation"
+        );
+    }
+
+    /// Test: The maximum valid timestamp boundary is accepted and just above is rejected.
+    ///
+    /// `HybridTimestamp::new` rejects wallclock values exceeding `MAX_VALID_TIMESTAMP`
+    /// (i64::MAX - 1000) to guard against overflow-based DoS attacks on the temporal
+    /// indexing layer. The internal `TIMESTAMP_MAX` sentinel (i64::MAX) is created only
+    /// via `new_unchecked` for use as an open-ended interval marker.
+    #[test]
+    fn test_timestamp_boundary_max_valid_timestamp() {
+        use crate::core::hlc::HybridTimestamp;
+        use crate::core::temporal::MAX_VALID_TIMESTAMP;
+
+        // Exactly at MAX_VALID_TIMESTAMP is valid
+        let at_boundary = HybridTimestamp::new(MAX_VALID_TIMESTAMP, 0);
+        assert!(
+            at_boundary.is_ok(),
+            "HybridTimestamp at MAX_VALID_TIMESTAMP must be valid, got: {at_boundary:?}"
+        );
+
+        // One above MAX_VALID_TIMESTAMP is invalid — this is the overflow guard
+        let above_boundary = HybridTimestamp::new(MAX_VALID_TIMESTAMP + 1, 0);
+        assert!(
+            above_boundary.is_err(),
+            "HybridTimestamp just above MAX_VALID_TIMESTAMP must be rejected"
+        );
+
+        // i64::MAX via the public constructor is also rejected (not a user-visible value)
+        let via_new = HybridTimestamp::new(i64::MAX, 0);
+        assert!(
+            via_new.is_err(),
+            "i64::MAX via HybridTimestamp::new must be rejected (use TIMESTAMP_MAX internally)"
+        );
+
+        // TIMESTAMP_MAX is accessible as a module-level constant and can be used
+        // in open-ended time ranges internally, but cannot be created via new()
+        let sentinel = crate::core::temporal::TIMESTAMP_MAX;
+        assert_eq!(sentinel.wallclock(), i64::MAX);
+        assert_eq!(sentinel.logical(), 0);
+    }
+
+    /// Test: Transaction with a valid_time set 1 year in future is rejected.
+    ///
+    /// The MAX_VALID_TIME_FUTURE_OFFSET_US constant limits how far ahead valid_time
+    /// can be set, preventing logical time paradoxes where recorded facts appear
+    /// to be valid arbitrarily far in the future.
+    #[test]
+    fn test_valid_time_one_year_in_future_rejected() {
+        use crate::core::error::TemporalError;
+        use crate::core::hlc::HybridTimestamp;
+
+        let harness = TestHarness::new();
+
+        // Use exactly 1 year + 1 second past the allowed limit
+        let over_limit_wallclock =
+            time::now().wallclock() + super::super::MAX_VALID_TIME_FUTURE_OFFSET_US + 1_000_000; // +1s over limit
+
+        let over_limit_ts = HybridTimestamp::new(over_limit_wallclock, 0).unwrap();
+
+        let mut tx = harness.begin_write();
+        let result =
+            tx.create_node_with_valid_time("Test", PropertyMap::new(), Some(over_limit_ts));
+
+        assert!(
+            result.is_err(),
+            "Should reject valid_time beyond the 1-year limit"
+        );
+        match result.unwrap_err() {
+            crate::core::error::Error::Temporal(TemporalError::ValidTimeTooFarInFuture {
+                ..
+            }) => {}
+            err => panic!("Expected ValidTimeTooFarInFuture, got: {err:?}"),
+        }
+    }
+
+    /// Test: Updating an edge with valid_time set more than 1 year in future is rejected.
+    #[test]
+    fn test_update_edge_rejects_far_future_valid_time() {
+        use crate::core::error::TemporalError;
+        use crate::core::hlc::HybridTimestamp;
+
+        let harness = TestHarness::new();
+
+        let mut tx = harness.begin_write();
+        let src = tx.create_node("Person", PropertyMap::new()).unwrap();
+        let tgt = tx.create_node("Person", PropertyMap::new()).unwrap();
+        tx.commit().unwrap();
+
+        let mut tx2 = harness.begin_write();
+        let edge_id = tx2
+            .create_edge(src, tgt, "KNOWS", PropertyMap::new())
+            .unwrap();
+        tx2.commit().unwrap();
+
+        let over_limit_wallclock =
+            time::now().wallclock() + super::super::MAX_VALID_TIME_FUTURE_OFFSET_US + 1_000_000;
+        let over_limit_ts = HybridTimestamp::new(over_limit_wallclock, 0).unwrap();
+
+        let mut tx3 = harness.begin_write();
+        let result = tx3.update_edge_with_valid_time(
+            edge_id,
+            PropertyMapBuilder::new().insert("strength", 5i64).build(),
+            Some(over_limit_ts),
+        );
+
+        assert!(
+            result.is_err(),
+            "Should reject valid_time beyond the 1-year limit"
+        );
+        match result.unwrap_err() {
+            crate::core::error::Error::Temporal(TemporalError::ValidTimeTooFarInFuture {
+                ..
+            }) => {}
+            err => panic!("Expected ValidTimeTooFarInFuture, got: {err:?}"),
+        }
+    }
+
+    /// Test: Deleting an edge with valid_time set more than 1 year in future is rejected.
+    #[test]
+    fn test_delete_edge_rejects_far_future_valid_time() {
+        use crate::core::error::TemporalError;
+        use crate::core::hlc::HybridTimestamp;
+
+        let harness = TestHarness::new();
+
+        let mut tx = harness.begin_write();
+        let src = tx.create_node("Person", PropertyMap::new()).unwrap();
+        let tgt = tx.create_node("Person", PropertyMap::new()).unwrap();
+        tx.commit().unwrap();
+
+        let mut tx2 = harness.begin_write();
+        let edge_id = tx2
+            .create_edge(src, tgt, "KNOWS", PropertyMap::new())
+            .unwrap();
+        tx2.commit().unwrap();
+
+        let over_limit_wallclock =
+            time::now().wallclock() + super::super::MAX_VALID_TIME_FUTURE_OFFSET_US + 1_000_000;
+        let over_limit_ts = HybridTimestamp::new(over_limit_wallclock, 0).unwrap();
+
+        let mut tx3 = harness.begin_write();
+        let result = tx3.delete_edge_with_valid_time(edge_id, Some(over_limit_ts));
+
+        assert!(
+            result.is_err(),
+            "Should reject valid_time beyond the 1-year limit"
+        );
+        match result.unwrap_err() {
+            crate::core::error::Error::Temporal(TemporalError::ValidTimeTooFarInFuture {
+                ..
+            }) => {}
+            err => panic!("Expected ValidTimeTooFarInFuture, got: {err:?}"),
+        }
     }
 }
 
