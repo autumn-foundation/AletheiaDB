@@ -89,6 +89,22 @@ impl AletheiaDB {
     ///
     /// Uses the temporal index for O(log n) candidate lookup, then verifies
     /// visibility with historical storage (handles closed intervals from deletions).
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use aletheiadb::{AletheiaDB, PropertyMapBuilder, core::NodeId, core::temporal::Timestamp};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # let node_id = db.create_node("Person", PropertyMapBuilder::new().insert("name", "Alice").build())?;
+    /// # let valid_time = Timestamp::from(100);
+    /// # let tx_time = Timestamp::from(100);
+    /// // Retrieve a node exactly as it appeared at a historical moment
+    /// let historical_node = db.get_node_at_time(node_id, valid_time, tx_time)?;
+    /// println!("Historical properties: {:?}", historical_node.properties);
+    /// # Ok(())
+    /// # }
+    /// ```
     #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn get_node_at_time(
         &self,
@@ -109,6 +125,24 @@ impl AletheiaDB {
     ///
     /// Uses the temporal index for O(log n) candidate lookup, then verifies
     /// visibility with historical storage (handles closed intervals from deletions).
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use aletheiadb::{AletheiaDB, PropertyMapBuilder, core::{NodeId, EdgeId}, core::temporal::Timestamp};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # let source_id = db.create_node("Person", PropertyMapBuilder::new().build())?;
+    /// # let target_id = db.create_node("Person", PropertyMapBuilder::new().build())?;
+    /// # let edge_id = db.create_edge(source_id, target_id, "KNOWS", PropertyMapBuilder::new().build())?;
+    /// # let valid_time = Timestamp::from(100);
+    /// # let tx_time = Timestamp::from(100);
+    /// // Retrieve an edge's past state
+    /// let past_edge = db.get_edge_at_time(edge_id, valid_time, tx_time)?;
+    /// println!("Edge existed back then with label: {}", past_edge.label.as_ref());
+    /// # Ok(())
+    /// # }
+    /// ```
     #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn get_edge_at_time(
         &self,
