@@ -1,3 +1,4 @@
+#![allow(unused_imports)]
 //! Luna: Semantic Subgraph Synthesis.
 //!
 //! "What holds these ideas together?"
@@ -23,7 +24,7 @@ use crate::core::property::PropertyMapBuilder;
 
 /// The Luna Engine for Semantic Synthesis.
 pub struct Luna<'a> {
-    db: &'a AletheiaDB,
+    #[allow(dead_code)] db: &'a AletheiaDB,
 }
 
 #[cfg(feature = "semantic-reasoning")]

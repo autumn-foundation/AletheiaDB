@@ -110,6 +110,8 @@ Averages across 30–212 datapoints of continuous CI runs:
 
 ## Feature Flags
 
+> ⚠️ **REQUIRES FEATURE NOVA**: To use experimental features like Narrative Generation (`story_demo`), you MUST explicitly enable the `nova` feature in your `Cargo.toml`.
+
 All features are off by default except `config-toml`.
 
 | Flag | What it enables |

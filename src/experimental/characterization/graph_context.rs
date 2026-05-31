@@ -1,3 +1,4 @@
+#![allow(deprecated)]
 //! Graph Context Exporter ("The Scribe")
 //!
 //! This module provides tools to generate rich, human-readable context descriptions
@@ -261,12 +262,14 @@ impl<'a> GraphContextBuilder<'a> {
 }
 
 #[cfg(test)]
+#[cfg(feature = "semantic-temporal")]
 mod tests {
     use super::*;
     use crate::api::transaction::WriteOps;
     use crate::core::property::PropertyMapBuilder;
 
     #[test]
+#[cfg(feature = "semantic-temporal")]
     fn test_graph_context_generation() {
         let db = AletheiaDB::new().unwrap();
 

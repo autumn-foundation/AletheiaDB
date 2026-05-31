@@ -1,3 +1,4 @@
+#![allow(unused_imports)]
 //! Starlight: Semantic Graph to JSON Exporter.
 //!
 //! "Light up the graph."
@@ -30,7 +31,7 @@ use std::collections::{HashSet, VecDeque};
 
 /// The Starlight Exporter Engine.
 pub struct Starlight<'a> {
-    db: &'a AletheiaDB,
+    #[allow(dead_code)] db: &'a AletheiaDB,
 }
 
 #[cfg(feature = "semantic-characterization")]

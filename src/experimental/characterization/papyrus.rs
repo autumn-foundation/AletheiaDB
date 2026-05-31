@@ -1,3 +1,4 @@
+#![allow(unused_imports)]
 //! Papyrus: Semantic Graph to Mermaid JS Exporter.
 //!
 //! "Visualize the invisible."
@@ -32,7 +33,7 @@ use std::fmt::Write;
 
 /// The Papyrus Exporter Engine.
 pub struct Papyrus<'a> {
-    db: &'a AletheiaDB,
+    #[allow(dead_code)] db: &'a AletheiaDB,
 }
 
 #[cfg(feature = "semantic-characterization")]
