@@ -37,3 +37,6 @@
 **[Fix `execute_traversal` target shards bug]**
 **Learning:** `plan.steps` from `route_traversal` returns empty list, and we need `involved_shards`
 **Action:** Replace `steps` with `involved_shards` and update the test.
+**[MockVectorNodeClient Lock Unwrapping]**
+**Learning:** In tests and mock components (like `MockVectorNodeClient`), using `.unwrap()` on lock acquisitions (`.read()` or `.write()`) can cause the testing thread or query process to panic unexpectedly if the lock gets poisoned. This masks actual logic failures with lock poisoning panics and poses a stability risk if these components are ever utilized in scenarios outside strict isolation.
+**Action:** Always gracefully handle lock acquisition by mapping the `PoisonError` to a domain-specific error using `.map_err` when the signature returns a `Result`, or by using an `if let Ok(...)` block when the signature returns `()`, avoiding panics entirely.

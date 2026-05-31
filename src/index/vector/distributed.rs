@@ -1315,11 +1315,16 @@ impl MockVectorNodeClient {
 
     /// Make the next operation fail.
     pub fn fail_next(&self, error: impl Into<String>) {
-        *self.fail_next.write().unwrap() = Some(error.into());
+        if let Ok(mut lock) = self.fail_next.write() {
+            *lock = Some(error.into());
+        }
     }
 
     fn check_fail(&self) -> Result<()> {
-        if let Some(err) = self.fail_next.write().unwrap().take() {
+        let mut lock = self.fail_next.write().map_err(|e| {
+            Error::Vector(VectorError::IndexError(format!("Lock poisoned: {}", e)))
+        })?;
+        if let Some(err) = lock.take() {
             return Err(Error::Vector(VectorError::IndexError(err)));
         }
         Ok(())
@@ -1381,7 +1386,10 @@ impl VectorNodeClient for MockVectorNodeClient {
             }));
         }
 
-        self.vectors.write().unwrap().insert(id, vector.to_vec());
+        let mut vectors = self.vectors.write().map_err(|e| {
+            Error::Vector(VectorError::IndexError(format!("Lock poisoned: {}", e)))
+        })?;
+        vectors.insert(id, vector.to_vec());
         Ok(())
     }
 
@@ -1395,7 +1403,10 @@ impl VectorNodeClient for MockVectorNodeClient {
             ))));
         }
 
-        self.vectors.write().unwrap().remove(&id);
+        let mut vectors = self.vectors.write().map_err(|e| {
+            Error::Vector(VectorError::IndexError(format!("Lock poisoned: {}", e)))
+        })?;
+        vectors.remove(&id);
         Ok(())
     }
 
@@ -1409,7 +1420,9 @@ impl VectorNodeClient for MockVectorNodeClient {
             ))));
         }
 
-        let vectors = self.vectors.read().unwrap();
+        let vectors = self.vectors.read().map_err(|e| {
+            Error::Vector(VectorError::IndexError(format!("Lock poisoned: {}", e)))
+        })?;
         let mut results: Vec<(NodeId, f32)> = vectors
             .iter()
             .map(|(id, vec)| (*id, self.compute_similarity(query, vec)))
@@ -1431,7 +1444,10 @@ impl VectorNodeClient for MockVectorNodeClient {
             ))));
         }
 
-        Ok(self.vectors.read().unwrap().len())
+        let vectors = self.vectors.read().map_err(|e| {
+            Error::Vector(VectorError::IndexError(format!("Lock poisoned: {}", e)))
+        })?;
+        Ok(vectors.len())
     }
 
     fn health_check(&self) -> Result<()> {
