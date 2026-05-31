@@ -636,62 +636,54 @@ impl QueryResults {
     /// ⚡ Bolt Optimization: Pre-allocates vector based on iterator's lower size bound
     /// to reduce heap allocations during collection of structured results.
     pub fn collect_structured(mut self) -> Result<QueryResult> {
-        // First pass: collect all rows
         let (lower, _) = self.iterator.size_hint();
-        let mut rows = Vec::with_capacity(lower);
-        while let Some(row) = self.iterator.next() {
-            rows.push(row?);
-        }
 
-        // Determine which fields we have (single pass)
-        let (mut has_any_scores, mut has_any_paths, mut has_any_versions, mut has_any_nodes) =
-            (false, false, false, false);
-        let mut node_count = 0usize;
-        for row in &rows {
-            has_any_scores = has_any_scores || row.score.is_some();
-            has_any_paths = has_any_paths || row.path.is_some();
-            has_any_versions = has_any_versions || row.timestamp.is_some();
-            if row.entity.as_node().is_some() {
-                has_any_nodes = true;
-                node_count += 1;
-            }
-        }
+        let mut nodes = Vec::with_capacity(lower);
+        let mut properties: Option<Vec<crate::core::PropertyMap>> = None;
+        let mut scores: Option<Vec<f32>> = None;
+        let mut paths: Option<Vec<Path>> = None;
+        let mut versions: Option<Vec<VersionId>> = None;
 
-        // Second pass: extract data with padding
-        let capacity = rows.len();
-        let mut nodes = Vec::with_capacity(node_count);
-        let mut properties = if has_any_nodes {
-            Some(Vec::with_capacity(node_count))
-        } else {
-            None
-        };
-        let mut scores = if has_any_scores {
-            Some(Vec::with_capacity(capacity))
-        } else {
-            None
-        };
-        let mut paths = if has_any_paths {
-            Some(Vec::with_capacity(capacity))
-        } else {
-            None
-        };
-        let mut versions = if has_any_versions {
-            Some(Vec::with_capacity(capacity))
-        } else {
-            None
-        };
+        let mut row_count = 0;
 
-        for row in rows {
+        while let Some(row_res) = self.iterator.next() {
             let QueryRow {
                 entity,
                 score,
                 path,
                 timestamp,
-            } = row;
+            } = row_res?;
 
-            // ⚡ Bolt Optimization: Consumes the entity directly by value instead of cloning
-            // properties map via `as_node().map(|n| n.properties.clone())`. This eliminates
-            // one large heap allocation per row during result structurization.
+            // ⚡ Bolt Optimization: Lazily initialize vectors on demand, allowing us to process
+            // results in a single pass without collecting all `QueryRow`s into an intermediate `Vec`.
+
+            // Check properties array (lazy init padding)
+            if properties.is_none() && entity.as_node().is_some() {
+                let mut props = Vec::with_capacity(lower);
+                props.resize(nodes.len(), Default::default());
+                properties = Some(props);
+            }
+            // Check scores (lazy init padding)
+            if scores.is_none() && score.is_some() {
+                let mut s = Vec::with_capacity(lower);
+                s.resize(row_count, 0.0);
+                scores = Some(s);
+            }
+            // Check paths (lazy init padding)
+            if paths.is_none() && path.is_some() {
+                let mut p = Vec::with_capacity(lower);
+                p.resize(row_count, Default::default());
+                paths = Some(p);
+            }
+            // Check versions (lazy init padding)
+            if versions.is_none() && timestamp.is_some() {
+                let mut v = Vec::with_capacity(lower);
+                let default_version =
+                    VersionId::new(0).expect("VersionId(0) should always be valid");
+                v.resize(row_count, default_version);
+                versions = Some(v);
+            }
+
             match entity {
                 EntityResult::Node(n) => {
                     nodes.push(n.id);
@@ -721,9 +713,6 @@ impl QueryResults {
             // Extract or pad versions
             if let Some(ref mut v) = versions {
                 if let Some(timestamp) = timestamp {
-                    // Safely convert timestamp (i64) to VersionId (u64)
-                    // Negative timestamps are clamped to 0
-                    // Phase 2: Use wallclock component for version ID
                     let wallclock = timestamp.wallclock();
                     let ts_u64 = if wallclock < 0 {
                         0_u64
@@ -731,7 +720,6 @@ impl QueryResults {
                         wallclock as u64
                     };
 
-                    // VersionId::new validates against MAX_VALID_ID
                     let version_id = VersionId::new(ts_u64).map_err(|e| {
                         crate::core::error::Error::Query(
                             crate::core::error::QueryError::InvalidParameter {
@@ -745,11 +733,11 @@ impl QueryResults {
                     })?;
                     v.push(version_id);
                 } else {
-                    // Pad with version 0 for missing timestamps
-                    // SAFETY: VersionId(0) is always valid as 0 < MAX_VALID_ID
                     v.push(VersionId::new(0).expect("VersionId(0) should always be valid"));
                 }
             }
+
+            row_count += 1;
         }
 
         Ok(QueryResult {
