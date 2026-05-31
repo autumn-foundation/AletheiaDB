@@ -10,3 +10,6 @@
 ## 2024-05-14 - [Adding Examples to HLC and documenting src/main.rs]
 **Confusion:** The `src/main.rs` file was missing module-level documentation (`//!`), which triggers the `missing_docs` lint, but was hidden by the lint configurations inside `src/lib.rs` affecting `src/main.rs`. Also `HybridTimestamp::send` lacked an example showing the behavior of its logical counter.
 **Clarification:** Added `//! The AletheiaDB binary.` to `src/main.rs` and added an executable `## Examples` block to `HybridTimestamp::send` in `src/core/hlc.rs`.
+## 2024-05-31 - [Group Commit Coordinator Documentation]
+**Confusion:** The structs `GroupCommitConfig` and `GroupCommitCoordinator::register_transaction` lacked any documentation around their intention (the "Abstract" and "Details") and did not include a valid usage example that correctly represented an interaction.
+**Clarification:** Added complete `///` documentation blocks containing "Abstract", "Usage", "Details", and "Examples" to both `GroupCommitConfig` and `GroupCommitCoordinator::register_transaction` to meet the Bard standard.

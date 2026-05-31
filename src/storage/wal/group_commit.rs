@@ -102,6 +102,45 @@ pub struct GroupCommitCoordinator {
 }
 
 /// Configuration for group commit behavior.
+///
+/// This structure defines the tuning parameters that control the balance between
+/// write throughput and commit latency when using the [`GroupCommit`](super::DurabilityMode::GroupCommit)
+/// durability mode.
+///
+/// # Abstract
+///
+/// Group commit works by accumulating multiple transactions into a single batch and writing
+/// them to disk with one `fsync` operation. This significantly reduces I/O overhead.
+/// The `GroupCommitConfig` lets you specify how long to wait for a batch to fill up
+/// (`max_delay_ms`) and the maximum size of a batch before forcing a flush (`max_batch_size`).
+///
+/// # Usage
+///
+/// You typically construct a configuration, modify its fields, and pass it to
+/// [`GroupCommitCoordinator::with_config`].
+///
+/// ## Examples
+///
+/// ```rust
+/// use aletheiadb::storage::wal::group_commit::{GroupCommitConfig, GroupCommitCoordinator};
+///
+/// // Start with the default configuration
+/// let mut config = GroupCommitConfig::default();
+///
+/// // Tune parameters for high throughput
+/// config.max_delay_ms = 50;
+/// config.max_batch_size = 500;
+///
+/// // Create the coordinator with the custom configuration
+/// let coordinator = GroupCommitCoordinator::with_config(config);
+/// ```
+///
+/// # Details
+///
+/// - **Latency vs Throughput:** Increasing `max_delay_ms` and `max_batch_size` will generally
+///   increase overall throughput at the cost of higher individual transaction latency.
+/// - **Defaults:** The default configuration is designed to provide a good balance for typical workloads,
+///   but extreme workloads may require tuning.
 #[derive(Debug, Clone)]
 pub struct GroupCommitConfig {
     /// Maximum time to wait for more transactions before flushing.
@@ -222,13 +261,43 @@ impl GroupCommitCoordinator {
 
     /// Register a transaction for group commit.
     ///
-    /// Returns the epoch number that this transaction should wait for.
-    /// If the batch is full, returns `true` in the second element to signal
-    /// that an immediate flush should be triggered.
+    /// # Abstract
+    ///
+    /// When a transaction is ready to commit, it calls this method to signal its intent to be included
+    /// in the current flush batch. The coordinator returns the epoch the transaction is assigned to,
+    /// along with a boolean indicating if this specific transaction triggered the flush.
+    ///
+    /// # Usage
+    ///
+    /// Use this method just before a transaction needs to ensure durability. The returned `epoch`
+    /// should then be passed to [`wait_for_flush`](Self::wait_for_flush) to block until the batch
+    /// is written to disk.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::storage::wal::group_commit::GroupCommitCoordinator;
+    ///
+    /// let coordinator = GroupCommitCoordinator::with_defaults();
+    ///
+    /// // Register a transaction and get its assigned epoch
+    /// let (epoch, should_flush) = coordinator.register_transaction().unwrap();
+    ///
+    /// // ... later, block until the epoch is safely flushed to disk
+    /// coordinator.wait_for_flush(epoch).unwrap();
+    /// ```
+    ///
+    /// # Details
+    ///
+    /// - **Lock Poisoning:** If the internal state lock is poisoned, this method will return a
+    ///   `StorageError::LockPoisoned`. This typically indicates a fatal error in another thread
+    ///   interacting with the coordinator.
+    /// - **Triggering Flushes:** If `should_flush` is `true`, the caller (usually a background thread
+    ///   or the coordinator itself) should initiate a flush operation via [`start_flush`](Self::start_flush).
     ///
     /// # Returns
     ///
-    /// A tuple of (epoch_to_wait_for, should_trigger_flush)
+    /// A tuple of `(epoch_to_wait_for, should_trigger_flush)`
     ///
     /// # Errors
     ///
