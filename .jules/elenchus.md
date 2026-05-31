@@ -346,3 +346,10 @@
 **Finding:** The `LimitPushdown` tests originally missed several behavioral edge cases and logic checks, particularly regarding the propagation limits in BinaryOp combinations (`||`), updating limit values correctly against child bounds, and setting vector rank limits.
 **Evidence:** `cargo mutants` caught mutants in `LimitPushdown::push_down` specifically targeting the changed boolean condition logic and bounds assignment.
 **Recommendation:** Added `sentry_tests` to `LimitPushdown` that explicitly trigger tests enforcing the boolean change propagation, verifying that updated properties reflect correct nested limits, and vector bounds assignment. Tests now prevent `||` to `&&` mutations and correct top-k modifications.
+
+**[Temporal Error Assertion Weakness]**
+**Module:** `tests/sentry_temporal_invariants.rs`, `src/storage/historical/tests.rs`
+**Severity:** 🟡 Suspect
+**Finding:** Tests validating temporal invariants (e.g., `close_at` boundaries and `MissingAnchor` detection) relied on ceremonial `assert!(result.is_err())` followed by separated value extractions or matches (`result.unwrap_err()`). This creates a minor false confidence gap where a panic in `unwrap_err` obscures the actual failure, and the initial assertion is redundant if the match is exhaustive.
+**Evidence:** In `tests/sentry_temporal_invariants.rs`, `assert!(result.is_err());` preceded `assert!(matches!(result.unwrap_err(), ...))`. In `src/storage/historical/tests.rs`, `assert!(result.is_err()); match result.unwrap_err() { ... }` was used for `MissingAnchor` validations.
+**Recommendation:** Refactored tests to use direct structural matching: either a single `assert!(matches!(result, Err(...)))` or a direct `match result { Err(...) => ..., _ => panic!(...) }`. This provides a single, robust point of failure that asserts both existence of error and its correctness simultaneously.

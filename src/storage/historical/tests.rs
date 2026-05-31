@@ -4640,11 +4640,10 @@ fn test_missing_anchor_detected_after_anchor_deletion() {
     );
 
     let result = storage.reconstruct_node_properties(v1_id);
-    assert!(result.is_err(), "Expected error when anchor is missing");
-    match result.unwrap_err() {
-        crate::core::error::Error::Temporal(crate::core::error::TemporalError::MissingAnchor {
-            entity_id,
-        }) => {
+    match result {
+        Err(crate::core::error::Error::Temporal(
+            crate::core::error::TemporalError::MissingAnchor { entity_id },
+        )) => {
             // entity_id must come from the version's node_id field (via
             // get_node_version_any_tier), not the generic "version V" fallback.
             // This assertion kills the mutation that removes the .and_then() lookup.
@@ -4653,7 +4652,7 @@ fn test_missing_anchor_detected_after_anchor_deletion() {
                 "MissingAnchor entity_id must identify the node, got: {entity_id}"
             );
         }
-        err => panic!("Expected MissingAnchor, got: {err:?}"),
+        res => panic!("Expected MissingAnchor error, got: {res:?}"),
     }
 }
 
@@ -4725,14 +4724,10 @@ fn test_edge_missing_anchor_detected_after_anchor_deletion() {
     );
 
     let result = storage.reconstruct_edge_properties(e1_id);
-    assert!(
-        result.is_err(),
-        "Expected error when edge anchor is missing"
-    );
-    match result.unwrap_err() {
-        crate::core::error::Error::Temporal(crate::core::error::TemporalError::MissingAnchor {
-            entity_id,
-        }) => {
+    match result {
+        Err(crate::core::error::Error::Temporal(
+            crate::core::error::TemporalError::MissingAnchor { entity_id },
+        )) => {
             // entity_id must come from the version's edge_id field (via
             // get_edge_version_any_tier), not the generic "version V" fallback.
             assert!(
@@ -4740,7 +4735,7 @@ fn test_edge_missing_anchor_detected_after_anchor_deletion() {
                 "MissingAnchor entity_id must identify the edge, got: {entity_id}"
             );
         }
-        err => panic!("Expected MissingAnchor, got: {err:?}"),
+        res => panic!("Expected MissingAnchor error, got: {res:?}"),
     }
 }
 

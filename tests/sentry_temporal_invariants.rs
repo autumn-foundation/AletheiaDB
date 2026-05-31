@@ -13,10 +13,9 @@ mod tests {
         let result = range.close_at(invalid_end);
 
         // This MUST fail now
-        assert!(result.is_err());
         assert!(matches!(
-            result.unwrap_err(),
-            TemporalError::InvalidTimeRange { .. }
+            result,
+            Err(TemporalError::InvalidTimeRange { .. })
         ));
     }
 
@@ -29,10 +28,9 @@ mod tests {
         let result = interval.close_valid_time(invalid_end);
 
         // This MUST fail now
-        assert!(result.is_err());
         assert!(matches!(
-            result.unwrap_err(),
-            TemporalError::InvalidTimeRange { .. }
+            result,
+            Err(TemporalError::InvalidTimeRange { .. })
         ));
     }
 }
