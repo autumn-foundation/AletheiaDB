@@ -1965,5 +1965,4 @@ mod tests {
         let second = run_distributed_tx(&coordinator, &shards).unwrap();
         assert!(second > first);
     }
-
 }
