@@ -1305,7 +1305,7 @@ impl AletheiaMcpServer {
         // DFS is chosen for memory efficiency: it processes nodes immediately rather than
         // queuing all nodes at each level. For large graphs with high branching factors,
         // this significantly reduces peak memory usage compared to BFS.
-        let mut results: Vec<TraversalResult> = Vec::new();
+        let mut results: Vec<TraversalResult> = Vec::with_capacity(limit);
         let mut visited: std::collections::HashSet<u64> = std::collections::HashSet::new();
         let mut frontier: Vec<(NodeId, Vec<u64>, usize)> =
             vec![(start_id, vec![start_id.as_u64()], 0)];

@@ -361,7 +361,7 @@ impl CypherParser {
     /// Parse `{key: value, ...}` property map.
     fn parse_properties(&mut self) -> Result<Vec<(String, CypherValue)>, CypherError> {
         self.expect(TokenKind::LBrace)?;
-        let mut props = Vec::new();
+        let mut props = Vec::with_capacity(4);
 
         if !self.at(TokenKind::RBrace) {
             loop {

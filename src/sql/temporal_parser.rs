@@ -593,7 +593,7 @@ pub fn extract_temporal_clauses(sql: &str) -> Result<ExtractedTemporal, SqlError
     let mut valid_time: Option<TemporalClause> = None;
 
     // Track byte ranges to remove (in reverse order to avoid offset issues)
-    let mut removals: Vec<(usize, usize)> = Vec::new();
+    let mut removals: Vec<(usize, usize)> = Vec::with_capacity(2);
 
     // Extract SYSTEM_TIME clause
     if let Some((clause, start, end)) =

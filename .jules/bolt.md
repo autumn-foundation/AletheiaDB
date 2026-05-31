@@ -77,3 +77,7 @@
 **Pre-allocating Vec Capacities in Hot Paths**
 **Learning:** Pre-allocating standard Rust `Vec` objects using `Vec::with_capacity` in hot-paths like parsers and query planners eliminates unnecessary heap reallocations (0 -> 4 -> 8 -> 16 etc.), without changing semantics or causing borrow checker issues. However, if the expected bounds are wildly incorrect it could lead to memory bloat. A small capacity for small collections minimizes performance impacts in hot loops.
 **Action:** When a loop dynamically pushes elements to a new empty Vector (especially in repeated execution domains like parsers and network/storage iterators), replace `Vec::new()` with `Vec::with_capacity(n)` if a typical or max size `n` is roughly known.
+
+**[Optimize HTTP and MCP Handler Vec Pre-allocation]**
+**Learning:** Found multiple vectors (`missing`, `nodes`, `results`) in `src/http/handlers.rs` and `src/mcp/server.rs` being created with `Vec::new()` without capacity, resulting in potentially multiple heap reallocations when processing bulk requests or traversing graphs up to a given limit.
+**Action:** Use `Vec::with_capacity(limit)` or `Vec::with_capacity(nodes.len())` when initializing vectors inside handlers and traversals to avoid intermediate heap reallocations on the happy path.

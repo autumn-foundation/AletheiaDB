@@ -273,7 +273,7 @@ async fn handle_find_node(
         // NOTE: explicit `row_result?` rather than `.flatten()` so storage
         // errors mid-scan propagate as 500 instead of being silently dropped
         // and producing a partial `success: true` response.
-        let mut nodes = Vec::new();
+        let mut nodes = Vec::with_capacity(limit_val);
         for row_result in results {
             let row = row_result.map_err(|e| AletheiaHttpError::Internal(e.to_string()))?;
             if let crate::query::executor::EntityResult::Node(node) = row.entity {
@@ -438,7 +438,7 @@ async fn handle_bulk_get_nodes(
     validate_bulk_size(&node_ids, "node_ids")?;
     blocking(move || {
         let mut found = Vec::with_capacity(node_ids.len());
-        let mut missing = Vec::new();
+        let mut missing = Vec::with_capacity(node_ids.len());
 
         for node_id in node_ids {
             let nid =
