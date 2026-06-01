@@ -38,6 +38,8 @@ jobs:
         with:
           python-version: "3.12"
       - uses: PyO3/maturin-action@v1
+        env:
+          CFLAGS: "-w"
         with:
           working-directory: python
           target: ${{ matrix.target }}
