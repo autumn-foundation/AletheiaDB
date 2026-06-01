@@ -346,3 +346,10 @@
 **Finding:** The `LimitPushdown` tests originally missed several behavioral edge cases and logic checks, particularly regarding the propagation limits in BinaryOp combinations (`||`), updating limit values correctly against child bounds, and setting vector rank limits.
 **Evidence:** `cargo mutants` caught mutants in `LimitPushdown::push_down` specifically targeting the changed boolean condition logic and bounds assignment.
 **Recommendation:** Added `sentry_tests` to `LimitPushdown` that explicitly trigger tests enforcing the boolean change propagation, verifying that updated properties reflect correct nested limits, and vector bounds assignment. Tests now prevent `||` to `&&` mutations and correct top-k modifications.
+
+**[Missing Intermediate Delta Validation Test]**
+**Module:** src::storage::historical::tests
+**Severity:** 🟡 Suspect
+**Finding:** Test `test_missing_anchor_detected_after_anchor_deletion` acts as an alibi for broader chain corruption cases. It verifies a missing *anchor* but fails to explicitly test if deleting an *intermediate delta* triggers the same `MissingAnchor` error (since the delta prevents traversal backward to the anchor).
+**Evidence:** The test name explicitly says `after_anchor_deletion`. Mutation testing on the condition `if !version_ids.is_empty()` could pass with the current tests while an intermediate delta missing might fail.
+**Recommendation:** Add two new tests: `test_missing_intermediate_delta_detected_after_deletion` and `test_edge_missing_intermediate_delta_detected_after_deletion` to cover the intermediate delta cases.

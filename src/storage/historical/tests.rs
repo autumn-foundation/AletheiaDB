@@ -4907,3 +4907,157 @@ fn test_reconstruct_nonexistent_edge_version_returns_version_not_found() {
         err => panic!("Expected VersionNotFound for a never-added edge version, got: {err:?}"),
     }
 }
+
+#[test]
+fn test_missing_intermediate_delta_detected_after_deletion() {
+    // Verifies that when an intermediate delta is missing in a chain, it
+    // returns MissingAnchor when we attempt to reconstruct downstream, as we can't
+    // traverse back to the anchor.
+    //
+    // Chain structure: v0 (anchor) <- v1 (delta) <- v2 (delta)
+    // Action: remove v1 from hot storage
+    // Expected: reconstruct(v2) -> MissingAnchor
+
+    let mut storage = HistoricalStorage::with_config(AnchorConfig {
+        anchor_interval: 10,
+        max_delta_chain: 10,
+    });
+    let node_id = NodeId::new(99).unwrap();
+    let label = GLOBAL_INTERNER.intern("Person").unwrap();
+
+    // v0 (anchor)
+    let v0_id = VersionId::new(10).unwrap();
+    storage
+        .add_node_version(
+            node_id,
+            v0_id,
+            1000.into(),
+            1000.into(),
+            label,
+            PropertyMapBuilder::new().insert("name", "Alice").build(),
+            false,
+        )
+        .unwrap();
+
+    // v1 (delta)
+    let v1_id = VersionId::new(11).unwrap();
+    storage
+        .add_node_version(
+            node_id,
+            v1_id,
+            2000.into(),
+            2000.into(),
+            label,
+            PropertyMapBuilder::new().insert("name", "Bob").build(),
+            false,
+        )
+        .unwrap();
+
+    // v2 (delta)
+    let v2_id = VersionId::new(12).unwrap();
+    storage
+        .add_node_version(
+            node_id,
+            v2_id,
+            3000.into(),
+            3000.into(),
+            label,
+            PropertyMapBuilder::new().insert("name", "Carol").build(),
+            false,
+        )
+        .unwrap();
+
+    storage.__test_remove_node_version(v1_id);
+    storage.__test_clear_property_cache();
+
+    let result = storage.reconstruct_node_properties(v2_id);
+    assert!(
+        result.is_err(),
+        "Expected error when intermediate delta is missing"
+    );
+    match result.unwrap_err() {
+        crate::core::error::Error::Temporal(crate::core::error::TemporalError::MissingAnchor {
+            entity_id,
+        }) => {
+            assert!(entity_id.starts_with("Node("));
+        }
+        err => panic!("Expected MissingAnchor, got: {:?}", err),
+    }
+}
+
+#[test]
+fn test_edge_missing_intermediate_delta_detected_after_deletion() {
+    let mut storage = HistoricalStorage::with_config(AnchorConfig {
+        anchor_interval: 10,
+        max_delta_chain: 10,
+    });
+    let edge_id = crate::core::id::EdgeId::new(55).unwrap();
+    let source = NodeId::new(1).unwrap();
+    let target = NodeId::new(2).unwrap();
+    let label = GLOBAL_INTERNER.intern("KNOWS").unwrap();
+
+    // e0 (anchor)
+    let e0_id = VersionId::new(20).unwrap();
+    storage
+        .add_edge_version(
+            edge_id,
+            e0_id,
+            1000.into(),
+            1000.into(),
+            label,
+            source,
+            target,
+            PropertyMapBuilder::new().insert("weight", 1i64).build(),
+            false,
+        )
+        .unwrap();
+
+    // e1 (delta)
+    let e1_id = VersionId::new(21).unwrap();
+    storage
+        .add_edge_version(
+            edge_id,
+            e1_id,
+            2000.into(),
+            2000.into(),
+            label,
+            source,
+            target,
+            PropertyMapBuilder::new().insert("weight", 2i64).build(),
+            false,
+        )
+        .unwrap();
+
+    // e2 (delta)
+    let e2_id = VersionId::new(22).unwrap();
+    storage
+        .add_edge_version(
+            edge_id,
+            e2_id,
+            3000.into(),
+            3000.into(),
+            label,
+            source,
+            target,
+            PropertyMapBuilder::new().insert("weight", 3i64).build(),
+            false,
+        )
+        .unwrap();
+
+    storage.__test_remove_edge_version(e1_id);
+    storage.__test_clear_edge_property_cache();
+
+    let result = storage.reconstruct_edge_properties(e2_id);
+    assert!(
+        result.is_err(),
+        "Expected error when intermediate delta is missing"
+    );
+    match result.unwrap_err() {
+        crate::core::error::Error::Temporal(crate::core::error::TemporalError::MissingAnchor {
+            entity_id,
+        }) => {
+            assert!(entity_id.starts_with("Edge("));
+        }
+        err => panic!("Expected MissingAnchor, got: {:?}", err),
+    }
+}
