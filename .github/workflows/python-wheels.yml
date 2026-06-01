@@ -25,6 +25,8 @@ defaults:
 jobs:
   linux:
     name: Linux ${{ matrix.target }}
+    env:
+      CFLAGS: "-w"
     # Use a native ARM64 runner for aarch64 so usearch's C++ build compiles
     # without cross-compilation; x86_64 uses the standard hosted runner.
     runs-on: ${{ matrix.target == 'aarch64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
@@ -38,8 +40,6 @@ jobs:
         with:
           python-version: "3.12"
       - uses: PyO3/maturin-action@v1
-        env:
-          CFLAGS: "-w"
         with:
           working-directory: python
           target: ${{ matrix.target }}
