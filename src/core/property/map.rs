@@ -486,9 +486,11 @@ impl PropertyMapBuilder {
     ///
     /// This will clone the underlying HashMap if the Arc has multiple references,
     /// implementing copy-on-write semantics.
+    /// ⚡ Bolt: Using `Arc::unwrap_or_clone` instead of manual fallback generates
+    /// more efficient assembly and is the idiomatic way to handle copy-on-write.
     pub fn from_map(prop_map: PropertyMap) -> Self {
         let current_size = prop_map.cached_size;
-        let map = Arc::try_unwrap(prop_map.inner).unwrap_or_else(|arc| (*arc).clone());
+        let map = Arc::unwrap_or_clone(prop_map.inner);
         PropertyMapBuilder { map, current_size }
     }
 
