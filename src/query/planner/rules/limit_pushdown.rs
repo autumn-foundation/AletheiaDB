@@ -542,4 +542,97 @@ mod sentry_tests {
             panic!("Expected VectorRank");
         }
     }
+
+    #[test]
+    fn test_pushdown_binary_right_changed() {
+        let rule = LimitPushdown;
+        // Left: Scan -> Scan [changed = false]
+        let left = LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(1).unwrap()]));
+
+        // Right: Limit(10, Limit(20, Scan)) -> Limit(10, Scan) [changed = true]
+        let right = LogicalOp::unary(
+            UnaryOp::Limit(10),
+            LogicalOp::unary(
+                UnaryOp::Limit(20),
+                LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(2).unwrap()])),
+            ),
+        );
+
+        let plan = LogicalPlan::new(LogicalOp::binary(BinaryOp::Union, left, right));
+
+        let result = rule.apply(&plan, &Statistics::default()).unwrap();
+        assert!(result.is_some(), "Should propagate true from right_changed");
+    }
+
+    #[test]
+    fn test_pushdown_binary_both_changed() {
+        let rule = LimitPushdown;
+        let left = LogicalOp::unary(
+            UnaryOp::Limit(10),
+            LogicalOp::unary(
+                UnaryOp::Limit(20),
+                LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(1).unwrap()])),
+            ),
+        );
+
+        let right = LogicalOp::unary(
+            UnaryOp::Limit(10),
+            LogicalOp::unary(
+                UnaryOp::Limit(20),
+                LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(2).unwrap()])),
+            ),
+        );
+
+        let plan = LogicalPlan::new(LogicalOp::binary(BinaryOp::Union, left, right));
+
+        let result = rule.apply(&plan, &Statistics::default()).unwrap();
+        assert!(result.is_some(), "Should propagate true from both_changed");
+    }
+
+    #[test]
+    fn test_pushdown_limit_input_changed_eq_limit() {
+        let rule = LimitPushdown;
+        // Outer Limit(10), inner Limit(20, Limit(30))
+        // So the input gets changed (Limit(20)), but effective_limit (10) == *n (10)
+        let op = LogicalOp::unary(
+            UnaryOp::Limit(10),
+            LogicalOp::unary(
+                UnaryOp::Limit(20),
+                LogicalOp::unary(
+                    UnaryOp::Limit(30),
+                    LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(1).unwrap()])),
+                ),
+            ),
+        );
+        let (_, changed) = rule.push_down(&op, None).unwrap();
+        assert!(
+            changed,
+            "Expected limit to be marked as changed due to input changing"
+        );
+    }
+
+    #[test]
+    fn test_pushdown_vector_rank_input_changed_eq_top_k() {
+        let rule = LimitPushdown;
+        // VectorRank top_k=10, inner Limit(20, Limit(30))
+        let op = LogicalOp::unary(
+            UnaryOp::VectorRank {
+                embedding: vec![0.1f32].into(),
+                top_k: Some(10),
+                property_key: None,
+            },
+            LogicalOp::unary(
+                UnaryOp::Limit(20),
+                LogicalOp::unary(
+                    UnaryOp::Limit(30),
+                    LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(1).unwrap()])),
+                ),
+            ),
+        );
+        let (_, changed) = rule.push_down(&op, None).unwrap();
+        assert!(
+            changed,
+            "Expected VectorRank to be marked as changed due to input changing"
+        );
+    }
 }

@@ -37,3 +37,6 @@
 **[Fix `execute_traversal` target shards bug]**
 **Learning:** `plan.steps` from `route_traversal` returns empty list, and we need `involved_shards`
 **Action:** Replace `steps` with `involved_shards` and update the test.
+**LimitPushdown Mutants**
+**Learning:** `cargo mutants` revealed missing test coverage for `LimitPushdown::push_down` in several conditions around `||`. Also limits shouldn't be blindly pushed down through filters, because limits only apply after the filter reduces the row count. Tests covering the lack of modification of binary children boundaries have also been introduced.
+**Action:** When adding rules like `LimitPushdown`, always ensure to write exhaustive structural test cases (verifying limits propagating, or explicitly stopping at operations like `Filter` or `Sort`).
