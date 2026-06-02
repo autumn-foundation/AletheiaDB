@@ -15,6 +15,9 @@ on:
       - "src/**"
   workflow_dispatch:
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 permissions:
   contents: read
 
@@ -138,7 +141,10 @@ jobs:
     needs: [linux, macos, windows, sdist, test]
     if: startsWith(github.ref, 'refs/tags/python-v')
     environment: pypi
-    permissions:
+    env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+permissions:
       id-token: write
     steps:
       - uses: actions/download-artifact@v4
