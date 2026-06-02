@@ -41,7 +41,6 @@ use crate::core::interning::GLOBAL_INTERNER;
 use crate::core::property::PropertyMapBuilder;
 use crate::experimental::wormhole::WormholeDetector;
 
-/// The Alchemist engine for graph transformation.
 /// Evaluates semantic reactions to automatically evolve the knowledge graph.
 ///
 /// # Why?
