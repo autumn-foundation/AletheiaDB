@@ -127,7 +127,9 @@ jobs:
           name: wheels-linux-x86_64
           path: python/dist
       - name: Install wheel
-        run: pip install --find-links dist aletheiadb pytest
+        run: |
+          pip install pytest
+          pip install dist/*.whl
       - name: Run tests
         working-directory: python
         run: pytest tests/ -v
