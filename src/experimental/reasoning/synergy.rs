@@ -68,7 +68,11 @@ pub struct SynergyResult {
     pub synergy_score: f32,
 }
 
-/// The Synergy Engine.
+/// Computes whether a subgraph's collective embedding differs significantly from its individual node embeddings.
+///
+/// # Why?
+/// This allows detecting emergent concepts or groupthink behavior where the structural
+/// connections create a meaning greater than the sum of its parts.
 pub struct Synergy<'a> {
     db: &'a AletheiaDB,
 }

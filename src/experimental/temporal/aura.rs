@@ -66,7 +66,11 @@ pub struct AuraResult {
     pub divergence_score: f32,
 }
 
-/// The Aura Engine.
+/// Tracks an entity's semantic essence over its entire lifespan.
+///
+/// # Why?
+/// It helps separate a node's long-term identity from short-term fluctuations or
+/// anomalies in its current embedding vector.
 pub struct AuraEngine<'a> {
     db: &'a AletheiaDB,
 }

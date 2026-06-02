@@ -42,6 +42,11 @@ use crate::core::property::PropertyMapBuilder;
 use crate::experimental::wormhole::WormholeDetector;
 
 /// The Alchemist engine for graph transformation.
+/// Evaluates semantic reactions to automatically evolve the knowledge graph.
+///
+/// # Why?
+/// Bridging the gap between discovering patterns and acting on them. It structurally mutates
+/// the graph based on the semantics.
 pub struct Alchemist<'a> {
     db: &'a AletheiaDB,
 }

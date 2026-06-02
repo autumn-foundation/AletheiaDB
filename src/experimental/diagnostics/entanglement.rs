@@ -60,7 +60,11 @@ pub struct EntangledPair {
     pub score: f32,
 }
 
-/// The Entanglement Detector.
+/// The Engine that calculates quantum correlations between nodes over time.
+///
+/// # Why?
+/// By grouping node updates by transaction time and comparing semantic deltas, this
+/// uncovers hidden relationships between entities that have no direct structural edges.
 pub struct EntanglementDetector<'a> {
     db: &'a AletheiaDB,
 }
@@ -71,7 +75,31 @@ impl<'a> EntanglementDetector<'a> {
         Self { db }
     }
 
-    /// Detect entanglement between the given nodes based on a vector property.
+    /// Analyzes nodes to reveal spooky action at a distance.
+    ///
+    /// # Why?
+    /// If two disconnected nodes suddenly start moving in the same semantic direction
+    /// simultaneously, they are likely being influenced by the same external event.
+    ///
+    /// ## Examples
+    /// ```rust,no_run
+    /// // Requires features = ["nova"]
+    /// use aletheiadb::AletheiaDB;
+    /// use aletheiadb::experimental::diagnostics::EntanglementDetector;
+    /// use aletheiadb::core::id::NodeId;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let db = AletheiaDB::new()?;
+    /// let detector = EntanglementDetector::new(&db);
+    /// # let node_id1 = NodeId::new(0).unwrap();
+    /// # let node_id2 = NodeId::new(1).unwrap();
+    /// let pairs = detector.detect_entanglement(&[node_id1, node_id2], "embedding")?;
+    /// for pair in pairs {
+    ///     println!("Entangled: {} and {} (score: {})", pair.node_a, pair.node_b, pair.score);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
     ///
     /// # Arguments
     /// * `nodes` - The list of node IDs to analyze.
