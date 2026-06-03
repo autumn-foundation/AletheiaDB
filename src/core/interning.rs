@@ -177,7 +177,7 @@ impl StringInterner {
                 let id = InternedString(id_value);
 
                 // Store the reverse mapping
-                self.id_to_string.insert(id, arc_str.clone());
+                self.id_to_string.insert(id, arc_str);
 
                 Ok(id)
             })
@@ -208,7 +208,7 @@ impl StringInterner {
         *self.string_to_id.entry(arc_str.clone()).or_insert_with(|| {
             let id_value = self.next_id.fetch_add(1, Ordering::Relaxed);
             let id = InternedString(id_value);
-            self.id_to_string.insert(id, arc_str.clone());
+            self.id_to_string.insert(id, arc_str);
             id
         })
     }

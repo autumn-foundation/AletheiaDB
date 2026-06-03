@@ -77,3 +77,11 @@
 **Pre-allocating Vec Capacities in Hot Paths**
 **Learning:** Pre-allocating standard Rust `Vec` objects using `Vec::with_capacity` in hot-paths like parsers and query planners eliminates unnecessary heap reallocations (0 -> 4 -> 8 -> 16 etc.), without changing semantics or causing borrow checker issues. However, if the expected bounds are wildly incorrect it could lead to memory bloat. A small capacity for small collections minimizes performance impacts in hot loops.
 **Action:** When a loop dynamically pushes elements to a new empty Vector (especially in repeated execution domains like parsers and network/storage iterators), replace `Vec::new()` with `Vec::with_capacity(n)` if a typical or max size `n` is roughly known.
+
+**Optimize Arc Cloning in StringInterner**
+**Learning:** `DashMap::entry()` takes ownership of its key. If a function takes an `Arc` by reference and needs to pass it into `entry()`, the naive approach is to clone the `Arc` before passing it. However, if the `Arc` is not used in the outer scope after the `entry()` call, it can be passed directly, preventing an unnecessary atomic reference count increment and decrement.
+**Action:** Avoid redundant `Arc::clone()` calls when passing an `Arc` into a `DashMap::entry()` closure if the `Arc` is not used again in the outer scope.
+
+**Refactor to Arc::unwrap_or_clone**
+**Learning:** Rust 1.76+ introduced the stabilized `Arc::unwrap_or_clone` method, which is a cleaner and more efficient alternative to the manual pattern `Arc::try_unwrap(arc).unwrap_or_else(|a| (*a).clone())` used for copy-on-write semantics.
+**Action:** Always prefer `Arc::unwrap_or_clone(arc)` when implementing copy-on-write patterns in Rust 1.76+.
