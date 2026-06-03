@@ -66,6 +66,14 @@ mod sentry_tests {
     }
 
     #[test]
+    fn test_tanimoto_distance_nan_input_does_not_panic() {
+        let a = [f32::NAN, f32::NAN];
+        let b = [1.0, 1.0];
+        let result = std::panic::catch_unwind(|| tanimoto_distance(&a, &b));
+        assert!(result.is_ok(), "tanimoto_distance panicked on NaN input");
+    }
+
+    #[test]
     fn test_hnsw_config_serialization_round_trip() {
         let config = HnswConfig {
             dimensions: 128,

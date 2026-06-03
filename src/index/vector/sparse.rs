@@ -1063,7 +1063,11 @@ pub fn hybrid_fusion(
     alpha: f32,
     k: usize,
 ) -> Vec<(NodeId, f32)> {
-    let alpha = alpha.clamp(0.0, 1.0);
+    let alpha = if alpha.is_nan() {
+        0.0
+    } else {
+        alpha.clamp(0.0, 1.0)
+    };
     let k = k.min(MAX_K);
 
     if dense_results.is_empty() && sparse_results.is_empty() {

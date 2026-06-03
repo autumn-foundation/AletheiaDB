@@ -113,7 +113,12 @@ impl<'a> ParadoxDetector<'a> {
 
         // Scale it up a bit since multiplying two numbers < 1 makes it small
         // For example, +0.5 delta and -0.5 delta -> +0.25 raw score -> x4 -> 1.0
-        let paradox_score = (raw_paradox * 4.0).clamp(-1.0, 1.0);
+        let scaled_paradox = raw_paradox * 4.0;
+        let paradox_score = if scaled_paradox.is_nan() {
+            f32::NAN
+        } else {
+            scaled_paradox.clamp(-1.0, 1.0)
+        };
 
         Ok(paradox_score)
     }
@@ -248,7 +253,12 @@ mod tests {
 
         // Paradox: Semantics approach, structure diverges
         let raw_paradox = -(semantic_delta * structural_delta); // -(0.8 * -0.6) = 0.48
-        let paradox_score = (raw_paradox * 4.0).clamp(-1.0, 1.0); // 0.48 * 4 = 1.92 -> 1.0
+        let scaled_paradox = raw_paradox * 4.0;
+        let paradox_score = if scaled_paradox.is_nan() {
+            f32::NAN
+        } else {
+            scaled_paradox.clamp(-1.0, 1.0)
+        };
 
         assert!(paradox_score > 0.0, "Expected a positive paradox score, got {}", paradox_score);
     }

@@ -140,7 +140,11 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> Result<f32> {
 
     // Clamp to handle minor floating-point inaccuracies that could produce
     // values slightly outside [-1.0, 1.0]
-    Ok(result.clamp(-1.0, 1.0))
+    if result.is_nan() {
+        Ok(f32::NAN)
+    } else {
+        Ok(result.clamp(-1.0, 1.0))
+    }
 }
 
 /// Computes cosine similarity between pre-normalized (unit) vectors.
@@ -225,7 +229,9 @@ pub fn cosine_similarity_normalized(a: &[f32], b: &[f32]) -> Result<f32> {
         let mag_b_sq: f32 = b.iter().map(|x| x * x).sum();
 
         // Allow unit vectors (mag ≈ 1.0) OR zero vectors (mag ≈ 0.0) produced by normalize()
-        let a_valid = (mag_a_sq - 1.0).abs() < 1e-4 || mag_a_sq < SQUARED_MAGNITUDE_THRESHOLD;
+        let a_valid = mag_a_sq.is_nan()
+            || (mag_a_sq - 1.0).abs() < 1e-4
+            || mag_a_sq < SQUARED_MAGNITUDE_THRESHOLD;
         debug_assert!(
             a_valid,
             "First vector is not unit length: ||a||² = {} (expected 1.0). \
@@ -233,7 +239,9 @@ pub fn cosine_similarity_normalized(a: &[f32], b: &[f32]) -> Result<f32> {
             mag_a_sq
         );
 
-        let b_valid = (mag_b_sq - 1.0).abs() < 1e-4 || mag_b_sq < SQUARED_MAGNITUDE_THRESHOLD;
+        let b_valid = mag_b_sq.is_nan()
+            || (mag_b_sq - 1.0).abs() < 1e-4
+            || mag_b_sq < SQUARED_MAGNITUDE_THRESHOLD;
         debug_assert!(
             b_valid,
             "Second vector is not unit length: ||b||² = {} (expected 1.0). \
@@ -247,7 +255,11 @@ pub fn cosine_similarity_normalized(a: &[f32], b: &[f32]) -> Result<f32> {
     let dot = dot_product_sum(a, b);
 
     // Clamp to handle floating-point inaccuracies
-    Ok(dot.clamp(-1.0, 1.0))
+    if dot.is_nan() {
+        Ok(f32::NAN)
+    } else {
+        Ok(dot.clamp(-1.0, 1.0))
+    }
 }
 
 // ============================================================================

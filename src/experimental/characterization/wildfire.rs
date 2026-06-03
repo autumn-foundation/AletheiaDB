@@ -61,9 +61,14 @@ impl WildfirePropagation {
         base_alpha: f32,
         temp_multiplier: f32,
     ) -> Self {
+        let base_alpha = if base_alpha.is_nan() {
+            0.0
+        } else {
+            base_alpha.clamp(0.0, 1.0)
+        };
         Self {
             temperatures,
-            base_alpha: base_alpha.clamp(0.0, 1.0),
+            base_alpha,
             temp_multiplier: temp_multiplier.max(0.0),
         }
     }
@@ -72,7 +77,11 @@ impl WildfirePropagation {
     fn get_dynamic_alpha(&self, node_id: NodeId) -> f32 {
         let temp = self.temperatures.get(&node_id).copied().unwrap_or(0.0);
         let alpha = self.base_alpha + (self.temp_multiplier * temp);
-        alpha.clamp(0.0, 1.0)
+        if alpha.is_nan() {
+            0.0
+        } else {
+            alpha.clamp(0.0, 1.0)
+        }
     }
 }
 

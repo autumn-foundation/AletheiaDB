@@ -261,7 +261,11 @@ impl RebalanceConfig {
 
     /// Set the imbalance threshold.
     pub fn with_imbalance_threshold(mut self, threshold: f64) -> Self {
-        self.imbalance_threshold = threshold.clamp(0.0, 1.0);
+        self.imbalance_threshold = if threshold.is_nan() {
+            0.0
+        } else {
+            threshold.clamp(0.0, 1.0)
+        };
         self
     }
 

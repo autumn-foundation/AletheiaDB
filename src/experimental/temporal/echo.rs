@@ -77,7 +77,11 @@ impl TemporalFingerprint {
 
         // Since bins are pre-normalized (unit vectors), cosine similarity is just the dot product.
         // We clamp to [0.0, 1.0] to handle floating point errors.
-        dot_product.clamp(0.0, 1.0)
+        if dot_product.is_nan() {
+            f32::NAN
+        } else {
+            dot_product.clamp(0.0, 1.0)
+        }
     }
 }
 

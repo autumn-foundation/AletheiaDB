@@ -133,7 +133,9 @@ fn tanimoto_distance(a: &[f32], b: &[f32]) -> f32 {
     }
 
     let similarity = dot / denominator;
-    if similarity.is_finite() {
+    if similarity.is_nan() {
+        f32::MAX
+    } else if similarity.is_finite() {
         (1.0 - similarity.clamp(0.0, 1.0)) as f32
     } else {
         f32::MAX
@@ -1309,3 +1311,6 @@ impl VectorIndex for HnswIndex {
         Ok(())
     }
 }
+/// Tests for Havoc clamp panic scenarios.
+#[cfg(test)]
+pub mod havoc_clamp_tests;

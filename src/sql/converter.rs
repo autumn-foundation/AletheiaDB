@@ -196,7 +196,7 @@ impl SqlConverter {
         }
 
         match &table.relation {
-            TableFactor::Table { name, alias: _, .. } => {
+            TableFactor::Table { name, .. } => {
                 let table_name = name.to_string().to_lowercase();
                 match table_name.as_str() {
                     "nodes" => {

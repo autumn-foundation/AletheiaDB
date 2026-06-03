@@ -75,9 +75,12 @@ pub struct LinearPropagation {
 impl LinearPropagation {
     /// Create a new LinearPropagation model.
     pub fn new(alpha: f32) -> Self {
-        Self {
-            alpha: alpha.clamp(0.0, 1.0),
-        }
+        let alpha = if alpha.is_nan() {
+            0.0
+        } else {
+            alpha.clamp(0.0, 1.0)
+        };
+        Self { alpha }
     }
 }
 

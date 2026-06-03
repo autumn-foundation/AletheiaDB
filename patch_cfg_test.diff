@@ -1,0 +1,8 @@
+<<<<<<< SEARCH
+/// Tests for Havoc clamp panic scenarios.
+pub mod havoc_clamp_tests;
+=======
+/// Tests for Havoc clamp panic scenarios.
+#[cfg(test)]
+pub mod havoc_clamp_tests;
+>>>>>>> REPLACE

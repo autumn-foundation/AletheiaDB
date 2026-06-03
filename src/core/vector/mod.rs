@@ -120,6 +120,9 @@ pub use sparse::*;
 pub use types::*;
 pub use validation::*;
 
+/// Tests for Havoc clamp panic scenarios.
+#[cfg(test)]
+pub mod havoc_clamp_tests;
 #[cfg(all(test, any(target_arch = "x86", target_arch = "x86_64")))]
 mod havoc_tests;
 #[cfg(test)]

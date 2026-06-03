@@ -1317,7 +1317,11 @@ impl TemporalVectorIndex {
             DriftMetric::Euclidean => euclidean_distance(a, b),
             DriftMetric::Angular => {
                 let similarity = cosine_similarity(a, b)?;
-                let clamped = similarity.clamp(-1.0, 1.0);
+                let clamped = if similarity.is_nan() {
+                    f32::NAN
+                } else {
+                    similarity.clamp(-1.0, 1.0)
+                };
                 Ok(clamped.acos())
             }
         }

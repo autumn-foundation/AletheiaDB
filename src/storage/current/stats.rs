@@ -121,6 +121,10 @@ impl FilterStats {
         let multiplier = MIN_MULTIPLIER / pass_rate.sqrt();
 
         // Clamp to reasonable bounds
-        multiplier.clamp(MIN_MULTIPLIER, MAX_MULTIPLIER)
+        if multiplier.is_nan() {
+            MIN_MULTIPLIER
+        } else {
+            multiplier.clamp(MIN_MULTIPLIER, MAX_MULTIPLIER)
+        }
     }
 }

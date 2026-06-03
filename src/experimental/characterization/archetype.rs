@@ -95,7 +95,12 @@ impl<'a> Archetype<'a> {
 
             let similarity = ops::cosine_similarity(&centroid, &normalized_vec)?;
             // Cosine similarity ranges from -1.0 to 1.0. We normalize it to 0.0 - 1.0 for purity.
-            let purity_score = ((similarity + 1.0) / 2.0).clamp(0.0, 1.0);
+            let raw_purity = (similarity + 1.0) / 2.0;
+            let purity_score = if raw_purity.is_nan() {
+                f32::NAN
+            } else {
+                raw_purity.clamp(0.0, 1.0)
+            };
 
             node_results.push(ArchetypeNodeResult {
                 node_id: valid_nodes[i],

@@ -564,7 +564,11 @@ pub fn sparse_cosine_similarity(a: &SparseVec, b: &SparseVec) -> Result<f32> {
     let similarity = dot / (sq_mag_a.sqrt() * sq_mag_b.sqrt());
 
     // Clamp to [-1, 1] to handle floating-point errors
-    Ok(similarity.clamp(-1.0, 1.0))
+    if similarity.is_nan() {
+        Ok(f32::NAN)
+    } else {
+        Ok(similarity.clamp(-1.0, 1.0))
+    }
 }
 
 /// Computes squared Euclidean distance between two sparse vectors.
