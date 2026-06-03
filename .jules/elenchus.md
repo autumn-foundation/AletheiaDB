@@ -346,3 +346,17 @@
 **Finding:** The `LimitPushdown` tests originally missed several behavioral edge cases and logic checks, particularly regarding the propagation limits in BinaryOp combinations (`||`), updating limit values correctly against child bounds, and setting vector rank limits.
 **Evidence:** `cargo mutants` caught mutants in `LimitPushdown::push_down` specifically targeting the changed boolean condition logic and bounds assignment.
 **Recommendation:** Added `sentry_tests` to `LimitPushdown` that explicitly trigger tests enforcing the boolean change propagation, verifying that updated properties reflect correct nested limits, and vector bounds assignment. Tests now prevent `||` to `&&` mutations and correct top-k modifications.
+
+**[Generic Error Types Assertion Weakness]**
+**Module:** `tests/generic_error_types.rs`
+**Severity:** 🟡 Suspect
+**Finding:** The tests in this file exhibited the "Ceremony Test" anti-pattern. Several tests relied on redundant `assert!(result.is_ok())` immediately before an `unwrap()`, or exclusively asserted `is_ok()` (e.g., `test_default_error_type_with_turbofish`) without verifying the underlying success states (like node creation validity or result counts).
+**Evidence:** The test `test_default_error_type_with_turbofish` asserted `is_ok()` without checking if the operations returned the expected valid logic states (`count == 0` or valid `NodeId` presence).
+**Recommendation:** Refactored tests to use direct `assert_eq!(result, Ok(expected))` and `assert_eq!(result, Err(expected))` matching. Strengthened `test_default_error_type_with_turbofish` to explicitly evaluate the created outputs (e.g., `read_result.unwrap()`).
+
+**[HLC Tests Audit]**
+**Module:** `src/core/hlc.rs`, `tests/hlc_tests.rs`
+**Severity:** 🟢 Acquitted
+**Finding:** Previous concerns regarding "HLC Causality Blind Spot" and "HLC Assertion Weakness" have been thoroughly addressed. The tests now use precise boundary definitions (e.g., `test_new_validation` for `MAX_VALID_TIMESTAMP`), exact sentinel value verifications, strong `matches!(result, Err(...))` error checking, and explicit Oracles (e.g., `test_receive_collision_oracle`) instead of tautological mirror logic.
+**Evidence:** Code inspection and mutation tools confirm strong coverage across serialization, bounds checking, and causality propagation constraints.
+**Recommendation:** None. The suite has earned its place.
