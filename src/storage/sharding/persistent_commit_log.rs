@@ -794,7 +794,7 @@ impl PersistentCommitLog {
         }
 
         // Parse entries
-        let mut entries = Vec::new();
+        let mut entries = Vec::with_capacity(128); // ⚡ Bolt Optimization: Pre-allocate capacity for commit log entries.
         let mut offset = HEADER_SIZE;
         let mut max_lsn = 0u64;
         let mut max_tx_id = 0u64;

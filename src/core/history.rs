@@ -259,7 +259,7 @@ impl VersionDiff {
 
         let mut added_builder = PropertyMapBuilder::new();
         let mut removed_builder = PropertyMapBuilder::new();
-        let mut modified = Vec::new();
+        let mut modified = Vec::with_capacity(to.len());
 
         // Find added and modified properties
         for (key, to_value) in to.iter() {

@@ -77,3 +77,7 @@
 **Pre-allocating Vec Capacities in Hot Paths**
 **Learning:** Pre-allocating standard Rust `Vec` objects using `Vec::with_capacity` in hot-paths like parsers and query planners eliminates unnecessary heap reallocations (0 -> 4 -> 8 -> 16 etc.), without changing semantics or causing borrow checker issues. However, if the expected bounds are wildly incorrect it could lead to memory bloat. A small capacity for small collections minimizes performance impacts in hot loops.
 **Action:** When a loop dynamically pushes elements to a new empty Vector (especially in repeated execution domains like parsers and network/storage iterators), replace `Vec::new()` with `Vec::with_capacity(n)` if a typical or max size `n` is roughly known.
+
+**Pre-allocating Vec Capacities when processing files and queries**
+**Learning:** Initializing standard Rust vectors with `Vec::new()` causes potentially several intermediate heap reallocations as elements are pushed into them (0 -> 4 -> 8 -> 16). In scenarios like reading multiple WAL segments, parsing commit log entries, comparing properties for history diffs, or mapping rows during query execution, the approximate or maximum size is often known.
+**Action:** Replace `Vec::new()` with `Vec::with_capacity(n)` when a collection's bounds can be estimated (e.g., using `rows.len()`, `to.len()`, or typical static thresholds like `128`) to completely prevent unnecessary heap reallocations on the critical path without increasing memory pressure.

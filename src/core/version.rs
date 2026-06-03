@@ -166,7 +166,7 @@ impl VectorDelta {
         }
 
         // Collect changed indices with epsilon-based comparison
-        let mut changes = Vec::new();
+        let mut changes = Vec::with_capacity(4); // Typical vector deltas are small
         for (idx, (old_val, new_val)) in old.iter().zip(new.iter()).enumerate() {
             // Use epsilon-based comparison to avoid spurious deltas from floating-point precision
             if !floats_approx_equal(*old_val, *new_val) {

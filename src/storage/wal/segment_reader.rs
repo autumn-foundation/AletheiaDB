@@ -146,7 +146,7 @@ pub fn read_entries_from_dir_with_cipher(
     start_lsn: LSN,
     cipher: Option<&Arc<dyn crate::encryption::cipher::Cipher>>,
 ) -> Result<Vec<WalEntry>> {
-    let mut entries = Vec::new();
+    let mut entries = Vec::with_capacity(128); // ⚡ Bolt Optimization: Pre-allocate capacity for WAL entries to reduce heap reallocations.
 
     // Find all WAL segments
     let mut segments = Vec::with_capacity(16); // ⚡ Bolt Optimization: Pre-allocate space for WAL segment paths to prevent small heap reallocations when reading directories.

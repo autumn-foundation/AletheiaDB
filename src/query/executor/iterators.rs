@@ -2152,7 +2152,7 @@ mod tests {
         let predicate = Predicate::gt("age", 28i64);
         let mut filter = FilterIterator::new(Box::new(input), predicate);
 
-        let mut results = Vec::new();
+        let mut results = Vec::with_capacity(3);
         while let Some(Ok(row)) = filter.next() {
             results.push(row);
         }
@@ -2232,7 +2232,7 @@ mod tests {
         let mut limit = LimitIterator::new(input, 2, 3);
 
         // Should skip 2, return 3
-        let mut results = Vec::new();
+        let mut results = Vec::with_capacity(3);
         while let Some(Ok(row)) = limit.next() {
             results.push(row);
         }
@@ -2254,7 +2254,7 @@ mod tests {
         let input = MockIterator::from_nodes(nodes);
         let mut limit = LimitIterator::new(Box::new(input), 0, 2);
 
-        let mut results = Vec::new();
+        let mut results = Vec::with_capacity(2);
         while let Some(Ok(row)) = limit.next() {
             results.push(row);
         }
@@ -2293,7 +2293,7 @@ mod tests {
         let input = MockIterator::from_nodes(nodes);
         let mut limit = LimitIterator::new(Box::new(input), 1, 10);
 
-        let mut results = Vec::new();
+        let mut results = Vec::with_capacity(10);
         while let Some(Ok(row)) = limit.next() {
             results.push(row);
         }
@@ -2725,7 +2725,7 @@ mod tests {
 
         let mut iter = NodeScanIterator::new(None, current);
 
-        let mut results = Vec::new();
+        let mut results = Vec::with_capacity(2);
         while let Some(Ok(row)) = iter.next() {
             results.push(row);
         }
@@ -2752,7 +2752,7 @@ mod tests {
 
         let mut iter = NodeScanIterator::new(Some("Person".to_string()), current);
 
-        let mut results = Vec::new();
+        let mut results = Vec::with_capacity(1);
         while let Some(Ok(row)) = iter.next() {
             results.push(row);
         }
@@ -3402,7 +3402,7 @@ mod tests {
         let mut rerank =
             VectorRerankIterator::new(input, query_embedding.clone(), 3, current.clone(), None);
 
-        let mut results = Vec::new();
+        let mut results = Vec::with_capacity(3);
         while let Some(Ok(row)) = rerank.next() {
             results.push(row);
         }
@@ -3416,7 +3416,7 @@ mod tests {
         let input = Box::new(NodeLookupIterator::new(nodes.clone(), current.clone()));
         let mut rerank =
             VectorRerankIterator::new(input, query_embedding.clone(), 1, current.clone(), None);
-        let mut results = Vec::new();
+        let mut results = Vec::with_capacity(1);
         while let Some(Ok(row)) = rerank.next() {
             results.push(row);
         }
@@ -3427,7 +3427,7 @@ mod tests {
         let input = Box::new(NodeLookupIterator::new(nodes.clone(), current.clone()));
         let mut rerank =
             VectorRerankIterator::new(input, query_embedding.clone(), 10, current.clone(), None);
-        let mut results = Vec::new();
+        let mut results = Vec::with_capacity(10);
         while let Some(Ok(row)) = rerank.next() {
             results.push(row);
         }
@@ -3439,7 +3439,7 @@ mod tests {
         let input = Box::new(NodeLookupIterator::new(nodes.clone(), current.clone()));
         let mut rerank =
             VectorRerankIterator::new(input, query_embedding.clone(), 0, current.clone(), None);
-        let mut results = Vec::new();
+        let mut results = Vec::new(); // Capacity 0 is ok here
         while let Some(Ok(row)) = rerank.next() {
             results.push(row);
         }
