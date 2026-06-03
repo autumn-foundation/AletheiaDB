@@ -12,3 +12,8 @@
 **Bloat:** `StorageSnapshot` and `FieldHolder` traits.
 **Cut:** Deleted single-implementation traits `StorageSnapshot` (implemented only by `CurrentStorageSnapshot`) and `FieldHolder` (implemented only by `Event`, unused except in tests). Moved methods directly to structs.
 **Saved:** ~50 lines of boilerplate + cognitive load of unnecessary abstraction layers.
+
+## [Reduction]
+**Bloat:** `VectorNodeClient` trait (Single-implementation abstraction used only by `MockVectorNodeClient`).
+**Cut:** Deleted the `VectorNodeClient` trait. Refactored all consumers in `distributed.rs` (like `DistributedVectorIndex` and `NodeConnection`) to use the concrete `MockVectorNodeClient` struct directly, removing generic type parameters.
+**Saved:** ~30 lines of boilerplate + cognitive load of unnecessary abstraction layers and complex generics handling.
