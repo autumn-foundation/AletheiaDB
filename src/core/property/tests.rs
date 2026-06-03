@@ -2578,4 +2578,21 @@ mod sentry_tests {
             "semantically_equal should treat NaN as equal"
         );
     }
+
+    #[test]
+    fn test_property_map_deserialize_truncated_entries() {
+        let mut buffer = Vec::new();
+        buffer.extend_from_slice(&2u32.to_le_bytes()); // Count: 2
+
+        // Entry 1: "a" -> 1
+        let key = "a";
+        buffer.extend_from_slice(&(key.len() as u32).to_le_bytes());
+        buffer.extend_from_slice(key.as_bytes());
+        PropertyValue::Int(1).serialize_into(&mut buffer).unwrap();
+
+        // We omit Entry 2
+
+        let result = PropertyMap::deserialize(&buffer);
+        assert!(result.is_err());
+    }
 }

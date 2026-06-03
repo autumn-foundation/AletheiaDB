@@ -37,3 +37,7 @@
 **[Fix `execute_traversal` target shards bug]**
 **Learning:** `plan.steps` from `route_traversal` returns empty list, and we need `involved_shards`
 **Action:** Replace `steps` with `involved_shards` and update the test.
+
+## Deserialization Slice Panic Prevention
+**Learning:** `unwrap()` inside array byte slice conversions using `try_into()` across `src/core/property/value.rs`, `src/core/vector/serialization.rs` and `src/core/hasher.rs` poses a panic risk if bounds check invariants drift over time.
+**Action:** Replace `bytes.try_into().unwrap()` arrays with graceful buffer `copy_from_slice()` mappings wrapped in `Result` handlers or `if let Ok(arr)` blocks, and use exhaustive test cases verifying truncated byte payloads properly surface `Err(StorageError::CorruptedData)`.

@@ -613,7 +613,9 @@ impl PropertyValue {
             );
         }
         // SAFETY: Length check above guarantees slice has 8 bytes
-        let value = i64::from_le_bytes(bytes[1..9].try_into().unwrap());
+        let mut arr = [0u8; 8];
+        arr.copy_from_slice(&bytes[1..9]);
+        let value = i64::from_le_bytes(arr);
         Ok((PropertyValue::Int(value), 9))
     }
 
@@ -625,7 +627,9 @@ impl PropertyValue {
             .into());
         }
         // SAFETY: Length check above guarantees slice has 8 bytes
-        let value = f64::from_le_bytes(bytes[1..9].try_into().unwrap());
+        let mut arr = [0u8; 8];
+        arr.copy_from_slice(&bytes[1..9]);
+        let value = f64::from_le_bytes(arr);
         Ok((PropertyValue::Float(value), 9))
     }
 
@@ -637,7 +641,9 @@ impl PropertyValue {
             )
             .into());
         }
-        let len = u32::from_le_bytes(bytes[1..5].try_into().unwrap()) as usize;
+        let mut arr = [0u8; 4];
+        arr.copy_from_slice(&bytes[1..5]);
+        let len = u32::from_le_bytes(arr) as usize;
         let offset = 5usize;
 
         let required_len = offset
@@ -667,7 +673,9 @@ impl PropertyValue {
             )
             .into());
         }
-        let len = u32::from_le_bytes(bytes[1..5].try_into().unwrap()) as usize;
+        let mut arr = [0u8; 4];
+        arr.copy_from_slice(&bytes[1..5]);
+        let len = u32::from_le_bytes(arr) as usize;
         let offset = 5usize;
 
         let required_len = offset
@@ -694,7 +702,9 @@ impl PropertyValue {
             )
             .into());
         }
-        let count = u32::from_le_bytes(bytes[1..5].try_into().unwrap()) as usize;
+        let mut arr = [0u8; 4];
+        arr.copy_from_slice(&bytes[1..5]);
+        let count = u32::from_le_bytes(arr) as usize;
         let mut offset: usize = 5;
 
         // Prevent DoS via memory exhaustion from malicious input

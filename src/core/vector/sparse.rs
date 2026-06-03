@@ -834,4 +834,65 @@ mod tests {
             "squared_euclidean_distance should fail on mismatched dimensions"
         );
     }
+
+    #[test]
+    fn test_sparse_vec_new_error_paths() {
+        struct TestCase {
+            indices: Vec<u32>,
+            values: Vec<f32>,
+            dim: u32,
+            expected: &'static str,
+        }
+        let tests = vec![
+            TestCase {
+                indices: vec![0, 1],
+                values: vec![1.0],
+                dim: 10,
+                expected: "dimension mismatch",
+            },
+            TestCase {
+                indices: vec![10],
+                values: vec![1.0],
+                dim: 10,
+                expected: "out of bounds",
+            },
+            TestCase {
+                indices: vec![1, 1],
+                values: vec![1.0, 2.0],
+                dim: 10,
+                expected: "Duplicate index",
+            },
+            TestCase {
+                indices: vec![0],
+                values: vec![f32::NAN],
+                dim: 10,
+                expected: "ContainsNaN",
+            },
+            TestCase {
+                indices: vec![0],
+                values: vec![f32::INFINITY],
+                dim: 10,
+                expected: "ContainsInfinity",
+            },
+            TestCase {
+                indices: vec![0],
+                values: vec![0.0],
+                dim: 10,
+                expected: "zero value",
+            },
+        ];
+
+        for t in tests {
+            let res = SparseVec::new(t.indices, t.values, t.dim);
+            assert!(res.is_err());
+            let err = res.unwrap_err();
+            let msg = format!("{:?}", err);
+            if !msg.contains(t.expected) && !format!("{}", err).contains(t.expected) {
+                panic!(
+                    "Expected error containing {}, but got {:?}",
+                    t.expected, err
+                );
+            }
+        }
+    }
 }

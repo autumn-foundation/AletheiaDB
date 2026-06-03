@@ -172,7 +172,9 @@ pub fn deserialize_vector(bytes: &[u8]) -> Result<(Arc<[f32]>, usize)> {
         .into());
     }
 
-    let dimension = u32::from_le_bytes(bytes[1..5].try_into().unwrap()) as usize;
+    let mut arr = [0u8; 4];
+    arr.copy_from_slice(&bytes[1..5]);
+    let dimension = u32::from_le_bytes(arr) as usize;
 
     // Prevent DoS via memory exhaustion from malicious input
     validate_vector_dimensions(dimension)?;
@@ -232,7 +234,9 @@ pub fn deserialize_vector(bytes: &[u8]) -> Result<(Arc<[f32]>, usize)> {
         let mut values = Vec::with_capacity(dimension);
         for chunk in data_slice.chunks_exact(4) {
             // SAFETY: chunks_exact guarantees exactly 4 bytes per chunk
-            values.push(f32::from_le_bytes(chunk.try_into().unwrap()));
+            let mut arr = [0u8; 4];
+            arr.copy_from_slice(chunk);
+            values.push(f32::from_le_bytes(arr));
         }
         values
     };
@@ -328,8 +332,12 @@ pub fn deserialize_sparse_vector(bytes: &[u8]) -> Result<(Arc<SparseVec>, usize)
         .into());
     }
 
-    let dimension = u32::from_le_bytes(bytes[1..5].try_into().unwrap());
-    let nnz = u32::from_le_bytes(bytes[5..9].try_into().unwrap()) as usize;
+    let mut arr_dim = [0u8; 4];
+    arr_dim.copy_from_slice(&bytes[1..5]);
+    let dimension = u32::from_le_bytes(arr_dim);
+    let mut arr_nnz = [0u8; 4];
+    arr_nnz.copy_from_slice(&bytes[5..9]);
+    let nnz = u32::from_le_bytes(arr_nnz) as usize;
 
     // Validate nnz doesn't exceed dimension
     if nnz > dimension as usize {
@@ -398,7 +406,9 @@ pub fn deserialize_sparse_vector(bytes: &[u8]) -> Result<(Arc<SparseVec>, usize)
     let indices = {
         let mut indices = Vec::with_capacity(nnz);
         for chunk in indices_slice.chunks_exact(4) {
-            indices.push(u32::from_le_bytes(chunk.try_into().unwrap()));
+            let mut arr = [0u8; 4];
+            arr.copy_from_slice(chunk);
+            indices.push(u32::from_le_bytes(arr));
         }
         indices
     };
@@ -433,7 +443,9 @@ pub fn deserialize_sparse_vector(bytes: &[u8]) -> Result<(Arc<SparseVec>, usize)
     let values = {
         let mut values = Vec::with_capacity(nnz);
         for chunk in values_slice.chunks_exact(4) {
-            values.push(f32::from_le_bytes(chunk.try_into().unwrap()));
+            let mut arr = [0u8; 4];
+            arr.copy_from_slice(chunk);
+            values.push(f32::from_le_bytes(arr));
         }
         values
     };
@@ -559,7 +571,9 @@ mod tests {
 
             // Validate header
             assert_eq!(bytes[0], TAG_VECTOR);
-            let dimension = u32::from_le_bytes(bytes[1..5].try_into().unwrap()) as usize;
+            let mut arr = [0u8; 4];
+            arr.copy_from_slice(&bytes[1..5]);
+            let dimension = u32::from_le_bytes(arr) as usize;
             assert_eq!(dimension, test_vector.len());
             assert_eq!(bytes.len(), 1 + 4 + test_vector.len() * 4);
 
@@ -931,5 +945,33 @@ mod tests {
         let (deserialized, _) =
             deserialize_vector(&bytes).expect("Should deserialize empty vector");
         assert!(deserialized.is_empty());
+    }
+
+    #[test]
+    fn test_deserialize_vector_truncated_data() {
+        let mut bytes = vec![TAG_VECTOR];
+        bytes.extend_from_slice(&2u32.to_le_bytes()); // dim = 2
+        bytes.extend_from_slice(&1.0f32.to_le_bytes()); // Only 1 element provided
+        // Missing the second element
+        let result = deserialize_vector(&bytes);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_deserialize_sparse_vector_truncated_data() {
+        let mut bytes = vec![TAG_SPARSE_VECTOR];
+        let dim = 10u32;
+        let nnz = 2u32;
+        bytes.extend_from_slice(&dim.to_le_bytes());
+        bytes.extend_from_slice(&nnz.to_le_bytes());
+
+        // Provide indices
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+
+        // Provide only one value instead of two
+        bytes.extend_from_slice(&1.0f32.to_le_bytes());
+        let result = deserialize_sparse_vector(&bytes);
+        assert!(result.is_err());
     }
 }

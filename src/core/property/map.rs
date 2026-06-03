@@ -225,7 +225,9 @@ impl PropertyMap {
             .into());
         }
 
-        let count = u32::from_le_bytes(bytes[0..4].try_into().unwrap()) as usize;
+        let mut arr = [0u8; 4];
+        arr.copy_from_slice(&bytes[0..4]);
+        let count = u32::from_le_bytes(arr) as usize;
 
         // Prevent DoS via memory exhaustion from malicious input
         if count > MAX_PROPERTY_MAP_CAPACITY {
@@ -265,8 +267,9 @@ impl PropertyMap {
                 .into());
             }
             // SAFETY: Length check above guarantees 4 bytes available
-            let key_len =
-                u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
+            let mut arr = [0u8; 4];
+            arr.copy_from_slice(&bytes[offset..offset + 4]);
+            let key_len = u32::from_le_bytes(arr) as usize;
             offset += 4;
 
             // Read key
