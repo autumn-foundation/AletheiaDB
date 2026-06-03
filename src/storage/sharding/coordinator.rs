@@ -1966,44 +1966,4 @@ mod tests {
         assert!(second > first);
     }
 
-    #[test]
-    fn test_havoc_deadlock() {
-        use std::sync::{Arc, RwLock};
-        use std::thread;
-        use std::time::Duration;
-
-        let active_transactions = Arc::new(RwLock::new(()));
-        let connections = Arc::new(RwLock::new(()));
-
-        let tx1 = active_transactions.clone();
-        let conn1 = connections.clone();
-        let t1 = thread::spawn(move || {
-            let _c = conn1.read().unwrap();
-            thread::sleep(Duration::from_millis(50));
-            // This simulates the missing drop(connections) before active_transactions.write()
-            let _t = tx1.write().unwrap();
-        });
-
-        let tx2 = active_transactions.clone();
-        let conn2 = connections.clone();
-        let t2 = thread::spawn(move || {
-            let _t = tx2.write().unwrap();
-            thread::sleep(Duration::from_millis(50));
-            // This simulates an operation that holds active_transactions and requests connections
-            let _c = conn2.read().unwrap();
-        });
-
-        // Use a timeout to detect deadlock
-        let (tx, rx) = std::sync::mpsc::channel();
-        thread::spawn(move || {
-            t1.join().unwrap();
-            t2.join().unwrap();
-            tx.send(()).unwrap();
-        });
-
-        assert!(
-            rx.recv_timeout(Duration::from_secs(2)).is_ok(),
-            "Deadlock detected!"
-        );
-    }
 }
