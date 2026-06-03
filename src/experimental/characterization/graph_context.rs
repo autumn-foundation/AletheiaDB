@@ -175,7 +175,7 @@ impl<'a> GraphContextBuilder<'a> {
 
         // 3. Evolution (History)
         writeln!(&mut output, "\n## Evolution").unwrap();
-        let generator = NarrativeGenerator::new(self.db);
+        let generator = NarrativeGenerator::new(self.db).unwrap();
         match generator.generate_node_narrative(self.center_node) {
             Ok(events) => {
                 if events.is_empty() {

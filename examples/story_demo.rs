@@ -55,7 +55,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     })?;
 
     // 3. Generate Narrative
-    let generator = NarrativeGenerator::new(&db);
+    let generator = NarrativeGenerator::new(&db)?;
     let narrative = generator.generate_node_narrative(node_id)?;
 
     for event in narrative {

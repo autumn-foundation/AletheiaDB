@@ -40,9 +40,7 @@ pub struct NarrativeGenerator<'a> {
 
 #[cfg(not(feature = "semantic-temporal"))]
 /// Generator for creating natural language narratives from temporal history.
-#[deprecated(
-    note = "NarrativeGenerator requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
-)]
+
 /// Generates human-readable summaries of temporal graph mutations.
 ///
 /// # Why?
@@ -56,8 +54,8 @@ pub struct NarrativeGenerator<'a> {
 #[cfg(feature = "semantic-temporal")]
 impl<'a> NarrativeGenerator<'a> {
     /// Create a new narrative generator.
-    pub fn new(db: &'a AletheiaDB) -> Self {
-        Self { db }
+    pub fn new(db: &'a AletheiaDB) -> Result<Self> {
+        Ok(Self { db })
     }
 
     /// Helper to resolve interned keys to strings.
@@ -156,32 +154,28 @@ impl<'a> NarrativeGenerator<'a> {
 }
 
 #[cfg(not(feature = "semantic-temporal"))]
-#[allow(deprecated)]
+
 impl<'a> NarrativeGenerator<'a> {
     /// Create a new narrative generator.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// This method panics if the `nova` feature is not enabled.
+    /// This method returns an error if the `nova` feature is not enabled.
     #[allow(unused_variables)]
     #[track_caller]
-    pub fn new(db: &'a AletheiaDB) -> Self {
-        panic!(
-            "NarrativeGenerator requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
-        );
+    pub fn new(_db: &'a AletheiaDB) -> Result<Self> {
+        Err(crate::core::error::Error::not_implemented("nova", "NarrativeGenerator requires the \'nova\' feature. Add \'features = [\"nova\"]\' to your Cargo.toml.".to_string()))
     }
 
     /// Generate a narrative for a specific node.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// This method panics if the `nova` feature is not enabled.
+    /// This method returns an error if the `nova` feature is not enabled.
     #[allow(unused_variables)]
     #[track_caller]
     pub fn generate_node_narrative(&self, node_id: NodeId) -> Result<Vec<NarrativeEvent>> {
-        panic!(
-            "NarrativeGenerator requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
-        );
+        Err(crate::core::error::Error::not_implemented("nova", "NarrativeGenerator requires the \'nova\' feature. Add \'features = [\"nova\"]\' to your Cargo.toml.".to_string()))
     }
 }
 
@@ -214,7 +208,7 @@ mod tests {
         .unwrap();
 
         // 3. Generate Narrative
-        let generator = NarrativeGenerator::new(&db);
+        let generator = NarrativeGenerator::new(&db).unwrap();
         let narrative = generator.generate_node_narrative(node_id).unwrap();
 
         assert_eq!(narrative.len(), 2);
@@ -279,7 +273,7 @@ mod tests {
         .unwrap();
 
         // 3. Generate Narrative
-        let generator = NarrativeGenerator::new(&db);
+        let generator = NarrativeGenerator::new(&db).unwrap();
         let narrative = generator.generate_node_narrative(node_id).unwrap();
 
         assert_eq!(narrative.len(), 2);
@@ -304,32 +298,30 @@ mod tests {
 }
 
 #[cfg(all(test, not(feature = "semantic-temporal")))]
-#[allow(deprecated)]
+
 mod stub_tests {
     use super::*;
 
     #[test]
-    #[should_panic(
-        expected = "NarrativeGenerator requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
-    )]
-    fn test_stub_panic_on_new() {
+
+    fn test_stub_error_on_new() {
         let db = AletheiaDB::new().unwrap();
-        // This should panic
-        let _ = NarrativeGenerator::new(&db);
+        // This should return an error
+        let err = NarrativeGenerator::new(&db).unwrap_err();
+        assert!(matches!(err, crate::core::error::Error::NotImplemented { .. }));
     }
 
     #[test]
-    #[should_panic(
-        expected = "NarrativeGenerator requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
-    )]
-    fn test_stub_panic_on_generate() {
+
+    fn test_stub_error_on_generate() {
         // Construct a fake NarrativeGenerator to test method panic
         // Safety: NarrativeGenerator is a ZST with PhantomData, so it's valid to transmute from unit or zeroed.
         // We just need it to call the method.
         let generator: NarrativeGenerator<'_> = NarrativeGenerator {
             _marker: std::marker::PhantomData,
         };
-        // This should panic
-        let _ = generator.generate_node_narrative(NodeId::new(0).unwrap());
+        // This should return an error
+        let err = generator.generate_node_narrative(NodeId::new(0).unwrap()).unwrap_err();
+        assert!(matches!(err, crate::core::error::Error::NotImplemented { .. }));
     }
 }

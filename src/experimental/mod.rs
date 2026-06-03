@@ -55,16 +55,11 @@
 //! # Example: Detecting Suspicious Patterns with Sherlock
 //!
 //! ```rust,no_run
-//! # #[cfg(feature = "semantic-temporal")]
 //! use aletheiadb::AletheiaDB;
-//! # #[cfg(feature = "semantic-temporal")]
 //! use aletheiadb::experimental::sherlock::{Sherlock, Mystery, Clue};
-//! # #[cfg(feature = "semantic-temporal")]
 //! use aletheiadb::core::property::PropertyValue;
-//! # #[cfg(feature = "semantic-temporal")]
 //! use std::time::Duration;
 //!
-//! # #[cfg(feature = "semantic-temporal")]
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let db = AletheiaDB::new()?;
 //! # let node_id = db.create_node("User", Default::default())?;
@@ -92,9 +87,7 @@ pub mod reasoning;
 #[cfg(feature = "semantic-reasoning")]
 pub use reasoning::*;
 
-#[cfg(feature = "semantic-temporal")]
 pub mod temporal;
-#[cfg(feature = "semantic-temporal")]
 pub use temporal::*;
 
 #[cfg(feature = "semantic-diagnostics")]

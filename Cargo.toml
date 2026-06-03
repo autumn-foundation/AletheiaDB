@@ -455,7 +455,6 @@ required-features = []
 # Experimental features
 [[example]]
 name = "story_demo"
-required-features = ["semantic-temporal"]
 
 [[example]]
 name = "russian_writers"
