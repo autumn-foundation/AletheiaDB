@@ -77,3 +77,6 @@
 **Pre-allocating Vec Capacities in Hot Paths**
 **Learning:** Pre-allocating standard Rust `Vec` objects using `Vec::with_capacity` in hot-paths like parsers and query planners eliminates unnecessary heap reallocations (0 -> 4 -> 8 -> 16 etc.), without changing semantics or causing borrow checker issues. However, if the expected bounds are wildly incorrect it could lead to memory bloat. A small capacity for small collections minimizes performance impacts in hot loops.
 **Action:** When a loop dynamically pushes elements to a new empty Vector (especially in repeated execution domains like parsers and network/storage iterators), replace `Vec::new()` with `Vec::with_capacity(n)` if a typical or max size `n` is roughly known.
+**[Optimize Traversal BFS/DFS result vector]**
+**Learning:** Initializing the results `Vec` in a graph traversal handler with `Vec::new()` without pre-allocating capacity causes unnecessary intermediate heap reallocations as results are collected.
+**Action:** Always pre-allocate the target array using `Vec::with_capacity(limit)` if the maximum bounded limit of elements is known (e.g. `limit` parameter in traversal requests).
