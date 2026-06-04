@@ -18,3 +18,4 @@ pub mod wormhole;
 
 // `paradox` is a stub awaiting revival — see CHANGELOG / ADR-0050.
 // pub mod paradox;
+pub mod doppelganger;
