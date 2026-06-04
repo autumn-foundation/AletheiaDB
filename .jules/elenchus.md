@@ -346,3 +346,10 @@
 **Finding:** The `LimitPushdown` tests originally missed several behavioral edge cases and logic checks, particularly regarding the propagation limits in BinaryOp combinations (`||`), updating limit values correctly against child bounds, and setting vector rank limits.
 **Evidence:** `cargo mutants` caught mutants in `LimitPushdown::push_down` specifically targeting the changed boolean condition logic and bounds assignment.
 **Recommendation:** Added `sentry_tests` to `LimitPushdown` that explicitly trigger tests enforcing the boolean change propagation, verifying that updated properties reflect correct nested limits, and vector bounds assignment. Tests now prevent `||` to `&&` mutations and correct top-k modifications.
+
+**[FilterScanFusion Optimization Rule Weakness]**
+**Module:** `src/query/planner/rules/filter_scan_fusion.rs`
+**Severity:** 🟡 Suspect
+**Finding:** The tests for `FilterScanFusion` missed key logic branches. Specifically, they did not verify that pseudo-keys (e.g., `_label`) bypass the fusion logic, they didn't assert that `Unary` operations correctly apply recursion, and they failed to correctly verify boolean change propagation across `Binary` operations (e.g. `left_changed || right_changed`). They also missed tests for the rule's `name()` and `apply()` fallback.
+**Evidence:** `cargo mutants` identified 10 surviving mutants, including match arm mutations on `!key.starts_with('_')`, mutating `||` to `&&` in the `Binary` match arm, and fully replacing `apply` or `name` methods.
+**Recommendation:** Added 7 new sentry tests (`test_fuse_changed_boolean_logic`, `test_fuse_changed_boolean_logic_changed_right`, `test_fuse_recursively_handles_binary_ops`, `test_fuses_unary_op_recursively`, `test_pseudo_key_not_fused`, `test_apply_returns_none_if_no_change`, `test_filter_scan_fusion_name`) to explicitly cover these edge cases, ensuring robust mutation resistance.
