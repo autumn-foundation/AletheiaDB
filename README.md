@@ -185,3 +185,11 @@ its edges.
 ## License
 
 Licensed under either of [MIT](LICENSE-MIT) or [Apache 2.0](LICENSE-APACHE) at your option.
+
+## Narrative Generation (Story Demo)
+
+**⚠️ REQUIRES FEATURE NOVA ⚠️**
+
+```bash
+cargo run --features nova --example story_demo
+```
