@@ -340,6 +340,10 @@ pub(crate) fn persist_graph_index(
 
     let mut graph_data = new_graph_index_data();
 
+    // ⚡ Bolt Optimization: Pre-allocate target vectors to eliminate O(log N) heap reallocations.
+    graph_data.nodes.reserve_exact(current.node_count());
+    graph_data.edges.reserve_exact(current.edge_count());
+
     // Stream all nodes without collecting into intermediate Vec (prevents OOM on large graphs)
     for node in current.all_nodes() {
         let properties = persist_property_map(&node.properties).map_err(|e| {
