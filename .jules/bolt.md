@@ -77,3 +77,7 @@
 **Pre-allocating Vec Capacities in Hot Paths**
 **Learning:** Pre-allocating standard Rust `Vec` objects using `Vec::with_capacity` in hot-paths like parsers and query planners eliminates unnecessary heap reallocations (0 -> 4 -> 8 -> 16 etc.), without changing semantics or causing borrow checker issues. However, if the expected bounds are wildly incorrect it could lead to memory bloat. A small capacity for small collections minimizes performance impacts in hot loops.
 **Action:** When a loop dynamically pushes elements to a new empty Vector (especially in repeated execution domains like parsers and network/storage iterators), replace `Vec::new()` with `Vec::with_capacity(n)` if a typical or max size `n` is roughly known.
+
+**Optimize Temporal Adjacency Index Deduplication**
+**Learning:** For retrieving edges at a specific point in time, using a `HashSet` to deduplicate edges introduces an unnecessary heap allocation and hashing overhead, especially on the hot path where most query result sizes are small (often <10 edges).
+**Action:** Replaced the `HashSet` inside `get_outgoing_at_time`, `get_incoming_at_time`, and `get_outgoing_with_label_at_time` with standard vector pre-allocation (`Vec::with_capacity` is automatically done when using iterators to `collect()`), and directly called `results.sort_unstable()` and `results.dedup()`. This directly avoids heap allocations related to hashing contexts and table growth for common small subsets of edges.

@@ -355,27 +355,26 @@ impl TemporalAdjacencyIndex {
         self.outgoing
             .get(&node_id)
             .map(|entries| {
-                let mut seen = std::collections::HashSet::new();
-
                 // Binary search to find first entry where valid_from <= valid_time
                 // Entries are sorted by valid_from, so we scan from this point forward
                 let start_idx = entries.partition_point(|e| e.valid_from <= valid_time);
 
                 // Scan backward from start_idx to find all entries that could be valid at valid_time
                 // An entry at index i could be valid if valid_from <= valid_time < valid_to
-                entries[..start_idx]
+                let mut results: Vec<EdgeId> = entries[..start_idx]
                     .iter()
                     .rev()
                     .take_while(|e| e.valid_to > valid_time) // Stop when valid_to <= valid_time
                     .filter(|e| e.is_valid_at(valid_time, tx_time))
-                    .filter_map(|e| {
-                        if seen.insert(e.edge_id) {
-                            Some(e.edge_id)
-                        } else {
-                            None
-                        }
-                    })
-                    .collect()
+                    .map(|e| e.edge_id)
+                    .collect();
+
+                // Deduplicate edges directly on the Vector without allocating a HashSet.
+                // ⚡ Bolt Optimization: Eliminates heap allocation for `HashSet` during deduplication
+                // for temporal edge retrieval. Small vector sort/dedup is significantly faster and uses less memory.
+                results.sort_unstable();
+                results.dedup();
+                results
             })
             .unwrap_or_default()
     }
@@ -397,25 +396,24 @@ impl TemporalAdjacencyIndex {
         self.incoming
             .get(&node_id)
             .map(|entries| {
-                let mut seen = std::collections::HashSet::new();
-
                 // Binary search to find first entry where valid_from <= valid_time
                 let start_idx = entries.partition_point(|e| e.valid_from <= valid_time);
 
                 // Scan backward from start_idx to find all entries that could be valid at valid_time
-                entries[..start_idx]
+                let mut results: Vec<EdgeId> = entries[..start_idx]
                     .iter()
                     .rev()
                     .take_while(|e| e.valid_to > valid_time)
                     .filter(|e| e.is_valid_at(valid_time, tx_time))
-                    .filter_map(|e| {
-                        if seen.insert(e.edge_id) {
-                            Some(e.edge_id)
-                        } else {
-                            None
-                        }
-                    })
-                    .collect()
+                    .map(|e| e.edge_id)
+                    .collect();
+
+                // Deduplicate edges directly on the Vector without allocating a HashSet.
+                // ⚡ Bolt Optimization: Eliminates heap allocation for `HashSet` during deduplication
+                // for temporal edge retrieval. Small vector sort/dedup is significantly faster and uses less memory.
+                results.sort_unstable();
+                results.dedup();
+                results
             })
             .unwrap_or_default()
     }
@@ -438,25 +436,24 @@ impl TemporalAdjacencyIndex {
         self.outgoing
             .get(&node_id)
             .map(|entries| {
-                let mut seen = std::collections::HashSet::new();
-
                 // Binary search to find first entry where valid_from <= valid_time
                 let start_idx = entries.partition_point(|e| e.valid_from <= valid_time);
 
                 // Scan backward from start_idx to find all entries that could be valid at valid_time
-                entries[..start_idx]
+                let mut results: Vec<EdgeId> = entries[..start_idx]
                     .iter()
                     .rev()
                     .take_while(|e| e.valid_to > valid_time)
                     .filter(|e| e.label == label && e.is_valid_at(valid_time, tx_time))
-                    .filter_map(|e| {
-                        if seen.insert(e.edge_id) {
-                            Some(e.edge_id)
-                        } else {
-                            None
-                        }
-                    })
-                    .collect()
+                    .map(|e| e.edge_id)
+                    .collect();
+
+                // Deduplicate edges directly on the Vector without allocating a HashSet.
+                // ⚡ Bolt Optimization: Eliminates heap allocation for `HashSet` during deduplication
+                // for temporal edge retrieval. Small vector sort/dedup is significantly faster and uses less memory.
+                results.sort_unstable();
+                results.dedup();
+                results
             })
             .unwrap_or_default()
     }
