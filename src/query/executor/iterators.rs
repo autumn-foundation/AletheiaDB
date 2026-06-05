@@ -822,97 +822,92 @@ impl TraversalIterator {
 
         match self.direction {
             Direction::Outgoing => {
-                // Use iterator methods to avoid intermediate Vec allocation (Issue #187)
+                // ⚡ Bolt Optimization: Instantiate iterators once,
+                // calculate required capacity, and pre-allocate to prevent heap reallocations.
+                // Avoids `.filter_map(...).collect()` dynamic reallocation overhead.
                 if let Some(ref label) = self.label {
-                    self.current
-                        .get_outgoing_edges_with_label_iter(node_id, label)
-                        .filter_map(|edge_id| {
-                            if !self.edge_visible_at_time(edge_id, &historical_guard) {
-                                return None;
+                    let iter = self.current.get_outgoing_edges_with_label_iter(node_id, label);
+                    let mut neighbors = Vec::with_capacity(iter.size_hint().0);
+                    for edge_id in iter {
+                        #[allow(clippy::collapsible_if)]
+                        if self.edge_visible_at_time(edge_id, &historical_guard) {
+                            if let Ok(target) = self.current.get_edge_target(edge_id) {
+                                neighbors.push((target, edge_id));
                             }
-                            // Zero-copy: only get target NodeId, not full Edge (Issue #190)
-                            self.current
-                                .get_edge_target(edge_id)
-                                .ok()
-                                .map(|target| (target, edge_id))
-                        })
-                        .collect()
+                        }
+                    }
+                    neighbors
                 } else {
-                    self.current
-                        .get_outgoing_edges_iter(node_id)
-                        .filter_map(|edge_id| {
-                            if !self.edge_visible_at_time(edge_id, &historical_guard) {
-                                return None;
+                    let iter = self.current.get_outgoing_edges_iter(node_id);
+                    let mut neighbors = Vec::with_capacity(iter.size_hint().0);
+                    for edge_id in iter {
+                        #[allow(clippy::collapsible_if)]
+                        if self.edge_visible_at_time(edge_id, &historical_guard) {
+                            if let Ok(target) = self.current.get_edge_target(edge_id) {
+                                neighbors.push((target, edge_id));
                             }
-                            // Zero-copy: only get target NodeId, not full Edge (Issue #190)
-                            self.current
-                                .get_edge_target(edge_id)
-                                .ok()
-                                .map(|target| (target, edge_id))
-                        })
-                        .collect()
+                        }
+                    }
+                    neighbors
                 }
             }
             Direction::Incoming => {
-                // Use iterator methods to avoid intermediate Vec allocation (Issue #187)
+                // ⚡ Bolt Optimization: Instantiate iterators once,
+                // calculate required capacity, and pre-allocate to prevent heap reallocations.
+                // Avoids `.filter_map(...).collect()` dynamic reallocation overhead.
                 if let Some(ref label) = self.label {
-                    self.current
-                        .get_incoming_edges_with_label_iter(node_id, label)
-                        .filter_map(|edge_id| {
-                            if !self.edge_visible_at_time(edge_id, &historical_guard) {
-                                return None;
+                    let iter = self.current.get_incoming_edges_with_label_iter(node_id, label);
+                    let mut neighbors = Vec::with_capacity(iter.size_hint().0);
+                    for edge_id in iter {
+                        #[allow(clippy::collapsible_if)]
+                        if self.edge_visible_at_time(edge_id, &historical_guard) {
+                            if let Ok(source) = self.current.get_edge_source(edge_id) {
+                                neighbors.push((source, edge_id));
                             }
-                            // Zero-copy: only get source NodeId, not full Edge (Issue #190)
-                            self.current
-                                .get_edge_source(edge_id)
-                                .ok()
-                                .map(|source| (source, edge_id))
-                        })
-                        .collect()
+                        }
+                    }
+                    neighbors
                 } else {
-                    self.current
-                        .get_incoming_edges_iter(node_id)
-                        .filter_map(|edge_id| {
-                            if !self.edge_visible_at_time(edge_id, &historical_guard) {
-                                return None;
+                    let iter = self.current.get_incoming_edges_iter(node_id);
+                    let mut neighbors = Vec::with_capacity(iter.size_hint().0);
+                    for edge_id in iter {
+                        #[allow(clippy::collapsible_if)]
+                        if self.edge_visible_at_time(edge_id, &historical_guard) {
+                            if let Ok(source) = self.current.get_edge_source(edge_id) {
+                                neighbors.push((source, edge_id));
                             }
-                            // Zero-copy: only get source NodeId, not full Edge (Issue #190)
-                            self.current
-                                .get_edge_source(edge_id)
-                                .ok()
-                                .map(|source| (source, edge_id))
-                        })
-                        .collect()
+                        }
+                    }
+                    neighbors
                 }
             }
             Direction::Both => {
-                // Use iterator methods to avoid intermediate Vec allocation (Issue #187)
+                // ⚡ Bolt Optimization: Instantiate iterators once to avoid duplicate lookups,
+                // calculate required capacity, and pre-allocate to prevent heap reallocations.
                 // Helper closure to process edges and add to neighbors
                 // Zero-copy: only get target NodeId, not full Edge (Issue #190)
                 let process_outgoing =
                     |edge_id, neighbors: &mut Vec<(NodeId, crate::core::EdgeId)>| {
-                        if !self.edge_visible_at_time(edge_id, &historical_guard) {
-                            return;
-                        }
-                        if let Ok(target) = self.current.get_edge_target(edge_id) {
-                            neighbors.push((target, edge_id));
+                        #[allow(clippy::collapsible_if)]
+                        if self.edge_visible_at_time(edge_id, &historical_guard) {
+                            if let Ok(target) = self.current.get_edge_target(edge_id) {
+                                neighbors.push((target, edge_id));
+                            }
                         }
                     };
 
                 // Zero-copy: only get source NodeId, not full Edge (Issue #190)
                 let process_incoming =
                     |edge_id, neighbors: &mut Vec<(NodeId, crate::core::EdgeId)>| {
-                        if !self.edge_visible_at_time(edge_id, &historical_guard) {
-                            return;
-                        }
-                        if let Ok(source) = self.current.get_edge_source(edge_id) {
-                            neighbors.push((source, edge_id));
+                        #[allow(clippy::collapsible_if)]
+                        if self.edge_visible_at_time(edge_id, &historical_guard) {
+                            if let Ok(source) = self.current.get_edge_source(edge_id) {
+                                neighbors.push((source, edge_id));
+                            }
                         }
                     };
 
                 if let Some(ref label) = self.label {
-                    // ⚡ Bolt Optimization: Instantiate iterators once to avoid duplicate lookups,
-                    // calculate required capacity, and pre-allocate to prevent heap reallocations.
                     let out_iter = self
                         .current
                         .get_outgoing_edges_with_label_iter(node_id, label);
@@ -930,8 +925,6 @@ impl TraversalIterator {
                     }
                     neighbors
                 } else {
-                    // ⚡ Bolt Optimization: Instantiate iterators once to avoid duplicate lookups,
-                    // calculate required capacity, and pre-allocate to prevent heap reallocations.
                     let out_iter = self.current.get_outgoing_edges_iter(node_id);
                     let in_iter = self.current.get_incoming_edges_iter(node_id);
                     let capacity = out_iter.size_hint().0 + in_iter.size_hint().0;
