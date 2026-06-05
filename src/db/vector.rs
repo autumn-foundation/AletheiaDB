@@ -24,17 +24,10 @@ impl AletheiaDB {
     /// # Example
     ///
     /// ```rust,no_run
-    /// # use aletheiadb::AletheiaDB;
-    /// # use aletheiadb::index::vector::{HnswConfig, DistanceMetric};
-    /// # use aletheiadb::index::vector::temporal::{TemporalVectorConfig, SnapshotStrategy};
-    /// # use aletheiadb::core::NodeId;
-    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// use aletheiadb::index::vector::{HnswConfig, DistanceMetric};
     ///
     /// let config = HnswConfig::new(384, DistanceMetric::Cosine);
-    /// # let db = AletheiaDB::new().unwrap();
     /// db.enable_vector_index("embedding", config)?;
-    /// # Ok(())
-    /// # }
     /// ```
     ///
     /// # Errors
@@ -75,19 +68,12 @@ impl AletheiaDB {
     /// # Example
     ///
     /// ```rust,no_run
-    /// # use aletheiadb::AletheiaDB;
-    /// # use aletheiadb::index::vector::{HnswConfig, DistanceMetric};
-    /// # use aletheiadb::index::vector::temporal::{TemporalVectorConfig, SnapshotStrategy};
-    /// # use aletheiadb::core::NodeId;
-    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// use aletheiadb::index::vector::temporal::{TemporalVectorConfig, SnapshotStrategy};
+    /// use aletheiadb::index::vector::HnswConfig;
     ///
     /// let hnsw_config = HnswConfig::new(384, DistanceMetric::Cosine);
-    /// # let hnsw_config = HnswConfig::new(384, DistanceMetric::Cosine);
     /// let temporal_config = TemporalVectorConfig::default_with_hnsw(hnsw_config);
-    /// # let db = AletheiaDB::new().unwrap();
     /// db.enable_temporal_vector_index("embedding", temporal_config)?;
-    /// # Ok(())
-    /// # }
     /// ```
     ///
     /// # Errors
@@ -196,25 +182,14 @@ impl AletheiaDB {
     /// # Example
     ///
     /// ```rust,no_run
-    /// # use aletheiadb::AletheiaDB;
-    /// # use aletheiadb::index::vector::{HnswConfig, DistanceMetric};
-    /// # use aletheiadb::index::vector::temporal::{TemporalVectorConfig, SnapshotStrategy};
-    /// # use aletheiadb::core::NodeId;
-    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let db = AletheiaDB::new();
     /// // Enable temporal indexes for two properties
-    /// # let db = AletheiaDB::new().unwrap();
-    /// # let config1 = HnswConfig::new(384, DistanceMetric::Cosine);
-    /// # let config2 = HnswConfig::new(384, DistanceMetric::Cosine);
-    /// # let temporal_config = TemporalVectorConfig::default();
-    /// db.vector_index("embedding1").hnsw(config1).temporal(temporal_config.clone()).enable()?;
+    /// db.vector_index("embedding1").hnsw(config1).temporal(temporal_config).enable()?;
     /// db.vector_index("embedding2").hnsw(config2).temporal(temporal_config).enable()?;
     ///
-    /// # let db = AletheiaDB::new().unwrap();
     /// let indexes = db.list_temporal_vector_indexes();
     /// assert!(indexes.contains(&"embedding1".to_string()));
     /// assert!(indexes.contains(&"embedding2".to_string()));
-    /// # Ok(())
-    /// # }
     /// ```
     pub fn list_temporal_vector_indexes(&self) -> Vec<String> {
         self.current.list_temporal_vector_indexes()
@@ -233,26 +208,18 @@ impl AletheiaDB {
     /// # Example
     ///
     /// ```rust,no_run
-    /// # use aletheiadb::AletheiaDB;
-    /// # use aletheiadb::index::vector::{HnswConfig, DistanceMetric};
-    /// # use aletheiadb::index::vector::temporal::{TemporalVectorConfig, SnapshotStrategy};
-    /// # use aletheiadb::core::NodeId;
-    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// use aletheiadb::index::vector::{HnswConfig, DistanceMetric};
     ///
     /// // Basic vector index
-    /// # let db = AletheiaDB::new().unwrap();
     /// db.vector_index("embedding")
     ///     .hnsw(HnswConfig::new(384, DistanceMetric::Cosine))
     ///     .enable()?;
     ///
     /// // With temporal indexing for time-travel queries
-    /// # let db = AletheiaDB::new().unwrap();
     /// db.vector_index("embedding")
     ///     .hnsw(HnswConfig::new(384, DistanceMetric::Cosine))
     ///     .temporal(TemporalVectorConfig::default())
     ///     .enable()?;
-    /// # Ok(())
-    /// # }
     /// ```
     pub fn vector_index(&self, property_name: &str) -> VectorIndexBuilder<'_> {
         VectorIndexBuilder::new(self, property_name.to_string())
@@ -269,8 +236,6 @@ impl AletheiaDB {
     /// ```rust,no_run
     /// # use aletheiadb::AletheiaDB;
     /// # use aletheiadb::index::vector::{HnswConfig, DistanceMetric};
-    /// # use aletheiadb::index::vector::temporal::{TemporalVectorConfig, SnapshotStrategy};
-    /// # use aletheiadb::core::NodeId;
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// # let db = AletheiaDB::new().unwrap();
     /// # let config = HnswConfig::new(384, DistanceMetric::Cosine);
@@ -278,8 +243,6 @@ impl AletheiaDB {
     ///     .hnsw(config)
     ///     .enable()?;
     ///
-    /// # let db = AletheiaDB::new().unwrap();
-    /// # let config = HnswConfig::new(384, DistanceMetric::Cosine);
     /// assert!(db.has_vector_index("embedding"));
     /// assert!(!db.has_vector_index("other_property"));
     /// # Ok(())
@@ -297,26 +260,16 @@ impl AletheiaDB {
     /// # Example
     ///
     /// ```rust,no_run
-    /// # use aletheiadb::AletheiaDB;
-    /// # use aletheiadb::index::vector::{HnswConfig, DistanceMetric};
-    /// # use aletheiadb::index::vector::temporal::{TemporalVectorConfig, SnapshotStrategy};
-    /// # use aletheiadb::core::NodeId;
-    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-    /// # let db = AletheiaDB::new().unwrap();
     /// db.vector_index("title_embedding")
     ///     .hnsw(HnswConfig::new(384, DistanceMetric::Cosine))
     ///     .enable()?;
     ///
-    /// # let db = AletheiaDB::new().unwrap();
     /// db.vector_index("body_embedding")
     ///     .hnsw(HnswConfig::new(768, DistanceMetric::Euclidean))
     ///     .enable()?;
     ///
-    /// # let db = AletheiaDB::new().unwrap();
     /// let indexes = db.list_vector_indexes();
     /// assert_eq!(indexes.len(), 2);
-    /// # Ok(())
-    /// # }
     /// ```
     pub fn list_vector_indexes(&self) -> Vec<crate::storage::VectorIndexInfo> {
         self.current.list_vector_indexes()
@@ -337,20 +290,11 @@ impl AletheiaDB {
     /// # Example
     ///
     /// ```rust,no_run
-    /// # use aletheiadb::AletheiaDB;
-    /// # use aletheiadb::index::vector::{HnswConfig, DistanceMetric};
-    /// # use aletheiadb::index::vector::temporal::{TemporalVectorConfig, SnapshotStrategy};
-    /// # use aletheiadb::core::NodeId;
-    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// // Search title embeddings for similar nodes
-    /// # let db = AletheiaDB::new().unwrap();
-    /// # let node_id = NodeId::new(1).unwrap();
     /// let similar = db.find_similar_in("title_embedding", node_id, 10)?;
     ///
     /// // Search body embeddings (different property, potentially different results)
     /// let similar_body = db.find_similar_in("body_embedding", node_id, 10)?;
-    /// # Ok(())
-    /// # }
     /// ```
     ///
     /// # Errors
@@ -388,17 +332,9 @@ impl AletheiaDB {
     /// # Example
     ///
     /// ```rust,no_run
-    /// # use aletheiadb::AletheiaDB;
-    /// # use aletheiadb::index::vector::{HnswConfig, DistanceMetric};
-    /// # use aletheiadb::index::vector::temporal::{TemporalVectorConfig, SnapshotStrategy};
-    /// # use aletheiadb::core::NodeId;
-    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// // Search with external embedding
-    /// # let db = AletheiaDB::new().unwrap();
-    /// # let query = vec![0.1, 0.2, 0.3];
+    /// let query = embed_text("search query");
     /// let results = db.search_vectors_in("title_embedding", &query, 10)?;
-    /// # Ok(())
-    /// # }
     /// ```
     ///
     /// # Errors
@@ -434,20 +370,11 @@ impl AletheiaDB {
     /// # Example
     ///
     /// ```rust,no_run
-    /// # use aletheiadb::AletheiaDB;
-    /// # use aletheiadb::index::vector::{HnswConfig, DistanceMetric};
-    /// # use aletheiadb::index::vector::temporal::{TemporalVectorConfig, SnapshotStrategy};
-    /// # use aletheiadb::core::NodeId;
-    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// // Find the 5 most similar documents to a given document
-    /// # let db = AletheiaDB::new().unwrap();
-    /// # let doc_id = NodeId::new(1).unwrap();
     /// let results = db.find_similar(doc_id, 5)?;
     /// for (node_id, score) in results {
     ///     println!("Similar node {} with score {}", node_id, score);
     /// }
-    /// # Ok(())
-    /// # }
     /// ```
     ///
     /// # Errors
@@ -479,17 +406,8 @@ impl AletheiaDB {
     /// # Example
     ///
     /// ```rust,no_run
-    /// # use aletheiadb::AletheiaDB;
-    /// # use aletheiadb::index::vector::{HnswConfig, DistanceMetric};
-    /// # use aletheiadb::index::vector::temporal::{TemporalVectorConfig, SnapshotStrategy};
-    /// # use aletheiadb::core::NodeId;
-    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// // Find similar Person nodes only
-    /// # let db = AletheiaDB::new().unwrap();
-    /// # let person_id = NodeId::new(1).unwrap();
     /// let similar_people = db.find_similar_with_label(person_id, "Person", 10)?;
-    /// # Ok(())
-    /// # }
     /// ```
     #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn find_similar_with_label(
@@ -530,20 +448,12 @@ impl AletheiaDB {
     /// # Example
     ///
     /// ```rust,no_run
-    /// # use aletheiadb::AletheiaDB;
-    /// # use aletheiadb::index::vector::{HnswConfig, DistanceMetric};
-    /// # use aletheiadb::index::vector::temporal::{TemporalVectorConfig, SnapshotStrategy};
-    /// # use aletheiadb::core::NodeId;
-    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// // Search with an embedding from external source (e.g., user query)
-    /// # let db = AletheiaDB::new().unwrap();
-    /// # let query_embedding = vec![0.1, 0.2, 0.3];
+    /// let query_embedding = get_embedding_from_llm("rust programming");
     /// let similar = db.find_similar_by_embedding(&query_embedding, 10)?;
     /// for (node_id, similarity) in similar {
     ///     println!("Node {:?} has similarity {}", node_id, similarity);
     /// }
-    /// # Ok(())
-    /// # }
     /// ```
     #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn find_similar_by_embedding(
@@ -584,21 +494,13 @@ impl AletheiaDB {
     /// # Example
     ///
     /// ```rust,no_run
-    /// # use aletheiadb::AletheiaDB;
-    /// # use aletheiadb::index::vector::{HnswConfig, DistanceMetric};
-    /// # use aletheiadb::index::vector::temporal::{TemporalVectorConfig, SnapshotStrategy};
-    /// # use aletheiadb::core::NodeId;
-    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// // Find similar documents only
-    /// # let db = AletheiaDB::new().unwrap();
-    /// # let query_embedding = vec![0.1, 0.2, 0.3];
+    /// let query_embedding = get_embedding_from_llm("rust programming");
     /// let similar_docs = db.find_similar_by_embedding_with_label(
     ///     &query_embedding,
     ///     "Document",
     ///     5
     /// )?;
-    /// # Ok(())
-    /// # }
     /// ```
     #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn find_similar_by_embedding_with_label(
