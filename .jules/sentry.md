@@ -37,3 +37,6 @@
 **[Fix `execute_traversal` target shards bug]**
 **Learning:** `plan.steps` from `route_traversal` returns empty list, and we need `involved_shards`
 **Action:** Replace `steps` with `involved_shards` and update the test.
+## Lock Poisoning Crash Risks in Mocks and Observers
+**Learning:** `unwrap()` is often used inside mock client trait implementations (`MockShardClient`) and test observers (`CollectingObserver`) on `RwLock` and `Mutex`. While these are test/mock utilities, they can cause an entire test process or coordinator thread to crash when a lock is intentionally poisoned during simulated chaos testing, masking the actual behavior being tested.
+**Action:** Always gracefully handle `PoisonError` by mapping it to a domain-specific error (`NetworkError::ProtocolError` or `StorageError::LockPoisoned`), returning default values for getters, or ignoring void setter failures, and write tests specifically verifying that poisoning a lock doesn't crash the system.

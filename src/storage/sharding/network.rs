@@ -683,61 +683,82 @@ impl MockShardClient {
 
     /// Set whether the client is healthy.
     pub fn set_healthy(&self, healthy: bool) {
-        *self.healthy.write().unwrap() = healthy;
+        if let Ok(mut lock) = self.healthy.write() {
+            *lock = healthy;
+        }
     }
 
     /// Set the prepare response.
     pub fn set_prepare_response(&self, response: PrepareResponse) {
-        *self.prepare_response.write().unwrap() = Some(response);
+        if let Ok(mut lock) = self.prepare_response.write() {
+            *lock = Some(response);
+        }
     }
 
     /// Set the commit response.
     pub fn set_commit_response(&self, response: CommitResponse) {
-        *self.commit_response.write().unwrap() = Some(response);
+        if let Ok(mut lock) = self.commit_response.write() {
+            *lock = Some(response);
+        }
     }
 
     /// Set the abort response.
     pub fn set_abort_response(&self, response: AbortResponse) {
-        *self.abort_response.write().unwrap() = Some(response);
+        if let Ok(mut lock) = self.abort_response.write() {
+            *lock = Some(response);
+        }
     }
 
     /// Set the query response.
     pub fn set_query_response(&self, response: Vec<u8>) {
-        *self.query_response.write().unwrap() = response;
+        if let Ok(mut lock) = self.query_response.write() {
+            *lock = response;
+        }
     }
 
     /// Set the shard state.
     pub fn set_state(&self, state: ShardState) {
-        *self.state.write().unwrap() = state;
+        if let Ok(mut lock) = self.state.write() {
+            *lock = state;
+        }
     }
 
     /// Set simulated latency.
     pub fn set_latency(&self, latency: Duration) {
-        *self.latency.write().unwrap() = latency;
+        if let Ok(mut lock) = self.latency.write() {
+            *lock = latency;
+        }
     }
 
     /// Make the next call fail with the given error.
     pub fn fail_next(&self, error: NetworkError) {
-        *self.fail_next.write().unwrap() = Some(error);
+        if let Ok(mut lock) = self.fail_next.write() {
+            *lock = Some(error);
+        }
     }
 
     /// Get call count for a method.
     pub fn call_count(&self, method: &str) -> usize {
-        self.call_counts
-            .read()
-            .unwrap()
-            .get(method)
-            .copied()
-            .unwrap_or(0)
+        if let Ok(counts) = self.call_counts.read() {
+            counts.get(method).copied().unwrap_or(0)
+        } else {
+            0
+        }
     }
 
     fn increment_call(&self, method: &str) {
-        let mut counts = self.call_counts.write().unwrap();
+        let mut counts = match self.call_counts.write() {
+            Ok(lock) => lock,
+            Err(_) => return,
+        };
         *counts.entry(method.to_string()).or_insert(0) += 1;
     }
 
     fn check_fail(&self) -> NetworkResult<()> {
-        let mut fail = self.fail_next.write().unwrap();
+        let mut fail = self
+            .fail_next
+            .write()
+            .map_err(|_| NetworkError::ProtocolError("Lock poisoned".into()))?;
         if let Some(err) = fail.take() {
             return Err(err);
         }
@@ -745,7 +766,7 @@ impl MockShardClient {
     }
 
     fn simulate_latency(&self) {
-        let latency = *self.latency.read().unwrap();
+        let latency = *self.latency.read().unwrap_or_else(|e| e.into_inner());
         if latency > Duration::ZERO {
             std::thread::sleep(latency);
         }
@@ -758,7 +779,7 @@ impl ShardClient for MockShardClient {
     }
 
     fn is_healthy(&self) -> bool {
-        *self.healthy.read().unwrap()
+        self.healthy.read().map(|h| *h).unwrap_or(false)
     }
 
     fn prepare(
@@ -778,7 +799,7 @@ impl ShardClient for MockShardClient {
 
         self.prepare_response
             .read()
-            .unwrap()
+            .map_err(|_| NetworkError::ProtocolError("Lock poisoned".into()))?
             .clone()
             .ok_or(NetworkError::ProtocolError("No response configured".into()))
     }
@@ -799,7 +820,7 @@ impl ShardClient for MockShardClient {
 
         self.commit_response
             .read()
-            .unwrap()
+            .map_err(|_| NetworkError::ProtocolError("Lock poisoned".into()))?
             .clone()
             .ok_or(NetworkError::ProtocolError("No response configured".into()))
     }
@@ -816,7 +837,7 @@ impl ShardClient for MockShardClient {
 
         self.abort_response
             .read()
-            .unwrap()
+            .map_err(|_| NetworkError::ProtocolError("Lock poisoned".into()))?
             .clone()
             .ok_or(NetworkError::ProtocolError("No response configured".into()))
     }
@@ -830,7 +851,11 @@ impl ShardClient for MockShardClient {
         }
 
         self.simulate_latency();
-        Ok(self.query_response.read().unwrap().clone())
+        Ok(self
+            .query_response
+            .read()
+            .map_err(|_| NetworkError::ProtocolError("Lock poisoned".into()))?
+            .clone())
     }
 
     fn get_state(&self) -> NetworkResult<ShardState> {
@@ -842,7 +867,11 @@ impl ShardClient for MockShardClient {
         }
 
         self.simulate_latency();
-        Ok(self.state.read().unwrap().clone())
+        Ok(self
+            .state
+            .read()
+            .map_err(|_| NetworkError::ProtocolError("Lock poisoned".into()))?
+            .clone())
     }
 
     fn receive_migration_batch(&self, batch: MigrationBatch) -> NetworkResult<MigrationResponse> {
@@ -1162,6 +1191,21 @@ mod tests {
     }
 
     // ============ MockShardClient Tests ============
+
+    #[test]
+    fn test_mock_client_lock_poisoning() {
+        let client = std::sync::Arc::new(MockShardClient::new(make_shard_id(0)));
+        let client_clone = std::sync::Arc::clone(&client);
+
+        let _ = std::thread::spawn(move || {
+            let _lock = client_clone.prepare_response.write().unwrap();
+            panic!("Poisoning the lock!");
+        })
+        .join();
+
+        let result = client.prepare(TxId::new(1), &[], None);
+        assert!(matches!(result, Err(NetworkError::ProtocolError(_))));
+    }
 
     #[test]
     fn test_mock_client_creation() {

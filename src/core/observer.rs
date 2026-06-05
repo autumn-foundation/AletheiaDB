@@ -448,9 +448,45 @@ mod tests {
 
     impl StorageObserver for CollectingObserver {
         fn on_event(&self, event: &StorageEvent) -> Result<()> {
-            self.events.lock().unwrap().push(event.clone());
+            if let Ok(mut events) = self.events.lock() {
+                events.push(event.clone());
+            } else {
+                return Err(crate::core::error::Error::Storage(
+                    crate::core::error::StorageError::LockPoisoned {
+                        resource: "CollectingObserver events lock".to_string(),
+                    },
+                ));
+            }
             Ok(())
         }
+    }
+
+    #[test]
+    fn test_collecting_observer_lock_poisoning() {
+        let collector = std::sync::Arc::new(CollectingObserver {
+            events: std::sync::Mutex::new(Vec::new()),
+        });
+
+        let collector_clone = std::sync::Arc::clone(&collector);
+        let _ = std::thread::spawn(move || {
+            let _lock = collector_clone.events.lock().unwrap();
+            panic!("Poisoning the lock!");
+        })
+        .join();
+
+        let event = StorageEvent::NodeAnchorCreated {
+            version_id: VersionId::new(1).unwrap(),
+            node_id: NodeId::new(1).unwrap(),
+            timestamp: 1000.into(),
+        };
+
+        let result = collector.on_event(&event);
+        assert!(matches!(
+            result,
+            Err(crate::core::error::Error::Storage(
+                crate::core::error::StorageError::LockPoisoned { .. }
+            ))
+        ));
     }
 
     #[test]
