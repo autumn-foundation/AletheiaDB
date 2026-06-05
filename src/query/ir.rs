@@ -453,6 +453,51 @@ impl Predicate {
     pub fn negate(self) -> Self {
         !self
     }
+
+    /// Convenience for building a Greater Than or Equal predicate
+    pub fn gte(key: impl Into<String>, value: impl Into<PredicateValue>) -> Self {
+        Predicate::Gte {
+            key: key.into(),
+            value: value.into(),
+        }
+    }
+
+    /// Convenience for building a Less Than or Equal predicate
+    pub fn lte(key: impl Into<String>, value: impl Into<PredicateValue>) -> Self {
+        Predicate::Lte {
+            key: key.into(),
+            value: value.into(),
+        }
+    }
+
+    /// Convenience for building a Starts With predicate
+    pub fn starts_with(key: impl Into<String>, prefix: impl Into<String>) -> Self {
+        Predicate::StartsWith {
+            key: key.into(),
+            prefix: prefix.into(),
+        }
+    }
+
+    /// Convenience for building an Ends With predicate
+    pub fn ends_with(key: impl Into<String>, suffix: impl Into<String>) -> Self {
+        Predicate::EndsWith {
+            key: key.into(),
+            suffix: suffix.into(),
+        }
+    }
+
+    /// Convenience for building a NOT Exists predicate
+    pub fn not_exists(key: impl Into<String>) -> Self {
+        !Predicate::Exists(key.into())
+    }
+
+    /// Convenience for building an In List predicate
+    pub fn in_list(key: impl Into<String>, values: Vec<impl Into<PredicateValue>>) -> Self {
+        Predicate::In {
+            key: key.into(),
+            values: values.into_iter().map(Into::into).collect(),
+        }
+    }
 }
 
 impl Not for Predicate {
