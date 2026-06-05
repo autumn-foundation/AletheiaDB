@@ -826,7 +826,9 @@ impl TraversalIterator {
                 // calculate required capacity, and pre-allocate to prevent heap reallocations.
                 // Avoids `.filter_map(...).collect()` dynamic reallocation overhead.
                 if let Some(ref label) = self.label {
-                    let iter = self.current.get_outgoing_edges_with_label_iter(node_id, label);
+                    let iter = self
+                        .current
+                        .get_outgoing_edges_with_label_iter(node_id, label);
                     let mut neighbors = Vec::with_capacity(iter.size_hint().0);
                     for edge_id in iter {
                         #[allow(clippy::collapsible_if)]
@@ -856,7 +858,9 @@ impl TraversalIterator {
                 // calculate required capacity, and pre-allocate to prevent heap reallocations.
                 // Avoids `.filter_map(...).collect()` dynamic reallocation overhead.
                 if let Some(ref label) = self.label {
-                    let iter = self.current.get_incoming_edges_with_label_iter(node_id, label);
+                    let iter = self
+                        .current
+                        .get_incoming_edges_with_label_iter(node_id, label);
                     let mut neighbors = Vec::with_capacity(iter.size_hint().0);
                     for edge_id in iter {
                         #[allow(clippy::collapsible_if)]
