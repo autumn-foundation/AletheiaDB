@@ -28,13 +28,22 @@ impl AletheiaDB {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```rust,no_run
+    /// # use aletheiadb::AletheiaDB;
+    /// # use aletheiadb::core::NodeId;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new().unwrap();
+    /// # let node_id = NodeId::new(1).unwrap();
+    /// # let valid_time = aletheiadb::core::temporal::Timestamp::from(0);
+    /// # let tx_time = aletheiadb::core::temporal::Timestamp::from(0);
     /// use aletheiadb::AletheiaDB;
     /// use aletheiadb::core::temporal::time;
     ///
     /// let db = AletheiaDB::new().unwrap();
     /// // ... create and delete edges ...
     /// let edges = db.get_outgoing_edges_at_time(node_id, valid_time, tx_time);
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn get_outgoing_edges_at_time(
         &self,
@@ -66,13 +75,22 @@ impl AletheiaDB {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```rust,no_run
+    /// # use aletheiadb::AletheiaDB;
+    /// # use aletheiadb::core::NodeId;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new().unwrap();
+    /// # let node_id = NodeId::new(1).unwrap();
+    /// # let valid_time = aletheiadb::core::temporal::Timestamp::from(0);
+    /// # let tx_time = aletheiadb::core::temporal::Timestamp::from(0);
     /// use aletheiadb::AletheiaDB;
     /// use aletheiadb::core::temporal::time;
     ///
     /// let db = AletheiaDB::new().unwrap();
     /// // ... create and delete edges ...
     /// let edges = db.get_incoming_edges_at_time(node_id, valid_time, tx_time);
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn get_incoming_edges_at_time(
         &self,

@@ -10,3 +10,7 @@
 ## 2024-05-14 - [Adding Examples to HLC and documenting src/main.rs]
 **Confusion:** The `src/main.rs` file was missing module-level documentation (`//!`), which triggers the `missing_docs` lint, but was hidden by the lint configurations inside `src/lib.rs` affecting `src/main.rs`. Also `HybridTimestamp::send` lacked an example showing the behavior of its logical counter.
 **Clarification:** Added `//! The AletheiaDB binary.` to `src/main.rs` and added an executable `## Examples` block to `HybridTimestamp::send` in `src/core/hlc.rs`.
+
+## 2024-05-30 - Fix Doc Tests in db
+**Confusion:** Some doc tests in `src/db/` modules were failing during `cargo test --doc` because they used ````ignore` to hide setup code, but that bypassed doc tests altogether. Converting them to ````rust,no_run` with `/// #` boilerplate setup lines was tricky due to variables missing from scope and subtle formatting issues.
+**Clarification:** To fix these, I added complete setup lines (like `db` and `config` declarations) with `#` to hide them, while preserving the visibility of the primary examples. Replaced all `/// ```ignore` blocks in `src/db/config.rs`, `src/db/temporal.rs`, and `src/db/vector.rs` with `/// ```rust,no_run`. This required careful string patching to ensure all variables used in the visible code were properly defined in the hidden setup code.

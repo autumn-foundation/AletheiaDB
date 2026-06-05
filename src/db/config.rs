@@ -201,20 +201,25 @@ impl AletheiaDB {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```rust,no_run
+    /// # use aletheiadb::AletheiaDB;
+    /// # use aletheiadb::config::AletheiaDBConfigBuilder;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// use aletheiadb::{AletheiaDB, WalConfigBuilder, DurabilityMode};
     ///
     /// // High-throughput ACID mode with group commit
     /// let wal_config = WalConfigBuilder::new()
-    ///     .durability_mode(DurabilityMode::group_commit(10, 200))
+    ///     .durability_mode(DurabilityMode::group_commit_validated(10, 200)?)
     ///     .build();
     /// let db = AletheiaDB::with_wal_config(wal_config)?;
     ///
     /// // Bulk loading mode with async durability
     /// let wal_config = WalConfigBuilder::new()
-    ///     .durability_mode(DurabilityMode::async_mode(100))
+    ///     .durability_mode(DurabilityMode::async_mode_validated(100)?)
     ///     .build();
     /// let db = AletheiaDB::with_wal_config(wal_config)?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn with_wal_config(wal_config: crate::config::WalConfig) -> Result<Self> {
@@ -232,7 +237,10 @@ impl AletheiaDB {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```rust,no_run
+    /// # use aletheiadb::AletheiaDB;
+    /// # use aletheiadb::config::AletheiaDBConfigBuilder;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// use aletheiadb::{AletheiaDB, config::AletheiaDBConfig, config::WalConfigBuilder};
     ///
     /// let config = AletheiaDBConfig::builder()
@@ -242,6 +250,8 @@ impl AletheiaDB {
     ///     .build();
     ///
     /// let db = AletheiaDB::with_unified_config(config)?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn with_unified_config(config: AletheiaDBConfig) -> Result<Self> {
