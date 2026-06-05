@@ -31,6 +31,35 @@ impl AletheiaDB {
     /// # }
     /// ```
     ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// # use aletheiadb::{AletheiaDB, properties};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// let node_id = db.create_node("Person", properties! {
+    ///     "name" => "Alice",
+    ///     "age" => 30,
+    /// })?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// # use aletheiadb::{AletheiaDB, properties};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # let source_id = db.create_node("Person", properties! { "name" => "Alice" })?;
+    /// # let target_id = db.create_node("Company", properties! { "name" => "Acme Corp" })?;
+    /// let edge_id = db.create_edge(source_id, target_id, "WORKS_FOR", properties! {
+    ///     "role" => "Engineer"
+    /// })?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
     /// # See Also
     ///
     /// * [`write`](Self::write) - For batched write operations.
@@ -79,6 +108,19 @@ impl AletheiaDB {
     /// Get the current state of a node.
     ///
     /// This uses the fast path (current storage) for O(1) lookup.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// # use aletheiadb::{AletheiaDB, properties};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # let node_id = db.create_node("Person", properties! { "name" => "Alice" })?;
+    /// let node = db.get_node(node_id)?;
+    /// assert!(node.has_label_str("Person"));
+    /// # Ok(())
+    /// # }
+    /// ```
     #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn get_node(&self, node_id: NodeId) -> Result<Node> {
         self.current.get_node(node_id).record_error_metric()
@@ -101,6 +143,19 @@ impl AletheiaDB {
     /// Do NOT attempt to modify the graph or perform operations that might acquire a
     /// write lock on the same shard (e.g., `update_node`, `delete_node`) within the closure.
     /// Doing so will cause a deadlock (lock re-entrancy hazard).
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// # use aletheiadb::{AletheiaDB, properties};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # let node_id = db.create_node("Person", properties! { "name" => "Alice" })?;
+    /// let is_person = db.with_node(node_id, |node| node.has_label_str("Person"))?;
+    /// assert!(is_person);
+    /// # Ok(())
+    /// # }
+    /// ```
     #[inline]
     #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn with_node<F, R>(&self, id: NodeId, f: F) -> Result<R>
@@ -111,6 +166,21 @@ impl AletheiaDB {
     }
 
     /// Get the current state of an edge.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// # use aletheiadb::{AletheiaDB, properties};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # let source_id = db.create_node("Person", properties! { "name" => "Alice" })?;
+    /// # let target_id = db.create_node("Company", properties! { "name" => "Acme Corp" })?;
+    /// # let edge_id = db.create_edge(source_id, target_id, "WORKS_FOR", properties! {})?;
+    /// let edge = db.get_edge(edge_id)?;
+    /// assert!(edge.has_label_str("WORKS_FOR"));
+    /// # Ok(())
+    /// # }
+    /// ```
     #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn get_edge(&self, edge_id: EdgeId) -> Result<Edge> {
         self.current.get_edge(edge_id).record_error_metric()
@@ -154,6 +224,20 @@ impl AletheiaDB {
     /// # }
     /// ```
     ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// # use aletheiadb::{AletheiaDB, properties};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # db.create_node("Person", properties! { "name" => "Alice" })?;
+    /// # db.create_node("Person", properties! { "name" => "Bob" })?;
+    /// let people: Vec<_> = db.scan_nodes_by_label("Person").collect();
+    /// assert_eq!(people.len(), 2);
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
     /// # See Also
     ///
     /// - [`find_nodes_by_property`](Self::find_nodes_by_property) - Find nodes by label + property value
@@ -172,6 +256,21 @@ impl AletheiaDB {
     ///
     /// - **Zero-copy**: Only reads and returns the target NodeId (8 bytes)
     /// - **No allocation**: Does not clone Edge or PropertyMap
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// # use aletheiadb::{AletheiaDB, properties};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # let source_id = db.create_node("Person", properties! { "name" => "Alice" })?;
+    /// # let target_id = db.create_node("Company", properties! { "name" => "Acme Corp" })?;
+    /// # let edge_id = db.create_edge(source_id, target_id, "WORKS_FOR", properties! {})?;
+    /// let retrieved_target = db.get_edge_target(edge_id)?;
+    /// assert_eq!(retrieved_target, target_id);
+    /// # Ok(())
+    /// # }
+    /// ```
     #[inline]
     #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn get_edge_target(&self, edge_id: EdgeId) -> Result<NodeId> {
@@ -184,6 +283,21 @@ impl AletheiaDB {
     ///
     /// - **Zero-copy**: Only reads and returns the source NodeId (8 bytes)
     /// - **No allocation**: Does not clone Edge or PropertyMap
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// # use aletheiadb::{AletheiaDB, properties};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # let source_id = db.create_node("Person", properties! { "name" => "Alice" })?;
+    /// # let target_id = db.create_node("Company", properties! { "name" => "Acme Corp" })?;
+    /// # let edge_id = db.create_edge(source_id, target_id, "WORKS_FOR", properties! {})?;
+    /// let retrieved_source = db.get_edge_source(edge_id)?;
+    /// assert_eq!(retrieved_source, source_id);
+    /// # Ok(())
+    /// # }
+    /// ```
     #[inline]
     #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn get_edge_source(&self, edge_id: EdgeId) -> Result<NodeId> {
@@ -191,6 +305,21 @@ impl AletheiaDB {
     }
 
     /// Get outgoing edges from a node (current state).
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// # use aletheiadb::{AletheiaDB, properties};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # let source_id = db.create_node("Person", properties! { "name" => "Alice" })?;
+    /// # let target_id = db.create_node("Company", properties! { "name" => "Acme Corp" })?;
+    /// # db.create_edge(source_id, target_id, "WORKS_FOR", properties! {})?;
+    /// let outgoing = db.get_outgoing_edges(source_id);
+    /// assert_eq!(outgoing.len(), 1);
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn get_outgoing_edges(&self, node_id: NodeId) -> Vec<EdgeId> {
         self.current.get_outgoing_edges(node_id)
     }
@@ -198,11 +327,41 @@ impl AletheiaDB {
     /// Get outgoing edges from a node as an iterator (current state).
     ///
     /// This provides zero-allocation traversal.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// # use aletheiadb::{AletheiaDB, properties};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # let source_id = db.create_node("Person", properties! { "name" => "Alice" })?;
+    /// # let target_id = db.create_node("Company", properties! { "name" => "Acme Corp" })?;
+    /// # db.create_edge(source_id, target_id, "WORKS_FOR", properties! {})?;
+    /// let count = db.get_outgoing_edges_iter(source_id).count();
+    /// assert_eq!(count, 1);
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn get_outgoing_edges_iter(&self, node_id: NodeId) -> OutgoingEdgesIter<'_> {
         self.current.get_outgoing_edges_iter(node_id)
     }
 
     /// Get incoming edges to a node (current state).
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// # use aletheiadb::{AletheiaDB, properties};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # let source_id = db.create_node("Person", properties! { "name" => "Alice" })?;
+    /// # let target_id = db.create_node("Company", properties! { "name" => "Acme Corp" })?;
+    /// # db.create_edge(source_id, target_id, "WORKS_FOR", properties! {})?;
+    /// let incoming = db.get_incoming_edges(target_id);
+    /// assert_eq!(incoming.len(), 1);
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn get_incoming_edges(&self, node_id: NodeId) -> Vec<EdgeId> {
         self.current.get_incoming_edges(node_id)
     }
@@ -210,21 +369,80 @@ impl AletheiaDB {
     /// Get incoming edges to a node as an iterator (current state).
     ///
     /// This provides zero-allocation traversal.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// # use aletheiadb::{AletheiaDB, properties};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # let source_id = db.create_node("Person", properties! { "name" => "Alice" })?;
+    /// # let target_id = db.create_node("Company", properties! { "name" => "Acme Corp" })?;
+    /// # db.create_edge(source_id, target_id, "WORKS_FOR", properties! {})?;
+    /// let count = db.get_incoming_edges_iter(target_id).count();
+    /// assert_eq!(count, 1);
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn get_incoming_edges_iter(&self, node_id: NodeId) -> IncomingEdgesIter<'_> {
         self.current.get_incoming_edges_iter(node_id)
     }
 
     /// Get incoming edges with a specific label (current state).
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// # use aletheiadb::{AletheiaDB, properties};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # let source_id = db.create_node("Person", properties! { "name" => "Alice" })?;
+    /// # let target_id = db.create_node("Company", properties! { "name" => "Acme Corp" })?;
+    /// # db.create_edge(source_id, target_id, "WORKS_FOR", properties! {})?;
+    /// let incoming = db.get_incoming_edges_with_label(target_id, "WORKS_FOR");
+    /// assert_eq!(incoming.len(), 1);
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn get_incoming_edges_with_label(&self, node_id: NodeId, label: &str) -> Vec<EdgeId> {
         self.current.get_incoming_edges_with_label(node_id, label)
     }
 
     /// Get outgoing edges with a specific label (current state).
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// # use aletheiadb::{AletheiaDB, properties};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # let source_id = db.create_node("Person", properties! { "name" => "Alice" })?;
+    /// # let target_id = db.create_node("Company", properties! { "name" => "Acme Corp" })?;
+    /// # db.create_edge(source_id, target_id, "WORKS_FOR", properties! {})?;
+    /// let outgoing = db.get_outgoing_edges_with_label(source_id, "WORKS_FOR");
+    /// assert_eq!(outgoing.len(), 1);
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn get_outgoing_edges_with_label(&self, node_id: NodeId, label: &str) -> Vec<EdgeId> {
         self.current.get_outgoing_edges_with_label(node_id, label)
     }
 
     /// Get the number of nodes in the current state.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// # use aletheiadb::{AletheiaDB, properties};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # db.create_node("Person", properties! { "name" => "Alice" })?;
+    /// # db.create_node("Company", properties! { "name" => "Acme Corp" })?;
+    /// let count = db.node_count();
+    /// assert_eq!(count, 2);
+    /// # Ok(())
+    /// # }
+    /// ```
     #[inline]
     pub fn node_count(&self) -> usize {
         self.current.node_count()
@@ -235,24 +453,83 @@ impl AletheiaDB {
     /// Returns a snapshot of all live node IDs. For large graphs prefer
     /// [`scan_nodes_by_label`](Self::scan_nodes_by_label) to avoid loading
     /// the full set into memory.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// # use aletheiadb::{AletheiaDB, properties};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # db.create_node("Person", properties! { "name" => "Alice" })?;
+    /// # db.create_node("Person", properties! { "name" => "Bob" })?;
+    /// let all_ids = db.get_all_node_ids();
+    /// assert_eq!(all_ids.len(), 2);
+    /// # Ok(())
+    /// # }
+    /// ```
     #[inline]
     pub fn get_all_node_ids(&self) -> Vec<NodeId> {
         self.current.get_all_node_ids()
     }
 
     /// Get the number of edges in the current state.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// # use aletheiadb::{AletheiaDB, properties};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # let source_id = db.create_node("Person", properties! { "name" => "Alice" })?;
+    /// # let target_id = db.create_node("Company", properties! { "name" => "Acme Corp" })?;
+    /// # db.create_edge(source_id, target_id, "WORKS_FOR", properties! {})?;
+    /// let count = db.edge_count();
+    /// assert_eq!(count, 1);
+    /// # Ok(())
+    /// # }
+    /// ```
     #[inline]
     pub fn edge_count(&self) -> usize {
         self.current.edge_count()
     }
 
     /// Get the out-degree of a node (current state).
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// # use aletheiadb::{AletheiaDB, properties};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # let source_id = db.create_node("Person", properties! { "name" => "Alice" })?;
+    /// # let target_id = db.create_node("Company", properties! { "name" => "Acme Corp" })?;
+    /// # db.create_edge(source_id, target_id, "WORKS_FOR", properties! {})?;
+    /// let degree = db.out_degree(source_id);
+    /// assert_eq!(degree, 1);
+    /// # Ok(())
+    /// # }
+    /// ```
     #[inline]
     pub fn out_degree(&self, node_id: NodeId) -> usize {
         self.current.out_degree(node_id)
     }
 
     /// Get the in-degree of a node (current state).
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// # use aletheiadb::{AletheiaDB, properties};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # let source_id = db.create_node("Person", properties! { "name" => "Alice" })?;
+    /// # let target_id = db.create_node("Company", properties! { "name" => "Acme Corp" })?;
+    /// # db.create_edge(source_id, target_id, "WORKS_FOR", properties! {})?;
+    /// let degree = db.in_degree(target_id);
+    /// assert_eq!(degree, 1);
+    /// # Ok(())
+    /// # }
+    /// ```
     #[inline]
     pub fn in_degree(&self, node_id: NodeId) -> usize {
         self.current.in_degree(node_id)
@@ -262,6 +539,20 @@ impl AletheiaDB {
     ///
     /// Returns the IDs of all nodes with the given label whose specified property
     /// equals the given value.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// # use aletheiadb::{AletheiaDB, properties, PropertyValue};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # db.create_node("Person", properties! { "name" => "Alice", "age" => 30 })?;
+    /// # db.create_node("Person", properties! { "name" => "Bob", "age" => 30 })?;
+    /// let thirty_year_olds = db.find_nodes_by_property("Person", "age", &PropertyValue::Int(30));
+    /// assert_eq!(thirty_year_olds.len(), 2);
+    /// # Ok(())
+    /// # }
+    /// ```
     #[inline]
     pub fn find_nodes_by_property(
         &self,
