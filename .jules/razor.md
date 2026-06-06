@@ -12,3 +12,7 @@
 **Bloat:** `StorageSnapshot` and `FieldHolder` traits.
 **Cut:** Deleted single-implementation traits `StorageSnapshot` (implemented only by `CurrentStorageSnapshot`) and `FieldHolder` (implemented only by `Event`, unused except in tests). Moved methods directly to structs.
 **Saved:** ~50 lines of boilerplate + cognitive load of unnecessary abstraction layers.
+## [Reduction]
+**Bloat:** `GraphView` and `Resonator` Traits
+**Cut:** Deleted single-implementation traits `GraphView` and `Resonator`, updated consumers to use concrete types.
+**Saved:** Reduced trait boilerplate, removed dynamic dispatch, deleted 3 files and simplified generics.
