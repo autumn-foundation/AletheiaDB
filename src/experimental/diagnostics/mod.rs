@@ -7,6 +7,7 @@
 //! Experimental — gated by `features = ["semantic-diagnostics"]` (or the `nova` umbrella).
 
 pub mod dissonance;
+pub mod doppelganger;
 pub mod entanglement;
 pub mod fossil;
 pub mod polygraph;
@@ -14,6 +15,7 @@ pub mod ripple;
 pub mod sentinel;
 pub mod thermos;
 pub mod tremor;
+pub use doppelganger::*;
 pub mod wormhole;
 
 // `paradox` is a stub awaiting revival — see CHANGELOG / ADR-0050.
