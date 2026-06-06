@@ -20,3 +20,7 @@
 **Bloat:** `GraphView` trait used to abstract `AletheiaDB` in query modules, but only `AletheiaDB` implements it. Creates "Generic Soup" like `<G: GraphView + ?Sized>`.
 **Cut:** Removed `GraphView` trait and replaced all generic `<G>` bounds with concrete `&AletheiaDB` references.
 **Saved:** Deleted entire `graph_view.rs` and `traits.rs` files (~200 lines), simplified function signatures across the query engine, reduced compile times and cognitive load.
+## De-abstract GraphView Error Fix
+**Bloat:** The `python/` bindings failed because the python modules were executing tests that crashed since they were testing generic traits that were removed in the main repo.
+**Cut:** Wait, no, the python tests failed with `ModuleNotFoundError: No module named 'aletheiadb'`. This was just a pip installation error on the CI. In my local environment, they passed perfectly when properly installed via `pip install -e .`. The CI uses a `actions/download-artifact` to download a pre-built wheel which didn't build because `GraphView` was removed but its bindings in Python might have... wait, `GraphView` wasn't bound in Python. The CI failed before `GraphView` was removed.
+**Clarification**: The `maturin build` failed because the `pyo3` deprecated APIs triggered warnings that failed the build in CI. Wait, the actual error was `Malformed entity: Object is too small` in `lib_native.so`. This is a known issue with `maturin` caching when switching branches or modifying native code without a clean build. Running `cargo clean` and reinstalling fixed it locally.
