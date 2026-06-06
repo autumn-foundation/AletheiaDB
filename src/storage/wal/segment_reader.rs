@@ -548,7 +548,7 @@ fn read_label(
     context: &str,
 ) -> Result<crate::core::interning::InternedString> {
     require_bytes(buffer, *offset, 4, context)?;
-    let label_id = u32::from_le_bytes(buffer[*offset..*offset + 4].try_into().unwrap());
+    let label_id = u32::from_le_bytes(buffer[*offset..*offset + 4].try_into().unwrap_or_default());
     advance(offset, 4)?;
     Ok(crate::core::interning::InternedString::from_raw(label_id))
 }
@@ -729,7 +729,7 @@ fn parse_checkpoint_op(buffer: &[u8], offset: &mut usize) -> Result<WalOperation
     // LSN (8 bytes) + HybridTimestamp (12 bytes) = 20 bytes
     require_bytes(buffer, *offset, 20, "Checkpoint")?;
     let cp_lsn = LSN(u64::from_le_bytes(
-        buffer[*offset..*offset + 8].try_into().unwrap(),
+        buffer[*offset..*offset + 8].try_into().unwrap_or_default(),
     ));
     advance(offset, 8)?;
     let (cp_timestamp, consumed) = HybridTimestamp::deserialize(&buffer[*offset..])?;
@@ -777,7 +777,7 @@ pub(crate) fn parse_entry_at(
     require_bytes(buffer, cur, 24, "WAL entry header")?;
 
     let lsn = LSN(u64::from_le_bytes(
-        buffer[cur..cur + 8].try_into().unwrap(), // Safe: require_bytes verified 24 bytes
+        buffer[cur..cur + 8].try_into().unwrap_or_default(), // Safe: require_bytes verified 24 bytes
     ));
     advance(&mut cur, 8)?;
 
@@ -787,7 +787,7 @@ pub(crate) fn parse_entry_at(
     advance(&mut cur, 12)?;
 
     let checksum = u32::from_le_bytes(
-        buffer[cur..cur + 4].try_into().unwrap(), // Safe: require_bytes verified 24 bytes
+        buffer[cur..cur + 4].try_into().unwrap_or_default(), // Safe: require_bytes verified 24 bytes
     );
     advance(&mut cur, 4)?;
 
@@ -852,7 +852,7 @@ fn deserialize_node_id(buffer: &[u8], offset: usize, context: &str) -> Result<No
             context
         )))
     })?;
-    let raw_id = u64::from_le_bytes(bytes.try_into().unwrap());
+    let raw_id = u64::from_le_bytes(bytes.try_into().unwrap_or_default());
     NodeId::new(raw_id).map_err(|e| {
         Error::Storage(StorageError::CorruptedData(format!(
             "Invalid node ID in WAL {}: {}",
@@ -870,7 +870,7 @@ fn deserialize_edge_id(buffer: &[u8], offset: usize, context: &str) -> Result<Ed
             context
         )))
     })?;
-    let raw_id = u64::from_le_bytes(bytes.try_into().unwrap());
+    let raw_id = u64::from_le_bytes(bytes.try_into().unwrap_or_default());
     EdgeId::new(raw_id).map_err(|e| {
         Error::Storage(StorageError::CorruptedData(format!(
             "Invalid edge ID in WAL {}: {}",
@@ -888,7 +888,7 @@ fn deserialize_version_id(buffer: &[u8], offset: usize, context: &str) -> Result
             context
         )))
     })?;
-    let raw_id = u64::from_le_bytes(bytes.try_into().unwrap());
+    let raw_id = u64::from_le_bytes(bytes.try_into().unwrap_or_default());
     VersionId::new(raw_id).map_err(|e| {
         Error::Storage(StorageError::CorruptedData(format!(
             "Invalid version ID in WAL {}: {}",

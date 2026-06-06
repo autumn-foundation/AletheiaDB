@@ -1540,7 +1540,7 @@ fn test_property_map_serialized_size() {
     );
 
     // Exact byte checks
-    let count = u32::from_le_bytes(serialized[0..4].try_into().unwrap());
+    let count = u32::from_le_bytes(serialized[0..4].try_into().unwrap_or_default());
     assert_eq!(count, 2);
 }
 

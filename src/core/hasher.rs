@@ -150,24 +150,24 @@ impl Hasher for IdentityHasher {
             1 => self.update_state(bytes[0] as u64),
             2 => {
                 // SAFETY: length checked
-                let arr: [u8; 2] = bytes.try_into().unwrap();
+                let arr: [u8; 2] = bytes.try_into().unwrap_or_default();
                 self.update_state(u16::from_le_bytes(arr) as u64);
             }
             4 => {
                 // SAFETY: length checked
-                let arr: [u8; 4] = bytes.try_into().unwrap();
+                let arr: [u8; 4] = bytes.try_into().unwrap_or_default();
                 self.update_state(u32::from_le_bytes(arr) as u64);
             }
             8 => {
                 // SAFETY: length checked
-                let arr: [u8; 8] = bytes.try_into().unwrap();
+                let arr: [u8; 8] = bytes.try_into().unwrap_or_default();
                 self.update_state(u64::from_le_bytes(arr));
             }
             16 => {
                 // Mix high and low parts for u128 to minimize collisions
                 // while keeping it deterministic
-                let low_arr: [u8; 8] = bytes[0..8].try_into().unwrap();
-                let high_arr: [u8; 8] = bytes[8..16].try_into().unwrap();
+                let low_arr: [u8; 8] = bytes[0..8].try_into().unwrap_or_default();
+                let high_arr: [u8; 8] = bytes[8..16].try_into().unwrap_or_default();
                 let low = u64::from_le_bytes(low_arr);
                 let high = u64::from_le_bytes(high_arr);
                 self.update_state(low ^ high);
