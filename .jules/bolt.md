@@ -77,3 +77,7 @@
 **Pre-allocating Vec Capacities in Hot Paths**
 **Learning:** Pre-allocating standard Rust `Vec` objects using `Vec::with_capacity` in hot-paths like parsers and query planners eliminates unnecessary heap reallocations (0 -> 4 -> 8 -> 16 etc.), without changing semantics or causing borrow checker issues. However, if the expected bounds are wildly incorrect it could lead to memory bloat. A small capacity for small collections minimizes performance impacts in hot loops.
 **Action:** When a loop dynamically pushes elements to a new empty Vector (especially in repeated execution domains like parsers and network/storage iterators), replace `Vec::new()` with `Vec::with_capacity(n)` if a typical or max size `n` is roughly known.
+
+**Optimize Vector Collection using Iterators**
+**Learning:** In Rust, when mapping and filtering an iterator using `.filter_map(...).collect()`, the iterator's exact size hint is lost, causing multiple dynamic heap allocations as the target `Vec` grows. This is especially impactful in hot paths traversing graph edges.
+**Action:** Manually pre-allocate using `Vec::with_capacity(iter.size_hint().0)` and populate it with a `for` loop to guarantee exactly one allocation and eliminate intermediate heap reallocations.

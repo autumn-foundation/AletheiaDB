@@ -824,65 +824,69 @@ impl TraversalIterator {
             Direction::Outgoing => {
                 // Use iterator methods to avoid intermediate Vec allocation (Issue #187)
                 if let Some(ref label) = self.label {
-                    self.current
-                        .get_outgoing_edges_with_label_iter(node_id, label)
-                        .filter_map(|edge_id| {
-                            if !self.edge_visible_at_time(edge_id, &historical_guard) {
-                                return None;
-                            }
-                            // Zero-copy: only get target NodeId, not full Edge (Issue #190)
-                            self.current
-                                .get_edge_target(edge_id)
-                                .ok()
-                                .map(|target| (target, edge_id))
-                        })
-                        .collect()
+                    // ⚡ Bolt Optimization: Calculate required capacity and pre-allocate to prevent heap reallocations.
+                    let iter = self
+                        .current
+                        .get_outgoing_edges_with_label_iter(node_id, label);
+                    let mut neighbors = Vec::with_capacity(iter.size_hint().0);
+                    for edge_id in iter {
+                        if !self.edge_visible_at_time(edge_id, &historical_guard) {
+                            continue;
+                        }
+                        // Zero-copy: only get target NodeId, not full Edge (Issue #190)
+                        if let Ok(target) = self.current.get_edge_target(edge_id) {
+                            neighbors.push((target, edge_id));
+                        }
+                    }
+                    neighbors
                 } else {
-                    self.current
-                        .get_outgoing_edges_iter(node_id)
-                        .filter_map(|edge_id| {
-                            if !self.edge_visible_at_time(edge_id, &historical_guard) {
-                                return None;
-                            }
-                            // Zero-copy: only get target NodeId, not full Edge (Issue #190)
-                            self.current
-                                .get_edge_target(edge_id)
-                                .ok()
-                                .map(|target| (target, edge_id))
-                        })
-                        .collect()
+                    // ⚡ Bolt Optimization: Calculate required capacity and pre-allocate to prevent heap reallocations.
+                    let iter = self.current.get_outgoing_edges_iter(node_id);
+                    let mut neighbors = Vec::with_capacity(iter.size_hint().0);
+                    for edge_id in iter {
+                        if !self.edge_visible_at_time(edge_id, &historical_guard) {
+                            continue;
+                        }
+                        // Zero-copy: only get target NodeId, not full Edge (Issue #190)
+                        if let Ok(target) = self.current.get_edge_target(edge_id) {
+                            neighbors.push((target, edge_id));
+                        }
+                    }
+                    neighbors
                 }
             }
             Direction::Incoming => {
                 // Use iterator methods to avoid intermediate Vec allocation (Issue #187)
                 if let Some(ref label) = self.label {
-                    self.current
-                        .get_incoming_edges_with_label_iter(node_id, label)
-                        .filter_map(|edge_id| {
-                            if !self.edge_visible_at_time(edge_id, &historical_guard) {
-                                return None;
-                            }
-                            // Zero-copy: only get source NodeId, not full Edge (Issue #190)
-                            self.current
-                                .get_edge_source(edge_id)
-                                .ok()
-                                .map(|source| (source, edge_id))
-                        })
-                        .collect()
+                    // ⚡ Bolt Optimization: Calculate required capacity and pre-allocate to prevent heap reallocations.
+                    let iter = self
+                        .current
+                        .get_incoming_edges_with_label_iter(node_id, label);
+                    let mut neighbors = Vec::with_capacity(iter.size_hint().0);
+                    for edge_id in iter {
+                        if !self.edge_visible_at_time(edge_id, &historical_guard) {
+                            continue;
+                        }
+                        // Zero-copy: only get source NodeId, not full Edge (Issue #190)
+                        if let Ok(source) = self.current.get_edge_source(edge_id) {
+                            neighbors.push((source, edge_id));
+                        }
+                    }
+                    neighbors
                 } else {
-                    self.current
-                        .get_incoming_edges_iter(node_id)
-                        .filter_map(|edge_id| {
-                            if !self.edge_visible_at_time(edge_id, &historical_guard) {
-                                return None;
-                            }
-                            // Zero-copy: only get source NodeId, not full Edge (Issue #190)
-                            self.current
-                                .get_edge_source(edge_id)
-                                .ok()
-                                .map(|source| (source, edge_id))
-                        })
-                        .collect()
+                    // ⚡ Bolt Optimization: Calculate required capacity and pre-allocate to prevent heap reallocations.
+                    let iter = self.current.get_incoming_edges_iter(node_id);
+                    let mut neighbors = Vec::with_capacity(iter.size_hint().0);
+                    for edge_id in iter {
+                        if !self.edge_visible_at_time(edge_id, &historical_guard) {
+                            continue;
+                        }
+                        // Zero-copy: only get source NodeId, not full Edge (Issue #190)
+                        if let Ok(source) = self.current.get_edge_source(edge_id) {
+                            neighbors.push((source, edge_id));
+                        }
+                    }
+                    neighbors
                 }
             }
             Direction::Both => {
