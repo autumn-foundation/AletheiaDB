@@ -223,6 +223,59 @@ mod tests {
     }
 
     #[test]
+    fn test_no_fusion_internal_keys() {
+        let rule = FilterScanFusion;
+        let stats = test_stats();
+        let plan = LogicalPlan::new(LogicalOp::unary(
+            UnaryOp::Filter(Predicate::eq("_internal_id", "123")),
+            LogicalOp::Scan(ScanOp::NodeScan {
+                label: Some("Person".to_string()),
+                estimated_rows: None,
+            }),
+        ));
+        let result = rule.apply(&plan, &stats).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_fusion_binary_changes() {
+        let rule = FilterScanFusion;
+        let stats = test_stats();
+
+        let left_scan = LogicalOp::unary(
+            UnaryOp::Filter(Predicate::eq("name", "Alice")),
+            LogicalOp::Scan(ScanOp::NodeScan {
+                label: Some("Person".to_string()),
+                estimated_rows: None,
+            }),
+        );
+        let right_scan = LogicalOp::Scan(ScanOp::NodeScan {
+            label: Some("Dog".to_string()),
+            estimated_rows: None,
+        });
+
+        let plan = LogicalPlan::new(LogicalOp::binary(
+            crate::query::plan::BinaryOp::Union,
+            left_scan,
+            right_scan.clone(),
+        ));
+
+        let result = rule.apply(&plan, &stats).unwrap();
+        assert_eq!(
+            result,
+            Some(LogicalPlan::new(LogicalOp::binary(
+                crate::query::plan::BinaryOp::Union,
+                LogicalOp::Scan(ScanOp::PropertyScan {
+                    label: "Person".to_string(),
+                    key: "name".to_string(),
+                    value: crate::query::ir::PredicateValue::String("Alice".to_string()),
+                }),
+                right_scan,
+            )))
+        );
+    }
+
+    #[test]
     fn test_preserves_temporal_context() {
         use crate::query::plan::TemporalContext;
 

@@ -346,3 +346,31 @@
 **Finding:** The `LimitPushdown` tests originally missed several behavioral edge cases and logic checks, particularly regarding the propagation limits in BinaryOp combinations (`||`), updating limit values correctly against child bounds, and setting vector rank limits.
 **Evidence:** `cargo mutants` caught mutants in `LimitPushdown::push_down` specifically targeting the changed boolean condition logic and bounds assignment.
 **Recommendation:** Added `sentry_tests` to `LimitPushdown` that explicitly trigger tests enforcing the boolean change propagation, verifying that updated properties reflect correct nested limits, and vector bounds assignment. Tests now prevent `||` to `&&` mutations and correct top-k modifications.
+
+**[OperationReordering Predicate Evaluation Weaknesses]**
+**Module:** `src/query/planner/rules/operation_reordering.rs`
+**Severity:** 🔴 Critical
+**Finding:** The `OperationReordering` module tests rely on equality assertions for estimated predicate selectivities, but the `estimate_filter_selectivity` and `filters_equal` methods are poorly tested against mutation. Mutants altering fundamental estimation mathematics (e.g. `*` to `+` or `/`) and predicate equality checks survive.
+**Evidence:** `cargo mutants` reveals surviving mutations replacing operators within `estimate_filter_selectivity`, `estimate_cardinality`, and `filters_equal`. For instance, replacing `==` with `!=` in `filters_equal` survives. Several selectivity estimations (e.g., subtracting or multiplying selectivities) survive mutations switching operators to `+` or `/`.
+**Recommendation:** Add comprehensive tests in `src/query/planner/rules/operation_reordering.rs` to rigorously verify the selectivity arithmetic and predicate equality logic. Test specifically for differences when calculating AND, OR, and NOT selectivities by using concrete, distinguishable expected values. Test `filters_equal` explicitly for its role in the reordering process.
+
+**[FilterScanFusion Tautological Fusions]**
+**Module:** `src/query/planner/rules/filter_scan_fusion.rs`
+**Severity:** 🔴 Critical
+**Finding:** The `fuse` method in `FilterScanFusion` has surviving mutants that remove negative conditions (like `!key.starts_with('_')`) or alter boolean conjunction logic (`||` to `&&`), yet the tests still pass. This indicates the fusion logic is not adequately verified against edge cases like internal system properties.
+**Evidence:** Mutants deleting the `!` operator in `!key.starts_with('_')` survive. Mutants changing `||` to `&&` in property checks survive.
+**Recommendation:** Add tests to `tests/sentry_filter_scan_fusion.rs` (or within the module) that explicitly attempt to fuse on an internal property key (e.g., `_internal_id`) and assert that fusion *fails* or is rejected. Verify that logical operators in `fuse` propagate correctly by testing complex node scan properties.
+
+**[LimitPushdown Logical Operator Propagations]**
+**Module:** `src/query/planner/rules/limit_pushdown.rs`
+**Severity:** 🟡 Suspect
+**Finding:** Mutants altering logical conjunction operators (`||` to `&&`) and equality checks (`!=` to `==`) within the `push_down` method survive testing.
+**Evidence:** `cargo mutants` output shows multiple survivals on lines containing `||` and `!=` inside `LimitPushdown::push_down`.
+**Recommendation:** Create tests that trigger these exact condition combinations, ensuring limits are appropriately pushed down (or not) through varied nested logical operator states.
+
+**[MemoryStats Mathematical Tautology]**
+**Module:** `src/index/vector/temporal/stats.rs`
+**Severity:** 🟡 Suspect
+**Finding:** The `MemoryStats` methods `is_high_memory_usage` and `estimated_accumulated_bytes` have surviving mutants because there are no tests at all for this module.
+**Evidence:** Mutants changing `>` to `==` or `<` and replacing `*` with `+` or `/` survive because there are zero tests covering `MemoryStats`.
+**Recommendation:** Add a `tests` module to `src/index/vector/temporal/stats.rs` checking boundary conditions of `is_high_memory_usage` and the exact output calculation of `estimated_accumulated_bytes`.

@@ -714,11 +714,8 @@ mod tests {
 
         let sel = rule.estimate_filter_selectivity(&pred, &stats);
         // Expected: 0.3 * 0.2 = 0.06
-        assert!(
-            (sel - 0.06).abs() < 0.001,
-            "AND selectivity should be product, got {}",
-            sel
-        );
+        // Exact match prevents * -> + or / mutation (e.g. 0.3+0.2=0.5, 0.3/0.2=1.5)
+        assert!((sel - 0.06).abs() < 1e-6);
     }
 
     #[test]
@@ -735,11 +732,8 @@ mod tests {
 
         let sel = rule.estimate_filter_selectivity(&pred, &stats);
         // Expected: 1 - (1-0.3) * (1-0.2) = 1 - 0.7 * 0.8 = 1 - 0.56 = 0.44
-        assert!(
-            (sel - 0.44).abs() < 0.001,
-            "OR selectivity should use union rule, got {}",
-            sel
-        );
+        // Exact match prevents math mutation survival
+        assert!((sel - 0.44).abs() < 1e-6);
     }
 
     #[test]
@@ -753,11 +747,7 @@ mod tests {
 
         let sel = rule.estimate_filter_selectivity(&pred, &stats);
         // Expected: 1 - 0.3 = 0.7
-        assert!(
-            (sel - 0.7).abs() < 0.001,
-            "NOT selectivity should be complement, got {}",
-            sel
-        );
+        assert!((sel - 0.7).abs() < 1e-6);
     }
 
     #[test]
@@ -800,11 +790,7 @@ mod tests {
         let sel = rule.estimate_filter_selectivity(&pred, &stats);
         // OR: 1 - (1-0.3) * (1-0.2) = 1 - 0.7 * 0.8 = 0.44
         // AND: 0.44 * 0.3 = 0.132
-        assert!(
-            (sel - 0.132).abs() < 0.001,
-            "Nested predicates should compute correctly, got {}",
-            sel
-        );
+        assert!((sel - 0.132).abs() < 1e-6);
     }
 
     #[test]
@@ -878,6 +864,28 @@ mod tests {
             rule.estimate_filter_selectivity(&Predicate::NotExists("x".to_string()), &stats),
             EXISTENCE_CHECK_SELECTIVITY
         );
+    }
+
+    #[test]
+    fn test_filters_equal() {
+        let rule = OperationReordering;
+        let op1 = LogicalOp::unary(
+            UnaryOp::Filter(Predicate::eq("name", "Alice")),
+            LogicalOp::Empty,
+        );
+        let op2 = LogicalOp::unary(
+            UnaryOp::Filter(Predicate::eq("name", "Alice")),
+            LogicalOp::Empty,
+        );
+        let op3 = LogicalOp::unary(
+            UnaryOp::Filter(Predicate::eq("name", "Bob")),
+            LogicalOp::Empty,
+        );
+        let op_not_filter = LogicalOp::Empty;
+
+        assert!(rule.filters_equal(&op1, &op2));
+        assert!(!rule.filters_equal(&op1, &op3));
+        assert!(!rule.filters_equal(&op1, &op_not_filter));
     }
 
     #[test]

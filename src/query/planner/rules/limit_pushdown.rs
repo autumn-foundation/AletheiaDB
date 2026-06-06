@@ -241,6 +241,54 @@ mod tests {
     }
 
     #[test]
+    fn test_limit_pushdown_binary_mutations() {
+        let rule = LimitPushdown;
+        let stats = test_stats();
+        let plan = LogicalPlan::new(LogicalOp::binary(
+            crate::query::plan::BinaryOp::Union,
+            LogicalOp::unary(
+                UnaryOp::Limit(5),
+                LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(1).unwrap()])),
+            ),
+            LogicalOp::unary(
+                UnaryOp::Limit(10),
+                LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(2).unwrap()])),
+            ),
+        ));
+
+        let result = rule.apply(&plan, &stats).unwrap();
+        assert_eq!(
+            result,
+            None // No change occurs when limits can't combine across siblings, verifying we didn't mistakenly modify
+        );
+
+        let plan2 = LogicalPlan::new(LogicalOp::binary(
+            crate::query::plan::BinaryOp::Union,
+            LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(1).unwrap()])),
+            LogicalOp::unary(
+                UnaryOp::Limit(10),
+                LogicalOp::unary(
+                    UnaryOp::Limit(5),
+                    LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(2).unwrap()])),
+                ),
+            ),
+        ));
+        let result2 = rule.apply(&plan2, &stats).unwrap();
+
+        assert_eq!(
+            result2,
+            Some(LogicalPlan::new(LogicalOp::binary(
+                crate::query::plan::BinaryOp::Union,
+                LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(1).unwrap()])),
+                LogicalOp::unary(
+                    UnaryOp::Limit(5),
+                    LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(2).unwrap()]))
+                ),
+            )))
+        );
+    }
+
+    #[test]
     fn test_combine_consecutive_limits() {
         let rule = LimitPushdown;
         let stats = test_stats();

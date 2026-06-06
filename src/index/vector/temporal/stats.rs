@@ -65,3 +65,39 @@ impl MemoryStats {
         self.changes_accumulated_size * 8 // NodeId is u64
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::index::vector::temporal::config::MAX_ACCUMULATED_CHANGES;
+
+    #[test]
+    fn test_is_high_memory_usage() {
+        let mut stats = MemoryStats {
+            changes_accumulated_size: 0,
+            vectors_changed_since_snapshot: 0,
+            snapshots_since_full: 0,
+            total_snapshots: 0,
+            current_vectors: 0,
+        };
+        assert!(!stats.is_high_memory_usage());
+
+        stats.changes_accumulated_size = MAX_ACCUMULATED_CHANGES;
+        assert!(!stats.is_high_memory_usage());
+
+        stats.changes_accumulated_size = MAX_ACCUMULATED_CHANGES + 1;
+        assert!(stats.is_high_memory_usage());
+    }
+
+    #[test]
+    fn test_estimated_accumulated_bytes() {
+        let stats = MemoryStats {
+            changes_accumulated_size: 10,
+            vectors_changed_since_snapshot: 0,
+            snapshots_since_full: 0,
+            total_snapshots: 0,
+            current_vectors: 0,
+        };
+        assert_eq!(stats.estimated_accumulated_bytes(), 80);
+    }
+}
