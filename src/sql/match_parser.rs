@@ -133,54 +133,47 @@ pub fn extract_match_clauses(sql: &str) -> Result<ExtractedMatch, SqlError> {
 ///
 /// Returns the byte offset of the first character of the keyword, or None.
 fn find_keyword_outside_strings(sql: &str, keyword: &str) -> Option<usize> {
-    let sql_upper = sql.to_uppercase();
-    let keyword_upper = keyword.to_uppercase();
-    let keyword_len = keyword_upper.chars().count();
+    let mut in_string = false;
+    let mut chars = sql.char_indices().peekable();
+    let keyword_len = keyword.len();
 
-    let mut i = 0;
-    let chars: Vec<char> = sql.chars().collect();
-    let upper_chars: Vec<char> = sql_upper.chars().collect();
-
-    while i < chars.len() {
-        // Skip string literals
-        if chars[i] == '\'' {
-            i += 1;
-            while i < chars.len() {
-                if chars[i] == '\'' {
-                    // Check for escaped quote ''
-                    if i + 1 < chars.len() && chars[i + 1] == '\'' {
-                        i += 2;
-                    } else {
-                        i += 1;
-                        break;
-                    }
+    while let Some((idx, c)) = chars.next() {
+        if c == '\'' {
+            if in_string {
+                if let Some(&(_, '\'')) = chars.peek() {
+                    chars.next(); // Skip escaped quote
+                    continue;
                 } else {
-                    i += 1;
+                    in_string = false;
                 }
+            } else {
+                in_string = true;
             }
             continue;
         }
 
-        // Check if we have the keyword at this position
-        if i + keyword_len <= upper_chars.len() {
-            let candidate: String = upper_chars[i..i + keyword_len].iter().collect();
-            if candidate == keyword_upper {
-                // Ensure it's a word boundary (not part of a larger identifier)
-                let before_ok = i == 0 || !chars[i - 1].is_alphanumeric() && chars[i - 1] != '_';
-                let after_ok = i + keyword_len >= chars.len()
-                    || !chars[i + keyword_len].is_alphanumeric() && chars[i + keyword_len] != '_';
+        if !in_string {
+            let tail = &sql[idx..];
+            if tail.len() >= keyword_len && tail.is_char_boundary(keyword_len) {
+                let candidate = &tail[..keyword_len];
+                if candidate.eq_ignore_ascii_case(keyword) {
+                    let before_ok = idx == 0 || {
+                        let prev_char = sql[..idx].chars().next_back().unwrap();
+                        !prev_char.is_alphanumeric() && prev_char != '_'
+                    };
+                    let after_idx = idx + keyword_len;
+                    let after_ok = after_idx >= sql.len() || {
+                        let next_char = sql[after_idx..].chars().next().unwrap();
+                        !next_char.is_alphanumeric() && next_char != '_'
+                    };
 
-                if before_ok && after_ok {
-                    // Calculate byte offset
-                    let byte_offset: usize = sql.chars().take(i).map(|c| c.len_utf8()).sum();
-                    return Some(byte_offset);
+                    if before_ok && after_ok {
+                        return Some(idx);
+                    }
                 }
             }
         }
-
-        i += 1;
     }
-
     None
 }
 

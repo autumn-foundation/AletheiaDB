@@ -77,3 +77,7 @@
 **Pre-allocating Vec Capacities in Hot Paths**
 **Learning:** Pre-allocating standard Rust `Vec` objects using `Vec::with_capacity` in hot-paths like parsers and query planners eliminates unnecessary heap reallocations (0 -> 4 -> 8 -> 16 etc.), without changing semantics or causing borrow checker issues. However, if the expected bounds are wildly incorrect it could lead to memory bloat. A small capacity for small collections minimizes performance impacts in hot loops.
 **Action:** When a loop dynamically pushes elements to a new empty Vector (especially in repeated execution domains like parsers and network/storage iterators), replace `Vec::new()` with `Vec::with_capacity(n)` if a typical or max size `n` is roughly known.
+
+**Optimize String Lookups inside SQL Parsers**
+**Learning:** Functions like `find_outside_strings` and `find_keyword_outside_strings` within `src/sql/` used `Vec<char>` allocations (`sql.chars().collect()`) combined with nested `to_uppercase()` resulting in multiple redundant heap allocations on hot parsing paths.
+**Action:** Use `sql.char_indices().peekable()` to iterate without allocation. Use `starts_with()` and `eq_ignore_ascii_case()` directly on string slices (`&sql[idx..]`) to test for matches, guaranteeing 0-cost abstractions without heap fragmentation.

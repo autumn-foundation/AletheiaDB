@@ -326,51 +326,37 @@ fn rfind_ascii_ci(haystack: &str, needle: &str) -> Option<usize> {
 /// Find a substring outside of single-quoted string literals.
 /// Returns the byte position of the first match, or None.
 fn find_outside_strings(sql: &str, needle: &str) -> Option<usize> {
-    let chars: Vec<char> = sql.chars().collect();
-    let needle_chars: Vec<char> = needle.chars().collect();
-    let needle_len = needle_chars.len();
+    let mut in_string = false;
+    let mut chars = sql.char_indices().peekable();
+    let needle_len = needle.len();
 
-    let mut i = 0;
-    while i < chars.len() {
-        // Skip single-quoted strings
-        if chars[i] == '\'' {
-            i += 1;
-            while i < chars.len() {
-                if chars[i] == '\'' {
-                    if i + 1 < chars.len() && chars[i + 1] == '\'' {
-                        i += 2; // escaped quote
-                    } else {
-                        i += 1;
-                        break;
-                    }
+    let is_operator = needle.starts_with('<') || needle.starts_with('>');
+
+    while let Some((idx, c)) = chars.next() {
+        if c == '\'' {
+            if in_string {
+                if let Some(&(_, '\'')) = chars.peek() {
+                    chars.next(); // Skip escaped quote
+                    continue;
                 } else {
-                    i += 1;
+                    in_string = false;
                 }
+            } else {
+                in_string = true;
             }
             continue;
         }
 
-        // Check for needle match
-        if i + needle_len <= chars.len() {
-            let candidate: String = chars[i..i + needle_len].iter().collect();
-            if candidate == needle {
-                // Convert char index to byte offset
-                let byte_offset: usize = chars[..i].iter().map(|c| c.len_utf8()).sum();
-                return Some(byte_offset);
-            }
-            // Also check case-insensitive for keyword-like needles (not operators)
-            if !needle.starts_with('<')
-                && !needle.starts_with('>')
-                && candidate.to_uppercase() == needle.to_uppercase()
-            {
-                let byte_offset: usize = chars[..i].iter().map(|c| c.len_utf8()).sum();
-                return Some(byte_offset);
+        if !in_string {
+            let tail = &sql[idx..];
+            if tail.len() >= needle_len && tail.is_char_boundary(needle_len) {
+                let candidate = &tail[..needle_len];
+                if candidate == needle || (!is_operator && candidate.eq_ignore_ascii_case(needle)) {
+                    return Some(idx);
+                }
             }
         }
-
-        i += 1;
     }
-
     None
 }
 
