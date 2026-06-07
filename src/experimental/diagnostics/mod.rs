@@ -11,6 +11,7 @@ pub mod entanglement;
 pub mod fossil;
 pub mod polygraph;
 pub mod ripple;
+pub mod schrodinger;
 pub mod sentinel;
 pub mod thermos;
 pub mod tremor;
