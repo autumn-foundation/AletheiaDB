@@ -37,3 +37,6 @@
 **[Fix `execute_traversal` target shards bug]**
 **Learning:** `plan.steps` from `route_traversal` returns empty list, and we need `involved_shards`
 **Action:** Replace `steps` with `involved_shards` and update the test.
+**[Handling Invalid Bin Sizes in RippleConfig]**
+**Learning:** Found a division by zero panic risk in `RippleDetector::compute_flux` when `RippleConfig::bin_size_us` is zero or less. I initially attempted to return `StorageError::InvalidInput` but discovered `core::error::StorageError` doesn't have an `InvalidInput` variant.
+**Action:** Use `StorageError::InconsistentState { reason: String }` for custom validation errors like "bin_size_us must be strictly positive" when `InvalidInput` isn't available. Ensure both Red (failing test) and Green (code fix) phases are completed to prevent CI failures.

@@ -164,6 +164,12 @@ impl<'a> RippleDetector<'a> {
         let end_time = config.window.end().wallclock();
         let duration = end_time - start_time;
 
+        if config.bin_size_us <= 0 {
+            return Err(Error::Storage(StorageError::InconsistentState {
+                reason: "RippleConfig bin_size_us must be strictly positive".to_string(),
+            }));
+        }
+
         if duration <= 0 {
             return Ok(Vec::new());
         }
@@ -295,6 +301,23 @@ mod tests {
     use crate::api::transaction::WriteOps;
     use crate::core::property::PropertyMapBuilder;
     use crate::core::temporal::time;
+
+    #[test]
+    fn test_zero_bin_size_returns_error() {
+        let db = AletheiaDB::new().unwrap();
+        let detector = RippleDetector::new(&db);
+        let config = RippleConfig {
+            window: TimeRange::new(0.into(), 1000.into()).unwrap(),
+            bin_size_us: 0,
+            max_lag_bins: 5,
+            min_correlation: 0.8,
+        };
+
+        // We don't need real nodes if it errors early, but let's pass a dummy id.
+        let a = crate::core::id::NodeId::new(1).unwrap();
+        let result = detector.detect_causality(a, a, &config, "vec");
+        assert!(result.is_err(), "Expected error for bin_size_us <= 0");
+    }
 
     #[test]
     fn test_ripple_exact_match_zero_lag() {
