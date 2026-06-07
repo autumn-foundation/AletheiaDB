@@ -346,3 +346,10 @@
 **Finding:** The `LimitPushdown` tests originally missed several behavioral edge cases and logic checks, particularly regarding the propagation limits in BinaryOp combinations (`||`), updating limit values correctly against child bounds, and setting vector rank limits.
 **Evidence:** `cargo mutants` caught mutants in `LimitPushdown::push_down` specifically targeting the changed boolean condition logic and bounds assignment.
 **Recommendation:** Added `sentry_tests` to `LimitPushdown` that explicitly trigger tests enforcing the boolean change propagation, verifying that updated properties reflect correct nested limits, and vector bounds assignment. Tests now prevent `||` to `&&` mutations and correct top-k modifications.
+
+**[Corrupted Edge Version Chain Testing]**
+**Module:** `src/storage/historical/tests.rs`
+**Severity:** 🔴 Critical
+**Finding:** The error path in `reconstruct_edge_properties_iterative` for detecting a corrupted delta version chain (a delta version with a missing `prev_version` pointer) was untested. While `test_corrupted_version_chain_delta_no_prev_version` handled this for nodes, there was no equivalent test for edges, leaving a gap where changes to the edge-specific reconstruction logic could silently fail or panic without failing tests.
+**Evidence:** Searching the codebase revealed `test_corrupted_version_chain_delta_no_prev_version` for nodes but no equivalent for edges. Mutation testing would likely have shown that the `prev_id.ok_or_else` failure case inside `reconstruct_edge_properties_iterative` could be mutated (e.g. replaced with returning Ok or returning a different error) without tests noticing.
+**Recommendation:** Added `test_edge_corrupted_version_chain_delta_no_prev_version` to `src/storage/historical/tests.rs`. This test manually crafts an edge delta version with `prev_version = None` and verifies that the `CorruptedVersionChain` error is specifically triggered with the exact expected payload.

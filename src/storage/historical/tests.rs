@@ -4907,3 +4907,69 @@ fn test_reconstruct_nonexistent_edge_version_returns_version_not_found() {
         err => panic!("Expected VersionNotFound for a never-added edge version, got: {err:?}"),
     }
 }
+
+#[test]
+fn test_edge_corrupted_version_chain_delta_no_prev_version() {
+    // Verifies that a delta edge version with a None prev_version link is detected
+    // as a corrupted chain during property reconstruction.
+    //
+    // This exercises the error path in reconstruct_edge_properties_iterative
+    // at the "Delta version has no previous version" check.
+    use crate::core::version::EdgeVersion;
+
+    let mut storage = HistoricalStorage::new();
+    let edge_id = crate::core::id::EdgeId::new(42).unwrap();
+    let source_id = NodeId::new(1).unwrap();
+    let target_id = NodeId::new(2).unwrap();
+    let label = GLOBAL_INTERNER.intern("CorruptEdgeTest").unwrap();
+
+    // Create a valid anchor version first
+    let e0_id = VersionId::new(1).unwrap();
+    storage
+        .add_edge_version(
+            edge_id,
+            e0_id,
+            1000.into(),
+            1000.into(),
+            label,
+            source_id,
+            target_id,
+            PropertyMapBuilder::new().insert("weight", 10i64).build(),
+            false,
+        )
+        .unwrap();
+
+    // Manually create a delta version then corrupt it by setting prev_version = None.
+    // This simulates a broken chain where the delta has no link back to the anchor.
+    let e1_id = VersionId::new(2).unwrap();
+    let mut e1 = EdgeVersion::new_delta(
+        e1_id,
+        edge_id,
+        BiTemporalInterval::current(2000.into()),
+        label,
+        source_id,
+        target_id,
+        &PropertyMapBuilder::new().insert("weight", 10i64).build(),
+        &PropertyMapBuilder::new().insert("weight", 20i64).build(),
+        e0_id,
+    );
+    e1.prev_version = None; // Deliberately corrupt: remove backward link
+
+    storage.insert_restored_edge_version(e1).unwrap();
+    storage.__test_clear_edge_property_cache();
+
+    // Reconstruction of e1 must fail with a specific corruption error
+    let result = storage.reconstruct_edge_properties(e1_id);
+    assert!(result.is_err(), "Expected error for corrupted chain");
+    match result.unwrap_err() {
+        crate::core::error::Error::Temporal(
+            crate::core::error::TemporalError::CorruptedVersionChain { reason, .. },
+        ) => {
+            assert!(
+                reason.contains("no previous version"),
+                "Expected 'no previous version' in reason, got: {reason}"
+            );
+        }
+        err => panic!("Expected CorruptedVersionChain, got: {err:?}"),
+    }
+}
