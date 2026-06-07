@@ -556,6 +556,10 @@ impl WriteTransaction {
 
         // Apply all changes atomically.
         // Nodes/edges are written with commit_timestamp: None during this phase.
+        // During apply_changes, both current and historical storages are updated.
+        // We acquire snapshot_lock on CurrentStorage to prevent partial checkpoints.
+        let _lock = self.current.snapshot_lock.read();
+
         apply::apply_changes(self, commit_timestamp)?;
 
         // Notify temporal vector index of transaction completion (for snapshot creation)

@@ -655,8 +655,7 @@ impl CurrentStorage {
     /// Does not generate IDs - caller must provide them.
     #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn insert_node_direct(&self, node: Node, timestamp: Timestamp) -> Result<()> {
-        // Synchronize with snapshot creation
-        let _lock = self.snapshot_lock.read();
+        // Note: The transaction layer holds snapshot_lock during apply_changes
         // CRITICAL: Index vector BEFORE inserting node. If vector indexing fails,
         // we have not modified any graph state, so we can safely return error without rollback.
         // This prevents the VS-030 bug where transaction-created nodes bypassed indexing,
@@ -676,8 +675,7 @@ impl CurrentStorage {
     /// Does not generate IDs or rebuild adjacency - caller must handle.
     #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn insert_edge_direct(&self, edge: Edge) -> Result<()> {
-        // Synchronize with snapshot creation
-        let _lock = self.snapshot_lock.read();
+        // Note: The transaction layer holds snapshot_lock during apply_changes
         self.indexes.insert_edge(edge);
         Ok(())
     }
@@ -685,8 +683,7 @@ impl CurrentStorage {
     /// Update a node directly (used by WriteTransaction).
     #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn update_node_direct(&self, node: Node, timestamp: Timestamp) -> Result<()> {
-        // Synchronize with snapshot creation
-        let _lock = self.snapshot_lock.read();
+        // Note: The transaction layer holds snapshot_lock during apply_changes
         // Save old node for vector index update
         let old_props = self.indexes.with_node(node.id, |n| n.properties.clone());
 
@@ -724,8 +721,7 @@ impl CurrentStorage {
     /// Update an edge directly (used by WriteTransaction).
     #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn update_edge_direct(&self, edge: Edge) -> Result<()> {
-        // Synchronize with snapshot creation
-        let _lock = self.snapshot_lock.read();
+        // Note: The transaction layer holds snapshot_lock during apply_changes
         // Remove old version and insert new
         self.indexes.insert_edge(edge);
         Ok(())
@@ -734,8 +730,7 @@ impl CurrentStorage {
     /// Delete a node directly (used by WriteTransaction).
     #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn delete_node_direct(&self, id: NodeId, timestamp: Timestamp) -> Result<()> {
-        // Synchronize with snapshot creation
-        let _lock = self.snapshot_lock.read();
+        // Note: The transaction layer holds snapshot_lock during apply_changes
         self.indexes
             .remove_node(id)
             .ok_or(StorageError::NodeNotFound(id))?;
@@ -752,8 +747,7 @@ impl CurrentStorage {
     /// Delete an edge directly (used by WriteTransaction).
     #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn delete_edge_direct(&self, id: EdgeId) -> Result<()> {
-        // Synchronize with snapshot creation
-        let _lock = self.snapshot_lock.read();
+        // Note: The transaction layer holds snapshot_lock during apply_changes
         self.indexes
             .remove_edge(id)
             .ok_or(StorageError::EdgeNotFound(id))?;
