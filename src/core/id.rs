@@ -355,6 +355,19 @@ impl IdGenerator {
     /// 3. The cost is per-ID, not per-operation on the graph
     ///
     /// See [issue #21](https://github.com/madmax983/AletheiaDB/issues/21) for context.
+    ///
+    /// ## Examples
+    ///
+    /// ```
+    /// use aletheiadb::core::IdGenerator;
+    ///
+    /// # fn main() {
+    /// let generator = IdGenerator::new();
+    /// let id1 = generator.next().unwrap();
+    /// let id2 = generator.next().unwrap();
+    /// assert!(id2 > id1);
+    /// # }
+    /// ```
     #[inline]
     pub fn next(&self) -> Result<u64, StorageError> {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);

@@ -155,6 +155,19 @@ impl VectorDelta {
     /// - Vectors have different dimensions
     /// - Vectors are identical (no changes)
     /// - Vector dimension exceeds MAX_VECTOR_DIMENSIONS
+    ///
+    /// ## Examples
+    ///
+    /// ```
+    /// use aletheiadb::core::version::VectorDelta;
+    ///
+    /// let old = vec![1.0, 2.0, 3.0, 4.0];
+    /// let new = vec![1.0, 9.0, 3.0, 4.0];
+    ///
+    /// // A sparse delta is created because <50% changed
+    /// let delta = VectorDelta::from_diff(&old, &new).unwrap();
+    /// assert!(matches!(delta, VectorDelta::Sparse { .. }));
+    /// ```
     pub fn from_diff(old: &[f32], new: &[f32]) -> Option<Self> {
         if old.len() != new.len() {
             return None;
@@ -201,7 +214,20 @@ impl VectorDelta {
 
     /// Apply this delta to a base vector, producing the new vector.
     ///
-    /// # Panics (Debug Only)
+    /// ## Examples
+    ///
+    /// ```
+    /// use aletheiadb::core::version::VectorDelta;
+    ///
+    /// let old = vec![1.0, 2.0, 3.0];
+    /// let new = vec![1.0, 9.0, 3.0];
+    /// let delta = VectorDelta::from_diff(&old, &new).unwrap();
+    ///
+    /// let applied = delta.apply(&old);
+    /// assert_eq!(applied, new);
+    /// ```
+    ///
+    /// ## Panics (Debug Only)
     ///
     /// In debug builds, panics if the base vector dimension doesn't match the
     /// expected dimension. In release builds, returns base unchanged on mismatch.
@@ -414,6 +440,19 @@ impl PropertyDelta {
     /// 2. Uses Arc::clone() for property values (O(1) refcount increment)
     /// 3. Uses sparse vector deltas when beneficial (Issue #215)
     /// 4. PropertyKey is InternedString (O(1) copy) - Issue #202
+    ///
+    /// ## Examples
+    ///
+    /// ```
+    /// use aletheiadb::core::PropertyMapBuilder;
+    /// use aletheiadb::core::version::PropertyDelta;
+    ///
+    /// let old = PropertyMapBuilder::new().insert("a", 1).insert("b", 2).build();
+    /// let new = PropertyMapBuilder::new().insert("a", 1).insert("b", 3).build();
+    ///
+    /// let delta = PropertyDelta::from_diff(&old, &new);
+    /// assert_eq!(delta.changed.len(), 1); // "b" changed
+    /// ```
     pub fn from_diff(old: &PropertyMap, new: &PropertyMap) -> Self {
         // Fast path: if the maps are identical (Arc pointer equality), the delta is empty.
         // This is a O(1) check that avoids iterating over the map content.
