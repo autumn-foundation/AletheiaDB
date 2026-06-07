@@ -1047,7 +1047,6 @@ mod tests {
 
     #[test]
     fn test_id_generator_concurrent_uniqueness() {
-        use std::collections::HashSet;
         use std::sync::Arc;
         use std::thread;
 
@@ -1092,7 +1091,10 @@ mod tests {
         );
 
         // CRITICAL: Verify all IDs are unique (no duplicates)
-        let unique_ids: HashSet<_> = all_ids.iter().copied().collect();
+        all_ids.sort_unstable();
+        let mut unique_ids = all_ids.clone();
+        unique_ids.dedup();
+
         assert_eq!(
             unique_ids.len(),
             all_ids.len(),
@@ -1111,9 +1113,7 @@ mod tests {
         }
 
         // Verify IDs form a contiguous sequence from 0 to total_ids-1
-        let mut sorted_ids = all_ids.clone();
-        sorted_ids.sort_unstable();
-        for (i, id) in sorted_ids.iter().enumerate() {
+        for (i, id) in all_ids.iter().enumerate() {
             assert_eq!(
                 *id, i as u64,
                 "Expected ID {} at position {} but found {}",
@@ -1127,7 +1127,7 @@ mod tests {
         println!("  Total IDs generated: {}", all_ids.len());
         println!("  Unique IDs: {}", unique_ids.len());
         println!("  Duplicates: 0 ✓");
-        println!("  ID range: 0 - {}", sorted_ids.last().unwrap());
+        println!("  ID range: 0 - {}", all_ids.last().unwrap());
     }
 
     #[test]
