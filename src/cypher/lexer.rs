@@ -574,11 +574,10 @@ impl<'a> CypherLexer<'a> {
         }
 
         // Check for decimal point followed by digit (not `..` which is DotDot)
-        if let Some(&(_, '.')) = self.chars.peek() {
-            let mut lookahead = self.chars.clone();
-            lookahead.next(); // skip the '.'
-            match lookahead.peek() {
-                Some(&(_, ch)) if ch.is_ascii_digit() => {
+        if let Some(&(pos, '.')) = self.chars.peek() {
+            let next_ch = self.input.as_bytes().get(pos + 1).map(|b| *b as char);
+            match next_ch {
+                Some(ch) if ch.is_ascii_digit() => {
                     is_float = true;
                     self.advance(); // consume '.'
                     while let Some(&(_, ch)) = self.chars.peek() {
