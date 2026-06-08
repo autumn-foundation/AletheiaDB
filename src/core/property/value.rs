@@ -63,20 +63,32 @@ pub enum PropertyValue {
 
 impl PartialEq for PropertyValue {
     fn eq(&self, other: &Self) -> bool {
-        match (self, other) {
-            (PropertyValue::Null, PropertyValue::Null) => true,
-            (PropertyValue::Bool(a), PropertyValue::Bool(b)) => a == b,
-            (PropertyValue::Int(a), PropertyValue::Int(b)) => a == b,
-            (PropertyValue::Float(a), PropertyValue::Float(b)) => a == b,
-            (PropertyValue::String(a), PropertyValue::String(b)) => Arc::ptr_eq(a, b) || a == b,
-            (PropertyValue::Bytes(a), PropertyValue::Bytes(b)) => Arc::ptr_eq(a, b) || a == b,
-            (PropertyValue::Array(a), PropertyValue::Array(b)) => Arc::ptr_eq(a, b) || a == b,
-            (PropertyValue::Vector(a), PropertyValue::Vector(b)) => Arc::ptr_eq(a, b) || a == b,
-            (PropertyValue::SparseVector(a), PropertyValue::SparseVector(b)) => {
-                Arc::ptr_eq(a, b) || a == b
+        let mut stack = vec![(self, other)];
+
+        while let Some((a_val, b_val)) = stack.pop() {
+            match (a_val, b_val) {
+                (PropertyValue::Null, PropertyValue::Null) => {}
+                (PropertyValue::Bool(a), PropertyValue::Bool(b)) if a == b => {}
+                (PropertyValue::Int(a), PropertyValue::Int(b)) if a == b => {}
+                (PropertyValue::Float(a), PropertyValue::Float(b)) if a == b => {}
+                (PropertyValue::String(a), PropertyValue::String(b)) if Arc::ptr_eq(a, b) || a == b => {}
+                (PropertyValue::Bytes(a), PropertyValue::Bytes(b)) if Arc::ptr_eq(a, b) || a == b => {}
+                (PropertyValue::Vector(a), PropertyValue::Vector(b)) if Arc::ptr_eq(a, b) || a == b => {}
+                (PropertyValue::SparseVector(a), PropertyValue::SparseVector(b)) if Arc::ptr_eq(a, b) || a == b => {}
+                (PropertyValue::Array(a), PropertyValue::Array(b)) => {
+                    if !Arc::ptr_eq(a, b) {
+                        if a.len() != b.len() {
+                            return false;
+                        }
+                        for (a_item, b_item) in a.iter().zip(b.iter()) {
+                            stack.push((a_item, b_item));
+                        }
+                    }
+                }
+                _ => return false,
             }
-            _ => false,
         }
+        true
     }
 }
 
