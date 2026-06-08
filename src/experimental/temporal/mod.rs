@@ -8,6 +8,7 @@
 
 pub mod ariadne;
 pub mod aura;
+pub mod cascade;
 pub mod chronos;
 pub mod echo;
 pub mod kairos;
