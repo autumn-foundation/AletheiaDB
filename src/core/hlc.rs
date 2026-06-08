@@ -1241,4 +1241,23 @@ mod sentinel_evaluate_clock_skew_tests {
         let err_f = result_forward_strict.unwrap_err();
         assert_eq!(err_f.direction, ClockSkewDirection::Forward);
     }
+
+    #[test]
+    fn should_return_error_when_increment_logical_overflows() {
+        // Create an HLC timestamp with logical max value
+        let wallclock = 12345;
+        let result = HybridTimestamp::increment_logical(u32::MAX, wallclock);
+
+        assert!(result.is_err());
+        match result {
+            Err(TemporalError::LogicalCounterOverflow {
+                wallclock: w,
+                current_logical: l,
+            }) => {
+                assert_eq!(w, wallclock);
+                assert_eq!(l, u32::MAX);
+            }
+            _ => panic!("Expected LogicalCounterOverflow error"),
+        }
+    }
 }

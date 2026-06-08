@@ -37,3 +37,11 @@
 **[Fix `execute_traversal` target shards bug]**
 **Learning:** `plan.steps` from `route_traversal` returns empty list, and we need `involved_shards`
 **Action:** Replace `steps` with `involved_shards` and update the test.
+
+**AletheiaDB Serialization Panic Guards**
+**Learning:** During extensive auditing of `try_into().unwrap()` in AletheiaDB's vector, mapping, and HLC parsers, no unguarded panics were found. Every occurrence of `from_le_bytes(bytes[A..B].try_into().unwrap())` is explicitly guarded by preceding `if bytes.len() < X` checks.
+**Action:** Use these modules as an example of correct defensive serialization programming in Rust, returning `StorageError::CorruptedData` instead of panicking on malformed user input.
+
+**AletheiaDB Serialization Panic Guards**
+**Learning:** During extensive auditing of `try_into().unwrap()` in AletheiaDB's vector, mapping, and HLC parsers, no unguarded panics were found. Every occurrence of `from_le_bytes(bytes[A..B].try_into().unwrap())` is explicitly guarded by preceding `if bytes.len() < X` checks.
+**Action:** Use these modules as an example of correct defensive serialization programming in Rust, returning `StorageError::CorruptedData` instead of panicking on malformed user input.
