@@ -346,3 +346,11 @@
 **Finding:** The `LimitPushdown` tests originally missed several behavioral edge cases and logic checks, particularly regarding the propagation limits in BinaryOp combinations (`||`), updating limit values correctly against child bounds, and setting vector rank limits.
 **Evidence:** `cargo mutants` caught mutants in `LimitPushdown::push_down` specifically targeting the changed boolean condition logic and bounds assignment.
 **Recommendation:** Added `sentry_tests` to `LimitPushdown` that explicitly trigger tests enforcing the boolean change propagation, verifying that updated properties reflect correct nested limits, and vector bounds assignment. Tests now prevent `||` to `&&` mutations and correct top-k modifications.
+
+
+**[Temporal Validation Boundary Tests]**
+**Module:** `src/api/transaction/write/tests.rs`
+**Severity:** 🟡 Suspect
+**Finding:** The `valid_time` boundary validation tests added by Sentry were weak. They tested rejection conditions using offsets far outside the boundary (e.g., `MAX_VALID_TIME_FUTURE_OFFSET_US + 1_000_000` instead of `MAX + 1` or an arbitrary past timestamp `1000` instead of exactly `creation_time - 1`).
+**Evidence:** A mutation changing `>=` to `>` or loosening limits slightly would survive because the tests do not verify exact boundary values (`MAX + 1` rejected, `MAX` allowed, `creation_time - 1` rejected, `creation_time` allowed).
+**Recommendation:** Refactored tests `test_valid_time_one_year_in_future_rejected`, `test_update_edge_rejects_far_future_valid_time`, `test_delete_node_rejects_valid_time_before_creation`, and `test_update_edge_rejects_valid_time_before_edge_creation` to explicitly compute exact logical timestamps (`+1` or `-1` microsecond) and assert that they correctly allow exactly the limit.

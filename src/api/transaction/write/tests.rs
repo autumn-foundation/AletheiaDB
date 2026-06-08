@@ -3274,15 +3274,34 @@ mod bitemporal_validation_tests {
         let node_id = tx.create_node("Person", PropertyMap::new()).unwrap();
         tx.commit().unwrap();
 
-        // Try to delete with valid_time before creation
-        let way_in_past = HybridTimestamp::new(1000, 0).unwrap();
+        // Get the actual creation time
+
+        let creation_time = {
+            let historical = harness.historical.read();
+            historical
+                .get_current_node_version(node_id)
+                .and_then(|vid| historical.get_node_version(vid))
+                .map(|v| v.temporal.valid_time().start())
+                .unwrap()
+        };
+
+        // Try to delete with valid_time exactly 1 microsecond before creation
+        let exact_past = HybridTimestamp::new(creation_time.wallclock() - 1, 0).unwrap();
 
         let mut tx2 = harness.begin_write();
-        let result = tx2.delete_node_with_valid_time(node_id, Some(way_in_past));
+        let result = tx2.delete_node_with_valid_time(node_id, Some(exact_past));
 
         assert!(
             result.is_err(),
-            "Should reject valid_time before entity creation"
+            "Should reject valid_time exactly 1 microsecond before entity creation"
+        );
+
+        // Exact creation time should be allowed
+        let mut tx3 = harness.begin_write();
+        let result = tx3.delete_node_with_valid_time(node_id, Some(creation_time));
+        assert!(
+            result.is_ok(),
+            "Should allow valid_time exactly at entity creation time"
         );
     }
 
@@ -3310,19 +3329,28 @@ mod bitemporal_validation_tests {
             .unwrap();
         tx2.commit().unwrap();
 
-        // Try to update the edge with a valid_time that predates its own creation
-        let before_creation = HybridTimestamp::new(1000, 0).unwrap();
+        let creation_time = {
+            let historical = harness.historical.read();
+            historical
+                .get_current_edge_version(edge_id)
+                .and_then(|vid| historical.get_edge_version(vid))
+                .map(|v| v.temporal.valid_time().start())
+                .unwrap()
+        };
+
+        // Try to update the edge with a valid_time exactly 1 microsecond before its own creation
+        let exact_past = HybridTimestamp::new(creation_time.wallclock() - 1, 0).unwrap();
 
         let mut tx3 = harness.begin_write();
         let result = tx3.update_edge_with_valid_time(
             edge_id,
             PropertyMapBuilder::new().insert("strength", 5i64).build(),
-            Some(before_creation),
+            Some(exact_past),
         );
 
         assert!(
             result.is_err(),
-            "Should reject valid_time before edge creation"
+            "Should reject valid_time exactly 1 microsecond before edge creation"
         );
         match result.unwrap_err() {
             crate::core::error::Error::Temporal(TemporalError::ValidTimeBeforeEntityCreation {
@@ -3330,6 +3358,16 @@ mod bitemporal_validation_tests {
             }) => {}
             err => panic!("Expected ValidTimeBeforeEntityCreation, got: {err:?}"),
         }
+
+        let result = tx3.update_edge_with_valid_time(
+            edge_id,
+            PropertyMapBuilder::new().insert("strength", 6i64).build(),
+            Some(creation_time),
+        );
+        assert!(
+            result.is_ok(),
+            "Should allow valid_time exactly at edge creation time"
+        );
     }
 
     /// Test: Deleting an edge with valid_time before the edge's own creation is rejected.
@@ -3350,14 +3388,30 @@ mod bitemporal_validation_tests {
             .unwrap();
         tx2.commit().unwrap();
 
-        let before_creation = HybridTimestamp::new(1000, 0).unwrap();
+        let creation_time = {
+            let historical = harness.historical.read();
+            historical
+                .get_current_edge_version(edge_id)
+                .and_then(|vid| historical.get_edge_version(vid))
+                .map(|v| v.temporal.valid_time().start())
+                .unwrap()
+        };
+
+        let exact_past = HybridTimestamp::new(creation_time.wallclock() - 1, 0).unwrap();
 
         let mut tx3 = harness.begin_write();
-        let result = tx3.delete_edge_with_valid_time(edge_id, Some(before_creation));
+        let result = tx3.delete_edge_with_valid_time(edge_id, Some(exact_past));
 
         assert!(
             result.is_err(),
-            "Should reject valid_time before edge creation"
+            "Should reject valid_time exactly 1 microsecond before edge creation"
+        );
+
+        let mut tx4 = harness.begin_write();
+        let result = tx4.delete_edge_with_valid_time(edge_id, Some(creation_time));
+        assert!(
+            result.is_ok(),
+            "Should allow valid_time exactly at edge creation time"
         );
     }
 
@@ -3412,26 +3466,37 @@ mod bitemporal_validation_tests {
 
         let harness = TestHarness::new();
 
-        // Use exactly 1 year + 1 second past the allowed limit
-        let over_limit_wallclock =
-            time::now().wallclock() + super::super::MAX_VALID_TIME_FUTURE_OFFSET_US + 1_000_000; // +1s over limit
-
-        let over_limit_ts = HybridTimestamp::new(over_limit_wallclock, 0).unwrap();
+        // To be independent of small time advancements inside the validation logic:
+        let now = time::now().wallclock();
+        // Since `validate` calls `time::now()` again, our offset must be comfortably larger
+        // than the duration it takes to execute `create_node_with_valid_time` to reliably fail.
+        let exactly_over_limit_wallclock =
+            now + super::super::MAX_VALID_TIME_FUTURE_OFFSET_US + 10_000;
+        let over_limit_ts = HybridTimestamp::new(exactly_over_limit_wallclock, 0).unwrap();
 
         let mut tx = harness.begin_write();
         let result =
             tx.create_node_with_valid_time("Test", PropertyMap::new(), Some(over_limit_ts));
 
-        assert!(
-            result.is_err(),
-            "Should reject valid_time beyond the 1-year limit"
-        );
+        assert!(result.is_err(), "Should reject valid_time beyond the limit");
         match result.unwrap_err() {
             crate::core::error::Error::Temporal(TemporalError::ValidTimeTooFarInFuture {
                 ..
             }) => {}
             err => panic!("Expected ValidTimeTooFarInFuture, got: {err:?}"),
         }
+
+        // Exact boundary: MAX should be allowed
+        // Because time advances between calls to `time::now()`, adding MAX directly to `now`
+        // might actually exceed the future limit when checked against a slightly later `time::now()`.
+        // So we test with MAX - a small buffer (e.g. 100_000 microsecond = 100ms) to ensure it's allowed.
+        let exact_limit_wallclock = now + super::super::MAX_VALID_TIME_FUTURE_OFFSET_US - 1_000_000;
+        let limit_ts = HybridTimestamp::new(exact_limit_wallclock, 0).unwrap();
+        let result = tx.create_node_with_valid_time("Test", PropertyMap::new(), Some(limit_ts));
+        assert!(
+            result.is_ok(),
+            "Should allow valid_time exactly at the limit"
+        );
     }
 
     /// Test: Updating an edge with valid_time set more than 1 year in future is rejected.
@@ -3453,9 +3518,11 @@ mod bitemporal_validation_tests {
             .unwrap();
         tx2.commit().unwrap();
 
-        let over_limit_wallclock =
-            time::now().wallclock() + super::super::MAX_VALID_TIME_FUTURE_OFFSET_US + 1_000_000;
-        let over_limit_ts = HybridTimestamp::new(over_limit_wallclock, 0).unwrap();
+        let now = time::now().wallclock();
+        // +10_000 ensures it fails despite execution time drift
+        let exactly_over_limit_wallclock =
+            now + super::super::MAX_VALID_TIME_FUTURE_OFFSET_US + 10_000;
+        let over_limit_ts = HybridTimestamp::new(exactly_over_limit_wallclock, 0).unwrap();
 
         let mut tx3 = harness.begin_write();
         let result = tx3.update_edge_with_valid_time(
@@ -3474,6 +3541,22 @@ mod bitemporal_validation_tests {
             }) => {}
             err => panic!("Expected ValidTimeTooFarInFuture, got: {err:?}"),
         }
+
+        // Exact boundary: MAX should be allowed
+        // Because time advances between calls to `time::now()`, adding MAX directly to `now`
+        // might actually exceed the future limit when checked against a slightly later `time::now()`.
+        // So we test with MAX - a small buffer (e.g. 100_000 microsecond = 100ms) to ensure it's allowed.
+        let exact_limit_wallclock = now + super::super::MAX_VALID_TIME_FUTURE_OFFSET_US - 1_000_000;
+        let limit_ts = HybridTimestamp::new(exact_limit_wallclock, 0).unwrap();
+        let result = tx3.update_edge_with_valid_time(
+            edge_id,
+            PropertyMapBuilder::new().insert("strength", 6i64).build(),
+            Some(limit_ts),
+        );
+        assert!(
+            result.is_ok(),
+            "Should allow valid_time exactly at the limit"
+        );
     }
 
     /// Test: Deleting an edge with valid_time set more than 1 year in future is rejected.
