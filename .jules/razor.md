@@ -12,3 +12,13 @@
 **Bloat:** `StorageSnapshot` and `FieldHolder` traits.
 **Cut:** Deleted single-implementation traits `StorageSnapshot` (implemented only by `CurrentStorageSnapshot`) and `FieldHolder` (implemented only by `Event`, unused except in tests). Moved methods directly to structs.
 **Saved:** ~50 lines of boilerplate + cognitive load of unnecessary abstraction layers.
+
+## [Reduction]
+**Bloat:** `Resonator` trait in `src/experimental/temporal/echo.rs` (single implementation).
+**Cut:** Removed trait and made `ActivityDensityResonator` the concrete type.
+**Saved:** ~10 lines of boilerplate + removed dynamic dispatch overhead.
+
+## [Reduction]
+**Bloat:** `VectorNodeClient` trait and associated generic bounds `<C: VectorNodeClient>` in `src/index/vector/distributed.rs`.
+**Cut:** Removed trait, renamed `MockVectorNodeClient` to the concrete struct `VectorNodeClient`, and stripped generics from `DistributedVectorIndex` and `NodeConnection`.
+**Saved:** ~50 lines of boilerplate + simplified generic signatures across multiple structs and impl blocks.
