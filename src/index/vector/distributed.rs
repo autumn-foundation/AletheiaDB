@@ -486,7 +486,7 @@ impl NodeConnection {
         }
     }
 
-        /// Get the node ID.
+    /// Get the node ID.
     pub fn node_id(&self) -> u16 {
         self.client.node_id()
     }
@@ -1326,7 +1326,7 @@ impl VectorNodeClient {
 }
 
 impl VectorNodeClient {
-        /// Get the node ID.
+    /// Get the node ID.
     pub fn node_id(&self) -> u16 {
         self.node_id
     }

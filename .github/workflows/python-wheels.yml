@@ -129,8 +129,7 @@ jobs:
       - name: Install wheel
         run: pip install --find-links dist aletheiadb pytest
       - name: Run tests
-        working-directory: python
-        run: pytest tests/ -v
+        run: pytest python/tests/ -v
 
   release:
     name: Publish to PyPI
