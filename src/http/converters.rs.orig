@@ -163,6 +163,11 @@ pub fn json_to_parameter_map(
     Ok(params)
 }
 
+/// Converts a JSON value to a ParameterValue.
+pub fn json_to_parameter_value(value: &serde_json::Value) -> Result<ParameterValue, String> {
+    json_to_parameter_value_recursive(value, 0)
+}
+
 fn json_to_parameter_value_recursive(
     value: &serde_json::Value,
     depth: usize,
