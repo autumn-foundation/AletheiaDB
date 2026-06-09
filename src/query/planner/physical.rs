@@ -2042,4 +2042,33 @@ mod tests {
         };
         assert!(op.get_input().is_none());
     }
+
+    #[test]
+    fn test_is_leaf_property_scan() {
+        use crate::query::ir::PredicateValue;
+        assert!(
+            PhysicalOp::PropertyScan {
+                label: "Person".to_string(),
+                key: "age".to_string(),
+                value: PredicateValue::Int(10),
+                estimated_rows: 100,
+            }
+            .is_leaf()
+        );
+    }
+
+    #[test]
+    fn test_depth_property_scan() {
+        use crate::query::ir::PredicateValue;
+        assert_eq!(
+            PhysicalOp::PropertyScan {
+                label: "Person".to_string(),
+                key: "age".to_string(),
+                value: PredicateValue::Int(10),
+                estimated_rows: 100,
+            }
+            .depth(),
+            1
+        );
+    }
 }

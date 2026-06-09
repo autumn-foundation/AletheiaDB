@@ -37,3 +37,6 @@
 **[Fix `execute_traversal` target shards bug]**
 **Learning:** `plan.steps` from `route_traversal` returns empty list, and we need `involved_shards`
 **Action:** Replace `steps` with `involved_shards` and update the test.
+## Missing Test Coverage for `PhysicalOp::PropertyScan`
+**Learning:** The `is_leaf` and `depth` functions for `PhysicalOp` did not have explicit test coverage for the `PropertyScan` variant, leading to potential regressions if these implementations were altered.
+**Action:** Always verify all variants in a large enum are explicitly tested in properties like `is_leaf` and `depth`, and do not assume `all_leaf_operators` tests are actually exhaustive without explicit validation. Added `test_is_leaf_property_scan` and `test_depth_property_scan` to `physical.rs`.
