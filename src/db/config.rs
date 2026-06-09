@@ -110,6 +110,17 @@ impl AletheiaDB {
     /// [`Self::open_from_env`] to honor the `ALETHEIADB_DATA_DIR` environment
     /// variable.
     ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::AletheiaDB;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let db = AletheiaDB::new()?;
+    /// // The database is ephemeral and will be removed when dropped.
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
     /// # Errors
     ///
     /// Returns an error if the temporary directory cannot be created or WAL

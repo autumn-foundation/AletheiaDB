@@ -10,3 +10,6 @@
 ## 2024-05-14 - [Adding Examples to HLC and documenting src/main.rs]
 **Confusion:** The `src/main.rs` file was missing module-level documentation (`//!`), which triggers the `missing_docs` lint, but was hidden by the lint configurations inside `src/lib.rs` affecting `src/main.rs`. Also `HybridTimestamp::send` lacked an example showing the behavior of its logical counter.
 **Clarification:** Added `//! The AletheiaDB binary.` to `src/main.rs` and added an executable `## Examples` block to `HybridTimestamp::send` in `src/core/hlc.rs`.
+## 2024-05-18 - [Missing Executeable Examples for DB Ops]
+**Confusion:** The core database operations exposed directly on `AletheiaDB` in `src/db/config.rs` and `src/db/ops.rs` lacked executable `## Examples` doc-tests, forcing users to read the test suites to figure out how to create an ephemeral DB, scan nodes, or get edges.
+**Clarification:** I added robust, executable `## Examples` using `aletheiadb::PropertyMapBuilder` to `AletheiaDB::new()`, `scan_nodes_by_label()`, and `get_outgoing_edges()`.

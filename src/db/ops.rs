@@ -31,6 +31,21 @@ impl AletheiaDB {
     /// # }
     /// ```
     ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::{AletheiaDB, PropertyMapBuilder};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let db = AletheiaDB::new()?;
+    /// db.create_node("Person", PropertyMapBuilder::new().build())?;
+    /// db.create_node("Person", PropertyMapBuilder::new().build())?;
+    ///
+    /// let count = db.scan_nodes_by_label("Person").count();
+    /// assert_eq!(count, 2);
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
     /// # See Also
     ///
     /// * [`write`](Self::write) - For batched write operations.
@@ -191,6 +206,22 @@ impl AletheiaDB {
     }
 
     /// Get outgoing edges from a node (current state).
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::{AletheiaDB, PropertyMapBuilder};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let db = AletheiaDB::new()?;
+    /// let src = db.create_node("Person", PropertyMapBuilder::new().build())?;
+    /// let target = db.create_node("Company", PropertyMapBuilder::new().build())?;
+    /// db.create_edge(src, target, "WORKS_AT", PropertyMapBuilder::new().build())?;
+    ///
+    /// let edges = db.get_outgoing_edges(src);
+    /// assert_eq!(edges.len(), 1);
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn get_outgoing_edges(&self, node_id: NodeId) -> Vec<EdgeId> {
         self.current.get_outgoing_edges(node_id)
     }
