@@ -599,35 +599,47 @@ impl PropertyDelta {
     ) -> std::result::Result<(), String> {
         // Materialize ALL vector deltas (both Sparse and Full) into regular changed properties
         // This is necessary for persistence since the persistence format doesn't support VectorDelta
-        let keys: Vec<_> = self.vector_deltas.keys().copied().collect();
+        // ⚡ Bolt Optimization: Avoid heap allocation by taking ownership of the map directly.
+        let old_deltas = std::mem::take(&mut self.vector_deltas);
+        let mut old_deltas_iter = old_deltas.into_iter();
 
-        for key in keys {
-            if let Some(vec_delta) = self.vector_deltas.remove(&key) {
-                match vec_delta {
-                    VectorDelta::Full(vec) => {
-                        // Full delta can be directly converted
-                        self.changed.insert(key, PropertyValue::Vector(vec));
-                    }
-                    VectorDelta::Sparse { .. } => {
-                        // Sparse delta requires base vector to materialize
-                        let base_value = base.get_by_interned_key(&key).ok_or_else(|| {
-                            format!(
+        while let Some((key, vec_delta)) = old_deltas_iter.next() {
+            match vec_delta {
+                VectorDelta::Full(vec) => {
+                    // Full delta can be directly converted
+                    self.changed.insert(key, PropertyValue::Vector(vec));
+                }
+                VectorDelta::Sparse { .. } => {
+                    // Sparse delta requires base vector to materialize
+                    let base_value = match base.get_by_interned_key(&key) {
+                        Some(val) => val,
+                        None => {
+                            // Restore state on error to maintain consistency
+                            self.vector_deltas.insert(key, vec_delta);
+                            self.vector_deltas.extend(old_deltas_iter);
+                            return Err(format!(
                                 "Cannot materialize sparse vector delta: base property not found for key {:?}",
                                 key
-                            )
-                        })?;
+                            ));
+                        }
+                    };
 
-                        let base_vec = base_value.as_vector().ok_or_else(|| {
-                            format!(
+                    let base_vec = match base_value.as_vector() {
+                        Some(val) => val,
+                        None => {
+                            // Restore state on error to maintain consistency
+                            self.vector_deltas.insert(key, vec_delta);
+                            self.vector_deltas.extend(old_deltas_iter);
+                            return Err(format!(
                                 "Cannot materialize sparse vector delta: base property is not a vector for key {:?}",
                                 key
-                            )
-                        })?;
+                            ));
+                        }
+                    };
 
-                        // Apply sparse delta to get full vector
-                        let new_vec = vec_delta.apply(base_vec);
-                        self.changed.insert(key, new_vec.into());
-                    }
+                    // Apply sparse delta to get full vector
+                    let new_vec = vec_delta.apply(base_vec);
+                    self.changed.insert(key, new_vec.into());
                 }
             }
         }

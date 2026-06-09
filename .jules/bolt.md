@@ -77,3 +77,7 @@
 **Pre-allocating Vec Capacities in Hot Paths**
 **Learning:** Pre-allocating standard Rust `Vec` objects using `Vec::with_capacity` in hot-paths like parsers and query planners eliminates unnecessary heap reallocations (0 -> 4 -> 8 -> 16 etc.), without changing semantics or causing borrow checker issues. However, if the expected bounds are wildly incorrect it could lead to memory bloat. A small capacity for small collections minimizes performance impacts in hot loops.
 **Action:** When a loop dynamically pushes elements to a new empty Vector (especially in repeated execution domains like parsers and network/storage iterators), replace `Vec::new()` with `Vec::with_capacity(n)` if a typical or max size `n` is roughly known.
+
+**Removed heap allocation in `materialize_vector_deltas`**
+**Learning:** Collecting elements from an iterator into a `Vec` just to iterate over them safely while modifying the source collection can be a hidden performance bottleneck, especially on hot paths like graph version snapshotting/persistence.
+**Action:** Use `std::mem::take(&mut self.map)` to efficiently extract all entries from a map into a local variable. This allows zero-allocation iteration over the entries. If an error occurs midway and the collection needs to be preserved or left in a consistent state, you can either re-insert the current item and `extend()` the rest back into the map, or simply fail closed if partial modification is acceptable.
