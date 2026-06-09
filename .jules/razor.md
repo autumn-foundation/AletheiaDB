@@ -12,3 +12,7 @@
 **Bloat:** `StorageSnapshot` and `FieldHolder` traits.
 **Cut:** Deleted single-implementation traits `StorageSnapshot` (implemented only by `CurrentStorageSnapshot`) and `FieldHolder` (implemented only by `Event`, unused except in tests). Moved methods directly to structs.
 **Saved:** ~50 lines of boilerplate + cognitive load of unnecessary abstraction layers.
+## [Reduction]
+**Bloat:** `ResultIterator` trait and `GraphView` trait.
+**Cut:** Deleted both single-implementation traits. Substituted `ResultIterator` with the standard `Iterator<Item = Result<QueryRow>>` and `GraphView` with direct references to `AletheiaDB`.
+**Saved:** Multiple files and ~150 lines of boilerplate mapping standard iterators to a custom trait.

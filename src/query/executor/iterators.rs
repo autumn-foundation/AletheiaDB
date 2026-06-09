@@ -27,24 +27,13 @@ use super::results::{EntityId, EntityResult, QueryRow};
 ///
 /// Query execution uses a pull-based iterator model, where each physical
 /// operator is implemented as an iterator. Calling `next()` pulls results
-/// sequentially through the pipeline.
-pub trait ResultIterator: Send {
-    /// Get the next result row
-    fn next(&mut self) -> Option<Result<QueryRow>>;
-
-    /// Estimate the remaining results
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        (0, None)
-    }
-}
-
-/// Empty iterator that produces no results.
 ///
 /// Used for query plans that evaluate to empty at planning time.
 pub struct EmptyIterator;
 
-impl ResultIterator for EmptyIterator {
-    fn next(&mut self) -> Option<Result<QueryRow>> {
+impl Iterator for EmptyIterator {
+    type Item = Result<QueryRow>;
+    fn next(&mut self) -> Option<Self::Item> {
         None
     }
 
@@ -88,8 +77,9 @@ impl NodeLookupIterator {
     }
 }
 
-impl ResultIterator for NodeLookupIterator {
-    fn next(&mut self) -> Option<Result<QueryRow>> {
+impl Iterator for NodeLookupIterator {
+    type Item = Result<QueryRow>;
+    fn next(&mut self) -> Option<Self::Item> {
         self.node_ids.next().map(|id| {
             self.current
                 .get_node(id)
@@ -186,8 +176,9 @@ impl NodeScanIterator {
     }
 }
 
-impl ResultIterator for NodeScanIterator {
-    fn next(&mut self) -> Option<Result<QueryRow>> {
+impl Iterator for NodeScanIterator {
+    type Item = Result<QueryRow>;
+    fn next(&mut self) -> Option<Self::Item> {
         self.initialize();
 
         loop {
@@ -236,7 +227,7 @@ impl ResultIterator for NodeScanIterator {
 /// # use aletheiadb::storage::current::CurrentStorage;
 /// # use aletheiadb::core::id::NodeId;
 /// # use aletheiadb::query::executor::VectorResultIterator;
-/// # use aletheiadb::query::executor::ResultIterator;
+/// #
 /// #
 /// # let current = Arc::new(CurrentStorage::new());
 /// # let node_id = current.create_node("Doc", aletheiadb::core::PropertyMapBuilder::new().build()).unwrap();
@@ -245,7 +236,7 @@ impl ResultIterator for NodeScanIterator {
 ///
 /// let mut iter = VectorResultIterator::new(raw_results, current);
 ///
-/// while let Some(result) = iter.next() {
+/// for result in iter.by_ref() {
 ///     let row = result.expect("Node should exist");
 ///     println!("Found node {:?} with similarity score: {}", row.entity, row.score.unwrap());
 /// }
@@ -265,8 +256,9 @@ impl VectorResultIterator {
     }
 }
 
-impl ResultIterator for VectorResultIterator {
-    fn next(&mut self) -> Option<Result<QueryRow>> {
+impl Iterator for VectorResultIterator {
+    type Item = Result<QueryRow>;
+    fn next(&mut self) -> Option<Self::Item> {
         self.results.next().map(|(node_id, score)| {
             self.current
                 .get_node(node_id)
@@ -308,7 +300,7 @@ impl ResultIterator for VectorResultIterator {
 /// # use aletheiadb::core::id::NodeId;
 /// # use aletheiadb::core::temporal::time;
 /// # use aletheiadb::query::executor::TemporalNodeIterator;
-/// # use aletheiadb::query::executor::ResultIterator;
+/// #
 /// #
 /// # let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
 /// # let node_id = NodeId::new(1).unwrap();
@@ -323,7 +315,7 @@ impl ResultIterator for VectorResultIterator {
 /// );
 ///
 /// // Iterate over the historical states
-/// while let Some(result) = iter.next() {
+/// for result in iter.by_ref() {
 ///     // Handle potential TemporalError if node didn't exist at `now`
 ///     if let Ok(row) = result {
 ///         println!("Historical node state: {:?}", row.entity);
@@ -354,8 +346,9 @@ impl TemporalNodeIterator {
     }
 }
 
-impl ResultIterator for TemporalNodeIterator {
-    fn next(&mut self) -> Option<Result<QueryRow>> {
+impl Iterator for TemporalNodeIterator {
+    type Item = Result<QueryRow>;
+    fn next(&mut self) -> Option<Self::Item> {
         self.node_ids.next().map(|id| {
             // Acquire read lock on historical storage (per-node)
             // For bulk queries, use BatchTemporalNodeIterator instead
@@ -419,7 +412,7 @@ impl ResultIterator for TemporalNodeIterator {
 /// # use aletheiadb::core::id::NodeId;
 /// # use aletheiadb::core::temporal::time;
 /// # use aletheiadb::query::executor::BatchTemporalNodeIterator;
-/// # use aletheiadb::query::executor::ResultIterator;
+/// #
 /// #
 /// # let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
 /// # let node_ids = vec![NodeId::new(1).unwrap(), NodeId::new(2).unwrap()];
@@ -503,8 +496,9 @@ impl BatchTemporalNodeIterator {
     }
 }
 
-impl ResultIterator for BatchTemporalNodeIterator {
-    fn next(&mut self) -> Option<Result<QueryRow>> {
+impl Iterator for BatchTemporalNodeIterator {
+    type Item = Result<QueryRow>;
+    fn next(&mut self) -> Option<Self::Item> {
         self.results.next()
     }
 
@@ -699,8 +693,9 @@ impl TemporalNodeScanIterator {
     }
 }
 
-impl ResultIterator for TemporalNodeScanIterator {
-    fn next(&mut self) -> Option<Result<QueryRow>> {
+impl Iterator for TemporalNodeScanIterator {
+    type Item = Result<QueryRow>;
+    fn next(&mut self) -> Option<Self::Item> {
         // Acquire read lock once for the duration of finding the next valid node
         let guard = self.historical.read();
 
@@ -749,7 +744,7 @@ impl ResultIterator for TemporalNodeScanIterator {
 /// Output: [C (from A), C (from B)]  // C appears twice
 /// ```
 pub struct TraversalIterator {
-    input: Box<dyn ResultIterator>,
+    input: Box<dyn Iterator<Item = Result<QueryRow>> + Send>,
     direction: Direction,
     label: Option<String>,
     depth: usize,
@@ -772,7 +767,7 @@ impl TraversalIterator {
     /// a frontier of visited nodes to prevent infinite loops in cyclic graphs,
     /// and conditionally queries the historical storage if a temporal context is present.
     pub fn new(
-        input: Box<dyn ResultIterator>,
+        input: Box<dyn Iterator<Item = Result<QueryRow>> + Send>,
         direction: Direction,
         label: Option<String>,
         depth: usize,
@@ -950,8 +945,9 @@ impl TraversalIterator {
     }
 }
 
-impl ResultIterator for TraversalIterator {
-    fn next(&mut self) -> Option<Result<QueryRow>> {
+impl Iterator for TraversalIterator {
+    type Item = Result<QueryRow>;
+    fn next(&mut self) -> Option<Self::Item> {
         loop {
             // Process current frontier
             if let Some((node_id, path, current_depth)) = self.frontier.pop_front() {
@@ -1031,13 +1027,16 @@ impl ResultIterator for TraversalIterator {
 ///
 /// Pulls rows from the input and yields only those matching the predicate.
 pub struct FilterIterator {
-    input: Box<dyn ResultIterator>,
+    input: Box<dyn Iterator<Item = Result<QueryRow>> + Send>,
     predicate: Predicate,
 }
 
 impl FilterIterator {
     /// Create a new FilterIterator that filters results based on the predicate.
-    pub fn new(input: Box<dyn ResultIterator>, predicate: Predicate) -> Self {
+    pub fn new(
+        input: Box<dyn Iterator<Item = Result<QueryRow>> + Send>,
+        predicate: Predicate,
+    ) -> Self {
         FilterIterator { input, predicate }
     }
 
@@ -1181,8 +1180,9 @@ impl FilterIterator {
     }
 }
 
-impl ResultIterator for FilterIterator {
-    fn next(&mut self) -> Option<Result<QueryRow>> {
+impl Iterator for FilterIterator {
+    type Item = Result<QueryRow>;
+    fn next(&mut self) -> Option<Self::Item> {
         loop {
             match self.input.next() {
                 Some(Ok(row)) => {
@@ -1237,7 +1237,7 @@ impl Ord for ScoredRow {
 /// Iterator for vector reranking.
 pub struct VectorRerankIterator {
     sorted: Option<std::vec::IntoIter<Reverse<ScoredRow>>>,
-    input: Option<Box<dyn ResultIterator>>,
+    input: Option<Box<dyn Iterator<Item = Result<QueryRow>> + Send>>,
     embedding: Arc<[f32]>,
     k: usize,
     _current: Arc<CurrentStorage>,
@@ -1255,7 +1255,7 @@ impl VectorRerankIterator {
     /// * `current` - Reference to current storage
     /// * `property_key` - Optional property to use for reranking. If None, uses default.
     pub fn new(
-        input: Box<dyn ResultIterator>,
+        input: Box<dyn Iterator<Item = Result<QueryRow>> + Send>,
         embedding: Arc<[f32]>,
         k: usize,
         current: Arc<CurrentStorage>,
@@ -1297,8 +1297,9 @@ impl VectorRerankIterator {
     }
 }
 
-impl ResultIterator for VectorRerankIterator {
-    fn next(&mut self) -> Option<Result<QueryRow>> {
+impl Iterator for VectorRerankIterator {
+    type Item = Result<QueryRow>;
+    fn next(&mut self) -> Option<Self::Item> {
         // Lazy initialization: collect and sort on first call
         if self.sorted.is_none() && self.input.is_some() {
             // Check if vector index is configured
@@ -1315,11 +1316,11 @@ impl ResultIterator for VectorRerankIterator {
                 }
             };
 
-            let mut input = self.input.take()?;
+            let input = self.input.take()?;
             // Use a min-heap to keep the top-k results
             let mut heap = BinaryHeap::with_capacity(self.k);
 
-            while let Some(result) = input.next() {
+            for result in input {
                 match result {
                     Ok(row) => {
                         // Get vector from node and compute similarity
@@ -1388,7 +1389,7 @@ impl ResultIterator for VectorRerankIterator {
 /// let limit_iter = LimitIterator::new(input, 5, 10);
 /// ```
 pub struct LimitIterator {
-    input: Box<dyn ResultIterator>,
+    input: Box<dyn Iterator<Item = Result<QueryRow>> + Send>,
     offset: usize,
     count: usize,
     skipped: usize,
@@ -1397,7 +1398,11 @@ pub struct LimitIterator {
 
 impl LimitIterator {
     /// Create a new LimitIterator that applies offset and limit to the input.
-    pub fn new(input: Box<dyn ResultIterator>, offset: usize, count: usize) -> Self {
+    pub fn new(
+        input: Box<dyn Iterator<Item = Result<QueryRow>> + Send>,
+        offset: usize,
+        count: usize,
+    ) -> Self {
         LimitIterator {
             input,
             offset,
@@ -1408,8 +1413,9 @@ impl LimitIterator {
     }
 }
 
-impl ResultIterator for LimitIterator {
-    fn next(&mut self) -> Option<Result<QueryRow>> {
+impl Iterator for LimitIterator {
+    type Item = Result<QueryRow>;
+    fn next(&mut self) -> Option<Self::Item> {
         // Skip offset
         while self.skipped < self.offset {
             match self.input.next() {
@@ -1446,13 +1452,16 @@ impl ResultIterator for LimitIterator {
 /// results based on the query hint. When include_provenance is false, these fields
 /// are set to None for better performance and reduced memory usage.
 pub struct ProvenanceFilterIterator {
-    inner: Box<dyn ResultIterator>,
+    inner: Box<dyn Iterator<Item = Result<QueryRow>> + Send>,
     include_provenance: bool,
 }
 
 impl ProvenanceFilterIterator {
     /// Create a new ProvenanceFilterIterator that conditionally strips metadata.
-    pub fn new(inner: Box<dyn ResultIterator>, include_provenance: bool) -> Self {
+    pub fn new(
+        inner: Box<dyn Iterator<Item = Result<QueryRow>> + Send>,
+        include_provenance: bool,
+    ) -> Self {
         ProvenanceFilterIterator {
             inner,
             include_provenance,
@@ -1460,8 +1469,9 @@ impl ProvenanceFilterIterator {
     }
 }
 
-impl ResultIterator for ProvenanceFilterIterator {
-    fn next(&mut self) -> Option<Result<QueryRow>> {
+impl Iterator for ProvenanceFilterIterator {
+    type Item = Result<QueryRow>;
+    fn next(&mut self) -> Option<Self::Item> {
         self.inner.next().map(|result| {
             result.map(|mut row| {
                 if !self.include_provenance {
@@ -1481,13 +1491,16 @@ impl ResultIterator for ProvenanceFilterIterator {
 
 /// Iterator for projecting specific properties from query results.
 pub struct ProjectIterator {
-    input: Box<dyn ResultIterator>,
+    input: Box<dyn Iterator<Item = Result<QueryRow>> + Send>,
     properties: Vec<String>,
 }
 
 impl ProjectIterator {
     /// Create a new ProjectIterator that projects specific properties from the results.
-    pub fn new(input: Box<dyn ResultIterator>, mut properties: Vec<String>) -> Self {
+    pub fn new(
+        input: Box<dyn Iterator<Item = Result<QueryRow>> + Send>,
+        mut properties: Vec<String>,
+    ) -> Self {
         // Deduplicate properties to prevent errors when projecting same property multiple times
         properties.sort();
         properties.dedup();
@@ -1495,8 +1508,9 @@ impl ProjectIterator {
     }
 }
 
-impl ResultIterator for ProjectIterator {
-    fn next(&mut self) -> Option<Result<QueryRow>> {
+impl Iterator for ProjectIterator {
+    type Item = Result<QueryRow>;
+    fn next(&mut self) -> Option<Self::Item> {
         match self.input.next() {
             Some(Ok(mut row)) => {
                 if let Some(node) = row.entity.as_node() {
@@ -1588,8 +1602,9 @@ impl PropertyScanIterator {
     }
 }
 
-impl ResultIterator for PropertyScanIterator {
-    fn next(&mut self) -> Option<Result<QueryRow>> {
+impl Iterator for PropertyScanIterator {
+    type Item = Result<QueryRow>;
+    fn next(&mut self) -> Option<Self::Item> {
         self.initialize();
 
         match self.node_ids.as_mut()?.next() {
@@ -1671,8 +1686,9 @@ mod tests {
         }
     }
 
-    impl ResultIterator for MockIterator {
-        fn next(&mut self) -> Option<Result<QueryRow>> {
+    impl Iterator for MockIterator {
+        type Item = Result<QueryRow>;
+        fn next(&mut self) -> Option<Self::Item> {
             self.items.next()
         }
 
@@ -2207,8 +2223,9 @@ mod tests {
             label: InternedString,
         }
 
-        impl ResultIterator for CountingIterator {
-            fn next(&mut self) -> Option<Result<QueryRow>> {
+        impl Iterator for CountingIterator {
+            type Item = Result<QueryRow>;
+            fn next(&mut self) -> Option<Self::Item> {
                 if self.count < self.max {
                     self.count += 1;
                     let node = Node::new(
@@ -3267,7 +3284,7 @@ mod tests {
         );
 
         let mut count = 0;
-        while let Some(result) = iter.next() {
+        for result in iter.by_ref() {
             assert!(result.is_ok());
             count += 1;
         }
@@ -3318,7 +3335,7 @@ mod tests {
             TemporalNodeScanIterator::new(node_ids, timestamp, timestamp, historical, None);
 
         let mut count = 0;
-        while let Some(result) = iter.next() {
+        for result in iter.by_ref() {
             assert!(result.is_ok());
             count += 1;
         }

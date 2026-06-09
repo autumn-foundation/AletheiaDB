@@ -2,7 +2,7 @@ use aletheiadb::core::property::{PropertyMapBuilder, PropertyValue};
 use aletheiadb::core::vector::cosine_similarity;
 use aletheiadb::index::vector::{DistanceMetric, HnswConfig};
 use aletheiadb::query::executor::QueryExecutor;
-use aletheiadb::query::executor::{QueryRow, ResultIterator};
+use aletheiadb::query::executor::QueryRow;
 use aletheiadb::storage::current::CurrentStorage;
 use aletheiadb::storage::historical::HistoricalStorage;
 use aletheiadb::storage::version::AnchorConfig;
@@ -18,7 +18,7 @@ use std::sync::Arc;
 /// DO NOT use this in production code - it exists solely for benchmark baseline comparison.
 struct BaselineVectorRerankIterator {
     sorted: Option<std::vec::IntoIter<(QueryRow, f32)>>,
-    input: Option<Box<dyn ResultIterator>>,
+    input: Option<Box<dyn Iterator<Item = aletheiadb::core::error::Result<QueryRow>> + Send>>,
     embedding: Arc<[f32]>,
     k: usize,
     _current: Arc<CurrentStorage>,
@@ -27,7 +27,7 @@ struct BaselineVectorRerankIterator {
 
 impl BaselineVectorRerankIterator {
     fn new(
-        input: Box<dyn ResultIterator>,
+        input: Box<dyn Iterator<Item = aletheiadb::core::error::Result<QueryRow>> + Send>,
         embedding: Arc<[f32]>,
         k: usize,
         current: Arc<CurrentStorage>,
@@ -58,8 +58,9 @@ impl BaselineVectorRerankIterator {
     }
 }
 
-impl ResultIterator for BaselineVectorRerankIterator {
-    fn next(&mut self) -> Option<aletheiadb::core::error::Result<QueryRow>> {
+impl Iterator for BaselineVectorRerankIterator {
+    type Item = aletheiadb::core::error::Result<QueryRow>;
+    fn next(&mut self) -> Option<Self::Item> {
         if self.sorted.is_none() && self.input.is_some() {
             let vector_property = match &self.vector_property {
                 Some(prop) => prop.clone(),
@@ -72,11 +73,11 @@ impl ResultIterator for BaselineVectorRerankIterator {
                 }
             };
 
-            let mut input = self.input.take().unwrap();
+            let input = self.input.take().unwrap();
             let mut scored: Vec<(QueryRow, f32)> = Vec::new();
 
             // OLD LOGIC: Collect EVERYTHING into a vector
-            while let Some(result) = input.next() {
+            for result in input {
                 match result {
                     Ok(row) => {
                         if let Some(similarity) = self.compute_similarity(&row, &vector_property) {

@@ -18,7 +18,7 @@ use super::planner::physical::{PhysicalOp, PhysicalPlan};
 
 #[doc(hidden)]
 pub use iterators::NodeScanIterator;
-pub use iterators::ResultIterator;
+
 pub use iterators::TemporalNodeScanIterator;
 pub use iterators::{
     BatchTemporalNodeIterator, FilterIterator, LimitIterator, ProjectIterator,
@@ -199,7 +199,10 @@ impl QueryExecutor {
     }
 
     /// Execute a physical operator, returning an iterator
-    fn execute_op(&self, op: &PhysicalOp) -> Result<Box<dyn ResultIterator>> {
+    fn execute_op(
+        &self,
+        op: &PhysicalOp,
+    ) -> Result<Box<dyn Iterator<Item = Result<QueryRow>> + Send>> {
         match op {
             PhysicalOp::NodeLookup { node_ids } => Ok(Box::new(
                 iterators::NodeLookupIterator::new(node_ids.clone(), Arc::clone(&self.current)),
@@ -366,7 +369,7 @@ impl QueryExecutor {
         k: usize,
         label_filter: Option<&str>,
         property_key: Option<&str>,
-    ) -> Result<Box<dyn ResultIterator>> {
+    ) -> Result<Box<dyn Iterator<Item = Result<QueryRow>> + Send>> {
         let results = match (property_key, label_filter) {
             // Property-specific with label filter
             (Some(prop), Some(label)) => self
@@ -396,7 +399,7 @@ impl QueryExecutor {
         property_key: &str,
         k: usize,
         label_filter: Option<&str>,
-    ) -> Result<Box<dyn ResultIterator>> {
+    ) -> Result<Box<dyn Iterator<Item = Result<QueryRow>> + Send>> {
         // 1. Validate that property_key matches the indexed property
         let indexed_property = self.current.get_indexed_property_name().ok_or_else(|| {
             crate::core::error::Error::Query(crate::core::error::QueryError::ExecutionError {

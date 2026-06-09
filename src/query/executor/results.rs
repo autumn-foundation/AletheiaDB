@@ -42,8 +42,6 @@ use crate::core::property::PropertyMap;
 use crate::core::temporal::Timestamp;
 use crate::core::{EdgeId, NodeId};
 
-use super::iterators::ResultIterator;
-
 /// Score threshold above which results are highlighted green in display output.
 const HIGH_SCORE_THRESHOLD: f64 = 0.8;
 
@@ -224,12 +222,12 @@ impl QueryRow {
 /// You can consume the stream item by item using the `Iterator` trait,
 /// or use convenience methods like `collect_all()` to exhaust it immediately.
 pub struct QueryResults {
-    iterator: Box<dyn ResultIterator>,
+    iterator: Box<dyn Iterator<Item = Result<QueryRow>> + Send>,
 }
 
 impl QueryResults {
     /// Create a new stream of results from a boxed iterator.
-    pub(crate) fn new(iterator: Box<dyn ResultIterator>) -> Self {
+    pub(crate) fn new(iterator: Box<dyn Iterator<Item = Result<QueryRow>> + Send>) -> Self {
         QueryResults { iterator }
     }
 
@@ -243,7 +241,7 @@ impl QueryResults {
     pub fn collect_all(mut self) -> Result<Vec<QueryRow>> {
         let (lower, _) = self.iterator.size_hint();
         let mut results = Vec::with_capacity(lower);
-        while let Some(row) = self.iterator.next() {
+        for row in self.iterator.by_ref() {
             results.push(row?);
         }
         Ok(results)
@@ -260,7 +258,7 @@ impl QueryResults {
     pub fn collect_nodes(mut self) -> Result<Vec<Node>> {
         let (lower, _) = self.iterator.size_hint();
         let mut nodes = Vec::with_capacity(lower);
-        while let Some(row) = self.iterator.next() {
+        for row in self.iterator.by_ref() {
             if let EntityResult::Node(n) = row?.entity {
                 nodes.push(n);
             }
@@ -276,7 +274,7 @@ impl QueryResults {
     pub fn collect_nodes_with_scores(mut self) -> Result<Vec<(Node, f32)>> {
         let (lower, _) = self.iterator.size_hint();
         let mut results = Vec::with_capacity(lower);
-        while let Some(row) = self.iterator.next() {
+        for row in self.iterator.by_ref() {
             let row = row?;
             if let (EntityResult::Node(n), Some(score)) = (row.entity, row.score) {
                 results.push((n, score));
@@ -320,7 +318,7 @@ impl QueryResults {
     /// reducing memory overhead for large result sets.
     pub fn count_all(mut self) -> Result<usize> {
         let mut count = 0;
-        while let Some(row) = self.iterator.next() {
+        for row in self.iterator.by_ref() {
             row?; // ensure no error
             count += 1;
         }
@@ -639,7 +637,7 @@ impl QueryResults {
         // First pass: collect all rows
         let (lower, _) = self.iterator.size_hint();
         let mut rows = Vec::with_capacity(lower);
-        while let Some(row) = self.iterator.next() {
+        for row in self.iterator.by_ref() {
             rows.push(row?);
         }
 
@@ -822,7 +820,8 @@ mod tests {
         }
     }
 
-    impl ResultIterator for MockIterator {
+    impl Iterator for MockIterator {
+        type Item = Result<QueryRow>;
         fn next(&mut self) -> Option<Result<QueryRow>> {
             self.items.next()
         }
