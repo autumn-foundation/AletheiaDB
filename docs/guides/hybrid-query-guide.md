@@ -535,7 +535,7 @@ use aletheiadb::query::plan::IndexHint;
 db.query()
     .start(node_id)
     .with_hint(IndexHint::UseVectorIndex)  // Force vector index use
-    .with_hint(IndexHint::ForceScan)       // Skip indexes
+    .with_hint(IndexHint::UseBruteForce)   // Skip indexes
     // ...
 ```
 
