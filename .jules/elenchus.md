@@ -346,3 +346,10 @@
 **Finding:** The `LimitPushdown` tests originally missed several behavioral edge cases and logic checks, particularly regarding the propagation limits in BinaryOp combinations (`||`), updating limit values correctly against child bounds, and setting vector rank limits.
 **Evidence:** `cargo mutants` caught mutants in `LimitPushdown::push_down` specifically targeting the changed boolean condition logic and bounds assignment.
 **Recommendation:** Added `sentry_tests` to `LimitPushdown` that explicitly trigger tests enforcing the boolean change propagation, verifying that updated properties reflect correct nested limits, and vector bounds assignment. Tests now prevent `||` to `&&` mutations and correct top-k modifications.
+
+## [Planner Rules Binary/Logical Partial Optimization Test Gap]
+**Module:** `src/query/planner/rules/`
+**Verdict:** 🟡 Suspect
+**Finding:** The logical query planner rules (`FilterScanFusion`, `OperationReordering`, `LimitPushdown`) propagated `changed` state across `BinaryOp` and nested limits using logical OR (`||`) operators. These logic paths lacked specific tests that verified partial modification (e.g. only the left branch of a Union, or only the child of a Limit), meaning mutations that transformed `||` into `&&` survived.
+**Evidence:** Mutation tests (e.g., `replace || with && in OperationReordering::reorder`) survived in CI because existing tests only covered scenarios where both branches changed or neither changed, missing the XOR case.
+**Recommendation:** Added missing boundary tests (`test_binary_op_partial_optimization` and equivalent variant logic tests) across `limit_pushdown`, `operation_reordering`, and `filter_scan_fusion` to prevent any logical short-circuits from regressing.

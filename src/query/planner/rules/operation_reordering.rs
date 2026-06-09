@@ -159,6 +159,112 @@ impl OptimizationRule for OperationReordering {
     }
 }
 
+#[cfg(test)]
+mod sentry_tests {
+    use super::*;
+    use crate::query::ir::Predicate;
+    use crate::query::plan::{BinaryOp, ScanOp};
+    use crate::query::planner::stats::Statistics;
+
+    fn test_stats() -> Statistics {
+        let stats = Statistics::default();
+        stats.update_property_stats("rare_property", 10);
+        stats.update_property_stats("common_property", 500);
+        stats
+    }
+
+    #[test]
+    fn test_binary_op_partial_optimization() {
+        let rule = OperationReordering;
+        let stats = test_stats();
+
+        let left = LogicalOp::unary(
+            UnaryOp::Filter(Predicate::eq("common_property", "value")),
+            LogicalOp::unary(
+                UnaryOp::Filter(Predicate::eq("rare_property", "value")),
+                LogicalOp::Scan(ScanOp::NodeScan {
+                    label: None,
+                    estimated_rows: Some(1000),
+                }),
+            ),
+        );
+
+        let right = LogicalOp::Scan(ScanOp::NodeScan {
+            label: None,
+            estimated_rows: Some(100),
+        });
+
+        let plan = LogicalPlan::new(LogicalOp::binary(BinaryOp::Union, left, right));
+
+        let result = rule.apply(&plan, &stats).unwrap();
+
+        let expected_plan = LogicalPlan::new(LogicalOp::binary(
+            BinaryOp::Union,
+            LogicalOp::unary(
+                UnaryOp::Filter(Predicate::eq("rare_property", "value")),
+                LogicalOp::unary(
+                    UnaryOp::Filter(Predicate::eq("common_property", "value")),
+                    LogicalOp::Scan(ScanOp::NodeScan {
+                        label: None,
+                        estimated_rows: Some(1000),
+                    }),
+                ),
+            ),
+            LogicalOp::Scan(ScanOp::NodeScan {
+                label: None,
+                estimated_rows: Some(100),
+            }),
+        ));
+
+        assert_eq!(result, Some(expected_plan));
+    }
+
+    #[test]
+    fn test_join_op_partial_optimization() {
+        let rule = OperationReordering;
+        let stats = test_stats();
+
+        // Right side is smaller (10 rows vs 100 rows), so they should be swapped.
+        let left = LogicalOp::Scan(ScanOp::NodeScan {
+            label: Some("Large".to_string()),
+            estimated_rows: Some(100),
+        });
+
+        let right = LogicalOp::Scan(ScanOp::NodeScan {
+            label: Some("Small".to_string()),
+            estimated_rows: Some(10),
+        });
+
+        let plan = LogicalPlan::new(LogicalOp::binary(
+            BinaryOp::Join {
+                left_key: "id".to_string(),
+                right_key: "ref_id".to_string(),
+            },
+            left,
+            right,
+        ));
+
+        let result = rule.apply(&plan, &stats).unwrap();
+
+        let expected_plan = LogicalPlan::new(LogicalOp::binary(
+            BinaryOp::Join {
+                left_key: "ref_id".to_string(),
+                right_key: "id".to_string(),
+            },
+            LogicalOp::Scan(ScanOp::NodeScan {
+                label: Some("Small".to_string()),
+                estimated_rows: Some(10),
+            }),
+            LogicalOp::Scan(ScanOp::NodeScan {
+                label: Some("Large".to_string()),
+                estimated_rows: Some(100),
+            }),
+        ));
+
+        assert_eq!(result, Some(expected_plan));
+    }
+}
+
 impl OperationReordering {
     /// Recursively reorder operations in the plan tree.
     fn reorder(&self, op: &LogicalOp, stats: &Statistics) -> Result<(LogicalOp, bool)> {

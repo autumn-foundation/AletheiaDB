@@ -243,3 +243,53 @@ mod tests {
         assert!(result.unwrap().temporal_context.is_some());
     }
 }
+
+#[cfg(test)]
+mod sentry_tests {
+    use super::*;
+    use crate::query::ir::Predicate;
+    use crate::query::plan::{BinaryOp, ScanOp};
+    use crate::query::planner::stats::Statistics;
+
+    fn test_stats() -> Statistics {
+        Statistics::default()
+    }
+
+    #[test]
+    fn test_binary_op_partial_optimization() {
+        let rule = FilterScanFusion;
+        let stats = test_stats();
+
+        let left = LogicalOp::unary(
+            UnaryOp::Filter(Predicate::eq("name", "Alice")),
+            LogicalOp::Scan(ScanOp::NodeScan {
+                label: Some("Person".to_string()),
+                estimated_rows: None,
+            }),
+        );
+
+        let right = LogicalOp::Scan(ScanOp::NodeScan {
+            label: Some("Other".to_string()),
+            estimated_rows: None,
+        });
+
+        let plan = LogicalPlan::new(LogicalOp::binary(BinaryOp::Union, left, right));
+
+        let result = rule.apply(&plan, &stats).unwrap();
+
+        let expected_plan = LogicalPlan::new(LogicalOp::binary(
+            BinaryOp::Union,
+            LogicalOp::Scan(ScanOp::PropertyScan {
+                label: "Person".to_string(),
+                key: "name".to_string(),
+                value: crate::query::ir::PredicateValue::String("Alice".to_string()),
+            }),
+            LogicalOp::Scan(ScanOp::NodeScan {
+                label: Some("Other".to_string()),
+                estimated_rows: None,
+            }),
+        ));
+
+        assert_eq!(result, Some(expected_plan));
+    }
+}

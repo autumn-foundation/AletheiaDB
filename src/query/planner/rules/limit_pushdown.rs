@@ -542,4 +542,89 @@ mod sentry_tests {
             panic!("Expected VectorRank");
         }
     }
+
+    #[test]
+    fn test_pushdown_limit_input_changed_but_same_limit() {
+        let rule = LimitPushdown;
+        // The limit doesn't change (10 -> 10), but the child changes because
+        // the child has a limit that gets pushed down.
+        let op = LogicalOp::unary(
+            UnaryOp::Limit(10),
+            LogicalOp::unary(
+                UnaryOp::Limit(20),
+                LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(1).unwrap()])),
+            ),
+        );
+        let (new_op, changed) = rule.push_down(&op, Some(10)).unwrap();
+        assert!(changed, "Limit should propagate changed=true if input changed, even if its own limit didn't change");
+
+        if let LogicalOp::Unary {
+            op: UnaryOp::Limit(n),
+            ..
+        } = new_op
+        {
+            assert_eq!(n, 10);
+        } else {
+            panic!("Expected limit");
+        }
+    }
+
+    #[test]
+    fn test_pushdown_vector_rank_input_changed_but_same_limit() {
+        let rule = LimitPushdown;
+        // top_k = Some(10), pass down limit = None. The limit doesn't change,
+        // but the child changes (e.g. limit is pushed to the scan).
+        // Let's pass limit=None. The child is Limit(20, Limit(30, Scan)) -> Limit(20, Scan) which is a change.
+        let op = LogicalOp::unary(
+            UnaryOp::VectorRank {
+                embedding: vec![0.1f32].into(),
+                top_k: Some(10),
+                property_key: None,
+            },
+            LogicalOp::unary(
+                UnaryOp::Limit(20),
+                LogicalOp::unary(
+                    UnaryOp::Limit(30),
+                    LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(1).unwrap()])),
+                ),
+            ),
+        );
+        let (new_op, changed) = rule.push_down(&op, None).unwrap();
+        assert!(changed, "Vector rank should apply changed=true if input changed");
+
+        if let LogicalOp::Unary {
+            op: UnaryOp::VectorRank { top_k, .. },
+            ..
+        } = new_op
+        {
+            assert_eq!(top_k, Some(10));
+        } else {
+            panic!("Expected VectorRank");
+        }
+    }
+
+    #[test]
+    fn test_pushdown_vector_rank_same_input_but_changed_limit() {
+        let rule = LimitPushdown;
+        let op = LogicalOp::unary(
+            UnaryOp::VectorRank {
+                embedding: vec![0.1f32].into(),
+                top_k: Some(10),
+                property_key: None,
+            },
+            LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(1).unwrap()])),
+        );
+        let (new_op, changed) = rule.push_down(&op, Some(5)).unwrap();
+        assert!(changed, "Vector rank should apply changed=true if limit changed");
+
+        if let LogicalOp::Unary {
+            op: UnaryOp::VectorRank { top_k, .. },
+            ..
+        } = new_op
+        {
+            assert_eq!(top_k, Some(5));
+        } else {
+            panic!("Expected VectorRank");
+        }
+    }
 }
