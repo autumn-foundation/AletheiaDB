@@ -1198,7 +1198,5 @@ impl std::fmt::Debug for ShardCoordinator {
     }
 }
 
-
-
 #[cfg(test)]
 pub(crate) mod tests;

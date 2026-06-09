@@ -964,8 +964,6 @@ impl Drop for CurrentIndexes {
     }
 }
 
-
-
 // Concurrency tests for rebuild race condition fix
 #[cfg(test)]
 mod concurrency_tests {

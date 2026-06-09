@@ -838,7 +838,5 @@ impl PhysicalOp {
     }
 }
 
-
-
 #[cfg(test)]
 pub(crate) mod tests;

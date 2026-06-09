@@ -1480,7 +1480,5 @@ impl Drop for MigrationService {
     }
 }
 
-
-
 #[cfg(test)]
 pub(crate) mod tests;

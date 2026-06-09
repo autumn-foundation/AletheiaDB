@@ -1452,7 +1452,5 @@ impl VectorNodeClient for MockVectorNodeClient {
 // Tests
 // ============================================================================
 
-
-
 #[cfg(test)]
 pub(crate) mod tests;

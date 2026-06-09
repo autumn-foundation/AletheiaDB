@@ -1,20 +1,22 @@
+#[allow(clippy::module_inception)]
 #[cfg(test)]
 mod tests {
+    #[allow(unused_imports)]
     use super::*;
-    use std::sync::Arc;
-    use parking_lot::RwLock;
     use crate::core::error::Result;
     use crate::core::graph::Node;
-    use crate::core::interning::GLOBAL_INTERNER;
-    use crate::core::property::{PropertyValue, PropertyMapBuilder};
-    use crate::core::{NodeId, Timestamp};
-    use crate::query::ir::{Direction, Predicate, PredicateValue};
-    use crate::query::executor::results::{EntityResult, QueryRow};
-    use crate::storage::historical::HistoricalStorage;
-    use crate::storage::current::CurrentStorage;
     use crate::core::id::VersionId;
+    use crate::core::interning::GLOBAL_INTERNER;
     use crate::core::interning::InternedString;
+    use crate::core::property::{PropertyMapBuilder, PropertyValue};
+    use crate::core::{NodeId, Timestamp};
     use crate::query::executor::iterators::*;
+    use crate::query::executor::results::{EntityResult, QueryRow};
+    use crate::query::ir::{Predicate, PredicateValue};
+    use crate::storage::current::CurrentStorage;
+
+    use parking_lot::RwLock;
+    use std::sync::Arc;
     fn test_node(id: u64, name: &str) -> Node {
         let props = PropertyMapBuilder::new().insert("name", name).build();
         let label = GLOBAL_INTERNER.intern("Person").unwrap();
@@ -1232,7 +1234,6 @@ mod tests {
     #[test]
     fn test_temporal_node_iterator_returns_current_state() {
         use crate::core::version::AnchorConfig;
-        use crate::storage::historical::HistoricalStorage;
 
         let current = Arc::new(CurrentStorage::new());
         let historical = Arc::new(RwLock::new(HistoricalStorage::with_config(
@@ -1274,7 +1275,6 @@ mod tests {
     #[test]
     fn test_temporal_node_iterator_empty() {
         use crate::core::version::AnchorConfig;
-        use crate::storage::historical::HistoricalStorage;
 
         let historical = Arc::new(RwLock::new(HistoricalStorage::with_config(
             AnchorConfig::default(),
@@ -1292,8 +1292,6 @@ mod tests {
 
     #[test]
     fn test_batch_temporal_node_iterator_success() {
-        use crate::storage::historical::HistoricalStorage;
-
         let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
         let mut hist = historical.write();
 
@@ -1334,8 +1332,6 @@ mod tests {
 
     #[test]
     fn test_batch_temporal_node_iterator_node_not_found() {
-        use crate::storage::historical::HistoricalStorage;
-
         let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
 
         let node_ids = vec![NodeId::new(999).unwrap()];
@@ -1348,8 +1344,6 @@ mod tests {
 
     #[test]
     fn test_batch_temporal_node_iterator_empty() {
-        use crate::storage::historical::HistoricalStorage;
-
         let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
         let node_ids = vec![];
         let mut iter =
@@ -1367,8 +1361,6 @@ mod tests {
 
     #[test]
     fn test_temporal_node_scan_iterator_get_temporal_version_success() {
-        use crate::storage::historical::HistoricalStorage;
-
         let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
         let node_id = NodeId::new(1).unwrap();
         let version_id = VersionId::new(100).unwrap();
@@ -1404,8 +1396,6 @@ mod tests {
 
     #[test]
     fn test_temporal_node_scan_iterator_get_temporal_version_not_found() {
-        use crate::storage::historical::HistoricalStorage;
-
         let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
         let node_id = NodeId::new(999).unwrap();
         let timestamp: Timestamp = 1000.into();
@@ -1425,8 +1415,6 @@ mod tests {
 
     #[test]
     fn test_temporal_node_scan_iterator_apply_label_filter_matches() {
-        use crate::storage::historical::HistoricalStorage;
-
         let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
         let timestamp: Timestamp = 1000.into();
 
@@ -1457,8 +1445,6 @@ mod tests {
 
     #[test]
     fn test_temporal_node_scan_iterator_apply_label_filter_no_match() {
-        use crate::storage::historical::HistoricalStorage;
-
         let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
         let timestamp: Timestamp = 1000.into();
 
@@ -1489,8 +1475,6 @@ mod tests {
 
     #[test]
     fn test_temporal_node_scan_iterator_apply_label_filter_no_filter() {
-        use crate::storage::historical::HistoricalStorage;
-
         let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
         let timestamp: Timestamp = 1000.into();
 
@@ -1512,8 +1496,6 @@ mod tests {
 
     #[test]
     fn test_temporal_node_scan_iterator_filter_node_success() {
-        use crate::storage::historical::HistoricalStorage;
-
         let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
         let node_id = NodeId::new(1).unwrap();
         let version_id = VersionId::new(100).unwrap();
@@ -1551,8 +1533,6 @@ mod tests {
 
     #[test]
     fn test_temporal_node_scan_iterator_filter_node_label_mismatch() {
-        use crate::storage::historical::HistoricalStorage;
-
         let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
         let node_id = NodeId::new(1).unwrap();
         let version_id = VersionId::new(100).unwrap();
@@ -1595,8 +1575,6 @@ mod tests {
 
     #[test]
     fn test_temporal_node_scan_iterator_filter_node_not_found() {
-        use crate::storage::historical::HistoricalStorage;
-
         let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
         let node_id = NodeId::new(999).unwrap();
         let timestamp: Timestamp = 1000.into();
@@ -1619,8 +1597,6 @@ mod tests {
 
     #[test]
     fn test_temporal_node_scan_iterator_full_iteration() {
-        use crate::storage::historical::HistoricalStorage;
-
         let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
         let timestamp: Timestamp = 5000.into();
 
@@ -1683,8 +1659,6 @@ mod tests {
 
     #[test]
     fn test_temporal_node_scan_iterator_no_label_filter() {
-        use crate::storage::historical::HistoricalStorage;
-
         let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
         let timestamp: Timestamp = 5000.into();
 
@@ -1734,8 +1708,6 @@ mod tests {
 
     #[test]
     fn test_temporal_node_scan_iterator_size_hint() {
-        use crate::storage::historical::HistoricalStorage;
-
         let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
         let timestamp: Timestamp = 1000.into();
 
@@ -1754,8 +1726,6 @@ mod tests {
 
     #[test]
     fn test_temporal_node_scan_iterator_empty() {
-        use crate::storage::historical::HistoricalStorage;
-
         let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
         let timestamp: Timestamp = 1000.into();
 

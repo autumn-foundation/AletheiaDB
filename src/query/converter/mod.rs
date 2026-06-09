@@ -1095,8 +1095,6 @@ pub fn parse_query_with_params(
     converter.convert(&ast)
 }
 
-
-
 #[cfg(test)]
 mod sentry_tests {
     use super::*;

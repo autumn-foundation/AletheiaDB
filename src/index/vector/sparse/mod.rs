@@ -1191,7 +1191,5 @@ fn normalize_scores(results: &[(NodeId, f32)]) -> Vec<(NodeId, f32)> {
 // Tests
 // ============================================================================
 
-
-
 #[cfg(test)]
 pub(crate) mod tests;

@@ -1225,7 +1225,5 @@ pub struct CheckpointStats {
     pub version_count: usize,
 }
 
-
-
 #[cfg(test)]
 pub(crate) mod tests;

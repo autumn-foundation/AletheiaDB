@@ -1602,6 +1602,5 @@ impl ResultIterator for PropertyScanIterator {
     }
 }
 
-
 #[cfg(test)]
 pub(crate) mod tests;

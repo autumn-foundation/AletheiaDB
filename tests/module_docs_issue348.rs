@@ -140,7 +140,7 @@ fn test_rules_module_explains_ordering() {
 /// contributors can understand the on-disk layout without reading the code.
 #[test]
 fn test_segment_reader_documents_segment_format() {
-    let docs = module_docs("src/storage/wal/segment_reader.rs");
+    let docs = module_docs("src/storage/wal/segment_reader/mod.rs");
     assert!(
         docs.contains("# Segment Format") || docs.contains("# Format") || docs.contains("magic"),
         "segment_reader.rs module docs must describe the binary segment format \

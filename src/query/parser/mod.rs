@@ -1417,8 +1417,6 @@ impl Parser {
     }
 }
 
-
-
 #[cfg(test)]
 mod sentry_tests {
     use super::*;

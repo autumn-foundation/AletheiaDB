@@ -897,8 +897,6 @@ fn deserialize_version_id(buffer: &[u8], offset: usize, context: &str) -> Result
     })
 }
 
-
-
 #[cfg(test)]
 mod regression_tests {
     use super::*;
