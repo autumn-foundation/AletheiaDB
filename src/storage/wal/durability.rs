@@ -473,6 +473,12 @@ impl DurabilityMode {
 ///     Ok(())
 /// })?;
 /// ```
+///
+/// # Why?
+///
+/// Exposing write options allows users to override the global database
+/// durability mode on a per-transaction basis. Critical data can use
+/// `Synchronous` mode while bulk imports use `Async` mode.
 #[derive(Debug, Clone, Default)]
 pub struct WriteOptions {
     /// Override the default durability mode for this transaction.

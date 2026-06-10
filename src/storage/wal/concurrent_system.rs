@@ -57,6 +57,11 @@ use crate::core::error::{Error, Result, StorageError};
 use crate::storage::wal::DurabilityMode;
 
 /// Configuration for the concurrent WAL system.
+///
+/// # Why?
+///
+/// Combines configuration parameters for both the front-end concurrent writers
+/// and the back-end flush coordinator into a single convenient object for initialization.
 #[derive(Clone)]
 pub struct ConcurrentWalSystemConfig {
     /// WAL directory path.
@@ -290,6 +295,12 @@ impl BackgroundFlusher {
 ///
 /// This combines the striped concurrent WAL with the flush coordinator
 /// and a background flush thread to provide a complete WAL solution.
+///
+/// # Why?
+///
+/// Provides the top-level API for interacting with the Write-Ahead Log. It
+/// wires together the lock-free writers (`ConcurrentWal`) and the disk
+/// flusher (`FlushCoordinator`), managing their lifetimes safely.
 pub struct ConcurrentWalSystem {
     /// The concurrent WAL with striped buffers.
     wal: Arc<ConcurrentWal>,

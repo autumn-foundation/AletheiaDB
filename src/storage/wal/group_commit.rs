@@ -102,6 +102,12 @@ pub struct GroupCommitCoordinator {
 }
 
 /// Configuration for group commit behavior.
+///
+/// # Why?
+///
+/// Group commit heavily depends on tuning batch sizes and delay times. This
+/// config struct exposes these dials so the database can optimize for its
+/// specific hardware and latency requirements.
 #[derive(Debug, Clone)]
 pub struct GroupCommitConfig {
     /// Maximum time to wait for more transactions before flushing.

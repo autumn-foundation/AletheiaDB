@@ -80,6 +80,12 @@ pub const DEFAULT_RING_BUFFER_CAPACITY: usize = 1024;
 /// - **Low-latency workloads**: Higher `initial_spins` (100-1000), lower sleep times
 /// - **High-throughput batch**: Lower `initial_spins` (10-50), higher sleep times
 /// - **Mixed workloads**: Use defaults, which balance both
+///
+/// # Why?
+///
+/// Without configurable backpressure, a full ring buffer would cause writer
+/// threads to spin infinitely (wasting CPU) or immediately sleep (spiking latency).
+/// This config allows tuning the trade-off for different hardware profiles.
 #[derive(Debug, Clone)]
 pub struct BackpressureConfig {
     /// Initial spin loop iterations on first contention (default: 10).
@@ -147,6 +153,12 @@ impl BackpressureConfig {
 }
 
 /// A pending WAL entry waiting to be flushed to disk.
+///
+/// # Why?
+///
+/// Bundles the pre-allocated LSN, the serialized byte payload, and an optional
+/// completion notifier. Passing this discrete unit through the ring buffer avoids
+/// expensive allocations or synchronizations inside the critical path.
 #[derive(Debug)]
 pub struct PendingEntry {
     /// Pre-allocated LSN from the global allocator.
@@ -250,6 +262,12 @@ enum CompletionState {
 ///
 /// 4. **Fail-safe default**: If we can't determine the error, we return
 ///    "Unknown error" rather than propagating the panic.
+///
+/// # Why?
+///
+/// Synchronous durability requires the writer thread to pause until the background
+/// flush coordinator confirms the bytes are safely on disk. This structure safely
+/// bridges the asynchronous flush with the blocking writer.
 #[derive(Debug)]
 pub struct CompletionNotifier {
     /// Current state (Pending, Complete, or Error).
@@ -354,6 +372,11 @@ impl Default for CompletionNotifier {
 /// This is returned to callers who need to wait for their entry to be
 /// durably flushed. The handle can be used to block until completion
 /// or to poll for completion status.
+///
+/// # Why?
+///
+/// Wraps the internal `CompletionNotifier` to provide a clean, safe public API
+/// for waiting on durability without exposing the underlying synchronization primitives.
 #[derive(Debug, Clone)]
 pub struct CompletionHandle(pub(crate) Arc<CompletionNotifier>);
 
@@ -441,6 +464,12 @@ impl<T> std::ops::Deref for CacheLinePadded<T> {
 /// 2. Yield/sleep with doubling duration (1µs → 2µs → ... → max)
 ///
 /// Configure via [`BackpressureConfig`] for your workload.
+///
+/// # Why?
+///
+/// Standard mutex-protected queues create significant contention under highly
+/// concurrent write workloads. A lock-free ring buffer allows many threads to
+/// enqueue data into a stripe simultaneously, maximizing CPU utilization.
 pub struct WalRingBuffer {
     /// Pre-allocated slots.
     slots: Box<[Slot]>,

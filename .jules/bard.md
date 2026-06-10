@@ -10,3 +10,6 @@
 ## 2024-05-14 - [Adding Examples to HLC and documenting src/main.rs]
 **Confusion:** The `src/main.rs` file was missing module-level documentation (`//!`), which triggers the `missing_docs` lint, but was hidden by the lint configurations inside `src/lib.rs` affecting `src/main.rs`. Also `HybridTimestamp::send` lacked an example showing the behavior of its logical counter.
 **Clarification:** Added `//! The AletheiaDB binary.` to `src/main.rs` and added an executable `## Examples` block to `HybridTimestamp::send` in `src/core/hlc.rs`.
+## 2026-05-30 - [Documenting the 'Why' of WAL Internals]
+**Confusion:** The `src/storage/wal` structs were documented with *what* they are, but not *why* they exist, violating the Bard persona's directive to explain the architectural reasoning.
+**Clarification:** Added `/// # Why?` blocks to all public structs in `stripe.rs`, `lsn_allocator.rs`, `ring_buffer.rs`, `flush_coordinator.rs`, `concurrent.rs`, `concurrent_system.rs`, `durability.rs`, and `group_commit.rs`.

@@ -239,6 +239,11 @@ impl WalStripe {
 }
 
 /// Metrics for a WAL stripe.
+///
+/// # Why?
+///
+/// Exposing per-stripe metrics allows us to diagnose thread-affinity imbalances
+/// or specific stripes experiencing excessive backpressure (full ring buffers).
 #[derive(Debug, Clone)]
 pub struct StripeMetrics {
     /// Stripe ID.

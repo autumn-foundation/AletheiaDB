@@ -42,6 +42,12 @@ use super::LSN;
 /// This is the single synchronization point for the concurrent WAL.
 /// All writers allocate LSNs from this shared allocator, ensuring
 /// global ordering of WAL entries.
+///
+/// # Why?
+///
+/// A dedicated lock-free allocator guarantees a single source of truth for total
+/// ordering of operations across the database, allowing subsequent parallel
+/// appends (to different stripes) to be correctly re-sorted before disk flush.
 pub struct LsnAllocator {
     /// Next LSN to allocate.
     next_lsn: AtomicU64,

@@ -50,6 +50,12 @@ use super::segment_reader::{WAL_HEADER_SIZE, WAL_MAGIC, WAL_VERSION, WAL_VERSION
 ///
 /// This is stored in a companion `.meta` file for each segment to enable
 /// efficient LSN-based truncation without reading the entire segment.
+///
+/// # Why?
+///
+/// Keeping lightweight metadata outside the main WAL segment allows the system
+/// to quickly identify which segments can be safely deleted or archived without
+/// scanning gigabytes of data.
 #[derive(Debug, Clone)]
 pub struct SegmentMetadata {
     /// Minimum LSN in this segment.
@@ -105,6 +111,12 @@ impl SegmentMetadata {
 }
 
 /// Configuration for the flush coordinator.
+///
+/// # Why?
+///
+/// Separating configuration from the coordinator allows us to dynamically
+/// adjust segment sizes, retention policies, and flush intervals based on
+/// the workload or durability requirements.
 #[derive(Clone)]
 pub struct FlushCoordinatorConfig {
     /// WAL directory path.
@@ -169,6 +181,11 @@ impl FlushCoordinatorConfig {
 }
 
 /// Statistics from a single flush operation.
+///
+/// # Why?
+///
+/// These metrics are essential for observability, allowing administrators to
+/// monitor disk I/O bottlenecks and verify that background flushing is keeping up.
 #[derive(Debug, Clone, Default)]
 pub struct FlushStats {
     /// Number of entries flushed.
@@ -214,6 +231,12 @@ pub struct FlushStats {
 /// 4. **Crash consistency**: The WAL already handles crash recovery at the
 ///    entry level via checksums. A panic during flush is treated the same
 ///    as a crash - entries are either fully written or not.
+///
+/// # Why?
+///
+/// The flush coordinator acts as the single point of serialization for disk I/O.
+/// It gathers concurrent writes from lock-free stripes, orders them by LSN, and
+/// efficiently batches them to the disk, maximizing throughput while maintaining ACID.
 pub struct FlushCoordinator {
     /// Configuration.
     config: FlushCoordinatorConfig,
@@ -849,6 +872,12 @@ impl FlushCoordinator {
 }
 
 /// Signal for requesting immediate flush.
+///
+/// # Why?
+///
+/// In synchronous durability modes, writer threads cannot wait for the next
+/// scheduled background flush. They must explicitly signal the flush thread
+/// to wake up and immediately persist data.
 pub struct FlushSignal {
     /// Flag indicating flush is requested.
     requested: AtomicBool,
@@ -912,6 +941,12 @@ impl Default for FlushSignal {
 }
 
 /// Background flush thread handle.
+///
+/// # Why?
+///
+/// Encapsulating the background thread handle provides a clean abstraction for
+/// lifecycle management, ensuring the flush thread can be cleanly joined and
+/// shut down when the database stops.
 pub struct FlushThread {
     /// Thread handle.
     handle: Option<JoinHandle<()>>,

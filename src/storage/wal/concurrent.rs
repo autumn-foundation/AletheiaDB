@@ -84,6 +84,12 @@ pub const DEFAULT_NUM_STRIPES: usize = 16;
 pub const DEFAULT_STRIPE_CAPACITY: usize = 1024;
 
 /// Configuration for the concurrent WAL.
+///
+/// # Why?
+///
+/// Defining a configuration struct enables flexible instantiation of the WAL,
+/// allowing different environments (testing, production) to tune capacities
+/// and stripe counts.
 #[derive(Debug, Clone)]
 pub struct ConcurrentWalConfig {
     /// WAL directory path.
@@ -147,6 +153,12 @@ thread_local! {
 ///
 /// Provides high-throughput, low-latency WAL operations by distributing
 /// writes across multiple stripes with lock-free ring buffers.
+///
+/// # Why?
+///
+/// The core orchestrator of the striped architecture. It manages the global
+/// LSN allocator and the independent stripes, shielding the user from the
+/// complexity of lock-free data structures while maximizing append throughput.
 pub struct ConcurrentWal {
     /// Configuration.
     config: ConcurrentWalConfig,
@@ -615,6 +627,11 @@ impl ConcurrentWal {
 }
 
 /// Aggregate metrics for the concurrent WAL.
+///
+/// # Why?
+///
+/// Provides a holistic view of the entire WAL system's performance, combining
+/// total appends, LSN progression, and individual stripe metrics for deep observability.
 #[derive(Debug, Clone)]
 pub struct ConcurrentWalMetrics {
     /// Total entries appended across all stripes.
