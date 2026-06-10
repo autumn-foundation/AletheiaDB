@@ -702,7 +702,7 @@ impl QueryResults {
                 EntityResult::NodeId(id) => {
                     nodes.push(id);
                     if let Some(ref mut props) = properties {
-                        props.push(Default::default());
+                        props.push(crate::core::property::PropertyMapBuilder::new().build());
                     }
                 }
                 _ => {} // Ignore edges, etc.

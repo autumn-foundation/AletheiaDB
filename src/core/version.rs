@@ -599,35 +599,33 @@ impl PropertyDelta {
     ) -> std::result::Result<(), String> {
         // Materialize ALL vector deltas (both Sparse and Full) into regular changed properties
         // This is necessary for persistence since the persistence format doesn't support VectorDelta
-        let keys: Vec<_> = self.vector_deltas.keys().copied().collect();
+        let vector_deltas = std::mem::take(&mut self.vector_deltas);
 
-        for key in keys {
-            if let Some(vec_delta) = self.vector_deltas.remove(&key) {
-                match vec_delta {
-                    VectorDelta::Full(vec) => {
-                        // Full delta can be directly converted
-                        self.changed.insert(key, PropertyValue::Vector(vec));
-                    }
-                    VectorDelta::Sparse { .. } => {
-                        // Sparse delta requires base vector to materialize
-                        let base_value = base.get_by_interned_key(&key).ok_or_else(|| {
+        for (key, vec_delta) in vector_deltas {
+            match vec_delta {
+                VectorDelta::Full(vec) => {
+                    // Full delta can be directly converted
+                    self.changed.insert(key, PropertyValue::Vector(vec));
+                }
+                VectorDelta::Sparse { .. } => {
+                    // Sparse delta requires base vector to materialize
+                    let base_value = base.get_by_interned_key(&key).ok_or_else(|| {
                             format!(
                                 "Cannot materialize sparse vector delta: base property not found for key {:?}",
                                 key
                             )
                         })?;
 
-                        let base_vec = base_value.as_vector().ok_or_else(|| {
+                    let base_vec = base_value.as_vector().ok_or_else(|| {
                             format!(
                                 "Cannot materialize sparse vector delta: base property is not a vector for key {:?}",
                                 key
                             )
                         })?;
 
-                        // Apply sparse delta to get full vector
-                        let new_vec = vec_delta.apply(base_vec);
-                        self.changed.insert(key, new_vec.into());
-                    }
+                    // Apply sparse delta to get full vector
+                    let new_vec = vec_delta.apply(base_vec);
+                    self.changed.insert(key, new_vec.into());
                 }
             }
         }
