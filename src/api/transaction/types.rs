@@ -159,12 +159,9 @@ mod tests {
         }
 
         // All IDs should be unique
-        all_ids.sort();
-        let unique_count = all_ids
-            .iter()
-            .collect::<std::collections::HashSet<_>>()
-            .len();
-        assert_eq!(unique_count, 1000);
+        all_ids.sort_unstable();
+        all_ids.dedup();
+        assert_eq!(all_ids.len(), 1000);
 
         // Final current should be 1000
         assert_eq!(generator.current().as_u64(), 1000u64);
