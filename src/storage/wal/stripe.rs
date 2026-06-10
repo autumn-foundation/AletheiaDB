@@ -239,6 +239,20 @@ impl WalStripe {
 }
 
 /// Metrics for a WAL stripe.
+///
+/// # Examples
+///
+/// ```
+/// use aletheiadb::storage::wal::stripe::StripeMetrics;
+///
+/// let metrics = StripeMetrics {
+///     id: 0,
+///     total_appends: 100,
+///     total_bytes: 1024,
+///     pending_count: 5,
+/// };
+/// assert_eq!(metrics.pending_count, 5);
+/// ```
 #[derive(Debug, Clone)]
 pub struct StripeMetrics {
     /// Stripe ID.

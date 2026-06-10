@@ -102,6 +102,18 @@ pub struct GroupCommitCoordinator {
 }
 
 /// Configuration for group commit behavior.
+///
+/// # Examples
+///
+/// ```
+/// use aletheiadb::storage::wal::group_commit::GroupCommitConfig;
+///
+/// let config = GroupCommitConfig {
+///     max_delay_ms: 10,
+///     max_batch_size: 100,
+///     ..GroupCommitConfig::default()
+/// };
+/// ```
 #[derive(Debug, Clone)]
 pub struct GroupCommitConfig {
     /// Maximum time to wait for more transactions before flushing.

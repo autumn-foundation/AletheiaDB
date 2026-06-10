@@ -10,3 +10,6 @@
 ## 2024-05-14 - [Adding Examples to HLC and documenting src/main.rs]
 **Confusion:** The `src/main.rs` file was missing module-level documentation (`//!`), which triggers the `missing_docs` lint, but was hidden by the lint configurations inside `src/lib.rs` affecting `src/main.rs`. Also `HybridTimestamp::send` lacked an example showing the behavior of its logical counter.
 **Clarification:** Added `//! The AletheiaDB binary.` to `src/main.rs` and added an executable `## Examples` block to `HybridTimestamp::send` in `src/core/hlc.rs`.
+## 2024-05-20 - [Adding Examples to WAL configurations and structures]
+**Confusion:** Many WAL configuration options, metrics structures, and handles lacked basic usage examples in their `///` rustdoc, forcing developers to look at tests to see how they should be instantiated or handled.
+**Clarification:** I added `## Examples` blocks to structures such as `GroupCommitConfig`, `LsnAllocator`, `BackpressureConfig`, `PendingEntry`, `CompletionNotifier`, `CompletionHandle`, `WalRingBuffer`, `StripeMetrics`, `SegmentMetadata`, `FlushCoordinatorConfig`, `FlushStats`, `ConcurrentWalConfig`, `ConcurrentWalMetrics`, `ConcurrentWalSystemConfig`, and `WriteOptions`. This directly answers the 'how' for developers attempting to tweak WAL configurations.

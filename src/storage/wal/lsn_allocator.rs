@@ -42,6 +42,17 @@ use super::LSN;
 /// This is the single synchronization point for the concurrent WAL.
 /// All writers allocate LSNs from this shared allocator, ensuring
 /// global ordering of WAL entries.
+///
+/// # Examples
+///
+/// ```
+/// use aletheiadb::storage::wal::lsn_allocator::LsnAllocator;
+///
+/// let allocator = LsnAllocator::new();
+/// let lsn1 = allocator.allocate();
+/// let lsn2 = allocator.allocate();
+/// assert!(lsn2 > lsn1);
+/// ```
 pub struct LsnAllocator {
     /// Next LSN to allocate.
     next_lsn: AtomicU64,

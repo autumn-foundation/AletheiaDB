@@ -57,6 +57,15 @@ use crate::core::error::{Error, Result, StorageError};
 use crate::storage::wal::DurabilityMode;
 
 /// Configuration for the concurrent WAL system.
+///
+/// # Examples
+///
+/// ```
+/// use aletheiadb::storage::wal::concurrent_system::ConcurrentWalSystemConfig;
+///
+/// let config = ConcurrentWalSystemConfig::new("data/wal");
+/// assert_eq!(config.wal_dir.to_str().unwrap(), "data/wal");
+/// ```
 #[derive(Clone)]
 pub struct ConcurrentWalSystemConfig {
     /// WAL directory path.

@@ -84,6 +84,15 @@ pub const DEFAULT_NUM_STRIPES: usize = 16;
 pub const DEFAULT_STRIPE_CAPACITY: usize = 1024;
 
 /// Configuration for the concurrent WAL.
+///
+/// # Examples
+///
+/// ```
+/// use aletheiadb::storage::wal::concurrent::ConcurrentWalConfig;
+///
+/// let config = ConcurrentWalConfig::default();
+/// assert_eq!(config.num_stripes, 16);
+/// ```
 #[derive(Debug, Clone)]
 pub struct ConcurrentWalConfig {
     /// WAL directory path.
@@ -615,6 +624,21 @@ impl ConcurrentWal {
 }
 
 /// Aggregate metrics for the concurrent WAL.
+///
+/// # Examples
+///
+/// ```
+/// use aletheiadb::storage::wal::concurrent::ConcurrentWalMetrics;
+/// use aletheiadb::storage::wal::entry::LSN;
+///
+/// let metrics = ConcurrentWalMetrics {
+///     total_appends: 100,
+///     current_lsn: LSN(101),
+///     stripes: vec![],
+///     total_pending: 0,
+/// };
+/// assert_eq!(metrics.total_appends, 100);
+/// ```
 #[derive(Debug, Clone)]
 pub struct ConcurrentWalMetrics {
     /// Total entries appended across all stripes.

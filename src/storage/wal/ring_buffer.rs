@@ -80,6 +80,15 @@ pub const DEFAULT_RING_BUFFER_CAPACITY: usize = 1024;
 /// - **Low-latency workloads**: Higher `initial_spins` (100-1000), lower sleep times
 /// - **High-throughput batch**: Lower `initial_spins` (10-50), higher sleep times
 /// - **Mixed workloads**: Use defaults, which balance both
+///
+/// # Examples
+///
+/// ```
+/// use aletheiadb::storage::wal::ring_buffer::BackpressureConfig;
+///
+/// let config = BackpressureConfig::low_latency();
+/// assert!(config.validate().is_ok());
+/// ```
 #[derive(Debug, Clone)]
 pub struct BackpressureConfig {
     /// Initial spin loop iterations on first contention (default: 10).
@@ -147,6 +156,18 @@ impl BackpressureConfig {
 }
 
 /// A pending WAL entry waiting to be flushed to disk.
+///
+/// # Examples
+///
+/// ```
+/// use aletheiadb::storage::wal::entry::LSN;
+/// use aletheiadb::storage::wal::ring_buffer::PendingEntry;
+///
+/// let lsn = LSN(1);
+/// let data = vec![1, 2, 3];
+/// let entry = PendingEntry::new_async(lsn, data);
+/// assert_eq!(entry.lsn, LSN(1));
+/// ```
 #[derive(Debug)]
 pub struct PendingEntry {
     /// Pre-allocated LSN from the global allocator.
@@ -250,6 +271,18 @@ enum CompletionState {
 ///
 /// 4. **Fail-safe default**: If we can't determine the error, we return
 ///    "Unknown error" rather than propagating the panic.
+///
+/// # Examples
+///
+/// ```
+/// use aletheiadb::storage::wal::ring_buffer::CompletionNotifier;
+/// use std::sync::Arc;
+///
+/// let notifier = Arc::new(CompletionNotifier::new());
+/// assert!(!notifier.is_complete());
+/// notifier.notify_success();
+/// assert!(notifier.is_complete());
+/// ```
 #[derive(Debug)]
 pub struct CompletionNotifier {
     /// Current state (Pending, Complete, or Error).
@@ -354,6 +387,23 @@ impl Default for CompletionNotifier {
 /// This is returned to callers who need to wait for their entry to be
 /// durably flushed. The handle can be used to block until completion
 /// or to poll for completion status.
+///
+/// # Examples
+///
+/// ```
+/// use aletheiadb::storage::wal::ring_buffer::{PendingEntry, CompletionHandle, CompletionNotifier};
+/// use aletheiadb::storage::wal::entry::LSN;
+/// use std::sync::Arc;
+///
+/// let lsn = LSN(1);
+/// let data = vec![1, 2, 3];
+/// let (entry, handle) = PendingEntry::new_sync(lsn, data);
+///
+/// if let Some(notifier) = &entry.completion {
+///     notifier.notify_success();
+/// }
+/// assert!(handle.is_complete());
+/// ```
 #[derive(Debug, Clone)]
 pub struct CompletionHandle(pub(crate) Arc<CompletionNotifier>);
 
@@ -441,6 +491,15 @@ impl<T> std::ops::Deref for CacheLinePadded<T> {
 /// 2. Yield/sleep with doubling duration (1µs → 2µs → ... → max)
 ///
 /// Configure via [`BackpressureConfig`] for your workload.
+///
+/// # Examples
+///
+/// ```
+/// use aletheiadb::storage::wal::ring_buffer::WalRingBuffer;
+///
+/// let buffer = WalRingBuffer::with_default_capacity();
+/// assert_eq!(buffer.capacity(), 1024);
+/// ```
 pub struct WalRingBuffer {
     /// Pre-allocated slots.
     slots: Box<[Slot]>,

@@ -473,6 +473,15 @@ impl DurabilityMode {
 ///     Ok(())
 /// })?;
 /// ```
+///
+/// # Examples
+///
+/// ```
+/// use aletheiadb::storage::wal::durability::{WriteOptions, DurabilityMode};
+///
+/// let options = WriteOptions::new().with_durability(DurabilityMode::Synchronous);
+/// assert_eq!(options.durability_mode, Some(DurabilityMode::Synchronous));
+/// ```
 #[derive(Debug, Clone, Default)]
 pub struct WriteOptions {
     /// Override the default durability mode for this transaction.

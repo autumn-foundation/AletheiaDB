@@ -50,6 +50,16 @@ use super::segment_reader::{WAL_HEADER_SIZE, WAL_MAGIC, WAL_VERSION, WAL_VERSION
 ///
 /// This is stored in a companion `.meta` file for each segment to enable
 /// efficient LSN-based truncation without reading the entire segment.
+///
+/// # Examples
+///
+/// ```
+/// use aletheiadb::storage::wal::entry::LSN;
+/// use aletheiadb::storage::wal::flush_coordinator::SegmentMetadata;
+///
+/// let meta = SegmentMetadata::new(LSN(1), LSN(100), 100);
+/// assert_eq!(meta.entry_count, 100);
+/// ```
 #[derive(Debug, Clone)]
 pub struct SegmentMetadata {
     /// Minimum LSN in this segment.
@@ -105,6 +115,17 @@ impl SegmentMetadata {
 }
 
 /// Configuration for the flush coordinator.
+///
+/// # Examples
+///
+/// ```
+/// use aletheiadb::storage::wal::flush_coordinator::FlushCoordinatorConfig;
+/// use std::path::PathBuf;
+///
+/// let mut config = FlushCoordinatorConfig::default();
+/// config.wal_dir = PathBuf::from("data/wal");
+/// assert_eq!(config.wal_dir.to_str().unwrap(), "data/wal");
+/// ```
 #[derive(Clone)]
 pub struct FlushCoordinatorConfig {
     /// WAL directory path.
@@ -169,6 +190,21 @@ impl FlushCoordinatorConfig {
 }
 
 /// Statistics from a single flush operation.
+///
+/// # Examples
+///
+/// ```
+/// use aletheiadb::storage::wal::flush_coordinator::FlushStats;
+/// use std::time::Duration;
+///
+/// let stats = FlushStats {
+///     entries_flushed: 10,
+///     bytes_written: 1024,
+///     flush_duration: Duration::from_millis(1),
+///     segment_rotated: false,
+/// };
+/// assert_eq!(stats.entries_flushed, 10);
+/// ```
 #[derive(Debug, Clone, Default)]
 pub struct FlushStats {
     /// Number of entries flushed.
