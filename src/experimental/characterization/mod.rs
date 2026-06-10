@@ -15,6 +15,7 @@ pub mod papyrus;
 pub mod prism;
 pub mod sybil;
 pub mod synapse;
+pub mod tesseract;
 
 // `wildfire` is a stub awaiting revival — see CHANGELOG / ADR-0050.
 // pub mod wildfire;
