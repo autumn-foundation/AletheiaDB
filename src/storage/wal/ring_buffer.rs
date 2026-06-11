@@ -555,6 +555,18 @@ impl WalRingBuffer {
     ///
     /// Uses exponential backoff: starts with `initial_spins` iterations,
     /// doubling each round until `max_spins` is reached, then returns `Err`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use aletheiadb::storage::wal::ring_buffer::{WalRingBuffer, PendingEntry};
+    /// use aletheiadb::storage::wal::entry::LSN;
+    ///
+    /// let buffer = WalRingBuffer::with_default_capacity();
+    /// let entry = PendingEntry::new_async(LSN(1), vec![1, 2, 3]);
+    /// let result = buffer.try_append(entry);
+    /// assert!(result.is_ok());
+    /// ```
     pub fn try_append(&self, entry: PendingEntry) -> Result<(), PendingEntry> {
         // Check if closed
         if self.is_closed() {
@@ -655,6 +667,18 @@ impl WalRingBuffer {
     /// After `try_append` exhausts spinning, this method sleeps with
     /// exponential backoff: starts at `base_sleep_us`, doubling each
     /// iteration until `max_sleep_us` is reached.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use aletheiadb::storage::wal::ring_buffer::{WalRingBuffer, PendingEntry};
+    /// use aletheiadb::storage::wal::entry::LSN;
+    ///
+    /// let buffer = WalRingBuffer::with_default_capacity();
+    /// let entry = PendingEntry::new_async(LSN(1), vec![1, 2, 3]);
+    /// let result = buffer.append_blocking(entry);
+    /// assert!(result.is_ok());
+    /// ```
     pub fn append_blocking(&self, entry: PendingEntry) -> Result<(), PendingEntry> {
         let mut current_entry = entry;
         let mut sleep_us = self.backpressure.base_sleep_us;
@@ -693,6 +717,18 @@ impl WalRingBuffer {
     ///
     /// A vector of pending entries ready for flushing. May be empty if
     /// no entries are available.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use aletheiadb::storage::wal::ring_buffer::{WalRingBuffer, PendingEntry};
+    /// use aletheiadb::storage::wal::entry::LSN;
+    ///
+    /// let buffer = WalRingBuffer::with_default_capacity();
+    /// buffer.try_append(PendingEntry::new_async(LSN(1), vec![1])).unwrap();
+    /// let entries = buffer.drain();
+    /// assert_eq!(entries.len(), 1);
+    /// ```
     pub fn drain(&self) -> Vec<PendingEntry> {
         let mut entries = Vec::new();
 

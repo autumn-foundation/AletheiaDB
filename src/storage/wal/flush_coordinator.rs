@@ -62,6 +62,16 @@ pub struct SegmentMetadata {
 
 impl SegmentMetadata {
     /// Create new segment metadata.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use aletheiadb::storage::wal::flush_coordinator::SegmentMetadata;
+    /// use aletheiadb::storage::wal::entry::LSN;
+    ///
+    /// let metadata = SegmentMetadata::new(LSN(1), LSN(100), 100);
+    /// assert_eq!(metadata.min_lsn, LSN(1));
+    /// ```
     pub fn new(min_lsn: LSN, max_lsn: LSN, entry_count: u64) -> Self {
         Self {
             min_lsn,
@@ -160,6 +170,16 @@ impl Default for FlushCoordinatorConfig {
 
 impl FlushCoordinatorConfig {
     /// Create a new config with the specified WAL directory.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::path::PathBuf;
+    /// use aletheiadb::storage::wal::flush_coordinator::FlushCoordinatorConfig;
+    ///
+    /// let config = FlushCoordinatorConfig::new("/tmp/wal");
+    /// assert_eq!(config.wal_dir, PathBuf::from("/tmp/wal"));
+    /// ```
     pub fn new(wal_dir: impl Into<PathBuf>) -> Self {
         Self {
             wal_dir: wal_dir.into(),
@@ -241,6 +261,17 @@ pub struct FlushCoordinator {
 
 impl FlushCoordinator {
     /// Create a new flush coordinator.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use aletheiadb::storage::wal::flush_coordinator::{FlushCoordinator, FlushCoordinatorConfig};
+    /// use tempfile::TempDir;
+    ///
+    /// let temp_dir = TempDir::new().unwrap();
+    /// let config = FlushCoordinatorConfig::new(temp_dir.path().to_path_buf());
+    /// let coordinator = FlushCoordinator::new(config).unwrap();
+    /// ```
     pub fn new(config: FlushCoordinatorConfig) -> Result<Self> {
         // Ensure WAL directory exists
         std::fs::create_dir_all(&config.wal_dir).map_err(|e| {
@@ -542,6 +573,21 @@ impl FlushCoordinator {
     /// This method should only be called after confirming that all operations
     /// up to `truncate_lsn` have been durably persisted to cold storage.
     /// The key invariant is: `truncate_lsn <= cold_storage.get_flushed_lsn()`
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use aletheiadb::storage::wal::flush_coordinator::{FlushCoordinator, FlushCoordinatorConfig};
+    /// use aletheiadb::storage::wal::entry::LSN;
+    /// use tempfile::TempDir;
+    ///
+    /// let temp_dir = TempDir::new().unwrap();
+    /// let config = FlushCoordinatorConfig::new(temp_dir.path().to_path_buf());
+    /// let coordinator = FlushCoordinator::new(config).unwrap();
+    ///
+    /// let removed = coordinator.truncate_to_lsn(LSN(100)).unwrap();
+    /// assert_eq!(removed, 0); // No segments to remove
+    /// ```
     pub fn truncate_to_lsn(&self, truncate_lsn: LSN) -> Result<usize> {
         let current_id = self.current_segment_id.load(Ordering::Relaxed);
         let mut removed_count = 0;
@@ -585,6 +631,20 @@ impl FlushCoordinator {
     ///
     /// Returns a list of (segment_id, metadata) for all segments that have
     /// metadata files. Segments without metadata are not included.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use aletheiadb::storage::wal::flush_coordinator::{FlushCoordinator, FlushCoordinatorConfig};
+    /// use tempfile::TempDir;
+    ///
+    /// let temp_dir = TempDir::new().unwrap();
+    /// let config = FlushCoordinatorConfig::new(temp_dir.path().to_path_buf());
+    /// let coordinator = FlushCoordinator::new(config).unwrap();
+    ///
+    /// let segments = coordinator.list_segments_with_metadata();
+    /// assert!(segments.is_empty());
+    /// ```
     pub fn list_segments_with_metadata(&self) -> Vec<(u64, SegmentMetadata)> {
         let mut segments = Vec::with_capacity(16); // ⚡ Bolt Optimization: Pre-allocate space for WAL segment metadata to prevent small heap reallocations when reading directories.
 
@@ -610,6 +670,19 @@ impl FlushCoordinator {
     ///
     /// This can be used to determine what LSN to start recovery from.
     /// Returns `None` if no segments exist or no segments have metadata.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use aletheiadb::storage::wal::flush_coordinator::{FlushCoordinator, FlushCoordinatorConfig};
+    /// use tempfile::TempDir;
+    ///
+    /// let temp_dir = TempDir::new().unwrap();
+    /// let config = FlushCoordinatorConfig::new(temp_dir.path().to_path_buf());
+    /// let coordinator = FlushCoordinator::new(config).unwrap();
+    ///
+    /// assert_eq!(coordinator.get_min_lsn(), None);
+    /// ```
     pub fn get_min_lsn(&self) -> Option<LSN> {
         self.list_segments_with_metadata()
             .into_iter()
@@ -629,6 +702,21 @@ impl FlushCoordinator {
     /// # Returns
     ///
     /// Statistics about the flush operation.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use aletheiadb::storage::wal::flush_coordinator::{FlushCoordinator, FlushCoordinatorConfig};
+    /// use tempfile::TempDir;
+    ///
+    /// let temp_dir = TempDir::new().unwrap();
+    /// let config = FlushCoordinatorConfig::new(temp_dir.path().to_path_buf());
+    /// let coordinator = FlushCoordinator::new(config).unwrap();
+    ///
+    /// // Flush empty batch
+    /// let stats = coordinator.flush(vec![], true).unwrap();
+    /// assert_eq!(stats.entries_flushed, 0);
+    /// ```
     pub fn flush(&self, entries: Vec<PendingEntry>, sync: bool) -> Result<FlushStats> {
         if entries.is_empty() {
             return Ok(FlushStats::default());
@@ -860,6 +948,15 @@ pub struct FlushSignal {
 
 impl FlushSignal {
     /// Create a new flush signal.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use aletheiadb::storage::wal::flush_coordinator::FlushSignal;
+    ///
+    /// let signal = FlushSignal::new();
+    /// assert_eq!(signal.take_request(), false);
+    /// ```
     pub fn new() -> Self {
         Self {
             requested: AtomicBool::new(false),
@@ -921,7 +1018,30 @@ pub struct FlushThread {
     flush_signal: Arc<FlushSignal>,
 }
 
+impl Default for FlushThread {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl FlushThread {
+    /// Create a new, unstarted flush thread handle.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use aletheiadb::storage::wal::flush_coordinator::FlushThread;
+    ///
+    /// let thread = FlushThread::new();
+    /// ```
+    pub fn new() -> Self {
+        Self {
+            handle: None,
+            shutdown: Arc::new(AtomicBool::new(false)),
+            flush_signal: Arc::new(FlushSignal::new()),
+        }
+    }
+
     /// Start a new background flush thread.
     ///
     /// The thread will periodically drain entries from the provided drain

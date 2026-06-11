@@ -184,6 +184,15 @@ impl DurabilityMode {
     /// # Errors
     ///
     /// Returns [`StorageError::WalError`] if validation fails.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use aletheiadb::storage::wal::DurabilityMode;
+    ///
+    /// let mode = DurabilityMode::async_mode_validated(100).unwrap();
+    /// let err = DurabilityMode::async_mode_validated(0).unwrap_err();
+    /// ```
     pub fn async_mode_validated(flush_interval_ms: u64) -> Result<Self> {
         if flush_interval_ms == 0 {
             return Err(StorageError::WalError {
@@ -239,6 +248,15 @@ impl DurabilityMode {
     /// # Errors
     ///
     /// Returns [`StorageError::WalError`] if validation fails.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use aletheiadb::storage::wal::DurabilityMode;
+    ///
+    /// let mode = DurabilityMode::group_commit_validated(2, 50).unwrap();
+    /// let err = DurabilityMode::group_commit_validated(0, 50).unwrap_err();
+    /// ```
     pub fn group_commit_validated(max_delay_ms: u64, max_batch_size: usize) -> Result<Self> {
         if max_delay_ms == 0 {
             return Err(StorageError::WalError {
@@ -488,12 +506,28 @@ impl WriteOptions {
     const BULK_IMPORT_FLUSH_INTERVAL_MS: u64 = 100;
 
     /// Create new WriteOptions with default settings.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use aletheiadb::storage::wal::WriteOptions;
+    ///
+    /// let opts = WriteOptions::new();
+    /// ```
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
     /// Set the durability mode for this transaction.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use aletheiadb::storage::wal::{WriteOptions, DurabilityMode};
+    ///
+    /// let opts = WriteOptions::new().with_durability(DurabilityMode::Synchronous);
+    /// ```
     #[must_use]
     pub fn with_durability(mut self, mode: DurabilityMode) -> Self {
         self.durability_mode = Some(mode);
@@ -501,6 +535,15 @@ impl WriteOptions {
     }
 
     /// Get the effective durability mode, falling back to the provided default.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use aletheiadb::storage::wal::{WriteOptions, DurabilityMode};
+    ///
+    /// let opts = WriteOptions::new();
+    /// let mode = opts.effective_durability(DurabilityMode::GroupCommit { max_delay_ms: 2, max_batch_size: 50 });
+    /// ```
     pub fn effective_durability(&self, default: DurabilityMode) -> DurabilityMode {
         self.durability_mode.unwrap_or(default)
     }

@@ -49,6 +49,16 @@ pub struct LsnAllocator {
 
 impl LsnAllocator {
     /// Create a new LSN allocator starting at LSN 1.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use aletheiadb::storage::wal::lsn_allocator::LsnAllocator;
+    /// use aletheiadb::storage::wal::entry::LSN;
+    ///
+    /// let allocator = LsnAllocator::new();
+    /// assert_eq!(allocator.current(), LSN(1));
+    /// ```
     pub fn new() -> Self {
         Self {
             next_lsn: AtomicU64::new(1),
@@ -58,6 +68,16 @@ impl LsnAllocator {
     /// Create a new LSN allocator starting at a specific LSN.
     ///
     /// Used during recovery to resume from the last known LSN.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use aletheiadb::storage::wal::lsn_allocator::LsnAllocator;
+    /// use aletheiadb::storage::wal::entry::LSN;
+    ///
+    /// let allocator = LsnAllocator::starting_at(LSN(42));
+    /// assert_eq!(allocator.allocate(), LSN(42));
+    /// ```
     pub fn starting_at(lsn: LSN) -> Self {
         Self {
             next_lsn: AtomicU64::new(lsn.0),
@@ -134,6 +154,19 @@ impl LsnAllocator {
     ///
     /// - Panics if `count` is 0.
     /// - Panics if the allocation would cause LSN overflow past `u64::MAX`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use aletheiadb::storage::wal::lsn_allocator::LsnAllocator;
+    /// use aletheiadb::storage::wal::entry::LSN;
+    ///
+    /// let allocator = LsnAllocator::new();
+    /// let (first, last) = allocator.allocate_batch(3);
+    /// assert_eq!(first, LSN(1));
+    /// assert_eq!(last, LSN(3));
+    /// assert_eq!(allocator.current(), LSN(4));
+    /// ```
     #[inline]
     pub fn allocate_batch(&self, count: u64) -> (LSN, LSN) {
         assert!(count > 0, "Cannot allocate 0 LSNs");
@@ -157,6 +190,18 @@ impl LsnAllocator {
     /// Get the current (next to be allocated) LSN without allocating.
     ///
     /// This is useful for checkpointing and recovery.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use aletheiadb::storage::wal::lsn_allocator::LsnAllocator;
+    /// use aletheiadb::storage::wal::entry::LSN;
+    ///
+    /// let allocator = LsnAllocator::new();
+    /// assert_eq!(allocator.current(), LSN(1));
+    /// allocator.allocate();
+    /// assert_eq!(allocator.current(), LSN(2));
+    /// ```
     #[inline]
     pub fn current(&self) -> LSN {
         LSN(self.next_lsn.load(Ordering::Relaxed))
@@ -171,6 +216,17 @@ impl LsnAllocator {
     /// # Arguments
     ///
     /// * `lsn` - The next LSN to allocate
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use aletheiadb::storage::wal::lsn_allocator::LsnAllocator;
+    /// use aletheiadb::storage::wal::entry::LSN;
+    ///
+    /// let allocator = LsnAllocator::new();
+    /// allocator.set_next(LSN(100));
+    /// assert_eq!(allocator.allocate(), LSN(100));
+    /// ```
     pub fn set_next(&self, lsn: LSN) {
         self.next_lsn.store(lsn.0, Ordering::Relaxed);
     }

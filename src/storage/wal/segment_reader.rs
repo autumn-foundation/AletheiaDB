@@ -141,6 +141,21 @@ pub fn read_entries_from_dir(wal_dir: &Path, start_lsn: LSN) -> Result<Vec<WalEn
 /// # Returns
 ///
 /// A vector of WAL entries sorted by LSN.
+///
+/// # Examples
+///
+/// ```
+/// use std::path::Path;
+/// use aletheiadb::storage::wal::segment_reader::read_entries_from_dir_with_cipher;
+/// use aletheiadb::storage::wal::entry::LSN;
+///
+/// // Example of attempting to read from an empty directory
+/// let empty_dir = Path::new("/tmp/some_non_existent_wal_dir");
+/// let result = read_entries_from_dir_with_cipher(empty_dir, LSN(1), None);
+/// // Directory does not exist, so it returns Ok(vec![]) since no files are found.
+/// assert!(result.is_ok());
+/// assert!(result.unwrap().is_empty());
+/// ```
 pub fn read_entries_from_dir_with_cipher(
     wal_dir: &Path,
     start_lsn: LSN,
@@ -251,6 +266,20 @@ pub fn read_segment(path: &Path, start_lsn: LSN) -> Result<Vec<WalEntry>> {
 /// - The segment is version 2 but no cipher is provided
 /// - Decryption fails (wrong key, corrupted data, tampered header)
 /// - The segment format is invalid
+///
+/// # Examples
+///
+/// ```
+/// use std::path::Path;
+/// use aletheiadb::storage::wal::segment_reader::read_segment_with_cipher;
+/// use aletheiadb::storage::wal::entry::LSN;
+///
+/// let path = Path::new("/tmp/non_existent_segment.log");
+/// let result = read_segment_with_cipher(path, LSN(1), None);
+/// // File does not exist, which is treated as an empty segment
+/// assert!(result.is_ok());
+/// assert!(result.unwrap().is_empty());
+/// ```
 pub fn read_segment_with_cipher(
     path: &Path,
     start_lsn: LSN,

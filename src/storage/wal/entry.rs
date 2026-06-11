@@ -24,11 +24,30 @@ pub struct LSN(pub u64);
 
 impl LSN {
     /// Create the first LSN
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use aletheiadb::storage::wal::entry::LSN;
+    ///
+    /// let lsn = LSN::initial();
+    /// assert_eq!(lsn.0, 1);
+    /// ```
     pub fn initial() -> Self {
         LSN(1)
     }
 
     /// Get the next LSN
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use aletheiadb::storage::wal::entry::LSN;
+    ///
+    /// let lsn = LSN::initial();
+    /// let next = lsn.next();
+    /// assert_eq!(next.0, 2);
+    /// ```
     pub fn next(&self) -> Self {
         LSN(self.0 + 1)
     }
@@ -147,6 +166,17 @@ pub struct WalEntry {
 
 impl WalEntry {
     /// Create a new WAL entry with computed checksum
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use aletheiadb::storage::wal::entry::{LSN, WalEntry, WalOperation};
+    /// use aletheiadb::core::temporal::time;
+    ///
+    /// let lsn = LSN::initial();
+    /// let entry = WalEntry::new(lsn, WalOperation::Checkpoint { lsn, timestamp: time::now() });
+    /// assert_eq!(entry.lsn, lsn);
+    /// ```
     pub fn new(lsn: LSN, operation: WalOperation) -> Self {
         let timestamp = time::now();
         // Checksum will be computed during serialization
@@ -159,6 +189,18 @@ impl WalEntry {
     }
 
     /// Verify the checksum against serialized data
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use aletheiadb::storage::wal::entry::{LSN, WalEntry, WalOperation};
+    /// use aletheiadb::core::temporal::time;
+    ///
+    /// let lsn = LSN::initial();
+    /// let entry = WalEntry::new(lsn, WalOperation::Checkpoint { lsn, timestamp: time::now() });
+    /// // In reality, you'd serialize the entry to bytes first.
+    /// // let is_valid = entry.verify_checksum(&serialized_bytes);
+    /// ```
     pub fn verify_checksum(&self, serialized_data: &[u8]) -> bool {
         // Phase 2: Checksum now at bytes 20-24 (LSN=8 + HybridTimestamp=12)
         if serialized_data.len() < 24 {

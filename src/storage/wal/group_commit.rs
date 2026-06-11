@@ -233,6 +233,16 @@ impl GroupCommitCoordinator {
     /// # Errors
     ///
     /// Returns `StorageError::LockPoisoned` if the coordinator lock is poisoned.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use aletheiadb::storage::wal::group_commit::GroupCommitCoordinator;
+    ///
+    /// let coordinator = GroupCommitCoordinator::with_defaults();
+    /// let (epoch, should_flush) = coordinator.register_transaction().unwrap();
+    /// assert_eq!(epoch, 1);
+    /// ```
     pub fn register_transaction(&self) -> Result<(u64, bool), Error> {
         let mut state = self.state.lock().map_err(|_| {
             Error::Storage(StorageError::LockPoisoned {

@@ -129,6 +129,17 @@ impl WalStripe {
     ///
     /// - `Ok(handle)` - Handle to wait for durability
     /// - `Err(entry)` if buffer is full or closed
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use aletheiadb::storage::wal::stripe::WalStripe;
+    /// use aletheiadb::storage::wal::entry::LSN;
+    ///
+    /// let stripe = WalStripe::new(0);
+    /// let result = stripe.append_sync(LSN(1), vec![1, 2, 3]);
+    /// assert!(result.is_ok());
+    /// ```
     pub fn append_sync(&self, lsn: LSN, data: Vec<u8>) -> Result<CompletionHandle, PendingEntry> {
         let (entry, handle) = PendingEntry::new_sync(lsn, data);
         self.append_entry(entry).map(|()| handle)
@@ -198,6 +209,18 @@ impl WalStripe {
     /// Drain all pending entries from this stripe.
     ///
     /// This should only be called by the flush coordinator.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use aletheiadb::storage::wal::stripe::WalStripe;
+    /// use aletheiadb::storage::wal::entry::LSN;
+    ///
+    /// let stripe = WalStripe::new(0);
+    /// stripe.append_async(LSN(1), vec![1, 2, 3]).unwrap();
+    /// let entries = stripe.drain();
+    /// assert_eq!(entries.len(), 1);
+    /// ```
     pub fn drain(&self) -> Vec<PendingEntry> {
         self.ring_buffer.drain()
     }
