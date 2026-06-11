@@ -11,7 +11,7 @@ use std::path::Path;
 use crate::encryption::KeyProviderError;
 use crate::encryption::config::{EncryptionConfig, KeyProviderConfig};
 use crate::encryption::factory::Algorithm;
-use crate::encryption::key_provider::{FileKeyProvider, KeyProvider};
+use crate::encryption::key_provider::FileKeyProvider;
 
 /// Result of a key generation operation.
 #[derive(Debug)]

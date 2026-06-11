@@ -55,10 +55,6 @@ pub enum KeyProviderError {
     #[error("Invalid key format: {0}")]
     InvalidKeyFormat(String),
 
-    /// Key rotation is not supported by this provider.
-    #[error("Key rotation not supported by this provider")]
-    RotationNotSupported,
-
     /// I/O error reading key material.
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),

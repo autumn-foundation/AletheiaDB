@@ -22,7 +22,6 @@ pub mod factory;
 pub mod key_derivation;
 pub mod key_provider;
 pub mod manager;
-pub mod rotation;
 pub mod wal_encryption;
 
 pub use audit::{AuditEvent, AuditLevel, EncryptionAuditLogger};
@@ -39,7 +38,6 @@ pub use factory::{Algorithm, algorithm_from_id, create_cipher};
 pub use key_derivation::{
     CHECKPOINT_DEK_CONTEXT, COLD_DEK_CONTEXT, INDEX_DEK_CONTEXT, KeyDerivation, WAL_DEK_CONTEXT,
 };
-pub use key_provider::{EnvKeyProvider, FileKeyProvider, KeyFormat, KeyProvider};
+pub use key_provider::{EnvKeyProvider, FileKeyProvider};
 pub use manager::EncryptionManager;
-pub use rotation::{KeyRotationManager, KeyVersion, RotationState};
 pub use wal_encryption::{decrypt_wal_payload, encrypt_wal_payload};

@@ -12,30 +12,6 @@ use zeroize::Zeroizing;
 
 use crate::encryption::KeyProviderError;
 
-/// Sources the Master Encryption Key (MEK) for the database.
-///
-/// Implementations must be `Send + Sync` to allow concurrent access from
-/// multiple storage components.
-pub trait KeyProvider: Send + Sync {
-    /// Retrieve the 32-byte master encryption key.
-    fn get_mek(&self) -> Result<Zeroizing<[u8; 32]>, KeyProviderError>;
-
-    /// Human-readable provider name for logging/diagnostics.
-    fn provider_name(&self) -> &str;
-
-    /// Validate that the provider is functional and the key is accessible.
-    fn health_check(&self) -> Result<(), KeyProviderError>;
-}
-
-/// Supported key file formats.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum KeyFormat {
-    /// 64-character hex-encoded key (ASCII).
-    Hex,
-    /// Raw 32-byte binary key.
-    Binary,
-}
-
 /// Encode bytes as a lowercase hex string.
 fn bytes_to_hex(bytes: &[u8]) -> String {
     let mut s = String::with_capacity(bytes.len() * 2);
@@ -87,7 +63,7 @@ impl FileKeyProvider {
     ///
     /// ## Examples
     /// ```
-    /// use aletheiadb::encryption::key_provider::{FileKeyProvider, KeyProvider};
+    /// use aletheiadb::encryption::key_provider::FileKeyProvider;
     ///
     /// let provider = FileKeyProvider::new("/etc/keys/master.key");
     /// assert_eq!(provider.provider_name(), "file");
@@ -145,10 +121,9 @@ impl FileKeyProvider {
             content.len()
         )))
     }
-}
 
-impl KeyProvider for FileKeyProvider {
-    fn get_mek(&self) -> Result<Zeroizing<[u8; 32]>, KeyProviderError> {
+    /// Retrieve the 32-byte master encryption key.
+    pub fn get_mek(&self) -> Result<Zeroizing<[u8; 32]>, KeyProviderError> {
         let content = std::fs::read(&self.path).map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 KeyProviderError::KeyNotFound
@@ -159,11 +134,13 @@ impl KeyProvider for FileKeyProvider {
         Self::parse_key(&content)
     }
 
-    fn provider_name(&self) -> &str {
+    /// Human-readable provider name for logging/diagnostics.
+    pub fn provider_name(&self) -> &str {
         "file"
     }
 
-    fn health_check(&self) -> Result<(), KeyProviderError> {
+    /// Validate that the provider is functional and the key is accessible.
+    pub fn health_check(&self) -> Result<(), KeyProviderError> {
         self.get_mek().map(|_| ())
     }
 }
@@ -184,7 +161,7 @@ impl EnvKeyProvider {
     ///
     /// ## Examples
     /// ```
-    /// use aletheiadb::encryption::key_provider::{EnvKeyProvider, KeyProvider};
+    /// use aletheiadb::encryption::key_provider::EnvKeyProvider;
     ///
     /// let provider = EnvKeyProvider::new("MY_MASTER_KEY");
     /// assert_eq!(provider.provider_name(), "env");
@@ -194,19 +171,20 @@ impl EnvKeyProvider {
             var_name: var_name.into(),
         }
     }
-}
 
-impl KeyProvider for EnvKeyProvider {
-    fn get_mek(&self) -> Result<Zeroizing<[u8; 32]>, KeyProviderError> {
+    /// Retrieve the 32-byte master encryption key.
+    pub fn get_mek(&self) -> Result<Zeroizing<[u8; 32]>, KeyProviderError> {
         let value = std::env::var(&self.var_name).map_err(|_| KeyProviderError::KeyNotFound)?;
         FileKeyProvider::parse_key(value.as_bytes())
     }
 
-    fn provider_name(&self) -> &str {
+    /// Human-readable provider name for logging/diagnostics.
+    pub fn provider_name(&self) -> &str {
         "env"
     }
 
-    fn health_check(&self) -> Result<(), KeyProviderError> {
+    /// Validate that the provider is functional and the key is accessible.
+    pub fn health_check(&self) -> Result<(), KeyProviderError> {
         self.get_mek().map(|_| ())
     }
 }

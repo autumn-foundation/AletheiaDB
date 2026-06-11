@@ -27,27 +27,6 @@ pub enum AuditEvent {
         /// Key version that was loaded.
         key_version: u32,
     },
-    /// Key rotation started.
-    RotationStarted {
-        /// Previous key version.
-        old_version: u32,
-        /// New key version being rotated to.
-        new_version: u32,
-    },
-    /// Key rotation completed successfully.
-    RotationCompleted {
-        /// The new active key version.
-        new_version: u32,
-        /// Time taken for the rotation in milliseconds.
-        duration_ms: u64,
-    },
-    /// Key rotation failed.
-    RotationFailed {
-        /// Key version that failed to rotate.
-        version: u32,
-        /// Error description.
-        error: String,
-    },
     /// Key access denied by the provider.
     KeyAccessDenied {
         /// Name of the key provider.
@@ -159,9 +138,6 @@ impl EncryptionAuditLogger {
     pub fn log(&self, event: &AuditEvent) {
         let required_level = match event {
             AuditEvent::KeyLoaded { .. }
-            | AuditEvent::RotationStarted { .. }
-            | AuditEvent::RotationCompleted { .. }
-            | AuditEvent::RotationFailed { .. }
             | AuditEvent::KeyAccessDenied { .. } => AuditLevel::KeyEvents,
             AuditEvent::EncryptOperation { .. } | AuditEvent::DecryptOperation { .. } => {
                 AuditLevel::AllOperations
@@ -184,30 +160,6 @@ impl EncryptionAuditLogger {
             } => {
                 eprintln!(
                     "[AUDIT] ts={timestamp} instance={} event=key.loaded provider={provider} version={key_version}",
-                    self.instance_id
-                );
-            }
-            AuditEvent::RotationStarted {
-                old_version,
-                new_version,
-            } => {
-                eprintln!(
-                    "[AUDIT] ts={timestamp} instance={} event=key.rotation.started old_version={old_version} new_version={new_version}",
-                    self.instance_id
-                );
-            }
-            AuditEvent::RotationCompleted {
-                new_version,
-                duration_ms,
-            } => {
-                eprintln!(
-                    "[AUDIT] ts={timestamp} instance={} event=key.rotation.completed version={new_version} duration_ms={duration_ms}",
-                    self.instance_id
-                );
-            }
-            AuditEvent::RotationFailed { version, error } => {
-                eprintln!(
-                    "[AUDIT] ts={timestamp} instance={} event=key.rotation.failed version={version} error={error}",
                     self.instance_id
                 );
             }
@@ -253,18 +205,6 @@ mod tests {
             provider: "file".into(),
             key_version: 1,
         });
-        logger.log(&AuditEvent::RotationStarted {
-            old_version: 1,
-            new_version: 2,
-        });
-        logger.log(&AuditEvent::RotationCompleted {
-            new_version: 2,
-            duration_ms: 42,
-        });
-        logger.log(&AuditEvent::RotationFailed {
-            version: 2,
-            error: "boom".into(),
-        });
         logger.log(&AuditEvent::KeyAccessDenied {
             provider: "env".into(),
             error: "denied".into(),
@@ -288,10 +228,6 @@ mod tests {
         logger.log(&AuditEvent::KeyLoaded {
             provider: "file".into(),
             key_version: 1,
-        });
-        logger.log(&AuditEvent::RotationStarted {
-            old_version: 1,
-            new_version: 2,
         });
 
         // Operation-level events are filtered out (still no panic).

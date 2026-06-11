@@ -13,7 +13,7 @@ use crate::encryption::factory::create_cipher;
 use crate::encryption::key_derivation::{
     CHECKPOINT_DEK_CONTEXT, COLD_DEK_CONTEXT, INDEX_DEK_CONTEXT, KeyDerivation, WAL_DEK_CONTEXT,
 };
-use crate::encryption::key_provider::{EnvKeyProvider, FileKeyProvider, KeyProvider};
+use crate::encryption::key_provider::{EnvKeyProvider, FileKeyProvider};
 
 /// Central manager that owns per-component ciphers for encryption at rest.
 ///
@@ -47,28 +47,28 @@ impl EncryptionManager {
     /// Build an [`EncryptionManager`] from an [`EncryptionConfig`].
     ///
     /// This:
-    /// 1. Creates the appropriate [`KeyProvider`] based on config.
-    /// 2. Loads the Master Encryption Key (MEK).
-    /// 3. Derives four per-component DEKs via HKDF-SHA256.
-    /// 4. Creates four independent ciphers (one per storage component).
+    /// 1. Loads the Master Encryption Key (MEK) based on config.
+    /// 2. Derives four per-component DEKs via HKDF-SHA256.
+    /// 3. Creates four independent ciphers (one per storage component).
     ///
     /// # Errors
     ///
     /// Returns [`KeyProviderError`] if the MEK cannot be loaded (missing file,
     /// missing env var, invalid format, etc.).
     pub fn from_config(config: &EncryptionConfig) -> Result<Self, KeyProviderError> {
-        // 1. Create the key provider.
-        let provider: Box<dyn KeyProvider> = match &config.key_provider {
-            KeyProviderConfig::File { path } => Box::new(FileKeyProvider::new(path)),
-            KeyProviderConfig::Env { variable } => Box::new(EnvKeyProvider::new(variable)),
+        // 1. Load the MEK and determine the provider name.
+        let (mek, name) = match &config.key_provider {
+            KeyProviderConfig::File { path } => {
+                let provider = FileKeyProvider::new(path);
+                (provider.get_mek()?, provider.provider_name().to_string())
+            }
+            KeyProviderConfig::Env { variable } => {
+                let provider = EnvKeyProvider::new(variable);
+                (provider.get_mek()?, provider.provider_name().to_string())
+            }
         };
 
-        let name = provider.provider_name().to_string();
-
-        // 2. Load the MEK.
-        let mek = provider.get_mek()?;
-
-        // 3. Derive per-component DEKs.
+        // 2. Derive per-component DEKs.
         let kd = KeyDerivation::new(mek);
         let wal_dek = kd
             .derive_dek(WAL_DEK_CONTEXT)
