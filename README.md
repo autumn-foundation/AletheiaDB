@@ -87,6 +87,29 @@ See the [Hybrid Query guide](docs/guides/hybrid-query-guide.md).
 
 ---
 
+## Narrative Generation (Experimental)
+
+> ⚠️ **REQUIRES FEATURE NOVA**: You must enable the `nova` feature in your `Cargo.toml` to use Narrative Generation.
+
+```rust
+// Requires "nova" feature in Cargo.toml
+use aletheiadb::experimental::temporal_narrative::NarrativeGenerator;
+use aletheiadb::prelude::*;
+
+fn main() -> Result<()> {
+    let db = AletheiaDB::new()?;
+
+    // Create and update nodes to generate history...
+    // let node_id = ...
+
+    let generator = NarrativeGenerator::new(&db);
+    // let narrative = generator.generate_node_narrative(node_id)?;
+    Ok(())
+}
+```
+
+---
+
 ## Performance
 
 Benchmarks run on every push to trunk.
