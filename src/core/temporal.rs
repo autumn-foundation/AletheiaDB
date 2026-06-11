@@ -960,7 +960,10 @@ mod tests {
     #[test]
     fn test_timerange_deserialize_truncated() {
         let result = TimeRange::deserialize(&[0; 23]); // Phase 2: 24 bytes needed
-        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            crate::core::error::StorageError::CorruptedData(_)
+        ));
     }
 
     #[test]
@@ -999,7 +1002,10 @@ mod tests {
     #[test]
     fn test_bitemporal_deserialize_truncated() {
         let result = BiTemporalInterval::deserialize(&[0; 47]); // Phase 2: 48 bytes needed
-        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            crate::core::error::StorageError::CorruptedData(_)
+        ));
     }
 
     #[test]

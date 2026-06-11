@@ -2355,7 +2355,10 @@ mod tests {
         // Should return error because no vector index is configured
         let result = rerank.next();
         assert!(result.is_some());
-        assert!(result.unwrap().is_err());
+        assert!(matches!(
+            result.unwrap().unwrap_err(),
+            crate::core::error::Error::Vector(crate::core::error::VectorError::IndexError(_))
+        ));
     }
 
     #[test]
@@ -2469,7 +2472,10 @@ mod tests {
         let mut project_iter = ProjectIterator::new(Box::new(mock_iter), vec!["deep".to_string()]);
 
         let res = project_iter.next().unwrap();
-        assert!(res.is_err());
+        assert!(matches!(
+            res.unwrap_err(),
+            crate::core::error::Error::Storage(crate::core::error::StorageError::CorruptedData(_))
+        ));
     }
 
     #[test]
@@ -2507,7 +2513,7 @@ mod tests {
 
         let res = project_iter.next().unwrap();
         assert!(
-            res.is_err(),
+            matches!(res.unwrap_err(), crate::core::error::Error::Storage(crate::core::error::StorageError::CorruptedData(_))),
             "ProjectIterator should gracefully handle property insertion errors"
         );
     }

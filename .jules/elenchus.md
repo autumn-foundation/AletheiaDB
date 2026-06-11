@@ -346,3 +346,24 @@
 **Finding:** The `LimitPushdown` tests originally missed several behavioral edge cases and logic checks, particularly regarding the propagation limits in BinaryOp combinations (`||`), updating limit values correctly against child bounds, and setting vector rank limits.
 **Evidence:** `cargo mutants` caught mutants in `LimitPushdown::push_down` specifically targeting the changed boolean condition logic and bounds assignment.
 **Recommendation:** Added `sentry_tests` to `LimitPushdown` that explicitly trigger tests enforcing the boolean change propagation, verifying that updated properties reflect correct nested limits, and vector bounds assignment. Tests now prevent `||` to `&&` mutations and correct top-k modifications.
+
+## [LimitPushdown VectorRank Coverage Gap]
+**Module:** `src/query/planner/rules/limit_pushdown.rs`
+**Severity:** 🔴 Critical
+**Finding:** The Oracle Problem / Missing Mutation Coverage. `test_pushdown_vector_rank_neq` and `test_propagate_limit_to_vector_rank` test limit propagation through `VectorRank`, but fail to test the case where `VectorRank`'s limit doesn't change, but its inner input *does* change.
+**Evidence:** Mentally mutating `changed = input_changed || new_top_k != *top_k` to `changed = new_top_k != *top_k` survives all tests. If `Limit(10, Limit(20, Scan))` is under a `VectorRank`, it silently drops the optimization.
+**Recommendation:** Add a test `test_pushdown_vector_rank_input_changed_but_limit_same` to ensure `changed = true` propagates.
+
+## [Iterators Error Passthrough Ceremony]
+**Module:** `src/query/executor/iterators.rs`
+**Severity:** 🟡 Suspect
+**Finding:** The Ceremony Test (Weak Assertions). `test_project_iterator_error_passthrough`, `test_project_iterator_handles_recursion_error_gracefully`, and `test_vector_rerank_no_vector_index_error` use `assert!(res.is_err())`.
+**Evidence:** If the code is mutated to return an incorrect error type instead of the intended error, the test still passes, failing to enforce domain error mapping correctly.
+**Recommendation:** Change `assert!(res.is_err())` to `assert!(matches!(res.unwrap_err(), ...))` checking the specific error variant.
+
+## [Temporal Deserialization Ceremony]
+**Module:** `src/core/temporal.rs`
+**Severity:** 🟡 Suspect
+**Finding:** The Ceremony Test. `test_timerange_deserialize_truncated` and `test_bitemporal_deserialize_truncated` use `assert!(result.is_err())`.
+**Evidence:** Similar to above, returning generic IO or other panics instead of `StorageError::CorruptedData` will go undetected.
+**Recommendation:** Change to `assert!(matches!(res.unwrap_err(), StorageError::CorruptedData(_)))`.

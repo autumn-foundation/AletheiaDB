@@ -519,6 +519,62 @@ mod sentry_tests {
     }
 
     #[test]
+    fn test_pushdown_vector_rank_input_changed_but_limit_same() {
+        let rule = LimitPushdown;
+        let stats = test_stats();
+
+        // Limit(10, VectorRank(10, Limit(20, Limit(30, Scan)))) -> Limit(10, VectorRank(10, Limit(20, Scan)))
+        let plan = LogicalPlan::new(LogicalOp::unary(
+            UnaryOp::Limit(10),
+            LogicalOp::unary(
+                UnaryOp::VectorRank {
+                    embedding: std::sync::Arc::from([0.1f32; 4].as_slice()),
+                    top_k: Some(10),
+                    property_key: None,
+                },
+                LogicalOp::unary(
+                    UnaryOp::Limit(20),
+                    LogicalOp::unary(
+                        UnaryOp::Limit(30),
+                        LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(1).unwrap()])),
+                    ),
+                ),
+            ),
+        ));
+
+        let result = rule.apply(&plan, &stats).unwrap();
+        assert!(result.is_some(), "Optimization should propagate because the inner limit changed");
+        let new_plan = result.unwrap();
+        match &new_plan.root {
+            LogicalOp::Unary {
+                op: UnaryOp::Limit(n),
+                input,
+            } => {
+                assert_eq!(*n, 10);
+                match input.as_ref() {
+                    LogicalOp::Unary {
+                        op: UnaryOp::VectorRank { top_k, .. },
+                        input: inner_input,
+                    } => {
+                        assert_eq!(*top_k, Some(10));
+                        match inner_input.as_ref() {
+                            LogicalOp::Unary {
+                                op: UnaryOp::Limit(inner_n),
+                                ..
+                            } => {
+                                assert_eq!(*inner_n, 20);
+                            }
+                            _ => panic!("Expected inner Limit"),
+                        }
+                    }
+                    _ => panic!("Expected VectorRank"),
+                }
+            }
+            _ => panic!("Expected outer Limit"),
+        }
+    }
+
+    #[test]
     fn test_pushdown_vector_rank_neq() {
         let rule = LimitPushdown;
         // Vector rank with top_k = None, pass down limit = Some(5)
