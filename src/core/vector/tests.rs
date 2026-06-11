@@ -2489,6 +2489,70 @@ fn test_cosine_similarity_zero_magnitude_handling() {
     }
 }
 
+#[test]
+fn test_sparse_vec_new_unsorted_invalid_inputs() {
+    struct TestCase {
+        name: &'static str,
+        indices: Vec<u32>,
+        values: Vec<f32>,
+        dimension: u32,
+        expected_error_contains: &'static str,
+    }
+
+    let cases = vec![
+        TestCase {
+            name: "Unsorted duplicate index",
+            indices: vec![1, 0, 1],
+            values: vec![1.0, 2.0, 3.0],
+            dimension: 10,
+            expected_error_contains: "Duplicate index 1 found",
+        },
+        TestCase {
+            name: "Unsorted zero value",
+            indices: vec![1, 0],
+            values: vec![1.0, 0.0],
+            dimension: 10,
+            expected_error_contains: "zero value",
+        },
+        TestCase {
+            name: "Unsorted NaN value",
+            indices: vec![1, 0],
+            values: vec![1.0, f32::NAN],
+            dimension: 10,
+            expected_error_contains: "NaN",
+        },
+        TestCase {
+            name: "Unsorted Infinity value",
+            indices: vec![1, 0],
+            values: vec![1.0, f32::INFINITY],
+            dimension: 10,
+            expected_error_contains: "infinity",
+        },
+        TestCase {
+            name: "Unsorted Negative Infinity value",
+            indices: vec![1, 0],
+            values: vec![1.0, f32::NEG_INFINITY],
+            dimension: 10,
+            expected_error_contains: "infinity",
+        },
+    ];
+
+    for case in cases {
+        let result = SparseVec::new(case.indices.clone(), case.values.clone(), case.dimension);
+        assert!(result.is_err(), "Test '{}' should have failed", case.name);
+
+        let err = result.unwrap_err();
+        let err_msg = err.to_string();
+        assert!(
+            err_msg.contains(case.expected_error_contains),
+            "Test '{}' failed with wrong message: '{}', expected to contain '{}'",
+            case.name,
+            err_msg,
+            case.expected_error_contains
+        );
+    }
+}
+
 // ========================================================================
 // SparseVec Tests
 // ========================================================================

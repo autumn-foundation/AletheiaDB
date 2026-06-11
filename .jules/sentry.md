@@ -37,3 +37,7 @@
 **[Fix `execute_traversal` target shards bug]**
 **Learning:** `plan.steps` from `route_traversal` returns empty list, and we need `involved_shards`
 **Action:** Replace `steps` with `involved_shards` and update the test.
+
+## SparseVec Fallback Path Testing Coverage
+**Learning:** Rust's sparse vector instantiation path has an optimized `O(N)` fast-path to validate structurally correct inputs, falling back to an `O(N log N)` path if indices are unsorted. While the fast-path was implicitly tested, explicit coverage confirming that edge cases—such as unsorted duplicate indices and zero/invalid float values (NaN, Inf)—are correctly captured by the fallback validation block was missing.
+**Action:** When implementing algorithms with "fast" and "slow" paths, use table-driven tests explicitly exercising the slow path to ensure that constraints applied during fallback mapping or sorting don't silently accept malformed states. Added table-driven unsorted constraint checks.
