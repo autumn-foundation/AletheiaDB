@@ -802,9 +802,9 @@ impl<S: QueryState> QueryBuilder<S> {
     /// # Ok(())
     /// # }
     /// ```
-    pub fn execute(
+    pub fn execute<E: crate::query::traits::QueryEngine>(
         self,
-        db: &crate::AletheiaDB,
+        db: &E,
     ) -> crate::core::error::Result<super::executor::QueryResults> {
         let query = self.build();
         db.execute_query(query)

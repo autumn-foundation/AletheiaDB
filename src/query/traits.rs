@@ -76,3 +76,12 @@ pub trait GraphView {
         timestamp: Timestamp,
     ) -> Result<Vec<(NodeId, f32)>>;
 }
+
+/// A trait for executing generic queries.
+///
+/// This abstracts the execution engine so the query builder does not
+/// need to depend directly on the concrete database implementation.
+pub trait QueryEngine {
+    /// Execute a generic hybrid query and return the results.
+    fn execute_query(&self, query: crate::query::Query) -> Result<crate::query::QueryResults>;
+}
