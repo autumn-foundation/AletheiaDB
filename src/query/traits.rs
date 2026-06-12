@@ -4,6 +4,16 @@ use crate::core::error::Result;
 use crate::core::graph::{Edge, Node};
 use crate::core::id::{EdgeId, NodeId};
 use crate::core::temporal::Timestamp;
+use crate::query::{Query, QueryResults};
+
+/// A trait representing an engine capable of executing a hybrid query.
+///
+/// This trait abstracts the query execution capabilities of the database,
+/// preventing circular dependencies between the query module and the db module.
+pub trait QueryEngine {
+    /// Execute a constructed query and return the results.
+    fn execute_query(&self, query: Query) -> Result<QueryResults>;
+}
 
 /// A trait representing a read-only view of the graph.
 ///
