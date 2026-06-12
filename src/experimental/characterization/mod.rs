@@ -8,6 +8,7 @@
 //! Experimental — gated by `features = ["semantic-characterization"]` (or the `nova` umbrella).
 
 pub mod archetype;
+pub mod crossroads;
 pub mod graph_context;
 pub mod gravity;
 pub mod kaleidoscope;
