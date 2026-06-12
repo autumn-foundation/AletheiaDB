@@ -37,3 +37,6 @@
 **[Fix `execute_traversal` target shards bug]**
 **Learning:** `plan.steps` from `route_traversal` returns empty list, and we need `involved_shards`
 **Action:** Replace `steps` with `involved_shards` and update the test.
+**Panic Risks in Deserialization**
+**Learning:** When dealing with untrusted binary data from disk or network, `unwrap()` calls on length-verified slices (like `try_into().unwrap()` or `as usize` after `bytes.len() < X`) are technically safe from panics due to the preceding bounds check. However, they rely heavily on the programmer correctly pairing the length check with the exact slice indices. If these become disconnected during refactoring, it becomes a panic vulnerability.
+**Action:** It is better to use `expect("Slice length verified")` or refactor the extraction to use explicit slicing that matches the length check natively. However, since they do not currently cause a panic on dynamic data (they are already safeguarded), no functional changes were made, respecting the "focus on dynamic data... if no meaningful test gap can be found, stop" directive.
