@@ -61,18 +61,27 @@ const ENTRY_TYPE_COMPLETE: u8 = 3;
 
 /// Error types for commit log operations.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(missing_docs)]
 pub enum CommitLogError {
     /// I/O error.
+    /// Indicates an underlying filesystem error (e.g., disk full, permission denied).
     IoError(String),
     /// Corrupt log file.
+    /// Indicates structural issues with the log file, such as a missing magic header or truncated entries.
     CorruptedLog(String),
     /// Invalid entry.
+    /// Indicates that an entry was parsed, but contained semantically invalid data (e.g., unknown entry type).
     InvalidEntry(String),
     /// Transaction not found.
+    /// Used when attempting to update or complete a transaction that is not recorded in the log.
     TransactionNotFound(TxId),
     /// Checksum mismatch.
-    ChecksumMismatch { expected: u32, actual: u32 },
+    /// Indicates data corruption within a specific entry.
+    ChecksumMismatch {
+        /// The checksum calculated based on the entry payload
+        expected: u32,
+        /// The checksum actually found in the log file
+        actual: u32,
+    },
 }
 
 impl std::fmt::Display for CommitLogError {

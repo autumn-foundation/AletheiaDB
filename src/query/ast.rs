@@ -447,47 +447,69 @@ pub struct WhereClause {
 
 /// A predicate expression.
 #[derive(Debug, Clone, PartialEq)]
-#[allow(missing_docs)]
 pub enum PredicateExpr {
-    /// Comparison: n.prop = value
+    /// Comparison: n.prop = value.
+    /// Used for strict equality and inequality comparisons.
     Comparison {
+        /// The left-hand side of the comparison
         left: Expression,
+        /// The operator used for comparison
         op: ComparisonOp,
+        /// The right-hand side of the comparison
         right: Expression,
     },
-    /// Existence check: EXISTS(n.prop)
+    /// Existence check: EXISTS(n.prop).
+    /// Used to filter out nodes that do not have a certain property.
     Exists(PropertyAccess),
-    /// NULL check: n.prop IS NULL
+    /// NULL check: n.prop IS NULL.
+    /// Used to find nodes where a property is explicitly set to NULL or is missing.
     IsNull(PropertyAccess),
-    /// NOT NULL check: n.prop IS NOT NULL
+    /// NOT NULL check: n.prop IS NOT NULL.
+    /// Used to find nodes where a property is explicitly set to a non-NULL value.
     IsNotNull(PropertyAccess),
-    /// String contains: n.prop CONTAINS 'str'
+    /// String contains: n.prop CONTAINS 'str'.
+    /// Used for basic full-text filtering on string properties.
     Contains {
+        /// The property being searched
         property: PropertyAccess,
+        /// The substring to search for
         substring: String,
     },
     /// String starts with: n.prop STARTS WITH 'str'
+    /// Used for prefix matching on string properties.
     StartsWith {
+        /// The property being searched
         property: PropertyAccess,
+        /// The prefix to search for
         prefix: String,
     },
     /// String ends with: n.prop ENDS WITH 'str'
+    /// Used for suffix matching on string properties.
     EndsWith {
+        /// The property being searched
         property: PropertyAccess,
+        /// The suffix to search for
         suffix: String,
     },
     /// IN list: n.prop IN [1, 2, 3]
+    /// Used to match a property against a set of valid values.
     In {
+        /// The property being checked
         property: PropertyAccess,
+        /// The set of valid values
         values: Vec<PropertyValue>,
     },
-    /// Logical AND
+    /// Logical AND.
+    /// Used to combine multiple predicates that must all be true.
     And(Box<PredicateExpr>, Box<PredicateExpr>),
-    /// Logical OR
+    /// Logical OR.
+    /// Used to combine multiple predicates where at least one must be true.
     Or(Box<PredicateExpr>, Box<PredicateExpr>),
-    /// Logical NOT
+    /// Logical NOT.
+    /// Used to negate the result of a predicate.
     Not(Box<PredicateExpr>),
-    /// Parenthesized expression
+    /// Parenthesized expression.
+    /// Used to group predicates and define order of evaluation.
     Grouped(Box<PredicateExpr>),
 }
 
@@ -553,18 +575,27 @@ pub enum ComparisonOp {
 
 /// An expression (used in comparisons and projections).
 #[derive(Debug, Clone, PartialEq)]
-#[allow(missing_docs)]
 pub enum Expression {
-    /// Property access: n.prop
+    /// Property access: n.prop.
+    /// Represents the extraction of a specific property from a matched element.
     Property(PropertyAccess),
-    /// Bare identifier (variable reference): n
+    /// Bare identifier (variable reference): n.
+    /// Refers to an element matched in a pattern (e.g., node 'n').
     Identifier(String),
-    /// Literal value
+    /// Literal value.
+    /// A raw, constant value used in queries (e.g., 'Alice', 30, true).
     Literal(PropertyValue),
-    /// Parameter: $param
+    /// Parameter: $param.
+    /// Represents a dynamic parameter injected into the query at runtime to prevent SQL injection.
     Parameter(String),
-    /// Function call: func(args)
-    FunctionCall { name: String, args: Vec<Expression> },
+    /// Function call: func(args).
+    /// Used for invoking built-in functions (e.g., date formatting, math operations).
+    FunctionCall {
+        /// The name of the function to call
+        name: String,
+        /// The arguments passed to the function
+        args: Vec<Expression>,
+    },
 }
 
 impl Expression {

@@ -53,38 +53,65 @@ pub struct RoutingToken {
 
 /// Error types for migration operations.
 #[derive(Debug, Clone)]
-#[allow(missing_docs)]
 pub enum MigrationError {
     /// Network error during migration.
+    /// Indicates an underlying network failure while transferring data or coordinating state.
     NetworkError(NetworkError),
     /// Checksum verification failed.
+    /// Used when the target shard calculates a different checksum than the source, indicating data corruption in transit.
     ChecksumMismatch {
+        /// The sequential batch number that failed checksum verification
         batch_number: u64,
+        /// The checksum calculated by the source
         expected: u64,
+        /// The checksum calculated by the target
         actual: u64,
     },
     /// Batch was rejected by target shard.
-    BatchRejected { batch_number: u64, reason: String },
+    /// Used when the target actively rejects a batch (e.g., due to schema mismatch or internal errors).
+    BatchRejected {
+        /// The sequential batch number that was rejected
+        batch_number: u64,
+        /// The reason provided by the target for rejecting the batch
+        reason: String,
+    },
     /// Migration was cancelled.
+    /// Used when a human operator or the rebalance manager explicitly aborts the migration.
     Cancelled(u64),
     /// Migration timed out.
+    /// Used when a specific phase of the migration takes longer than the configured timeout threshold.
     Timeout {
+        /// The unique ID of the migration
         migration_id: u64,
+        /// The phase during which the timeout occurred
         phase: MigrationState,
+        /// The total time elapsed before timing out
         elapsed: Duration,
     },
     /// Source shard unavailable.
+    /// Used when the shard containing the data to be migrated goes offline.
     SourceUnavailable(ShardId),
     /// Target shard unavailable.
+    /// Used when the shard receiving the data goes offline.
     TargetUnavailable(ShardId),
     /// Invalid migration state.
+    /// Used when a command is issued that is incompatible with the current phase (e.g., cutting over before verifying).
     InvalidState {
+        /// The unique ID of the migration
         migration_id: u64,
+        /// The state required for the operation
         expected: MigrationState,
+        /// The actual current state
         actual: MigrationState,
     },
     /// Verification failed.
-    VerificationFailed { migration_id: u64, reason: String },
+    /// Used when the post-copy consistency checks (row counts, indexes) fail.
+    VerificationFailed {
+        /// The unique ID of the migration
+        migration_id: u64,
+        /// The specific reason verification failed
+        reason: String,
+    },
 }
 
 impl fmt::Display for MigrationError {

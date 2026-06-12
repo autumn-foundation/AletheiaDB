@@ -17,30 +17,48 @@ use std::time::{Duration, Instant};
 
 /// Error types for network operations.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(missing_docs)]
 pub enum NetworkError {
     /// Connection failed.
-    ConnectionFailed { shard_id: ShardId, reason: String },
-    /// Request timed out.
-    Timeout {
+    /// Used when the initial TCP handshake or TLS negotiation fails.
+    ConnectionFailed {
+        /// The target shard that refused the connection
         shard_id: ShardId,
+        /// The low-level reason (e.g., "Connection refused")
+        reason: String,
+    },
+    /// Request timed out.
+    /// Used when the connection succeeds but the remote shard takes too long to reply.
+    Timeout {
+        /// The target shard that timed out
+        shard_id: ShardId,
+        /// The logical operation that was being attempted (e.g., "CommitTransaction")
         operation: String,
+        /// The duration waited before giving up
         duration: Duration,
     },
     /// Circuit breaker is open.
+    /// Used to quickly fail requests without hitting the network when a shard is known to be failing.
     CircuitOpen {
+        /// The shard that has tripped its circuit breaker
         shard_id: ShardId,
+        /// The time remaining before the circuit breaker attempts a half-open retry
         remaining: Duration,
     },
     /// Shard is unavailable.
+    /// Used when a shard has explicitly communicated that it is shutting down or in maintenance mode.
     ShardUnavailable(ShardId),
     /// Serialization error.
+    /// Used when the client fails to encode a request or decode a response.
     SerializationError(String),
     /// Protocol error.
+    /// Used when the server responds with a structurally invalid or unexpected message.
     ProtocolError(String),
     /// Connection pool exhausted.
+    /// Used when too many concurrent requests are targeting the same shard and the pool is full.
     PoolExhausted {
+        /// The target shard whose connection pool is exhausted
         shard_id: ShardId,
+        /// The maximum number of allowed connections
         max_connections: usize,
     },
 }

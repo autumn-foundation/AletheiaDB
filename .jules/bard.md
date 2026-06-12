@@ -10,3 +10,6 @@
 ## 2024-05-14 - [Adding Examples to HLC and documenting src/main.rs]
 **Confusion:** The `src/main.rs` file was missing module-level documentation (`//!`), which triggers the `missing_docs` lint, but was hidden by the lint configurations inside `src/lib.rs` affecting `src/main.rs`. Also `HybridTimestamp::send` lacked an example showing the behavior of its logical counter.
 **Clarification:** Added `//! The AletheiaDB binary.` to `src/main.rs` and added an executable `## Examples` block to `HybridTimestamp::send` in `src/core/hlc.rs`.
+## 2024-05-20 - [Removing `#[allow(missing_docs)]` from core enums]
+**Confusion:** Several core public enums (`PredicateExpr`, `Expression`, `QueryRequest`, `MigrationError`, `NetworkError`, `CommitLogError`, `ExecutorError`) were using the `#[allow(missing_docs)]` escape hatch. This led to undocumented variants that users would have to dig into the source code to understand, going against the "If it isn't documented, it doesn't exist" philosophy.
+**Clarification:** Removed the `#[allow(missing_docs)]` attributes and added proper `///` documentation to all undocumented variants in these enums to ensure their purpose is clear in the generated `cargo doc` output.

@@ -48,31 +48,45 @@ use std::time::{Duration, Instant};
 
 /// Error types for query execution.
 #[derive(Debug, Clone)]
-#[allow(missing_docs)]
 pub enum ExecutorError {
     /// All target shards failed.
+    /// Used when a scatter query receives no successful responses.
     AllShardsFailed {
+        /// The unique ID of the failed query
         query_id: u64,
+        /// The list of shards and their respective network errors
         failures: Vec<(ShardId, NetworkError)>,
     },
     /// Query timed out.
+    /// Used when the gather phase exceeds the configured timeout before all shards respond.
     Timeout {
+        /// The unique ID of the timed out query
         query_id: u64,
+        /// The timeout threshold that was exceeded
         timeout: Duration,
+        /// The shards that successfully responded in time
         responded: Vec<ShardId>,
+        /// The shards that were still pending when the timeout occurred
         pending: Vec<ShardId>,
     },
     /// Partial failure (some shards succeeded, some failed).
+    /// Used when at least one shard failed, preventing a complete global result.
     PartialFailure {
+        /// The unique ID of the partially failed query
         query_id: u64,
+        /// The shards that successfully responded
         successes: Vec<ShardId>,
+        /// The shards that failed, along with their errors
         failures: Vec<(ShardId, NetworkError)>,
     },
     /// No shards available for query.
+    /// Used when the query router determines there are no healthy shards to send the query to.
     NoShardsAvailable,
     /// Invalid query.
+    /// Used when a query cannot be planned or routed.
     InvalidQuery(String),
     /// Aggregation error.
+    /// Used when the executor fails to merge the responses from multiple shards.
     AggregationError(String),
 }
 
