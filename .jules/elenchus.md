@@ -346,3 +346,35 @@
 **Finding:** The `LimitPushdown` tests originally missed several behavioral edge cases and logic checks, particularly regarding the propagation limits in BinaryOp combinations (`||`), updating limit values correctly against child bounds, and setting vector rank limits.
 **Evidence:** `cargo mutants` caught mutants in `LimitPushdown::push_down` specifically targeting the changed boolean condition logic and bounds assignment.
 **Recommendation:** Added `sentry_tests` to `LimitPushdown` that explicitly trigger tests enforcing the boolean change propagation, verifying that updated properties reflect correct nested limits, and vector bounds assignment. Tests now prevent `||` to `&&` mutations and correct top-k modifications.
+
+**[Parser Error Assertions Audit]**
+**Module:** `src/query/parser.rs`
+**Severity:** 🟡 Suspect
+**Finding:** The parser error tests heavily rely on `assert!(result.is_err())` followed occasionally by weak `.contains` checks on the error message. This is a form of The Ceremony Test. If the parser starts throwing entirely unrelated errors (e.g., failing to parse due to a bug in a previous token rather than the expected error), the tests would still pass, providing false confidence.
+**Evidence:**
+- `test_parse_error_missing_source`
+- `test_parse_error_invalid_pattern`
+- `test_parse_error_unclosed_paren`
+- `test_parse_error_missing_label`
+- `test_parse_error_negative_skip`
+All these tests only assert `result.is_err()`.
+Other tests like `test_parse_error_negative_limit` only check `.contains("non-negative")`.
+**Recommendation:** Refactor error tests to unwrap the error and explicitly verify the `ParseError` struct fields (like `message`, `expected`, `found`) using exact string matching or strong checks.
+
+**[Parser Missing Assertions on AST Audit]**
+**Module:** `src/query/parser.rs`
+**Severity:** 🟡 Suspect
+**Finding:** Many AST tests simply check `assert!(query.return_clause.is_some())` without checking what was actually parsed. They mirror "The Ceremony Test".
+**Evidence:**
+- `test_parse_where_equality` just asserts it matches `PredicateExpr::Comparison { .. }` without checking the operator or values.
+- `test_parse_as_of_string` just asserts `transaction_time.is_none()`.
+- `test_parse_find_similar` just checks the variant type.
+**Recommendation:** Replace `.is_some()` and weak `matches!` checks with exact struct equality (`assert_eq!(query.foo, expected_foo)` or full deep-inspection of the relevant variants) to prove correctness.
+
+
+**[AST Return Clause Exactness Missing]**
+**Module:** `src/query/parser.rs`
+**Severity:** 🟡 Suspect
+**Finding:** The `test_parse_return_multiple` only checks that `items.len() == 2`. It never validates that the two items actually contain `n.name` and `n.age` property expressions, effectively leaving the precise return values completely untested.
+**Evidence:** The test only reads: `assert_eq!(ret.items.len(), 2);`
+**Recommendation:** Refactor `test_parse_return_multiple` and `test_parse_order_by` to strictly check AST value contents. (Left as future priority fix).

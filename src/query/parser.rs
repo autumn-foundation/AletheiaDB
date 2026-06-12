@@ -1659,21 +1659,41 @@ mod tests {
     fn test_parse_where_equality() {
         let query = Parser::parse("MATCH (n) WHERE n.name = 'Alice' RETURN n").unwrap();
 
-        assert!(query.where_clause.is_some());
-        if let Some(WhereClause { predicate }) = &query.where_clause {
-            assert!(matches!(predicate, PredicateExpr::Comparison { .. }));
-        }
+        let predicate = query.where_clause.expect("Missing WHERE clause").predicate;
+        let PredicateExpr::Comparison { left, op, right } = predicate else {
+            panic!("Expected Comparison predicate");
+        };
+        assert_eq!(
+            left,
+            Expression::Property(PropertyAccess {
+                variable: "n".to_string(),
+                property: "name".to_string()
+            })
+        );
+        assert_eq!(op, ComparisonOp::Eq);
+        assert_eq!(
+            right,
+            Expression::Literal(PropertyValue::String("Alice".to_string()))
+        );
     }
 
     #[test]
     fn test_parse_where_comparison() {
         let query = Parser::parse("MATCH (n) WHERE n.age > 18 RETURN n").unwrap();
 
-        if let Some(WhereClause { predicate }) = &query.where_clause
-            && let PredicateExpr::Comparison { op, .. } = predicate
-        {
-            assert_eq!(*op, ComparisonOp::Gt);
-        }
+        let predicate = query.where_clause.expect("Missing WHERE clause").predicate;
+        let PredicateExpr::Comparison { left, op, right } = predicate else {
+            panic!("Expected Comparison predicate");
+        };
+        assert_eq!(
+            left,
+            Expression::Property(PropertyAccess {
+                variable: "n".to_string(),
+                property: "age".to_string()
+            })
+        );
+        assert_eq!(op, ComparisonOp::Gt);
+        assert_eq!(right, Expression::Literal(PropertyValue::Int(18)));
     }
 
     #[test]
@@ -1681,74 +1701,158 @@ mod tests {
         let query =
             Parser::parse("MATCH (n) WHERE n.age > 18 AND n.name = 'Alice' RETURN n").unwrap();
 
-        if let Some(WhereClause { predicate }) = &query.where_clause {
-            assert!(matches!(predicate, PredicateExpr::And(_, _)));
-        }
+        let predicate = query.where_clause.expect("Missing WHERE clause").predicate;
+        let PredicateExpr::And(left, right) = predicate else {
+            panic!("Expected And predicate");
+        };
+
+        let PredicateExpr::Comparison {
+            left: _l_left,
+            op: l_op,
+            right: l_right,
+        } = *left
+        else {
+            panic!("Expected Comparison predicate on LHS");
+        };
+        assert_eq!(l_op, ComparisonOp::Gt);
+        assert_eq!(l_right, Expression::Literal(PropertyValue::Int(18)));
+
+        let PredicateExpr::Comparison {
+            left: _r_left,
+            op: r_op,
+            right: r_right,
+        } = *right
+        else {
+            panic!("Expected Comparison predicate on RHS");
+        };
+        assert_eq!(r_op, ComparisonOp::Eq);
+        assert_eq!(
+            r_right,
+            Expression::Literal(PropertyValue::String("Alice".to_string()))
+        );
     }
 
     #[test]
     fn test_parse_where_or() {
         let query = Parser::parse("MATCH (n) WHERE n.age = 20 OR n.age = 30 RETURN n").unwrap();
 
-        if let Some(WhereClause { predicate }) = &query.where_clause {
-            assert!(matches!(predicate, PredicateExpr::Or(_, _)));
-        }
+        let predicate = query.where_clause.expect("Missing WHERE clause").predicate;
+        let PredicateExpr::Or(left, right) = predicate else {
+            panic!("Expected Or predicate");
+        };
+
+        let PredicateExpr::Comparison {
+            left: _l_left,
+            op: l_op,
+            right: l_right,
+        } = *left
+        else {
+            panic!("Expected Comparison predicate on LHS");
+        };
+        assert_eq!(l_op, ComparisonOp::Eq);
+        assert_eq!(l_right, Expression::Literal(PropertyValue::Int(20)));
+
+        let PredicateExpr::Comparison {
+            left: _r_left,
+            op: r_op,
+            right: r_right,
+        } = *right
+        else {
+            panic!("Expected Comparison predicate on RHS");
+        };
+        assert_eq!(r_op, ComparisonOp::Eq);
+        assert_eq!(r_right, Expression::Literal(PropertyValue::Int(30)));
     }
 
     #[test]
     fn test_parse_where_not() {
         let query = Parser::parse("MATCH (n) WHERE NOT n.active = true RETURN n").unwrap();
 
-        if let Some(WhereClause { predicate }) = &query.where_clause {
-            assert!(matches!(predicate, PredicateExpr::Not(_)));
-        }
+        let predicate = query.where_clause.expect("Missing WHERE clause").predicate;
+        let PredicateExpr::Not(inner) = predicate else {
+            panic!("Expected Not predicate");
+        };
+
+        let PredicateExpr::Comparison {
+            left: _left,
+            op,
+            right,
+        } = *inner
+        else {
+            panic!("Expected Comparison predicate inside Not");
+        };
+        assert_eq!(op, ComparisonOp::Eq);
+        assert_eq!(right, Expression::Literal(PropertyValue::Bool(true)));
     }
 
     #[test]
     fn test_parse_where_is_null() {
         let query = Parser::parse("MATCH (n) WHERE n.email IS NULL RETURN n").unwrap();
 
-        if let Some(WhereClause { predicate }) = &query.where_clause {
-            assert!(matches!(predicate, PredicateExpr::IsNull(_)));
-        }
+        let predicate = query.where_clause.expect("Missing WHERE clause").predicate;
+        let PredicateExpr::IsNull(prop) = predicate else {
+            panic!("Expected IsNull predicate");
+        };
+        assert_eq!(prop.variable, "n");
+        assert_eq!(prop.property, "email");
     }
 
     #[test]
     fn test_parse_where_is_not_null() {
         let query = Parser::parse("MATCH (n) WHERE n.email IS NOT NULL RETURN n").unwrap();
 
-        if let Some(WhereClause { predicate }) = &query.where_clause {
-            assert!(matches!(predicate, PredicateExpr::IsNotNull(_)));
-        }
+        let predicate = query.where_clause.expect("Missing WHERE clause").predicate;
+        let PredicateExpr::IsNotNull(prop) = predicate else {
+            panic!("Expected IsNotNull predicate");
+        };
+        assert_eq!(prop.variable, "n");
+        assert_eq!(prop.property, "email");
     }
 
     #[test]
     fn test_parse_where_contains() {
         let query = Parser::parse("MATCH (n) WHERE n.name CONTAINS 'Ali' RETURN n").unwrap();
 
-        if let Some(WhereClause { predicate }) = &query.where_clause {
-            assert!(matches!(predicate, PredicateExpr::Contains { .. }));
-        }
+        let predicate = query.where_clause.expect("Missing WHERE clause").predicate;
+        let PredicateExpr::Contains {
+            property,
+            substring,
+        } = predicate
+        else {
+            panic!("Expected Contains predicate");
+        };
+        assert_eq!(property.variable, "n");
+        assert_eq!(property.property, "name");
+        assert_eq!(substring, "Ali");
     }
 
     #[test]
     fn test_parse_where_starts_with() {
         let query = Parser::parse("MATCH (n) WHERE n.name STARTS WITH 'A' RETURN n").unwrap();
 
-        if let Some(WhereClause { predicate }) = &query.where_clause {
-            assert!(matches!(predicate, PredicateExpr::StartsWith { .. }));
-        }
+        let predicate = query.where_clause.expect("Missing WHERE clause").predicate;
+        let PredicateExpr::StartsWith { property, prefix } = predicate else {
+            panic!("Expected StartsWith predicate");
+        };
+        assert_eq!(property.variable, "n");
+        assert_eq!(property.property, "name");
+        assert_eq!(prefix, "A");
     }
 
     #[test]
     fn test_parse_where_in() {
         let query = Parser::parse("MATCH (n) WHERE n.age IN [20, 30, 40] RETURN n").unwrap();
 
-        if let Some(WhereClause { predicate }) = &query.where_clause
-            && let PredicateExpr::In { values, .. } = predicate
-        {
-            assert_eq!(values.len(), 3);
-        }
+        let predicate = query.where_clause.expect("Missing WHERE clause").predicate;
+        let PredicateExpr::In { property, values } = predicate else {
+            panic!("Expected In predicate");
+        };
+        assert_eq!(property.variable, "n");
+        assert_eq!(property.property, "age");
+        assert_eq!(values.len(), 3);
+        assert_eq!(values[0], PropertyValue::Int(20));
+        assert_eq!(values[1], PropertyValue::Int(30));
+        assert_eq!(values[2], PropertyValue::Int(40));
     }
 
     #[test]
@@ -1756,9 +1860,51 @@ mod tests {
         let query =
             Parser::parse("MATCH (n) WHERE (n.a = 1 OR n.b = 2) AND n.c = 3 RETURN n").unwrap();
 
-        if let Some(WhereClause { predicate }) = &query.where_clause {
-            assert!(matches!(predicate, PredicateExpr::And(_, _)));
-        }
+        let predicate = query.where_clause.expect("Missing WHERE clause").predicate;
+        let PredicateExpr::And(left, right) = predicate else {
+            panic!("Expected And predicate");
+        };
+
+        let PredicateExpr::Grouped(grouped_inner) = *left else {
+            panic!("Expected Grouped predicate on LHS");
+        };
+
+        let PredicateExpr::Or(inner_left, inner_right) = *grouped_inner else {
+            panic!("Expected Or predicate inside Grouped");
+        };
+
+        let PredicateExpr::Comparison {
+            left: _il_left,
+            op: il_op,
+            right: il_right,
+        } = *inner_left
+        else {
+            panic!("Expected Comparison predicate for n.a = 1");
+        };
+        assert_eq!(il_op, ComparisonOp::Eq);
+        assert_eq!(il_right, Expression::Literal(PropertyValue::Int(1)));
+
+        let PredicateExpr::Comparison {
+            left: _ir_left,
+            op: ir_op,
+            right: ir_right,
+        } = *inner_right
+        else {
+            panic!("Expected Comparison predicate for n.b = 2");
+        };
+        assert_eq!(ir_op, ComparisonOp::Eq);
+        assert_eq!(ir_right, Expression::Literal(PropertyValue::Int(2)));
+
+        let PredicateExpr::Comparison {
+            left: _r_left,
+            op: r_op,
+            right: r_right,
+        } = *right
+        else {
+            panic!("Expected Comparison predicate on RHS");
+        };
+        assert_eq!(r_op, ComparisonOp::Eq);
+        assert_eq!(r_right, Expression::Literal(PropertyValue::Int(3)));
     }
 
     // =====================================================
@@ -1772,11 +1918,12 @@ mod tests {
         )
         .unwrap();
 
-        assert!(query.rank.is_some());
-        if let Some(rank) = &query.rank {
-            assert!(matches!(rank.embedding, EmbeddingRef::Parameter(_)));
-            assert_eq!(rank.top_k, Some(10));
-        }
+        let rank = query.rank.expect("Expected Rank clause");
+        let EmbeddingRef::Parameter(param) = rank.embedding else {
+            panic!("Expected Parameter embedding");
+        };
+        assert_eq!(param, "embedding");
+        assert_eq!(rank.top_k, Some(10));
     }
 
     #[test]
@@ -1947,24 +2094,32 @@ mod tests {
     fn test_parse_error_missing_source() {
         let result = Parser::parse("WHERE n.age > 18");
         assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.message.contains("Expected MATCH, SIMILAR, or FIND"));
     }
 
     #[test]
     fn test_parse_error_invalid_pattern() {
         let result = Parser::parse("MATCH n RETURN n");
         assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.message.contains("Expected ("));
     }
 
     #[test]
     fn test_parse_error_unclosed_paren() {
         let result = Parser::parse("MATCH (n:Person RETURN n");
         assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.message.contains("Expected )"));
     }
 
     #[test]
     fn test_parse_error_missing_label() {
         let result = Parser::parse("MATCH (n:) RETURN n");
         assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.message.contains("Expected label after ':'"));
     }
 
     #[test]
@@ -1979,6 +2134,8 @@ mod tests {
     fn test_parse_error_negative_skip() {
         let result = Parser::parse("MATCH (n) RETURN n SKIP -5");
         assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.message.contains("non-negative"));
     }
 
     #[test]
