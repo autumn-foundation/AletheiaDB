@@ -11,7 +11,7 @@
 
 pub use crate::AletheiaDB;
 pub use crate::api::{ReadOps, ReadTransaction, WriteOps, WriteTransaction};
-pub use crate::core::error::{Error, Result};
+pub use crate::core::error::Error;
 pub use crate::core::id::{EdgeId, NodeId, VersionId};
 pub use crate::core::interning::InternedString;
 pub use crate::core::property::{PropertyMap, PropertyMapBuilder, PropertyValue};
