@@ -134,27 +134,27 @@ impl AletheiaDB {
     /// # Example
     ///
     /// ```rust,no_run
-    /// # use aletheiadb::AletheiaDB;
+    /// # use aletheiadb::{AletheiaDB, Error, PropertyValue};
     /// # use aletheiadb::core::NodeId;
     /// # use aletheiadb::api::ReadOps;
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// # let db = AletheiaDB::new()?;
     /// # let node_id = NodeId::new(1)?;
     /// // With AletheiaDB's error type (default)
-    /// let name: Option<aletheiadb::PropertyValue> = db.read(|tx| {
+    /// let name: Option<PropertyValue> = db.read(|tx| {
     ///     let node = tx.get_node(node_id)?;
-    ///     Ok::<_, aletheiadb::Error>(node.get_property("name").cloned())
+    ///     Ok::<_, Error>(node.get_property("name").cloned())
     /// })?;
     ///
     /// // With custom error type
     /// #[derive(Debug)]
     /// enum RepositoryError {
-    ///     Database(aletheiadb::Error),
+    ///     Database(Error),
     ///     NotFound,
     /// }
     ///
-    /// impl From<aletheiadb::Error> for RepositoryError {
-    ///     fn from(e: aletheiadb::Error) -> Self {
+    /// impl From<Error> for RepositoryError {
+    ///     fn from(e: Error) -> Self {
     ///         RepositoryError::Database(e)
     ///     }
     /// }
@@ -193,7 +193,7 @@ impl AletheiaDB {
     /// # Example
     ///
     /// ```rust,no_run
-    /// # use aletheiadb::{AletheiaDB, PropertyMapBuilder};
+    /// # use aletheiadb::{AletheiaDB, Error, PropertyMapBuilder};
     /// # use aletheiadb::core::NodeId;
     /// # use aletheiadb::api::WriteOps;
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -245,7 +245,7 @@ impl AletheiaDB {
     /// # Example
     ///
     /// ```rust,no_run
-    /// # use aletheiadb::{AletheiaDB, PropertyMapBuilder};
+    /// # use aletheiadb::{AletheiaDB, Error, PropertyMapBuilder};
     /// # use aletheiadb::core::NodeId;
     /// # use aletheiadb::api::WriteOps;
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -258,16 +258,16 @@ impl AletheiaDB {
     /// let node_id = db.write(|tx| {
     ///     let id = tx.create_node("Person", props.clone())?;
     ///     tx.create_edge(id, other, "KNOWS", edge_props.clone())?;
-    ///     Ok::<_, aletheiadb::Error>(id)
+    ///     Ok::<_, Error>(id)
     /// })?;
     ///
     /// #[derive(Debug)]
     /// enum RepositoryError {
-    ///     Database(aletheiadb::Error),
+    ///     Database(Error),
     ///     ValidationFailed,
     /// }
-    /// impl From<aletheiadb::Error> for RepositoryError {
-    ///     fn from(e: aletheiadb::Error) -> Self { RepositoryError::Database(e) }
+    /// impl From<Error> for RepositoryError {
+    ///     fn from(e: Error) -> Self { RepositoryError::Database(e) }
     /// }
     ///
     /// // With custom error type
@@ -304,7 +304,7 @@ impl AletheiaDB {
     /// # Example
     ///
     /// ```rust,no_run
-    /// # use aletheiadb::{AletheiaDB, PropertyMapBuilder};
+    /// # use aletheiadb::{AletheiaDB, Error, PropertyMapBuilder};
     /// # use aletheiadb::core::NodeId;
     /// # use aletheiadb::core::temporal::Timestamp;
     /// # use aletheiadb::api::WriteOps;
@@ -321,10 +321,10 @@ impl AletheiaDB {
     ///
     /// #[derive(Debug)]
     /// enum RepositoryError {
-    ///     Database(aletheiadb::Error),
+    ///     Database(Error),
     /// }
-    /// impl From<aletheiadb::Error> for RepositoryError {
-    ///     fn from(e: aletheiadb::Error) -> Self { RepositoryError::Database(e) }
+    /// impl From<Error> for RepositoryError {
+    ///     fn from(e: Error) -> Self { RepositoryError::Database(e) }
     /// }
     ///
     /// // With custom error type
@@ -360,7 +360,7 @@ impl AletheiaDB {
     /// # Example
     ///
     /// ```rust,no_run
-    /// # use aletheiadb::{AletheiaDB, WriteOptions, DurabilityMode, PropertyMap};
+    /// # use aletheiadb::{AletheiaDB, Error, WriteOptions, DurabilityMode, PropertyMap};
     /// # use aletheiadb::api::WriteOps;
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// let db = AletheiaDB::new()?;
@@ -375,15 +375,15 @@ impl AletheiaDB {
     ///     for item in &bulk_data {
     ///         tx.create_node("Item", item.clone())?;
     ///     }
-    ///     Ok::<_, aletheiadb::Error>(())
+    ///     Ok::<_, Error>(())
     /// })?;
     ///
     /// #[derive(Debug)]
     /// enum RepositoryError {
-    ///     Database(aletheiadb::Error),
+    ///     Database(Error),
     /// }
-    /// impl From<aletheiadb::Error> for RepositoryError {
-    ///     fn from(e: aletheiadb::Error) -> Self { RepositoryError::Database(e) }
+    /// impl From<Error> for RepositoryError {
+    ///     fn from(e: Error) -> Self { RepositoryError::Database(e) }
     /// }
     ///
     /// // With custom error type
