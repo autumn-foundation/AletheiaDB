@@ -11,6 +11,8 @@ pub mod archetype;
 pub mod graph_context;
 pub mod gravity;
 pub mod kaleidoscope;
+/// Lorebook exporter for generating interconnected Markdown pages with WikiLinks.
+pub mod lorebook;
 pub mod papyrus;
 pub mod prism;
 pub mod sybil;
