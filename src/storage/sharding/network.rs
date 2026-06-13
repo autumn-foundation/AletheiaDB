@@ -682,46 +682,73 @@ impl MockShardClient {
     }
 
     /// Set whether the client is healthy.
+    /// # Panics
+    ///
+    /// Panics if the internal lock is poisoned.
     pub fn set_healthy(&self, healthy: bool) {
         *self.healthy.write().unwrap() = healthy;
     }
 
     /// Set the prepare response.
+    /// # Panics
+    ///
+    /// Panics if the internal lock is poisoned.
     pub fn set_prepare_response(&self, response: PrepareResponse) {
         *self.prepare_response.write().unwrap() = Some(response);
     }
 
     /// Set the commit response.
+    /// # Panics
+    ///
+    /// Panics if the internal lock is poisoned.
     pub fn set_commit_response(&self, response: CommitResponse) {
         *self.commit_response.write().unwrap() = Some(response);
     }
 
     /// Set the abort response.
+    /// # Panics
+    ///
+    /// Panics if the internal lock is poisoned.
     pub fn set_abort_response(&self, response: AbortResponse) {
         *self.abort_response.write().unwrap() = Some(response);
     }
 
     /// Set the query response.
+    /// # Panics
+    ///
+    /// Panics if the internal lock is poisoned.
     pub fn set_query_response(&self, response: Vec<u8>) {
         *self.query_response.write().unwrap() = response;
     }
 
     /// Set the shard state.
+    /// # Panics
+    ///
+    /// Panics if the internal lock is poisoned.
     pub fn set_state(&self, state: ShardState) {
         *self.state.write().unwrap() = state;
     }
 
     /// Set simulated latency.
+    /// # Panics
+    ///
+    /// Panics if the internal lock is poisoned.
     pub fn set_latency(&self, latency: Duration) {
         *self.latency.write().unwrap() = latency;
     }
 
     /// Make the next call fail with the given error.
+    /// # Panics
+    ///
+    /// Panics if the internal lock is poisoned.
     pub fn fail_next(&self, error: NetworkError) {
         *self.fail_next.write().unwrap() = Some(error);
     }
 
     /// Get call count for a method.
+    /// # Panics
+    ///
+    /// Panics if the internal lock is poisoned.
     pub fn call_count(&self, method: &str) -> usize {
         self.call_counts
             .read()

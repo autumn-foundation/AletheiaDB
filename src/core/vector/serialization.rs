@@ -155,6 +155,9 @@ pub fn try_serialize_vector_into(v: &[f32], buffer: &mut Vec<u8>) -> Result<()> 
 /// let (vector, consumed) = deserialize_vector(&bytes)?;
 /// assert_eq!(vector.as_ref(), &[0.1f32, 0.2, 0.3]);
 /// ```
+/// # Panics
+///
+/// Panics if the byte slice does not match the platform endianness size.
 pub fn deserialize_vector(bytes: &[u8]) -> Result<(Arc<[f32]>, usize)> {
     // Need at least tag (1) + dimension (4) = 5 bytes
     if bytes.len() < 5 {
@@ -310,6 +313,9 @@ pub fn serialize_sparse_vector_into(sv: &SparseVec, buffer: &mut Vec<u8>) {
 /// - `StorageError::CorruptedData` if buffer is too short
 /// - `StorageError::CorruptedData` if type tag is not TAG_SPARSE_VECTOR
 /// - `VectorError` variants if sparse vector construction fails
+/// # Panics
+///
+/// Panics if the byte slice does not match the platform endianness size.
 pub fn deserialize_sparse_vector(bytes: &[u8]) -> Result<(Arc<SparseVec>, usize)> {
     // Need at least tag (1) + dimension (4) + nnz (4) = 9 bytes
     if bytes.len() < 9 {

@@ -1621,6 +1621,9 @@ impl TxIdGenerator {
     /// Generate the next transaction ID
     ///
     /// This operation is atomic and thread-safe.
+    /// # Panics
+    ///
+    /// Panics if the transaction ID overflows `u64::MAX`.
     pub fn next(&self) -> TxId {
         let mut current = self.counter.load(Ordering::SeqCst);
         loop {

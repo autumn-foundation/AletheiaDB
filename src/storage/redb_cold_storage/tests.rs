@@ -1,3 +1,4 @@
+//! Tests for tests
 use super::*;
 use crate::core::id::{EdgeId, NodeId};
 use crate::core::interning::GLOBAL_INTERNER;

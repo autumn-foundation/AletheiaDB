@@ -10,3 +10,6 @@
 ## 2024-05-14 - [Adding Examples to HLC and documenting src/main.rs]
 **Confusion:** The `src/main.rs` file was missing module-level documentation (`//!`), which triggers the `missing_docs` lint, but was hidden by the lint configurations inside `src/lib.rs` affecting `src/main.rs`. Also `HybridTimestamp::send` lacked an example showing the behavior of its logical counter.
 **Clarification:** Added `//! The AletheiaDB binary.` to `src/main.rs` and added an executable `## Examples` block to `HybridTimestamp::send` in `src/core/hlc.rs`.
+## 2024-06-13 - [Resolving panics and errors missing docs and un-documented test modules]
+**Confusion:** The MCP server module functions, Cypher lexer, internal property maps, SQL AST converters and tests directories missed comprehensive explicit warnings like `# Panics` and `# Errors` along with missing module-level documentations for `tests/`, which makes debugging painful for new developers navigating error types and exceptions.
+**Clarification:** Added `# Panics` and `# Errors` headers describing explicit exceptions explicitly for public functions. Also, added module-level `//! Tests for ...` tags to un-documented test and bench modules.

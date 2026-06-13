@@ -667,6 +667,9 @@ impl MigrationService {
     /// // ... later ...
     /// service.stop();
     /// ```
+    /// # Panics
+    ///
+    /// Panics if the thread pool fails to spawn.
     pub fn start(&self) {
         // Check if already running (atomic compare-and-swap)
         if self
@@ -781,6 +784,9 @@ impl MigrationService {
     /// 2. The worker thread exits cleanly
     ///
     /// If the service is not running, this is a no-op and returns immediately.
+    /// # Panics
+    ///
+    /// Panics if the thread pool fails to join.
     pub fn stop(&self) {
         // Signal the worker to stop
         if !self.running.swap(false, Ordering::SeqCst) {

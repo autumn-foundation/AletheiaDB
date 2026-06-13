@@ -311,6 +311,9 @@ pub(crate) fn atomic_write(path: &std::path::Path, data: &[u8]) -> Result<()> {
 ///     vec![],
 /// )?;
 /// ```
+/// # Panics
+///
+/// Panics if the thread pool fails to execute tasks.
 pub fn load_indexes_parallel(
     graph_path: &std::path::Path,
     temporal_path: Option<&std::path::Path>,

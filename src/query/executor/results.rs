@@ -635,6 +635,9 @@ impl QueryResults {
     /// the streaming iterator directly for result sets exceeding 100K rows.
     /// ⚡ Bolt Optimization: Pre-allocates vector based on iterator's lower size bound
     /// to reduce heap allocations during collection of structured results.
+    /// # Panics
+    ///
+    /// Panics if the internal iterator yields an unsupported state.
     pub fn collect_structured(mut self) -> Result<QueryResult> {
         // First pass: collect all rows
         let (lower, _) = self.iterator.size_hint();

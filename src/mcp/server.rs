@@ -273,6 +273,10 @@ impl AletheiaMcpServer {
     /// ```json
     /// { "error": "Node not found: 123" }
     /// ```
+    /// # Panics
+    ///
+    /// Panics if the request cannot be serialized to JSON (which should never happen
+    /// for these generated types).
     pub fn get_node(&self, req: GetNodeRequest) -> String {
         Self::extract_text(self.handle_get_node(
             serde_json::to_value(req).expect("request serialization should not fail"),
@@ -311,6 +315,9 @@ impl AletheiaMcpServer {
     ///   "properties": { "name": "Alice" }
     /// }
     /// ```
+    /// # Panics
+    ///
+    /// Panics if the request cannot be serialized to JSON.
     pub fn create_node(&self, req: CreateNodeRequest) -> String {
         Self::extract_text(self.handle_create_node(
             serde_json::to_value(req).expect("request serialization should not fail"),
@@ -327,6 +334,9 @@ impl AletheiaMcpServer {
     /// # Output Format
     ///
     /// Returns the updated node object.
+    /// # Panics
+    ///
+    /// Panics if the request cannot be serialized to JSON.
     pub fn update_node(&self, req: UpdateNodeRequest) -> String {
         Self::extract_text(self.handle_update_node(
             serde_json::to_value(req).expect("request serialization should not fail"),
@@ -337,6 +347,9 @@ impl AletheiaMcpServer {
     ///
     /// Permanently removes the node from the current state. Historical versions remain accessible via time-travel queries.
     /// Fails if the node has connected edges (unless `delete_node_cascade` is used).
+    /// # Panics
+    ///
+    /// Panics if the request cannot be serialized to JSON.
     pub fn delete_node(&self, req: DeleteNodeRequest) -> String {
         Self::extract_text(self.handle_delete_node(
             serde_json::to_value(req).expect("request serialization should not fail"),
@@ -346,6 +359,9 @@ impl AletheiaMcpServer {
     /// Delete a node and all its connected edges (cascade delete).
     ///
     /// Removes the node and any edges connected to it, maintaining referential integrity.
+    /// # Panics
+    ///
+    /// Panics if the request cannot be serialized to JSON.
     pub fn delete_node_cascade(&self, req: DeleteNodeCascadeRequest) -> String {
         Self::extract_text(self.handle_delete_node_cascade(
             serde_json::to_value(req).expect("request serialization should not fail"),
@@ -356,6 +372,9 @@ impl AletheiaMcpServer {
     ///
     /// Supports filtering by label and pagination (limit/offset).
     /// Note: Listing all nodes without filters can be expensive on large graphs.
+    /// # Panics
+    ///
+    /// Panics if the request cannot be serialized to JSON.
     pub fn list_nodes(&self, req: ListNodesRequest) -> String {
         Self::extract_text(self.handle_list_nodes(
             serde_json::to_value(req).expect("request serialization should not fail"),
@@ -365,6 +384,9 @@ impl AletheiaMcpServer {
     /// Count nodes.
     ///
     /// Returns the total number of nodes in the graph, or nodes matching a specific label.
+    /// # Panics
+    ///
+    /// Panics if the request cannot be serialized to JSON.
     pub fn count_nodes(&self, req: CountNodesRequest) -> String {
         Self::extract_text(self.handle_count_nodes(
             serde_json::to_value(req).expect("request serialization should not fail"),
@@ -374,6 +396,9 @@ impl AletheiaMcpServer {
     /// Get an edge by its ID.
     ///
     /// Returns the edge's source, target, label, and properties.
+    /// # Panics
+    ///
+    /// Panics if the request cannot be serialized to JSON.
     pub fn get_edge(&self, req: GetEdgeRequest) -> String {
         Self::extract_text(self.handle_get_edge(
             serde_json::to_value(req).expect("request serialization should not fail"),
@@ -384,6 +409,9 @@ impl AletheiaMcpServer {
     ///
     /// Establishes a relationship between two existing nodes.
     /// Fails if either source or target node does not exist.
+    /// # Panics
+    ///
+    /// Panics if the request cannot be serialized to JSON.
     pub fn create_edge(&self, req: CreateEdgeRequest) -> String {
         Self::extract_text(self.handle_create_edge(
             serde_json::to_value(req).expect("request serialization should not fail"),
@@ -393,6 +421,9 @@ impl AletheiaMcpServer {
     /// Update an edge's properties.
     ///
     /// Merges properties similar to `update_node`.
+    /// # Panics
+    ///
+    /// Panics if the request cannot be serialized to JSON.
     pub fn update_edge(&self, req: UpdateEdgeRequest) -> String {
         Self::extract_text(self.handle_update_edge(
             serde_json::to_value(req).expect("request serialization should not fail"),
@@ -402,6 +433,9 @@ impl AletheiaMcpServer {
     /// Delete an edge.
     ///
     /// Removes the relationship between two nodes.
+    /// # Panics
+    ///
+    /// Panics if the request cannot be serialized to JSON.
     pub fn delete_edge(&self, req: DeleteEdgeRequest) -> String {
         Self::extract_text(self.handle_delete_edge(
             serde_json::to_value(req).expect("request serialization should not fail"),
@@ -411,6 +445,9 @@ impl AletheiaMcpServer {
     /// List edges.
     ///
     /// Lists edges with pagination. Note that filtering edges by label without a start node is not currently efficient.
+    /// # Panics
+    ///
+    /// Panics if the request cannot be serialized to JSON.
     pub fn list_edges(&self, req: ListEdgesRequest) -> String {
         Self::extract_text(self.handle_list_edges(
             serde_json::to_value(req).expect("request serialization should not fail"),
@@ -420,6 +457,9 @@ impl AletheiaMcpServer {
     /// Count edges.
     ///
     /// Returns the total number of edges in the graph.
+    /// # Panics
+    ///
+    /// Panics if the request cannot be serialized to JSON.
     pub fn count_edges(&self, req: CountEdgesRequest) -> String {
         Self::extract_text(self.handle_count_edges(
             serde_json::to_value(req).expect("request serialization should not fail"),
@@ -429,6 +469,9 @@ impl AletheiaMcpServer {
     /// Get outgoing edges from a node.
     ///
     /// Returns all edges starting from the specified node. Can be filtered by edge label.
+    /// # Panics
+    ///
+    /// Panics if the request cannot be serialized to JSON.
     pub fn get_outgoing_edges(&self, req: GetOutgoingEdgesRequest) -> String {
         Self::extract_text(self.handle_get_outgoing_edges(
             serde_json::to_value(req).expect("request serialization should not fail"),
@@ -438,6 +481,9 @@ impl AletheiaMcpServer {
     /// Get incoming edges to a node.
     ///
     /// Returns all edges ending at the specified node. Can be filtered by edge label.
+    /// # Panics
+    ///
+    /// Panics if the request cannot be serialized to JSON.
     pub fn get_incoming_edges(&self, req: GetIncomingEdgesRequest) -> String {
         Self::extract_text(self.handle_get_incoming_edges(
             serde_json::to_value(req).expect("request serialization should not fail"),
@@ -448,6 +494,9 @@ impl AletheiaMcpServer {
     ///
     /// Performs a multi-hop traversal starting from a node, following edges of a specific type.
     /// Returns the path and the final nodes found.
+    /// # Panics
+    ///
+    /// Panics if the request cannot be serialized to JSON.
     pub fn traverse(&self, req: TraverseRequest) -> String {
         Self::extract_text(self.handle_traverse(
             serde_json::to_value(req).expect("request serialization should not fail"),
@@ -482,6 +531,9 @@ impl AletheiaMcpServer {
     ///   "count": 1
     /// }
     /// ```
+    /// # Panics
+    ///
+    /// Panics if the request cannot be serialized to JSON.
     pub fn find_similar(&self, req: FindSimilarRequest) -> String {
         Self::extract_text(self.handle_find_similar(
             serde_json::to_value(req).expect("request serialization should not fail"),
@@ -511,6 +563,9 @@ impl AletheiaMcpServer {
     ///   "distance_metric": "cosine"
     /// }
     /// ```
+    /// # Panics
+    ///
+    /// Panics if the request cannot be serialized to JSON.
     pub fn enable_vector_index(&self, req: EnableVectorIndexRequest) -> String {
         Self::extract_text(self.handle_enable_vector_index(
             serde_json::to_value(req).expect("request serialization should not fail"),
@@ -535,6 +590,9 @@ impl AletheiaMcpServer {
     ///   "count": 1
     /// }
     /// ```
+    /// # Panics
+    ///
+    /// Panics if the request cannot be serialized to JSON.
     pub fn list_vector_indexes(&self, req: ListVectorIndexesRequest) -> String {
         Self::extract_text(self.handle_list_vector_indexes(
             serde_json::to_value(req).expect("request serialization should not fail"),
@@ -544,6 +602,9 @@ impl AletheiaMcpServer {
     /// Get node at a specific time.
     ///
     /// Performs a time-travel query to retrieve the state of a node at a specific valid time and transaction time.
+    /// # Panics
+    ///
+    /// Panics if the request cannot be serialized to JSON.
     pub fn get_node_at_time(&self, req: GetNodeAtTimeRequest) -> String {
         Self::extract_text(self.handle_get_node_at_time(
             serde_json::to_value(req).expect("request serialization should not fail"),
@@ -553,6 +614,9 @@ impl AletheiaMcpServer {
     /// Get edge at a specific time.
     ///
     /// Performs a time-travel query to retrieve the state of an edge at a specific valid time and transaction time.
+    /// # Panics
+    ///
+    /// Panics if the request cannot be serialized to JSON.
     pub fn get_edge_at_time(&self, req: GetEdgeAtTimeRequest) -> String {
         Self::extract_text(self.handle_get_edge_at_time(
             serde_json::to_value(req).expect("request serialization should not fail"),
@@ -599,6 +663,9 @@ impl AletheiaMcpServer {
     ///   "count": 1
     /// }
     /// ```
+    /// # Panics
+    ///
+    /// Panics if the request cannot be serialized to JSON.
     pub fn hybrid_query(&self, req: HybridQueryRequest) -> String {
         Self::extract_text(self.handle_hybrid_query(
             serde_json::to_value(req).expect("request serialization should not fail"),

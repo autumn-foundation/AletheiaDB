@@ -1,3 +1,4 @@
+//! Tests for havoc_tests
 #[cfg(test)]
 mod tests {
     use crate::core::vector::simd;

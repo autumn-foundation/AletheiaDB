@@ -482,6 +482,9 @@ impl ShardCoordinator {
     ///
     /// Generates a new unique `TxId` and registers the transaction as active.
     /// The transaction starts in the `Pending` phase.
+    /// # Panics
+    ///
+    /// Panics if locks are poisoned.
     pub fn begin_distributed_transaction(
         &self,
         participants: Vec<ShardId>,
@@ -937,6 +940,9 @@ impl ShardCoordinator {
     /// A `RecoveryResult` containing:
     /// *   `recovered`: List of `TxId`s that were successfully completed.
     /// *   `dead_lettered`: List of transactions that failed after max retries and require manual intervention.
+    /// # Panics
+    ///
+    /// Panics if the recovery log is fatally corrupted or locks are poisoned.
     pub fn recover_pending_transactions(&self) -> RecoveryResult {
         let decisions = {
             let log = self.commit_log.read().expect("Commit log lock poisoned");

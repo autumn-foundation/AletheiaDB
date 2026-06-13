@@ -352,6 +352,9 @@ impl StringInterner {
     /// This method is thread-safe and consistent. It waits for any concurrent
     /// interning operations to complete to ensure there are no "holes" in the
     /// returned sequence.
+    /// # Panics
+    ///
+    /// Panics if a deadlock is detected during concurrent interning.
     pub fn get_all_strings(&self) -> Vec<String> {
         // Use next_id to estimate the required size.
         let max_id = self.next_id.load(Ordering::Relaxed) as usize;
