@@ -478,10 +478,10 @@ impl<'a, G: GraphView + ?Sized> SemanticPathfinder<'a, G> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::AletheiaDB;
     use crate::api::transaction::WriteOps;
     use crate::core::error::Error;
     use crate::core::property::PropertyMapBuilder;
-    use crate::db::AletheiaDB;
     use crate::index::vector::{DistanceMetric, HnswConfig};
 
     fn create_test_db() -> AletheiaDB {
@@ -816,9 +816,9 @@ mod tests {
 
     mod sentry_robustness_tests {
         use super::*;
+        use crate::AletheiaDB;
         use crate::api::transaction::WriteOps;
         use crate::core::property::PropertyMapBuilder;
-        use crate::db::AletheiaDB;
         use crate::index::vector::{DistanceMetric, HnswConfig}; // Import WriteOps to get create_node/update_node
 
         fn create_test_db() -> AletheiaDB {

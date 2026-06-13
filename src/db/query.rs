@@ -111,6 +111,12 @@ impl AletheiaDB {
     /// ```
     #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn execute_query(&self, query: Query) -> Result<QueryResults> {
+        crate::query::QueryEngine::execute_query(self, query)
+    }
+}
+
+impl crate::query::QueryEngine for AletheiaDB {
+    fn execute_query(&self, query: Query) -> Result<QueryResults> {
         let result = (|| {
             #[cfg(feature = "observability")]
             let _span =
@@ -129,7 +135,18 @@ impl AletheiaDB {
         })();
         result.record_error_metric()
     }
+}
 
+impl<T: crate::query::QueryEngine> crate::query::QueryEngine for std::sync::Arc<T> {
+    fn execute_query(
+        &self,
+        query: crate::query::builder::Query,
+    ) -> Result<crate::query::executor::QueryResults> {
+        (**self).execute_query(query)
+    }
+}
+
+impl AletheiaDB {
     /// Traverse from a node and rank results by similarity to an embedding.
     ///
     /// This is a convenience method for a common hybrid query pattern:

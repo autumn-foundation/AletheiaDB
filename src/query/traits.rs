@@ -5,6 +5,18 @@ use crate::core::graph::{Edge, Node};
 use crate::core::id::{EdgeId, NodeId};
 use crate::core::temporal::Timestamp;
 
+/// A trait representing the query engine capabilities of the database.
+///
+/// This trait abstracts the query execution from the concrete database implementation,
+/// breaking the circular dependency between `db` and `query` modules.
+pub trait QueryEngine {
+    /// Executes a given logical query.
+    fn execute_query(
+        &self,
+        query: crate::query::builder::Query,
+    ) -> Result<crate::query::executor::QueryResults>;
+}
+
 /// A trait representing a read-only view of the graph.
 ///
 /// This trait abstracts the underlying database implementation, allowing
