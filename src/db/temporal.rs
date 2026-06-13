@@ -473,6 +473,34 @@ impl AletheiaDB {
     /// Get the complete version history of an edge.
     ///
     /// Returns all versions in chronological order (oldest first).
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use aletheiadb::{AletheiaDB, PropertyMapBuilder, core::NodeId};
+    /// # use aletheiadb::WriteOps;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # let node_a = db.create_node("Node", Default::default())?;
+    /// # let node_b = db.create_node("Node", Default::default())?;
+    /// let edge_id = db.create_edge(
+    ///     node_a,
+    ///     node_b,
+    ///     "RELATION",
+    ///     PropertyMapBuilder::new().insert("status", "active").build()
+    /// )?;
+    ///
+    /// // Update the edge properties
+    /// db.write(|tx| {
+    ///     tx.update_edge(edge_id, PropertyMapBuilder::new().insert("status", "inactive").build())
+    /// })?;
+    ///
+    /// // Retrieve history
+    /// let history = db.get_edge_history(edge_id)?;
+    /// assert_eq!(history.versions.len(), 2);
+    /// # Ok(())
+    /// # }
+    /// ```
     #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn get_edge_history(&self, edge_id: EdgeId) -> Result<EntityHistory> {
         self.historical

@@ -79,6 +79,26 @@ impl AletheiaDB {
     /// Get the current state of a node.
     ///
     /// This uses the fast path (current storage) for O(1) lookup.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use aletheiadb::{AletheiaDB, PropertyMapBuilder};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// let node_id = db.create_node(
+    ///     "Person",
+    ///     PropertyMapBuilder::new()
+    ///         .insert("name", "Alice")
+    ///         .build()
+    /// )?;
+    ///
+    /// // Retrieve the created node
+    /// let node = db.get_node(node_id)?;
+    /// assert_eq!(node.properties.get("name").unwrap().as_str().unwrap(), "Alice");
+    /// # Ok(())
+    /// # }
+    /// ```
     #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn get_node(&self, node_id: NodeId) -> Result<Node> {
         self.current.get_node(node_id).record_error_metric()
@@ -111,6 +131,28 @@ impl AletheiaDB {
     }
 
     /// Get the current state of an edge.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use aletheiadb::{AletheiaDB, PropertyMapBuilder, core::NodeId};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # let node_a = db.create_node("Node", Default::default())?;
+    /// # let node_b = db.create_node("Node", Default::default())?;
+    /// let edge_id = db.create_edge(
+    ///     node_a,
+    ///     node_b,
+    ///     "KNOWS",
+    ///     PropertyMapBuilder::new().insert("weight", 1.5).build()
+    /// )?;
+    ///
+    /// // Retrieve the created edge
+    /// let edge = db.get_edge(edge_id)?;
+    /// assert_eq!(edge.properties.get("weight").unwrap().as_float().unwrap(), 1.5);
+    /// # Ok(())
+    /// # }
+    /// ```
     #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn get_edge(&self, edge_id: EdgeId) -> Result<Edge> {
         self.current.get_edge(edge_id).record_error_metric()
