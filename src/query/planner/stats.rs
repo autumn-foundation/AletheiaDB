@@ -17,11 +17,10 @@
 //!
 //! 1. **Initialization**: Created with default/empty values.
 //! 2. **Lazy Refresh**: The database triggers a refresh on the first query execution.
-//! 3. **Manual Refresh**: Administrators can trigger a refresh via [`AletheiaDB::refresh_statistics`].
+//! 3. **Manual Refresh**: Administrators can trigger a refresh via `AletheiaDB::refresh_statistics`.
 //! 4. **Invalidation**: Schema changes (e.g., adding an index) invalidate the cache,
 //!    forcing a refresh on the next query.
 //!
-//! [`AletheiaDB::refresh_statistics`]: crate::db::AletheiaDB::refresh_statistics
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
@@ -335,7 +334,7 @@ impl Statistics {
 
     /// Update statistics from storage.
     ///
-    /// This is called by [`AletheiaDB::refresh_statistics`](crate::db::AletheiaDB::refresh_statistics)
+    /// This is called by `AletheiaDB::refresh_statistics`
     /// to populate the cache with fresh values from the storage engine.
     ///
     /// ## Examples

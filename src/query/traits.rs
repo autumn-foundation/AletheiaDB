@@ -76,3 +76,19 @@ pub trait GraphView {
         timestamp: Timestamp,
     ) -> Result<Vec<(NodeId, f32)>>;
 }
+
+/// A trait representing the query engine execution capabilities.
+///
+/// This abstracts the actual database instance away from query building
+/// to prevent circular dependencies between the query module and the db module.
+pub trait QueryEngine {
+    /// Execute a compiled query and return the results.
+    fn execute_query(&self, query: crate::query::builder::Query) -> Result<crate::query::executor::QueryResults>;
+}
+
+// Implement for Arc<T> to support execution when db is wrapped in Arc
+impl<T: QueryEngine> QueryEngine for std::sync::Arc<T> {
+    fn execute_query(&self, query: crate::query::builder::Query) -> Result<crate::query::executor::QueryResults> {
+        (**self).execute_query(query)
+    }
+}

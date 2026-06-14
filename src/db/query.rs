@@ -9,6 +9,15 @@ use crate::query::builder::state::Initial;
 use crate::query::{Query, QueryBuilder, QueryExecutor, QueryPlanner, QueryResults};
 use std::sync::Arc;
 
+
+use crate::query::traits::QueryEngine;
+
+impl QueryEngine for AletheiaDB {
+    fn execute_query(&self, query: Query) -> Result<QueryResults> {
+        self.execute_query(query)
+    }
+}
+
 impl AletheiaDB {
     /// Execute a Cypher-like AletheiaDB Query Language (AQL) string.
     ///
