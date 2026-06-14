@@ -79,6 +79,19 @@ impl AletheiaDB {
     /// Get the current state of a node.
     ///
     /// This uses the fast path (current storage) for O(1) lookup.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust,no_run
+    /// # use aletheiadb::{AletheiaDB, PropertyMapBuilder, GLOBAL_INTERNER};
+    /// # fn main() -> aletheiadb::core::error::Result<()> {
+    /// # let db = AletheiaDB::new().unwrap();
+    /// let node_id = db.create_node("Person", PropertyMapBuilder::new().insert("name", "Alice").build())?;
+    /// let node = db.get_node(node_id)?;
+    /// assert!(node.has_label(GLOBAL_INTERNER.intern("Person").unwrap()));
+    /// # Ok(())
+    /// # }
+    /// ```
     #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn get_node(&self, node_id: NodeId) -> Result<Node> {
         self.current.get_node(node_id).record_error_metric()
@@ -101,6 +114,21 @@ impl AletheiaDB {
     /// Do NOT attempt to modify the graph or perform operations that might acquire a
     /// write lock on the same shard (e.g., `update_node`, `delete_node`) within the closure.
     /// Doing so will cause a deadlock (lock re-entrancy hazard).
+    ///
+    /// ## Examples
+    ///
+    /// ```rust,no_run
+    /// # use aletheiadb::{AletheiaDB, PropertyMapBuilder};
+    /// # fn main() -> aletheiadb::core::error::Result<()> {
+    /// # let db = AletheiaDB::new().unwrap();
+    /// let node_id = db.create_node("Person", PropertyMapBuilder::new().insert("age", 30).build())?;
+    /// let is_adult = db.with_node(node_id, |node| {
+    ///     node.properties.get("age").and_then(|v| v.as_int()).unwrap_or(0) >= 18
+    /// })?;
+    /// assert!(is_adult);
+    /// # Ok(())
+    /// # }
+    /// ```
     #[inline]
     #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn with_node<F, R>(&self, id: NodeId, f: F) -> Result<R>
@@ -111,6 +139,21 @@ impl AletheiaDB {
     }
 
     /// Get the current state of an edge.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust,no_run
+    /// # use aletheiadb::{AletheiaDB, PropertyMapBuilder, GLOBAL_INTERNER};
+    /// # fn main() -> aletheiadb::core::error::Result<()> {
+    /// # let db = AletheiaDB::new().unwrap();
+    /// let u1 = db.create_node("User", PropertyMapBuilder::new().build())?;
+    /// let u2 = db.create_node("User", PropertyMapBuilder::new().build())?;
+    /// let edge_id = db.create_edge(u1, u2, "KNOWS", PropertyMapBuilder::new().insert("since", 2023).build())?;
+    /// let edge = db.get_edge(edge_id)?;
+    /// assert!(edge.has_label(GLOBAL_INTERNER.intern("KNOWS").unwrap()));
+    /// # Ok(())
+    /// # }
+    /// ```
     #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn get_edge(&self, edge_id: EdgeId) -> Result<Edge> {
         self.current.get_edge(edge_id).record_error_metric()
@@ -172,6 +215,21 @@ impl AletheiaDB {
     ///
     /// - **Zero-copy**: Only reads and returns the target NodeId (8 bytes)
     /// - **No allocation**: Does not clone Edge or PropertyMap
+    ///
+    /// ## Examples
+    ///
+    /// ```rust,no_run
+    /// # use aletheiadb::{AletheiaDB, PropertyMapBuilder};
+    /// # fn main() -> aletheiadb::core::error::Result<()> {
+    /// # let db = AletheiaDB::new().unwrap();
+    /// let u1 = db.create_node("User", PropertyMapBuilder::new().build())?;
+    /// let u2 = db.create_node("User", PropertyMapBuilder::new().build())?;
+    /// let edge_id = db.create_edge(u1, u2, "KNOWS", PropertyMapBuilder::new().build())?;
+    /// let target_id = db.get_edge_target(edge_id)?;
+    /// assert_eq!(target_id, u2);
+    /// # Ok(())
+    /// # }
+    /// ```
     #[inline]
     #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn get_edge_target(&self, edge_id: EdgeId) -> Result<NodeId> {
@@ -184,6 +242,21 @@ impl AletheiaDB {
     ///
     /// - **Zero-copy**: Only reads and returns the source NodeId (8 bytes)
     /// - **No allocation**: Does not clone Edge or PropertyMap
+    ///
+    /// ## Examples
+    ///
+    /// ```rust,no_run
+    /// # use aletheiadb::{AletheiaDB, PropertyMapBuilder};
+    /// # fn main() -> aletheiadb::core::error::Result<()> {
+    /// # let db = AletheiaDB::new().unwrap();
+    /// let u1 = db.create_node("User", PropertyMapBuilder::new().build())?;
+    /// let u2 = db.create_node("User", PropertyMapBuilder::new().build())?;
+    /// let edge_id = db.create_edge(u1, u2, "KNOWS", PropertyMapBuilder::new().build())?;
+    /// let source_id = db.get_edge_source(edge_id)?;
+    /// assert_eq!(source_id, u1);
+    /// # Ok(())
+    /// # }
+    /// ```
     #[inline]
     #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn get_edge_source(&self, edge_id: EdgeId) -> Result<NodeId> {
@@ -191,6 +264,19 @@ impl AletheiaDB {
     }
 
     /// Get outgoing edges from a node (current state).
+    ///
+    /// ## Examples
+    ///
+    /// ```rust,no_run
+    /// # use aletheiadb::{AletheiaDB, PropertyMapBuilder};
+    /// # fn main() -> aletheiadb::core::error::Result<()> {
+    /// # let db = AletheiaDB::new().unwrap();
+    /// let u1 = db.create_node("User", PropertyMapBuilder::new().build())?;
+    /// let edges = db.get_outgoing_edges(u1);
+    /// assert!(edges.is_empty());
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn get_outgoing_edges(&self, node_id: NodeId) -> Vec<EdgeId> {
         self.current.get_outgoing_edges(node_id)
     }
@@ -198,11 +284,38 @@ impl AletheiaDB {
     /// Get outgoing edges from a node as an iterator (current state).
     ///
     /// This provides zero-allocation traversal.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust,no_run
+    /// # use aletheiadb::{AletheiaDB, PropertyMapBuilder};
+    /// # fn main() -> aletheiadb::core::error::Result<()> {
+    /// # let db = AletheiaDB::new().unwrap();
+    /// let u1 = db.create_node("User", PropertyMapBuilder::new().build())?;
+    /// for edge_id in db.get_outgoing_edges_iter(u1) {
+    ///     println!("Found edge: {:?}", edge_id);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn get_outgoing_edges_iter(&self, node_id: NodeId) -> OutgoingEdgesIter<'_> {
         self.current.get_outgoing_edges_iter(node_id)
     }
 
     /// Get incoming edges to a node (current state).
+    ///
+    /// ## Examples
+    ///
+    /// ```rust,no_run
+    /// # use aletheiadb::{AletheiaDB, PropertyMapBuilder};
+    /// # fn main() -> aletheiadb::core::error::Result<()> {
+    /// # let db = AletheiaDB::new().unwrap();
+    /// let u1 = db.create_node("User", PropertyMapBuilder::new().build())?;
+    /// let edges = db.get_incoming_edges(u1);
+    /// assert!(edges.is_empty());
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn get_incoming_edges(&self, node_id: NodeId) -> Vec<EdgeId> {
         self.current.get_incoming_edges(node_id)
     }
@@ -210,6 +323,20 @@ impl AletheiaDB {
     /// Get incoming edges to a node as an iterator (current state).
     ///
     /// This provides zero-allocation traversal.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust,no_run
+    /// # use aletheiadb::{AletheiaDB, PropertyMapBuilder};
+    /// # fn main() -> aletheiadb::core::error::Result<()> {
+    /// # let db = AletheiaDB::new().unwrap();
+    /// let u1 = db.create_node("User", PropertyMapBuilder::new().build())?;
+    /// for edge_id in db.get_incoming_edges_iter(u1) {
+    ///     println!("Found incoming edge: {:?}", edge_id);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn get_incoming_edges_iter(&self, node_id: NodeId) -> IncomingEdgesIter<'_> {
         self.current.get_incoming_edges_iter(node_id)
     }
