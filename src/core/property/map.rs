@@ -184,6 +184,27 @@ impl PropertyMap {
     ///
     /// Returns `StorageError::InconsistentState` if any PropertyKey cannot be
     /// resolved from the interner, indicating data corruption.
+    /// Check if two property maps are semantically equal.
+    pub fn semantically_equal(&self, other: &Self) -> bool {
+        if Arc::ptr_eq(&self.inner, &other.inner) {
+            return true;
+        }
+        if self.cached_size != other.cached_size || self.inner.len() != other.inner.len() {
+            return false;
+        }
+        for (k, v) in self.inner.iter() {
+            if let Some(other_v) = other.inner.get(k) {
+                if !v.semantically_equal(other_v) {
+                    return false;
+                }
+            } else {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Serialize into buffer.
     pub fn serialize_into(&self, buffer: &mut Vec<u8>) -> Result<()> {
         // Reserve space for the entire map to avoid reallocations
         buffer.reserve(self.cached_size);

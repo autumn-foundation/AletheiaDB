@@ -1,0 +1,10 @@
+--- fuzz/fuzz_targets/wal_entry_parsing.rs
++++ fuzz/fuzz_targets/wal_entry_parsing.rs
+@@ -12,6 +12,6 @@
+         assert_eq!(roundtrip_consumed, canonical.len());
+         assert_eq!(roundtrip.lsn, entry.lsn);
+         assert_eq!(roundtrip.timestamp, entry.timestamp);
+-        assert!(roundtrip.semantically_equal(&entry));
++        assert!(roundtrip.operation.semantically_equal(&entry.operation));
+     }
+ });

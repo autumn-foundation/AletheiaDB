@@ -15,6 +15,6 @@ fuzz_target!(|data: &[u8]| {
         assert_eq!(roundtrip_consumed, canonical.len());
         assert_eq!(roundtrip.lsn, entry.lsn);
         assert_eq!(roundtrip.timestamp, entry.timestamp);
-        assert!(roundtrip.operation.semantically_equal(&entry.operation));
+        assert!(roundtrip.semantically_equal(&entry));
     }
 });

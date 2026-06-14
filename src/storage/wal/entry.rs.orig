@@ -312,7 +312,6 @@ mod sentry_tests {
 }
 
 impl WalOperation {
-    /// Check if two operations are semantically equal.
     pub fn semantically_equal(&self, other: &Self) -> bool {
         match (self, other) {
             (
@@ -324,13 +323,13 @@ impl WalOperation {
                 WalOperation::CreateEdge { edge_id: id2, source: s2, target: t2, label: l2, properties: p2, valid_from: v2 }
             ) => id1 == id2 && s1 == s2 && t1 == t2 && l1 == l2 && v1 == v2 && p1.semantically_equal(p2),
             (
-                WalOperation::UpdateNode { node_id: id1, properties: p1, valid_from: v1, version_id: vid1, label: l1 },
-                WalOperation::UpdateNode { node_id: id2, properties: p2, valid_from: v2, version_id: vid2, label: l2 }
-            ) => id1 == id2 && v1 == v2 && vid1 == vid2 && l1 == l2 && p1.semantically_equal(p2),
+                WalOperation::UpdateNode { node_id: id1, properties: p1, valid_from: v1 },
+                WalOperation::UpdateNode { node_id: id2, properties: p2, valid_from: v2 }
+            ) => id1 == id2 && v1 == v2 && p1.semantically_equal(p2),
             (
-                WalOperation::UpdateEdge { edge_id: id1, properties: p1, valid_from: v1, version_id: vid1, label: l1 },
-                WalOperation::UpdateEdge { edge_id: id2, properties: p2, valid_from: v2, version_id: vid2, label: l2 }
-            ) => id1 == id2 && v1 == v2 && vid1 == vid2 && l1 == l2 && p1.semantically_equal(p2),
+                WalOperation::UpdateEdge { edge_id: id1, properties: p1, valid_from: v1 },
+                WalOperation::UpdateEdge { edge_id: id2, properties: p2, valid_from: v2 }
+            ) => id1 == id2 && v1 == v2 && p1.semantically_equal(p2),
             (
                 WalOperation::DeleteNode { node_id: id1, valid_from: v1 },
                 WalOperation::DeleteNode { node_id: id2, valid_from: v2 }
@@ -339,14 +338,13 @@ impl WalOperation {
                 WalOperation::DeleteEdge { edge_id: id1, valid_from: v1 },
                 WalOperation::DeleteEdge { edge_id: id2, valid_from: v2 }
             ) => id1 == id2 && v1 == v2,
-            (WalOperation::Checkpoint { lsn: l1, timestamp: t1 }, WalOperation::Checkpoint { lsn: l2, timestamp: t2 }) => l1 == l2 && t1 == t2,
+            (WalOperation::Checkpoint { lsn: l1 }, WalOperation::Checkpoint { lsn: l2 }) => l1 == l2,
             _ => false,
         }
     }
 }
 
 impl WalEntry {
-    /// Check if two operations are semantically equal.
     pub fn semantically_equal(&self, other: &Self) -> bool {
         self.lsn == other.lsn && self.timestamp == other.timestamp && self.operation.semantically_equal(&other.operation)
     }
