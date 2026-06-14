@@ -654,7 +654,8 @@ impl QueryResults {
                 EntityResult::Node(n) => {
                     nodes.push(n.id);
                     let node_idx = nodes.len().saturating_sub(1);
-                    let props = properties.get_or_insert_with(|| vec![Default::default(); node_idx]);
+                    let props =
+                        properties.get_or_insert_with(|| vec![Default::default(); node_idx]);
                     props.push(n.properties);
                 }
                 EntityResult::NodeId(id) => {
@@ -685,7 +686,11 @@ impl QueryResults {
                 });
                 if let Some(ts) = timestamp {
                     let wallclock = ts.wallclock();
-                    let ts_u64 = if wallclock < 0 { 0_u64 } else { wallclock as u64 };
+                    let ts_u64 = if wallclock < 0 {
+                        0_u64
+                    } else {
+                        wallclock as u64
+                    };
                     let version_id = VersionId::new(ts_u64).map_err(|e| {
                         crate::core::error::Error::Query(
                             crate::core::error::QueryError::InvalidParameter {
