@@ -633,70 +633,41 @@ impl QueryResults {
     ///
     /// For very large result sets, this may consume significant memory. Consider using
     /// the streaming iterator directly for result sets exceeding 100K rows.
-    /// ⚡ Bolt Optimization: Pre-allocates vector based on iterator's lower size bound
-    /// to reduce heap allocations during collection of structured results.
+    /// ⚡ Bolt Optimization: Pre-allocates vectors based on iterator's lower size bound,
+    /// and uses a single pass over the iterator, lazily allocating columnar vectors
+    /// on-demand to eliminate a large intermediate O(N) allocation (`Vec<QueryRow>`).
     pub fn collect_structured(mut self) -> Result<QueryResult> {
-        // First pass: collect all rows
         let (lower, _) = self.iterator.size_hint();
-        let mut rows = Vec::with_capacity(lower);
-        while let Some(row) = self.iterator.next() {
-            rows.push(row?);
-        }
+        let initial_cap = lower.max(64); // Provide a reasonable default minimum capacity
 
-        // Determine which fields we have (single pass)
-        let (mut has_any_scores, mut has_any_paths, mut has_any_versions, mut has_any_nodes) =
-            (false, false, false, false);
-        let mut node_count = 0usize;
-        for row in &rows {
-            has_any_scores = has_any_scores || row.score.is_some();
-            has_any_paths = has_any_paths || row.path.is_some();
-            has_any_versions = has_any_versions || row.timestamp.is_some();
-            if row.entity.as_node().is_some() {
-                has_any_nodes = true;
-                node_count += 1;
-            }
-        }
+        let mut nodes = Vec::with_capacity(initial_cap);
+        let mut properties: Option<Vec<PropertyMap>> = None;
+        let mut scores: Option<Vec<f32>> = None;
+        let mut paths: Option<Vec<Path>> = None;
+        let mut versions: Option<Vec<VersionId>> = None;
 
-        // Second pass: extract data with padding
-        let capacity = rows.len();
-        let mut nodes = Vec::with_capacity(node_count);
-        let mut properties = if has_any_nodes {
-            Some(Vec::with_capacity(node_count))
-        } else {
-            None
-        };
-        let mut scores = if has_any_scores {
-            Some(Vec::with_capacity(capacity))
-        } else {
-            None
-        };
-        let mut paths = if has_any_paths {
-            Some(Vec::with_capacity(capacity))
-        } else {
-            None
-        };
-        let mut versions = if has_any_versions {
-            Some(Vec::with_capacity(capacity))
-        } else {
-            None
-        };
+        let mut row_idx = 0;
 
-        for row in rows {
-            let QueryRow {
-                entity,
-                score,
-                path,
-                timestamp,
-            } = row;
+        while let Some(row_res) = self.iterator.next() {
+            let row = row_res?;
 
+            // Process entity (Node)
             // ⚡ Bolt Optimization: Consumes the entity directly by value instead of cloning
             // properties map via `as_node().map(|n| n.properties.clone())`. This eliminates
             // one large heap allocation per row during result structurization.
-            match entity {
+            match row.entity {
                 EntityResult::Node(n) => {
                     nodes.push(n.id);
                     if let Some(ref mut props) = properties {
                         props.push(n.properties);
+                    } else {
+                        let mut p = Vec::with_capacity(initial_cap);
+                        // Properties map strictly parallels `nodes`, so we pad based on the current
+                        // nodes.len() - 1 to account for previously encountered NodeIds that didn't have properties.
+                        let pad = nodes.len().saturating_sub(1);
+                        p.resize(pad, Default::default());
+                        p.push(n.properties);
+                        properties = Some(p);
                     }
                 }
                 EntityResult::NodeId(id) => {
@@ -708,30 +679,35 @@ impl QueryResults {
                 _ => {} // Ignore edges, etc.
             }
 
-            // Extract or pad scores
+            // Extract or pad scores (aligned to `row_idx`)
             if let Some(ref mut s) = scores {
-                s.push(score.unwrap_or(0.0));
+                s.push(row.score.unwrap_or(0.0));
+            } else if let Some(score) = row.score {
+                let mut s = Vec::with_capacity(initial_cap);
+                s.resize(row_idx, 0.0);
+                s.push(score);
+                scores = Some(s);
             }
 
-            // Extract or pad paths
+            // Extract or pad paths (aligned to `row_idx`)
             if let Some(ref mut p) = paths {
-                p.push(path.unwrap_or_default());
+                p.push(row.path.unwrap_or_default());
+            } else if let Some(path) = row.path {
+                let mut p = Vec::with_capacity(initial_cap);
+                p.resize(row_idx, Default::default());
+                p.push(path);
+                paths = Some(p);
             }
 
-            // Extract or pad versions
+            // Extract or pad versions (aligned to `row_idx`)
             if let Some(ref mut v) = versions {
-                if let Some(timestamp) = timestamp {
-                    // Safely convert timestamp (i64) to VersionId (u64)
-                    // Negative timestamps are clamped to 0
-                    // Phase 2: Use wallclock component for version ID
+                if let Some(timestamp) = row.timestamp {
                     let wallclock = timestamp.wallclock();
                     let ts_u64 = if wallclock < 0 {
                         0_u64
                     } else {
                         wallclock as u64
                     };
-
-                    // VersionId::new validates against MAX_VALID_ID
                     let version_id = VersionId::new(ts_u64).map_err(|e| {
                         crate::core::error::Error::Query(
                             crate::core::error::QueryError::InvalidParameter {
@@ -745,11 +721,31 @@ impl QueryResults {
                     })?;
                     v.push(version_id);
                 } else {
-                    // Pad with version 0 for missing timestamps
-                    // SAFETY: VersionId(0) is always valid as 0 < MAX_VALID_ID
                     v.push(VersionId::new(0).expect("VersionId(0) should always be valid"));
                 }
+            } else if let Some(timestamp) = row.timestamp {
+                let mut v = Vec::with_capacity(initial_cap);
+                v.resize(row_idx, VersionId::new(0).unwrap());
+
+                let wallclock = timestamp.wallclock();
+                let ts_u64 = if wallclock < 0 {
+                    0_u64
+                } else {
+                    wallclock as u64
+                };
+                let version_id = VersionId::new(ts_u64).map_err(|e| {
+                    crate::core::error::Error::Query(
+                        crate::core::error::QueryError::InvalidParameter {
+                            parameter: "timestamp".to_string(),
+                            reason: format!("Timestamp {} exceeds MAX_VALID_ID: {}", timestamp, e),
+                        },
+                    )
+                })?;
+                v.push(version_id);
+                versions = Some(v);
             }
+
+            row_idx += 1;
         }
 
         Ok(QueryResult {
