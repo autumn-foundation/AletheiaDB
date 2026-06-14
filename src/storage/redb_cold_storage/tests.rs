@@ -1,3 +1,5 @@
+//! Tests for the Redb Cold Storage backend.
+
 use super::*;
 use crate::core::id::{EdgeId, NodeId};
 use crate::core::interning::GLOBAL_INTERNER;

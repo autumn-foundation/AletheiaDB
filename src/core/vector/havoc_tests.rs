@@ -1,3 +1,5 @@
+//! Havoc (Panic/Security) Tests for Vector Operations.
+
 #[cfg(test)]
 mod tests {
     use crate::core::vector::simd;

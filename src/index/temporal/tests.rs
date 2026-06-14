@@ -1,3 +1,5 @@
+//! Tests for the Temporal Indexes.
+
 use super::*;
 use crate::core::temporal::{BiTemporalInterval, TIMESTAMP_MAX};
 

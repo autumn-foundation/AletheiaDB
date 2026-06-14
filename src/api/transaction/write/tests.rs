@@ -1,3 +1,5 @@
+//! Tests for Write Transactions.
+
 use super::*;
 use crate::core::id::TxIdGenerator;
 use crate::storage::wal::concurrent_system::ConcurrentWalSystemConfig;
