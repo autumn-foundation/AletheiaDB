@@ -77,3 +77,9 @@
 **Pre-allocating Vec Capacities in Hot Paths**
 **Learning:** Pre-allocating standard Rust `Vec` objects using `Vec::with_capacity` in hot-paths like parsers and query planners eliminates unnecessary heap reallocations (0 -> 4 -> 8 -> 16 etc.), without changing semantics or causing borrow checker issues. However, if the expected bounds are wildly incorrect it could lead to memory bloat. A small capacity for small collections minimizes performance impacts in hot loops.
 **Action:** When a loop dynamically pushes elements to a new empty Vector (especially in repeated execution domains like parsers and network/storage iterators), replace `Vec::new()` with `Vec::with_capacity(n)` if a typical or max size `n` is roughly known.
+**[Single-pass Columnar Aggregation]**
+**Learning:** Collecting iterators into intermediate Vecs before extracting their fields into separate Vecs results in double allocation. Lazily initializing columnar vectors within a single pass avoids the intermediate Vec. When aligning padding, align the padding size to the count of the specific target entity (e.g., nodes) rather than the general row index.
+**Action:** When aggregating rows into columnar structures (like `QueryResult`), iterate over the source iterator exactly once and lazily initialize vectors the first time a field is present, padding them up to the current target entity count to maintain alignment.
+**[Single-pass Columnar Alignment]**
+**Learning:** Lazily initializing columnar vectors using `nodes.len() - 1` causes an underflow panic if the first element is a non-node entity (like an edge). Furthermore, using a global `row_index` to align vectors corrupts data because the `nodes` vector only increments for node entities.
+**Action:** When padding lazy columnar vectors, align the padding size strictly to the count of the specific target entity using `nodes.len().saturating_sub(1)` rather than the general row index, avoiding both underflow and data misalignment.
