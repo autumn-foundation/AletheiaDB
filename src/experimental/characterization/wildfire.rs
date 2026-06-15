@@ -39,7 +39,6 @@
 //! ```
 
 use crate::core::id::NodeId;
-use crate::experimental::sybil::PropagationModel;
 use std::collections::HashMap;
 
 /// A temperature-modulated propagation model.
@@ -56,11 +55,7 @@ pub struct WildfirePropagation {
 
 impl WildfirePropagation {
     /// Create a new WildfirePropagation model.
-    pub fn new(
-        temperatures: HashMap<NodeId, f32>,
-        base_alpha: f32,
-        temp_multiplier: f32,
-    ) -> Self {
+    pub fn new(temperatures: HashMap<NodeId, f32>, base_alpha: f32, temp_multiplier: f32) -> Self {
         Self {
             temperatures,
             base_alpha: base_alpha.clamp(0.0, 1.0),
@@ -74,10 +69,9 @@ impl WildfirePropagation {
         let alpha = self.base_alpha + (self.temp_multiplier * temp);
         alpha.clamp(0.0, 1.0)
     }
-}
 
-impl PropagationModel for WildfirePropagation {
-    fn next_state(
+    /// Calculate the next state for a node.
+    pub fn next_state(
         &self,
         node_id: NodeId,
         current_self: Option<&[f32]>,
@@ -171,7 +165,9 @@ mod tests {
         // Base alpha 0.0, multiplier 0.1.
         // B's alpha = 0.0 + (10.0 * 0.1) = 1.0 (Full Conformity)
         // C's alpha = 0.0 + (0.0 * 0.1)  = 0.0 (Full Inertia)
-        let model = WildfirePropagation::new(temps, 0.0, 0.1);
+        let model = crate::experimental::characterization::sybil::PropagationModel::Wildfire(
+            WildfirePropagation::new(temps, 0.0, 0.1),
+        );
 
         let sybil = Sybil::new(&db);
         let state = sybil.simulate("opinion", &model, 2).unwrap();

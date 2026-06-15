@@ -40,12 +40,21 @@ use crate::core::NodeId;
 use crate::core::error::Result;
 use std::collections::HashMap;
 
+use crate::experimental::characterization::wildfire::WildfirePropagation;
+
 /// Represents the state of the simulation at a given step.
 /// Maps NodeId -> Vector (state).
 pub type PropagationState = HashMap<NodeId, Vec<f32>>;
 
 /// Defines how a node updates its state based on its neighbors.
-pub trait PropagationModel {
+pub enum PropagationModel {
+    /// Linear propagation model.
+    Linear(LinearPropagation),
+    /// Wildfire propagation model.
+    Wildfire(WildfirePropagation),
+}
+
+impl PropagationModel {
     /// Calculate the next state for a node.
     ///
     /// # Arguments
@@ -55,12 +64,17 @@ pub trait PropagationModel {
     ///
     /// # Returns
     /// The new vector state for the node.
-    fn next_state(
+    pub fn next_state(
         &self,
         node_id: NodeId,
         current_self: Option<&[f32]>,
         neighbors: &[(NodeId, &[f32])],
-    ) -> Option<Vec<f32>>;
+    ) -> Option<Vec<f32>> {
+        match self {
+            PropagationModel::Linear(model) => model.next_state(node_id, current_self, neighbors),
+            PropagationModel::Wildfire(model) => model.next_state(node_id, current_self, neighbors),
+        }
+    }
 }
 
 /// A simple linear propagation model.
@@ -79,10 +93,9 @@ impl LinearPropagation {
             alpha: alpha.clamp(0.0, 1.0),
         }
     }
-}
 
-impl PropagationModel for LinearPropagation {
-    fn next_state(
+    /// Calculate the next state for a node.
+    pub fn next_state(
         &self,
         _node_id: NodeId,
         current_self: Option<&[f32]>,
@@ -156,10 +169,10 @@ impl<'a> Sybil<'a> {
     /// * `property_name` - The vector property to use as the "meme".
     /// * `model` - The propagation logic.
     /// * `steps` - Number of iterations.
-    pub fn simulate<M: PropagationModel>(
+    pub fn simulate(
         &self,
         property_name: &str,
-        model: &M,
+        model: &PropagationModel,
         steps: usize,
     ) -> Result<PropagationState> {
         // Step 1: Load Initial State
@@ -318,7 +331,7 @@ mod tests {
 
         let sybil = Sybil::new(&db);
         // Alpha 0.5: Take halfway between self and neighbor
-        let model = LinearPropagation::new(0.5);
+        let model = PropagationModel::Linear(LinearPropagation::new(0.5));
 
         // Step 1:
         // A sees B (1,1). Self (0,0). Avg(Neighbor)= (1,1). New A = 0.5*(0,0) + 0.5*(1,1) = (0.5, 0.5)
@@ -373,7 +386,7 @@ mod tests {
 
         let sybil = Sybil::new(&db);
         // Alpha 1.0 = Total Copy
-        let model = LinearPropagation::new(1.0);
+        let model = PropagationModel::Linear(LinearPropagation::new(1.0));
 
         // 1 Step: B sees A(1.0). B becomes 1.0. C sees B(0.0) (old state). C stays 0.0.
         let state_1 = sybil.simulate("val", &model, 1).unwrap();
