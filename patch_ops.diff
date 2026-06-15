@@ -1,0 +1,36 @@
+<<<<<<< SEARCH
+    // Clamp to handle minor floating-point inaccuracies that could produce
+    // values slightly outside [-1.0, 1.0]
+    Ok(result.clamp(-1.0, 1.0))
+}
+=======
+    // Clamp to handle minor floating-point inaccuracies that could produce
+    // values slightly outside [-1.0, 1.0]. Avoid panicking on NaN.
+    if result.is_nan() {
+        Ok(result)
+    } else {
+        Ok(result.clamp(-1.0, 1.0))
+    }
+}
+>>>>>>> REPLACE
+<<<<<<< SEARCH
+    // For unit vectors, cosine similarity = dot product
+    // We reuse the SIMD infrastructure but only need the dot product
+    let dot = dot_product_sum(a, b);
+
+    // Clamp to handle floating-point inaccuracies
+    Ok(dot.clamp(-1.0, 1.0))
+}
+=======
+    // For unit vectors, cosine similarity = dot product
+    // We reuse the SIMD infrastructure but only need the dot product
+    let dot = dot_product_sum(a, b);
+
+    // Clamp to handle floating-point inaccuracies. Avoid panicking on NaN.
+    if dot.is_nan() {
+        Ok(dot)
+    } else {
+        Ok(dot.clamp(-1.0, 1.0))
+    }
+}
+>>>>>>> REPLACE

@@ -1,0 +1,35 @@
+<<<<<<< SEARCH
+        // Allow unit vectors (mag ≈ 1.0) OR zero vectors (mag ≈ 0.0) produced by normalize()
+        let a_valid = mag_a_sq.is_nan() || (mag_a_sq - 1.0).abs() < 1e-4 || mag_a_sq < SQUARED_MAGNITUDE_THRESHOLD;
+        debug_assert!(
+            a_valid,
+            "First vector is not unit length: ||a||² = {} (expected 1.0). \
+             Use cosine_similarity() for non-normalized vectors.",
+            mag_a_sq
+        );
+
+        let b_valid = mag_b_sq.is_nan() || (mag_b_sq - 1.0).abs() < 1e-4 || mag_b_sq < SQUARED_MAGNITUDE_THRESHOLD;
+        debug_assert!(
+            b_valid,
+            "Second vector is not unit length: ||b||² = {} (expected 1.0). \
+             Use cosine_similarity() for non-normalized vectors.",
+            mag_b_sq
+        );
+=======
+        // Allow unit vectors (mag ≈ 1.0) OR zero vectors (mag ≈ 0.0) produced by normalize()
+        let a_valid = !mag_a_sq.is_finite() || (mag_a_sq - 1.0).abs() < 1e-4 || mag_a_sq < SQUARED_MAGNITUDE_THRESHOLD;
+        debug_assert!(
+            a_valid,
+            "First vector is not unit length: ||a||² = {} (expected 1.0). \
+             Use cosine_similarity() for non-normalized vectors.",
+            mag_a_sq
+        );
+
+        let b_valid = !mag_b_sq.is_finite() || (mag_b_sq - 1.0).abs() < 1e-4 || mag_b_sq < SQUARED_MAGNITUDE_THRESHOLD;
+        debug_assert!(
+            b_valid,
+            "Second vector is not unit length: ||b||² = {} (expected 1.0). \
+             Use cosine_similarity() for non-normalized vectors.",
+            mag_b_sq
+        );
+>>>>>>> REPLACE
