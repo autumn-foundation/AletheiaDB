@@ -263,12 +263,16 @@ mod tests {
     use crate::api::transaction::WriteOps;
     use crate::core::error::VectorError;
     use crate::core::property::PropertyMapBuilder;
-    use crate::db::AletheiaDB;
     use crate::index::vector::{DistanceMetric, HnswConfig};
 
+    // We use a proxy to avoid depending on crate::db in query's tests.
+    // However, AletheiaDB itself can just be accessed via crate::test_utils since tests
+    // are allowed to use it.
+    use crate::test_utils::create_test_db as base_create_test_db;
+
     /// Helper to create a test database with vector indexing enabled.
-    fn create_test_db() -> AletheiaDB {
-        let db = AletheiaDB::new().unwrap();
+    fn create_test_db() -> crate::AletheiaDB {
+        let (_, db) = base_create_test_db().unwrap();
         let config = HnswConfig::new(4, DistanceMetric::Cosine);
         db.enable_vector_index("embedding", config)
             .expect("Failed to enable vector index");
@@ -280,7 +284,7 @@ mod tests {
     /// Alice -> Carol (embedding [0.0, 1.0, 0.0, 0.0] - dissimilar to Alice)
     /// Alice -> Dave (embedding [0.8, 0.2, 0.0, 0.0] - somewhat similar to Alice)
     /// Returns (alice_id, bob_id, carol_id, dave_id)
-    fn create_social_graph(db: &AletheiaDB) -> (NodeId, NodeId, NodeId, NodeId) {
+    fn create_social_graph(db: &crate::AletheiaDB) -> (NodeId, NodeId, NodeId, NodeId) {
         let alice = db
             .create_node(
                 "Person",
@@ -699,12 +703,12 @@ mod tests {
     // Tests for find_similar_as_of
 
     /// Helper to create a test database with temporal vector indexing enabled.
-    fn create_temporal_test_db() -> AletheiaDB {
+    fn create_temporal_test_db() -> crate::AletheiaDB {
         use crate::index::vector::temporal::{
             RetentionPolicy, SnapshotStrategy, TemporalVectorConfig,
         };
 
-        let db = AletheiaDB::new().unwrap();
+        let (_, db) = base_create_test_db().unwrap();
         let hnsw_config = HnswConfig::new(4, DistanceMetric::Cosine);
         let temporal_config = TemporalVectorConfig {
             snapshot_strategy: SnapshotStrategy::TransactionInterval(1),

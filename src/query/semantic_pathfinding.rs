@@ -481,11 +481,12 @@ mod tests {
     use crate::api::transaction::WriteOps;
     use crate::core::error::Error;
     use crate::core::property::PropertyMapBuilder;
-    use crate::db::AletheiaDB;
     use crate::index::vector::{DistanceMetric, HnswConfig};
 
-    fn create_test_db() -> AletheiaDB {
-        let db = AletheiaDB::new().unwrap();
+    use crate::test_utils::create_test_db as base_create_test_db;
+
+    fn create_test_db() -> crate::AletheiaDB {
+        let (_, db) = base_create_test_db().unwrap();
         // Enable vector index to ensure vector properties are handled correctly
         // (though SemanticPathfinder works with raw properties too)
         db.vector_index("embedding")
@@ -818,11 +819,11 @@ mod tests {
         use super::*;
         use crate::api::transaction::WriteOps;
         use crate::core::property::PropertyMapBuilder;
-        use crate::db::AletheiaDB;
         use crate::index::vector::{DistanceMetric, HnswConfig}; // Import WriteOps to get create_node/update_node
+        use crate::test_utils::create_test_db as base_create_test_db;
 
-        fn create_test_db() -> AletheiaDB {
-            let db = AletheiaDB::new().unwrap();
+        fn create_test_db() -> crate::AletheiaDB {
+            let (_, db) = base_create_test_db().unwrap();
             // Enable vector index
             db.vector_index("embedding")
                 .hnsw(HnswConfig::new(3, DistanceMetric::Cosine))

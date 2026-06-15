@@ -111,3 +111,10 @@ impl GraphView for AletheiaDB {
         self.find_similar_as_of(embedding, k, timestamp)
     }
 }
+
+use crate::query::traits::QueryEngine;
+impl QueryEngine for AletheiaDB {
+    fn execute_query(&self, query: crate::query::Query) -> Result<crate::query::QueryResults> {
+        self.execute_query(query)
+    }
+}
