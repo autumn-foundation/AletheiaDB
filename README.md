@@ -26,9 +26,10 @@ Requires Rust 1.92+.
 ## Quick Start
 
 ```rust
+// Requires std::result::Result in main, as prelude does not export it
 use aletheiadb::prelude::*;
 
-fn main() -> Result<()> {
+fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let db = AletheiaDB::new()?;
 
     // Create nodes and a relationship
@@ -59,11 +60,13 @@ See the [Getting Started guide](docs/guides/getting-started.md) for a full walkt
 Graph traversal, vector ranking, and temporal snapshots compose into a single
 query with a consistent view of the data:
 
+> ⚠️ **EXPERIMENTAL FEATURES:** Modules like `NarrativeGenerator` and `story_demo` require the `nova` feature. Enable it in your `Cargo.toml` or via `cargo run --features nova`.
+
 ```rust
 use aletheiadb::prelude::*;
 use aletheiadb::HnswConfig;
 
-fn main() -> Result<()> {
+fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let db = AletheiaDB::new()?;
     db.vector_index("embedding").hnsw(HnswConfig { dimensions: 2, ..Default::default() }).enable()?;
 
