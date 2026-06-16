@@ -704,3 +704,85 @@ mod sentry_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod additional_sentry_tests {
+    use super::*;
+    use crate::core::NodeId;
+    use crate::query::ir::Predicate;
+    use crate::query::plan::{ScanOp, SortKey};
+    use std::sync::Arc;
+
+    #[test]
+    fn test_pushdown_scan_match_arm_mutant() {
+        let rule = PredicatePushdown;
+        let scan = LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(1).unwrap()]));
+        let filter = LogicalOp::unary(UnaryOp::Filter(Predicate::eq("a", 1)), scan);
+        let result = rule.push_down(&filter).unwrap();
+        assert!(
+            !result.1,
+            "Filter over scan should not change directly (no push down)"
+        );
+    }
+
+    #[test]
+    fn test_pushdown_vector_rank_match_arm_mutant() {
+        let rule = PredicatePushdown;
+        let vector_rank = LogicalOp::unary(
+            UnaryOp::VectorRank {
+                embedding: Arc::from([0.1f32; 4].as_slice()),
+                top_k: None,
+                property_key: None,
+            },
+            LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(1).unwrap()])),
+        );
+        let filter = LogicalOp::unary(UnaryOp::Filter(Predicate::eq("a", 1)), vector_rank);
+        let result = rule.push_down(&filter).unwrap();
+        assert!(result.1, "Filter over VectorRank should be pushed down");
+        match result.0 {
+            LogicalOp::Unary {
+                op: UnaryOp::VectorRank { .. },
+                input,
+            } => {
+                assert!(matches!(
+                    *input,
+                    LogicalOp::Unary {
+                        op: UnaryOp::Filter(_),
+                        ..
+                    }
+                ));
+            }
+            _ => panic!("Expected VectorRank to be top level"),
+        }
+    }
+
+    #[test]
+    fn test_pushdown_sort_match_arm_mutant() {
+        let rule = PredicatePushdown;
+        let sort = LogicalOp::unary(
+            UnaryOp::Sort {
+                key: SortKey::Property("a".to_string()),
+                descending: true,
+            },
+            LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(1).unwrap()])),
+        );
+        let filter = LogicalOp::unary(UnaryOp::Filter(Predicate::eq("a", 1)), sort);
+        let result = rule.push_down(&filter).unwrap();
+        assert!(result.1, "Filter over Sort should be pushed down");
+        match result.0 {
+            LogicalOp::Unary {
+                op: UnaryOp::Sort { .. },
+                input,
+            } => {
+                assert!(matches!(
+                    *input,
+                    LogicalOp::Unary {
+                        op: UnaryOp::Filter(_),
+                        ..
+                    }
+                ));
+            }
+            _ => panic!("Expected Sort to be top level"),
+        }
+    }
+}

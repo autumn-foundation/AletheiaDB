@@ -346,3 +346,31 @@
 **Finding:** The `LimitPushdown` tests originally missed several behavioral edge cases and logic checks, particularly regarding the propagation limits in BinaryOp combinations (`||`), updating limit values correctly against child bounds, and setting vector rank limits.
 **Evidence:** `cargo mutants` caught mutants in `LimitPushdown::push_down` specifically targeting the changed boolean condition logic and bounds assignment.
 **Recommendation:** Added `sentry_tests` to `LimitPushdown` that explicitly trigger tests enforcing the boolean change propagation, verifying that updated properties reflect correct nested limits, and vector bounds assignment. Tests now prevent `||` to `&&` mutations and correct top-k modifications.
+
+**[Predicate Pushdown Sentry Coverage]**
+**Module:** `src/query/planner/rules/predicate_pushdown.rs`
+**Severity:** 🟢 Acquitted (Strengthened)
+**Finding:** Mutation testing revealed missed coverage of pattern matching (e.g. UnaryOp match arms missing structural verifications beyond top-level properties) and partial optimization bounds inside binary nodes.
+**Evidence:** Missing tests for specific Match Arm UnaryOp::Sort/Traverse/VectorRank.
+**Recommendation:** Added missing `match` arm verification sentry tests, validating structural optimization logic boundaries.
+
+**[FilterScanFusion Logic Gap]**
+**Module:** `src/query/planner/rules/filter_scan_fusion.rs`
+**Severity:** 🟢 Acquitted (Strengthened)
+**Finding:** The rule did not explicitly test the boolean returned on successful fusion logic, binary node change propagation (`||`), and negative tests for pseudo properties like `_label`.
+**Evidence:** Missing tests in existing `tests` module for these boundaries.
+**Recommendation:** Added `sentry_tests` to strictly verify pseudo-key exclusion (`_label`), binary branch modification propagation, and default structural fusions.
+
+**[OperationReordering Mutants and Selectivity Checks]**
+**Module:** `src/query/planner/rules/operation_reordering.rs`
+**Severity:** 🟢 Acquitted (Strengthened)
+**Finding:** The rule's boolean logic in binary propagations, strict checks on cardinality (avoiding negative or 0 estimations masking bugs), selectivity equations and structural filter comparisons were largely untested.
+**Evidence:** Missing `match` arms or arithmetic logic branches in existing tests.
+**Recommendation:** Added `sentry_tests` to `OperationReordering` to explicitly test binary branch propagations, ensure arithmetic estimates operate strictly as expected, and test single-filter early return boundaries.
+
+**[Predicate Pushdown Sentry Coverage]**
+**Module:** `src/query/planner/rules/predicate_pushdown.rs`
+**Severity:** 🟢 Acquitted (Strengthened)
+**Finding:** Mutation testing revealed missed coverage of pattern matching (e.g. UnaryOp match arms missing structural verifications beyond top-level properties).
+**Evidence:** Missing tests for specific Match Arm UnaryOp::Sort/Traverse/VectorRank.
+**Recommendation:** Added missing `match` arm verification sentry tests, validating structural optimization logic boundaries.

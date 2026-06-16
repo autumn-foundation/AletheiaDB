@@ -243,3 +243,74 @@ mod tests {
         assert!(result.unwrap().temporal_context.is_some());
     }
 }
+
+#[cfg(test)]
+mod sentry_tests {
+    use super::*;
+    use crate::query::ir::Predicate;
+    use crate::query::plan::{BinaryOp, LogicalOp, LogicalPlan, ScanOp, UnaryOp};
+    use crate::query::planner::stats::Statistics;
+
+    #[test]
+    fn test_filter_scan_fusion_mutants() {
+        let rule = FilterScanFusion;
+        let stats = Statistics::default();
+
+        // 1. replace match guard !key.starts_with('_') with true in FilterScanFusion::fuse
+        // test: Starts with '_' should not fuse
+        let filter = LogicalOp::unary(
+            UnaryOp::Filter(Predicate::eq("_label", "Alice")),
+            LogicalOp::Scan(ScanOp::NodeScan {
+                label: Some("Person".into()),
+                estimated_rows: Some(100),
+            }),
+        );
+        let plan = LogicalPlan::new(filter);
+        let result = rule.apply(&plan, &stats).unwrap();
+        assert!(result.is_none(), "Should not fuse pseudo-key");
+
+        // 2. replace || with && in FilterScanFusion::fuse
+        // test: binary op partial fusion
+        let left = LogicalOp::unary(
+            UnaryOp::Filter(Predicate::eq("name", "Alice")),
+            LogicalOp::Scan(ScanOp::NodeScan {
+                label: Some("Person".into()),
+                estimated_rows: Some(100),
+            }),
+        );
+        let right = LogicalOp::Scan(ScanOp::NodeScan {
+            label: Some("Company".into()),
+            estimated_rows: Some(100),
+        });
+        let filter_binary = LogicalOp::binary(BinaryOp::Union, left, right);
+        let plan_binary = LogicalPlan::new(filter_binary);
+        let result_binary = rule.apply(&plan_binary, &stats).unwrap();
+        assert!(result_binary.is_some(), "Should fuse left binary side");
+
+        // 3. Name check
+        assert_eq!(rule.name(), "filter-scan-fusion");
+
+        // 4. Default fusion check (tests apply)
+        let scan = LogicalOp::Scan(ScanOp::NodeScan {
+            label: Some("Person".into()),
+            estimated_rows: Some(100),
+        });
+        let filter = LogicalOp::unary(UnaryOp::Filter(Predicate::eq("name", "Alice")), scan);
+        let plan = LogicalPlan::new(filter);
+        let result = rule.apply(&plan, &stats).unwrap();
+        assert!(result.is_some(), "Should fuse");
+
+        // 5. Test recursive UnaryOp that isn't a filter Eq directly
+        let inner_filter = LogicalOp::unary(
+            UnaryOp::Filter(Predicate::eq("name", "Alice")),
+            LogicalOp::Scan(ScanOp::NodeScan {
+                label: Some("Person".into()),
+                estimated_rows: Some(100),
+            }),
+        );
+        let outer_limit = LogicalOp::unary(UnaryOp::Limit(10), inner_filter);
+        let plan_limit = LogicalPlan::new(outer_limit);
+        let result_limit = rule.apply(&plan_limit, &stats).unwrap();
+        assert!(result_limit.is_some(), "Should fuse inside limit");
+    }
+}

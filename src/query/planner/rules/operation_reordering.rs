@@ -1186,3 +1186,121 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod sentry_tests {
+    use super::*;
+    use crate::core::NodeId;
+    use crate::query::plan::{BinaryOp, ScanOp};
+
+    fn test_stats() -> Statistics {
+        Statistics::default()
+    }
+
+    #[test]
+    fn test_binary_op_partial_reorder_propagation() {
+        let rule = OperationReordering;
+        let stats = test_stats();
+
+        // Right side: A single filter on a scan -> No reordering (changed = false)
+        let right_op = LogicalOp::unary(
+            UnaryOp::Filter(Predicate::eq("a", 1)),
+            LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(2).unwrap()])),
+        );
+
+        // Left side: Three filters (c, b, a) -> Will be reordered (changed = true)
+        let filter_c = LogicalOp::unary(
+            UnaryOp::Filter(Predicate::eq("c", 3)),
+            LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(1).unwrap()])),
+        );
+        let filter_b = LogicalOp::unary(UnaryOp::Filter(Predicate::eq("b", 2)), filter_c);
+        let left_op = LogicalOp::unary(UnaryOp::Filter(Predicate::eq("a", 1)), filter_b);
+
+        let binary = LogicalOp::binary(BinaryOp::Union, left_op, right_op);
+        let plan = LogicalPlan::new(binary);
+
+        let result = rule.apply(&plan, &stats).unwrap();
+        assert!(
+            result.is_some(),
+            "Partial reordering in left branch should propagate changed=true"
+        );
+    }
+
+    #[test]
+    fn test_estimate_filter_selectivity_arithmetic_mutants() {
+        let rule = OperationReordering;
+        let stats = test_stats();
+
+        // Test AND predicate selectivity
+        let pred_and = Predicate::And(vec![Predicate::eq("a", 1), Predicate::eq("b", 2)]);
+        // Default selectivity for eq is 0.1, so AND should be 0.1 * 0.1 = 0.01
+        let sel_and = rule.estimate_filter_selectivity(&pred_and, &stats);
+        assert!(
+            (sel_and - 0.01).abs() < f64::EPSILON,
+            "AND selectivity arithmetic mismatch"
+        );
+
+        // Test OR predicate selectivity
+        let pred_or = Predicate::Or(vec![Predicate::eq("a", 1), Predicate::eq("b", 2)]);
+        // OR is 1 - (1-0.1)*(1-0.1) = 1 - 0.81 = 0.19
+        let sel_or = rule.estimate_filter_selectivity(&pred_or, &stats);
+        assert!(
+            (sel_or - 0.19).abs() < f64::EPSILON,
+            "OR selectivity arithmetic mismatch"
+        );
+
+        // Test NOT predicate selectivity
+        let pred_not = Predicate::Not(Box::new(Predicate::eq("a", 1)));
+        // NOT is 1 - 0.1 = 0.9
+        let sel_not = rule.estimate_filter_selectivity(&pred_not, &stats);
+        assert!(
+            (sel_not - 0.9).abs() < f64::EPSILON,
+            "NOT selectivity arithmetic mismatch"
+        );
+    }
+
+    #[test]
+    fn test_estimate_cardinality_arithmetic_mutants() {
+        let rule = OperationReordering;
+
+        // Test cardinality for Filter
+        let filter = LogicalOp::unary(
+            UnaryOp::Filter(Predicate::eq("a", 1)),
+            LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(1).unwrap()])),
+        );
+        let card_filter = rule.estimate_cardinality(&filter);
+        assert_eq!(card_filter, 0, "Filter cardinality arithmetic mismatch");
+
+        // Test cardinality for BinaryOp (Union)
+        let right_op = LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(2).unwrap()]));
+        let binary = LogicalOp::binary(BinaryOp::Union, filter, right_op);
+        let card_binary = rule.estimate_cardinality(&binary);
+        assert_eq!(
+            card_binary, 0,
+            "BinaryOp Union cardinality arithmetic mismatch"
+        );
+
+        // Test cardinality for Join
+        let left_join = LogicalOp::Scan(ScanOp::NodeLookup(vec![
+            NodeId::new(1).unwrap(),
+            NodeId::new(2).unwrap(),
+        ]));
+        let right_join = LogicalOp::Scan(ScanOp::NodeLookup(vec![
+            NodeId::new(3).unwrap(),
+            NodeId::new(4).unwrap(),
+        ]));
+        let join = LogicalOp::binary(
+            BinaryOp::Join {
+                left_key: "id".to_string(),
+                right_key: "id".to_string(),
+            },
+            left_join,
+            right_join,
+        );
+        let card_join = rule.estimate_cardinality(&join);
+        assert_eq!(
+            card_join, 0,
+            "BinaryOp Join cardinality arithmetic mismatch"
+        );
+    }
+}
