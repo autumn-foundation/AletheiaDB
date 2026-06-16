@@ -1025,8 +1025,29 @@ impl CurrentStorage {
 
     /// Get the number of nodes.
     #[inline]
+    /// Get the maximum generated node ID.
+    pub fn get_max_node_id(&self) -> u64 {
+        self.node_id_gen.current_approximate()
+    }
+
+    /// Get the number of nodes.
     pub fn node_count(&self) -> usize {
         self.indexes.node_count()
+    }
+
+    /// Fast path check if a node has a specific label using node_headers.
+    #[allow(clippy::collapsible_if)]
+    pub fn node_has_label(
+        &self,
+        node_id: u64,
+        label_id: crate::core::interning::InternedString,
+    ) -> bool {
+        if let Ok(id) = NodeId::new(node_id) {
+            if let Some(header) = self.indexes.get_node_header(id) {
+                return header.label == label_id;
+            }
+        }
+        false
     }
 
     /// Get the number of edges.

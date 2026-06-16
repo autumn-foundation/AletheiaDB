@@ -146,70 +146,65 @@ impl ResultIterator for NodeLookupIterator {
 /// let iter = NodeScanIterator::new(Some("Person".to_string()), current);
 /// ```
 pub struct NodeScanIterator {
-    label: Option<String>,
+    interned_label: Option<crate::core::interning::InternedString>,
     current: Arc<CurrentStorage>,
-    initialized: bool,
-    node_ids: Option<std::vec::IntoIter<NodeId>>,
+    current_id: u64,
+    max_id: u64,
 }
 
 impl NodeScanIterator {
     /// Create a new NodeScanIterator.
     pub fn new(label: Option<String>, current: Arc<CurrentStorage>) -> Self {
+        let max_id = current.get_max_node_id();
+        let interned_label = label
+            .as_ref()
+            .and_then(|l| crate::core::interning::GLOBAL_INTERNER.get_id(l));
+
         NodeScanIterator {
-            label,
+            interned_label,
             current,
-            initialized: false,
-            node_ids: None,
+            current_id: 0, // IDs start at 0
+            max_id,
         }
-    }
-
-    fn initialize(&mut self) {
-        if self.initialized {
-            return;
-        }
-        self.initialized = true;
-
-        // Collect all node IDs upfront.
-        //
-        // NOTE: This is a known memory concern for large graphs. See the struct
-        // documentation above for details and mitigation strategies.
-        //
-        // The current implementation trades memory efficiency for correctness:
-        // DashMap iterators cannot be sent across threads (not Send), and the
-        // ResultIterator trait requires Send for parallel query execution.
-        let ids: Vec<NodeId> = if let Some(ref label) = self.label {
-            self.current.get_node_ids_by_label(label)
-        } else {
-            self.current.get_all_node_ids()
-        };
-        self.node_ids = Some(ids.into_iter());
     }
 }
 
 impl ResultIterator for NodeScanIterator {
     fn next(&mut self) -> Option<Result<QueryRow>> {
-        self.initialize();
+        while self.current_id <= self.max_id {
+            let id_val = self.current_id;
+            self.current_id += 1;
 
-        loop {
-            match self.node_ids.as_mut()?.next() {
-                Some(id) => {
-                    match self.current.get_node(id) {
-                        Ok(node) => {
-                            // Check label filter by comparing InternedString IDs
-                            if let Some(ref label_str) = self.label {
-                                // Get the InternedString ID for the filter label
-                                let label_id = GLOBAL_INTERNER.get_id(label_str);
-                                if label_id != Some(node.label) {
-                                    continue; // Skip this node
-                                }
-                            }
-                            return Some(Ok(QueryRow::from_entity(EntityResult::Node(node))));
-                        }
-                        Err(e) => return Some(Err(e)),
-                    }
+            // Fast path: Check node_headers before fetching the full node!
+            #[allow(clippy::collapsible_if)]
+            if let Some(label_id) = self.interned_label {
+                if !self.current.node_has_label(id_val, label_id) {
+                    continue;
                 }
-                None => return None,
             }
+
+            if let Ok(id) = NodeId::new(id_val) {
+                match self.current.get_node(id) {
+                    Ok(node) => {
+                        return Some(Ok(QueryRow::from_entity(EntityResult::Node(node))));
+                    }
+                    Err(crate::core::error::Error::Storage(
+                        crate::core::error::StorageError::NodeNotFound(_),
+                    )) => {
+                        continue;
+                    }
+                    Err(e) => return Some(Err(e)),
+                }
+            }
+        }
+        None
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        if self.current_id <= self.max_id {
+            (0, Some((self.max_id - self.current_id + 1) as usize))
+        } else {
+            (0, Some(0))
         }
     }
 }
