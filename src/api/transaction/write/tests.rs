@@ -2246,12 +2246,10 @@ mod conflict_detection_tests {
                 "Node should be deleted after successful tx2 commit"
             );
 
-            // Current implementation: edge becomes orphaned but still exists in storage.
-            // This documents a limitation: the system allows orphaned edges.
-            // TODO(issue): Consider adding cascade delete or stricter referential integrity
+            // Fixed: Edge is deleted because read-your-writes works
             assert!(
-                harness.current.get_edge(edge_id).is_ok(),
-                "Edge still exists as orphan (documents current behavior)"
+                harness.current.get_edge(edge_id).is_err(),
+                "Edge should be deleted"
             );
 
             // Verify the edge references the deleted node (orphaned edge)
