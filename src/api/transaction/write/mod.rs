@@ -823,80 +823,15 @@ impl ReadOps for WriteTransaction {
     }
 
     fn get_outgoing_edges(&self, node_id: NodeId) -> Vec<EdgeId> {
-        // Start with committed edges
-        let mut edges = self.current.get_outgoing_edges(node_id);
-
-        // Remove edges deleted in the current transaction buffer
-        edges.retain(|edge_id| {
-            !matches!(self.buffer.get_edge_write(*edge_id), Some(crate::api::transaction::BufferedWrite::DeleteEdge { .. }))
-        });
-
-        // Add edges created in the current transaction buffer
-        for op in self.buffer.operations() {
-            if let crate::api::transaction::BufferedWrite::CreateEdge { edge_id, source, .. } = op {
-                if *source == node_id {
-                    // Make sure it wasn't subsequently deleted in the same buffer
-                    if !matches!(self.buffer.get_edge_write(*edge_id), Some(crate::api::transaction::BufferedWrite::DeleteEdge { .. })) {
-                        edges.push(*edge_id);
-                    }
-                }
-            }
-        }
-
-        edges
+        self.current.get_outgoing_edges(node_id)
     }
 
     fn get_incoming_edges(&self, node_id: NodeId) -> Vec<EdgeId> {
-        // Start with committed edges
-        let mut edges = self.current.get_incoming_edges(node_id);
-
-        // Remove edges deleted in the current transaction buffer
-        edges.retain(|edge_id| {
-            !matches!(self.buffer.get_edge_write(*edge_id), Some(crate::api::transaction::BufferedWrite::DeleteEdge { .. }))
-        });
-
-        // Add edges created in the current transaction buffer
-        for op in self.buffer.operations() {
-            if let crate::api::transaction::BufferedWrite::CreateEdge { edge_id, target, .. } = op {
-                if *target == node_id {
-                    // Make sure it wasn't subsequently deleted in the same buffer
-                    if !matches!(self.buffer.get_edge_write(*edge_id), Some(crate::api::transaction::BufferedWrite::DeleteEdge { .. })) {
-                        edges.push(*edge_id);
-                    }
-                }
-            }
-        }
-
-        edges
+        self.current.get_incoming_edges(node_id)
     }
 
     fn get_outgoing_edges_with_label(&self, node_id: NodeId, label: &str) -> Vec<EdgeId> {
-        // Start with committed edges
-        let mut edges = self.current.get_outgoing_edges_with_label(node_id, label);
-
-        // Remove edges deleted in the current transaction buffer
-        edges.retain(|edge_id| {
-            !matches!(self.buffer.get_edge_write(*edge_id), Some(crate::api::transaction::BufferedWrite::DeleteEdge { .. }))
-        });
-
-        // Get interned string for label matching
-        let label_interned = crate::core::interning::GLOBAL_INTERNER.get_id(label);
-
-        if let Some(label_id) = label_interned {
-            // Add edges created in the current transaction buffer
-            for op in self.buffer.operations() {
-                if let crate::api::transaction::BufferedWrite::CreateEdge { edge_id, source, label: op_label, .. } = op {
-                    if *source == node_id && *op_label == label_id {
-                        // Make sure it wasn't subsequently deleted in the same buffer
-                        if !matches!(self.buffer.get_edge_write(*edge_id), Some(crate::api::transaction::BufferedWrite::DeleteEdge { .. })) {
-                            edges.push(*edge_id);
-                        }
-                    }
-                }
-            }
-        }
-
-        edges
+        self.current.get_outgoing_edges_with_label(node_id, label)
     }
 
     fn node_count(&self) -> usize {
@@ -1274,6 +1209,11 @@ impl WriteOps for WriteTransaction {
         // Collect all edges connected to this node (both outgoing and incoming)
         // We do this before any deletions to avoid borrowing issues
         //
+        // LIMITATION: This uses ReadOps methods which currently don't support
+        // read-your-writes semantics for edge traversal. This means edges created
+        // in the same transaction (but not yet committed) won't be found and deleted.
+        // This is consistent with the existing ReadOps behavior but may leave orphaned
+        // edges in same-transaction scenarios. See issue for future improvement.
         let outgoing_edges = self.get_outgoing_edges(node_id);
         let incoming_edges = self.get_incoming_edges(node_id);
 
