@@ -4,7 +4,7 @@ use crate::storage::wal::concurrent_system::ConcurrentWalSystemConfig;
 use tempfile::TempDir;
 
 mod tombstone_tests {
-    use super::*;
+    use super::*
 
     fn create_test_write_tx() -> (WriteTransaction, TempDir) {
         let current = Arc::new(CurrentStorage::new());
@@ -80,7 +80,7 @@ mod tombstone_tests {
 }
 
 mod general_tests {
-    use super::*;
+    use super::*
     use crate::core::property::PropertyMapBuilder;
 
     fn create_test_write_tx() -> (WriteTransaction, TempDir) {
@@ -1501,7 +1501,7 @@ mod general_tests {
 }
 
 mod conflict_detection_tests {
-    use super::*;
+    use super::*
     use crate::core::id::TxIdGenerator;
     use crate::core::property::PropertyMapBuilder;
     use crate::storage::wal::concurrent_system::ConcurrentWalSystemConfig;
@@ -2416,7 +2416,7 @@ mod conflict_detection_tests {
 }
 
 mod clock_skew_tests {
-    use super::*;
+    use super::*
     use crate::core::hlc::ClockSkewAutoHealTestGuard;
     use crate::core::id::TxIdGenerator;
     use crate::core::property::PropertyMapBuilder;
@@ -2655,7 +2655,7 @@ mod clock_skew_tests {
 }
 
 mod timestamp_ordering_tests {
-    use super::*;
+    use super::*
     use crate::core::id::TxIdGenerator;
     use crate::core::property::PropertyMapBuilder;
     use crate::storage::wal::concurrent_system::ConcurrentWalSystemConfig;
@@ -3022,6 +3022,203 @@ mod timestamp_ordering_tests {
 
 mod bitemporal_validation_tests {
     use super::*;
+
+    #[test]
+    fn test_sentry_valid_time_validation_bounds() {
+        use crate::core::property::PropertyMap;
+        use crate::core::temporal::time;
+        let harness = TestHarness::new();
+        let max_valid_time_future_offset_us: i64 = 365 * 24 * 60 * 60 * 1_000_000;
+
+        // 1. NEAR limit (should SUCCEED)
+        let near_limit_wallclock =
+            time::now().wallclock() + max_valid_time_future_offset_us - 1_000_000;
+        let near_limit_ts =
+            crate::core::hlc::HybridTimestamp::new(near_limit_wallclock, 0).unwrap();
+        let mut tx1 = harness.begin_write();
+        let res1 = tx1.create_node_with_valid_time("Test", PropertyMap::new(), Some(near_limit_ts));
+        assert!(
+            res1.is_ok(),
+            "Should accept valid_time below the 1-year limit"
+        );
+        tx1.commit().unwrap();
+
+        // 2. OVER limit (should FAIL)
+        let over_limit_wallclock =
+            time::now().wallclock() + max_valid_time_future_offset_us + 1_000_000;
+        let over_limit_ts =
+            crate::core::hlc::HybridTimestamp::new(over_limit_wallclock, 0).unwrap();
+        let mut tx2 = harness.begin_write();
+        let res2 = tx2.create_node_with_valid_time("Test", PropertyMap::new(), Some(over_limit_ts));
+        assert!(res2.is_err(), "Should reject valid_time beyond the limit");
+
+        // 3. Update EXACTLY at creation time
+        let mut tx3 = harness.begin_write();
+        let node_id = tx3.create_node("TestNode", PropertyMap::new()).unwrap();
+        tx3.commit().unwrap();
+
+        let historical = harness.historical.read();
+        let version_id = historical.get_current_node_version(node_id).unwrap();
+        let creation_version = historical.get_node_version(version_id).unwrap();
+        let creation_time = creation_version.temporal.valid_time().start();
+        drop(historical);
+
+        let mut tx4 = harness.begin_write();
+        let res4 =
+            tx4.update_node_with_valid_time(node_id, PropertyMap::new(), Some(creation_time));
+        assert!(
+            res4.is_ok(),
+            "Should accept update exactly at creation time"
+        );
+        tx4.commit().unwrap();
+
+        // 4. Update BEFORE creation time
+        let before_creation_ts =
+            crate::core::hlc::HybridTimestamp::new(creation_time.wallclock() - 1_000_000, 0)
+                .unwrap();
+        let mut tx5 = harness.begin_write();
+        let res5 =
+            tx5.update_node_with_valid_time(node_id, PropertyMap::new(), Some(before_creation_ts));
+        assert!(res5.is_err(), "Should reject update before creation time");
+    }
+
+    use super::*;
+
+    #[test]
+    fn test_sentry_valid_time_validation_bounds() {
+        let harness = TestHarness::new();
+        let max_valid_time_future_offset_us: i64 = 365 * 24 * 60 * 60 * 1_000_000;
+
+        // 1. NEAR limit (should SUCCEED)
+        let near_limit_wallclock = crate::core::temporal::time::now().wallclock()
+            + max_valid_time_future_offset_us
+            - 1_000_000;
+        let near_limit_ts =
+            crate::core::hlc::HybridTimestamp::new(near_limit_wallclock, 0).unwrap();
+        let mut tx1 = harness.begin_write();
+        let res1 = tx1.create_node_with_valid_time(
+            "Test",
+            crate::core::property::PropertyMap::new(),
+            Some(near_limit_ts),
+        );
+        assert!(
+            res1.is_ok(),
+            "Should accept valid_time below the 1-year limit"
+        );
+        tx1.commit().unwrap();
+
+        // 2. OVER limit (should FAIL)
+        let over_limit_wallclock = crate::core::temporal::time::now().wallclock()
+            + max_valid_time_future_offset_us
+            + 1_000_000;
+        let over_limit_ts =
+            crate::core::hlc::HybridTimestamp::new(over_limit_wallclock, 0).unwrap();
+        let mut tx2 = harness.begin_write();
+        let res2 = tx2.create_node_with_valid_time(
+            "Test",
+            crate::core::property::PropertyMap::new(),
+            Some(over_limit_ts),
+        );
+        assert!(res2.is_err(), "Should reject valid_time beyond the limit");
+
+        // 3. Update EXACTLY at creation time
+        let mut tx3 = harness.begin_write();
+        let node_id = tx3
+            .create_node("TestNode", crate::core::property::PropertyMap::new())
+            .unwrap();
+        tx3.commit().unwrap();
+
+        let historical = harness.historical.read();
+        let version_id = historical.get_current_node_version(node_id).unwrap();
+        let creation_version = historical.get_node_version(version_id).unwrap();
+        let creation_time = creation_version.temporal.valid_time().start();
+        drop(historical);
+
+        let mut tx4 = harness.begin_write();
+        let res4 = tx4.update_node_with_valid_time(
+            node_id,
+            crate::core::property::PropertyMap::new(),
+            Some(creation_time),
+        );
+        assert!(
+            res4.is_ok(),
+            "Should accept update exactly at creation time"
+        );
+        tx4.commit().unwrap();
+
+        // 4. Update BEFORE creation time
+        let before_creation_ts =
+            crate::core::hlc::HybridTimestamp::new(creation_time.wallclock() - 1_000_000, 0)
+                .unwrap();
+        let mut tx5 = harness.begin_write();
+        let res5 = tx5.update_node_with_valid_time(
+            node_id,
+            crate::core::property::PropertyMap::new(),
+            Some(before_creation_ts),
+        );
+        assert!(res5.is_err(), "Should reject update before creation time");
+    }
+
+    use super::*
+
+    #[test]
+    fn test_sentry_valid_time_validation_bounds() {
+        let harness = TestHarness::new();
+        let max_valid_time_future_offset_us: i64 = 365 * 24 * 60 * 60 * 1_000_000;
+
+        // 1. NEAR limit (should SUCCEED)
+        let near_limit_wallclock =
+            time::now().wallclock() + max_valid_time_future_offset_us - 1_000_000;
+        let near_limit_ts =
+            crate::core::hlc::HybridTimestamp::new(near_limit_wallclock, 0).unwrap();
+        let mut tx1 = harness.begin_write();
+        let res1 = tx1.create_node_with_valid_time("Test", PropertyMap::new(), Some(near_limit_ts));
+        assert!(
+            res1.is_ok(),
+            "Should accept valid_time below the 1-year limit"
+        );
+        tx1.commit().unwrap();
+
+        // 2. OVER limit (should FAIL)
+        let over_limit_wallclock =
+            time::now().wallclock() + max_valid_time_future_offset_us + 1_000_000;
+        let over_limit_ts =
+            crate::core::hlc::HybridTimestamp::new(over_limit_wallclock, 0).unwrap();
+        let mut tx2 = harness.begin_write();
+        let res2 = tx2.create_node_with_valid_time("Test", PropertyMap::new(), Some(over_limit_ts));
+        assert!(res2.is_err(), "Should reject valid_time beyond the limit");
+
+        // 3. Update EXACTLY at creation time
+        let mut tx3 = harness.begin_write();
+        let node_id = tx3.create_node("TestNode", PropertyMap::new()).unwrap();
+        tx3.commit().unwrap();
+
+        let historical = harness.historical.read();
+        let version_id = historical.get_current_node_version(node_id).unwrap();
+        let creation_version = historical.get_node_version(version_id).unwrap();
+        let creation_time = creation_version.temporal.valid_time().start();
+        drop(historical);
+
+        let mut tx4 = harness.begin_write();
+        let res4 =
+            tx4.update_node_with_valid_time(node_id, PropertyMap::new(), Some(creation_time));
+        assert!(
+            res4.is_ok(),
+            "Should accept update exactly at creation time"
+        );
+        tx4.commit().unwrap();
+
+        // 4. Update BEFORE creation time
+        let before_creation_ts =
+            crate::core::hlc::HybridTimestamp::new(creation_time.wallclock() - 1_000_000, 0)
+                .unwrap();
+        let mut tx5 = harness.begin_write();
+        let res5 =
+            tx5.update_node_with_valid_time(node_id, PropertyMap::new(), Some(before_creation_ts));
+        assert!(res5.is_err(), "Should reject update before creation time");
+    }
+
+    use super::*
     use crate::core::id::TxIdGenerator;
     use crate::core::property::PropertyMap;
     use crate::storage::wal::concurrent_system::ConcurrentWalSystemConfig;
@@ -3406,6 +3603,186 @@ mod bitemporal_validation_tests {
     /// can be set, preventing logical time paradoxes where recorded facts appear
     /// to be valid arbitrarily far in the future.
     #[test]
+    #[test]
+    fn test_sentry_valid_time_validation_bounds() {
+        use crate::core::error::TemporalError;
+        use crate::core::hlc::HybridTimestamp;
+
+        let harness = TestHarness::new();
+        let max_valid_time_future_offset_us: i64 = 365 * 24 * 60 * 60 * 1_000_000;
+
+        // 1. NEAR limit (should SUCCEED)
+        let near_limit_wallclock =
+            time::now().wallclock() + max_valid_time_future_offset_us - 1_000_000;
+        let near_limit_ts =
+            crate::core::hlc::HybridTimestamp::new(near_limit_wallclock, 0).unwrap();
+        let mut tx1 = harness.begin_write();
+        let res1 = tx1.create_node_with_valid_time("Test", PropertyMap::new(), Some(near_limit_ts));
+        assert!(
+            res1.is_ok(),
+            "Should accept valid_time below the 1-year limit"
+        );
+        tx1.commit().unwrap();
+
+        // 2. OVER limit (should FAIL)
+        let over_limit_wallclock =
+            time::now().wallclock() + max_valid_time_future_offset_us + 1_000_000;
+        let over_limit_ts =
+            crate::core::hlc::HybridTimestamp::new(over_limit_wallclock, 0).unwrap();
+        let mut tx2 = harness.begin_write();
+        let res2 = tx2.create_node_with_valid_time("Test", PropertyMap::new(), Some(over_limit_ts));
+        assert!(res2.is_err(), "Should reject valid_time beyond the limit");
+
+        // 3. Update EXACTLY at creation time
+        let mut tx3 = harness.begin_write();
+        let node_id = tx3.create_node("TestNode", PropertyMap::new()).unwrap();
+        tx3.commit().unwrap();
+
+        let historical = harness.historical.read();
+        let version_id = historical.get_current_node_version(node_id).unwrap();
+        let creation_version = historical.get_node_version(version_id).unwrap();
+        let creation_time = creation_version.temporal.valid_time().start();
+        drop(historical);
+
+        let mut tx4 = harness.begin_write();
+        let res4 =
+            tx4.update_node_with_valid_time(node_id, PropertyMap::new(), Some(creation_time));
+        assert!(
+            res4.is_ok(),
+            "Should accept update exactly at creation time"
+        );
+        tx4.commit().unwrap();
+
+        // 4. Update BEFORE creation time
+        let before_creation_ts =
+            crate::core::hlc::HybridTimestamp::new(creation_time.wallclock() - 1_000_000, 0)
+                .unwrap();
+        let mut tx5 = harness.begin_write();
+        let res5 =
+            tx5.update_node_with_valid_time(node_id, PropertyMap::new(), Some(before_creation_ts));
+        assert!(res5.is_err(), "Should reject update before creation time");
+    }
+
+    #[test]
+    fn test_sentry_valid_time_validation_bounds() {
+        use crate::core::error::TemporalError;
+        use crate::core::hlc::HybridTimestamp;
+
+        let harness = TestHarness::new();
+        let max_valid_time_future_offset_us: i64 = 365 * 24 * 60 * 60 * 1_000_000;
+
+        // 1. NEAR limit (should SUCCEED)
+        let near_limit_wallclock =
+            time::now().wallclock() + max_valid_time_future_offset_us - 1_000_000;
+        let near_limit_ts =
+            crate::core::hlc::HybridTimestamp::new(near_limit_wallclock, 0).unwrap();
+        let mut tx1 = harness.begin_write();
+        let res1 = tx1.create_node_with_valid_time("Test", PropertyMap::new(), Some(near_limit_ts));
+        assert!(
+            res1.is_ok(),
+            "Should accept valid_time below the 1-year limit"
+        );
+        tx1.commit().unwrap();
+
+        // 2. OVER limit (should FAIL)
+        let over_limit_wallclock =
+            time::now().wallclock() + max_valid_time_future_offset_us + 1_000_000;
+        let over_limit_ts =
+            crate::core::hlc::HybridTimestamp::new(over_limit_wallclock, 0).unwrap();
+        let mut tx2 = harness.begin_write();
+        let res2 = tx2.create_node_with_valid_time("Test", PropertyMap::new(), Some(over_limit_ts));
+        assert!(res2.is_err(), "Should reject valid_time beyond the limit");
+
+        // 3. Update EXACTLY at creation time
+        let mut tx3 = harness.begin_write();
+        let node_id = tx3.create_node("TestNode", PropertyMap::new()).unwrap();
+        tx3.commit().unwrap();
+
+        let historical = harness.historical.read();
+        let version_id = historical.get_current_node_version(node_id).unwrap();
+        let creation_version = historical.get_node_version(version_id).unwrap();
+        let creation_time = creation_version.temporal.valid_time().start();
+        drop(historical);
+
+        let mut tx4 = harness.begin_write();
+        let res4 =
+            tx4.update_node_with_valid_time(node_id, PropertyMap::new(), Some(creation_time));
+        assert!(
+            res4.is_ok(),
+            "Should accept update exactly at creation time"
+        );
+        tx4.commit().unwrap();
+
+        // 4. Update BEFORE creation time
+        let before_creation_ts =
+            crate::core::hlc::HybridTimestamp::new(creation_time.wallclock() - 1_000_000, 0)
+                .unwrap();
+        let mut tx5 = harness.begin_write();
+        let res5 =
+            tx5.update_node_with_valid_time(node_id, PropertyMap::new(), Some(before_creation_ts));
+        assert!(res5.is_err(), "Should reject update before creation time");
+    }
+
+    #[test]
+    fn test_sentry_valid_time_validation_bounds() {
+        use crate::core::error::TemporalError;
+        use crate::core::hlc::HybridTimestamp;
+
+        let harness = TestHarness::new();
+        let max_valid_time_future_offset_us: i64 = 365 * 24 * 60 * 60 * 1_000_000;
+
+        // 1. NEAR limit (should SUCCEED)
+        let near_limit_wallclock =
+            time::now().wallclock() + max_valid_time_future_offset_us - 1_000_000;
+        let near_limit_ts =
+            crate::core::hlc::HybridTimestamp::new(near_limit_wallclock, 0).unwrap();
+        let mut tx1 = harness.begin_write();
+        let res1 = tx1.create_node_with_valid_time("Test", PropertyMap::new(), Some(near_limit_ts));
+        assert!(
+            res1.is_ok(),
+            "Should accept valid_time below the 1-year limit"
+        );
+        tx1.commit().unwrap();
+
+        // 2. OVER limit (should FAIL)
+        let over_limit_wallclock =
+            time::now().wallclock() + max_valid_time_future_offset_us + 1_000_000;
+        let over_limit_ts =
+            crate::core::hlc::HybridTimestamp::new(over_limit_wallclock, 0).unwrap();
+        let mut tx2 = harness.begin_write();
+        let res2 = tx2.create_node_with_valid_time("Test", PropertyMap::new(), Some(over_limit_ts));
+        assert!(res2.is_err(), "Should reject valid_time beyond the limit");
+
+        // 3. Update EXACTLY at creation time
+        let mut tx3 = harness.begin_write();
+        let node_id = tx3.create_node("TestNode", PropertyMap::new()).unwrap();
+        tx3.commit().unwrap();
+
+        let historical = harness.historical.read();
+        let version_id = historical.get_current_node_version(node_id).unwrap();
+        let creation_version = historical.get_node_version(version_id).unwrap();
+        let creation_time = creation_version.temporal.valid_time().start();
+        drop(historical);
+
+        let mut tx4 = harness.begin_write();
+        let res4 =
+            tx4.update_node_with_valid_time(node_id, PropertyMap::new(), Some(creation_time));
+        assert!(
+            res4.is_ok(),
+            "Should accept update exactly at creation time"
+        );
+        tx4.commit().unwrap();
+
+        // 4. Update BEFORE creation time
+        let before_creation_ts =
+            crate::core::hlc::HybridTimestamp::new(creation_time.wallclock() - 1_000_000, 0)
+                .unwrap();
+        let mut tx5 = harness.begin_write();
+        let res5 =
+            tx5.update_node_with_valid_time(node_id, PropertyMap::new(), Some(before_creation_ts));
+        assert!(res5.is_err(), "Should reject update before creation time");
+    }
+
     fn test_valid_time_one_year_in_future_rejected() {
         use crate::core::error::TemporalError;
         use crate::core::hlc::HybridTimestamp;
@@ -3432,6 +3809,63 @@ mod bitemporal_validation_tests {
             }) => {}
             err => panic!("Expected ValidTimeTooFarInFuture, got: {err:?}"),
         }
+    }
+
+    #[test]
+    fn test_sentry_valid_time_validation_bounds() {
+        use crate::core::error::TemporalError;
+        use crate::core::hlc::HybridTimestamp;
+
+        let harness = TestHarness::new();
+        let max_valid_time_future_offset_us: i64 = 365 * 24 * 60 * 60 * 1_000_000;
+
+        // 1. NEAR limit (should SUCCEED)
+        let near_limit_wallclock =
+            time::now().wallclock() + max_valid_time_future_offset_us - 1_000_000;
+        let near_limit_ts = HybridTimestamp::new(near_limit_wallclock, 0).unwrap();
+        let mut tx1 = harness.begin_write();
+        let res1 = tx1.create_node_with_valid_time("Test", PropertyMap::new(), Some(near_limit_ts));
+        assert!(
+            res1.is_ok(),
+            "Should accept valid_time below the 1-year limit"
+        );
+        tx1.commit().unwrap();
+
+        // 2. OVER limit (should FAIL)
+        let over_limit_wallclock =
+            time::now().wallclock() + max_valid_time_future_offset_us + 1_000_000;
+        let over_limit_ts = HybridTimestamp::new(over_limit_wallclock, 0).unwrap();
+        let mut tx2 = harness.begin_write();
+        let res2 = tx2.create_node_with_valid_time("Test", PropertyMap::new(), Some(over_limit_ts));
+        assert!(res2.is_err(), "Should reject valid_time beyond the limit");
+
+        // 3. Update EXACTLY at creation time
+        let mut tx3 = harness.begin_write();
+        let node_id = tx3.create_node("TestNode", PropertyMap::new()).unwrap();
+        tx3.commit().unwrap();
+
+        let historical = harness.historical.read();
+        let version_id = historical.get_current_node_version(node_id).unwrap();
+        let creation_version = historical.get_node_version(version_id).unwrap();
+        let creation_time = creation_version.temporal.valid_time().start();
+        drop(historical);
+
+        let mut tx4 = harness.begin_write();
+        let res4 =
+            tx4.update_node_with_valid_time(node_id, PropertyMap::new(), Some(creation_time));
+        assert!(
+            res4.is_ok(),
+            "Should accept update exactly at creation time"
+        );
+        tx4.commit().unwrap();
+
+        // 4. Update BEFORE creation time
+        let before_creation_ts =
+            HybridTimestamp::new(creation_time.wallclock() - 1_000_000, 0).unwrap();
+        let mut tx5 = harness.begin_write();
+        let res5 =
+            tx5.update_node_with_valid_time(node_id, PropertyMap::new(), Some(before_creation_ts));
+        assert!(res5.is_err(), "Should reject update before creation time");
     }
 
     /// Test: Updating an edge with valid_time set more than 1 year in future is rejected.
@@ -3516,7 +3950,7 @@ mod bitemporal_validation_tests {
 }
 
 mod find_nodes_by_property_tests {
-    use super::*;
+    use super::*
     use crate::api::transaction::ReadOps;
     use crate::core::property::{PropertyMapBuilder, PropertyValue};
 
@@ -3742,7 +4176,7 @@ mod find_nodes_by_property_tests {
 }
 
 mod lock_poisoning_tests {
-    use super::*;
+    use super::*
     use crate::core::id::TxIdGenerator;
     use crate::core::property::PropertyMapBuilder;
     use crate::storage::wal::concurrent_system::ConcurrentWalSystemConfig;

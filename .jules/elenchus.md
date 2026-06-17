@@ -346,3 +346,10 @@
 **Finding:** The `LimitPushdown` tests originally missed several behavioral edge cases and logic checks, particularly regarding the propagation limits in BinaryOp combinations (`||`), updating limit values correctly against child bounds, and setting vector rank limits.
 **Evidence:** `cargo mutants` caught mutants in `LimitPushdown::push_down` specifically targeting the changed boolean condition logic and bounds assignment.
 **Recommendation:** Added `sentry_tests` to `LimitPushdown` that explicitly trigger tests enforcing the boolean change propagation, verifying that updated properties reflect correct nested limits, and vector bounds assignment. Tests now prevent `||` to `&&` mutations and correct top-k modifications.
+
+## [Validation Future Bounds Constraints Testing]
+**Module:** `src/api/transaction/write/validation.rs`
+**Verdict:** 🟡 Suspect
+**Finding:** Temporal validations involving limit boundaries (such as `MAX_VALID_TIME_FUTURE_OFFSET_US`) and temporal creation bounds (`valid_from < entity_creation_time`) had weak tests that did not reliably cover mutated relational operators (e.g. `>` mutated to `==` or `<`, `<` mutated to `<=`).
+**Evidence:** The output of `cargo mutants` on `validation.rs` highlighted that these boolean boundary decisions were unpinned, as tests usually exceeded limits by 1 million microseconds rather than ensuring strict adherence around boundaries and edge cases.
+**Recommendation:** Added `test_sentry_valid_time_validation_bounds` in `src/api/transaction/write/tests.rs` to enforce behavior right before/after the 1-year max limit boundary and precisely at vs strictly before the entity creation boundary, terminating remaining mutants.
