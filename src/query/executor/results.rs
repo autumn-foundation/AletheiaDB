@@ -636,52 +636,21 @@ impl QueryResults {
     /// ⚡ Bolt Optimization: Pre-allocates vector based on iterator's lower size bound
     /// to reduce heap allocations during collection of structured results.
     pub fn collect_structured(mut self) -> Result<QueryResult> {
-        // First pass: collect all rows
         let (lower, _) = self.iterator.size_hint();
-        let mut rows = Vec::with_capacity(lower);
-        while let Some(row) = self.iterator.next() {
-            rows.push(row?);
-        }
+        let capacity = lower;
 
-        // Determine which fields we have (single pass)
-        let (mut has_any_scores, mut has_any_paths, mut has_any_versions, mut has_any_nodes) =
-            (false, false, false, false);
-        let mut node_count = 0usize;
-        for row in &rows {
-            has_any_scores = has_any_scores || row.score.is_some();
-            has_any_paths = has_any_paths || row.path.is_some();
-            has_any_versions = has_any_versions || row.timestamp.is_some();
-            if row.entity.as_node().is_some() {
-                has_any_nodes = true;
-                node_count += 1;
-            }
-        }
+        // ⚡ Bolt Optimization: Replace two-pass collection with single-pass lazy allocation
+        // Eliminates O(N) intermediate Vec<QueryRow> allocation, saving memory and allocations
+        let mut nodes = Vec::with_capacity(capacity);
+        let mut properties: Option<Vec<PropertyMap>> = None;
+        let mut scores: Option<Vec<f32>> = None;
+        let mut paths: Option<Vec<Path>> = None;
+        let mut versions: Option<Vec<VersionId>> = None;
 
-        // Second pass: extract data with padding
-        let capacity = rows.len();
-        let mut nodes = Vec::with_capacity(node_count);
-        let mut properties = if has_any_nodes {
-            Some(Vec::with_capacity(node_count))
-        } else {
-            None
-        };
-        let mut scores = if has_any_scores {
-            Some(Vec::with_capacity(capacity))
-        } else {
-            None
-        };
-        let mut paths = if has_any_paths {
-            Some(Vec::with_capacity(capacity))
-        } else {
-            None
-        };
-        let mut versions = if has_any_versions {
-            Some(Vec::with_capacity(capacity))
-        } else {
-            None
-        };
+        let mut row_idx = 0;
+        while let Some(row_res) = self.iterator.next() {
+            let row = row_res?;
 
-        for row in rows {
             let QueryRow {
                 entity,
                 score,
@@ -695,12 +664,20 @@ impl QueryResults {
             match entity {
                 EntityResult::Node(n) => {
                     nodes.push(n.id);
+                    // Initialize properties lazily if needed
+                    if properties.is_none() && !n.properties.is_empty() {
+                        let mut props = Vec::with_capacity(capacity);
+                        props.resize_with(nodes.len().saturating_sub(1), Default::default);
+                        properties = Some(props);
+                    }
+                    #[allow(clippy::collapsible_if)]
                     if let Some(ref mut props) = properties {
                         props.push(n.properties);
                     }
                 }
                 EntityResult::NodeId(id) => {
                     nodes.push(id);
+                    #[allow(clippy::collapsible_if)]
                     if let Some(ref mut props) = properties {
                         props.push(Default::default());
                     }
@@ -708,18 +685,38 @@ impl QueryResults {
                 _ => {} // Ignore edges, etc.
             }
 
-            // Extract or pad scores
-            if let Some(ref mut s) = scores {
-                s.push(score.unwrap_or(0.0));
+            // Extract or pad scores lazily
+            if score.is_some() || scores.is_some() {
+                if scores.is_none() {
+                    let mut s = Vec::with_capacity(capacity);
+                    s.resize(row_idx, 0.0);
+                    scores = Some(s);
+                }
+                scores.as_mut().unwrap().push(score.unwrap_or(0.0));
             }
 
-            // Extract or pad paths
-            if let Some(ref mut p) = paths {
-                p.push(path.unwrap_or_default());
+            // Extract or pad paths lazily
+            if path.is_some() || paths.is_some() {
+                if paths.is_none() {
+                    let mut p = Vec::with_capacity(capacity);
+                    p.resize_with(row_idx, Default::default);
+                    paths = Some(p);
+                }
+                paths.as_mut().unwrap().push(path.unwrap_or_default());
             }
 
-            // Extract or pad versions
-            if let Some(ref mut v) = versions {
+            // Extract or pad versions lazily
+            if timestamp.is_some() || versions.is_some() {
+                if versions.is_none() {
+                    let mut v = Vec::with_capacity(capacity);
+                    v.resize(
+                        row_idx,
+                        VersionId::new(0).expect("VersionId(0) should always be valid"),
+                    );
+                    versions = Some(v);
+                }
+
+                let v = versions.as_mut().unwrap();
                 if let Some(timestamp) = timestamp {
                     // Safely convert timestamp (i64) to VersionId (u64)
                     // Negative timestamps are clamped to 0
@@ -749,6 +746,16 @@ impl QueryResults {
                     // SAFETY: VersionId(0) is always valid as 0 < MAX_VALID_ID
                     v.push(VersionId::new(0).expect("VersionId(0) should always be valid"));
                 }
+            }
+
+            row_idx += 1;
+        }
+
+        // If nodes were generated, we must make sure the properties array length matches the nodes array length if it was created
+        #[allow(clippy::collapsible_if)]
+        if let Some(ref mut props) = properties {
+            if props.len() < nodes.len() {
+                props.resize_with(nodes.len(), Default::default);
             }
         }
 
