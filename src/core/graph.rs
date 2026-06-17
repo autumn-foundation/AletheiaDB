@@ -63,6 +63,27 @@ pub struct Node {
 
 impl Node {
     /// Create a new node with the given ID, label, and properties.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::core::{Node, NodeId, VersionId};
+    /// use aletheiadb::core::interning::GLOBAL_INTERNER;
+    /// use aletheiadb::PropertyMapBuilder;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let id = NodeId::new(1)?;
+    /// let label = GLOBAL_INTERNER.intern("Person")?;
+    /// let properties = PropertyMapBuilder::new().insert("name", "Alice").build();
+    /// let current_version = VersionId::new(1)?;
+    ///
+    /// let node = Node::new(id, label, properties, current_version);
+    ///
+    /// assert_eq!(node.id, id);
+    /// assert!(node.has_label_str("Person"));
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn new(
         id: NodeId,
         label: InternedString,
@@ -187,6 +208,31 @@ pub struct Edge {
 
 impl Edge {
     /// Create a new edge with the given parameters.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::core::{Edge, EdgeId, NodeId, VersionId};
+    /// use aletheiadb::core::interning::GLOBAL_INTERNER;
+    /// use aletheiadb::PropertyMapBuilder;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let edge_id = EdgeId::new(1)?;
+    /// let label = GLOBAL_INTERNER.intern("KNOWS")?;
+    /// let source = NodeId::new(1)?;
+    /// let target = NodeId::new(2)?;
+    /// let properties = PropertyMapBuilder::new().insert("since", 2020).build();
+    /// let current_version = VersionId::new(1)?;
+    ///
+    /// let edge = Edge::new(edge_id, label, source, target, properties, current_version);
+    ///
+    /// assert_eq!(edge.id, edge_id);
+    /// assert_eq!(edge.source, source);
+    /// assert_eq!(edge.target, target);
+    /// assert!(edge.has_label_str("KNOWS"));
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn new(
         id: EdgeId,
         label: InternedString,

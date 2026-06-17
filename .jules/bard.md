@@ -10,3 +10,6 @@
 ## 2024-05-14 - [Adding Examples to HLC and documenting src/main.rs]
 **Confusion:** The `src/main.rs` file was missing module-level documentation (`//!`), which triggers the `missing_docs` lint, but was hidden by the lint configurations inside `src/lib.rs` affecting `src/main.rs`. Also `HybridTimestamp::send` lacked an example showing the behavior of its logical counter.
 **Clarification:** Added `//! The AletheiaDB binary.` to `src/main.rs` and added an executable `## Examples` block to `HybridTimestamp::send` in `src/core/hlc.rs`.
+## 2024-05-15 - [The Missing Documentations of Graph Entities Instantiation]
+**Confusion:** The core graph structures `Node` and `Edge` were lacking `# Examples` in their constructor documentation (`new`), making it slightly involved for a newcomer to figure out how to instantiate `InternedString` or `PropertyMap` to use them.
+**Clarification:** Added executable `## Examples` blocks to `Node::new` and `Edge::new` in `src/core/graph.rs` to demonstrate instantiating graph entities directly.
