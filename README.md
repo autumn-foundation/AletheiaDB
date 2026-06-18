@@ -25,6 +25,8 @@ Requires Rust 1.92+.
 
 ## Quick Start
 
+# ⚠️ REQUIRES FEATURE NOVA ⚠️
+
 ```rust
 use aletheiadb::prelude::*;
 
