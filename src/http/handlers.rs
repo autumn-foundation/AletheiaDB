@@ -62,49 +62,76 @@ pub async fn health_check() -> Json<HealthResponse> {
 /// Polymorphic request for the `/query` endpoint, discriminated by `operation`.
 #[derive(Debug, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case")]
-#[allow(missing_docs)] // fields are self-describing via their names and variant-level docs
 pub enum QueryRequest {
     /// Find nodes matching label/property filters. Paginated.
     FindNode {
+        /// Optional label to filter by.
         label: Option<String>,
+        /// Optional properties to filter by.
         properties: Option<HashMap<String, Value>>,
+        /// Maximum number of nodes to return.
         limit: Option<usize>,
+        /// Number of nodes to skip.
         offset: Option<usize>,
     },
     /// Get a single node by its 64-bit ID.
-    GetNode { node_id: u64 },
+    GetNode {
+        /// The ID of the node to fetch.
+        node_id: u64,
+    },
     /// Create a new node with an optional property map.
     CreateNode {
+        /// The label of the new node.
         label: String,
+        /// Properties of the new node.
         properties: Option<HashMap<String, Value>>,
     },
     /// Create many nodes atomically in one transaction.
-    BulkCreateNodes { nodes: Vec<CreateNodeInput> },
+    BulkCreateNodes {
+        /// The nodes to create.
+        nodes: Vec<CreateNodeInput>,
+    },
     /// Fetch many nodes by ID.
-    BulkGetNodes { node_ids: Vec<u64> },
+    BulkGetNodes {
+        /// The IDs of the nodes to fetch.
+        node_ids: Vec<u64>,
+    },
     /// Update many nodes atomically in one transaction.
-    BulkUpdateNodes { updates: Vec<UpdateNodeInput> },
+    BulkUpdateNodes {
+        /// The updates to apply.
+        updates: Vec<UpdateNodeInput>,
+    },
     /// Delete many nodes atomically in one transaction.
     BulkDeleteNodes {
+        /// The IDs of the nodes to delete.
         node_ids: Vec<u64>,
+        /// Whether to cascade deletes to relationships.
         #[serde(default)]
         cascade: bool,
     },
     /// Find neighbors (either direction) of a node. Paginated, deduped.
     FindNeighbors {
+        /// The ID of the node to find neighbors for.
         node_id: u64,
+        /// Maximum number of neighbors to return.
         #[serde(default)]
         limit: Option<usize>,
+        /// Number of neighbors to skip.
         #[serde(default)]
         offset: Option<usize>,
     },
     /// Execute an AQL query string, optionally with bound parameters.
     ExecuteQuery {
+        /// The AQL query string.
         query: String,
+        /// Parameters for the query.
         parameters: Option<HashMap<String, Value>>,
     },
     /// Execute many AQL queries in sequence and return per-query rows.
-    BulkExecuteQuery { queries: Vec<ExecuteQueryInput> },
+    BulkExecuteQuery {
+        /// The queries to execute.
+        queries: Vec<ExecuteQueryInput>,
+    },
 }
 
 /// Payload for node creation inside a bulk request.

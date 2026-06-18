@@ -61,7 +61,7 @@ const ENTRY_TYPE_COMPLETE: u8 = 3;
 
 /// Error types for commit log operations.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(missing_docs)]
+
 pub enum CommitLogError {
     /// I/O error.
     IoError(String),
@@ -72,7 +72,12 @@ pub enum CommitLogError {
     /// Transaction not found.
     TransactionNotFound(TxId),
     /// Checksum mismatch.
-    ChecksumMismatch { expected: u32, actual: u32 },
+    ChecksumMismatch {
+        /// The expected checksum.
+        expected: u32,
+        /// The actual checksum.
+        actual: u32,
+    },
 }
 
 impl std::fmt::Display for CommitLogError {

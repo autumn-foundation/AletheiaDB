@@ -447,12 +447,15 @@ pub struct WhereClause {
 
 /// A predicate expression.
 #[derive(Debug, Clone, PartialEq)]
-#[allow(missing_docs)]
+
 pub enum PredicateExpr {
     /// Comparison: n.prop = value
     Comparison {
+        /// The left side expression to compare.
         left: Expression,
+        /// The operator used for comparison.
         op: ComparisonOp,
+        /// The right side expression to compare against.
         right: Expression,
     },
     /// Existence check: EXISTS(n.prop)
@@ -463,22 +466,30 @@ pub enum PredicateExpr {
     IsNotNull(PropertyAccess),
     /// String contains: n.prop CONTAINS 'str'
     Contains {
+        /// The property being checked.
         property: PropertyAccess,
+        /// The substring that must be present.
         substring: String,
     },
     /// String starts with: n.prop STARTS WITH 'str'
     StartsWith {
+        /// The property being checked.
         property: PropertyAccess,
+        /// The prefix string.
         prefix: String,
     },
     /// String ends with: n.prop ENDS WITH 'str'
     EndsWith {
+        /// The property being checked.
         property: PropertyAccess,
+        /// The suffix string.
         suffix: String,
     },
     /// IN list: n.prop IN [1, 2, 3]
     In {
+        /// The property to search for.
         property: PropertyAccess,
+        /// The list of values to match against.
         values: Vec<PropertyValue>,
     },
     /// Logical AND
@@ -553,7 +564,7 @@ pub enum ComparisonOp {
 
 /// An expression (used in comparisons and projections).
 #[derive(Debug, Clone, PartialEq)]
-#[allow(missing_docs)]
+
 pub enum Expression {
     /// Property access: n.prop
     Property(PropertyAccess),
@@ -564,7 +575,12 @@ pub enum Expression {
     /// Parameter: $param
     Parameter(String),
     /// Function call: func(args)
-    FunctionCall { name: String, args: Vec<Expression> },
+    FunctionCall {
+        /// The name of the function to execute.
+        name: String,
+        /// The arguments passed to the function.
+        args: Vec<Expression>,
+    },
 }
 
 impl Expression {
