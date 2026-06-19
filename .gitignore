@@ -107,3 +107,7 @@ pr_description.md
 
 # Re-include Python SDK sources (overrides "*.py" above)
 !python/**/*.py
+python/.venv/
+/python/.venv
+/python/.venv
+python/aletheiadb/_native.abi3.so
