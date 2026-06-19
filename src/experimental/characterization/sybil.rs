@@ -35,6 +35,20 @@
 //! # }
 //! ```
 
+//! Sybil: Semantic meme propagation simulation.
+//!
+//! # The "Nova" Philosophy 🌟
+//!
+//! **Sybil** models how ideas, labels, or vectors spread through a network over time.
+//! By applying propagation models (like `LinearPropagation`), nodes can adopt the semantic
+//! traits of their neighbors. This is useful for community consensus, belief propagation,
+//! or smoothing out noisy data.
+//!
+//! # Use Cases
+//! - **Belief Propagation**: Simulating how a rumor or sentiment spreads through a social graph.
+//! - **Missing Data Imputation**: If a node lacks a vector, it can "borrow" the average of its neighbors.
+//! - **Community Smoothing**: Creating a shared "consensus vector" for a highly connected cluster.
+
 use crate::AletheiaDB;
 use crate::core::NodeId;
 use crate::core::error::Result;
@@ -152,10 +166,47 @@ impl<'a> Sybil<'a> {
 
     /// Run the simulation.
     ///
+    /// This method scans the graph to load the initial state of the specified vector property,
+    /// then iterates for the specified number of steps, applying the propagation model to update
+    /// each node's state based on its neighbors.
+    ///
     /// # Arguments
     /// * `property_name` - The vector property to use as the "meme".
     /// * `model` - The propagation logic.
     /// * `steps` - Number of iterations.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::AletheiaDB;
+    /// use aletheiadb::experimental::characterization::sybil::{Sybil, LinearPropagation};
+    /// use aletheiadb::core::property::PropertyMapBuilder;
+    /// use aletheiadb::api::transaction::WriteOps;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let db = AletheiaDB::new()?;
+    /// let sybil = Sybil::new(&db);
+    /// let model = LinearPropagation::new(0.5); // Take halfway between self and neighbors
+    ///
+    /// // Create nodes and edges
+    /// db.write(|tx| {
+    ///     let props_a = PropertyMapBuilder::new().insert_vector("opinion", &[0.0, 0.0]).build();
+    ///     let node_a = tx.create_node("Person", props_a)?;
+    ///
+    ///     let props_b = PropertyMapBuilder::new().insert_vector("opinion", &[1.0, 1.0]).build();
+    ///     let node_b = tx.create_node("Person", props_b)?;
+    ///
+    ///     tx.create_edge(node_a, node_b, "INFLUENCES", PropertyMapBuilder::new().build())?;
+    ///     tx.create_edge(node_b, node_a, "INFLUENCES", PropertyMapBuilder::new().build())?;
+    ///
+    ///     Ok::<(), aletheiadb::core::error::Error>(())
+    /// })?;
+    ///
+    /// // Simulate 1 step of propagation
+    /// let state = sybil.simulate("opinion", &model, 1)?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn simulate<M: PropagationModel>(
         &self,
         property_name: &str,

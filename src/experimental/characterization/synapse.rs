@@ -37,6 +37,18 @@
 //! # }
 //! ```
 
+//! Synapse: Hebbian learning and adaptive semantic pathfinding.
+//!
+//! # The "Nova" Philosophy 🌟
+//!
+//! **Synapse** combines structural pathfinding with semantic costs, but introduces a memory mechanism.
+//! Borrowing from neuroscience ("neurons that fire together wire together"), paths that are
+//! frequently traversed become "cheaper" over time.
+//!
+//! # Use Cases
+//! - **Adaptive Routing**: Routing queries through the graph based on both meaning and historical success.
+//! - **Personalization**: If users constantly select a slightly sub-optimal semantic result, the graph learns to prefer it.
+
 use crate::AletheiaDB;
 use crate::core::error::{Error, Result};
 use crate::core::hasher::IdentityHasher;
@@ -168,6 +180,38 @@ impl<'a> Synapse<'a> {
     ///
     /// This encourages the algorithm to choose paths that are semantically "good enough"
     /// but highly popular, over paths that are semantically perfect but unknown.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::AletheiaDB;
+    /// use aletheiadb::experimental::characterization::synapse::{Synapse, SynapseContext};
+    /// use aletheiadb::core::property::PropertyMapBuilder;
+    /// use aletheiadb::api::transaction::WriteOps;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let db = AletheiaDB::new()?;
+    /// let context = SynapseContext::new();
+    /// let synapse = Synapse::new(&db, &context);
+    ///
+    /// let props_a = PropertyMapBuilder::new().insert_vector("vec", &[1.0, 0.0]).build();
+    /// let props_b = PropertyMapBuilder::new().insert_vector("vec", &[0.0, 1.0]).build();
+    ///
+    /// let mut node_a = aletheiadb::core::NodeId::new(0).unwrap();
+    /// let mut node_b = aletheiadb::core::NodeId::new(0).unwrap();
+    ///
+    /// db.write(|tx| {
+    ///     node_a = tx.create_node("Node", props_a)?;
+    ///     node_b = tx.create_node("Node", props_b)?;
+    ///     tx.create_edge(node_a, node_b, "NEXT", PropertyMapBuilder::new().build())?;
+    ///     Ok::<(), aletheiadb::core::error::Error>(())
+    /// })?;
+    ///
+    /// let path = synapse.adaptive_semantic_path(node_a, node_b, "vec")?;
+    /// assert_eq!(path.len(), 2);
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn adaptive_semantic_path(
         &self,
         start: NodeId,

@@ -10,3 +10,6 @@
 ## 2024-05-14 - [Adding Examples to HLC and documenting src/main.rs]
 **Confusion:** The `src/main.rs` file was missing module-level documentation (`//!`), which triggers the `missing_docs` lint, but was hidden by the lint configurations inside `src/lib.rs` affecting `src/main.rs`. Also `HybridTimestamp::send` lacked an example showing the behavior of its logical counter.
 **Clarification:** Added `//! The AletheiaDB binary.` to `src/main.rs` and added an executable `## Examples` block to `HybridTimestamp::send` in `src/core/hlc.rs`.
+## 2024-06-19 - [Adding Module level documentations and examples to experimental/characterization]
+**Confusion:** Files inside `src/experimental/characterization/` such as `sybil.rs`, `kaleidoscope.rs`, and `synapse.rs` were lacking module-level (`//!`) documentations outlining their goals and context under the "Nova" philosophy. Crucial simulation functions lacked concrete code examples demonstrating their usage.
+**Clarification:** I added `//!` module-level documentation describing what each engine solves (`sybil` for meme propagation, `kaleidoscope` for topology+semantic layout mapping, `synapse` for Hebbian learning pathfinding). I also added robust, compiling executable doc-tests (`/// \`\`\`rust`) to their primary execution methods to clarify their inputs, behavior, and outputs.

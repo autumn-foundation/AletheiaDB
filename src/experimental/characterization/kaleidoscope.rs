@@ -10,6 +10,20 @@
 //!
 //! This allows you to *see* clusters that form not just from edges, but from shared meaning.
 
+//! Kaleidoscope: Topology + Semantic Gravity Layout Engine.
+//!
+//! # The "Nova" Philosophy 🌟
+//!
+//! **Kaleidoscope** generates 2D layouts of graphs by balancing two forces:
+//! 1. **Topological Springs**: Connected nodes pull each other together.
+//! 2. **Semantic Gravity**: Nodes with similar vectors attract each other, even if unconnected.
+//!
+//! This creates layouts where structural communities and semantic clusters overlap visually.
+//!
+//! # Use Cases
+//! - **Graph Visualization**: Rendering a graph where both connections and concepts matter.
+//! - **Semantic Clustering**: Finding implicit communities based on vector similarity.
+
 use crate::core::id::NodeId;
 use std::collections::HashMap;
 
@@ -111,11 +125,14 @@ impl Default for LayoutConfig {
 
 /// The Layout Engine.
 ///
+/// This engine runs a physics simulation using a spring-electrical model,
+/// enhanced with a custom "semantic gravity" force.
+///
 /// # Examples
 ///
 /// ```rust
-/// use aletheiadb::experimental::kaleidoscope::{LayoutEngine, LayoutConfig};
-/// use aletheiadb::core::id::NodeId;
+/// use aletheiadb::experimental::characterization::kaleidoscope::{LayoutEngine, LayoutConfig};
+/// use aletheiadb::core::NodeId;
 ///
 /// let mut engine = LayoutEngine::new(LayoutConfig::default());
 ///
