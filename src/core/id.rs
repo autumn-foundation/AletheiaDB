@@ -1576,6 +1576,15 @@ impl TxId {
     }
 
     /// Get the inner ID value
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use aletheiadb::core::id::TxId;
+    ///
+    /// let tx_id = TxId::new(42);
+    /// assert_eq!(tx_id.as_u64(), 42);
+    /// ```
     pub fn as_u64(&self) -> u64 {
         self.0
     }
@@ -1640,6 +1649,17 @@ impl TxIdGenerator {
     }
 
     /// Get the current transaction ID (last generated)
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use aletheiadb::core::id::TxIdGenerator;
+    ///
+    /// let generator = TxIdGenerator::new();
+    /// let _ = generator.next();
+    /// let current = generator.current();
+    /// assert_eq!(current.as_u64(), 1);
+    /// ```
     pub fn current(&self) -> TxId {
         TxId(self.counter.load(Ordering::SeqCst).saturating_sub(1))
     }

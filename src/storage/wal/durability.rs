@@ -488,6 +488,14 @@ impl WriteOptions {
     const BULK_IMPORT_FLUSH_INTERVAL_MS: u64 = 100;
 
     /// Create new WriteOptions with default settings.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use aletheiadb::storage::wal::WriteOptions;
+    ///
+    /// let options = WriteOptions::new();
+    /// ```
     #[must_use]
     pub fn new() -> Self {
         Self::default()

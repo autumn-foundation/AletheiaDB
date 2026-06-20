@@ -10,3 +10,6 @@
 ## 2024-05-14 - [Adding Examples to HLC and documenting src/main.rs]
 **Confusion:** The `src/main.rs` file was missing module-level documentation (`//!`), which triggers the `missing_docs` lint, but was hidden by the lint configurations inside `src/lib.rs` affecting `src/main.rs`. Also `HybridTimestamp::send` lacked an example showing the behavior of its logical counter.
 **Clarification:** Added `//! The AletheiaDB binary.` to `src/main.rs` and added an executable `## Examples` block to `HybridTimestamp::send` in `src/core/hlc.rs`.
+## 2024-05-18 - [Adding Doc-Tests to Core Identifiers and Timestamps]
+**Confusion:** Some fundamental types (`TxId`, `TxIdGenerator`, `HybridTimestamp`, `WriteOptions`) were lacking executable `## Examples` in their rustdocs. Users could easily guess how they worked, but the absence of copy-pasteable examples violated the principle that "a good example is worth 1,000 lines of explanation".
+**Clarification:** I added concrete `## Examples` sections to `TxId::as_u64()`, `TxIdGenerator::current()`, `HybridTimestamp::serialize()`, `HybridTimestamp::serialize_into()`, `HybridTimestamp::deserialize()`, and `WriteOptions::new()`. These examples demonstrate basic usage and successfully compile.

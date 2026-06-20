@@ -473,6 +473,16 @@ impl HybridTimestamp {
     /// # Performance Note
     /// This allocates a new `Vec<u8>`. For better performance when serializing
     /// multiple timestamps, consider using `serialize_into()` with a reused buffer.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use aletheiadb::core::hlc::HybridTimestamp;
+    ///
+    /// let ts = HybridTimestamp::new(1000, 5).unwrap();
+    /// let bytes = ts.serialize();
+    /// assert_eq!(bytes.len(), 12);
+    /// ```
     pub fn serialize(&self) -> Vec<u8> {
         let mut buffer = Vec::with_capacity(12);
         self.serialize_into(&mut buffer);
@@ -480,6 +490,17 @@ impl HybridTimestamp {
     }
 
     /// Serialize into an existing buffer.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use aletheiadb::core::hlc::HybridTimestamp;
+    ///
+    /// let ts = HybridTimestamp::new(1000, 5).unwrap();
+    /// let mut buffer = Vec::new();
+    /// ts.serialize_into(&mut buffer);
+    /// assert_eq!(buffer.len(), 12);
+    /// ```
     pub fn serialize_into(&self, buffer: &mut Vec<u8>) {
         buffer.extend_from_slice(&self.wallclock.to_le_bytes());
         buffer.extend_from_slice(&self.logical.to_le_bytes());
@@ -492,6 +513,18 @@ impl HybridTimestamp {
     /// # Errors
     /// - Returns `StorageError::CorruptedData` if buffer is too short
     /// - Returns `StorageError::CorruptedData` if wallclock exceeds `MAX_VALID_TIMESTAMP`
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use aletheiadb::core::hlc::HybridTimestamp;
+    ///
+    /// let ts = HybridTimestamp::new(1000, 5).unwrap();
+    /// let bytes = ts.serialize();
+    /// let (deserialized, consumed) = HybridTimestamp::deserialize(&bytes).unwrap();
+    /// assert_eq!(deserialized, ts);
+    /// assert_eq!(consumed, 12);
+    /// ```
     pub fn deserialize(bytes: &[u8]) -> Result<(Self, usize), StorageError> {
         if bytes.len() < 12 {
             return Err(StorageError::CorruptedData(format!(
