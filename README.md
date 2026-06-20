@@ -76,7 +76,7 @@ fn main() -> Result<()> {
         .as_of(valid_time, tx_time)              // temporal: point-in-time snapshot
         .start(alice)                            // graph: starting node
         .traverse("KNOWS")                       // graph: follow edges
-        .rank_by_similarity(&query_embedding, 10) // vector: re-rank by similarity
+        .rank_by_similarity_builder(&query_embedding, 10).property("embedding").finish() // vector: re-rank by similarity
         .execute(&db)?;
 
     Ok(())
