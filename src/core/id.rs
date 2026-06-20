@@ -34,6 +34,7 @@ pub const MAX_VALID_ID: u64 = u64::MAX - 1000;
 /// let node_id = NodeId::new(42).unwrap();
 /// assert_eq!(node_id.as_u64(), 42);
 /// ```
+/// Unique identifier for a Node in the database.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, bytemuck::Pod, bytemuck::Zeroable,
 )]
@@ -102,6 +103,7 @@ impl fmt::Display for NodeId {
 }
 
 /// Unique identifier for an edge in the graph.
+/// Unique identifier for an Edge in the database.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[repr(transparent)]
 pub struct EdgeId(u64);
@@ -168,6 +170,7 @@ impl fmt::Display for EdgeId {
 }
 
 /// Unique identifier for a version of a node or edge.
+/// Unique identifier for a specific Version of a node or edge.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[repr(transparent)]
 pub struct VersionId(u64);

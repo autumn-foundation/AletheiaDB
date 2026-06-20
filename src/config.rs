@@ -56,6 +56,8 @@ use crate::storage::version::AnchorConfig;
 /// The WAL is the backbone of durability in AletheiaDB. This struct allows you to tune
 /// its behavior, such as concurrency (stripes), sync intervals, and directory paths,
 /// to balance between latency and throughput.
+///
+/// Configuration options for the Write-Ahead Log (WAL).
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "config-toml", derive(Serialize, Deserialize))]
 #[cfg_attr(feature = "config-toml", serde(default))]
@@ -326,6 +328,8 @@ impl Default for WalConfigBuilder {
 /// To support time-travel queries, AletheiaDB keeps past versions of nodes and edges.
 /// This configuration dictates how those versions are managed, including pruning
 /// thresholds and the directory where historical data is stored on disk.
+///
+/// Configuration for the historical temporal storage.
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "config-toml", derive(Serialize, Deserialize))]
 #[cfg_attr(feature = "config-toml", serde(default))]
@@ -626,6 +630,8 @@ impl Default for HistoricalConfigBuilder {
 /// Vector search requires careful tuning of the HNSW algorithm. This struct lets you
 /// configure parameters like the number of layers, connections per node, and memory
 /// limits to optimize the recall-vs-latency tradeoff.
+///
+/// Configuration for the vector indexing subsystem.
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "config-toml", derive(Serialize, Deserialize))]
 #[cfg_attr(feature = "config-toml", serde(default))]

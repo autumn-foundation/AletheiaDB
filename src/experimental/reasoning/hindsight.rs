@@ -27,7 +27,11 @@ use std::collections::{HashMap, HashSet, VecDeque};
 ///
 /// This structure holds all the virtual modifications (additions, updates, deletions)
 /// that are applied as an overlay on top of the base database state.
-
+///
+/// A purely speculative 'what-if' branch applied over the core database.
+///
+/// A `Scenario` allows reasoning systems to experiment with adding, modifying,
+/// or deleting nodes and edges without affecting the base database state.
 #[derive(Debug, Clone)]
 pub struct Scenario {
     /// Nodes added in this scenario.
@@ -77,7 +81,8 @@ impl Scenario {
 ///
 /// This allows you to inspect exactly what changes would be made if the scenario
 /// were committed to the actual database.
-
+///
+/// Represents the delta or differences between two scenarios or states.
 #[derive(Debug, Clone)]
 pub struct HindsightDiff {
     /// Nodes added in this scenario.

@@ -17,7 +17,7 @@ impl AletheiaDB {
     ///
     /// # Example
     ///
-    /// ```rust,no_run
+    /// ```rust
     /// # use aletheiadb::{AletheiaDB, PropertyMapBuilder};
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// # let db = AletheiaDB::new()?;
@@ -46,12 +46,12 @@ impl AletheiaDB {
     ///
     /// # Example
     ///
-    /// ```rust,no_run
+    /// ```rust
     /// # use aletheiadb::{AletheiaDB, PropertyMapBuilder, core::NodeId};
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// # let db = AletheiaDB::new()?;
-    /// # let source_id = NodeId::new(1)?;
-    /// # let target_id = NodeId::new(2)?;
+    /// # let source_id = db.create_node("Person", PropertyMapBuilder::new().build())?;
+    /// # let target_id = db.create_node("Person", PropertyMapBuilder::new().build())?;
     /// let edge_id = db.create_edge(
     ///     source_id,
     ///     target_id,
@@ -79,6 +79,19 @@ impl AletheiaDB {
     /// Get the current state of a node.
     ///
     /// This uses the fast path (current storage) for O(1) lookup.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// # use aletheiadb::{AletheiaDB, PropertyMapBuilder, core::NodeId};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # let node_id = db.create_node("Person", PropertyMapBuilder::new().insert("name", "Alice").build())?;
+    /// let node = db.get_node(node_id)?;
+    /// assert_eq!(node.properties.get("name").unwrap().as_str().unwrap(), "Alice");
+    /// # Ok(())
+    /// # }
+    /// ```
     #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn get_node(&self, node_id: NodeId) -> Result<Node> {
         self.current.get_node(node_id).record_error_metric()
@@ -101,6 +114,21 @@ impl AletheiaDB {
     /// Do NOT attempt to modify the graph or perform operations that might acquire a
     /// write lock on the same shard (e.g., `update_node`, `delete_node`) within the closure.
     /// Doing so will cause a deadlock (lock re-entrancy hazard).
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// # use aletheiadb::{AletheiaDB, PropertyMapBuilder, core::NodeId};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # let node_id = db.create_node("Person", PropertyMapBuilder::new().insert("age", 30).build())?;
+    /// let age = db.with_node(node_id, |node| {
+    ///     node.properties.get("age").and_then(|p: &aletheiadb::PropertyValue| p.as_int()).unwrap_or(0)
+    /// })?;
+    /// assert_eq!(age, 30);
+    /// # Ok(())
+    /// # }
+    /// ```
     #[inline]
     #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn with_node<F, R>(&self, id: NodeId, f: F) -> Result<R>
@@ -111,6 +139,21 @@ impl AletheiaDB {
     }
 
     /// Get the current state of an edge.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// # use aletheiadb::{AletheiaDB, PropertyMapBuilder, core::NodeId};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # let source_id = db.create_node("Person", PropertyMapBuilder::new().build())?;
+    /// # let target_id = db.create_node("Person", PropertyMapBuilder::new().build())?;
+    /// # let edge_id = db.create_edge(source_id, target_id, "KNOWS", PropertyMapBuilder::new().insert("weight", 1.5).build())?;
+    /// let edge = db.get_edge(edge_id)?;
+    /// assert_eq!(edge.properties.get("weight").unwrap().as_float().unwrap(), 1.5);
+    /// # Ok(())
+    /// # }
+    /// ```
     #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn get_edge(&self, edge_id: EdgeId) -> Result<Edge> {
         self.current.get_edge(edge_id).record_error_metric()
@@ -135,9 +178,9 @@ impl AletheiaDB {
     /// - **Space**: O(1) - lazy iterator, no allocation
     /// - **Comparison**: Uses interned string pointer equality (very fast)
     ///
-    /// # Examples
+    /// ## Examples
     ///
-    /// ```rust,no_run
+    /// ```rust
     /// # use aletheiadb::AletheiaDB;
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// # let db = AletheiaDB::new()?;

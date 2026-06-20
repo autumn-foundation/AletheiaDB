@@ -10,3 +10,7 @@
 ## 2024-05-14 - [Adding Examples to HLC and documenting src/main.rs]
 **Confusion:** The `src/main.rs` file was missing module-level documentation (`//!`), which triggers the `missing_docs` lint, but was hidden by the lint configurations inside `src/lib.rs` affecting `src/main.rs`. Also `HybridTimestamp::send` lacked an example showing the behavior of its logical counter.
 **Clarification:** Added `//! The AletheiaDB binary.` to `src/main.rs` and added an executable `## Examples` block to `HybridTimestamp::send` in `src/core/hlc.rs`.
+
+## 2024-05-20 - [Added executable examples and fixed missing documentation]
+**Confusion:** Several highly utilized core database functions (like `get_node`, `get_edge`, and zero-copy accessors like `with_node`) lacked `## Examples` sections. In addition, some core DB struct implementations and config traits (`WalConfig`, `AletheiaDBConfig`, `NodeId`, `Scenario`) were completely missing documentation.
+**Clarification:** I added comprehensive executable `## Examples` code blocks to `AletheiaDB::get_node`, `AletheiaDB::get_edge`, `AletheiaDB::with_node` assuring that the examples are executable doc-tests. I also explicitly documented the previously undocumented config and core id objects (`WalConfig`, `HistoricalConfig`, `AletheiaDBConfig`, `NodeId`, `EdgeId`, `VersionId`, `Scenario`, `HindsightDiff`). This complies with Bard's core philosophy.
