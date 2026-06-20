@@ -769,8 +769,10 @@ impl PersistentCommitLog {
         let file = File::open(path)
             .map_err(|e| CommitLogError::IoError(format!("Failed to open log: {}", e)))?;
 
+        // ⚡ Bolt Optimization: Pre-allocate buffer using file size to prevent heap reallocations.
+        let file_size = file.metadata().map(|m| m.len() as usize).unwrap_or(0);
         let mut reader = BufReader::new(file);
-        let mut buffer = Vec::new();
+        let mut buffer = Vec::with_capacity(file_size);
 
         reader
             .read_to_end(&mut buffer)
@@ -794,7 +796,10 @@ impl PersistentCommitLog {
         }
 
         // Parse entries
-        let mut entries = Vec::new();
+        // ⚡ Bolt Optimization: Pre-allocate space to prevent heap reallocations when reading commit log entries.
+        // Assuming an average entry is ~128 bytes.
+        let capacity_hint = (buffer.len() / 128).max(1);
+        let mut entries = Vec::with_capacity(capacity_hint);
         let mut offset = HEADER_SIZE;
         let mut max_lsn = 0u64;
         let mut max_tx_id = 0u64;
