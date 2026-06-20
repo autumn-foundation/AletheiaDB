@@ -1967,7 +1967,7 @@ mod tests {
     }
 
     #[test]
-    fn test_havoc_deadlock() {
+    fn test_havoc_deadlock_commented() {
         use std::sync::{Arc, RwLock};
         use std::thread;
         use std::time::Duration;
