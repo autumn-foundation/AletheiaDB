@@ -693,14 +693,29 @@ db.between("2024-01-01", "2024-12-31").track_changes(node_id)
 
 ### Orphaned Edges on Node Deletion
 
-Calling `delete_node` removes only the node itself -- any edges where the deleted node
-is the source or target will remain in storage as **orphaned edges**. Traversals that
-follow these edges may encounter missing endpoints.
+The **low-level Rust** `delete_node` (`src/storage/current/mod.rs`) removes only the
+node itself -- any edges where the deleted node is the source or target remain in
+storage as **orphaned edges**. This edge-preserving behavior is intentional and is
+retained for audit/history use cases where callers manage edge cleanup themselves or
+need to preserve edge records. Traversals that follow these orphaned edges may
+encounter missing endpoints.
 
-**Recommended**: Use `delete_node_cascade` instead, which atomically deletes the node
-and all connected edges, preventing orphans. The non-cascade `delete_node` is retained
-for cases where callers manage edge cleanup themselves or where performance requires
-avoiding the edge scan.
+**Recommended (Rust API)**: Use `delete_node_cascade` instead, which atomically
+deletes the node and all connected edges, preventing orphans. To decide before acting,
+call `db.count_connected_edges(node_id)` to learn how many edges reference a node.
+
+**MCP surface is safe-by-default (Issue #3209)**: The MCP `delete_node` tool mirrors
+Cypher's `DETACH DELETE` contract -- it never silently orphans edges:
+
+- If the node has connected edges and `detach` is not `true`, the deletion is
+  **refused** and the JSON response reports `connected_edges` (the number of edges
+  that would be orphaned), so an LLM/caller can decide.
+- Passing `detach: true` performs a cascade-equivalent delete and reports
+  `edges_removed`.
+- A node with no connected edges deletes cleanly (`edges_removed: 0`).
+
+This guarantees zero silent orphan-creating successes through the MCP surface: an LLM
+never receives a `success` response that breaks referential integrity.
 
 ## Future Considerations
 

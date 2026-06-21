@@ -333,10 +333,17 @@ impl AletheiaMcpServer {
         ))
     }
 
-    /// Delete a node.
+    /// Delete a node (safe-by-default).
     ///
-    /// Permanently removes the node from the current state. Historical versions remain accessible via time-travel queries.
-    /// Fails if the node has connected edges (unless `delete_node_cascade` is used).
+    /// Permanently removes the node from the current state. Historical versions
+    /// remain accessible via time-travel queries.
+    ///
+    /// Mirrors Cypher's `DETACH DELETE` contract (Issue #3209): if the node has
+    /// connected edges and `detach` is not `true`, the deletion is **refused**
+    /// and the JSON response reports `connected_edges` (the number of edges that
+    /// would be orphaned) so the caller can decide. Pass `detach: true` to delete
+    /// the node together with all connected edges; the response then reports
+    /// `edges_removed`. A node with no connected edges always deletes cleanly.
     pub fn delete_node(&self, req: DeleteNodeRequest) -> String {
         Self::extract_text(self.handle_delete_node(
             serde_json::to_value(req).expect("request serialization should not fail"),
@@ -894,12 +901,59 @@ impl AletheiaMcpServer {
             Err(e) => return self.error_json(&e.to_string()),
         };
 
-        match self.db.write(|tx| tx.delete_node(node_id)) {
-            Ok(()) => self.success_json(json!({
-                "success": true,
-                "deleted_node_id": req.node_id
-            })),
-            Err(e) => self.error_json(&e.to_string()),
+        // Determine how many edges are connected before we touch anything. This
+        // both verifies the node exists and lets us honor the safe-by-default
+        // DETACH-DELETE contract (Issue #3209).
+        let connected_edges = match self.db.count_connected_edges(node_id) {
+            Ok(count) => count,
+            Err(e) => return self.error_json(&e.to_string()),
+        };
+
+        let detach = req.detach.unwrap_or(false);
+
+        // Refuse-by-default: never report a bare success while silently orphaning
+        // edges. The caller must opt into destruction via `detach: true`.
+        if connected_edges > 0 && !detach {
+            return CallToolResult::error(vec![Content::text(
+                serde_json::to_string_pretty(&json!({
+                    "error": format!(
+                        "Node {} has {} connected edge(s); refusing to delete. \
+                         Pass `detach: true` to delete the node and its connected edges, \
+                         or remove the edges first.",
+                        req.node_id, connected_edges
+                    ),
+                    "success": false,
+                    "node_id": req.node_id,
+                    "connected_edges": connected_edges,
+                    "detach_required": true
+                }))
+                .unwrap_or_else(|_| "{\"error\":\"serialization failed\"}".to_string()),
+            )]);
+        }
+
+        if detach {
+            // Cascade-equivalent delete: remove the node and all connected edges,
+            // reporting exactly how many edges were removed.
+            match self.db.write(|tx| tx.delete_node_cascade(node_id)) {
+                Ok(()) => self.success_json(json!({
+                    "success": true,
+                    "deleted_node_id": req.node_id,
+                    "detached": true,
+                    "edges_removed": connected_edges
+                })),
+                Err(e) => self.error_json(&e.to_string()),
+            }
+        } else {
+            // No connected edges: a plain delete cannot orphan anything.
+            match self.db.write(|tx| tx.delete_node(node_id)) {
+                Ok(()) => self.success_json(json!({
+                    "success": true,
+                    "deleted_node_id": req.node_id,
+                    "detached": false,
+                    "edges_removed": 0
+                })),
+                Err(e) => self.error_json(&e.to_string()),
+            }
         }
     }
 
@@ -2085,7 +2139,10 @@ impl ServerHandler for AletheiaMcpServer {
                 ),
                 Tool::new(
                     "delete_node",
-                    "Delete a node by its ID.",
+                    "Delete a node by its ID (safe-by-default). If the node has connected \
+                     edges and `detach` is not true, the deletion is refused and the response \
+                     reports `connected_edges`. Pass `detach: true` to delete the node together \
+                     with all connected edges; the response then reports `edges_removed`.",
                     make_input_schema::<DeleteNodeRequest>(),
                 ),
                 Tool::new(
