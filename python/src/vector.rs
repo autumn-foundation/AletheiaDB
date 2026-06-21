@@ -147,9 +147,12 @@ pub fn find_similar(
     let rust_db = db.inner();
     let label_owned = label.map(|s| s.to_string());
     let results = py
-        .allow_threads(move || match &label_owned {
-            Some(l) => rust_db.find_similar_with_label(nid, l, k),
-            None => rust_db.find_similar(nid, k),
+        .allow_threads(move || {
+            let mut query = aletheiadb::SimilarityQuery::from_node(nid).k(k);
+            if let Some(l) = &label_owned {
+                query = query.with_label(l);
+            }
+            rust_db.similarity_search(query)
         })
         .map_err(map_error)?;
     let list = PyList::empty_bound(py);
@@ -176,9 +179,12 @@ pub fn find_similar_by_vector(
     let rust_db = db.inner();
     let label_owned = label.map(|s| s.to_string());
     let results = py
-        .allow_threads(move || match &label_owned {
-            Some(l) => rust_db.find_similar_by_embedding_with_label(&embedding, l, k),
-            None => rust_db.find_similar_by_embedding(&embedding, k),
+        .allow_threads(move || {
+            let mut query = aletheiadb::SimilarityQuery::from_embedding(embedding).k(k);
+            if let Some(l) = &label_owned {
+                query = query.with_label(l);
+            }
+            rust_db.similarity_search(query)
         })
         .map_err(map_error)?;
     let list = PyList::empty_bound(py);

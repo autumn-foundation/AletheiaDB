@@ -1824,6 +1824,7 @@ fn test_diff_node_versions_same_version() {
 // ========================================================================
 
 #[test]
+#[allow(deprecated)] // exercises deprecated wrappers for back-compat
 fn test_find_similar_without_index() {
     let db = AletheiaDB::new().unwrap();
     let node_id = db
@@ -1834,6 +1835,7 @@ fn test_find_similar_without_index() {
 }
 
 #[test]
+#[allow(deprecated)] // exercises deprecated wrappers for back-compat
 fn test_find_similar_by_embedding_without_index() {
     let db = AletheiaDB::new().unwrap();
     let embedding = vec![0.1, 0.2, 0.3];
@@ -1903,6 +1905,7 @@ fn test_enable_vector_index_duplicate() {
 }
 
 #[test]
+#[allow(deprecated)] // exercises deprecated wrappers for back-compat
 fn test_find_similar_with_label_without_matches() {
     use crate::index::vector::{DistanceMetric, HnswConfig};
 
@@ -1927,6 +1930,7 @@ fn test_find_similar_with_label_without_matches() {
 }
 
 #[test]
+#[allow(deprecated)] // exercises deprecated wrappers for back-compat
 fn test_find_similar_by_embedding_with_label() {
     use crate::index::vector::{DistanceMetric, HnswConfig};
 
@@ -1986,6 +1990,7 @@ fn test_list_temporal_vector_indexes_empty() {
 }
 
 #[test]
+#[allow(deprecated)] // exercises deprecated wrappers for back-compat
 fn test_find_similar_as_of_without_temporal_index() {
     let db = AletheiaDB::new().unwrap();
     let now = crate::core::temporal::time::now();

@@ -118,7 +118,7 @@ pub use core::{
 
 pub use api::{ReadOps, ReadTransaction, TxId, TxState, WriteOps, WriteTransaction};
 pub use core::error::{Error, QueryError, Result, StorageError, TemporalError, TransactionError};
-pub use db::{AletheiaDB, VectorIndexBuilder};
+pub use db::{AletheiaDB, SimilarityQuery, SimilaritySource, VectorIndexBuilder};
 pub use index::{
     AdjacencyIndex, CurrentIndexes, TemporalIndexes,
     vector::{DistanceMetric, HnswConfig, TemporalVectorConfig},

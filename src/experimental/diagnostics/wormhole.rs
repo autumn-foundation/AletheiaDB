@@ -88,8 +88,10 @@ impl<'a> WormholeDetector<'a> {
 
         for &source in candidates {
             // Find semantic neighbors using the default vector index.
-            // Note: find_similar excludes the query node itself.
-            let semantic_neighbors = self.db.find_similar(source, k)?;
+            // Note: the similarity search excludes the query node itself.
+            let semantic_neighbors = self
+                .db
+                .similarity_search(crate::SimilarityQuery::from_node(source).k(k))?;
 
             for (target, similarity) in semantic_neighbors {
                 // Check structural distance

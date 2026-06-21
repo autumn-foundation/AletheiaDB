@@ -254,7 +254,7 @@ pub fn find_similar_as_of<G: GraphView + ?Sized>(
     // Validate embedding
     validate_vector(embedding)?;
 
-    // Delegate to database method
+    // Delegate to the GraphView trait method
     db.find_similar_as_of(embedding, k, timestamp)
 }
 #[cfg(test)]

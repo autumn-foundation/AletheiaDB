@@ -9,6 +9,7 @@
 
 mod common;
 
+use aletheiadb::SimilarityQuery;
 use aletheiadb::api::transaction::WriteOps;
 use aletheiadb::core::id::NodeId;
 use aletheiadb::core::property::PropertyMapBuilder;
@@ -510,12 +511,28 @@ fn bench_temporal_vs_current(c: &mut Criterion) {
 
     // Current-state query on temporal DB (uses current storage path)
     group.bench_function("current_on_temporal_db", |b| {
-        b.iter(|| temporal_db.find_similar_by_embedding(black_box(&query), black_box(10)));
+        b.iter_batched(
+            || query.clone(),
+            |q| {
+                temporal_db.similarity_search(
+                    SimilarityQuery::from_embedding(black_box(q)).k(black_box(10)),
+                )
+            },
+            criterion::BatchSize::SmallInput,
+        );
     });
 
     // Current-state query on non-temporal DB (baseline)
     group.bench_function("current_query", |b| {
-        b.iter(|| current_db.find_similar_by_embedding(black_box(&query), black_box(10)));
+        b.iter_batched(
+            || query.clone(),
+            |q| {
+                current_db.similarity_search(
+                    SimilarityQuery::from_embedding(black_box(q)).k(black_box(10)),
+                )
+            },
+            criterion::BatchSize::SmallInput,
+        );
     });
 
     group.finish();

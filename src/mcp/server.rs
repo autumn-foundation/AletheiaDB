@@ -1406,7 +1406,10 @@ impl AletheiaMcpServer {
             return self.error_json(&e);
         }
 
-        match self.db.find_similar_by_embedding(&req.embedding, k) {
+        match self
+            .db
+            .similarity_search(crate::SimilarityQuery::from_embedding(req.embedding).k(k))
+        {
             Ok(results) => {
                 let similarity_results: Vec<SimilarityResult> = results
                     .into_iter()

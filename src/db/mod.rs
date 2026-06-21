@@ -27,6 +27,8 @@ pub mod graph_view;
 pub mod ops;
 /// Query builder and executor hooks.
 pub mod query;
+/// Unified vector similarity query builder.
+pub mod similarity_query;
 /// Temporal query operations.
 pub mod temporal;
 #[cfg(test)]
@@ -39,6 +41,7 @@ pub mod vector;
 /// Vector index builder pattern.
 pub mod vector_builder;
 
+pub use similarity_query::{SimilarityQuery, SimilaritySource};
 pub use vector_builder::VectorIndexBuilder;
 
 /// Main AletheiaDB database.
