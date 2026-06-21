@@ -30,7 +30,6 @@
 //! The coordinator is designed to be run from a single thread. Multiple
 //! threads should not call `flush()` concurrently.
 
-use std::borrow::Cow;
 use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -671,8 +670,7 @@ impl FlushCoordinator {
                     // 4-byte LE length prefix so the reader knows how many bytes
                     // each encrypted entry occupies. Without a cipher, write the
                     // raw entry data directly (no allocation, zero overhead).
-                    let write_data: Cow<'_, [u8]> = if let Some(ref cipher) = self.config.wal_cipher
-                    {
+                    if let Some(ref cipher) = self.config.wal_cipher {
                         let encrypted = crate::encryption::wal_encryption::encrypt_wal_payload(
                             &entry.data,
                             cipher,
@@ -680,21 +678,32 @@ impl FlushCoordinator {
                         .map_err(|e| Error::Storage(StorageError::Encryption(e.to_string())))?;
                         // Prepend 4-byte LE length of the encrypted block
                         let len_bytes = (encrypted.len() as u32).to_le_bytes();
-                        let mut framed = Vec::with_capacity(4 + encrypted.len());
-                        framed.extend_from_slice(&len_bytes);
-                        framed.extend_from_slice(&encrypted);
-                        Cow::Owned(framed)
-                    } else {
-                        Cow::Borrowed(&entry.data)
-                    };
 
-                    writer.write_all(&write_data).map_err(|e| {
-                        Error::Storage(StorageError::IoError(format!(
-                            "Failed to write WAL entry: {}",
-                            e
-                        )))
-                    })?;
-                    bytes_written += write_data.len();
+                        writer.write_all(&len_bytes).map_err(|e| {
+                            Error::Storage(StorageError::IoError(format!(
+                                "Failed to write WAL entry length: {}",
+                                e
+                            )))
+                        })?;
+
+                        writer.write_all(&encrypted).map_err(|e| {
+                            Error::Storage(StorageError::IoError(format!(
+                                "Failed to write WAL entry: {}",
+                                e
+                            )))
+                        })?;
+
+                        bytes_written += 4 + encrypted.len();
+                    } else {
+                        writer.write_all(&entry.data).map_err(|e| {
+                            Error::Storage(StorageError::IoError(format!(
+                                "Failed to write WAL entry: {}",
+                                e
+                            )))
+                        })?;
+
+                        bytes_written += entry.data.len();
+                    }
                 }
 
                 // Flush buffer to OS
