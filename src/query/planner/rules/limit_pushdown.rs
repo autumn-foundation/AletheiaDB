@@ -542,4 +542,44 @@ mod sentry_tests {
             panic!("Expected VectorRank");
         }
     }
+    #[test]
+    fn test_binary_op_partial_limit_pushdown() {
+        use crate::core::NodeId;
+        use crate::query::plan::BinaryOp;
+
+        let rule = LimitPushdown;
+        let stats = test_stats();
+
+        // Left side: Limit(10) -> Scan
+        let left_op = LogicalOp::unary(
+            UnaryOp::Limit(10),
+            LogicalOp::unary(
+                UnaryOp::Limit(20),
+                LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(1).unwrap()])),
+            ),
+        );
+
+        // Right side: Scan
+        let right_op = LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(2).unwrap()]));
+
+        // Binary op: Union
+        let plan = LogicalPlan::new(LogicalOp::binary(BinaryOp::Union, left_op, right_op));
+
+        let result = rule.apply(&plan, &stats).unwrap();
+        assert!(
+            result.is_some(),
+            "Binary op with one changed branch should return Some"
+        );
+
+        let expected_plan = LogicalPlan::new(LogicalOp::binary(
+            BinaryOp::Union,
+            LogicalOp::unary(
+                UnaryOp::Limit(10),
+                LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(1).unwrap()])),
+            ),
+            LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(2).unwrap()])),
+        ));
+
+        assert_eq!(result, Some(expected_plan));
+    }
 }

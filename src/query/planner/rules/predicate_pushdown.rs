@@ -703,4 +703,35 @@ mod sentry_tests {
             "Partial optimization (left branch) should trigger change"
         );
     }
+    #[test]
+    fn test_binary_op_partial_pushdown() {
+        use crate::query::plan::BinaryOp;
+
+        let rule = PredicatePushdown;
+        let stats = Statistics::default();
+
+        // Left side: Filter(Sort(Scan)) -> Should push down
+        let left_op = LogicalOp::unary(
+            UnaryOp::Filter(Predicate::eq("name", "Alice")),
+            LogicalOp::unary(
+                UnaryOp::Sort {
+                    key: SortKey::Property("name".to_string()),
+                    descending: true,
+                },
+                LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(1).unwrap()])),
+            ),
+        );
+
+        // Right side: Scan -> Unchanged
+        let right_op = LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(2).unwrap()]));
+
+        // Union
+        let plan = LogicalPlan::new(LogicalOp::binary(BinaryOp::Union, left_op, right_op));
+
+        let result = rule.apply(&plan, &stats).unwrap();
+        assert!(
+            result.is_some(),
+            "Binary op with one changed branch should return Some"
+        );
+    }
 }

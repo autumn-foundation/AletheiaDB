@@ -1185,4 +1185,37 @@ mod tests {
             Predicate::Or(vec![Predicate::eq("a", 1), Predicate::eq("b", 2)])
         );
     }
+    #[test]
+    fn test_binary_op_partial_reorder() {
+        use crate::core::NodeId;
+        use crate::query::plan::{BinaryOp, ScanOp};
+
+        let rule = OperationReordering;
+        let stats = test_stats();
+
+        // Left side: two filters that should be reordered based on selectivity
+        // Predicate "a" (selectivity 0.1) and Predicate "b" (selectivity 0.5)
+        // Inserted in order "b" then "a" -> should be reordered to "a" then "b"
+        let left_op = LogicalOp::unary(
+            UnaryOp::Filter(Predicate::eq("b", 1)), // 0.5
+            LogicalOp::unary(
+                UnaryOp::Filter(Predicate::eq("a", 1)), // 0.1
+                LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(1).unwrap()])),
+            ),
+        );
+
+        // Right side: Single filter, nothing to reorder
+        let right_op = LogicalOp::unary(
+            UnaryOp::Filter(Predicate::eq("c", 1)),
+            LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(2).unwrap()])),
+        );
+
+        let plan = LogicalPlan::new(LogicalOp::binary(BinaryOp::Union, left_op, right_op));
+
+        let result = rule.apply(&plan, &stats).unwrap();
+        assert!(
+            result.is_some(),
+            "Binary op with one changed branch should return Some"
+        );
+    }
 }

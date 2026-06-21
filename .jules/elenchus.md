@@ -346,3 +346,10 @@
 **Finding:** The `LimitPushdown` tests originally missed several behavioral edge cases and logic checks, particularly regarding the propagation limits in BinaryOp combinations (`||`), updating limit values correctly against child bounds, and setting vector rank limits.
 **Evidence:** `cargo mutants` caught mutants in `LimitPushdown::push_down` specifically targeting the changed boolean condition logic and bounds assignment.
 **Recommendation:** Added `sentry_tests` to `LimitPushdown` that explicitly trigger tests enforcing the boolean change propagation, verifying that updated properties reflect correct nested limits, and vector bounds assignment. Tests now prevent `||` to `&&` mutations and correct top-k modifications.
+
+**[BinaryOp Partial Mutation Tests]**
+**Module:** `src/query/planner/rules` (`filter_scan_fusion`, `limit_pushdown`, `operation_reordering`, `predicate_pushdown`)
+**Severity:** 🔴 Critical
+**Finding:** The `||` operator inside `LogicalOp::Binary` pattern match branches in several query optimization rules (`filter_scan_fusion`, `limit_pushdown`, `operation_reordering`, `predicate_pushdown`) was vulnerable to mutation testing. The operator was responsible for signaling whether an optimization caused a change in the plan, but test suites lacked scenarios where only a single branch (e.g., the left branch) was mutated. Therefore, mutants changing `||` to `&&` survived.
+**Evidence:** Using `cargo mutants` against `src/query/planner/rules/*.rs` flagged multiple surviving `replace || with && in ...::Binary` mutations.
+**Recommendation:** Added sentry tests in all four modules (`test_binary_op_partial_fusion`, `test_binary_op_partial_limit_pushdown`, `test_binary_op_partial_reorder`, `test_binary_op_partial_pushdown`) specifically targeting the `LogicalOp::Binary` case with asymmetric inputs (left branch changed, right branch unchanged) to definitively catch `||` -> `&&` mutants.

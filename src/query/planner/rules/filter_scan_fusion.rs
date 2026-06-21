@@ -242,4 +242,49 @@ mod tests {
         assert!(result.is_some());
         assert!(result.unwrap().temporal_context.is_some());
     }
+    #[test]
+    fn test_binary_op_partial_fusion() {
+        use crate::query::plan::BinaryOp;
+
+        let rule = FilterScanFusion;
+        let stats = test_stats();
+
+        // Left side: Fusable (Filter + NodeScan with label)
+        let left_op = LogicalOp::unary(
+            UnaryOp::Filter(Predicate::eq("name", "Alice")),
+            LogicalOp::Scan(ScanOp::NodeScan {
+                label: Some("Person".to_string()),
+                estimated_rows: None,
+            }),
+        );
+
+        // Right side: Not fusable (Scan)
+        let right_op = LogicalOp::Scan(ScanOp::NodeScan {
+            label: Some("Company".to_string()),
+            estimated_rows: None,
+        });
+
+        // Binary op: Union
+        let plan = LogicalPlan::new(LogicalOp::binary(BinaryOp::Union, left_op, right_op));
+
+        let result = rule.apply(&plan, &stats).unwrap();
+        assert!(
+            result.is_some(),
+            "Binary op with one changed branch should return Some"
+        );
+
+        let optimized_plan = result.unwrap();
+        match &optimized_plan.root {
+            LogicalOp::Binary { left, right, .. } => {
+                // Left should be fused
+                assert!(matches!(
+                    **left,
+                    LogicalOp::Scan(ScanOp::PropertyScan { .. })
+                ));
+                // Right should remain unchanged
+                assert!(matches!(**right, LogicalOp::Scan(ScanOp::NodeScan { .. })));
+            }
+            _ => panic!("Expected Binary op at root"),
+        }
+    }
 }
