@@ -1,3 +1,6 @@
+## 2026-06-21 - [Doctests for Embeddings module]
+**Confusion:** The `src/embeddings/mod.rs` module lacked executable doctests for its primary functions `to_dense_iter` and `embed_data_to_dense_iter`, as well as the struct `DenseEmbedData`.
+**Clarification:** Added `## Examples` sections with executable Rust code in the `///` docs to ensure developers understand how to use these interfaces.
 ## 2024-04-07 - [The Missing Documentation of the WAL internals]
 **Confusion:** Many core public functions and structures within the `src/storage/wal` submodules were completely undocumented. Since the internals of the Write-Ahead Log are deeply nuanced (stripe concurrency, lock-free allocations, background flush threads), a developer trying to extend or debug this sub-system would be met with an opaque wall of uncommented signatures.
 **Clarification:** I added structured `///` documentation for all un-commented public structs and functions across `stripe.rs`, `lsn_allocator.rs`, `ring_buffer.rs`, `flush_coordinator.rs`, `concurrent.rs`, `durability.rs`, and `group_commit.rs`. Specifically, I utilized the `# Why?` convention to articulate exactly why a particular structural unit or function is publicly exposed.

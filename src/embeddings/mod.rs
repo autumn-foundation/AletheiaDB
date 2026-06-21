@@ -21,6 +21,21 @@ pub use embed_anything::embeddings::embed::{
 };
 
 /// Dense embedding data with chunk text and metadata preserved.
+///
+/// ## Examples
+///
+/// ```rust
+/// use aletheiadb::embeddings::{DenseEmbedData, DenseEmbeddingError};
+/// use std::collections::HashMap;
+///
+/// let data = DenseEmbedData {
+///     text: Some("Example text".to_string()),
+///     metadata: Some(HashMap::new()),
+///     embedding: vec![0.1, 0.2, 0.3],
+/// };
+///
+/// assert_eq!(data.embedding.len(), 3);
+/// ```
 #[derive(Debug, Clone, PartialEq)]
 pub struct DenseEmbedData {
     /// Text associated with the embedding chunk, when provided upstream.
@@ -51,6 +66,22 @@ impl Error for DenseEmbeddingError {}
 /// Converts upstream embedding results into dense vectors lazily.
 ///
 /// When `limit` is provided, at most that many results are converted.
+///
+/// ## Examples
+///
+/// ```rust
+/// use aletheiadb::embeddings::{EmbeddingResult, to_dense_iter};
+///
+/// let results = vec![
+///     EmbeddingResult::DenseVector(vec![0.1, 0.2]),
+///     EmbeddingResult::DenseVector(vec![0.3, 0.4]),
+/// ];
+///
+/// let mut iter = to_dense_iter(results, None);
+/// assert_eq!(iter.next().unwrap().unwrap(), vec![0.1, 0.2]);
+/// assert_eq!(iter.next().unwrap().unwrap(), vec![0.3, 0.4]);
+/// assert!(iter.next().is_none());
+/// ```
 pub fn to_dense_iter<I>(
     results: I,
     limit: Option<usize>,
@@ -68,6 +99,26 @@ where
 /// chunk text and metadata.
 ///
 /// When `limit` is provided, at most that many chunks are converted.
+///
+/// ## Examples
+///
+/// ```rust
+/// use aletheiadb::embeddings::{EmbedData, EmbeddingResult, embed_data_to_dense_iter};
+/// use std::collections::HashMap;
+///
+/// let data = vec![
+///     EmbedData {
+///         text: Some("hello".to_string()),
+///         metadata: None,
+///         embedding: EmbeddingResult::DenseVector(vec![0.1, 0.2]),
+///     }
+/// ];
+///
+/// let mut iter = embed_data_to_dense_iter(data, None);
+/// let dense_data = iter.next().unwrap().unwrap();
+/// assert_eq!(dense_data.text.as_deref(), Some("hello"));
+/// assert_eq!(dense_data.embedding, vec![0.1, 0.2]);
+/// ```
 pub fn embed_data_to_dense_iter<I>(
     data: I,
     limit: Option<usize>,
