@@ -116,11 +116,11 @@ succeed or all roll back.
 For operations that must succeed together:
 
 ```rust
-let (carol_id, dave_id) = db.write(|tx| -> Result<(NodeId, NodeId)> {
+db.write(|tx| -> Result<()> {
     let carol = tx.create_node("Person", properties! { "name" => "Carol" })?;
     let dave  = tx.create_node("Person", properties! { "name" => "Dave"  })?;
     tx.create_edge(carol, dave, "WORKS_WITH", properties! {})?;
-    Ok((carol, dave))
+    Ok(())
 })?;
 ```
 

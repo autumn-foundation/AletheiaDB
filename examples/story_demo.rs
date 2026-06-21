@@ -10,7 +10,7 @@
 //! ## Running this example
 //!
 //! ```bash
-//! cargo run --features nova --example story_demo
+//! cargo run --features semantic-temporal --example story_demo
 //! ```
 //!
 //! ## Using in your project
@@ -22,15 +22,13 @@
 //! aletheiadb = { version = "0.1", features = ["nova"] }
 //! ```
 
-use aletheiadb::AletheiaDB;
-use aletheiadb::WriteOps;
-// ⚠️ REQUIRES FEATURE 'NOVA' IN CARGO.TOML
+use aletheiadb::prelude::*;
+// ⚠️ REQUIRES FEATURE 'NOVA' OR 'SEMANTIC-TEMPORAL' IN CARGO.TOML
 // [dependencies]
 // aletheiadb = { version = "0.1", features = ["nova"] }
 use aletheiadb::experimental::temporal_narrative::NarrativeGenerator;
-use aletheiadb::properties;
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<()> {
     let db = AletheiaDB::new()?;
 
     // 1. Create Node
