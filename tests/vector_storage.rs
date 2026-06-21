@@ -4,6 +4,8 @@
 //! AletheiaDB API, including storage, retrieval, versioning, and
 //! temporal queries.
 
+#![allow(deprecated)] // exercises deprecated find_similar* wrappers for back-compat coverage (issue #352)
+
 use aletheiadb::Error;
 use aletheiadb::{AletheiaDB, PropertyMapBuilder, WriteOps};
 

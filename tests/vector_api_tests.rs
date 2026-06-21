@@ -1,3 +1,5 @@
+#![allow(deprecated)] // exercises deprecated find_similar* wrappers for back-compat coverage (issue #352)
+
 use aletheiadb::AletheiaDB;
 use aletheiadb::Error;
 use aletheiadb::WriteOps;

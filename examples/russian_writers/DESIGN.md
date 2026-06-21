@@ -233,7 +233,7 @@ create_edge(dostoevsky, pushkin, "INFLUENCED_BY", {
 ```rust
 // Find characters similar to Raskolnikov
 let raskolnikov = db.find_node("Character", "name" == "Rodion Raskolnikov")?;
-let similar = db.find_similar(raskolnikov, 5)?;
+let similar = db.similarity_search(SimilarityQuery::from_node(raskolnikov).k(5))?;
 // Returns: Prince Myshkin (0.87), Ivan Karamazov (0.85), Pechorin (0.82)...
 ```
 

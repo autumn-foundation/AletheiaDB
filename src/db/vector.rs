@@ -5,6 +5,7 @@ use crate::core::error::{Result, ResultExt};
 use crate::core::id::NodeId;
 use crate::core::temporal::Timestamp;
 use crate::db::AletheiaDB;
+use crate::db::similarity_query::{SimilarityQuery, SimilaritySource};
 use crate::db::vector_builder::VectorIndexBuilder;
 use crate::index::vector::hnsw::HnswConfig;
 use crate::index::vector::temporal::{TemporalVectorConfig, VectorIndexObserver};
@@ -350,6 +351,85 @@ impl AletheiaDB {
             .record_error_metric()
     }
 
+    /// Run a vector similarity search described by a [`SimilarityQuery`].
+    ///
+    /// This is the unified entry point for vector search. It consolidates the
+    /// previously separate `find_similar*` methods (node-based, embedding-based,
+    /// label-filtered, and temporal) behind a single extensible builder, so that
+    /// adding a new filter does not require adding a new database method.
+    ///
+    /// # Arguments
+    ///
+    /// * `query` - A [`SimilarityQuery`] built via [`SimilarityQuery::from_node`]
+    ///   or [`SimilarityQuery::from_embedding`] and refined with `.k()`,
+    ///   `.with_label()`, and `.at_time()`.
+    ///
+    /// # Returns
+    ///
+    /// A list of `(NodeId, similarity_score)` pairs sorted by similarity (highest first).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the appropriate vector index is not enabled, the query
+    /// node/embedding is invalid, or the requested combination of filters is not
+    /// supported (currently: a node-based temporal search, or a label-filtered
+    /// temporal search).
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use aletheiadb::SimilarityQuery;
+    ///
+    /// // Find similar Documents to an existing node.
+    /// let results = db.similarity_search(
+    ///     SimilarityQuery::from_node(doc_id).k(5).with_label("Document"),
+    /// )?;
+    ///
+    /// // Find similar nodes to a raw embedding at a point in time.
+    /// let results = db.similarity_search(
+    ///     SimilarityQuery::from_embedding(&query_embedding).k(10).at_time(ts),
+    /// )?;
+    /// ```
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
+    pub fn similarity_search(&self, query: SimilarityQuery) -> Result<Vec<(NodeId, f32)>> {
+        #[cfg(feature = "observability")]
+        let _span = crate::observability::vector_search_span("similarity_search", "").entered();
+
+        let k = query.limit();
+        let label = query.label();
+        let timestamp = query.timestamp();
+
+        let result = match (query.source(), label, timestamp) {
+            (SimilaritySource::Node(node_id), None, None) => self.current.find_similar(*node_id, k),
+            (SimilaritySource::Node(node_id), Some(label), None) => {
+                self.current.find_similar_with_label(*node_id, label, k)
+            }
+            (SimilaritySource::Embedding(embedding), None, None) => {
+                self.current.find_similar_by_embedding(embedding, k)
+            }
+            (SimilaritySource::Embedding(embedding), Some(label), None) => self
+                .current
+                .find_similar_by_embedding_with_label(embedding, label, k),
+            (SimilaritySource::Embedding(embedding), None, Some(ts)) => {
+                self.current.find_similar_as_of(embedding, k, ts)
+            }
+            (SimilaritySource::Node(_), _, Some(_)) => Err(crate::core::error::Error::Vector(
+                crate::core::error::VectorError::IndexError(
+                    "Temporal similarity search from a node is not supported. \
+                         Use SimilarityQuery::from_embedding(...).at_time(...) instead."
+                        .to_string(),
+                ),
+            )),
+            (SimilaritySource::Embedding(_), Some(_), Some(_)) => Err(
+                crate::core::error::Error::Vector(crate::core::error::VectorError::IndexError(
+                    "Label-filtered temporal similarity search is not supported.".to_string(),
+                )),
+            ),
+        };
+
+        result.record_error_metric()
+    }
+
     /// Find k most similar nodes to a query node based on vector similarity.
     ///
     /// Returns a list of (NodeId, score) pairs sorted by similarity (highest first).
@@ -376,6 +456,10 @@ impl AletheiaDB {
     /// - Vector index is not enabled
     /// - Query node is not found
     /// - Query node does not have the indexed vector property
+    #[deprecated(
+        since = "0.1.0",
+        note = "use db.similarity_search(SimilarityQuery::from_node(id).k(k)) instead"
+    )]
     #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn find_similar(&self, query_node_id: NodeId, k: usize) -> Result<Vec<(NodeId, f32)>> {
         #[cfg(feature = "observability")]
@@ -402,6 +486,10 @@ impl AletheiaDB {
     /// // Find similar Person nodes only
     /// let similar_people = db.find_similar_with_label(person_id, "Person", 10)?;
     /// ```
+    #[deprecated(
+        since = "0.1.0",
+        note = "use db.similarity_search(SimilarityQuery::from_node(id).k(k).with_label(label)) instead"
+    )]
     #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn find_similar_with_label(
         &self,
@@ -448,6 +536,10 @@ impl AletheiaDB {
     ///     println!("Node {:?} has similarity {}", node_id, similarity);
     /// }
     /// ```
+    #[deprecated(
+        since = "0.1.0",
+        note = "use db.similarity_search(SimilarityQuery::from_embedding(emb).k(k)) instead"
+    )]
     #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn find_similar_by_embedding(
         &self,
@@ -495,6 +587,10 @@ impl AletheiaDB {
     ///     5
     /// )?;
     /// ```
+    #[deprecated(
+        since = "0.1.0",
+        note = "use db.similarity_search(SimilarityQuery::from_embedding(emb).k(k).with_label(label)) instead"
+    )]
     #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn find_similar_by_embedding_with_label(
         &self,
@@ -577,6 +673,10 @@ impl AletheiaDB {
     /// # Ok(())
     /// # }
     /// ```
+    #[deprecated(
+        since = "0.1.0",
+        note = "use db.similarity_search(SimilarityQuery::from_embedding(emb).k(k).at_time(ts)) instead"
+    )]
     #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn find_similar_as_of(
         &self,

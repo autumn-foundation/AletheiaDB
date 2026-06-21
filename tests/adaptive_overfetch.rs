@@ -2,6 +2,8 @@
 //!
 //! Issue #334: Make the over-fetch heuristic adaptive based on actual filter pass rates.
 
+#![allow(deprecated)] // exercises deprecated find_similar* wrappers for back-compat coverage (issue #352)
+
 use aletheiadb::AletheiaDB;
 use aletheiadb::core::property::PropertyMapBuilder;
 use aletheiadb::index::vector::{DistanceMetric, HnswConfig};

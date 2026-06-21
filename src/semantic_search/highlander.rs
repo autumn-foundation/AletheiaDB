@@ -56,12 +56,14 @@ impl<'a> HighlanderDetector<'a> {
         threshold: f32,
         limit: usize,
     ) -> Result<Vec<(NodeId, f32)>> {
-        self.db.find_similar(target, limit).map(|candidates| {
-            candidates
-                .into_iter()
-                .filter(|&(_, score)| score >= threshold)
-                .collect()
-        })
+        self.db
+            .similarity_search(crate::SimilarityQuery::from_node(target).k(limit))
+            .map(|candidates| {
+                candidates
+                    .into_iter()
+                    .filter(|&(_, score)| score >= threshold)
+                    .collect()
+            })
     }
 }
 

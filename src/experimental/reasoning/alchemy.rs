@@ -137,8 +137,10 @@ impl<'a> Alchemist<'a> {
             }
 
             // Find similar nodes (excludes self)
-            // Note: find_similar might return nodes outside candidates list
-            let neighbors = self.db.find_similar(node_id, 5)?;
+            // Note: the search might return nodes outside candidates list
+            let neighbors = self
+                .db
+                .similarity_search(crate::SimilarityQuery::from_node(node_id).k(5))?;
 
             for (neighbor, sim) in neighbors {
                 if sim >= similarity_threshold

@@ -110,7 +110,8 @@ impl<'a> FishingRod<'a> {
                     self.db.find_similar_in(&prop, id, config.limit)?
                 } else {
                     // Fallback to finding similar across any index (default behavior)
-                    self.db.find_similar(id, config.limit)?
+                    self.db
+                        .similarity_search(crate::SimilarityQuery::from_node(id).k(config.limit))?
                 }
             }
             Bait::Vector { vector, property } => {
