@@ -239,8 +239,10 @@ impl AletheiaDB {
         // Verify the node exists first; an absent node should error rather than
         // silently report zero connected edges.
         let _ = self.current.get_node_label(node_id)?;
-        let outgoing = self.current.get_outgoing_edges(node_id).len();
-        let incoming = self.current.get_incoming_edges(node_id).len();
+        // Use degree counters rather than materializing edge-id vectors: this
+        // avoids allocations for high-degree nodes.
+        let outgoing = self.current.out_degree(node_id);
+        let incoming = self.current.in_degree(node_id);
         Ok(outgoing + incoming)
     }
 

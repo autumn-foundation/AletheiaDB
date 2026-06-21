@@ -901,20 +901,52 @@ impl AletheiaMcpServer {
             Err(e) => return self.error_json(&e.to_string()),
         };
 
-        // Determine how many edges are connected before we touch anything. This
-        // both verifies the node exists and lets us honor the safe-by-default
-        // DETACH-DELETE contract (Issue #3209).
-        let connected_edges = match self.db.count_connected_edges(node_id) {
-            Ok(count) => count,
+        let detach = req.detach.unwrap_or(false);
+
+        // Perform the connected-edge check and the deletion inside a single write
+        // transaction so they observe the same storage state. Splitting the count
+        // into a separate transaction (or doing it before opening one) leaves a
+        // check-then-act gap in which a concurrent writer could add an edge after
+        // the count but before the delete, silently orphaning it. Keeping both in
+        // one closure removes that cross-transaction gap (Issue #3209).
+        enum Outcome {
+            Refused { connected_edges: usize },
+            Deleted { edges_removed: usize },
+        }
+
+        let outcome = self.db.write(|tx| -> crate::core::error::Result<Outcome> {
+            // `count_connected_edges` reads the same `current` storage the
+            // transaction's edge traversal uses, and also verifies the node
+            // exists (errors propagate via `?`).
+            let connected_edges = self.db.count_connected_edges(node_id)?;
+
+            // Refuse-by-default: never report a bare success while silently
+            // orphaning edges. The caller must opt into destruction via `detach`.
+            if connected_edges > 0 && !detach {
+                return Ok(Outcome::Refused { connected_edges });
+            }
+
+            if detach {
+                // Cascade-equivalent delete: remove the node and all connected
+                // edges, reporting exactly how many edges were removed.
+                tx.delete_node_cascade(node_id)?;
+                Ok(Outcome::Deleted {
+                    edges_removed: connected_edges,
+                })
+            } else {
+                // No connected edges: a plain delete cannot orphan anything.
+                tx.delete_node(node_id)?;
+                Ok(Outcome::Deleted { edges_removed: 0 })
+            }
+        });
+
+        let outcome = match outcome {
+            Ok(o) => o,
             Err(e) => return self.error_json(&e.to_string()),
         };
 
-        let detach = req.detach.unwrap_or(false);
-
-        // Refuse-by-default: never report a bare success while silently orphaning
-        // edges. The caller must opt into destruction via `detach: true`.
-        if connected_edges > 0 && !detach {
-            return CallToolResult::error(vec![Content::text(
+        match outcome {
+            Outcome::Refused { connected_edges } => CallToolResult::error(vec![Content::text(
                 serde_json::to_string_pretty(&json!({
                     "error": format!(
                         "Node {} has {} connected edge(s); refusing to delete. \
@@ -928,32 +960,13 @@ impl AletheiaMcpServer {
                     "detach_required": true
                 }))
                 .unwrap_or_else(|_| "{\"error\":\"serialization failed\"}".to_string()),
-            )]);
-        }
-
-        if detach {
-            // Cascade-equivalent delete: remove the node and all connected edges,
-            // reporting exactly how many edges were removed.
-            match self.db.write(|tx| tx.delete_node_cascade(node_id)) {
-                Ok(()) => self.success_json(json!({
-                    "success": true,
-                    "deleted_node_id": req.node_id,
-                    "detached": true,
-                    "edges_removed": connected_edges
-                })),
-                Err(e) => self.error_json(&e.to_string()),
-            }
-        } else {
-            // No connected edges: a plain delete cannot orphan anything.
-            match self.db.write(|tx| tx.delete_node(node_id)) {
-                Ok(()) => self.success_json(json!({
-                    "success": true,
-                    "deleted_node_id": req.node_id,
-                    "detached": false,
-                    "edges_removed": 0
-                })),
-                Err(e) => self.error_json(&e.to_string()),
-            }
+            )]),
+            Outcome::Deleted { edges_removed } => self.success_json(json!({
+                "success": true,
+                "deleted_node_id": req.node_id,
+                "detached": detach,
+                "edges_removed": edges_removed
+            })),
         }
     }
 
