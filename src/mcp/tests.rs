@@ -80,6 +80,21 @@ fn test_server_with_existing_db() {
 mod node_tests {
     use super::*;
 
+    /// Helper to create two `Person` nodes and return their IDs.
+    fn create_two_nodes(server: &AletheiaMcpServer) -> (u64, u64) {
+        let n1: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            label: "Person".to_string(),
+            properties: None,
+        }))
+        .unwrap();
+        let n2: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            label: "Person".to_string(),
+            properties: None,
+        }))
+        .unwrap();
+        (n1.id, n2.id)
+    }
+
     #[test]
     fn test_create_node_basic() {
         let server = create_test_server();
@@ -216,7 +231,10 @@ mod node_tests {
         let node_id = created.id;
 
         // Delete it
-        let delete_req = DeleteNodeRequest { node_id };
+        let delete_req = DeleteNodeRequest {
+            node_id,
+            detach: None,
+        };
 
         let delete_response = server.delete_node(delete_req);
         let value: serde_json::Value = serde_json::from_str(&delete_response).unwrap();
@@ -229,6 +247,128 @@ mod node_tests {
         let get_value: serde_json::Value = serde_json::from_str(&get_response).unwrap();
 
         assert!(get_value.get("error").is_some());
+    }
+
+    #[test]
+    fn test_delete_node_with_edges_refused_without_detach() {
+        // Issue #3209: the MCP delete_node must NOT return a bare success when the
+        // target node has connected edges. Without `detach`, it refuses and reports
+        // the machine-readable count of connected edges.
+        let server = create_test_server();
+        let (source_id, target_id) = create_two_nodes(&server);
+
+        server.create_edge(CreateEdgeRequest {
+            source_id,
+            target_id,
+            label: "KNOWS".to_string(),
+            properties: None,
+        });
+
+        let delete_response = server.delete_node(DeleteNodeRequest {
+            node_id: source_id,
+            detach: None,
+        });
+        let value: serde_json::Value = serde_json::from_str(&delete_response).unwrap();
+
+        // It must not claim success...
+        assert_ne!(value.get("success"), Some(&serde_json::json!(true)));
+        // ...and it must surface exactly the number of connected edges.
+        assert_eq!(value.get("connected_edges"), Some(&serde_json::json!(1)));
+
+        // The node must still exist (refused, not destroyed).
+        let get_value: serde_json::Value =
+            serde_json::from_str(&server.get_node(GetNodeRequest { node_id: source_id })).unwrap();
+        assert!(get_value.get("error").is_none());
+    }
+
+    #[test]
+    fn test_delete_node_with_detach_removes_edges_no_dangling() {
+        // Issue #3209: with detach: true, the MCP path performs a cascade-equivalent
+        // delete and reports the number of edges removed, leaving no dangling endpoints.
+        let server = create_test_server();
+        let (source_id, target_id) = create_two_nodes(&server);
+
+        // A third node so we have both an outgoing and an incoming edge.
+        let third = server.create_node(CreateNodeRequest {
+            label: "Person".to_string(),
+            properties: None,
+        });
+        let third_id: NodeResponse = parse_response(&third).unwrap();
+        let third_id = third_id.id;
+
+        server.create_edge(CreateEdgeRequest {
+            source_id,
+            target_id,
+            label: "KNOWS".to_string(),
+            properties: None,
+        });
+        server.create_edge(CreateEdgeRequest {
+            source_id: third_id,
+            target_id: source_id,
+            label: "FOLLOWS".to_string(),
+            properties: None,
+        });
+
+        let delete_response = server.delete_node(DeleteNodeRequest {
+            node_id: source_id,
+            detach: Some(true),
+        });
+        let value: serde_json::Value = serde_json::from_str(&delete_response).unwrap();
+
+        assert_eq!(value.get("success"), Some(&serde_json::json!(true)));
+        assert_eq!(value.get("edges_removed"), Some(&serde_json::json!(2)));
+        assert_eq!(value.get("detached"), Some(&serde_json::json!(true)));
+
+        // Node is gone.
+        let get_value: serde_json::Value =
+            serde_json::from_str(&server.get_node(GetNodeRequest { node_id: source_id })).unwrap();
+        assert!(get_value.get("error").is_some());
+
+        // Traversal from the surviving neighbors yields no dangling endpoint to
+        // the deleted node: the connected edges were removed with it.
+        let outgoing: serde_json::Value =
+            serde_json::from_str(&server.get_outgoing_edges(GetOutgoingEdgesRequest {
+                node_id: third_id,
+                label: None,
+            }))
+            .unwrap();
+        let edges = outgoing.get("edges").and_then(|e| e.as_array());
+        assert!(
+            edges.map(|e| e.is_empty()).unwrap_or(true),
+            "third node should have no outgoing edges after detach delete"
+        );
+
+        let incoming: serde_json::Value =
+            serde_json::from_str(&server.get_incoming_edges(GetIncomingEdgesRequest {
+                node_id: target_id,
+                label: None,
+            }))
+            .unwrap();
+        let in_edges = incoming.get("edges").and_then(|e| e.as_array());
+        assert!(
+            in_edges.map(|e| e.is_empty()).unwrap_or(true),
+            "target node should have no incoming edges after detach delete"
+        );
+    }
+
+    #[test]
+    fn test_delete_node_without_edges_succeeds_with_detach_false() {
+        // A node with no edges deletes cleanly and reports zero edges removed.
+        let server = create_test_server();
+        let created: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            label: "Lonely".to_string(),
+            properties: None,
+        }))
+        .unwrap();
+
+        let delete_response = server.delete_node(DeleteNodeRequest {
+            node_id: created.id,
+            detach: None,
+        });
+        let value: serde_json::Value = serde_json::from_str(&delete_response).unwrap();
+
+        assert_eq!(value.get("success"), Some(&serde_json::json!(true)));
+        assert_eq!(value.get("edges_removed"), Some(&serde_json::json!(0)));
     }
 
     #[test]
@@ -1568,7 +1708,10 @@ mod error_handling_tests {
     fn test_delete_node_nonexistent() {
         let server = create_test_server();
 
-        let req = DeleteNodeRequest { node_id: 999999 };
+        let req = DeleteNodeRequest {
+            node_id: 999999,
+            detach: None,
+        };
 
         let response = server.delete_node(req);
         let value: serde_json::Value = serde_json::from_str(&response).unwrap();

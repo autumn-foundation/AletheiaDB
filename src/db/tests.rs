@@ -1176,6 +1176,42 @@ fn test_delete_node_cascade() {
 }
 
 #[test]
+fn test_count_connected_edges() {
+    // Issue #3209: additive, non-breaking helper to learn how many edges connect
+    // a node prior to deletion, so callers can decide before acting.
+    let db = AletheiaDB::new().unwrap();
+
+    let alice = db
+        .create_node("Person", PropertyMapBuilder::new().build())
+        .unwrap();
+    let bob = db
+        .create_node("Person", PropertyMapBuilder::new().build())
+        .unwrap();
+    let charlie = db
+        .create_node("Person", PropertyMapBuilder::new().build())
+        .unwrap();
+
+    // No edges yet
+    assert_eq!(db.count_connected_edges(alice).unwrap(), 0);
+
+    // One outgoing edge
+    db.create_edge(alice, bob, "KNOWS", PropertyMapBuilder::new().build())
+        .unwrap();
+    assert_eq!(db.count_connected_edges(alice).unwrap(), 1);
+
+    // One incoming edge (counts both directions)
+    db.create_edge(charlie, alice, "FOLLOWS", PropertyMapBuilder::new().build())
+        .unwrap();
+    assert_eq!(db.count_connected_edges(alice).unwrap(), 2);
+    assert_eq!(db.count_connected_edges(bob).unwrap(), 1);
+    assert_eq!(db.count_connected_edges(charlie).unwrap(), 1);
+
+    // Missing node returns an error rather than a bogus count
+    let missing = NodeId::new(999_999).unwrap();
+    assert!(db.count_connected_edges(missing).is_err());
+}
+
+#[test]
 fn test_delete_edge_via_transaction() {
     let db = AletheiaDB::new().unwrap();
 

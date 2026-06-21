@@ -164,6 +164,36 @@ fn test_delete_node() {
 }
 
 #[test]
+fn test_delete_node_preserves_edges_for_audit() {
+    // Issue #3209: the low-level `delete_node` must retain its edge-preserving
+    // semantics for the documented audit/history use case. Its behavior is NOT
+    // changed by the safe-by-default MCP work, so the published crate surface
+    // stays backward-compatible.
+    let storage = CurrentStorage::new();
+
+    let alice = storage
+        .create_node("Person", PropertyMapBuilder::new().build())
+        .unwrap();
+    let bob = storage
+        .create_node("Person", PropertyMapBuilder::new().build())
+        .unwrap();
+
+    let edge_id = storage
+        .create_edge(alice, bob, "KNOWS", PropertyMapBuilder::new().build())
+        .unwrap();
+
+    // Direct low-level delete removes only the node...
+    let deleted = storage.delete_node(alice).unwrap();
+    assert_eq!(deleted.id, alice);
+    assert!(storage.get_node(alice).is_err());
+
+    // ...and intentionally preserves the connected edge (audit path intact).
+    let edge = storage.get_edge(edge_id).unwrap();
+    assert_eq!(edge.source, alice);
+    assert_eq!(edge.target, bob);
+}
+
+#[test]
 fn test_delete_edge() {
     let storage = CurrentStorage::new();
 

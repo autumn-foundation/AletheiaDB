@@ -44,11 +44,26 @@ pub struct UpdateNodeRequest {
 }
 
 /// Request to delete a node.
+///
+/// Safe-by-default (Issue #3209): if the node has connected edges and `detach`
+/// is not `true`, the deletion is refused and the response reports the number of
+/// connected edges (mirrors Cypher's `DETACH DELETE` contract). Set `detach:
+/// true` to delete the node together with all of its connected edges.
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct DeleteNodeRequest {
     /// The unique identifier of the node to delete.
     #[schemars(description = "The unique identifier of the node to delete")]
     pub node_id: u64,
+
+    /// When `true`, also delete every edge connected to the node (cascade /
+    /// detach delete). When omitted or `false`, deleting a node that has
+    /// connected edges is refused and the response reports `connected_edges`.
+    #[schemars(
+        description = "When true, also delete all edges connected to the node (detach delete). \
+                       When false/omitted, deletion is refused if the node has connected edges, \
+                       and the response reports the connected edge count so the caller can decide."
+    )]
+    pub detach: Option<bool>,
 }
 
 /// Request to delete a node and all its connected edges (cascade delete).

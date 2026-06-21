@@ -224,6 +224,28 @@ impl AletheiaDB {
         self.current.get_outgoing_edges_with_label(node_id, label)
     }
 
+    /// Count the edges connected to a node (both outgoing and incoming).
+    ///
+    /// This is an additive, non-breaking helper (Issue #3209) that lets callers
+    /// learn how many edges reference a node *before* deleting it, so they can
+    /// decide whether a detach/cascade delete is required to avoid orphaning
+    /// edges.
+    ///
+    /// Returns [`StorageError::NodeNotFound`](crate::storage::StorageError::NodeNotFound)
+    /// if the node does not exist in the current state, so callers never receive
+    /// a misleading zero count for a missing node.
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
+    pub fn count_connected_edges(&self, node_id: NodeId) -> Result<usize> {
+        // Verify the node exists first; an absent node should error rather than
+        // silently report zero connected edges.
+        let _ = self.current.get_node_label(node_id)?;
+        // Use degree counters rather than materializing edge-id vectors: this
+        // avoids allocations for high-degree nodes.
+        let outgoing = self.current.out_degree(node_id);
+        let incoming = self.current.in_degree(node_id);
+        Ok(outgoing + incoming)
+    }
+
     /// Get the number of nodes in the current state.
     #[inline]
     pub fn node_count(&self) -> usize {
