@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "aletheiadb"
-version = "0.1.0"
+version = "0.1.3"
 description = "Python SDK for AletheiaDB — a high-performance bi-temporal graph database for LLM integration"
 readme = "README.md"
 requires-python = ">=3.9"
