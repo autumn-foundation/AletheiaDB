@@ -1408,7 +1408,7 @@ impl AletheiaMcpServer {
 
         match self
             .db
-            .similarity_search(crate::SimilarityQuery::from_embedding(req.embedding.clone()).k(k))
+            .similarity_search(crate::SimilarityQuery::from_embedding(req.embedding).k(k))
         {
             Ok(results) => {
                 let similarity_results: Vec<SimilarityResult> = results
