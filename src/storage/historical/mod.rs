@@ -197,21 +197,21 @@ pub struct HistoricalStorage {
     cached_edge_anchor_count: usize,
     cached_edge_delta_count: usize,
     /// TinyLFU cache for reconstructed node properties (reduces lock contention)
-    node_property_cache: Arc<Cache<VersionId, Arc<PropertyMap>>>,
+    node_property_cache: Arc<Cache<VersionId, PropertyMap>>,
     /// TinyLFU cache for reconstructed edge properties
-    edge_property_cache: Arc<Cache<VersionId, Arc<PropertyMap>>>,
+    edge_property_cache: Arc<Cache<VersionId, PropertyMap>>,
     /// Improvement #1: Dedicated cache for node anchor properties.
     ///
     /// This separate cache ensures anchors are never evicted by delta cache pressure,
     /// providing guaranteed O(1) access to anchors even under heavy load. Anchors are
     /// frequently reused as base points for delta reconstruction, so keeping them cached
     /// reduces average reconstruction cost from O(N) to O(M) where M << N.
-    node_anchor_cache: Arc<Cache<VersionId, Arc<PropertyMap>>>,
+    node_anchor_cache: Arc<Cache<VersionId, PropertyMap>>,
     /// Improvement #1: Dedicated cache for edge anchor properties.
     ///
     /// This separate cache ensures anchors are never evicted by delta cache pressure,
     /// providing guaranteed O(1) access to anchors even under heavy load.
-    edge_anchor_cache: Arc<Cache<VersionId, Arc<PropertyMap>>>,
+    edge_anchor_cache: Arc<Cache<VersionId, PropertyMap>>,
     /// Improvement #3: Primary cache hit counter for adaptive sizing.
     ///
     /// Tracks successful lookups in the primary property cache (fast path).
@@ -661,13 +661,12 @@ impl HistoricalStorage {
         //         the previous delta's properties even though we just added them.
         // AFTER:  All versions are cached in the main property cache, eliminating
         //         unnecessary reconstructions during consecutive writes.
-        let props_arc = Arc::new(properties);
         self.node_property_cache
-            .insert(version_id, props_arc.clone());
+            .insert(version_id, properties.clone());
 
         // Anchors are also cached in the dedicated anchor cache for fallback
         if is_anchor {
-            self.node_anchor_cache.insert(version_id, props_arc);
+            self.node_anchor_cache.insert(version_id, properties);
         }
 
         // Notify observers
@@ -875,13 +874,12 @@ impl HistoricalStorage {
 
         // Issue #210: Cache properties for ALL versions (anchors and deltas) to avoid
         // reconstructing properties we just added when creating the next delta.
-        let props_arc = Arc::new(properties);
         self.edge_property_cache
-            .insert(version_id, props_arc.clone());
+            .insert(version_id, properties.clone());
 
         // Anchors are also cached in the dedicated anchor cache for fallback
         if is_anchor {
-            self.edge_anchor_cache.insert(version_id, props_arc);
+            self.edge_anchor_cache.insert(version_id, properties);
         }
 
         // Notify observers
@@ -1240,14 +1238,14 @@ impl HistoricalStorage {
     fn reconstruct_node_properties_with_depth(&self, version_id: VersionId) -> Result<PropertyMap> {
         if let Some(cached) = self.node_property_cache.get(&version_id) {
             self.primary_cache_hits.fetch_add(1, Ordering::Relaxed);
-            return Ok(cached.as_ref().clone());
+            return Ok(cached);
         }
 
         // Anchor cache fallback: survives primary cache eviction under delta pressure
         if let Some(cached) = self.node_anchor_cache.get(&version_id) {
             self.anchor_cache_hits.fetch_add(1, Ordering::Relaxed);
             self.node_property_cache.insert(version_id, cached.clone());
-            return Ok(cached.as_ref().clone());
+            return Ok(cached);
         }
 
         self.full_reconstructions.fetch_add(1, Ordering::Relaxed);
@@ -1256,7 +1254,7 @@ impl HistoricalStorage {
 
         // Populate cache for future reads
         self.node_property_cache
-            .insert(version_id, Arc::new(properties.clone()));
+            .insert(version_id, properties.clone());
 
         Ok(properties)
     }
@@ -1280,14 +1278,14 @@ impl HistoricalStorage {
     fn reconstruct_edge_properties_with_depth(&self, version_id: VersionId) -> Result<PropertyMap> {
         if let Some(cached) = self.edge_property_cache.get(&version_id) {
             self.primary_cache_hits.fetch_add(1, Ordering::Relaxed);
-            return Ok(cached.as_ref().clone());
+            return Ok(cached);
         }
 
         // Anchor cache fallback: survives primary cache eviction under delta pressure
         if let Some(cached) = self.edge_anchor_cache.get(&version_id) {
             self.anchor_cache_hits.fetch_add(1, Ordering::Relaxed);
             self.edge_property_cache.insert(version_id, cached.clone());
-            return Ok(cached.as_ref().clone());
+            return Ok(cached);
         }
 
         self.full_reconstructions.fetch_add(1, Ordering::Relaxed);
@@ -1296,7 +1294,7 @@ impl HistoricalStorage {
 
         // Populate cache for future reads
         self.edge_property_cache
-            .insert(version_id, Arc::new(properties.clone()));
+            .insert(version_id, properties.clone());
 
         Ok(properties)
     }
