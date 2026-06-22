@@ -91,5 +91,15 @@
 
 pub mod transaction;
 
+/// Bulk graph importer for CSV/JSONL with per-row valid-time backfill (Issue #3211).
+#[cfg(feature = "import")]
+pub mod import;
+
 // Re-export commonly used types
 pub use transaction::{ReadOps, ReadTransaction, TxId, TxState, WriteOps, WriteTransaction};
+
+#[cfg(feature = "import")]
+pub use import::{
+    ColumnType, EdgeMapping, Endpoint, FailureMode, ImportConfig, ImportError, ImportReport,
+    Importer, LabelSource, NodeMapping, PropertyMapping, RowError, UnresolvedEndpoint,
+};

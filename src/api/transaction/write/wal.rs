@@ -56,10 +56,24 @@ pub(crate) fn log_operations_to_wal(
     tx: &WriteTransaction,
     _commit_timestamp: Timestamp,
 ) -> Result<()> {
-    for write in tx.buffer.operations() {
-        // Append to WAL (lock-free!)
-        tx.wal.append_async(WalOperation::from(write))?;
+    // Collect all buffered writes into a single batch and append them under one atomic
+    // LSN allocation via the WAL `append_batch` path (Issue #219). This is strictly more
+    // efficient than the previous per-operation `append_async` loop for multi-operation
+    // transactions — e.g. each chunk committed by the bulk importer (Issue #3211) — and is
+    // behavior-preserving: `append_batch_async` only buffers, leaving the subsequent
+    // `wal.commit()` to perform the `DurabilityMode`-appropriate flush.
+    let operations: Vec<WalOperation> = tx
+        .buffer
+        .operations()
+        .iter()
+        .map(WalOperation::from)
+        .collect();
+
+    if operations.is_empty() {
+        return Ok(());
     }
+
+    tx.wal.append_batch_async(operations)?;
 
     Ok(())
 }
