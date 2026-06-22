@@ -46,6 +46,12 @@
 //!
 //! ## Hybrid Queries
 //! - `hybrid_query`: Combined graph + vector + temporal query
+//!
+//! ## Declarative Query
+//! - `query`: Execute a single read-only Cypher/AQL statement (with optional
+//!   `$param` bindings) and get structured rows back. Mutating statements are
+//!   rejected before execution. Cypher requires the `cypher` feature; AQL is
+//!   always available.
 
 use std::sync::Arc;
 

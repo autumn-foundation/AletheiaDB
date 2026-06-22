@@ -3025,3 +3025,333 @@ mod list_nodes_extended_tests {
         assert_eq!(nodes.len(), 1, "Page 3 should have 1 node");
     }
 }
+
+// ============================================================================
+// Declarative Query Tool Tests (Issue #3213)
+// ============================================================================
+
+mod query_tool_tests {
+    use super::*;
+
+    /// Seed a node with the given label and `name` property, returning its id.
+    fn seed_named(server: &AletheiaMcpServer, label: &str, name: &str) -> u64 {
+        let mut props = HashMap::new();
+        props.insert("name".to_string(), serde_json::json!(name));
+        let resp = server.create_node(CreateNodeRequest {
+            label: label.to_string(),
+            properties: Some(props),
+        });
+        let node: NodeResponse = parse_response(&resp).expect("seed node should succeed");
+        node.id
+    }
+
+    /// Run a query and return the parsed JSON value (success or error).
+    fn run_query(server: &AletheiaMcpServer, req: QueryRequest) -> serde_json::Value {
+        serde_json::from_str(&server.query(req)).expect("query response should be JSON")
+    }
+
+    /// Extract the structured error object from a query response.
+    fn error_obj(value: &serde_json::Value) -> &serde_json::Value {
+        value
+            .get("error")
+            .expect("expected an `error` payload in the response")
+    }
+
+    #[test]
+    fn test_query_tool_is_advertised() {
+        let server = create_test_server();
+        assert!(
+            server.list_tools_for_test().contains(&"query".to_string()),
+            "the `query` tool must be advertised in list_tools"
+        );
+    }
+
+    #[test]
+    fn test_query_aql_returns_structured_rows() {
+        let server = create_test_server();
+        seed_named(&server, "Widget", "alpha");
+
+        let value = run_query(
+            &server,
+            QueryRequest {
+                language: "aql".to_string(),
+                query: "MATCH (n:Widget) RETURN n".to_string(),
+                params: None,
+                limit: None,
+            },
+        );
+
+        // Column metadata is present.
+        assert!(
+            value.get("columns").and_then(|c| c.as_array()).is_some(),
+            "response must include column metadata: {value}"
+        );
+        assert_eq!(
+            value["row_count"].as_u64(),
+            Some(1),
+            "exactly one row: {value}"
+        );
+        let rows = value["rows"].as_array().expect("rows array");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["entity"]["label"].as_str(), Some("Widget"));
+        assert_eq!(
+            rows[0]["entity"]["properties"]["name"].as_str(),
+            Some("alpha")
+        );
+    }
+
+    #[test]
+    fn test_query_rejects_mutations_before_execution() {
+        for stmt in [
+            "CREATE (n:Hacker {name: 'x'})",
+            "MATCH (n:Widget) SET n.name = 'x'",
+            "MATCH (n:Widget) DELETE n",
+            "MERGE (n:Widget {name: 'x'})",
+            "MATCH (n:Widget) REMOVE n.name",
+        ] {
+            let server = create_test_server();
+            seed_named(&server, "Widget", "alpha");
+            let before = server.db().node_count();
+
+            let value = run_query(
+                &server,
+                QueryRequest {
+                    language: "cypher".to_string(),
+                    query: stmt.to_string(),
+                    params: None,
+                    limit: None,
+                },
+            );
+
+            let err = error_obj(&value);
+            assert_eq!(
+                err["kind"].as_str(),
+                Some("read_only_violation"),
+                "statement `{stmt}` must be rejected as read-only: {value}"
+            );
+            assert!(
+                err.get("clause").and_then(|c| c.as_str()).is_some(),
+                "the error must name the offending clause: {value}"
+            );
+            // It must never write.
+            assert_eq!(
+                server.db().node_count(),
+                before,
+                "statement `{stmt}` must not have mutated state"
+            );
+        }
+    }
+
+    #[test]
+    fn test_query_parse_error_is_structured() {
+        let server = create_test_server();
+        let value = run_query(
+            &server,
+            QueryRequest {
+                language: "aql".to_string(),
+                query: "this is not a valid query".to_string(),
+                params: None,
+                limit: None,
+            },
+        );
+        assert_eq!(
+            error_obj(&value)["kind"].as_str(),
+            Some("parse_error"),
+            "malformed query must yield a parse_error: {value}"
+        );
+    }
+
+    #[test]
+    fn test_query_unknown_language_is_invalid_request() {
+        let server = create_test_server();
+        let value = run_query(
+            &server,
+            QueryRequest {
+                language: "sql".to_string(),
+                query: "MATCH (n) RETURN n".to_string(),
+                params: None,
+                limit: None,
+            },
+        );
+        assert_eq!(
+            error_obj(&value)["kind"].as_str(),
+            Some("invalid_request"),
+            "unknown language must yield invalid_request: {value}"
+        );
+    }
+
+    #[test]
+    fn test_query_aql_rejects_params() {
+        let server = create_test_server();
+        let mut params = HashMap::new();
+        params.insert("name".to_string(), serde_json::json!("alpha"));
+        let value = run_query(
+            &server,
+            QueryRequest {
+                language: "aql".to_string(),
+                query: "MATCH (n:Widget) RETURN n".to_string(),
+                params: Some(params),
+                limit: None,
+            },
+        );
+        assert_eq!(
+            error_obj(&value)["kind"].as_str(),
+            Some("invalid_request"),
+            "AQL does not support params and must reject them: {value}"
+        );
+    }
+
+    #[test]
+    fn test_query_row_cap_truncates() {
+        let server = create_test_server();
+        for i in 0..5 {
+            seed_named(&server, "Widget", &format!("w{i}"));
+        }
+        let value = run_query(
+            &server,
+            QueryRequest {
+                language: "aql".to_string(),
+                query: "MATCH (n:Widget) RETURN n".to_string(),
+                params: None,
+                limit: Some(2),
+            },
+        );
+        assert_eq!(
+            value["row_count"].as_u64(),
+            Some(2),
+            "row cap honored: {value}"
+        );
+        assert_eq!(
+            value["truncated"].as_bool(),
+            Some(true),
+            "truncated flag must be set when results exceed the cap: {value}"
+        );
+    }
+
+    #[cfg(not(feature = "cypher"))]
+    #[test]
+    fn test_query_cypher_reports_unavailable_when_feature_disabled() {
+        let server = create_test_server();
+        let value = run_query(
+            &server,
+            QueryRequest {
+                language: "cypher".to_string(),
+                query: "MATCH (n) RETURN n".to_string(),
+                params: None,
+                limit: None,
+            },
+        );
+        assert_eq!(
+            error_obj(&value)["kind"].as_str(),
+            Some("language_unavailable"),
+            "with the cypher feature off, cypher must report as unavailable (not fail to compile): {value}"
+        );
+    }
+
+    #[cfg(feature = "cypher")]
+    #[test]
+    fn test_query_cypher_returns_rows() {
+        let server = create_test_server();
+        seed_named(&server, "Person", "Alice");
+        let value = run_query(
+            &server,
+            QueryRequest {
+                language: "cypher".to_string(),
+                query: "MATCH (n:Person {name: 'Alice'}) RETURN n".to_string(),
+                params: None,
+                limit: None,
+            },
+        );
+        assert_eq!(value["row_count"].as_u64(), Some(1), "{value}");
+        assert_eq!(
+            value["rows"][0]["entity"]["properties"]["name"].as_str(),
+            Some("Alice")
+        );
+    }
+
+    #[cfg(feature = "cypher")]
+    #[test]
+    fn test_query_cypher_with_params() {
+        let server = create_test_server();
+        seed_named(&server, "Person", "Alice");
+        seed_named(&server, "Person", "Bob");
+        let mut params = HashMap::new();
+        params.insert("name".to_string(), serde_json::json!("Alice"));
+        let value = run_query(
+            &server,
+            QueryRequest {
+                language: "cypher".to_string(),
+                query: "MATCH (n:Person {name: $name}) RETURN n".to_string(),
+                params: Some(params),
+                limit: None,
+            },
+        );
+        assert_eq!(value["row_count"].as_u64(), Some(1), "{value}");
+        assert_eq!(
+            value["rows"][0]["entity"]["properties"]["name"].as_str(),
+            Some("Alice")
+        );
+    }
+
+    #[cfg(feature = "cypher")]
+    #[test]
+    fn test_query_cypher_temporal_clauses_are_honored() {
+        let server = create_test_server();
+        seed_named(&server, "Person", "Alice");
+
+        // Each temporal form must parse, flow through to the engine, and return
+        // the correct row (the clause is honored, not dropped or rejected).
+        for clause in [
+            "AS OF VALID_TIME '2099-01-01'",
+            "AS OF SYSTEM_TIME '2099-01-01'",
+            "AS OF TIMESTAMP '2099-01-01T00:00:00Z'",
+            "BETWEEN '2000-01-01' AND '2099-01-01'",
+        ] {
+            let q = format!("MATCH (n:Person) {clause} RETURN n");
+            let value = run_query(
+                &server,
+                QueryRequest {
+                    language: "cypher".to_string(),
+                    query: q.clone(),
+                    params: None,
+                    limit: None,
+                },
+            );
+            assert!(
+                value.get("error").is_none(),
+                "temporal query `{q}` must not error: {value}"
+            );
+            assert_eq!(
+                value["row_count"].as_u64(),
+                Some(1),
+                "temporal query `{q}` must return the node: {value}"
+            );
+            assert_eq!(
+                value["rows"][0]["entity"]["properties"]["name"].as_str(),
+                Some("Alice"),
+                "temporal query `{q}` must return correct data: {value}"
+            );
+        }
+    }
+
+    #[cfg(feature = "cypher")]
+    #[test]
+    fn test_query_cypher_invalid_temporal_timestamp_is_structured() {
+        let server = create_test_server();
+        seed_named(&server, "Person", "Alice");
+        let value = run_query(
+            &server,
+            QueryRequest {
+                language: "cypher".to_string(),
+                query: "MATCH (n:Person) AS OF TIMESTAMP 'not-a-timestamp' RETURN n".to_string(),
+                params: None,
+                limit: None,
+            },
+        );
+        let kind = error_obj(&value)["kind"].as_str();
+        assert!(
+            matches!(kind, Some("invalid_params") | Some("parse_error")),
+            "an invalid temporal timestamp must yield a structured error: {value}"
+        );
+    }
+}

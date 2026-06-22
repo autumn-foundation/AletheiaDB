@@ -36,7 +36,7 @@ pub use tools::{
     DeleteNodeCascadeRequest, DeleteNodeRequest, EnableVectorIndexRequest, FindSimilarRequest,
     GetEdgeAtTimeRequest, GetEdgeRequest, GetIncomingEdgesRequest, GetNodeAtTimeRequest,
     GetNodeRequest, GetOutgoingEdgesRequest, HybridQueryRequest, ListChangesRequest,
-    ListEdgesRequest, ListNodesRequest, ListVectorIndexesRequest, TraverseRequest,
+    ListEdgesRequest, ListNodesRequest, ListVectorIndexesRequest, QueryRequest, TraverseRequest,
     UpdateEdgeRequest, UpdateNodeRequest,
 };
 

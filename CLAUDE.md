@@ -305,6 +305,23 @@ cargo run --bin aletheia-mcp --features mcp-server
 | **Vector** | `find_similar`, `enable_vector_index`, `list_vector_indexes` |
 | **Temporal** | `get_node_at_time`, `get_edge_at_time` |
 | **Hybrid** | `hybrid_query` (combined graph + vector + temporal) |
+| **Query** | `query` (execute a single read-only Cypher/AQL statement; see below) |
+
+**`query` tool (read-only Cypher/AQL):** Lets an LLM answer a multi-hop,
+filtered, temporally-scoped question with **one declarative statement** instead
+of chaining `get_node`/`traverse`/filter calls. Accepts `language`
+(`"cypher"` | `"aql"`), `query` (the statement), optional `params` (`$param`
+bindings, Cypher only — numeric arrays are treated as embeddings), and `limit`
+(default 100, max 10000). Returns `{language, columns, rows, row_count,
+truncated}`. It is **read-only**: mutating clauses
+(CREATE/MERGE/SET/DELETE/REMOVE/DETACH/DROP/CALL/FOREACH/LOAD) are rejected
+before execution and never write. Errors come back as a structured
+`{error:{kind, message, clause?, language}}` payload (kinds: `invalid_request`,
+`read_only_violation`, `language_unavailable`, `parse_error`,
+`unsupported_construct`, `invalid_params`, `runtime_error`) so the caller can
+self-correct. When the `cypher` feature is not compiled in, `language:"cypher"`
+returns `language_unavailable` (AQL is always available). See
+[docs/guides/mcp-query-tool.md](docs/guides/mcp-query-tool.md).
 
 **Programmatic Usage:**
 ```rust
