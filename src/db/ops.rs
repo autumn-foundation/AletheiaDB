@@ -15,7 +15,7 @@ impl AletheiaDB {
     /// This is a convenience method that internally uses a write transaction.
     /// For multiple operations, prefer using `write()` or `write_transaction()`.
     ///
-    /// # Example
+    /// ## Examples
     ///
     /// ```rust,no_run
     /// # use aletheiadb::{AletheiaDB, PropertyMapBuilder};
@@ -44,7 +44,7 @@ impl AletheiaDB {
     /// This is a convenience method that internally uses a write transaction.
     /// For multiple operations, prefer using `write()` or `write_transaction()`.
     ///
-    /// # Example
+    /// ## Examples
     ///
     /// ```rust,no_run
     /// # use aletheiadb::{AletheiaDB, PropertyMapBuilder, core::NodeId};
@@ -135,7 +135,7 @@ impl AletheiaDB {
     /// - **Space**: O(1) - lazy iterator, no allocation
     /// - **Comparison**: Uses interned string pointer equality (very fast)
     ///
-    /// # Examples
+    /// ## Examples
     ///
     /// ```rust,no_run
     /// # use aletheiadb::AletheiaDB;
@@ -231,9 +231,23 @@ impl AletheiaDB {
     /// decide whether a detach/cascade delete is required to avoid orphaning
     /// edges.
     ///
-    /// Returns [`StorageError::NodeNotFound`](crate::storage::StorageError::NodeNotFound)
+    /// Returns [`StorageError::NodeNotFound`](crate::core::error::StorageError::NodeNotFound)
     /// if the node does not exist in the current state, so callers never receive
     /// a misleading zero count for a missing node.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust,no_run
+    /// # use aletheiadb::{AletheiaDB, PropertyMapBuilder, properties};
+    /// # fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// let node_id = db.create_node("Person", properties! { "name" => "Alice" })?;
+    ///
+    /// // Initially, the node has no connected edges
+    /// assert_eq!(db.count_connected_edges(node_id)?, 0);
+    /// # Ok(())
+    /// # }
+    /// ```
     #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn count_connected_edges(&self, node_id: NodeId) -> Result<usize> {
         // Verify the node exists first; an absent node should error rather than

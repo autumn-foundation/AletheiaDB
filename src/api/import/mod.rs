@@ -21,7 +21,7 @@
 //! committed, but any *already-committed* chunks persist. Callers needing all-or-nothing
 //! semantics should validate input first or run against a disposable database.
 //!
-//! # Example
+//! ## Examples
 //!
 //! ```rust,no_run
 //! use aletheiadb::AletheiaDB;

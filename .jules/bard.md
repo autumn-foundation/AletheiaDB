@@ -10,3 +10,6 @@
 ## 2024-05-14 - [Adding Examples to HLC and documenting src/main.rs]
 **Confusion:** The `src/main.rs` file was missing module-level documentation (`//!`), which triggers the `missing_docs` lint, but was hidden by the lint configurations inside `src/lib.rs` affecting `src/main.rs`. Also `HybridTimestamp::send` lacked an example showing the behavior of its logical counter.
 **Clarification:** Added `//! The AletheiaDB binary.` to `src/main.rs` and added an executable `## Examples` block to `HybridTimestamp::send` in `src/core/hlc.rs`.
+## 2026-06-21 - [Consistent Documentation Formatting and Missing Examples]
+**Confusion:** Many examples across the codebase (e.g. `src/db/ops.rs`) were using the `# Example` header instead of the standardized `## Examples`. This caused inconsistencies in doc generation. Additionally, the recently added `count_connected_edges` method lacked an executable doc-test example.
+**Clarification:** I ran a script to update all `# Example` and `# Examples` headers in `src/db/ops.rs` and `src/api/import/mod.rs` to the standard `## Examples`. I also wrote and added an executable `## Examples` doctest block for the `count_connected_edges` function to demonstrate its usage clearly.
