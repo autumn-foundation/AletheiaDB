@@ -2259,13 +2259,13 @@ impl AletheiaMcpServer {
             Error::Query(QueryError::UnsupportedFeature { feature }) => self.query_error(
                 "unsupported_construct",
                 &format!("Unsupported query construct: {feature}"),
-                Some(&feature),
+                None,
                 Some(language),
             ),
             Error::Query(QueryError::InvalidParameter { parameter, reason }) => self.query_error(
                 "invalid_params",
                 &format!("Invalid parameter '{parameter}': {reason}"),
-                Some(&parameter),
+                None,
                 Some(language),
             ),
             Error::Query(QueryError::ExecutionError { message }) => {
@@ -2302,8 +2302,8 @@ impl AletheiaMcpServer {
             "path": row.path.map(|p| {
                 p.iter()
                     .map(|e| match e {
-                        ResultEntityId::Node(id) => id.as_u64(),
-                        ResultEntityId::Edge(id) => id.as_u64(),
+                        ResultEntityId::Node(id) => json!({"type": "node", "id": id.as_u64()}),
+                        ResultEntityId::Edge(id) => json!({"type": "edge", "id": id.as_u64()}),
                     })
                     .collect::<Vec<_>>()
             }),
@@ -2328,7 +2328,12 @@ impl AletheiaMcpServer {
                 serde_json::Value::Null => CypherParameterValue::Null,
                 serde_json::Value::Bool(b) => CypherParameterValue::Bool(*b),
                 serde_json::Value::Number(n) => {
-                    if let Some(i) = n.as_i64() {
+                    // Check is_f64() first so that JSON floats (e.g. 1.0) are not
+                    // silently coerced to Int by as_i64(), which would succeed for
+                    // whole-number floats in some representations.
+                    if n.is_f64() {
+                        CypherParameterValue::Float(n.as_f64().unwrap())
+                    } else if let Some(i) = n.as_i64() {
                         CypherParameterValue::Int(i)
                     } else if let Some(f) = n.as_f64() {
                         CypherParameterValue::Float(f)
@@ -2338,6 +2343,14 @@ impl AletheiaMcpServer {
                 }
                 serde_json::Value::String(s) => CypherParameterValue::String(s.clone()),
                 serde_json::Value::Array(arr) => {
+                    if arr.is_empty() {
+                        return Err((
+                            key.clone(),
+                            "array parameters must not be empty; embeddings require at least \
+                             one dimension"
+                                .to_string(),
+                        ));
+                    }
                     let mut floats = Vec::with_capacity(arr.len());
                     for element in arr {
                         match element.as_f64() {
@@ -2367,6 +2380,13 @@ impl AletheiaMcpServer {
     }
 
     fn handle_query(&self, args: serde_json::Value) -> CallToolResult {
+        // Extract language early so it can appear in error payloads even when
+        // full deserialization fails (language is not yet known at that point).
+        let raw_language = args
+            .get("language")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_ascii_lowercase());
+
         let req: QueryRequest = match serde_json::from_value(args) {
             Ok(r) => r,
             Err(e) => {
@@ -2374,7 +2394,7 @@ impl AletheiaMcpServer {
                     "invalid_request",
                     &format!("Invalid arguments: {e}"),
                     None,
-                    None,
+                    raw_language.as_deref(),
                 );
             }
         };
@@ -2436,7 +2456,7 @@ impl AletheiaMcpServer {
                             return self.query_error(
                                 "invalid_params",
                                 &format!("Invalid parameter '{parameter}': {reason}"),
-                                Some(&parameter),
+                                None,
                                 Some("cypher"),
                             );
                         }
@@ -2513,15 +2533,27 @@ const MUTATING_KEYWORDS: &[&str] = &[
 /// (so `{name: 'DELETE'}` does not trip the guard). Returns the offending
 /// keyword so the error can name it.
 fn detect_mutating_clause(query: &str) -> Option<&'static str> {
-    // Strip single- and double-quoted string literals.
+    // Strip single- and double-quoted string literals, respecting backslash
+    // escapes so that `\'` or `\"` inside a string does not prematurely close
+    // the literal and leak its content into the token scan.
     let mut sanitized = String::with_capacity(query.len());
     let mut quote: Option<char> = None;
+    let mut escaped = false;
     for c in query.chars() {
+        if escaped {
+            // Previous character was a backslash inside a string — skip this
+            // character unconditionally regardless of what it is.
+            escaped = false;
+            continue;
+        }
         match quote {
             Some(q) => {
-                if c == q {
+                if c == '\\' {
+                    escaped = true; // next char is escaped, don't close the string on it
+                } else if c == q {
                     quote = None;
                 }
+                // Characters inside string literals are not pushed to sanitized.
             }
             None => {
                 if c == '\'' || c == '"' {
@@ -2537,38 +2569,48 @@ fn detect_mutating_clause(query: &str) -> Option<&'static str> {
         .split(|ch: char| !ch.is_alphanumeric() && ch != '_')
         .filter(|token| !token.is_empty())
         .find_map(|token| {
-            let upper = token.to_ascii_uppercase();
-            MUTATING_KEYWORDS.iter().copied().find(|kw| *kw == upper)
+            // eq_ignore_ascii_case avoids a per-token String allocation.
+            MUTATING_KEYWORDS
+                .iter()
+                .copied()
+                .find(|kw| kw.eq_ignore_ascii_case(token))
         })
 }
 
 /// Column metadata describing the structured shape of each `query` result row.
 ///
 /// `QueryRow` does not carry the `RETURN` aliases, so the contract is the fixed
-/// row schema rather than per-query projection names.
+/// row schema rather than per-query projection names. Constructed once and
+/// cloned cheaply on each call via `OnceLock`.
 fn query_columns() -> serde_json::Value {
-    json!([
-        {
-            "name": "entity",
-            "type": "node|edge",
-            "description": "The node or edge bound by the RETURN clause (with label and properties)."
-        },
-        {
-            "name": "score",
-            "type": "number|null",
-            "description": "Vector similarity score, present for ranked queries."
-        },
-        {
-            "name": "path",
-            "type": "array<number>|null",
-            "description": "Entity IDs along the traversal path, when applicable."
-        },
-        {
-            "name": "timestamp",
-            "type": "string|null",
-            "description": "Bi-temporal point this row represents, when applicable."
-        }
-    ])
+    use std::sync::OnceLock;
+    static COLUMNS: OnceLock<serde_json::Value> = OnceLock::new();
+    COLUMNS
+        .get_or_init(|| {
+            json!([
+                {
+                    "name": "entity",
+                    "type": "node|edge",
+                    "description": "The node or edge bound by the RETURN clause (with label and properties)."
+                },
+                {
+                    "name": "score",
+                    "type": "number|null",
+                    "description": "Vector similarity score, present for ranked queries."
+                },
+                {
+                    "name": "path",
+                    "type": "array<{type:string,id:number}>|null",
+                    "description": "Typed entity references along the traversal path (each element has `type` and `id`), when applicable."
+                },
+                {
+                    "name": "timestamp",
+                    "type": "string|null",
+                    "description": "Bi-temporal point this row represents, when applicable."
+                }
+            ])
+        })
+        .clone()
 }
 
 /// Build the list of tool definitions advertised by this MCP server.

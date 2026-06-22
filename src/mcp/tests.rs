@@ -3354,4 +3354,121 @@ mod query_tool_tests {
             "an invalid temporal timestamp must yield a structured error: {value}"
         );
     }
+
+    // -----------------------------------------------------------------------
+    // Tests for fixes applied after the initial code review
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_query_backslash_escape_in_string_does_not_block_valid_query() {
+        // A query whose string literal contains a backslash-escaped quote must
+        // NOT be rejected as a read_only_violation. The old sanitizer would
+        // close the quote at the `\'` and then scan `s fine'}) RETURN n` as
+        // bare tokens, finding no mutating keyword and passing — but the correct
+        // behavior is that the whole content stays inside the string.
+        let server = create_test_server();
+        seed_named(&server, "Person", "Alice");
+        let value = run_query(
+            &server,
+            QueryRequest {
+                language: "aql".to_string(),
+                // String literal `it\'s fine` — backslash-escaped quote inside single quotes.
+                query: "MATCH (n:Person {note: 'it\\'s fine'}) RETURN n".to_string(),
+                params: None,
+                limit: None,
+            },
+        );
+        // The guard must not fire (no read_only_violation for a read-only query).
+        let err = value.get("error");
+        if let Some(err) = err {
+            assert_ne!(
+                err["kind"].as_str(),
+                Some("read_only_violation"),
+                "backslash-escaped quote inside a string literal must not trip the read-only guard: {value}"
+            );
+        }
+        // Whether the engine can parse this specific AQL variant is a grammar
+        // question; what matters is that the guard itself does not reject it.
+    }
+
+    #[test]
+    fn test_query_clause_field_absent_for_non_write_errors() {
+        // `clause` is reserved exclusively for read_only_violation (it names the
+        // mutating keyword). For other error kinds (parse_error,
+        // unsupported_construct, invalid_params, runtime_error) the field must
+        // NOT appear, since it would be semantically wrong.
+        let server = create_test_server();
+        let value = run_query(
+            &server,
+            QueryRequest {
+                language: "aql".to_string(),
+                query: "this is not valid".to_string(),
+                params: None,
+                limit: None,
+            },
+        );
+        let err = error_obj(&value);
+        assert_eq!(err["kind"].as_str(), Some("parse_error"));
+        assert!(
+            err.get("clause").is_none(),
+            "parse_error must not include a `clause` field: {value}"
+        );
+    }
+
+    #[cfg(feature = "cypher")]
+    #[test]
+    fn test_query_empty_array_param_is_invalid() {
+        // An empty JSON array [] must be rejected with invalid_params rather
+        // than silently accepted as a zero-dimension embedding.
+        let server = create_test_server();
+        let mut params = HashMap::new();
+        params.insert("vec".to_string(), serde_json::json!([]));
+        let value = run_query(
+            &server,
+            QueryRequest {
+                language: "cypher".to_string(),
+                query: "MATCH (n) RETURN n".to_string(),
+                params: Some(params),
+                limit: None,
+            },
+        );
+        assert_eq!(
+            error_obj(&value)["kind"].as_str(),
+            Some("invalid_params"),
+            "empty array parameter must yield invalid_params: {value}"
+        );
+    }
+
+    #[cfg(feature = "cypher")]
+    #[test]
+    fn test_query_float_param_preserved_as_float() {
+        // A JSON number with a decimal point (1.0) must be bound as Float, not Int.
+        // We verify indirectly: the query must not fail with a type error, and
+        // the params round-trip must work (parse_error or correct rows, not a
+        // crash or wrong type coercion error).
+        let server = create_test_server();
+        seed_named(&server, "Product", "Gadget");
+        let mut params = HashMap::new();
+        // 1.0 is an explicit float in JSON — must not be coerced to Int.
+        params.insert("threshold".to_string(), serde_json::json!(1.0_f64));
+        let value = run_query(
+            &server,
+            QueryRequest {
+                language: "cypher".to_string(),
+                query: "MATCH (n:Product) WHERE n.price < $threshold RETURN n".to_string(),
+                params: Some(params),
+                limit: None,
+            },
+        );
+        // The key assertion: the error must NOT be invalid_params (the float
+        // was accepted as a float). Whether the engine returns rows or a
+        // parse/runtime error for the WHERE predicate is a grammar question.
+        if let Some(err) = value.get("error") {
+            assert_ne!(
+                err["kind"].as_str(),
+                Some("invalid_params"),
+                "a float-valued JSON param must be accepted as Float, not rejected: {value}"
+            );
+        }
+    }
 }

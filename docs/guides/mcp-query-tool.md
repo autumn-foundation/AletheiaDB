@@ -33,7 +33,7 @@ as one Cypher/AQL statement. Keep using the structured tools (`create_node`,
   "columns": [
     {"name": "entity", "type": "node|edge", "description": "..."},
     {"name": "score", "type": "number|null", "description": "..."},
-    {"name": "path", "type": "array<number>|null", "description": "..."},
+    {"name": "path", "type": "array<{type:string,id:number}>|null", "description": "..."},
     {"name": "timestamp", "type": "string|null", "description": "..."}
   ],
   "rows": [
