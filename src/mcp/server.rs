@@ -758,6 +758,22 @@ impl AletheiaMcpServer {
         ))
     }
 
+    /// Parse an optional timestamp argument, returning an `error_json` result on a parse failure.
+    ///
+    /// Collapses the otherwise-duplicated "if present, parse, else None" handling for the
+    /// changefeed's optional time bounds.
+    fn parse_opt_timestamp(
+        &self,
+        label: &str,
+        value: &Option<String>,
+    ) -> std::result::Result<Option<Timestamp>, CallToolResult> {
+        value
+            .as_deref()
+            .map(|s| self.parse_timestamp(s))
+            .transpose()
+            .map_err(|e| self.error_json(&format!("Invalid {label}: {e}")))
+    }
+
     /// Parse an optional transaction time, returning the current time if not specified.
     fn parse_optional_tx_time(&self, tx_time: Option<&str>) -> Result<Timestamp, String> {
         match tx_time {
@@ -1636,25 +1652,20 @@ impl AletheiaMcpServer {
             Err(e) => return self.error_json(&format!("Invalid tx_to: {}", e)),
         };
 
-        let valid_from = match req.valid_from.as_deref() {
-            Some(s) => match self.parse_timestamp(s) {
-                Ok(t) => Some(t),
-                Err(e) => return self.error_json(&format!("Invalid valid_from: {}", e)),
-            },
-            None => None,
+        let valid_from = match self.parse_opt_timestamp("valid_from", &req.valid_from) {
+            Ok(v) => v,
+            Err(resp) => return resp,
         };
-        let valid_to = match req.valid_to.as_deref() {
-            Some(s) => match self.parse_timestamp(s) {
-                Ok(t) => Some(t),
-                Err(e) => return self.error_json(&format!("Invalid valid_to: {}", e)),
-            },
-            None => None,
+        let valid_to = match self.parse_opt_timestamp("valid_to", &req.valid_to) {
+            Ok(v) => v,
+            Err(resp) => return resp,
         };
 
+        // A page must be able to carry a continuation cursor, so the limit is at least 1.
         let limit = req
             .limit
             .unwrap_or(DEFAULT_RESULT_LIMIT)
-            .min(MAX_RESULT_LIMIT);
+            .clamp(1, MAX_RESULT_LIMIT);
 
         let query = ChangeFeedQuery {
             tx_from,
@@ -1674,10 +1685,11 @@ impl AletheiaMcpServer {
                     .map(|record| {
                         json!({
                             "entity_id": record.entity_id,
+                            "version_id": record.version_id,
                             "kind": record.kind.as_str(),
                             "change_type": record.change_type.as_str(),
                             "label": record.label,
-                            "transaction_time": time::to_iso8601(record.transaction_time),
+                            "transaction_time": time::to_iso8601(record.transaction_time()),
                             "transaction_time_range": {
                                 "start": time::to_iso8601(record.transaction_time_range.start()),
                                 "end": time::to_iso8601(record.transaction_time_range.end()),

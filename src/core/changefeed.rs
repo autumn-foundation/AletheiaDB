@@ -7,8 +7,8 @@
 //! entity IDs, then drill into each result with the existing per-entity history/diff APIs.
 //!
 //! The feed is **bounded** (a `limit` plus a stable, opaque continuation cursor) and
-//! **deterministically ordered** (transaction-time ascending, then entity kind, then id)
-//! so that paginated reads are stable and replayable.
+//! **deterministically ordered** (transaction-time ascending, then entity kind, id, and
+//! version) so that paginated reads are stable and replayable.
 
 use crate::core::error::{Error, QueryError};
 use crate::core::interning::{GLOBAL_INTERNER, InternedString};
@@ -33,6 +33,16 @@ impl EntityKind {
         match self {
             EntityKind::Node => 0,
             EntityKind::Edge => 1,
+        }
+    }
+
+    /// Inverse of [`EntityKind::ord`] for values produced by this crate (0 = node, else edge).
+    #[inline]
+    pub(crate) const fn from_ord(ord: u8) -> EntityKind {
+        if ord == 0 {
+            EntityKind::Node
+        } else {
+            EntityKind::Edge
         }
     }
 
@@ -74,14 +84,15 @@ impl ChangeType {
 pub struct ChangeRecord {
     /// Entity id (`NodeId`/`EdgeId` as `u64`).
     pub entity_id: u64,
+    /// Version id of the specific version this row describes (use with the per-entity
+    /// history/diff APIs to drill in).
+    pub version_id: u64,
     /// Whether this is a node or an edge.
     pub kind: EntityKind,
     /// How the entity changed at this version.
     pub change_type: ChangeType,
     /// Resolved node label / edge type.
     pub label: String,
-    /// Commit timestamp (== `transaction_time_range.start()`).
-    pub transaction_time: Timestamp,
     /// Full transaction-time range of the version.
     pub transaction_time_range: TimeRange,
     /// Full valid-time range of the version (an empty range denotes a deletion).
@@ -89,29 +100,29 @@ pub struct ChangeRecord {
 }
 
 impl ChangeRecord {
-    /// The total-order sort key for this record (tx-time asc, then kind, then id).
+    /// Commit timestamp of this version (== `transaction_time_range.start()`).
+    ///
+    /// Derived rather than stored so it can never disagree with the range it comes from.
     #[inline]
-    pub(crate) fn cursor(&self) -> ChangeCursor {
-        ChangeCursor {
-            tx_wallclock: self.transaction_time.wallclock(),
-            tx_logical: self.transaction_time.logical(),
-            kind_ord: self.kind.ord(),
-            entity_id: self.entity_id,
-        }
+    pub fn transaction_time(&self) -> Timestamp {
+        self.transaction_time_range.start()
     }
 }
 
 /// Total-order sort key used for deterministic ordering and cursor pagination.
 ///
-/// Ordering is by `(tx_wallclock, tx_logical, kind_ord, entity_id)` ascending. This tuple is
-/// unique per emitted row because a single entity cannot have two versions at the exact same
-/// hybrid transaction time, so "resume strictly after this key" is unambiguous and replayable.
+/// Ordering is by `(tx_wallclock, tx_logical, kind_ord, entity_id, version_id)` ascending.
+/// `version_id` is included as the final component so the key is **unique per emitted version**
+/// even when one transaction commits two versions of the same entity (which share a commit
+/// timestamp): without it, two such rows would collide and one would be silently dropped at a
+/// page boundary by the strict `> cursor` resume rule.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct ChangeCursor {
     pub tx_wallclock: i64,
     pub tx_logical: u32,
     pub kind_ord: u8,
     pub entity_id: u64,
+    pub version_id: u64,
 }
 
 impl ChangeCursor {
@@ -121,23 +132,25 @@ impl ChangeCursor {
     /// opaque and never attempt to parse or construct it by hand.
     pub(crate) fn encode(&self) -> String {
         let raw = format!(
-            "{}:{}:{}:{}",
-            self.tx_wallclock, self.tx_logical, self.kind_ord, self.entity_id
+            "{}:{}:{}:{}:{}",
+            self.tx_wallclock, self.tx_logical, self.kind_ord, self.entity_id, self.version_id
         );
-        hex_encode(raw.as_bytes())
+        crate::core::hex::encode(raw.as_bytes())
     }
 
     /// Decode an opaque continuation token produced by [`ChangeCursor::encode`].
     ///
     /// Returns a `QueryError::InvalidParameter` (never panics) when the token is malformed.
     pub(crate) fn decode(token: &str) -> Result<Self, Error> {
-        let bytes = hex_decode(token).ok_or_else(|| invalid_cursor("not valid hex"))?;
+        let bytes =
+            crate::core::hex::decode(token).ok_or_else(|| invalid_cursor("not valid hex"))?;
         let raw = std::str::from_utf8(&bytes).map_err(|_| invalid_cursor("not valid utf-8"))?;
         let mut parts = raw.split(':');
         let tx_wallclock = parse_field(parts.next())?;
         let tx_logical = parse_field(parts.next())?;
         let kind_ord = parse_field(parts.next())?;
         let entity_id = parse_field(parts.next())?;
+        let version_id = parse_field(parts.next())?;
         if parts.next().is_some() {
             return Err(invalid_cursor("too many fields"));
         }
@@ -146,6 +159,7 @@ impl ChangeCursor {
             tx_logical,
             kind_ord,
             entity_id,
+            version_id,
         })
     }
 }
@@ -164,50 +178,55 @@ fn invalid_cursor(reason: &str) -> Error {
     })
 }
 
-fn hex_encode(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for &b in bytes {
-        out.push(HEX[(b >> 4) as usize] as char);
-        out.push(HEX[(b & 0x0f) as usize] as char);
-    }
-    out
-}
-
-fn hex_decode(s: &str) -> Option<Vec<u8>> {
-    let bytes = s.as_bytes();
-    if !bytes.len().is_multiple_of(2) {
-        return None;
-    }
-    let mut out = Vec::with_capacity(bytes.len() / 2);
-    for chunk in bytes.chunks_exact(2) {
-        let hi = hex_val(chunk[0])?;
-        let lo = hex_val(chunk[1])?;
-        out.push((hi << 4) | lo);
-    }
-    Some(out)
-}
-
-fn hex_val(c: u8) -> Option<u8> {
-    match c {
-        b'0'..=b'9' => Some(c - b'0'),
-        b'a'..=b'f' => Some(c - b'a' + 10),
-        b'A'..=b'F' => Some(c - b'A' + 10),
-        _ => None,
-    }
-}
-
-/// Build a [`ChangeRecord`] for a single committed version if it passes all filters.
+/// A changefeed row in its cheap, pre-materialization form.
 ///
-/// Shared by the node and edge scans — they differ only in id accessor and [`EntityKind`].
-/// Returns `None` when the version falls outside the transaction-time window, the optional
-/// valid-time window, or the optional label filter.
+/// This is what the storage scan produces: it carries the precomputed sort [`ChangeCursor`] and
+/// the label as an [`InternedString`] (no owned `String`). The expensive label resolution is
+/// deferred to [`RawChange::into_record`], which the query layer calls only for the rows that
+/// actually survive cursor filtering and the page `limit` — so a wide window over a large store
+/// never allocates a label per matching version just to discard it.
+#[derive(Debug, Clone)]
+pub(crate) struct RawChange {
+    pub cursor: ChangeCursor,
+    pub change_type: ChangeType,
+    pub label_id: InternedString,
+    pub transaction_time_range: TimeRange,
+    pub valid_time_range: TimeRange,
+}
+
+impl RawChange {
+    /// Resolve the label and materialize a public [`ChangeRecord`].
+    pub(crate) fn into_record(self) -> ChangeRecord {
+        let label = GLOBAL_INTERNER
+            .resolve_with(self.label_id, |s| s.to_string())
+            .unwrap_or_default();
+        ChangeRecord {
+            entity_id: self.cursor.entity_id,
+            version_id: self.cursor.version_id,
+            kind: EntityKind::from_ord(self.cursor.kind_ord),
+            change_type: self.change_type,
+            label,
+            transaction_time_range: self.transaction_time_range,
+            valid_time_range: self.valid_time_range,
+        }
+    }
+}
+
+/// Build a [`RawChange`] for a single committed version if it passes all filters.
 ///
-/// Tombstone (deletion) handling under a valid-time filter: a deletion's valid-time is an
-/// empty range `[v, v)`, which never *overlaps* any window. We therefore treat the deletion
-/// instant as a point and include the tombstone iff that instant lies within the valid window.
+/// Shared by the node and edge scans (hot and cold tiers) — they differ only in id accessor
+/// and [`EntityKind`]. Returns `None` when the version falls outside the transaction-time
+/// window, the optional valid-time window, or the optional label filter.
+///
+/// Valid-time filtering treats a version's *valid extent* and the window as sets and includes
+/// the version iff they intersect. A live version has a non-empty extent, so this is a range
+/// overlap. A deletion (tombstone) has an empty valid range `[v, v)` — a degenerate point at
+/// the deletion instant `v` — so it intersects the half-open window iff the window contains
+/// that single instant. The two predicates are the same intersection rule applied to a range
+/// vs. a point.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn build_change_record(
+pub(crate) fn build_raw_change(
+    version_id: u64,
     entity_id: u64,
     kind: EntityKind,
     temporal: &BiTemporalInterval,
@@ -216,7 +235,7 @@ pub(crate) fn build_change_record(
     tx_window: &TimeRange,
     valid_window: Option<&TimeRange>,
     label_filter: Option<&str>,
-) -> Option<ChangeRecord> {
+) -> Option<RawChange> {
     let tx_range = temporal.transaction_time();
     // Transaction-time window is half-open [t1, t2).
     if !tx_window.contains(tx_range.start()) {
@@ -227,13 +246,13 @@ pub(crate) fn build_change_record(
     let is_deletion = valid_range.is_empty();
 
     if let Some(vw) = valid_window {
-        let matches = if is_deletion {
-            // Treat the deletion instant as a point within the window.
+        // Intersection of the version's valid extent with the window (tombstone = point).
+        let intersects = if is_deletion {
             vw.contains(valid_range.start())
         } else {
             valid_range.overlaps(vw)
         };
-        if !matches {
+        if !intersects {
             return None;
         }
     }
@@ -252,16 +271,16 @@ pub(crate) fn build_change_record(
         ChangeType::Modified
     };
 
-    let label = GLOBAL_INTERNER
-        .resolve_with(label_id, |s| s.to_string())
-        .unwrap_or_default();
-
-    Some(ChangeRecord {
-        entity_id,
-        kind,
+    Some(RawChange {
+        cursor: ChangeCursor {
+            tx_wallclock: tx_range.start().wallclock(),
+            tx_logical: tx_range.start().logical(),
+            kind_ord: kind.ord(),
+            entity_id,
+            version_id,
+        },
         change_type,
-        label,
-        transaction_time: tx_range.start(),
+        label_id,
         transaction_time_range: tx_range,
         valid_time_range: valid_range,
     })
@@ -286,7 +305,9 @@ pub struct ChangeFeedQuery {
     pub valid_to: Option<Timestamp>,
     /// Optional node-label / edge-type filter (exact string match).
     pub label: Option<String>,
-    /// Maximum number of rows to return in this page.
+    /// Maximum number of rows to return in this page. A value of `0` is treated as `1`
+    /// (a page must be able to carry a continuation cursor, so it cannot be empty when more
+    /// rows exist).
     pub limit: usize,
     /// Opaque continuation token from a previous page's `next_cursor` (`None` = first page).
     pub cursor: Option<String>,
@@ -321,6 +342,16 @@ pub struct ChangeFeedPage {
 mod tests {
     use super::*;
 
+    fn cur(tx: i64, logical: u32, kind_ord: u8, entity_id: u64, version_id: u64) -> ChangeCursor {
+        ChangeCursor {
+            tx_wallclock: tx,
+            tx_logical: logical,
+            kind_ord,
+            entity_id,
+            version_id,
+        }
+    }
+
     #[test]
     fn entity_kind_ord_and_str() {
         assert_eq!(EntityKind::Node.ord(), 0);
@@ -328,6 +359,8 @@ mod tests {
         assert!(EntityKind::Node.ord() < EntityKind::Edge.ord());
         assert_eq!(EntityKind::Node.as_str(), "node");
         assert_eq!(EntityKind::Edge.as_str(), "edge");
+        assert_eq!(EntityKind::from_ord(0), EntityKind::Node);
+        assert_eq!(EntityKind::from_ord(1), EntityKind::Edge);
     }
 
     #[test]
@@ -339,12 +372,7 @@ mod tests {
 
     #[test]
     fn cursor_round_trips() {
-        let c = ChangeCursor {
-            tx_wallclock: 1_700_000_000_000_000,
-            tx_logical: 7,
-            kind_ord: 1,
-            entity_id: 42,
-        };
+        let c = cur(1_700_000_000_000_000, 7, 1, 42, 99);
         let token = c.encode();
         let decoded = ChangeCursor::decode(&token).expect("round-trip should succeed");
         assert_eq!(c, decoded);
@@ -352,50 +380,27 @@ mod tests {
 
     #[test]
     fn cursor_token_is_opaque_hex() {
-        let c = ChangeCursor {
-            tx_wallclock: 10,
-            tx_logical: 0,
-            kind_ord: 0,
-            entity_id: 1,
-        };
-        let token = c.encode();
-        // Hex-only alphabet: no ':' or digits-with-separators leaking through.
+        let token = cur(10, 0, 0, 1, 1).encode();
         assert!(token.bytes().all(|b| b.is_ascii_hexdigit()));
     }
 
     #[test]
     fn cursor_ordering_is_total_and_correct() {
-        let a = ChangeCursor {
-            tx_wallclock: 10,
-            tx_logical: 0,
-            kind_ord: 0,
-            entity_id: 5,
-        };
+        let a = cur(10, 0, 0, 5, 1);
         // Later tx-time dominates everything else.
-        let b = ChangeCursor {
-            tx_wallclock: 11,
-            tx_logical: 0,
-            kind_ord: 0,
-            entity_id: 1,
-        };
+        let b = cur(11, 0, 0, 1, 1);
         // Same tx-time, edge (kind_ord 1) after node (kind_ord 0).
-        let c = ChangeCursor {
-            tx_wallclock: 10,
-            tx_logical: 0,
-            kind_ord: 1,
-            entity_id: 1,
-        };
+        let c = cur(10, 0, 1, 1, 1);
         // Same tx-time + kind, higher id is later.
-        let d = ChangeCursor {
-            tx_wallclock: 10,
-            tx_logical: 0,
-            kind_ord: 0,
-            entity_id: 6,
-        };
+        let d = cur(10, 0, 0, 6, 1);
+        // Same tx-time + kind + entity, higher version_id is later (the collision tiebreak).
+        let e = cur(10, 0, 0, 5, 2);
         assert!(a < b);
         assert!(a < c);
         assert!(a < d);
         assert!(d < c);
+        assert!(a < e);
+        assert!(e < d);
     }
 
     #[test]
@@ -404,9 +409,9 @@ mod tests {
         assert!(ChangeCursor::decode("zzzz").is_err());
         // Odd length.
         assert!(ChangeCursor::decode("abc").is_err());
-        // Valid hex but wrong field count ("1:2" -> "31 3a 32").
-        assert!(ChangeCursor::decode(&hex_encode(b"1:2")).is_err());
+        // Valid hex but too few fields ("1:2:0:3" -> 4 fields, need 5).
+        assert!(ChangeCursor::decode(&crate::core::hex::encode(b"1:2:0:3")).is_err());
         // Valid hex, right field count, but a non-numeric field.
-        assert!(ChangeCursor::decode(&hex_encode(b"1:2:0:x")).is_err());
+        assert!(ChangeCursor::decode(&crate::core::hex::encode(b"1:2:0:3:x")).is_err());
     }
 }

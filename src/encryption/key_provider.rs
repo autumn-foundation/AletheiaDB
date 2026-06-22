@@ -4,7 +4,6 @@
 //! variable, or (in the future) a remote KMS. All providers return a
 //! `Zeroizing<[u8; 32]>` that is securely erased when dropped.
 
-use std::fmt::Write as FmtWrite;
 use std::path::{Path, PathBuf};
 
 use rand::RngCore;
@@ -38,36 +37,13 @@ pub enum KeyFormat {
 
 /// Encode bytes as a lowercase hex string.
 fn bytes_to_hex(bytes: &[u8]) -> String {
-    let mut s = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        write!(s, "{b:02x}").expect("writing to String never fails");
-    }
-    s
+    crate::core::hex::encode(bytes)
 }
 
 /// Decode a hex string into bytes. Returns `None` if the string contains
 /// non-hex characters or has odd length.
 fn hex_to_bytes(hex: &str) -> Option<Vec<u8>> {
-    if !hex.len().is_multiple_of(2) {
-        return None;
-    }
-    let mut out = Vec::with_capacity(hex.len() / 2);
-    for chunk in hex.as_bytes().chunks(2) {
-        let hi = hex_digit(chunk[0])?;
-        let lo = hex_digit(chunk[1])?;
-        out.push((hi << 4) | lo);
-    }
-    Some(out)
-}
-
-/// Convert a single ASCII hex digit to its numeric value.
-fn hex_digit(b: u8) -> Option<u8> {
-    match b {
-        b'0'..=b'9' => Some(b - b'0'),
-        b'a'..=b'f' => Some(b - b'a' + 10),
-        b'A'..=b'F' => Some(b - b'A' + 10),
-        _ => None,
-    }
+    crate::core::hex::decode(hex)
 }
 
 /// Reads the MEK from a file on disk.

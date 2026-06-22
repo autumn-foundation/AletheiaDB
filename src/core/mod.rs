@@ -29,6 +29,7 @@ pub mod changefeed;
 pub mod error;
 pub mod graph;
 pub mod hasher;
+pub mod hex;
 pub mod history;
 pub mod hlc;
 pub mod id;

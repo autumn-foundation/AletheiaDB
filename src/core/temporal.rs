@@ -679,13 +679,21 @@ pub mod time {
         }
 
         let wallclock = timestamp.wallclock();
-        // Convert microseconds to seconds and nanoseconds
-        let secs = wallclock / 1_000_000;
-        let nanos = ((wallclock % 1_000_000) * 1000) as u32;
-
-        // This is a simplified conversion - for production use chrono crate
-        let datetime = UNIX_EPOCH + std::time::Duration::new(secs as u64, nanos);
-        format!("{:?}", datetime) // Simplified - use chrono for proper formatting
+        // Build the offset from the epoch without panicking on negative (pre-1970) or
+        // extreme wallclocks: `unsigned_abs` handles `i64::MIN`, and checked add/sub guard
+        // against SystemTime overflow. A non-representable instant falls back to a raw
+        // microsecond form rather than panicking.
+        let dur = std::time::Duration::from_micros(wallclock.unsigned_abs());
+        let datetime = if wallclock >= 0 {
+            UNIX_EPOCH.checked_add(dur)
+        } else {
+            UNIX_EPOCH.checked_sub(dur)
+        };
+        match datetime {
+            // Simplified conversion - for production use the chrono crate.
+            Some(dt) => format!("{:?}", dt),
+            None => format!("{wallclock}us"),
+        }
     }
 
     /// Create a timestamp from seconds since Unix epoch.
@@ -720,6 +728,19 @@ pub mod time {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn to_iso8601_handles_pre_epoch_without_panicking() {
+        // A pre-1970 (negative wallclock) timestamp must not panic during formatting.
+        let pre_epoch = HybridTimestamp::new_unchecked(-1_000_000, 0);
+        let s = time::to_iso8601(pre_epoch);
+        assert!(!s.is_empty());
+        // Extreme negative must also be total.
+        let extreme = HybridTimestamp::new_unchecked(i64::MIN, 0);
+        let _ = time::to_iso8601(extreme);
+        // TIMESTAMP_MAX still renders as "current".
+        assert_eq!(time::to_iso8601(TIMESTAMP_MAX), "current");
+    }
 
     #[test]
     fn test_time_range_creation() {

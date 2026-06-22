@@ -10,7 +10,7 @@
 //! - Reconstruction walks backward to nearest anchor and applies deltas forward
 //! - TinyLFU cache reduces redundant delta chain traversals for concurrent reads
 
-use crate::core::changefeed::{ChangeRecord, EntityKind, build_change_record};
+use crate::core::changefeed::{EntityKind, RawChange, build_raw_change};
 use crate::core::error::{Result, StorageError, TemporalError};
 use crate::core::graph::{Edge, Node};
 use crate::core::history::{EntityHistory, VersionDiff, VersionInfo};
@@ -1362,19 +1362,24 @@ impl HistoricalStorage {
     ///
     /// # Performance
     ///
-    /// This is an O(V) scan of all node and edge versions. It is adequate for the bounded
-    /// windows this API targets; a future optimization could maintain a transaction-time
-    /// index keyed by `(commit_timestamp, kind, id)` to make this O(log V + page).
-    pub fn collect_changes(
+    /// This is an O(V) scan of all node and edge versions in the **hot** maps. It is adequate
+    /// for the bounded windows this API targets; a future optimization could maintain a
+    /// transaction-time index keyed by `(commit_timestamp, kind, id)` to make this
+    /// O(log V + page). To keep the historical lock hold short, this produces lightweight
+    /// [`RawChange`]s (no owned label `String`); label resolution is deferred to the query
+    /// layer for surviving rows only. Cold-tier versions are scanned separately by the caller
+    /// after the lock is released (see `tiered_storage_arc`).
+    pub(crate) fn collect_changes(
         &self,
         tx_window: &TimeRange,
         valid_window: Option<&TimeRange>,
         label_filter: Option<&str>,
-    ) -> Vec<ChangeRecord> {
+    ) -> Vec<RawChange> {
         let mut out = Vec::new();
 
         for v in self.node_versions.values() {
-            if let Some(rec) = build_change_record(
+            if let Some(rec) = build_raw_change(
+                v.id.as_u64(),
                 v.node_id.as_u64(),
                 EntityKind::Node,
                 &v.temporal,
@@ -1389,7 +1394,8 @@ impl HistoricalStorage {
         }
 
         for v in self.edge_versions.values() {
-            if let Some(rec) = build_change_record(
+            if let Some(rec) = build_raw_change(
+                v.id.as_u64(),
                 v.edge_id.as_u64(),
                 EntityKind::Edge,
                 &v.temporal,
@@ -1404,6 +1410,14 @@ impl HistoricalStorage {
         }
 
         out
+    }
+
+    /// Clone the configured tiered-storage handle, if any.
+    ///
+    /// Lets a caller release the historical lock and then scan the cold tier (disk I/O) without
+    /// holding the lock across that I/O.
+    pub fn tiered_storage_arc(&self) -> Option<Arc<super::tiered_storage::TieredStorage>> {
+        self.tiered_storage.clone()
     }
 
     // ========================================================================
