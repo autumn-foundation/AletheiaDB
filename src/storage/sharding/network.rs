@@ -425,16 +425,24 @@ impl CircuitBreaker {
         };
 
         if state == CircuitState::Open {
+            let mut should_transition = false;
             if let Ok(opened) = self.opened_at.read() {
                 if let Some(opened_time) = *opened {
                     if opened_time.elapsed() >= self.config.open_duration {
-                        // Transition to half-open
-                        if let Ok(mut s) = self.state.write() {
-                            *s = CircuitState::HalfOpen;
-                        }
-                        self.success_count.store(0, Ordering::SeqCst);
+                        should_transition = true;
                     }
                 }
+            }
+
+            if should_transition {
+                // Transition to half-open
+                if let Ok(mut s) = self.state.write() {
+                    // Only transition if it's still Open
+                    if *s == CircuitState::Open {
+                        *s = CircuitState::HalfOpen;
+                    }
+                }
+                self.success_count.store(0, Ordering::SeqCst);
             }
         }
     }
