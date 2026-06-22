@@ -13,7 +13,7 @@ By the end you'll have a working mental model of how AletheiaDB works day-to-day
 ```rust
 use aletheiadb::prelude::*;
 
-fn main() -> Result<()> {
+fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let db = AletheiaDB::new()?;
     // db is ready to use
     Ok(())
@@ -147,8 +147,8 @@ db.write(|tx| {
 // Query what Alice looked like *before* the update
 let historical_alice = db.get_node_at_time(
     alice_id,
-    before_update,  // valid time: what was true at this moment
-    before_update,  // transaction time: what the DB knew at this moment
+    before_update.into(),  // valid time: what was true at this moment
+    before_update.into(),  // transaction time: what the DB knew at this moment
 )?;
 
 // historical_alice.properties does not have "role" — the update hadn't happened yet
@@ -166,7 +166,7 @@ AletheiaDB stores dense vector embeddings as node properties and indexes them
 with HNSW for fast k-NN search. Enable the index before inserting nodes.
 
 ```rust
-use aletheiadb::{AletheiaDB, HnswConfig, DistanceMetric};
+use aletheiadb::{AletheiaDB, HnswConfig, DistanceMetric, SimilarityQuery};
 
 let db = AletheiaDB::new()?;
 
@@ -190,7 +190,7 @@ let _doc2 = db.create_node("Document", properties! {
 
 // Find the 10 nodes most similar to doc1
 // (doc1 itself is excluded from results)
-let similar = db.find_similar(doc1, 10)?;
+let similar = db.similarity_search(SimilarityQuery::from_node(doc1).k(10))?;
 for (node_id, score) in similar {
     println!("Node {:?} similarity: {:.3}", node_id, score);
 }
@@ -211,7 +211,7 @@ let t = time::now();
 // "Who does Alice know (graph), ranked by semantic similarity to my embedding
 //  (vector), as of a specific point in time (temporal)?"
 let results = db.query()
-    .as_of(t, t)                                      // temporal
+    .as_of(t.into(), t.into())                                      // temporal
     .start(alice_id)                                  // graph: start node
     .traverse("KNOWS")                                // graph: hop
     .rank_by_similarity(&query_embedding, 10)         // vector: re-rank

@@ -168,10 +168,10 @@ Add time-travel capabilities:
 
 ```rust
 // Point-in-time query (bi-temporal)
-.as_of(valid_time, transaction_time)
+.as_of(valid_time.into(), transaction_time.into())
 
 // Time range query
-.between(start_timestamp, end_timestamp)
+.between(start_timestamp.into(), end_timestamp.into())
 ```
 
 ### Filter Operations
@@ -259,7 +259,7 @@ for row in results {
 let timestamp_2023 = 1672531200000000; // 2023-01-01 in microseconds
 
 let results = db.query()
-    .as_of(timestamp_2023, timestamp_2023)
+    .as_of(timestamp_2023.into(), timestamp_2023.into())
     .find_similar(&query_embedding, 10)
     .with_label("Document")
     .execute(&db)?;
@@ -308,7 +308,7 @@ for row in results {
 
 ```rust
 let results = db.query()
-    .as_of(timestamp_2023, timestamp_2023)
+    .as_of(timestamp_2023.into(), timestamp_2023.into())
     .start(alice_id)
     .traverse("KNOWS")
     .rank_by_similarity(&bob_embedding, 50)

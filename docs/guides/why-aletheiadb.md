@@ -78,7 +78,7 @@ becomes a single query:
 // "What treatments did patients with similar presentations receive,
 //  as of the treatment date — before any subsequent knowledge updates?"
 let results = db.query()
-    .as_of(treatment_date, treatment_date)      // temporal: exact knowledge state
+    .as_of(treatment_date.into(), treatment_date.into())      // temporal: exact knowledge state
     .start(patient_id)                          // graph: this patient
     .traverse("HAS_DIAGNOSIS")                  // graph: their diagnoses
     .traverse("TREATED_WITH")                   // graph: treatments used

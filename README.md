@@ -28,7 +28,7 @@ Requires Rust 1.92+.
 ```rust
 use aletheiadb::prelude::*;
 
-fn main() -> Result<()> {
+fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let db = AletheiaDB::new()?;
 
     // Create nodes and a relationship
@@ -43,7 +43,7 @@ fn main() -> Result<()> {
     db.write(|tx| tx.update_node(alice, properties! { "role" => "engineer" }))?;
 
     // Time-travel: what did Alice look like before the update?
-    let past = db.get_node_at_time(alice, before, before)?;
+    let past = db.get_node_at_time(alice, before.into(), before.into())?;
     assert!(past.properties.get("role").is_none());
 
     Ok(())
@@ -63,7 +63,7 @@ query with a consistent view of the data:
 use aletheiadb::prelude::*;
 use aletheiadb::HnswConfig;
 
-fn main() -> Result<()> {
+fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let db = AletheiaDB::new()?;
     db.vector_index("embedding").hnsw(HnswConfig { dimensions: 2, ..Default::default() }).enable()?;
 
@@ -73,7 +73,7 @@ fn main() -> Result<()> {
     let tx_time = aletheiadb::time::now();
 
     let _results = db.query()
-        .as_of(valid_time, tx_time)              // temporal: point-in-time snapshot
+        .as_of(valid_time.into(), tx_time.into())              // temporal: point-in-time snapshot
         .start(alice)                            // graph: starting node
         .traverse("KNOWS")                       // graph: follow edges
         .rank_by_similarity(&query_embedding, 10) // vector: re-rank by similarity
