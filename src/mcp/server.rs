@@ -143,7 +143,8 @@ use serde_json::json;
 use crate::api::transaction::WriteOps;
 use crate::core::temporal::time;
 use crate::core::{
-    EdgeId, GLOBAL_INTERNER, NodeId, PropertyMap, PropertyMapBuilder, PropertyValue, Timestamp,
+    ChangeFeedQuery, EdgeId, GLOBAL_INTERNER, NodeId, PropertyMap, PropertyMapBuilder,
+    PropertyValue, Timestamp,
 };
 use crate::db::AletheiaDB;
 use crate::index::vector::{DistanceMetric, HnswConfig};
@@ -562,6 +563,18 @@ impl AletheiaMcpServer {
     /// Performs a time-travel query to retrieve the state of an edge at a specific valid time and transaction time.
     pub fn get_edge_at_time(&self, req: GetEdgeAtTimeRequest) -> String {
         Self::extract_text(self.handle_get_edge_at_time(
+            serde_json::to_value(req).expect("request serialization should not fail"),
+        ))
+    }
+
+    /// List graph-wide changes within a transaction-time window.
+    ///
+    /// Enumerates the nodes and edges whose versions were committed in `[tx_from, tx_to)`,
+    /// with optional valid-time and label filtering and stable cursor pagination. This is the
+    /// discovery primitive an agent reaches for to answer "what changed since `<time>`?"
+    /// without already knowing any entity IDs.
+    pub fn list_changes(&self, req: ListChangesRequest) -> String {
+        Self::extract_text(self.handle_list_changes(
             serde_json::to_value(req).expect("request serialization should not fail"),
         ))
     }
@@ -1608,6 +1621,85 @@ impl AletheiaMcpServer {
         }
     }
 
+    fn handle_list_changes(&self, args: serde_json::Value) -> CallToolResult {
+        let req: ListChangesRequest = match serde_json::from_value(args) {
+            Ok(r) => r,
+            Err(e) => return self.error_json(&format!("Invalid arguments: {}", e)),
+        };
+
+        let tx_from = match self.parse_timestamp(&req.tx_from) {
+            Ok(t) => t,
+            Err(e) => return self.error_json(&format!("Invalid tx_from: {}", e)),
+        };
+        let tx_to = match self.parse_timestamp(&req.tx_to) {
+            Ok(t) => t,
+            Err(e) => return self.error_json(&format!("Invalid tx_to: {}", e)),
+        };
+
+        let valid_from = match req.valid_from.as_deref() {
+            Some(s) => match self.parse_timestamp(s) {
+                Ok(t) => Some(t),
+                Err(e) => return self.error_json(&format!("Invalid valid_from: {}", e)),
+            },
+            None => None,
+        };
+        let valid_to = match req.valid_to.as_deref() {
+            Some(s) => match self.parse_timestamp(s) {
+                Ok(t) => Some(t),
+                Err(e) => return self.error_json(&format!("Invalid valid_to: {}", e)),
+            },
+            None => None,
+        };
+
+        let limit = req
+            .limit
+            .unwrap_or(DEFAULT_RESULT_LIMIT)
+            .min(MAX_RESULT_LIMIT);
+
+        let query = ChangeFeedQuery {
+            tx_from,
+            tx_to,
+            valid_from,
+            valid_to,
+            label: req.label.clone(),
+            limit,
+            cursor: req.cursor.clone(),
+        };
+
+        match self.db.list_changes(&query) {
+            Ok(page) => {
+                let changes: Vec<serde_json::Value> = page
+                    .changes
+                    .iter()
+                    .map(|record| {
+                        json!({
+                            "entity_id": record.entity_id,
+                            "kind": record.kind.as_str(),
+                            "change_type": record.change_type.as_str(),
+                            "label": record.label,
+                            "transaction_time": time::to_iso8601(record.transaction_time),
+                            "transaction_time_range": {
+                                "start": time::to_iso8601(record.transaction_time_range.start()),
+                                "end": time::to_iso8601(record.transaction_time_range.end()),
+                            },
+                            "valid_time_range": {
+                                "start": time::to_iso8601(record.valid_time_range.start()),
+                                "end": time::to_iso8601(record.valid_time_range.end()),
+                            },
+                        })
+                    })
+                    .collect();
+
+                self.success_json(json!({
+                    "changes": changes,
+                    "count": page.changes.len(),
+                    "next_cursor": page.next_cursor,
+                }))
+            }
+            Err(e) => self.error_json(&e.to_string()),
+        }
+    }
+
     // ============================================================================
     // Phase 11: Independent Dimension Temporal Queries & Version History
     // ============================================================================
@@ -2103,6 +2195,15 @@ impl AletheiaMcpServer {
             self.error_json("Must specify either start_node_id, query_embedding, or filter_label")
         }
     }
+
+    /// Test-only accessor returning the names of all advertised tools.
+    #[cfg(test)]
+    pub(crate) fn list_tools_for_test(&self) -> Vec<String> {
+        tool_definitions()
+            .iter()
+            .map(|tool| tool.name.to_string())
+            .collect()
+    }
 }
 
 fn make_input_schema<T: rmcp::schemars::JsonSchema>()
@@ -2115,7 +2216,174 @@ fn make_input_schema<T: rmcp::schemars::JsonSchema>()
     }
 }
 
-/// Implement the MCP ServerHandler trait.
+/// Build the list of tool definitions advertised by this MCP server.
+///
+/// Shared between [`ServerHandler::list_tools`] and test helpers so the advertised tool
+/// set and the `call_tool` dispatch table cannot silently drift apart.
+fn tool_definitions() -> Vec<Tool> {
+    vec![
+        Tool::new(
+            "get_node",
+            "Get a node by its ID. Returns the node's label and properties.",
+            make_input_schema::<GetNodeRequest>(),
+        ),
+        Tool::new(
+            "create_node",
+            "Create a new node with a label and optional properties.",
+            make_input_schema::<CreateNodeRequest>(),
+        ),
+        Tool::new(
+            "update_node",
+            "Update an existing node's properties.",
+            make_input_schema::<UpdateNodeRequest>(),
+        ),
+        Tool::new(
+            "delete_node",
+            "Delete a node by its ID (safe-by-default). If the node has connected \
+                     edges and `detach` is not true, the deletion is refused and the response \
+                     reports `connected_edges`. Pass `detach: true` to delete the node together \
+                     with all connected edges; the response then reports `edges_removed`.",
+            make_input_schema::<DeleteNodeRequest>(),
+        ),
+        Tool::new(
+            "delete_node_cascade",
+            "Delete a node and all its connected edges (cascade delete). \
+                     This maintains referential integrity by removing orphaned edges.",
+            make_input_schema::<DeleteNodeCascadeRequest>(),
+        ),
+        Tool::new(
+            "list_nodes",
+            "List nodes with optional label filter and pagination.",
+            make_input_schema::<ListNodesRequest>(),
+        ),
+        Tool::new(
+            "count_nodes",
+            "Count the total number of nodes.",
+            make_input_schema::<CountNodesRequest>(),
+        ),
+        Tool::new(
+            "get_edge",
+            "Get an edge by its ID.",
+            make_input_schema::<GetEdgeRequest>(),
+        ),
+        Tool::new(
+            "create_edge",
+            "Create a new edge between two nodes.",
+            make_input_schema::<CreateEdgeRequest>(),
+        ),
+        Tool::new(
+            "update_edge",
+            "Update an existing edge's properties.",
+            make_input_schema::<UpdateEdgeRequest>(),
+        ),
+        Tool::new(
+            "delete_edge",
+            "Delete an edge by its ID.",
+            make_input_schema::<DeleteEdgeRequest>(),
+        ),
+        Tool::new(
+            "list_edges",
+            "List edges with optional label filter and pagination.",
+            make_input_schema::<ListEdgesRequest>(),
+        ),
+        Tool::new(
+            "count_edges",
+            "Count the total number of edges.",
+            make_input_schema::<CountEdgesRequest>(),
+        ),
+        Tool::new(
+            "get_outgoing_edges",
+            "Get all outgoing edges from a node.",
+            make_input_schema::<GetOutgoingEdgesRequest>(),
+        ),
+        Tool::new(
+            "get_incoming_edges",
+            "Get all incoming edges to a node.",
+            make_input_schema::<GetIncomingEdgesRequest>(),
+        ),
+        Tool::new(
+            "traverse",
+            "Traverse the graph starting from a node.",
+            make_input_schema::<TraverseRequest>(),
+        ),
+        Tool::new(
+            "find_similar",
+            "Find nodes similar to a query embedding.",
+            make_input_schema::<FindSimilarRequest>(),
+        ),
+        Tool::new(
+            "enable_vector_index",
+            "Enable vector indexing on a property.",
+            make_input_schema::<EnableVectorIndexRequest>(),
+        ),
+        Tool::new(
+            "list_vector_indexes",
+            "List all enabled vector indexes.",
+            make_input_schema::<ListVectorIndexesRequest>(),
+        ),
+        Tool::new(
+            "get_node_at_time",
+            "Get node state at a specific time.",
+            make_input_schema::<GetNodeAtTimeRequest>(),
+        ),
+        Tool::new(
+            "get_edge_at_time",
+            "Get edge state at a specific time.",
+            make_input_schema::<GetEdgeAtTimeRequest>(),
+        ),
+        Tool::new(
+            "list_changes",
+            "List graph-wide changes (node & edge versions) committed in a transaction-time window, with optional valid-time and label filters and stable cursor pagination. Discover what changed without knowing entity IDs.",
+            make_input_schema::<ListChangesRequest>(),
+        ),
+        Tool::new(
+            "get_node_at_valid_time",
+            "Get node state at a specific valid time (independent dimension query).",
+            make_input_schema::<GetNodeAtValidTimeRequest>(),
+        ),
+        Tool::new(
+            "get_node_at_transaction_time",
+            "Get node state at a specific transaction time (independent dimension query).",
+            make_input_schema::<GetNodeAtTransactionTimeRequest>(),
+        ),
+        Tool::new(
+            "get_node_history",
+            "Get complete version history of a node.",
+            make_input_schema::<GetNodeHistoryRequest>(),
+        ),
+        Tool::new(
+            "diff_node_versions",
+            "Compute the difference between two versions of a node.",
+            make_input_schema::<DiffNodeVersionsRequest>(),
+        ),
+        Tool::new(
+            "get_edge_at_valid_time",
+            "Get edge state at a specific valid time (independent dimension query).",
+            make_input_schema::<GetEdgeAtValidTimeRequest>(),
+        ),
+        Tool::new(
+            "get_edge_at_transaction_time",
+            "Get edge state at a specific transaction time (independent dimension query).",
+            make_input_schema::<GetEdgeAtTransactionTimeRequest>(),
+        ),
+        Tool::new(
+            "get_edge_history",
+            "Get complete version history of an edge.",
+            make_input_schema::<GetEdgeHistoryRequest>(),
+        ),
+        Tool::new(
+            "diff_edge_versions",
+            "Compute the difference between two versions of an edge.",
+            make_input_schema::<DiffEdgeVersionsRequest>(),
+        ),
+        Tool::new(
+            "hybrid_query",
+            "Execute a hybrid query combining graph traversal, vector similarity, and temporal filtering.",
+            make_input_schema::<HybridQueryRequest>(),
+        ),
+    ]
+}
+
 impl ServerHandler for AletheiaMcpServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
@@ -2134,162 +2402,7 @@ impl ServerHandler for AletheiaMcpServer {
         _context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
         Ok(ListToolsResult {
-            tools: vec![
-                Tool::new(
-                    "get_node",
-                    "Get a node by its ID. Returns the node's label and properties.",
-                    make_input_schema::<GetNodeRequest>(),
-                ),
-                Tool::new(
-                    "create_node",
-                    "Create a new node with a label and optional properties.",
-                    make_input_schema::<CreateNodeRequest>(),
-                ),
-                Tool::new(
-                    "update_node",
-                    "Update an existing node's properties.",
-                    make_input_schema::<UpdateNodeRequest>(),
-                ),
-                Tool::new(
-                    "delete_node",
-                    "Delete a node by its ID (safe-by-default). If the node has connected \
-                     edges and `detach` is not true, the deletion is refused and the response \
-                     reports `connected_edges`. Pass `detach: true` to delete the node together \
-                     with all connected edges; the response then reports `edges_removed`.",
-                    make_input_schema::<DeleteNodeRequest>(),
-                ),
-                Tool::new(
-                    "delete_node_cascade",
-                    "Delete a node and all its connected edges (cascade delete). \
-                     This maintains referential integrity by removing orphaned edges.",
-                    make_input_schema::<DeleteNodeCascadeRequest>(),
-                ),
-                Tool::new(
-                    "list_nodes",
-                    "List nodes with optional label filter and pagination.",
-                    make_input_schema::<ListNodesRequest>(),
-                ),
-                Tool::new(
-                    "count_nodes",
-                    "Count the total number of nodes.",
-                    make_input_schema::<CountNodesRequest>(),
-                ),
-                Tool::new(
-                    "get_edge",
-                    "Get an edge by its ID.",
-                    make_input_schema::<GetEdgeRequest>(),
-                ),
-                Tool::new(
-                    "create_edge",
-                    "Create a new edge between two nodes.",
-                    make_input_schema::<CreateEdgeRequest>(),
-                ),
-                Tool::new(
-                    "update_edge",
-                    "Update an existing edge's properties.",
-                    make_input_schema::<UpdateEdgeRequest>(),
-                ),
-                Tool::new(
-                    "delete_edge",
-                    "Delete an edge by its ID.",
-                    make_input_schema::<DeleteEdgeRequest>(),
-                ),
-                Tool::new(
-                    "list_edges",
-                    "List edges with optional label filter and pagination.",
-                    make_input_schema::<ListEdgesRequest>(),
-                ),
-                Tool::new(
-                    "count_edges",
-                    "Count the total number of edges.",
-                    make_input_schema::<CountEdgesRequest>(),
-                ),
-                Tool::new(
-                    "get_outgoing_edges",
-                    "Get all outgoing edges from a node.",
-                    make_input_schema::<GetOutgoingEdgesRequest>(),
-                ),
-                Tool::new(
-                    "get_incoming_edges",
-                    "Get all incoming edges to a node.",
-                    make_input_schema::<GetIncomingEdgesRequest>(),
-                ),
-                Tool::new(
-                    "traverse",
-                    "Traverse the graph starting from a node.",
-                    make_input_schema::<TraverseRequest>(),
-                ),
-                Tool::new(
-                    "find_similar",
-                    "Find nodes similar to a query embedding.",
-                    make_input_schema::<FindSimilarRequest>(),
-                ),
-                Tool::new(
-                    "enable_vector_index",
-                    "Enable vector indexing on a property.",
-                    make_input_schema::<EnableVectorIndexRequest>(),
-                ),
-                Tool::new(
-                    "list_vector_indexes",
-                    "List all enabled vector indexes.",
-                    make_input_schema::<ListVectorIndexesRequest>(),
-                ),
-                Tool::new(
-                    "get_node_at_time",
-                    "Get node state at a specific time.",
-                    make_input_schema::<GetNodeAtTimeRequest>(),
-                ),
-                Tool::new(
-                    "get_edge_at_time",
-                    "Get edge state at a specific time.",
-                    make_input_schema::<GetEdgeAtTimeRequest>(),
-                ),
-                Tool::new(
-                    "get_node_at_valid_time",
-                    "Get node state at a specific valid time (independent dimension query).",
-                    make_input_schema::<GetNodeAtValidTimeRequest>(),
-                ),
-                Tool::new(
-                    "get_node_at_transaction_time",
-                    "Get node state at a specific transaction time (independent dimension query).",
-                    make_input_schema::<GetNodeAtTransactionTimeRequest>(),
-                ),
-                Tool::new(
-                    "get_node_history",
-                    "Get complete version history of a node.",
-                    make_input_schema::<GetNodeHistoryRequest>(),
-                ),
-                Tool::new(
-                    "diff_node_versions",
-                    "Compute the difference between two versions of a node.",
-                    make_input_schema::<DiffNodeVersionsRequest>(),
-                ),
-                Tool::new(
-                    "get_edge_at_valid_time",
-                    "Get edge state at a specific valid time (independent dimension query).",
-                    make_input_schema::<GetEdgeAtValidTimeRequest>(),
-                ),
-                Tool::new(
-                    "get_edge_at_transaction_time",
-                    "Get edge state at a specific transaction time (independent dimension query).",
-                    make_input_schema::<GetEdgeAtTransactionTimeRequest>(),
-                ),
-                Tool::new(
-                    "get_edge_history",
-                    "Get complete version history of an edge.",
-                    make_input_schema::<GetEdgeHistoryRequest>(),
-                ),
-                Tool::new(
-                    "diff_edge_versions",
-                    "Compute the difference between two versions of an edge.",
-                    make_input_schema::<DiffEdgeVersionsRequest>(),
-                ),
-                Tool::new(
-                    "hybrid_query",
-                    "Execute a hybrid query combining graph traversal, vector similarity, and temporal filtering.",
-                    make_input_schema::<HybridQueryRequest>(),
-                ),
-            ],
+            tools: tool_definitions(),
             next_cursor: None,
             meta: None,
         })
@@ -2327,6 +2440,7 @@ impl ServerHandler for AletheiaMcpServer {
             "list_vector_indexes" => self.handle_list_vector_indexes(args),
             "get_node_at_time" => self.handle_get_node_at_time(args),
             "get_edge_at_time" => self.handle_get_edge_at_time(args),
+            "list_changes" => self.handle_list_changes(args),
             "get_node_at_valid_time" => self.handle_get_node_at_valid_time(args),
             "get_node_at_transaction_time" => self.handle_get_node_at_transaction_time(args),
             "get_node_history" => self.handle_get_node_history(args),

@@ -10,6 +10,7 @@
 //! - Reconstruction walks backward to nearest anchor and applies deltas forward
 //! - TinyLFU cache reduces redundant delta chain traversals for concurrent reads
 
+use crate::core::changefeed::{ChangeRecord, EntityKind, build_change_record};
 use crate::core::error::{Result, StorageError, TemporalError};
 use crate::core::graph::{Edge, Node};
 use crate::core::history::{EntityHistory, VersionDiff, VersionInfo};
@@ -17,7 +18,7 @@ use crate::core::id::{EdgeId, NodeId, VersionId};
 use crate::core::interning::{GLOBAL_INTERNER, InternedString};
 use crate::core::observer::{Observer, StorageEvent, notify_observers};
 use crate::core::property::PropertyMap;
-use crate::core::temporal::{BiTemporalInterval, TIMESTAMP_MAX, Timestamp};
+use crate::core::temporal::{BiTemporalInterval, TIMESTAMP_MAX, TimeRange, Timestamp};
 use crate::core::version::{
     AnchorConfig, EdgeVersion, EntityVersion, FastHashMap, NodeVersion, TemporalVersion,
     VersionData,
@@ -1347,6 +1348,62 @@ impl HistoricalStorage {
         }
 
         result
+    }
+
+    /// Collect changefeed records for every committed version that falls within the given
+    /// transaction-time window, optionally constrained by a valid-time window and/or a
+    /// node-label / edge-type filter (Issue #3216).
+    ///
+    /// This is a read-only scan over the in-memory version maps. Only committed versions are
+    /// ever present in these maps (versions are inserted on the commit-apply path), so the
+    /// changefeed never surfaces uncommitted or rolled-back data. The result is unordered and
+    /// unpaginated; the caller is responsible for deterministic ordering and cursor/limit
+    /// pagination.
+    ///
+    /// # Performance
+    ///
+    /// This is an O(V) scan of all node and edge versions. It is adequate for the bounded
+    /// windows this API targets; a future optimization could maintain a transaction-time
+    /// index keyed by `(commit_timestamp, kind, id)` to make this O(log V + page).
+    pub fn collect_changes(
+        &self,
+        tx_window: &TimeRange,
+        valid_window: Option<&TimeRange>,
+        label_filter: Option<&str>,
+    ) -> Vec<ChangeRecord> {
+        let mut out = Vec::new();
+
+        for v in self.node_versions.values() {
+            if let Some(rec) = build_change_record(
+                v.node_id.as_u64(),
+                EntityKind::Node,
+                &v.temporal,
+                v.label,
+                v.prev_version.is_none(),
+                tx_window,
+                valid_window,
+                label_filter,
+            ) {
+                out.push(rec);
+            }
+        }
+
+        for v in self.edge_versions.values() {
+            if let Some(rec) = build_change_record(
+                v.edge_id.as_u64(),
+                EntityKind::Edge,
+                &v.temporal,
+                v.label,
+                v.prev_version.is_none(),
+                tx_window,
+                valid_window,
+                label_filter,
+            ) {
+                out.push(rec);
+            }
+        }
+
+        out
     }
 
     // ========================================================================

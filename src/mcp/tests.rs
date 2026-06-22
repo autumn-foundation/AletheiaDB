@@ -1150,6 +1150,106 @@ mod temporal_tests {
         let value: serde_json::Value = serde_json::from_str(&response).unwrap();
         assert!(value.get("edge").is_some() || value.get("error").is_some());
     }
+
+    // ------------------------------------------------------------------------
+    // list_changes (temporal changefeed, Issue #3216)
+    // ------------------------------------------------------------------------
+
+    fn list_changes_req() -> ListChangesRequest {
+        ListChangesRequest {
+            tx_from: "0".to_string(),
+            tx_to: i64::MAX.to_string(),
+            valid_from: None,
+            valid_to: None,
+            label: None,
+            limit: None,
+            cursor: None,
+        }
+    }
+
+    #[test]
+    fn test_list_changes_success_shape() {
+        let server = create_test_server();
+        server.create_node(CreateNodeRequest {
+            label: "Person".to_string(),
+            properties: None,
+        });
+
+        let response = server.list_changes(list_changes_req());
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+
+        assert!(value.get("error").is_none(), "unexpected error: {value}");
+        let changes = value["changes"].as_array().expect("changes array");
+        assert_eq!(changes.len(), 1);
+        assert_eq!(value["count"], serde_json::json!(1));
+        assert!(value.get("next_cursor").is_some());
+
+        let row = &changes[0];
+        assert_eq!(row["kind"], serde_json::json!("node"));
+        assert_eq!(row["change_type"], serde_json::json!("created"));
+        assert_eq!(row["label"], serde_json::json!("Person"));
+        assert!(row.get("transaction_time").is_some());
+        assert!(row["transaction_time_range"].get("start").is_some());
+        assert!(row["valid_time_range"].get("start").is_some());
+    }
+
+    #[test]
+    fn test_list_changes_invalid_window_errors() {
+        let server = create_test_server();
+        let mut req = list_changes_req();
+        req.tx_from = "2000000".to_string();
+        req.tx_to = "1000000".to_string();
+        let response = server.list_changes(req);
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert!(value.get("error").is_some());
+    }
+
+    #[test]
+    fn test_list_changes_empty_window_is_success() {
+        let server = create_test_server();
+        server.create_node(CreateNodeRequest {
+            label: "Person".to_string(),
+            properties: None,
+        });
+        let mut req = list_changes_req();
+        req.tx_from = "1000000".to_string();
+        req.tx_to = "1000000".to_string(); // empty window
+        let response = server.list_changes(req);
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert!(value.get("error").is_none());
+        assert_eq!(value["count"], serde_json::json!(0));
+    }
+
+    #[test]
+    fn test_list_changes_half_specified_valid_window_errors() {
+        let server = create_test_server();
+        let mut req = list_changes_req();
+        req.valid_from = Some("1000".to_string());
+        // valid_to omitted.
+        let response = server.list_changes(req);
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert!(value.get("error").is_some());
+    }
+
+    #[test]
+    fn test_list_changes_bad_timestamp_errors() {
+        let server = create_test_server();
+        let mut req = list_changes_req();
+        req.tx_from = "not-a-time".to_string();
+        let response = server.list_changes(req);
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert!(value.get("error").is_some());
+    }
+
+    #[test]
+    fn test_list_changes_registered_in_tool_list() {
+        let server = create_test_server();
+        let tools = server.list_tools_for_test();
+        assert!(
+            tools.iter().any(|name| name == "list_changes"),
+            "list_changes must be registered in the tool list"
+        );
+    }
 }
 
 // ============================================================================
