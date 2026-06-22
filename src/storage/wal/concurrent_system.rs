@@ -460,6 +460,19 @@ impl ConcurrentWalSystem {
         self.wal.append_async(operation)
     }
 
+    /// Append a batch of operations to the buffer without flushing (returns immediately).
+    ///
+    /// This is the batch counterpart of [`append_async`](Self::append_async): it buffers
+    /// every operation under a single atomic LSN allocation (the Issue #219 win) and lets
+    /// the configured durability path flush them later. Like `append_async`, it performs
+    /// **no** durability-mode branching — callers that need a flush still call
+    /// [`commit`](Self::commit) afterwards, which honors the active `DurabilityMode`. This
+    /// keeps the transaction commit path's behavior identical across Sync/Async/GroupCommit
+    /// while routing multi-operation transactions through the efficient batch append.
+    pub fn append_batch_async(&self, operations: Vec<WalOperation>) -> Result<Vec<LSN>> {
+        self.wal.append_batch(operations)
+    }
+
     /// Append an operation synchronously (waits for durability).
     ///
     /// This flushes immediately and waits for fsync.

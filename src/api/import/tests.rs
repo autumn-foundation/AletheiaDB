@@ -1,0 +1,301 @@
+//! Tests for the bulk graph importer (Issue #3211).
+
+use std::io::Write;
+use std::path::PathBuf;
+
+use tempfile::TempDir;
+
+use super::*;
+use crate::core::property::PropertyValue;
+use crate::core::temporal::time;
+use crate::test_utils::create_test_db;
+
+/// Write `contents` to a file named `name` inside `dir`, returning its path.
+fn write_file(dir: &TempDir, name: &str, contents: &str) -> PathBuf {
+    let path = dir.path().join(name);
+    let mut file = std::fs::File::create(&path).expect("create temp file");
+    file.write_all(contents.as_bytes())
+        .expect("write temp file");
+    path
+}
+
+fn person_nodes(key_col: &str) -> NodeMapping {
+    NodeMapping::new(LabelSource::fixed("Person"), key_col)
+        .property("name", "name", ColumnType::String)
+        .property("age", "age", ColumnType::Int)
+}
+
+// AC: happy path — nodes + edges CSV load with type coercion.
+#[test]
+fn happy_path_nodes_and_edges_csv() {
+    let files = TempDir::new().unwrap();
+    let (_tmp, db) = create_test_db().unwrap();
+
+    let nodes = write_file(
+        &files,
+        "nodes.csv",
+        "id,name,age\nalice,Alice,30\nbob,Bob,25\n",
+    );
+    let edges = write_file(&files, "edges.csv", "src,dst,since\nalice,bob,2020\n");
+
+    let mut importer = db.import();
+    let node_report = importer
+        .nodes_from_csv(&nodes, person_nodes("id"))
+        .expect("nodes import");
+    assert_eq!(node_report.rows_read, 2);
+    assert_eq!(node_report.nodes_imported, 2);
+    assert!(node_report.skipped.is_empty());
+
+    let edge_mapping = EdgeMapping::new(LabelSource::fixed("KNOWS"), "src", "dst").property(
+        "since",
+        "since",
+        ColumnType::Int,
+    );
+    let edge_report = importer
+        .edges_from_csv(&edges, edge_mapping)
+        .expect("edges import");
+    assert_eq!(edge_report.edges_imported, 1);
+    assert!(edge_report.unresolved_endpoints.is_empty());
+
+    assert_eq!(db.node_count(), 2);
+    assert_eq!(db.edge_count(), 1);
+
+    // Type coercion: name is a String, age is an Int.
+    let alice = importer.resolve_key("alice").expect("alice resolved");
+    let node = db.get_node(alice).unwrap();
+    assert_eq!(
+        node.properties.get("name"),
+        Some(&PropertyValue::string("Alice"))
+    );
+    assert_eq!(node.properties.get("age"), Some(&PropertyValue::Int(30)));
+
+    // Edge endpoints resolved by business key.
+    let bob = importer.resolve_key("bob").expect("bob resolved");
+    let out = db.get_outgoing_edges(alice);
+    assert_eq!(out.len(), 1);
+    assert_eq!(db.get_edge_target(out[0]).unwrap(), bob);
+}
+
+// AC: malformed row, Abort mode -> precise `row N:` error, nothing past it committed.
+#[test]
+fn malformed_row_abort_reports_row_number() {
+    let files = TempDir::new().unwrap();
+    let (_tmp, db) = create_test_db().unwrap();
+
+    // Row 2 ("bob") has a non-integer age.
+    let nodes = write_file(
+        &files,
+        "nodes.csv",
+        "id,name,age\nalice,Alice,30\nbob,Bob,notanumber\ncarol,Carol,40\n",
+    );
+
+    let mut importer = db.import().batch_size(1);
+    let err = importer
+        .nodes_from_csv(&nodes, person_nodes("id"))
+        .expect_err("should abort on malformed row");
+    let msg = err.to_string();
+    assert!(msg.contains("row 2"), "message was: {msg}");
+    assert!(msg.contains("Int"), "message was: {msg}");
+
+    // Abort: alice (row 1) committed before the bad row, carol (row 3) never reached.
+    assert_eq!(db.node_count(), 1);
+}
+
+// AC: malformed row, SkipAndReport mode -> good rows committed, precise errors reported.
+#[test]
+fn malformed_row_skip_and_report() {
+    let files = TempDir::new().unwrap();
+    let (_tmp, db) = create_test_db().unwrap();
+
+    let nodes = write_file(
+        &files,
+        "nodes.csv",
+        "id,name,age\nalice,Alice,30\nbob,Bob,notanumber\ncarol,Carol,40\n",
+    );
+
+    let mut importer = db.import().failure_mode(FailureMode::SkipAndReport);
+    let report = importer
+        .nodes_from_csv(&nodes, person_nodes("id"))
+        .expect("skip mode should not error");
+
+    assert_eq!(report.rows_read, 3);
+    assert_eq!(report.nodes_imported, 2);
+    assert_eq!(report.skipped.len(), 1);
+    assert_eq!(report.skipped[0].row, 2);
+    assert!(report.skipped[0].message.contains("Int"));
+    assert_eq!(db.node_count(), 2);
+}
+
+// AC: edges referencing missing endpoints are reported, not silently dropped.
+#[test]
+fn missing_endpoint_edges_reported() {
+    let files = TempDir::new().unwrap();
+    let (_tmp, db) = create_test_db().unwrap();
+
+    let nodes = write_file(&files, "nodes.csv", "id,name,age\nalice,Alice,30\n");
+    // bob does not exist as a node.
+    let edges = write_file(&files, "edges.csv", "src,dst\nalice,bob\n");
+
+    let mut importer = db.import().failure_mode(FailureMode::SkipAndReport);
+    importer
+        .nodes_from_csv(&nodes, person_nodes("id"))
+        .expect("nodes");
+    let report = importer
+        .edges_from_csv(
+            &edges,
+            EdgeMapping::new(LabelSource::fixed("KNOWS"), "src", "dst"),
+        )
+        .expect("edges");
+
+    assert_eq!(report.edges_imported, 0);
+    assert_eq!(report.unresolved_endpoints.len(), 1);
+    let unresolved = &report.unresolved_endpoints[0];
+    assert_eq!(unresolved.row, 1);
+    assert_eq!(unresolved.key, "bob");
+    assert_eq!(unresolved.side, Endpoint::Target);
+    assert_eq!(db.edge_count(), 0);
+
+    // Same situation aborts in Abort mode.
+    let (_tmp2, db2) = create_test_db().unwrap();
+    let mut importer2 = db2.import();
+    importer2
+        .nodes_from_csv(&nodes, person_nodes("id"))
+        .unwrap();
+    let err = importer2
+        .edges_from_csv(
+            &edges,
+            EdgeMapping::new(LabelSource::fixed("KNOWS"), "src", "dst"),
+        )
+        .expect_err("abort on unresolved endpoint");
+    assert!(err.to_string().contains("unresolved"));
+}
+
+// AC: optional valid_time column -> data is queryable with AS OF VALID_TIME.
+#[test]
+fn valid_time_backfill_round_trips_with_as_of() {
+    let files = TempDir::new().unwrap();
+    let (_tmp, db) = create_test_db().unwrap();
+
+    // Alice's fact is valid from 2021-01-01.
+    let nodes = write_file(
+        &files,
+        "nodes.csv",
+        "id,name,age,known_since\nalice,Alice,30,2021-01-01\n",
+    );
+
+    let mapping = person_nodes("id").valid_time_column("known_since");
+    let mut importer = db.import();
+    importer.nodes_from_csv(&nodes, mapping).unwrap();
+    let alice = importer.resolve_key("alice").unwrap();
+
+    let now = time::now();
+    // 2021-06-01 (after valid_from): node is visible.
+    let after = time::from_secs(1_622_505_600);
+    assert!(
+        db.get_node_at_time(alice, after, now).is_ok(),
+        "node should be valid after its valid_from"
+    );
+
+    // 2020-06-01 (before valid_from): node is NOT yet valid.
+    let before = time::from_secs(1_590_969_600);
+    assert!(
+        db.get_node_at_time(alice, before, now).is_err(),
+        "node should not be valid before its valid_from"
+    );
+}
+
+// AC: when valid_time is absent, rows default to import (transaction) time.
+#[test]
+fn without_valid_time_defaults_to_now() {
+    let files = TempDir::new().unwrap();
+    let (_tmp, db) = create_test_db().unwrap();
+    let nodes = write_file(&files, "nodes.csv", "id,name,age\nalice,Alice,30\n");
+
+    let mut importer = db.import();
+    importer.nodes_from_csv(&nodes, person_nodes("id")).unwrap();
+    let alice = importer.resolve_key("alice").unwrap();
+
+    // Visible now in current state.
+    assert!(db.get_node(alice).is_ok());
+    let now = time::now();
+    assert!(db.get_node_at_time(alice, now, now).is_ok());
+}
+
+// AC: JSONL variant parses + imports equivalently.
+#[test]
+fn jsonl_nodes_and_edges() {
+    let files = TempDir::new().unwrap();
+    let (_tmp, db) = create_test_db().unwrap();
+
+    let nodes = write_file(
+        &files,
+        "nodes.jsonl",
+        "{\"id\":\"alice\",\"name\":\"Alice\",\"age\":30}\n\n{\"id\":\"bob\",\"name\":\"Bob\",\"age\":25}\n",
+    );
+    let edges = write_file(
+        &files,
+        "edges.jsonl",
+        "{\"src\":\"alice\",\"dst\":\"bob\"}\n",
+    );
+
+    let mut importer = db.import();
+    let node_report = importer
+        .nodes_from_jsonl(&nodes, person_nodes("id"))
+        .unwrap();
+    // Blank line is skipped, not counted.
+    assert_eq!(node_report.rows_read, 2);
+    assert_eq!(node_report.nodes_imported, 2);
+
+    let edge_report = importer
+        .edges_from_jsonl(
+            &edges,
+            EdgeMapping::new(LabelSource::fixed("KNOWS"), "src", "dst"),
+        )
+        .unwrap();
+    assert_eq!(edge_report.edges_imported, 1);
+
+    let alice = importer.resolve_key("alice").unwrap();
+    let node = db.get_node(alice).unwrap();
+    assert_eq!(node.properties.get("age"), Some(&PropertyValue::Int(30)));
+}
+
+// AC: label-from-column works (in addition to fixed labels).
+#[test]
+fn label_from_column() {
+    let files = TempDir::new().unwrap();
+    let (_tmp, db) = create_test_db().unwrap();
+    let nodes = write_file(
+        &files,
+        "nodes.csv",
+        "id,kind,name\nn1,Person,Alice\nn2,Company,Acme\n",
+    );
+
+    let mapping = NodeMapping::new(LabelSource::column("kind"), "id").property(
+        "name",
+        "name",
+        ColumnType::String,
+    );
+    let mut importer = db.import();
+    importer.nodes_from_csv(&nodes, mapping).unwrap();
+
+    assert_eq!(db.scan_nodes_by_label("Person").count(), 1);
+    assert_eq!(db.scan_nodes_by_label("Company").count(), 1);
+}
+
+// Batching: a chunk larger than one batch still imports every row.
+#[test]
+fn batching_across_multiple_chunks() {
+    let files = TempDir::new().unwrap();
+    let (_tmp, db) = create_test_db().unwrap();
+
+    let mut csv = String::from("id,name,age\n");
+    for i in 0..25 {
+        csv.push_str(&format!("n{i},Name{i},{i}\n"));
+    }
+    let nodes = write_file(&files, "nodes.csv", &csv);
+
+    let mut importer = db.import().batch_size(10);
+    let report = importer.nodes_from_csv(&nodes, person_nodes("id")).unwrap();
+    assert_eq!(report.nodes_imported, 25);
+    assert_eq!(db.node_count(), 25);
+}
