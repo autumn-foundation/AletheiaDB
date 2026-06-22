@@ -111,9 +111,10 @@ pub use config::{
 };
 pub use core::temporal::time;
 pub use core::{
-    BiTemporalInterval, Edge, EdgeId, EntityId, GLOBAL_INTERNER, InternedString, Node, NodeHeader,
-    NodeId, PropertyKey, PropertyMap, PropertyMapBuilder, PropertyValue, StringInterner, TimeRange,
-    Timestamp, VersionId,
+    BiTemporalInterval, ChangeFeedPage, ChangeFeedQuery, ChangeRecord, ChangeType, Edge, EdgeId,
+    EntityId, EntityKind, GLOBAL_INTERNER, InternedString, Node, NodeHeader, NodeId, PropertyKey,
+    PropertyMap, PropertyMapBuilder, PropertyValue, StringInterner, TimeRange, Timestamp,
+    VersionId,
 };
 
 pub use api::{ReadOps, ReadTransaction, TxId, TxState, WriteOps, WriteTransaction};

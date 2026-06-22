@@ -1,10 +1,14 @@
 //! Temporal query operations for bi-temporal data.
 //!
 //! Methods for querying historical states of the graph using valid and transaction times.
+use crate::core::changefeed::{
+    ChangeCursor, ChangeFeedPage, ChangeFeedQuery, ChangeRecord, EntityKind, RawChange,
+    build_raw_change,
+};
 use crate::core::error::{Result, ResultExt};
 use crate::core::graph::{Edge, Node};
 use crate::core::id::{EdgeId, NodeId, VersionId};
-use crate::core::temporal::{Timestamp, time};
+use crate::core::temporal::{TimeRange, Timestamp, time};
 use crate::db::AletheiaDB;
 use crate::query::{EntityHistory, VersionDiff};
 
@@ -495,5 +499,667 @@ impl AletheiaDB {
             .read()
             .diff_edge_versions(edge_id, from_version, to_version)
             .record_error_metric()
+    }
+
+    /// Enumerate the entities (nodes **and** edges) that changed within a transaction-time
+    /// window — the graph-wide temporal changefeed (Issue #3216).
+    ///
+    /// This is the *discovery* counterpart to the per-entity history/diff APIs: it answers
+    /// "**which** entities were created, modified, or deleted between T1 and T2?" without the
+    /// caller already knowing any IDs. Each returned [`ChangeRecord`](crate::core::ChangeRecord)
+    /// carries the entity id, kind, change type, and the version's transaction- and valid-time
+    /// bounds, so a caller can then drill in with `get_node_history` / `diff_node_versions`.
+    ///
+    /// # Semantics
+    ///
+    /// - The transaction-time window `[tx_from, tx_to)` is **required** and half-open: a
+    ///   version is included iff its commit timestamp lies in the window.
+    /// - An optional valid-time window further constrains results (both `valid_from` and
+    ///   `valid_to` must be supplied together). Deletions (tombstones) have an empty valid-time
+    ///   range and are included iff their deletion instant lies within the valid window.
+    /// - An optional label filter matches both node labels and edge types by exact string.
+    /// - Results are deterministically ordered (transaction-time ascending, then kind, then id)
+    ///   and bounded by `limit`; when more rows remain, `next_cursor` carries an opaque,
+    ///   replayable continuation token.
+    /// - An empty window (`tx_from == tx_to`) yields an empty page — it is **not** an error.
+    /// - Only committed versions are ever returned; uncommitted/rolled-back versions are never
+    ///   present in historical storage.
+    ///
+    /// # Errors
+    ///
+    /// Returns `TemporalError::InvalidTimeRange` when `tx_from > tx_to` (or for an inverted
+    /// valid-time window), and `QueryError::InvalidParameter` for a malformed `cursor` or a
+    /// half-specified valid-time window.
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
+    pub fn list_changes(&self, query: &ChangeFeedQuery) -> Result<ChangeFeedPage> {
+        #[cfg(feature = "observability")]
+        let _span = crate::observability::temporal_query_span("list_changes").entered();
+
+        // Validate the (required) transaction-time window. `TimeRange::new` rejects start > end
+        // but allows start == end, so an empty window is valid and yields no rows.
+        let tx_window = TimeRange::new(query.tx_from, query.tx_to)?;
+
+        // Validate the optional valid-time window: both bounds or neither.
+        let valid_window = match (query.valid_from, query.valid_to) {
+            (Some(from), Some(to)) => Some(TimeRange::new(from, to)?),
+            (None, None) => None,
+            _ => {
+                return Err(crate::core::error::QueryError::InvalidParameter {
+                    parameter: "valid_time".to_string(),
+                    reason: "valid_from and valid_to must be supplied together".to_string(),
+                }
+                .into());
+            }
+        };
+
+        // Decode the continuation cursor (if any) before touching storage.
+        let cursor = match &query.cursor {
+            Some(token) => Some(ChangeCursor::decode(token)?),
+            None => None,
+        };
+
+        let label = query.label.as_deref();
+        let valid = valid_window.as_ref();
+
+        // Scan the hot tier under the read lock, but keep the lock hold short: `collect_changes`
+        // returns lightweight `RawChange`s (no label allocation), and the cold-tier scan (disk
+        // I/O) happens after the lock is released using the cloned tiered handle.
+        let (mut changes, tiered) = {
+            let hist = self.historical.read();
+            (
+                hist.collect_changes(&tx_window, valid, label),
+                hist.tiered_storage_arc(),
+            )
+        };
+
+        // Include versions that have migrated out of the hot maps into cold storage, so the feed
+        // is complete when tiered storage is enabled. Dedup against hot by (kind, version_id) in
+        // case a version is transiently present in both tiers during migration.
+        if let Some(tiered) = tiered {
+            let mut seen: std::collections::HashSet<(u8, u64)> = changes
+                .iter()
+                .map(|r| (r.cursor.kind_ord, r.cursor.version_id))
+                .collect();
+
+            for v in tiered.scan_node_versions_cold()? {
+                if let Some(rec) = build_raw_change(
+                    v.id.as_u64(),
+                    v.node_id.as_u64(),
+                    EntityKind::Node,
+                    &v.temporal,
+                    v.label,
+                    v.prev_version.is_none(),
+                    &tx_window,
+                    valid,
+                    label,
+                ) && seen.insert((rec.cursor.kind_ord, rec.cursor.version_id))
+                {
+                    changes.push(rec);
+                }
+            }
+            for v in tiered.scan_edge_versions_cold()? {
+                if let Some(rec) = build_raw_change(
+                    v.id.as_u64(),
+                    v.edge_id.as_u64(),
+                    EntityKind::Edge,
+                    &v.temporal,
+                    v.label,
+                    v.prev_version.is_none(),
+                    &tx_window,
+                    valid,
+                    label,
+                ) && seen.insert((rec.cursor.kind_ord, rec.cursor.version_id))
+                {
+                    changes.push(rec);
+                }
+            }
+        }
+
+        // A page must be able to carry a continuation cursor, so it can never be empty while more
+        // rows exist: treat limit 0 as 1.
+        let limit = query.limit.max(1);
+
+        // Resume strictly after the cursor key (the precomputed `cursor` is a Copy field, so no
+        // per-element recomputation).
+        if let Some(c) = cursor {
+            changes.retain(|record| record.cursor > c);
+        }
+
+        // Bound the page. When more rows remain than fit, select the `limit` smallest by cursor
+        // in O(n) before sorting just that page, rather than fully sorting the whole scan.
+        let has_more = changes.len() > limit;
+        if has_more {
+            changes.select_nth_unstable_by_key(limit, |record| record.cursor);
+            changes.truncate(limit);
+        }
+
+        // Deterministic order: transaction-time ascending, then kind, id, version.
+        changes.sort_unstable_by_key(|record| record.cursor);
+
+        let next_cursor = if has_more {
+            changes.last().map(|record| record.cursor.encode())
+        } else {
+            None
+        };
+
+        // Resolve labels only for the rows that made it onto this page.
+        let records: Vec<ChangeRecord> = changes.into_iter().map(RawChange::into_record).collect();
+
+        Ok(ChangeFeedPage {
+            changes: records,
+            next_cursor,
+        })
+    }
+}
+
+#[cfg(test)]
+mod changefeed_tests {
+    use crate::AletheiaDB;
+    use crate::api::WriteOps;
+    use crate::core::PropertyMapBuilder;
+    use crate::core::changefeed::{ChangeFeedQuery, ChangeType, EntityKind};
+    use crate::core::error::Error;
+    use crate::core::temporal::{TIMESTAMP_MAX, TimeRange, Timestamp, time};
+
+    fn props(name: &str) -> crate::core::PropertyMap {
+        PropertyMapBuilder::new().insert("name", name).build()
+    }
+
+    /// A window covering the entire timeline.
+    fn all() -> (Timestamp, Timestamp) {
+        (Timestamp::from(0), TIMESTAMP_MAX)
+    }
+
+    fn query(tx_from: Timestamp, tx_to: Timestamp, limit: usize) -> ChangeFeedQuery {
+        ChangeFeedQuery::new(tx_from, tx_to, limit)
+    }
+
+    #[test]
+    fn created_classification() {
+        let db = AletheiaDB::new().unwrap();
+        let (id, _t) = db
+            .write_with_timestamp(|tx| tx.create_node("Person", props("Alice")))
+            .unwrap();
+
+        let (from, to) = all();
+        let page = db.list_changes(&query(from, to, 100)).unwrap();
+        assert_eq!(page.changes.len(), 1);
+        let rec = &page.changes[0];
+        assert_eq!(rec.entity_id, id.as_u64());
+        assert_eq!(rec.kind, EntityKind::Node);
+        assert_eq!(rec.change_type, ChangeType::Created);
+        assert_eq!(rec.label, "Person");
+        assert!(page.next_cursor.is_none());
+    }
+
+    #[test]
+    fn modified_classification() {
+        let db = AletheiaDB::new().unwrap();
+        let (id, _t) = db
+            .write_with_timestamp(|tx| tx.create_node("Person", props("Alice")))
+            .unwrap();
+        db.write(|tx| {
+            tx.update_node(id, props("Alice v2"))?;
+            Ok::<_, Error>(())
+        })
+        .unwrap();
+
+        let (from, to) = all();
+        let page = db.list_changes(&query(from, to, 100)).unwrap();
+        // Two versions: created + modified, ordered by tx-time ascending.
+        assert_eq!(page.changes.len(), 2);
+        assert_eq!(page.changes[0].change_type, ChangeType::Created);
+        assert_eq!(page.changes[1].change_type, ChangeType::Modified);
+    }
+
+    #[test]
+    fn deleted_classification() {
+        let db = AletheiaDB::new().unwrap();
+        let (id, _t) = db
+            .write_with_timestamp(|tx| tx.create_node("Person", props("Alice")))
+            .unwrap();
+        db.write(|tx| {
+            tx.delete_node(id)?;
+            Ok::<_, Error>(())
+        })
+        .unwrap();
+
+        let (from, to) = all();
+        let page = db.list_changes(&query(from, to, 100)).unwrap();
+        let deleted: Vec<_> = page
+            .changes
+            .iter()
+            .filter(|r| r.change_type == ChangeType::Deleted)
+            .collect();
+        assert_eq!(deleted.len(), 1, "expected exactly one deletion row");
+        // A tombstone has an empty valid-time range.
+        assert!(deleted[0].valid_time_range.is_empty());
+    }
+
+    #[test]
+    fn enumerates_nodes_and_edges() {
+        let db = AletheiaDB::new().unwrap();
+        let (a, _) = db
+            .write_with_timestamp(|tx| tx.create_node("Person", props("A")))
+            .unwrap();
+        let (b, _) = db
+            .write_with_timestamp(|tx| tx.create_node("Person", props("B")))
+            .unwrap();
+        let (edge, _) = db
+            .write_with_timestamp(|tx| tx.create_edge(a, b, "KNOWS", props("e")))
+            .unwrap();
+
+        let (from, to) = all();
+        let page = db.list_changes(&query(from, to, 100)).unwrap();
+        assert_eq!(page.changes.len(), 3);
+        assert!(
+            page.changes
+                .iter()
+                .any(|r| r.kind == EntityKind::Edge && r.entity_id == edge.as_u64())
+        );
+        assert_eq!(
+            page.changes
+                .iter()
+                .filter(|r| r.kind == EntityKind::Node)
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn tx_window_is_half_open() {
+        let db = AletheiaDB::new().unwrap();
+        let (_id, t_create) = db
+            .write_with_timestamp(|tx| tx.create_node("Person", props("Alice")))
+            .unwrap();
+
+        // [t_create, MAX) -> includes the version (start is inclusive).
+        let included = db
+            .list_changes(&query(t_create, TIMESTAMP_MAX, 100))
+            .unwrap();
+        assert_eq!(included.changes.len(), 1);
+
+        // [0, t_create) -> excludes the version (end is exclusive).
+        let excluded = db
+            .list_changes(&query(Timestamp::from(0), t_create, 100))
+            .unwrap();
+        assert_eq!(excluded.changes.len(), 0);
+    }
+
+    #[test]
+    fn empty_window_is_empty_not_error() {
+        let db = AletheiaDB::new().unwrap();
+        db.write_with_timestamp(|tx| tx.create_node("Person", props("Alice")))
+            .unwrap();
+
+        let now = time::now();
+        let page = db.list_changes(&query(now, now, 100)).unwrap();
+        assert!(page.changes.is_empty());
+        assert!(page.next_cursor.is_none());
+    }
+
+    #[test]
+    fn invalid_window_errors() {
+        let db = AletheiaDB::new().unwrap();
+        let later = Timestamp::from(2_000_000);
+        let earlier = Timestamp::from(1_000_000);
+        let err = db.list_changes(&query(later, earlier, 100));
+        assert!(err.is_err(), "tx_from > tx_to must error");
+    }
+
+    #[test]
+    fn valid_time_constraint_filters() {
+        let db = AletheiaDB::new().unwrap();
+        db.write_with_timestamp(|tx| tx.create_node("Person", props("Alice")))
+            .unwrap();
+
+        let (from, to) = all();
+        // A node created "now" is valid from now to forever; a valid window entirely in the
+        // far past should exclude it.
+        let mut q = query(from, to, 100);
+        q.valid_from = Some(Timestamp::from(1));
+        q.valid_to = Some(Timestamp::from(2));
+        let page = db.list_changes(&q).unwrap();
+        assert_eq!(page.changes.len(), 0);
+
+        // A valid window covering the whole timeline includes it.
+        let mut q2 = query(from, to, 100);
+        q2.valid_from = Some(Timestamp::from(0));
+        q2.valid_to = Some(TIMESTAMP_MAX);
+        let page2 = db.list_changes(&q2).unwrap();
+        assert_eq!(page2.changes.len(), 1);
+    }
+
+    #[test]
+    fn half_specified_valid_window_errors() {
+        let db = AletheiaDB::new().unwrap();
+        let (from, to) = all();
+        let mut q = query(from, to, 100);
+        q.valid_from = Some(Timestamp::from(1));
+        // valid_to omitted.
+        assert!(db.list_changes(&q).is_err());
+    }
+
+    #[test]
+    fn label_filter() {
+        let db = AletheiaDB::new().unwrap();
+        db.write_with_timestamp(|tx| tx.create_node("Person", props("Alice")))
+            .unwrap();
+        db.write_with_timestamp(|tx| tx.create_node("Company", props("Acme")))
+            .unwrap();
+
+        let (from, to) = all();
+        let mut q = query(from, to, 100);
+        q.label = Some("Person".to_string());
+        let page = db.list_changes(&q).unwrap();
+        assert_eq!(page.changes.len(), 1);
+        assert_eq!(page.changes[0].label, "Person");
+    }
+
+    #[test]
+    fn ordering_is_deterministic() {
+        let db = AletheiaDB::new().unwrap();
+        for i in 0..5 {
+            db.write_with_timestamp(|tx| tx.create_node("Person", props(&format!("n{i}"))))
+                .unwrap();
+        }
+        let (from, to) = all();
+        let page = db.list_changes(&query(from, to, 100)).unwrap();
+        assert_eq!(page.changes.len(), 5);
+        // Transaction-time ascending, then kind, id, version.
+        for w in page.changes.windows(2) {
+            let a = &w[0];
+            let b = &w[1];
+            assert!(
+                (
+                    a.transaction_time(),
+                    a.kind.ord(),
+                    a.entity_id,
+                    a.version_id
+                ) <= (
+                    b.transaction_time(),
+                    b.kind.ord(),
+                    b.entity_id,
+                    b.version_id
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn pagination_is_stable_and_replayable() {
+        let db = AletheiaDB::new().unwrap();
+        for i in 0..5 {
+            db.write_with_timestamp(|tx| tx.create_node("Person", props(&format!("n{i}"))))
+                .unwrap();
+        }
+        let (from, to) = all();
+
+        // Full unpaginated result for comparison.
+        let full = db.list_changes(&query(from, to, 100)).unwrap();
+        assert_eq!(full.changes.len(), 5);
+
+        // Page through with limit = 2.
+        let mut collected = Vec::new();
+        let mut cursor = None;
+        let mut pages = 0;
+        loop {
+            let mut q = query(from, to, 2);
+            q.cursor = cursor.clone();
+            let page = db.list_changes(&q).unwrap();
+            collected.extend(page.changes.iter().map(|r| r.entity_id));
+            pages += 1;
+            match page.next_cursor {
+                Some(c) => cursor = Some(c),
+                None => break,
+            }
+            assert!(pages <= 5, "pagination did not terminate");
+        }
+        assert_eq!(pages, 3); // 2 + 2 + 1
+        let expected: Vec<u64> = full.changes.iter().map(|r| r.entity_id).collect();
+        assert_eq!(collected, expected, "paged result must equal unpaginated");
+
+        // Replayability: re-running page 2 with page 1's cursor yields identical rows.
+        let mut q1 = query(from, to, 2);
+        q1.cursor = None;
+        let page1 = db.list_changes(&q1).unwrap();
+        let mut q2a = query(from, to, 2);
+        q2a.cursor = page1.next_cursor.clone();
+        let page2a = db.list_changes(&q2a).unwrap();
+        let mut q2b = query(from, to, 2);
+        q2b.cursor = page1.next_cursor.clone();
+        let page2b = db.list_changes(&q2b).unwrap();
+        assert_eq!(page2a.changes, page2b.changes);
+    }
+
+    #[test]
+    fn rolled_back_tx_is_not_surfaced() {
+        let db = AletheiaDB::new().unwrap();
+        db.write_with_timestamp(|tx| tx.create_node("Person", props("committed")))
+            .unwrap();
+
+        let (from, to) = all();
+        let before = db
+            .list_changes(&query(from, to, 100))
+            .unwrap()
+            .changes
+            .len();
+
+        // A write that creates a node then fails -> rolled back, no version committed.
+        let result: Result<(), Error> = db.write(|tx| {
+            let _ = tx.create_node("Person", props("rolled-back"))?;
+            Err(Error::Other("intentional rollback".to_string()))
+        });
+        assert!(result.is_err());
+
+        let after = db
+            .list_changes(&query(from, to, 100))
+            .unwrap()
+            .changes
+            .len();
+        assert_eq!(before, after, "rolled-back versions must not appear");
+    }
+
+    #[test]
+    fn bad_cursor_errors_not_panics() {
+        let db = AletheiaDB::new().unwrap();
+        db.write_with_timestamp(|tx| tx.create_node("Person", props("Alice")))
+            .unwrap();
+        let (from, to) = all();
+        let mut q = query(from, to, 100);
+        q.cursor = Some("not-a-valid-cursor".to_string());
+        assert!(db.list_changes(&q).is_err());
+    }
+
+    #[test]
+    fn unknown_node_window_far_future_is_empty() {
+        let db = AletheiaDB::new().unwrap();
+        db.write_with_timestamp(|tx| tx.create_node("Person", props("Alice")))
+            .unwrap();
+        // Window far in the future, after everything committed.
+        let far = Timestamp::from(time::now().wallclock() + 1_000_000_000_000);
+        let page = db.list_changes(&query(far, TIMESTAMP_MAX, 100)).unwrap();
+        assert!(page.changes.is_empty());
+        // Sanity: TimeRange constructor is reachable for documentation of bounds.
+        let _ = TimeRange::new(Timestamp::from(0), far).unwrap();
+    }
+
+    #[test]
+    fn updated_edge_is_modified() {
+        let db = AletheiaDB::new().unwrap();
+        let (a, _) = db
+            .write_with_timestamp(|tx| tx.create_node("Person", props("A")))
+            .unwrap();
+        let (b, _) = db
+            .write_with_timestamp(|tx| tx.create_node("Person", props("B")))
+            .unwrap();
+        let (edge, _) = db
+            .write_with_timestamp(|tx| tx.create_edge(a, b, "KNOWS", props("e")))
+            .unwrap();
+        db.write(|tx| {
+            tx.update_edge(edge, props("e2"))?;
+            Ok::<_, Error>(())
+        })
+        .unwrap();
+
+        let (from, to) = all();
+        let mut q = query(from, to, 100);
+        q.label = Some("KNOWS".to_string());
+        let page = db.list_changes(&q).unwrap();
+        assert_eq!(page.changes.len(), 2);
+        assert_eq!(page.changes[0].change_type, ChangeType::Created);
+        assert_eq!(page.changes[1].change_type, ChangeType::Modified);
+    }
+
+    #[test]
+    fn pagination_carries_version_id_for_drill_in() {
+        // Every emitted row exposes a version_id (usable with the history/diff APIs) and the
+        // cursor includes it, so the sort key is unique per version regardless of how commit
+        // timestamps are assigned. Paging never drops or duplicates a row.
+        let db = AletheiaDB::new().unwrap();
+        for i in 0..5 {
+            db.write_with_timestamp(|tx| tx.create_node("Person", props(&format!("n{i}"))))
+                .unwrap();
+        }
+        let (from, to) = all();
+        let full = db.list_changes(&query(from, to, 100)).unwrap();
+        assert_eq!(full.changes.len(), 5);
+
+        let mut collected: Vec<(u64, u64)> = Vec::new();
+        let mut cursor = None;
+        loop {
+            let mut q = query(from, to, 2);
+            q.cursor = cursor.clone();
+            let page = db.list_changes(&q).unwrap();
+            collected.extend(page.changes.iter().map(|r| (r.entity_id, r.version_id)));
+            match page.next_cursor {
+                Some(c) => cursor = Some(c),
+                None => break,
+            }
+            assert!(collected.len() <= 10, "pagination did not terminate");
+        }
+        let mut expected: Vec<(u64, u64)> = full
+            .changes
+            .iter()
+            .map(|r| (r.entity_id, r.version_id))
+            .collect();
+        expected.sort_unstable();
+        collected.sort_unstable();
+        assert_eq!(
+            collected, expected,
+            "no version dropped or duplicated across pages"
+        );
+    }
+
+    #[test]
+    fn limit_zero_is_treated_as_one() {
+        let db = AletheiaDB::new().unwrap();
+        db.write_with_timestamp(|tx| tx.create_node("Person", props("a")))
+            .unwrap();
+        db.write_with_timestamp(|tx| tx.create_node("Person", props("b")))
+            .unwrap();
+
+        let (from, to) = all();
+        let page = db.list_changes(&query(from, to, 0)).unwrap();
+        assert!(
+            !page.changes.is_empty(),
+            "limit 0 must not silently drop all rows"
+        );
+        assert!(
+            page.next_cursor.is_some(),
+            "rows remain, so a continuation cursor must be present"
+        );
+    }
+
+    #[test]
+    fn valid_time_window_boundary_pairing() {
+        use crate::api::WriteOps;
+        let db = AletheiaDB::new().unwrap();
+        // Create with valid_from=100, then delete with valid_from=200 (tombstone instant 200).
+        let id = db
+            .write(|tx| tx.create_node_with_valid_time("Person", props("x"), Some(100.into())))
+            .unwrap();
+        db.write(|tx| {
+            tx.delete_node_with_valid_time(id, Some(200.into()))?;
+            Ok::<_, Error>(())
+        })
+        .unwrap();
+
+        let (from, to) = all();
+
+        // Window [100,200): the live create overlaps; the deletion instant 200 is excluded.
+        let mut q = query(from, to, 100);
+        q.valid_from = Some(100.into());
+        q.valid_to = Some(200.into());
+        let page = db.list_changes(&q).unwrap();
+        assert!(
+            page.changes
+                .iter()
+                .any(|r| r.change_type == ChangeType::Created)
+        );
+        assert!(
+            !page
+                .changes
+                .iter()
+                .any(|r| r.change_type == ChangeType::Deleted),
+            "deletion instant equals the exclusive upper bound, so it is excluded"
+        );
+
+        // Window [200,300): both the still-live-at-200 create and the deletion instant are in.
+        let mut q2 = query(from, to, 100);
+        q2.valid_from = Some(200.into());
+        q2.valid_to = Some(300.into());
+        let page2 = db.list_changes(&q2).unwrap();
+        assert!(
+            page2
+                .changes
+                .iter()
+                .any(|r| r.change_type == ChangeType::Deleted)
+        );
+    }
+
+    #[test]
+    fn cold_storage_versions_appear_in_feed() {
+        use crate::core::id::{NodeId, VersionId};
+        use crate::core::interning::GLOBAL_INTERNER;
+        use crate::core::property::PropertyMap;
+        use crate::core::temporal::BiTemporalInterval;
+        use crate::core::version::NodeVersion;
+        use crate::storage::redb_cold_storage::RedbColdStorage;
+        use crate::storage::tiered_storage::TieredStorage;
+        use std::sync::Arc;
+
+        let db = AletheiaDB::new().unwrap();
+        let (hot_id, _t) = db
+            .write_with_timestamp(|tx| tx.create_node("Person", props("hot")))
+            .unwrap();
+
+        // Place a version that exists ONLY in the cold tier, as if migrated out of the hot maps.
+        let dir = tempfile::tempdir().unwrap();
+        let cold =
+            Arc::new(RedbColdStorage::with_default_config(dir.path().join("cold.redb")).unwrap());
+        let cold_version = NodeVersion::new_anchor(
+            VersionId::new(999_999).unwrap(),
+            NodeId::new(888_888).unwrap(),
+            BiTemporalInterval::current(1000.into()),
+            GLOBAL_INTERNER.intern("ColdNode").unwrap(),
+            PropertyMap::new(),
+        );
+        cold.store_node_version(&cold_version).unwrap();
+        let tiered = Arc::new(TieredStorage::with_default_config(cold));
+        db.__test_historical_storage()
+            .write()
+            .set_tiered_storage(tiered);
+
+        let (from, to) = all();
+        let page = db.list_changes(&query(from, to, 100)).unwrap();
+        assert!(
+            page.changes.iter().any(|r| r.entity_id == hot_id.as_u64()),
+            "hot version still present"
+        );
+        assert!(
+            page.changes.iter().any(|r| r.entity_id == 888_888),
+            "cold-only version must be included in the feed"
+        );
     }
 }

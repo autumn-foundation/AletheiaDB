@@ -35,9 +35,9 @@ pub use tools::{
     CountEdgesRequest, CountNodesRequest, CreateEdgeRequest, CreateNodeRequest, DeleteEdgeRequest,
     DeleteNodeCascadeRequest, DeleteNodeRequest, EnableVectorIndexRequest, FindSimilarRequest,
     GetEdgeAtTimeRequest, GetEdgeRequest, GetIncomingEdgesRequest, GetNodeAtTimeRequest,
-    GetNodeRequest, GetOutgoingEdgesRequest, HybridQueryRequest, ListEdgesRequest,
-    ListNodesRequest, ListVectorIndexesRequest, TraverseRequest, UpdateEdgeRequest,
-    UpdateNodeRequest,
+    GetNodeRequest, GetOutgoingEdgesRequest, HybridQueryRequest, ListChangesRequest,
+    ListEdgesRequest, ListNodesRequest, ListVectorIndexesRequest, TraverseRequest,
+    UpdateEdgeRequest, UpdateNodeRequest,
 };
 
 #[cfg(test)]

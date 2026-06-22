@@ -25,9 +25,11 @@
 //! The [`hlc`] module combines both: ensuring causal ordering for events while remaining tightly bound
 //! to the physical wall clock, bridging the gap between machines and human expectations.
 
+pub mod changefeed;
 pub mod error;
 pub mod graph;
 pub mod hasher;
+pub mod hex;
 pub mod history;
 pub mod hlc;
 pub mod id;
@@ -38,6 +40,7 @@ pub mod temporal;
 pub mod vector;
 
 // Re-export commonly used types for convenience
+pub use changefeed::{ChangeFeedPage, ChangeFeedQuery, ChangeRecord, ChangeType, EntityKind};
 pub use error::{Error, Result, StorageError, TemporalError};
 pub use graph::{Edge, Node, NodeHeader};
 pub use id::{EdgeId, EntityId, IdGenerator, NodeId, VersionId};

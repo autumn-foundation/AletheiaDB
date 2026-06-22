@@ -333,6 +333,49 @@ pub struct GetEdgeAtTimeRequest {
     pub transaction_time: Option<String>,
 }
 
+/// Request to list graph-wide changes (node & edge versions) committed within a
+/// transaction-time window. Read-only; the discovery counterpart to `get_node_history`.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct ListChangesRequest {
+    /// Start of the transaction-time window (inclusive).
+    #[schemars(
+        description = "Start of the transaction-time window (inclusive), ISO 8601 timestamp or microseconds since epoch"
+    )]
+    pub tx_from: String,
+
+    /// End of the transaction-time window (exclusive).
+    #[schemars(
+        description = "End of the transaction-time window (exclusive), ISO 8601 timestamp or microseconds since epoch"
+    )]
+    pub tx_to: String,
+
+    /// Optional valid-time window start (inclusive). Must be paired with `valid_to`.
+    #[schemars(
+        description = "Optional valid-time window start (inclusive). Must be supplied together with valid_to."
+    )]
+    pub valid_from: Option<String>,
+
+    /// Optional valid-time window end (exclusive). Must be paired with `valid_from`.
+    #[schemars(
+        description = "Optional valid-time window end (exclusive). Must be supplied together with valid_from."
+    )]
+    pub valid_to: Option<String>,
+
+    /// Optional node-label / edge-type filter (exact match).
+    #[schemars(description = "Optional node label / edge type filter (exact match)")]
+    pub label: Option<String>,
+
+    /// Maximum number of changes to return (default 100, max 10000).
+    #[schemars(description = "Maximum number of changes to return (default 100, max 10000)")]
+    pub limit: Option<usize>,
+
+    /// Opaque continuation token from a previous response's `next_cursor`.
+    #[schemars(
+        description = "Opaque continuation token from a previous response's next_cursor; omit for the first page"
+    )]
+    pub cursor: Option<String>,
+}
+
 /// Request to get a node at a specific valid time (independent dimension query).
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct GetNodeAtValidTimeRequest {

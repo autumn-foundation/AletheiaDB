@@ -400,6 +400,22 @@ impl TieredStorage {
         })
     }
 
+    /// Decode every node version held in the cold tier (full scan).
+    ///
+    /// Used by the temporal changefeed to include versions that have been migrated out of hot
+    /// storage. See [`crate::storage::redb_cold_storage::RedbColdStorage::scan_node_versions`].
+    pub fn scan_node_versions_cold(&self) -> Result<Vec<NodeVersion>> {
+        self.cold.scan_node_versions()
+    }
+
+    /// Decode every edge version held in the cold tier (full scan).
+    ///
+    /// Used by the temporal changefeed to include versions that have been migrated out of hot
+    /// storage. See [`crate::storage::redb_cold_storage::RedbColdStorage::scan_edge_versions`].
+    pub fn scan_edge_versions_cold(&self) -> Result<Vec<EdgeVersion>> {
+        self.cold.scan_edge_versions()
+    }
+
     /// Prefetch versions in a chain (up to prefetch_depth).
     fn prefetch_chain<V, F>(&self, start: &V, cache: &Cache<VersionId, Arc<V>>, fetch_fn: &F)
     where

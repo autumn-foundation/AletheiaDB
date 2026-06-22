@@ -371,6 +371,12 @@ path = "benches/temporal_query.rs"
 required-features = []
 
 [[bench]]
+name = "changefeed"
+harness = false
+path = "benches/changefeed.rs"
+required-features = []
+
+[[bench]]
 name = "temporal_vector"
 harness = false
 path = "benches/temporal_vector.rs"

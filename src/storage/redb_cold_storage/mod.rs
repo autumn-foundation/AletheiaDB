@@ -1043,6 +1043,69 @@ impl RedbColdStorage {
         }
     }
 
+    /// Decode every entry in a versions table.
+    ///
+    /// Full-table scan used by the temporal changefeed so that versions migrated out of the hot
+    /// tier are still discoverable. Cold storage is keyed by `VersionId`, so there is no
+    /// transaction-time index to narrow the scan — every entry is decoded and the caller filters.
+    fn scan_entries_internal<V, F>(
+        &self,
+        decode_fn: F,
+        table_def: redb::TableDefinition<'static, u64, &'static [u8]>,
+    ) -> Result<Vec<V>>
+    where
+        F: Fn(&[u8]) -> Result<V>,
+    {
+        let read_txn = self
+            .db
+            .begin_read()
+            .map_err(map_transaction_error("Failed to begin read transaction"))?;
+
+        let table = match read_txn.open_table(table_def) {
+            Ok(table) => table,
+            // A cold store that has never persisted this kind of version has no such table yet.
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),
+            Err(e) => {
+                return Err(StorageError::io_error(format!(
+                    "Failed to open table '{}': {}",
+                    table_def.name(),
+                    e
+                ))
+                .into());
+            }
+        };
+
+        let mut out = Vec::new();
+        let iter = table
+            .iter()
+            .map_err(|e| StorageError::io_error(format!("Failed to iterate cold table: {}", e)))?;
+        for entry in iter {
+            let (_key, value) = entry
+                .map_err(|e| StorageError::io_error(format!("Failed to read cold entry: {}", e)))?;
+            let raw: &[u8] = value.value();
+            let compressed = self.decrypt_if_needed(raw)?;
+            let decompressed = self.decompress(&compressed)?;
+            out.push(decode_fn(&decompressed)?);
+        }
+        Ok(out)
+    }
+
+    /// Decode every node version currently held in cold storage.
+    ///
+    /// This is an O(N) full scan + decode of the cold node-version table; prefer the by-id
+    /// lookups for point reads. Used by the changefeed to include migrated history.
+    pub fn scan_node_versions(&self) -> Result<Vec<NodeVersion>> {
+        self.scan_entries_internal(decode_node_version, NODE_VERSIONS_TABLE)
+    }
+
+    /// Decode every edge version currently held in cold storage.
+    ///
+    /// This is an O(N) full scan + decode of the cold edge-version table; prefer the by-id
+    /// lookups for point reads. Used by the changefeed to include migrated history.
+    pub fn scan_edge_versions(&self) -> Result<Vec<EdgeVersion>> {
+        self.scan_entries_internal(decode_edge_version, EDGE_VERSIONS_TABLE)
+    }
+
     /// Store a single node version.
     ///
     /// Encodes and compresses the version before writing it to the `node_versions` table.
