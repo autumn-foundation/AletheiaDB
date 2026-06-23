@@ -529,6 +529,40 @@ pub struct HybridQueryRequest {
 }
 
 // ============================================================================
+// Declarative Query Operations (read-only Cypher / AQL)
+// ============================================================================
+
+/// Request to execute a read-only declarative query (Cypher or AQL).
+///
+/// This is the single-call counterpart to chaining several structured tools:
+/// the LLM emits one Cypher/AQL statement and receives structured rows back.
+/// Mutating statements (CREATE/SET/DELETE/MERGE/REMOVE/…) are rejected before
+/// execution — the tool never writes.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct QueryRequest {
+    /// Query language: "cypher" or "aql".
+    #[schemars(description = "Query language to use: \"cypher\" or \"aql\"")]
+    pub language: String,
+
+    /// The read-only query string to execute.
+    #[schemars(
+        description = "The read-only query string (e.g. MATCH (n:Person {name:$name}) RETURN n)"
+    )]
+    pub query: String,
+
+    /// Optional `$param` bindings (Cypher only). Numbers, strings, booleans,
+    /// null, and numeric arrays (treated as embeddings) are supported.
+    #[schemars(
+        description = "Optional $param bindings for Cypher. Numeric arrays are treated as embeddings."
+    )]
+    pub params: Option<HashMap<String, serde_json::Value>>,
+
+    /// Maximum number of rows to return (default: 100, capped at 10000).
+    #[schemars(description = "Maximum number of rows to return (default: 100, capped at 10000)")]
+    pub limit: Option<usize>,
+}
+
+// ============================================================================
 // Response Types (for serialization)
 // ============================================================================
 

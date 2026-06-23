@@ -625,6 +625,17 @@ impl AletheiaMcpServer {
         ))
     }
 
+    /// Execute a read-only declarative query (Cypher or AQL).
+    ///
+    /// Returns the engine's structured rows plus column metadata as JSON, or a
+    /// structured `{error:{kind,message,clause?,language}}` payload. Mutating
+    /// statements are rejected before execution and never write.
+    pub fn query(&self, req: QueryRequest) -> String {
+        Self::extract_text(self.handle_query(
+            serde_json::to_value(req).expect("request serialization should not fail"),
+        ))
+    }
+
     // ========================================================================
     // Helper methods for converting between AletheiaDB and MCP types
     // ========================================================================
@@ -2208,6 +2219,290 @@ impl AletheiaMcpServer {
         }
     }
 
+    // ========================================================================
+    // Declarative query tool (read-only Cypher / AQL) -- Issue #3213
+    // ========================================================================
+
+    /// Build a structured query-tool error payload.
+    ///
+    /// Distinct `kind`s let an LLM self-correct on retry: `invalid_request`,
+    /// `read_only_violation`, `language_unavailable`, `parse_error`,
+    /// `unsupported_construct`, `invalid_params`, `runtime_error`.
+    fn query_error(
+        &self,
+        kind: &str,
+        message: &str,
+        clause: Option<&str>,
+        language: Option<&str>,
+    ) -> CallToolResult {
+        let mut obj = serde_json::Map::new();
+        obj.insert("kind".to_string(), json!(kind));
+        obj.insert("message".to_string(), json!(message));
+        if let Some(clause) = clause {
+            obj.insert("clause".to_string(), json!(clause));
+        }
+        if let Some(language) = language {
+            obj.insert("language".to_string(), json!(language));
+        }
+        CallToolResult::error(vec![Content::text(
+            json!({ "error": serde_json::Value::Object(obj) }).to_string(),
+        )])
+    }
+
+    /// Map an engine error from query execution into a structured query-tool error.
+    fn map_query_error(&self, error: crate::core::error::Error, language: &str) -> CallToolResult {
+        use crate::core::error::{Error, QueryError};
+        match error {
+            Error::Query(QueryError::SyntaxError { message }) => {
+                self.query_error("parse_error", &message, None, Some(language))
+            }
+            Error::Query(QueryError::UnsupportedFeature { feature }) => self.query_error(
+                "unsupported_construct",
+                &format!("Unsupported query construct: {feature}"),
+                None,
+                Some(language),
+            ),
+            Error::Query(QueryError::InvalidParameter { parameter, reason }) => self.query_error(
+                "invalid_params",
+                &format!("Invalid parameter '{parameter}': {reason}"),
+                None,
+                Some(language),
+            ),
+            Error::Query(QueryError::ExecutionError { message }) => {
+                self.query_error("runtime_error", &message, None, Some(language))
+            }
+            other => self.query_error("runtime_error", &other.to_string(), None, Some(language)),
+        }
+    }
+
+    /// Serialize a single query row (entity + score/path/timestamp) to JSON.
+    fn query_row_to_json(&self, row: crate::query::executor::QueryRow) -> serde_json::Value {
+        let entity = match row.entity {
+            EntityResult::Node(node) => {
+                let r = self.node_to_response(&node);
+                json!({"type": "node", "id": r.id, "label": r.label, "properties": r.properties})
+            }
+            EntityResult::Edge(edge) => {
+                let r = self.edge_to_response(&edge);
+                json!({
+                    "type": "edge",
+                    "id": r.id,
+                    "source_id": r.source_id,
+                    "target_id": r.target_id,
+                    "label": r.label,
+                    "properties": r.properties,
+                })
+            }
+            EntityResult::NodeId(id) => json!({"type": "node", "id": id.as_u64()}),
+            EntityResult::EdgeId(id) => json!({"type": "edge", "id": id.as_u64()}),
+        };
+        json!({
+            "entity": entity,
+            "score": row.score,
+            "path": row.path.map(|p| {
+                p.iter()
+                    .map(|e| match e {
+                        ResultEntityId::Node(id) => json!({"type": "node", "id": id.as_u64()}),
+                        ResultEntityId::Edge(id) => json!({"type": "edge", "id": id.as_u64()}),
+                    })
+                    .collect::<Vec<_>>()
+            }),
+            "timestamp": row.timestamp.map(|t| t.wallclock().to_string()),
+        })
+    }
+
+    /// Convert JSON parameter bindings into Cypher parameter values.
+    #[cfg(feature = "cypher")]
+    fn json_to_cypher_params(
+        &self,
+        params: Option<&HashMap<String, serde_json::Value>>,
+    ) -> std::result::Result<HashMap<String, crate::cypher::CypherParameterValue>, (String, String)>
+    {
+        use crate::cypher::CypherParameterValue;
+        let mut out = HashMap::new();
+        let Some(map) = params else {
+            return Ok(out);
+        };
+        for (key, value) in map {
+            let pv = match value {
+                serde_json::Value::Null => CypherParameterValue::Null,
+                serde_json::Value::Bool(b) => CypherParameterValue::Bool(*b),
+                serde_json::Value::Number(n) => {
+                    // Check is_f64() first so that JSON floats (e.g. 1.0) are not
+                    // silently coerced to Int by as_i64(), which would succeed for
+                    // whole-number floats in some representations.
+                    if n.is_f64() {
+                        CypherParameterValue::Float(n.as_f64().unwrap())
+                    } else if let Some(i) = n.as_i64() {
+                        CypherParameterValue::Int(i)
+                    } else if let Some(f) = n.as_f64() {
+                        CypherParameterValue::Float(f)
+                    } else {
+                        return Err((key.clone(), "unsupported numeric value".to_string()));
+                    }
+                }
+                serde_json::Value::String(s) => CypherParameterValue::String(s.clone()),
+                serde_json::Value::Array(arr) => {
+                    if arr.is_empty() {
+                        return Err((
+                            key.clone(),
+                            "array parameters must not be empty; embeddings require at least \
+                             one dimension"
+                                .to_string(),
+                        ));
+                    }
+                    let mut floats = Vec::with_capacity(arr.len());
+                    for element in arr {
+                        match element.as_f64() {
+                            Some(f) => floats.push(f as f32),
+                            None => {
+                                return Err((
+                                    key.clone(),
+                                    "array parameters must contain only numbers (numeric arrays \
+                                     are treated as embeddings)"
+                                        .to_string(),
+                                ));
+                            }
+                        }
+                    }
+                    CypherParameterValue::Embedding(Arc::from(floats))
+                }
+                serde_json::Value::Object(_) => {
+                    return Err((
+                        key.clone(),
+                        "object parameters are not supported".to_string(),
+                    ));
+                }
+            };
+            out.insert(key.clone(), pv);
+        }
+        Ok(out)
+    }
+
+    fn handle_query(&self, args: serde_json::Value) -> CallToolResult {
+        // Extract language early so it can appear in error payloads even when
+        // full deserialization fails (language is not yet known at that point).
+        let raw_language = args
+            .get("language")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_ascii_lowercase());
+
+        let req: QueryRequest = match serde_json::from_value(args) {
+            Ok(r) => r,
+            Err(e) => {
+                return self.query_error(
+                    "invalid_request",
+                    &format!("Invalid arguments: {e}"),
+                    None,
+                    raw_language.as_deref(),
+                );
+            }
+        };
+
+        let language = req.language.to_ascii_lowercase();
+        if language != "cypher" && language != "aql" {
+            return self.query_error(
+                "invalid_request",
+                &format!(
+                    "Unsupported query language '{}'. Use \"cypher\" or \"aql\".",
+                    req.language
+                ),
+                None,
+                Some(&language),
+            );
+        }
+
+        // Read-only guard: reject mutating statements BEFORE any execution.
+        // Runs for every language so the tool can never write, even if the
+        // grammars later gain write support.
+        if let Some(clause) = detect_mutating_clause(&req.query) {
+            return self.query_error(
+                "read_only_violation",
+                &format!(
+                    "The `query` tool is read-only; the `{clause}` clause would mutate state and \
+                     is rejected before execution."
+                ),
+                Some(clause),
+                Some(&language),
+            );
+        }
+
+        let limit = req
+            .limit
+            .unwrap_or(DEFAULT_RESULT_LIMIT)
+            .min(MAX_RESULT_LIMIT);
+        let has_params = req.params.as_ref().is_some_and(|p| !p.is_empty());
+
+        let execution = match language.as_str() {
+            "aql" => {
+                if has_params {
+                    return self.query_error(
+                        "invalid_request",
+                        "AQL does not support parameter bindings; inline literal values or use \
+                         language \"cypher\" with $params.",
+                        None,
+                        Some("aql"),
+                    );
+                }
+                self.db.execute_aql(&req.query)
+            }
+            "cypher" => {
+                #[cfg(feature = "cypher")]
+                {
+                    match self.json_to_cypher_params(req.params.as_ref()) {
+                        Ok(params) if params.is_empty() => self.db.execute_cypher(&req.query),
+                        Ok(params) => self.db.execute_cypher_with_params(&req.query, params),
+                        Err((parameter, reason)) => {
+                            return self.query_error(
+                                "invalid_params",
+                                &format!("Invalid parameter '{parameter}': {reason}"),
+                                None,
+                                Some("cypher"),
+                            );
+                        }
+                    }
+                }
+                #[cfg(not(feature = "cypher"))]
+                {
+                    return self.query_error(
+                        "language_unavailable",
+                        "Cypher support is not compiled in (enable the `cypher` feature). Use \
+                         language \"aql\" instead.",
+                        None,
+                        Some("cypher"),
+                    );
+                }
+            }
+            _ => unreachable!("language already validated above"),
+        };
+
+        let results = match execution {
+            Ok(results) => results,
+            Err(e) => return self.map_query_error(e, &language),
+        };
+
+        // Collect one extra row to detect (and report) truncation at the cap.
+        let collected = match results.take_n(limit.saturating_add(1)) {
+            Ok(rows) => rows,
+            Err(e) => return self.map_query_error(e, &language),
+        };
+        let truncated = collected.len() > limit;
+        let rows: Vec<serde_json::Value> = collected
+            .into_iter()
+            .take(limit)
+            .map(|row| self.query_row_to_json(row))
+            .collect();
+        let row_count = rows.len();
+
+        self.success_json(json!({
+            "language": language,
+            "columns": query_columns(),
+            "rows": rows,
+            "row_count": row_count,
+            "truncated": truncated,
+        }))
+    }
+
     /// Test-only accessor returning the names of all advertised tools.
     #[cfg(test)]
     pub(crate) fn list_tools_for_test(&self) -> Vec<String> {
@@ -2226,6 +2521,122 @@ fn make_input_schema<T: rmcp::schemars::JsonSchema>()
         serde_json::Value::Object(map) => Arc::new(map),
         _ => Arc::new(serde_json::Map::new()),
     }
+}
+
+/// Clauses that would mutate state. The read-only `query` tool rejects any
+/// statement containing one of these (as a whole token) before execution.
+const MUTATING_KEYWORDS: &[&str] = &[
+    "CREATE", "MERGE", "SET", "DELETE", "REMOVE", "DETACH", "DROP", "CALL", "FOREACH", "LOAD",
+];
+
+/// Scan a query string for a mutating clause, ignoring string-literal contents
+/// (so `{name: 'DELETE'}` does not trip the guard), single-line `//` comments,
+/// node labels (`:CALL`), and property keys (`n.set`). Returns the offending
+/// keyword so the error can name it.
+fn detect_mutating_clause(query: &str) -> Option<&'static str> {
+    // First pass: strip string literals (single and double quoted, with backslash
+    // escapes) and single-line comments (//) into a sanitized string.
+    let mut sanitized = String::with_capacity(query.len());
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    let mut chars = query.chars().peekable();
+    while let Some(c) = chars.next() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match quote {
+            Some(q) => {
+                if c == '\\' {
+                    escaped = true;
+                } else if c == q {
+                    quote = None;
+                }
+                // Inside a string literal — don't emit characters.
+            }
+            None => {
+                if c == '\'' || c == '"' {
+                    quote = Some(c);
+                } else if c == '/' && chars.peek() == Some(&'/') {
+                    // Single-line comment: skip to end of line.
+                    for next in chars.by_ref() {
+                        if next == '\n' {
+                            break;
+                        }
+                    }
+                } else {
+                    sanitized.push(c);
+                }
+            }
+        }
+    }
+
+    // Second pass: tokenise and match, but skip tokens immediately preceded by
+    // ':' or '.' so that node labels (`:CALL`) and property keys (`n.set`) do
+    // not trigger a false positive.
+    let mut last_non_ws: Option<char> = None;
+    let mut current_token = String::new();
+
+    for c in sanitized.chars().chain(std::iter::once(' ')) {
+        if c.is_alphanumeric() || c == '_' {
+            current_token.push(c);
+        } else {
+            if !current_token.is_empty() {
+                let preceded_by_label_or_prop =
+                    last_non_ws == Some(':') || last_non_ws == Some('.');
+                if !preceded_by_label_or_prop
+                    && let Some(kw) = MUTATING_KEYWORDS
+                        .iter()
+                        .copied()
+                        .find(|kw| kw.eq_ignore_ascii_case(&current_token))
+                {
+                    return Some(kw);
+                }
+                current_token.clear();
+            }
+            if !c.is_whitespace() {
+                last_non_ws = Some(c);
+            }
+        }
+    }
+
+    None
+}
+
+/// Column metadata describing the structured shape of each `query` result row.
+///
+/// `QueryRow` does not carry the `RETURN` aliases, so the contract is the fixed
+/// row schema rather than per-query projection names. Constructed once and
+/// cloned cheaply on each call via `OnceLock`.
+fn query_columns() -> serde_json::Value {
+    use std::sync::OnceLock;
+    static COLUMNS: OnceLock<serde_json::Value> = OnceLock::new();
+    COLUMNS
+        .get_or_init(|| {
+            json!([
+                {
+                    "name": "entity",
+                    "type": "node|edge",
+                    "description": "The node or edge bound by the RETURN clause (with label and properties)."
+                },
+                {
+                    "name": "score",
+                    "type": "number|null",
+                    "description": "Vector similarity score, present for ranked queries."
+                },
+                {
+                    "name": "path",
+                    "type": "array<{type:string,id:number}>|null",
+                    "description": "Typed entity references along the traversal path (each element has `type` and `id`), when applicable."
+                },
+                {
+                    "name": "timestamp",
+                    "type": "string|null",
+                    "description": "Bi-temporal point this row represents, when applicable."
+                }
+            ])
+        })
+        .clone()
 }
 
 /// Build the list of tool definitions advertised by this MCP server.
@@ -2393,6 +2804,26 @@ fn tool_definitions() -> Vec<Tool> {
             "Execute a hybrid query combining graph traversal, vector similarity, and temporal filtering.",
             make_input_schema::<HybridQueryRequest>(),
         ),
+        Tool::new(
+            "query",
+            "Execute a single READ-ONLY declarative query and get structured rows back, \
+             replacing a chain of get_node/traverse/filter calls. \
+             `language` is \"cypher\" or \"aql\"; pass the statement in `query` and optional \
+             `$param` bindings in `params` (Cypher only; numeric arrays are treated as \
+             embeddings). \
+             Supported read-only subset: MATCH patterns with node/edge labels and inline \
+             property filters, variable-depth traversal (-[:REL*1..3]->), directions \
+             (->, <-, -), WHERE, RETURN [DISTINCT] / AS aliases, ORDER BY, SKIP/LIMIT, WITH \
+             chaining, vector similarity ranking, and bi-temporal scoping \
+             (AS OF TIMESTAMP/VALID_TIME/SYSTEM_TIME, FOR SYSTEM_TIME AS OF, BETWEEN ... AND ...). \
+             Mutating statements (CREATE/MERGE/SET/DELETE/REMOVE/DETACH/DROP/CALL/FOREACH/LOAD) \
+             are rejected before execution and never write. Results are capped (default 100, \
+             max 10000 rows; `truncated` indicates a cap hit). Errors are returned as a \
+             structured {error:{kind,message,clause?,language}} payload \
+             (kinds: invalid_request, read_only_violation, language_unavailable, parse_error, \
+             unsupported_construct, invalid_params, runtime_error) so callers can self-correct.",
+            make_input_schema::<QueryRequest>(),
+        ),
     ]
 }
 
@@ -2462,9 +2893,86 @@ impl ServerHandler for AletheiaMcpServer {
             "get_edge_history" => self.handle_get_edge_history(args),
             "diff_edge_versions" => self.handle_diff_edge_versions(args),
             "hybrid_query" => self.handle_hybrid_query(args),
+            "query" => self.handle_query(args),
             _ => self.error_json(&format!("Unknown tool: {}", request.name)),
         };
 
         Ok(result)
+    }
+}
+
+#[cfg(test)]
+mod server_unit_tests {
+    use std::sync::Arc;
+
+    use super::AletheiaMcpServer;
+    use crate::core::error::{Error, QueryError};
+    use crate::core::id::{EdgeId, NodeId};
+    use crate::db::AletheiaDB;
+    use crate::query::executor::{EntityResult, QueryRow};
+
+    fn make_server() -> AletheiaMcpServer {
+        AletheiaMcpServer::new(Arc::new(AletheiaDB::new().expect("db init")))
+    }
+
+    fn error_kind(server: &AletheiaMcpServer, err: Error) -> String {
+        let result = server.map_query_error(err, "aql");
+        let text = AletheiaMcpServer::extract_text(result);
+        let val: serde_json::Value = serde_json::from_str(&text).unwrap();
+        val["error"]["kind"].as_str().unwrap_or("").to_string()
+    }
+
+    #[test]
+    fn map_query_error_unsupported_feature_yields_unsupported_construct() {
+        let server = make_server();
+        let err = Error::Query(QueryError::UnsupportedFeature {
+            feature: "DISTINCT".to_string(),
+        });
+        assert_eq!(error_kind(&server, err), "unsupported_construct");
+    }
+
+    #[test]
+    fn map_query_error_invalid_parameter_yields_invalid_params() {
+        let server = make_server();
+        let err = Error::Query(QueryError::InvalidParameter {
+            parameter: "p".to_string(),
+            reason: "out of range".to_string(),
+        });
+        assert_eq!(error_kind(&server, err), "invalid_params");
+    }
+
+    #[test]
+    fn map_query_error_execution_error_yields_runtime_error() {
+        let server = make_server();
+        let err = Error::Query(QueryError::ExecutionError {
+            message: "boom".to_string(),
+        });
+        assert_eq!(error_kind(&server, err), "runtime_error");
+    }
+
+    #[test]
+    fn map_query_error_other_variant_yields_runtime_error() {
+        let server = make_server();
+        // Error::Other is a variant not matched by any specific arm — falls through to `other`.
+        let err = Error::Other("unexpected situation".to_string());
+        assert_eq!(error_kind(&server, err), "runtime_error");
+    }
+
+    #[test]
+    fn query_row_to_json_node_id_variant() {
+        let server = make_server();
+        let row = QueryRow::from_entity(EntityResult::NodeId(NodeId::new(42).unwrap()));
+        let json = server.query_row_to_json(row);
+        assert_eq!(json["entity"]["type"].as_str(), Some("node"));
+        assert_eq!(json["entity"]["id"].as_u64(), Some(42));
+    }
+
+    #[test]
+    fn query_row_to_json_edge_id_variant() {
+        let server = make_server();
+        let row = QueryRow::from_entity(EntityResult::EdgeId(EdgeId::new(99).unwrap()));
+        let json = server.query_row_to_json(row);
+        assert_eq!(json["entity"]["type"].as_str(), Some("edge"));
+        assert_eq!(json["entity"]["id"].as_u64(), Some(99));
     }
 }
