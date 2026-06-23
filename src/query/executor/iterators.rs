@@ -5,7 +5,7 @@
 
 use parking_lot::RwLock;
 use std::cmp::Reverse;
-use std::collections::{BinaryHeap, HashSet, VecDeque};
+use std::collections::{BinaryHeap, VecDeque};
 use std::sync::Arc;
 
 #[cfg(feature = "observability")]
@@ -760,7 +760,6 @@ pub struct TraversalIterator {
     temporal_context: Option<(Timestamp, Timestamp)>,
     // BFS state - reset for each input node (see doc comment above)
     frontier: VecDeque<(NodeId, Vec<EntityId>, usize)>,
-    visited: HashSet<NodeId>,
     input_exhausted: bool,
 }
 
@@ -789,7 +788,6 @@ impl TraversalIterator {
             historical,
             temporal_context,
             frontier: VecDeque::new(),
-            visited: HashSet::new(),
             input_exhausted: false,
         }
     }
@@ -968,13 +966,20 @@ impl ResultIterator for TraversalIterator {
                 // Expand neighbors
                 let neighbors = self.get_neighbors(node_id);
                 for (target, edge_id) in neighbors {
-                    if self.visited.insert(target) {
-                        // ⚡ Bolt Optimization: Pre-allocate capacity for new path to avoid reallocations.
-                        // We are adding exactly 2 elements (edge and node) to the current path length.
-                        let mut new_path = Vec::with_capacity(path.len() + 2);
-                        new_path.extend_from_slice(&path);
-                        new_path.push(EntityId::Edge(edge_id));
-                        new_path.push(EntityId::Node(target));
+                    // Create path with capacity before checking visited
+                    let mut new_path = Vec::with_capacity(path.len() + 2);
+                    new_path.extend_from_slice(&path);
+                    new_path.push(EntityId::Edge(edge_id));
+                    new_path.push(EntityId::Node(target));
+
+                    // For breadth-first traversal (MATCH a-[*]->b), we want to explore
+                    // ALL valid paths up to max depth. However, to prevent infinite loops,
+                    // we must ensure that a node does not appear twice IN THE SAME PATH
+                    // (Node Isomorphism). Using a global visited set (self.visited) would
+                    // incorrectly prune valid paths reaching the same node via different routes,
+                    // or valid paths continuing from the root node on a cycle.
+                    let cycle_detected = path.contains(&EntityId::Node(target));
+                    if !cycle_detected {
                         self.frontier
                             .push_back((target, new_path, current_depth + 1));
                     }
@@ -990,8 +995,6 @@ impl ResultIterator for TraversalIterator {
             match self.input.next() {
                 Some(Ok(row)) => {
                     if let Some(node_id) = row.entity.node_id() {
-                        self.visited.clear();
-                        self.visited.insert(node_id);
                         self.frontier
                             .push_back((node_id, vec![EntityId::Node(node_id)], 0));
                     }
@@ -1142,6 +1145,8 @@ impl FilterIterator {
             (PropertyValue::Bool(a), PredicateValue::Bool(b)) => a == b,
             (PropertyValue::Int(a), PredicateValue::Int(b)) => a == b,
             (PropertyValue::Float(a), PredicateValue::Float(b)) => (a - b).abs() < f64::EPSILON,
+            (PropertyValue::Int(a), PredicateValue::Float(b)) => ((*a as f64) - b).abs() < f64::EPSILON,
+            (PropertyValue::Float(a), PredicateValue::Int(b)) => (a - (*b as f64)).abs() < f64::EPSILON,
             (PropertyValue::String(a), PredicateValue::String(b)) => a.as_ref() == b.as_str(),
             (PropertyValue::Null, PredicateValue::Null) => true,
             _ => false,
@@ -1152,6 +1157,8 @@ impl FilterIterator {
         match (prop, value) {
             (PropertyValue::Int(a), PredicateValue::Int(b)) => a > b,
             (PropertyValue::Float(a), PredicateValue::Float(b)) => a > b,
+            (PropertyValue::Int(a), PredicateValue::Float(b)) => (*a as f64) > *b,
+            (PropertyValue::Float(a), PredicateValue::Int(b)) => *a > (*b as f64),
             _ => false,
         }
     }
@@ -1160,6 +1167,8 @@ impl FilterIterator {
         match (prop, value) {
             (PropertyValue::Int(a), PredicateValue::Int(b)) => a < b,
             (PropertyValue::Float(a), PredicateValue::Float(b)) => a < b,
+            (PropertyValue::Int(a), PredicateValue::Float(b)) => (*a as f64) < *b,
+            (PropertyValue::Float(a), PredicateValue::Int(b)) => *a < (*b as f64),
             _ => false,
         }
     }
@@ -1168,6 +1177,8 @@ impl FilterIterator {
         match (prop, value) {
             (PropertyValue::Int(a), PredicateValue::Int(b)) => a >= b,
             (PropertyValue::Float(a), PredicateValue::Float(b)) => a >= b,
+            (PropertyValue::Int(a), PredicateValue::Float(b)) => (*a as f64) >= *b,
+            (PropertyValue::Float(a), PredicateValue::Int(b)) => *a >= (*b as f64),
             _ => false,
         }
     }
@@ -1176,6 +1187,8 @@ impl FilterIterator {
         match (prop, value) {
             (PropertyValue::Int(a), PredicateValue::Int(b)) => a <= b,
             (PropertyValue::Float(a), PredicateValue::Float(b)) => a <= b,
+            (PropertyValue::Int(a), PredicateValue::Float(b)) => (*a as f64) <= *b,
+            (PropertyValue::Float(a), PredicateValue::Int(b)) => *a <= (*b as f64),
             _ => false,
         }
     }
@@ -1316,6 +1329,10 @@ impl ResultIterator for VectorRerankIterator {
             };
 
             let mut input = self.input.take()?;
+            if self.k == 0 {
+                self.sorted = Some(vec![].into_iter());
+                return None;
+            }
             // Use a min-heap to keep the top-k results
             let mut heap = BinaryHeap::with_capacity(self.k);
 
