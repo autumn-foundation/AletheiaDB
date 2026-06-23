@@ -12,3 +12,8 @@
 **Bloat:** `StorageSnapshot` and `FieldHolder` traits.
 **Cut:** Deleted single-implementation traits `StorageSnapshot` (implemented only by `CurrentStorageSnapshot`) and `FieldHolder` (implemented only by `Event`, unused except in tests). Moved methods directly to structs.
 **Saved:** ~50 lines of boilerplate + cognitive load of unnecessary abstraction layers.
+
+## [Reduction]
+**Bloat:** `StorageObserver` and related trait definitions, event types, and management logic in `HistoricalStorage` which was implemented solely for `VectorIndexObserver`. The vector snapshot creation is already properly synchronized using pre-anchor hooks.
+**Cut:** Deleted the `StorageObserver` trait, `StorageEvent` enum, `VectorIndexObserver`, and all notification plumbing from `HistoricalStorage` (`notify_observers`, `add_observer`, and tests).
+**Saved:** ~500 lines of complex event-driven boiler-plate, simplifying temporal vector alignment logic and making `HistoricalStorage` core logic easier to follow without unused callback infrastructure.
