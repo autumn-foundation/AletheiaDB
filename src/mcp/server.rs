@@ -2900,3 +2900,79 @@ impl ServerHandler for AletheiaMcpServer {
         Ok(result)
     }
 }
+
+#[cfg(test)]
+mod server_unit_tests {
+    use std::sync::Arc;
+
+    use super::AletheiaMcpServer;
+    use crate::core::error::{Error, QueryError};
+    use crate::core::id::{EdgeId, NodeId};
+    use crate::db::AletheiaDB;
+    use crate::query::executor::{EntityResult, QueryRow};
+
+    fn make_server() -> AletheiaMcpServer {
+        AletheiaMcpServer::new(Arc::new(AletheiaDB::new().expect("db init")))
+    }
+
+    fn error_kind(server: &AletheiaMcpServer, err: Error) -> String {
+        let result = server.map_query_error(err, "aql");
+        let text = AletheiaMcpServer::extract_text(result);
+        let val: serde_json::Value = serde_json::from_str(&text).unwrap();
+        val["error"]["kind"].as_str().unwrap_or("").to_string()
+    }
+
+    #[test]
+    fn map_query_error_unsupported_feature_yields_unsupported_construct() {
+        let server = make_server();
+        let err = Error::Query(QueryError::UnsupportedFeature {
+            feature: "DISTINCT".to_string(),
+        });
+        assert_eq!(error_kind(&server, err), "unsupported_construct");
+    }
+
+    #[test]
+    fn map_query_error_invalid_parameter_yields_invalid_params() {
+        let server = make_server();
+        let err = Error::Query(QueryError::InvalidParameter {
+            parameter: "p".to_string(),
+            reason: "out of range".to_string(),
+        });
+        assert_eq!(error_kind(&server, err), "invalid_params");
+    }
+
+    #[test]
+    fn map_query_error_execution_error_yields_runtime_error() {
+        let server = make_server();
+        let err = Error::Query(QueryError::ExecutionError {
+            message: "boom".to_string(),
+        });
+        assert_eq!(error_kind(&server, err), "runtime_error");
+    }
+
+    #[test]
+    fn map_query_error_other_variant_yields_runtime_error() {
+        let server = make_server();
+        // Error::Other is a variant not matched by any specific arm — falls through to `other`.
+        let err = Error::Other("unexpected situation".to_string());
+        assert_eq!(error_kind(&server, err), "runtime_error");
+    }
+
+    #[test]
+    fn query_row_to_json_node_id_variant() {
+        let server = make_server();
+        let row = QueryRow::from_entity(EntityResult::NodeId(NodeId::new(42).unwrap()));
+        let json = server.query_row_to_json(row);
+        assert_eq!(json["entity"]["type"].as_str(), Some("node"));
+        assert_eq!(json["entity"]["id"].as_u64(), Some(42));
+    }
+
+    #[test]
+    fn query_row_to_json_edge_id_variant() {
+        let server = make_server();
+        let row = QueryRow::from_entity(EntityResult::EdgeId(EdgeId::new(99).unwrap()));
+        let json = server.query_row_to_json(row);
+        assert_eq!(json["entity"]["type"].as_str(), Some("edge"));
+        assert_eq!(json["entity"]["id"].as_u64(), Some(99));
+    }
+}
