@@ -4,7 +4,6 @@ fn test_flush_deadlock_on_io_error() {
     use aletheiadb::storage::wal::entry::LSN;
     use aletheiadb::storage::wal::flush_coordinator::{FlushCoordinator, FlushCoordinatorConfig};
     use aletheiadb::storage::wal::ring_buffer::PendingEntry;
-    use std::os::unix::fs::PermissionsExt;
     use std::sync::Arc;
     use std::thread;
 
@@ -16,10 +15,12 @@ fn test_flush_deadlock_on_io_error() {
     let config = FlushCoordinatorConfig::new(dir_path.clone());
     let coordinator = Arc::new(FlushCoordinator::new(config).unwrap());
 
-    // 3. Make directory read-only to force I/O error on file creation
-    let mut perms = std::fs::metadata(&dir_path).unwrap().permissions();
-    perms.set_mode(0o444); // Read-only
-    std::fs::set_permissions(&dir_path, perms).unwrap();
+    // 3. Replace the WAL directory with a regular file to force ENOTDIR on segment creation.
+    // We cannot use chmod 0o444 because root can still create files in read-only directories.
+    // ENOTDIR, however, is enforced by the kernel regardless of privilege level: no process
+    // can open a path whose component is a file rather than a directory.
+    std::fs::remove_dir(&dir_path).unwrap(); // dir is empty after FlushCoordinator::new()
+    std::fs::File::create(&dir_path).unwrap(); // replace with a regular file
 
     // 4. Create a PendingEntry with completion handle
     let (entry, handle) = PendingEntry::new_sync(
@@ -50,10 +51,9 @@ fn test_flush_deadlock_on_io_error() {
 
     let join_result = waiter.join();
 
-    // Restore permissions so tempdir can be cleaned up
-    let mut perms = std::fs::metadata(&dir_path).unwrap().permissions();
-    perms.set_mode(0o755);
-    std::fs::set_permissions(&dir_path, perms).unwrap();
+    // Replace the file back with an empty directory so TempDir can clean up.
+    std::fs::remove_file(&dir_path).unwrap();
+    std::fs::create_dir(&dir_path).unwrap();
 
     // Verify waiter finished
     assert!(join_result.is_ok(), "Waiter thread panicked or hung");
