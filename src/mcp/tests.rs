@@ -3471,4 +3471,214 @@ mod query_tool_tests {
             );
         }
     }
+
+    #[test]
+    fn test_query_single_line_comment_before_mutation_is_not_rejected() {
+        // A `//`-style comment that contains a mutating keyword must NOT trip the
+        // read-only guard — only bare (outside-comment, outside-string) tokens count.
+        let server = create_test_server();
+        seed_named(&server, "Widget", "alpha");
+        let value = run_query(
+            &server,
+            QueryRequest {
+                language: "aql".to_string(),
+                query: "// CREATE would mutate\nMATCH (n:Widget) RETURN n".to_string(),
+                params: None,
+                limit: None,
+            },
+        );
+        if let Some(err) = value.get("error") {
+            assert_ne!(
+                err["kind"].as_str(),
+                Some("read_only_violation"),
+                "mutating keyword inside a // comment must not trigger the guard: {value}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_query_node_label_matching_mutating_keyword_is_allowed() {
+        // A node label that happens to spell a mutating keyword (e.g. :Call, :Set)
+        // must NOT be rejected — the token is preceded by ':' and is a label, not
+        // a clause.
+        for stmt in [
+            "MATCH (c:Call) RETURN c",
+            "MATCH (s:Set) RETURN s",
+            "MATCH (d:Drop) RETURN d",
+        ] {
+            let server = create_test_server();
+            let value = run_query(
+                &server,
+                QueryRequest {
+                    language: "aql".to_string(),
+                    query: stmt.to_string(),
+                    params: None,
+                    limit: None,
+                },
+            );
+            if let Some(err) = value.get("error") {
+                assert_ne!(
+                    err["kind"].as_str(),
+                    Some("read_only_violation"),
+                    "node label `{stmt}` must not trip the read-only guard: {value}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_query_property_key_matching_mutating_keyword_is_allowed() {
+        // A property key that happens to spell a mutating keyword (e.g. n.set,
+        // n.merge) must NOT be rejected — the token is preceded by '.' and is a
+        // property access, not a clause.
+        for stmt in [
+            "MATCH (n) RETURN n.set",
+            "MATCH (n) RETURN n.merge",
+            "MATCH (n) RETURN n.delete",
+        ] {
+            let server = create_test_server();
+            let value = run_query(
+                &server,
+                QueryRequest {
+                    language: "aql".to_string(),
+                    query: stmt.to_string(),
+                    params: None,
+                    limit: None,
+                },
+            );
+            if let Some(err) = value.get("error") {
+                assert_ne!(
+                    err["kind"].as_str(),
+                    Some("read_only_violation"),
+                    "property key in `{stmt}` must not trip the read-only guard: {value}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_query_remaining_mutating_keywords_are_rejected() {
+        // DETACH, DROP, FOREACH, and LOAD are listed as mutating keywords but are
+        // not exercised by the existing CREATE/SET/DELETE/MERGE/REMOVE tests.
+        for (stmt, kw) in [
+            ("DETACH DELETE (n)", "DETACH"),
+            ("DROP INDEX ON :Person(name)", "DROP"),
+            ("FOREACH (x IN $list | SET x.flag = 1)", "FOREACH"),
+            ("LOAD CSV FROM 'file' AS row", "LOAD"),
+        ] {
+            let server = create_test_server();
+            let value = run_query(
+                &server,
+                QueryRequest {
+                    language: "aql".to_string(),
+                    query: stmt.to_string(),
+                    params: None,
+                    limit: None,
+                },
+            );
+            assert_eq!(
+                error_obj(&value)["kind"].as_str(),
+                Some("read_only_violation"),
+                "statement with `{kw}` must be rejected: {value}"
+            );
+        }
+    }
+
+    #[cfg(feature = "cypher")]
+    #[test]
+    fn test_query_cypher_null_param_is_accepted() {
+        // JSON null must be bound as CypherParameterValue::Null without error.
+        let server = create_test_server();
+        let mut params = HashMap::new();
+        params.insert("x".to_string(), serde_json::json!(null));
+        let value = run_query(
+            &server,
+            QueryRequest {
+                language: "cypher".to_string(),
+                query: "MATCH (n) WHERE n.x = $x RETURN n".to_string(),
+                params: Some(params),
+                limit: None,
+            },
+        );
+        if let Some(err) = value.get("error") {
+            assert_ne!(
+                err["kind"].as_str(),
+                Some("invalid_params"),
+                "null param must be accepted: {value}"
+            );
+        }
+    }
+
+    #[cfg(feature = "cypher")]
+    #[test]
+    fn test_query_cypher_bool_and_int_params_are_accepted() {
+        // JSON booleans and integers must bind without error.
+        let server = create_test_server();
+        let mut params = HashMap::new();
+        params.insert("flag".to_string(), serde_json::json!(true));
+        params.insert("count".to_string(), serde_json::json!(42_i64));
+        let value = run_query(
+            &server,
+            QueryRequest {
+                language: "cypher".to_string(),
+                query: "MATCH (n) WHERE n.flag = $flag AND n.count = $count RETURN n".to_string(),
+                params: Some(params),
+                limit: None,
+            },
+        );
+        if let Some(err) = value.get("error") {
+            assert_ne!(
+                err["kind"].as_str(),
+                Some("invalid_params"),
+                "bool/int params must be accepted: {value}"
+            );
+        }
+    }
+
+    #[cfg(feature = "cypher")]
+    #[test]
+    fn test_query_cypher_object_param_is_invalid() {
+        // A JSON object parameter is not supported; must yield invalid_params.
+        let server = create_test_server();
+        let mut params = HashMap::new();
+        params.insert("obj".to_string(), serde_json::json!({"key": "value"}));
+        let value = run_query(
+            &server,
+            QueryRequest {
+                language: "cypher".to_string(),
+                query: "MATCH (n) RETURN n".to_string(),
+                params: Some(params),
+                limit: None,
+            },
+        );
+        assert_eq!(
+            error_obj(&value)["kind"].as_str(),
+            Some("invalid_params"),
+            "object parameter must yield invalid_params: {value}"
+        );
+    }
+
+    #[cfg(feature = "cypher")]
+    #[test]
+    fn test_query_cypher_non_numeric_array_param_is_invalid() {
+        // An array containing non-numeric elements is not a valid embedding;
+        // must yield invalid_params.
+        let server = create_test_server();
+        let mut params = HashMap::new();
+        params.insert("vec".to_string(), serde_json::json!(["not", "numbers"]));
+        let value = run_query(
+            &server,
+            QueryRequest {
+                language: "cypher".to_string(),
+                query: "MATCH (n) RETURN n".to_string(),
+                params: Some(params),
+                limit: None,
+            },
+        );
+        assert_eq!(
+            error_obj(&value)["kind"].as_str(),
+            Some("invalid_params"),
+            "non-numeric array parameter must yield invalid_params: {value}"
+        );
+    }
 }

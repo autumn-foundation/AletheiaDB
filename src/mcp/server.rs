@@ -2530,34 +2530,40 @@ const MUTATING_KEYWORDS: &[&str] = &[
 ];
 
 /// Scan a query string for a mutating clause, ignoring string-literal contents
-/// (so `{name: 'DELETE'}` does not trip the guard). Returns the offending
+/// (so `{name: 'DELETE'}` does not trip the guard), single-line `//` comments,
+/// node labels (`:CALL`), and property keys (`n.set`). Returns the offending
 /// keyword so the error can name it.
 fn detect_mutating_clause(query: &str) -> Option<&'static str> {
-    // Strip single- and double-quoted string literals, respecting backslash
-    // escapes so that `\'` or `\"` inside a string does not prematurely close
-    // the literal and leak its content into the token scan.
+    // First pass: strip string literals (single and double quoted, with backslash
+    // escapes) and single-line comments (//) into a sanitized string.
     let mut sanitized = String::with_capacity(query.len());
     let mut quote: Option<char> = None;
     let mut escaped = false;
-    for c in query.chars() {
+    let mut chars = query.chars().peekable();
+    while let Some(c) = chars.next() {
         if escaped {
-            // Previous character was a backslash inside a string — skip this
-            // character unconditionally regardless of what it is.
             escaped = false;
             continue;
         }
         match quote {
             Some(q) => {
                 if c == '\\' {
-                    escaped = true; // next char is escaped, don't close the string on it
+                    escaped = true;
                 } else if c == q {
                     quote = None;
                 }
-                // Characters inside string literals are not pushed to sanitized.
+                // Inside a string literal — don't emit characters.
             }
             None => {
                 if c == '\'' || c == '"' {
                     quote = Some(c);
+                } else if c == '/' && chars.peek() == Some(&'/') {
+                    // Single-line comment: skip to end of line.
+                    for next in chars.by_ref() {
+                        if next == '\n' {
+                            break;
+                        }
+                    }
                 } else {
                     sanitized.push(c);
                 }
@@ -2565,16 +2571,36 @@ fn detect_mutating_clause(query: &str) -> Option<&'static str> {
         }
     }
 
-    sanitized
-        .split(|ch: char| !ch.is_alphanumeric() && ch != '_')
-        .filter(|token| !token.is_empty())
-        .find_map(|token| {
-            // eq_ignore_ascii_case avoids a per-token String allocation.
-            MUTATING_KEYWORDS
-                .iter()
-                .copied()
-                .find(|kw| kw.eq_ignore_ascii_case(token))
-        })
+    // Second pass: tokenise and match, but skip tokens immediately preceded by
+    // ':' or '.' so that node labels (`:CALL`) and property keys (`n.set`) do
+    // not trigger a false positive.
+    let mut last_non_ws: Option<char> = None;
+    let mut current_token = String::new();
+
+    for c in sanitized.chars().chain(std::iter::once(' ')) {
+        if c.is_alphanumeric() || c == '_' {
+            current_token.push(c);
+        } else {
+            if !current_token.is_empty() {
+                let preceded_by_label_or_prop =
+                    last_non_ws == Some(':') || last_non_ws == Some('.');
+                if !preceded_by_label_or_prop
+                    && let Some(kw) = MUTATING_KEYWORDS
+                        .iter()
+                        .copied()
+                        .find(|kw| kw.eq_ignore_ascii_case(&current_token))
+                {
+                    return Some(kw);
+                }
+                current_token.clear();
+            }
+            if !c.is_whitespace() {
+                last_non_ws = Some(c);
+            }
+        }
+    }
+
+    None
 }
 
 /// Column metadata describing the structured shape of each `query` result row.
