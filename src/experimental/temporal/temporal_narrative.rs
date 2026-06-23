@@ -38,20 +38,6 @@ pub struct NarrativeGenerator<'a> {
     db: &'a AletheiaDB,
 }
 
-#[cfg(not(feature = "semantic-temporal"))]
-/// Generator for creating natural language narratives from temporal history.
-#[deprecated(
-    note = "NarrativeGenerator requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
-)]
-/// Generates human-readable summaries of temporal graph mutations.
-///
-/// # Why?
-/// When analyzing a `BiTemporalInterval`, users often need to understand
-/// the sequence of events (e.g., "Alice liked the post, then Bob deleted it").
-/// This struct translates raw `VersionMetadata` into a chronological narrative.
-pub struct NarrativeGenerator<'a> {
-    _marker: std::marker::PhantomData<&'a AletheiaDB>,
-}
 
 #[cfg(feature = "semantic-temporal")]
 impl<'a> NarrativeGenerator<'a> {

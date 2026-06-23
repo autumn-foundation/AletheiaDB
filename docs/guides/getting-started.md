@@ -13,7 +13,7 @@ By the end you'll have a working mental model of how AletheiaDB works day-to-day
 ```rust
 use aletheiadb::prelude::*;
 
-fn main() -> Result<()> {
+fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let db = AletheiaDB::new()?;
     // db is ready to use
     Ok(())
@@ -190,7 +190,8 @@ let _doc2 = db.create_node("Document", properties! {
 
 // Find the 10 nodes most similar to doc1
 // (doc1 itself is excluded from results)
-let similar = db.find_similar(doc1, 10)?;
+use aletheiadb::SimilarityQuery;
+let similar = db.similarity_search(SimilarityQuery::from_node(doc1).k(10))?;
 for (node_id, score) in similar {
     println!("Node {:?} similarity: {:.3}", node_id, score);
 }

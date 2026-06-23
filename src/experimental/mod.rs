@@ -39,6 +39,14 @@
 //! > graduated semantic-search cohort. Add `"semantic-search"` alongside `"nova"`
 //! > if you want every former-nova module compiled.
 //!
+//! # ⚠️ Important Note on Stubs
+//!
+//! Certain structs in this module (like `NarrativeGenerator`) may be visible in documentation
+//! even when their respective feature flags are disabled. However, attempting to instantiate
+//! or use these stubs without the proper feature flag (e.g., `nova` or `semantic-temporal`)
+//! will result in a hard **compile error**. Always ensure the appropriate features are
+//! enabled in your `Cargo.toml`.
+//!
 //! # Categories
 //!
 //! | Flag | What it gates | Modules |

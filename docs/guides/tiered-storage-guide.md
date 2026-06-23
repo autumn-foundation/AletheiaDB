@@ -69,26 +69,7 @@ let config = AletheiaDBConfig::builder()
 let db = AletheiaDB::with_unified_config(config)?;
 ```
 
-**Legacy: Manual Setup**
 
-For advanced use cases requiring custom backends:
-
-```rust
-use aletheiadb::storage::{
-    HistoricalStorage, TieredStorage, TieredStorageConfig,
-    RedbColdStorage, RedbConfig,
-};
-use std::sync::Arc;
-
-// 1. Create Redb cold storage
-let cold = Arc::new(RedbColdStorage::new("data/cold.redb", RedbConfig::new())?);
-
-// 2. Create tiered storage
-let tiered = TieredStorage::new(TieredStorageConfig::default(), cold);
-
-// 3. Wire to historical storage
-historical.set_tiered_storage(Arc::new(tiered));
-```
 
 ## Configuration
 
