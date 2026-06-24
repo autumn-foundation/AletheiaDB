@@ -77,3 +77,7 @@
 **Pre-allocating Vec Capacities in Hot Paths**
 **Learning:** Pre-allocating standard Rust `Vec` objects using `Vec::with_capacity` in hot-paths like parsers and query planners eliminates unnecessary heap reallocations (0 -> 4 -> 8 -> 16 etc.), without changing semantics or causing borrow checker issues. However, if the expected bounds are wildly incorrect it could lead to memory bloat. A small capacity for small collections minimizes performance impacts in hot loops.
 **Action:** When a loop dynamically pushes elements to a new empty Vector (especially in repeated execution domains like parsers and network/storage iterators), replace `Vec::new()` with `Vec::with_capacity(n)` if a typical or max size `n` is roughly known.
+
+**Optimize Vector Deduplication with In-Place Retain**
+**Learning:** When needing to deduplicate a `Vec` while keeping the *last* occurrence of each item (scanning in reverse), the previous approach involved allocating a new `Vec`, iterating backwards to populate it, and then reversing the new `Vec`. This causes an unnecessary O(N) heap allocation.
+**Action:** Use `.reverse()`, `.retain()`, and `.reverse()` again on the original `Vec` to perform the deduplication entirely in-place, eliminating the heap allocation completely.
