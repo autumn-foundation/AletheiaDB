@@ -77,3 +77,7 @@
 **Pre-allocating Vec Capacities in Hot Paths**
 **Learning:** Pre-allocating standard Rust `Vec` objects using `Vec::with_capacity` in hot-paths like parsers and query planners eliminates unnecessary heap reallocations (0 -> 4 -> 8 -> 16 etc.), without changing semantics or causing borrow checker issues. However, if the expected bounds are wildly incorrect it could lead to memory bloat. A small capacity for small collections minimizes performance impacts in hot loops.
 **Action:** When a loop dynamically pushes elements to a new empty Vector (especially in repeated execution domains like parsers and network/storage iterators), replace `Vec::new()` with `Vec::with_capacity(n)` if a typical or max size `n` is roughly known.
+
+**[Zero-Allocation SQL Keyword Parsing]**
+**Learning:** In string parsers (like `find_keyword_outside_strings`), calling `.to_uppercase()` creates a complete owned copy of the string. Storing characters via `.chars().collect::<Vec<char>>()` adds another two full string-length heap allocations per function call. Slicing with `.iter().collect::<String>()` creates an `O(N)` number of intermediate loop allocations.
+**Action:** Achieve zero-allocation parsing by iterating over `char_indices().peekable()` to track string literal scopes. For ASCII-dominant keywords, compare string slices using `remainder[..len].eq_ignore_ascii_case(keyword)`, which requires zero heap allocations. Use `.starts_with()` on `.to_uppercase()` as a fallback only when dealing with non-ASCII boundaries.

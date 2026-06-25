@@ -133,52 +133,55 @@ pub fn extract_match_clauses(sql: &str) -> Result<ExtractedMatch, SqlError> {
 ///
 /// Returns the byte offset of the first character of the keyword, or None.
 fn find_keyword_outside_strings(sql: &str, keyword: &str) -> Option<usize> {
-    let sql_upper = sql.to_uppercase();
-    let keyword_upper = keyword.to_uppercase();
-    let keyword_len = keyword_upper.chars().count();
+    let mut in_string = false;
+    let mut chars = sql.char_indices().peekable();
+    let keyword_byte_len = keyword.len();
 
-    let mut i = 0;
-    let chars: Vec<char> = sql.chars().collect();
-    let upper_chars: Vec<char> = sql_upper.chars().collect();
-
-    while i < chars.len() {
-        // Skip string literals
-        if chars[i] == '\'' {
-            i += 1;
-            while i < chars.len() {
-                if chars[i] == '\'' {
-                    // Check for escaped quote ''
-                    if i + 1 < chars.len() && chars[i + 1] == '\'' {
-                        i += 2;
-                    } else {
-                        i += 1;
-                        break;
-                    }
-                } else {
-                    i += 1;
-                }
+    while let Some((idx, c)) = chars.next() {
+        if c == '\'' {
+            if in_string && chars.peek().map(|&(_, next_c)| next_c) == Some('\'') {
+                chars.next(); // Skip escaped quote
+                continue;
             }
+            in_string = !in_string;
             continue;
         }
 
-        // Check if we have the keyword at this position
-        if i + keyword_len <= upper_chars.len() {
-            let candidate: String = upper_chars[i..i + keyword_len].iter().collect();
-            if candidate == keyword_upper {
-                // Ensure it's a word boundary (not part of a larger identifier)
-                let before_ok = i == 0 || !chars[i - 1].is_alphanumeric() && chars[i - 1] != '_';
-                let after_ok = i + keyword_len >= chars.len()
-                    || !chars[i + keyword_len].is_alphanumeric() && chars[i + keyword_len] != '_';
+        if !in_string {
+            let remainder = &sql[idx..];
 
-                if before_ok && after_ok {
-                    // Calculate byte offset
-                    let byte_offset: usize = sql.chars().take(i).map(|c| c.len_utf8()).sum();
-                    return Some(byte_offset);
+            // Keywords are strictly ASCII ("MATCH", "WHERE", etc.).
+            // We can do a zero-allocation byte-slice comparison if the remaining
+            // string has enough bytes. Since we're searching for keywords,
+            // we do case-insensitive ASCII comparison.
+            if remainder.len() >= keyword_byte_len {
+                // Use as_bytes() and eq_ignore_ascii_case on the byte slice to avoid UTF-8 boundary panics
+                let candidate_bytes = &remainder.as_bytes()[..keyword_byte_len];
+                if candidate_bytes.eq_ignore_ascii_case(keyword.as_bytes()) {
+                    // Ensure it's a word boundary.
+                    let before_ok = idx == 0 || {
+                        let before_char = sql[..idx].chars().next_back().unwrap();
+                        !before_char.is_alphanumeric() && before_char != '_'
+                    };
+
+                    let after_idx = idx + keyword_byte_len;
+                    let after_ok = after_idx == sql.len() || {
+                        // We must ensure the next character starts at a valid char boundary,
+                        // which `keyword_byte_len` guarantees if `eq_ignore_ascii_case` was true
+                        // since keywords are ASCII.
+                        if let Some(after_char) = sql[after_idx..].chars().next() {
+                            !after_char.is_alphanumeric() && after_char != '_'
+                        } else {
+                            true
+                        }
+                    };
+
+                    if before_ok && after_ok {
+                        return Some(idx);
+                    }
                 }
             }
         }
-
-        i += 1;
     }
 
     None
