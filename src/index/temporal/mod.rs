@@ -360,16 +360,13 @@ impl EntityTimeline {
             }
             DeduplicationPolicy::LastOccurrence => {
                 // Keep the latest occurrence for each metadata_idx by scanning in reverse.
-                // Reverse scan avoids O(n^2) lookups and preserves sorted order after reverse().
+                // ⚡ Bolt Optimization: Operates in-place via reverse + retain + reverse to avoid
+                // allocating an intermediate Vec of potentially equal size.
                 let mut seen = std::collections::HashSet::with_capacity(self.versions.len());
-                let mut deduped = Vec::with_capacity(self.versions.len());
-                for entry in self.versions.iter().rev() {
-                    if seen.insert(entry.metadata_idx) {
-                        deduped.push(*entry);
-                    }
-                }
-                deduped.reverse();
-                self.versions = deduped;
+                self.versions.reverse();
+                self.versions
+                    .retain(|entry| seen.insert(entry.metadata_idx));
+                self.versions.reverse();
             }
             DeduplicationPolicy::Reject => {
                 // Already checked above, no further deduplication needed.
