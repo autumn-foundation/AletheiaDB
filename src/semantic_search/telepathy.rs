@@ -21,9 +21,12 @@
 
 use crate::AletheiaDB;
 use crate::core::error::Result;
+use crate::core::hasher::IdentityHasher;
 use crate::core::id::NodeId;
 use crate::core::vector::ops::cosine_similarity;
 use std::collections::HashMap;
+use std::hash::BuildHasherDefault;
+use std::sync::Arc;
 
 /// Configuration for the Telepathy engine.
 #[derive(Debug, Clone)]
@@ -86,11 +89,17 @@ impl<'a> TelepathyEngine<'a> {
         let mut activations = seeds.clone();
 
         // Cache vectors to avoid repeated DB lookups
-        // Map<NodeId, Option<Vec<f32>>>
-        let mut vector_cache: HashMap<NodeId, Option<Vec<f32>>> = HashMap::new();
+        // Map<NodeId, Option<Arc<[f32]>>>
+        // ⚡ Bolt: `BuildHasherDefault<IdentityHasher>` avoids SipHash overhead because `NodeId` is already an integer.
+        // `Option<Arc<[f32]>>` eliminates O(N) heap allocations when cloning vectors during propagation caching.
+        let mut vector_cache: HashMap<
+            NodeId,
+            Option<Arc<[f32]>>,
+            BuildHasherDefault<IdentityHasher>,
+        > = HashMap::default();
 
         // Helper to get vector (cached)
-        let mut get_vector = |node_id: NodeId| -> Result<Option<Vec<f32>>> {
+        let mut get_vector = |node_id: NodeId| -> Result<Option<Arc<[f32]>>> {
             if let Some(v) = vector_cache.get(&node_id) {
                 return Ok(v.clone());
             }
@@ -98,8 +107,7 @@ impl<'a> TelepathyEngine<'a> {
             let vec = node
                 .properties
                 .get(&self.config.vector_property)
-                .and_then(|v| v.as_vector())
-                .map(|v| v.to_vec());
+                .and_then(|v| v.as_arc_vector());
 
             vector_cache.insert(node_id, vec.clone());
             Ok(vec)
@@ -194,6 +202,41 @@ impl<'a> TelepathyEngine<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn test_telepathy_cache_optimization() {
+        let db = AletheiaDB::new().unwrap();
+        db.enable_vector_index("vec", HnswConfig::new(2, DistanceMetric::Cosine))
+            .unwrap();
+
+        let props = PropertyMapBuilder::new()
+            .insert_vector("vec", &[1.0, 0.0])
+            .build();
+        let a = db.create_node("Node", props.clone()).unwrap();
+        let b = db.create_node("Node", props.clone()).unwrap();
+
+        db.create_edge(a, b, "NEXT", PropertyMapBuilder::new().build())
+            .unwrap();
+
+        let engine = TelepathyEngine::new(&db).with_config(TelepathyConfig {
+            vector_property: "vec".to_string(),
+            decay: 1.0,
+            threshold: 0.0,
+            max_steps: 1,
+            missing_vector_weight: 0.0,
+        });
+
+        let mut seeds = HashMap::new();
+        seeds.insert(a, 1.0);
+
+        let results = engine.propagate(&seeds).unwrap();
+        let results_map: HashMap<NodeId, f32> = results.into_iter().collect();
+
+        assert!(
+            (results_map[&b] - 1.0).abs() < 0.01,
+            "B should be activated and cached correctly"
+        );
+    }
+
     use crate::core::property::PropertyMapBuilder;
     use crate::index::vector::{DistanceMetric, HnswConfig};
 

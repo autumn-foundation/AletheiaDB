@@ -77,3 +77,7 @@
 **Pre-allocating Vec Capacities in Hot Paths**
 **Learning:** Pre-allocating standard Rust `Vec` objects using `Vec::with_capacity` in hot-paths like parsers and query planners eliminates unnecessary heap reallocations (0 -> 4 -> 8 -> 16 etc.), without changing semantics or causing borrow checker issues. However, if the expected bounds are wildly incorrect it could lead to memory bloat. A small capacity for small collections minimizes performance impacts in hot loops.
 **Action:** When a loop dynamically pushes elements to a new empty Vector (especially in repeated execution domains like parsers and network/storage iterators), replace `Vec::new()` with `Vec::with_capacity(n)` if a typical or max size `n` is roughly known.
+
+**[Optimized Telepathy Propagation]**
+**Learning:** `Vec::to_vec()` creates a clone of the underlying vector slice data, which can be an O(N) heap allocation bottleneck in performance-critical paths such as propagation/simulation over graph nodes.
+**Action:** Use `.as_arc_vector()` and work with `Arc<[f32]>` whenever you only need shared access. Combined with `IdentityHasher` when indexing by `NodeId`, we reduce O(N) work down to O(1) cloning operations without any memory cost or SipHash overhead.
