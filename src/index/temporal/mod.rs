@@ -363,7 +363,8 @@ impl EntityTimeline {
                 // Reverse scan avoids O(n^2) lookups and preserves sorted order after reverse().
                 let mut seen = std::collections::HashSet::with_capacity(self.versions.len());
                 self.versions.reverse();
-                self.versions.retain(|entry| seen.insert(entry.metadata_idx));
+                self.versions
+                    .retain(|entry| seen.insert(entry.metadata_idx));
                 self.versions.reverse();
             }
             DeduplicationPolicy::Reject => {
