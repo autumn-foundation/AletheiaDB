@@ -231,7 +231,7 @@ impl AletheiaDB {
     /// decide whether a detach/cascade delete is required to avoid orphaning
     /// edges.
     ///
-    /// Returns [`StorageError::NodeNotFound`](crate::storage::StorageError::NodeNotFound)
+    /// Returns [`StorageError::NodeNotFound`](crate::core::StorageError::NodeNotFound)
     /// if the node does not exist in the current state, so callers never receive
     /// a misleading zero count for a missing node.
     #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
