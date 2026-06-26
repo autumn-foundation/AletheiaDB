@@ -10,3 +10,7 @@
 ## 2024-05-14 - [Adding Examples to HLC and documenting src/main.rs]
 **Confusion:** The `src/main.rs` file was missing module-level documentation (`//!`), which triggers the `missing_docs` lint, but was hidden by the lint configurations inside `src/lib.rs` affecting `src/main.rs`. Also `HybridTimestamp::send` lacked an example showing the behavior of its logical counter.
 **Clarification:** Added `//! The AletheiaDB binary.` to `src/main.rs` and added an executable `## Examples` block to `HybridTimestamp::send` in `src/core/hlc.rs`.
+
+## 2024-05-18 - [Fixing broken intra-doc links in src/db]
+**Confusion:** Using `crate::storage::StorageError::NodeNotFound` is incorrect since `StorageError` is exported in `crate::core`, and explicitly targeting a label that resolves to the same place like ``[`ChangeRecord`](crate::core::ChangeRecord)`` triggers `redundant explicit link target` warnings in rustdoc.
+**Clarification:** Replaced `crate::storage::StorageError::NodeNotFound` with `crate::core::StorageError::NodeNotFound` in `src/db/ops.rs` and removed the explicit target in `src/db/temporal.rs` for `[`ChangeRecord`]`, resolving both the `broken_intra_doc_links` and `redundant_explicit_links` warnings.
