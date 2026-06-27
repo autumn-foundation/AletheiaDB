@@ -52,6 +52,8 @@ fn main() -> Result<()> {
 
 See the [Getting Started guide](docs/guides/getting-started.md) for a full walkthrough.
 
+> ⚠️ **Note:** Some experimental examples like `story_demo` require the `nova` feature flag to run. Add `features = ["nova"]` to your dependencies if you are using them.
+
 ---
 
 ## Hybrid Queries

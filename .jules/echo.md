@@ -19,3 +19,6 @@ Turns out, `NarrativeGenerator` is hidden behind an experimental `nova` feature 
 
 💡 **The Fix:**
 Add a huge, unmistakable banner or note in the README section *before* the code block that explicitly warns users to update their `Cargo.toml` with `features = ["nova"]` before they even try to copy the code. The warning needs to be in the Markdown text, not just hidden in the code comments. Also, maybe don't make the stub compile just to panic at runtime—if it's missing the feature, make it a hard compile error so I don't get false hope!
+**Docs Fix**
+**Context:** When users try to run experimental examples (like `story_demo`) from the README, they hit unresolved import errors (`NarrativeGenerator`) because experimental modules require specific feature flags (like `nova`).
+**Action:** Added a `> ⚠️ **Note:**` callout to `README.md` explicitly warning that experimental features require modifying `Cargo.toml` dependencies to include `features = ["nova"]`.
