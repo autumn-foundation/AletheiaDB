@@ -399,7 +399,7 @@ impl<C: ShardClient> QueryExecutor<C> {
         }
 
         // Gather: Aggregate results
-        let aggregated = self.aggregate_results(&query, &results)?;
+        let aggregated = self.aggregate_results(&query, &mut results)?;
 
         let total_results: usize = results.iter().map(|r| r.result_count).sum();
         let total_time = start.elapsed();
@@ -484,32 +484,38 @@ impl<C: ShardClient> QueryExecutor<C> {
     fn aggregate_results(
         &self,
         query: &DistributedQuery,
-        results: &[ShardResult],
+        results: &mut [ShardResult],
     ) -> ExecutorResult<Vec<u8>> {
         match query.aggregation {
             AggregationStrategy::Concat => {
                 // Simple concatenation
+                if results.is_empty() {
+                    return Ok(Vec::new());
+                } else if results.len() == 1 {
+                    return Ok(std::mem::take(&mut results[0].data));
+                }
+
                 let mut aggregated = Vec::with_capacity(results.iter().map(|r| r.data.len()).sum());
-                for result in results {
-                    aggregated.extend(&result.data);
+                for result in results.iter_mut() {
+                    aggregated.append(&mut result.data);
                 }
                 Ok(aggregated)
             }
             AggregationStrategy::First => {
                 // Return first non-empty result
-                for result in results {
+                for result in results.iter_mut() {
                     if !result.data.is_empty() {
-                        return Ok(result.data.clone());
+                        return Ok(std::mem::take(&mut result.data));
                     }
                 }
                 Ok(Vec::new())
             }
             AggregationStrategy::MergeNodes => {
                 // Merge and deduplicate (simplified - real impl would parse nodes)
-                // Avoids O(N) heap allocations by only cloning the largest result once.
-                let best_result = results.iter().max_by_key(|r| r.data.len());
+                // Avoids O(N) heap allocations by taking the largest result without cloning.
+                let best_result = results.iter_mut().max_by_key(|r| r.data.len());
                 match best_result {
-                    Some(res) if !res.data.is_empty() => Ok(res.data.clone()),
+                    Some(res) if !res.data.is_empty() => Ok(std::mem::take(&mut res.data)),
                     _ => Ok(Vec::new()),
                 }
             }
