@@ -94,6 +94,10 @@ fn wire_temporal_indexes(db: &AletheiaDB) {
     let mut hist = db.historical.write();
     hist.set_temporal_indexes(Arc::clone(&db.temporal_indexes));
     hist.set_temporal_adjacency_index(temporal_adjacency_index);
+    // Populate the temporal index from any versions already in historical storage
+    // (loaded from index persistence + WAL replay). Without this, temporal
+    // point-in-time queries would silently miss those versions.
+    hist.rebuild_temporal_index_from_versions();
 }
 
 impl AletheiaDB {

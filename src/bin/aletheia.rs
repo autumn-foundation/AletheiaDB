@@ -50,6 +50,8 @@ fn run() -> Result<(), String> {
         Some("edge") => handle_edge(args.collect()),
         Some("traverse") => handle_traverse(args.collect()),
         Some("daemon") => handle_daemon(args.collect()),
+        Some("backup") => handle_backup(args.collect()),
+        Some("restore") => handle_restore(args.collect()),
         Some("help") | Some("--help") | Some("-h") | None => {
             print_usage();
             Ok(())
@@ -71,8 +73,52 @@ Usage:\n\
   aletheia daemon start [--pid-file PATH] [--log-file PATH] [--host HOST] [--port PORT]\n\
   aletheia daemon stop [--pid-file PATH]\n\
   aletheia daemon status [--pid-file PATH]\n\
-\nCommands map to core MCP-style graph operations while using local storage.\n"
+  aletheia backup <output_path>\n\
+  aletheia restore <input_path>\n\
+\nCommands map to core MCP-style graph operations while using local storage.\n\
+\nBackup / Restore:\n\
+  backup  — Write a portable .albk artifact capturing full bi-temporal state.\n\
+            Opens the database via ALETHEIADB_CONFIG or ALETHEIADB_DATA_DIR.\n\
+  restore — Restore a .albk artifact into ALETHEIADB_DATA_DIR (must be empty).\n"
     );
+}
+
+/// `aletheia backup <output_path>` — create a portable backup artifact.
+fn handle_backup(args: Vec<String>) -> Result<(), String> {
+    let path = args
+        .first()
+        .ok_or_else(|| "usage: aletheia backup <output_path>".to_string())?;
+    let db = open_db()?;
+    let summary = db
+        .backup(std::path::Path::new(path))
+        .map_err(|e| format!("backup failed: {e}"))?;
+    println!(
+        "{{\"ok\":true,\"bytes_written\":{},\"node_versions\":{},\"edge_versions\":{},\
+         \"current_node_count\":{},\"current_edge_count\":{},\"source_lsn\":{}}}",
+        summary.bytes_written,
+        summary.node_versions,
+        summary.edge_versions,
+        summary.current_node_count,
+        summary.current_edge_count,
+        summary.source_lsn,
+    );
+    Ok(())
+}
+
+/// `aletheia restore <input_path>` — restore a backup artifact into `ALETHEIADB_DATA_DIR`.
+fn handle_restore(args: Vec<String>) -> Result<(), String> {
+    let path = args
+        .first()
+        .ok_or_else(|| "usage: aletheia restore <input_path>".to_string())?;
+    let data_dir = env::var("ALETHEIADB_DATA_DIR")
+        .map(PathBuf::from)
+        .map_err(|_| {
+            "ALETHEIADB_DATA_DIR must be set to restore into a durable directory".to_string()
+        })?;
+    AletheiaDB::restore_to_data_dir(std::path::Path::new(path), &data_dir)
+        .map_err(|e| format!("restore failed: {e}"))?;
+    println!("{{\"ok\":true,\"data_dir\":\"{}\"}}", data_dir.display());
+    Ok(())
 }
 
 /// Opens the AletheiaDB database, honouring environment-driven config:

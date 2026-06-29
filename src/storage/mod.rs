@@ -10,6 +10,7 @@
 //! - Checkpoint: Full state snapshots via index persistence
 //! - Sharding: Horizontal scaling via domain-based partitioning (ADR-0014)
 
+pub mod backup;
 pub mod checkpoint;
 pub mod compression;
 pub mod current;
