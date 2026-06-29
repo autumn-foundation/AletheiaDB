@@ -112,7 +112,7 @@ impl AletheiaDB {
 
         // Use an isolated WAL dir inside the temp dir to avoid cross-test contamination
         // from the default "aletheiadb/wal" path.
-        let config = build_restore_config(tmp.path(), Some(tmp.path().join("wal")));
+        let config = build_restore_config(tmp.path(), tmp.path().join("wal"));
         let mut db = AletheiaDB::with_unified_config(config)?;
 
         // Keep the temp dir alive for the lifetime of the ephemeral DB.
@@ -139,7 +139,7 @@ impl AletheiaDB {
         let payload = read_artifact(path).map_err(Error::Backup)?;
         materialize_to_dir(&payload, data_dir).map_err(Error::Backup)?;
 
-        let config = build_restore_config(data_dir, Some(data_dir.join("wal")));
+        let config = build_restore_config(data_dir, data_dir.join("wal"));
         AletheiaDB::with_unified_config(config)
     }
 }
@@ -148,22 +148,16 @@ impl AletheiaDB {
 ///
 /// * `persistence_dir` — base dir for `IndexPersistenceManager` (contains `indexes/`).
 /// * `wal_dir` — WAL directory; if `None` a fresh in-memory-only WAL is used.
-fn build_restore_config(
-    persistence_dir: &Path,
-    wal_dir: Option<std::path::PathBuf>,
-) -> AletheiaDBConfig {
+fn build_restore_config(persistence_dir: &Path, wal_dir: std::path::PathBuf) -> AletheiaDBConfig {
     use crate::config::WalConfigBuilder;
 
-    let wal_builder = if let Some(dir) = wal_dir {
+    let wal_builder =
         WalConfigBuilder::new()
-            .wal_dir(dir)
+            .wal_dir(wal_dir)
             .durability_mode(DurabilityMode::GroupCommit {
                 max_delay_ms: 10,
                 max_batch_size: 200,
-            })
-    } else {
-        WalConfigBuilder::new()
-    };
+            });
 
     AletheiaDBConfig::builder()
         .wal(wal_builder.build())

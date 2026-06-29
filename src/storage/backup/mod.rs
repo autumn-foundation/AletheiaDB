@@ -500,3 +500,211 @@ pub(crate) fn check_target_empty(data_dir: &Path) -> Result<(), BackupError> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    // -----------------------------------------------------------------------
+    // read_artifact error paths
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn read_artifact_empty_file_yields_corrupt() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("empty.albk");
+        std::fs::write(&path, b"").unwrap();
+        let err = read_artifact(&path).unwrap_err();
+        assert!(
+            matches!(err, BackupError::Corrupt(_)),
+            "expected Corrupt, got: {err:?}"
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("too short") || msg.contains("Corrupt"),
+            "{msg}"
+        );
+    }
+
+    #[test]
+    fn read_artifact_partial_header_yields_corrupt() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("partial.albk");
+        // 3 bytes — too short for the 6-byte header
+        std::fs::write(&path, b"ALB").unwrap();
+        let err = read_artifact(&path).unwrap_err();
+        assert!(
+            matches!(err, BackupError::Corrupt(_)),
+            "expected Corrupt for partial header, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn read_artifact_bad_zstd_yields_corrupt() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("badzstd.albk");
+        // Valid magic + version, then garbage that is not valid zstd.
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&BACKUP_MAGIC);
+        bytes.extend_from_slice(&BACKUP_FORMAT_VERSION.to_le_bytes());
+        bytes.extend_from_slice(b"NOT_VALID_ZSTD_DATA_AT_ALL");
+        std::fs::write(&path, &bytes).unwrap();
+        let err = read_artifact(&path).unwrap_err();
+        assert!(
+            matches!(err, BackupError::Corrupt(_)),
+            "expected Corrupt for bad zstd, got: {err:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // check_target_empty sentinel detection
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn check_target_empty_detects_sentinel() {
+        let dir = TempDir::new().unwrap();
+        let manager = IndexPersistenceManager::new(dir.path());
+        manager.ensure_directories().unwrap();
+        let sentinel = manager.indexes_path().join(".restore-in-progress");
+        std::fs::write(&sentinel, b"").unwrap();
+
+        let err = check_target_empty(dir.path()).unwrap_err();
+        assert!(matches!(err, BackupError::TargetNotEmpty));
+    }
+
+    #[test]
+    fn check_target_empty_succeeds_on_fresh_dir() {
+        let dir = TempDir::new().unwrap();
+        assert!(check_target_empty(dir.path()).is_ok());
+    }
+
+    // -----------------------------------------------------------------------
+    // build_*_anchor_entry rejects Delta versions
+    // -----------------------------------------------------------------------
+
+    fn make_temporal() -> crate::core::temporal::BiTemporalInterval {
+        use crate::core::temporal::{BiTemporalInterval, TimeRange};
+        BiTemporalInterval::new(TimeRange::from(0.into()), TimeRange::from(0.into()))
+    }
+
+    #[test]
+    fn build_node_anchor_rejects_delta_version() {
+        use crate::core::id::{NodeId, VersionId};
+        use crate::core::version::NodeVersion;
+        use crate::core::{InternedString, PropertyMap};
+
+        let id = VersionId::new_unchecked(1);
+        let node_id = NodeId::new_unchecked(1);
+        let prev = VersionId::new_unchecked(0);
+        let v = NodeVersion::new_delta(
+            id,
+            node_id,
+            make_temporal(),
+            InternedString::from_raw(0),
+            &PropertyMap::new(),
+            &PropertyMap::new(),
+            prev,
+        );
+
+        let err = build_node_anchor_entry(&v).unwrap_err();
+        assert!(matches!(err, BackupError::Serialization(_)));
+    }
+
+    #[test]
+    fn build_edge_anchor_rejects_delta_version() {
+        use crate::core::id::{EdgeId, NodeId, VersionId};
+        use crate::core::version::EdgeVersion;
+        use crate::core::{InternedString, PropertyMap};
+
+        let id = VersionId::new_unchecked(1);
+        let edge_id = EdgeId::new_unchecked(1);
+        let source = NodeId::new_unchecked(1);
+        let target = NodeId::new_unchecked(2);
+        let prev = VersionId::new_unchecked(0);
+        let v = EdgeVersion::new_delta(
+            id,
+            edge_id,
+            make_temporal(),
+            InternedString::from_raw(0),
+            source,
+            target,
+            &PropertyMap::new(),
+            &PropertyMap::new(),
+            prev,
+        );
+
+        let err = build_edge_anchor_entry(&v).unwrap_err();
+        assert!(matches!(err, BackupError::Serialization(_)));
+    }
+
+    // -----------------------------------------------------------------------
+    // encode_artifact / encode+decode roundtrip
+    // -----------------------------------------------------------------------
+
+    fn empty_payload() -> BackupPayload {
+        use crate::storage::index_persistence::formats::{GraphIndexData, TemporalIndexData};
+        use crate::storage::index_persistence::{
+            GRAPH_MAGIC, INTERNER_MAGIC, MANIFEST_VERSION, TEMPORAL_MAGIC,
+        };
+        BackupPayload {
+            created_at_micros: 0,
+            source_lsn: 0,
+            current_node_count: 0,
+            current_edge_count: 0,
+            node_version_count: 0,
+            edge_version_count: 0,
+            interner: crate::storage::index_persistence::formats::StringInternerData {
+                magic: INTERNER_MAGIC,
+                version: MANIFEST_VERSION,
+                string_count: 0,
+                strings: vec![],
+            },
+            graph: GraphIndexData {
+                magic: GRAPH_MAGIC,
+                version: MANIFEST_VERSION,
+                node_count: 0,
+                edge_count: 0,
+                nodes: vec![],
+                edges: vec![],
+                outgoing_node_ids: vec![],
+                outgoing_offsets: vec![],
+                outgoing_neighbors: vec![],
+                incoming_node_ids: vec![],
+                incoming_offsets: vec![],
+                incoming_neighbors: vec![],
+            },
+            temporal: TemporalIndexData {
+                magic: TEMPORAL_MAGIC,
+                version: MANIFEST_VERSION,
+                node_versions: vec![],
+                node_anchors: vec![],
+                edge_versions: vec![],
+                edge_anchors: vec![],
+            },
+        }
+    }
+
+    #[test]
+    fn encode_artifact_produces_valid_header() {
+        let payload = empty_payload();
+        let bytes = encode_artifact(&payload).unwrap();
+        assert!(bytes.len() >= 6);
+        assert_eq!(&bytes[..4], &BACKUP_MAGIC);
+        assert_eq!(
+            u16::from_le_bytes([bytes[4], bytes[5]]),
+            BACKUP_FORMAT_VERSION
+        );
+    }
+
+    #[test]
+    fn encode_then_decode_roundtrip() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("rt.albk");
+        let payload = empty_payload();
+        write_artifact(&payload, &path).unwrap();
+        let restored = read_artifact(&path).unwrap();
+        assert_eq!(restored.source_lsn, 0);
+        assert_eq!(restored.current_node_count, 0);
+    }
+}

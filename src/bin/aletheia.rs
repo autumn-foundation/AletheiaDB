@@ -677,3 +677,96 @@ fn print_json_pretty(value: &serde_json::Value) -> Result<(), String> {
         Err(e) => Err(format!("error writing JSON output: {e}")),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn handle_backup_missing_arg_returns_usage_error() {
+        let err = handle_backup(vec![]).unwrap_err();
+        assert!(err.contains("usage:"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn handle_restore_missing_arg_returns_usage_error() {
+        let err = handle_restore(vec![]).unwrap_err();
+        assert!(err.contains("usage:"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn handle_restore_missing_data_dir_env_returns_error() {
+        // ALETHEIADB_DATA_DIR is not set in the test environment.
+        // If it somehow is set, this test exercises a different (later) error path,
+        // but it still returns Err, so the assertion holds.
+        let result = handle_restore(vec!["nonexistent.albk".to_string()]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_direction_defaults_to_outgoing() {
+        let dir = parse_direction(&[]).unwrap();
+        assert_eq!(dir, "outgoing");
+    }
+
+    #[test]
+    fn parse_direction_accepts_incoming() {
+        let dir = parse_direction(&["--direction".to_string(), "incoming".to_string()]).unwrap();
+        assert_eq!(dir, "incoming");
+    }
+
+    #[test]
+    fn parse_direction_accepts_both() {
+        let dir = parse_direction(&["--direction".to_string(), "both".to_string()]).unwrap();
+        assert_eq!(dir, "both");
+    }
+
+    #[test]
+    fn parse_direction_rejects_invalid() {
+        let err =
+            parse_direction(&["--direction".to_string(), "sideways".to_string()]).unwrap_err();
+        assert!(err.contains("invalid direction"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn parse_node_id_rejects_non_numeric() {
+        let err = parse_node_id("abc").unwrap_err();
+        assert!(err.contains("invalid node id"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn parse_edge_id_rejects_non_numeric() {
+        let err = parse_edge_id("xyz").unwrap_err();
+        assert!(err.contains("invalid edge id"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn json_to_property_map_parses_mixed_types() {
+        let map = json_to_property_map(r#"{"name":"Alice","age":30,"active":true}"#).unwrap();
+        assert!(!map.is_empty());
+    }
+
+    #[test]
+    fn json_to_property_map_rejects_non_object() {
+        let err = json_to_property_map(r#"[1,2,3]"#).unwrap_err();
+        assert!(err.contains("must be an object"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn json_to_property_map_rejects_invalid_json() {
+        let err = json_to_property_map("not json").unwrap_err();
+        assert!(err.contains("invalid JSON"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn arg_value_finds_flag() {
+        let args = vec!["--port".to_string(), "1234".to_string()];
+        assert_eq!(arg_value(&args, "--port"), Some("1234".to_string()));
+    }
+
+    #[test]
+    fn arg_value_returns_none_when_absent() {
+        let args = vec!["--host".to_string(), "localhost".to_string()];
+        assert_eq!(arg_value(&args, "--port"), None);
+    }
+}
