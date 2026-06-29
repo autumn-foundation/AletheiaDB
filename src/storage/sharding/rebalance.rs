@@ -556,9 +556,12 @@ impl RebalanceManager {
     pub fn queue_migration(&mut self, plan: MigrationPlan) {
         self.migration_queue.push_back(plan);
         // Sort by priority (higher priority first)
-        let mut vec: Vec<_> = self.migration_queue.drain(..).collect();
-        vec.sort_by_key(|p| std::cmp::Reverse(p.priority));
-        self.migration_queue = vec.into_iter().collect();
+        // ⚡ Bolt Optimization: Using `make_contiguous` allows us to sort the queue in-place,
+        // eliminating the heap allocation of an intermediate `Vec` and avoiding redundant
+        // iteration over the elements during drain and collect.
+        self.migration_queue
+            .make_contiguous()
+            .sort_by_key(|p| std::cmp::Reverse(p.priority));
     }
 
     /// Start the next migration from the queue.
