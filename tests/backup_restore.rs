@@ -68,6 +68,7 @@ fn build_sample_db() -> (AletheiaDB, NodeId, NodeId) {
 
 /// A `backup()` call must produce a non-empty file at the specified path.
 #[test]
+#[serial]
 fn backup_creates_artifact() {
     let (db, _, _) = build_sample_db();
     let tmp = TempDir::new().unwrap();
@@ -325,6 +326,7 @@ fn roundtrip_with_cold_storage_configured() {
 /// Restoring into a directory that already contains a manifest must yield
 /// a typed `BackupError::TargetNotEmpty` error without modifying anything.
 #[test]
+#[serial]
 fn restore_rejects_nonempty_target() {
     let (db, _, _) = build_sample_db();
     let tmp = TempDir::new().unwrap();
@@ -352,6 +354,7 @@ fn restore_rejects_nonempty_target() {
 /// A backup whose format_version is set to an unknown value must be rejected
 /// with a typed `BackupError::IncompatibleVersion` error.
 #[test]
+#[serial]
 fn restore_rejects_bad_version() {
     let (db, _, _) = build_sample_db();
     let tmp = TempDir::new().unwrap();
@@ -383,6 +386,7 @@ fn restore_rejects_bad_version() {
 /// A file whose first 4 bytes are not the backup magic must be rejected with
 /// a typed `BackupError::BadMagic` error.
 #[test]
+#[serial]
 fn restore_rejects_corrupt_magic() {
     let (db, _, _) = build_sample_db();
     let tmp = TempDir::new().unwrap();

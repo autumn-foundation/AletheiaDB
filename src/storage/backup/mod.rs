@@ -44,6 +44,13 @@ pub const BACKUP_MAGIC: [u8; 4] = *b"ALBK";
 /// Current backup format version.
 pub const BACKUP_FORMAT_VERSION: u16 = 1;
 
+/// Maximum allowed decompressed payload size (5 GiB).
+///
+/// Enforced during restore to mitigate decompression-bomb denial-of-service:
+/// a maliciously crafted small `.albk` file could otherwise decompress into
+/// gigabytes of data and exhaust process memory.
+const MAX_DECOMPRESSED_PAYLOAD_BYTES: u64 = 5 * 1024 * 1024 * 1024;
+
 // ============================================================================
 // Public error type
 // ============================================================================
@@ -332,8 +339,13 @@ pub(crate) fn read_artifact(path: &Path) -> Result<BackupPayload, BackupError> {
 
     // Read the 6-byte header with read_exact — avoids buffering the full file.
     let mut header = [0u8; 6];
-    file.read_exact(&mut header)
-        .map_err(|_| BackupError::Corrupt("Artifact too short to contain header".to_string()))?;
+    file.read_exact(&mut header).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::UnexpectedEof {
+            BackupError::Corrupt("Artifact too short to contain header".to_string())
+        } else {
+            BackupError::Io(e.to_string())
+        }
+    })?;
 
     // Validate magic.
     if header[..4] != BACKUP_MAGIC {
@@ -354,6 +366,8 @@ pub(crate) fn read_artifact(path: &Path) -> Result<BackupPayload, BackupError> {
         .map_err(|e| BackupError::Corrupt(format!("zstd stream init failed: {e}")))?;
     let mut decoded_bytes = Vec::new();
     decoder
+        .by_ref()
+        .take(MAX_DECOMPRESSED_PAYLOAD_BYTES)
         .read_to_end(&mut decoded_bytes)
         .map_err(|e| BackupError::Corrupt(format!("zstd decompression failed: {e}")))?;
 
@@ -420,9 +434,15 @@ pub(crate) fn materialize_to_dir(
         .map_err(|e| BackupError::Io(e.to_string()))?;
 
     // Remove sentinel LAST — after manifest is on disk.
-    // Failure to remove is non-fatal: data is intact, but the directory will
-    // be rejected by check_target_empty until the sentinel is cleaned up.
-    let _ = std::fs::remove_file(&sentinel);
+    // Failure is non-fatal (data is intact) but should be logged so operators
+    // know why a subsequent restore on the same dir would see TargetNotEmpty.
+    if let Err(_e) = std::fs::remove_file(&sentinel) {
+        #[cfg(feature = "observability")]
+        tracing::warn!(
+            "Failed to remove restore sentinel at {}: {_e}",
+            sentinel.display()
+        );
+    }
 
     Ok(())
 }

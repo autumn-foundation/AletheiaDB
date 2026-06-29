@@ -160,3 +160,29 @@ JSON output from `aletheia backup`:
   relative to uncompressed bitcode.
 - Restore from a 10K/50K dataset: under 5 seconds (dominated by zstd
   decompression and index reconstruction).
+
+## Limitations
+
+### Single-process restore constraint
+
+`restore` and `restore_to_data_dir` call `GLOBAL_INTERNER.clear()` to reset the
+process-wide string interner before re-loading strings from the backup. This is
+safe only when the process contains **exactly one** AletheiaDB instance and restore
+runs **before any queries begin**. Calling restore while other live instances share
+the same process will invalidate their interned string IDs, causing data corruption.
+
+> **Future work**: making the string interner instance-local will lift this restriction.
+
+### Cold-tier memory usage
+
+During backup, cold-tier historical versions (`scan_node_versions_cold` /
+`scan_edge_versions_cold`) are loaded into memory in full before being serialised
+into the artifact. For databases with millions of cold-tier versions, peak backup
+memory equals the total in-memory size of those version objects. A streaming cold
+scan API that avoids this peak is planned as follow-up work.
+
+### Decompression size limit
+
+Restore enforces a 5 GiB cap on decompressed payload size to guard against
+decompression-bomb denial-of-service attacks. Artifacts larger than 5 GiB
+uncompressed are rejected with `BackupError::Corrupt`.
