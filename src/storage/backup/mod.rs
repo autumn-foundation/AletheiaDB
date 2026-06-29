@@ -17,7 +17,7 @@
 //! `load_on_startup = true`.  This reuses the existing, tested startup load path (including
 //! ID-generator re-seeding, version-chain rebuilding, and interner restoration).
 
-use std::io::{Read, Write};
+use std::io::Read;
 use std::path::Path;
 
 use bitcode::{Decode, Encode};
@@ -34,7 +34,7 @@ use crate::storage::index_persistence::temporal::{
     convert_edge_version, convert_node_version, save_temporal_index,
 };
 use crate::storage::index_persistence::{
-    GRAPH_MAGIC, INTERNER_MAGIC, IndexPersistenceManager, MANIFEST_VERSION, TEMPORAL_MAGIC,
+    INTERNER_MAGIC, IndexPersistenceManager, MANIFEST_VERSION, TEMPORAL_MAGIC,
 };
 use crate::storage::snapshot::{CurrentStorageSnapshot, HistoricalStorageSnapshot};
 
@@ -73,8 +73,8 @@ pub enum BackupError {
     },
     /// The target restore directory is non-empty; refusing to overwrite existing data.
     #[error(
-        "Restore target directory is not empty (contains a manifest.idx). \
-         Use an empty directory or a fresh ephemeral database."
+        "Restore target directory is not empty (contains existing index files or an \
+         in-progress restore sentinel). Use an empty directory or a fresh ephemeral database."
     )]
     TargetNotEmpty,
     /// The backup artifact is corrupt (bad checksum, truncated, or invalid data).
@@ -136,50 +136,11 @@ pub(crate) struct BackupPayload {
 
 /// Extract `GraphIndexData` from a `CurrentStorageSnapshot`.
 ///
-/// Mirrors `CheckpointManager::extract_graph_data_from_snapshot` but is kept
-/// independent so the backup module does not depend on checkpoint internals.
+/// Delegates to the canonical implementation in
+/// `crate::storage::index_persistence::graph::extract_graph_data_from_snapshot`.
 fn build_graph_data(snapshot: &CurrentStorageSnapshot) -> Result<GraphIndexData, BackupError> {
-    let mut nodes = Vec::with_capacity(snapshot.node_count());
-    let mut edges = Vec::with_capacity(snapshot.edge_count());
-
-    for node in snapshot.iter_nodes() {
-        let properties = persist_property_map(&node.properties)
-            .map_err(|e| BackupError::Serialization(e.to_string()))?;
-        nodes.push(crate::storage::index_persistence::formats::PersistedNode {
-            id: node.id.as_u64(),
-            label_idx: node.label.as_u32(),
-            version_id: node.current_version.as_u64(),
-            properties,
-        });
-    }
-
-    for edge in snapshot.iter_edges() {
-        let properties = persist_property_map(&edge.properties)
-            .map_err(|e| BackupError::Serialization(e.to_string()))?;
-        edges.push(crate::storage::index_persistence::formats::PersistedEdge {
-            id: edge.id.as_u64(),
-            source_id: edge.source.as_u64(),
-            target_id: edge.target.as_u64(),
-            label_idx: edge.label.as_u32(),
-            version_id: edge.current_version.as_u64(),
-            properties,
-        });
-    }
-
-    Ok(GraphIndexData {
-        magic: GRAPH_MAGIC,
-        version: MANIFEST_VERSION,
-        node_count: nodes.len() as u64,
-        edge_count: edges.len() as u64,
-        nodes,
-        edges,
-        outgoing_node_ids: Vec::new(),
-        outgoing_offsets: Vec::new(),
-        outgoing_neighbors: Vec::new(),
-        incoming_node_ids: Vec::new(),
-        incoming_offsets: Vec::new(),
-        incoming_neighbors: Vec::new(),
-    })
+    crate::storage::index_persistence::graph::extract_graph_data_from_snapshot(snapshot)
+        .map_err(|e| BackupError::Serialization(e.to_string()))
 }
 
 /// Extract `TemporalIndexData` from a `HistoricalStorageSnapshot` and optional
@@ -354,49 +315,33 @@ pub(crate) fn encode_artifact(payload: &BackupPayload) -> Result<Vec<u8>, Backup
 ///
 /// Returns the number of bytes written.
 pub(crate) fn write_artifact(payload: &BackupPayload, path: &Path) -> Result<usize, BackupError> {
-    use rand::Rng;
     let data = encode_artifact(payload)?;
     let bytes_written = data.len();
-
-    let suffix: u32 = rand::thread_rng().r#gen();
-    let temp_path = path.with_extension(format!("albk.{}.tmp", suffix));
-
-    {
-        let mut file =
-            std::fs::File::create(&temp_path).map_err(|e| BackupError::Io(e.to_string()))?;
-        file.write_all(&data)
-            .map_err(|e| BackupError::Io(e.to_string()))?;
-        file.sync_all()
-            .map_err(|e| BackupError::Io(e.to_string()))?;
-    }
-
-    std::fs::rename(&temp_path, path).map_err(|e| BackupError::Io(e.to_string()))?;
+    crate::storage::index_persistence::atomic_write(path, &data)
+        .map_err(|e| BackupError::Io(e.to_string()))?;
     Ok(bytes_written)
 }
 
 /// Read and validate a backup artifact from `path`.
 ///
 /// Validates magic bytes and format version before decompressing and decoding.
+/// Uses streaming decompression so peak memory is the decompressed payload only,
+/// not compressed + decompressed simultaneously.
 pub(crate) fn read_artifact(path: &Path) -> Result<BackupPayload, BackupError> {
     let mut file = std::fs::File::open(path).map_err(|e| BackupError::Io(e.to_string()))?;
-    let mut raw = Vec::new();
-    file.read_to_end(&mut raw)
-        .map_err(|e| BackupError::Io(e.to_string()))?;
 
-    if raw.len() < 6 {
-        return Err(BackupError::Corrupt(
-            "Artifact too short to contain header".to_string(),
-        ));
-    }
+    // Read the 6-byte header with read_exact — avoids buffering the full file.
+    let mut header = [0u8; 6];
+    file.read_exact(&mut header)
+        .map_err(|_| BackupError::Corrupt("Artifact too short to contain header".to_string()))?;
 
     // Validate magic.
-    let magic: [u8; 4] = raw[..4].try_into().unwrap();
-    if magic != BACKUP_MAGIC {
+    if header[..4] != BACKUP_MAGIC {
         return Err(BackupError::BadMagic);
     }
 
     // Validate format version.
-    let found_version = u16::from_le_bytes([raw[4], raw[5]]);
+    let found_version = u16::from_le_bytes([header[4], header[5]]);
     if found_version != BACKUP_FORMAT_VERSION {
         return Err(BackupError::IncompatibleVersion {
             found: found_version,
@@ -404,9 +349,12 @@ pub(crate) fn read_artifact(path: &Path) -> Result<BackupPayload, BackupError> {
         });
     }
 
-    // Decompress payload.
-    let compressed = &raw[6..];
-    let decoded_bytes = zstd::decode_all(compressed)
+    // Stream-decompress the payload — peak memory = decompressed size only.
+    let mut decoder = zstd::stream::Decoder::new(file)
+        .map_err(|e| BackupError::Corrupt(format!("zstd stream init failed: {e}")))?;
+    let mut decoded_bytes = Vec::new();
+    decoder
+        .read_to_end(&mut decoded_bytes)
         .map_err(|e| BackupError::Corrupt(format!("zstd decompression failed: {e}")))?;
 
     // Decode bitcode.
@@ -423,19 +371,28 @@ pub(crate) fn read_artifact(path: &Path) -> Result<BackupPayload, BackupError> {
 /// Write a `BackupPayload` as a complete set of index-persistence files under
 /// `data_dir`, suitable for loading via `load_indexes_startup`.
 ///
-/// Writes the manifest **last** so that `indexes_exist()` (which checks for
-/// `manifest.idx`) only returns `true` after all data is on disk — giving
-/// callers a reliable atomicity signal.
+/// A `.restore-in-progress` sentinel is written first and removed last (after
+/// the manifest is committed).  Any crash between those two points leaves the
+/// sentinel in place, which `check_target_empty` treats as a non-empty target —
+/// preventing a future restore from silently overwriting partially-written data.
 pub(crate) fn materialize_to_dir(
     payload: &BackupPayload,
     data_dir: &Path,
 ) -> Result<(), BackupError> {
-    let manager = IndexPersistenceManager::new(data_dir.to_str().unwrap_or(""));
+    let manager = IndexPersistenceManager::new(data_dir);
     manager
         .ensure_directories()
         .map_err(|e| BackupError::Io(e.to_string()))?;
 
+    // Write sentinel FIRST — any crash before the final remove leaves this file,
+    // so check_target_empty will refuse a subsequent restore on the same dir.
+    let sentinel = manager.indexes_path().join(".restore-in-progress");
+    std::fs::write(&sentinel, b"")
+        .map_err(|e| BackupError::Io(format!("failed to write restore sentinel: {e}")))?;
+
     // 1. String interner (must come first; graph + temporal resolve string indices).
+    // Clear before restoring so this process's interner matches the backup's ID layout.
+    GLOBAL_INTERNER.clear();
     restore_string_interner(&payload.interner)
         .map_err(|e| BackupError::Serialization(e.to_string()))?;
 
@@ -456,11 +413,16 @@ pub(crate) fn materialize_to_dir(
     save_temporal_index(&payload.temporal, &temporal_path)
         .map_err(|e| BackupError::Io(e.to_string()))?;
 
-    // 5. Manifest (written last — acts as a committed marker).
+    // 5. Manifest (written last — acts as the committed marker).
     let manifest = IndexManifest::new(payload.source_lsn);
     manager
         .save_manifest(&manifest)
         .map_err(|e| BackupError::Io(e.to_string()))?;
+
+    // Remove sentinel LAST — after manifest is on disk.
+    // Failure to remove is non-fatal: data is intact, but the directory will
+    // be rejected by check_target_empty until the sentinel is cleaned up.
+    let _ = std::fs::remove_file(&sentinel);
 
     Ok(())
 }
@@ -506,12 +468,14 @@ pub(crate) fn build_payload(
     })
 }
 
-/// Check whether a target data directory is non-empty (has a `manifest.idx`).
+/// Check whether a target data directory is non-empty (has a `manifest.idx` or
+/// a `.restore-in-progress` sentinel from a previous interrupted restore).
 ///
 /// Returns `Err(BackupError::TargetNotEmpty)` if the target is occupied.
 pub(crate) fn check_target_empty(data_dir: &Path) -> Result<(), BackupError> {
-    let manager = IndexPersistenceManager::new(data_dir.to_str().unwrap_or(""));
-    if manager.indexes_exist() {
+    let manager = IndexPersistenceManager::new(data_dir);
+    let sentinel = manager.indexes_path().join(".restore-in-progress");
+    if manager.indexes_exist() || sentinel.exists() {
         return Err(BackupError::TargetNotEmpty);
     }
     Ok(())

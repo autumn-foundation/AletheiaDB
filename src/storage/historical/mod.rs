@@ -2883,6 +2883,7 @@ impl HistoricalStorage {
             // Fix transaction-time end for non-latest versions.
             // Persistence only stores tx_start; after loading every version has
             // tx_end = TIMESTAMP_MAX.  Reconstruct: version[i].tx_end = version[i+1].tx_start.
+            // Guard: skip if next_tx_start <= this version's tx_start to avoid zero-width [T,T) intervals.
             for i in 0..version_ids.len().saturating_sub(1) {
                 let next_tx_start = self
                     .node_versions
@@ -2892,6 +2893,7 @@ impl HistoricalStorage {
 
                 if let Some(version) = self.node_versions.get_mut(&version_ids[i])
                     && version.temporal.transaction_time().is_current()
+                    && next_tx_start > version.temporal.transaction_time().start()
                     && let Ok(new_temporal) = version.temporal.close_transaction_time(next_tx_start)
                 {
                     version.temporal = new_temporal;
@@ -2973,6 +2975,7 @@ impl HistoricalStorage {
             }
 
             // Fix transaction-time end for non-latest edge versions (mirror node logic).
+            // Guard: skip if next_tx_start <= this version's tx_start to avoid zero-width [T,T) intervals.
             for i in 0..version_ids.len().saturating_sub(1) {
                 let next_tx_start = self
                     .edge_versions
@@ -2982,6 +2985,7 @@ impl HistoricalStorage {
 
                 if let Some(version) = self.edge_versions.get_mut(&version_ids[i])
                     && version.temporal.transaction_time().is_current()
+                    && next_tx_start > version.temporal.transaction_time().start()
                     && let Ok(new_temporal) = version.temporal.close_transaction_time(next_tx_start)
                 {
                     version.temporal = new_temporal;
@@ -3023,6 +3027,9 @@ impl HistoricalStorage {
     /// tx_ends) and `set_temporal_indexes` (which wires the index struct in).
     /// It is idempotent: a version already in the index is a no-op duplicate insert.
     pub(crate) fn rebuild_temporal_index_from_versions(&self) {
+        if self.node_versions.is_empty() && self.edge_versions.is_empty() {
+            return;
+        }
         let Some(ref indexes) = self.temporal_indexes else {
             return;
         };

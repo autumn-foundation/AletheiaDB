@@ -13,7 +13,8 @@ use crate::storage::compression::decompress_with_limit;
 
 use super::error::{IndexPersistenceError, Result};
 use super::formats::{
-    GraphIndexData, GraphIndexDelta, PersistedPropertyMap, PersistedPropertyValue,
+    GraphIndexData, GraphIndexDelta, PersistedEdge, PersistedNode, PersistedPropertyMap,
+    PersistedPropertyValue,
 };
 use super::{DELTA_MAGIC, GRAPH_MAGIC, MANIFEST_VERSION};
 
@@ -156,6 +157,52 @@ pub fn restore_property_map(persisted: &PersistedPropertyMap) -> Result<Property
             })?;
     }
     Ok(builder.build())
+}
+
+/// Extract `GraphIndexData` from a `CurrentStorageSnapshot`.
+///
+/// Shared by the checkpoint and backup code paths so the conversion logic
+/// lives in one place.
+pub(crate) fn extract_graph_data_from_snapshot(
+    snapshot: &crate::storage::snapshot::CurrentStorageSnapshot,
+) -> Result<GraphIndexData> {
+    let mut nodes = Vec::with_capacity(snapshot.node_count());
+    let mut edges = Vec::with_capacity(snapshot.edge_count());
+
+    for node in snapshot.iter_nodes() {
+        nodes.push(PersistedNode {
+            id: node.id.as_u64(),
+            label_idx: node.label.as_u32(),
+            version_id: node.current_version.as_u64(),
+            properties: persist_property_map(&node.properties)?,
+        });
+    }
+
+    for edge in snapshot.iter_edges() {
+        edges.push(PersistedEdge {
+            id: edge.id.as_u64(),
+            source_id: edge.source.as_u64(),
+            target_id: edge.target.as_u64(),
+            label_idx: edge.label.as_u32(),
+            version_id: edge.current_version.as_u64(),
+            properties: persist_property_map(&edge.properties)?,
+        });
+    }
+
+    Ok(GraphIndexData {
+        magic: GRAPH_MAGIC,
+        version: MANIFEST_VERSION,
+        node_count: nodes.len() as u64,
+        edge_count: edges.len() as u64,
+        nodes,
+        edges,
+        outgoing_node_ids: Vec::new(),
+        outgoing_offsets: Vec::new(),
+        outgoing_neighbors: Vec::new(),
+        incoming_node_ids: Vec::new(),
+        incoming_offsets: Vec::new(),
+        incoming_neighbors: Vec::new(),
+    })
 }
 
 /// Save graph index data to disk with CRC32 checksum using atomic write.
