@@ -1,2 +1,17 @@
 [advisories]
-ignore = ["RUSTSEC-2026-0098", "RUSTSEC-2026-0099", "RUSTSEC-2026-0104"]
+ignore = [
+    # Pre-existing ignores
+    "RUSTSEC-2026-0098",
+    "RUSTSEC-2026-0099",
+    "RUSTSEC-2026-0104",
+
+    # lopdf 0.36 stack-overflow via deeply nested PDFs (CVSS 7.5).
+    # Fixed in lopdf >= 0.42.0, but pdf-extract 0.9.0 (pulled in transitively
+    # through the optional `embeddings` / `embeddings-onnx` features via
+    # embed_anything -> processors-rs -> pdf-extract) requires lopdf ^0.36,
+    # so we cannot upgrade without a breaking change in that dependency chain.
+    # AletheiaDB never parses untrusted PDF input directly; exposure is limited
+    # to the optional embedding pipeline, which is not deployed in production.
+    # Track: upgrade embed_anything when it supports lopdf >= 0.42.
+    "RUSTSEC-2026-0187",
+]
