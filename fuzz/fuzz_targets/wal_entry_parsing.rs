@@ -15,6 +15,11 @@ fuzz_target!(|data: &[u8]| {
         assert_eq!(roundtrip_consumed, canonical.len());
         assert_eq!(roundtrip.lsn, entry.lsn);
         assert_eq!(roundtrip.timestamp, entry.timestamp);
-        assert_eq!(roundtrip.operation, entry.operation);
+        // Compare via re-serialization rather than PartialEq: vectors containing NaN
+        // would fail `==` (IEEE 754: NaN != NaN) even though the round-trip is lossless.
+        // Byte-level idempotence is the correct invariant for WAL round-trip fidelity.
+        let canonical2 = aletheiadb::fuzzing::wal::serialize_entry(&roundtrip)
+            .expect("double-serialized WAL entry must serialize");
+        assert_eq!(canonical2, canonical, "WAL serialization must be idempotent");
     }
 });
