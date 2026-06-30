@@ -371,6 +371,14 @@ pub(crate) fn read_artifact(path: &Path) -> Result<BackupPayload, BackupError> {
         .read_to_end(&mut decoded_bytes)
         .map_err(|e| BackupError::Corrupt(format!("zstd decompression failed: {e}")))?;
 
+    // If we read exactly the take limit the payload was truncated — the real
+    // decompressed size may be larger (decompression-bomb guard).
+    if decoded_bytes.len() as u64 >= MAX_DECOMPRESSED_PAYLOAD_BYTES {
+        return Err(BackupError::Corrupt(
+            "Decompressed payload exceeds size limit (possible decompression bomb)".to_string(),
+        ));
+    }
+
     // Decode bitcode.
     let payload: BackupPayload = bitcode::decode(&decoded_bytes)
         .map_err(|e| BackupError::Serialization(format!("bitcode deserialization failed: {e}")))?;

@@ -260,11 +260,15 @@ fn roundtrip_preserves_bitemporal_history() {
 #[test]
 #[serial]
 fn roundtrip_with_cold_storage_configured() {
-    use aletheiadb::config::{AletheiaDBConfig, HistoricalConfigBuilder};
+    use aletheiadb::config::{AletheiaDBConfig, HistoricalConfigBuilder, WalConfigBuilder};
     use std::time::Duration;
 
     let tmp_src = TempDir::new().unwrap();
     let cold_path = tmp_src.path().join("cold.redb");
+    // Give the source DB its own isolated WAL directory so that concurrent
+    // test binaries running against the default relative "aletheiadb/wal/"
+    // path cannot contaminate the WAL segments read during restore.
+    let wal_path = tmp_src.path().join("wal");
 
     let config = AletheiaDBConfig::builder()
         .historical(
@@ -276,6 +280,7 @@ fn roundtrip_with_cold_storage_configured() {
                 .migration_age_threshold(Duration::from_nanos(1))
                 .build(),
         )
+        .wal(WalConfigBuilder::new().wal_dir(wal_path).build())
         .build();
 
     let db = AletheiaDB::with_unified_config(config).unwrap();
@@ -308,6 +313,11 @@ fn roundtrip_with_cold_storage_configured() {
         summary.node_versions >= orig_history.versions.len() as u64,
         "backup must capture all versions visible through get_node_history"
     );
+
+    // Drop the source DB before restoring to avoid GLOBAL_INTERNER conflicts:
+    // materialize_to_dir calls GLOBAL_INTERNER.clear() then repopulates it from
+    // the backup, so any live DB sharing that interner would see stale indices.
+    drop(db);
 
     let restored = AletheiaDB::restore(&backup_path).unwrap();
 
