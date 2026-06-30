@@ -3070,4 +3070,19 @@ mod server_unit_tests {
         assert_eq!(json["entity"]["type"].as_str(), Some("edge"));
         assert_eq!(json["entity"]["id"].as_u64(), Some(99));
     }
+
+    #[test]
+    fn handle_enable_unique_constraint_invalid_json_returns_error() {
+        // Covers the `Err(e) => return self.error_json(...)` parse-error arm of
+        // handle_enable_unique_constraint (added for Issue #3218).  The public
+        // `enable_unique_constraint(req)` API always serialises a valid struct,
+        // so this arm is only reachable via the internal handle_ function.
+        let server = make_server();
+        let result = server.handle_enable_unique_constraint(serde_json::Value::Null);
+        // Must be an error CallToolResult (is_error = Some(true))
+        assert!(
+            result.is_error.unwrap_or(false),
+            "Null JSON input must produce an error result"
+        );
+    }
 }

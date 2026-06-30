@@ -3858,4 +3858,33 @@ mod constraint_tests {
         assert_eq!(v["success"], serde_json::json!(false));
         assert_eq!(v["property"], "email");
     }
+
+    #[test]
+    fn test_update_node_non_constraint_error_fallthrough() {
+        // Covers server.rs:
+        //   • constraint_violation_result() `else { None }` branch (non-constraint error)
+        //   • handle_update_node `self.error_json(...)` fallthrough (when
+        //     constraint_violation_result returns None)
+        //
+        // We call update_node with a valid-format but non-existent node ID so that
+        // `tx.update_node` returns StorageError::NodeNotFound — which is NOT a
+        // ConstraintError::UniqueViolation — and constraint_violation_result returns None.
+        let server = create_test_server();
+
+        let response = server.update_node(UpdateNodeRequest {
+            node_id: 99999,
+            properties: HashMap::new(),
+        });
+
+        let v = parse_json(&response);
+        assert!(
+            v.get("error").is_some(),
+            "update_node on non-existent node must return an error: {v}"
+        );
+        assert_eq!(
+            v.get("constraint_violation"),
+            None,
+            "non-constraint error must NOT set constraint_violation: {v}"
+        );
+    }
 }

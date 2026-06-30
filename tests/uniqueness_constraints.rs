@@ -921,6 +921,33 @@ fn rollback_releases_partially_reserved_keys() {
 // 14. NaN float uniqueness normalization
 // ──────────────────────────────────────────────────────────────
 
+// ──────────────────────────────────────────────────────────────
+// 15. disable clears reservation index (constraint.rs:167)
+// ──────────────────────────────────────────────────────────────
+
+/// Covers the `DashMap::retain` closure in `ConstraintRegistry::undeclare`
+/// (constraint.rs line ~167): when there are actual entries in the reservation
+/// index for the constraint being dropped, the closure must fire and remove them.
+#[test]
+fn disable_constraint_clears_live_reservations() {
+    let db = in_memory_db();
+
+    db.unique_constraint("Person", "email").enable().unwrap();
+
+    // Create a node — this populates the reservation index with (Person, email, alice@x) → id.
+    db.create_node("Person", properties! { "email" => "alice@x" })
+        .expect("first create must succeed");
+
+    // Disable the constraint — calls undeclare() which calls retain() on the
+    // non-empty reservation_index, exercising the closure at line ~167.
+    db.disable_unique_constraint("Person", "email")
+        .expect("disable must succeed");
+
+    // After disabling, a second node with the same email is allowed.
+    db.create_node("Person", properties! { "email" => "alice@x" })
+        .expect("duplicate email must be allowed after disabling the constraint");
+}
+
 /// Covers constraint.rs `ValueKey::from_property_value` NaN branch (line ~44):
 /// all NaN float values are normalized to a single canonical bit pattern, so
 /// two nodes with `f64::NAN` on a constrained property count as duplicates.

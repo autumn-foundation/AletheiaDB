@@ -822,4 +822,80 @@ mod ephemeral_tests {
                 .expect_err("constraint must survive WAL+persistence restart");
         }
     }
+
+    /// WAL-only recovery (no index persistence) bumps edge_id_gen past the
+    /// highest edge ID seen in the WAL.  This exercises the
+    /// `if persistence_manager.is_none()` branch at config.rs lines ~468-472:
+    ///
+    /// ```text
+    /// if let Some(max_eid) = max_edge_id {
+    ///     db.edge_id_gen.ensure_at_least(max_eid + 1);
+    /// }
+    /// ```
+    #[test]
+    fn wal_only_recovery_bumps_edge_id_gen() {
+        use crate::WriteOps;
+        use crate::config::{AletheiaDBConfig, WalConfigBuilder};
+        use crate::storage::index_persistence::PersistenceConfig;
+        use crate::storage::wal::DurabilityMode;
+        use tempfile::tempdir;
+
+        let scratch = tempdir().unwrap();
+        let wal_dir = scratch.path().join("wal");
+
+        let make_config = || {
+            AletheiaDBConfig::builder()
+                .wal(
+                    WalConfigBuilder::new()
+                        .wal_dir(wal_dir.clone())
+                        .durability_mode(DurabilityMode::Synchronous)
+                        .build(),
+                )
+                .persistence(PersistenceConfig {
+                    enabled: false,
+                    ..PersistenceConfig::default()
+                })
+                .build()
+        };
+
+        // Session 1: create two nodes and an edge; remember the edge ID.
+        let recorded_edge_id = {
+            let db = AletheiaDB::with_unified_config(make_config()).unwrap();
+            let n1 = db
+                .create_node("N", crate::PropertyMapBuilder::new().build())
+                .unwrap();
+            let n2 = db
+                .create_node("N", crate::PropertyMapBuilder::new().build())
+                .unwrap();
+            let eid = db
+                .write(|tx| tx.create_edge(n1, n2, "E", crate::PropertyMapBuilder::new().build()))
+                .unwrap();
+            eid.as_u64()
+        };
+
+        // Session 2: WAL-only replay — no persistence manager → enters the
+        // `persistence_manager.is_none()` branch → max_edge_id is Some(_) →
+        // edge_id_gen.ensure_at_least fires → new edge ID must be > recorded one.
+        {
+            let db = AletheiaDB::with_unified_config(make_config()).unwrap();
+            assert_eq!(db.edge_count(), 1, "edge must be recovered from WAL replay");
+
+            let n1 = db
+                .create_node("N", crate::PropertyMapBuilder::new().build())
+                .unwrap();
+            let n2 = db
+                .create_node("N", crate::PropertyMapBuilder::new().build())
+                .unwrap();
+            let new_eid = db
+                .write(|tx| tx.create_edge(n1, n2, "E2", crate::PropertyMapBuilder::new().build()))
+                .unwrap();
+            assert!(
+                new_eid.as_u64() > recorded_edge_id,
+                "edge_id_gen must be bumped past the WAL-replayed max edge ID \
+                 (got {}, expected > {})",
+                new_eid.as_u64(),
+                recorded_edge_id,
+            );
+        }
+    }
 }
