@@ -803,3 +803,40 @@ mod null_property_coverage {
         );
     }
 }
+
+// ──────────────────────────────────────────────────────────────
+// 12. ReservationGuard rollback coverage
+// ──────────────────────────────────────────────────────────────
+
+/// Covers constraint.rs `Drop for ReservationGuard` body (line ~122):
+/// when a batch transaction partially reserves keys and then hits a violation,
+/// the RAII guard must release the already-reserved keys on drop.
+///
+/// Scenario: pre-existing node holds "alice@x". A two-operation batch first
+/// creates "new@x" (newly reserved → pushed to `guard.added`) then attempts
+/// "alice@x" (collision → Err). The guard's `Drop` must remove "new@x" so it
+/// is available for a subsequent single create.
+#[test]
+fn rollback_releases_partially_reserved_keys() {
+    let db = in_memory_db();
+    db.unique_constraint("Person", "email").enable().unwrap();
+
+    // Pre-existing node holds "alice@x".
+    db.create_node("Person", properties! { "email" => "alice@x" })
+        .unwrap();
+
+    // Batch: first op reserves a NEW key; second op collides → tx fails.
+    let result = db.write(|tx| {
+        tx.create_node("Person", properties! { "email" => "new@x" })?;
+        tx.create_node("Person", properties! { "email" => "alice@x" })?;
+        Ok::<_, aletheiadb::Error>(())
+    });
+
+    let err = result.expect_err("batch must fail due to alice@x collision");
+    err.as_constraint()
+        .expect("error must be a ConstraintError");
+
+    // "new@x" must have been released by the RAII rollback.
+    db.create_node("Person", properties! { "email" => "new@x" })
+        .expect("new@x must be available after rollback released it");
+}
