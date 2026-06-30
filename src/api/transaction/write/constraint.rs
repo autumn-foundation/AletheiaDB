@@ -25,11 +25,10 @@ pub(crate) fn check_constraints(
     tx: &WriteTransaction,
     registry: &Arc<ConstraintRegistry>,
 ) -> std::result::Result<ReservationGuard, ConstraintError> {
-    // Tuples for post-tx (newly owned) constraint keys.
-    // We collect (label, PropertyMap, NodeId) and borrow from them below.
-    let mut added_owned: Vec<(InternedString, PropertyMap, NodeId)> = Vec::new();
+    // Borrow property maps directly from the buffer to avoid cloning on the hot path.
+    let mut added_refs: Vec<(InternedString, &PropertyMap, NodeId)> = Vec::new();
 
-    // Tuples for pre-tx (to be freed on commit) constraint keys.
+    // Pre-tx nodes whose constraint keys are freed on a successful commit.
     let mut removed_nodes: Vec<Node> = Vec::new();
 
     for op in tx.buffer.operations() {
@@ -40,7 +39,7 @@ pub(crate) fn check_constraints(
                 properties,
                 ..
             } => {
-                added_owned.push((*label, properties.clone(), *node_id));
+                added_refs.push((*label, properties, *node_id));
             }
             BufferedWrite::UpdateNode {
                 node_id,
@@ -49,7 +48,7 @@ pub(crate) fn check_constraints(
                 ..
             } => {
                 // Post-tx state is the new properties.
-                added_owned.push((*label, properties.clone(), *node_id));
+                added_refs.push((*label, properties, *node_id));
                 // Pre-tx state: fetch current node to find keys being released.
                 if let Ok(current_node) = tx.current.get_node(*node_id) {
                     removed_nodes.push(current_node);
@@ -64,10 +63,6 @@ pub(crate) fn check_constraints(
             _ => {}
         }
     }
-
-    // Build reference slices from the owned data.
-    let added_refs: Vec<(InternedString, &PropertyMap, NodeId)> =
-        added_owned.iter().map(|(l, p, id)| (*l, p, *id)).collect();
 
     let removed_refs: Vec<(InternedString, &PropertyMap, NodeId)> = removed_nodes
         .iter()

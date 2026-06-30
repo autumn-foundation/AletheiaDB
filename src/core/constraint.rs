@@ -36,7 +36,17 @@ impl ValueKey {
         match v {
             PropertyValue::Bool(b) => Some(ValueKey::Bool(*b)),
             PropertyValue::Int(i) => Some(ValueKey::Int(*i)),
-            PropertyValue::Float(f) => Some(ValueKey::Float(f.to_bits())),
+            PropertyValue::Float(f) => {
+                // Normalize all NaN representations to one canonical bit pattern so two
+                // NaN floats are treated as the same unique key (instead of different
+                // bit-patterns bypassing the constraint).
+                let bits = if f.is_nan() {
+                    f64::NAN.to_bits()
+                } else {
+                    f.to_bits()
+                };
+                Some(ValueKey::Float(bits))
+            }
             PropertyValue::String(s) => Some(ValueKey::String(Arc::clone(s))),
             PropertyValue::Bytes(b) => Some(ValueKey::Bytes(Arc::clone(b))),
             PropertyValue::Null
@@ -219,6 +229,11 @@ impl ConstraintRegistry {
                 continue;
             }
             if let Some(pv) = node.properties.get_by_interned_key(&property) {
+                // Null means "property not set" — treat it as absent, not as a
+                // constraint violation or an unsupported type.
+                if matches!(pv, PropertyValue::Null) {
+                    continue;
+                }
                 match ValueKey::from_property_value(pv) {
                     None => {
                         return Err(ConstraintError::UnsupportedKeyType {
