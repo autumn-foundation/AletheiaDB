@@ -916,3 +916,33 @@ fn rollback_releases_partially_reserved_keys() {
     db.create_node("Person", properties! { "email" => "new@x" })
         .expect("new@x must be available after rollback released it");
 }
+
+// ──────────────────────────────────────────────────────────────
+// 14. NaN float uniqueness normalization
+// ──────────────────────────────────────────────────────────────
+
+/// Covers constraint.rs `ValueKey::from_property_value` NaN branch (line ~44):
+/// all NaN float values are normalized to a single canonical bit pattern, so
+/// two nodes with `f64::NAN` on a constrained property count as duplicates.
+#[test]
+fn nan_float_uniqueness_is_enforced() {
+    use aletheiadb::core::property::{PropertyMapBuilder, PropertyValue};
+
+    let db = in_memory_db();
+    db.unique_constraint("Score", "rating").enable().unwrap();
+
+    let nan_props = || {
+        PropertyMapBuilder::new()
+            .insert("rating", PropertyValue::Float(f64::NAN))
+            .build()
+    };
+
+    db.create_node("Score", nan_props())
+        .expect("first NaN rating must succeed");
+
+    let err = db
+        .create_node("Score", nan_props())
+        .expect_err("duplicate NaN rating must fail (NaN normalized to same key)");
+
+    err.as_constraint().expect("error must be ConstraintError");
+}
