@@ -608,9 +608,12 @@ fn constraint_survives_restart_via_index_persistence() {
             .unwrap();
     }
 
-    // Session 2: constraint must still be enforced via the combined
-    // index-load + WAL-replay + replay_constraint_declarations_from_wal path.
-    {
+    // Session 2: reload snapshot + WAL, verify constraint, create a new edge so
+    // that edge appears in the WAL *after* the session-1 snapshot.  This ensures
+    // that a session-3 incremental replay will have a Some(max_edge_id), which
+    // exercises the `db.edge_id_gen.ensure_at_least(max_eid + 1)` path in
+    // config.rs that the snapshot-only case does not reach.
+    let (n1_s2, n2_s2) = {
         let db = aletheiadb::AletheiaDB::with_unified_config(make_config()).unwrap();
 
         assert_eq!(db.node_count(), 2, "nodes must survive restart");
@@ -618,8 +621,31 @@ fn constraint_survives_restart_via_index_persistence() {
         db.create_node("Person", aletheiadb::properties! { "email" => "keep@x" })
             .expect_err("Person.email constraint must be enforced after index-persistence restart");
 
-        db.create_node("Person", aletheiadb::properties! { "email" => "new@x" })
+        let n3 = db
+            .create_node("Person", aletheiadb::properties! { "email" => "new@x" })
             .expect("different email must be allowed");
+
+        // Retrieve an existing node ID and create an edge in this session —
+        // this edge is in the incremental WAL but NOT in any snapshot yet.
+        let nodes = db.get_nodes_by_label("Person");
+        let n_existing = nodes[0].id;
+        db.write(|tx| tx.create_edge(n_existing, n3, "FOLLOWS", aletheiadb::properties! {}))
+            .unwrap();
+        (n_existing, n3)
+    };
+    let _ = (n1_s2, n2_s2);
+
+    // Session 3: reload — the incremental WAL now contains the session-2 edge,
+    // so max_edge_id is Some(_) and config.rs edge_id_gen path is covered.
+    {
+        let db = aletheiadb::AletheiaDB::with_unified_config(make_config()).unwrap();
+        assert!(
+            db.node_count() >= 2,
+            "nodes must still be present in session 3"
+        );
+        // Constraint still active
+        db.create_node("Person", aletheiadb::properties! { "email" => "keep@x" })
+            .expect_err("constraint still enforced in session 3");
     }
 }
 
