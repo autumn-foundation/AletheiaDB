@@ -715,18 +715,16 @@ pub(crate) fn load_indexes_startup(
                     max_version_id = max_version_id.max(persisted_edge.version_id);
                 }
 
-                // Initialize ID generators BEFORE inserting entities to prevent collisions
+                // Initialize ID generators BEFORE inserting entities to prevent collisions.
                 // IdGenerator uses AtomicU64, so reset_to is lock-free and thread-safe.
-                if max_node_id > 0 {
+                // Note: IDs start at 0, so a single node with NodeId(0) yields max_node_id == 0.
+                // Seed the generator whenever any entity was found, not only when the max > 0.
+                if !graph_data.nodes.is_empty() {
                     node_id_gen.reset_to(max_node_id + 1);
                 }
-                if max_edge_id > 0 {
+                if !graph_data.edges.is_empty() {
                     edge_id_gen.reset_to(max_edge_id + 1);
                 }
-                // Initialize version ID generator from max persisted version_id.
-                // Note: version IDs start at 0, so a single node with version 0 yields
-                // max_version_id == 0.  We must seed the generator whenever any entity
-                // was found, not only when max_version_id > 0.
                 if !graph_data.nodes.is_empty() || !graph_data.edges.is_empty() {
                     version_id_gen.reset_to(max_version_id + 1);
                 }

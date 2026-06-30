@@ -35,6 +35,7 @@ use std::time::Instant;
 
 mod apply;
 mod conflict;
+pub(crate) mod constraint;
 mod validation;
 mod wal;
 
@@ -98,6 +99,10 @@ pub struct WriteTransaction {
 
     /// Durability mode for this transaction's commit
     pub(crate) durability_mode: DurabilityMode,
+
+    /// Uniqueness constraint registry shared with the parent database.
+    /// `None` for transactions created without a registry (legacy / tests).
+    pub(crate) constraint_registry: Option<Arc<crate::core::constraint::ConstraintRegistry>>,
 }
 
 impl WriteTransaction {
@@ -234,7 +239,17 @@ impl WriteTransaction {
             edge_id_gen,
             version_id_gen,
             durability_mode,
+            constraint_registry: None,
         }
+    }
+
+    /// Attach a constraint registry to this transaction (called by the DB layer).
+    pub(crate) fn with_constraint_registry(
+        mut self,
+        registry: Arc<crate::core::constraint::ConstraintRegistry>,
+    ) -> Self {
+        self.constraint_registry = Some(registry);
+        self
     }
 
     /// Get transaction metadata.
@@ -371,6 +386,20 @@ impl WriteTransaction {
 
         // Detect write-write conflicts (Snapshot Isolation)
         self.detect_conflicts()?;
+
+        // Enforce uniqueness constraints (reservation step).
+        // Must sit before the timestamp lock so we never hold a DashMap shard
+        // guard across `current_timestamp` (preserves lock-ordering contract).
+        // The guard is intentionally kept alive (not prefixed with `_`) so its
+        // Drop impl releases reserved keys on any subsequent error path.
+        let constraint_guard = if let Some(ref registry) = self.constraint_registry {
+            Some(
+                constraint::check_constraints(self, registry)
+                    .map_err(crate::core::error::Error::Constraint)?,
+            )
+        } else {
+            None
+        };
 
         // Acquire commit timestamp and perform mode-aware WAL flush.
         //
@@ -568,6 +597,15 @@ impl WriteTransaction {
         // Only reached on the success path — sets commit_timestamp: Some(T) on all
         // written nodes/edges, making them visible to future snapshot readers.
         apply::finalize_current_commit_timestamps(self, commit_timestamp);
+
+        // Commit the constraint guard before registering with the visibility manager.
+        // Committing first ensures that freed old-value slots are released before
+        // other transactions observe this commit as visible — otherwise a concurrent
+        // delete+create of the same key could see the old reservation still present
+        // and raise a spurious UniqueViolation.
+        if let Some(guard) = constraint_guard {
+            guard.commit();
+        }
 
         // Register commit with visibility manager
         self.visibility_manager.register_commit(self.tx_id);

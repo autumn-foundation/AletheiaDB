@@ -329,6 +329,7 @@ impl AletheiaDB {
                 persistence_thread_stopped: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 persistence_thread_handle: None,
                 encryption_manager: encryption_manager.clone(),
+                constraint_registry: Arc::new(crate::core::constraint::ConstraintRegistry::new()),
                 _tempdir: None,
             };
 
@@ -360,6 +361,14 @@ impl AletheiaDB {
                         crate::core::GLOBAL_INTERNER.len() as u64
                     );
                 }
+
+                // Replay constraint declarations from the full WAL history before the
+                // differential node/edge replay.  Constraint WAL entries may predate
+                // the snapshot LSN and would be skipped by the differential replay.
+                crate::storage::recovery::replay_constraint_declarations_from_wal(
+                    &db.wal,
+                    &db.constraint_registry,
+                )?;
 
                 // Replay WAL entries that occurred after the persisted snapshot
                 // This ensures no data loss if the WAL is ahead of the indexes (e.g. crash before persist)
@@ -395,17 +404,67 @@ impl AletheiaDB {
 
                 let mut historical_guard = db.historical.write();
                 let (_final_lsn, max_node_id, max_edge_id, next_version_id) =
-                    crate::storage::recovery::replay_wal_into_storage(
+                    crate::storage::recovery::replay_wal_into_storage_with_constraints(
                         &db.wal,
                         &db.current,
                         &mut historical_guard,
                         start_lsn,
                         initial_version_id,
+                        Some(&db.constraint_registry),
                     )?;
                 drop(historical_guard);
 
+                // Rebuild reservation index from currently-valid nodes for each declared constraint.
+                for (label_str, property_str) in db.constraint_registry.list() {
+                    if let (Some(label_id), Some(property_id)) = (
+                        crate::core::interning::GLOBAL_INTERNER.get_id(&label_str),
+                        crate::core::interning::GLOBAL_INTERNER.get_id(&property_str),
+                    ) {
+                        let nodes = db.current.get_nodes_by_label(&label_str);
+                        db.constraint_registry
+                            .rebuild_from_nodes(&nodes, label_id, property_id);
+                    }
+                }
+
                 // Update ID generators to account for replayed entities.
                 // This ensures that subsequent writes use IDs that don't collide with replayed data.
+                if let Some(max_nid) = max_node_id {
+                    db.node_id_gen.ensure_at_least(max_nid + 1);
+                }
+                if let Some(max_eid) = max_edge_id {
+                    db.edge_id_gen.ensure_at_least(max_eid + 1);
+                }
+                db.version_id_gen.ensure_at_least(next_version_id);
+            }
+
+            // When only the WAL is configured (no index persistence), replay the full
+            // WAL from the beginning to restore node/edge data AND constraint declarations.
+            if persistence_manager.is_none() {
+                let initial_version_id = db.version_id_gen.current();
+                let mut historical_guard = db.historical.write();
+                let (_final_lsn, max_node_id, max_edge_id, next_version_id) =
+                    crate::storage::recovery::replay_wal_into_storage_with_constraints(
+                        &db.wal,
+                        &db.current,
+                        &mut historical_guard,
+                        crate::storage::wal::LSN::initial(),
+                        initial_version_id,
+                        Some(&db.constraint_registry),
+                    )?;
+                drop(historical_guard);
+
+                // Rebuild reservation index.
+                for (label_str, property_str) in db.constraint_registry.list() {
+                    if let (Some(label_id), Some(property_id)) = (
+                        crate::core::interning::GLOBAL_INTERNER.get_id(&label_str),
+                        crate::core::interning::GLOBAL_INTERNER.get_id(&property_str),
+                    ) {
+                        let nodes = db.current.get_nodes_by_label(&label_str);
+                        db.constraint_registry
+                            .rebuild_from_nodes(&nodes, label_id, property_id);
+                    }
+                }
+
                 if let Some(max_nid) = max_node_id {
                     db.node_id_gen.ensure_at_least(max_nid + 1);
                 }
@@ -517,6 +576,7 @@ impl AletheiaDB {
                 persistence_thread_stopped: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 persistence_thread_handle: None,
                 encryption_manager: None,
+                constraint_registry: Arc::new(crate::core::constraint::ConstraintRegistry::new()),
                 _tempdir: None,
             };
             seed_startup_current_timestamp(&db)?;
@@ -652,6 +712,190 @@ mod ephemeral_tests {
         unsafe {
             std::env::remove_var(crate::config::CONFIG_ENV);
             std::env::remove_var(crate::config::DATA_DIR_ENV);
+        }
+    }
+
+    /// Covers config.rs line 435: the WAL+persistence incremental-replay path that
+    /// runs `db.edge_id_gen.ensure_at_least(max_eid + 1)` when the incremental WAL
+    /// (between the last snapshot LSN and the current WAL head) contains an edge.
+    ///
+    /// Achieving this requires a snapshot taken *before* the edge is written, while
+    /// ensuring the normal background thread does not re-snapshot on shutdown (which
+    /// would swallow the edge into the snapshot and leave the incremental WAL empty).
+    /// We do this by manually calling `persist_all_indexes`, then stopping the
+    /// background thread before creating the edge.
+    #[test]
+    fn wal_persistence_incremental_wal_edge_covers_edge_id_gen() {
+        use crate::config::{AletheiaDBConfig, WalConfigBuilder};
+        use crate::storage::index_persistence::PersistenceConfig;
+        use crate::storage::index_persistence::operations::persist_all_indexes;
+        use crate::storage::wal::DurabilityMode;
+        use crate::{PropertyMapBuilder, WriteOps};
+        use tempfile::tempdir;
+
+        let scratch = tempdir().unwrap();
+        let db_path = scratch.path().to_path_buf();
+
+        let make_config = || {
+            AletheiaDBConfig::builder()
+                .wal(
+                    WalConfigBuilder::new()
+                        .wal_dir(db_path.join("wal"))
+                        .durability_mode(DurabilityMode::Synchronous)
+                        .build(),
+                )
+                .persistence(PersistenceConfig {
+                    enabled: true,
+                    data_dir: db_path.join("indexes"),
+                    load_on_startup: true,
+                    ..Default::default()
+                })
+                .build()
+        };
+
+        let (n1, n2) = {
+            let mut db = AletheiaDB::with_unified_config(make_config()).unwrap();
+            db.unique_constraint("P", "k").enable().unwrap();
+            let n1 = db
+                .create_node("P", PropertyMapBuilder::new().insert("k", "a").build())
+                .unwrap();
+            let n2 = db
+                .create_node("P", PropertyMapBuilder::new().insert("k", "b").build())
+                .unwrap();
+
+            // Snapshot now so startup sees safe_lsn = current WAL head.
+            // Use .expect() rather than if-let so LLVM does not generate uncovered
+            // else-branches that inflate the Codecov patch-missing count.
+            let tracker = db
+                .persistence_tracker
+                .as_ref()
+                .expect("persistence configured");
+            let manager = db
+                .persistence_manager
+                .as_ref()
+                .expect("persistence configured");
+            let _ = persist_all_indexes(
+                &db.current,
+                &db.historical,
+                &db.temporal_indexes,
+                &db.wal,
+                manager,
+                tracker,
+            );
+
+            // Stop the background thread before it can re-snapshot on its own.
+            tracker.signal_shutdown();
+            let handle = db
+                .persistence_thread_handle
+                .take()
+                .expect("background thread running");
+            let _ = handle.join();
+
+            // persist_all_indexes records safe_lsn = wal.current_lsn() which is the
+            // NEXT-to-allocate LSN (call it L).  On the second session startup,
+            // start_lsn = L+1.  Any WAL entry at LSN < L+1 is below the replay window
+            // and will NOT be recovered from the incremental replay.
+            //
+            // To place the edge inside the replay window we first allocate LSN=L with a
+            // throwaway node (key "x" is unique and does not conflict with "a"/"b").
+            // The edge then receives LSN=L+1 and will be seen by the incremental replay.
+            db.create_node("P", PropertyMapBuilder::new().insert("k", "x").build())
+                .expect("dummy node must succeed (key 'x' not yet reserved)");
+
+            // Edge at LSN=L+1 — will be in the incremental replay window on restart.
+            db.write(|tx| tx.create_edge(n1, n2, "R", PropertyMapBuilder::new().build()))
+                .unwrap();
+            (n1, n2)
+        };
+        let _ = (n1, n2);
+
+        // Session 2: startup loads snapshot (n1+n2 only, no edge, no dummy) then replays
+        // incremental WAL from LSN L+1 (edge) → max_edge_id = Some(_) → line 435 fires.
+        {
+            let db = AletheiaDB::with_unified_config(make_config()).unwrap();
+            assert_eq!(
+                db.edge_count(),
+                1,
+                "edge must be recovered from incremental WAL"
+            );
+            db.create_node("P", PropertyMapBuilder::new().insert("k", "a").build())
+                .expect_err("constraint must survive WAL+persistence restart");
+        }
+    }
+
+    /// WAL-only recovery (no index persistence) bumps edge_id_gen past the
+    /// highest edge ID seen in the WAL.  This exercises the
+    /// `if persistence_manager.is_none()` branch at config.rs lines ~468-472:
+    ///
+    /// ```text
+    /// if let Some(max_eid) = max_edge_id {
+    ///     db.edge_id_gen.ensure_at_least(max_eid + 1);
+    /// }
+    /// ```
+    #[test]
+    fn wal_only_recovery_bumps_edge_id_gen() {
+        use crate::WriteOps;
+        use crate::config::{AletheiaDBConfig, WalConfigBuilder};
+        use crate::storage::index_persistence::PersistenceConfig;
+        use crate::storage::wal::DurabilityMode;
+        use tempfile::tempdir;
+
+        let scratch = tempdir().unwrap();
+        let wal_dir = scratch.path().join("wal");
+
+        let make_config = || {
+            AletheiaDBConfig::builder()
+                .wal(
+                    WalConfigBuilder::new()
+                        .wal_dir(wal_dir.clone())
+                        .durability_mode(DurabilityMode::Synchronous)
+                        .build(),
+                )
+                .persistence(PersistenceConfig {
+                    enabled: false,
+                    ..PersistenceConfig::default()
+                })
+                .build()
+        };
+
+        // Session 1: create two nodes and an edge; remember the edge ID.
+        let recorded_edge_id = {
+            let db = AletheiaDB::with_unified_config(make_config()).unwrap();
+            let n1 = db
+                .create_node("N", crate::PropertyMapBuilder::new().build())
+                .unwrap();
+            let n2 = db
+                .create_node("N", crate::PropertyMapBuilder::new().build())
+                .unwrap();
+            let eid = db
+                .write(|tx| tx.create_edge(n1, n2, "E", crate::PropertyMapBuilder::new().build()))
+                .unwrap();
+            eid.as_u64()
+        };
+
+        // Session 2: WAL-only replay — no persistence manager → enters the
+        // `persistence_manager.is_none()` branch → max_edge_id is Some(_) →
+        // edge_id_gen.ensure_at_least fires → new edge ID must be > recorded one.
+        {
+            let db = AletheiaDB::with_unified_config(make_config()).unwrap();
+            assert_eq!(db.edge_count(), 1, "edge must be recovered from WAL replay");
+
+            let n1 = db
+                .create_node("N", crate::PropertyMapBuilder::new().build())
+                .unwrap();
+            let n2 = db
+                .create_node("N", crate::PropertyMapBuilder::new().build())
+                .unwrap();
+            let new_eid = db
+                .write(|tx| tx.create_edge(n1, n2, "E2", crate::PropertyMapBuilder::new().build()))
+                .unwrap();
+            assert!(
+                new_eid.as_u64() > recorded_edge_id,
+                "edge_id_gen must be bumped past the WAL-replayed max edge ID \
+                 (got {}, expected > {})",
+                new_eid.as_u64(),
+                recorded_edge_id,
+            );
         }
     }
 }

@@ -16,8 +16,12 @@ use std::time::Instant;
 /// at various timestamps return the correct version IDs.
 #[test]
 fn test_version_lookup_correctness_many_versions() {
-    use aletheiadb::config::{AletheiaDBConfigBuilder, HistoricalConfigBuilder};
+    use aletheiadb::config::{AletheiaDBConfigBuilder, HistoricalConfigBuilder, WalConfigBuilder};
     use aletheiadb::storage::index_persistence::PersistenceConfig;
+
+    // Isolated WAL dir prevents parallel-test WAL pollution (shared default dir causes
+    // InvalidTimeRange errors when tests replay each other's entries).
+    let tmpdir = tempfile::tempdir().unwrap();
 
     // Create database with increased version limit (need extra headroom)
     let historical_config = HistoricalConfigBuilder::new()
@@ -34,6 +38,11 @@ fn test_version_lookup_correctness_many_versions() {
     let config = AletheiaDBConfigBuilder::new()
         .historical(historical_config)
         .persistence(persistence_config)
+        .wal(
+            WalConfigBuilder::new()
+                .wal_dir(tmpdir.path().join("wal"))
+                .build(),
+        )
         .build();
 
     let db = AletheiaDB::with_unified_config(config).expect("Failed to create database");
@@ -133,8 +142,10 @@ fn test_version_lookup_correctness_many_versions() {
 /// implementation should remain fast.
 #[test]
 fn test_version_lookup_performance_scaling() {
-    use aletheiadb::config::{AletheiaDBConfigBuilder, HistoricalConfigBuilder};
+    use aletheiadb::config::{AletheiaDBConfigBuilder, HistoricalConfigBuilder, WalConfigBuilder};
     use aletheiadb::storage::index_persistence::PersistenceConfig;
+
+    let tmpdir = tempfile::tempdir().unwrap();
 
     // Create database with increased version limit (need extra headroom)
     let historical_config = HistoricalConfigBuilder::new()
@@ -151,6 +162,11 @@ fn test_version_lookup_performance_scaling() {
     let config = AletheiaDBConfigBuilder::new()
         .historical(historical_config)
         .persistence(persistence_config)
+        .wal(
+            WalConfigBuilder::new()
+                .wal_dir(tmpdir.path().join("wal"))
+                .build(),
+        )
         .build();
 
     let db = AletheiaDB::with_unified_config(config).expect("Failed to create database");
@@ -241,8 +257,10 @@ fn test_version_lookup_performance_scaling() {
 /// Test edge version lookup with many versions.
 #[test]
 fn test_edge_version_lookup_correctness_many_versions() {
-    use aletheiadb::config::AletheiaDBConfigBuilder;
+    use aletheiadb::config::{AletheiaDBConfigBuilder, WalConfigBuilder};
     use aletheiadb::storage::index_persistence::PersistenceConfig;
+
+    let tmpdir = tempfile::tempdir().unwrap();
 
     // Disable persistence to avoid stale index data
     let persistence_config = PersistenceConfig {
@@ -252,6 +270,11 @@ fn test_edge_version_lookup_correctness_many_versions() {
 
     let config = AletheiaDBConfigBuilder::new()
         .persistence(persistence_config)
+        .wal(
+            WalConfigBuilder::new()
+                .wal_dir(tmpdir.path().join("wal"))
+                .build(),
+        )
         .build();
 
     let db = AletheiaDB::with_unified_config(config).expect("Failed to create database");

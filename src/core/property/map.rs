@@ -164,9 +164,9 @@ impl PropertyMap {
     ///   - Key bytes: UTF-8 encoded string
     ///   - Value: Serialized PropertyValue (includes type tag)
     ///
-    /// Note: HashMap ordering is not guaranteed, so serialization order
-    /// may vary. This is acceptable for correctness but may affect
-    /// byte-for-byte reproducibility.
+    /// Keys are serialized in ascending interned-ID order so that
+    /// serialize → deserialize → serialize is byte-for-byte idempotent
+    /// (required for WAL round-trip fidelity and fuzz testing).
     ///
     /// # Errors
     ///
@@ -189,7 +189,15 @@ impl PropertyMap {
         buffer.reserve(self.cached_size);
 
         buffer.extend_from_slice(&(self.inner.len() as u32).to_le_bytes());
-        for (key, value) in self.inner.iter() {
+
+        // Sort by interned key ID to produce a deterministic byte order.
+        // HashMap iteration order is not stable across insertions, so without
+        // sorting, serialize → deserialize → serialize can produce different
+        // bytes (keys in a different sequence), breaking WAL round-trip fidelity.
+        let mut entries: Vec<(&PropertyKey, &PropertyValue)> = self.inner.iter().collect();
+        entries.sort_unstable_by_key(|(k, _)| **k);
+
+        for (key, value) in entries {
             let value: &PropertyValue = value;
             // Serialize key: resolve InternedString to actual string
             // Use with_str to avoid Arc cloning overhead
@@ -679,4 +687,31 @@ macro_rules! properties {
             builder.build()
         }
     };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn serialize_round_trip_idempotent_multi_key() {
+        let props = PropertyMapBuilder::new()
+            .insert("zebra", 1)
+            .insert("alpha", 2)
+            .insert("mango", 3)
+            .insert("beta", true)
+            .build();
+
+        let canonical = props.serialize().expect("serialize must succeed");
+
+        let (props2, consumed) =
+            PropertyMap::deserialize(&canonical).expect("deserialize must succeed");
+        assert_eq!(consumed, canonical.len());
+
+        let canonical2 = props2.serialize().expect("re-serialize must succeed");
+        assert_eq!(
+            canonical2, canonical,
+            "PropertyMap serialization must be idempotent"
+        );
+    }
 }

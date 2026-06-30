@@ -5,9 +5,11 @@ use crate::api::transaction::WriteOps;
 use crate::core::error::{Result, ResultExt};
 use crate::core::graph::{Edge, Node};
 use crate::core::id::{EdgeId, NodeId};
+use crate::core::interning::GLOBAL_INTERNER;
 use crate::core::property::{PropertyMap, PropertyValue};
 use crate::db::AletheiaDB;
 use crate::storage::current::{IncomingEdgesIter, OutgoingEdgesIter};
+use crate::storage::wal::WalOperation;
 
 impl AletheiaDB {
     /// Create a node with the given label and properties.
@@ -293,6 +295,110 @@ impl AletheiaDB {
     ) -> Vec<NodeId> {
         self.current
             .find_nodes_by_property(label, property_key, property_value)
+    }
+
+    /// Return all currently-valid nodes with the given label.
+    ///
+    /// Useful for pre-flight checks before enabling a uniqueness constraint.
+    pub fn get_nodes_by_label(&self, label: &str) -> Vec<Node> {
+        self.current.get_nodes_by_label(label)
+    }
+
+    // ========================================================================
+    // Uniqueness constraint API
+    // ========================================================================
+
+    /// Begin building a uniqueness constraint for a label+property pair.
+    ///
+    /// Call `.enable()` on the returned builder to activate the constraint.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use aletheiadb::AletheiaDB;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// db.unique_constraint("Person", "email").enable()?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[must_use = "call .enable() to activate the constraint"]
+    pub fn unique_constraint(
+        &self,
+        label: impl Into<String>,
+        property: impl Into<String>,
+    ) -> crate::db::constraint_builder::UniqueConstraintBuilder<'_> {
+        crate::db::constraint_builder::UniqueConstraintBuilder::new(self, label, property)
+    }
+
+    /// Enable a uniqueness constraint on `(label, property)`.
+    ///
+    /// Fails with [`ConstraintError::DuplicateOnEnable`] if existing nodes already
+    /// violate the constraint. No constraint is enabled in that case.
+    pub(crate) fn enable_unique_constraint(&self, label: &str, property: &str) -> Result<()> {
+        let label_id = GLOBAL_INTERNER.intern(label).record_error_metric()?;
+        let prop_id = GLOBAL_INTERNER.intern(property).record_error_metric()?;
+
+        // Pre-flight: scan current nodes for the label and reject if duplicates exist.
+        let nodes = self.current.get_nodes_by_label(label);
+        crate::core::constraint::ConstraintRegistry::check_no_duplicates(
+            &nodes, label_id, prop_id, label, property,
+        )?;
+
+        // Populate the reservation index from existing nodes before declaring,
+        // so that in-flight transactions observe the full index immediately.
+        self.constraint_registry
+            .rebuild_from_nodes(&nodes, label_id, prop_id);
+
+        // Persist the declaration to the WAL BEFORE activating it in memory.
+        // If the flush fails, we return an error without touching the in-memory
+        // registry, so the constraint is never partially active.
+        self.wal
+            .append(WalOperation::DeclareUniqueConstraint {
+                label: label_id,
+                property: prop_id,
+            })
+            .record_error_metric()?;
+        self.wal.flush().record_error_metric()?;
+
+        // Record the declaration in the in-memory registry only after it is durable.
+        self.constraint_registry.declare(label_id, prop_id);
+
+        Ok(())
+    }
+
+    /// Disable a uniqueness constraint on `(label, property)`.
+    ///
+    /// Existing data is unaffected; the index slot is freed.
+    pub fn disable_unique_constraint(&self, label: &str, property: &str) -> Result<()> {
+        let label_id = match GLOBAL_INTERNER.get_id(label) {
+            Some(id) => id,
+            None => return Ok(()), // never declared — nothing to do
+        };
+        let prop_id = match GLOBAL_INTERNER.get_id(property) {
+            Some(id) => id,
+            None => return Ok(()),
+        };
+
+        // Persist the drop to the WAL BEFORE removing it from memory.
+        // If the flush fails, we return an error without touching the in-memory
+        // registry, so the constraint is never silently lost.
+        self.wal
+            .append(WalOperation::DropUniqueConstraint {
+                label: label_id,
+                property: prop_id,
+            })
+            .record_error_metric()?;
+        self.wal.flush().record_error_metric()?;
+
+        self.constraint_registry.undeclare(label_id, prop_id);
+
+        Ok(())
+    }
+
+    /// List all active uniqueness constraints as `(label, property)` string pairs.
+    pub fn list_unique_constraints(&self) -> Vec<(String, String)> {
+        self.constraint_registry.list()
     }
 }
 

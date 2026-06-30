@@ -229,7 +229,8 @@ impl AletheiaDB {
                 Arc::clone(&self.node_id_gen),
                 Arc::clone(&self.edge_id_gen),
                 Arc::clone(&self.version_id_gen),
-            ))
+            )
+            .with_constraint_registry(Arc::clone(&self.constraint_registry)))
         })();
         result.record_error_metric()
     }
@@ -464,7 +465,8 @@ impl AletheiaDB {
                 Arc::clone(&self.edge_id_gen),
                 Arc::clone(&self.version_id_gen),
                 durability,
-            ))
+            )
+            .with_constraint_registry(Arc::clone(&self.constraint_registry)))
         })();
         result.record_error_metric()
     }

@@ -549,6 +549,20 @@ impl AletheiaMcpServer {
         ))
     }
 
+    /// Enable a uniqueness constraint on a label+property pair.
+    pub fn enable_unique_constraint(&self, req: EnableUniqueConstraintRequest) -> String {
+        Self::extract_text(self.handle_enable_unique_constraint(
+            serde_json::to_value(req).expect("request serialization should not fail"),
+        ))
+    }
+
+    /// List all active uniqueness constraints.
+    pub fn list_unique_constraints(&self, req: ListUniqueConstraintsRequest) -> String {
+        Self::extract_text(self.handle_list_unique_constraints(
+            serde_json::to_value(req).expect("request serialization should not fail"),
+        ))
+    }
+
     /// Get node at a specific time.
     ///
     /// Performs a time-travel query to retrieve the state of a node at a specific valid time and transaction time.
@@ -843,6 +857,33 @@ impl AletheiaMcpServer {
         CallToolResult::error(vec![Content::text(json!({"error": msg}).to_string())])
     }
 
+    /// Build a structured `CallToolResult` for a `UniqueViolation` constraint error.
+    /// Returns `None` if `e` is not a `UniqueViolation`.
+    fn constraint_violation_result(&self, e: &crate::core::error::Error) -> Option<CallToolResult> {
+        if let Some(crate::core::error::ConstraintError::UniqueViolation {
+            label,
+            property,
+            value,
+            existing_node_id,
+        }) = e.as_constraint()
+        {
+            Some(CallToolResult::error(vec![Content::text(
+                serde_json::to_string_pretty(&json!({
+                    "error": e.to_string(),
+                    "success": false,
+                    "constraint_violation": true,
+                    "label": label,
+                    "property": property,
+                    "value": value,
+                    "existing_node_id": existing_node_id.as_u64()
+                }))
+                .unwrap_or_else(|_| "{\"error\":\"serialization failed\"}".to_string()),
+            )]))
+        } else {
+            None
+        }
+    }
+
     // ========================================================================
     // Tool Implementations
     // ========================================================================
@@ -895,7 +936,12 @@ impl AletheiaMcpServer {
                 }
                 Err(e) => self.error_json(&e.to_string()),
             },
-            Err(e) => self.error_json(&e.to_string()),
+            Err(ref e) => {
+                if let Some(result) = self.constraint_violation_result(e) {
+                    return result;
+                }
+                self.error_json(&e.to_string())
+            }
         }
     }
 
@@ -926,7 +972,12 @@ impl AletheiaMcpServer {
                 }
                 Err(e) => self.error_json(&e.to_string()),
             },
-            Err(e) => self.error_json(&e.to_string()),
+            Err(ref e) => {
+                if let Some(result) = self.constraint_violation_result(e) {
+                    return result;
+                }
+                self.error_json(&e.to_string())
+            }
         }
     }
 
@@ -1577,6 +1628,38 @@ impl AletheiaMcpServer {
         self.success_json(json!({
             "indexes": index_list,
             "count": index_list.len()
+        }))
+    }
+
+    fn handle_enable_unique_constraint(&self, args: serde_json::Value) -> CallToolResult {
+        let req: EnableUniqueConstraintRequest = match serde_json::from_value(args) {
+            Ok(r) => r,
+            Err(e) => return self.error_json(&format!("Invalid arguments: {}", e)),
+        };
+
+        match self
+            .db
+            .unique_constraint(&req.label, &req.property)
+            .enable()
+        {
+            Ok(()) => self.success_json(json!({
+                "success": true,
+                "label": req.label,
+                "property": req.property
+            })),
+            Err(e) => self.error_json(&e.to_string()),
+        }
+    }
+
+    fn handle_list_unique_constraints(&self, _args: serde_json::Value) -> CallToolResult {
+        let constraints = self.db.list_unique_constraints();
+        let list: Vec<serde_json::Value> = constraints
+            .into_iter()
+            .map(|(label, property)| json!({ "label": label, "property": property }))
+            .collect();
+        self.success_json(json!({
+            "constraints": list,
+            "count": list.len()
         }))
     }
 
@@ -2745,6 +2828,16 @@ fn tool_definitions() -> Vec<Tool> {
             make_input_schema::<ListVectorIndexesRequest>(),
         ),
         Tool::new(
+            "enable_unique_constraint",
+            "Enable a uniqueness constraint on a label+property pair. Fails fast if existing duplicates are found.",
+            make_input_schema::<EnableUniqueConstraintRequest>(),
+        ),
+        Tool::new(
+            "list_unique_constraints",
+            "List all active uniqueness constraints.",
+            make_input_schema::<ListUniqueConstraintsRequest>(),
+        ),
+        Tool::new(
             "get_node_at_time",
             "Get node state at a specific time.",
             make_input_schema::<GetNodeAtTimeRequest>(),
@@ -2881,6 +2974,8 @@ impl ServerHandler for AletheiaMcpServer {
             "find_similar" => self.handle_find_similar(args),
             "enable_vector_index" => self.handle_enable_vector_index(args),
             "list_vector_indexes" => self.handle_list_vector_indexes(args),
+            "enable_unique_constraint" => self.handle_enable_unique_constraint(args),
+            "list_unique_constraints" => self.handle_list_unique_constraints(args),
             "get_node_at_time" => self.handle_get_node_at_time(args),
             "get_edge_at_time" => self.handle_get_edge_at_time(args),
             "list_changes" => self.handle_list_changes(args),
@@ -2974,5 +3069,20 @@ mod server_unit_tests {
         let json = server.query_row_to_json(row);
         assert_eq!(json["entity"]["type"].as_str(), Some("edge"));
         assert_eq!(json["entity"]["id"].as_u64(), Some(99));
+    }
+
+    #[test]
+    fn handle_enable_unique_constraint_invalid_json_returns_error() {
+        // Covers the `Err(e) => return self.error_json(...)` parse-error arm of
+        // handle_enable_unique_constraint (added for Issue #3218).  The public
+        // `enable_unique_constraint(req)` API always serialises a valid struct,
+        // so this arm is only reachable via the internal handle_ function.
+        let server = make_server();
+        let result = server.handle_enable_unique_constraint(serde_json::Value::Null);
+        // Must be an error CallToolResult (is_error = Some(true))
+        assert!(
+            result.is_error.unwrap_or(false),
+            "Null JSON input must produce an error result"
+        );
     }
 }

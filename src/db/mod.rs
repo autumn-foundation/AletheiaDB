@@ -23,6 +23,8 @@ pub mod admin;
 pub mod backup;
 /// Configuration and initialization.
 pub mod config;
+/// Uniqueness constraint builder.
+pub mod constraint_builder;
 /// GraphView implementation.
 pub mod graph_view;
 /// Basic graph operations (CRUD).
@@ -44,6 +46,7 @@ pub mod vector;
 pub mod vector_builder;
 
 pub use crate::storage::backup::BackupSummary;
+pub use constraint_builder::UniqueConstraintBuilder;
 pub use similarity_query::{SimilarityQuery, SimilaritySource};
 pub use vector_builder::VectorIndexBuilder;
 
@@ -162,6 +165,8 @@ pub struct AletheiaDB {
     pub(crate) persistence_thread_handle: Option<std::thread::JoinHandle<()>>,
     /// Encryption manager (if encryption at rest is enabled)
     pub(crate) encryption_manager: Option<Arc<crate::encryption::EncryptionManager>>,
+    /// Uniqueness constraint registry (declarations + reservation index).
+    pub(crate) constraint_registry: Arc<crate::core::constraint::ConstraintRegistry>,
     /// Backing tempdir for ephemeral databases created via [`AletheiaDB::new`].
     /// Declared last so it is dropped last (Rust drops struct fields in
     /// declaration order); this guarantees the WAL/persistence file handles

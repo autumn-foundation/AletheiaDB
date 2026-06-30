@@ -54,8 +54,8 @@ use crate::core::id::{EdgeId, NodeId, VersionId};
 use crate::core::property::PropertyMap;
 
 use super::serialization::{
-    OP_CHECKPOINT, OP_CREATE_EDGE, OP_CREATE_NODE, OP_DELETE_EDGE, OP_DELETE_NODE, OP_UPDATE_EDGE,
-    OP_UPDATE_NODE,
+    OP_CHECKPOINT, OP_CREATE_EDGE, OP_CREATE_NODE, OP_DECLARE_UNIQUE_CONSTRAINT, OP_DELETE_EDGE,
+    OP_DELETE_NODE, OP_DROP_UNIQUE_CONSTRAINT, OP_UPDATE_EDGE, OP_UPDATE_NODE,
 };
 use super::{LSN, WalEntry, WalOperation};
 
@@ -808,6 +808,16 @@ pub(crate) fn parse_entry_at(
         OP_DELETE_NODE => parse_delete_node_op(buffer, &mut cur, version, timestamp)?,
         OP_DELETE_EDGE => parse_delete_edge_op(buffer, &mut cur, version, timestamp)?,
         OP_CHECKPOINT => parse_checkpoint_op(buffer, &mut cur)?,
+        OP_DECLARE_UNIQUE_CONSTRAINT => {
+            let label = read_label(buffer, &mut cur, "DeclareUniqueConstraint.label")?;
+            let property = read_label(buffer, &mut cur, "DeclareUniqueConstraint.property")?;
+            WalOperation::DeclareUniqueConstraint { label, property }
+        }
+        OP_DROP_UNIQUE_CONSTRAINT => {
+            let label = read_label(buffer, &mut cur, "DropUniqueConstraint.label")?;
+            let property = read_label(buffer, &mut cur, "DropUniqueConstraint.property")?;
+            WalOperation::DropUniqueConstraint { label, property }
+        }
         _ => {
             return Err(StorageError::CorruptedData(format!(
                 "Unknown WAL operation type: {}",
