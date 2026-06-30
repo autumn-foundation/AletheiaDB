@@ -350,10 +350,9 @@ impl AletheiaDB {
         self.constraint_registry
             .rebuild_from_nodes(&nodes, label_id, prop_id);
 
-        // Record the declaration in the in-memory registry.
-        self.constraint_registry.declare(label_id, prop_id);
-
-        // Persist the declaration to the WAL so it survives restart.
+        // Persist the declaration to the WAL BEFORE activating it in memory.
+        // If the flush fails, we return an error without touching the in-memory
+        // registry, so the constraint is never partially active.
         self.wal
             .append(WalOperation::DeclareUniqueConstraint {
                 label: label_id,
@@ -361,6 +360,9 @@ impl AletheiaDB {
             })
             .record_error_metric()?;
         self.wal.flush().record_error_metric()?;
+
+        // Record the declaration in the in-memory registry only after it is durable.
+        self.constraint_registry.declare(label_id, prop_id);
 
         Ok(())
     }
@@ -378,8 +380,9 @@ impl AletheiaDB {
             None => return Ok(()),
         };
 
-        self.constraint_registry.undeclare(label_id, prop_id);
-
+        // Persist the drop to the WAL BEFORE removing it from memory.
+        // If the flush fails, we return an error without touching the in-memory
+        // registry, so the constraint is never silently lost.
         self.wal
             .append(WalOperation::DropUniqueConstraint {
                 label: label_id,
@@ -387,6 +390,8 @@ impl AletheiaDB {
             })
             .record_error_metric()?;
         self.wal.flush().record_error_metric()?;
+
+        self.constraint_registry.undeclare(label_id, prop_id);
 
         Ok(())
     }

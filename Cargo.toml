@@ -437,6 +437,12 @@ harness = false
 path = "benches/vector_rerank.rs"
 required-features = []
 
+[[bench]]
+name = "uniqueness_constraints"
+harness = false
+path = "benches/uniqueness_constraints.rs"
+required-features = []
+
 # Unified CLI binary for local operations + daemon management
 [[bin]]
 name = "aletheia"

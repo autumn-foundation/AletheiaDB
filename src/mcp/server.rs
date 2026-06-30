@@ -857,6 +857,33 @@ impl AletheiaMcpServer {
         CallToolResult::error(vec![Content::text(json!({"error": msg}).to_string())])
     }
 
+    /// Build a structured `CallToolResult` for a `UniqueViolation` constraint error.
+    /// Returns `None` if `e` is not a `UniqueViolation`.
+    fn constraint_violation_result(&self, e: &crate::core::error::Error) -> Option<CallToolResult> {
+        if let Some(crate::core::error::ConstraintError::UniqueViolation {
+            label,
+            property,
+            value,
+            existing_node_id,
+        }) = e.as_constraint()
+        {
+            Some(CallToolResult::error(vec![Content::text(
+                serde_json::to_string_pretty(&json!({
+                    "error": e.to_string(),
+                    "success": false,
+                    "constraint_violation": true,
+                    "label": label,
+                    "property": property,
+                    "value": value,
+                    "existing_node_id": existing_node_id.as_u64()
+                }))
+                .unwrap_or_else(|_| "{\"error\":\"serialization failed\"}".to_string()),
+            )]))
+        } else {
+            None
+        }
+    }
+
     // ========================================================================
     // Tool Implementations
     // ========================================================================
@@ -910,25 +937,8 @@ impl AletheiaMcpServer {
                 Err(e) => self.error_json(&e.to_string()),
             },
             Err(ref e) => {
-                if let Some(crate::core::error::ConstraintError::UniqueViolation {
-                    label,
-                    property,
-                    value,
-                    existing_node_id,
-                }) = e.as_constraint()
-                {
-                    return CallToolResult::error(vec![Content::text(
-                        serde_json::to_string_pretty(&json!({
-                            "error": e.to_string(),
-                            "success": false,
-                            "constraint_violation": true,
-                            "label": label,
-                            "property": property,
-                            "value": value,
-                            "existing_node_id": existing_node_id.as_u64()
-                        }))
-                        .unwrap_or_else(|_| "{\"error\":\"serialization failed\"}".to_string()),
-                    )]);
+                if let Some(result) = self.constraint_violation_result(e) {
+                    return result;
                 }
                 self.error_json(&e.to_string())
             }
@@ -963,25 +973,8 @@ impl AletheiaMcpServer {
                 Err(e) => self.error_json(&e.to_string()),
             },
             Err(ref e) => {
-                if let Some(crate::core::error::ConstraintError::UniqueViolation {
-                    label,
-                    property,
-                    value,
-                    existing_node_id,
-                }) = e.as_constraint()
-                {
-                    return CallToolResult::error(vec![Content::text(
-                        serde_json::to_string_pretty(&json!({
-                            "error": e.to_string(),
-                            "success": false,
-                            "constraint_violation": true,
-                            "label": label,
-                            "property": property,
-                            "value": value,
-                            "existing_node_id": existing_node_id.as_u64()
-                        }))
-                        .unwrap_or_else(|_| "{\"error\":\"serialization failed\"}".to_string()),
-                    )]);
+                if let Some(result) = self.constraint_violation_result(e) {
+                    return result;
                 }
                 self.error_json(&e.to_string())
             }

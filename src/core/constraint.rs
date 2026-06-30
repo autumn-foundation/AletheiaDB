@@ -90,7 +90,8 @@ pub struct ReservationGuard {
     /// Keys added during this transaction (released on rollback).
     added: Vec<ReservationKey>,
     /// Old-value keys to remove after commit (freed on the success path).
-    to_remove: Vec<ReservationKey>,
+    /// HashSet for O(1) dedup in the removed-entries loop.
+    to_remove: std::collections::HashSet<ReservationKey>,
     committed: bool,
 }
 
@@ -99,7 +100,7 @@ impl ReservationGuard {
         Self {
             registry,
             added: Vec::new(),
-            to_remove: Vec::new(),
+            to_remove: std::collections::HashSet::new(),
             committed: false,
         }
     }
@@ -364,8 +365,9 @@ impl ConstraintRegistry {
                     // Only free the old key if it is not still claimed by this tx.
                     // (Handles the case where a node updates a property to its own
                     // current value — the slot must not be freed.)
-                    if !claimed.contains(&key) && !guard.to_remove.contains(&key) {
-                        guard.to_remove.push(key);
+                    // HashSet insert is idempotent, so no explicit contains check needed.
+                    if !claimed.contains(&key) {
+                        guard.to_remove.insert(key);
                     }
                 }
             }

@@ -390,7 +390,9 @@ impl WriteTransaction {
         // Enforce uniqueness constraints (reservation step).
         // Must sit before the timestamp lock so we never hold a DashMap shard
         // guard across `current_timestamp` (preserves lock-ordering contract).
-        let _constraint_guard = if let Some(ref registry) = self.constraint_registry {
+        // The guard is intentionally kept alive (not prefixed with `_`) so its
+        // Drop impl releases reserved keys on any subsequent error path.
+        let constraint_guard = if let Some(ref registry) = self.constraint_registry {
             Some(
                 constraint::check_constraints(self, registry)
                     .map_err(crate::core::error::Error::Constraint)?,
@@ -596,13 +598,17 @@ impl WriteTransaction {
         // written nodes/edges, making them visible to future snapshot readers.
         apply::finalize_current_commit_timestamps(self, commit_timestamp);
 
-        // Register commit with visibility manager
-        self.visibility_manager.register_commit(self.tx_id);
-
-        // Commit the constraint guard: keeps added reservations, frees removed ones.
-        if let Some(guard) = _constraint_guard {
+        // Commit the constraint guard before registering with the visibility manager.
+        // Committing first ensures that freed old-value slots are released before
+        // other transactions observe this commit as visible — otherwise a concurrent
+        // delete+create of the same key could see the old reservation still present
+        // and raise a spurious UniqueViolation.
+        if let Some(guard) = constraint_guard {
             guard.commit();
         }
+
+        // Register commit with visibility manager
+        self.visibility_manager.register_commit(self.tx_id);
 
         // Mark as committed
         self.state = TxState::Committed;
