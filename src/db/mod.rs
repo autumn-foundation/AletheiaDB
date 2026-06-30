@@ -19,6 +19,8 @@ use std::time::Instant;
 
 /// Administrative and maintenance operations.
 pub mod admin;
+/// Backup and restore operations.
+pub mod backup;
 /// Configuration and initialization.
 pub mod config;
 /// GraphView implementation.
@@ -41,6 +43,7 @@ pub mod vector;
 /// Vector index builder pattern.
 pub mod vector_builder;
 
+pub use crate::storage::backup::BackupSummary;
 pub use similarity_query::{SimilarityQuery, SimilaritySource};
 pub use vector_builder::VectorIndexBuilder;
 

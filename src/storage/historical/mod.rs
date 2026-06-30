@@ -2880,6 +2880,26 @@ impl HistoricalStorage {
                 }
             }
 
+            // Fix transaction-time end for non-latest versions.
+            // Persistence only stores tx_start; after loading every version has
+            // tx_end = TIMESTAMP_MAX.  Reconstruct: version[i].tx_end = version[i+1].tx_start.
+            // Guard: skip if next_tx_start <= this version's tx_start to avoid zero-width [T,T) intervals.
+            for i in 0..version_ids.len().saturating_sub(1) {
+                let next_tx_start = self
+                    .node_versions
+                    .get(&version_ids[i + 1])
+                    .map(|v| v.temporal.transaction_time().start())
+                    .unwrap_or(TIMESTAMP_MAX);
+
+                if let Some(version) = self.node_versions.get_mut(&version_ids[i])
+                    && version.temporal.transaction_time().is_current()
+                    && next_tx_start > version.temporal.transaction_time().start()
+                    && let Ok(new_temporal) = version.temporal.close_transaction_time(next_tx_start)
+                {
+                    version.temporal = new_temporal;
+                }
+            }
+
             // Set head to the latest version (last in sorted order)
             if let Some(&latest_vid) = version_ids.last() {
                 self.node_version_heads.insert(node_id, latest_vid);
@@ -2954,6 +2974,24 @@ impl HistoricalStorage {
                 }
             }
 
+            // Fix transaction-time end for non-latest edge versions (mirror node logic).
+            // Guard: skip if next_tx_start <= this version's tx_start to avoid zero-width [T,T) intervals.
+            for i in 0..version_ids.len().saturating_sub(1) {
+                let next_tx_start = self
+                    .edge_versions
+                    .get(&version_ids[i + 1])
+                    .map(|v| v.temporal.transaction_time().start())
+                    .unwrap_or(TIMESTAMP_MAX);
+
+                if let Some(version) = self.edge_versions.get_mut(&version_ids[i])
+                    && version.temporal.transaction_time().is_current()
+                    && next_tx_start > version.temporal.transaction_time().start()
+                    && let Ok(new_temporal) = version.temporal.close_transaction_time(next_tx_start)
+                {
+                    version.temporal = new_temporal;
+                }
+            }
+
             // Set head to the latest version (last in sorted order)
             if let Some(&latest_vid) = version_ids.last() {
                 self.edge_version_heads.insert(edge_id, latest_vid);
@@ -2980,6 +3018,26 @@ impl HistoricalStorage {
 
                 self.edge_versions_since_anchor.insert(edge_id, count);
             }
+        }
+    }
+
+    /// Repopulate temporal indexes from existing version data.
+    ///
+    /// This must be called after both `rebuild_version_chains` (which sets correct
+    /// tx_ends) and `set_temporal_indexes` (which wires the index struct in).
+    /// It is idempotent: a version already in the index is a no-op duplicate insert.
+    pub(crate) fn rebuild_temporal_index_from_versions(&self) {
+        if self.node_versions.is_empty() && self.edge_versions.is_empty() {
+            return;
+        }
+        let Some(ref indexes) = self.temporal_indexes else {
+            return;
+        };
+        for (vid, version) in &self.node_versions {
+            let _ = indexes.insert_node_version(version.node_id, *vid, version.temporal);
+        }
+        for (vid, version) in &self.edge_versions {
+            let _ = indexes.insert_edge_version(version.edge_id, *vid, version.temporal);
         }
     }
 

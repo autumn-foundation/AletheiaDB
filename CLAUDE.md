@@ -156,7 +156,7 @@ For high-throughput workloads with multiple operations, use `append_batch()` for
 
 ### Persistence Systems
 
-AletheiaDB provides three persistence layers for different needs:
+AletheiaDB provides four persistence layers for different needs:
 
 **1. WAL (Write-Ahead Log)**
 - Transaction durability and crash recovery
@@ -172,6 +172,13 @@ AletheiaDB provides three persistence layers for different needs:
 - Unlimited bi-temporal history on disk
 - Three-tier architecture (Hot RAM → Warm Cache → Cold Disk)
 - Enables time-travel queries over years of data
+
+**4. Backup / Restore (`*.albk`)**
+- Portable single-file artifact capturing complete bi-temporal state (hot + cold tiers)
+- Atomic write (temp → rename); consistent point-in-time snapshot at WAL LSN
+- `AletheiaDB::backup(path)` / `::restore(path)` / `::restore_to_data_dir(path, dir)`
+- CLI: `aletheia backup <path>` / `aletheia restore <path>`
+- See [docs/guides/backup-restore.md](docs/guides/backup-restore.md)
 
 **See [docs/guides/PERSISTENCE.md](docs/guides/PERSISTENCE.md) for comprehensive persistence documentation.**
 

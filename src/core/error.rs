@@ -48,6 +48,9 @@ pub enum Error {
     /// I/O errors.
     #[error("I/O error: {0}")]
     Io(io::Error),
+    /// Backup or restore errors.
+    #[error("Backup error: {0}")]
+    Backup(crate::storage::backup::BackupError),
     /// Feature not yet implemented.
     #[error("Feature not implemented: {feature} ({reason})")]
     NotImplemented {
@@ -77,6 +80,7 @@ impl Error {
                 Error::Transaction(_) => crate::observability::ErrorCategory::Transaction,
                 Error::Vector(_) => crate::observability::ErrorCategory::Vector,
                 Error::Io(_) => crate::observability::ErrorCategory::Io,
+                Error::Backup(_) => crate::observability::ErrorCategory::Other,
                 Error::NotImplemented { .. } | Error::Other(_) => {
                     crate::observability::ErrorCategory::Other
                 }
@@ -122,6 +126,12 @@ impl From<QueryError> for Error {
 impl From<io::Error> for Error {
     fn from(e: io::Error) -> Self {
         Error::Io(e)
+    }
+}
+
+impl From<crate::storage::backup::BackupError> for Error {
+    fn from(e: crate::storage::backup::BackupError) -> Self {
+        Error::Backup(e)
     }
 }
 

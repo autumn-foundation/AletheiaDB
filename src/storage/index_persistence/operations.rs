@@ -723,8 +723,11 @@ pub(crate) fn load_indexes_startup(
                 if max_edge_id > 0 {
                     edge_id_gen.reset_to(max_edge_id + 1);
                 }
-                // Initialize version ID generator from max persisted version_id
-                if max_version_id > 0 {
+                // Initialize version ID generator from max persisted version_id.
+                // Note: version IDs start at 0, so a single node with version 0 yields
+                // max_version_id == 0.  We must seed the generator whenever any entity
+                // was found, not only when max_version_id > 0.
+                if !graph_data.nodes.is_empty() || !graph_data.edges.is_empty() {
                     version_id_gen.reset_to(max_version_id + 1);
                 }
 
@@ -924,6 +927,29 @@ pub(crate) fn load_indexes_startup(
                     }
                 }
                 drop(historical_guard);
+
+                // Seed version_id_gen from temporal index so that new versions don't
+                // collide with IDs already present in historical storage.  This is
+                // necessary even when the graph index failed to load (corruption
+                // recovery): the temporal index still holds valid version IDs and the
+                // generator must start above the highest one.
+                //
+                // Use ensure_at_least (not reset_to) so we take the max of what the
+                // graph-index seeding already set and what the temporal data requires.
+                // Note: version IDs start at 0, so a single entry with version 0 yields
+                // max == 0; we must seed whenever entries exist, not only when max > 0.
+                if !temporal_data.node_versions.is_empty()
+                    || !temporal_data.edge_versions.is_empty()
+                {
+                    let max_temporal_version = temporal_data
+                        .node_versions
+                        .iter()
+                        .map(|v| v.version_id)
+                        .chain(temporal_data.edge_versions.iter().map(|v| v.version_id))
+                        .max()
+                        .unwrap_or(0);
+                    version_id_gen.ensure_at_least(max_temporal_version + 1);
+                }
             }
             Err(e) => {
                 eprintln!("Warning: Failed to load temporal index: {}", e);

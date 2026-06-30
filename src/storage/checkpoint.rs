@@ -53,10 +53,10 @@ use crate::core::version::VersionData;
 use crate::storage::current::CurrentStorage;
 use crate::storage::historical::HistoricalStorage;
 use crate::storage::index_persistence::{
-    GRAPH_MAGIC, IndexPersistenceError, IndexPersistenceManager, MANIFEST_VERSION, TEMPORAL_MAGIC,
+    IndexPersistenceError, IndexPersistenceManager, MANIFEST_VERSION, TEMPORAL_MAGIC,
     formats::{
-        GraphIndexData, GraphIndexManifestEntry, IndexManifest, PersistedEdge, PersistedNode,
-        StringInternerManifestEntry, TemporalIndexData, TemporalIndexManifestEntry,
+        GraphIndexData, GraphIndexManifestEntry, IndexManifest, StringInternerManifestEntry,
+        TemporalIndexData, TemporalIndexManifestEntry,
     },
     graph::{persist_property_map, restore_property_map},
 };
@@ -683,53 +683,14 @@ impl CheckpointManager {
 
     /// Extract graph data from CurrentStorage snapshot for persistence.
     ///
-    /// Uses MVCC snapshot for isolation, preventing fuzzy checkpointing.
+    /// Delegates to the canonical free function in the index-persistence layer
+    /// so the extraction logic lives in one place.
     fn extract_graph_data_from_snapshot(
         &self,
         snapshot: &crate::storage::snapshot::CurrentStorageSnapshot,
     ) -> Result<GraphIndexData> {
-        let mut nodes = Vec::with_capacity(snapshot.node_count());
-        let mut edges = Vec::with_capacity(snapshot.edge_count());
-
-        // Extract all nodes from snapshot (isolated from concurrent writes)
-        for node in snapshot.iter_nodes() {
-            let persisted = PersistedNode {
-                id: node.id.as_u64(),
-                label_idx: node.label.as_u32(),
-                version_id: node.current_version.as_u64(),
-                properties: persist_property_map(&node.properties).map_err(persistence_err)?,
-            };
-            nodes.push(persisted);
-        }
-
-        // Extract all edges from snapshot (isolated from concurrent writes)
-        for edge in snapshot.iter_edges() {
-            let persisted = PersistedEdge {
-                id: edge.id.as_u64(),
-                source_id: edge.source.as_u64(),
-                target_id: edge.target.as_u64(),
-                label_idx: edge.label.as_u32(),
-                version_id: edge.current_version.as_u64(),
-                properties: persist_property_map(&edge.properties).map_err(persistence_err)?,
-            };
-            edges.push(persisted);
-        }
-
-        Ok(GraphIndexData {
-            magic: GRAPH_MAGIC,
-            version: MANIFEST_VERSION,
-            node_count: nodes.len() as u64,
-            edge_count: edges.len() as u64,
-            nodes,
-            edges,
-            // CSR adjacency will be rebuilt during loading
-            outgoing_node_ids: Vec::new(),
-            outgoing_offsets: Vec::new(),
-            outgoing_neighbors: Vec::new(),
-            incoming_node_ids: Vec::new(),
-            incoming_offsets: Vec::new(),
-            incoming_neighbors: Vec::new(),
-        })
+        crate::storage::index_persistence::graph::extract_graph_data_from_snapshot(snapshot)
+            .map_err(persistence_err)
     }
 
     /// Extract graph data from CurrentStorage for persistence (legacy method).
