@@ -609,3 +609,152 @@ fn constraint_survives_restart_via_index_persistence() {
             .expect("different email must be allowed");
     }
 }
+
+// ──────────────────────────────────────────────────────────────
+// 10. Additional coverage tests
+// ──────────────────────────────────────────────────────────────
+
+#[test]
+fn update_node_to_new_unique_value_frees_old_slot() {
+    // When a node's constrained property changes to a NEW value, the old
+    // reservation must be freed on commit so another node can claim it.
+    // This exercises ReservationGuard::commit() with a non-empty `to_remove`
+    // set and the `guard.to_remove.insert(key)` path in reserve_for_transaction.
+    let db = in_memory_db();
+    db.unique_constraint("Person", "email").enable().unwrap();
+
+    let alice_id = db
+        .create_node(
+            "Person",
+            properties! { "email" => "alice@x", "name" => "Alice" },
+        )
+        .unwrap();
+
+    // Update Alice to a brand-new email.
+    db.write(|tx| {
+        tx.update_node(
+            alice_id,
+            properties! { "email" => "alice_new@x", "name" => "Alice" },
+        )
+    })
+    .expect("updating to a new unique email must succeed");
+
+    // The old slot (alice@x) must now be free for a new node.
+    db.create_node("Person", properties! { "email" => "alice@x" })
+        .expect("old email slot must be freed after node update");
+
+    // The new slot (alice_new@x) must still be reserved.
+    db.create_node("Person", properties! { "email" => "alice_new@x" })
+        .expect_err("new email slot must still be reserved for Alice");
+}
+
+#[test]
+fn disable_constraint_with_interned_label_uninterned_property() {
+    // Intern the label by creating a node, but never intern the property name.
+    // disable_unique_constraint should return Ok(()) without panicking —
+    // exercises the property get_id() → None early return in ops.rs.
+    let db = in_memory_db();
+    db.create_node("KnownLabel", properties! { "x" => "y" })
+        .unwrap();
+
+    // "PropertyNeverEverInterned" was never used as a property key anywhere.
+    db.disable_unique_constraint("KnownLabel", "PropertyNeverEverInterned")
+        .expect("disable with interned label but uninterned property must be Ok");
+}
+
+#[test]
+fn non_string_typed_unique_keys_are_enforced() {
+    // Exercises ValueKey::display_string() for Bool, Int, Float, and Bytes
+    // variants — each produces a distinct display string used in error messages.
+
+    // --- Bool ---
+    {
+        let db = in_memory_db();
+        db.unique_constraint("Flag", "active").enable().unwrap();
+        db.create_node("Flag", properties! { "active" => true })
+            .unwrap();
+        let err = db
+            .create_node("Flag", properties! { "active" => true })
+            .expect_err("duplicate Bool key must fail");
+        let cv = err.as_constraint().expect("must be ConstraintError");
+        match cv {
+            ConstraintError::UniqueViolation { value, .. } => {
+                // display_string for Bool: "true"
+                assert!(!value.is_empty(), "Bool display string must not be empty");
+            }
+            other => panic!("expected UniqueViolation, got {:?}", other),
+        }
+    }
+
+    // --- Int ---
+    {
+        let db = in_memory_db();
+        db.unique_constraint("Counter", "count").enable().unwrap();
+        db.create_node("Counter", properties! { "count" => 42i64 })
+            .unwrap();
+        let err = db
+            .create_node("Counter", properties! { "count" => 42i64 })
+            .expect_err("duplicate Int key must fail");
+        let cv = err.as_constraint().expect("must be ConstraintError");
+        match cv {
+            ConstraintError::UniqueViolation { value, .. } => {
+                assert_eq!(value, "42", "Int display string must be decimal");
+            }
+            other => panic!("expected UniqueViolation, got {:?}", other),
+        }
+    }
+
+    // --- Float ---
+    {
+        let db = in_memory_db();
+        db.unique_constraint("Score", "rating").enable().unwrap();
+        db.create_node("Score", properties! { "rating" => 9.81f64 })
+            .unwrap();
+        let err = db
+            .create_node("Score", properties! { "rating" => 9.81f64 })
+            .expect_err("duplicate Float key must fail");
+        let cv = err.as_constraint().expect("must be ConstraintError");
+        match cv {
+            ConstraintError::UniqueViolation { value, .. } => {
+                assert!(!value.is_empty(), "Float display string must not be empty");
+            }
+            other => panic!("expected UniqueViolation, got {:?}", other),
+        }
+    }
+
+    // --- Bytes (trigger DuplicateOnEnable since bytes can't be set via properties! macro) ---
+    {
+        use aletheiadb::core::property::{PropertyMapBuilder, PropertyValue};
+
+        let db = in_memory_db();
+
+        let make_bytes_props = || {
+            PropertyMapBuilder::new()
+                .insert("data", PropertyValue::bytes(b"\x01\x02\x03"))
+                .build()
+        };
+
+        db.create_node("Doc", make_bytes_props()).unwrap();
+        db.create_node("Doc", make_bytes_props()).unwrap();
+
+        let err = db
+            .unique_constraint("Doc", "data")
+            .enable()
+            .expect_err("enable with bytes duplicates must fail");
+        let cv = err.as_constraint().expect("must be ConstraintError");
+        match cv {
+            ConstraintError::DuplicateOnEnable {
+                value, node_ids, ..
+            } => {
+                // display_string for Bytes: "<bytes:N>"
+                assert!(
+                    value.starts_with("<bytes:"),
+                    "Bytes display string must start with '<bytes:': {}",
+                    value
+                );
+                assert_eq!(node_ids.len(), 2);
+            }
+            other => panic!("expected DuplicateOnEnable, got {:?}", other),
+        }
+    }
+}
