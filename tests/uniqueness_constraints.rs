@@ -430,3 +430,182 @@ mod proptest_suite {
         }
     }
 }
+
+// ──────────────────────────────────────────────────────────────
+// 9. Edge-case coverage: disable on never-interned label,
+//    display_string for Float/Bytes, Null skip, unsupported types,
+//    WAL round-trip, and restart with index persistence.
+// ──────────────────────────────────────────────────────────────
+
+#[test]
+fn disable_constraint_on_unknown_label_is_noop() {
+    // disable_unique_constraint on a label that was never interned must
+    // return Ok(()) without panicking (exercises the get_id early-return path).
+    let db = in_memory_db();
+    db.disable_unique_constraint("NeverInterned", "prop")
+        .expect("disable on unknown label must be Ok");
+}
+
+#[test]
+fn disable_constraint_on_known_but_unconstrained_label_is_noop() {
+    // Intern the label (by creating a node) but don't declare a constraint.
+    // disable must still return Ok(()) without panicking.
+    let db = in_memory_db();
+    db.create_node("Known", aletheiadb::properties! { "x" => "y" })
+        .unwrap();
+    db.disable_unique_constraint("Known", "x")
+        .expect("disable on unconstrained label must be Ok");
+}
+
+#[test]
+fn null_valued_property_does_not_block_enable() {
+    // Nodes whose constrained property is Null must not prevent enable()
+    // (Null is treated as "property absent", not a key to check for duplicates).
+    let db = in_memory_db();
+
+    // Node with Null for the would-be-constrained property (property not set).
+    db.create_node("Person", aletheiadb::properties! { "name" => "Alice" })
+        .unwrap();
+    db.create_node("Person", aletheiadb::properties! { "name" => "Bob" })
+        .unwrap();
+
+    // enable must succeed — Null/absent entries are not counted as duplicates.
+    db.unique_constraint("Person", "email")
+        .enable()
+        .expect("enable must succeed when all nodes lack the constrained property");
+}
+
+#[test]
+fn unsupported_key_type_errors_on_enable() {
+    // A node with a Vector-typed property on the constrained key must cause
+    // enable() to return UnsupportedKeyType, not panic.
+    let db = in_memory_db();
+
+    let props = aletheiadb::core::property::PropertyMapBuilder::new()
+        .insert_vector("embedding", &[0.1f32, 0.2, 0.3])
+        .build();
+    db.create_node("Doc", props).unwrap();
+
+    let err = db
+        .unique_constraint("Doc", "embedding")
+        .enable()
+        .expect_err("enable on Vector-typed property must fail");
+
+    match err.as_constraint().expect("must be ConstraintError") {
+        aletheiadb::core::error::ConstraintError::UnsupportedKeyType { .. } => {}
+        other => panic!("expected UnsupportedKeyType, got {:?}", other),
+    }
+}
+
+#[test]
+fn wal_constraint_entries_survive_round_trip() {
+    // Append DeclareUniqueConstraint + DropUniqueConstraint to a WAL,
+    // read them back, and verify the constraint registry reflects the net state.
+    use aletheiadb::config::{AletheiaDBConfig, WalConfigBuilder};
+    use aletheiadb::storage::index_persistence::PersistenceConfig;
+    use aletheiadb::storage::wal::DurabilityMode;
+    use tempfile::tempdir;
+
+    let dir = tempdir().unwrap();
+    let wal_dir = dir.path().join("wal");
+
+    // Disable index persistence so this test exercises only the WAL replay path
+    // and does not write to (or read from) the shared default "./data" directory.
+    let make_config = || {
+        AletheiaDBConfig::builder()
+            .wal(
+                WalConfigBuilder::new()
+                    .wal_dir(wal_dir.clone())
+                    .durability_mode(DurabilityMode::Synchronous)
+                    .build(),
+            )
+            .persistence(PersistenceConfig {
+                enabled: false,
+                ..PersistenceConfig::default()
+            })
+            .build()
+    };
+
+    // Session 1: declare a constraint then drop it, then declare a different one.
+    {
+        let db = aletheiadb::AletheiaDB::with_unified_config(make_config()).unwrap();
+        db.unique_constraint("A", "x").enable().unwrap();
+        db.disable_unique_constraint("A", "x").unwrap();
+        db.unique_constraint("B", "y").enable().unwrap();
+    }
+
+    // Session 2: replay the WAL — only B.y must be active.
+    {
+        let db = aletheiadb::AletheiaDB::with_unified_config(make_config()).unwrap();
+        let active = db.list_unique_constraints();
+        assert!(
+            !active.iter().any(|(l, p)| l == "A" && p == "x"),
+            "dropped constraint A.x must not be present after replay: {active:?}"
+        );
+        assert!(
+            active.iter().any(|(l, p)| l == "B" && p == "y"),
+            "constraint B.y must survive WAL replay: {active:?}"
+        );
+        // B.y must still be enforced.
+        db.create_node("B", aletheiadb::properties! { "y" => "dup" })
+            .unwrap();
+        db.create_node("B", aletheiadb::properties! { "y" => "dup" })
+            .expect_err("B.y constraint must be enforced after replay");
+    }
+}
+
+#[test]
+fn constraint_survives_restart_via_index_persistence() {
+    // Exercises the replay_constraint_declarations_from_wal path that is only
+    // reached when index-persistence data exists on startup.
+    use aletheiadb::config::{AletheiaDBConfig, WalConfigBuilder};
+    use aletheiadb::storage::index_persistence::PersistenceConfig;
+    use aletheiadb::storage::wal::DurabilityMode;
+    use tempfile::tempdir;
+
+    let dir = tempdir().unwrap();
+    let wal_dir = dir.path().join("wal");
+    let idx_dir = dir.path().join("indexes");
+
+    let make_config = || {
+        AletheiaDBConfig::builder()
+            .wal(
+                WalConfigBuilder::new()
+                    .wal_dir(wal_dir.clone())
+                    .durability_mode(DurabilityMode::Synchronous)
+                    .build(),
+            )
+            .persistence(PersistenceConfig {
+                enabled: true,
+                data_dir: idx_dir.clone(),
+                load_on_startup: true,
+                ..PersistenceConfig::default()
+            })
+            .build()
+    };
+
+    // Session 1: enable constraint and write a node.  Drop the DB cleanly so
+    // the background persistence thread's shutdown handler writes a complete
+    // snapshot (persist_all_indexes) that includes the manifest, string
+    // interner, and graph index.
+    {
+        let db = aletheiadb::AletheiaDB::with_unified_config(make_config()).unwrap();
+        db.unique_constraint("Person", "email").enable().unwrap();
+        db.create_node("Person", aletheiadb::properties! { "email" => "keep@x" })
+            .unwrap();
+    }
+
+    // Session 2: constraint must still be enforced via the combined
+    // index-load + WAL-replay + replay_constraint_declarations_from_wal path.
+    {
+        let db = aletheiadb::AletheiaDB::with_unified_config(make_config()).unwrap();
+
+        assert_eq!(db.node_count(), 1, "node must survive restart");
+
+        db.create_node("Person", aletheiadb::properties! { "email" => "keep@x" })
+            .expect_err("Person.email constraint must be enforced after index-persistence restart");
+
+        db.create_node("Person", aletheiadb::properties! { "email" => "new@x" })
+            .expect("different email must be allowed");
+    }
+}

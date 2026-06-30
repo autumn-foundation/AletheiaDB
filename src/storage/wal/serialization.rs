@@ -707,7 +707,15 @@ mod prop_tests {
                 }),
             // Checkpoint
             (any::<u64>().prop_map(LSN), arb_timestamp())
-                .prop_map(|(lsn, timestamp)| { WalOperation::Checkpoint { lsn, timestamp } })
+                .prop_map(|(lsn, timestamp)| { WalOperation::Checkpoint { lsn, timestamp } }),
+            // DeclareUniqueConstraint
+            (arb_interned_string(), arb_interned_string()).prop_map(|(label, property)| {
+                WalOperation::DeclareUniqueConstraint { label, property }
+            }),
+            // DropUniqueConstraint
+            (arb_interned_string(), arb_interned_string()).prop_map(|(label, property)| {
+                WalOperation::DropUniqueConstraint { label, property }
+            })
         ]
     }
 

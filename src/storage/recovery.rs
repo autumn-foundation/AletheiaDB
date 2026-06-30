@@ -444,3 +444,67 @@ pub(crate) fn replay_constraint_declarations_from_wal(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::interning::GLOBAL_INTERNER;
+    use crate::storage::wal::concurrent_system::ConcurrentWalSystemConfig;
+    use tempfile::tempdir;
+
+    #[test]
+    fn replay_constraint_declarations_declare_and_drop() {
+        let dir = tempdir().unwrap();
+        let config = ConcurrentWalSystemConfig::new(dir.path());
+        let wal = ConcurrentWalSystem::new(config).unwrap();
+
+        let label = GLOBAL_INTERNER.intern("RcvTestLabel").unwrap();
+        let prop = GLOBAL_INTERNER.intern("rcvTestProp").unwrap();
+
+        // Declare then drop: net result = not active.
+        wal.append(WalOperation::DeclareUniqueConstraint {
+            label,
+            property: prop,
+        })
+        .unwrap();
+        wal.append(WalOperation::DropUniqueConstraint {
+            label,
+            property: prop,
+        })
+        .unwrap();
+        wal.flush().unwrap();
+
+        let registry = ConstraintRegistry::new();
+        replay_constraint_declarations_from_wal(&wal, &registry).unwrap();
+
+        assert!(
+            !registry.is_constrained(label, prop),
+            "net declare+drop must leave constraint inactive"
+        );
+    }
+
+    #[test]
+    fn replay_constraint_declarations_declare_survives() {
+        let dir = tempdir().unwrap();
+        let config = ConcurrentWalSystemConfig::new(dir.path());
+        let wal = ConcurrentWalSystem::new(config).unwrap();
+
+        let label = GLOBAL_INTERNER.intern("RcvSurviveLabel").unwrap();
+        let prop = GLOBAL_INTERNER.intern("rcvSurviveProp").unwrap();
+
+        wal.append(WalOperation::DeclareUniqueConstraint {
+            label,
+            property: prop,
+        })
+        .unwrap();
+        wal.flush().unwrap();
+
+        let registry = ConstraintRegistry::new();
+        replay_constraint_declarations_from_wal(&wal, &registry).unwrap();
+
+        assert!(
+            registry.is_constrained(label, prop),
+            "declare without drop must leave constraint active after replay"
+        );
+    }
+}

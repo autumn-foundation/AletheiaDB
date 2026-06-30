@@ -3682,3 +3682,180 @@ mod query_tool_tests {
         );
     }
 }
+
+// ============================================================================
+// Uniqueness Constraint Tests
+// ============================================================================
+
+mod constraint_tests {
+    use super::*;
+
+    fn parse_json(s: &str) -> serde_json::Value {
+        serde_json::from_str(s).expect("server response must be valid JSON")
+    }
+
+    #[test]
+    fn test_enable_unique_constraint_success() {
+        let server = create_test_server();
+
+        let response = server.enable_unique_constraint(EnableUniqueConstraintRequest {
+            label: "Person".to_string(),
+            property: "email".to_string(),
+        });
+
+        let v = parse_json(&response);
+        assert_eq!(v["success"], serde_json::json!(true));
+        assert_eq!(v["label"], "Person");
+        assert_eq!(v["property"], "email");
+    }
+
+    #[test]
+    fn test_enable_unique_constraint_rejects_existing_duplicates() {
+        let server = create_test_server();
+
+        let mut props = HashMap::new();
+        props.insert("email".to_string(), serde_json::json!("dup@x"));
+        server.create_node(CreateNodeRequest {
+            label: "Person".to_string(),
+            properties: Some(props.clone()),
+        });
+        server.create_node(CreateNodeRequest {
+            label: "Person".to_string(),
+            properties: Some(props),
+        });
+
+        let response = server.enable_unique_constraint(EnableUniqueConstraintRequest {
+            label: "Person".to_string(),
+            property: "email".to_string(),
+        });
+
+        let v = parse_json(&response);
+        assert!(
+            v.get("error").is_some(),
+            "enable on label with pre-existing duplicates must return error: {v}"
+        );
+    }
+
+    #[test]
+    fn test_list_unique_constraints_empty() {
+        let server = create_test_server();
+
+        let response = server.list_unique_constraints(ListUniqueConstraintsRequest {});
+
+        let v = parse_json(&response);
+        assert_eq!(v["count"], serde_json::json!(0));
+        assert!(
+            v["constraints"]
+                .as_array()
+                .map(|a| a.is_empty())
+                .unwrap_or(false),
+            "constraints list should be empty on fresh server: {v}"
+        );
+    }
+
+    #[test]
+    fn test_list_unique_constraints_after_enable() {
+        let server = create_test_server();
+
+        server.enable_unique_constraint(EnableUniqueConstraintRequest {
+            label: "Person".to_string(),
+            property: "email".to_string(),
+        });
+        server.enable_unique_constraint(EnableUniqueConstraintRequest {
+            label: "Company".to_string(),
+            property: "name".to_string(),
+        });
+
+        let response = server.list_unique_constraints(ListUniqueConstraintsRequest {});
+
+        let v = parse_json(&response);
+        assert_eq!(
+            v["count"],
+            serde_json::json!(2),
+            "should list 2 constraints: {v}"
+        );
+        assert_eq!(v["constraints"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn test_create_node_constraint_violation_structured_error() {
+        let server = create_test_server();
+
+        server.enable_unique_constraint(EnableUniqueConstraintRequest {
+            label: "Person".to_string(),
+            property: "email".to_string(),
+        });
+
+        let mut props = HashMap::new();
+        props.insert("email".to_string(), serde_json::json!("alice@x"));
+
+        let first_response = server.create_node(CreateNodeRequest {
+            label: "Person".to_string(),
+            properties: Some(props.clone()),
+        });
+        let first: NodeResponse =
+            parse_response(&first_response).expect("first create must succeed");
+
+        let dup_response = server.create_node(CreateNodeRequest {
+            label: "Person".to_string(),
+            properties: Some(props),
+        });
+
+        let v = parse_json(&dup_response);
+        assert_eq!(
+            v["constraint_violation"],
+            serde_json::json!(true),
+            "duplicate create must set constraint_violation=true: {v}"
+        );
+        assert_eq!(v["success"], serde_json::json!(false));
+        assert_eq!(v["label"], "Person");
+        assert_eq!(v["property"], "email");
+        assert_eq!(v["value"], "alice@x");
+        assert_eq!(
+            v["existing_node_id"],
+            serde_json::json!(first.id),
+            "existing_node_id must point to the first node: {v}"
+        );
+    }
+
+    #[test]
+    fn test_update_node_constraint_violation_structured_error() {
+        let server = create_test_server();
+
+        server.enable_unique_constraint(EnableUniqueConstraintRequest {
+            label: "Person".to_string(),
+            property: "email".to_string(),
+        });
+
+        let mut props_a = HashMap::new();
+        props_a.insert("email".to_string(), serde_json::json!("a@x"));
+        let resp_a = server.create_node(CreateNodeRequest {
+            label: "Person".to_string(),
+            properties: Some(props_a),
+        });
+        let node_a: NodeResponse = parse_response(&resp_a).expect("node A must be created");
+
+        let mut props_b = HashMap::new();
+        props_b.insert("email".to_string(), serde_json::json!("b@x"));
+        server.create_node(CreateNodeRequest {
+            label: "Person".to_string(),
+            properties: Some(props_b),
+        });
+
+        let mut collision = HashMap::new();
+        collision.insert("email".to_string(), serde_json::json!("b@x"));
+        let update_response = server.update_node(UpdateNodeRequest {
+            node_id: node_a.id,
+            properties: collision,
+        });
+
+        let v = parse_json(&update_response);
+        assert_eq!(
+            v["constraint_violation"],
+            serde_json::json!(true),
+            "colliding update must set constraint_violation=true: {v}"
+        );
+        assert_eq!(v["success"], serde_json::json!(false));
+        assert_eq!(v["property"], "email");
+    }
+}
