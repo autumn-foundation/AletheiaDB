@@ -758,3 +758,48 @@ fn non_string_typed_unique_keys_are_enforced() {
         }
     }
 }
+
+// ──────────────────────────────────────────────────────────────
+// 11. Null-property coverage
+// ──────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod null_property_coverage {
+    use super::*;
+    use aletheiadb::core::property::{PropertyMapBuilder, PropertyValue};
+
+    /// A node whose constrained property is explicitly `PropertyValue::Null`
+    /// must be allowed through — the reservation index skips Null values.
+    /// Covers constraint.rs `reserve_for_transaction` `None => continue` arm.
+    #[test]
+    fn null_valued_constrained_property_is_skipped_in_reservation() {
+        let db = in_memory_db();
+        db.unique_constraint("Person", "email").enable().unwrap();
+
+        let props = PropertyMapBuilder::new()
+            .insert("email", PropertyValue::Null)
+            .insert("name", "Alice")
+            .build();
+
+        db.create_node("Person", props)
+            .expect("node with Null constrained property must be allowed");
+    }
+
+    /// Multiple nodes may share an explicit Null on the constrained property
+    /// because Null is not indexed — enabling must succeed on such data.
+    /// Covers constraint.rs `check_no_duplicates` Null `continue` arm.
+    #[test]
+    fn enable_constraint_skips_null_valued_nodes() {
+        let db = in_memory_db();
+
+        let null_props = PropertyMapBuilder::new()
+            .insert("email", PropertyValue::Null)
+            .build();
+        db.create_node("Person", null_props.clone()).unwrap();
+        db.create_node("Person", null_props).unwrap();
+
+        db.unique_constraint("Person", "email").enable().expect(
+            "enable must succeed when all existing nodes have Null on constrained property",
+        );
+    }
+}
