@@ -232,19 +232,21 @@ impl<'a, G: GraphView + ?Sized> SemanticPathfinder<'a, G> {
             neighbors.clear();
 
             // Get outgoing edges
-            for edge_id in self.db.get_outgoing_edges(node) {
-                if let Ok(target) = self.db.get_edge_target(edge_id) {
-                    neighbors.push(target);
-                }
-            }
+            neighbors.extend(
+                self.db
+                    .get_outgoing_edges(node)
+                    .into_iter()
+                    .filter_map(|edge_id| self.db.get_edge_target(edge_id).ok()),
+            );
 
             // Also get incoming edges if bidirectional
             if bidirectional {
-                for edge_id in self.db.get_incoming_edges(node) {
-                    if let Ok(edge) = self.db.get_edge(edge_id) {
-                        neighbors.push(edge.source);
-                    }
-                }
+                neighbors.extend(
+                    self.db
+                        .get_incoming_edges(node)
+                        .into_iter()
+                        .filter_map(|edge_id| self.db.get_edge(edge_id).ok().map(|e| e.source)),
+                );
             }
 
             // Process all neighbors
@@ -367,15 +369,21 @@ impl<'a, G: GraphView + ?Sized> SemanticPathfinder<'a, G> {
             neighbor_edges.clear();
 
             // Get outgoing edges at the specified time
-            for edge_id in self.db.get_outgoing_edges_at_time(node, time, time) {
-                neighbor_edges.push((edge_id, true)); // true = outgoing
-            }
+            neighbor_edges.extend(
+                self.db
+                    .get_outgoing_edges_at_time(node, time, time)
+                    .into_iter()
+                    .map(|edge_id| (edge_id, true)),
+            );
 
             // Also get incoming edges if bidirectional
             if bidirectional {
-                for edge_id in self.db.get_incoming_edges_at_time(node, time, time) {
-                    neighbor_edges.push((edge_id, false)); // false = incoming
-                }
+                neighbor_edges.extend(
+                    self.db
+                        .get_incoming_edges_at_time(node, time, time)
+                        .into_iter()
+                        .map(|edge_id| (edge_id, false)),
+                );
             }
 
             for &(edge_id, is_outgoing) in &neighbor_edges {
