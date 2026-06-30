@@ -714,4 +714,107 @@ mod ephemeral_tests {
             std::env::remove_var(crate::config::DATA_DIR_ENV);
         }
     }
+
+    /// Cover config.rs line 435: `db.edge_id_gen.ensure_at_least(max_eid + 1)` in the
+    /// WAL+persistence startup path when the incremental WAL (after the snapshot) has edges.
+    ///
+    /// Strategy: manually flush the snapshot BEFORE creating an edge, then stop the
+    /// background thread so Drop cannot run a second final-persist.  On the next startup
+    /// the snapshot has no edges but the incremental WAL does → `max_edge_id = Some(...)`.
+    #[test]
+    fn walpersistence_incremental_wal_edge_covers_edge_id_gen() {
+        use crate::api::transaction::WriteOps;
+        use crate::storage::index_persistence::operations::persist_all_indexes;
+        use crate::storage::{index_persistence::PersistenceConfig, wal::DurabilityMode};
+        use crate::{
+            PropertyMapBuilder,
+            config::{AletheiaDBConfig, WalConfigBuilder},
+        };
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let wal_dir = dir.path().join("wal");
+        let idx_dir = dir.path().join("indexes");
+
+        let make_config = || {
+            AletheiaDBConfig::builder()
+                .wal(
+                    WalConfigBuilder::new()
+                        .wal_dir(wal_dir.clone())
+                        .durability_mode(DurabilityMode::Synchronous)
+                        .build(),
+                )
+                .persistence(PersistenceConfig {
+                    enabled: true,
+                    data_dir: idx_dir.clone(),
+                    load_on_startup: true,
+                    ..PersistenceConfig::default()
+                })
+                .build()
+        };
+
+        let (n1, n2) = {
+            let mut db = AletheiaDB::with_unified_config(make_config()).unwrap();
+            db.unique_constraint("P", "k").enable().unwrap();
+            let n1 = db
+                .create_node("P", PropertyMapBuilder::new().insert("k", "a").build())
+                .unwrap();
+            let n2 = db
+                .create_node("P", PropertyMapBuilder::new().insert("k", "b").build())
+                .unwrap();
+
+            // Flush a mid-session snapshot now (n1+n2 only, no edge).
+            // wal.current_lsn() returns the NEXT unallocated LSN (call it L).
+            // persist_all_indexes records safe_lsn = L in the manifest.
+            // start_lsn in the next session will be L+1.
+            if let (Some(tracker), Some(manager)) =
+                (&db.persistence_tracker, &db.persistence_manager)
+            {
+                let _ = persist_all_indexes(
+                    &db.current,
+                    &db.historical,
+                    &db.temporal_indexes,
+                    &db.wal,
+                    manager,
+                    tracker,
+                );
+                // Stop the background thread now (before creating any new ops).
+                // The thread's own final-persist runs at the same LSN L (no new ops yet)
+                // and writes the same manifest — no later operations are captured.
+                tracker.signal_shutdown();
+                if let Some(handle) = db.persistence_thread_handle.take() {
+                    let _ = handle.join();
+                }
+            }
+
+            // Write one dummy node at WAL LSN = L (the "next" that was recorded as safe_lsn).
+            // start_lsn for session 2 = L+1, so this dummy is intentionally skipped.
+            // The edge created next will land at WAL LSN = L+1 and IS replayed.
+            let _dummy = db
+                .create_node("P", PropertyMapBuilder::new().insert("k", "dummy").build())
+                .unwrap();
+
+            // Edge at WAL LSN = L+1: visible in session-2's incremental WAL replay.
+            db.write(|tx| tx.create_edge(n1, n2, "R", PropertyMapBuilder::new().build()))
+                .unwrap();
+            // Drop: thread is gone; no final-persist occurs → edge stays WAL-only.
+            (n1, n2)
+        };
+        let _ = (n1, n2);
+
+        // Session 2: startup loads snapshot (n1+n2 only, no edge, no dummy) then replays
+        // incremental WAL from LSN L+1 (edge) → max_edge_id = Some(_) → line 435 fires.
+        {
+            let db = AletheiaDB::with_unified_config(make_config()).unwrap();
+            // n1, n2 from snapshot; dummy skipped (at LSN L, before start_lsn L+1).
+            assert_eq!(
+                db.node_count(),
+                2,
+                "only snapshot nodes; dummy was below start_lsn"
+            );
+            assert_eq!(db.edge_count(), 1, "edge recovered from incremental WAL");
+            db.create_node("P", PropertyMapBuilder::new().insert("k", "a").build())
+                .expect_err("constraint must survive WAL+persistence restart");
+        }
+    }
 }
