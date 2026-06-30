@@ -329,6 +329,7 @@ impl AletheiaDB {
                 persistence_thread_stopped: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 persistence_thread_handle: None,
                 encryption_manager: encryption_manager.clone(),
+                constraint_registry: Arc::new(crate::core::constraint::ConstraintRegistry::new()),
                 _tempdir: None,
             };
 
@@ -360,6 +361,14 @@ impl AletheiaDB {
                         crate::core::GLOBAL_INTERNER.len() as u64
                     );
                 }
+
+                // Replay constraint declarations from the full WAL history before the
+                // differential node/edge replay.  Constraint WAL entries may predate
+                // the snapshot LSN and would be skipped by the differential replay.
+                crate::storage::recovery::replay_constraint_declarations_from_wal(
+                    &db.wal,
+                    &db.constraint_registry,
+                )?;
 
                 // Replay WAL entries that occurred after the persisted snapshot
                 // This ensures no data loss if the WAL is ahead of the indexes (e.g. crash before persist)
@@ -395,17 +404,67 @@ impl AletheiaDB {
 
                 let mut historical_guard = db.historical.write();
                 let (_final_lsn, max_node_id, max_edge_id, next_version_id) =
-                    crate::storage::recovery::replay_wal_into_storage(
+                    crate::storage::recovery::replay_wal_into_storage_with_constraints(
                         &db.wal,
                         &db.current,
                         &mut historical_guard,
                         start_lsn,
                         initial_version_id,
+                        Some(&db.constraint_registry),
                     )?;
                 drop(historical_guard);
 
+                // Rebuild reservation index from currently-valid nodes for each declared constraint.
+                for (label_str, property_str) in db.constraint_registry.list() {
+                    if let (Some(label_id), Some(property_id)) = (
+                        crate::core::interning::GLOBAL_INTERNER.get_id(&label_str),
+                        crate::core::interning::GLOBAL_INTERNER.get_id(&property_str),
+                    ) {
+                        let nodes = db.current.get_nodes_by_label(&label_str);
+                        db.constraint_registry
+                            .rebuild_from_nodes(&nodes, label_id, property_id);
+                    }
+                }
+
                 // Update ID generators to account for replayed entities.
                 // This ensures that subsequent writes use IDs that don't collide with replayed data.
+                if let Some(max_nid) = max_node_id {
+                    db.node_id_gen.ensure_at_least(max_nid + 1);
+                }
+                if let Some(max_eid) = max_edge_id {
+                    db.edge_id_gen.ensure_at_least(max_eid + 1);
+                }
+                db.version_id_gen.ensure_at_least(next_version_id);
+            }
+
+            // When only the WAL is configured (no index persistence), replay the full
+            // WAL from the beginning to restore node/edge data AND constraint declarations.
+            if persistence_manager.is_none() {
+                let initial_version_id = db.version_id_gen.current();
+                let mut historical_guard = db.historical.write();
+                let (_final_lsn, max_node_id, max_edge_id, next_version_id) =
+                    crate::storage::recovery::replay_wal_into_storage_with_constraints(
+                        &db.wal,
+                        &db.current,
+                        &mut historical_guard,
+                        crate::storage::wal::LSN::initial(),
+                        initial_version_id,
+                        Some(&db.constraint_registry),
+                    )?;
+                drop(historical_guard);
+
+                // Rebuild reservation index.
+                for (label_str, property_str) in db.constraint_registry.list() {
+                    if let (Some(label_id), Some(property_id)) = (
+                        crate::core::interning::GLOBAL_INTERNER.get_id(&label_str),
+                        crate::core::interning::GLOBAL_INTERNER.get_id(&property_str),
+                    ) {
+                        let nodes = db.current.get_nodes_by_label(&label_str);
+                        db.constraint_registry
+                            .rebuild_from_nodes(&nodes, label_id, property_id);
+                    }
+                }
+
                 if let Some(max_nid) = max_node_id {
                     db.node_id_gen.ensure_at_least(max_nid + 1);
                 }
@@ -517,6 +576,7 @@ impl AletheiaDB {
                 persistence_thread_stopped: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 persistence_thread_handle: None,
                 encryption_manager: None,
+                constraint_registry: Arc::new(crate::core::constraint::ConstraintRegistry::new()),
                 _tempdir: None,
             };
             seed_startup_current_timestamp(&db)?;

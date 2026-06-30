@@ -288,6 +288,28 @@ pub struct EnableVectorIndexRequest {
 pub struct ListVectorIndexesRequest {}
 
 // ============================================================================
+// Constraint Operations
+// ============================================================================
+
+/// Request to enable a uniqueness constraint on a label+property pair.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct EnableUniqueConstraintRequest {
+    /// The node label the constraint applies to (e.g., "Person").
+    #[schemars(description = "The node label the constraint applies to (e.g., 'Person')")]
+    pub label: String,
+
+    /// The property name that must be unique within the label (e.g., "email").
+    #[schemars(
+        description = "The property name that must be unique within the label (e.g., 'email')"
+    )]
+    pub property: String,
+}
+
+/// Request to list all active uniqueness constraints.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct ListUniqueConstraintsRequest {}
+
+// ============================================================================
 // Temporal Operations
 // ============================================================================
 

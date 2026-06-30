@@ -35,6 +35,7 @@ use std::time::Instant;
 
 mod apply;
 mod conflict;
+pub(crate) mod constraint;
 mod validation;
 mod wal;
 
@@ -98,6 +99,10 @@ pub struct WriteTransaction {
 
     /// Durability mode for this transaction's commit
     pub(crate) durability_mode: DurabilityMode,
+
+    /// Uniqueness constraint registry shared with the parent database.
+    /// `None` for transactions created without a registry (legacy / tests).
+    pub(crate) constraint_registry: Option<Arc<crate::core::constraint::ConstraintRegistry>>,
 }
 
 impl WriteTransaction {
@@ -234,7 +239,17 @@ impl WriteTransaction {
             edge_id_gen,
             version_id_gen,
             durability_mode,
+            constraint_registry: None,
         }
+    }
+
+    /// Attach a constraint registry to this transaction (called by the DB layer).
+    pub(crate) fn with_constraint_registry(
+        mut self,
+        registry: Arc<crate::core::constraint::ConstraintRegistry>,
+    ) -> Self {
+        self.constraint_registry = Some(registry);
+        self
     }
 
     /// Get transaction metadata.
@@ -371,6 +386,18 @@ impl WriteTransaction {
 
         // Detect write-write conflicts (Snapshot Isolation)
         self.detect_conflicts()?;
+
+        // Enforce uniqueness constraints (reservation step).
+        // Must sit before the timestamp lock so we never hold a DashMap shard
+        // guard across `current_timestamp` (preserves lock-ordering contract).
+        let _constraint_guard = if let Some(ref registry) = self.constraint_registry {
+            Some(
+                constraint::check_constraints(self, registry)
+                    .map_err(crate::core::error::Error::Constraint)?,
+            )
+        } else {
+            None
+        };
 
         // Acquire commit timestamp and perform mode-aware WAL flush.
         //
@@ -571,6 +598,11 @@ impl WriteTransaction {
 
         // Register commit with visibility manager
         self.visibility_manager.register_commit(self.tx_id);
+
+        // Commit the constraint guard: keeps added reservations, frees removed ones.
+        if let Some(guard) = _constraint_guard {
+            guard.commit();
+        }
 
         // Mark as committed
         self.state = TxState::Committed;

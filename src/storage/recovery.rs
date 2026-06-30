@@ -24,6 +24,7 @@
 //! every write, we sync a simple, sequential log of operations. The recovery process
 //! uses this log to rebuild the complex structures exactly as they were.
 
+use crate::core::constraint::ConstraintRegistry;
 use crate::core::error::Result;
 use crate::core::graph::{Edge, Node};
 use crate::core::id::{TxId, VersionId};
@@ -117,7 +118,25 @@ pub(crate) fn replay_wal_into_storage(
     current: &CurrentStorage,
     historical: &mut HistoricalStorage,
     start_lsn: LSN,
+    next_version_id: u64,
+) -> Result<(LSN, Option<u64>, Option<u64>, u64)> {
+    replay_wal_into_storage_with_constraints(
+        wal,
+        current,
+        historical,
+        start_lsn,
+        next_version_id,
+        None,
+    )
+}
+
+pub(crate) fn replay_wal_into_storage_with_constraints(
+    wal: &ConcurrentWalSystem,
+    current: &CurrentStorage,
+    historical: &mut HistoricalStorage,
+    start_lsn: LSN,
     mut next_version_id: u64,
+    constraint_registry: Option<&ConstraintRegistry>,
 ) -> Result<(LSN, Option<u64>, Option<u64>, u64)> {
     const RECOVERY_TX_ID: u64 = 0;
 
@@ -381,10 +400,47 @@ pub(crate) fn replay_wal_into_storage(
             WalOperation::Checkpoint { .. } => {
                 // Checkpoint markers are informational only during replay
             }
+            WalOperation::DeclareUniqueConstraint { label, property } => {
+                if let Some(reg) = constraint_registry {
+                    reg.declare(label, property);
+                }
+            }
+            WalOperation::DropUniqueConstraint { label, property } => {
+                if let Some(reg) = constraint_registry {
+                    reg.undeclare(label, property);
+                }
+            }
         }
     }
 
     let final_lsn = wal.current_lsn();
 
     Ok((final_lsn, max_node_id, max_edge_id, next_version_id))
+}
+
+/// Replay ONLY constraint declaration/drop entries from the full WAL history.
+///
+/// Called during index-persistence startup BEFORE the regular snapshot-based
+/// WAL replay.  Because constraint declarations are written to the WAL before
+/// the corresponding node data, they may lie at LSNs below the persisted
+/// snapshot LSN and therefore be skipped by the normal differential replay.
+/// This pass reads every WAL entry from LSN 0 and replays only the two
+/// constraint-related operations, giving us the net constraint state.
+pub(crate) fn replay_constraint_declarations_from_wal(
+    wal: &ConcurrentWalSystem,
+    registry: &ConstraintRegistry,
+) -> Result<()> {
+    let all_entries = wal.read_from(LSN::initial())?;
+    for entry in all_entries {
+        match entry.operation {
+            WalOperation::DeclareUniqueConstraint { label, property } => {
+                registry.declare(label, property);
+            }
+            WalOperation::DropUniqueConstraint { label, property } => {
+                registry.undeclare(label, property);
+            }
+            _ => {}
+        }
+    }
+    Ok(())
 }

@@ -110,6 +110,20 @@ pub enum WalOperation {
         /// When the checkpoint was created
         timestamp: Timestamp,
     },
+    /// Declare a new uniqueness constraint (label, property).
+    DeclareUniqueConstraint {
+        /// The node label the constraint is scoped to.
+        label: InternedString,
+        /// The property key the constraint is on.
+        property: InternedString,
+    },
+    /// Drop a uniqueness constraint (label, property).
+    DropUniqueConstraint {
+        /// The node label the constraint was scoped to.
+        label: InternedString,
+        /// The property key the constraint was on.
+        property: InternedString,
+    },
 }
 
 /// A single WAL entry.

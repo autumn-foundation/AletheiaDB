@@ -26,6 +26,7 @@
 //! to the physical wall clock, bridging the gap between machines and human expectations.
 
 pub mod changefeed;
+pub mod constraint;
 pub mod error;
 pub mod graph;
 pub mod hasher;

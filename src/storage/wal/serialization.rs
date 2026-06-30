@@ -47,6 +47,8 @@ pub(crate) const OP_UPDATE_EDGE: u8 = 4;
 pub(crate) const OP_CHECKPOINT: u8 = 5;
 pub(crate) const OP_DELETE_NODE: u8 = 6;
 pub(crate) const OP_DELETE_EDGE: u8 = 7;
+pub(crate) const OP_DECLARE_UNIQUE_CONSTRAINT: u8 = 8;
+pub(crate) const OP_DROP_UNIQUE_CONSTRAINT: u8 = 9;
 
 /// Helper to serialize an InternedString into the buffer (4-byte ID)
 #[inline(always)]
@@ -158,6 +160,11 @@ pub(crate) fn estimate_entry_capacity(operation: &WalOperation) -> usize {
         WalOperation::Checkpoint { .. } => {
             // op type (1) + lsn (8) + timestamp (12)
             1 + 8 + 12
+        }
+        WalOperation::DeclareUniqueConstraint { .. }
+        | WalOperation::DropUniqueConstraint { .. } => {
+            // op type (1) + label (4) + property (4)
+            1 + 4 + 4
         }
     };
 
@@ -306,6 +313,16 @@ pub(crate) fn serialize_operation_into(
             buffer.extend_from_slice(&lsn.0.to_le_bytes());
             // Phase 2: Use HybridTimestamp serialization
             timestamp.serialize_into(buffer);
+        }
+        WalOperation::DeclareUniqueConstraint { label, property } => {
+            buffer.push(OP_DECLARE_UNIQUE_CONSTRAINT);
+            serialize_interned_string(*label, buffer);
+            serialize_interned_string(*property, buffer);
+        }
+        WalOperation::DropUniqueConstraint { label, property } => {
+            buffer.push(OP_DROP_UNIQUE_CONSTRAINT);
+            serialize_interned_string(*label, buffer);
+            serialize_interned_string(*property, buffer);
         }
     }
 

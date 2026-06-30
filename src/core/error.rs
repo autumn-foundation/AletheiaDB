@@ -45,6 +45,9 @@ pub enum Error {
     /// Vector-related errors.
     #[error("Vector error: {0}")]
     Vector(VectorError),
+    /// Uniqueness constraint violations.
+    #[error("Constraint error: {0}")]
+    Constraint(ConstraintError),
     /// I/O errors.
     #[error("I/O error: {0}")]
     Io(io::Error),
@@ -79,6 +82,7 @@ impl Error {
                 Error::Query(_) => crate::observability::ErrorCategory::Query,
                 Error::Transaction(_) => crate::observability::ErrorCategory::Transaction,
                 Error::Vector(_) => crate::observability::ErrorCategory::Vector,
+                Error::Constraint(_) => crate::observability::ErrorCategory::Other,
                 Error::Io(_) => crate::observability::ErrorCategory::Io,
                 Error::Backup(_) => crate::observability::ErrorCategory::Other,
                 Error::NotImplemented { .. } | Error::Other(_) => {
@@ -86,6 +90,15 @@ impl Error {
                 }
             };
             crate::observability::record_error(category);
+        }
+    }
+
+    /// Downcast to `ConstraintError` if this is a constraint violation.
+    pub fn as_constraint(&self) -> Option<&ConstraintError> {
+        if let Error::Constraint(e) = self {
+            Some(e)
+        } else {
+            None
         }
     }
 
@@ -144,6 +157,12 @@ impl From<TransactionError> for Error {
 impl From<VectorError> for Error {
     fn from(e: VectorError) -> Self {
         Error::Vector(e)
+    }
+}
+
+impl From<ConstraintError> for Error {
+    fn from(e: ConstraintError) -> Self {
+        Error::Constraint(e)
     }
 }
 
@@ -773,6 +792,51 @@ fn format_clock_skew(wallclock: i64, previous: i64, drift_us: i64, max_allowed: 
         wallclock,
         previous
     )
+}
+
+/// Errors related to uniqueness constraint operations.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum ConstraintError {
+    /// A node create or update would violate a uniqueness constraint.
+    #[error(
+        "Unique constraint violation on {label}.{property}: value already owned by node {existing_node_id}"
+    )]
+    UniqueViolation {
+        /// The node label the constraint is scoped to.
+        label: String,
+        /// The property the constraint is on.
+        property: String,
+        /// The conflicting value, as a debug string.
+        value: String,
+        /// The NodeId that already owns this value.
+        existing_node_id: crate::core::id::NodeId,
+    },
+    /// Enabling a constraint failed because duplicate currently-valid values exist.
+    #[error(
+        "Cannot enable unique constraint on {label}.{property}: duplicate value {value} exists on {node_ids:?}"
+    )]
+    DuplicateOnEnable {
+        /// The node label the constraint was declared for.
+        label: String,
+        /// The property the constraint was declared for.
+        property: String,
+        /// One of the duplicate values.
+        value: String,
+        /// All node IDs that share the duplicate value (at least 2).
+        node_ids: Vec<crate::core::id::NodeId>,
+    },
+    /// The property value type cannot be used as a unique constraint key.
+    #[error(
+        "Unsupported key type for unique constraint on {label}.{property}: {type_name} cannot be used as a unique key"
+    )]
+    UnsupportedKeyType {
+        /// The node label.
+        label: String,
+        /// The property name.
+        property: String,
+        /// The type name that is not supported.
+        type_name: String,
+    },
 }
 
 /// Errors related to vector operations and validation.
