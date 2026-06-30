@@ -327,11 +327,18 @@ fn constraint_survives_restart_via_wal() {
             .build()
     };
 
-    // First session: enable constraint and create a node
+    // First session: enable constraint, create a node, and create an edge so
+    // max_edge_id is Some(_) during WAL replay (covers config.rs edge_id_gen path).
     {
         let db = AletheiaDB::with_unified_config(make_config()).unwrap();
         db.unique_constraint("Person", "email").enable().unwrap();
-        db.create_node("Person", properties! { "email" => "alive@x" })
+        let n1 = db
+            .create_node("Person", properties! { "email" => "alive@x" })
+            .unwrap();
+        let n2 = db
+            .create_node("Person", properties! { "email" => "other@x" })
+            .unwrap();
+        db.write(|tx| tx.create_edge(n1, n2, "KNOWS", properties! {}))
             .unwrap();
     }
 
@@ -584,14 +591,20 @@ fn constraint_survives_restart_via_index_persistence() {
             .build()
     };
 
-    // Session 1: enable constraint and write a node.  Drop the DB cleanly so
-    // the background persistence thread's shutdown handler writes a complete
-    // snapshot (persist_all_indexes) that includes the manifest, string
-    // interner, and graph index.
+    // Session 1: enable constraint, write a node, and create an edge so
+    // max_edge_id is Some(_) on restart (covers config.rs edge_id_gen path).
+    // Drop the DB cleanly so the background persistence thread writes a complete
+    // snapshot that includes the manifest, string interner, and graph index.
     {
         let db = aletheiadb::AletheiaDB::with_unified_config(make_config()).unwrap();
         db.unique_constraint("Person", "email").enable().unwrap();
-        db.create_node("Person", aletheiadb::properties! { "email" => "keep@x" })
+        let n1 = db
+            .create_node("Person", aletheiadb::properties! { "email" => "keep@x" })
+            .unwrap();
+        let n2 = db
+            .create_node("Person", aletheiadb::properties! { "email" => "other@x" })
+            .unwrap();
+        db.write(|tx| tx.create_edge(n1, n2, "KNOWS", aletheiadb::properties! {}))
             .unwrap();
     }
 
@@ -600,7 +613,7 @@ fn constraint_survives_restart_via_index_persistence() {
     {
         let db = aletheiadb::AletheiaDB::with_unified_config(make_config()).unwrap();
 
-        assert_eq!(db.node_count(), 1, "node must survive restart");
+        assert_eq!(db.node_count(), 2, "nodes must survive restart");
 
         db.create_node("Person", aletheiadb::properties! { "email" => "keep@x" })
             .expect_err("Person.email constraint must be enforced after index-persistence restart");
@@ -760,7 +773,44 @@ fn non_string_typed_unique_keys_are_enforced() {
 }
 
 // ──────────────────────────────────────────────────────────────
-// 11. Null-property coverage
+// 11. UnsupportedKeyType path in check_no_duplicates
+// ──────────────────────────────────────────────────────────────
+
+/// Covers constraint.rs `check_no_duplicates` `None => return Err(UnsupportedKeyType)`
+/// arm (lines ~239-245): enabling a constraint on a label where an existing node
+/// has an Array/Vector value on the constrained property fails because those types
+/// cannot be used as constraint keys.
+#[test]
+fn enable_constraint_fails_on_array_property_type() {
+    use aletheiadb::core::property::{PropertyMapBuilder, PropertyValue};
+
+    let db = in_memory_db();
+
+    // Create a node with an Array value on the property we want to constrain.
+    // Array is not a valid constraint key type.
+    let props = PropertyMapBuilder::new()
+        .insert("tags", PropertyValue::Array(Arc::new(vec![])))
+        .build();
+    db.create_node("Item", props).unwrap();
+
+    let err = db
+        .unique_constraint("Item", "tags")
+        .enable()
+        .expect_err("enable on Array-valued property must fail with UnsupportedKeyType");
+    let cv = err.as_constraint().expect("must be ConstraintError");
+    match cv {
+        ConstraintError::UnsupportedKeyType {
+            label, property, ..
+        } => {
+            assert_eq!(label, "Item");
+            assert_eq!(property, "tags");
+        }
+        other => panic!("expected UnsupportedKeyType, got {:?}", other),
+    }
+}
+
+// ──────────────────────────────────────────────────────────────
+// 12. Null-property coverage
 // ──────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -805,7 +855,7 @@ mod null_property_coverage {
 }
 
 // ──────────────────────────────────────────────────────────────
-// 12. ReservationGuard rollback coverage
+// 13. ReservationGuard rollback coverage
 // ──────────────────────────────────────────────────────────────
 
 /// Covers constraint.rs `Drop for ReservationGuard` body (line ~122):
