@@ -90,3 +90,6 @@
 ## 2026-06-21 - Splitting Redb Cold Storage Blob
 **Tangle:** `src/storage/redb_cold_storage.rs` was over 4100 lines long, a "Blob" module holding both core cold storage logic and over 2000 lines of tests. It made navigation and understanding the core operations difficult.
 **Blueprint:** Refactored into a `src/storage/redb_cold_storage/` module. Kept the core data definitions and implementation in `mod.rs` (reduced to ~2000 lines) and moved all tests to `tests.rs` (~2000 lines), maintaining the `#[cfg(test)]` block functionality but with better physical separation.
+## 2026-07-02 - Splitting Temporal Vector Index Blob
+**Tangle:** `src/index/vector/temporal/mod.rs` grew to a 140,000+ byte file containing both core temporal vector index logic and over 2,300 lines of unit tests. This made the file difficult to navigate, edit, and understand as the core logic was buried among extensive test cases.
+**Blueprint:** Sliced `mod.rs` into two files: keeping the core logic in `mod.rs` and moving all tests into a new `tests.rs` file. Configured `mod.rs` with `#[cfg(test)] mod tests;` to maintain test discovery and execution, improving the modularity and readability of the temporal vector index implementation.
