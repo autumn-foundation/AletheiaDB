@@ -22,9 +22,9 @@ use std::collections::{BTreeMap, BTreeSet};
 /// database with substantial bi-temporal history -- directly at odds with
 /// this tool being advertised (in the MCP tool manifest) as a cheap,
 /// call-it-first discovery primitive. When the actual population exceeds
-/// this cap, the scan is truncated to a deterministic (ID-sorted) prefix and
-/// [`GraphSchema::sampled`] is set to `true`; per this feature's disclosure
-/// requirement, sampling must never happen silently.
+/// this cap, the scan is truncated to a deterministic set (the `cap`
+/// smallest IDs) and [`GraphSchema::sampled`] is set to `true`; per this
+/// feature's disclosure requirement, sampling must never happen silently.
 const MAX_SCHEMA_AS_OF_ENTITIES: usize = 50_000;
 
 /// Resolve an interned label/key to an owned `String`, falling back to empty
@@ -228,12 +228,18 @@ impl AletheiaDB {
     }
 }
 
-/// Truncate `ids` to a deterministic (sorted) prefix of at most `cap`
-/// elements. Returns `true` if truncation actually happened, so the caller
-/// can disclose it via [`GraphSchema::sampled`].
+/// Truncate `ids` down to the `cap` smallest elements (a deterministic set,
+/// though not necessarily in sorted order -- the order among the kept
+/// elements doesn't matter, since they're only used as a scan input, not
+/// exposed to callers). Returns `true` if truncation actually happened, so
+/// the caller can disclose it via [`GraphSchema::sampled`].
+///
+/// Uses a partial selection (`select_nth_unstable`, O(n) average) rather
+/// than a full sort (O(n log n)), since only membership in the smallest-`cap`
+/// set matters here, not a total order.
 fn cap_ids<T: Ord>(ids: &mut Vec<T>, cap: usize) -> bool {
     if ids.len() > cap {
-        ids.sort_unstable();
+        ids.select_nth_unstable(cap);
         ids.truncate(cap);
         true
     } else {
@@ -312,11 +318,16 @@ mod cap_ids_tests {
     }
 
     #[test]
-    fn over_cap_truncates_to_sorted_prefix_and_is_sampled() {
+    fn over_cap_truncates_to_the_cap_smallest_elements_and_is_sampled() {
         let mut ids = vec![9, 1, 5, 3, 7, 2];
         let sampled = cap_ids(&mut ids, 3);
         assert!(sampled);
-        assert_eq!(ids, vec![1, 2, 3], "deterministic sorted prefix");
+        assert_eq!(ids.len(), 3);
+        // select_nth_unstable only guarantees a correct partition, not a
+        // sorted order among the kept elements -- compare as a set.
+        let mut kept = ids.clone();
+        kept.sort_unstable();
+        assert_eq!(kept, vec![1, 2, 3], "kept elements are the 3 smallest");
     }
 
     #[test]
