@@ -111,7 +111,11 @@ impl PropagationModel for LinearPropagation {
             return current_self.map(|v| v.to_vec());
         }
 
-        let avg: Vec<f32> = sum.iter().map(|x| x / count as f32).collect();
+        let count_f32 = count as f32;
+        for val in sum.iter_mut() {
+            *val /= count_f32;
+        }
+        let mut avg = sum; // Re-use the allocation
 
         match current_self {
             Some(self_vec) => {
@@ -122,12 +126,11 @@ impl PropagationModel for LinearPropagation {
                 }
 
                 // Blend: (1 - alpha) * self + alpha * avg
-                let new_vec: Vec<f32> = self_vec
-                    .iter()
-                    .zip(avg.iter())
-                    .map(|(s, a)| (1.0 - self.alpha) * s + self.alpha * a)
-                    .collect();
-                Some(new_vec)
+                // Optimization: Compute in-place using the existing `avg` vector to avoid allocations.
+                for (a, &s) in avg.iter_mut().zip(self_vec.iter()) {
+                    *a = (1.0 - self.alpha) * s + self.alpha * *a;
+                }
+                Some(avg)
             }
             None => {
                 // If we didn't have a state, we "adopt" the average (if alpha allows adoption)
