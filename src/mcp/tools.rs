@@ -585,6 +585,37 @@ pub struct QueryRequest {
 }
 
 // ============================================================================
+// Schema Discovery (Issue #3214)
+// ============================================================================
+
+/// Request to discover the graph's schema: distinct node labels and edge
+/// types, their counts, and the property keys observed on each.
+///
+/// With no `as_of_*` fields, returns the current-state schema. If either
+/// `as_of_valid_time` or `as_of_transaction_time` is supplied, returns the
+/// schema as it existed at that bi-temporal instant (the other dimension
+/// defaults to the current time, matching the independent-dimension query
+/// tools).
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct GetSchemaRequest {
+    /// Optional valid time as ISO 8601 timestamp or microseconds since epoch.
+    /// If supplied (alone or with `as_of_transaction_time`), the schema is
+    /// computed as of this bi-temporal instant instead of the current state.
+    #[schemars(
+        description = "Optional valid time (ISO 8601 or microseconds since epoch). Supplying this or as_of_transaction_time switches to a bi-temporal schema snapshot."
+    )]
+    pub as_of_valid_time: Option<String>,
+
+    /// Optional transaction time as ISO 8601 timestamp or microseconds since epoch.
+    /// If supplied (alone or with `as_of_valid_time`), the schema is computed
+    /// as of this bi-temporal instant instead of the current state.
+    #[schemars(
+        description = "Optional transaction time (ISO 8601 or microseconds since epoch). Supplying this or as_of_valid_time switches to a bi-temporal schema snapshot."
+    )]
+    pub as_of_transaction_time: Option<String>,
+}
+
+// ============================================================================
 // Response Types (for serialization)
 // ============================================================================
 

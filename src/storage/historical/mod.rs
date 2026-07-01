@@ -1322,6 +1322,24 @@ impl HistoricalStorage {
         self.edge_version_heads.get(&edge_id).copied()
     }
 
+    /// Get the IDs of every node that has ever had at least one version recorded.
+    ///
+    /// Used for bi-temporal schema discovery (Issue #3214): the caller reconstructs
+    /// each ID at a given instant via [`AletheiaDB::get_nodes_at_time`](crate::db::AletheiaDB::get_nodes_at_time)
+    /// to determine which were visible.
+    pub fn versioned_node_ids(&self) -> Vec<NodeId> {
+        self.node_version_heads.keys().copied().collect()
+    }
+
+    /// Get the IDs of every edge that has ever had at least one version recorded.
+    ///
+    /// Used for bi-temporal schema discovery (Issue #3214): the caller reconstructs
+    /// each ID at a given instant via [`AletheiaDB::get_edges_at_time`](crate::db::AletheiaDB::get_edges_at_time)
+    /// to determine which were visible.
+    pub fn versioned_edge_ids(&self) -> Vec<EdgeId> {
+        self.edge_version_heads.keys().copied().collect()
+    }
+
     /// Get all node versions for all nodes.
     ///
     /// Returns a map of NodeId -> `Vec<NodeVersion>` for recovery property tests.

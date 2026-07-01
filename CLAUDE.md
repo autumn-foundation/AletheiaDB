@@ -313,6 +313,7 @@ cargo run --bin aletheia-mcp --features mcp-server
 | **Temporal** | `get_node_at_time`, `get_edge_at_time` |
 | **Hybrid** | `hybrid_query` (combined graph + vector + temporal) |
 | **Query** | `query` (execute a single read-only Cypher/AQL statement; see below) |
+| **Schema** | `get_schema` (node labels, edge types, and property keys, each with counts; optional bi-temporal `as_of_valid_time`/`as_of_transaction_time`) |
 
 **`query` tool (read-only Cypher/AQL):** Lets an LLM answer a multi-hop,
 filtered, temporally-scoped question with **one declarative statement** instead

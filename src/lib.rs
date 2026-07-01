@@ -122,8 +122,8 @@ pub use core::error::{
     ConstraintError, Error, QueryError, Result, StorageError, TemporalError, TransactionError,
 };
 pub use db::{
-    AletheiaDB, BackupSummary, SimilarityQuery, SimilaritySource, UniqueConstraintBuilder,
-    VectorIndexBuilder,
+    AletheiaDB, BackupSummary, EdgeTypeSchema, GraphSchema, LabelSchema, SchemaInstant,
+    SimilarityQuery, SimilaritySource, UniqueConstraintBuilder, VectorIndexBuilder,
 };
 pub use index::{
     AdjacencyIndex, CurrentIndexes, TemporalIndexes,
