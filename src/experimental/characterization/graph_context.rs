@@ -130,9 +130,7 @@ impl<'a> GraphContextBuilder<'a> {
     }
 
     fn resolve(s: InternedString) -> String {
-        GLOBAL_INTERNER
-            .resolve_with(s, |s| s.to_string())
-            .unwrap_or_else(|| format!("<interned:{}>", s.as_u32()))
+        GLOBAL_INTERNER.resolve_or_else(s, || format!("<interned:{}>", s.as_u32()))
     }
 
     /// Build the context string (Markdown).

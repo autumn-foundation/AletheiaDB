@@ -3996,6 +3996,75 @@ mod schema_tests {
         assert!(value.get("error").is_some());
     }
 
+    /// AC: with only `as_of_valid_time` set, `as_of_transaction_time`
+    /// defaults to "now" -- so a node created (and thus recorded) right now
+    /// is visible, since "now" covers both "the fact is valid as of
+    /// as_of_valid_time" (explicit) and "it was recorded by now" (default).
+    #[test]
+    fn test_get_schema_only_valid_time_set_defaults_transaction_time_to_now() {
+        let server = create_test_server();
+
+        server.create_node(CreateNodeRequest {
+            label: "Report".to_string(),
+            properties: None,
+        });
+
+        let now_micros = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_micros() as i64;
+
+        let response = server.get_schema(schema_req(Some(&now_micros.to_string()), None));
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+
+        assert!(value.get("error").is_none(), "unexpected error: {value}");
+        assert!(!value["as_of"].is_null(), "temporal branch must be taken");
+        let labels: Vec<String> = value["node_labels"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|l| l["label"].as_str().unwrap().to_string())
+            .collect();
+        assert!(
+            labels.contains(&"Report".to_string()),
+            "Report should be visible: valid_time=now (explicit), transaction_time defaults to now: {labels:?}"
+        );
+    }
+
+    /// AC: with only `as_of_transaction_time` set, `as_of_valid_time`
+    /// defaults to "now" -- so a node created (and thus recorded) right now
+    /// is visible.
+    #[test]
+    fn test_get_schema_only_transaction_time_set_defaults_valid_time_to_now() {
+        let server = create_test_server();
+
+        server.create_node(CreateNodeRequest {
+            label: "Invoice".to_string(),
+            properties: None,
+        });
+
+        let now_micros = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_micros() as i64;
+
+        let response = server.get_schema(schema_req(None, Some(&now_micros.to_string())));
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+
+        assert!(value.get("error").is_none(), "unexpected error: {value}");
+        assert!(!value["as_of"].is_null(), "temporal branch must be taken");
+        let labels: Vec<String> = value["node_labels"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|l| l["label"].as_str().unwrap().to_string())
+            .collect();
+        assert!(
+            labels.contains(&"Invoice".to_string()),
+            "Invoice should be visible: transaction_time=now (explicit), valid_time defaults to now: {labels:?}"
+        );
+    }
+
     #[test]
     fn test_get_schema_as_of_label_absent_before_first_write() {
         let server = create_test_server();

@@ -668,9 +668,7 @@ impl AletheiaMcpServer {
     // ========================================================================
 
     fn interned_to_string(&self, interned: crate::core::InternedString) -> String {
-        GLOBAL_INTERNER
-            .resolve_with(interned, |s| s.to_string())
-            .unwrap_or_else(|| format!("<unknown:{}>", interned.as_u32()))
+        GLOBAL_INTERNER.resolve_or_else(interned, || format!("<unknown:{}>", interned.as_u32()))
     }
 
     fn node_to_response(&self, node: &crate::core::Node) -> NodeResponse {
@@ -2187,6 +2185,10 @@ impl AletheiaMcpServer {
 
         let result = match (valid_time, transaction_time) {
             (None, None) => self.db.schema(),
+            // Only one axis supplied: default the other to "now", matching
+            // db.get_node_at_valid_time()/get_node_at_transaction_time()'s
+            // independent-dimension convention (see GetSchemaRequest's doc
+            // comment for the exact semantics this produces).
             (vt, tt) => self
                 .db
                 .schema_as_of(vt.unwrap_or_else(time::now), tt.unwrap_or_else(time::now)),

@@ -1830,6 +1830,27 @@ impl CurrentStorage {
         edges
     }
 
+    /// Visit every node in the current storage by reference, without cloning.
+    ///
+    /// Prefer this over `get_all_nodes()` when only a read-only pass over each
+    /// node is needed (e.g. aggregation), since it avoids allocating an owned
+    /// `Vec<Node>` and cloning each node.
+    pub fn visit_nodes<F: FnMut(&crate::Node)>(&self, mut f: F) {
+        for node in self.indexes.iter_nodes() {
+            f(&node);
+        }
+    }
+
+    /// Visit every edge in the current storage by reference, without cloning.
+    ///
+    /// See [`Self::visit_nodes`] for why this is preferable to `get_all_edges()`
+    /// for read-only aggregation passes.
+    pub fn visit_edges<F: FnMut(&crate::Edge)>(&self, mut f: F) {
+        for edge in self.indexes.iter_edges() {
+            f(&edge);
+        }
+    }
+
     /// Get node IDs by label.
     ///
     /// Returns the IDs of all nodes with the given label.

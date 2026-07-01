@@ -591,26 +591,36 @@ pub struct QueryRequest {
 /// Request to discover the graph's schema: distinct node labels and edge
 /// types, their counts, and the property keys observed on each.
 ///
-/// With no `as_of_*` fields, returns the current-state schema. If either
-/// `as_of_valid_time` or `as_of_transaction_time` is supplied, returns the
-/// schema as it existed at that bi-temporal instant (the other dimension
-/// defaults to the current time, matching the independent-dimension query
-/// tools).
+/// With no `as_of_*` fields, returns the current-state schema.
+///
+/// With either field supplied, returns the schema as it existed at that
+/// bi-temporal instant. Each dimension defaults independently to the
+/// current time when the *other* one is supplied but it isn't -- e.g.
+/// `as_of_transaction_time` alone answers "what does the schema look like,
+/// using only facts recorded by transaction-time T, for whatever is valid
+/// right now" (valid_time defaults to now). This mirrors the Rust API's
+/// `get_node_at_valid_time`/`get_node_at_transaction_time` convenience
+/// methods, which default the unspecified dimension the same way. If you
+/// want a specific instant on *both* axes, supply both fields explicitly.
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct GetSchemaRequest {
     /// Optional valid time as ISO 8601 timestamp or microseconds since epoch.
     /// If supplied (alone or with `as_of_transaction_time`), the schema is
     /// computed as of this bi-temporal instant instead of the current state.
+    /// If omitted while `as_of_transaction_time` is set, defaults to the
+    /// current time (i.e. "whatever is valid right now").
     #[schemars(
-        description = "Optional valid time (ISO 8601 or microseconds since epoch). Supplying this or as_of_transaction_time switches to a bi-temporal schema snapshot."
+        description = "Optional valid time (ISO 8601 or microseconds since epoch). Supplying this or as_of_transaction_time switches to a bi-temporal schema snapshot. If omitted while as_of_transaction_time is set, defaults to the current time."
     )]
     pub as_of_valid_time: Option<String>,
 
     /// Optional transaction time as ISO 8601 timestamp or microseconds since epoch.
     /// If supplied (alone or with `as_of_valid_time`), the schema is computed
-    /// as of this bi-temporal instant instead of the current state.
+    /// as of this bi-temporal instant instead of the current state. If
+    /// omitted while `as_of_valid_time` is set, defaults to the current time
+    /// (i.e. "everything recorded so far").
     #[schemars(
-        description = "Optional transaction time (ISO 8601 or microseconds since epoch). Supplying this or as_of_valid_time switches to a bi-temporal schema snapshot."
+        description = "Optional transaction time (ISO 8601 or microseconds since epoch). Supplying this or as_of_valid_time switches to a bi-temporal schema snapshot. If omitted while as_of_valid_time is set, defaults to the current time."
     )]
     pub as_of_transaction_time: Option<String>,
 }

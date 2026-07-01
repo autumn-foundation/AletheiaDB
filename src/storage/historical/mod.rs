@@ -2052,15 +2052,20 @@ impl HistoricalStorage {
                             version.id,
                         ))
                     }
-                    Err(_e) => {
+                    Err(e) => {
+                        // Per this method's documented contract, a reconstruction failure
+                        // is a systemic failure (corruption, not "didn't exist") and must
+                        // propagate as `Err`, not be silently downgraded to `None` --
+                        // otherwise callers can't distinguish "not visible at this instant"
+                        // from "we couldn't tell".
                         #[cfg(feature = "observability")]
                         tracing::error!(
                             version_id = %version_id,
                             node_id = %node_id,
-                            error = %_e,
+                            error = %e,
                             "Property reconstruction failed in batch query"
                         );
-                        None
+                        return Err(e);
                     }
                 }
             } else {
@@ -2108,15 +2113,17 @@ impl HistoricalStorage {
                             version.id,
                         ))
                     }
-                    Err(_e) => {
+                    Err(e) => {
+                        // See the matching comment in get_nodes_at_time: reconstruction
+                        // failures are systemic and must propagate, not become `None`.
                         #[cfg(feature = "observability")]
                         tracing::error!(
                             version_id = %version_id,
                             edge_id = %edge_id,
-                            error = %_e,
+                            error = %e,
                             "Property reconstruction failed in batch query"
                         );
-                        None
+                        return Err(e);
                     }
                 }
             } else {
