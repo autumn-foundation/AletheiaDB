@@ -159,6 +159,15 @@ Exposes AletheiaDB as a set of MCP tools over stdio: node/edge CRUD,
 multi-hop traversal, vector search, temporal queries, and hybrid queries.
 Compatible with Claude, Claude Code, and any MCP-capable host.
 
+**Vector elision by default**: read tools (`get_node`, `list_nodes`,
+`get_edge`, `list_edges`, `get_outgoing_edges`, `get_incoming_edges`,
+`traverse`, `find_similar`, `hybrid_query`) replace vector/embedding
+properties with a small `{type, dim, elided: true}` descriptor instead of
+the raw float array, since a single embedding can cost thousands of tokens
+of context an LLM can't reason over. Pass `include_vectors: true` on the
+request to get the full array back. Similarity scores (`score` /
+`similarity_score`) are always returned in full regardless of this flag.
+
 ---
 
 ## Contributing

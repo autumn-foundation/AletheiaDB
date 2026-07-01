@@ -671,34 +671,42 @@ impl AletheiaMcpServer {
         GLOBAL_INTERNER.resolve_or_else(interned, || format!("<unknown:{}>", interned.as_u32()))
     }
 
-    fn node_to_response(&self, node: &crate::core::Node) -> NodeResponse {
+    fn node_to_response(&self, node: &crate::core::Node, include_vectors: bool) -> NodeResponse {
         NodeResponse {
             id: node.id.as_u64(),
             label: self.interned_to_string(node.label),
-            properties: self.property_map_to_json(&node.properties),
+            properties: self.property_map_to_json(&node.properties, include_vectors),
         }
     }
 
-    fn edge_to_response(&self, edge: &crate::core::Edge) -> EdgeResponse {
+    fn edge_to_response(&self, edge: &crate::core::Edge, include_vectors: bool) -> EdgeResponse {
         EdgeResponse {
             id: edge.id.as_u64(),
             source_id: edge.source.as_u64(),
             target_id: edge.target.as_u64(),
             label: self.interned_to_string(edge.label),
-            properties: self.property_map_to_json(&edge.properties),
+            properties: self.property_map_to_json(&edge.properties, include_vectors),
         }
     }
 
-    fn property_map_to_json(&self, props: &PropertyMap) -> HashMap<String, serde_json::Value> {
+    fn property_map_to_json(
+        &self,
+        props: &PropertyMap,
+        include_vectors: bool,
+    ) -> HashMap<String, serde_json::Value> {
         let mut result = HashMap::new();
         for (key, value) in props.iter() {
             let key_str = self.interned_to_string(*key);
-            result.insert(key_str, self.property_value_to_json(value));
+            result.insert(key_str, self.property_value_to_json(value, include_vectors));
         }
         result
     }
 
-    fn property_value_to_json(&self, value: &PropertyValue) -> serde_json::Value {
+    fn property_value_to_json(
+        &self,
+        value: &PropertyValue,
+        include_vectors: bool,
+    ) -> serde_json::Value {
         match value {
             PropertyValue::Null => serde_json::Value::Null,
             PropertyValue::Bool(b) => serde_json::Value::Bool(*b),
@@ -709,16 +717,35 @@ impl AletheiaMcpServer {
                 serde_json::Value::String(base64::engine::general_purpose::STANDARD.encode(b))
             }
             PropertyValue::Array(arr) => serde_json::Value::Array(
-                arr.iter().map(|v| self.property_value_to_json(v)).collect(),
+                arr.iter()
+                    .map(|v| self.property_value_to_json(v, include_vectors))
+                    .collect(),
             ),
             PropertyValue::Vector(v) => {
-                serde_json::Value::Array(v.iter().map(|f| json!(*f)).collect())
+                if include_vectors {
+                    serde_json::Value::Array(
+                        v.iter()
+                            .map(|&f| serde_json::Value::from(f as f64))
+                            .collect(),
+                    )
+                } else {
+                    json!({"type": "vector", "dim": v.len(), "elided": true})
+                }
             }
             PropertyValue::SparseVector(sv) => {
-                json!({
-                    "indices": sv.indices(),
-                    "values": sv.values()
-                })
+                if include_vectors {
+                    json!({
+                        "indices": sv.indices(),
+                        "values": sv.values()
+                    })
+                } else {
+                    json!({
+                        "type": "sparse_vector",
+                        "dim": sv.dimension(),
+                        "nnz": sv.nnz(),
+                        "elided": true
+                    })
+                }
             }
         }
     }
@@ -912,7 +939,7 @@ impl AletheiaMcpServer {
 
         match self.db.get_node(node_id) {
             Ok(node) => {
-                let response = self.node_to_response(&node);
+                let response = self.node_to_response(&node, req.include_vectors.unwrap_or(false));
                 self.success_json(
                     serde_json::to_value(&response)
                         .expect("response serialization should not fail"),
@@ -939,7 +966,7 @@ impl AletheiaMcpServer {
         match self.db.create_node(&req.label, properties) {
             Ok(node_id) => match self.db.get_node(node_id) {
                 Ok(node) => {
-                    let response = self.node_to_response(&node);
+                    let response = self.node_to_response(&node, true);
                     self.success_json(
                         serde_json::to_value(&response)
                             .expect("response serialization should not fail"),
@@ -975,7 +1002,7 @@ impl AletheiaMcpServer {
         match self.db.write(|tx| tx.update_node(node_id, properties)) {
             Ok(()) => match self.db.get_node(node_id) {
                 Ok(node) => {
-                    let response = self.node_to_response(&node);
+                    let response = self.node_to_response(&node, true);
                     self.success_json(
                         serde_json::to_value(&response)
                             .expect("response serialization should not fail"),
@@ -1131,10 +1158,11 @@ impl AletheiaMcpServer {
                 .db
                 .find_nodes_by_property(label, prop_key, &property_value);
 
+            let include_vectors = req.include_vectors.unwrap_or(false);
             let mut nodes = Vec::with_capacity(limit);
             for node_id in node_ids.into_iter().skip(offset).take(limit) {
                 if let Ok(node) = self.db.get_node(node_id) {
-                    nodes.push(self.node_to_response(&node));
+                    nodes.push(self.node_to_response(&node, include_vectors));
                 }
             }
 
@@ -1155,6 +1183,7 @@ impl AletheiaMcpServer {
             match builder.limit(limit + offset).execute(&self.db) {
                 Ok(results) => {
                     // Use iterator-based approach to avoid allocating full Vec
+                    let include_vectors = req.include_vectors.unwrap_or(false);
                     let mut nodes = Vec::with_capacity(limit);
                     let mut skipped = 0;
 
@@ -1166,7 +1195,7 @@ impl AletheiaMcpServer {
                                     continue;
                                 }
                                 if let EntityResult::Node(node) = row.entity {
-                                    nodes.push(self.node_to_response(&node));
+                                    nodes.push(self.node_to_response(&node, include_vectors));
                                     if nodes.len() >= limit {
                                         break;
                                     }
@@ -1242,7 +1271,7 @@ impl AletheiaMcpServer {
 
         match self.db.get_edge(edge_id) {
             Ok(edge) => {
-                let response = self.edge_to_response(&edge);
+                let response = self.edge_to_response(&edge, req.include_vectors.unwrap_or(false));
                 self.success_json(
                     serde_json::to_value(&response)
                         .expect("response serialization should not fail"),
@@ -1282,7 +1311,7 @@ impl AletheiaMcpServer {
         {
             Ok(edge_id) => match self.db.get_edge(edge_id) {
                 Ok(edge) => {
-                    let response = self.edge_to_response(&edge);
+                    let response = self.edge_to_response(&edge, true);
                     self.success_json(
                         serde_json::to_value(&response)
                             .expect("response serialization should not fail"),
@@ -1313,7 +1342,7 @@ impl AletheiaMcpServer {
         match self.db.write(|tx| tx.update_edge(edge_id, properties)) {
             Ok(()) => match self.db.get_edge(edge_id) {
                 Ok(edge) => {
-                    let response = self.edge_to_response(&edge);
+                    let response = self.edge_to_response(&edge, true);
                     self.success_json(
                         serde_json::to_value(&response)
                             .expect("response serialization should not fail"),
@@ -1407,10 +1436,11 @@ impl AletheiaMcpServer {
             self.db.get_outgoing_edges(node_id)
         };
 
+        let include_vectors = req.include_vectors.unwrap_or(false);
         let edges: Vec<EdgeResponse> = edge_ids
             .into_iter()
             .filter_map(|eid| self.db.get_edge(eid).ok())
-            .map(|e| self.edge_to_response(&e))
+            .map(|e| self.edge_to_response(&e, include_vectors))
             .collect();
 
         self.success_json(json!({
@@ -1433,6 +1463,7 @@ impl AletheiaMcpServer {
         let edge_ids = self.db.get_incoming_edges(node_id);
 
         // Filter by label if provided
+        let include_vectors = req.include_vectors.unwrap_or(false);
         let edges: Vec<EdgeResponse> = edge_ids
             .into_iter()
             .filter_map(|eid| self.db.get_edge(eid).ok())
@@ -1442,7 +1473,7 @@ impl AletheiaMcpServer {
                     .map(|l| self.matches_label(e.label, l))
                     .unwrap_or(true)
             })
-            .map(|e| self.edge_to_response(&e))
+            .map(|e| self.edge_to_response(&e, include_vectors))
             .collect();
 
         self.success_json(json!({
@@ -1484,7 +1515,7 @@ impl AletheiaMcpServer {
                 visited.insert(current_id.as_u64());
                 if let Ok(node) = self.db.get_node(current_id) {
                     results.push(TraversalResult {
-                        node: self.node_to_response(&node),
+                        node: self.node_to_response(&node, req.include_vectors.unwrap_or(false)),
                         path: path.clone(),
                         depth: current_depth,
                     });
@@ -1580,11 +1611,12 @@ impl AletheiaMcpServer {
             .similarity_search(crate::SimilarityQuery::from_embedding(req.embedding).k(k))
         {
             Ok(results) => {
+                let include_vectors = req.include_vectors.unwrap_or(false);
                 let similarity_results: Vec<SimilarityResult> = results
                     .into_iter()
                     .filter_map(|(node_id, score)| {
                         self.db.get_node(node_id).ok().map(|node| SimilarityResult {
-                            node: self.node_to_response(&node),
+                            node: self.node_to_response(&node, include_vectors),
                             score,
                         })
                     })
@@ -1697,7 +1729,7 @@ impl AletheiaMcpServer {
 
         match self.db.get_node_at_time(node_id, valid_time, tx_time) {
             Ok(node) => {
-                let response = self.node_to_response(&node);
+                let response = self.node_to_response(&node, true);
                 self.success_json(json!({
                     "node": response,
                     "valid_time": req.valid_time,
@@ -1731,7 +1763,7 @@ impl AletheiaMcpServer {
 
         match self.db.get_edge_at_time(edge_id, valid_time, tx_time) {
             Ok(edge) => {
-                let response = self.edge_to_response(&edge);
+                let response = self.edge_to_response(&edge, true);
                 self.success_json(json!({
                     "edge": response,
                     "valid_time": req.valid_time,
@@ -1839,7 +1871,7 @@ impl AletheiaMcpServer {
 
         match self.db.get_node_at_valid_time(node_id, valid_time) {
             Ok(node) => {
-                let response = self.node_to_response(&node);
+                let response = self.node_to_response(&node, true);
                 self.success_json(json!({
                     "node": response,
                     "valid_time": req.valid_time
@@ -1867,7 +1899,7 @@ impl AletheiaMcpServer {
 
         match self.db.get_node_at_transaction_time(node_id, tx_time) {
             Ok(node) => {
-                let response = self.node_to_response(&node);
+                let response = self.node_to_response(&node, true);
                 self.success_json(json!({
                     "node": response,
                     "transaction_time": req.transaction_time
@@ -1957,7 +1989,7 @@ impl AletheiaMcpServer {
 
         match self.db.get_edge_at_valid_time(edge_id, valid_time) {
             Ok(edge) => {
-                let response = self.edge_to_response(&edge);
+                let response = self.edge_to_response(&edge, true);
                 self.success_json(json!({
                     "edge": response,
                     "valid_time": req.valid_time
@@ -1985,7 +2017,7 @@ impl AletheiaMcpServer {
 
         match self.db.get_edge_at_transaction_time(edge_id, tx_time) {
             Ok(edge) => {
-                let response = self.edge_to_response(&edge);
+                let response = self.edge_to_response(&edge, true);
                 self.success_json(json!({
                     "edge": response,
                     "transaction_time": req.transaction_time
@@ -2062,7 +2094,7 @@ impl AletheiaMcpServer {
     fn version_info_to_response(&self, info: &crate::query::VersionInfo) -> serde_json::Value {
         use crate::core::temporal::TIMESTAMP_MAX;
 
-        let properties = self.property_map_to_json(&info.properties);
+        let properties = self.property_map_to_json(&info.properties, true);
 
         let valid_to = {
             let end = info.temporal.valid_time().end();
@@ -2095,8 +2127,8 @@ impl AletheiaMcpServer {
     }
 
     fn version_diff_to_response(&self, diff: &crate::query::VersionDiff) -> serde_json::Value {
-        let added = self.property_map_to_json(&diff.added);
-        let removed = self.property_map_to_json(&diff.removed);
+        let added = self.property_map_to_json(&diff.added, true);
+        let removed = self.property_map_to_json(&diff.removed, true);
 
         let modified: Vec<_> = diff
             .modified
@@ -2108,8 +2140,8 @@ impl AletheiaMcpServer {
 
                 json!({
                     "key": key_str,
-                    "old_value": self.property_value_to_json(old_val),
-                    "new_value": self.property_value_to_json(new_val)
+                    "old_value": self.property_value_to_json(old_val, true),
+                    "new_value": self.property_value_to_json(new_val, true)
                 })
             })
             .collect();
@@ -2233,6 +2265,8 @@ impl AletheiaMcpServer {
             None
         };
 
+        let include_vectors = req.include_vectors.unwrap_or(false);
+
         // Helper to convert rows to hybrid results with temporal info
         let rows_to_results =
             |rows: Vec<crate::query::executor::QueryRow>| -> Vec<HybridQueryResult> {
@@ -2240,7 +2274,7 @@ impl AletheiaMcpServer {
                     .filter_map(|row| {
                         if let EntityResult::Node(node) = row.entity {
                             Some(HybridQueryResult {
-                                node: self.node_to_response(&node),
+                                node: self.node_to_response(&node, include_vectors),
                                 similarity_score: row.score,
                                 traversal_path: row.path.map(|p| {
                                     p.iter()
@@ -2271,7 +2305,7 @@ impl AletheiaMcpServer {
                 // Temporal query for a single node
                 return match self.db.get_node_at_time(node_id, vt, tt) {
                     Ok(node) => {
-                        let response = self.node_to_response(&node);
+                        let response = self.node_to_response(&node, include_vectors);
                         self.success_json(json!({
                             "results": [HybridQueryResult {
                                 node: response,
@@ -2303,7 +2337,7 @@ impl AletheiaMcpServer {
                 // Just return the start node
                 return match self.db.get_node(node_id) {
                     Ok(node) => {
-                        let response = self.node_to_response(&node);
+                        let response = self.node_to_response(&node, include_vectors);
                         self.success_json(json!({
                             "results": [HybridQueryResult {
                                 node: response,
@@ -2448,11 +2482,11 @@ impl AletheiaMcpServer {
     fn query_row_to_json(&self, row: crate::query::executor::QueryRow) -> serde_json::Value {
         let entity = match row.entity {
             EntityResult::Node(node) => {
-                let r = self.node_to_response(&node);
+                let r = self.node_to_response(&node, true);
                 json!({"type": "node", "id": r.id, "label": r.label, "properties": r.properties})
             }
             EntityResult::Edge(edge) => {
-                let r = self.edge_to_response(&edge);
+                let r = self.edge_to_response(&edge, true);
                 json!({
                     "type": "edge",
                     "id": r.id,
@@ -2816,7 +2850,10 @@ fn tool_definitions() -> Vec<Tool> {
     vec![
         Tool::new(
             "get_node",
-            "Get a node by its ID. Returns the node's label and properties.",
+            "Get a node by its ID. Returns the node's label and properties. \
+                     Vector/embedding properties are elided by default (replaced with a \
+                     `{type, dim, elided:true}` descriptor) to protect LLM context; pass \
+                     `include_vectors: true` to receive the full float array.",
             make_input_schema::<GetNodeRequest>(),
         ),
         Tool::new(
@@ -2845,7 +2882,10 @@ fn tool_definitions() -> Vec<Tool> {
         ),
         Tool::new(
             "list_nodes",
-            "List nodes with optional label filter and pagination.",
+            "List nodes with optional label filter and pagination. Vector/embedding \
+                     properties are elided by default (replaced with a `{type, dim, elided:true}` \
+                     descriptor) to protect LLM context; pass `include_vectors: true` to receive \
+                     the full float arrays.",
             make_input_schema::<ListNodesRequest>(),
         ),
         Tool::new(
@@ -2855,7 +2895,9 @@ fn tool_definitions() -> Vec<Tool> {
         ),
         Tool::new(
             "get_edge",
-            "Get an edge by its ID.",
+            "Get an edge by its ID. Vector/embedding properties are elided by default \
+                     (replaced with a `{type, dim, elided:true}` descriptor) to protect LLM \
+                     context; pass `include_vectors: true` to receive the full float array.",
             make_input_schema::<GetEdgeRequest>(),
         ),
         Tool::new(
@@ -2875,7 +2917,10 @@ fn tool_definitions() -> Vec<Tool> {
         ),
         Tool::new(
             "list_edges",
-            "List edges with optional label filter and pagination.",
+            "List edges with optional label filter and pagination. Vector/embedding \
+                     properties are elided by default (replaced with a `{type, dim, elided:true}` \
+                     descriptor) to protect LLM context; pass `include_vectors: true` to receive \
+                     the full float arrays.",
             make_input_schema::<ListEdgesRequest>(),
         ),
         Tool::new(
@@ -2885,22 +2930,34 @@ fn tool_definitions() -> Vec<Tool> {
         ),
         Tool::new(
             "get_outgoing_edges",
-            "Get all outgoing edges from a node.",
+            "Get all outgoing edges from a node. Vector/embedding properties are elided \
+                     by default (replaced with a `{type, dim, elided:true}` descriptor) to \
+                     protect LLM context; pass `include_vectors: true` to receive the full float \
+                     arrays.",
             make_input_schema::<GetOutgoingEdgesRequest>(),
         ),
         Tool::new(
             "get_incoming_edges",
-            "Get all incoming edges to a node.",
+            "Get all incoming edges to a node. Vector/embedding properties are elided by \
+                     default (replaced with a `{type, dim, elided:true}` descriptor) to protect \
+                     LLM context; pass `include_vectors: true` to receive the full float arrays.",
             make_input_schema::<GetIncomingEdgesRequest>(),
         ),
         Tool::new(
             "traverse",
-            "Traverse the graph starting from a node.",
+            "Traverse the graph starting from a node. Vector/embedding properties are \
+                     elided by default (replaced with a `{type, dim, elided:true}` descriptor) to \
+                     protect LLM context; pass `include_vectors: true` to receive the full float \
+                     arrays.",
             make_input_schema::<TraverseRequest>(),
         ),
         Tool::new(
             "find_similar",
-            "Find nodes similar to a query embedding.",
+            "Find nodes similar to a query embedding. The similarity `score` is always \
+                     returned in full. Vector/embedding properties on the returned nodes are \
+                     elided by default (replaced with a `{type, dim, elided:true}` descriptor) to \
+                     protect LLM context; pass `include_vectors: true` to receive the full float \
+                     arrays.",
             make_input_schema::<FindSimilarRequest>(),
         ),
         Tool::new(
@@ -2980,7 +3037,11 @@ fn tool_definitions() -> Vec<Tool> {
         ),
         Tool::new(
             "hybrid_query",
-            "Execute a hybrid query combining graph traversal, vector similarity, and temporal filtering.",
+            "Execute a hybrid query combining graph traversal, vector similarity, and \
+                     temporal filtering. The `similarity_score` is always returned in full. \
+                     Vector/embedding properties on returned nodes are elided by default \
+                     (replaced with a `{type, dim, elided:true}` descriptor) to protect LLM \
+                     context; pass `include_vectors: true` to receive the full float arrays.",
             make_input_schema::<HybridQueryRequest>(),
         ),
         Tool::new(

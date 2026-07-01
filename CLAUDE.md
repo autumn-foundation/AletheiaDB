@@ -331,6 +331,19 @@ self-correct. When the `cypher` feature is not compiled in, `language:"cypher"`
 returns `language_unavailable` (AQL is always available). See
 [docs/guides/mcp-query-tool.md](docs/guides/mcp-query-tool.md).
 
+**Vector properties are elided by default (Issue #3220)**: `get_node`,
+`list_nodes`, `get_edge`, `list_edges`, `get_outgoing_edges`,
+`get_incoming_edges`, `traverse`, `find_similar`, and `hybrid_query` replace
+vector/embedding properties with a `{type, dim, elided: true}` descriptor
+(or `{type: "sparse_vector", dim, nnz, elided: true}` for sparse vectors)
+instead of the raw float array -- a single embedding can otherwise cost
+thousands of tokens of context an LLM can't reason over. Pass
+`include_vectors: true` on the request to receive the full array. This does
+not affect `find_similar`'s `score` or `hybrid_query`'s `similarity_score`,
+which are always returned in full, nor the write path (`create_node`,
+`update_node`, `create_edge`, `update_edge`) or temporal/history tools,
+which are unaffected by this flag and always return full vectors.
+
 **Programmatic Usage:**
 ```rust
 use aletheiadb::mcp::AletheiaMcpServer;
