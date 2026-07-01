@@ -2494,3 +2494,38 @@ fn test_schema_as_of_label_absent_before_first_write() {
         })
     );
 }
+
+#[test]
+fn test_schema_as_of_entity_cap_is_configurable_and_discloses_sampling() {
+    use crate::config::{AletheiaDBConfig, HistoricalConfigBuilder};
+    use crate::test_utils::create_test_db_with_config;
+
+    // A tiny cap makes the truncation path cheap to exercise directly,
+    // instead of needing 50,000+ real entities to hit the default cap.
+    let config = AletheiaDBConfig::builder()
+        .historical(
+            HistoricalConfigBuilder::new()
+                .max_schema_as_of_entities(2)
+                .build(),
+        )
+        .build();
+    let (_temp_dir, db) = create_test_db_with_config(config).unwrap();
+
+    for _ in 0..3 {
+        db.create_node("Widget", PropertyMapBuilder::new().build())
+            .unwrap();
+    }
+
+    let now = crate::core::temporal::time::now();
+    let schema = db.schema_as_of(now, now).unwrap();
+    assert!(
+        schema.sampled,
+        "a cap of 2 with 3 versioned nodes must disclose truncation"
+    );
+
+    // schema() (current state) is always exhaustive, regardless of the
+    // schema_as_of() cap.
+    let current = db.schema().unwrap();
+    assert!(!current.sampled);
+    assert_eq!(current.total_nodes, 3);
+}

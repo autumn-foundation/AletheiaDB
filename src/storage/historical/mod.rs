@@ -47,6 +47,12 @@ pub const DEFAULT_MAX_VERSION_AGE_MS: i64 = 365 * 24 * 60 * 60 * 1000;
 ///   Still provides infinite loop protection while enabling practical use cases.
 pub const MAX_RECONSTRUCTION_DEPTH: usize = 1_000;
 
+/// Default safety cap on the number of ever-versioned entities
+/// `AletheiaDB::schema_as_of` will reconstruct in a single call, per entity
+/// kind (nodes/edges). See [`crate::config::HistoricalConfigBuilder::max_schema_as_of_entities`]
+/// to override this.
+pub const DEFAULT_MAX_SCHEMA_AS_OF_ENTITIES: usize = 50_000;
+
 /// Retention policy for version history (DoS protection).
 ///
 /// Controls how many versions are kept and for how long to prevent
@@ -171,6 +177,9 @@ pub struct HistoricalStorage {
     retention_policy: RetentionPolicy,
     /// Maximum depth for version reconstruction (DoS protection)
     max_reconstruction_depth: usize,
+    /// Safety cap (per entity kind) on the number of ever-versioned entities
+    /// `AletheiaDB::schema_as_of` will reconstruct in a single call.
+    max_schema_as_of_entities: usize,
     // All FastHashMap fields below use IdentityHasher to avoid SipHash overhead
     // on integer keys (NodeId, EdgeId, VersionId are all newtypes over u64).
     /// All node versions, indexed by version ID.
@@ -329,6 +338,7 @@ impl HistoricalStorage {
 
         // Override max_reconstruction_depth from config
         storage.max_reconstruction_depth = config.max_reconstruction_depth;
+        storage.max_schema_as_of_entities = config.max_schema_as_of_entities;
 
         storage
     }
@@ -358,6 +368,7 @@ impl HistoricalStorage {
             config,
             retention_policy,
             max_reconstruction_depth: MAX_RECONSTRUCTION_DEPTH,
+            max_schema_as_of_entities: DEFAULT_MAX_SCHEMA_AS_OF_ENTITIES,
             node_versions: FastHashMap::default(),
             edge_versions: FastHashMap::default(),
             node_version_heads: FastHashMap::default(),
@@ -1338,6 +1349,14 @@ impl HistoricalStorage {
     /// to determine which were visible.
     pub fn versioned_edge_ids(&self) -> Vec<EdgeId> {
         self.edge_version_heads.keys().copied().collect()
+    }
+
+    /// Get the configured safety cap (per entity kind) on the number of
+    /// ever-versioned entities `AletheiaDB::schema_as_of` will reconstruct
+    /// in a single call. See
+    /// [`crate::config::HistoricalConfigBuilder::max_schema_as_of_entities`].
+    pub fn max_schema_as_of_entities(&self) -> usize {
+        self.max_schema_as_of_entities
     }
 
     /// Get all node versions for all nodes.

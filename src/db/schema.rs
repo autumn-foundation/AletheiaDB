@@ -14,19 +14,6 @@ use crate::core::temporal::Timestamp;
 use crate::db::AletheiaDB;
 use std::collections::{BTreeMap, BTreeSet};
 
-/// Safety cap on the number of ever-versioned entities [`AletheiaDB::schema_as_of`]
-/// will reconstruct in a single call, applied independently to nodes and edges.
-///
-/// Without a cap, `schema_as_of` would be an unbounded
-/// O(all-ever-versioned entities x average delta-chain length) scan on any
-/// database with substantial bi-temporal history -- directly at odds with
-/// this tool being advertised (in the MCP tool manifest) as a cheap,
-/// call-it-first discovery primitive. When the actual population exceeds
-/// this cap, the scan is truncated to a deterministic set (the `cap`
-/// smallest IDs) and [`GraphSchema::sampled`] is set to `true`; per this
-/// feature's disclosure requirement, sampling must never happen silently.
-const MAX_SCHEMA_AS_OF_ENTITIES: usize = 50_000;
-
 /// Resolve an interned label/key to an owned `String`, falling back to empty
 /// if the interner entry is somehow missing (cannot happen in practice,
 /// since labels and property keys are interned before being stored on a
@@ -168,10 +155,11 @@ impl AletheiaDB {
     /// there is no error case for "nothing existed yet".
     ///
     /// The set of candidate entities (every node/edge that has ever had a
-    /// version recorded) is capped at [`MAX_SCHEMA_AS_OF_ENTITIES`] per
-    /// entity kind to keep this call bounded on databases with substantial
-    /// bi-temporal history; when the cap is hit, [`GraphSchema::sampled`] is
-    /// set to `true` to disclose the truncation.
+    /// version recorded) is capped per entity kind (see
+    /// [`crate::config::HistoricalConfigBuilder::max_schema_as_of_entities`],
+    /// default 50,000) to keep this call bounded on databases with
+    /// substantial bi-temporal history; when the cap is hit,
+    /// [`GraphSchema::sampled`] is set to `true` to disclose the truncation.
     ///
     /// # Example
     ///
@@ -195,10 +183,11 @@ impl AletheiaDB {
             let historical = self.historical.read();
             let mut node_ids = historical.versioned_node_ids();
             let mut edge_ids = historical.versioned_edge_ids();
+            let cap = historical.max_schema_as_of_entities();
             drop(historical);
 
-            let node_sampled = cap_ids(&mut node_ids, MAX_SCHEMA_AS_OF_ENTITIES);
-            let edge_sampled = cap_ids(&mut edge_ids, MAX_SCHEMA_AS_OF_ENTITIES);
+            let node_sampled = cap_ids(&mut node_ids, cap);
+            let edge_sampled = cap_ids(&mut edge_ids, cap);
             (node_ids, edge_ids, node_sampled || edge_sampled)
         };
 

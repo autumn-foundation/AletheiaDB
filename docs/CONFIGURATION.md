@@ -195,6 +195,7 @@ max_batch_size = 1000
 | `max_versions_per_entity` | usize | 1000 | Maximum versions to keep per entity |
 | `max_reconstruction_depth` | usize | 100 | Maximum anchor chain depth (max: 1000) |
 | `reconstruction_cache_size` | usize | 10000 | LFU cache size for reconstructed versions |
+| `max_schema_as_of_entities` | usize | 50000 | Per-kind (nodes/edges) cap on entities `AletheiaDB::schema_as_of` reconstructs in one call; truncation is disclosed via `GraphSchema::sampled` |
 
 **Validation:**
 - `max_versions_per_entity` must be > 0

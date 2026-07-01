@@ -372,6 +372,15 @@ pub struct HistoricalConfig {
     /// Maximum number of hot versions to keep per entity before triggering migration.
     /// Default: 1000 (same as max_versions_per_entity)
     pub max_hot_versions: usize,
+
+    /// Safety cap (per entity kind: nodes, edges) on the number of
+    /// ever-versioned entities `AletheiaDB::schema_as_of` will reconstruct
+    /// in a single call. Without a cap, a bi-temporal schema query would be
+    /// an unbounded scan over every entity ever versioned. When the actual
+    /// population exceeds this cap, the scan is truncated to this many
+    /// entities and `GraphSchema::sampled` is set to `true` to disclose it.
+    /// Default: 50000
+    pub max_schema_as_of_entities: usize,
 }
 
 impl Default for HistoricalConfig {
@@ -387,6 +396,8 @@ impl Default for HistoricalConfig {
             cold_storage_path: None,
             migration_age_threshold: std::time::Duration::from_secs(3600), // 1 hour
             max_hot_versions: 1000,
+            max_schema_as_of_entities:
+                crate::storage::historical::DEFAULT_MAX_SCHEMA_AS_OF_ENTITIES,
         }
     }
 }
@@ -579,6 +590,35 @@ impl HistoricalConfigBuilder {
     /// ```
     pub fn max_hot_versions(mut self, max: usize) -> Self {
         self.config.max_hot_versions = max;
+        self
+    }
+
+    /// Set the safety cap (per entity kind) on the number of ever-versioned
+    /// entities `AletheiaDB::schema_as_of` will reconstruct in a single
+    /// call.
+    ///
+    /// Without a cap, a bi-temporal schema query would be an unbounded scan
+    /// over every node/edge ever versioned. When the actual population
+    /// exceeds this cap, the scan is truncated and `GraphSchema::sampled` is
+    /// set to `true` to disclose it -- raise this if you need exhaustive
+    /// bi-temporal schema results on a large history and can afford the
+    /// extra scan cost; lower it to bound worst-case latency more tightly.
+    ///
+    /// # Default
+    ///
+    /// 50000
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use aletheiadb::config::HistoricalConfigBuilder;
+    ///
+    /// let config = HistoricalConfigBuilder::new()
+    ///     .max_schema_as_of_entities(200_000) // allow a larger bi-temporal scan
+    ///     .build();
+    /// ```
+    pub fn max_schema_as_of_entities(mut self, max: usize) -> Self {
+        self.config.max_schema_as_of_entities = max;
         self
     }
 
@@ -1053,6 +1093,7 @@ mod tests {
         assert_eq!(config.reconstruction_cache_size, 10000);
         assert_eq!(config.anchor_interval, 10);
         assert_eq!(config.max_delta_chain, 20);
+        assert_eq!(config.max_schema_as_of_entities, 50_000);
     }
 
     #[test]
@@ -1068,6 +1109,7 @@ mod tests {
             .unwrap()
             .max_delta_chain(10)
             .unwrap()
+            .max_schema_as_of_entities(100_000)
             .build();
 
         assert_eq!(config.max_versions_per_entity, 5000);
@@ -1075,6 +1117,7 @@ mod tests {
         assert_eq!(config.reconstruction_cache_size, 20000);
         assert_eq!(config.anchor_interval, 5);
         assert_eq!(config.max_delta_chain, 10);
+        assert_eq!(config.max_schema_as_of_entities, 100_000);
     }
 
     #[test]
