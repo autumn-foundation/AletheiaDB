@@ -3888,3 +3888,294 @@ mod constraint_tests {
         );
     }
 }
+
+// ============================================================================
+// Schema Discovery Tests (get_schema, Issue #3214)
+// ============================================================================
+
+mod schema_tests {
+    use super::*;
+
+    fn schema_req(
+        as_of_valid_time: Option<&str>,
+        as_of_transaction_time: Option<&str>,
+    ) -> GetSchemaRequest {
+        GetSchemaRequest {
+            as_of_valid_time: as_of_valid_time.map(str::to_string),
+            as_of_transaction_time: as_of_transaction_time.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn test_get_schema_empty_database() {
+        let server = create_test_server();
+
+        let response = server.get_schema(schema_req(None, None));
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+
+        assert!(value.get("error").is_none(), "unexpected error: {value}");
+        assert_eq!(value["node_labels"].as_array().unwrap().len(), 0);
+        assert_eq!(value["edge_types"].as_array().unwrap().len(), 0);
+        assert_eq!(value["total_nodes"], serde_json::json!(0));
+        assert_eq!(value["total_edges"], serde_json::json!(0));
+        assert_eq!(value["sampled"], serde_json::json!(false));
+        assert!(value["as_of"].is_null());
+    }
+
+    #[test]
+    fn test_get_schema_populated_graph() {
+        let server = create_test_server();
+
+        let alice_response = server.create_node(CreateNodeRequest {
+            label: "Person".to_string(),
+            properties: Some({
+                let mut m = HashMap::new();
+                m.insert("name".to_string(), serde_json::json!("Alice"));
+                m
+            }),
+        });
+        let alice: NodeResponse = parse_response(&alice_response).unwrap();
+
+        let bob_response = server.create_node(CreateNodeRequest {
+            label: "Person".to_string(),
+            properties: Some({
+                let mut m = HashMap::new();
+                m.insert("email".to_string(), serde_json::json!("bob@example.com"));
+                m
+            }),
+        });
+        let bob: NodeResponse = parse_response(&bob_response).unwrap();
+
+        server.create_edge(CreateEdgeRequest {
+            source_id: alice.id,
+            target_id: bob.id,
+            label: "KNOWS".to_string(),
+            properties: Some({
+                let mut m = HashMap::new();
+                m.insert("since".to_string(), serde_json::json!(2020));
+                m
+            }),
+        });
+
+        let response = server.get_schema(schema_req(None, None));
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+
+        assert!(value.get("error").is_none(), "unexpected error: {value}");
+
+        let node_labels = value["node_labels"].as_array().unwrap();
+        assert_eq!(node_labels.len(), 1);
+        assert_eq!(node_labels[0]["label"], serde_json::json!("Person"));
+        assert_eq!(node_labels[0]["count"], serde_json::json!(2));
+        let person_keys: Vec<String> = node_labels[0]["property_keys"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(person_keys, vec!["email".to_string(), "name".to_string()]);
+
+        let edge_types = value["edge_types"].as_array().unwrap();
+        assert_eq!(edge_types.len(), 1);
+        assert_eq!(edge_types[0]["edge_type"], serde_json::json!("KNOWS"));
+        assert_eq!(edge_types[0]["count"], serde_json::json!(1));
+        assert_eq!(edge_types[0]["property_keys"], serde_json::json!(["since"]));
+
+        assert_eq!(value["total_nodes"], serde_json::json!(2));
+        assert_eq!(value["total_edges"], serde_json::json!(1));
+        assert_eq!(value["sampled"], serde_json::json!(false));
+        assert!(value["as_of"].is_null());
+    }
+
+    #[test]
+    fn test_get_schema_invalid_timestamp() {
+        let server = create_test_server();
+
+        let response = server.get_schema(schema_req(Some("not-a-timestamp"), None));
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+
+        assert!(value.get("error").is_some());
+    }
+
+    /// AC: with only `as_of_valid_time` set, `as_of_transaction_time`
+    /// defaults to "now" -- so a node created (and thus recorded) right now
+    /// is visible, since "now" covers both "the fact is valid as of
+    /// as_of_valid_time" (explicit) and "it was recorded by now" (default).
+    #[test]
+    fn test_get_schema_only_valid_time_set_defaults_transaction_time_to_now() {
+        let server = create_test_server();
+
+        server.create_node(CreateNodeRequest {
+            label: "Report".to_string(),
+            properties: None,
+        });
+
+        let now_micros = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_micros() as i64;
+
+        let response = server.get_schema(schema_req(Some(&now_micros.to_string()), None));
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+
+        assert!(value.get("error").is_none(), "unexpected error: {value}");
+        assert!(!value["as_of"].is_null(), "temporal branch must be taken");
+        let labels: Vec<String> = value["node_labels"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|l| l["label"].as_str().unwrap().to_string())
+            .collect();
+        assert!(
+            labels.contains(&"Report".to_string()),
+            "Report should be visible: valid_time=now (explicit), transaction_time defaults to now: {labels:?}"
+        );
+    }
+
+    /// AC: with only `as_of_transaction_time` set, `as_of_valid_time`
+    /// defaults to "now" -- so a node created (and thus recorded) right now
+    /// is visible.
+    #[test]
+    fn test_get_schema_only_transaction_time_set_defaults_valid_time_to_now() {
+        let server = create_test_server();
+
+        server.create_node(CreateNodeRequest {
+            label: "Invoice".to_string(),
+            properties: None,
+        });
+
+        let now_micros = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_micros() as i64;
+
+        let response = server.get_schema(schema_req(None, Some(&now_micros.to_string())));
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+
+        assert!(value.get("error").is_none(), "unexpected error: {value}");
+        assert!(!value["as_of"].is_null(), "temporal branch must be taken");
+        let labels: Vec<String> = value["node_labels"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|l| l["label"].as_str().unwrap().to_string())
+            .collect();
+        assert!(
+            labels.contains(&"Invoice".to_string()),
+            "Invoice should be visible: transaction_time=now (explicit), valid_time defaults to now: {labels:?}"
+        );
+    }
+
+    #[test]
+    fn test_get_schema_as_of_label_absent_before_first_write() {
+        let server = create_test_server();
+
+        // Schema as of the Unix epoch — well before any writes — must be empty.
+        let before = server.get_schema(schema_req(Some("0"), Some("0")));
+        let before_value: serde_json::Value = serde_json::from_str(&before).unwrap();
+        assert!(before_value.get("error").is_none());
+        assert_eq!(before_value["node_labels"].as_array().unwrap().len(), 0);
+
+        // Create a node now.
+        server.create_node(CreateNodeRequest {
+            label: "Gadget".to_string(),
+            properties: None,
+        });
+
+        // Still as of the epoch: "Gadget" must remain absent (recorded later).
+        let still_before = server.get_schema(schema_req(Some("0"), Some("0")));
+        let still_before_value: serde_json::Value = serde_json::from_str(&still_before).unwrap();
+        assert!(still_before_value.get("error").is_none());
+        let labels: Vec<String> = still_before_value["node_labels"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|l| l["label"].as_str().unwrap().to_string())
+            .collect();
+        assert!(
+            !labels.contains(&"Gadget".to_string()),
+            "Gadget should be absent as of the epoch: {labels:?}"
+        );
+
+        // Current-state schema (no as_of) must include it.
+        let now = server.get_schema(schema_req(None, None));
+        let now_value: serde_json::Value = serde_json::from_str(&now).unwrap();
+        let now_labels: Vec<String> = now_value["node_labels"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|l| l["label"].as_str().unwrap().to_string())
+            .collect();
+        assert!(now_labels.contains(&"Gadget".to_string()));
+    }
+
+    #[test]
+    fn test_get_schema_registered_in_tool_list() {
+        let server = create_test_server();
+        let tools = server.list_tools_for_test();
+        assert!(
+            tools.iter().any(|name| name == "get_schema"),
+            "get_schema must be registered in the tools manifest: {tools:?}"
+        );
+    }
+
+    /// AC: "Counts in the summary match the results of the corresponding
+    /// count_nodes / count_edges calls for each label/type."
+    #[test]
+    fn test_get_schema_counts_match_count_nodes_and_count_edges_tools() {
+        let server = create_test_server();
+
+        for _ in 0..3 {
+            server.create_node(CreateNodeRequest {
+                label: "Person".to_string(),
+                properties: None,
+            });
+        }
+        for _ in 0..2 {
+            server.create_node(CreateNodeRequest {
+                label: "Company".to_string(),
+                properties: None,
+            });
+        }
+        let n1: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            label: "Person".to_string(),
+            properties: None,
+        }))
+        .unwrap();
+        let n2: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            label: "Company".to_string(),
+            properties: None,
+        }))
+        .unwrap();
+        server.create_edge(CreateEdgeRequest {
+            source_id: n1.id,
+            target_id: n2.id,
+            label: "WORKS_AT".to_string(),
+            properties: None,
+        });
+
+        let schema_value: serde_json::Value =
+            serde_json::from_str(&server.get_schema(schema_req(None, None))).unwrap();
+
+        // Per-label node counts must match the count_nodes tool filtered by that label.
+        for label_entry in schema_value["node_labels"].as_array().unwrap() {
+            let label = label_entry["label"].as_str().unwrap();
+            let count_response = server.count_nodes(CountNodesRequest {
+                label: Some(label.to_string()),
+            });
+            let count_value: serde_json::Value = serde_json::from_str(&count_response).unwrap();
+            assert_eq!(
+                label_entry["count"], count_value["count"],
+                "schema count for label '{label}' must match count_nodes(label='{label}')"
+            );
+        }
+
+        // Total node/edge counts must match the unfiltered count_nodes/count_edges tools.
+        let total_nodes: serde_json::Value =
+            serde_json::from_str(&server.count_nodes(CountNodesRequest { label: None })).unwrap();
+        assert_eq!(schema_value["total_nodes"], total_nodes["count"]);
+
+        let total_edges: serde_json::Value =
+            serde_json::from_str(&server.count_edges(CountEdgesRequest { label: None })).unwrap();
+        assert_eq!(schema_value["total_edges"], total_edges["count"]);
+    }
+}

@@ -24,6 +24,7 @@
 //! | **Vector** | `find_similar`, `enable_vector_index` | Semantic similarity search |
 //! | **Temporal** | `get_node_at_time`, `get_node_history` | Time-travel queries and history |
 //! | **Hybrid** | `hybrid_query` | Combined graph + vector + temporal queries |
+//! | **Schema** | `get_schema` | Discover node labels, edge types, and property keys (optionally bi-temporal) |
 //!
 //! # Examples
 //!
@@ -581,6 +582,18 @@ impl AletheiaMcpServer {
         ))
     }
 
+    /// Discover the graph's schema: distinct node labels and edge types,
+    /// their counts, and the property keys observed on each.
+    ///
+    /// With no `as_of_*` fields, returns the current-state schema. With
+    /// either field set, returns the schema as it existed at that bi-temporal
+    /// instant. Never errors on an empty database.
+    pub fn get_schema(&self, req: GetSchemaRequest) -> String {
+        Self::extract_text(self.handle_get_schema(
+            serde_json::to_value(req).expect("request serialization should not fail"),
+        ))
+    }
+
     /// List graph-wide changes within a transaction-time window.
     ///
     /// Enumerates the nodes and edges whose versions were committed in `[tx_from, tx_to)`,
@@ -655,9 +668,7 @@ impl AletheiaMcpServer {
     // ========================================================================
 
     fn interned_to_string(&self, interned: crate::core::InternedString) -> String {
-        GLOBAL_INTERNER
-            .resolve_with(interned, |s| s.to_string())
-            .unwrap_or_else(|| format!("<unknown:{}>", interned.as_u32()))
+        GLOBAL_INTERNER.resolve_or_else(interned, || format!("<unknown:{}>", interned.as_u32()))
     }
 
     fn node_to_response(&self, node: &crate::core::Node) -> NodeResponse {
@@ -2114,6 +2125,81 @@ impl AletheiaMcpServer {
         })
     }
 
+    /// Convert a [`crate::db::GraphSchema`] into its JSON wire representation.
+    fn schema_to_json(&self, schema: &crate::db::GraphSchema) -> serde_json::Value {
+        let node_labels: Vec<serde_json::Value> = schema
+            .node_labels
+            .iter()
+            .map(|l| {
+                json!({
+                    "label": l.label,
+                    "count": l.count,
+                    "property_keys": l.property_keys,
+                })
+            })
+            .collect();
+
+        let edge_types: Vec<serde_json::Value> = schema
+            .edge_types
+            .iter()
+            .map(|e| {
+                json!({
+                    "edge_type": e.edge_type,
+                    "count": e.count,
+                    "property_keys": e.property_keys,
+                })
+            })
+            .collect();
+
+        json!({
+            "node_labels": node_labels,
+            "edge_types": edge_types,
+            "total_nodes": schema.total_nodes,
+            "total_edges": schema.total_edges,
+            "sampled": schema.sampled,
+            "as_of": schema.as_of.map(|instant| json!({
+                "valid_time": time::to_iso8601(instant.valid_time),
+                "transaction_time": time::to_iso8601(instant.transaction_time),
+            })),
+        })
+    }
+
+    /// Discover the graph's schema (labels, edge types, property keys),
+    /// optionally as of a bi-temporal instant. Never errors on an empty
+    /// database — returns a well-formed, empty summary instead.
+    fn handle_get_schema(&self, args: serde_json::Value) -> CallToolResult {
+        let req: GetSchemaRequest = match serde_json::from_value(args) {
+            Ok(r) => r,
+            Err(e) => return self.error_json(&format!("Invalid arguments: {}", e)),
+        };
+
+        let valid_time = match self.parse_opt_timestamp("as_of_valid_time", &req.as_of_valid_time) {
+            Ok(t) => t,
+            Err(result) => return result,
+        };
+        let transaction_time =
+            match self.parse_opt_timestamp("as_of_transaction_time", &req.as_of_transaction_time) {
+                Ok(t) => t,
+                Err(result) => return result,
+            };
+
+        let result = match (valid_time, transaction_time) {
+            (None, None) => self.db.schema(),
+            // Only one axis supplied: default the other to "now", matching
+            // db.get_node_at_valid_time()/get_node_at_transaction_time()'s
+            // independent-dimension convention (see GetSchemaRequest's doc
+            // comment for the exact semantics this produces).
+            (vt, tt) => self
+                .db
+                .schema_as_of(vt.unwrap_or_else(time::now), tt.unwrap_or_else(time::now)),
+        };
+
+        match result {
+            Ok(schema) => self.success_json(self.schema_to_json(&schema)),
+            Err(e) => self.error_json(&e.to_string()),
+        }
+    }
+
     fn handle_hybrid_query(&self, args: serde_json::Value) -> CallToolResult {
         let req: HybridQueryRequest = match serde_json::from_value(args) {
             Ok(r) => r,
@@ -2917,6 +3003,17 @@ fn tool_definitions() -> Vec<Tool> {
              unsupported_construct, invalid_params, runtime_error) so callers can self-correct.",
             make_input_schema::<QueryRequest>(),
         ),
+        Tool::new(
+            "get_schema",
+            "Discover the graph's schema: distinct node labels and edge/relationship types, \
+             each with an entity count and the union of property keys observed. Call this \
+             first to learn what labels/edge-types/properties exist before guessing names in \
+             list_nodes, traverse, or query. Accepts optional as_of_valid_time / \
+             as_of_transaction_time (ISO 8601 or microseconds since epoch) to return the \
+             schema as it existed at that bi-temporal instant instead of the current state. \
+             Returns a well-formed empty summary on an empty database, never an error.",
+            make_input_schema::<GetSchemaRequest>(),
+        ),
     ]
 }
 
@@ -2989,6 +3086,7 @@ impl ServerHandler for AletheiaMcpServer {
             "diff_edge_versions" => self.handle_diff_edge_versions(args),
             "hybrid_query" => self.handle_hybrid_query(args),
             "query" => self.handle_query(args),
+            "get_schema" => self.handle_get_schema(args),
             _ => self.error_json(&format!("Unknown tool: {}", request.name)),
         };
 

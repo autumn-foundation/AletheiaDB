@@ -2323,3 +2323,209 @@ fn test_write_commit_error_counts_once() {
     let snapshot = crate::observability::METRICS.snapshot();
     assert_eq!(snapshot.error_transaction_total, 1);
 }
+
+// ==================== Schema Discovery Tests (Issue #3214) ====================
+
+#[test]
+fn test_schema_empty_database() {
+    let db = AletheiaDB::new().unwrap();
+
+    let schema = db.schema().unwrap();
+
+    assert!(schema.node_labels.is_empty());
+    assert!(schema.edge_types.is_empty());
+    assert_eq!(schema.total_nodes, 0);
+    assert_eq!(schema.total_edges, 0);
+    assert!(!schema.sampled);
+    assert!(schema.as_of.is_none());
+}
+
+#[test]
+fn test_schema_populated_graph_labels_and_edge_types() {
+    let db = AletheiaDB::new().unwrap();
+
+    let alice = db
+        .create_node(
+            "Person",
+            PropertyMapBuilder::new()
+                .insert("name", "Alice")
+                .insert("age", 30i64)
+                .build(),
+        )
+        .unwrap();
+    let bob = db
+        .create_node(
+            "Person",
+            PropertyMapBuilder::new()
+                .insert("name", "Bob")
+                .insert("email", "bob@example.com")
+                .build(),
+        )
+        .unwrap();
+    let acme = db
+        .create_node(
+            "Company",
+            PropertyMapBuilder::new().insert("name", "Acme").build(),
+        )
+        .unwrap();
+
+    db.create_edge(
+        alice,
+        bob,
+        "KNOWS",
+        PropertyMapBuilder::new().insert("since", 2020i64).build(),
+    )
+    .unwrap();
+    db.create_edge(
+        alice,
+        acme,
+        "WORKS_AT",
+        PropertyMapBuilder::new().insert("role", "Engineer").build(),
+    )
+    .unwrap();
+
+    let schema = db.schema().unwrap();
+
+    // Sorted by label.
+    assert_eq!(schema.node_labels.len(), 2);
+    assert_eq!(schema.node_labels[0].label, "Company");
+    assert_eq!(schema.node_labels[0].count, 1);
+    assert_eq!(schema.node_labels[1].label, "Person");
+    assert_eq!(schema.node_labels[1].count, 2);
+
+    // Property keys are the union across all nodes of that label, sorted.
+    assert_eq!(
+        schema.node_labels[1].property_keys,
+        vec!["age".to_string(), "email".to_string(), "name".to_string()]
+    );
+
+    assert_eq!(schema.edge_types.len(), 2);
+    assert_eq!(schema.edge_types[0].edge_type, "KNOWS");
+    assert_eq!(schema.edge_types[0].count, 1);
+    assert_eq!(
+        schema.edge_types[0].property_keys,
+        vec!["since".to_string()]
+    );
+    assert_eq!(schema.edge_types[1].edge_type, "WORKS_AT");
+    assert_eq!(schema.edge_types[1].count, 1);
+    assert_eq!(schema.edge_types[1].property_keys, vec!["role".to_string()]);
+
+    assert_eq!(schema.total_nodes, 3);
+    assert_eq!(schema.total_edges, 2);
+    assert!(!schema.sampled);
+}
+
+#[test]
+fn test_schema_counts_are_consistent_with_scan_and_count_nodes() {
+    let db = AletheiaDB::new().unwrap();
+
+    for _ in 0..3 {
+        db.create_node("Person", PropertyMapBuilder::new().build())
+            .unwrap();
+    }
+    for _ in 0..2 {
+        db.create_node("Company", PropertyMapBuilder::new().build())
+            .unwrap();
+    }
+
+    let schema = db.schema().unwrap();
+
+    let mut total_from_labels = 0;
+    for label_schema in &schema.node_labels {
+        let scanned = db.scan_nodes_by_label(&label_schema.label).count();
+        assert_eq!(
+            label_schema.count, scanned,
+            "count for label '{}' must match scan_nodes_by_label",
+            label_schema.label
+        );
+        total_from_labels += label_schema.count;
+    }
+    assert_eq!(total_from_labels, db.node_count());
+    assert_eq!(schema.total_nodes, db.node_count());
+}
+
+#[test]
+fn test_schema_as_of_label_absent_before_first_write() {
+    use crate::core::hlc::HybridTimestamp;
+
+    let db = AletheiaDB::new().unwrap();
+
+    let jan_1 = HybridTimestamp::new(1_704_067_200_000_000, 0).unwrap(); // 2024-01-01
+    let jan_15 = HybridTimestamp::new(1_705_276_800_000_000, 0).unwrap(); // 2024-01-15
+
+    // Before any writes have happened, the schema is empty.
+    let before_any_writes = db.schema_as_of(jan_1, jan_1).unwrap();
+    assert!(before_any_writes.node_labels.is_empty());
+
+    // Create a "Widget" node with valid_time = Jan 1, but the write is recorded
+    // (transaction time) at the real current time, which is after jan_15.
+    db.write(|tx| {
+        tx.create_node_with_valid_time(
+            "Widget",
+            PropertyMapBuilder::new().insert("name", "Thing").build(),
+            Some(jan_1),
+        )
+    })
+    .unwrap();
+
+    // As of Jan 15 transaction time (before the write was actually recorded),
+    // the "Widget" label must still be absent.
+    let still_absent = db.schema_as_of(jan_15, jan_1).unwrap();
+    assert!(
+        still_absent.node_labels.iter().all(|l| l.label != "Widget"),
+        "label should be absent before its first write was committed"
+    );
+
+    // As of the current bi-temporal instant, the label is present.
+    let now = crate::core::temporal::time::now();
+    let present = db.schema_as_of(now, now).unwrap();
+    let widget = present
+        .node_labels
+        .iter()
+        .find(|l| l.label == "Widget")
+        .expect("Widget label should be present as of now");
+    assert_eq!(widget.count, 1);
+
+    assert_eq!(
+        present.as_of,
+        Some(crate::db::schema::SchemaInstant {
+            valid_time: now,
+            transaction_time: now,
+        })
+    );
+}
+
+#[test]
+fn test_schema_as_of_entity_cap_is_configurable_and_discloses_sampling() {
+    use crate::config::{AletheiaDBConfig, HistoricalConfigBuilder};
+    use crate::test_utils::create_test_db_with_config;
+
+    // A tiny cap makes the truncation path cheap to exercise directly,
+    // instead of needing 50,000+ real entities to hit the default cap.
+    let config = AletheiaDBConfig::builder()
+        .historical(
+            HistoricalConfigBuilder::new()
+                .max_schema_as_of_entities(2)
+                .build(),
+        )
+        .build();
+    let (_temp_dir, db) = create_test_db_with_config(config).unwrap();
+
+    for _ in 0..3 {
+        db.create_node("Widget", PropertyMapBuilder::new().build())
+            .unwrap();
+    }
+
+    let now = crate::core::temporal::time::now();
+    let schema = db.schema_as_of(now, now).unwrap();
+    assert!(
+        schema.sampled,
+        "a cap of 2 with 3 versioned nodes must disclose truncation"
+    );
+
+    // schema() (current state) is always exhaustive, regardless of the
+    // schema_as_of() cap.
+    let current = db.schema().unwrap();
+    assert!(!current.sampled);
+    assert_eq!(current.total_nodes, 3);
+}

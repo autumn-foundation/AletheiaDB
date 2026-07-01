@@ -47,6 +47,12 @@ pub const DEFAULT_MAX_VERSION_AGE_MS: i64 = 365 * 24 * 60 * 60 * 1000;
 ///   Still provides infinite loop protection while enabling practical use cases.
 pub const MAX_RECONSTRUCTION_DEPTH: usize = 1_000;
 
+/// Default safety cap on the number of ever-versioned entities
+/// `AletheiaDB::schema_as_of` will reconstruct in a single call, per entity
+/// kind (nodes/edges). See [`crate::config::HistoricalConfigBuilder::max_schema_as_of_entities`]
+/// to override this.
+pub const DEFAULT_MAX_SCHEMA_AS_OF_ENTITIES: usize = 50_000;
+
 /// Retention policy for version history (DoS protection).
 ///
 /// Controls how many versions are kept and for how long to prevent
@@ -171,6 +177,9 @@ pub struct HistoricalStorage {
     retention_policy: RetentionPolicy,
     /// Maximum depth for version reconstruction (DoS protection)
     max_reconstruction_depth: usize,
+    /// Safety cap (per entity kind) on the number of ever-versioned entities
+    /// `AletheiaDB::schema_as_of` will reconstruct in a single call.
+    max_schema_as_of_entities: usize,
     // All FastHashMap fields below use IdentityHasher to avoid SipHash overhead
     // on integer keys (NodeId, EdgeId, VersionId are all newtypes over u64).
     /// All node versions, indexed by version ID.
@@ -329,6 +338,7 @@ impl HistoricalStorage {
 
         // Override max_reconstruction_depth from config
         storage.max_reconstruction_depth = config.max_reconstruction_depth;
+        storage.max_schema_as_of_entities = config.max_schema_as_of_entities;
 
         storage
     }
@@ -358,6 +368,7 @@ impl HistoricalStorage {
             config,
             retention_policy,
             max_reconstruction_depth: MAX_RECONSTRUCTION_DEPTH,
+            max_schema_as_of_entities: DEFAULT_MAX_SCHEMA_AS_OF_ENTITIES,
             node_versions: FastHashMap::default(),
             edge_versions: FastHashMap::default(),
             node_version_heads: FastHashMap::default(),
@@ -1322,6 +1333,32 @@ impl HistoricalStorage {
         self.edge_version_heads.get(&edge_id).copied()
     }
 
+    /// Get the IDs of every node that has ever had at least one version recorded.
+    ///
+    /// Used for bi-temporal schema discovery (Issue #3214): the caller reconstructs
+    /// each ID at a given instant via [`AletheiaDB::get_nodes_at_time`](crate::db::AletheiaDB::get_nodes_at_time)
+    /// to determine which were visible.
+    pub fn versioned_node_ids(&self) -> Vec<NodeId> {
+        self.node_version_heads.keys().copied().collect()
+    }
+
+    /// Get the IDs of every edge that has ever had at least one version recorded.
+    ///
+    /// Used for bi-temporal schema discovery (Issue #3214): the caller reconstructs
+    /// each ID at a given instant via [`AletheiaDB::get_edges_at_time`](crate::db::AletheiaDB::get_edges_at_time)
+    /// to determine which were visible.
+    pub fn versioned_edge_ids(&self) -> Vec<EdgeId> {
+        self.edge_version_heads.keys().copied().collect()
+    }
+
+    /// Get the configured safety cap (per entity kind) on the number of
+    /// ever-versioned entities `AletheiaDB::schema_as_of` will reconstruct
+    /// in a single call. See
+    /// [`crate::config::HistoricalConfigBuilder::max_schema_as_of_entities`].
+    pub fn max_schema_as_of_entities(&self) -> usize {
+        self.max_schema_as_of_entities
+    }
+
     /// Get all node versions for all nodes.
     ///
     /// Returns a map of NodeId -> `Vec<NodeVersion>` for recovery property tests.
@@ -2034,15 +2071,20 @@ impl HistoricalStorage {
                             version.id,
                         ))
                     }
-                    Err(_e) => {
+                    Err(e) => {
+                        // Per this method's documented contract, a reconstruction failure
+                        // is a systemic failure (corruption, not "didn't exist") and must
+                        // propagate as `Err`, not be silently downgraded to `None` --
+                        // otherwise callers can't distinguish "not visible at this instant"
+                        // from "we couldn't tell".
                         #[cfg(feature = "observability")]
                         tracing::error!(
                             version_id = %version_id,
                             node_id = %node_id,
-                            error = %_e,
+                            error = %e,
                             "Property reconstruction failed in batch query"
                         );
-                        None
+                        return Err(e);
                     }
                 }
             } else {
@@ -2090,15 +2132,17 @@ impl HistoricalStorage {
                             version.id,
                         ))
                     }
-                    Err(_e) => {
+                    Err(e) => {
+                        // See the matching comment in get_nodes_at_time: reconstruction
+                        // failures are systemic and must propagate, not become `None`.
                         #[cfg(feature = "observability")]
                         tracing::error!(
                             version_id = %version_id,
                             edge_id = %edge_id,
-                            error = %_e,
+                            error = %e,
                             "Property reconstruction failed in batch query"
                         );
-                        None
+                        return Err(e);
                     }
                 }
             } else {
