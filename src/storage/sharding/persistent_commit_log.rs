@@ -769,8 +769,10 @@ impl PersistentCommitLog {
         let file = File::open(path)
             .map_err(|e| CommitLogError::IoError(format!("Failed to open log: {}", e)))?;
 
+        // Use file size to pre-allocate buffer capacity to avoid reallocations.
+        let capacity = file.metadata().map(|m| m.len() as usize).unwrap_or(0);
         let mut reader = BufReader::new(file);
-        let mut buffer = Vec::new();
+        let mut buffer = Vec::with_capacity(capacity);
 
         reader
             .read_to_end(&mut buffer)

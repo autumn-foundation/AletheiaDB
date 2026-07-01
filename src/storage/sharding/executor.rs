@@ -349,11 +349,16 @@ impl<C: ShardClient> QueryExecutor<C> {
         for shard_id in target_shards.as_ref() {
             if start.elapsed() >= timeout {
                 // Timed out before sending to all shards
-                let pending: Vec<_> = target_shards
-                    .iter()
-                    .filter(|s| !results.iter().any(|r| r.shard_id == **s))
-                    .copied()
-                    .collect();
+                // Avoid O(N^2) complexity and intermediate allocations
+                // by using a HashSet for responded shards and pre-allocating the pending vector.
+                let responded_shards: std::collections::HashSet<_> = results.iter().map(|r| r.shard_id).collect();
+                let mut pending = Vec::with_capacity(target_shards.len().saturating_sub(responded_shards.len()));
+                pending.extend(
+                    target_shards
+                        .iter()
+                        .filter(|&s| !responded_shards.contains(s))
+                        .copied()
+                );
 
                 if self.config.allow_partial_results && !results.is_empty() {
                     break;
