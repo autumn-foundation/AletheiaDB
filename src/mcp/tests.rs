@@ -154,6 +154,7 @@ mod node_tests {
         // Now get it
         let get_req = GetNodeRequest {
             node_id: created.id,
+            include_vectors: None,
         };
 
         let get_response = server.get_node(get_req);
@@ -171,7 +172,10 @@ mod node_tests {
     fn test_get_nonexistent_node() {
         let server = create_test_server();
 
-        let req = GetNodeRequest { node_id: 999999 };
+        let req = GetNodeRequest {
+            node_id: 999999,
+            include_vectors: None,
+        };
 
         let response = server.get_node(req);
         let value: serde_json::Value = serde_json::from_str(&response).unwrap();
@@ -242,7 +246,10 @@ mod node_tests {
         assert_eq!(value.get("success"), Some(&serde_json::json!(true)));
 
         // Verify it's gone
-        let get_req = GetNodeRequest { node_id };
+        let get_req = GetNodeRequest {
+            node_id,
+            include_vectors: None,
+        };
         let get_response = server.get_node(get_req);
         let get_value: serde_json::Value = serde_json::from_str(&get_response).unwrap();
 
@@ -276,8 +283,11 @@ mod node_tests {
         assert_eq!(value.get("connected_edges"), Some(&serde_json::json!(1)));
 
         // The node must still exist (refused, not destroyed).
-        let get_value: serde_json::Value =
-            serde_json::from_str(&server.get_node(GetNodeRequest { node_id: source_id })).unwrap();
+        let get_value: serde_json::Value = serde_json::from_str(&server.get_node(GetNodeRequest {
+            node_id: source_id,
+            include_vectors: None,
+        }))
+        .unwrap();
         assert!(get_value.get("error").is_none());
     }
 
@@ -320,8 +330,11 @@ mod node_tests {
         assert_eq!(value.get("detached"), Some(&serde_json::json!(true)));
 
         // Node is gone.
-        let get_value: serde_json::Value =
-            serde_json::from_str(&server.get_node(GetNodeRequest { node_id: source_id })).unwrap();
+        let get_value: serde_json::Value = serde_json::from_str(&server.get_node(GetNodeRequest {
+            node_id: source_id,
+            include_vectors: None,
+        }))
+        .unwrap();
         assert!(get_value.get("error").is_some());
 
         // Traversal from the surviving neighbors yields no dangling endpoint to
@@ -330,6 +343,7 @@ mod node_tests {
             serde_json::from_str(&server.get_outgoing_edges(GetOutgoingEdgesRequest {
                 node_id: third_id,
                 label: None,
+                include_vectors: None,
             }))
             .unwrap();
         let edges = outgoing.get("edges").and_then(|e| e.as_array());
@@ -342,6 +356,7 @@ mod node_tests {
             serde_json::from_str(&server.get_incoming_edges(GetIncomingEdgesRequest {
                 node_id: target_id,
                 label: None,
+                include_vectors: None,
             }))
             .unwrap();
         let in_edges = incoming.get("edges").and_then(|e| e.as_array());
@@ -394,6 +409,7 @@ mod node_tests {
             property_value: None,
             limit: None,
             offset: None,
+            include_vectors: None,
         };
 
         let response = server.list_nodes(list_req);
@@ -428,6 +444,7 @@ mod node_tests {
             property_value: None,
             limit: None,
             offset: None,
+            include_vectors: None,
         };
 
         let response = server.list_nodes(list_req);
@@ -458,6 +475,7 @@ mod node_tests {
             property_value: None,
             limit: Some(5),
             offset: Some(0),
+            include_vectors: None,
         };
 
         let page1_response = server.list_nodes(page1_req);
@@ -472,6 +490,7 @@ mod node_tests {
             property_value: None,
             limit: Some(5),
             offset: Some(5),
+            include_vectors: None,
         };
 
         let page2_response = server.list_nodes(page2_req);
@@ -632,6 +651,7 @@ mod edge_tests {
 
         let get_response = server.get_edge(GetEdgeRequest {
             edge_id: created.id,
+            include_vectors: None,
         });
         let retrieved: EdgeResponse = parse_response(&get_response).unwrap();
 
@@ -690,6 +710,7 @@ mod edge_tests {
         // Verify it's gone
         let get_response = server.get_edge(GetEdgeRequest {
             edge_id: created.id,
+            include_vectors: None,
         });
         let get_value: serde_json::Value = serde_json::from_str(&get_response).unwrap();
         assert!(get_value.get("error").is_some());
@@ -727,6 +748,7 @@ mod edge_tests {
             label: None,
             limit: None,
             offset: None,
+            include_vectors: None,
         });
         let value: serde_json::Value = serde_json::from_str(&list_response).unwrap();
         // Verify total_count is 2 (edges exist, even if not returned)
@@ -786,6 +808,7 @@ mod edge_tests {
         let response = server.get_outgoing_edges(GetOutgoingEdgesRequest {
             node_id: n1,
             label: None,
+            include_vectors: None,
         });
         let value: serde_json::Value = serde_json::from_str(&response).unwrap();
         assert_eq!(value.get("count"), Some(&serde_json::json!(2)));
@@ -794,6 +817,7 @@ mod edge_tests {
         let response = server.get_outgoing_edges(GetOutgoingEdgesRequest {
             node_id: n1,
             label: Some("KNOWS".to_string()),
+            include_vectors: None,
         });
         let value: serde_json::Value = serde_json::from_str(&response).unwrap();
         assert_eq!(value.get("count"), Some(&serde_json::json!(1)));
@@ -828,6 +852,7 @@ mod edge_tests {
         let response = server.get_incoming_edges(GetIncomingEdgesRequest {
             node_id: n2,
             label: None,
+            include_vectors: None,
         });
         let value: serde_json::Value = serde_json::from_str(&response).unwrap();
         assert_eq!(value.get("count"), Some(&serde_json::json!(2)));
@@ -882,6 +907,7 @@ mod traversal_tests {
             direction: Some("outgoing".to_string()),
             depth: Some(1),
             limit: None,
+            include_vectors: None,
         });
 
         let value: serde_json::Value = serde_json::from_str(&response).unwrap();
@@ -901,6 +927,7 @@ mod traversal_tests {
             direction: Some("outgoing".to_string()),
             depth: Some(3),
             limit: None,
+            include_vectors: None,
         });
 
         let value: serde_json::Value = serde_json::from_str(&response).unwrap();
@@ -921,6 +948,7 @@ mod traversal_tests {
             direction: Some("incoming".to_string()),
             depth: Some(1),
             limit: None,
+            include_vectors: None,
         });
 
         let value: serde_json::Value = serde_json::from_str(&response).unwrap();
@@ -939,6 +967,7 @@ mod traversal_tests {
             direction: None,
             depth: Some(3),
             limit: Some(2),
+            include_vectors: None,
         });
 
         let value: serde_json::Value = serde_json::from_str(&response).unwrap();
@@ -1000,6 +1029,7 @@ mod vector_tests {
             property_name: "embedding".to_string(),
             embedding: vec![0.1, 0.2, 0.3, 0.4],
             k: Some(5),
+            include_vectors: None,
         });
 
         let value: serde_json::Value = serde_json::from_str(&response).unwrap();
@@ -1042,6 +1072,7 @@ mod vector_tests {
             property_name: "embedding".to_string(),
             embedding: vec![0.1, 0.2, 0.3, 0.4],
             k: Some(3),
+            include_vectors: None,
         });
 
         let value: serde_json::Value = serde_json::from_str(&response).unwrap();
@@ -1296,6 +1327,7 @@ mod hybrid_tests {
             transaction_time: None,
             filter_label: None,
             limit: Some(10),
+            include_vectors: None,
         });
 
         let value: serde_json::Value = serde_json::from_str(&response).unwrap();
@@ -1333,6 +1365,7 @@ mod hybrid_tests {
             transaction_time: None,
             filter_label: Some("Person".to_string()),
             limit: Some(100),
+            include_vectors: None,
         });
 
         let value: serde_json::Value = serde_json::from_str(&response).unwrap();
@@ -1363,6 +1396,7 @@ mod hybrid_tests {
             transaction_time: None,
             filter_label: None,
             limit: None,
+            include_vectors: None,
         });
 
         let value: serde_json::Value = serde_json::from_str(&response).unwrap();
@@ -1405,6 +1439,7 @@ mod hybrid_tests {
             transaction_time: None,
             filter_label: None,
             limit: Some(10),
+            include_vectors: None,
         });
 
         let value: serde_json::Value = serde_json::from_str(&response).unwrap();
@@ -1504,6 +1539,7 @@ mod coverage_tests {
             property_name: "embedding".to_string(),
             embedding: vec![0.1, 0.2, 0.3], // Wrong: 3 dimensions instead of 4
             k: Some(5),
+            include_vectors: None,
         });
 
         // Should get dimension mismatch error
@@ -1543,6 +1579,7 @@ mod coverage_tests {
             limit: None,
             valid_time: None,
             transaction_time: None,
+            include_vectors: None,
         });
 
         // Should get dimension mismatch error
@@ -1690,7 +1727,8 @@ mod coverage_tests {
             property_key: None,
             property_value: None,
             limit: Some(10),
-            offset: Some(100_000), // Very large offset, should be capped to MAX_PAGINATION_OFFSET
+            offset: Some(100_000), // Very large offset, should be capped to MAX_PAGINATION_OFFSET,
+            include_vectors: None,
         });
 
         // Should not error, just return empty results due to offset being beyond data
@@ -1737,6 +1775,7 @@ mod coverage_tests {
             depth: Some(100), // Very large depth, should be capped
             direction: Some("outgoing".to_string()),
             limit: Some(50),
+            include_vectors: None,
         });
 
         // Should not error
@@ -1823,7 +1862,10 @@ mod error_handling_tests {
     fn test_get_edge_nonexistent() {
         let server = create_test_server();
 
-        let req = GetEdgeRequest { edge_id: 999999 };
+        let req = GetEdgeRequest {
+            edge_id: 999999,
+            include_vectors: None,
+        };
 
         let response = server.get_edge(req);
         let value: serde_json::Value = serde_json::from_str(&response).unwrap();
@@ -1996,7 +2038,8 @@ mod vector_distance_tests {
         let response = server.find_similar(FindSimilarRequest {
             property_name: "embedding".to_string(),
             embedding: vec![0.1, 0.2, 0.3, 0.4],
-            k: Some(10000), // Much larger than MAX_VECTOR_K
+            k: Some(10000), // Much larger than MAX_VECTOR_K,
+            include_vectors: None,
         });
 
         // Should not error (k gets capped internally)
@@ -2250,6 +2293,7 @@ mod traversal_extended_tests {
             direction: Some("both".to_string()),
             depth: Some(1),
             limit: None,
+            include_vectors: None,
         });
 
         let value: serde_json::Value = serde_json::from_str(&response).unwrap();
@@ -2279,6 +2323,7 @@ mod traversal_extended_tests {
             direction: None,
             depth: Some(3),
             limit: None,
+            include_vectors: None,
         });
 
         let value: serde_json::Value = serde_json::from_str(&response).unwrap();
@@ -2318,6 +2363,7 @@ mod traversal_extended_tests {
             direction: None, // Default to outgoing
             depth: Some(1),
             limit: None,
+            include_vectors: None,
         });
 
         let value: serde_json::Value = serde_json::from_str(&response).unwrap();
@@ -2362,6 +2408,7 @@ mod traversal_extended_tests {
             direction: Some("outgoing".to_string()),
             depth: Some(1),
             limit: Some(5),
+            include_vectors: None,
         });
 
         let value: serde_json::Value = serde_json::from_str(&response).unwrap();
@@ -2409,6 +2456,7 @@ mod hybrid_extended_tests {
             transaction_time: Some(now_micros.to_string()),
             filter_label: None,
             limit: Some(10),
+            include_vectors: None,
         });
 
         let value: serde_json::Value = serde_json::from_str(&response).unwrap();
@@ -2462,6 +2510,7 @@ mod hybrid_extended_tests {
             transaction_time: None,
             filter_label: None,
             limit: Some(10),
+            include_vectors: None,
         });
 
         let value: serde_json::Value = serde_json::from_str(&response).unwrap();
@@ -2493,6 +2542,7 @@ mod hybrid_extended_tests {
             transaction_time: None,
             filter_label: None,
             limit: None,
+            include_vectors: None,
         });
 
         let value: serde_json::Value = serde_json::from_str(&response).unwrap();
@@ -2526,6 +2576,7 @@ mod hybrid_extended_tests {
             transaction_time: Some("bad-tx-time".to_string()),
             filter_label: None,
             limit: None,
+            include_vectors: None,
         });
 
         let value: serde_json::Value = serde_json::from_str(&response).unwrap();
@@ -2564,7 +2615,8 @@ mod hybrid_extended_tests {
             valid_time: None,
             transaction_time: None,
             filter_label: Some("LimitTest".to_string()),
-            limit: Some(100000), // Much larger than MAX_RESULT_LIMIT
+            limit: Some(100000), // Much larger than MAX_RESULT_LIMIT,
+            include_vectors: None,
         });
 
         let value: serde_json::Value = serde_json::from_str(&response).unwrap();
@@ -2591,6 +2643,7 @@ mod hybrid_extended_tests {
             transaction_time: None,
             filter_label: None,
             limit: None,
+            include_vectors: None,
         });
 
         let value: serde_json::Value = serde_json::from_str(&response).unwrap();
@@ -2646,6 +2699,7 @@ mod edge_extended_tests {
             label: Some("KNOWS".to_string()),
             limit: None,
             offset: None,
+            include_vectors: None,
         });
 
         let value: serde_json::Value = serde_json::from_str(&response).unwrap();
@@ -2736,6 +2790,7 @@ mod edge_extended_tests {
         let response = server.get_incoming_edges(GetIncomingEdgesRequest {
             node_id: n2.id,
             label: Some("KNOWS".to_string()),
+            include_vectors: None,
         });
 
         let value: serde_json::Value = serde_json::from_str(&response).unwrap();
@@ -2773,6 +2828,7 @@ mod list_nodes_extended_tests {
             property_value: None,
             limit: None,
             offset: None,
+            include_vectors: None,
         });
 
         let value: serde_json::Value = serde_json::from_str(&response).unwrap();
@@ -2807,6 +2863,7 @@ mod list_nodes_extended_tests {
             property_value: None,
             limit: Some(100000), // Much larger than MAX_RESULT_LIMIT
             offset: Some(0),
+            include_vectors: None,
         });
 
         let value: serde_json::Value = serde_json::from_str(&response).unwrap();
@@ -2858,6 +2915,7 @@ mod list_nodes_extended_tests {
             property_value: Some(serde_json::json!("Alice")),
             limit: None,
             offset: None,
+            include_vectors: None,
         });
 
         let value: serde_json::Value = serde_json::from_str(&response).unwrap();
@@ -2892,6 +2950,7 @@ mod list_nodes_extended_tests {
             property_value: Some(serde_json::json!(42)),
             limit: None,
             offset: None,
+            include_vectors: None,
         });
 
         let value: serde_json::Value = serde_json::from_str(&response).unwrap();
@@ -2922,6 +2981,7 @@ mod list_nodes_extended_tests {
             property_value: Some(serde_json::json!("blue")),
             limit: None,
             offset: None,
+            include_vectors: None,
         });
 
         let value: serde_json::Value = serde_json::from_str(&response).unwrap();
@@ -2940,6 +3000,7 @@ mod list_nodes_extended_tests {
             property_value: Some(serde_json::json!("Alice")),
             limit: None,
             offset: None,
+            include_vectors: None,
         });
 
         let value: serde_json::Value = serde_json::from_str(&response).unwrap();
@@ -2960,6 +3021,7 @@ mod list_nodes_extended_tests {
             property_value: None,
             limit: None,
             offset: None,
+            include_vectors: None,
         });
 
         let value: serde_json::Value = serde_json::from_str(&response).unwrap();
@@ -2992,6 +3054,7 @@ mod list_nodes_extended_tests {
             property_value: Some(serde_json::json!("active")),
             limit: Some(2),
             offset: Some(0),
+            include_vectors: None,
         });
 
         let value: serde_json::Value = serde_json::from_str(&response).unwrap();
@@ -3005,6 +3068,7 @@ mod list_nodes_extended_tests {
             property_value: Some(serde_json::json!("active")),
             limit: Some(2),
             offset: Some(2),
+            include_vectors: None,
         });
 
         let value: serde_json::Value = serde_json::from_str(&response).unwrap();
@@ -3018,6 +3082,7 @@ mod list_nodes_extended_tests {
             property_value: Some(serde_json::json!("active")),
             limit: Some(2),
             offset: Some(4),
+            include_vectors: None,
         });
 
         let value: serde_json::Value = serde_json::from_str(&response).unwrap();
@@ -4177,5 +4242,581 @@ mod schema_tests {
         let total_edges: serde_json::Value =
             serde_json::from_str(&server.count_edges(CountEdgesRequest { label: None })).unwrap();
         assert_eq!(schema_value["total_edges"], total_edges["count"]);
+    }
+}
+
+// ============================================================================
+// Vector Elision Tests (Issue #3220)
+// ============================================================================
+//
+// MCP read responses elide vector/embedding properties by default (replacing
+// them with a `{type, dim, elided:true}` descriptor) to protect LLM context.
+// `include_vectors: true` is the escape hatch that restores the full float
+// array. These tests pin that contract across every affected tool.
+
+mod vector_elision_tests {
+    use super::*;
+    use crate::core::vector::SparseVec;
+
+    fn embedding_of(dim: usize) -> Vec<f32> {
+        (0..dim).map(|i| (i as f32) * 0.001 + 0.1).collect()
+    }
+
+    fn create_node_with_embedding(server: &AletheiaMcpServer, dim: usize) -> (u64, Vec<f32>) {
+        let embedding = embedding_of(dim);
+        let mut props = HashMap::new();
+        props.insert(
+            "embedding".to_string(),
+            serde_json::json!(embedding.clone()),
+        );
+        let response = server.create_node(CreateNodeRequest {
+            label: "Document".to_string(),
+            properties: Some(props),
+        });
+        let node: NodeResponse = parse_response(&response).expect("Failed to create node");
+        (node.id, embedding)
+    }
+
+    #[test]
+    fn test_get_node_elides_vector_by_default() {
+        let server = create_test_server();
+        let (node_id, _embedding) = create_node_with_embedding(&server, 1536);
+
+        let response = server.get_node(GetNodeRequest {
+            node_id,
+            include_vectors: None,
+        });
+
+        assert!(
+            response.len() < 500,
+            "elided response should be small, was {} bytes: {response}",
+            response.len()
+        );
+
+        let node: NodeResponse = parse_response(&response).expect("Failed to get node");
+        assert_eq!(
+            node.properties.get("embedding"),
+            Some(&serde_json::json!({"type": "vector", "dim": 1536, "elided": true}))
+        );
+    }
+
+    #[test]
+    fn test_get_node_include_vectors_true_is_lossless() {
+        let server = create_test_server();
+        let (node_id, embedding) = create_node_with_embedding(&server, 1536);
+
+        let response = server.get_node(GetNodeRequest {
+            node_id,
+            include_vectors: Some(true),
+        });
+
+        let node: NodeResponse = parse_response(&response).expect("Failed to get node");
+        let returned = node.properties.get("embedding").unwrap();
+        let returned_array = returned.as_array().expect("embedding should be an array");
+        assert_eq!(returned_array.len(), 1536);
+
+        let returned_floats: Vec<f32> = returned_array
+            .iter()
+            .map(|v| v.as_f64().unwrap() as f32)
+            .collect();
+        assert_eq!(returned_floats, embedding);
+    }
+
+    #[test]
+    fn test_list_nodes_elides_vectors_by_default() {
+        let server = create_test_server();
+        for _ in 0..3 {
+            create_node_with_embedding(&server, 8);
+        }
+
+        let response = server.list_nodes(ListNodesRequest {
+            label: Some("Document".to_string()),
+            property_key: None,
+            property_value: None,
+            limit: None,
+            offset: None,
+            include_vectors: None,
+        });
+
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        let nodes = value["nodes"].as_array().expect("nodes array");
+        assert_eq!(nodes.len(), 3);
+        for node in nodes {
+            assert_eq!(
+                node["properties"]["embedding"],
+                serde_json::json!({"type": "vector", "dim": 8, "elided": true})
+            );
+        }
+
+        // include_vectors: true restores the full arrays.
+        let response = server.list_nodes(ListNodesRequest {
+            label: Some("Document".to_string()),
+            property_key: None,
+            property_value: None,
+            limit: None,
+            offset: None,
+            include_vectors: Some(true),
+        });
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        for node in value["nodes"].as_array().unwrap() {
+            let arr = node["properties"]["embedding"]
+                .as_array()
+                .expect("embedding should be a full array");
+            assert_eq!(arr.len(), 8);
+        }
+    }
+
+    #[test]
+    fn test_get_edge_and_outgoing_incoming_edges_elide_vectors_by_default() {
+        let server = create_test_server();
+        let n1: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            label: "Person".to_string(),
+            properties: None,
+        }))
+        .unwrap();
+        let n2: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            label: "Person".to_string(),
+            properties: None,
+        }))
+        .unwrap();
+
+        let embedding = embedding_of(6);
+        let mut props = HashMap::new();
+        props.insert("embedding".to_string(), serde_json::json!(embedding));
+        let edge_response = server.create_edge(CreateEdgeRequest {
+            source_id: n1.id,
+            target_id: n2.id,
+            label: "SIMILAR_TO".to_string(),
+            properties: Some(props),
+        });
+        let edge: EdgeResponse = parse_response(&edge_response).unwrap();
+
+        // get_edge
+        let response = server.get_edge(GetEdgeRequest {
+            edge_id: edge.id,
+            include_vectors: None,
+        });
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(
+            value["properties"]["embedding"],
+            serde_json::json!({"type": "vector", "dim": 6, "elided": true})
+        );
+
+        let response = server.get_edge(GetEdgeRequest {
+            edge_id: edge.id,
+            include_vectors: Some(true),
+        });
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(
+            value["properties"]["embedding"].as_array().unwrap().len(),
+            6
+        );
+
+        // get_outgoing_edges
+        let response = server.get_outgoing_edges(GetOutgoingEdgesRequest {
+            node_id: n1.id,
+            label: None,
+            include_vectors: None,
+        });
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(
+            value["edges"][0]["properties"]["embedding"],
+            serde_json::json!({"type": "vector", "dim": 6, "elided": true})
+        );
+
+        let response = server.get_outgoing_edges(GetOutgoingEdgesRequest {
+            node_id: n1.id,
+            label: None,
+            include_vectors: Some(true),
+        });
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(
+            value["edges"][0]["properties"]["embedding"]
+                .as_array()
+                .unwrap()
+                .len(),
+            6
+        );
+
+        // get_incoming_edges
+        let response = server.get_incoming_edges(GetIncomingEdgesRequest {
+            node_id: n2.id,
+            label: None,
+            include_vectors: None,
+        });
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(
+            value["edges"][0]["properties"]["embedding"],
+            serde_json::json!({"type": "vector", "dim": 6, "elided": true})
+        );
+
+        let response = server.get_incoming_edges(GetIncomingEdgesRequest {
+            node_id: n2.id,
+            label: None,
+            include_vectors: Some(true),
+        });
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(
+            value["edges"][0]["properties"]["embedding"]
+                .as_array()
+                .unwrap()
+                .len(),
+            6
+        );
+    }
+
+    #[test]
+    fn test_traverse_elides_vectors_by_default() {
+        let server = create_test_server();
+        let (n1_id, _) = create_node_with_embedding(&server, 5);
+        let (n2_id, _) = create_node_with_embedding(&server, 5);
+        server.create_edge(CreateEdgeRequest {
+            source_id: n1_id,
+            target_id: n2_id,
+            label: "NEXT".to_string(),
+            properties: None,
+        });
+
+        let response = server.traverse(TraverseRequest {
+            start_node_id: n1_id,
+            edge_label: "NEXT".to_string(),
+            direction: None,
+            depth: Some(1),
+            limit: None,
+            include_vectors: None,
+        });
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        let results = value["results"].as_array().expect("results array");
+        assert_eq!(results.len(), 1);
+        assert_eq!(
+            results[0]["node"]["properties"]["embedding"],
+            serde_json::json!({"type": "vector", "dim": 5, "elided": true})
+        );
+
+        let response = server.traverse(TraverseRequest {
+            start_node_id: n1_id,
+            edge_label: "NEXT".to_string(),
+            direction: None,
+            depth: Some(1),
+            limit: None,
+            include_vectors: Some(true),
+        });
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        let results = value["results"].as_array().unwrap();
+        assert_eq!(
+            results[0]["node"]["properties"]["embedding"]
+                .as_array()
+                .unwrap()
+                .len(),
+            5
+        );
+    }
+
+    #[test]
+    fn test_find_similar_elides_vectors_but_keeps_score() {
+        let server = create_test_server();
+        server.enable_vector_index(EnableVectorIndexRequest {
+            property_name: "embedding".to_string(),
+            dimensions: 4,
+            distance_metric: Some("cosine".to_string()),
+        });
+
+        for i in 0..3 {
+            let mut props = HashMap::new();
+            props.insert(
+                "embedding".to_string(),
+                serde_json::json!([
+                    (i as f32) * 0.1,
+                    (i as f32) * 0.2,
+                    (i as f32) * 0.3,
+                    (i as f32) * 0.4,
+                ]),
+            );
+            server.create_node(CreateNodeRequest {
+                label: "Document".to_string(),
+                properties: Some(props),
+            });
+        }
+
+        let response = server.find_similar(FindSimilarRequest {
+            property_name: "embedding".to_string(),
+            embedding: vec![0.1, 0.2, 0.3, 0.4],
+            k: Some(3),
+            include_vectors: None,
+        });
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        let results = value["results"].as_array().expect("results array");
+        assert!(!results.is_empty());
+        for result in results {
+            assert!(result.get("score").and_then(|s| s.as_f64()).is_some());
+            assert_eq!(
+                result["node"]["properties"]["embedding"],
+                serde_json::json!({"type": "vector", "dim": 4, "elided": true})
+            );
+        }
+
+        let response = server.find_similar(FindSimilarRequest {
+            property_name: "embedding".to_string(),
+            embedding: vec![0.1, 0.2, 0.3, 0.4],
+            k: Some(3),
+            include_vectors: Some(true),
+        });
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        for result in value["results"].as_array().unwrap() {
+            assert!(result.get("score").and_then(|s| s.as_f64()).is_some());
+            assert_eq!(
+                result["node"]["properties"]["embedding"]
+                    .as_array()
+                    .unwrap()
+                    .len(),
+                4
+            );
+        }
+    }
+
+    #[test]
+    fn test_hybrid_query_vector_first_elides_vectors_but_keeps_similarity_score() {
+        let server = create_test_server();
+        server.enable_vector_index(EnableVectorIndexRequest {
+            property_name: "embedding".to_string(),
+            dimensions: 4,
+            distance_metric: Some("cosine".to_string()),
+        });
+        for i in 0..3 {
+            let mut props = HashMap::new();
+            props.insert(
+                "embedding".to_string(),
+                serde_json::json!([
+                    (i as f32) * 0.1,
+                    (i as f32) * 0.2,
+                    (i as f32) * 0.3,
+                    (i as f32) * 0.4,
+                ]),
+            );
+            server.create_node(CreateNodeRequest {
+                label: "Document".to_string(),
+                properties: Some(props),
+            });
+        }
+
+        let response = server.hybrid_query(HybridQueryRequest {
+            start_node_id: None,
+            traverse_edge: None,
+            traverse_depth: None,
+            vector_property: Some("embedding".to_string()),
+            query_embedding: Some(vec![0.1, 0.2, 0.3, 0.4]),
+            top_k: Some(3),
+            valid_time: None,
+            transaction_time: None,
+            filter_label: None,
+            limit: None,
+            include_vectors: None,
+        });
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        let results = value["results"].as_array().expect("results array");
+        assert!(!results.is_empty());
+        for result in results {
+            assert!(result.get("similarity_score").is_some());
+            assert_eq!(
+                result["node"]["properties"]["embedding"],
+                serde_json::json!({"type": "vector", "dim": 4, "elided": true})
+            );
+        }
+
+        let response = server.hybrid_query(HybridQueryRequest {
+            start_node_id: None,
+            traverse_edge: None,
+            traverse_depth: None,
+            vector_property: Some("embedding".to_string()),
+            query_embedding: Some(vec![0.1, 0.2, 0.3, 0.4]),
+            top_k: Some(3),
+            valid_time: None,
+            transaction_time: None,
+            filter_label: None,
+            limit: None,
+            include_vectors: Some(true),
+        });
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        for result in value["results"].as_array().unwrap() {
+            assert_eq!(
+                result["node"]["properties"]["embedding"]
+                    .as_array()
+                    .unwrap()
+                    .len(),
+                4
+            );
+        }
+    }
+
+    #[test]
+    fn test_hybrid_query_graph_first_elides_vectors_but_keeps_similarity_score() {
+        let server = create_test_server();
+        let (n1_id, _) = create_node_with_embedding(&server, 4);
+        let (n2_id, _) = create_node_with_embedding(&server, 4);
+        server.create_edge(CreateEdgeRequest {
+            source_id: n1_id,
+            target_id: n2_id,
+            label: "NEXT".to_string(),
+            properties: None,
+        });
+
+        let response = server.hybrid_query(HybridQueryRequest {
+            start_node_id: Some(n1_id),
+            traverse_edge: Some("NEXT".to_string()),
+            traverse_depth: Some(1),
+            vector_property: None,
+            query_embedding: None,
+            top_k: None,
+            valid_time: None,
+            transaction_time: None,
+            filter_label: None,
+            limit: None,
+            include_vectors: None,
+        });
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        let results = value["results"].as_array().expect("results array");
+        assert_eq!(results.len(), 1);
+        assert_eq!(
+            results[0]["node"]["properties"]["embedding"],
+            serde_json::json!({"type": "vector", "dim": 4, "elided": true})
+        );
+
+        let response = server.hybrid_query(HybridQueryRequest {
+            start_node_id: Some(n1_id),
+            traverse_edge: Some("NEXT".to_string()),
+            traverse_depth: Some(1),
+            vector_property: None,
+            query_embedding: None,
+            top_k: None,
+            valid_time: None,
+            transaction_time: None,
+            filter_label: None,
+            limit: None,
+            include_vectors: Some(true),
+        });
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(
+            value["results"][0]["node"]["properties"]["embedding"]
+                .as_array()
+                .unwrap()
+                .len(),
+            4
+        );
+    }
+
+    #[test]
+    fn test_sparse_vector_elided_by_default_with_dim_and_nnz() {
+        let server = create_test_server();
+
+        let sparse = SparseVec::new(vec![1, 4], vec![1.5, 2.3], 10).expect("valid sparse vector");
+        let props = PropertyMapBuilder::new()
+            .try_insert("embedding", sparse)
+            .expect("insert sparse vector")
+            .build();
+        let node_id = server
+            .db()
+            .create_node("Document", props)
+            .expect("create node with sparse vector");
+
+        let response = server.get_node(GetNodeRequest {
+            node_id: node_id.as_u64(),
+            include_vectors: None,
+        });
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(
+            value["properties"]["embedding"],
+            serde_json::json!({"type": "sparse_vector", "dim": 10, "nnz": 2, "elided": true})
+        );
+
+        let response = server.get_node(GetNodeRequest {
+            node_id: node_id.as_u64(),
+            include_vectors: Some(true),
+        });
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(
+            value["properties"]["embedding"]["indices"],
+            serde_json::json!([1, 4])
+        );
+        assert_eq!(
+            value["properties"]["embedding"]["values"],
+            serde_json::json!([1.5, 2.3])
+        );
+    }
+
+    #[test]
+    fn test_create_node_and_update_node_always_return_full_vectors() {
+        let server = create_test_server();
+
+        let mut props = HashMap::new();
+        props.insert(
+            "embedding".to_string(),
+            serde_json::json!([0.1, 0.2, 0.3, 0.4]),
+        );
+        let response = server.create_node(CreateNodeRequest {
+            label: "Document".to_string(),
+            properties: Some(props),
+        });
+        let node: NodeResponse = parse_response(&response).expect("Failed to create node");
+        assert_eq!(
+            node.properties
+                .get("embedding")
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .len(),
+            4
+        );
+
+        let mut new_props = HashMap::new();
+        new_props.insert(
+            "embedding".to_string(),
+            serde_json::json!([0.5, 0.6, 0.7, 0.8]),
+        );
+        let update_response = server.update_node(UpdateNodeRequest {
+            node_id: node.id,
+            properties: new_props,
+        });
+        let updated: NodeResponse =
+            parse_response(&update_response).expect("Failed to update node");
+        let updated_embedding = updated
+            .properties
+            .get("embedding")
+            .unwrap()
+            .as_array()
+            .unwrap();
+        assert_eq!(updated_embedding.len(), 4);
+        assert_eq!(updated_embedding[0].as_f64().unwrap() as f32, 0.5);
+    }
+
+    #[test]
+    fn test_non_vector_properties_unaffected_by_include_vectors_flag() {
+        let server = create_test_server();
+
+        let mut props = HashMap::new();
+        props.insert("name".to_string(), serde_json::json!("Alice"));
+        props.insert("age".to_string(), serde_json::json!(30));
+        props.insert("active".to_string(), serde_json::json!(true));
+        props.insert("nickname".to_string(), serde_json::Value::Null);
+        props.insert("tags".to_string(), serde_json::json!(["a", "b", "c"]));
+
+        let response = server.create_node(CreateNodeRequest {
+            label: "Person".to_string(),
+            properties: Some(props),
+        });
+        let node: NodeResponse = parse_response(&response).expect("Failed to create node");
+
+        let variants = [None, Some(false), Some(true)];
+        let mut previous: Option<HashMap<String, serde_json::Value>> = None;
+        for include_vectors in variants {
+            let response = server.get_node(GetNodeRequest {
+                node_id: node.id,
+                include_vectors,
+            });
+            let fetched: NodeResponse = parse_response(&response).expect("Failed to get node");
+            if let Some(prev) = &previous {
+                assert_eq!(prev, &fetched.properties);
+            }
+            previous = Some(fetched.properties);
+        }
     }
 }

@@ -17,6 +17,14 @@ pub struct GetNodeRequest {
     /// The unique identifier of the node (u64).
     #[schemars(description = "The unique identifier of the node")]
     pub node_id: u64,
+
+    /// When true, return full vector/embedding properties instead of the
+    /// elided descriptor (default: false).
+    #[schemars(
+        description = "When true, return full vector/embedding float arrays instead of the elided \
+                       {type, dim, elided:true} descriptor (default: false)"
+    )]
+    pub include_vectors: Option<bool>,
 }
 
 /// Request to create a new node.
@@ -103,6 +111,14 @@ pub struct ListNodesRequest {
     /// Number of nodes to skip (for pagination).
     #[schemars(description = "Number of nodes to skip (for pagination)")]
     pub offset: Option<usize>,
+
+    /// When true, return full vector/embedding properties instead of the
+    /// elided descriptor (default: false).
+    #[schemars(
+        description = "When true, return full vector/embedding float arrays instead of the elided \
+                       {type, dim, elided:true} descriptor (default: false)"
+    )]
+    pub include_vectors: Option<bool>,
 }
 
 /// Request to count nodes.
@@ -123,6 +139,14 @@ pub struct GetEdgeRequest {
     /// The unique identifier of the edge (u64).
     #[schemars(description = "The unique identifier of the edge")]
     pub edge_id: u64,
+
+    /// When true, return full vector/embedding properties instead of the
+    /// elided descriptor (default: false).
+    #[schemars(
+        description = "When true, return full vector/embedding float arrays instead of the elided \
+                       {type, dim, elided:true} descriptor (default: false)"
+    )]
+    pub include_vectors: Option<bool>,
 }
 
 /// Request to create a new edge between nodes.
@@ -179,6 +203,14 @@ pub struct ListEdgesRequest {
     /// Number of edges to skip (for pagination).
     #[schemars(description = "Number of edges to skip (for pagination)")]
     pub offset: Option<usize>,
+
+    /// When true, return full vector/embedding properties instead of the
+    /// elided descriptor (default: false).
+    #[schemars(
+        description = "When true, return full vector/embedding float arrays instead of the elided \
+                       {type, dim, elided:true} descriptor (default: false)"
+    )]
+    pub include_vectors: Option<bool>,
 }
 
 /// Request to count edges.
@@ -199,6 +231,14 @@ pub struct GetOutgoingEdgesRequest {
     /// Filter by edge label (optional).
     #[schemars(description = "Filter by edge label (optional)")]
     pub label: Option<String>,
+
+    /// When true, return full vector/embedding properties instead of the
+    /// elided descriptor (default: false).
+    #[schemars(
+        description = "When true, return full vector/embedding float arrays instead of the elided \
+                       {type, dim, elided:true} descriptor (default: false)"
+    )]
+    pub include_vectors: Option<bool>,
 }
 
 /// Request to get incoming edges to a node.
@@ -211,6 +251,14 @@ pub struct GetIncomingEdgesRequest {
     /// Filter by edge label (optional).
     #[schemars(description = "Filter by edge label (optional)")]
     pub label: Option<String>,
+
+    /// When true, return full vector/embedding properties instead of the
+    /// elided descriptor (default: false).
+    #[schemars(
+        description = "When true, return full vector/embedding float arrays instead of the elided \
+                       {type, dim, elided:true} descriptor (default: false)"
+    )]
+    pub include_vectors: Option<bool>,
 }
 
 // ============================================================================
@@ -241,6 +289,14 @@ pub struct TraverseRequest {
     /// Maximum number of results to return.
     #[schemars(description = "Maximum number of results to return (default: 100)")]
     pub limit: Option<usize>,
+
+    /// When true, return full vector/embedding properties instead of the
+    /// elided descriptor (default: false).
+    #[schemars(
+        description = "When true, return full vector/embedding float arrays instead of the elided \
+                       {type, dim, elided:true} descriptor (default: false)"
+    )]
+    pub include_vectors: Option<bool>,
 }
 
 // ============================================================================
@@ -263,6 +319,16 @@ pub struct FindSimilarRequest {
     /// Number of similar results to return.
     #[schemars(description = "Number of similar results to return (default: 10)")]
     pub k: Option<usize>,
+
+    /// When true, return full vector/embedding properties instead of the
+    /// elided descriptor (default: false). Does not affect the similarity
+    /// `score`, which is always returned in full.
+    #[schemars(
+        description = "When true, return full vector/embedding float arrays instead of the elided \
+                       {type, dim, elided:true} descriptor (default: false). The similarity score \
+                       is always returned in full regardless of this flag."
+    )]
+    pub include_vectors: Option<bool>,
 }
 
 /// Request to enable vector indexing on a property.
@@ -548,6 +614,16 @@ pub struct HybridQueryRequest {
     /// Maximum number of results.
     #[schemars(description = "Maximum number of results (default: 100)")]
     pub limit: Option<usize>,
+
+    /// When true, return full vector/embedding properties instead of the
+    /// elided descriptor (default: false). Does not affect the
+    /// `similarity_score`, which is always returned in full.
+    #[schemars(
+        description = "When true, return full vector/embedding float arrays instead of the elided \
+                       {type, dim, elided:true} descriptor (default: false). The similarity_score \
+                       is always returned in full regardless of this flag."
+    )]
+    pub include_vectors: Option<bool>,
 }
 
 // ============================================================================
