@@ -255,20 +255,12 @@ mod tests {
         ));
 
         let result = rule.apply(&plan, &stats).unwrap();
-        assert!(result.is_some());
 
-        let new_plan = result.unwrap();
-        // Should be Limit(5, Scan) - no nested limit
-        match &new_plan.root {
-            LogicalOp::Unary {
-                op: UnaryOp::Limit(n),
-                input,
-            } => {
-                assert_eq!(*n, 5);
-                assert!(matches!(input.as_ref(), LogicalOp::Scan(_)));
-            }
-            _ => panic!("Expected Limit"),
-        }
+        let expected_plan = LogicalPlan::new(LogicalOp::unary(
+            UnaryOp::Limit(5),
+            LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(1).unwrap()])),
+        ));
+        assert_eq!(result, Some(expected_plan));
     }
 
     #[test]
@@ -290,25 +282,19 @@ mod tests {
         ));
 
         let result = rule.apply(&plan, &stats).unwrap();
-        assert!(result.is_some());
 
-        let new_plan = result.unwrap();
-        // VectorRank should have top_k=5 now
-        match &new_plan.root {
-            LogicalOp::Unary {
-                op: UnaryOp::Limit(_),
-                input,
-            } => match input.as_ref() {
-                LogicalOp::Unary {
-                    op: UnaryOp::VectorRank { top_k, .. },
-                    ..
-                } => {
-                    assert_eq!(*top_k, Some(5));
-                }
-                _ => panic!("Expected VectorRank"),
-            },
-            _ => panic!("Expected Limit"),
-        }
+        let expected_plan = LogicalPlan::new(LogicalOp::unary(
+            UnaryOp::Limit(5),
+            LogicalOp::unary(
+                UnaryOp::VectorRank {
+                    embedding: Arc::from([0.1f32; 4].as_slice()),
+                    top_k: Some(5),
+                    property_key: None,
+                },
+                LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(1).unwrap()])),
+            ),
+        ));
+        assert_eq!(result, Some(expected_plan));
     }
 
     #[test]
@@ -405,7 +391,16 @@ mod tests {
             LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(2).unwrap()])),
         ));
         let result = rule.apply(&plan, &stats).unwrap();
-        assert!(result.is_some());
+
+        let expected_plan = LogicalPlan::new(LogicalOp::binary(
+            crate::query::plan::BinaryOp::Union,
+            LogicalOp::unary(
+                UnaryOp::Limit(10),
+                LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(1).unwrap()])),
+            ),
+            LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(2).unwrap()])),
+        ));
+        assert_eq!(result, Some(expected_plan));
     }
 
     #[test]
@@ -507,15 +502,12 @@ mod sentry_tests {
         let (new_op, changed) = rule.push_down(&op, Some(5)).unwrap();
 
         assert!(changed, "Expected limit to shrink from 10 to 5");
-        if let LogicalOp::Unary {
-            op: UnaryOp::Limit(n),
-            ..
-        } = new_op
-        {
-            assert_eq!(n, 5);
-        } else {
-            panic!("Expected limit");
-        }
+
+        let expected_op = LogicalOp::unary(
+            UnaryOp::Limit(5),
+            LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(1).unwrap()])),
+        );
+        assert_eq!(new_op, expected_op);
     }
 
     #[test]
