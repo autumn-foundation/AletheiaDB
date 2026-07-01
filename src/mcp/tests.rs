@@ -4737,10 +4737,13 @@ mod vector_elision_tests {
             value["properties"]["embedding"]["indices"],
             serde_json::json!([1, 4])
         );
-        assert_eq!(
-            value["properties"]["embedding"]["values"],
-            serde_json::json!([1.5, 2.3])
-        );
+        let values: Vec<f32> = value["properties"]["embedding"]["values"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_f64().unwrap() as f32)
+            .collect();
+        assert_eq!(values, vec![1.5_f32, 2.3_f32]);
     }
 
     #[test]

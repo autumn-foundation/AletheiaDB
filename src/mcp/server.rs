@@ -723,7 +723,11 @@ impl AletheiaMcpServer {
             ),
             PropertyValue::Vector(v) => {
                 if include_vectors {
-                    serde_json::Value::Array(v.iter().map(|f| json!(*f)).collect())
+                    serde_json::Value::Array(
+                        v.iter()
+                            .map(|&f| serde_json::Value::from(f as f64))
+                            .collect(),
+                    )
                 } else {
                     json!({"type": "vector", "dim": v.len(), "elided": true})
                 }
