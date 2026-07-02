@@ -120,12 +120,17 @@ string-concatenate vectors into the query text.
 ## Recording facts at a specific valid time
 
 `query` is read-only, but the structured write tools it complements
-(`create_node`, `create_edge`, `update_node`, `update_edge`) accept an
-optional `valid_time` field so an LLM ingesting a document can record the
-fact's real-world effective date in the **same** tool call, instead of
-defaulting to "now". This closes the loop with the bi-temporal `AS OF`
-queries above: without it, every LLM-ingested fact would collapse to "valid
-as of now" and `AS OF VALID_TIME` reads over that data would be wrong.
+(`create_node`, `create_edge`, `update_node`, `update_edge`, `delete_node`,
+`delete_edge`) accept an optional `valid_time` field so an LLM ingesting a
+document can record the fact's real-world effective date — including when it
+stopped being true — in the **same** tool call, instead of defaulting to
+"now". This closes the loop with the bi-temporal `AS OF` queries above:
+without it, every LLM-ingested fact would collapse to "valid as of now" and
+`AS OF VALID_TIME` reads over that data would be wrong.
+
+On `delete_node`, `valid_time` is not supported together with `detach: true`
+(cascade delete does not support backdating): pass one or the other, or
+delete the connected edges individually with `valid_time` first.
 
 **Example:** an LLM reads a filing and extracts "Alice became CEO on
 2021-03-01," today.

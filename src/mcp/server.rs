@@ -1049,6 +1049,19 @@ impl AletheiaMcpServer {
 
         let detach = req.detach.unwrap_or(false);
 
+        let valid_from = match self.parse_opt_timestamp("valid_time", &req.valid_time) {
+            Ok(v) => v,
+            Err(result) => return result,
+        };
+
+        if detach && valid_from.is_some() {
+            return self.error_json(
+                "valid_time is not supported together with detach:true; cascade delete does \
+                 not support backdating. Delete the connected edges individually with \
+                 valid_time, or omit valid_time to cascade-delete at now.",
+            );
+        }
+
         // Perform the connected-edge check and the deletion inside a single write
         // transaction so they observe the same storage state. Splitting the count
         // into a separate transaction (or doing it before opening one) leaves a
@@ -1081,7 +1094,7 @@ impl AletheiaMcpServer {
                 })
             } else {
                 // No connected edges: a plain delete cannot orphan anything.
-                tx.delete_node(node_id)?;
+                tx.delete_node_with_valid_time(node_id, valid_from)?;
                 Ok(Outcome::Deleted { edges_removed: 0 })
             }
         });
@@ -1395,7 +1408,15 @@ impl AletheiaMcpServer {
             Err(e) => return self.error_json(&e.to_string()),
         };
 
-        match self.db.write(|tx| tx.delete_edge(edge_id)) {
+        let valid_from = match self.parse_opt_timestamp("valid_time", &req.valid_time) {
+            Ok(v) => v,
+            Err(result) => return result,
+        };
+
+        match self
+            .db
+            .write(|tx| tx.delete_edge_with_valid_time(edge_id, valid_from))
+        {
             Ok(()) => self.success_json(json!({
                 "success": true,
                 "deleted_edge_id": req.edge_id
@@ -2907,7 +2928,10 @@ fn tool_definitions() -> Vec<Tool> {
             "Delete a node by its ID (safe-by-default). If the node has connected \
                      edges and `detach` is not true, the deletion is refused and the response \
                      reports `connected_edges`. Pass `detach: true` to delete the node together \
-                     with all connected edges; the response then reports `edges_removed`.",
+                     with all connected edges; the response then reports `edges_removed`. \
+                     Optionally pass `valid_time` to record when this fact stopped being true in \
+                     the real world; omit it to default to the transaction time. Not supported \
+                     together with `detach: true` (cascade delete does not support backdating).",
             make_input_schema::<DeleteNodeRequest>(),
         ),
         Tool::new(
@@ -2954,7 +2978,9 @@ fn tool_definitions() -> Vec<Tool> {
         ),
         Tool::new(
             "delete_edge",
-            "Delete an edge by its ID.",
+            "Delete an edge by its ID. Optionally pass `valid_time` to record when this \
+                     relationship stopped being true in the real world; omit it to default to the \
+                     transaction time.",
             make_input_schema::<DeleteEdgeRequest>(),
         ),
         Tool::new(

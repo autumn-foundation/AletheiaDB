@@ -92,6 +92,17 @@ pub struct DeleteNodeRequest {
                        and the response reports the connected edge count so the caller can decide."
     )]
     pub detach: Option<bool>,
+
+    /// Optional valid time: when this fact stopped being true in the real world.
+    #[schemars(
+        description = "Optional valid time: when this fact stopped being true in the real world, \
+                       as an ISO 8601 / RFC 3339 timestamp (e.g., '2024-01-15T10:00:00Z') or integer \
+                       microseconds since epoch. Omit to default to the transaction time (today's \
+                       behavior). Must not precede the node's own creation time. Not supported \
+                       together with detach:true (cascade delete does not support backdating). \
+                       Transaction time is always system-assigned and cannot be set."
+    )]
+    pub valid_time: Option<String>,
 }
 
 /// Request to delete a node and all its connected edges (cascade delete).
@@ -227,6 +238,16 @@ pub struct DeleteEdgeRequest {
     /// The unique identifier of the edge to delete.
     #[schemars(description = "The unique identifier of the edge to delete")]
     pub edge_id: u64,
+
+    /// Optional valid time: when this fact stopped being true in the real world.
+    #[schemars(
+        description = "Optional valid time: when this fact stopped being true in the real world, \
+                       as an ISO 8601 / RFC 3339 timestamp (e.g., '2024-01-15T10:00:00Z') or integer \
+                       microseconds since epoch. Omit to default to the transaction time (today's \
+                       behavior). Must not precede the edge's own creation time. Transaction time \
+                       is always system-assigned and cannot be set."
+    )]
+    pub valid_time: Option<String>,
 }
 
 /// Request to list edges with optional filtering.

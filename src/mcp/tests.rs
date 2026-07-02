@@ -246,6 +246,7 @@ mod node_tests {
         let delete_req = DeleteNodeRequest {
             node_id,
             detach: None,
+            valid_time: None,
         };
 
         let delete_response = server.delete_node(delete_req);
@@ -283,6 +284,7 @@ mod node_tests {
         let delete_response = server.delete_node(DeleteNodeRequest {
             node_id: source_id,
             detach: None,
+            valid_time: None,
         });
         let value: serde_json::Value = serde_json::from_str(&delete_response).unwrap();
 
@@ -334,6 +336,7 @@ mod node_tests {
         let delete_response = server.delete_node(DeleteNodeRequest {
             node_id: source_id,
             detach: Some(true),
+            valid_time: None,
         });
         let value: serde_json::Value = serde_json::from_str(&delete_response).unwrap();
 
@@ -392,6 +395,7 @@ mod node_tests {
         let delete_response = server.delete_node(DeleteNodeRequest {
             node_id: created.id,
             detach: None,
+            valid_time: None,
         });
         let value: serde_json::Value = serde_json::from_str(&delete_response).unwrap();
 
@@ -731,6 +735,7 @@ mod edge_tests {
 
         let delete_response = server.delete_edge(DeleteEdgeRequest {
             edge_id: created.id,
+            valid_time: None,
         });
         let value: serde_json::Value = serde_json::from_str(&delete_response).unwrap();
         assert_eq!(value.get("success"), Some(&serde_json::json!(true)));
@@ -1914,6 +1919,7 @@ mod error_handling_tests {
         let req = DeleteNodeRequest {
             node_id: 999999,
             detach: None,
+            valid_time: None,
         };
 
         let response = server.delete_node(req);
@@ -1957,7 +1963,10 @@ mod error_handling_tests {
     fn test_delete_edge_nonexistent() {
         let server = create_test_server();
 
-        let req = DeleteEdgeRequest { edge_id: 999999 };
+        let req = DeleteEdgeRequest {
+            edge_id: 999999,
+            valid_time: None,
+        };
 
         let response = server.delete_edge(req);
         let value: serde_json::Value = serde_json::from_str(&response).unwrap();
@@ -5268,5 +5277,235 @@ mod valid_time_write_tests {
             fetched.properties.get("strength"),
             Some(&serde_json::json!(9))
         );
+    }
+
+    /// Regression test: `create_edge_with_valid_time` used to be the only one of the six
+    /// `*_with_valid_time` operations that never enforced the 1-year future cap, so an
+    /// edge could silently be created with an arbitrarily-far-future `valid_time`. Mirrors
+    /// `test_create_node_far_future_valid_time_typed_error_surfaced`.
+    #[test]
+    fn test_create_edge_far_future_valid_time_typed_error_surfaced() {
+        let server = create_test_server();
+
+        let n1: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            label: "Person".to_string(),
+            properties: None,
+            valid_time: None,
+        }))
+        .unwrap();
+        let n2: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            label: "Person".to_string(),
+            properties: None,
+            valid_time: None,
+        }))
+        .unwrap();
+
+        let response = server.create_edge(CreateEdgeRequest {
+            source_id: n1.id,
+            target_id: n2.id,
+            label: "KNOWS".to_string(),
+            properties: None,
+            valid_time: Some(rfc3339_hours_from_now(24 * 400)), // > 1 year
+        });
+
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        let error = value.get("error").and_then(|e| e.as_str()).unwrap();
+        assert!(error.contains("too far in future"), "got: {error}");
+        assert_eq!(server.db().edge_count(), 0);
+    }
+
+    /// `delete_node`'s `valid_time` field: the caller-specified `valid_from` is
+    /// correctly threaded through to the tombstone version, and the node is no longer
+    /// visible as of now. (A probe strictly between create's and delete's `valid_from`
+    /// is not reachable via `get_node_at_time` -- deleting closes the previous version's
+    /// *transaction* time at commit, same documented caveat as
+    /// `update_node_with_valid_time_backdated_round_trip` in `db::ops::tests`.)
+    #[test]
+    fn test_delete_node_with_valid_time_backdated_round_trip() {
+        let server = create_test_server();
+
+        let node: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            label: "Person".to_string(),
+            properties: None,
+            valid_time: Some(rfc3339_hours_ago(2)),
+        }))
+        .unwrap();
+
+        let delete_valid_time = rfc3339_hours_ago(1);
+        let response = server.delete_node(DeleteNodeRequest {
+            node_id: node.id,
+            detach: None,
+            valid_time: Some(delete_valid_time.clone()),
+        });
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(value.get("success"), Some(&serde_json::json!(true)));
+
+        // The caller-specified valid_from was correctly threaded through to the
+        // tombstone version.
+        let node_id = crate::core::id::NodeId::new(node.id).unwrap();
+        let historical = server.db().historical.read();
+        let version_id = historical.get_current_node_version(node_id).unwrap();
+        let version = historical.get_node_version(version_id).unwrap();
+        let recorded_valid_from = version.temporal.valid_time().start();
+        drop(historical);
+        let expected: chrono::DateTime<Utc> = delete_valid_time.parse().unwrap();
+        assert_eq!(
+            recorded_valid_from.wallclock(),
+            expected.timestamp_micros(),
+            "tombstone valid_from should match the requested delete_valid_time"
+        );
+
+        // No longer visible as of now.
+        let gone = server.get_node_at_time(GetNodeAtTimeRequest {
+            node_id: node.id,
+            valid_time: Utc::now().to_rfc3339(),
+            transaction_time: None,
+        });
+        let value: serde_json::Value = serde_json::from_str(&gone).unwrap();
+        assert!(value.get("error").is_some());
+    }
+
+    /// `delete_edge`'s `valid_time` field: edge mirror of the node round trip above --
+    /// same caveat about the probe-strictly-between-versions gap applies.
+    #[test]
+    fn test_delete_edge_with_valid_time_backdated_round_trip() {
+        let server = create_test_server();
+
+        let n1: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            label: "Person".to_string(),
+            properties: None,
+            valid_time: None,
+        }))
+        .unwrap();
+        let n2: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            label: "Person".to_string(),
+            properties: None,
+            valid_time: None,
+        }))
+        .unwrap();
+        let edge: EdgeResponse = parse_response(&server.create_edge(CreateEdgeRequest {
+            source_id: n1.id,
+            target_id: n2.id,
+            label: "KNOWS".to_string(),
+            properties: None,
+            valid_time: Some(rfc3339_hours_ago(2)),
+        }))
+        .unwrap();
+
+        let delete_valid_time = rfc3339_hours_ago(1);
+        let response = server.delete_edge(DeleteEdgeRequest {
+            edge_id: edge.id,
+            valid_time: Some(delete_valid_time.clone()),
+        });
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(value.get("success"), Some(&serde_json::json!(true)));
+
+        // The caller-specified valid_from was correctly threaded through to the
+        // tombstone version.
+        let edge_id = crate::core::id::EdgeId::new(edge.id).unwrap();
+        let historical = server.db().historical.read();
+        let version_id = historical.get_current_edge_version(edge_id).unwrap();
+        let version = historical.get_edge_version(version_id).unwrap();
+        let recorded_valid_from = version.temporal.valid_time().start();
+        drop(historical);
+        let expected: chrono::DateTime<Utc> = delete_valid_time.parse().unwrap();
+        assert_eq!(
+            recorded_valid_from.wallclock(),
+            expected.timestamp_micros(),
+            "tombstone valid_from should match the requested delete_valid_time"
+        );
+
+        // No longer visible as of now.
+        let gone = server.get_edge_at_time(GetEdgeAtTimeRequest {
+            edge_id: edge.id,
+            valid_time: Utc::now().to_rfc3339(),
+            transaction_time: None,
+        });
+        let value: serde_json::Value = serde_json::from_str(&gone).unwrap();
+        assert!(value.get("error").is_some());
+    }
+
+    /// `detach: true` (cascade delete) does not support backdating -- passing
+    /// `valid_time` alongside it must be a clear, structured rejection rather than
+    /// silently ignoring `valid_time` or cascading at the wrong time.
+    #[test]
+    fn test_delete_node_detach_with_valid_time_rejected() {
+        let server = create_test_server();
+
+        let n1: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            label: "Person".to_string(),
+            properties: None,
+            valid_time: None,
+        }))
+        .unwrap();
+        let n2: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            label: "Person".to_string(),
+            properties: None,
+            valid_time: None,
+        }))
+        .unwrap();
+        parse_response::<EdgeResponse>(&server.create_edge(CreateEdgeRequest {
+            source_id: n1.id,
+            target_id: n2.id,
+            label: "KNOWS".to_string(),
+            properties: None,
+            valid_time: None,
+        }))
+        .unwrap();
+
+        let response = server.delete_node(DeleteNodeRequest {
+            node_id: n1.id,
+            detach: Some(true),
+            valid_time: Some(rfc3339_hours_ago(1)),
+        });
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert!(value.get("error").is_some(), "expected error, got {value}");
+        assert_ne!(value.get("success"), Some(&serde_json::json!(true)));
+
+        // Node and edge must be untouched by the rejected request.
+        let get_value: serde_json::Value = serde_json::from_str(&server.get_node(GetNodeRequest {
+            node_id: n1.id,
+            include_vectors: None,
+        }))
+        .unwrap();
+        assert!(get_value.get("error").is_none(), "node should still exist");
+    }
+
+    /// Plain cascade delete (`detach: true`, no `valid_time`) must behave exactly as
+    /// before this fix -- a regression guard alongside the new rejection above.
+    #[test]
+    fn test_delete_node_detach_without_valid_time_unchanged() {
+        let server = create_test_server();
+
+        let n1: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            label: "Person".to_string(),
+            properties: None,
+            valid_time: None,
+        }))
+        .unwrap();
+        let n2: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            label: "Person".to_string(),
+            properties: None,
+            valid_time: None,
+        }))
+        .unwrap();
+        parse_response::<EdgeResponse>(&server.create_edge(CreateEdgeRequest {
+            source_id: n1.id,
+            target_id: n2.id,
+            label: "KNOWS".to_string(),
+            properties: None,
+            valid_time: None,
+        }))
+        .unwrap();
+
+        let response = server.delete_node(DeleteNodeRequest {
+            node_id: n1.id,
+            detach: Some(true),
+            valid_time: None,
+        });
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(value.get("success"), Some(&serde_json::json!(true)));
+        assert_eq!(value.get("edges_removed"), Some(&serde_json::json!(1)));
+        assert_eq!(value.get("detached"), Some(&serde_json::json!(true)));
     }
 }

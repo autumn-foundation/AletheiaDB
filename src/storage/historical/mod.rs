@@ -1333,6 +1333,39 @@ impl HistoricalStorage {
         self.edge_version_heads.get(&edge_id).copied()
     }
 
+    /// Get the node's true creation time: the `valid_from` of its first-ever version.
+    ///
+    /// Walks `prev_version` links from the current head back to the terminal (oldest)
+    /// version. Unlike `get_current_node_version`, which returns the *latest* version,
+    /// this is the correct floor for "was this valid_from before the entity existed"
+    /// checks — the latest version's `valid_from` can be later than the entity's true
+    /// creation time when a prior write already backdated it.
+    pub(crate) fn node_creation_time(&self, node_id: NodeId) -> Option<Timestamp> {
+        let mut version_id = self.get_current_node_version(node_id)?;
+        loop {
+            let version = self.get_node_version(version_id)?;
+            match version.prev_version {
+                Some(prev) => version_id = prev,
+                None => return Some(version.temporal.valid_time().start()),
+            }
+        }
+    }
+
+    /// Get the edge's true creation time: the `valid_from` of its first-ever version.
+    ///
+    /// See [`Self::node_creation_time`] for why this must walk to the terminal version
+    /// rather than reading the current (latest) one.
+    pub(crate) fn edge_creation_time(&self, edge_id: EdgeId) -> Option<Timestamp> {
+        let mut version_id = self.get_current_edge_version(edge_id)?;
+        loop {
+            let version = self.get_edge_version(version_id)?;
+            match version.prev_version {
+                Some(prev) => version_id = prev,
+                None => return Some(version.temporal.valid_time().start()),
+            }
+        }
+    }
+
     /// Get the IDs of every node that has ever had at least one version recorded.
     ///
     /// Used for bi-temporal schema discovery (Issue #3214): the caller reconstructs

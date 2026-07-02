@@ -905,6 +905,49 @@ mod tests {
             }
         }
 
+        /// Regression test: backfilling a correction between an entity's true creation
+        /// time and a later (already backdated) update must succeed through the public
+        /// `AletheiaDB` API, not just at the `WriteTransaction` layer. Previously the
+        /// "not before creation" floor was computed from the *latest* version instead of
+        /// the entity's true original creation time, spuriously rejecting this.
+        #[test]
+        fn update_node_with_valid_time_backfill_between_existing_versions_succeeds() {
+            let (_tmp, db) = create_test_db().unwrap();
+            let t0 = hours_ago(3); // true creation time
+            let t2 = hours_ago(2); // later backdated update (becomes latest version)
+            let t1 = HybridTimestamp::new(
+                time::now().wallclock() - 2 * 3_600_000_000 - 1_800_000_000,
+                0,
+            )
+            .unwrap(); // 2h30m ago: t0 < t1 < t2
+
+            let id = db
+                .create_node_with_valid_time(
+                    "Person",
+                    PropertyMapBuilder::new().insert("city", "Paris").build(),
+                    Some(t0),
+                )
+                .unwrap();
+            db.update_node_with_valid_time(
+                id,
+                PropertyMapBuilder::new().insert("city", "London").build(),
+                Some(t2),
+            )
+            .unwrap();
+
+            // Backfilling between t0 and t2 must succeed, not be spuriously rejected
+            // against t2 (the latest version) instead of t0 (the true creation time).
+            let result = db.update_node_with_valid_time(
+                id,
+                PropertyMapBuilder::new().insert("city", "Berlin").build(),
+                Some(t1),
+            );
+            assert!(
+                result.is_ok(),
+                "Backfill between existing versions should succeed, got: {result:?}"
+            );
+        }
+
         #[test]
         fn transaction_time_is_system_assigned_for_backdated_create() {
             let (_tmp, db) = create_test_db().unwrap();

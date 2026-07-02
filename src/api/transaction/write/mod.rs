@@ -1017,6 +1017,9 @@ impl WriteOps for WriteTransaction {
             let timestamp = self.start_timestamp;
             let valid_from = valid_from.unwrap_or(timestamp);
 
+            // Validate valid_from is not too far in future
+            validation::validate_valid_from_future(valid_from)?;
+
             // Buffer the write
             self.buffer.add(super::BufferedWrite::CreateEdge {
                 edge_id,
@@ -1074,12 +1077,11 @@ impl WriteOps for WriteTransaction {
             validation::validate_valid_from_future(valid_from)?;
 
             // Validate valid_from is not before entity creation
-            let historical = self.historical.read();
-            if let Some(current_version_id) = historical.get_current_node_version(node_id)
-                && let Some(current_version) = historical.get_node_version(current_version_id)
-            {
-                let creation_time = current_version.temporal.valid_time().start();
-                drop(historical); // Release lock before calling validation
+            let creation_time = {
+                let historical = self.historical.read();
+                historical.node_creation_time(node_id)
+            };
+            if let Some(creation_time) = creation_time {
                 validation::validate_valid_from_not_before_creation(
                     &format!("node:{}", node_id.as_u64()),
                     creation_time,
@@ -1144,10 +1146,7 @@ impl WriteOps for WriteTransaction {
             // Validate valid_from is not before the edge's own creation time
             let creation_time = {
                 let historical = self.historical.read();
-                historical
-                    .get_current_edge_version(edge_id)
-                    .and_then(|vid| historical.get_edge_version(vid))
-                    .map(|v| v.temporal.valid_time().start())
+                historical.edge_creation_time(edge_id)
             };
             if let Some(creation_time) = creation_time {
                 validation::validate_valid_from_not_before_creation(
@@ -1206,12 +1205,11 @@ impl WriteOps for WriteTransaction {
             validation::validate_valid_from_future(valid_from)?;
 
             // Validate valid_from is not before entity creation
-            let historical = self.historical.read();
-            if let Some(current_version_id) = historical.get_current_node_version(node_id)
-                && let Some(current_version) = historical.get_node_version(current_version_id)
-            {
-                let creation_time = current_version.temporal.valid_time().start();
-                drop(historical); // Release lock before calling validation
+            let creation_time = {
+                let historical = self.historical.read();
+                historical.node_creation_time(node_id)
+            };
+            if let Some(creation_time) = creation_time {
                 validation::validate_valid_from_not_before_creation(
                     &format!("node:{}", node_id.as_u64()),
                     creation_time,
@@ -1303,10 +1301,7 @@ impl WriteOps for WriteTransaction {
             // Validate valid_from is not before the edge's own creation time
             let creation_time = {
                 let historical = self.historical.read();
-                historical
-                    .get_current_edge_version(edge_id)
-                    .and_then(|vid| historical.get_edge_version(vid))
-                    .map(|v| v.temporal.valid_time().start())
+                historical.edge_creation_time(edge_id)
             };
             if let Some(creation_time) = creation_time {
                 validation::validate_valid_from_not_before_creation(
