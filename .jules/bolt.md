@@ -77,3 +77,6 @@
 **Pre-allocating Vec Capacities in Hot Paths**
 **Learning:** Pre-allocating standard Rust `Vec` objects using `Vec::with_capacity` in hot-paths like parsers and query planners eliminates unnecessary heap reallocations (0 -> 4 -> 8 -> 16 etc.), without changing semantics or causing borrow checker issues. However, if the expected bounds are wildly incorrect it could lead to memory bloat. A small capacity for small collections minimizes performance impacts in hot loops.
 **Action:** When a loop dynamically pushes elements to a new empty Vector (especially in repeated execution domains like parsers and network/storage iterators), replace `Vec::new()` with `Vec::with_capacity(n)` if a typical or max size `n` is roughly known.
+**[Replace sort_by_key with sort_unstable_by_key]**
+**Learning:** `sort_by_key` guarantees stable sorting but may require memory allocations, whereas `sort_unstable_by_key` is typically faster and operates in-place, reducing memory overhead when stable sorting isn't strictly necessary.
+**Action:** When sorting primitive types like IDs or LSNs, default to `sort_unstable_by_key` to avoid unnecessary allocations unless stable ordering of identical keys is specifically required.

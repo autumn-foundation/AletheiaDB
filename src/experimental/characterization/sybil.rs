@@ -195,7 +195,7 @@ impl<'a> Sybil<'a> {
             // it won't be in `current_state` next round unless we add it.
 
             // To allow expansion, we must include neighbors in the processing list.
-            let mut expansion_candidates = Vec::new();
+            let mut expansion_candidates = Vec::with_capacity(active_nodes.len() * 4); // Guess average degree
             for &node_id in &active_nodes {
                 // Get neighbors
                 let edges = self.db.get_outgoing_edges(node_id); // Assuming directed flow? Or undirected?
@@ -238,7 +238,7 @@ impl<'a> Sybil<'a> {
                 // If this is slow or unsupported, we might need to change strategy.
                 // Assuming it works for now.
 
-                let mut neighbor_vectors = Vec::new();
+                let mut neighbor_vectors = Vec::with_capacity(incoming_edges.len());
                 for edge_id in incoming_edges {
                     if let Ok(source) = self.db.get_edge_source(edge_id)
                         && let Some(vec) = current_state.get(&source)
