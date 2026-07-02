@@ -4358,11 +4358,14 @@ mod vector_elision_tests {
             include_vectors: Some(true),
         });
         let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        let expected_embedding = embedding_of(8);
         for node in value["nodes"].as_array().unwrap() {
             let arr = node["properties"]["embedding"]
                 .as_array()
                 .expect("embedding should be a full array");
             assert_eq!(arr.len(), 8);
+            let returned_floats: Vec<f32> = arr.iter().map(|v| v.as_f64().unwrap() as f32).collect();
+            assert_eq!(returned_floats, expected_embedding);
         }
     }
 
@@ -4407,10 +4410,10 @@ mod vector_elision_tests {
             include_vectors: Some(true),
         });
         let value: serde_json::Value = serde_json::from_str(&response).unwrap();
-        assert_eq!(
-            value["properties"]["embedding"].as_array().unwrap().len(),
-            6
-        );
+        let arr = value["properties"]["embedding"].as_array().unwrap();
+        assert_eq!(arr.len(), 6);
+        let returned_floats: Vec<f32> = arr.iter().map(|v| v.as_f64().unwrap() as f32).collect();
+        assert_eq!(returned_floats, embedding);
 
         // get_outgoing_edges
         let response = server.get_outgoing_edges(GetOutgoingEdgesRequest {
@@ -4430,13 +4433,10 @@ mod vector_elision_tests {
             include_vectors: Some(true),
         });
         let value: serde_json::Value = serde_json::from_str(&response).unwrap();
-        assert_eq!(
-            value["edges"][0]["properties"]["embedding"]
-                .as_array()
-                .unwrap()
-                .len(),
-            6
-        );
+        let arr = value["edges"][0]["properties"]["embedding"].as_array().unwrap();
+        assert_eq!(arr.len(), 6);
+        let returned_floats: Vec<f32> = arr.iter().map(|v| v.as_f64().unwrap() as f32).collect();
+        assert_eq!(returned_floats, embedding);
 
         // get_incoming_edges
         let response = server.get_incoming_edges(GetIncomingEdgesRequest {
@@ -4456,20 +4456,17 @@ mod vector_elision_tests {
             include_vectors: Some(true),
         });
         let value: serde_json::Value = serde_json::from_str(&response).unwrap();
-        assert_eq!(
-            value["edges"][0]["properties"]["embedding"]
-                .as_array()
-                .unwrap()
-                .len(),
-            6
-        );
+        let arr = value["edges"][0]["properties"]["embedding"].as_array().unwrap();
+        assert_eq!(arr.len(), 6);
+        let returned_floats: Vec<f32> = arr.iter().map(|v| v.as_f64().unwrap() as f32).collect();
+        assert_eq!(returned_floats, embedding);
     }
 
     #[test]
     fn test_traverse_elides_vectors_by_default() {
         let server = create_test_server();
         let (n1_id, _) = create_node_with_embedding(&server, 5);
-        let (n2_id, _) = create_node_with_embedding(&server, 5);
+        let (n2_id, embedding2) = create_node_with_embedding(&server, 5);
         server.create_edge(CreateEdgeRequest {
             source_id: n1_id,
             target_id: n2_id,
@@ -4503,13 +4500,10 @@ mod vector_elision_tests {
         });
         let value: serde_json::Value = serde_json::from_str(&response).unwrap();
         let results = value["results"].as_array().unwrap();
-        assert_eq!(
-            results[0]["node"]["properties"]["embedding"]
-                .as_array()
-                .unwrap()
-                .len(),
-            5
-        );
+        let arr = results[0]["node"]["properties"]["embedding"].as_array().unwrap();
+        assert_eq!(arr.len(), 5);
+        let returned_floats: Vec<f32> = arr.iter().map(|v| v.as_f64().unwrap() as f32).collect();
+        assert_eq!(returned_floats, embedding2);
     }
 
     #[test]
@@ -4564,13 +4558,11 @@ mod vector_elision_tests {
         let value: serde_json::Value = serde_json::from_str(&response).unwrap();
         for result in value["results"].as_array().unwrap() {
             assert!(result.get("score").and_then(|s| s.as_f64()).is_some());
-            assert_eq!(
-                result["node"]["properties"]["embedding"]
-                    .as_array()
-                    .unwrap()
-                    .len(),
-                4
-            );
+            let arr = result["node"]["properties"]["embedding"].as_array().unwrap();
+            assert_eq!(arr.len(), 4);
+            let returned_floats: Vec<f32> = arr.iter().map(|v| v.as_f64().unwrap() as f32).collect();
+            let base = returned_floats[0] / 0.1;
+            assert_eq!(returned_floats, vec![base * 0.1, base * 0.2, base * 0.3, base * 0.4]);
         }
     }
 
@@ -4638,13 +4630,11 @@ mod vector_elision_tests {
         });
         let value: serde_json::Value = serde_json::from_str(&response).unwrap();
         for result in value["results"].as_array().unwrap() {
-            assert_eq!(
-                result["node"]["properties"]["embedding"]
-                    .as_array()
-                    .unwrap()
-                    .len(),
-                4
-            );
+            let arr = result["node"]["properties"]["embedding"].as_array().unwrap();
+            assert_eq!(arr.len(), 4);
+            let returned_floats: Vec<f32> = arr.iter().map(|v| v.as_f64().unwrap() as f32).collect();
+            let base = returned_floats[0] / 0.1;
+            assert_eq!(returned_floats, vec![base * 0.1, base * 0.2, base * 0.3, base * 0.4]);
         }
     }
 
@@ -4652,7 +4642,7 @@ mod vector_elision_tests {
     fn test_hybrid_query_graph_first_elides_vectors_but_keeps_similarity_score() {
         let server = create_test_server();
         let (n1_id, _) = create_node_with_embedding(&server, 4);
-        let (n2_id, _) = create_node_with_embedding(&server, 4);
+        let (n2_id, embedding2) = create_node_with_embedding(&server, 4);
         server.create_edge(CreateEdgeRequest {
             source_id: n1_id,
             target_id: n2_id,
@@ -4695,13 +4685,10 @@ mod vector_elision_tests {
             include_vectors: Some(true),
         });
         let value: serde_json::Value = serde_json::from_str(&response).unwrap();
-        assert_eq!(
-            value["results"][0]["node"]["properties"]["embedding"]
-                .as_array()
-                .unwrap()
-                .len(),
-            4
-        );
+        let arr = value["results"][0]["node"]["properties"]["embedding"].as_array().unwrap();
+        assert_eq!(arr.len(), 4);
+        let returned_floats: Vec<f32> = arr.iter().map(|v| v.as_f64().unwrap() as f32).collect();
+        assert_eq!(returned_floats, embedding2);
     }
 
     #[test]
