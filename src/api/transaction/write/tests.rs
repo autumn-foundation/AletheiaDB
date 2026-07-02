@@ -1219,6 +1219,51 @@ mod general_tests {
     // ===================================================================
 
     #[test]
+    fn test_read_your_writes_edge_traversal() {
+        let (mut tx, _temp_dir) = create_test_write_tx();
+        let node1 = tx.create_node("Node", PropertyMapBuilder::new().build()).unwrap();
+        let node2 = tx.create_node("Node", PropertyMapBuilder::new().build()).unwrap();
+        let edge_id = tx.create_edge(node1, node2, "KNOWS", PropertyMapBuilder::new().build()).unwrap();
+
+        let out_edges = tx.get_outgoing_edges(node1);
+        assert_eq!(out_edges.len(), 1);
+        assert_eq!(out_edges[0], edge_id);
+
+        let in_edges = tx.get_incoming_edges(node2);
+        assert_eq!(in_edges.len(), 1);
+        assert_eq!(in_edges[0], edge_id);
+
+        let labeled_edges = tx.get_outgoing_edges_with_label(node1, "KNOWS");
+        assert_eq!(labeled_edges.len(), 1);
+        assert_eq!(labeled_edges[0], edge_id);
+
+        tx.delete_edge(edge_id).unwrap();
+        let out_edges_after_delete = tx.get_outgoing_edges(node1);
+        assert_eq!(out_edges_after_delete.len(), 0);
+
+        tx.commit().unwrap();
+    }
+
+    #[test]
+    fn test_delete_node_cascade_removes_buffered_edges() {
+        let (mut tx, _temp_dir) = create_test_write_tx();
+        let node1 = tx.create_node("Node", PropertyMapBuilder::new().build()).unwrap();
+        let node2 = tx.create_node("Node", PropertyMapBuilder::new().build()).unwrap();
+        let edge_id = tx.create_edge(node1, node2, "KNOWS", PropertyMapBuilder::new().build()).unwrap();
+
+        // Verify edge exists in buffer
+        let out_edges = tx.get_outgoing_edges(node1);
+        assert_eq!(out_edges.len(), 1);
+
+        // Perform cascade delete on node1
+        tx.delete_node_cascade(node1).unwrap();
+
+        // Verify edge is deleted
+        assert!(tx.get_edge(edge_id).is_err());
+        assert!(tx.buffer.get_edge_write(edge_id).map(|w| matches!(w, crate::api::transaction::BufferedWrite::DeleteEdge { .. })).unwrap_or(false));
+    }
+
+    #[test]
     fn test_delete_node_cascade_removes_edges() {
         let (mut tx, _temp_dir) = create_test_write_tx();
         let current = Arc::clone(&tx.current);
