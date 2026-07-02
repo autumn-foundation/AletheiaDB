@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Valid-time writes on the convenience API and MCP tools (Issue #3221):
+  `AletheiaDB::create_node_with_valid_time`, `create_edge_with_valid_time`,
+  `update_node_with_valid_time`, `update_edge_with_valid_time`,
+  `delete_node_with_valid_time`, and `delete_edge_with_valid_time` expose the
+  existing `WriteOps::*_with_valid_time` trait methods on the top-level type.
+  The MCP `create_node`, `create_edge`, `update_node`, `update_edge`,
+  `delete_node`, and `delete_edge` tools gain an optional `valid_time` field
+  (ISO 8601 / RFC 3339 or microseconds since epoch) so an LLM can record a
+  fact's real-world effective date — including when it stopped being true —
+  in a single tool call. Purely additive; omitting `valid_time` reproduces
+  prior behavior exactly. On `delete_node`, `valid_time` is not supported
+  together with `detach: true` (cascade delete does not support backdating).
+
+### Fixed
+
+- `create_edge_with_valid_time` now enforces the same "not more than one
+  year in the future" cap as every other `*_with_valid_time` operation; it
+  previously accepted an arbitrarily-far-future `valid_time` on edges.
+- The "valid_time must not precede entity creation" check on
+  `update_node_with_valid_time`, `update_edge_with_valid_time`,
+  `delete_node_with_valid_time`, and `delete_edge_with_valid_time` now
+  compares against the entity's true original creation time instead of its
+  most recent version, so backfilling a correction between two existing
+  (already backdated) versions no longer fails with a spurious
+  `ValidTimeBeforeEntityCreation` error.
+
 ## [0.1.1] - 2026-05-12
 
 ### Fixed

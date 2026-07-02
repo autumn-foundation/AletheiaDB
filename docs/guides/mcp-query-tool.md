@@ -117,6 +117,61 @@ temporally scoped by the engine's planner.
 A numeric array parameter is bound as an embedding, so the LLM never has to
 string-concatenate vectors into the query text.
 
+## Recording facts at a specific valid time
+
+`query` is read-only, but the structured write tools it complements
+(`create_node`, `create_edge`, `update_node`, `update_edge`, `delete_node`,
+`delete_edge`) accept an optional `valid_time` field so an LLM ingesting a
+document can record the fact's real-world effective date — including when it
+stopped being true — in the **same** tool call, instead of defaulting to
+"now". This closes the loop with the bi-temporal `AS OF` queries above:
+without it, every LLM-ingested fact would collapse to "valid as of now" and
+`AS OF VALID_TIME` reads over that data would be wrong.
+
+On `delete_node`, `valid_time` is not supported together with `detach: true`
+(cascade delete does not support backdating): pass one or the other, or
+delete the connected edges individually with `valid_time` first.
+
+**Example:** an LLM reads a filing and extracts "Alice became CEO on
+2021-03-01," today.
+
+```jsonc
+// tools/call -> "create_node"
+{
+  "label": "Person",
+  "properties": { "name": "Alice", "title": "CEO" },
+  "valid_time": "2021-03-01T00:00:00Z"
+}
+```
+
+Verifying the backdated fact is retrievable at its stated valid time, and
+absent before it:
+
+```jsonc
+// tools/call -> "get_node_at_time"
+{ "node_id": 7, "valid_time": "2021-03-01T00:00:00Z" }
+// -> { "node": { "id": 7, "label": "Person", "properties": {...} }, ... }
+
+// tools/call -> "get_node_at_time"
+{ "node_id": 7, "valid_time": "2021-01-01T00:00:00Z" }
+// -> { "error": "..." }  (not yet true at this valid time)
+```
+
+`valid_time` accepts the same formats as every other MCP temporal field
+(ISO 8601 / RFC 3339, or integer microseconds since epoch). Omitting it
+reproduces today's behavior exactly (valid time defaults to the transaction
+time). **Transaction time is always system-assigned** — there is no
+`transaction_time` field on the write tools, so provenance (when the DB
+actually learned the fact) can never be forged. A malformed, more-than-a-year-
+in-the-future, or before-entity-creation `valid_time` is rejected with a
+structured error, e.g.:
+
+```jsonc
+{ "error": "Invalid valid_time: Invalid timestamp format: 'not-a-timestamp'. ..." }
+{ "error": "valid_from ... is too far in future (current: ..., max offset: ...)" }
+{ "error": "valid_from ... is before entity creation time ... for node:7" }
+```
+
 ## Notes
 
 - **AQL has no parameter binding.** Sending `params` with `language: "aql"`

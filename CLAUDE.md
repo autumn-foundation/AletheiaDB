@@ -331,6 +331,17 @@ self-correct. When the `cypher` feature is not compiled in, `language:"cypher"`
 returns `language_unavailable` (AQL is always available). See
 [docs/guides/mcp-query-tool.md](docs/guides/mcp-query-tool.md).
 
+**Valid-time writes (Issue #3221)**: `create_node`, `create_edge`,
+`update_node`, `update_edge`, `delete_node`, and `delete_edge` accept an
+optional `valid_time` (ISO 8601 / RFC 3339 or microseconds since epoch) so a
+caller/LLM can record when a fact became (or stopped being) true in the real
+world, independent of when it was recorded. Omitting it reproduces prior
+behavior exactly (valid time defaults to the transaction time). On
+`delete_node`, `valid_time` is not supported together with `detach: true`
+(cascade delete does not support backdating). Transaction time is always
+system-assigned and cannot be set. See
+[docs/guides/mcp-query-tool.md](docs/guides/mcp-query-tool.md#recording-facts-at-a-specific-valid-time).
+
 **Vector properties are elided by default (Issue #3220)**: `get_node`,
 `list_nodes`, `get_edge`, `list_edges`, `get_outgoing_edges`,
 `get_incoming_edges`, `traverse`, `find_similar`, and `hybrid_query` replace

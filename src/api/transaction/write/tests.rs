@@ -3361,6 +3361,211 @@ mod bitemporal_validation_tests {
         );
     }
 
+    /// Test: `create_edge_with_valid_time` rejects a far-future `valid_time`, mirroring
+    /// `test_create_node_rejects_far_future_valid_time`. Regression test for a gap where
+    /// `create_edge_with_valid_time` was the only one of the six `*_with_valid_time`
+    /// methods that never called `validate_valid_from_future`, silently accepting an
+    /// arbitrarily-far-future `valid_time` on edges.
+    #[test]
+    fn test_create_edge_rejects_far_future_valid_time() {
+        use crate::core::error::TemporalError;
+        use crate::core::hlc::HybridTimestamp;
+
+        let harness = TestHarness::new();
+
+        let mut tx = harness.begin_write();
+        let src = tx.create_node("Person", PropertyMap::new()).unwrap();
+        let tgt = tx.create_node("Person", PropertyMap::new()).unwrap();
+        tx.commit().unwrap();
+
+        let two_years_future_wallclock = time::now().wallclock() + 2 * 365 * 24 * 3_600_000_000;
+        let two_years_future = HybridTimestamp::new(two_years_future_wallclock, 0).unwrap();
+
+        let mut tx2 = harness.begin_write();
+        let result = tx2.create_edge_with_valid_time(
+            src,
+            tgt,
+            "KNOWS",
+            PropertyMap::new(),
+            Some(two_years_future),
+        );
+
+        assert!(
+            result.is_err(),
+            "Should reject far-future valid_time on edge creation"
+        );
+        match result.unwrap_err() {
+            crate::core::error::Error::Temporal(TemporalError::ValidTimeTooFarInFuture {
+                ..
+            }) => {}
+            other => panic!("Expected ValidTimeTooFarInFuture, got: {:?}", other),
+        }
+    }
+
+    /// Test: backfilling a node update between two existing (already backdated) versions
+    /// succeeds. Regression test for a bug where the "not before creation" floor was
+    /// computed from the *latest* version's `valid_from` instead of the entity's true
+    /// original creation time, spuriously rejecting legitimate backfills.
+    #[test]
+    fn test_update_node_valid_time_backfill_between_existing_versions_succeeds() {
+        use crate::core::hlc::HybridTimestamp;
+
+        let harness = TestHarness::new();
+        let now = time::now().wallclock();
+        let t0 = HybridTimestamp::new(now - 3 * 3_600_000_000, 0).unwrap(); // 3h ago: true creation
+        let t2 = HybridTimestamp::new(now - 2 * 3_600_000_000, 0).unwrap(); // 2h ago: latest version
+        let t1 = HybridTimestamp::new(now - 2 * 3_600_000_000 - 1_800_000_000, 0).unwrap(); // 2h30m ago: t0 < t1 < t2
+
+        let mut tx = harness.begin_write();
+        let node_id = tx
+            .create_node_with_valid_time("Person", PropertyMap::new(), Some(t0))
+            .unwrap();
+        tx.commit().unwrap();
+
+        let mut tx2 = harness.begin_write();
+        tx2.update_node_with_valid_time(
+            node_id,
+            PropertyMapBuilder::new().insert("name", "Bob").build(),
+            Some(t2),
+        )
+        .unwrap();
+        tx2.commit().unwrap();
+
+        // Backfill a correction between t0 and t2: must succeed, not spuriously reject
+        // against t2 (the latest version) instead of t0 (the true creation time).
+        let mut tx3 = harness.begin_write();
+        let result = tx3.update_node_with_valid_time(
+            node_id,
+            PropertyMapBuilder::new().insert("name", "Carol").build(),
+            Some(t1),
+        );
+        assert!(
+            result.is_ok(),
+            "Backfill between existing versions should succeed, got: {:?}",
+            result
+        );
+    }
+
+    /// Edge mirror of `test_update_node_valid_time_backfill_between_existing_versions_succeeds`.
+    #[test]
+    fn test_update_edge_valid_time_backfill_between_existing_versions_succeeds() {
+        use crate::core::hlc::HybridTimestamp;
+
+        let harness = TestHarness::new();
+        let now = time::now().wallclock();
+        let t0 = HybridTimestamp::new(now - 3 * 3_600_000_000, 0).unwrap();
+        let t2 = HybridTimestamp::new(now - 2 * 3_600_000_000, 0).unwrap();
+        let t1 = HybridTimestamp::new(now - 2 * 3_600_000_000 - 1_800_000_000, 0).unwrap();
+
+        let mut tx = harness.begin_write();
+        let src = tx.create_node("Person", PropertyMap::new()).unwrap();
+        let tgt = tx.create_node("Person", PropertyMap::new()).unwrap();
+        tx.commit().unwrap();
+
+        let mut tx2 = harness.begin_write();
+        let edge_id = tx2
+            .create_edge_with_valid_time(src, tgt, "KNOWS", PropertyMap::new(), Some(t0))
+            .unwrap();
+        tx2.commit().unwrap();
+
+        let mut tx3 = harness.begin_write();
+        tx3.update_edge_with_valid_time(
+            edge_id,
+            PropertyMapBuilder::new().insert("strength", 5i64).build(),
+            Some(t2),
+        )
+        .unwrap();
+        tx3.commit().unwrap();
+
+        let mut tx4 = harness.begin_write();
+        let result = tx4.update_edge_with_valid_time(
+            edge_id,
+            PropertyMapBuilder::new().insert("strength", 3i64).build(),
+            Some(t1),
+        );
+        assert!(
+            result.is_ok(),
+            "Backfill between existing edge versions should succeed, got: {:?}",
+            result
+        );
+    }
+
+    /// Node-delete mirror of the update backfill regression test: deleting with a
+    /// `valid_time` between an entity's true creation and a later update must succeed.
+    #[test]
+    fn test_delete_node_valid_time_backfill_between_existing_versions_succeeds() {
+        use crate::core::hlc::HybridTimestamp;
+
+        let harness = TestHarness::new();
+        let now = time::now().wallclock();
+        let t0 = HybridTimestamp::new(now - 3 * 3_600_000_000, 0).unwrap();
+        let t2 = HybridTimestamp::new(now - 2 * 3_600_000_000, 0).unwrap();
+        let t1 = HybridTimestamp::new(now - 2 * 3_600_000_000 - 1_800_000_000, 0).unwrap();
+
+        let mut tx = harness.begin_write();
+        let node_id = tx
+            .create_node_with_valid_time("Person", PropertyMap::new(), Some(t0))
+            .unwrap();
+        tx.commit().unwrap();
+
+        let mut tx2 = harness.begin_write();
+        tx2.update_node_with_valid_time(
+            node_id,
+            PropertyMapBuilder::new().insert("name", "Bob").build(),
+            Some(t2),
+        )
+        .unwrap();
+        tx2.commit().unwrap();
+
+        let mut tx3 = harness.begin_write();
+        let result = tx3.delete_node_with_valid_time(node_id, Some(t1));
+        assert!(
+            result.is_ok(),
+            "Delete backfill between existing versions should succeed, got: {:?}",
+            result
+        );
+    }
+
+    /// Edge-delete mirror of the node-delete backfill regression test.
+    #[test]
+    fn test_delete_edge_valid_time_backfill_between_existing_versions_succeeds() {
+        use crate::core::hlc::HybridTimestamp;
+
+        let harness = TestHarness::new();
+        let now = time::now().wallclock();
+        let t0 = HybridTimestamp::new(now - 3 * 3_600_000_000, 0).unwrap();
+        let t2 = HybridTimestamp::new(now - 2 * 3_600_000_000, 0).unwrap();
+        let t1 = HybridTimestamp::new(now - 2 * 3_600_000_000 - 1_800_000_000, 0).unwrap();
+
+        let mut tx = harness.begin_write();
+        let src = tx.create_node("Person", PropertyMap::new()).unwrap();
+        let tgt = tx.create_node("Person", PropertyMap::new()).unwrap();
+        tx.commit().unwrap();
+
+        let mut tx2 = harness.begin_write();
+        let edge_id = tx2
+            .create_edge_with_valid_time(src, tgt, "KNOWS", PropertyMap::new(), Some(t0))
+            .unwrap();
+        tx2.commit().unwrap();
+
+        let mut tx3 = harness.begin_write();
+        tx3.update_edge_with_valid_time(
+            edge_id,
+            PropertyMapBuilder::new().insert("strength", 5i64).build(),
+            Some(t2),
+        )
+        .unwrap();
+        tx3.commit().unwrap();
+
+        let mut tx4 = harness.begin_write();
+        let result = tx4.delete_edge_with_valid_time(edge_id, Some(t1));
+        assert!(
+            result.is_ok(),
+            "Edge delete backfill between existing versions should succeed, got: {:?}",
+            result
+        );
+    }
+
     /// Test: The maximum valid timestamp boundary is accepted and just above is rejected.
     ///
     /// `HybridTimestamp::new` rejects wallclock values exceeding `MAX_VALID_TIMESTAMP`

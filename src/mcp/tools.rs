@@ -37,6 +37,16 @@ pub struct CreateNodeRequest {
     /// Properties to set on the node as key-value pairs.
     #[schemars(description = "Properties to set on the node as key-value pairs")]
     pub properties: Option<HashMap<String, serde_json::Value>>,
+
+    /// Optional valid time: when this fact became true in the real world.
+    #[schemars(
+        description = "Optional valid time: when this fact became true in the real world, as an \
+                       ISO 8601 / RFC 3339 timestamp (e.g., '2024-01-15T10:00:00Z') or integer \
+                       microseconds since epoch. Omit to default to the transaction time (today's \
+                       behavior). Backdating records history; up to 1 year in the future is \
+                       allowed. Transaction time is always system-assigned and cannot be set."
+    )]
+    pub valid_time: Option<String>,
 }
 
 /// Request to update an existing node's properties.
@@ -49,6 +59,16 @@ pub struct UpdateNodeRequest {
     /// New properties to set (replaces all existing properties).
     #[schemars(description = "New properties to set (replaces all existing properties)")]
     pub properties: HashMap<String, serde_json::Value>,
+
+    /// Optional valid time: when this update became true in the real world.
+    #[schemars(
+        description = "Optional valid time: when this update became true in the real world, as an \
+                       ISO 8601 / RFC 3339 timestamp (e.g., '2024-01-15T10:00:00Z') or integer \
+                       microseconds since epoch. Omit to default to the transaction time (today's \
+                       behavior). Must not precede the node's own creation time. Transaction time \
+                       is always system-assigned and cannot be set."
+    )]
+    pub valid_time: Option<String>,
 }
 
 /// Request to delete a node.
@@ -72,6 +92,17 @@ pub struct DeleteNodeRequest {
                        and the response reports the connected edge count so the caller can decide."
     )]
     pub detach: Option<bool>,
+
+    /// Optional valid time: when this fact stopped being true in the real world.
+    #[schemars(
+        description = "Optional valid time: when this fact stopped being true in the real world, \
+                       as an ISO 8601 / RFC 3339 timestamp (e.g., '2024-01-15T10:00:00Z') or integer \
+                       microseconds since epoch. Omit to default to the transaction time (today's \
+                       behavior). Must not precede the node's own creation time. Not supported \
+                       together with detach:true (cascade delete does not support backdating). \
+                       Transaction time is always system-assigned and cannot be set."
+    )]
+    pub valid_time: Option<String>,
 }
 
 /// Request to delete a node and all its connected edges (cascade delete).
@@ -167,6 +198,16 @@ pub struct CreateEdgeRequest {
     /// Properties to set on the edge as key-value pairs.
     #[schemars(description = "Properties to set on the edge as key-value pairs")]
     pub properties: Option<HashMap<String, serde_json::Value>>,
+
+    /// Optional valid time: when this relationship became true in the real world.
+    #[schemars(
+        description = "Optional valid time: when this relationship became true in the real world, \
+                       as an ISO 8601 / RFC 3339 timestamp (e.g., '2024-01-15T10:00:00Z') or integer \
+                       microseconds since epoch. Omit to default to the transaction time (today's \
+                       behavior). Backdating records history; up to 1 year in the future is \
+                       allowed. Transaction time is always system-assigned and cannot be set."
+    )]
+    pub valid_time: Option<String>,
 }
 
 /// Request to update an existing edge's properties.
@@ -179,6 +220,16 @@ pub struct UpdateEdgeRequest {
     /// New properties to set (replaces all existing properties).
     #[schemars(description = "New properties to set (replaces all existing properties)")]
     pub properties: HashMap<String, serde_json::Value>,
+
+    /// Optional valid time: when this update became true in the real world.
+    #[schemars(
+        description = "Optional valid time: when this update became true in the real world, as an \
+                       ISO 8601 / RFC 3339 timestamp (e.g., '2024-01-15T10:00:00Z') or integer \
+                       microseconds since epoch. Omit to default to the transaction time (today's \
+                       behavior). Must not precede the edge's own creation time. Transaction time \
+                       is always system-assigned and cannot be set."
+    )]
+    pub valid_time: Option<String>,
 }
 
 /// Request to delete an edge.
@@ -187,6 +238,16 @@ pub struct DeleteEdgeRequest {
     /// The unique identifier of the edge to delete.
     #[schemars(description = "The unique identifier of the edge to delete")]
     pub edge_id: u64,
+
+    /// Optional valid time: when this fact stopped being true in the real world.
+    #[schemars(
+        description = "Optional valid time: when this fact stopped being true in the real world, \
+                       as an ISO 8601 / RFC 3339 timestamp (e.g., '2024-01-15T10:00:00Z') or integer \
+                       microseconds since epoch. Omit to default to the transaction time (today's \
+                       behavior). Must not precede the edge's own creation time. Transaction time \
+                       is always system-assigned and cannot be set."
+    )]
+    pub valid_time: Option<String>,
 }
 
 /// Request to list edges with optional filtering.

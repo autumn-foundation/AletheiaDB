@@ -299,6 +299,7 @@ impl AletheiaMcpServer {
     /// let req = CreateNodeRequest {
     ///     label: "Person".to_string(),
     ///     properties: Some(props),
+    ///     valid_time: None,
     /// };
     /// ```
     ///
@@ -963,7 +964,15 @@ impl AletheiaMcpServer {
             None => PropertyMap::default(),
         };
 
-        match self.db.create_node(&req.label, properties) {
+        let valid_from = match self.parse_opt_timestamp("valid_time", &req.valid_time) {
+            Ok(v) => v,
+            Err(result) => return result,
+        };
+
+        match self
+            .db
+            .create_node_with_valid_time(&req.label, properties, valid_from)
+        {
             Ok(node_id) => match self.db.get_node(node_id) {
                 Ok(node) => {
                     let response = self.node_to_response(&node, true);
@@ -999,7 +1008,15 @@ impl AletheiaMcpServer {
             Err(e) => return self.error_json(&format!("Invalid properties: {}", e)),
         };
 
-        match self.db.write(|tx| tx.update_node(node_id, properties)) {
+        let valid_from = match self.parse_opt_timestamp("valid_time", &req.valid_time) {
+            Ok(v) => v,
+            Err(result) => return result,
+        };
+
+        match self
+            .db
+            .update_node_with_valid_time(node_id, properties, valid_from)
+        {
             Ok(()) => match self.db.get_node(node_id) {
                 Ok(node) => {
                     let response = self.node_to_response(&node, true);
@@ -1031,6 +1048,19 @@ impl AletheiaMcpServer {
         };
 
         let detach = req.detach.unwrap_or(false);
+
+        let valid_from = match self.parse_opt_timestamp("valid_time", &req.valid_time) {
+            Ok(v) => v,
+            Err(result) => return result,
+        };
+
+        if detach && valid_from.is_some() {
+            return self.error_json(
+                "valid_time is not supported together with detach:true; cascade delete does \
+                 not support backdating. Delete the connected edges individually with \
+                 valid_time, or omit valid_time to cascade-delete at now.",
+            );
+        }
 
         // Perform the connected-edge check and the deletion inside a single write
         // transaction so they observe the same storage state. Splitting the count
@@ -1064,7 +1094,7 @@ impl AletheiaMcpServer {
                 })
             } else {
                 // No connected edges: a plain delete cannot orphan anything.
-                tx.delete_node(node_id)?;
+                tx.delete_node_with_valid_time(node_id, valid_from)?;
                 Ok(Outcome::Deleted { edges_removed: 0 })
             }
         });
@@ -1305,9 +1335,14 @@ impl AletheiaMcpServer {
             None => PropertyMap::default(),
         };
 
+        let valid_from = match self.parse_opt_timestamp("valid_time", &req.valid_time) {
+            Ok(v) => v,
+            Err(result) => return result,
+        };
+
         match self
             .db
-            .create_edge(source_id, target_id, &req.label, properties)
+            .create_edge_with_valid_time(source_id, target_id, &req.label, properties, valid_from)
         {
             Ok(edge_id) => match self.db.get_edge(edge_id) {
                 Ok(edge) => {
@@ -1339,7 +1374,15 @@ impl AletheiaMcpServer {
             Err(e) => return self.error_json(&format!("Invalid properties: {}", e)),
         };
 
-        match self.db.write(|tx| tx.update_edge(edge_id, properties)) {
+        let valid_from = match self.parse_opt_timestamp("valid_time", &req.valid_time) {
+            Ok(v) => v,
+            Err(result) => return result,
+        };
+
+        match self
+            .db
+            .update_edge_with_valid_time(edge_id, properties, valid_from)
+        {
             Ok(()) => match self.db.get_edge(edge_id) {
                 Ok(edge) => {
                     let response = self.edge_to_response(&edge, true);
@@ -1365,7 +1408,15 @@ impl AletheiaMcpServer {
             Err(e) => return self.error_json(&e.to_string()),
         };
 
-        match self.db.write(|tx| tx.delete_edge(edge_id)) {
+        let valid_from = match self.parse_opt_timestamp("valid_time", &req.valid_time) {
+            Ok(v) => v,
+            Err(result) => return result,
+        };
+
+        match self
+            .db
+            .write(|tx| tx.delete_edge_with_valid_time(edge_id, valid_from))
+        {
             Ok(()) => self.success_json(json!({
                 "success": true,
                 "deleted_edge_id": req.edge_id
@@ -2858,12 +2909,18 @@ fn tool_definitions() -> Vec<Tool> {
         ),
         Tool::new(
             "create_node",
-            "Create a new node with a label and optional properties.",
+            "Create a new node with a label and optional properties. Optionally pass \
+                     `valid_time` (ISO 8601 or microseconds since epoch) to record when this fact \
+                     became true in the real world (backdating/future-dating); omit it to default \
+                     to the transaction time. Transaction time is always system-assigned.",
             make_input_schema::<CreateNodeRequest>(),
         ),
         Tool::new(
             "update_node",
-            "Update an existing node's properties.",
+            "Update an existing node's properties. Optionally pass `valid_time` (ISO 8601 or \
+                     microseconds since epoch) to record when this update became true in the real \
+                     world; omit it to default to the transaction time. Transaction time is always \
+                     system-assigned.",
             make_input_schema::<UpdateNodeRequest>(),
         ),
         Tool::new(
@@ -2871,7 +2928,10 @@ fn tool_definitions() -> Vec<Tool> {
             "Delete a node by its ID (safe-by-default). If the node has connected \
                      edges and `detach` is not true, the deletion is refused and the response \
                      reports `connected_edges`. Pass `detach: true` to delete the node together \
-                     with all connected edges; the response then reports `edges_removed`.",
+                     with all connected edges; the response then reports `edges_removed`. \
+                     Optionally pass `valid_time` to record when this fact stopped being true in \
+                     the real world; omit it to default to the transaction time. Not supported \
+                     together with `detach: true` (cascade delete does not support backdating).",
             make_input_schema::<DeleteNodeRequest>(),
         ),
         Tool::new(
@@ -2902,17 +2962,25 @@ fn tool_definitions() -> Vec<Tool> {
         ),
         Tool::new(
             "create_edge",
-            "Create a new edge between two nodes.",
+            "Create a new edge between two nodes. Optionally pass `valid_time` (ISO 8601 or \
+                     microseconds since epoch) to record when this relationship became true in the \
+                     real world (backdating/future-dating); omit it to default to the transaction \
+                     time. Transaction time is always system-assigned.",
             make_input_schema::<CreateEdgeRequest>(),
         ),
         Tool::new(
             "update_edge",
-            "Update an existing edge's properties.",
+            "Update an existing edge's properties. Optionally pass `valid_time` (ISO 8601 or \
+                     microseconds since epoch) to record when this update became true in the real \
+                     world; omit it to default to the transaction time. Transaction time is always \
+                     system-assigned.",
             make_input_schema::<UpdateEdgeRequest>(),
         ),
         Tool::new(
             "delete_edge",
-            "Delete an edge by its ID.",
+            "Delete an edge by its ID. Optionally pass `valid_time` to record when this \
+                     relationship stopped being true in the real world; omit it to default to the \
+                     transaction time.",
             make_input_schema::<DeleteEdgeRequest>(),
         ),
         Tool::new(
