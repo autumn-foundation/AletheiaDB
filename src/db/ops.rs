@@ -7,6 +7,7 @@ use crate::core::graph::{Edge, Node};
 use crate::core::id::{EdgeId, NodeId};
 use crate::core::interning::GLOBAL_INTERNER;
 use crate::core::property::{PropertyMap, PropertyValue};
+use crate::core::temporal::Timestamp;
 use crate::db::AletheiaDB;
 use crate::storage::current::{IncomingEdgesIter, OutgoingEdgesIter};
 use crate::storage::wal::WalOperation;
@@ -16,6 +17,9 @@ impl AletheiaDB {
     ///
     /// This is a convenience method that internally uses a write transaction.
     /// For multiple operations, prefer using `write()` or `write_transaction()`.
+    /// `valid_time` defaults to the transaction start time; use
+    /// [`create_node_with_valid_time`](Self::create_node_with_valid_time) to
+    /// backdate or future-date the fact.
     ///
     /// # Example
     ///
@@ -36,15 +40,69 @@ impl AletheiaDB {
     /// # See Also
     ///
     /// * [`write`](Self::write) - For batched write operations.
+    /// * [`create_node_with_valid_time`](Self::create_node_with_valid_time) - To set a specific valid time.
     #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn create_node(&self, label: &str, properties: PropertyMap) -> Result<NodeId> {
-        self.write(|tx| tx.create_node(label, properties))
+        self.create_node_with_valid_time(label, properties, None)
+    }
+
+    /// Create a node with the given label, properties, and an optional valid time.
+    ///
+    /// Use this to record a fact whose real-world effective date differs from
+    /// "now" -- for example, an LLM extracting "Alice became CEO on 2021-03-01"
+    /// from a document ingested today. When `valid_from` is `None`, this behaves
+    /// exactly like [`create_node`](Self::create_node) (valid time defaults to
+    /// the transaction start time). Transaction time is always system-assigned
+    /// to the commit time and cannot be set by the caller.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed [`TemporalError`](crate::core::error::TemporalError) if
+    /// `valid_from` is more than one year in the future; it is never silently
+    /// coerced.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use aletheiadb::{AletheiaDB, PropertyMapBuilder};
+    /// # use aletheiadb::core::temporal::time;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// // Record that Alice became CEO on 2021-03-01, even though we're
+    /// // recording it today.
+    /// let march_2021 = time::from_secs(1614556800);
+    /// let node_id = db.create_node_with_valid_time(
+    ///     "Person",
+    ///     PropertyMapBuilder::new()
+    ///         .insert("name", "Alice")
+    ///         .insert("title", "CEO")
+    ///         .build(),
+    ///     Some(march_2021),
+    /// )?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # See Also
+    ///
+    /// * [`write`](Self::write) - For batched write operations.
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
+    pub fn create_node_with_valid_time(
+        &self,
+        label: &str,
+        properties: PropertyMap,
+        valid_from: Option<Timestamp>,
+    ) -> Result<NodeId> {
+        self.write(|tx| tx.create_node_with_valid_time(label, properties, valid_from))
     }
 
     /// Create an edge between two nodes.
     ///
     /// This is a convenience method that internally uses a write transaction.
     /// For multiple operations, prefer using `write()` or `write_transaction()`.
+    /// `valid_time` defaults to the transaction start time; use
+    /// [`create_edge_with_valid_time`](Self::create_edge_with_valid_time) to
+    /// backdate or future-date the fact.
     ///
     /// # Example
     ///
@@ -67,6 +125,7 @@ impl AletheiaDB {
     /// # See Also
     ///
     /// * [`write`](Self::write) - For batched write operations.
+    /// * [`create_edge_with_valid_time`](Self::create_edge_with_valid_time) - To set a specific valid time.
     #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn create_edge(
         &self,
@@ -75,7 +134,155 @@ impl AletheiaDB {
         label: &str,
         properties: PropertyMap,
     ) -> Result<EdgeId> {
-        self.write(|tx| tx.create_edge(source, target, label, properties))
+        self.create_edge_with_valid_time(source, target, label, properties, None)
+    }
+
+    /// Create an edge between two nodes with an optional valid time.
+    ///
+    /// See [`create_node_with_valid_time`](Self::create_node_with_valid_time)
+    /// for the bi-temporal semantics: `valid_from` sets when the relationship
+    /// became true in the real world, while transaction time always remains
+    /// system-assigned to the commit time.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed [`TemporalError`](crate::core::error::TemporalError) if
+    /// `valid_from` is more than one year in the future.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use aletheiadb::{AletheiaDB, PropertyMapBuilder, core::NodeId};
+    /// # use aletheiadb::core::temporal::time;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # let source_id = NodeId::new(1)?;
+    /// # let target_id = NodeId::new(2)?;
+    /// let since_2021 = time::from_secs(1609459200);
+    /// let edge_id = db.create_edge_with_valid_time(
+    ///     source_id,
+    ///     target_id,
+    ///     "KNOWS",
+    ///     PropertyMapBuilder::new().build(),
+    ///     Some(since_2021),
+    /// )?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # See Also
+    ///
+    /// * [`write`](Self::write) - For batched write operations.
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
+    pub fn create_edge_with_valid_time(
+        &self,
+        source: NodeId,
+        target: NodeId,
+        label: &str,
+        properties: PropertyMap,
+        valid_from: Option<Timestamp>,
+    ) -> Result<EdgeId> {
+        self.write(|tx| {
+            tx.create_edge_with_valid_time(source, target, label, properties, valid_from)
+        })
+    }
+
+    /// Update a node's properties with an optional valid time (PATCH semantics).
+    ///
+    /// When `valid_from` is `None`, valid time defaults to the transaction
+    /// start time. Pass `Some(ts)` to retroactively correct or future-date a
+    /// fact. Transaction time is always system-assigned.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed [`TemporalError`](crate::core::error::TemporalError) if
+    /// `valid_from` is more than one year in the future, or precedes the
+    /// node's own creation time.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use aletheiadb::{AletheiaDB, PropertyMapBuilder, core::NodeId};
+    /// # use aletheiadb::core::temporal::time;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # let node_id = NodeId::new(1)?;
+    /// let yesterday = time::from_secs(time::now().wallclock() / 1_000_000 - 86_400);
+    /// db.update_node_with_valid_time(
+    ///     node_id,
+    ///     PropertyMapBuilder::new().insert("city", "London").build(),
+    ///     Some(yesterday),
+    /// )?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
+    pub fn update_node_with_valid_time(
+        &self,
+        node_id: NodeId,
+        properties: PropertyMap,
+        valid_from: Option<Timestamp>,
+    ) -> Result<()> {
+        self.write(|tx| tx.update_node_with_valid_time(node_id, properties, valid_from))
+    }
+
+    /// Update an edge's properties with an optional valid time (PATCH semantics).
+    ///
+    /// See [`update_node_with_valid_time`](Self::update_node_with_valid_time)
+    /// for the bi-temporal semantics.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed [`TemporalError`](crate::core::error::TemporalError) if
+    /// `valid_from` is more than one year in the future, or precedes the
+    /// edge's own creation time.
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
+    pub fn update_edge_with_valid_time(
+        &self,
+        edge_id: EdgeId,
+        properties: PropertyMap,
+        valid_from: Option<Timestamp>,
+    ) -> Result<()> {
+        self.write(|tx| tx.update_edge_with_valid_time(edge_id, properties, valid_from))
+    }
+
+    /// Delete a node with an optional valid time (without deleting connected edges).
+    ///
+    /// # Warning
+    ///
+    /// This does NOT delete edges connected to the node, which may leave
+    /// orphaned edges in the graph. For most use cases, prefer a cascade
+    /// delete that also removes connected edges. Only use this method if you
+    /// explicitly need to preserve edges for a specialized use case.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed [`TemporalError`](crate::core::error::TemporalError) if
+    /// `valid_from` is more than one year in the future, or precedes the
+    /// node's own creation time.
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
+    pub fn delete_node_with_valid_time(
+        &self,
+        node_id: NodeId,
+        valid_from: Option<Timestamp>,
+    ) -> Result<()> {
+        self.write(|tx| tx.delete_node_with_valid_time(node_id, valid_from))
+    }
+
+    /// Delete an edge with an optional valid time.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed [`TemporalError`](crate::core::error::TemporalError) if
+    /// `valid_from` is more than one year in the future, or precedes the
+    /// edge's own creation time.
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
+    pub fn delete_edge_with_valid_time(
+        &self,
+        edge_id: EdgeId,
+        valid_from: Option<Timestamp>,
+    ) -> Result<()> {
+        self.write(|tx| tx.delete_edge_with_valid_time(edge_id, valid_from))
     }
 
     /// Get the current state of a node.
@@ -426,5 +633,318 @@ mod tests {
         assert_eq!(ids.len(), 2);
         assert!(ids.contains(&a));
         assert!(ids.contains(&b));
+    }
+
+    mod valid_time_tests {
+        use super::*;
+        use crate::core::error::{Error, TemporalError};
+        use crate::core::hlc::HybridTimestamp;
+        use crate::core::property::PropertyValue;
+        use crate::core::temporal::time;
+
+        fn hours_ago(hours: i64) -> HybridTimestamp {
+            HybridTimestamp::new(time::now().wallclock() - hours * 3_600_000_000, 0).unwrap()
+        }
+
+        fn hours_from_now(hours: i64) -> HybridTimestamp {
+            HybridTimestamp::new(time::now().wallclock() + hours * 3_600_000_000, 0).unwrap()
+        }
+
+        #[test]
+        fn create_node_with_valid_time_backdated_round_trip() {
+            let (_tmp, db) = create_test_db().unwrap();
+            let t_past = hours_ago(1);
+
+            let id = db
+                .create_node_with_valid_time(
+                    "Person",
+                    PropertyMapBuilder::new().insert("name", "Alice").build(),
+                    Some(t_past),
+                )
+                .unwrap();
+
+            // Visible at t_past.
+            let node = db.get_node_at_valid_time(id, t_past).unwrap();
+            assert_eq!(
+                node.properties.get("name"),
+                Some(&PropertyValue::from("Alice"))
+            );
+
+            // Invisible strictly before t_past.
+            let before = hours_ago(2);
+            assert!(db.get_node_at_valid_time(id, before).is_err());
+        }
+
+        #[test]
+        fn create_node_with_valid_time_future_dated_invisible_now_visible_at_future() {
+            let (_tmp, db) = create_test_db().unwrap();
+            let t_future = hours_from_now(1);
+
+            let id = db
+                .create_node_with_valid_time(
+                    "Person",
+                    PropertyMapBuilder::new().build(),
+                    Some(t_future),
+                )
+                .unwrap();
+
+            assert!(db.get_node_at_valid_time(id, time::now()).is_err());
+            assert!(db.get_node_at_valid_time(id, t_future).is_ok());
+        }
+
+        #[test]
+        fn create_edge_with_valid_time_backdated_round_trip() {
+            let (_tmp, db) = create_test_db().unwrap();
+            let source = db
+                .create_node("Person", PropertyMapBuilder::new().build())
+                .unwrap();
+            let target = db
+                .create_node("Person", PropertyMapBuilder::new().build())
+                .unwrap();
+
+            let t_past = hours_ago(1);
+            let edge_id = db
+                .create_edge_with_valid_time(
+                    source,
+                    target,
+                    "KNOWS",
+                    PropertyMapBuilder::new().build(),
+                    Some(t_past),
+                )
+                .unwrap();
+
+            assert!(db.get_edge_at_valid_time(edge_id, t_past).is_ok());
+            assert!(db.get_edge_at_valid_time(edge_id, hours_ago(2)).is_err());
+        }
+
+        // NOTE: Updating/deleting closes the *transaction time* of the previous
+        // version at commit (standard MVCC on the transaction-time axis), so a
+        // valid-time probe strictly between the old and new `valid_from` is not
+        // reachable via `get_node_at_valid_time(id, probe)` (which always queries
+        // as of the *current* transaction time). This is pre-existing, unmodified
+        // `WriteOps` behavior -- verified the same way the transaction-level tests
+        // in `api::transaction::write::tests` do: by reading the recorded
+        // `valid_from` back from historical storage directly.
+        #[test]
+        fn update_node_with_valid_time_backdated_round_trip() {
+            let (_tmp, db) = create_test_db().unwrap();
+            let id = db
+                .create_node_with_valid_time(
+                    "Person",
+                    PropertyMapBuilder::new().insert("city", "Paris").build(),
+                    Some(hours_ago(2)),
+                )
+                .unwrap();
+
+            let t_update = hours_ago(1);
+            db.update_node_with_valid_time(
+                id,
+                PropertyMapBuilder::new().insert("city", "London").build(),
+                Some(t_update),
+            )
+            .unwrap();
+
+            // The caller-specified valid_from was correctly threaded through.
+            let historical = db.historical.read();
+            let version_id = historical.get_current_node_version(id).unwrap();
+            let version = historical.get_node_version(version_id).unwrap();
+            assert_eq!(version.temporal.valid_time().start(), t_update);
+            drop(historical);
+
+            // Updated properties are visible from their own valid_from onward.
+            let new_state = db.get_node_at_valid_time(id, t_update).unwrap();
+            assert_eq!(
+                new_state.properties.get("city"),
+                Some(&PropertyValue::from("London"))
+            );
+            let now_state = db.get_node_at_valid_time(id, time::now()).unwrap();
+            assert_eq!(
+                now_state.properties.get("city"),
+                Some(&PropertyValue::from("London"))
+            );
+        }
+
+        #[test]
+        fn update_edge_with_valid_time_backdated_round_trip() {
+            let (_tmp, db) = create_test_db().unwrap();
+            let source = db
+                .create_node("Person", PropertyMapBuilder::new().build())
+                .unwrap();
+            let target = db
+                .create_node("Person", PropertyMapBuilder::new().build())
+                .unwrap();
+            let edge_id = db
+                .create_edge_with_valid_time(
+                    source,
+                    target,
+                    "KNOWS",
+                    PropertyMapBuilder::new().insert("strength", 1i64).build(),
+                    Some(hours_ago(2)),
+                )
+                .unwrap();
+
+            let t_update = hours_ago(1);
+            db.update_edge_with_valid_time(
+                edge_id,
+                PropertyMapBuilder::new().insert("strength", 9i64).build(),
+                Some(t_update),
+            )
+            .unwrap();
+
+            let historical = db.historical.read();
+            let version_id = historical.get_current_edge_version(edge_id).unwrap();
+            let version = historical.get_edge_version(version_id).unwrap();
+            assert_eq!(version.temporal.valid_time().start(), t_update);
+            drop(historical);
+
+            let new_state = db.get_edge_at_valid_time(edge_id, t_update).unwrap();
+            assert_eq!(
+                new_state.properties.get("strength"),
+                Some(&PropertyValue::from(9i64))
+            );
+            let now_state = db.get_edge_at_valid_time(edge_id, time::now()).unwrap();
+            assert_eq!(
+                now_state.properties.get("strength"),
+                Some(&PropertyValue::from(9i64))
+            );
+        }
+
+        #[test]
+        fn delete_node_with_valid_time_round_trip() {
+            let (_tmp, db) = create_test_db().unwrap();
+            let id = db
+                .create_node_with_valid_time(
+                    "Person",
+                    PropertyMapBuilder::new().build(),
+                    Some(hours_ago(2)),
+                )
+                .unwrap();
+
+            let t_delete = hours_ago(1);
+            db.delete_node_with_valid_time(id, Some(t_delete)).unwrap();
+
+            // Tombstone recorded with the caller-specified valid_from.
+            let historical = db.historical.read();
+            let version_id = historical.get_current_node_version(id).unwrap();
+            let version = historical.get_node_version(version_id).unwrap();
+            assert_eq!(version.temporal.valid_time().start(), t_delete);
+            drop(historical);
+
+            // No longer visible as of now.
+            assert!(db.get_node_at_valid_time(id, time::now()).is_err());
+        }
+
+        #[test]
+        fn delete_edge_with_valid_time_round_trip() {
+            let (_tmp, db) = create_test_db().unwrap();
+            let source = db
+                .create_node("Person", PropertyMapBuilder::new().build())
+                .unwrap();
+            let target = db
+                .create_node("Person", PropertyMapBuilder::new().build())
+                .unwrap();
+            let edge_id = db
+                .create_edge_with_valid_time(
+                    source,
+                    target,
+                    "KNOWS",
+                    PropertyMapBuilder::new().build(),
+                    Some(hours_ago(2)),
+                )
+                .unwrap();
+
+            let t_delete = hours_ago(1);
+            db.delete_edge_with_valid_time(edge_id, Some(t_delete))
+                .unwrap();
+
+            let historical = db.historical.read();
+            let version_id = historical.get_current_edge_version(edge_id).unwrap();
+            let version = historical.get_edge_version(version_id).unwrap();
+            assert_eq!(version.temporal.valid_time().start(), t_delete);
+            drop(historical);
+
+            assert!(db.get_edge_at_valid_time(edge_id, time::now()).is_err());
+        }
+
+        #[test]
+        fn create_node_with_valid_time_rejects_far_future_typed_error() {
+            let (_tmp, db) = create_test_db().unwrap();
+            let err = db
+                .create_node_with_valid_time(
+                    "Person",
+                    PropertyMapBuilder::new().build(),
+                    Some(hours_from_now(24 * 400)), // > 1 year
+                )
+                .unwrap_err();
+
+            match err {
+                Error::Temporal(TemporalError::ValidTimeTooFarInFuture { .. }) => {}
+                other => panic!("Expected ValidTimeTooFarInFuture, got: {other:?}"),
+            }
+        }
+
+        #[test]
+        fn update_node_with_valid_time_rejects_before_creation_typed_error() {
+            let (_tmp, db) = create_test_db().unwrap();
+            let id = db
+                .create_node("Person", PropertyMapBuilder::new().build())
+                .unwrap();
+
+            let way_in_past = HybridTimestamp::new(1000, 0).unwrap();
+            let err = db
+                .update_node_with_valid_time(
+                    id,
+                    PropertyMapBuilder::new().insert("name", "Bob").build(),
+                    Some(way_in_past),
+                )
+                .unwrap_err();
+
+            match err {
+                Error::Temporal(TemporalError::ValidTimeBeforeEntityCreation { .. }) => {}
+                other => panic!("Expected ValidTimeBeforeEntityCreation, got: {other:?}"),
+            }
+        }
+
+        #[test]
+        fn transaction_time_is_system_assigned_for_backdated_create() {
+            let (_tmp, db) = create_test_db().unwrap();
+            let t_past = hours_ago(1);
+            let id = db
+                .create_node_with_valid_time(
+                    "Person",
+                    PropertyMapBuilder::new().build(),
+                    Some(t_past),
+                )
+                .unwrap();
+
+            // At t_past, the write had not happened yet transactionally.
+            assert!(db.get_node_at_transaction_time(id, t_past).is_err());
+            // At now, the write is visible (transaction time == commit time, near now).
+            assert!(db.get_node_at_transaction_time(id, time::now()).is_ok());
+        }
+
+        #[test]
+        fn create_node_plain_delegates_with_none_and_is_valid_now() {
+            let (_tmp, db) = create_test_db().unwrap();
+            let id = db
+                .create_node("Person", PropertyMapBuilder::new().build())
+                .unwrap();
+            assert!(db.get_node_at_valid_time(id, time::now()).is_ok());
+        }
+
+        #[test]
+        fn create_edge_plain_delegates_with_none_and_is_valid_now() {
+            let (_tmp, db) = create_test_db().unwrap();
+            let source = db
+                .create_node("Person", PropertyMapBuilder::new().build())
+                .unwrap();
+            let target = db
+                .create_node("Person", PropertyMapBuilder::new().build())
+                .unwrap();
+            let edge_id = db
+                .create_edge(source, target, "KNOWS", PropertyMapBuilder::new().build())
+                .unwrap();
+            assert!(db.get_edge_at_valid_time(edge_id, time::now()).is_ok());
+        }
     }
 }

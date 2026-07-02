@@ -83,11 +83,13 @@ mod node_tests {
     /// Helper to create two `Person` nodes and return their IDs.
     fn create_two_nodes(server: &AletheiaMcpServer) -> (u64, u64) {
         let n1: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            valid_time: None,
             label: "Person".to_string(),
             properties: None,
         }))
         .unwrap();
         let n2: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            valid_time: None,
             label: "Person".to_string(),
             properties: None,
         }))
@@ -100,6 +102,7 @@ mod node_tests {
         let server = create_test_server();
 
         let req = CreateNodeRequest {
+            valid_time: None,
             label: "Person".to_string(),
             properties: None,
         };
@@ -120,6 +123,7 @@ mod node_tests {
         props.insert("age".to_string(), serde_json::json!(30));
 
         let req = CreateNodeRequest {
+            valid_time: None,
             label: "Person".to_string(),
             properties: Some(props),
         };
@@ -144,6 +148,7 @@ mod node_tests {
         props.insert("name".to_string(), serde_json::json!("Bob"));
 
         let create_req = CreateNodeRequest {
+            valid_time: None,
             label: "Person".to_string(),
             properties: Some(props),
         };
@@ -193,6 +198,7 @@ mod node_tests {
         props.insert("age".to_string(), serde_json::json!(25));
 
         let create_req = CreateNodeRequest {
+            valid_time: None,
             label: "Person".to_string(),
             properties: Some(props),
         };
@@ -206,6 +212,7 @@ mod node_tests {
         new_props.insert("city".to_string(), serde_json::json!("London"));
 
         let update_req = UpdateNodeRequest {
+            valid_time: None,
             node_id: created.id,
             properties: new_props,
         };
@@ -226,6 +233,7 @@ mod node_tests {
 
         // Create a node
         let create_req = CreateNodeRequest {
+            valid_time: None,
             label: "ToDelete".to_string(),
             properties: None,
         };
@@ -265,6 +273,7 @@ mod node_tests {
         let (source_id, target_id) = create_two_nodes(&server);
 
         server.create_edge(CreateEdgeRequest {
+            valid_time: None,
             source_id,
             target_id,
             label: "KNOWS".to_string(),
@@ -300,6 +309,7 @@ mod node_tests {
 
         // A third node so we have both an outgoing and an incoming edge.
         let third = server.create_node(CreateNodeRequest {
+            valid_time: None,
             label: "Person".to_string(),
             properties: None,
         });
@@ -307,12 +317,14 @@ mod node_tests {
         let third_id = third_id.id;
 
         server.create_edge(CreateEdgeRequest {
+            valid_time: None,
             source_id,
             target_id,
             label: "KNOWS".to_string(),
             properties: None,
         });
         server.create_edge(CreateEdgeRequest {
+            valid_time: None,
             source_id: third_id,
             target_id: source_id,
             label: "FOLLOWS".to_string(),
@@ -371,6 +383,7 @@ mod node_tests {
         // A node with no edges deletes cleanly and reports zero edges removed.
         let server = create_test_server();
         let created: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            valid_time: None,
             label: "Lonely".to_string(),
             properties: None,
         }))
@@ -396,6 +409,7 @@ mod node_tests {
             props.insert("index".to_string(), serde_json::json!(i));
 
             let req = CreateNodeRequest {
+                valid_time: None,
                 label: "ListTest".to_string(),
                 properties: Some(props),
             };
@@ -425,6 +439,7 @@ mod node_tests {
         // Create nodes with different labels
         for _ in 0..3 {
             server.create_node(CreateNodeRequest {
+                valid_time: None,
                 label: "TypeA".to_string(),
                 properties: None,
             });
@@ -432,6 +447,7 @@ mod node_tests {
 
         for _ in 0..2 {
             server.create_node(CreateNodeRequest {
+                valid_time: None,
                 label: "TypeB".to_string(),
                 properties: None,
             });
@@ -463,6 +479,7 @@ mod node_tests {
             props.insert("index".to_string(), serde_json::json!(i));
 
             server.create_node(CreateNodeRequest {
+                valid_time: None,
                 label: "Paginated".to_string(),
                 properties: Some(props),
             });
@@ -512,6 +529,7 @@ mod node_tests {
         // Create some nodes
         for _ in 0..3 {
             server.create_node(CreateNodeRequest {
+                valid_time: None,
                 label: "Counted".to_string(),
                 properties: None,
             });
@@ -530,6 +548,7 @@ mod node_tests {
         // Create nodes with different labels
         for _ in 0..3 {
             server.create_node(CreateNodeRequest {
+                valid_time: None,
                 label: "CountA".to_string(),
                 properties: None,
             });
@@ -537,6 +556,7 @@ mod node_tests {
 
         for _ in 0..2 {
             server.create_node(CreateNodeRequest {
+                valid_time: None,
                 label: "CountB".to_string(),
                 properties: None,
             });
@@ -565,6 +585,7 @@ mod edge_tests {
 
     fn create_two_nodes(server: &AletheiaMcpServer) -> (u64, u64) {
         let node1 = server.create_node(CreateNodeRequest {
+            valid_time: None,
             label: "Person".to_string(),
             properties: Some({
                 let mut m = HashMap::new();
@@ -575,6 +596,7 @@ mod edge_tests {
         let n1: NodeResponse = parse_response(&node1).unwrap();
 
         let node2 = server.create_node(CreateNodeRequest {
+            valid_time: None,
             label: "Person".to_string(),
             properties: Some({
                 let mut m = HashMap::new();
@@ -593,6 +615,7 @@ mod edge_tests {
         let (source_id, target_id) = create_two_nodes(&server);
 
         let req = CreateEdgeRequest {
+            valid_time: None,
             source_id,
             target_id,
             label: "KNOWS".to_string(),
@@ -617,6 +640,7 @@ mod edge_tests {
         props.insert("strength".to_string(), serde_json::json!(0.9));
 
         let req = CreateEdgeRequest {
+            valid_time: None,
             source_id,
             target_id,
             label: "KNOWS".to_string(),
@@ -642,6 +666,7 @@ mod edge_tests {
         let (source_id, target_id) = create_two_nodes(&server);
 
         let create_response = server.create_edge(CreateEdgeRequest {
+            valid_time: None,
             source_id,
             target_id,
             label: "KNOWS".to_string(),
@@ -666,6 +691,7 @@ mod edge_tests {
         let (source_id, target_id) = create_two_nodes(&server);
 
         let create_response = server.create_edge(CreateEdgeRequest {
+            valid_time: None,
             source_id,
             target_id,
             label: "KNOWS".to_string(),
@@ -677,6 +703,7 @@ mod edge_tests {
         new_props.insert("weight".to_string(), serde_json::json!(0.5));
 
         let update_response = server.update_edge(UpdateEdgeRequest {
+            valid_time: None,
             edge_id: created.id,
             properties: new_props,
         });
@@ -694,6 +721,7 @@ mod edge_tests {
         let (source_id, target_id) = create_two_nodes(&server);
 
         let create_response = server.create_edge(CreateEdgeRequest {
+            valid_time: None,
             source_id,
             target_id,
             label: "KNOWS".to_string(),
@@ -723,6 +751,7 @@ mod edge_tests {
 
         // Create node3
         let node3 = server.create_node(CreateNodeRequest {
+            valid_time: None,
             label: "Person".to_string(),
             properties: None,
         });
@@ -730,12 +759,14 @@ mod edge_tests {
 
         // Create edges
         server.create_edge(CreateEdgeRequest {
+            valid_time: None,
             source_id: n1,
             target_id: n2,
             label: "KNOWS".to_string(),
             properties: None,
         });
         server.create_edge(CreateEdgeRequest {
+            valid_time: None,
             source_id: n2,
             target_id: n3.id,
             label: "KNOWS".to_string(),
@@ -767,6 +798,7 @@ mod edge_tests {
         assert_eq!(value.get("count"), Some(&serde_json::json!(0)));
 
         server.create_edge(CreateEdgeRequest {
+            valid_time: None,
             source_id: n1,
             target_id: n2,
             label: "KNOWS".to_string(),
@@ -785,6 +817,7 @@ mod edge_tests {
 
         // Create node3
         let node3 = server.create_node(CreateNodeRequest {
+            valid_time: None,
             label: "Person".to_string(),
             properties: None,
         });
@@ -792,12 +825,14 @@ mod edge_tests {
 
         // Create edges from n1
         server.create_edge(CreateEdgeRequest {
+            valid_time: None,
             source_id: n1,
             target_id: n2,
             label: "KNOWS".to_string(),
             properties: None,
         });
         server.create_edge(CreateEdgeRequest {
+            valid_time: None,
             source_id: n1,
             target_id: n3.id,
             label: "WORKS_WITH".to_string(),
@@ -830,6 +865,7 @@ mod edge_tests {
 
         // Create node3
         let node3 = server.create_node(CreateNodeRequest {
+            valid_time: None,
             label: "Person".to_string(),
             properties: None,
         });
@@ -837,12 +873,14 @@ mod edge_tests {
 
         // Create edges to n2
         server.create_edge(CreateEdgeRequest {
+            valid_time: None,
             source_id: n1,
             target_id: n2,
             label: "KNOWS".to_string(),
             properties: None,
         });
         server.create_edge(CreateEdgeRequest {
+            valid_time: None,
             source_id: n3.id,
             target_id: n2,
             label: "KNOWS".to_string(),
@@ -871,6 +909,7 @@ mod traversal_tests {
         let nodes: Vec<u64> = (0..4)
             .map(|i| {
                 let response = server.create_node(CreateNodeRequest {
+                    valid_time: None,
                     label: "Node".to_string(),
                     properties: Some({
                         let mut m = HashMap::new();
@@ -886,6 +925,7 @@ mod traversal_tests {
         // Create edges
         for i in 0..3 {
             server.create_edge(CreateEdgeRequest {
+                valid_time: None,
                 source_id: nodes[i],
                 target_id: nodes[i + 1],
                 label: "NEXT".to_string(),
@@ -1062,6 +1102,7 @@ mod vector_tests {
             );
 
             server.create_node(CreateNodeRequest {
+                valid_time: None,
                 label: "Document".to_string(),
                 properties: Some(props),
             });
@@ -1094,6 +1135,7 @@ mod temporal_tests {
 
         // Create a node
         let node_response = server.create_node(CreateNodeRequest {
+            valid_time: None,
             label: "Person".to_string(),
             properties: None,
         });
@@ -1116,6 +1158,7 @@ mod temporal_tests {
 
         // Create a node
         let node_response = server.create_node(CreateNodeRequest {
+            valid_time: None,
             label: "Person".to_string(),
             properties: Some({
                 let mut m = HashMap::new();
@@ -1148,18 +1191,21 @@ mod temporal_tests {
 
         // Create nodes and edge
         let n1_response = server.create_node(CreateNodeRequest {
+            valid_time: None,
             label: "Person".to_string(),
             properties: None,
         });
         let n1: NodeResponse = parse_response(&n1_response).unwrap();
 
         let n2_response = server.create_node(CreateNodeRequest {
+            valid_time: None,
             label: "Person".to_string(),
             properties: None,
         });
         let n2: NodeResponse = parse_response(&n2_response).unwrap();
 
         let edge_response = server.create_edge(CreateEdgeRequest {
+            valid_time: None,
             source_id: n1.id,
             target_id: n2.id,
             label: "KNOWS".to_string(),
@@ -1202,6 +1248,7 @@ mod temporal_tests {
     fn test_list_changes_success_shape() {
         let server = create_test_server();
         server.create_node(CreateNodeRequest {
+            valid_time: None,
             label: "Person".to_string(),
             properties: None,
         });
@@ -1239,6 +1286,7 @@ mod temporal_tests {
     fn test_list_changes_empty_window_is_success() {
         let server = create_test_server();
         server.create_node(CreateNodeRequest {
+            valid_time: None,
             label: "Person".to_string(),
             properties: None,
         });
@@ -1296,6 +1344,7 @@ mod hybrid_tests {
 
         // Create nodes
         let n1_response = server.create_node(CreateNodeRequest {
+            valid_time: None,
             label: "Person".to_string(),
             properties: Some({
                 let mut m = HashMap::new();
@@ -1306,6 +1355,7 @@ mod hybrid_tests {
         let n1: NodeResponse = parse_response(&n1_response).unwrap();
 
         let n2_response = server.create_node(CreateNodeRequest {
+            valid_time: None,
             label: "Person".to_string(),
             properties: Some({
                 let mut m = HashMap::new();
@@ -1341,6 +1391,7 @@ mod hybrid_tests {
         // Create nodes with different labels
         for _ in 0..3 {
             server.create_node(CreateNodeRequest {
+                valid_time: None,
                 label: "Person".to_string(),
                 properties: None,
             });
@@ -1348,6 +1399,7 @@ mod hybrid_tests {
 
         for _ in 0..2 {
             server.create_node(CreateNodeRequest {
+                valid_time: None,
                 label: "Document".to_string(),
                 properties: None,
             });
@@ -1409,18 +1461,21 @@ mod hybrid_tests {
 
         // Create a simple graph
         let n1_response = server.create_node(CreateNodeRequest {
+            valid_time: None,
             label: "Person".to_string(),
             properties: None,
         });
         let n1: NodeResponse = parse_response(&n1_response).unwrap();
 
         let n2_response = server.create_node(CreateNodeRequest {
+            valid_time: None,
             label: "Person".to_string(),
             properties: None,
         });
         let n2: NodeResponse = parse_response(&n2_response).unwrap();
 
         server.create_edge(CreateEdgeRequest {
+            valid_time: None,
             source_id: n1.id,
             target_id: n2.id,
             label: "KNOWS".to_string(),
@@ -1467,6 +1522,7 @@ mod conversion_tests {
         props.insert("array_val".to_string(), serde_json::json!([1, 2, 3]));
 
         let response = server.create_node(CreateNodeRequest {
+            valid_time: None,
             label: "Test".to_string(),
             properties: Some(props),
         });
@@ -1499,6 +1555,7 @@ mod conversion_tests {
         );
 
         let response = server.create_node(CreateNodeRequest {
+            valid_time: None,
             label: "Document".to_string(),
             properties: Some(props),
         });
@@ -1597,6 +1654,7 @@ mod coverage_tests {
 
         // Create a node first
         let response = server.create_node(CreateNodeRequest {
+            valid_time: None,
             label: "Event".to_string(),
             properties: None,
         });
@@ -1629,6 +1687,7 @@ mod coverage_tests {
 
         // Create a node first
         let response = server.create_node(CreateNodeRequest {
+            valid_time: None,
             label: "Event".to_string(),
             properties: None,
         });
@@ -1659,6 +1718,7 @@ mod coverage_tests {
 
         // Create a node first
         let response = server.create_node(CreateNodeRequest {
+            valid_time: None,
             label: "Event".to_string(),
             properties: None,
         });
@@ -1712,6 +1772,7 @@ mod coverage_tests {
         // Create a few nodes
         for i in 0..5 {
             server.create_node(CreateNodeRequest {
+                valid_time: None,
                 label: "OffsetTest".to_string(),
                 properties: Some({
                     let mut props = HashMap::new();
@@ -1748,6 +1809,7 @@ mod coverage_tests {
         let mut prev_id: Option<u64> = None;
         for i in 0..5 {
             let response = server.create_node(CreateNodeRequest {
+                valid_time: None,
                 label: "ChainNode".to_string(),
                 properties: Some({
                     let mut props = HashMap::new();
@@ -1759,6 +1821,7 @@ mod coverage_tests {
 
             if let Some(source_id) = prev_id {
                 server.create_edge(CreateEdgeRequest {
+                    valid_time: None,
                     source_id,
                     target_id: node.id,
                     label: "NEXT".to_string(),
@@ -1833,6 +1896,7 @@ mod error_handling_tests {
         let server = create_test_server();
 
         let req = UpdateNodeRequest {
+            valid_time: None,
             node_id: 999999,
             properties: HashMap::new(),
         };
@@ -1878,6 +1942,7 @@ mod error_handling_tests {
         let server = create_test_server();
 
         let req = UpdateEdgeRequest {
+            valid_time: None,
             edge_id: 999999,
             properties: HashMap::new(),
         };
@@ -1906,6 +1971,7 @@ mod error_handling_tests {
 
         // Create only target node
         let target_resp = server.create_node(CreateNodeRequest {
+            valid_time: None,
             label: "Target".to_string(),
             properties: None,
         });
@@ -1913,6 +1979,7 @@ mod error_handling_tests {
 
         // Try to create edge with non-existent source
         let req = CreateEdgeRequest {
+            valid_time: None,
             source_id: 999999,
             target_id: target.id,
             label: "KNOWS".to_string(),
@@ -1931,6 +1998,7 @@ mod error_handling_tests {
 
         // Create only source node
         let source_resp = server.create_node(CreateNodeRequest {
+            valid_time: None,
             label: "Source".to_string(),
             properties: None,
         });
@@ -1938,6 +2006,7 @@ mod error_handling_tests {
 
         // Try to create edge with non-existent target
         let req = CreateEdgeRequest {
+            valid_time: None,
             source_id: source.id,
             target_id: 999999,
             label: "KNOWS".to_string(),
@@ -2066,6 +2135,7 @@ mod temporal_extended_tests {
 
         // Create a node
         let node_response = server.create_node(CreateNodeRequest {
+            valid_time: None,
             label: "Event".to_string(),
             properties: Some({
                 let mut m = HashMap::new();
@@ -2108,18 +2178,21 @@ mod temporal_extended_tests {
 
         // Create nodes and edge
         let n1_response = server.create_node(CreateNodeRequest {
+            valid_time: None,
             label: "Person".to_string(),
             properties: None,
         });
         let n1: NodeResponse = parse_response(&n1_response).unwrap();
 
         let n2_response = server.create_node(CreateNodeRequest {
+            valid_time: None,
             label: "Person".to_string(),
             properties: None,
         });
         let n2: NodeResponse = parse_response(&n2_response).unwrap();
 
         let edge_response = server.create_edge(CreateEdgeRequest {
+            valid_time: None,
             source_id: n1.id,
             target_id: n2.id,
             label: "KNOWS".to_string(),
@@ -2151,6 +2224,7 @@ mod temporal_extended_tests {
         let server = create_test_server();
 
         let node_response = server.create_node(CreateNodeRequest {
+            valid_time: None,
             label: "Test".to_string(),
             properties: None,
         });
@@ -2179,18 +2253,21 @@ mod temporal_extended_tests {
 
         // Create nodes and edge
         let n1_response = server.create_node(CreateNodeRequest {
+            valid_time: None,
             label: "Person".to_string(),
             properties: None,
         });
         let n1: NodeResponse = parse_response(&n1_response).unwrap();
 
         let n2_response = server.create_node(CreateNodeRequest {
+            valid_time: None,
             label: "Person".to_string(),
             properties: None,
         });
         let n2: NodeResponse = parse_response(&n2_response).unwrap();
 
         let edge_response = server.create_edge(CreateEdgeRequest {
+            valid_time: None,
             source_id: n1.id,
             target_id: n2.id,
             label: "KNOWS".to_string(),
@@ -2214,6 +2291,7 @@ mod temporal_extended_tests {
         let server = create_test_server();
 
         let node_response = server.create_node(CreateNodeRequest {
+            valid_time: None,
             label: "Event".to_string(),
             properties: None,
         });
@@ -2250,6 +2328,7 @@ mod traversal_extended_tests {
         let nodes: Vec<u64> = (0..3)
             .map(|i| {
                 let response = server.create_node(CreateNodeRequest {
+                    valid_time: None,
                     label: "BiNode".to_string(),
                     properties: Some({
                         let mut m = HashMap::new();
@@ -2265,12 +2344,14 @@ mod traversal_extended_tests {
         // Create bidirectional edges
         for i in 0..2 {
             server.create_edge(CreateEdgeRequest {
+                valid_time: None,
                 source_id: nodes[i],
                 target_id: nodes[i + 1],
                 label: "CONNECTED".to_string(),
                 properties: None,
             });
             server.create_edge(CreateEdgeRequest {
+                valid_time: None,
                 source_id: nodes[i + 1],
                 target_id: nodes[i],
                 label: "CONNECTED".to_string(),
@@ -2311,6 +2392,7 @@ mod traversal_extended_tests {
 
         // Create a single node
         let node_response = server.create_node(CreateNodeRequest {
+            valid_time: None,
             label: "Lonely".to_string(),
             properties: None,
         });
@@ -2338,18 +2420,21 @@ mod traversal_extended_tests {
 
         // Create A -> B
         let n1_response = server.create_node(CreateNodeRequest {
+            valid_time: None,
             label: "Node".to_string(),
             properties: None,
         });
         let n1: NodeResponse = parse_response(&n1_response).unwrap();
 
         let n2_response = server.create_node(CreateNodeRequest {
+            valid_time: None,
             label: "Node".to_string(),
             properties: None,
         });
         let n2: NodeResponse = parse_response(&n2_response).unwrap();
 
         server.create_edge(CreateEdgeRequest {
+            valid_time: None,
             source_id: n1.id,
             target_id: n2.id,
             label: "NEXT".to_string(),
@@ -2377,6 +2462,7 @@ mod traversal_extended_tests {
 
         // Create a star graph: center -> 10 spokes
         let center_response = server.create_node(CreateNodeRequest {
+            valid_time: None,
             label: "Center".to_string(),
             properties: None,
         });
@@ -2384,6 +2470,7 @@ mod traversal_extended_tests {
 
         for i in 0..10 {
             let spoke_response = server.create_node(CreateNodeRequest {
+                valid_time: None,
                 label: "Spoke".to_string(),
                 properties: Some({
                     let mut m = HashMap::new();
@@ -2394,6 +2481,7 @@ mod traversal_extended_tests {
             let spoke: NodeResponse = parse_response(&spoke_response).unwrap();
 
             server.create_edge(CreateEdgeRequest {
+                valid_time: None,
                 source_id: center.id,
                 target_id: spoke.id,
                 label: "SPOKE".to_string(),
@@ -2430,6 +2518,7 @@ mod hybrid_extended_tests {
 
         // Create a node
         let node_response = server.create_node(CreateNodeRequest {
+            valid_time: None,
             label: "Person".to_string(),
             properties: Some({
                 let mut m = HashMap::new();
@@ -2477,6 +2566,7 @@ mod hybrid_extended_tests {
         let nodes: Vec<u64> = (0..4)
             .map(|i| {
                 let response = server.create_node(CreateNodeRequest {
+                    valid_time: None,
                     label: "ChainNode".to_string(),
                     properties: Some({
                         let mut m = HashMap::new();
@@ -2491,6 +2581,7 @@ mod hybrid_extended_tests {
 
         for i in 0..3 {
             server.create_edge(CreateEdgeRequest {
+                valid_time: None,
                 source_id: nodes[i],
                 target_id: nodes[i + 1],
                 label: "CHAIN".to_string(),
@@ -2525,6 +2616,7 @@ mod hybrid_extended_tests {
         let server = create_test_server();
 
         let node_response = server.create_node(CreateNodeRequest {
+            valid_time: None,
             label: "Test".to_string(),
             properties: None,
         });
@@ -2559,6 +2651,7 @@ mod hybrid_extended_tests {
         let server = create_test_server();
 
         let node_response = server.create_node(CreateNodeRequest {
+            valid_time: None,
             label: "Test".to_string(),
             properties: None,
         });
@@ -2595,6 +2688,7 @@ mod hybrid_extended_tests {
         // Create some nodes
         for i in 0..5 {
             server.create_node(CreateNodeRequest {
+                valid_time: None,
                 label: "LimitTest".to_string(),
                 properties: Some({
                     let mut m = HashMap::new();
@@ -2669,12 +2763,14 @@ mod edge_extended_tests {
 
         // Create nodes
         let n1_response = server.create_node(CreateNodeRequest {
+            valid_time: None,
             label: "Person".to_string(),
             properties: None,
         });
         let n1: NodeResponse = parse_response(&n1_response).unwrap();
 
         let n2_response = server.create_node(CreateNodeRequest {
+            valid_time: None,
             label: "Person".to_string(),
             properties: None,
         });
@@ -2682,12 +2778,14 @@ mod edge_extended_tests {
 
         // Create edges with different labels
         server.create_edge(CreateEdgeRequest {
+            valid_time: None,
             source_id: n1.id,
             target_id: n2.id,
             label: "KNOWS".to_string(),
             properties: None,
         });
         server.create_edge(CreateEdgeRequest {
+            valid_time: None,
             source_id: n1.id,
             target_id: n2.id,
             label: "WORKS_WITH".to_string(),
@@ -2714,18 +2812,21 @@ mod edge_extended_tests {
 
         // Create nodes and edges
         let n1_response = server.create_node(CreateNodeRequest {
+            valid_time: None,
             label: "Person".to_string(),
             properties: None,
         });
         let n1: NodeResponse = parse_response(&n1_response).unwrap();
 
         let n2_response = server.create_node(CreateNodeRequest {
+            valid_time: None,
             label: "Person".to_string(),
             properties: None,
         });
         let n2: NodeResponse = parse_response(&n2_response).unwrap();
 
         server.create_edge(CreateEdgeRequest {
+            valid_time: None,
             source_id: n1.id,
             target_id: n2.id,
             label: "KNOWS".to_string(),
@@ -2755,18 +2856,21 @@ mod edge_extended_tests {
 
         // Create nodes
         let n1_response = server.create_node(CreateNodeRequest {
+            valid_time: None,
             label: "Person".to_string(),
             properties: None,
         });
         let n1: NodeResponse = parse_response(&n1_response).unwrap();
 
         let n2_response = server.create_node(CreateNodeRequest {
+            valid_time: None,
             label: "Person".to_string(),
             properties: None,
         });
         let n2: NodeResponse = parse_response(&n2_response).unwrap();
 
         let n3_response = server.create_node(CreateNodeRequest {
+            valid_time: None,
             label: "Person".to_string(),
             properties: None,
         });
@@ -2774,12 +2878,14 @@ mod edge_extended_tests {
 
         // Create edges with different labels pointing to n2
         server.create_edge(CreateEdgeRequest {
+            valid_time: None,
             source_id: n1.id,
             target_id: n2.id,
             label: "KNOWS".to_string(),
             properties: None,
         });
         server.create_edge(CreateEdgeRequest {
+            valid_time: None,
             source_id: n3.id,
             target_id: n2.id,
             label: "WORKS_WITH".to_string(),
@@ -2816,6 +2922,7 @@ mod list_nodes_extended_tests {
         // Create some nodes
         for i in 0..3 {
             server.create_node(CreateNodeRequest {
+                valid_time: None,
                 label: format!("Type{}", i),
                 properties: None,
             });
@@ -2847,6 +2954,7 @@ mod list_nodes_extended_tests {
         // Create a few nodes
         for i in 0..5 {
             server.create_node(CreateNodeRequest {
+                valid_time: None,
                 label: "LimitCap".to_string(),
                 properties: Some({
                     let mut m = HashMap::new();
@@ -2884,6 +2992,7 @@ mod list_nodes_extended_tests {
 
         // Create nodes with different names
         server.create_node(CreateNodeRequest {
+            valid_time: None,
             label: "Person".to_string(),
             properties: Some({
                 let mut m = HashMap::new();
@@ -2892,6 +3001,7 @@ mod list_nodes_extended_tests {
             }),
         });
         server.create_node(CreateNodeRequest {
+            valid_time: None,
             label: "Person".to_string(),
             properties: Some({
                 let mut m = HashMap::new();
@@ -2900,6 +3010,7 @@ mod list_nodes_extended_tests {
             }),
         });
         server.create_node(CreateNodeRequest {
+            valid_time: None,
             label: "Person".to_string(),
             properties: Some({
                 let mut m = HashMap::new();
@@ -2928,6 +3039,7 @@ mod list_nodes_extended_tests {
         let server = create_test_server();
 
         server.create_node(CreateNodeRequest {
+            valid_time: None,
             label: "Sensor".to_string(),
             properties: Some({
                 let mut m = HashMap::new();
@@ -2936,6 +3048,7 @@ mod list_nodes_extended_tests {
             }),
         });
         server.create_node(CreateNodeRequest {
+            valid_time: None,
             label: "Sensor".to_string(),
             properties: Some({
                 let mut m = HashMap::new();
@@ -2967,6 +3080,7 @@ mod list_nodes_extended_tests {
         let server = create_test_server();
 
         server.create_node(CreateNodeRequest {
+            valid_time: None,
             label: "Item".to_string(),
             properties: Some({
                 let mut m = HashMap::new();
@@ -3038,6 +3152,7 @@ mod list_nodes_extended_tests {
         // Create 5 nodes with same property
         for _ in 0..5 {
             server.create_node(CreateNodeRequest {
+                valid_time: None,
                 label: "Widget".to_string(),
                 properties: Some({
                     let mut m = HashMap::new();
@@ -3103,6 +3218,7 @@ mod query_tool_tests {
         let mut props = HashMap::new();
         props.insert("name".to_string(), serde_json::json!(name));
         let resp = server.create_node(CreateNodeRequest {
+            valid_time: None,
             label: label.to_string(),
             properties: Some(props),
         });
@@ -3781,10 +3897,12 @@ mod constraint_tests {
         let mut props = HashMap::new();
         props.insert("email".to_string(), serde_json::json!("dup@x"));
         server.create_node(CreateNodeRequest {
+            valid_time: None,
             label: "Person".to_string(),
             properties: Some(props.clone()),
         });
         server.create_node(CreateNodeRequest {
+            valid_time: None,
             label: "Person".to_string(),
             properties: Some(props),
         });
@@ -3855,6 +3973,7 @@ mod constraint_tests {
         props.insert("email".to_string(), serde_json::json!("alice@x"));
 
         let first_response = server.create_node(CreateNodeRequest {
+            valid_time: None,
             label: "Person".to_string(),
             properties: Some(props.clone()),
         });
@@ -3862,6 +3981,7 @@ mod constraint_tests {
             parse_response(&first_response).expect("first create must succeed");
 
         let dup_response = server.create_node(CreateNodeRequest {
+            valid_time: None,
             label: "Person".to_string(),
             properties: Some(props),
         });
@@ -3895,6 +4015,7 @@ mod constraint_tests {
         let mut props_a = HashMap::new();
         props_a.insert("email".to_string(), serde_json::json!("a@x"));
         let resp_a = server.create_node(CreateNodeRequest {
+            valid_time: None,
             label: "Person".to_string(),
             properties: Some(props_a),
         });
@@ -3903,6 +4024,7 @@ mod constraint_tests {
         let mut props_b = HashMap::new();
         props_b.insert("email".to_string(), serde_json::json!("b@x"));
         server.create_node(CreateNodeRequest {
+            valid_time: None,
             label: "Person".to_string(),
             properties: Some(props_b),
         });
@@ -3910,6 +4032,7 @@ mod constraint_tests {
         let mut collision = HashMap::new();
         collision.insert("email".to_string(), serde_json::json!("b@x"));
         let update_response = server.update_node(UpdateNodeRequest {
+            valid_time: None,
             node_id: node_a.id,
             properties: collision,
         });
@@ -3937,6 +4060,7 @@ mod constraint_tests {
         let server = create_test_server();
 
         let response = server.update_node(UpdateNodeRequest {
+            valid_time: None,
             node_id: 99999,
             properties: HashMap::new(),
         });
@@ -3992,6 +4116,7 @@ mod schema_tests {
         let server = create_test_server();
 
         let alice_response = server.create_node(CreateNodeRequest {
+            valid_time: None,
             label: "Person".to_string(),
             properties: Some({
                 let mut m = HashMap::new();
@@ -4002,6 +4127,7 @@ mod schema_tests {
         let alice: NodeResponse = parse_response(&alice_response).unwrap();
 
         let bob_response = server.create_node(CreateNodeRequest {
+            valid_time: None,
             label: "Person".to_string(),
             properties: Some({
                 let mut m = HashMap::new();
@@ -4012,6 +4138,7 @@ mod schema_tests {
         let bob: NodeResponse = parse_response(&bob_response).unwrap();
 
         server.create_edge(CreateEdgeRequest {
+            valid_time: None,
             source_id: alice.id,
             target_id: bob.id,
             label: "KNOWS".to_string(),
@@ -4070,6 +4197,7 @@ mod schema_tests {
         let server = create_test_server();
 
         server.create_node(CreateNodeRequest {
+            valid_time: None,
             label: "Report".to_string(),
             properties: None,
         });
@@ -4104,6 +4232,7 @@ mod schema_tests {
         let server = create_test_server();
 
         server.create_node(CreateNodeRequest {
+            valid_time: None,
             label: "Invoice".to_string(),
             properties: None,
         });
@@ -4142,6 +4271,7 @@ mod schema_tests {
 
         // Create a node now.
         server.create_node(CreateNodeRequest {
+            valid_time: None,
             label: "Gadget".to_string(),
             properties: None,
         });
@@ -4191,27 +4321,32 @@ mod schema_tests {
 
         for _ in 0..3 {
             server.create_node(CreateNodeRequest {
+                valid_time: None,
                 label: "Person".to_string(),
                 properties: None,
             });
         }
         for _ in 0..2 {
             server.create_node(CreateNodeRequest {
+                valid_time: None,
                 label: "Company".to_string(),
                 properties: None,
             });
         }
         let n1: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            valid_time: None,
             label: "Person".to_string(),
             properties: None,
         }))
         .unwrap();
         let n2: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            valid_time: None,
             label: "Company".to_string(),
             properties: None,
         }))
         .unwrap();
         server.create_edge(CreateEdgeRequest {
+            valid_time: None,
             source_id: n1.id,
             target_id: n2.id,
             label: "WORKS_AT".to_string(),
@@ -4270,6 +4405,7 @@ mod vector_elision_tests {
             serde_json::json!(embedding.clone()),
         );
         let response = server.create_node(CreateNodeRequest {
+            valid_time: None,
             label: "Document".to_string(),
             properties: Some(props),
         });
@@ -4370,11 +4506,13 @@ mod vector_elision_tests {
     fn test_get_edge_and_outgoing_incoming_edges_elide_vectors_by_default() {
         let server = create_test_server();
         let n1: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            valid_time: None,
             label: "Person".to_string(),
             properties: None,
         }))
         .unwrap();
         let n2: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            valid_time: None,
             label: "Person".to_string(),
             properties: None,
         }))
@@ -4384,6 +4522,7 @@ mod vector_elision_tests {
         let mut props = HashMap::new();
         props.insert("embedding".to_string(), serde_json::json!(embedding));
         let edge_response = server.create_edge(CreateEdgeRequest {
+            valid_time: None,
             source_id: n1.id,
             target_id: n2.id,
             label: "SIMILAR_TO".to_string(),
@@ -4471,6 +4610,7 @@ mod vector_elision_tests {
         let (n1_id, _) = create_node_with_embedding(&server, 5);
         let (n2_id, _) = create_node_with_embedding(&server, 5);
         server.create_edge(CreateEdgeRequest {
+            valid_time: None,
             source_id: n1_id,
             target_id: n2_id,
             label: "NEXT".to_string(),
@@ -4533,6 +4673,7 @@ mod vector_elision_tests {
                 ]),
             );
             server.create_node(CreateNodeRequest {
+                valid_time: None,
                 label: "Document".to_string(),
                 properties: Some(props),
             });
@@ -4594,6 +4735,7 @@ mod vector_elision_tests {
                 ]),
             );
             server.create_node(CreateNodeRequest {
+                valid_time: None,
                 label: "Document".to_string(),
                 properties: Some(props),
             });
@@ -4654,6 +4796,7 @@ mod vector_elision_tests {
         let (n1_id, _) = create_node_with_embedding(&server, 4);
         let (n2_id, _) = create_node_with_embedding(&server, 4);
         server.create_edge(CreateEdgeRequest {
+            valid_time: None,
             source_id: n1_id,
             target_id: n2_id,
             label: "NEXT".to_string(),
@@ -4756,6 +4899,7 @@ mod vector_elision_tests {
             serde_json::json!([0.1, 0.2, 0.3, 0.4]),
         );
         let response = server.create_node(CreateNodeRequest {
+            valid_time: None,
             label: "Document".to_string(),
             properties: Some(props),
         });
@@ -4776,6 +4920,7 @@ mod vector_elision_tests {
             serde_json::json!([0.5, 0.6, 0.7, 0.8]),
         );
         let update_response = server.update_node(UpdateNodeRequest {
+            valid_time: None,
             node_id: node.id,
             properties: new_props,
         });
@@ -4803,6 +4948,7 @@ mod vector_elision_tests {
         props.insert("tags".to_string(), serde_json::json!(["a", "b", "c"]));
 
         let response = server.create_node(CreateNodeRequest {
+            valid_time: None,
             label: "Person".to_string(),
             properties: Some(props),
         });
@@ -4821,5 +4967,306 @@ mod vector_elision_tests {
             }
             previous = Some(fetched.properties);
         }
+    }
+}
+
+// ============================================================================
+// Valid-Time Write Tests (Issue #3221)
+// ============================================================================
+
+mod valid_time_write_tests {
+    use super::*;
+    use chrono::{Duration, Utc};
+
+    fn rfc3339_hours_ago(hours: i64) -> String {
+        (Utc::now() - Duration::hours(hours)).to_rfc3339()
+    }
+
+    fn rfc3339_hours_from_now(hours: i64) -> String {
+        (Utc::now() + Duration::hours(hours)).to_rfc3339()
+    }
+
+    #[test]
+    fn test_create_node_with_valid_time_backdated_round_trip() {
+        let server = create_test_server();
+
+        let response = server.create_node(CreateNodeRequest {
+            label: "Person".to_string(),
+            properties: None,
+            valid_time: Some(rfc3339_hours_ago(1)),
+        });
+        let node: NodeResponse = parse_response(&response).expect("create should succeed");
+
+        // Visible shortly after its valid_from.
+        let visible = server.get_node_at_time(GetNodeAtTimeRequest {
+            node_id: node.id,
+            valid_time: rfc3339_hours_ago(0),
+            transaction_time: None,
+        });
+        let value: serde_json::Value = serde_json::from_str(&visible).unwrap();
+        assert!(value.get("error").is_none(), "expected node, got {value}");
+
+        // Invisible strictly before its valid_from.
+        let invisible = server.get_node_at_time(GetNodeAtTimeRequest {
+            node_id: node.id,
+            valid_time: rfc3339_hours_ago(2),
+            transaction_time: None,
+        });
+        let value: serde_json::Value = serde_json::from_str(&invisible).unwrap();
+        assert!(value.get("error").is_some());
+    }
+
+    #[test]
+    fn test_create_node_omitted_valid_time_matches_today() {
+        // Omitting the field entirely (raw JSON) still deserializes.
+        let parsed: CreateNodeRequest =
+            serde_json::from_value(serde_json::json!({ "label": "Person" }))
+                .expect("valid_time should be optional");
+        assert_eq!(parsed.valid_time, None);
+
+        let server = create_test_server();
+        let response = server.create_node(CreateNodeRequest {
+            label: "Person".to_string(),
+            properties: None,
+            valid_time: None,
+        });
+        let node: NodeResponse = parse_response(&response).expect("create should succeed");
+        assert_eq!(node.label, "Person");
+
+        let now_response = server.get_node_at_time(GetNodeAtTimeRequest {
+            node_id: node.id,
+            valid_time: Utc::now().to_rfc3339(),
+            transaction_time: None,
+        });
+        let value: serde_json::Value = serde_json::from_str(&now_response).unwrap();
+        assert!(value.get("error").is_none());
+    }
+
+    #[test]
+    fn test_create_node_malformed_valid_time_error_json() {
+        let server = create_test_server();
+
+        let response = server.create_node(CreateNodeRequest {
+            label: "Person".to_string(),
+            properties: None,
+            valid_time: Some("not-a-timestamp".to_string()),
+        });
+
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        let error = value.get("error").and_then(|e| e.as_str()).unwrap();
+        assert!(error.contains("Invalid valid_time"), "got: {error}");
+        assert_eq!(server.db().node_count(), 0, "no node should be created");
+    }
+
+    #[test]
+    fn test_create_node_far_future_valid_time_typed_error_surfaced() {
+        let server = create_test_server();
+
+        let response = server.create_node(CreateNodeRequest {
+            label: "Person".to_string(),
+            properties: None,
+            valid_time: Some(rfc3339_hours_from_now(24 * 400)), // > 1 year
+        });
+
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        let error = value.get("error").and_then(|e| e.as_str()).unwrap();
+        assert!(error.contains("too far in future"), "got: {error}");
+        assert_eq!(server.db().node_count(), 0);
+    }
+
+    #[test]
+    fn test_create_edge_with_valid_time_backdated_round_trip() {
+        let server = create_test_server();
+
+        let n1: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            label: "Person".to_string(),
+            properties: None,
+            valid_time: None,
+        }))
+        .unwrap();
+        let n2: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            label: "Person".to_string(),
+            properties: None,
+            valid_time: None,
+        }))
+        .unwrap();
+
+        let response = server.create_edge(CreateEdgeRequest {
+            source_id: n1.id,
+            target_id: n2.id,
+            label: "KNOWS".to_string(),
+            properties: None,
+            valid_time: Some(rfc3339_hours_ago(1)),
+        });
+        let edge: EdgeResponse = parse_response(&response).expect("create_edge should succeed");
+
+        let visible = server.get_edge_at_time(GetEdgeAtTimeRequest {
+            edge_id: edge.id,
+            valid_time: rfc3339_hours_ago(0),
+            transaction_time: None,
+        });
+        let value: serde_json::Value = serde_json::from_str(&visible).unwrap();
+        assert!(value.get("error").is_none(), "expected edge, got {value}");
+
+        let invisible = server.get_edge_at_time(GetEdgeAtTimeRequest {
+            edge_id: edge.id,
+            valid_time: rfc3339_hours_ago(2),
+            transaction_time: None,
+        });
+        let value: serde_json::Value = serde_json::from_str(&invisible).unwrap();
+        assert!(value.get("error").is_some());
+    }
+
+    #[test]
+    fn test_update_node_with_valid_time_backdated() {
+        let server = create_test_server();
+
+        let mut props = HashMap::new();
+        props.insert("city".to_string(), serde_json::json!("Paris"));
+        let node: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            label: "Person".to_string(),
+            properties: Some(props),
+            valid_time: Some(rfc3339_hours_ago(2)),
+        }))
+        .unwrap();
+
+        let mut update_props = HashMap::new();
+        update_props.insert("city".to_string(), serde_json::json!("London"));
+        let update_valid_time = rfc3339_hours_ago(1);
+        let response = server.update_node(UpdateNodeRequest {
+            node_id: node.id,
+            properties: update_props,
+            valid_time: Some(update_valid_time.clone()),
+        });
+        let updated: NodeResponse = parse_response(&response).expect("update should succeed");
+        assert_eq!(
+            updated.properties.get("city"),
+            Some(&serde_json::json!("London"))
+        );
+
+        // Visible from its own valid_from onward.
+        let at_update = server.get_node_at_time(GetNodeAtTimeRequest {
+            node_id: node.id,
+            valid_time: update_valid_time,
+            transaction_time: None,
+        });
+        let value: serde_json::Value = serde_json::from_str(&at_update).unwrap();
+        let fetched: NodeResponse = serde_json::from_value(value["node"].clone()).unwrap();
+        assert_eq!(
+            fetched.properties.get("city"),
+            Some(&serde_json::json!("London"))
+        );
+    }
+
+    #[test]
+    fn test_update_node_valid_time_before_creation_rejected() {
+        let server = create_test_server();
+
+        let node: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            label: "Person".to_string(),
+            properties: None,
+            valid_time: None,
+        }))
+        .unwrap();
+
+        let mut update_props = HashMap::new();
+        update_props.insert("name".to_string(), serde_json::json!("Bob"));
+        let response = server.update_node(UpdateNodeRequest {
+            node_id: node.id,
+            properties: update_props,
+            // Far enough in the past to precede the node's creation time.
+            valid_time: Some("1970-01-01T00:00:01Z".to_string()),
+        });
+
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        let error = value.get("error").and_then(|e| e.as_str()).unwrap();
+        assert!(error.contains("before entity creation"), "got: {error}");
+    }
+
+    #[test]
+    fn test_transaction_time_not_client_settable() {
+        let server = create_test_server();
+
+        let node: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            label: "Person".to_string(),
+            properties: None,
+            valid_time: Some(rfc3339_hours_ago(1)),
+        }))
+        .unwrap();
+
+        // As of a transaction_time 30 minutes ago, the write (committed just now)
+        // had not happened yet -- the fact must not be retroactively knowable.
+        let too_early_tx = (Utc::now() - Duration::minutes(30)).to_rfc3339();
+        let too_early = server.get_node_at_time(GetNodeAtTimeRequest {
+            node_id: node.id,
+            valid_time: rfc3339_hours_ago(0),
+            transaction_time: Some(too_early_tx),
+        });
+        let value: serde_json::Value = serde_json::from_str(&too_early).unwrap();
+        assert!(value.get("error").is_some());
+
+        // Omitting transaction_time defaults to now, where the write is visible.
+        let now_response = server.get_node_at_time(GetNodeAtTimeRequest {
+            node_id: node.id,
+            valid_time: rfc3339_hours_ago(0),
+            transaction_time: None,
+        });
+        let value: serde_json::Value = serde_json::from_str(&now_response).unwrap();
+        assert!(value.get("error").is_none());
+    }
+
+    #[test]
+    fn test_update_edge_with_valid_time_backdated() {
+        let server = create_test_server();
+
+        let n1: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            label: "Person".to_string(),
+            properties: None,
+            valid_time: None,
+        }))
+        .unwrap();
+        let n2: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            label: "Person".to_string(),
+            properties: None,
+            valid_time: None,
+        }))
+        .unwrap();
+
+        let mut props = HashMap::new();
+        props.insert("strength".to_string(), serde_json::json!(1));
+        let edge: EdgeResponse = parse_response(&server.create_edge(CreateEdgeRequest {
+            source_id: n1.id,
+            target_id: n2.id,
+            label: "KNOWS".to_string(),
+            properties: Some(props),
+            valid_time: Some(rfc3339_hours_ago(2)),
+        }))
+        .unwrap();
+
+        let mut update_props = HashMap::new();
+        update_props.insert("strength".to_string(), serde_json::json!(9));
+        let update_valid_time = rfc3339_hours_ago(1);
+        let response = server.update_edge(UpdateEdgeRequest {
+            edge_id: edge.id,
+            properties: update_props,
+            valid_time: Some(update_valid_time.clone()),
+        });
+        let updated: EdgeResponse = parse_response(&response).expect("update should succeed");
+        assert_eq!(
+            updated.properties.get("strength"),
+            Some(&serde_json::json!(9))
+        );
+
+        let at_update = server.get_edge_at_time(GetEdgeAtTimeRequest {
+            edge_id: edge.id,
+            valid_time: update_valid_time,
+            transaction_time: None,
+        });
+        let value: serde_json::Value = serde_json::from_str(&at_update).unwrap();
+        let fetched: EdgeResponse = serde_json::from_value(value["edge"].clone()).unwrap();
+        assert_eq!(
+            fetched.properties.get("strength"),
+            Some(&serde_json::json!(9))
+        );
     }
 }

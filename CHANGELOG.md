@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Valid-time writes on the convenience API and MCP tools (Issue #3221):
+  `AletheiaDB::create_node_with_valid_time`, `create_edge_with_valid_time`,
+  `update_node_with_valid_time`, `update_edge_with_valid_time`,
+  `delete_node_with_valid_time`, and `delete_edge_with_valid_time` expose the
+  existing `WriteOps::*_with_valid_time` trait methods on the top-level type.
+  The MCP `create_node`, `create_edge`, `update_node`, and `update_edge`
+  tools gain an optional `valid_time` field (ISO 8601 / RFC 3339 or
+  microseconds since epoch) so an LLM can record a fact's real-world
+  effective date in a single tool call. Purely additive; omitting
+  `valid_time` reproduces prior behavior exactly.
+
 ## [0.1.1] - 2026-05-12
 
 ### Fixed
