@@ -233,7 +233,7 @@ impl AletheiaDB {
     /// decide whether a detach/cascade delete is required to avoid orphaning
     /// edges.
     ///
-    /// Returns [`StorageError::NodeNotFound`](crate::storage::StorageError::NodeNotFound)
+    /// Returns [`StorageError::NodeNotFound`](crate::core::error::StorageError::NodeNotFound)
     /// if the node does not exist in the current state, so callers never receive
     /// a misleading zero count for a missing node.
     #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
@@ -333,7 +333,7 @@ impl AletheiaDB {
 
     /// Enable a uniqueness constraint on `(label, property)`.
     ///
-    /// Fails with [`ConstraintError::DuplicateOnEnable`] if existing nodes already
+    /// Fails with [`ConstraintError::DuplicateOnEnable`](crate::core::error::ConstraintError::DuplicateOnEnable) if existing nodes already
     /// violate the constraint. No constraint is enabled in that case.
     pub(crate) fn enable_unique_constraint(&self, label: &str, property: &str) -> Result<()> {
         let label_id = GLOBAL_INTERNER.intern(label).record_error_metric()?;
