@@ -642,18 +642,24 @@ mod tests {
         use crate::core::property::PropertyValue;
         use crate::core::temporal::time;
 
-        fn hours_ago(hours: i64) -> HybridTimestamp {
-            HybridTimestamp::new(time::now().wallclock() - hours * 3_600_000_000, 0).unwrap()
+        /// `now` is the caller's own `time::now().wallclock()`, captured once at the
+        /// start of the test and reused for every offset it computes. Calling
+        /// `time::now()` freshly inside the helper would let each call observe a
+        /// slightly different instant under load, making relative orderings between
+        /// offsets (e.g. `t0 < t1 < t2`) non-deterministic.
+        fn hours_ago(now: i64, hours: i64) -> HybridTimestamp {
+            HybridTimestamp::new(now - hours * 3_600_000_000, 0).unwrap()
         }
 
-        fn hours_from_now(hours: i64) -> HybridTimestamp {
-            HybridTimestamp::new(time::now().wallclock() + hours * 3_600_000_000, 0).unwrap()
+        fn hours_from_now(now: i64, hours: i64) -> HybridTimestamp {
+            HybridTimestamp::new(now + hours * 3_600_000_000, 0).unwrap()
         }
 
         #[test]
         fn create_node_with_valid_time_backdated_round_trip() {
             let (_tmp, db) = create_test_db().unwrap();
-            let t_past = hours_ago(1);
+            let now = time::now().wallclock();
+            let t_past = hours_ago(now, 1);
 
             let id = db
                 .create_node_with_valid_time(
@@ -671,14 +677,15 @@ mod tests {
             );
 
             // Invisible strictly before t_past.
-            let before = hours_ago(2);
+            let before = hours_ago(now, 2);
             assert!(db.get_node_at_valid_time(id, before).is_err());
         }
 
         #[test]
         fn create_node_with_valid_time_future_dated_invisible_now_visible_at_future() {
             let (_tmp, db) = create_test_db().unwrap();
-            let t_future = hours_from_now(1);
+            let now = time::now().wallclock();
+            let t_future = hours_from_now(now, 1);
 
             let id = db
                 .create_node_with_valid_time(
@@ -695,6 +702,7 @@ mod tests {
         #[test]
         fn create_edge_with_valid_time_backdated_round_trip() {
             let (_tmp, db) = create_test_db().unwrap();
+            let now = time::now().wallclock();
             let source = db
                 .create_node("Person", PropertyMapBuilder::new().build())
                 .unwrap();
@@ -702,7 +710,7 @@ mod tests {
                 .create_node("Person", PropertyMapBuilder::new().build())
                 .unwrap();
 
-            let t_past = hours_ago(1);
+            let t_past = hours_ago(now, 1);
             let edge_id = db
                 .create_edge_with_valid_time(
                     source,
@@ -714,7 +722,10 @@ mod tests {
                 .unwrap();
 
             assert!(db.get_edge_at_valid_time(edge_id, t_past).is_ok());
-            assert!(db.get_edge_at_valid_time(edge_id, hours_ago(2)).is_err());
+            assert!(
+                db.get_edge_at_valid_time(edge_id, hours_ago(now, 2))
+                    .is_err()
+            );
         }
 
         // NOTE: Updating/deleting closes the *transaction time* of the previous
@@ -728,15 +739,16 @@ mod tests {
         #[test]
         fn update_node_with_valid_time_backdated_round_trip() {
             let (_tmp, db) = create_test_db().unwrap();
+            let now = time::now().wallclock();
             let id = db
                 .create_node_with_valid_time(
                     "Person",
                     PropertyMapBuilder::new().insert("city", "Paris").build(),
-                    Some(hours_ago(2)),
+                    Some(hours_ago(now, 2)),
                 )
                 .unwrap();
 
-            let t_update = hours_ago(1);
+            let t_update = hours_ago(now, 1);
             db.update_node_with_valid_time(
                 id,
                 PropertyMapBuilder::new().insert("city", "London").build(),
@@ -767,6 +779,7 @@ mod tests {
         #[test]
         fn update_edge_with_valid_time_backdated_round_trip() {
             let (_tmp, db) = create_test_db().unwrap();
+            let now = time::now().wallclock();
             let source = db
                 .create_node("Person", PropertyMapBuilder::new().build())
                 .unwrap();
@@ -779,11 +792,11 @@ mod tests {
                     target,
                     "KNOWS",
                     PropertyMapBuilder::new().insert("strength", 1i64).build(),
-                    Some(hours_ago(2)),
+                    Some(hours_ago(now, 2)),
                 )
                 .unwrap();
 
-            let t_update = hours_ago(1);
+            let t_update = hours_ago(now, 1);
             db.update_edge_with_valid_time(
                 edge_id,
                 PropertyMapBuilder::new().insert("strength", 9i64).build(),
@@ -812,15 +825,16 @@ mod tests {
         #[test]
         fn delete_node_with_valid_time_round_trip() {
             let (_tmp, db) = create_test_db().unwrap();
+            let now = time::now().wallclock();
             let id = db
                 .create_node_with_valid_time(
                     "Person",
                     PropertyMapBuilder::new().build(),
-                    Some(hours_ago(2)),
+                    Some(hours_ago(now, 2)),
                 )
                 .unwrap();
 
-            let t_delete = hours_ago(1);
+            let t_delete = hours_ago(now, 1);
             db.delete_node_with_valid_time(id, Some(t_delete)).unwrap();
 
             // Tombstone recorded with the caller-specified valid_from.
@@ -837,6 +851,7 @@ mod tests {
         #[test]
         fn delete_edge_with_valid_time_round_trip() {
             let (_tmp, db) = create_test_db().unwrap();
+            let now = time::now().wallclock();
             let source = db
                 .create_node("Person", PropertyMapBuilder::new().build())
                 .unwrap();
@@ -849,11 +864,11 @@ mod tests {
                     target,
                     "KNOWS",
                     PropertyMapBuilder::new().build(),
-                    Some(hours_ago(2)),
+                    Some(hours_ago(now, 2)),
                 )
                 .unwrap();
 
-            let t_delete = hours_ago(1);
+            let t_delete = hours_ago(now, 1);
             db.delete_edge_with_valid_time(edge_id, Some(t_delete))
                 .unwrap();
 
@@ -869,11 +884,12 @@ mod tests {
         #[test]
         fn create_node_with_valid_time_rejects_far_future_typed_error() {
             let (_tmp, db) = create_test_db().unwrap();
+            let now = time::now().wallclock();
             let err = db
                 .create_node_with_valid_time(
                     "Person",
                     PropertyMapBuilder::new().build(),
-                    Some(hours_from_now(24 * 400)), // > 1 year
+                    Some(hours_from_now(now, 24 * 400)), // > 1 year
                 )
                 .unwrap_err();
 
@@ -913,13 +929,10 @@ mod tests {
         #[test]
         fn update_node_with_valid_time_backfill_between_existing_versions_succeeds() {
             let (_tmp, db) = create_test_db().unwrap();
-            let t0 = hours_ago(3); // true creation time
-            let t2 = hours_ago(2); // later backdated update (becomes latest version)
-            let t1 = HybridTimestamp::new(
-                time::now().wallclock() - 2 * 3_600_000_000 - 1_800_000_000,
-                0,
-            )
-            .unwrap(); // 2h30m ago: t0 < t1 < t2
+            let now = time::now().wallclock();
+            let t0 = hours_ago(now, 3); // true creation time
+            let t2 = hours_ago(now, 2); // later backdated update (becomes latest version)
+            let t1 = HybridTimestamp::new(now - 2 * 3_600_000_000 - 1_800_000_000, 0).unwrap(); // 2h30m ago: t0 < t1 < t2
 
             let id = db
                 .create_node_with_valid_time(
@@ -951,7 +964,8 @@ mod tests {
         #[test]
         fn transaction_time_is_system_assigned_for_backdated_create() {
             let (_tmp, db) = create_test_db().unwrap();
-            let t_past = hours_ago(1);
+            let now = time::now().wallclock();
+            let t_past = hours_ago(now, 1);
             let id = db
                 .create_node_with_valid_time(
                     "Person",

@@ -4985,31 +4985,36 @@ mod vector_elision_tests {
 
 mod valid_time_write_tests {
     use super::*;
-    use chrono::{Duration, Utc};
+    use chrono::{DateTime, Duration, Utc};
 
-    fn rfc3339_hours_ago(hours: i64) -> String {
-        (Utc::now() - Duration::hours(hours)).to_rfc3339()
+    /// `now` is the caller's own `Utc::now()`, captured once at the start of the test
+    /// and reused for every offset it computes. Calling `Utc::now()` freshly inside the
+    /// helper would let each call observe a slightly different instant under load,
+    /// making relative orderings between offsets non-deterministic.
+    fn rfc3339_hours_ago(now: DateTime<Utc>, hours: i64) -> String {
+        (now - Duration::hours(hours)).to_rfc3339()
     }
 
-    fn rfc3339_hours_from_now(hours: i64) -> String {
-        (Utc::now() + Duration::hours(hours)).to_rfc3339()
+    fn rfc3339_hours_from_now(now: DateTime<Utc>, hours: i64) -> String {
+        (now + Duration::hours(hours)).to_rfc3339()
     }
 
     #[test]
     fn test_create_node_with_valid_time_backdated_round_trip() {
         let server = create_test_server();
+        let now = Utc::now();
 
         let response = server.create_node(CreateNodeRequest {
             label: "Person".to_string(),
             properties: None,
-            valid_time: Some(rfc3339_hours_ago(1)),
+            valid_time: Some(rfc3339_hours_ago(now, 1)),
         });
         let node: NodeResponse = parse_response(&response).expect("create should succeed");
 
         // Visible shortly after its valid_from.
         let visible = server.get_node_at_time(GetNodeAtTimeRequest {
             node_id: node.id,
-            valid_time: rfc3339_hours_ago(0),
+            valid_time: rfc3339_hours_ago(now, 0),
             transaction_time: None,
         });
         let value: serde_json::Value = serde_json::from_str(&visible).unwrap();
@@ -5018,7 +5023,7 @@ mod valid_time_write_tests {
         // Invisible strictly before its valid_from.
         let invisible = server.get_node_at_time(GetNodeAtTimeRequest {
             node_id: node.id,
-            valid_time: rfc3339_hours_ago(2),
+            valid_time: rfc3339_hours_ago(now, 2),
             transaction_time: None,
         });
         let value: serde_json::Value = serde_json::from_str(&invisible).unwrap();
@@ -5070,11 +5075,12 @@ mod valid_time_write_tests {
     #[test]
     fn test_create_node_far_future_valid_time_typed_error_surfaced() {
         let server = create_test_server();
+        let now = Utc::now();
 
         let response = server.create_node(CreateNodeRequest {
             label: "Person".to_string(),
             properties: None,
-            valid_time: Some(rfc3339_hours_from_now(24 * 400)), // > 1 year
+            valid_time: Some(rfc3339_hours_from_now(now, 24 * 400)), // > 1 year
         });
 
         let value: serde_json::Value = serde_json::from_str(&response).unwrap();
@@ -5086,6 +5092,7 @@ mod valid_time_write_tests {
     #[test]
     fn test_create_edge_with_valid_time_backdated_round_trip() {
         let server = create_test_server();
+        let now = Utc::now();
 
         let n1: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
             label: "Person".to_string(),
@@ -5105,13 +5112,13 @@ mod valid_time_write_tests {
             target_id: n2.id,
             label: "KNOWS".to_string(),
             properties: None,
-            valid_time: Some(rfc3339_hours_ago(1)),
+            valid_time: Some(rfc3339_hours_ago(now, 1)),
         });
         let edge: EdgeResponse = parse_response(&response).expect("create_edge should succeed");
 
         let visible = server.get_edge_at_time(GetEdgeAtTimeRequest {
             edge_id: edge.id,
-            valid_time: rfc3339_hours_ago(0),
+            valid_time: rfc3339_hours_ago(now, 0),
             transaction_time: None,
         });
         let value: serde_json::Value = serde_json::from_str(&visible).unwrap();
@@ -5119,7 +5126,7 @@ mod valid_time_write_tests {
 
         let invisible = server.get_edge_at_time(GetEdgeAtTimeRequest {
             edge_id: edge.id,
-            valid_time: rfc3339_hours_ago(2),
+            valid_time: rfc3339_hours_ago(now, 2),
             transaction_time: None,
         });
         let value: serde_json::Value = serde_json::from_str(&invisible).unwrap();
@@ -5129,19 +5136,20 @@ mod valid_time_write_tests {
     #[test]
     fn test_update_node_with_valid_time_backdated() {
         let server = create_test_server();
+        let now = Utc::now();
 
         let mut props = HashMap::new();
         props.insert("city".to_string(), serde_json::json!("Paris"));
         let node: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
             label: "Person".to_string(),
             properties: Some(props),
-            valid_time: Some(rfc3339_hours_ago(2)),
+            valid_time: Some(rfc3339_hours_ago(now, 2)),
         }))
         .unwrap();
 
         let mut update_props = HashMap::new();
         update_props.insert("city".to_string(), serde_json::json!("London"));
-        let update_valid_time = rfc3339_hours_ago(1);
+        let update_valid_time = rfc3339_hours_ago(now, 1);
         let response = server.update_node(UpdateNodeRequest {
             node_id: node.id,
             properties: update_props,
@@ -5195,20 +5203,21 @@ mod valid_time_write_tests {
     #[test]
     fn test_transaction_time_not_client_settable() {
         let server = create_test_server();
+        let now = Utc::now();
 
         let node: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
             label: "Person".to_string(),
             properties: None,
-            valid_time: Some(rfc3339_hours_ago(1)),
+            valid_time: Some(rfc3339_hours_ago(now, 1)),
         }))
         .unwrap();
 
         // As of a transaction_time 30 minutes ago, the write (committed just now)
         // had not happened yet -- the fact must not be retroactively knowable.
-        let too_early_tx = (Utc::now() - Duration::minutes(30)).to_rfc3339();
+        let too_early_tx = (now - Duration::minutes(30)).to_rfc3339();
         let too_early = server.get_node_at_time(GetNodeAtTimeRequest {
             node_id: node.id,
-            valid_time: rfc3339_hours_ago(0),
+            valid_time: rfc3339_hours_ago(now, 0),
             transaction_time: Some(too_early_tx),
         });
         let value: serde_json::Value = serde_json::from_str(&too_early).unwrap();
@@ -5217,7 +5226,7 @@ mod valid_time_write_tests {
         // Omitting transaction_time defaults to now, where the write is visible.
         let now_response = server.get_node_at_time(GetNodeAtTimeRequest {
             node_id: node.id,
-            valid_time: rfc3339_hours_ago(0),
+            valid_time: rfc3339_hours_ago(now, 0),
             transaction_time: None,
         });
         let value: serde_json::Value = serde_json::from_str(&now_response).unwrap();
@@ -5227,6 +5236,7 @@ mod valid_time_write_tests {
     #[test]
     fn test_update_edge_with_valid_time_backdated() {
         let server = create_test_server();
+        let now = Utc::now();
 
         let n1: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
             label: "Person".to_string(),
@@ -5248,13 +5258,13 @@ mod valid_time_write_tests {
             target_id: n2.id,
             label: "KNOWS".to_string(),
             properties: Some(props),
-            valid_time: Some(rfc3339_hours_ago(2)),
+            valid_time: Some(rfc3339_hours_ago(now, 2)),
         }))
         .unwrap();
 
         let mut update_props = HashMap::new();
         update_props.insert("strength".to_string(), serde_json::json!(9));
-        let update_valid_time = rfc3339_hours_ago(1);
+        let update_valid_time = rfc3339_hours_ago(now, 1);
         let response = server.update_edge(UpdateEdgeRequest {
             edge_id: edge.id,
             properties: update_props,
@@ -5286,6 +5296,7 @@ mod valid_time_write_tests {
     #[test]
     fn test_create_edge_far_future_valid_time_typed_error_surfaced() {
         let server = create_test_server();
+        let now = Utc::now();
 
         let n1: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
             label: "Person".to_string(),
@@ -5305,7 +5316,7 @@ mod valid_time_write_tests {
             target_id: n2.id,
             label: "KNOWS".to_string(),
             properties: None,
-            valid_time: Some(rfc3339_hours_from_now(24 * 400)), // > 1 year
+            valid_time: Some(rfc3339_hours_from_now(now, 24 * 400)), // > 1 year
         });
 
         let value: serde_json::Value = serde_json::from_str(&response).unwrap();
@@ -5323,15 +5334,16 @@ mod valid_time_write_tests {
     #[test]
     fn test_delete_node_with_valid_time_backdated_round_trip() {
         let server = create_test_server();
+        let now = Utc::now();
 
         let node: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
             label: "Person".to_string(),
             properties: None,
-            valid_time: Some(rfc3339_hours_ago(2)),
+            valid_time: Some(rfc3339_hours_ago(now, 2)),
         }))
         .unwrap();
 
-        let delete_valid_time = rfc3339_hours_ago(1);
+        let delete_valid_time = rfc3339_hours_ago(now, 1);
         let response = server.delete_node(DeleteNodeRequest {
             node_id: node.id,
             detach: None,
@@ -5358,7 +5370,7 @@ mod valid_time_write_tests {
         // No longer visible as of now.
         let gone = server.get_node_at_time(GetNodeAtTimeRequest {
             node_id: node.id,
-            valid_time: Utc::now().to_rfc3339(),
+            valid_time: now.to_rfc3339(),
             transaction_time: None,
         });
         let value: serde_json::Value = serde_json::from_str(&gone).unwrap();
@@ -5370,6 +5382,7 @@ mod valid_time_write_tests {
     #[test]
     fn test_delete_edge_with_valid_time_backdated_round_trip() {
         let server = create_test_server();
+        let now = Utc::now();
 
         let n1: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
             label: "Person".to_string(),
@@ -5388,11 +5401,11 @@ mod valid_time_write_tests {
             target_id: n2.id,
             label: "KNOWS".to_string(),
             properties: None,
-            valid_time: Some(rfc3339_hours_ago(2)),
+            valid_time: Some(rfc3339_hours_ago(now, 2)),
         }))
         .unwrap();
 
-        let delete_valid_time = rfc3339_hours_ago(1);
+        let delete_valid_time = rfc3339_hours_ago(now, 1);
         let response = server.delete_edge(DeleteEdgeRequest {
             edge_id: edge.id,
             valid_time: Some(delete_valid_time.clone()),
@@ -5418,7 +5431,7 @@ mod valid_time_write_tests {
         // No longer visible as of now.
         let gone = server.get_edge_at_time(GetEdgeAtTimeRequest {
             edge_id: edge.id,
-            valid_time: Utc::now().to_rfc3339(),
+            valid_time: now.to_rfc3339(),
             transaction_time: None,
         });
         let value: serde_json::Value = serde_json::from_str(&gone).unwrap();
@@ -5431,6 +5444,7 @@ mod valid_time_write_tests {
     #[test]
     fn test_delete_node_detach_with_valid_time_rejected() {
         let server = create_test_server();
+        let now = Utc::now();
 
         let n1: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
             label: "Person".to_string(),
@@ -5456,7 +5470,7 @@ mod valid_time_write_tests {
         let response = server.delete_node(DeleteNodeRequest {
             node_id: n1.id,
             detach: Some(true),
-            valid_time: Some(rfc3339_hours_ago(1)),
+            valid_time: Some(rfc3339_hours_ago(now, 1)),
         });
         let value: serde_json::Value = serde_json::from_str(&response).unwrap();
         assert!(value.get("error").is_some(), "expected error, got {value}");
