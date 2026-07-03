@@ -31,13 +31,21 @@ As of 2026-02, the active restart/recovery path is:
 Notes:
 - `StringInterner` is persisted and restored; interned IDs survive restart.
 - Legacy references to `storage::persistence` / `PersistenceManager` are obsolete.
-- `AletheiaDB::open()` is not an API in this codebase.
+- `AletheiaDB::open(path)` is the one-line entry point for this restart/recovery path with default settings.
 
 ## File-Based Persistence Quickstart
 
-**⚠️ Common Mistake:** Trying to use `AletheiaDB::open()` for startup. That API does not exist. Use `with_unified_config()` for full index/interner restore.
+The default settings above are exactly what `AletheiaDB::open(path)` gives you:
 
-### The Right Way (File-Based Persistence)
+```rust
+let db = AletheiaDB::open(std::env::current_dir()?.join(".my-app-data"))?;
+```
+
+### Custom Paths and Tuning (Full Control)
+
+Reach for `with_unified_config()` directly when you need to override
+defaults — e.g. a non-default `auto_persist_interval` — for full
+index/interner restore:
 
 ```rust
 use aletheiadb::{AletheiaDB, AletheiaDBConfig};

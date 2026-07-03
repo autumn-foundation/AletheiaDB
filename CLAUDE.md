@@ -531,17 +531,33 @@ let config = AletheiaDBConfig::builder()
 
 ## Persistence Quickstart
 
-**⚠️ Common Mistake:** There is **NO `AletheiaDB::open()` method**. Use `with_unified_config()` instead.
-
 AletheiaDB provides **two persistence systems** (cold storage requires manual setup):
 
 | System | Purpose | Setup |
 |--------|---------|-------|
-| **WAL** | Transaction durability | ✅ Via config |
-| **Index Persistence** | Fast restarts (6-30x) | ✅ Via config |
+| **WAL** | Transaction durability | ✅ Via `open()` |
+| **Index Persistence** | Fast restarts (6-30x) | ✅ Via `open()` |
 | **Cold Storage (Redb)** | Unlimited history | ⚙️ Manual (see guide) |
 
 ### Quick Setup (WAL + Index Persistence)
+
+The one-line entry point for a durable database is `AletheiaDB::open(path)`:
+
+```rust
+use aletheiadb::AletheiaDB;
+
+let db_path = std::env::current_dir()?.join(".my-app-data");
+
+// ✅ Creates directories automatically! Idempotent across restarts.
+let db = AletheiaDB::open(&db_path)?;
+```
+
+`open(path)` is the durable counterpart to `AletheiaDB::new()` (which is
+ephemeral/tempdir-backed). It is exactly
+`with_unified_config(durable_config_for_data_dir(path))` under the hood —
+WAL + index persistence with `load_on_startup`, group-commit durability —
+so power users who need to tune those settings can still call
+`with_unified_config` directly with a custom config:
 
 ```rust
 use aletheiadb::{AletheiaDB, AletheiaDBConfig};
