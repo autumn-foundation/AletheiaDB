@@ -58,6 +58,10 @@ Equivalent explicit config (useful if you later need to layer in Pattern 3):
 let config = AletheiaDBConfig::builder()
     .wal(WalConfigBuilder::new()
         .wal_dir("data/wal")
+        .durability_mode(DurabilityMode::GroupCommit {
+            max_delay_ms: 10,
+            max_batch_size: 200,
+        })
         .build())
     .persistence(PersistenceConfig {
         enabled: true,

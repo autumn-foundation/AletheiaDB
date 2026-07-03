@@ -144,8 +144,7 @@ impl AletheiaDB {
     ///    (enabled by default); without that feature this returns an error
     ///    when the variable is set.
     /// 2. `ALETHEIADB_DATA_DIR=/path` — open a durable database rooted at
-    ///    that path with the canonical config from
-    ///    [`crate::config::durable_config_for_data_dir`].
+    ///    that path via [`Self::open`].
     /// 3. Neither set — fall back to [`Self::new`] (ephemeral, tempdir-backed).
     ///
     /// This is the entry point every exposed binary (HTTP server, MCP server,
@@ -161,7 +160,7 @@ impl AletheiaDB {
             return Self::open_from_toml_path(&path);
         }
         if let Some(path) = crate::config::data_dir_from_env() {
-            return Self::with_unified_config(crate::config::durable_config_for_data_dir(path));
+            return Self::open(path);
         }
         Self::new()
     }

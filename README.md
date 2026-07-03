@@ -29,8 +29,10 @@ Requires Rust 1.92+.
 use aletheiadb::prelude::*;
 
 fn main() -> Result<()> {
-    // Durable: persists across restarts at this path. For an ephemeral,
-    // in-memory-only database (tests, scratch sessions), use `AletheiaDB::new()`.
+    // Durable: persists across restarts at this path, so rerunning this
+    // example against the same `./mydb` directory adds more nodes each time
+    // (delete `./mydb` to start fresh). For an ephemeral, in-memory-only
+    // database (tests, scratch sessions), use `AletheiaDB::new()`.
     let db = AletheiaDB::open("./mydb")?;
 
     // Create nodes and a relationship

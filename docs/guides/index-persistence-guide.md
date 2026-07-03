@@ -44,14 +44,16 @@ let db = AletheiaDB::open(std::env::current_dir()?.join(".my-app-data"))?;
 ### Custom Paths and Tuning (Full Control)
 
 Reach for `with_unified_config()` directly when you need to override
-defaults — e.g. a non-default `auto_persist_interval` — for full
+defaults — e.g. non-default persistence trigger policies — for full
 index/interner restore:
 
 ```rust
 use aletheiadb::{AletheiaDB, AletheiaDBConfig};
 use aletheiadb::config::WalConfigBuilder;
 use aletheiadb::storage::index_persistence::PersistenceConfig;
-use std::time::Duration;
+use aletheiadb::storage::index_persistence::formats::{
+    GraphPersistencePolicy, PersistencePolicies,
+};
 
 // Configure database with custom paths
 let db_path = std::env::current_dir()?.join(".my-app-data");
@@ -64,7 +66,14 @@ let config = AletheiaDBConfig::builder()
         enabled: true,
         data_dir: db_path.join("indexes"),  // Index persistence location
         load_on_startup: true,  // Load existing indexes on startup
-        auto_persist_interval: Duration::from_secs(300),  // Save every 5min
+        policies: PersistencePolicies {
+            // Save the graph index every 5min instead of the 10min default
+            graph: GraphPersistencePolicy {
+                time_interval_secs: 300,
+                ..Default::default()
+            },
+            ..Default::default()
+        },
         ..Default::default()
     })
     .build();

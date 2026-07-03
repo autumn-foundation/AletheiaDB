@@ -29,6 +29,12 @@ path you choose, use `AletheiaDB::open(path)` instead:
 let db = AletheiaDB::open("./mydb")?;
 ```
 
+> **Note on leftover state**: Unlike `new()`, data at a path passed to
+> `open()` survives between runs. If you run this guide's examples against
+> the same `./mydb` directory more than once, each run adds its own nodes on
+> top of the last rather than starting fresh. Delete `./mydb` between runs,
+> or point each run at its own path, if you want a clean slate.
+
 For custom durability settings or cold storage, use
 `AletheiaDB::with_unified_config()` — see [Persistence Guide](PERSISTENCE.md).
 
