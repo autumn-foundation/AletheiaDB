@@ -54,6 +54,12 @@ impl PyAletheiaDB {
     }
 
     /// Open a database from a TOML config file.
+    ///
+    /// Note: `config_path` is a path to a **TOML config file**, not a data
+    /// directory — this is a different contract from the Rust-level
+    /// `AletheiaDB::open(path)` (which treats `path` as a durable data
+    /// directory root). Do not forward this method to the Rust `open()`;
+    /// they are intentionally distinct entry points.
     #[staticmethod]
     fn open(config_path: &str) -> PyResult<Self> {
         use aletheiadb::AletheiaDBConfig;

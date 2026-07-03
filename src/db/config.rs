@@ -108,11 +108,13 @@ impl AletheiaDB {
     /// state survives the process; nothing is loaded from prior runs.
     ///
     /// This is the right constructor for tests, scratch sessions, and quick
-    /// experiments. For durable storage that replays prior state on restart,
-    /// use [`Self::with_unified_config`] with a config built from
-    /// [`crate::config::durable_config_for_data_dir`], or call
-    /// [`Self::open_from_env`] to honor the `ALETHEIADB_DATA_DIR` environment
-    /// variable.
+    /// experiments. For durable storage that persists across restarts, use
+    /// [`Self::open`] — the one-line durable counterpart to this
+    /// constructor. Power users needing full control can call
+    /// [`Self::with_unified_config`] with a config built from
+    /// [`crate::config::durable_config_for_data_dir`], or
+    /// [`Self::open_from_env`] to honor the `ALETHEIADB_DATA_DIR`
+    /// environment variable.
     ///
     /// # Errors
     ///
@@ -142,8 +144,7 @@ impl AletheiaDB {
     ///    (enabled by default); without that feature this returns an error
     ///    when the variable is set.
     /// 2. `ALETHEIADB_DATA_DIR=/path` — open a durable database rooted at
-    ///    that path with the canonical config from
-    ///    [`crate::config::durable_config_for_data_dir`].
+    ///    that path via [`Self::open`].
     /// 3. Neither set — fall back to [`Self::new`] (ephemeral, tempdir-backed).
     ///
     /// This is the entry point every exposed binary (HTTP server, MCP server,
@@ -159,9 +160,62 @@ impl AletheiaDB {
             return Self::open_from_toml_path(&path);
         }
         if let Some(path) = crate::config::data_dir_from_env() {
-            return Self::with_unified_config(crate::config::durable_config_for_data_dir(path));
+            return Self::open(path);
         }
         Self::new()
+    }
+
+    /// Open (or create) a **durable** database rooted at `path`.
+    ///
+    /// This is the one-line entry point for embedding a durable AletheiaDB:
+    /// it creates the directory tree at `path` if absent, and opens an
+    /// existing one otherwise, replaying any prior state so calls are
+    /// idempotent across process restarts. Internally it is exactly
+    /// [`Self::with_unified_config`] with a config built by
+    /// [`crate::config::durable_config_for_data_dir`] — WAL + index
+    /// persistence with `load_on_startup`, group-commit durability — so
+    /// behavior stays in one canonical place and does not fork config
+    /// defaults. For an ephemeral, tempdir-backed database, use
+    /// [`Self::new`] instead.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `path` is not writable, WAL initialization
+    /// fails, or index loading fails. Never falls back to an ephemeral
+    /// database on failure.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use aletheiadb::{AletheiaDB, PropertyMapBuilder};
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let dir = tempfile::tempdir()?;
+    ///
+    /// let node_id = {
+    ///     let db = AletheiaDB::open(dir.path())?;
+    ///     db.create_node(
+    ///         "Person",
+    ///         PropertyMapBuilder::new().insert("name", "Alice").build(),
+    ///     )?
+    ///     // `db` drops here, persisting final state.
+    /// };
+    ///
+    /// // Reopening the same path replays the prior state.
+    /// let db = AletheiaDB::open(dir.path())?;
+    /// let node = db.get_node(node_id)?;
+    /// assert_eq!(
+    ///     node.properties.get("name").and_then(|v| v.as_str()),
+    ///     Some("Alice")
+    /// );
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
+    pub fn open(path: impl AsRef<std::path::Path>) -> Result<Self> {
+        Self::with_unified_config(crate::config::durable_config_for_data_dir(
+            path.as_ref().to_path_buf(),
+        ))
     }
 
     /// Load a TOML config and open the database with it. Used by
