@@ -715,6 +715,7 @@ impl CheckpointManager {
             EdgeAnchorEntry, EdgeVersionEntry, NodeAnchorEntry, NodeVersionEntry,
             PersistedVersionType,
         };
+        use crate::storage::index_persistence::temporal::persist_provenance;
 
         let mut node_versions = Vec::with_capacity(snapshot.node_version_count());
         let mut node_anchors = Vec::with_capacity(snapshot.node_version_count());
@@ -794,6 +795,7 @@ impl CheckpointManager {
                 version_type,
                 properties,
                 vector_snapshot_id,
+                provenance: persist_provenance(version.provenance.as_deref()),
             };
             node_versions.push(entry);
         }
@@ -866,6 +868,7 @@ impl CheckpointManager {
                 tx_time_logical: version.temporal.transaction_time().start().logical(),
                 version_type,
                 properties,
+                provenance: persist_provenance(version.provenance.as_deref()),
             };
             edge_versions.push(entry);
         }
@@ -1041,6 +1044,10 @@ impl CheckpointManager {
                     data,
                     next_version: None,
                     prev_version: None,
+                    provenance: crate::storage::index_persistence::temporal::restore_provenance(
+                        entry.provenance.clone(),
+                    )
+                    .map_err(persistence_err)?,
                 };
 
                 historical.insert_restored_node_version(version)?;
@@ -1113,6 +1120,10 @@ impl CheckpointManager {
                     data,
                     next_version: None,
                     prev_version: None,
+                    provenance: crate::storage::index_persistence::temporal::restore_provenance(
+                        entry.provenance.clone(),
+                    )
+                    .map_err(persistence_err)?,
                 };
 
                 historical.insert_restored_edge_version(version)?;
@@ -1352,6 +1363,7 @@ mod tests {
                 label: GLOBAL_INTERNER.intern("Person").unwrap(),
                 properties: props,
                 valid_from: time::now(),
+                provenance: None,
             })?;
         }
         wal.flush()?;
@@ -1396,6 +1408,7 @@ mod tests {
                 label: GLOBAL_INTERNER.intern("Person").unwrap(),
                 properties: props,
                 valid_from: time::now(),
+                provenance: None,
             })?;
         }
         wal.flush()?;
@@ -1495,6 +1508,7 @@ mod tests {
                 label: GLOBAL_INTERNER.intern("Test").unwrap(),
                 properties: props,
                 valid_from: time::now(),
+                provenance: None,
             })?;
         }
         wal.flush()?;
@@ -1891,6 +1905,7 @@ mod tests {
                     .insert("name", format!("Person{}", i))
                     .build(),
                 valid_from: time::now(),
+                provenance: None,
             })?;
         }
 
@@ -1902,6 +1917,7 @@ mod tests {
             label: GLOBAL_INTERNER.intern("KNOWS").unwrap(),
             properties: PropertyMapBuilder::new().insert("since", 2023i64).build(),
             valid_from: time::now(),
+            provenance: None,
         })?;
         wal.flush()?;
 
@@ -1945,6 +1961,7 @@ mod tests {
                 .insert("age", 30i64)
                 .build(),
             valid_from: time::now(),
+            provenance: None,
         })?;
 
         // Update node
@@ -1957,6 +1974,7 @@ mod tests {
                 .insert("age", 31i64)
                 .build(),
             valid_from: time::now(),
+            provenance: None,
         })?;
         wal.flush()?;
 
@@ -1996,6 +2014,7 @@ mod tests {
                 label: GLOBAL_INTERNER.intern("Person").unwrap(),
                 properties: PropertyMapBuilder::new().build(),
                 valid_from: time::now(),
+                provenance: None,
             })?;
         }
 
@@ -2009,6 +2028,7 @@ mod tests {
             label: GLOBAL_INTERNER.intern("KNOWS").unwrap(),
             properties: PropertyMapBuilder::new().insert("strength", 5i64).build(),
             valid_from: time::now(),
+            provenance: None,
         })?;
 
         // Update edge
@@ -2018,6 +2038,7 @@ mod tests {
             label: GLOBAL_INTERNER.intern("KNOWS").unwrap(),
             properties: PropertyMapBuilder::new().insert("strength", 10i64).build(),
             valid_from: time::now(),
+            provenance: None,
         })?;
         wal.flush()?;
 
@@ -2056,6 +2077,7 @@ mod tests {
             label: GLOBAL_INTERNER.intern("ToDelete").unwrap(),
             properties: PropertyMapBuilder::new().insert("temp", true).build(),
             valid_from: time::now(),
+            provenance: None,
         })?;
 
         // Delete node
@@ -2099,6 +2121,7 @@ mod tests {
                 label: GLOBAL_INTERNER.intern("Person").unwrap(),
                 properties: PropertyMapBuilder::new().build(),
                 valid_from: time::now(),
+                provenance: None,
             })?;
         }
 
@@ -2112,6 +2135,7 @@ mod tests {
             label: GLOBAL_INTERNER.intern("TEMP_EDGE").unwrap(),
             properties: PropertyMapBuilder::new().build(),
             valid_from: time::now(),
+            provenance: None,
         })?;
 
         // Delete edge
@@ -2154,6 +2178,7 @@ mod tests {
             label: GLOBAL_INTERNER.intern("Test").unwrap(),
             properties: PropertyMapBuilder::new().build(),
             valid_from: time::now(),
+            provenance: None,
         })?;
 
         // Add checkpoint marker
@@ -2168,6 +2193,7 @@ mod tests {
             label: GLOBAL_INTERNER.intern("Test").unwrap(),
             properties: PropertyMapBuilder::new().build(),
             valid_from: time::now(),
+            provenance: None,
         })?;
         wal.flush()?;
 
@@ -2580,6 +2606,7 @@ mod tests {
             label: GLOBAL_INTERNER.intern("HighId").unwrap(),
             properties: PropertyMapBuilder::new().build(),
             valid_from: time::now(),
+            provenance: None,
         })?;
 
         // Add entry with high edge ID
@@ -2590,6 +2617,7 @@ mod tests {
             label: GLOBAL_INTERNER.intern("HighEdge").unwrap(),
             properties: PropertyMapBuilder::new().build(),
             valid_from: time::now(),
+            provenance: None,
         })?;
         wal.flush()?;
 
@@ -2775,6 +2803,7 @@ mod tests {
                 label: GLOBAL_INTERNER.intern(format!("Node{}", i)).unwrap(),
                 properties: PropertyMapBuilder::new().build(),
                 valid_from: time::now(),
+                provenance: None,
             };
             wal.append_async(op)?;
         }
@@ -2884,6 +2913,7 @@ mod tests {
                 label: GLOBAL_INTERNER.intern(format!("Node{}", i)).unwrap(),
                 properties: PropertyMapBuilder::new().build(),
                 valid_from: time::now(),
+                provenance: None,
             };
             wal.append_async(op)?;
         }
@@ -2994,6 +3024,7 @@ mod tests {
                 label: GLOBAL_INTERNER.intern(format!("Node{}", i)).unwrap(),
                 properties: PropertyMapBuilder::new().build(),
                 valid_from: time::now(),
+                provenance: None,
             };
             wal.append_async(op)?;
         }

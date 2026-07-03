@@ -26,6 +26,7 @@ fn test_wal_entry_size_limit() {
         label: GLOBAL_INTERNER.intern("DoS").unwrap(),
         properties,
         valid_from: time::now(),
+        provenance: None,
     };
 
     // Attempt to append

@@ -58,6 +58,7 @@ fn bench_serialize_create_node(c: &mut Criterion) {
                     label: GLOBAL_INTERNER.intern("Person").unwrap(),
                     properties: props.build(),
                     valid_from: time::now(),
+                    provenance: None,
                 };
 
                 // This will call serialize_entry internally
@@ -93,6 +94,7 @@ fn bench_serialize_create_edge(c: &mut Criterion) {
                     label: GLOBAL_INTERNER.intern("KNOWS").unwrap(),
                     properties: props.build(),
                     valid_from: time::now(),
+                    provenance: None,
                 };
 
                 black_box(wal.append_async(operation).unwrap());
@@ -126,6 +128,7 @@ fn bench_serialize_update_node(c: &mut Criterion) {
                     label: GLOBAL_INTERNER.intern("Person").unwrap(),
                     properties: props.build(),
                     valid_from: time::now(),
+                    provenance: None,
                 };
 
                 black_box(wal.append_async(operation).unwrap());
@@ -153,6 +156,7 @@ fn bench_serialize_batch(c: &mut Criterion) {
                     label: GLOBAL_INTERNER.intern("Person").unwrap(),
                     properties: PropertyMapBuilder::new().insert("id", i as i64).build(),
                     valid_from: time::now(),
+                    provenance: None,
                 };
                 black_box(wal.append_async(operation).unwrap());
             }
@@ -180,6 +184,7 @@ fn bench_serialize_high_frequency(c: &mut Criterion) {
                     label: GLOBAL_INTERNER.intern("Test").unwrap(),
                     properties: PropertyMapBuilder::new().build(),
                     valid_from: time::now(),
+                    provenance: None,
                 };
                 black_box(wal.append_async(operation).unwrap());
             }

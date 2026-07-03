@@ -258,6 +258,23 @@ pub enum PersistedPropertyValue {
 // Temporal Index Format
 // ============================================================================
 
+/// Persisted write-time attributive provenance bundle (Issue #3224).
+///
+/// Mirrors [`crate::core::provenance::Provenance`]'s fields exactly; kept as
+/// a separate bitcode-encodable type since `Provenance` itself has private
+/// fields and validates on construction (not on persistence).
+#[derive(Debug, Clone, Encode, Decode)]
+pub struct PersistedProvenance {
+    /// Source system/identifier that produced the write, if any.
+    pub source: Option<String>,
+    /// Confidence in `[0.0, 1.0]`, if any.
+    pub confidence: Option<f64>,
+    /// Free-text note, if any.
+    pub note: Option<String>,
+    /// Correlation ID grouping co-committed writes, if any.
+    pub correlation_id: Option<String>,
+}
+
 /// Persisted temporal index data.
 #[derive(Debug, Clone, Encode, Decode)]
 pub struct TemporalIndexData {
@@ -304,6 +321,8 @@ pub struct NodeVersionEntry {
     pub properties: PersistedPropertyMap,
     /// Vector snapshot ID for provenance tracking
     pub vector_snapshot_id: Option<u64>,
+    /// Write-time attributive provenance bundle (Issue #3224), if supplied.
+    pub provenance: Option<PersistedProvenance>,
 }
 
 /// Persisted node anchor entry.
@@ -364,6 +383,8 @@ pub struct EdgeVersionEntry {
     pub version_type: PersistedVersionType,
     /// Properties
     pub properties: PersistedPropertyMap,
+    /// Write-time attributive provenance bundle (Issue #3224), if supplied.
+    pub provenance: Option<PersistedProvenance>,
 }
 
 /// Persisted edge anchor entry.
@@ -633,6 +654,157 @@ impl Default for StringPersistencePolicy {
         Self {
             new_strings_threshold: 500,
             time_interval_secs: 600, // 10 minutes
+        }
+    }
+}
+
+// ============================================================================
+// Legacy (pre-provenance) Temporal Index Format (Issue #3224)
+// ============================================================================
+
+/// Frozen copies of the temporal index structs as they existed before
+/// write-time provenance (Issue #3224) was added, i.e. `MANIFEST_VERSION == 1`.
+///
+/// `bitcode` is a positional, non-self-describing format: appending a field
+/// to [`NodeVersionEntry`]/[`EdgeVersionEntry`] changes their wire layout, so
+/// files written by older binaries can no longer decode as the current
+/// structs. These frozen shapes let [`super::temporal::load_temporal_index`]
+/// fall back to the old layout and upgrade in memory (`provenance: None`).
+///
+/// Do not modify these types after they're introduced -- they exist purely
+/// to describe historical on-disk bytes.
+pub mod legacy_v1 {
+    use super::{EdgeAnchorEntry, NodeAnchorEntry, PersistedPropertyMap, PersistedVersionType};
+    use bitcode::{Decode, Encode};
+
+    /// Pre-provenance `TemporalIndexData` (`version == 1`).
+    #[derive(Debug, Clone, Encode, Decode)]
+    pub struct TemporalIndexDataV1 {
+        /// Magic bytes: "GTMP"
+        pub magic: [u8; 4],
+        /// Format version (always 1 for this shape)
+        pub version: u16,
+        /// Node version entries
+        pub node_versions: Vec<NodeVersionEntryV1>,
+        /// Node anchor entries (unchanged since v1)
+        pub node_anchors: Vec<NodeAnchorEntry>,
+        /// Edge version entries
+        pub edge_versions: Vec<EdgeVersionEntryV1>,
+        /// Edge anchor entries (unchanged since v1)
+        pub edge_anchors: Vec<EdgeAnchorEntry>,
+    }
+
+    /// Pre-provenance `NodeVersionEntry` (no `provenance` field).
+    #[derive(Debug, Clone, Encode, Decode)]
+    pub struct NodeVersionEntryV1 {
+        /// Unique version identifier (preserved from original)
+        pub version_id: u64,
+        /// Node ID
+        pub node_id: u64,
+        /// Label index in string interner
+        pub label_idx: u32,
+        /// Valid time start (unix timestamp)
+        pub valid_from: i64,
+        /// Valid time end (None = still valid)
+        pub valid_to: Option<i64>,
+        /// Valid time start (logical counter)
+        pub valid_from_logical: u32,
+        /// Valid time end (logical counter)
+        pub valid_to_logical: Option<u32>,
+        /// Transaction time (unix timestamp)
+        pub tx_time: i64,
+        /// Transaction time (logical counter)
+        pub tx_time_logical: u32,
+        /// Version type (delta or anchor)
+        pub version_type: PersistedVersionType,
+        /// Properties at this version
+        pub properties: PersistedPropertyMap,
+        /// Vector snapshot ID for provenance tracking
+        pub vector_snapshot_id: Option<u64>,
+    }
+
+    /// Pre-provenance `EdgeVersionEntry` (no `provenance` field).
+    #[derive(Debug, Clone, Encode, Decode)]
+    pub struct EdgeVersionEntryV1 {
+        /// Unique version identifier (preserved from original)
+        pub version_id: u64,
+        /// Edge ID
+        pub edge_id: u64,
+        /// Source node ID
+        pub source_id: u64,
+        /// Target node ID
+        pub target_id: u64,
+        /// Label index in string interner
+        pub label_idx: u32,
+        /// Valid time start
+        pub valid_from: i64,
+        /// Valid time end
+        pub valid_to: Option<i64>,
+        /// Valid time start (logical counter)
+        pub valid_from_logical: u32,
+        /// Valid time end (logical counter)
+        pub valid_to_logical: Option<u32>,
+        /// Transaction time
+        pub tx_time: i64,
+        /// Transaction time (logical counter)
+        pub tx_time_logical: u32,
+        /// Version type
+        pub version_type: PersistedVersionType,
+        /// Properties
+        pub properties: PersistedPropertyMap,
+    }
+
+    impl From<NodeVersionEntryV1> for super::NodeVersionEntry {
+        fn from(v1: NodeVersionEntryV1) -> Self {
+            super::NodeVersionEntry {
+                version_id: v1.version_id,
+                node_id: v1.node_id,
+                label_idx: v1.label_idx,
+                valid_from: v1.valid_from,
+                valid_to: v1.valid_to,
+                valid_from_logical: v1.valid_from_logical,
+                valid_to_logical: v1.valid_to_logical,
+                tx_time: v1.tx_time,
+                tx_time_logical: v1.tx_time_logical,
+                version_type: v1.version_type,
+                properties: v1.properties,
+                vector_snapshot_id: v1.vector_snapshot_id,
+                provenance: None,
+            }
+        }
+    }
+
+    impl From<EdgeVersionEntryV1> for super::EdgeVersionEntry {
+        fn from(v1: EdgeVersionEntryV1) -> Self {
+            super::EdgeVersionEntry {
+                version_id: v1.version_id,
+                edge_id: v1.edge_id,
+                source_id: v1.source_id,
+                target_id: v1.target_id,
+                label_idx: v1.label_idx,
+                valid_from: v1.valid_from,
+                valid_to: v1.valid_to,
+                valid_from_logical: v1.valid_from_logical,
+                valid_to_logical: v1.valid_to_logical,
+                tx_time: v1.tx_time,
+                tx_time_logical: v1.tx_time_logical,
+                version_type: v1.version_type,
+                properties: v1.properties,
+                provenance: None,
+            }
+        }
+    }
+
+    impl From<TemporalIndexDataV1> for super::TemporalIndexData {
+        fn from(v1: TemporalIndexDataV1) -> Self {
+            super::TemporalIndexData {
+                magic: v1.magic,
+                version: v1.version,
+                node_versions: v1.node_versions.into_iter().map(Into::into).collect(),
+                node_anchors: v1.node_anchors,
+                edge_versions: v1.edge_versions.into_iter().map(Into::into).collect(),
+                edge_anchors: v1.edge_anchors,
+            }
         }
     }
 }

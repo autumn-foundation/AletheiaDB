@@ -44,6 +44,7 @@ fn test_replay_delete_node_basic() -> Result<()> {
         label: GLOBAL_INTERNER.intern("Person").unwrap(),
         properties: PropertyMapBuilder::new().insert("name", "Alice").build(),
         valid_from: timestamp1,
+        provenance: None,
     })?;
 
     // Delete node
@@ -86,6 +87,7 @@ fn test_replay_delete_node_after_update() -> Result<()> {
         label: GLOBAL_INTERNER.intern("Person").unwrap(),
         properties: PropertyMapBuilder::new().insert("name", "Alice").build(),
         valid_from: time::now(),
+        provenance: None,
     })?;
 
     // Update node
@@ -98,6 +100,7 @@ fn test_replay_delete_node_after_update() -> Result<()> {
             .insert("age", 30_i64)
             .build(),
         valid_from: time::now(),
+        provenance: None,
     })?;
 
     // Delete node
@@ -141,6 +144,7 @@ fn test_replay_delete_edge_basic() -> Result<()> {
         label: GLOBAL_INTERNER.intern("Person").unwrap(),
         properties: PropertyMap::new(),
         valid_from: time::now(),
+        provenance: None,
     })?;
 
     wal.append(WalOperation::CreateNode {
@@ -148,6 +152,7 @@ fn test_replay_delete_edge_basic() -> Result<()> {
         label: GLOBAL_INTERNER.intern("Person").unwrap(),
         properties: PropertyMap::new(),
         valid_from: time::now(),
+        provenance: None,
     })?;
 
     // Create edge
@@ -158,6 +163,7 @@ fn test_replay_delete_edge_basic() -> Result<()> {
         label: GLOBAL_INTERNER.intern("KNOWS").unwrap(),
         properties: PropertyMap::new(),
         valid_from: time::now(),
+        provenance: None,
     })?;
 
     // Delete edge
@@ -205,6 +211,7 @@ fn test_replay_multiple_deletes() -> Result<()> {
             label: GLOBAL_INTERNER.intern("Node").unwrap(),
             properties: PropertyMap::new(),
             valid_from: time::now(),
+            provenance: None,
         })?;
     }
 
@@ -258,6 +265,7 @@ fn test_replay_delete_with_vector() -> Result<()> {
             .insert_vector("embedding", &embedding)
             .build(),
         valid_from: time::now(),
+        provenance: None,
     })?;
 
     // Delete node
@@ -297,6 +305,7 @@ fn test_replay_mixed_creates_updates_deletes() -> Result<()> {
         label: GLOBAL_INTERNER.intern("Node").unwrap(),
         properties: PropertyMapBuilder::new().insert("value", 1_i64).build(),
         valid_from: time::now(),
+        provenance: None,
     })?;
 
     // Create node 2
@@ -305,6 +314,7 @@ fn test_replay_mixed_creates_updates_deletes() -> Result<()> {
         label: GLOBAL_INTERNER.intern("Node").unwrap(),
         properties: PropertyMapBuilder::new().insert("value", 2_i64).build(),
         valid_from: time::now(),
+        provenance: None,
     })?;
 
     // Update node 1
@@ -314,6 +324,7 @@ fn test_replay_mixed_creates_updates_deletes() -> Result<()> {
         label: GLOBAL_INTERNER.intern("Node").unwrap(),
         properties: PropertyMapBuilder::new().insert("value", 10_i64).build(),
         valid_from: time::now(),
+        provenance: None,
     })?;
 
     // Delete node 2
@@ -328,6 +339,7 @@ fn test_replay_mixed_creates_updates_deletes() -> Result<()> {
         label: GLOBAL_INTERNER.intern("Node").unwrap(),
         properties: PropertyMapBuilder::new().insert("value", 3_i64).build(),
         valid_from: time::now(),
+        provenance: None,
     })?;
 
     wal.flush()?;

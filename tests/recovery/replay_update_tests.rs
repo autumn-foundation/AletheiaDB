@@ -44,6 +44,7 @@ fn test_replay_update_node_basic() -> Result<()> {
         label: GLOBAL_INTERNER.intern("Person").unwrap(),
         properties: PropertyMapBuilder::new().insert("name", "Alice").build(),
         valid_from: timestamp1,
+        provenance: None,
     })?;
 
     // Update node with new properties
@@ -56,6 +57,7 @@ fn test_replay_update_node_basic() -> Result<()> {
             .insert("age", 30_i64)
             .build(),
         valid_from: timestamp2,
+        provenance: None,
     })?;
     wal.flush()?;
 
@@ -101,6 +103,7 @@ fn test_replay_update_node_label_change() -> Result<()> {
         label: GLOBAL_INTERNER.intern("Person").unwrap(),
         properties: PropertyMap::new(),
         valid_from: time::now(),
+        provenance: None,
     })?;
 
     // Update node to "User" label
@@ -110,6 +113,7 @@ fn test_replay_update_node_label_change() -> Result<()> {
         label: GLOBAL_INTERNER.intern("User").unwrap(),
         properties: PropertyMap::new(),
         valid_from: time::now(),
+        provenance: None,
     })?;
     wal.flush()?;
 
@@ -146,6 +150,7 @@ fn test_replay_update_node_with_vector() -> Result<()> {
             .insert_vector("embedding", &embedding_v1)
             .build(),
         valid_from: time::now(),
+        provenance: None,
     })?;
 
     // Update node with new embedding
@@ -157,6 +162,7 @@ fn test_replay_update_node_with_vector() -> Result<()> {
             .insert_vector("embedding", &embedding_v2)
             .build(),
         valid_from: time::now(),
+        provenance: None,
     })?;
     wal.flush()?;
 
@@ -195,6 +201,7 @@ fn test_replay_multiple_updates_same_node() -> Result<()> {
         label: GLOBAL_INTERNER.intern("Counter").unwrap(),
         properties: PropertyMapBuilder::new().insert("count", 0_i64).build(),
         valid_from: time::now(),
+        provenance: None,
     })?;
 
     // Update 5 times
@@ -205,6 +212,7 @@ fn test_replay_multiple_updates_same_node() -> Result<()> {
             label: GLOBAL_INTERNER.intern("Counter").unwrap(),
             properties: PropertyMapBuilder::new().insert("count", i).build(),
             valid_from: time::now(),
+            provenance: None,
         })?;
     }
     wal.flush()?;
@@ -248,6 +256,7 @@ fn test_replay_update_edge_basic() -> Result<()> {
         label: GLOBAL_INTERNER.intern("Person").unwrap(),
         properties: PropertyMap::new(),
         valid_from: time::now(),
+        provenance: None,
     })?;
 
     wal.append(WalOperation::CreateNode {
@@ -255,6 +264,7 @@ fn test_replay_update_edge_basic() -> Result<()> {
         label: GLOBAL_INTERNER.intern("Person").unwrap(),
         properties: PropertyMap::new(),
         valid_from: time::now(),
+        provenance: None,
     })?;
 
     // Create edge
@@ -265,6 +275,7 @@ fn test_replay_update_edge_basic() -> Result<()> {
         label: GLOBAL_INTERNER.intern("KNOWS").unwrap(),
         properties: PropertyMapBuilder::new().insert("since", 2020_i64).build(),
         valid_from: time::now(),
+        provenance: None,
     })?;
 
     // Update edge
@@ -277,6 +288,7 @@ fn test_replay_update_edge_basic() -> Result<()> {
             .insert("strength", 0.8)
             .build(),
         valid_from: time::now(),
+        provenance: None,
     })?;
     wal.flush()?;
 
@@ -322,6 +334,7 @@ fn test_replay_update_edge_label_change() -> Result<()> {
         label: GLOBAL_INTERNER.intern("Person").unwrap(),
         properties: PropertyMap::new(),
         valid_from: time::now(),
+        provenance: None,
     })?;
 
     wal.append(WalOperation::CreateNode {
@@ -329,6 +342,7 @@ fn test_replay_update_edge_label_change() -> Result<()> {
         label: GLOBAL_INTERNER.intern("Person").unwrap(),
         properties: PropertyMap::new(),
         valid_from: time::now(),
+        provenance: None,
     })?;
 
     // Create edge with "KNOWS" label
@@ -339,6 +353,7 @@ fn test_replay_update_edge_label_change() -> Result<()> {
         label: GLOBAL_INTERNER.intern("KNOWS").unwrap(),
         properties: PropertyMap::new(),
         valid_from: time::now(),
+        provenance: None,
     })?;
 
     // Update edge to "FRIENDS_WITH" label
@@ -348,6 +363,7 @@ fn test_replay_update_edge_label_change() -> Result<()> {
         label: GLOBAL_INTERNER.intern("FRIENDS_WITH").unwrap(),
         properties: PropertyMap::new(),
         valid_from: time::now(),
+        provenance: None,
     })?;
     wal.flush()?;
 
@@ -379,6 +395,7 @@ fn test_replay_mixed_creates_and_updates() -> Result<()> {
             label: GLOBAL_INTERNER.intern("Node").unwrap(),
             properties: PropertyMapBuilder::new().insert("value", i as i64).build(),
             valid_from: time::now(),
+            provenance: None,
         })?;
     }
 
@@ -389,6 +406,7 @@ fn test_replay_mixed_creates_and_updates() -> Result<()> {
         label: GLOBAL_INTERNER.intern("Node").unwrap(),
         properties: PropertyMapBuilder::new().insert("value", 10_i64).build(),
         valid_from: time::now(),
+        provenance: None,
     })?;
 
     wal.append(WalOperation::UpdateNode {
@@ -397,6 +415,7 @@ fn test_replay_mixed_creates_and_updates() -> Result<()> {
         label: GLOBAL_INTERNER.intern("Node").unwrap(),
         properties: PropertyMapBuilder::new().insert("value", 20_i64).build(),
         valid_from: time::now(),
+        provenance: None,
     })?;
 
     wal.flush()?;

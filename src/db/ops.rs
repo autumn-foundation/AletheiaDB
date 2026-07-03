@@ -285,6 +285,112 @@ impl AletheiaDB {
         self.write(|tx| tx.delete_edge_with_valid_time(edge_id, valid_from))
     }
 
+    /// Create a node with an optional [`WriteOptions`](crate::api::transaction::WriteOptions)
+    /// bundle: a backdated `valid_from` and/or a write-time [`Provenance`] bundle (Issue #3224).
+    ///
+    /// Passing `WriteOptions::default()` is identical to [`create_node`](Self::create_node).
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use aletheiadb::{AletheiaDB, PropertyMapBuilder, Provenance};
+    /// # use aletheiadb::api::transaction::WriteOptions;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// let provenance = Provenance::builder().source("hr-system").confidence(0.95).build()?;
+    /// let node_id = db.create_node_with_options(
+    ///     "Person",
+    ///     PropertyMapBuilder::new().insert("name", "Alice").build(),
+    ///     WriteOptions::new().with_provenance(provenance),
+    /// )?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
+    pub fn create_node_with_options(
+        &self,
+        label: &str,
+        properties: PropertyMap,
+        options: crate::api::transaction::WriteOptions,
+    ) -> Result<NodeId> {
+        self.write(|tx| tx.create_node_with_options(label, properties, options))
+    }
+
+    /// Create an edge with an optional [`WriteOptions`](crate::api::transaction::WriteOptions)
+    /// bundle. See [`create_node_with_options`](Self::create_node_with_options).
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
+    pub fn create_edge_with_options(
+        &self,
+        source: NodeId,
+        target: NodeId,
+        label: &str,
+        properties: PropertyMap,
+        options: crate::api::transaction::WriteOptions,
+    ) -> Result<EdgeId> {
+        self.write(|tx| tx.create_edge_with_options(source, target, label, properties, options))
+    }
+
+    /// Update a node's properties (PATCH semantics) with an optional
+    /// [`WriteOptions`](crate::api::transaction::WriteOptions) bundle.
+    ///
+    /// The provenance recorded here describes *this* version only -- it is
+    /// not inherited from the version being updated.
+    /// See [`create_node_with_options`](Self::create_node_with_options).
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
+    pub fn update_node_with_options(
+        &self,
+        node_id: NodeId,
+        properties: PropertyMap,
+        options: crate::api::transaction::WriteOptions,
+    ) -> Result<()> {
+        self.write(|tx| tx.update_node_with_options(node_id, properties, options))
+    }
+
+    /// Update an edge's properties (PATCH semantics) with an optional
+    /// [`WriteOptions`](crate::api::transaction::WriteOptions) bundle.
+    ///
+    /// The provenance recorded here describes *this* version only -- it is
+    /// not inherited from the version being updated.
+    /// See [`create_node_with_options`](Self::create_node_with_options).
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
+    pub fn update_edge_with_options(
+        &self,
+        edge_id: EdgeId,
+        properties: PropertyMap,
+        options: crate::api::transaction::WriteOptions,
+    ) -> Result<()> {
+        self.write(|tx| tx.update_edge_with_options(edge_id, properties, options))
+    }
+
+    /// Get the provenance bundle attached to a node's *current* version, if any.
+    ///
+    /// Returns `Ok(None)` (not an error) if the node has no provenance --
+    /// never a fabricated default (Issue #3224).
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
+    pub fn get_node_provenance(
+        &self,
+        node_id: NodeId,
+    ) -> Result<Option<crate::core::provenance::Provenance>> {
+        self.historical
+            .read()
+            .get_current_node_provenance(node_id)
+            .record_error_metric()
+    }
+
+    /// Get the provenance bundle attached to an edge's *current* version, if any.
+    ///
+    /// See [`get_node_provenance`](Self::get_node_provenance) for semantics.
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
+    pub fn get_edge_provenance(
+        &self,
+        edge_id: EdgeId,
+    ) -> Result<Option<crate::core::provenance::Provenance>> {
+        self.historical
+            .read()
+            .get_current_edge_provenance(edge_id)
+            .record_error_metric()
+    }
+
     /// Get the current state of a node.
     ///
     /// This uses the fast path (current storage) for O(1) lookup.

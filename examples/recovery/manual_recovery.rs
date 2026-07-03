@@ -143,6 +143,7 @@ fn main() -> Result<()> {
                 .insert("name", format!("Node {}", i))
                 .build(),
             valid_from: time::now(),
+            provenance: None,
         })?;
     }
 
@@ -158,6 +159,7 @@ fn main() -> Result<()> {
             label: GLOBAL_INTERNER.intern("LINKS_TO").unwrap(),
             properties: PropertyMapBuilder::new().insert("weight", i as i64).build(),
             valid_from: time::now(),
+            provenance: None,
         })?;
     }
 
@@ -174,6 +176,7 @@ fn main() -> Result<()> {
             .insert("updated", 1)
             .build(),
         valid_from: time::now(),
+        provenance: None,
     })?;
 
     // Flush WAL to ensure all entries are persisted

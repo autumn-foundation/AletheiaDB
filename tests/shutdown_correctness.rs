@@ -16,6 +16,7 @@ fn create_test_operation(id: u64) -> WalOperation {
         label: GLOBAL_INTERNER.intern(format!("Node{}", id)).unwrap(),
         properties: PropertyMap::new(),
         valid_from: time::now(),
+        provenance: None,
     }
 }
 

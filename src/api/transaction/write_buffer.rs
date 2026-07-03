@@ -5,9 +5,11 @@ use crate::core::hasher::IdentityHasher;
 use crate::core::id::{EdgeId, NodeId, VersionId};
 use crate::core::interning::InternedString;
 use crate::core::property::PropertyMap;
+use crate::core::provenance::Provenance;
 use crate::core::temporal::Timestamp;
 use std::collections::HashMap;
 use std::hash::BuildHasherDefault;
+use std::sync::Arc;
 
 type FastHashMap<K, V> = HashMap<K, V, BuildHasherDefault<IdentityHasher>>;
 
@@ -36,6 +38,8 @@ pub enum BufferedWrite {
         properties: PropertyMap,
         /// When the node became valid in reality (user-controlled)
         valid_from: Timestamp,
+        /// Write-time provenance bundle (Issue #3224), if supplied.
+        provenance: Option<Arc<Provenance>>,
     },
     /// Create a new edge
     CreateEdge {
@@ -53,6 +57,8 @@ pub enum BufferedWrite {
         properties: PropertyMap,
         /// When the edge became valid in reality (user-controlled)
         valid_from: Timestamp,
+        /// Write-time provenance bundle (Issue #3224), if supplied.
+        provenance: Option<Arc<Provenance>>,
     },
     /// Update an existing node (creates new version)
     UpdateNode {
@@ -66,6 +72,8 @@ pub enum BufferedWrite {
         properties: PropertyMap,
         /// When this update became valid in reality (user-controlled)
         valid_from: Timestamp,
+        /// Write-time provenance bundle (Issue #3224), if supplied.
+        provenance: Option<Arc<Provenance>>,
     },
     /// Update an existing edge (creates new version)
     UpdateEdge {
@@ -83,6 +91,8 @@ pub enum BufferedWrite {
         properties: PropertyMap,
         /// When this update became valid in reality (user-controlled)
         valid_from: Timestamp,
+        /// Write-time provenance bundle (Issue #3224), if supplied.
+        provenance: Option<Arc<Provenance>>,
     },
     /// Delete a node
     DeleteNode {
@@ -269,6 +279,7 @@ impl WriteBuffer {
     ///     label,
     ///     properties: PropertyMap::new(),
     ///     valid_from: time::now(),
+    ///     provenance: None,
     /// }).unwrap();
     ///
     /// assert_eq!(buffer.len(), 1);
@@ -397,12 +408,14 @@ impl From<&BufferedWrite> for crate::storage::wal::WalOperation {
                 label,
                 properties,
                 valid_from,
+                provenance,
                 ..
             } => crate::storage::wal::WalOperation::CreateNode {
                 node_id: *node_id,
                 label: *label,
                 properties: properties.clone(),
                 valid_from: *valid_from,
+                provenance: provenance.as_deref().cloned(),
             },
             BufferedWrite::CreateEdge {
                 edge_id,
@@ -411,6 +424,7 @@ impl From<&BufferedWrite> for crate::storage::wal::WalOperation {
                 label,
                 properties,
                 valid_from,
+                provenance,
                 ..
             } => crate::storage::wal::WalOperation::CreateEdge {
                 edge_id: *edge_id,
@@ -419,6 +433,7 @@ impl From<&BufferedWrite> for crate::storage::wal::WalOperation {
                 label: *label,
                 properties: properties.clone(),
                 valid_from: *valid_from,
+                provenance: provenance.as_deref().cloned(),
             },
             BufferedWrite::UpdateNode {
                 node_id,
@@ -426,6 +441,7 @@ impl From<&BufferedWrite> for crate::storage::wal::WalOperation {
                 label,
                 properties,
                 valid_from,
+                provenance,
                 ..
             } => crate::storage::wal::WalOperation::UpdateNode {
                 node_id: *node_id,
@@ -433,6 +449,7 @@ impl From<&BufferedWrite> for crate::storage::wal::WalOperation {
                 label: *label,
                 properties: properties.clone(),
                 valid_from: *valid_from,
+                provenance: provenance.as_deref().cloned(),
             },
             BufferedWrite::UpdateEdge {
                 edge_id,
@@ -440,6 +457,7 @@ impl From<&BufferedWrite> for crate::storage::wal::WalOperation {
                 label,
                 properties,
                 valid_from,
+                provenance,
                 ..
             } => crate::storage::wal::WalOperation::UpdateEdge {
                 edge_id: *edge_id,
@@ -447,6 +465,7 @@ impl From<&BufferedWrite> for crate::storage::wal::WalOperation {
                 label: *label,
                 properties: properties.clone(),
                 valid_from: *valid_from,
+                provenance: provenance.as_deref().cloned(),
             },
             BufferedWrite::DeleteNode {
                 node_id,
@@ -496,6 +515,7 @@ mod tests {
                 label,
                 properties,
                 valid_from,
+                provenance: None,
             })
             .unwrap();
 
@@ -527,6 +547,7 @@ mod tests {
                 label,
                 properties,
                 valid_from,
+                provenance: None,
             })
             .unwrap();
 
@@ -555,6 +576,7 @@ mod tests {
                 label,
                 properties: properties.clone(),
                 valid_from,
+                provenance: None,
             })
             .unwrap();
 
@@ -568,6 +590,7 @@ mod tests {
                 label,
                 properties,
                 valid_from,
+                provenance: None,
             })
             .unwrap();
 
@@ -594,6 +617,7 @@ mod tests {
                 label,
                 properties,
                 valid_from,
+                provenance: None,
             })
             .unwrap();
 
@@ -626,6 +650,7 @@ mod tests {
                 label,
                 properties: properties.clone(),
                 valid_from,
+                provenance: None,
             })
             .unwrap();
 
@@ -637,6 +662,7 @@ mod tests {
                 label,
                 properties,
                 valid_from,
+                provenance: None,
             })
             .unwrap();
 
@@ -666,6 +692,7 @@ mod tests {
                 label,
                 properties: properties.clone(),
                 valid_from,
+                provenance: None,
             })
             .unwrap();
 
@@ -677,6 +704,7 @@ mod tests {
                 label,
                 properties: properties.clone(),
                 valid_from,
+                provenance: None,
             })
             .unwrap();
 
@@ -687,6 +715,7 @@ mod tests {
             label,
             properties,
             valid_from,
+            provenance: None,
         });
 
         assert!(result.is_err());
@@ -740,6 +769,7 @@ mod tests {
                 label,
                 properties: props,
                 valid_from,
+                provenance: None,
             })
             .unwrap();
 
@@ -772,6 +802,7 @@ mod tests {
                 label,
                 properties: props,
                 valid_from,
+                provenance: None,
             })
             .unwrap();
 
@@ -804,6 +835,7 @@ mod tests {
                 label,
                 properties: props,
                 valid_from,
+                provenance: None,
             })
             .unwrap();
 
@@ -847,6 +879,7 @@ mod tests {
                 label,
                 properties: props,
                 valid_from,
+                provenance: None,
             })
             .unwrap();
 
@@ -879,6 +912,7 @@ mod tests {
                 label,
                 properties: props,
                 valid_from,
+                provenance: None,
             })
             .unwrap();
 
@@ -915,6 +949,7 @@ mod tests {
                 label,
                 properties: props,
                 valid_from,
+                provenance: None,
             })
             .unwrap();
 
@@ -953,6 +988,7 @@ mod tests {
                     label,
                     properties: PropertyMap::new().builder().insert("id", i as i64).build(),
                     valid_from,
+                    provenance: None,
                 })
                 .unwrap();
         }
@@ -972,6 +1008,7 @@ mod tests {
                 label,
                 properties: props,
                 valid_from,
+                provenance: None,
             })
             .unwrap();
 
@@ -987,6 +1024,7 @@ mod tests {
                     label,
                     properties: PropertyMap::new().builder().insert("id", i as i64).build(),
                     valid_from,
+                    provenance: None,
                 })
                 .unwrap();
         }
@@ -1019,6 +1057,7 @@ mod tests {
                 label,
                 properties: PropertyMap::new(),
                 valid_from,
+                provenance: None,
             })
             .unwrap();
 
@@ -1051,6 +1090,7 @@ mod tests {
                 label,
                 properties: PropertyMap::new(),
                 valid_from,
+                provenance: None,
             })
             .unwrap();
 
@@ -1098,6 +1138,7 @@ mod tests {
                 label,
                 properties: props,
                 valid_from,
+                provenance: None,
             })
             .unwrap();
 
@@ -1127,6 +1168,7 @@ mod tests {
                 label,
                 properties: PropertyMap::new(),
                 valid_from,
+                provenance: None,
             })
             .unwrap();
 
@@ -1160,6 +1202,7 @@ mod tests {
                 label,
                 properties: PropertyMap::new(),
                 valid_from,
+                provenance: None,
             })
             .unwrap();
 
@@ -1176,6 +1219,7 @@ mod tests {
                 label,
                 properties: PropertyMap::new(),
                 valid_from,
+                provenance: None,
             })
             .unwrap();
 
@@ -1190,6 +1234,7 @@ mod tests {
                 label,
                 properties: PropertyMap::new(),
                 valid_from,
+                provenance: None,
             })
             .unwrap();
 
@@ -1222,6 +1267,7 @@ mod tests {
                 label,
                 properties: PropertyMap::new(),
                 valid_from,
+                provenance: None,
             })
             .unwrap();
 
@@ -1237,6 +1283,7 @@ mod tests {
                 label,
                 properties: PropertyMap::new(),
                 valid_from,
+                provenance: None,
             })
             .unwrap();
 
@@ -1256,6 +1303,7 @@ mod tests {
                 label,
                 properties: PropertyMap::new(),
                 valid_from,
+                provenance: None,
             })
             .unwrap();
 
@@ -1290,6 +1338,7 @@ mod tests {
                 .unwrap(),
             properties: PropertyMap::new(),
             valid_from,
+            provenance: None,
         };
 
         match write {
@@ -1314,6 +1363,7 @@ mod tests {
                 .unwrap(),
             properties: PropertyMap::new(),
             valid_from,
+            provenance: None,
         };
 
         match write {
@@ -1340,6 +1390,7 @@ mod tests {
                 .unwrap(),
             properties: PropertyMap::new(),
             valid_from,
+            provenance: None,
         };
 
         match write {
@@ -1366,6 +1417,7 @@ mod tests {
                 .unwrap(),
             properties: PropertyMap::new(),
             valid_from,
+            provenance: None,
         };
 
         match write {

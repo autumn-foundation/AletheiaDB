@@ -37,6 +37,7 @@ pub mod id;
 pub mod interning;
 pub mod observer;
 pub mod property;
+pub mod provenance;
 pub mod temporal;
 pub mod vector;
 
@@ -50,6 +51,7 @@ pub use interning::{
     StringInterner,
 };
 pub use property::{PropertyKey, PropertyMap, PropertyMapBuilder, PropertyValue};
+pub use provenance::{Provenance, ProvenanceBuilder, ProvenanceError};
 pub use temporal::{BiTemporalInterval, TIMESTAMP_MAX, TimeRange, Timestamp};
 pub use vector::{
     // Types and constants

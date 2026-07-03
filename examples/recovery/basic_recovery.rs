@@ -105,6 +105,7 @@ fn main() -> Result<()> {
                 .insert("age", (20 + i) as i64)
                 .build(),
             valid_from: time::now(),
+            provenance: None,
         })?;
     }
     println!("✓ Created 50 nodes");
@@ -123,6 +124,7 @@ fn main() -> Result<()> {
                 .insert("since", 2020 + (i as i64))
                 .build(),
             valid_from: time::now(),
+            provenance: None,
         })?;
     }
     println!("✓ Created 49 edges (chain: 1→2→3→...→50)");
@@ -140,6 +142,7 @@ fn main() -> Result<()> {
             .insert("updated", true)
             .build(),
         valid_from: time::now(),
+        provenance: None,
     })?;
     println!("✓ Updated node 1 properties");
 

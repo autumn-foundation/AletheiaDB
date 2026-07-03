@@ -110,7 +110,13 @@ pub use loader::IndexPersistenceManager;
 use rayon::prelude::*;
 
 /// Current manifest format version.
-pub const MANIFEST_VERSION: u16 = 1;
+///
+/// Bumped to 2 for write-time provenance on temporal versions (Issue #3224):
+/// `NodeVersionEntry`/`EdgeVersionEntry` gained an optional `provenance`
+/// field. Since `bitcode` is positional, files written at version 1 can no
+/// longer decode directly as the current structs; see
+/// `temporal::load_temporal_index` for the legacy fallback.
+pub const MANIFEST_VERSION: u16 = 2;
 
 /// Magic bytes for manifest files.
 pub const MANIFEST_MAGIC: [u8; 4] = *b"GIDX";

@@ -77,7 +77,42 @@ use crate::core::graph::{Edge, Node};
 use crate::core::id::MAX_VALID_ID;
 use crate::core::id::{EdgeId, NodeId};
 use crate::core::property::{PropertyMap, PropertyValue};
+use crate::core::provenance::Provenance;
 use crate::core::temporal::Timestamp;
+
+/// Optional per-write settings: backdated `valid_from` and/or a write-time
+/// [`Provenance`] bundle (Issue #3224).
+///
+/// Constructed via [`WriteOptions::new`] (or its [`Default`] impl) and the
+/// `with_*` builder methods. Passing `WriteOptions::default()` reproduces the
+/// behavior of the plain `create_node`/`update_node`/etc. convenience methods
+/// exactly (valid time defaults to transaction start time, no provenance).
+#[derive(Debug, Clone, Default)]
+pub struct WriteOptions {
+    pub(crate) valid_from: Option<Timestamp>,
+    pub(crate) provenance: Option<Provenance>,
+}
+
+impl WriteOptions {
+    /// Create an empty set of options (equivalent to [`Default::default`]).
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set when the fact became valid in reality (`None` = transaction start time).
+    #[must_use]
+    pub fn with_valid_from(mut self, valid_from: Timestamp) -> Self {
+        self.valid_from = Some(valid_from);
+        self
+    }
+
+    /// Attach a write-time provenance bundle to this write.
+    #[must_use]
+    pub fn with_provenance(mut self, provenance: Provenance) -> Self {
+        self.provenance = Some(provenance);
+        self
+    }
+}
 
 /// Common read operations available in all transaction types
 pub trait ReadOps {
@@ -317,6 +352,42 @@ pub trait WriteOps: ReadOps {
         label: &str,
         properties: PropertyMap,
         valid_from: Option<Timestamp>,
+    ) -> Result<NodeId> {
+        let options = WriteOptions {
+            valid_from,
+            provenance: None,
+        };
+        self.create_node_with_options(label, properties, options)
+    }
+
+    /// Create a new node with an optional [`WriteOptions`] bundle (backdated
+    /// `valid_from` and/or a write-time [`Provenance`] bundle, Issue #3224).
+    ///
+    /// This is the most general node-creation method; all other
+    /// `create_node*` methods delegate to it. Passing `WriteOptions::default()`
+    /// is identical to [`create_node`](Self::create_node).
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use aletheiadb::{AletheiaDB, properties, Provenance, api::transaction::{WriteOps, WriteOptions}};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # let mut tx = db.write_transaction()?;
+    /// let provenance = Provenance::builder().source("hr-system").confidence(0.95).build()?;
+    /// let node_id = tx.create_node_with_options(
+    ///     "Person",
+    ///     properties! { "name" => "Alice" },
+    ///     WriteOptions::new().with_provenance(provenance),
+    /// )?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    fn create_node_with_options(
+        &mut self,
+        label: &str,
+        properties: PropertyMap,
+        options: WriteOptions,
     ) -> Result<NodeId>;
 
     /// Create a new node.
@@ -374,6 +445,26 @@ pub trait WriteOps: ReadOps {
         label: &str,
         properties: PropertyMap,
         valid_from: Option<Timestamp>,
+    ) -> Result<EdgeId> {
+        let options = WriteOptions {
+            valid_from,
+            provenance: None,
+        };
+        self.create_edge_with_options(source, target, label, properties, options)
+    }
+
+    /// Create a new edge with an optional [`WriteOptions`] bundle (backdated
+    /// `valid_from` and/or a write-time [`Provenance`] bundle, Issue #3224).
+    ///
+    /// This is the most general edge-creation method; all other
+    /// `create_edge*` methods delegate to it.
+    fn create_edge_with_options(
+        &mut self,
+        source: NodeId,
+        target: NodeId,
+        label: &str,
+        properties: PropertyMap,
+        options: WriteOptions,
     ) -> Result<EdgeId>;
 
     /// Create a new edge.
@@ -439,6 +530,27 @@ pub trait WriteOps: ReadOps {
         node_id: NodeId,
         properties: PropertyMap,
         valid_from: Option<Timestamp>,
+    ) -> Result<()> {
+        let options = WriteOptions {
+            valid_from,
+            provenance: None,
+        };
+        self.update_node_with_options(node_id, properties, options)
+    }
+
+    /// Update a node's properties with an optional [`WriteOptions`] bundle
+    /// (backdated `valid_from` and/or a write-time [`Provenance`] bundle,
+    /// Issue #3224).
+    ///
+    /// This is the most general node-update method; all other
+    /// `update_node*` methods delegate to it. The provenance recorded here
+    /// describes *this* version only -- it is not inherited from the
+    /// version being updated.
+    fn update_node_with_options(
+        &mut self,
+        node_id: NodeId,
+        properties: PropertyMap,
+        options: WriteOptions,
     ) -> Result<()>;
 
     /// Update a node's properties.
@@ -496,6 +608,27 @@ pub trait WriteOps: ReadOps {
         edge_id: EdgeId,
         properties: PropertyMap,
         valid_from: Option<Timestamp>,
+    ) -> Result<()> {
+        let options = WriteOptions {
+            valid_from,
+            provenance: None,
+        };
+        self.update_edge_with_options(edge_id, properties, options)
+    }
+
+    /// Update an edge's properties with an optional [`WriteOptions`] bundle
+    /// (backdated `valid_from` and/or a write-time [`Provenance`] bundle,
+    /// Issue #3224).
+    ///
+    /// This is the most general edge-update method; all other
+    /// `update_edge*` methods delegate to it. The provenance recorded here
+    /// describes *this* version only -- it is not inherited from the
+    /// version being updated.
+    fn update_edge_with_options(
+        &mut self,
+        edge_id: EdgeId,
+        properties: PropertyMap,
+        options: WriteOptions,
     ) -> Result<()>;
 
     /// Update an edge's properties.

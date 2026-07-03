@@ -1326,6 +1326,184 @@ fn test_edge_version_roundtrip_all_fields() {
     assert_eq!(retrieved.target, version.target);
 }
 
+// -----------------------------------------------------------------------
+// Provenance persistence (Issue #3224)
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_encode_decode_node_version_with_provenance() {
+    use crate::core::provenance::Provenance;
+    use std::sync::Arc;
+
+    let provenance = Arc::new(
+        Provenance::builder()
+            .source("hr-system")
+            .confidence(0.95)
+            .correlation_id("batch-42")
+            .build()
+            .unwrap(),
+    );
+
+    let version = NodeVersion::new_anchor(
+        VersionId::new(1).unwrap(),
+        NodeId::new(1).unwrap(),
+        BiTemporalInterval::current(1000.into()),
+        GLOBAL_INTERNER.intern("Person").unwrap(),
+        PropertyMapBuilder::new().build(),
+    )
+    .with_provenance(Some(provenance.clone()));
+
+    let encoded = encode_node_version(&version);
+    assert_eq!(
+        encoded[0], COLD_RECORD_TAG_V2,
+        "new records must be tag-prefixed"
+    );
+
+    let decoded = decode_node_version(&encoded).unwrap();
+    let decoded_provenance = decoded.provenance.unwrap();
+    assert_eq!(decoded_provenance.source(), Some("hr-system"));
+    assert_eq!(decoded_provenance.confidence(), Some(0.95));
+    assert_eq!(decoded_provenance.correlation_id(), Some("batch-42"));
+}
+
+#[test]
+fn test_encode_decode_node_version_without_provenance() {
+    let version = NodeVersion::new_anchor(
+        VersionId::new(1).unwrap(),
+        NodeId::new(1).unwrap(),
+        BiTemporalInterval::current(1000.into()),
+        GLOBAL_INTERNER.intern("Person").unwrap(),
+        PropertyMapBuilder::new().build(),
+    );
+
+    let encoded = encode_node_version(&version);
+    let decoded = decode_node_version(&encoded).unwrap();
+    assert!(decoded.provenance.is_none());
+}
+
+#[test]
+fn test_encode_decode_edge_version_with_provenance() {
+    use crate::core::provenance::Provenance;
+    use std::sync::Arc;
+
+    let provenance = Arc::new(
+        Provenance::builder()
+            .source("csv-import")
+            .note("bulk load 2026-06")
+            .build()
+            .unwrap(),
+    );
+
+    let version = EdgeVersion::new_anchor(
+        VersionId::new(1).unwrap(),
+        EdgeId::new(1).unwrap(),
+        BiTemporalInterval::current(1000.into()),
+        GLOBAL_INTERNER.intern("KNOWS").unwrap(),
+        NodeId::new(1).unwrap(),
+        NodeId::new(2).unwrap(),
+        PropertyMapBuilder::new().build(),
+    )
+    .with_provenance(Some(provenance));
+
+    let encoded = encode_edge_version(&version);
+    assert_eq!(encoded[0], COLD_RECORD_TAG_V2);
+
+    let decoded = decode_edge_version(&encoded).unwrap();
+    let decoded_provenance = decoded.provenance.unwrap();
+    assert_eq!(decoded_provenance.source(), Some("csv-import"));
+    assert_eq!(decoded_provenance.note(), Some("bulk load 2026-06"));
+}
+
+#[test]
+fn test_decode_legacy_untagged_node_record_provenance_none() {
+    // Simulate a record written by a pre-#3224 binary: no tag byte, no
+    // `provenance` field in the wire struct at all.
+    let legacy = SerializableNodeVersionV1 {
+        id: 1,
+        node_id: 1,
+        temporal_valid_start: 1000,
+        temporal_valid_end: crate::core::temporal::TIMESTAMP_MAX.wallclock(),
+        temporal_tx_start: 1000,
+        temporal_tx_end: crate::core::temporal::TIMESTAMP_MAX.wallclock(),
+        label: "Person".to_string(),
+        data: SerializableVersionData::Anchor {
+            properties: vec![],
+            vector_snapshot_id: None,
+        },
+        next_version: None,
+        prev_version: None,
+    };
+    let legacy_bytes = bitcode::encode(&legacy);
+    assert_ne!(
+        legacy_bytes.first(),
+        Some(&COLD_RECORD_TAG_V2),
+        "legacy fixture must not accidentally collide with the new tag byte"
+    );
+
+    let decoded = decode_node_version(&legacy_bytes).unwrap();
+    assert_eq!(decoded.node_id.as_u64(), 1);
+    assert!(decoded.provenance.is_none());
+}
+
+#[test]
+fn test_decode_legacy_untagged_edge_record_provenance_none() {
+    let legacy = SerializableEdgeVersionV1 {
+        id: 1,
+        edge_id: 1,
+        temporal_valid_start: 1000,
+        temporal_valid_end: crate::core::temporal::TIMESTAMP_MAX.wallclock(),
+        temporal_tx_start: 1000,
+        temporal_tx_end: crate::core::temporal::TIMESTAMP_MAX.wallclock(),
+        label: "KNOWS".to_string(),
+        source: 1,
+        target: 2,
+        data: SerializableVersionData::Anchor {
+            properties: vec![],
+            vector_snapshot_id: None,
+        },
+        next_version: None,
+        prev_version: None,
+    };
+    let legacy_bytes = bitcode::encode(&legacy);
+
+    let decoded = decode_edge_version(&legacy_bytes).unwrap();
+    assert_eq!(decoded.edge_id.as_u64(), 1);
+    assert!(decoded.provenance.is_none());
+}
+
+#[test]
+fn test_migrate_to_cold_preserves_provenance() {
+    use crate::core::provenance::Provenance;
+    use std::sync::Arc;
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let db_path = temp_dir.path().join("test.redb");
+    let storage = RedbColdStorage::with_default_config(&db_path).unwrap();
+
+    let provenance = Arc::new(
+        Provenance::builder()
+            .source("claude-mcp")
+            .confidence(0.8)
+            .build()
+            .unwrap(),
+    );
+    let version = NodeVersion::new_anchor(
+        VersionId::new(1).unwrap(),
+        NodeId::new(1).unwrap(),
+        BiTemporalInterval::current(1000.into()),
+        GLOBAL_INTERNER.intern("Person").unwrap(),
+        PropertyMapBuilder::new().build(),
+    )
+    .with_provenance(Some(provenance));
+
+    storage.store_node_version(&version).unwrap();
+    let retrieved = storage.get_node_version(version.id).unwrap().unwrap();
+
+    let retrieved_provenance = retrieved.provenance.unwrap();
+    assert_eq!(retrieved_provenance.source(), Some("claude-mcp"));
+    assert_eq!(retrieved_provenance.confidence(), Some(0.8));
+}
+
 #[test]
 fn test_batch_operations_preserve_order() {
     let temp_dir = tempfile::tempdir().unwrap();

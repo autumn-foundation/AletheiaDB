@@ -139,6 +139,7 @@ fn bench_recovery(c: &mut Criterion) {
                     label: GLOBAL_INTERNER.intern("Person").unwrap(),
                     properties: PropertyMapBuilder::new().build(),
                     valid_from: time::now(),
+                    provenance: None,
                 };
                 wal.append_async(operation).unwrap();
             }
@@ -164,6 +165,7 @@ fn bench_recovery(c: &mut Criterion) {
                     label: GLOBAL_INTERNER.intern("Person").unwrap(),
                     properties: PropertyMapBuilder::new().build(),
                     valid_from: time::now(),
+                    provenance: None,
                 };
                 wal.append_async(operation).unwrap();
             }

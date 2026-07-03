@@ -775,6 +775,7 @@ mod tests {
             label: GLOBAL_INTERNER.intern(format!("Node{}", id)).unwrap(),
             properties: PropertyMap::new(),
             valid_from: time::now(),
+            provenance: None,
         }
     }
 

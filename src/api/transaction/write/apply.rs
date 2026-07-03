@@ -42,9 +42,11 @@ use crate::core::graph::{Edge, Node};
 use crate::core::id::{EdgeId, NodeId, VersionId};
 use crate::core::interning::InternedString;
 use crate::core::property::PropertyMap;
+use crate::core::provenance::Provenance;
 use crate::core::temporal::{BiTemporalInterval, Timestamp};
 use crate::core::version::VersionMetadata;
 use crate::storage::historical::HistoricalStorage;
+use std::sync::Arc;
 
 /// Helper function to create a bi-temporal interval with proper closing logic.
 ///
@@ -84,6 +86,7 @@ pub(crate) fn apply_node_write(
     valid_from: Timestamp,
     commit_timestamp: Timestamp,
     historical: &mut HistoricalStorage,
+    provenance: Option<Arc<Provenance>>,
 ) -> Result<()> {
     // Create node with pending metadata (commit_timestamp finalized after full apply_changes).
     // Using uncommitted here prevents phantom visibility if apply_changes fails partway through.
@@ -102,7 +105,7 @@ pub(crate) fn apply_node_write(
     }
 
     // Store in historical storage (consume properties, avoiding second clone)
-    historical.add_node_version(
+    historical.add_node_version_with_provenance(
         node_id,
         version_id,
         valid_from,
@@ -110,6 +113,7 @@ pub(crate) fn apply_node_write(
         label,
         properties,
         false, // not a tombstone
+        provenance,
     )?;
 
     // Index in temporal indexes with bi-temporal interval
@@ -143,6 +147,7 @@ pub(crate) fn apply_edge_write(
     valid_from: Timestamp,
     commit_timestamp: Timestamp,
     historical: &mut HistoricalStorage,
+    provenance: Option<Arc<Provenance>>,
 ) -> Result<()> {
     // Create edge with pending metadata (commit_timestamp finalized after full apply_changes).
     let metadata = VersionMetadata::uncommitted(tx.tx_id);
@@ -168,7 +173,7 @@ pub(crate) fn apply_edge_write(
     }
 
     // Store in historical storage (consume properties, avoiding second clone)
-    historical.add_edge_version(
+    historical.add_edge_version_with_provenance(
         edge_id,
         version_id,
         valid_from,
@@ -178,6 +183,7 @@ pub(crate) fn apply_edge_write(
         target,
         properties,
         false, // not a tombstone
+        provenance,
     )?;
 
     // Index in temporal indexes with bi-temporal interval
@@ -308,6 +314,7 @@ pub(crate) fn apply_single_write(
             label,
             properties,
             valid_from,
+            provenance,
         }
         | crate::api::transaction::BufferedWrite::UpdateNode {
             node_id,
@@ -315,6 +322,7 @@ pub(crate) fn apply_single_write(
             label,
             properties,
             valid_from,
+            provenance,
         } => {
             let is_create = matches!(
                 write,
@@ -330,6 +338,7 @@ pub(crate) fn apply_single_write(
                 *valid_from,
                 commit_timestamp,
                 historical,
+                provenance.clone(),
             )?;
         }
         crate::api::transaction::BufferedWrite::CreateEdge {
@@ -340,6 +349,7 @@ pub(crate) fn apply_single_write(
             label,
             properties,
             valid_from,
+            provenance,
         }
         | crate::api::transaction::BufferedWrite::UpdateEdge {
             edge_id,
@@ -349,6 +359,7 @@ pub(crate) fn apply_single_write(
             label,
             properties,
             valid_from,
+            provenance,
         } => {
             let is_create = matches!(
                 write,
@@ -366,6 +377,7 @@ pub(crate) fn apply_single_write(
                 *valid_from,
                 commit_timestamp,
                 historical,
+                provenance.clone(),
             )?;
         }
         crate::api::transaction::BufferedWrite::DeleteNode {

@@ -52,6 +52,7 @@ use crate::core::error::{Error, Result, StorageError};
 use crate::core::hlc::HybridTimestamp;
 use crate::core::id::{EdgeId, NodeId, VersionId};
 use crate::core::property::PropertyMap;
+use crate::core::provenance::Provenance;
 
 use super::serialization::{
     OP_CHECKPOINT, OP_CREATE_EDGE, OP_CREATE_NODE, OP_DECLARE_UNIQUE_CONSTRAINT, OP_DELETE_EDGE,
@@ -72,8 +73,45 @@ pub(crate) const WAL_VERSION: u8 = 1;
 /// The header (magic + version) remains plaintext.
 pub(crate) const WAL_VERSION_ENCRYPTED: u8 = 2;
 
+/// WAL format version for plaintext segments whose `CreateNode`/`CreateEdge`/
+/// `UpdateNode`/`UpdateEdge` payloads carry an optional [`Provenance`] bundle
+/// after `valid_from` (Issue #3224).
+///
+/// Segments below this version simply lack the provenance bytes; parsing
+/// falls back to `provenance: None` for them (see `read_provenance`).
+pub(crate) const WAL_VERSION_PROVENANCE: u8 = 3;
+
+/// WAL format version for encrypted segments whose decrypted payload uses
+/// the provenance-carrying entry format (i.e. `WAL_VERSION_PROVENANCE`).
+///
+/// Mirrors the `WAL_VERSION` / `WAL_VERSION_ENCRYPTED` relationship: this is
+/// `WAL_VERSION_ENCRYPTED`'s counterpart once provenance was added.
+pub(crate) const WAL_VERSION_ENCRYPTED_PROVENANCE: u8 = 4;
+
 /// Maximum supported WAL version (inclusive).
-const WAL_VERSION_MAX: u8 = WAL_VERSION_ENCRYPTED;
+const WAL_VERSION_MAX: u8 = WAL_VERSION_ENCRYPTED_PROVENANCE;
+
+/// Returns `true` if `version` denotes an encrypted segment (either the
+/// original encrypted format or its provenance-carrying successor).
+#[inline]
+fn is_encrypted_version(version: u8) -> bool {
+    version == WAL_VERSION_ENCRYPTED || version == WAL_VERSION_ENCRYPTED_PROVENANCE
+}
+
+/// Map a segment/container format version to the logical *payload* version
+/// used to gate field parsing (e.g. `version >= WAL_VERSION_PROVENANCE`).
+///
+/// Encrypted versions describe the on-disk *container* (length-prefixed +
+/// encrypted), not the entry payload layout once decrypted; this maps them
+/// back to the plaintext version whose entry layout they share.
+#[inline]
+fn payload_version(version: u8) -> u8 {
+    match version {
+        WAL_VERSION_ENCRYPTED => WAL_VERSION,
+        WAL_VERSION_ENCRYPTED_PROVENANCE => WAL_VERSION_PROVENANCE,
+        v => v,
+    }
+}
 
 /// Size of the WAL segment header (magic + version).
 pub(crate) const WAL_HEADER_SIZE: usize = 5;
@@ -330,21 +368,30 @@ pub fn read_segment_with_cipher(
         return Ok(Vec::new()); // Empty segment
     };
 
-    // Version 2 (encrypted) segments require a cipher for decryption.
-    if version == WAL_VERSION_ENCRYPTED && cipher.is_none() {
-        return Err(StorageError::Encryption(
-            "Cannot read encrypted WAL segment (version 2) without a cipher".to_string(),
-        )
+    // Encrypted segments (version 2 or 4) require a cipher for decryption.
+    if is_encrypted_version(version) && cipher.is_none() {
+        return Err(StorageError::Encryption(format!(
+            "Cannot read encrypted WAL segment (version {}) without a cipher",
+            version
+        ))
         .into());
     }
 
     // Dispatch to the appropriate parsing loop based on version.
-    if version == WAL_VERSION_ENCRYPTED {
-        // Version 2: length-prefixed encrypted entries.
+    if is_encrypted_version(version) {
+        // Version 2/4: length-prefixed encrypted entries.
         let cipher = cipher.expect("cipher presence checked above");
-        parse_encrypted_entries(buffer, &mut offset, start_lsn, cipher, path, &mut entries)?;
+        parse_encrypted_entries(
+            buffer,
+            &mut offset,
+            start_lsn,
+            cipher,
+            path,
+            &mut entries,
+            version,
+        )?;
     } else {
-        // Version 1: plaintext entries (original format).
+        // Version 1/3: plaintext entries.
         parse_plaintext_entries(buffer, &mut offset, version, start_lsn, path, &mut entries)?;
     }
 
@@ -415,11 +462,12 @@ fn parse_plaintext_entries(
     Ok(())
 }
 
-/// Parse encrypted (version 2) entries from a WAL segment buffer.
+/// Parse encrypted (version 2 or 4) entries from a WAL segment buffer.
 ///
 /// Each entry is stored as `[4-byte LE length][encrypted entry bytes]`.
 /// The encrypted entry bytes are decrypted using the provided cipher,
-/// then parsed as a normal WAL entry (version 1 format).
+/// then parsed as a normal WAL entry using the payload version implied by
+/// `container_version` (see [`payload_version`]).
 fn parse_encrypted_entries(
     buffer: &[u8],
     offset: &mut usize,
@@ -427,7 +475,9 @@ fn parse_encrypted_entries(
     cipher: &Arc<dyn crate::encryption::cipher::Cipher>,
     path: &Path,
     entries: &mut Vec<WalEntry>,
+    container_version: u8,
 ) -> Result<()> {
+    let entry_version = payload_version(container_version);
     while *offset < buffer.len() {
         // Need at least 4 bytes for the length prefix
         if *offset + 4 > buffer.len() {
@@ -482,8 +532,9 @@ fn parse_encrypted_entries(
                     )))
                 })?;
 
-        // Parse the decrypted bytes as a normal (version 1) entry
-        match parse_entry_at(&decrypted, 0, WAL_VERSION) {
+        // Parse the decrypted bytes as a normal entry, using the payload
+        // version implied by the container version (plaintext-equivalent).
+        match parse_entry_at(&decrypted, 0, entry_version) {
             Ok((entry, _bytes_consumed)) => {
                 if entry.lsn >= start_lsn {
                     entries.push(entry);
@@ -540,6 +591,80 @@ fn require_bytes(buffer: &[u8], offset: usize, n: usize, context: &str) -> Resul
     Ok(())
 }
 
+/// Read an optional `String` field: `[1-byte presence][4-byte LE len][UTF-8 bytes]`.
+///
+/// The length and bytes are only present when the presence byte is nonzero.
+fn read_opt_string(buffer: &[u8], offset: &mut usize, context: &str) -> Result<Option<String>> {
+    require_bytes(buffer, *offset, 1, context)?;
+    let present = buffer[*offset];
+    advance(offset, 1)?;
+    if present == 0 {
+        return Ok(None);
+    }
+    require_bytes(buffer, *offset, 4, context)?;
+    let len = u32::from_le_bytes(buffer[*offset..*offset + 4].try_into().unwrap()) as usize;
+    advance(offset, 4)?;
+    require_bytes(buffer, *offset, len, context)?;
+    let s = std::str::from_utf8(&buffer[*offset..*offset + len])
+        .map_err(|e| StorageError::CorruptedData(format!("Invalid UTF-8 in {}: {}", context, e)))?
+        .to_string();
+    advance(offset, len)?;
+    Ok(Some(s))
+}
+
+/// Read an optional `f64` field: `[1-byte presence][8-byte LE value]`.
+fn read_opt_f64(buffer: &[u8], offset: &mut usize, context: &str) -> Result<Option<f64>> {
+    require_bytes(buffer, *offset, 1, context)?;
+    let present = buffer[*offset];
+    advance(offset, 1)?;
+    if present == 0 {
+        return Ok(None);
+    }
+    require_bytes(buffer, *offset, 8, context)?;
+    let v = f64::from_le_bytes(buffer[*offset..*offset + 8].try_into().unwrap());
+    advance(offset, 8)?;
+    Ok(Some(v))
+}
+
+/// Read an optional [`Provenance`] bundle written by `serialize_provenance_into`.
+///
+/// Segments below [`WAL_VERSION_PROVENANCE`] never contain these bytes at
+/// all; for those, this returns `Ok(None)` without touching `offset`.
+fn read_provenance(buffer: &[u8], offset: &mut usize, version: u8) -> Result<Option<Provenance>> {
+    if version < WAL_VERSION_PROVENANCE {
+        return Ok(None);
+    }
+    require_bytes(buffer, *offset, 1, "provenance presence")?;
+    let present = buffer[*offset];
+    advance(offset, 1)?;
+    if present == 0 {
+        return Ok(None);
+    }
+
+    let source = read_opt_string(buffer, offset, "provenance.source")?;
+    let confidence = read_opt_f64(buffer, offset, "provenance.confidence")?;
+    let note = read_opt_string(buffer, offset, "provenance.note")?;
+    let correlation_id = read_opt_string(buffer, offset, "provenance.correlation_id")?;
+
+    let mut builder = Provenance::builder();
+    if let Some(source) = source {
+        builder = builder.source(source);
+    }
+    if let Some(confidence) = confidence {
+        builder = builder.confidence(confidence);
+    }
+    if let Some(note) = note {
+        builder = builder.note(note);
+    }
+    if let Some(correlation_id) = correlation_id {
+        builder = builder.correlation_id(correlation_id);
+    }
+    let provenance = builder.build().map_err(|e| {
+        StorageError::CorruptedData(format!("Invalid provenance in WAL entry: {}", e))
+    })?;
+    Ok(Some(provenance))
+}
+
 /// Read a 4-byte InternedString label ID from `buffer` at `offset`, advancing `offset` by 4.
 #[inline]
 fn read_label(
@@ -585,11 +710,13 @@ fn parse_create_node_op(
     let label = read_label(buffer, offset, "CreateNode label")?;
     let (properties, valid_from) =
         read_props_and_valid_from(buffer, offset, version, tx_timestamp)?;
+    let provenance = read_provenance(buffer, offset, version)?;
     Ok(WalOperation::CreateNode {
         node_id,
         label,
         properties,
         valid_from,
+        provenance,
     })
 }
 
@@ -608,6 +735,7 @@ fn parse_create_edge_op(
     let label = read_label(buffer, offset, "CreateEdge label")?;
     let (properties, valid_from) =
         read_props_and_valid_from(buffer, offset, version, tx_timestamp)?;
+    let provenance = read_provenance(buffer, offset, version)?;
     Ok(WalOperation::CreateEdge {
         edge_id,
         source,
@@ -615,6 +743,7 @@ fn parse_create_edge_op(
         label,
         properties,
         valid_from,
+        provenance,
     })
 }
 
@@ -639,12 +768,14 @@ fn parse_update_node_op(
             tx_timestamp,
         )
     };
+    let provenance = read_provenance(buffer, offset, version)?;
     Ok(WalOperation::UpdateNode {
         node_id,
         version_id,
         label,
         properties,
         valid_from,
+        provenance,
     })
 }
 
@@ -674,12 +805,14 @@ fn parse_update_edge_op(
             tx_timestamp,
         )
     };
+    let provenance = read_provenance(buffer, offset, version)?;
     Ok(WalOperation::UpdateEdge {
         edge_id,
         version_id,
         label,
         properties,
         valid_from,
+        provenance,
     })
 }
 
@@ -943,6 +1076,7 @@ mod tests {
             label: GLOBAL_INTERNER.intern("Person").unwrap(),
             properties: PropertyMap::new(),
             valid_from: time::now(),
+            provenance: None,
         };
         let entry = WalEntry::new(LSN(1), operation);
 
@@ -950,8 +1084,11 @@ mod tests {
         let mut buffer = Vec::new();
         serialize_entry_into(&entry, &mut buffer).unwrap();
 
-        // Parse it back
-        let (parsed_entry, bytes_consumed) = parse_entry_at(&buffer, 0, WAL_VERSION).unwrap();
+        // Parse it back. Serialization always writes the provenance-carrying
+        // payload shape now (Issue #3224), so parsing must use the matching
+        // version to consume the same bytes that were written.
+        let (parsed_entry, bytes_consumed) =
+            parse_entry_at(&buffer, 0, WAL_VERSION_PROVENANCE).unwrap();
 
         // Verify
         assert_eq!(parsed_entry.lsn, LSN(1));
@@ -982,6 +1119,7 @@ mod tests {
             label: GLOBAL_INTERNER.intern("KNOWS").unwrap(),
             properties: PropertyMap::new(),
             valid_from: time::now(),
+            provenance: None,
         };
         let entry = WalEntry::new(LSN(2), operation);
 
@@ -989,8 +1127,11 @@ mod tests {
         let mut buffer = Vec::new();
         serialize_entry_into(&entry, &mut buffer).unwrap();
 
-        // Parse it back
-        let (parsed_entry, bytes_consumed) = parse_entry_at(&buffer, 0, WAL_VERSION).unwrap();
+        // Parse it back. Serialization always writes the provenance-carrying
+        // payload shape now (Issue #3224), so parsing must use the matching
+        // version to consume the same bytes that were written.
+        let (parsed_entry, bytes_consumed) =
+            parse_entry_at(&buffer, 0, WAL_VERSION_PROVENANCE).unwrap();
 
         // Verify
         assert_eq!(parsed_entry.lsn, LSN(2));
@@ -1023,6 +1164,7 @@ mod tests {
             label: GLOBAL_INTERNER.intern("UpdatedPerson").unwrap(),
             properties: PropertyMap::new(),
             valid_from: time::now(),
+            provenance: None,
         };
         let entry = WalEntry::new(LSN(3), operation);
 
@@ -1030,8 +1172,11 @@ mod tests {
         let mut buffer = Vec::new();
         serialize_entry_into(&entry, &mut buffer).unwrap();
 
-        // Parse it back
-        let (parsed_entry, bytes_consumed) = parse_entry_at(&buffer, 0, WAL_VERSION).unwrap();
+        // Parse it back. Serialization always writes the provenance-carrying
+        // payload shape now (Issue #3224), so parsing must use the matching
+        // version to consume the same bytes that were written.
+        let (parsed_entry, bytes_consumed) =
+            parse_entry_at(&buffer, 0, WAL_VERSION_PROVENANCE).unwrap();
 
         // Verify
         assert_eq!(parsed_entry.lsn, LSN(3));
@@ -1062,6 +1207,7 @@ mod tests {
             label: GLOBAL_INTERNER.intern("UPDATED_KNOWS").unwrap(),
             properties: PropertyMap::new(),
             valid_from: time::now(),
+            provenance: None,
         };
         let entry = WalEntry::new(LSN(4), operation);
 
@@ -1069,8 +1215,11 @@ mod tests {
         let mut buffer = Vec::new();
         serialize_entry_into(&entry, &mut buffer).unwrap();
 
-        // Parse it back
-        let (parsed_entry, bytes_consumed) = parse_entry_at(&buffer, 0, WAL_VERSION).unwrap();
+        // Parse it back. Serialization always writes the provenance-carrying
+        // payload shape now (Issue #3224), so parsing must use the matching
+        // version to consume the same bytes that were written.
+        let (parsed_entry, bytes_consumed) =
+            parse_entry_at(&buffer, 0, WAL_VERSION_PROVENANCE).unwrap();
 
         // Verify
         assert_eq!(parsed_entry.lsn, LSN(4));
@@ -1186,6 +1335,7 @@ mod tests {
             label: GLOBAL_INTERNER.intern("First").unwrap(),
             properties: PropertyMap::new(),
             valid_from: time::now(),
+            provenance: None,
         };
         let entry1 = WalEntry::new(LSN(1), operation1);
 
@@ -1194,6 +1344,7 @@ mod tests {
             label: GLOBAL_INTERNER.intern("Second").unwrap(),
             properties: PropertyMap::new(),
             valid_from: time::now(),
+            provenance: None,
         };
         let entry2 = WalEntry::new(LSN(2), operation2);
 
@@ -1208,9 +1359,11 @@ mod tests {
         serialize_entry_into(&entry2, &mut buffer2).unwrap();
         buffer.extend_from_slice(&buffer2);
 
-        // Parse second entry using offset
+        // Parse second entry using offset. Serialization always writes the
+        // provenance-carrying payload shape now (Issue #3224), so parsing
+        // must use the matching version to consume the same bytes written.
         let (parsed_entry, bytes_consumed) =
-            parse_entry_at(&buffer, offset1_end, WAL_VERSION).unwrap();
+            parse_entry_at(&buffer, offset1_end, WAL_VERSION_PROVENANCE).unwrap();
 
         // Verify
         assert_eq!(parsed_entry.lsn, LSN(2));
@@ -1330,6 +1483,7 @@ mod tests {
                 label: parsed_label,
                 properties,
                 valid_from,
+                ..
             } => {
                 assert_eq!(node_id.as_u64(), 123);
                 assert_eq!(parsed_label, GLOBAL_INTERNER.intern("TestNode").unwrap());
@@ -1351,6 +1505,7 @@ mod tests {
             label: GLOBAL_INTERNER.intern("Person").unwrap(),
             properties: PropertyMap::new(),
             valid_from: time::now(),
+            provenance: None,
         };
         let entry = WalEntry::new(LSN(1), operation);
 
@@ -1477,9 +1632,11 @@ mod tests {
         // Create a segment file with many entries
         let mut file = File::create(&segment_path).unwrap();
 
-        // Write WAL header
+        // Write WAL header. Entries below are serialized with the modern
+        // (always-provenance-carrying) format, so the header must declare
+        // WAL_VERSION_PROVENANCE for the reader to parse them correctly.
         file.write_all(&WAL_MAGIC).unwrap();
-        file.write_all(&[WAL_VERSION]).unwrap();
+        file.write_all(&[WAL_VERSION_PROVENANCE]).unwrap();
 
         // Create and write many entries to simulate a large segment
         // We'll create 1000 entries, which should be several MB
@@ -1495,6 +1652,7 @@ mod tests {
                 label: GLOBAL_INTERNER.intern(format!("Node_{}", i)).unwrap(),
                 properties: PropertyMap::new(),
                 valid_from: time::now(),
+                provenance: None,
             };
 
             let entry = WalEntry::new(lsn, operation);
@@ -1534,9 +1692,12 @@ mod tests {
             let segment_path = dir.path().join(format!("{}.log", seg_id));
             let mut file = File::create(&segment_path).unwrap();
 
-            // Write WAL header
+            // Write WAL header. Entries below are serialized with the modern
+            // (always-provenance-carrying) format, so the header must
+            // declare WAL_VERSION_PROVENANCE for the reader to parse them
+            // correctly.
             file.write_all(&WAL_MAGIC).unwrap();
-            file.write_all(&[WAL_VERSION]).unwrap();
+            file.write_all(&[WAL_VERSION_PROVENANCE]).unwrap();
 
             // Write entries for this segment
             for i in 0..entries_per_segment {
@@ -1549,6 +1710,7 @@ mod tests {
                         .unwrap(),
                     properties: PropertyMap::new(),
                     valid_from: time::now(),
+                    provenance: None,
                 };
 
                 let entry = WalEntry::new(lsn, operation);
@@ -1585,9 +1747,11 @@ mod tests {
 
         let mut file = File::create(&segment_path).unwrap();
 
-        // Write WAL header
+        // Write WAL header. Entries below are serialized with the modern
+        // (always-provenance-carrying) format, so the header must declare
+        // WAL_VERSION_PROVENANCE for the reader to parse them correctly.
         file.write_all(&WAL_MAGIC).unwrap();
-        file.write_all(&[WAL_VERSION]).unwrap();
+        file.write_all(&[WAL_VERSION_PROVENANCE]).unwrap();
 
         // Write 100 entries with LSN 1-100
         for i in 1..=100 {
@@ -1597,6 +1761,7 @@ mod tests {
                 label: GLOBAL_INTERNER.intern(format!("Node_{}", i)).unwrap(),
                 properties: PropertyMap::new(),
                 valid_from: time::now(),
+                provenance: None,
             };
 
             let entry = WalEntry::new(lsn, operation);
@@ -1653,9 +1818,11 @@ mod tests {
 
         let mut file = File::create(&segment_path).unwrap();
 
-        // Write WAL header
+        // Write WAL header. The entry below is serialized with the modern
+        // (always-provenance-carrying) format, so the header must declare
+        // WAL_VERSION_PROVENANCE for the reader to parse it correctly.
         file.write_all(&WAL_MAGIC).unwrap();
-        file.write_all(&[WAL_VERSION]).unwrap();
+        file.write_all(&[WAL_VERSION_PROVENANCE]).unwrap();
 
         // Write one complete entry
         let operation = WalOperation::CreateNode {
@@ -1663,6 +1830,7 @@ mod tests {
             label: GLOBAL_INTERNER.intern("Node_1").unwrap(),
             properties: PropertyMap::new(),
             valid_from: time::now(),
+            provenance: None,
         };
         let entry = WalEntry::new(LSN(1), operation);
         let mut buffer = Vec::new();
@@ -1768,6 +1936,7 @@ mod tests {
             label: GLOBAL_INTERNER.intern("UpdatedPerson").unwrap(),
             properties: PropertyMap::new(),
             valid_from: time::now(),
+            provenance: None,
         };
         let entry = WalEntry::new(LSN(1), operation);
 
@@ -1802,6 +1971,7 @@ mod tests {
             label: GLOBAL_INTERNER.intern("UPDATED_KNOWS").unwrap(),
             properties: PropertyMap::new(),
             valid_from: time::now(),
+            provenance: None,
         };
         let entry = WalEntry::new(LSN(1), operation);
 
