@@ -434,17 +434,31 @@ pub(crate) fn read_artifact(path: &Path) -> Result<BackupPayload, BackupError> {
     // and not itself part of the bitcode blob) tells us unambiguously which
     // payload shape to expect -- no try-decode-and-fallback needed here,
     // unlike the temporal index file's embedded version (Issue #3224).
-    if found_version == 1 {
-        let legacy: BackupPayloadV1 = bitcode::decode(&decoded_bytes).map_err(|e| {
-            BackupError::Serialization(format!("bitcode deserialization failed: {e}"))
-        })?;
-        return Ok(legacy.into());
+    //
+    // This matches exhaustively on every version this build actually knows
+    // how to decode, rather than treating "not the legacy version" as
+    // synonymous with "current version": a corrupted or hand-crafted header
+    // claiming an unassigned value (e.g. 0, or a version skipped by a future
+    // release) is rejected with a clear `IncompatibleVersion` error instead
+    // of being silently routed through the current-shape decoder.
+    match found_version {
+        1 => {
+            let legacy: BackupPayloadV1 = bitcode::decode(&decoded_bytes).map_err(|e| {
+                BackupError::Serialization(format!("bitcode deserialization failed: {e}"))
+            })?;
+            Ok(legacy.into())
+        }
+        v if v == BACKUP_FORMAT_VERSION => {
+            let payload: BackupPayload = bitcode::decode(&decoded_bytes).map_err(|e| {
+                BackupError::Serialization(format!("bitcode deserialization failed: {e}"))
+            })?;
+            Ok(payload)
+        }
+        other => Err(BackupError::IncompatibleVersion {
+            found: other,
+            supported: BACKUP_FORMAT_VERSION,
+        }),
     }
-
-    let payload: BackupPayload = bitcode::decode(&decoded_bytes)
-        .map_err(|e| BackupError::Serialization(format!("bitcode deserialization failed: {e}")))?;
-
-    Ok(payload)
 }
 
 // ============================================================================
@@ -851,6 +865,77 @@ mod tests {
         assert!(restored.temporal.node_versions.is_empty());
     }
 
+    /// Regression test for a bug where restoring a legacy (`BACKUP_FORMAT_VERSION
+    /// == 1`) artifact with actual version data produced a `TemporalIndexData`
+    /// whose entries were upgraded to the current (provenance-carrying) shape
+    /// but whose `version` field still said `1` (copied verbatim from the V1
+    /// struct). Persisting that mismatched struct and reloading it would then
+    /// misdetect it as legacy and misdecode every entry. See Issue #3224.
+    #[test]
+    fn restoring_legacy_v1_backup_with_versions_stamps_current_manifest_version() {
+        use crate::storage::index_persistence::formats::legacy_v1::{
+            NodeVersionEntryV1, TemporalIndexDataV1,
+        };
+        use crate::storage::index_persistence::formats::{
+            PersistedPropertyMap, PersistedVersionType,
+        };
+        use crate::storage::index_persistence::temporal::{
+            load_temporal_index, save_temporal_index,
+        };
+        use crate::storage::index_persistence::{MANIFEST_VERSION, TEMPORAL_MAGIC};
+
+        let dir = TempDir::new().unwrap();
+        let artifact_path = dir.path().join("legacy_with_data.albk");
+
+        let mut payload = empty_payload_v1();
+        payload.node_version_count = 1;
+        payload.temporal = TemporalIndexDataV1 {
+            magic: TEMPORAL_MAGIC,
+            version: 1,
+            node_versions: vec![NodeVersionEntryV1 {
+                version_id: 1,
+                node_id: 1,
+                label_idx: 0,
+                valid_from: 1000,
+                valid_to: None,
+                valid_from_logical: 0,
+                valid_to_logical: None,
+                tx_time: 1000,
+                tx_time_logical: 0,
+                version_type: PersistedVersionType::Anchor,
+                properties: PersistedPropertyMap { entries: vec![] },
+                vector_snapshot_id: None,
+            }],
+            node_anchors: vec![],
+            edge_versions: vec![],
+            edge_anchors: vec![],
+        };
+
+        std::fs::write(&artifact_path, encode_artifact_v1(&payload)).unwrap();
+
+        let restored = read_artifact(&artifact_path).unwrap();
+
+        // The upgraded struct must claim the *current* format version, not
+        // the legacy one it was originally decoded as, since its entries are
+        // already current-shape.
+        assert_eq!(restored.temporal.version, MANIFEST_VERSION);
+        assert_eq!(restored.temporal.node_versions.len(), 1);
+        assert!(restored.temporal.node_versions[0].provenance.is_none());
+
+        // Persist the restored (upgraded) temporal index and reload it, as
+        // `restore_to_data_dir`/normal operation would. Before the fix, this
+        // would silently take the legacy-decode fallback path and either
+        // error or corrupt the entry.
+        let temporal_path = dir.path().join("temporal.idx");
+        save_temporal_index(&restored.temporal, &temporal_path).unwrap();
+        let reloaded = load_temporal_index(&temporal_path).unwrap();
+
+        assert_eq!(reloaded.version, MANIFEST_VERSION);
+        assert_eq!(reloaded.node_versions.len(), 1);
+        assert_eq!(reloaded.node_versions[0].node_id, 1);
+        assert!(reloaded.node_versions[0].provenance.is_none());
+    }
+
     #[test]
     fn read_artifact_rejects_future_version() {
         let dir = TempDir::new().unwrap();
@@ -862,5 +947,26 @@ mod tests {
 
         let err = read_artifact(&path).unwrap_err();
         assert!(matches!(err, BackupError::IncompatibleVersion { .. }));
+    }
+
+    /// Regression test: the version dispatch must explicitly reject any
+    /// `found_version` it doesn't recognize (e.g. 0, or any value skipped by
+    /// a future release) rather than silently treating "not the legacy
+    /// version" as synonymous with "current version".
+    #[test]
+    fn read_artifact_rejects_unassigned_version_zero() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("zero.albk");
+        let mut bytes = encode_artifact(&empty_payload()).unwrap();
+        // Corrupt the header to claim an unassigned version (below the
+        // legacy version-1 floor, not a valid value in either scheme).
+        bytes[4..6].copy_from_slice(&0u16.to_le_bytes());
+        std::fs::write(&path, &bytes).unwrap();
+
+        let err = read_artifact(&path).unwrap_err();
+        assert!(matches!(
+            err,
+            BackupError::IncompatibleVersion { found: 0, .. }
+        ));
     }
 }

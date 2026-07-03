@@ -1410,10 +1410,29 @@ impl HistoricalStorage {
     /// version carries no provenance -- this is the common case for writes
     /// that never supplied a bundle (Issue #3224). Falls back to cold/tiered
     /// storage if the current version has been migrated out of hot storage.
+    ///
+    /// This re-resolves "whichever version is current right now", which is a
+    /// separate lookup from any node snapshot the caller may already hold --
+    /// prefer [`get_node_version_provenance`](Self::get_node_version_provenance)
+    /// with an already-fetched `Node`'s `current_version` when consistency
+    /// with that snapshot matters (e.g. a concurrent write must not be able
+    /// to return one version's properties paired with a different version's
+    /// provenance).
     pub fn get_current_node_provenance(&self, node_id: NodeId) -> Result<Option<Provenance>> {
         let Some(version_id) = self.get_current_node_version(node_id) else {
             return Ok(None);
         };
+        self.get_node_version_provenance(version_id)
+    }
+
+    /// Get the provenance bundle attached to a specific node version, if any.
+    ///
+    /// Unlike [`get_current_node_provenance`](Self::get_current_node_provenance),
+    /// this looks up an exact, caller-supplied version rather than
+    /// re-resolving "whichever version is current right now" -- callers that
+    /// already hold a `Node` snapshot (e.g. from `get_node`) should pass that
+    /// snapshot's `current_version` here for a consistent, race-free read.
+    pub fn get_node_version_provenance(&self, version_id: VersionId) -> Result<Option<Provenance>> {
         let provenance = if let Some(v) = self.node_versions.get(&version_id) {
             v.provenance.as_deref().cloned()
         } else {
@@ -1428,11 +1447,21 @@ impl HistoricalStorage {
     /// Get the provenance bundle attached to an edge's *current* version, if any.
     ///
     /// See [`get_current_node_provenance`](Self::get_current_node_provenance)
-    /// for semantics.
+    /// for semantics, including the race-condition note about
+    /// [`get_edge_version_provenance`](Self::get_edge_version_provenance).
     pub fn get_current_edge_provenance(&self, edge_id: EdgeId) -> Result<Option<Provenance>> {
         let Some(version_id) = self.get_current_edge_version(edge_id) else {
             return Ok(None);
         };
+        self.get_edge_version_provenance(version_id)
+    }
+
+    /// Get the provenance bundle attached to a specific edge version, if any.
+    ///
+    /// See [`get_node_version_provenance`](Self::get_node_version_provenance)
+    /// for why callers holding an `Edge` snapshot should prefer this over
+    /// [`get_current_edge_provenance`](Self::get_current_edge_provenance).
+    pub fn get_edge_version_provenance(&self, version_id: VersionId) -> Result<Option<Provenance>> {
         let provenance = if let Some(v) = self.edge_versions.get(&version_id) {
             v.provenance.as_deref().cloned()
         } else {

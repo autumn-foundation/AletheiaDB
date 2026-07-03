@@ -11,7 +11,7 @@
 
 use super::{
     ReadOps, TransactionSnapshot, TxId, TxMetadata, TxState, TxVisibilityManager, WriteBuffer,
-    WriteOps, WriteOptions,
+    WriteOps, WriteRequestOptions,
 };
 use crate::core::error::{Result, ResultExt, StorageError, TransactionError};
 use crate::core::graph::{Edge, Node};
@@ -951,7 +951,7 @@ impl WriteOps for WriteTransaction {
         &mut self,
         label: &str,
         properties: PropertyMap,
-        options: WriteOptions,
+        options: WriteRequestOptions,
     ) -> Result<NodeId> {
         let result = (|| {
             // Check transaction state
@@ -1004,7 +1004,7 @@ impl WriteOps for WriteTransaction {
         target: NodeId,
         label: &str,
         properties: PropertyMap,
-        options: WriteOptions,
+        options: WriteRequestOptions,
     ) -> Result<EdgeId> {
         let result = (|| {
             // Check transaction state
@@ -1057,7 +1057,7 @@ impl WriteOps for WriteTransaction {
         &mut self,
         node_id: NodeId,
         properties: PropertyMap,
-        options: WriteOptions,
+        options: WriteRequestOptions,
     ) -> Result<()> {
         let result = (|| {
             // Check transaction state
@@ -1133,7 +1133,7 @@ impl WriteOps for WriteTransaction {
         &mut self,
         edge_id: EdgeId,
         properties: PropertyMap,
-        options: WriteOptions,
+        options: WriteRequestOptions,
     ) -> Result<()> {
         let result = (|| {
             // Check transaction state

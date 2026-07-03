@@ -71,22 +71,10 @@ pub(crate) fn restore_provenance(
     let Some(p) = persisted else {
         return Ok(None);
     };
-    let mut builder = Provenance::builder();
-    if let Some(source) = p.source {
-        builder = builder.source(source);
-    }
-    if let Some(confidence) = p.confidence {
-        builder = builder.confidence(confidence);
-    }
-    if let Some(note) = p.note {
-        builder = builder.note(note);
-    }
-    if let Some(correlation_id) = p.correlation_id {
-        builder = builder.correlation_id(correlation_id);
-    }
-    let provenance = builder.build().map_err(|e| {
-        IndexPersistenceError::Serialization(format!("Invalid persisted provenance: {}", e))
-    })?;
+    let provenance = Provenance::from_parts(p.source, p.confidence, p.note, p.correlation_id)
+        .map_err(|e| {
+            IndexPersistenceError::Serialization(format!("Invalid persisted provenance: {}", e))
+        })?;
     Ok(Some(Arc::new(provenance)))
 }
 

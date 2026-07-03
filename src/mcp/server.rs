@@ -145,7 +145,7 @@ use crate::api::transaction::WriteOps;
 use crate::core::temporal::time;
 use crate::core::{
     ChangeFeedQuery, EdgeId, GLOBAL_INTERNER, NodeId, PropertyMap, PropertyMapBuilder,
-    PropertyValue, Timestamp,
+    PropertyValue, Provenance, Timestamp, VersionId,
 };
 use crate::db::AletheiaDB;
 use crate::index::vector::{DistanceMetric, HnswConfig};
@@ -693,12 +693,54 @@ impl AletheiaMcpServer {
         GLOBAL_INTERNER.resolve_or_else(interned, || format!("<unknown:{}>", interned.as_u32()))
     }
 
+    /// Look up the provenance bundle for the *exact* version already captured
+    /// in `version_id` (a `Node`/`Edge` snapshot's `current_version`), rather
+    /// than re-resolving "whichever version is current now". This keeps the
+    /// returned provenance consistent with the properties already read from
+    /// that same snapshot, even under a concurrent write.
+    ///
+    /// A lookup failure (e.g. a corrupted or unreachable cold-storage record)
+    /// is logged rather than silently treated as "no provenance": that
+    /// distinction matters because an MCP caller has no other way to learn
+    /// the two cases apart. Best-effort here (returning `None` rather than
+    /// failing the whole response) is deliberate: a single-node lookup or a
+    /// bulk endpoint like `list_nodes`/`traverse` should not fail entirely
+    /// because one entry's provenance couldn't be read.
+    fn lookup_node_provenance(&self, version_id: VersionId) -> Option<Provenance> {
+        match self.db.get_node_version_provenance(version_id) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!(
+                    "Warning: failed to load provenance for node version {}: {}",
+                    version_id.as_u64(),
+                    e
+                );
+                None
+            }
+        }
+    }
+
+    /// Edge counterpart of [`lookup_node_provenance`](Self::lookup_node_provenance).
+    fn lookup_edge_provenance(&self, version_id: VersionId) -> Option<Provenance> {
+        match self.db.get_edge_version_provenance(version_id) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!(
+                    "Warning: failed to load provenance for edge version {}: {}",
+                    version_id.as_u64(),
+                    e
+                );
+                None
+            }
+        }
+    }
+
     fn node_to_response(&self, node: &crate::core::Node, include_vectors: bool) -> NodeResponse {
         NodeResponse {
             id: node.id.as_u64(),
             label: self.interned_to_string(node.label),
             properties: self.property_map_to_json(&node.properties, include_vectors),
-            provenance: None,
+            provenance: self.lookup_node_provenance(node.current_version),
         }
     }
 
@@ -709,7 +751,7 @@ impl AletheiaMcpServer {
             target_id: edge.target.as_u64(),
             label: self.interned_to_string(edge.label),
             properties: self.property_map_to_json(&edge.properties, include_vectors),
-            provenance: None,
+            provenance: self.lookup_edge_provenance(edge.current_version),
         }
     }
 
@@ -872,28 +914,17 @@ impl AletheiaMcpServer {
     fn parse_opt_provenance(
         &self,
         value: Option<crate::mcp::tools::ProvenanceRequest>,
-    ) -> std::result::Result<Option<crate::core::provenance::Provenance>, CallToolResult> {
+    ) -> std::result::Result<Option<Provenance>, CallToolResult> {
         let Some(req) = value else {
             return Ok(None);
         };
-        let mut builder = crate::core::provenance::Provenance::builder();
-        if let Some(source) = req.source {
-            builder = builder.source(source);
-        }
-        if let Some(confidence) = req.confidence {
-            builder = builder.confidence(confidence);
-        }
-        if let Some(note) = req.note {
-            builder = builder.note(note);
-        }
-        if let Some(correlation_id) = req.correlation_id {
-            builder = builder.correlation_id(correlation_id);
-        }
-        let provenance = builder.build().map_err(|e| {
-            self.error_json(&format!(
-                "Invalid provenance: confidence must be between 0.0 and 1.0 ({e})"
-            ))
-        })?;
+        let provenance =
+            Provenance::from_parts(req.source, req.confidence, req.note, req.correlation_id)
+                .map_err(|e| {
+                    self.error_json(&format!(
+                        "Invalid provenance: confidence must be between 0.0 and 1.0 ({e})"
+                    ))
+                })?;
         if provenance.is_empty() {
             return Ok(None);
         }
@@ -1002,9 +1033,7 @@ impl AletheiaMcpServer {
 
         match self.db.get_node(node_id) {
             Ok(node) => {
-                let mut response =
-                    self.node_to_response(&node, req.include_vectors.unwrap_or(false));
-                response.provenance = self.db.get_node_provenance(node_id).unwrap_or(None);
+                let response = self.node_to_response(&node, req.include_vectors.unwrap_or(false));
                 self.success_json(
                     serde_json::to_value(&response)
                         .expect("response serialization should not fail"),
@@ -1037,7 +1066,7 @@ impl AletheiaMcpServer {
             Err(result) => return result,
         };
 
-        let mut options = crate::api::transaction::WriteOptions::new();
+        let mut options = crate::api::transaction::WriteRequestOptions::new();
         if let Some(valid_from) = valid_from {
             options = options.with_valid_from(valid_from);
         }
@@ -1051,8 +1080,7 @@ impl AletheiaMcpServer {
         {
             Ok(node_id) => match self.db.get_node(node_id) {
                 Ok(node) => {
-                    let mut response = self.node_to_response(&node, true);
-                    response.provenance = self.db.get_node_provenance(node_id).unwrap_or(None);
+                    let response = self.node_to_response(&node, true);
                     self.success_json(
                         serde_json::to_value(&response)
                             .expect("response serialization should not fail"),
@@ -1094,7 +1122,7 @@ impl AletheiaMcpServer {
             Err(result) => return result,
         };
 
-        let mut options = crate::api::transaction::WriteOptions::new();
+        let mut options = crate::api::transaction::WriteRequestOptions::new();
         if let Some(valid_from) = valid_from {
             options = options.with_valid_from(valid_from);
         }
@@ -1108,8 +1136,7 @@ impl AletheiaMcpServer {
         {
             Ok(()) => match self.db.get_node(node_id) {
                 Ok(node) => {
-                    let mut response = self.node_to_response(&node, true);
-                    response.provenance = self.db.get_node_provenance(node_id).unwrap_or(None);
+                    let response = self.node_to_response(&node, true);
                     self.success_json(
                         serde_json::to_value(&response)
                             .expect("response serialization should not fail"),
@@ -1391,9 +1418,7 @@ impl AletheiaMcpServer {
 
         match self.db.get_edge(edge_id) {
             Ok(edge) => {
-                let mut response =
-                    self.edge_to_response(&edge, req.include_vectors.unwrap_or(false));
-                response.provenance = self.db.get_edge_provenance(edge_id).unwrap_or(None);
+                let response = self.edge_to_response(&edge, req.include_vectors.unwrap_or(false));
                 self.success_json(
                     serde_json::to_value(&response)
                         .expect("response serialization should not fail"),
@@ -1436,7 +1461,7 @@ impl AletheiaMcpServer {
             Err(result) => return result,
         };
 
-        let mut options = crate::api::transaction::WriteOptions::new();
+        let mut options = crate::api::transaction::WriteRequestOptions::new();
         if let Some(valid_from) = valid_from {
             options = options.with_valid_from(valid_from);
         }
@@ -1450,8 +1475,7 @@ impl AletheiaMcpServer {
         {
             Ok(edge_id) => match self.db.get_edge(edge_id) {
                 Ok(edge) => {
-                    let mut response = self.edge_to_response(&edge, true);
-                    response.provenance = self.db.get_edge_provenance(edge_id).unwrap_or(None);
+                    let response = self.edge_to_response(&edge, true);
                     self.success_json(
                         serde_json::to_value(&response)
                             .expect("response serialization should not fail"),
@@ -1488,7 +1512,7 @@ impl AletheiaMcpServer {
             Err(result) => return result,
         };
 
-        let mut options = crate::api::transaction::WriteOptions::new();
+        let mut options = crate::api::transaction::WriteRequestOptions::new();
         if let Some(valid_from) = valid_from {
             options = options.with_valid_from(valid_from);
         }
@@ -1502,8 +1526,7 @@ impl AletheiaMcpServer {
         {
             Ok(()) => match self.db.get_edge(edge_id) {
                 Ok(edge) => {
-                    let mut response = self.edge_to_response(&edge, true);
-                    response.provenance = self.db.get_edge_provenance(edge_id).unwrap_or(None);
+                    let response = self.edge_to_response(&edge, true);
                     self.success_json(
                         serde_json::to_value(&response)
                             .expect("response serialization should not fail"),

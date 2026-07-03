@@ -81,6 +81,43 @@ impl Provenance {
             && self.note.is_none()
             && self.correlation_id.is_none()
     }
+
+    /// Construct and validate a [`Provenance`] bundle from four independently
+    /// optional fields.
+    ///
+    /// This is the single shared implementation of "feed whichever fields are
+    /// present through [`Provenance::builder`]" -- every storage tier that
+    /// restores a persisted provenance record (WAL replay, index-persistence
+    /// temporal index, Redb cold storage) and the MCP layer that parses a
+    /// caller-supplied provenance request should call this instead of
+    /// re-deriving the same builder chain, so a future field addition or
+    /// validation change only needs to happen in one place.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProvenanceError::InvalidConfidence`] if `confidence` is
+    /// `Some` and outside `[0.0, 1.0]` or is NaN.
+    pub fn from_parts(
+        source: Option<String>,
+        confidence: Option<f64>,
+        note: Option<String>,
+        correlation_id: Option<String>,
+    ) -> Result<Provenance, ProvenanceError> {
+        let mut builder = ProvenanceBuilder::default();
+        if let Some(source) = source {
+            builder = builder.source(source);
+        }
+        if let Some(confidence) = confidence {
+            builder = builder.confidence(confidence);
+        }
+        if let Some(note) = note {
+            builder = builder.note(note);
+        }
+        if let Some(correlation_id) = correlation_id {
+            builder = builder.correlation_id(correlation_id);
+        }
+        builder.build()
+    }
 }
 
 /// Builder for [`Provenance`], validating `confidence` on [`build`](ProvenanceBuilder::build).
@@ -157,20 +194,7 @@ impl TryFrom<ProvenanceRaw> for Provenance {
     type Error = ProvenanceError;
 
     fn try_from(raw: ProvenanceRaw) -> Result<Self, Self::Error> {
-        let mut builder = ProvenanceBuilder::default();
-        if let Some(source) = raw.source {
-            builder = builder.source(source);
-        }
-        if let Some(confidence) = raw.confidence {
-            builder = builder.confidence(confidence);
-        }
-        if let Some(note) = raw.note {
-            builder = builder.note(note);
-        }
-        if let Some(correlation_id) = raw.correlation_id {
-            builder = builder.correlation_id(correlation_id);
-        }
-        builder.build()
+        Provenance::from_parts(raw.source, raw.confidence, raw.note, raw.correlation_id)
     }
 }
 

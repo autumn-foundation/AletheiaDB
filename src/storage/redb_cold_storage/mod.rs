@@ -1799,7 +1799,7 @@ struct SerializableEdgeVersion {
 /// Cold-storage records have no version tag at all, so a legacy record is
 /// indistinguishable from a current one except by trying to decode it. This
 /// frozen shape is the fallback `decode_node_version` tries when the
-/// tag-prefixed current decode fails (see [`COLD_RECORD_TAG_V2`]).
+/// tag-prefixed current decode fails (see [`COLD_RECORD_MAGIC_V2`]).
 #[derive(bitcode::Encode, bitcode::Decode)]
 struct SerializableNodeVersionV1 {
     id: u64,
@@ -1831,12 +1831,20 @@ struct SerializableEdgeVersionV1 {
     prev_version: Option<u64>,
 }
 
-/// Tag byte prepended to cold-storage records written with provenance
+/// Magic sequence prepended to cold-storage records written with provenance
 /// support (Issue #3224). Legacy (pre-#3224) records have no tag at all --
 /// `decode_node_version`/`decode_edge_version` fall back to the untagged
 /// [`SerializableNodeVersionV1`]/[`SerializableEdgeVersionV1`] shape when the
-/// first byte isn't this tag (or the tagged decode fails).
-const COLD_RECORD_TAG_V2: u8 = 0x02;
+/// leading bytes don't match this magic (or the tagged decode fails).
+///
+/// This is a 4-byte sequence rather than a single tag byte specifically to
+/// make an accidental collision with a legacy record's leading bytes (which
+/// start with a bitcode-encoded `id: u64`) astronomically unlikely rather
+/// than merely unlikely: a 1-in-256 chance (single byte) is a real risk over
+/// the lifetime of a large cold-storage table, a 1-in-4-billion chance is
+/// not. The value itself is arbitrary but deliberately not a small integer
+/// (to avoid any structural resemblance to a plausible bitcode-encoded id).
+const COLD_RECORD_MAGIC_V2: [u8; 4] = [0xA1, 0x37, 0xC0, 0xDE];
 
 /// Serializable wrapper for VersionData.
 #[derive(bitcode::Encode, bitcode::Decode)]
@@ -1897,8 +1905,8 @@ pub fn encode_node_version(version: &NodeVersion) -> Vec<u8> {
         provenance: encode_provenance(version.provenance.as_deref()),
     };
 
-    let mut out = Vec::with_capacity(1);
-    out.push(COLD_RECORD_TAG_V2);
+    let mut out = Vec::with_capacity(COLD_RECORD_MAGIC_V2.len());
+    out.extend_from_slice(&COLD_RECORD_MAGIC_V2);
     out.extend_from_slice(&bitcode::encode(&serializable));
     out
 }
@@ -1925,21 +1933,7 @@ fn decode_provenance(
         return Ok(None);
     };
     use crate::core::provenance::Provenance;
-    let mut builder = Provenance::builder();
-    if let Some(source) = p.source {
-        builder = builder.source(source);
-    }
-    if let Some(confidence) = p.confidence {
-        builder = builder.confidence(confidence);
-    }
-    if let Some(note) = p.note {
-        builder = builder.note(note);
-    }
-    if let Some(correlation_id) = p.correlation_id {
-        builder = builder.correlation_id(correlation_id);
-    }
-    let provenance = builder
-        .build()
+    let provenance = Provenance::from_parts(p.source, p.confidence, p.note, p.correlation_id)
         .map_err(|e| StorageError::corruption(format!("Invalid persisted provenance: {}", e)))?;
     Ok(Some(std::sync::Arc::new(provenance)))
 }
@@ -1958,8 +1952,8 @@ pub fn decode_node_version(data: &[u8]) -> Result<NodeVersion> {
 
     // Tagged (Issue #3224) records carry provenance; untagged records are
     // pre-provenance and are decoded via the frozen `..V1` shape instead.
-    // There is no version byte on legacy records at all, so the tag itself
-    // is the only signal -- see `COLD_RECORD_TAG_V2`.
+    // There is no version marker on legacy records at all, so the magic
+    // sequence itself is the only signal -- see `COLD_RECORD_MAGIC_V2`.
     let (
         label,
         temporal_valid_start,
@@ -1972,8 +1966,9 @@ pub fn decode_node_version(data: &[u8]) -> Result<NodeVersion> {
         next_version,
         prev_version,
         provenance,
-    ) = if data.first() == Some(&COLD_RECORD_TAG_V2)
-        && let Ok(s) = bitcode::decode::<SerializableNodeVersion>(&data[1..])
+    ) = if data.starts_with(&COLD_RECORD_MAGIC_V2)
+        && let Ok(s) =
+            bitcode::decode::<SerializableNodeVersion>(&data[COLD_RECORD_MAGIC_V2.len()..])
     {
         (
             s.label,
@@ -2068,8 +2063,8 @@ pub fn encode_edge_version(version: &EdgeVersion) -> Vec<u8> {
         provenance: encode_provenance(version.provenance.as_deref()),
     };
 
-    let mut out = Vec::with_capacity(1);
-    out.push(COLD_RECORD_TAG_V2);
+    let mut out = Vec::with_capacity(COLD_RECORD_MAGIC_V2.len());
+    out.extend_from_slice(&COLD_RECORD_MAGIC_V2);
     out.extend_from_slice(&bitcode::encode(&serializable));
     out
 }
@@ -2103,8 +2098,9 @@ pub fn decode_edge_version(data: &[u8]) -> Result<EdgeVersion> {
         next_version,
         prev_version,
         provenance,
-    ) = if data.first() == Some(&COLD_RECORD_TAG_V2)
-        && let Ok(s) = bitcode::decode::<SerializableEdgeVersion>(&data[1..])
+    ) = if data.starts_with(&COLD_RECORD_MAGIC_V2)
+        && let Ok(s) =
+            bitcode::decode::<SerializableEdgeVersion>(&data[COLD_RECORD_MAGIC_V2.len()..])
     {
         (
             s.label,

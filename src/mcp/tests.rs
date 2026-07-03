@@ -6106,4 +6106,139 @@ mod provenance_write_tests {
         let value: serde_json::Value = serde_json::from_str(&history).unwrap();
         assert!(value["versions"][0].get("provenance").is_none());
     }
+
+    /// Regression test: `node_to_response`/`edge_to_response` used to
+    /// hardcode `provenance: None`, and only `get_node`/`create_node`/
+    /// `update_node` (and edge equivalents) patched it back in afterward.
+    /// `list_nodes` (and every other read path built on `node_to_response`)
+    /// silently omitted provenance even when it existed. See Issue #3224.
+    #[test]
+    fn test_list_nodes_returns_provenance() {
+        let server = create_test_server();
+
+        let node: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            label: "ListProvenanceTest".to_string(),
+            properties: None,
+            valid_time: None,
+            provenance: Some(ProvenanceRequest {
+                source: Some("csv-import".to_string()),
+                confidence: None,
+                note: None,
+                correlation_id: None,
+            }),
+        }))
+        .unwrap();
+
+        let response = server.list_nodes(ListNodesRequest {
+            label: Some("ListProvenanceTest".to_string()),
+            property_key: None,
+            property_value: None,
+            limit: None,
+            offset: None,
+            include_vectors: None,
+        });
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        let nodes = value["nodes"].as_array().unwrap();
+        let found = nodes.iter().find(|n| n["id"] == node.id).unwrap();
+        assert_eq!(found["provenance"]["source"], "csv-import");
+    }
+
+    /// See [`test_list_nodes_returns_provenance`] -- same gap, `traverse` path.
+    #[test]
+    fn test_traverse_returns_provenance() {
+        let server = create_test_server();
+
+        let start: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            label: "Person".to_string(),
+            properties: None,
+            valid_time: None,
+            provenance: None,
+        }))
+        .unwrap();
+        let end: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            label: "Person".to_string(),
+            properties: None,
+            valid_time: None,
+            provenance: Some(ProvenanceRequest {
+                source: Some("graph-import".to_string()),
+                confidence: None,
+                note: None,
+                correlation_id: None,
+            }),
+        }))
+        .unwrap();
+        parse_response::<EdgeResponse>(&server.create_edge(CreateEdgeRequest {
+            source_id: start.id,
+            target_id: end.id,
+            label: "KNOWS".to_string(),
+            properties: None,
+            valid_time: None,
+            provenance: None,
+        }))
+        .unwrap();
+
+        let response = server.traverse(TraverseRequest {
+            start_node_id: start.id,
+            edge_label: "KNOWS".to_string(),
+            direction: Some("outgoing".to_string()),
+            depth: Some(1),
+            limit: None,
+            include_vectors: None,
+        });
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        let results = value["results"].as_array().unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0]["node"]["provenance"]["source"], "graph-import");
+    }
+
+    /// See [`test_list_nodes_returns_provenance`] -- same gap, the bi-temporal
+    /// `get_node_at_time` path. This one matters especially: `get_node_at_time`
+    /// resolves the *as-of* version, not necessarily the node's current head,
+    /// so the returned provenance must be attached to that exact historical
+    /// version rather than "whatever is current now".
+    #[test]
+    fn test_get_node_at_time_returns_provenance_for_that_version() {
+        let server = create_test_server();
+
+        let node: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            label: "Person".to_string(),
+            properties: None,
+            valid_time: None,
+            provenance: Some(ProvenanceRequest {
+                source: Some("initial-load".to_string()),
+                confidence: None,
+                note: None,
+                correlation_id: None,
+            }),
+        }))
+        .unwrap();
+
+        let as_of_micros = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_micros() as i64;
+
+        // Update with different provenance; the as-of query above must still
+        // report the *original* version's provenance, not this new one.
+        parse_response::<NodeResponse>(&server.update_node(UpdateNodeRequest {
+            node_id: node.id,
+            properties: HashMap::new(),
+            valid_time: None,
+            provenance: Some(ProvenanceRequest {
+                source: Some("manual-correction".to_string()),
+                confidence: None,
+                note: None,
+                correlation_id: None,
+            }),
+        }))
+        .unwrap();
+
+        let response = server.get_node_at_time(GetNodeAtTimeRequest {
+            node_id: node.id,
+            valid_time: as_of_micros.to_string(),
+            transaction_time: Some(as_of_micros.to_string()),
+        });
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(value["node"]["provenance"]["source"], "initial-load");
+    }
 }

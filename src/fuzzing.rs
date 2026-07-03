@@ -21,7 +21,7 @@ pub mod wal {
     /// The wrapper intentionally starts at offset zero. Fuzz targets that need to
     /// test segment headers should use the public segment-reader API instead.
     pub fn parse_current_entry(bytes: &[u8]) -> Result<(WalEntry, usize)> {
-        segment_reader::parse_entry_at(bytes, 0, segment_reader::WAL_VERSION)
+        segment_reader::parse_entry_at(bytes, 0, segment_reader::WAL_VERSION_PROVENANCE)
     }
 
     /// Serialize a parsed WAL entry back to bytes with a fresh checksum.
@@ -74,5 +74,49 @@ impl<'a> arbitrary::Arbitrary<'a> for HybridTimestamp {
         let wallclock = (u64::arbitrary(unstructured)? % max) as i64;
         let logical = u32::arbitrary(unstructured)?;
         Ok(HybridTimestamp::new(wallclock, logical).expect("bounded fuzz timestamp must be valid"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::wal::{parse_current_entry, serialize_entry};
+    use crate::core::NodeId;
+    use crate::core::interning::InternedString;
+    use crate::core::property::PropertyMap;
+    use crate::core::provenance::Provenance;
+    use crate::core::temporal::time;
+    use crate::storage::wal::entry::{LSN, WalEntry, WalOperation};
+
+    /// Regression test for a bug where `parse_current_entry` hardcoded the
+    /// pre-provenance `WAL_VERSION` (1) even though `serialize_entry` always
+    /// writes the provenance presence byte for Create/Update ops (Issue
+    /// #3224). Parsing at the stale version left a trailing byte unconsumed,
+    /// breaking round-trip byte-count fidelity for every Create/Update op --
+    /// exactly the invariant `fuzz/fuzz_targets/wal_entry_parsing.rs` checks.
+    #[test]
+    fn create_node_roundtrip_consumes_all_bytes() {
+        let entry = WalEntry::new(
+            LSN(1),
+            WalOperation::CreateNode {
+                node_id: NodeId::new(1).unwrap(),
+                label: InternedString::from_raw(0),
+                properties: PropertyMap::new(),
+                valid_from: time::now(),
+                provenance: Some(
+                    Provenance::builder()
+                        .source("test")
+                        .confidence(0.9)
+                        .build()
+                        .unwrap(),
+                ),
+            },
+        );
+
+        let canonical = serialize_entry(&entry).expect("entry must serialize");
+        let (roundtrip, roundtrip_consumed) =
+            parse_current_entry(&canonical).expect("serialized entry must parse");
+
+        assert_eq!(roundtrip_consumed, canonical.len());
+        assert_eq!(roundtrip.lsn, entry.lsn);
     }
 }

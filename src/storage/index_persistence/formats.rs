@@ -799,7 +799,13 @@ pub mod legacy_v1 {
         fn from(v1: TemporalIndexDataV1) -> Self {
             super::TemporalIndexData {
                 magic: v1.magic,
-                version: v1.version,
+                // The converted entries are current-shape (provenance field
+                // added by the `NodeVersionEntryV1`/`EdgeVersionEntryV1` `From`
+                // impls above), so the upgraded struct must be stamped with
+                // the current format version, not the legacy one it was read
+                // as. Otherwise `decode_temporal_blob` would misdetect this
+                // struct as legacy on the next load and misdecode it.
+                version: super::super::MANIFEST_VERSION,
                 node_versions: v1.node_versions.into_iter().map(Into::into).collect(),
                 node_anchors: v1.node_anchors,
                 edge_versions: v1.edge_versions.into_iter().map(Into::into).collect(),
