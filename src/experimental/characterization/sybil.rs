@@ -111,29 +111,32 @@ impl PropagationModel for LinearPropagation {
             return current_self.map(|v| v.to_vec());
         }
 
-        let avg: Vec<f32> = sum.iter().map(|x| x / count as f32).collect();
+        let mut sum = sum;
+        // Convert sum in-place to avg
+        // Reuse intermediate vector to avoid 2 allocations per node evaluation.
+        for x in sum.iter_mut() {
+            *x /= count as f32;
+        }
 
         match current_self {
             Some(self_vec) => {
-                if self_vec.len() != dim {
+                if self_vec.len() != sum.len() {
                     // Dimension mismatch, just return self (or handle error?)
                     // For simulation robustness, we ignore mismatched neighbors/self.
                     return Some(self_vec.to_vec());
                 }
 
                 // Blend: (1 - alpha) * self + alpha * avg
-                let new_vec: Vec<f32> = self_vec
-                    .iter()
-                    .zip(avg.iter())
-                    .map(|(s, a)| (1.0 - self.alpha) * s + self.alpha * a)
-                    .collect();
-                Some(new_vec)
+                for (a, s) in sum.iter_mut().zip(self_vec.iter()) {
+                    *a = (1.0 - self.alpha) * s + self.alpha * (*a);
+                }
+                Some(sum)
             }
             None => {
                 // If we didn't have a state, we "adopt" the average (if alpha allows adoption)
                 // Interpretation: If I have no opinion, do I adopt neighbors'?
                 // For this model, yes, let's say we adopt the average directly.
-                Some(avg)
+                Some(sum)
             }
         }
     }
