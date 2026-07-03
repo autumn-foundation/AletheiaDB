@@ -14,6 +14,7 @@ use crate::core::hasher::IdentityHasher;
 use crate::core::id::{EdgeId, NodeId, TxId, VersionId};
 use crate::core::interning::InternedString;
 use crate::core::property::{MAX_VECTOR_DIMENSIONS, PropertyKey, PropertyMap, PropertyValue};
+use crate::core::provenance::Provenance;
 use crate::core::temporal::{BiTemporalInterval, Timestamp};
 use std::collections::{HashMap, HashSet};
 use std::hash::BuildHasherDefault;
@@ -800,6 +801,13 @@ pub struct NodeVersion {
     pub next_version: Option<VersionId>,
     /// Link to the previous version (for reverse traversal)
     pub prev_version: Option<VersionId>,
+    /// Write-time attributive provenance (source, confidence, note, correlation_id).
+    ///
+    /// `None` unless the write that created this version supplied a
+    /// [`Provenance`] bundle (Issue #3224). Distinct from `commit_timestamp`
+    /// (which records *when* this version was written): provenance records
+    /// *who/what* wrote it and *how confident* the writer was.
+    pub provenance: Option<Arc<Provenance>>,
 }
 
 impl NodeVersion {
@@ -821,6 +829,7 @@ impl NodeVersion {
             commit_timestamp,
             next_version: None,
             prev_version: None,
+            provenance: None,
         }
     }
 
@@ -844,7 +853,15 @@ impl NodeVersion {
             commit_timestamp,
             next_version: None,
             prev_version: Some(prev_version),
+            provenance: None,
         }
+    }
+
+    /// Attach a provenance bundle to this version, replacing any previous value.
+    #[must_use]
+    pub fn with_provenance(mut self, provenance: Option<Arc<Provenance>>) -> Self {
+        self.provenance = provenance;
+        self
     }
 
     /// Returns true if this is an anchor version.
@@ -910,6 +927,11 @@ pub struct EdgeVersion {
     pub next_version: Option<VersionId>,
     /// Link to the previous version
     pub prev_version: Option<VersionId>,
+    /// Write-time attributive provenance (source, confidence, note, correlation_id).
+    ///
+    /// `None` unless the write that created this version supplied a
+    /// [`Provenance`] bundle (Issue #3224).
+    pub provenance: Option<Arc<Provenance>>,
 }
 
 impl EdgeVersion {
@@ -935,7 +957,15 @@ impl EdgeVersion {
             commit_timestamp,
             next_version: None,
             prev_version: None,
+            provenance: None,
         }
+    }
+
+    /// Attach a provenance bundle to this version, replacing any previous value.
+    #[must_use]
+    pub fn with_provenance(mut self, provenance: Option<Arc<Provenance>>) -> Self {
+        self.provenance = provenance;
+        self
     }
 
     /// Create a new delta version (incremental change).
@@ -963,6 +993,7 @@ impl EdgeVersion {
             commit_timestamp,
             next_version: None,
             prev_version: Some(prev_version),
+            provenance: None,
         }
     }
 

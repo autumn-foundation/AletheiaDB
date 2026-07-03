@@ -12,6 +12,7 @@ fn test_operation(id: u64) -> WalOperation {
         label: GLOBAL_INTERNER.intern("Test").unwrap(),
         properties: PropertyMap::new(),
         valid_from: time::now(),
+        provenance: None,
     }
 }
 
@@ -50,6 +51,7 @@ fn huge_operation(id: u64) -> WalOperation {
         label: GLOBAL_INTERNER.intern("Huge").unwrap(),
         properties: props,
         valid_from: time::now(),
+        provenance: None,
     }
 }
 

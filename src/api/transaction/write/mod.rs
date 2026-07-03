@@ -11,7 +11,7 @@
 
 use super::{
     ReadOps, TransactionSnapshot, TxId, TxMetadata, TxState, TxVisibilityManager, WriteBuffer,
-    WriteOps,
+    WriteOps, WriteRequestOptions,
 };
 use crate::core::error::{Result, ResultExt, StorageError, TransactionError};
 use crate::core::graph::{Edge, Node};
@@ -947,11 +947,11 @@ impl ReadOps for WriteTransaction {
 }
 
 impl WriteOps for WriteTransaction {
-    fn create_node_with_valid_time(
+    fn create_node_with_options(
         &mut self,
         label: &str,
         properties: PropertyMap,
-        valid_from: Option<Timestamp>,
+        options: WriteRequestOptions,
     ) -> Result<NodeId> {
         let result = (|| {
             // Check transaction state
@@ -970,10 +970,17 @@ impl WriteOps for WriteTransaction {
 
             // Get timestamp: use provided valid_from or default to transaction start time
             let timestamp = self.start_timestamp;
-            let valid_from = valid_from.unwrap_or(timestamp);
+            let valid_from = options.valid_from.unwrap_or(timestamp);
 
             // Validate valid_from is not too far in future
             validation::validate_valid_from_future(valid_from)?;
+
+            // Normalize an all-absent provenance bundle to `None` -- never
+            // persist a fabricated empty object (Issue #3224).
+            let provenance = options
+                .provenance
+                .filter(|p| !p.is_empty())
+                .map(std::sync::Arc::new);
 
             // Buffer the write
             self.buffer.add(super::BufferedWrite::CreateNode {
@@ -982,6 +989,7 @@ impl WriteOps for WriteTransaction {
                 label: label_interned,
                 properties,
                 valid_from,
+                provenance,
             })?;
 
             Ok(node_id)
@@ -990,13 +998,13 @@ impl WriteOps for WriteTransaction {
         result.record_error_metric()
     }
 
-    fn create_edge_with_valid_time(
+    fn create_edge_with_options(
         &mut self,
         source: NodeId,
         target: NodeId,
         label: &str,
         properties: PropertyMap,
-        valid_from: Option<Timestamp>,
+        options: WriteRequestOptions,
     ) -> Result<EdgeId> {
         let result = (|| {
             // Check transaction state
@@ -1015,10 +1023,17 @@ impl WriteOps for WriteTransaction {
 
             // Get timestamp: use provided valid_from or default to transaction start time
             let timestamp = self.start_timestamp;
-            let valid_from = valid_from.unwrap_or(timestamp);
+            let valid_from = options.valid_from.unwrap_or(timestamp);
 
             // Validate valid_from is not too far in future
             validation::validate_valid_from_future(valid_from)?;
+
+            // Normalize an all-absent provenance bundle to `None` -- never
+            // persist a fabricated empty object (Issue #3224).
+            let provenance = options
+                .provenance
+                .filter(|p| !p.is_empty())
+                .map(std::sync::Arc::new);
 
             // Buffer the write
             self.buffer.add(super::BufferedWrite::CreateEdge {
@@ -1029,6 +1044,7 @@ impl WriteOps for WriteTransaction {
                 label: label_interned,
                 properties,
                 valid_from,
+                provenance,
             })?;
 
             Ok(edge_id)
@@ -1037,11 +1053,11 @@ impl WriteOps for WriteTransaction {
         result.record_error_metric()
     }
 
-    fn update_node_with_valid_time(
+    fn update_node_with_options(
         &mut self,
         node_id: NodeId,
         properties: PropertyMap,
-        valid_from: Option<Timestamp>,
+        options: WriteRequestOptions,
     ) -> Result<()> {
         let result = (|| {
             // Check transaction state
@@ -1071,7 +1087,7 @@ impl WriteOps for WriteTransaction {
 
             // Get timestamp: use provided valid_from or default to transaction start time
             let timestamp = self.start_timestamp;
-            let valid_from = valid_from.unwrap_or(timestamp);
+            let valid_from = options.valid_from.unwrap_or(timestamp);
 
             // Validate valid_from is not too far in future
             validation::validate_valid_from_future(valid_from)?;
@@ -1089,6 +1105,14 @@ impl WriteOps for WriteTransaction {
                 )?;
             }
 
+            // Normalize an all-absent provenance bundle to `None` -- never
+            // persist a fabricated empty object (Issue #3224). This update's
+            // provenance is independent of whatever the prior version carried.
+            let provenance = options
+                .provenance
+                .filter(|p| !p.is_empty())
+                .map(std::sync::Arc::new);
+
             // Buffer the write with merged properties
             self.buffer.add(super::BufferedWrite::UpdateNode {
                 node_id,
@@ -1096,6 +1120,7 @@ impl WriteOps for WriteTransaction {
                 label: node.label,
                 properties: merged_properties,
                 valid_from,
+                provenance,
             })?;
 
             Ok(())
@@ -1104,11 +1129,11 @@ impl WriteOps for WriteTransaction {
         result.record_error_metric()
     }
 
-    fn update_edge_with_valid_time(
+    fn update_edge_with_options(
         &mut self,
         edge_id: EdgeId,
         properties: PropertyMap,
-        valid_from: Option<Timestamp>,
+        options: WriteRequestOptions,
     ) -> Result<()> {
         let result = (|| {
             // Check transaction state
@@ -1138,7 +1163,7 @@ impl WriteOps for WriteTransaction {
 
             // Get timestamp: use provided valid_from or default to transaction start time
             let timestamp = self.start_timestamp;
-            let valid_from = valid_from.unwrap_or(timestamp);
+            let valid_from = options.valid_from.unwrap_or(timestamp);
 
             // Validate valid_from is not too far in future
             validation::validate_valid_from_future(valid_from)?;
@@ -1156,6 +1181,14 @@ impl WriteOps for WriteTransaction {
                 )?;
             }
 
+            // Normalize an all-absent provenance bundle to `None` -- never
+            // persist a fabricated empty object (Issue #3224). This update's
+            // provenance is independent of whatever the prior version carried.
+            let provenance = options
+                .provenance
+                .filter(|p| !p.is_empty())
+                .map(std::sync::Arc::new);
+
             // Buffer the write with merged properties
             self.buffer.add(super::BufferedWrite::UpdateEdge {
                 edge_id,
@@ -1165,6 +1198,7 @@ impl WriteOps for WriteTransaction {
                 label: edge.label,
                 properties: merged_properties,
                 valid_from,
+                provenance,
             })?;
 
             Ok(())

@@ -4,6 +4,7 @@ use crate::core::{
     id::{EdgeId, NodeId, VersionId},
     interning::InternedString,
     property::PropertyMap,
+    provenance::Provenance,
     temporal::{Timestamp, time},
 };
 
@@ -47,6 +48,8 @@ pub enum WalOperation {
         properties: PropertyMap,
         /// When the node became valid in reality (user-controlled)
         valid_from: Timestamp,
+        /// Write-time provenance bundle (Issue #3224), if supplied.
+        provenance: Option<Provenance>,
     },
     /// Create a new edge
     CreateEdge {
@@ -62,6 +65,8 @@ pub enum WalOperation {
         properties: PropertyMap,
         /// When the edge became valid in reality (user-controlled)
         valid_from: Timestamp,
+        /// Write-time provenance bundle (Issue #3224), if supplied.
+        provenance: Option<Provenance>,
     },
     /// Update node (creates new version)
     UpdateNode {
@@ -75,6 +80,8 @@ pub enum WalOperation {
         properties: PropertyMap,
         /// When this update became valid in reality (user-controlled)
         valid_from: Timestamp,
+        /// Write-time provenance bundle (Issue #3224), if supplied.
+        provenance: Option<Provenance>,
     },
     /// Update edge (creates new version)
     UpdateEdge {
@@ -88,6 +95,8 @@ pub enum WalOperation {
         properties: PropertyMap,
         /// When this update became valid in reality (user-controlled)
         valid_from: Timestamp,
+        /// Write-time provenance bundle (Issue #3224), if supplied.
+        provenance: Option<Provenance>,
     },
     /// Delete a node
     DeleteNode {
@@ -263,6 +272,7 @@ mod sentry_tests {
             label: GLOBAL_INTERNER.intern("TestLabel").unwrap(),
             properties,
             valid_from,
+            provenance: None,
         };
 
         // Create the original entry
@@ -275,10 +285,15 @@ mod sentry_tests {
         let mut buffer = Vec::new();
         serialize_entry_into(&original_entry, &mut buffer).expect("Serialization failed");
 
-        // Deserialize
-        // version 1 is current
-        let (parsed_entry, consumed) =
-            parse_entry_at(&buffer, 0, 1).expect("Deserialization failed");
+        // Deserialize. Serialization always writes the provenance-carrying
+        // payload shape now (Issue #3224), so parsing must use the matching
+        // version to consume the same bytes that were written.
+        let (parsed_entry, consumed) = parse_entry_at(
+            &buffer,
+            0,
+            crate::storage::wal::segment_reader::WAL_VERSION_PROVENANCE,
+        )
+        .expect("Deserialization failed");
 
         // Verify bytes consumed
         assert_eq!(consumed, buffer.len(), "Should consume entire buffer");

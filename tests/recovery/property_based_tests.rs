@@ -229,6 +229,7 @@ impl RecoveryTestHarness {
                             label: GLOBAL_INTERNER.intern(label).unwrap(),
                             properties: PropertyMapBuilder::new().insert("value", *value).build(),
                             valid_from: timestamp_counter,
+                            provenance: None,
                         })?;
                         created_nodes.insert(*id);
                     }
@@ -245,6 +246,7 @@ impl RecoveryTestHarness {
                                 .insert("value", *new_value)
                                 .build(),
                             valid_from: timestamp_counter,
+                            provenance: None,
                         })?;
                     }
                 }
@@ -274,6 +276,7 @@ impl RecoveryTestHarness {
                             label: GLOBAL_INTERNER.intern(label).unwrap(),
                             properties: PropertyMapBuilder::new().build(),
                             valid_from: timestamp_counter,
+                            provenance: None,
                         })?;
                         created_edges.insert(*id);
                     }
@@ -290,6 +293,7 @@ impl RecoveryTestHarness {
                                 .insert("value", *new_value)
                                 .build(),
                             valid_from: timestamp_counter,
+                            provenance: None,
                         })?;
                     }
                 }

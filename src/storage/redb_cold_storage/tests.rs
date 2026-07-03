@@ -1326,6 +1326,223 @@ fn test_edge_version_roundtrip_all_fields() {
     assert_eq!(retrieved.target, version.target);
 }
 
+// -----------------------------------------------------------------------
+// Provenance persistence (Issue #3224)
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_encode_decode_node_version_with_provenance() {
+    use crate::core::provenance::Provenance;
+    use std::sync::Arc;
+
+    let provenance = Arc::new(
+        Provenance::builder()
+            .source("hr-system")
+            .confidence(0.95)
+            .correlation_id("batch-42")
+            .build()
+            .unwrap(),
+    );
+
+    let version = NodeVersion::new_anchor(
+        VersionId::new(1).unwrap(),
+        NodeId::new(1).unwrap(),
+        BiTemporalInterval::current(1000.into()),
+        GLOBAL_INTERNER.intern("Person").unwrap(),
+        PropertyMapBuilder::new().build(),
+    )
+    .with_provenance(Some(provenance.clone()));
+
+    let encoded = encode_node_version(&version);
+    assert!(
+        encoded.starts_with(&COLD_RECORD_MAGIC_V2),
+        "new records must be magic-prefixed"
+    );
+
+    let decoded = decode_node_version(&encoded).unwrap();
+    let decoded_provenance = decoded.provenance.unwrap();
+    assert_eq!(decoded_provenance.source(), Some("hr-system"));
+    assert_eq!(decoded_provenance.confidence(), Some(0.95));
+    assert_eq!(decoded_provenance.correlation_id(), Some("batch-42"));
+}
+
+#[test]
+fn test_encode_decode_node_version_without_provenance() {
+    let version = NodeVersion::new_anchor(
+        VersionId::new(1).unwrap(),
+        NodeId::new(1).unwrap(),
+        BiTemporalInterval::current(1000.into()),
+        GLOBAL_INTERNER.intern("Person").unwrap(),
+        PropertyMapBuilder::new().build(),
+    );
+
+    let encoded = encode_node_version(&version);
+    let decoded = decode_node_version(&encoded).unwrap();
+    assert!(decoded.provenance.is_none());
+}
+
+#[test]
+fn test_encode_decode_edge_version_with_provenance() {
+    use crate::core::provenance::Provenance;
+    use std::sync::Arc;
+
+    let provenance = Arc::new(
+        Provenance::builder()
+            .source("csv-import")
+            .note("bulk load 2026-06")
+            .build()
+            .unwrap(),
+    );
+
+    let version = EdgeVersion::new_anchor(
+        VersionId::new(1).unwrap(),
+        EdgeId::new(1).unwrap(),
+        BiTemporalInterval::current(1000.into()),
+        GLOBAL_INTERNER.intern("KNOWS").unwrap(),
+        NodeId::new(1).unwrap(),
+        NodeId::new(2).unwrap(),
+        PropertyMapBuilder::new().build(),
+    )
+    .with_provenance(Some(provenance));
+
+    let encoded = encode_edge_version(&version);
+    assert!(encoded.starts_with(&COLD_RECORD_MAGIC_V2));
+
+    let decoded = decode_edge_version(&encoded).unwrap();
+    let decoded_provenance = decoded.provenance.unwrap();
+    assert_eq!(decoded_provenance.source(), Some("csv-import"));
+    assert_eq!(decoded_provenance.note(), Some("bulk load 2026-06"));
+}
+
+#[test]
+fn test_decode_legacy_untagged_node_record_provenance_none() {
+    // Simulate a record written by a pre-#3224 binary: no tag prefix, no
+    // `provenance` field in the wire struct at all.
+    let legacy = SerializableNodeVersionV1 {
+        id: 1,
+        node_id: 1,
+        temporal_valid_start: 1000,
+        temporal_valid_end: crate::core::temporal::TIMESTAMP_MAX.wallclock(),
+        temporal_tx_start: 1000,
+        temporal_tx_end: crate::core::temporal::TIMESTAMP_MAX.wallclock(),
+        label: "Person".to_string(),
+        data: SerializableVersionData::Anchor {
+            properties: vec![],
+            vector_snapshot_id: None,
+        },
+        next_version: None,
+        prev_version: None,
+    };
+    let legacy_bytes = bitcode::encode(&legacy);
+    assert!(
+        !legacy_bytes.starts_with(&COLD_RECORD_MAGIC_V2),
+        "legacy fixture must not accidentally collide with the new magic sequence"
+    );
+
+    let decoded = decode_node_version(&legacy_bytes).unwrap();
+    assert_eq!(decoded.node_id.as_u64(), 1);
+    assert!(decoded.provenance.is_none());
+}
+
+/// Regression test for a real (not merely theoretical) misdetection risk:
+/// before `COLD_RECORD_MAGIC_V2` was widened from a single tag byte to a
+/// 4-byte sequence, any legacy (untagged) record whose leading byte happened
+/// to equal that single tag byte would be misrouted into decoding as the new
+/// tagged shape, silently corrupting or erroring on a valid historical
+/// record. This fabricates a legacy record and prepends the *old* single-byte
+/// tag value the new decoder no longer recognizes, then confirms it still
+/// makes it down the legacy fallback path rather than being misdecoded as
+/// V2 -- this is inherently true for a 4-byte magic vs. a single leading
+/// byte, since matching one byte can never satisfy `starts_with` on four.
+#[test]
+fn test_legacy_record_with_leading_byte_matching_old_single_byte_tag_is_not_misdetected() {
+    let legacy = SerializableNodeVersionV1 {
+        id: 1,
+        node_id: 42,
+        temporal_valid_start: 1000,
+        temporal_valid_end: crate::core::temporal::TIMESTAMP_MAX.wallclock(),
+        temporal_tx_start: 1000,
+        temporal_tx_end: crate::core::temporal::TIMESTAMP_MAX.wallclock(),
+        label: "Person".to_string(),
+        data: SerializableVersionData::Anchor {
+            properties: vec![],
+            vector_snapshot_id: None,
+        },
+        next_version: None,
+        prev_version: None,
+    };
+    let mut legacy_bytes = bitcode::encode(&legacy);
+    // Force the leading byte to collide with what used to be the entire tag
+    // (0x02) -- a single-byte match must no longer be mistaken for the
+    // 4-byte `COLD_RECORD_MAGIC_V2` prefix.
+    legacy_bytes[0] = COLD_RECORD_MAGIC_V2[0];
+    assert!(!legacy_bytes.starts_with(&COLD_RECORD_MAGIC_V2));
+
+    // Decoding a mutated legacy record isn't expected to preserve field
+    // values (we corrupted a byte), but it must not panic and must not be
+    // silently routed through the V2 decoder.
+    let _ = decode_node_version(&legacy_bytes);
+}
+
+#[test]
+fn test_decode_legacy_untagged_edge_record_provenance_none() {
+    let legacy = SerializableEdgeVersionV1 {
+        id: 1,
+        edge_id: 1,
+        temporal_valid_start: 1000,
+        temporal_valid_end: crate::core::temporal::TIMESTAMP_MAX.wallclock(),
+        temporal_tx_start: 1000,
+        temporal_tx_end: crate::core::temporal::TIMESTAMP_MAX.wallclock(),
+        label: "KNOWS".to_string(),
+        source: 1,
+        target: 2,
+        data: SerializableVersionData::Anchor {
+            properties: vec![],
+            vector_snapshot_id: None,
+        },
+        next_version: None,
+        prev_version: None,
+    };
+    let legacy_bytes = bitcode::encode(&legacy);
+
+    let decoded = decode_edge_version(&legacy_bytes).unwrap();
+    assert_eq!(decoded.edge_id.as_u64(), 1);
+    assert!(decoded.provenance.is_none());
+}
+
+#[test]
+fn test_migrate_to_cold_preserves_provenance() {
+    use crate::core::provenance::Provenance;
+    use std::sync::Arc;
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let db_path = temp_dir.path().join("test.redb");
+    let storage = RedbColdStorage::with_default_config(&db_path).unwrap();
+
+    let provenance = Arc::new(
+        Provenance::builder()
+            .source("claude-mcp")
+            .confidence(0.8)
+            .build()
+            .unwrap(),
+    );
+    let version = NodeVersion::new_anchor(
+        VersionId::new(1).unwrap(),
+        NodeId::new(1).unwrap(),
+        BiTemporalInterval::current(1000.into()),
+        GLOBAL_INTERNER.intern("Person").unwrap(),
+        PropertyMapBuilder::new().build(),
+    )
+    .with_provenance(Some(provenance));
+
+    storage.store_node_version(&version).unwrap();
+    let retrieved = storage.get_node_version(version.id).unwrap().unwrap();
+
+    let retrieved_provenance = retrieved.provenance.unwrap();
+    assert_eq!(retrieved_provenance.source(), Some("claude-mcp"));
+    assert_eq!(retrieved_provenance.confidence(), Some(0.8));
+}
+
 #[test]
 fn test_batch_operations_preserve_order() {
     let temp_dir = tempfile::tempdir().unwrap();
@@ -1622,6 +1839,37 @@ fn test_node_version_decode_error_path() {
     let result = storage.get_node_version(VersionId::new(12345).unwrap());
     // Should fail to decompress or decode
     assert!(result.is_err());
+}
+
+/// Regression test: a record whose leading bytes match `COLD_RECORD_MAGIC_V2`
+/// is unambiguously a V2 record. If the bytes *after* the magic fail to
+/// decode as `SerializableNodeVersion` (corruption), `decode_node_version`
+/// must surface that error immediately rather than falling through to the
+/// legacy V1 decoder, which would misinterpret the magic-prefixed buffer.
+#[test]
+fn test_decode_node_version_v2_magic_match_with_corrupt_payload_errors_immediately() {
+    let mut data = COLD_RECORD_MAGIC_V2.to_vec();
+    data.extend_from_slice(&[0xFF; 8]);
+    let err = decode_node_version(&data).unwrap_err();
+    let message = format!("{err}");
+    assert!(
+        message.contains("V2"),
+        "expected a V2-specific decode error, got: {message}"
+    );
+}
+
+/// Edge counterpart of
+/// [`test_decode_node_version_v2_magic_match_with_corrupt_payload_errors_immediately`].
+#[test]
+fn test_decode_edge_version_v2_magic_match_with_corrupt_payload_errors_immediately() {
+    let mut data = COLD_RECORD_MAGIC_V2.to_vec();
+    data.extend_from_slice(&[0xFF; 8]);
+    let err = decode_edge_version(&data).unwrap_err();
+    let message = format!("{err}");
+    assert!(
+        message.contains("V2"),
+        "expected a V2-specific decode error, got: {message}"
+    );
 }
 
 #[test]

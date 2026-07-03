@@ -36,6 +36,7 @@ use super::entry::WalEntry;
 use super::entry::{LSN, WalOperation};
 use crate::core::error::Result;
 use crate::core::interning::InternedString;
+use crate::core::provenance::Provenance;
 use crate::core::temporal::Timestamp;
 
 // WAL operation type tags for the binary format.
@@ -54,6 +55,80 @@ pub(crate) const OP_DROP_UNIQUE_CONSTRAINT: u8 = 9;
 #[inline(always)]
 fn serialize_interned_string(s: InternedString, buffer: &mut Vec<u8>) {
     buffer.extend_from_slice(&s.as_u32().to_le_bytes());
+}
+
+/// Serialize an optional `&str`: `[1-byte presence][4-byte LE len][UTF-8 bytes]`.
+#[inline]
+fn serialize_opt_str(s: Option<&str>, buffer: &mut Vec<u8>) {
+    match s {
+        None => buffer.push(0),
+        Some(s) => {
+            buffer.push(1);
+            let bytes = s.as_bytes();
+            buffer.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+            buffer.extend_from_slice(bytes);
+        }
+    }
+}
+
+/// Serialize an optional `f64`: `[1-byte presence][8-byte LE value]`.
+#[inline]
+fn serialize_opt_f64(v: Option<f64>, buffer: &mut Vec<u8>) {
+    match v {
+        None => buffer.push(0),
+        Some(v) => {
+            buffer.push(1);
+            buffer.extend_from_slice(&v.to_le_bytes());
+        }
+    }
+}
+
+/// Byte size of an optional `&str` as serialized by [`serialize_opt_str`].
+#[inline]
+fn opt_str_size(s: Option<&str>) -> usize {
+    1 + s.map(|s| 4 + s.len()).unwrap_or(0)
+}
+
+/// Byte size of an optional `f64` as serialized by [`serialize_opt_f64`].
+#[inline]
+fn opt_f64_size(v: Option<f64>) -> usize {
+    1 + if v.is_some() { 8 } else { 0 }
+}
+
+/// Serialize an optional [`Provenance`] bundle: `[1-byte presence][source][confidence][note][correlation_id]`.
+///
+/// The four fields are only present when the outer presence byte is nonzero;
+/// each is itself independently optional (see [`serialize_opt_str`] /
+/// [`serialize_opt_f64`]). Written unconditionally by writers on this format
+/// version -- readers on older WAL versions never look for these bytes at
+/// all (see `WAL_VERSION_PROVENANCE` in `segment_reader.rs`).
+#[inline]
+fn serialize_provenance_into(provenance: Option<&Provenance>, buffer: &mut Vec<u8>) {
+    match provenance {
+        None => buffer.push(0),
+        Some(p) => {
+            buffer.push(1);
+            serialize_opt_str(p.source(), buffer);
+            serialize_opt_f64(p.confidence(), buffer);
+            serialize_opt_str(p.note(), buffer);
+            serialize_opt_str(p.correlation_id(), buffer);
+        }
+    }
+}
+
+/// Byte size of an optional [`Provenance`] bundle as serialized by
+/// [`serialize_provenance_into`].
+#[inline]
+fn provenance_serialized_size(provenance: Option<&Provenance>) -> usize {
+    match provenance {
+        None => 1,
+        Some(p) => {
+            1 + opt_str_size(p.source())
+                + opt_f64_size(p.confidence())
+                + opt_str_size(p.note())
+                + opt_str_size(p.correlation_id())
+        }
+    }
 }
 
 /// Estimate the required buffer capacity for serializing a WAL entry.
@@ -129,25 +204,41 @@ pub(crate) fn estimate_entry_capacity(operation: &WalOperation) -> usize {
     const TIMESTAMP_SIZE: usize = 12;
 
     let variable_size = match operation {
-        WalOperation::CreateNode { properties, .. } => {
-            // op type (1) + node_id (8) + label (4-byte InternedString ID) + properties + valid_from (12)
+        WalOperation::CreateNode {
+            properties,
+            provenance,
+            ..
+        } => {
+            // op type (1) + node_id (8) + label (4-byte InternedString ID) + properties + valid_from (12) + provenance
             let base = 1 + 8 + 4 + TIMESTAMP_SIZE;
-            base + properties.serialized_size()
+            base + properties.serialized_size() + provenance_serialized_size(provenance.as_ref())
         }
-        WalOperation::CreateEdge { properties, .. } => {
-            // op type (1) + edge_id (8) + source (8) + target (8) + label (4-byte InternedString ID) + properties + valid_from (12)
+        WalOperation::CreateEdge {
+            properties,
+            provenance,
+            ..
+        } => {
+            // op type (1) + edge_id (8) + source (8) + target (8) + label (4-byte InternedString ID) + properties + valid_from (12) + provenance
             let base = 1 + 8 + 8 + 8 + 4 + TIMESTAMP_SIZE;
-            base + properties.serialized_size()
+            base + properties.serialized_size() + provenance_serialized_size(provenance.as_ref())
         }
-        WalOperation::UpdateNode { properties, .. } => {
-            // op type (1) + node_id (8) + version_id (8) + label (4-byte InternedString ID) + properties + valid_from (12)
+        WalOperation::UpdateNode {
+            properties,
+            provenance,
+            ..
+        } => {
+            // op type (1) + node_id (8) + version_id (8) + label (4-byte InternedString ID) + properties + valid_from (12) + provenance
             let base = 1 + 8 + 8 + 4 + TIMESTAMP_SIZE;
-            base + properties.serialized_size()
+            base + properties.serialized_size() + provenance_serialized_size(provenance.as_ref())
         }
-        WalOperation::UpdateEdge { properties, .. } => {
-            // op type (1) + edge_id (8) + version_id (8) + label (4-byte InternedString ID) + properties + valid_from (12)
+        WalOperation::UpdateEdge {
+            properties,
+            provenance,
+            ..
+        } => {
+            // op type (1) + edge_id (8) + version_id (8) + label (4-byte InternedString ID) + properties + valid_from (12) + provenance
             let base = 1 + 8 + 8 + 4 + TIMESTAMP_SIZE;
-            base + properties.serialized_size()
+            base + properties.serialized_size() + provenance_serialized_size(provenance.as_ref())
         }
         WalOperation::DeleteNode { .. } => {
             // op type (1) + node_id (8) + valid_from (12)
@@ -241,12 +332,14 @@ pub(crate) fn serialize_operation_into(
             label,
             properties,
             valid_from,
+            provenance,
         } => {
             buffer.push(OP_CREATE_NODE);
             buffer.extend_from_slice(&node_id.as_u64().to_le_bytes());
             serialize_interned_string(*label, buffer);
             properties.serialize_into(buffer)?;
             valid_from.serialize_into(buffer);
+            serialize_provenance_into(provenance.as_ref(), buffer);
         }
         WalOperation::CreateEdge {
             edge_id,
@@ -255,6 +348,7 @@ pub(crate) fn serialize_operation_into(
             label,
             properties,
             valid_from,
+            provenance,
         } => {
             buffer.push(OP_CREATE_EDGE);
             buffer.extend_from_slice(&edge_id.as_u64().to_le_bytes());
@@ -263,6 +357,7 @@ pub(crate) fn serialize_operation_into(
             serialize_interned_string(*label, buffer);
             properties.serialize_into(buffer)?;
             valid_from.serialize_into(buffer);
+            serialize_provenance_into(provenance.as_ref(), buffer);
         }
         WalOperation::UpdateNode {
             node_id,
@@ -270,6 +365,7 @@ pub(crate) fn serialize_operation_into(
             label,
             properties,
             valid_from,
+            provenance,
         } => {
             buffer.push(OP_UPDATE_NODE);
             buffer.extend_from_slice(&node_id.as_u64().to_le_bytes());
@@ -277,6 +373,7 @@ pub(crate) fn serialize_operation_into(
             serialize_interned_string(*label, buffer);
             properties.serialize_into(buffer)?;
             valid_from.serialize_into(buffer);
+            serialize_provenance_into(provenance.as_ref(), buffer);
         }
         WalOperation::UpdateEdge {
             edge_id,
@@ -284,6 +381,7 @@ pub(crate) fn serialize_operation_into(
             label,
             properties,
             valid_from,
+            provenance,
         } => {
             buffer.push(OP_UPDATE_EDGE);
             buffer.extend_from_slice(&edge_id.as_u64().to_le_bytes());
@@ -291,6 +389,7 @@ pub(crate) fn serialize_operation_into(
             serialize_interned_string(*label, buffer);
             properties.serialize_into(buffer)?;
             valid_from.serialize_into(buffer);
+            serialize_provenance_into(provenance.as_ref(), buffer);
         }
         WalOperation::DeleteNode {
             node_id,
@@ -440,21 +539,23 @@ mod tests {
 
     #[test]
     fn test_estimate_capacity_create_node_empty_properties() {
-        // CreateNode with empty properties:
+        // CreateNode with empty properties, no provenance:
         // Fixed: 24 bytes (LSN + Timestamp + Checksum)
-        // op type (1) + node_id (8) + label (4-byte InternedString) + properties (4 for empty count) + valid_from (12)
-        // = 24 + 1 + 8 + 4 + 4 + 12 = 53 bytes
+        // op type (1) + node_id (8) + label (4-byte InternedString) + properties (4 for empty count)
+        // + valid_from (12) + provenance presence byte (1, absent)
+        // = 24 + 1 + 8 + 4 + 4 + 12 + 1 = 54 bytes
         let op = WalOperation::CreateNode {
             node_id: NodeId::new(1).unwrap(),
             label: GLOBAL_INTERNER.intern("test").unwrap(),
             properties: PropertyMapBuilder::new().build(),
             valid_from: test_timestamp(),
+            provenance: None,
         };
 
         let estimated = estimate_entry_capacity(&op);
         assert_eq!(
-            estimated, 53,
-            "CreateNode with empty properties should be 53 bytes"
+            estimated, 54,
+            "CreateNode with empty properties (no provenance) should be 54 bytes"
         );
 
         // Verify by actually serializing
@@ -483,6 +584,7 @@ mod tests {
             label: GLOBAL_INTERNER.intern("Person").unwrap(),
             properties,
             valid_from: test_timestamp(),
+            provenance: None,
         };
 
         let estimated = estimate_entry_capacity(&op);
@@ -524,6 +626,7 @@ mod tests {
             label: GLOBAL_INTERNER.intern("KNOWS").unwrap(),
             properties,
             valid_from: test_timestamp(),
+            provenance: None,
         };
 
         let estimated = estimate_entry_capacity(&op);
@@ -562,6 +665,7 @@ mod tests {
             label: GLOBAL_INTERNER.intern("Document").unwrap(),
             properties,
             valid_from: test_timestamp(),
+            provenance: None,
         };
 
         let estimated = estimate_entry_capacity(&op);
@@ -602,6 +706,7 @@ mod tests {
             label: GLOBAL_INTERNER.intern("LargeNode").unwrap(),
             properties,
             valid_from: test_timestamp(),
+            provenance: None,
         };
 
         let estimated = estimate_entry_capacity(&op);
@@ -692,6 +797,7 @@ mod prop_tests {
                         label,
                         properties,
                         valid_from,
+                        provenance: None,
                     }
                 }),
             // DeleteNode

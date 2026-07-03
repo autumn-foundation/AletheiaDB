@@ -659,6 +659,7 @@ mod tests {
             label: GLOBAL_INTERNER.intern("Test").unwrap(),
             properties: PropertyMap::new(),
             valid_from: time::now(),
+            provenance: None,
         }
     }
 
@@ -944,6 +945,7 @@ mod tests {
                 label: GLOBAL_INTERNER.intern(format!("Node{}", i)).unwrap(),
                 properties: PropertyMap::new(),
                 valid_from: now,
+                provenance: None,
             })
             .collect();
 
@@ -1036,12 +1038,12 @@ mod sentry_tests {
         // 4 (count) + 4 (key_len) + key_bytes + 1 (tag_string) + 4 (val_len) + val_bytes
 
         // Let's use a key "k" (1 byte)
-        // Overhead = 24 + 25 + 4 + 4 + 1 + 1 + 4 = 63 bytes
-        // Total = 63 + val_bytes
+        // Overhead = 24 + 25 + 4 + 4 + 1 + 1 + 4 + 1 (provenance presence byte) = 64 bytes
+        // Total = 64 + val_bytes
         // Target = MAX_WAL_ENTRY_SIZE
-        // val_bytes = MAX_WAL_ENTRY_SIZE - 63
+        // val_bytes = MAX_WAL_ENTRY_SIZE - 64
 
-        let overhead = 63;
+        let overhead = 64;
         let target_val_len = MAX_WAL_ENTRY_SIZE - overhead;
 
         // Create a string of target length
@@ -1055,6 +1057,7 @@ mod sentry_tests {
             label: GLOBAL_INTERNER.intern("Test").unwrap(),
             properties,
             valid_from: time::now(),
+            provenance: None,
         };
 
         // Verify our math was correct
@@ -1084,7 +1087,7 @@ mod sentry_tests {
         let wal = ConcurrentWal::new(config).unwrap();
 
         // Use same calculation as above but +1 byte
-        let overhead = 63;
+        let overhead = 64;
         let target_val_len = MAX_WAL_ENTRY_SIZE - overhead + 1;
 
         let big_string = "x".repeat(target_val_len);
@@ -1096,6 +1099,7 @@ mod sentry_tests {
             label: GLOBAL_INTERNER.intern("Test").unwrap(),
             properties,
             valid_from: time::now(),
+            provenance: None,
         };
 
         // Verify size
@@ -1143,6 +1147,7 @@ mod sentry_tests {
                         label: GLOBAL_INTERNER.intern("Test").unwrap(),
                         properties: PropertyMapBuilder::new().build(),
                         valid_from: time::now(),
+                        provenance: None,
                     };
 
                     // This populates the thread-local cache with an index in [0, 31]

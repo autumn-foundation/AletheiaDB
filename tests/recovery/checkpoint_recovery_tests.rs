@@ -51,6 +51,7 @@ fn test_checkpoint_recovery_basic() -> Result<()> {
             label: GLOBAL_INTERNER.intern("Person").unwrap(),
             properties: props,
             valid_from: time::now(),
+            provenance: None,
         })?;
     }
     wal.flush()?;
@@ -93,6 +94,7 @@ fn test_checkpoint_with_persisted_state_and_wal_replay() -> Result<()> {
             label: GLOBAL_INTERNER.intern("Test").unwrap(),
             properties: props,
             valid_from: time::now(),
+            provenance: None,
         })?;
     }
     wal.flush()?;
@@ -124,6 +126,7 @@ fn test_checkpoint_with_persisted_state_and_wal_replay() -> Result<()> {
             label: GLOBAL_INTERNER.intern("Test").unwrap(),
             properties: props,
             valid_from: time::now(),
+            provenance: None,
         })?;
     }
     wal.flush()?;
@@ -323,6 +326,7 @@ fn test_checkpoint_recovery_with_updates() -> Result<()> {
         label: GLOBAL_INTERNER.intern("Person").unwrap(),
         properties: PropertyMapBuilder::new().insert("name", "Alice").build(),
         valid_from: time::now(),
+        provenance: None,
     })?;
 
     // Update node
@@ -334,6 +338,7 @@ fn test_checkpoint_recovery_with_updates() -> Result<()> {
             .insert("name", "Alice Updated")
             .build(),
         valid_from: time::now(),
+        provenance: None,
     })?;
 
     wal.flush()?;
@@ -376,6 +381,7 @@ fn test_checkpoint_recovery_with_deletes() -> Result<()> {
             label: GLOBAL_INTERNER.intern("Test").unwrap(),
             properties: PropertyMap::new(),
             valid_from: time::now(),
+            provenance: None,
         })?;
     }
 

@@ -159,7 +159,12 @@ fn test_full_persistence_cycle() {
     // Load manifest and strings (validates load order: interner → manifest)
     let loaded_manifest = manager.load_manifest_and_strings().unwrap();
     assert_eq!(loaded_manifest.lsn, 100);
-    assert_eq!(loaded_manifest.version, 1);
+    // Manifest version was bumped to 2 when write-time provenance
+    // (Issue #3224) was added to the persisted temporal index format.
+    assert_eq!(
+        loaded_manifest.version,
+        aletheiadb::storage::index_persistence::MANIFEST_VERSION
+    );
 
     // Verify string interner was restored correctly
     assert_eq!(
@@ -333,9 +338,15 @@ fn test_db_persist_indexes_mvp() {
             "Graph index file should exist"
         );
 
-        // Verify we can load manifest and strings back
+        // Verify we can load manifest and strings back. Manifest version was
+        // bumped to 2 when write-time provenance (Issue #3224) was added to
+        // the persisted temporal index format.
         let manifest = manager.load_manifest_and_strings().unwrap();
-        assert_eq!(manifest.version, 1, "Manifest version should be 1");
+        assert_eq!(
+            manifest.version,
+            aletheiadb::storage::index_persistence::MANIFEST_VERSION,
+            "Manifest version should match the current format version"
+        );
 
         // Verify strings were saved (we interned "Person", "name", "age", "Bob", "Alice", "KNOWS")
         use aletheiadb::core::GLOBAL_INTERNER;
@@ -1992,6 +2003,7 @@ fn test_temporal_version_round_trip() {
         },
         next_version: None,
         prev_version: None,
+        provenance: None,
     };
 
     // Create edge anchor version
@@ -2012,6 +2024,7 @@ fn test_temporal_version_round_trip() {
         data: VersionData::anchor(edge_props),
         next_version: None,
         prev_version: None,
+        provenance: None,
     };
 
     // ========================================================================
@@ -2338,6 +2351,7 @@ fn test_delta_removed_properties_persistence() {
         },
         next_version: None,
         prev_version: None,
+        provenance: None,
     };
 
     // Create delta that removes "city" property
@@ -2362,6 +2376,7 @@ fn test_delta_removed_properties_persistence() {
         },
         next_version: None,
         prev_version: Some(VersionId::new(1).unwrap()),
+        provenance: None,
     };
 
     println!("✓ Created delta with 1 changed property (age: 31) and 1 removed property (city)");
@@ -2476,6 +2491,7 @@ fn test_version_chain_reconstruction() {
             },
             properties: PersistedPropertyMap { entries: vec![] },
             vector_snapshot_id: None,
+            provenance: None,
         },
         // Version 3 (newest) - inserted second
         NodeVersionEntry {
@@ -2495,6 +2511,7 @@ fn test_version_chain_reconstruction() {
             },
             properties: PersistedPropertyMap { entries: vec![] },
             vector_snapshot_id: None,
+            provenance: None,
         },
         // Version 1 (oldest) - inserted last
         NodeVersionEntry {
@@ -2510,6 +2527,7 @@ fn test_version_chain_reconstruction() {
             version_type: PersistedVersionType::Anchor,
             properties: PersistedPropertyMap { entries: vec![] },
             vector_snapshot_id: None,
+            provenance: None,
         },
     ];
 

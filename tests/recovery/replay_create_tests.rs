@@ -43,6 +43,7 @@ fn test_replay_create_node_basic() -> Result<()> {
         label: GLOBAL_INTERNER.intern("Person").unwrap(),
         properties: PropertyMap::new(),
         valid_from: timestamp,
+        provenance: None,
     })?;
     wal.flush()?;
 
@@ -85,6 +86,7 @@ fn test_replay_create_node_with_properties() -> Result<()> {
         label: GLOBAL_INTERNER.intern("User").unwrap(),
         properties: properties.clone(),
         valid_from: time::now(),
+        provenance: None,
     })?;
     wal.flush()?;
 
@@ -132,6 +134,7 @@ fn test_replay_create_node_with_vector() -> Result<()> {
         label: GLOBAL_INTERNER.intern("Document").unwrap(),
         properties: properties.clone(),
         valid_from: time::now(),
+        provenance: None,
     })?;
     wal.flush()?;
 
@@ -172,6 +175,7 @@ fn test_replay_create_edge_basic() -> Result<()> {
         label: GLOBAL_INTERNER.intern("Person").unwrap(),
         properties: PropertyMap::new(),
         valid_from: time::now(),
+        provenance: None,
     })?;
 
     wal.append(WalOperation::CreateNode {
@@ -179,6 +183,7 @@ fn test_replay_create_edge_basic() -> Result<()> {
         label: GLOBAL_INTERNER.intern("Person").unwrap(),
         properties: PropertyMap::new(),
         valid_from: time::now(),
+        provenance: None,
     })?;
 
     // Create edge
@@ -189,6 +194,7 @@ fn test_replay_create_edge_basic() -> Result<()> {
         label: GLOBAL_INTERNER.intern("KNOWS").unwrap(),
         properties: PropertyMap::new(),
         valid_from: time::now(),
+        provenance: None,
     })?;
     wal.flush()?;
 
@@ -230,6 +236,7 @@ fn test_replay_create_edge_with_properties() -> Result<()> {
         label: GLOBAL_INTERNER.intern("Person").unwrap(),
         properties: PropertyMap::new(),
         valid_from: time::now(),
+        provenance: None,
     })?;
 
     wal.append(WalOperation::CreateNode {
@@ -237,6 +244,7 @@ fn test_replay_create_edge_with_properties() -> Result<()> {
         label: GLOBAL_INTERNER.intern("Person").unwrap(),
         properties: PropertyMap::new(),
         valid_from: time::now(),
+        provenance: None,
     })?;
 
     // Create edge with properties
@@ -252,6 +260,7 @@ fn test_replay_create_edge_with_properties() -> Result<()> {
         label: GLOBAL_INTERNER.intern("KNOWS").unwrap(),
         properties: edge_properties.clone(),
         valid_from: time::now(),
+        provenance: None,
     })?;
     wal.flush()?;
 
@@ -290,6 +299,7 @@ fn test_replay_multiple_creates() -> Result<()> {
             label: GLOBAL_INTERNER.intern(format!("Node{}", i)).unwrap(),
             properties: PropertyMap::new(),
             valid_from: time::now(),
+            provenance: None,
         })?;
     }
 
@@ -302,6 +312,7 @@ fn test_replay_multiple_creates() -> Result<()> {
             label: GLOBAL_INTERNER.intern("LINKS_TO").unwrap(),
             properties: PropertyMap::new(),
             valid_from: time::now(),
+            provenance: None,
         })?;
     }
     wal.flush()?;
@@ -338,6 +349,7 @@ fn test_replay_create_node_tracks_max_id() -> Result<()> {
             label: GLOBAL_INTERNER.intern("Test").unwrap(),
             properties: PropertyMap::new(),
             valid_from: time::now(),
+            provenance: None,
         })?;
     }
     wal.flush()?;
@@ -378,6 +390,7 @@ fn test_replay_preserves_temporal_interval() -> Result<()> {
         label: GLOBAL_INTERNER.intern("Test").unwrap(),
         properties: PropertyMap::new(),
         valid_from: timestamp,
+        provenance: None,
     })?;
     wal.flush()?;
 

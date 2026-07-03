@@ -8,6 +8,42 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 // ============================================================================
+// Provenance (Issue #3224)
+// ============================================================================
+
+/// Optional write-time attributive provenance bundle.
+///
+/// Attach this to a write to record *who/what* wrote a fact, *why*, and *how
+/// confident* the writer was -- complementing the bi-temporal axes (valid
+/// time / transaction time) that already record *when*. Every field is
+/// independently optional; an entirely empty bundle (all fields omitted) is
+/// treated as no provenance at all. `confidence`, if present, is validated
+/// to be in `[0.0, 1.0]` and rejected with a clear error otherwise.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct ProvenanceRequest {
+    /// Source system/identifier that produced this write (e.g. "hr-system",
+    /// "csv-import:2026-06", "claude-mcp").
+    #[schemars(
+        description = "Source system/identifier that produced this write (e.g. 'hr-system', 'csv-import:2026-06', 'claude-mcp')"
+    )]
+    pub source: Option<String>,
+
+    /// Confidence in this fact, in `[0.0, 1.0]`. Out-of-range values are rejected.
+    #[schemars(
+        description = "Confidence in this fact, in [0.0, 1.0]. Out-of-range values are rejected with a clear error"
+    )]
+    pub confidence: Option<f64>,
+
+    /// Free-text explanation of the write.
+    #[schemars(description = "Free-text explanation of the write")]
+    pub note: Option<String>,
+
+    /// Correlation ID grouping all writes made in one logical operation.
+    #[schemars(description = "Correlation ID grouping all writes made in one logical operation")]
+    pub correlation_id: Option<String>,
+}
+
+// ============================================================================
 // Node Operations
 // ============================================================================
 
@@ -47,6 +83,14 @@ pub struct CreateNodeRequest {
                        allowed. Transaction time is always system-assigned and cannot be set."
     )]
     pub valid_time: Option<String>,
+
+    /// Optional write-time provenance bundle (source, confidence, note, correlation_id).
+    #[schemars(
+        description = "Optional write-time provenance bundle recording source, confidence \
+                       ([0.0, 1.0]), a free-text note, and/or a correlation_id grouping co-committed \
+                       writes. Retrievable later via get_node/get_node_history. Omit for no provenance."
+    )]
+    pub provenance: Option<ProvenanceRequest>,
 }
 
 /// Request to update an existing node's properties.
@@ -69,6 +113,15 @@ pub struct UpdateNodeRequest {
                        is always system-assigned and cannot be set."
     )]
     pub valid_time: Option<String>,
+
+    /// Optional write-time provenance bundle for this version. Independent of
+    /// whatever provenance the prior version carried.
+    #[schemars(
+        description = "Optional write-time provenance bundle recording source, confidence \
+                       ([0.0, 1.0]), a free-text note, and/or a correlation_id for this version. \
+                       Not inherited from the version being updated. Omit for no provenance."
+    )]
+    pub provenance: Option<ProvenanceRequest>,
 }
 
 /// Request to delete a node.
@@ -208,6 +261,14 @@ pub struct CreateEdgeRequest {
                        allowed. Transaction time is always system-assigned and cannot be set."
     )]
     pub valid_time: Option<String>,
+
+    /// Optional write-time provenance bundle (source, confidence, note, correlation_id).
+    #[schemars(
+        description = "Optional write-time provenance bundle recording source, confidence \
+                       ([0.0, 1.0]), a free-text note, and/or a correlation_id grouping co-committed \
+                       writes. Retrievable later via get_edge_history. Omit for no provenance."
+    )]
+    pub provenance: Option<ProvenanceRequest>,
 }
 
 /// Request to update an existing edge's properties.
@@ -230,6 +291,15 @@ pub struct UpdateEdgeRequest {
                        is always system-assigned and cannot be set."
     )]
     pub valid_time: Option<String>,
+
+    /// Optional write-time provenance bundle for this version. Independent of
+    /// whatever provenance the prior version carried.
+    #[schemars(
+        description = "Optional write-time provenance bundle recording source, confidence \
+                       ([0.0, 1.0]), a free-text note, and/or a correlation_id for this version. \
+                       Not inherited from the version being updated. Omit for no provenance."
+    )]
+    pub provenance: Option<ProvenanceRequest>,
 }
 
 /// Request to delete an edge.
@@ -772,6 +842,10 @@ pub struct NodeResponse {
     pub id: u64,
     pub label: String,
     pub properties: HashMap<String, serde_json::Value>,
+    /// The current version's write-time provenance bundle, if any. Omitted
+    /// (never a fabricated `null`) when the version has none (Issue #3224).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub provenance: Option<crate::core::provenance::Provenance>,
 }
 
 /// Serializable edge representation for MCP responses.
@@ -782,6 +856,10 @@ pub struct EdgeResponse {
     pub target_id: u64,
     pub label: String,
     pub properties: HashMap<String, serde_json::Value>,
+    /// The current version's write-time provenance bundle, if any. Omitted
+    /// (never a fabricated `null`) when the version has none (Issue #3224).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub provenance: Option<crate::core::provenance::Provenance>,
 }
 
 /// Similarity search result.

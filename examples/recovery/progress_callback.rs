@@ -194,6 +194,7 @@ fn main() -> Result<()> {
             label: GLOBAL_INTERNER.intern(format!("Node{}", i)).unwrap(),
             properties: PropertyMapBuilder::new().insert("id", i as i64).build(),
             valid_from: time::now(),
+            provenance: None,
         })?;
     }
 
@@ -210,6 +211,7 @@ fn main() -> Result<()> {
             label: GLOBAL_INTERNER.intern("EDGE").unwrap(),
             properties: PropertyMapBuilder::new().insert("weight", i as i64).build(),
             valid_from: time::now(),
+            provenance: None,
         })?;
     }
 

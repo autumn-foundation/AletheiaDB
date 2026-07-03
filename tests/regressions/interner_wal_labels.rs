@@ -28,6 +28,7 @@ fn test_wal_create_node_uses_interned_string() {
         label, // Should accept InternedString directly
         properties,
         valid_from: temporal,
+        provenance: None,
     };
 
     // Verify the operation was created successfully
@@ -57,6 +58,7 @@ fn test_wal_create_edge_uses_interned_string() {
         label, // Should accept InternedString directly
         properties,
         valid_from: temporal,
+        provenance: None,
     };
 
     match op {
@@ -82,6 +84,7 @@ fn test_wal_update_node_uses_interned_string() {
         label, // Should accept InternedString directly
         properties,
         valid_from: temporal,
+        provenance: None,
     };
 
     match op {
@@ -107,6 +110,7 @@ fn test_wal_update_edge_uses_interned_string() {
         label, // Should accept InternedString directly
         properties,
         valid_from: temporal,
+        provenance: None,
     };
 
     match op {
@@ -130,6 +134,7 @@ fn test_wal_entry_creation_with_interned_string() {
         label,
         properties,
         valid_from: temporal,
+        provenance: None,
     };
 
     // Creating a WAL entry should work without any allocations
@@ -161,6 +166,7 @@ fn test_no_allocations_in_buffered_write_to_wal_operation() {
         label,
         properties: properties.clone(),
         valid_from: temporal,
+        provenance: None,
     };
 
     // When converting to WalOperation, the label should be copied directly
@@ -178,6 +184,7 @@ fn test_no_allocations_in_buffered_write_to_wal_operation() {
                 label, // Should copy InternedString directly (just a u32)
                 properties,
                 valid_from: temporal,
+                provenance: None,
             }
         }
         _ => panic!("Expected CreateNode"),
@@ -215,6 +222,7 @@ fn test_interned_string_size_independence() {
         label: short_label,
         properties: properties.clone(),
         valid_from: temporal,
+        provenance: None,
     };
 
     let op2 = WalOperation::CreateNode {
@@ -222,6 +230,7 @@ fn test_interned_string_size_independence() {
         label: long_label,
         properties,
         valid_from: temporal,
+        provenance: None,
     };
 
     // Both operations should use the same amount of memory for the label field

@@ -1314,6 +1314,7 @@ fn test_recovery_after_concurrent_writes() {
                             label: GLOBAL_INTERNER.intern("CrashTest").unwrap(),
                             properties: PropertyMap::new(),
                             valid_from: time::now(),
+                            provenance: None,
                         };
 
                         // Retry with backoff on backpressure
@@ -1448,6 +1449,7 @@ fn test_recovery_partial_flush_ordering() {
                             label: GLOBAL_INTERNER.intern("PartialCrashTest").unwrap(),
                             properties: PropertyMap::new(),
                             valid_from: time::now(),
+                            provenance: None,
                         };
                         let _ = wal_ref.append_async(operation);
                     }

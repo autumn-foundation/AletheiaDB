@@ -167,6 +167,7 @@ pub(crate) fn replay_wal_into_storage_with_constraints(
                 label,
                 properties,
                 valid_from,
+                provenance,
             } => {
                 max_node_id = Some(match max_node_id {
                     Some(current_max) => current_max.max(node_id.as_u64()),
@@ -190,7 +191,7 @@ pub(crate) fn replay_wal_into_storage_with_constraints(
                 );
 
                 current.insert_node_direct(node, commit_timestamp)?;
-                historical.add_node_version(
+                historical.add_node_version_with_provenance(
                     node_id,
                     version_id,
                     valid_from,
@@ -198,6 +199,7 @@ pub(crate) fn replay_wal_into_storage_with_constraints(
                     interned_label,
                     properties,
                     false, // not a tombstone
+                    provenance.map(std::sync::Arc::new),
                 )?;
             }
             WalOperation::CreateEdge {
@@ -207,6 +209,7 @@ pub(crate) fn replay_wal_into_storage_with_constraints(
                 label,
                 properties,
                 valid_from,
+                provenance,
             } => {
                 max_edge_id = Some(match max_edge_id {
                     Some(current_max) => current_max.max(edge_id.as_u64()),
@@ -231,7 +234,7 @@ pub(crate) fn replay_wal_into_storage_with_constraints(
                 );
 
                 current.insert_edge_direct(edge)?;
-                historical.add_edge_version(
+                historical.add_edge_version_with_provenance(
                     edge_id,
                     version_id,
                     valid_from,
@@ -241,6 +244,7 @@ pub(crate) fn replay_wal_into_storage_with_constraints(
                     target,
                     properties,
                     false, // not a tombstone
+                    provenance.map(std::sync::Arc::new),
                 )?;
             }
             WalOperation::UpdateNode {
@@ -249,6 +253,7 @@ pub(crate) fn replay_wal_into_storage_with_constraints(
                 label,
                 properties,
                 valid_from,
+                provenance,
             } => {
                 next_version_id = next_version_id.max(version_id.as_u64() + 1);
 
@@ -272,7 +277,7 @@ pub(crate) fn replay_wal_into_storage_with_constraints(
                         .close_node_version_transaction_time(prev_version_id, commit_timestamp)?;
                 }
 
-                historical.add_node_version(
+                historical.add_node_version_with_provenance(
                     node_id,
                     version_id,
                     valid_from,
@@ -280,6 +285,7 @@ pub(crate) fn replay_wal_into_storage_with_constraints(
                     interned_label,
                     properties,
                     false, // not a tombstone
+                    provenance.map(std::sync::Arc::new),
                 )?;
             }
             WalOperation::UpdateEdge {
@@ -288,6 +294,7 @@ pub(crate) fn replay_wal_into_storage_with_constraints(
                 label,
                 properties,
                 valid_from,
+                provenance,
             } => {
                 next_version_id = next_version_id.max(version_id.as_u64() + 1);
 
@@ -315,7 +322,7 @@ pub(crate) fn replay_wal_into_storage_with_constraints(
                         .close_edge_version_transaction_time(prev_version_id, commit_timestamp)?;
                 }
 
-                historical.add_edge_version(
+                historical.add_edge_version_with_provenance(
                     edge_id,
                     version_id,
                     valid_from,
@@ -325,6 +332,7 @@ pub(crate) fn replay_wal_into_storage_with_constraints(
                     current_edge.target,
                     properties,
                     false, // not a tombstone
+                    provenance.map(std::sync::Arc::new),
                 )?;
             }
             WalOperation::DeleteNode {

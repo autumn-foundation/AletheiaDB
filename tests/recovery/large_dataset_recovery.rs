@@ -58,6 +58,7 @@ fn test_large_dataset_recovery_10k_nodes() -> Result<()> {
                 .insert("batch", (i / 1000) as i64)
                 .build(),
             valid_from: time::now(),
+            provenance: None,
         })?;
 
         if i % 1000 == 0 {
@@ -144,6 +145,7 @@ fn test_large_dataset_recovery_50k_edges() -> Result<()> {
             label: GLOBAL_INTERNER.intern("Node").unwrap(),
             properties: PropertyMap::new(),
             valid_from: time::now(),
+            provenance: None,
         })?;
     }
 
@@ -162,6 +164,7 @@ fn test_large_dataset_recovery_50k_edges() -> Result<()> {
             label: GLOBAL_INTERNER.intern("CONNECTS").unwrap(),
             properties: PropertyMapBuilder::new().insert("index", i as i64).build(),
             valid_from: time::now(),
+            provenance: None,
         })?;
 
         if i % 10000 == 0 {
@@ -258,6 +261,7 @@ fn test_large_dataset_full_recovery() -> Result<()> {
                 .insert("type", "node")
                 .build(),
             valid_from: time::now(),
+            provenance: None,
         })?;
 
         if i % 2000 == 0 {
@@ -285,6 +289,7 @@ fn test_large_dataset_full_recovery() -> Result<()> {
                 .insert("weight", (i % 100) as i64)
                 .build(),
             valid_from: time::now(),
+            provenance: None,
         })?;
 
         if i % 10000 == 0 {
@@ -400,6 +405,7 @@ fn test_large_dataset_with_updates() -> Result<()> {
                 .insert("value", (i * 10) as i64)
                 .build(),
             valid_from: time::now(),
+            provenance: None,
         })?;
     }
 
@@ -416,6 +422,7 @@ fn test_large_dataset_with_updates() -> Result<()> {
                     .insert("value", (i * 10 + update_round) as i64)
                     .build(),
                 valid_from: time::now(),
+                provenance: None,
             })?;
             version_id += 1;
         }
@@ -497,6 +504,7 @@ fn test_large_dataset_with_deletions() -> Result<()> {
             label: GLOBAL_INTERNER.intern("Node").unwrap(),
             properties: PropertyMapBuilder::new().insert("index", i as i64).build(),
             valid_from: time::now(),
+            provenance: None,
         })?;
     }
 
@@ -596,6 +604,7 @@ fn bench_recovery_throughput() -> Result<()> {
                 label: GLOBAL_INTERNER.intern("BenchNode").unwrap(),
                 properties: PropertyMapBuilder::new().insert("i", i as i64).build(),
                 valid_from: time::now(),
+                provenance: None,
             })?;
         }
         wal.flush()?;

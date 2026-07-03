@@ -145,7 +145,7 @@ use crate::api::transaction::WriteOps;
 use crate::core::temporal::time;
 use crate::core::{
     ChangeFeedQuery, EdgeId, GLOBAL_INTERNER, NodeId, PropertyMap, PropertyMapBuilder,
-    PropertyValue, Timestamp,
+    PropertyValue, Provenance, Timestamp, VersionId,
 };
 use crate::db::AletheiaDB;
 use crate::index::vector::{DistanceMetric, HnswConfig};
@@ -300,6 +300,7 @@ impl AletheiaMcpServer {
     ///     label: "Person".to_string(),
     ///     properties: Some(props),
     ///     valid_time: None,
+    ///     provenance: None,
     /// };
     /// ```
     ///
@@ -450,6 +451,26 @@ impl AletheiaMcpServer {
     /// Returns all edges ending at the specified node. Can be filtered by edge label.
     pub fn get_incoming_edges(&self, req: GetIncomingEdgesRequest) -> String {
         Self::extract_text(self.handle_get_incoming_edges(
+            serde_json::to_value(req).expect("request serialization should not fail"),
+        ))
+    }
+
+    /// Get the complete version history of a node.
+    ///
+    /// Returns all versions in chronological order (oldest first), including
+    /// each version's write-time provenance bundle when present (Issue #3224).
+    pub fn get_node_history(&self, req: GetNodeHistoryRequest) -> String {
+        Self::extract_text(self.handle_get_node_history(
+            serde_json::to_value(req).expect("request serialization should not fail"),
+        ))
+    }
+
+    /// Get the complete version history of an edge.
+    ///
+    /// Returns all versions in chronological order (oldest first), including
+    /// each version's write-time provenance bundle when present (Issue #3224).
+    pub fn get_edge_history(&self, req: GetEdgeHistoryRequest) -> String {
+        Self::extract_text(self.handle_get_edge_history(
             serde_json::to_value(req).expect("request serialization should not fail"),
         ))
     }
@@ -672,11 +693,54 @@ impl AletheiaMcpServer {
         GLOBAL_INTERNER.resolve_or_else(interned, || format!("<unknown:{}>", interned.as_u32()))
     }
 
+    /// Look up the provenance bundle for the *exact* version already captured
+    /// in `version_id` (a `Node`/`Edge` snapshot's `current_version`), rather
+    /// than re-resolving "whichever version is current now". This keeps the
+    /// returned provenance consistent with the properties already read from
+    /// that same snapshot, even under a concurrent write.
+    ///
+    /// A lookup failure (e.g. a corrupted or unreachable cold-storage record)
+    /// is logged rather than silently treated as "no provenance": that
+    /// distinction matters because an MCP caller has no other way to learn
+    /// the two cases apart. Best-effort here (returning `None` rather than
+    /// failing the whole response) is deliberate: a single-node lookup or a
+    /// bulk endpoint like `list_nodes`/`traverse` should not fail entirely
+    /// because one entry's provenance couldn't be read.
+    fn lookup_node_provenance(&self, version_id: VersionId) -> Option<Provenance> {
+        match self.db.get_node_version_provenance(version_id) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!(
+                    "Warning: failed to load provenance for node version {}: {}",
+                    version_id.as_u64(),
+                    e
+                );
+                None
+            }
+        }
+    }
+
+    /// Edge counterpart of [`lookup_node_provenance`](Self::lookup_node_provenance).
+    fn lookup_edge_provenance(&self, version_id: VersionId) -> Option<Provenance> {
+        match self.db.get_edge_version_provenance(version_id) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!(
+                    "Warning: failed to load provenance for edge version {}: {}",
+                    version_id.as_u64(),
+                    e
+                );
+                None
+            }
+        }
+    }
+
     fn node_to_response(&self, node: &crate::core::Node, include_vectors: bool) -> NodeResponse {
         NodeResponse {
             id: node.id.as_u64(),
             label: self.interned_to_string(node.label),
             properties: self.property_map_to_json(&node.properties, include_vectors),
+            provenance: self.lookup_node_provenance(node.current_version),
         }
     }
 
@@ -687,6 +751,7 @@ impl AletheiaMcpServer {
             target_id: edge.target.as_u64(),
             label: self.interned_to_string(edge.label),
             properties: self.property_map_to_json(&edge.properties, include_vectors),
+            provenance: self.lookup_edge_provenance(edge.current_version),
         }
     }
 
@@ -838,6 +903,34 @@ impl AletheiaMcpServer {
             .map_err(|e| self.error_json(&format!("Invalid {label}: {e}")))
     }
 
+    /// Validate and convert an optional MCP [`ProvenanceRequest`] into a
+    /// core [`Provenance`](crate::core::provenance::Provenance).
+    ///
+    /// Mirrors [`parse_opt_timestamp`](Self::parse_opt_timestamp): returns
+    /// `Err(error_json(...))` with a clear message when `confidence` is out
+    /// of `[0.0, 1.0]` (Issue #3224), rather than a generic deserialization
+    /// error. An entirely empty bundle (all fields omitted) is normalized to
+    /// `None` -- never persisted as a fabricated empty object.
+    fn parse_opt_provenance(
+        &self,
+        value: Option<crate::mcp::tools::ProvenanceRequest>,
+    ) -> std::result::Result<Option<Provenance>, CallToolResult> {
+        let Some(req) = value else {
+            return Ok(None);
+        };
+        let provenance =
+            Provenance::from_parts(req.source, req.confidence, req.note, req.correlation_id)
+                .map_err(|e| {
+                    self.error_json(&format!(
+                        "Invalid provenance: confidence must be between 0.0 and 1.0 ({e})"
+                    ))
+                })?;
+        if provenance.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(provenance))
+    }
+
     /// Parse an optional transaction time, returning the current time if not specified.
     fn parse_optional_tx_time(&self, tx_time: Option<&str>) -> Result<Timestamp, String> {
         match tx_time {
@@ -968,10 +1061,22 @@ impl AletheiaMcpServer {
             Ok(v) => v,
             Err(result) => return result,
         };
+        let provenance = match self.parse_opt_provenance(req.provenance) {
+            Ok(p) => p,
+            Err(result) => return result,
+        };
+
+        let mut options = crate::api::transaction::WriteRequestOptions::new();
+        if let Some(valid_from) = valid_from {
+            options = options.with_valid_from(valid_from);
+        }
+        if let Some(provenance) = provenance {
+            options = options.with_provenance(provenance);
+        }
 
         match self
             .db
-            .create_node_with_valid_time(&req.label, properties, valid_from)
+            .create_node_with_options(&req.label, properties, options)
         {
             Ok(node_id) => match self.db.get_node(node_id) {
                 Ok(node) => {
@@ -1012,10 +1117,22 @@ impl AletheiaMcpServer {
             Ok(v) => v,
             Err(result) => return result,
         };
+        let provenance = match self.parse_opt_provenance(req.provenance) {
+            Ok(p) => p,
+            Err(result) => return result,
+        };
+
+        let mut options = crate::api::transaction::WriteRequestOptions::new();
+        if let Some(valid_from) = valid_from {
+            options = options.with_valid_from(valid_from);
+        }
+        if let Some(provenance) = provenance {
+            options = options.with_provenance(provenance);
+        }
 
         match self
             .db
-            .update_node_with_valid_time(node_id, properties, valid_from)
+            .update_node_with_options(node_id, properties, options)
         {
             Ok(()) => match self.db.get_node(node_id) {
                 Ok(node) => {
@@ -1339,10 +1456,22 @@ impl AletheiaMcpServer {
             Ok(v) => v,
             Err(result) => return result,
         };
+        let provenance = match self.parse_opt_provenance(req.provenance) {
+            Ok(p) => p,
+            Err(result) => return result,
+        };
+
+        let mut options = crate::api::transaction::WriteRequestOptions::new();
+        if let Some(valid_from) = valid_from {
+            options = options.with_valid_from(valid_from);
+        }
+        if let Some(provenance) = provenance {
+            options = options.with_provenance(provenance);
+        }
 
         match self
             .db
-            .create_edge_with_valid_time(source_id, target_id, &req.label, properties, valid_from)
+            .create_edge_with_options(source_id, target_id, &req.label, properties, options)
         {
             Ok(edge_id) => match self.db.get_edge(edge_id) {
                 Ok(edge) => {
@@ -1378,10 +1507,22 @@ impl AletheiaMcpServer {
             Ok(v) => v,
             Err(result) => return result,
         };
+        let provenance = match self.parse_opt_provenance(req.provenance) {
+            Ok(p) => p,
+            Err(result) => return result,
+        };
+
+        let mut options = crate::api::transaction::WriteRequestOptions::new();
+        if let Some(valid_from) = valid_from {
+            options = options.with_valid_from(valid_from);
+        }
+        if let Some(provenance) = provenance {
+            options = options.with_provenance(provenance);
+        }
 
         match self
             .db
-            .update_edge_with_valid_time(edge_id, properties, valid_from)
+            .update_edge_with_options(edge_id, properties, options)
         {
             Ok(()) => match self.db.get_edge(edge_id) {
                 Ok(edge) => {
@@ -2165,7 +2306,7 @@ impl AletheiaMcpServer {
             }
         };
 
-        json!({
+        let mut value = json!({
             "version_number": info.version_number,
             "version_id": info.version_id.as_u64(),
             "valid_from": info.temporal.valid_time().start().wallclock().to_string(),
@@ -2174,7 +2315,20 @@ impl AletheiaMcpServer {
             "transaction_to": transaction_to,
             "properties": properties,
             "label": info.label
-        })
+        });
+
+        // Provenance is omitted entirely when absent -- never a fabricated
+        // default (Issue #3224).
+        if let Some(provenance) = &info.provenance
+            && let Some(obj) = value.as_object_mut()
+        {
+            obj.insert(
+                "provenance".to_string(),
+                serde_json::to_value(provenance).unwrap_or(serde_json::Value::Null),
+            );
+        }
+
+        value
     }
 
     fn version_diff_to_response(&self, diff: &crate::query::VersionDiff) -> serde_json::Value {

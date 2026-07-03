@@ -44,7 +44,9 @@ use super::ring_buffer::PendingEntry;
 
 use crate::core::error::{Error, Result, StorageError};
 
-use super::segment_reader::{WAL_HEADER_SIZE, WAL_MAGIC, WAL_VERSION, WAL_VERSION_ENCRYPTED};
+use super::segment_reader::{
+    WAL_HEADER_SIZE, WAL_MAGIC, WAL_VERSION_ENCRYPTED_PROVENANCE, WAL_VERSION_PROVENANCE,
+};
 
 /// Metadata about a WAL segment's LSN range.
 ///
@@ -381,11 +383,12 @@ impl FlushCoordinator {
                     e
                 )))
             })?;
-            // Use version 2 for encrypted segments, version 1 for plaintext.
+            // New segments always use the provenance-carrying format (Issue #3224):
+            // version 4 for encrypted segments, version 3 for plaintext.
             let version = if self.config.wal_cipher.is_some() {
-                WAL_VERSION_ENCRYPTED
+                WAL_VERSION_ENCRYPTED_PROVENANCE
             } else {
-                WAL_VERSION
+                WAL_VERSION_PROVENANCE
             };
             writer.write_all(&[version]).map_err(|e| {
                 Error::Storage(StorageError::IoError(format!(
@@ -1176,7 +1179,7 @@ mod tests {
 
         assert!(data.len() >= WAL_HEADER_SIZE);
         assert_eq!(&data[0..4], &WAL_MAGIC);
-        assert_eq!(data[4], WAL_VERSION);
+        assert_eq!(data[4], WAL_VERSION_PROVENANCE);
     }
 
     #[test]

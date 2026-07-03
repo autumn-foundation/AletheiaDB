@@ -86,12 +86,14 @@ mod node_tests {
             valid_time: None,
             label: "Person".to_string(),
             properties: None,
+            provenance: None,
         }))
         .unwrap();
         let n2: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
             valid_time: None,
             label: "Person".to_string(),
             properties: None,
+            provenance: None,
         }))
         .unwrap();
         (n1.id, n2.id)
@@ -105,6 +107,7 @@ mod node_tests {
             valid_time: None,
             label: "Person".to_string(),
             properties: None,
+            provenance: None,
         };
 
         let response = server.create_node(req);
@@ -126,6 +129,7 @@ mod node_tests {
             valid_time: None,
             label: "Person".to_string(),
             properties: Some(props),
+            provenance: None,
         };
 
         let response = server.create_node(req);
@@ -151,6 +155,7 @@ mod node_tests {
             valid_time: None,
             label: "Person".to_string(),
             properties: Some(props),
+            provenance: None,
         };
 
         let create_response = server.create_node(create_req);
@@ -201,6 +206,7 @@ mod node_tests {
             valid_time: None,
             label: "Person".to_string(),
             properties: Some(props),
+            provenance: None,
         };
 
         let create_response = server.create_node(create_req);
@@ -215,6 +221,7 @@ mod node_tests {
             valid_time: None,
             node_id: created.id,
             properties: new_props,
+            provenance: None,
         };
 
         let update_response = server.update_node(update_req);
@@ -236,6 +243,7 @@ mod node_tests {
             valid_time: None,
             label: "ToDelete".to_string(),
             properties: None,
+            provenance: None,
         };
 
         let create_response = server.create_node(create_req);
@@ -279,6 +287,7 @@ mod node_tests {
             target_id,
             label: "KNOWS".to_string(),
             properties: None,
+            provenance: None,
         });
 
         let delete_response = server.delete_node(DeleteNodeRequest {
@@ -314,6 +323,7 @@ mod node_tests {
             valid_time: None,
             label: "Person".to_string(),
             properties: None,
+            provenance: None,
         });
         let third_id: NodeResponse = parse_response(&third).unwrap();
         let third_id = third_id.id;
@@ -324,6 +334,7 @@ mod node_tests {
             target_id,
             label: "KNOWS".to_string(),
             properties: None,
+            provenance: None,
         });
         server.create_edge(CreateEdgeRequest {
             valid_time: None,
@@ -331,6 +342,7 @@ mod node_tests {
             target_id: source_id,
             label: "FOLLOWS".to_string(),
             properties: None,
+            provenance: None,
         });
 
         let delete_response = server.delete_node(DeleteNodeRequest {
@@ -389,6 +401,7 @@ mod node_tests {
             valid_time: None,
             label: "Lonely".to_string(),
             properties: None,
+            provenance: None,
         }))
         .unwrap();
 
@@ -416,6 +429,7 @@ mod node_tests {
                 valid_time: None,
                 label: "ListTest".to_string(),
                 properties: Some(props),
+                provenance: None,
             };
             server.create_node(req);
         }
@@ -446,6 +460,7 @@ mod node_tests {
                 valid_time: None,
                 label: "TypeA".to_string(),
                 properties: None,
+                provenance: None,
             });
         }
 
@@ -454,6 +469,7 @@ mod node_tests {
                 valid_time: None,
                 label: "TypeB".to_string(),
                 properties: None,
+                provenance: None,
             });
         }
 
@@ -486,6 +502,7 @@ mod node_tests {
                 valid_time: None,
                 label: "Paginated".to_string(),
                 properties: Some(props),
+                provenance: None,
             });
         }
 
@@ -536,6 +553,7 @@ mod node_tests {
                 valid_time: None,
                 label: "Counted".to_string(),
                 properties: None,
+                provenance: None,
             });
         }
 
@@ -555,6 +573,7 @@ mod node_tests {
                 valid_time: None,
                 label: "CountA".to_string(),
                 properties: None,
+                provenance: None,
             });
         }
 
@@ -563,6 +582,7 @@ mod node_tests {
                 valid_time: None,
                 label: "CountB".to_string(),
                 properties: None,
+                provenance: None,
             });
         }
 
@@ -596,6 +616,7 @@ mod edge_tests {
                 m.insert("name".to_string(), serde_json::json!("Alice"));
                 m
             }),
+            provenance: None,
         });
         let n1: NodeResponse = parse_response(&node1).unwrap();
 
@@ -607,6 +628,7 @@ mod edge_tests {
                 m.insert("name".to_string(), serde_json::json!("Bob"));
                 m
             }),
+            provenance: None,
         });
         let n2: NodeResponse = parse_response(&node2).unwrap();
 
@@ -624,6 +646,7 @@ mod edge_tests {
             target_id,
             label: "KNOWS".to_string(),
             properties: None,
+            provenance: None,
         };
 
         let response = server.create_edge(req);
@@ -649,6 +672,7 @@ mod edge_tests {
             target_id,
             label: "KNOWS".to_string(),
             properties: Some(props),
+            provenance: None,
         };
 
         let response = server.create_edge(req);
@@ -675,6 +699,7 @@ mod edge_tests {
             target_id,
             label: "KNOWS".to_string(),
             properties: None,
+            provenance: None,
         });
         let created: EdgeResponse = parse_response(&create_response).unwrap();
 
@@ -700,6 +725,7 @@ mod edge_tests {
             target_id,
             label: "KNOWS".to_string(),
             properties: None,
+            provenance: None,
         });
         let created: EdgeResponse = parse_response(&create_response).unwrap();
 
@@ -710,6 +736,7 @@ mod edge_tests {
             valid_time: None,
             edge_id: created.id,
             properties: new_props,
+            provenance: None,
         });
         let updated: EdgeResponse = parse_response(&update_response).unwrap();
 
@@ -730,6 +757,7 @@ mod edge_tests {
             target_id,
             label: "KNOWS".to_string(),
             properties: None,
+            provenance: None,
         });
         let created: EdgeResponse = parse_response(&create_response).unwrap();
 
@@ -759,6 +787,7 @@ mod edge_tests {
             valid_time: None,
             label: "Person".to_string(),
             properties: None,
+            provenance: None,
         });
         let n3: NodeResponse = parse_response(&node3).unwrap();
 
@@ -769,6 +798,7 @@ mod edge_tests {
             target_id: n2,
             label: "KNOWS".to_string(),
             properties: None,
+            provenance: None,
         });
         server.create_edge(CreateEdgeRequest {
             valid_time: None,
@@ -776,6 +806,7 @@ mod edge_tests {
             target_id: n3.id,
             label: "KNOWS".to_string(),
             properties: None,
+            provenance: None,
         });
 
         // Note: list_edges doesn't support listing all edges without a node
@@ -808,6 +839,7 @@ mod edge_tests {
             target_id: n2,
             label: "KNOWS".to_string(),
             properties: None,
+            provenance: None,
         });
 
         let count_response = server.count_edges(CountEdgesRequest { label: None });
@@ -825,6 +857,7 @@ mod edge_tests {
             valid_time: None,
             label: "Person".to_string(),
             properties: None,
+            provenance: None,
         });
         let n3: NodeResponse = parse_response(&node3).unwrap();
 
@@ -835,6 +868,7 @@ mod edge_tests {
             target_id: n2,
             label: "KNOWS".to_string(),
             properties: None,
+            provenance: None,
         });
         server.create_edge(CreateEdgeRequest {
             valid_time: None,
@@ -842,6 +876,7 @@ mod edge_tests {
             target_id: n3.id,
             label: "WORKS_WITH".to_string(),
             properties: None,
+            provenance: None,
         });
 
         // Get all outgoing edges
@@ -873,6 +908,7 @@ mod edge_tests {
             valid_time: None,
             label: "Person".to_string(),
             properties: None,
+            provenance: None,
         });
         let n3: NodeResponse = parse_response(&node3).unwrap();
 
@@ -883,6 +919,7 @@ mod edge_tests {
             target_id: n2,
             label: "KNOWS".to_string(),
             properties: None,
+            provenance: None,
         });
         server.create_edge(CreateEdgeRequest {
             valid_time: None,
@@ -890,6 +927,7 @@ mod edge_tests {
             target_id: n2,
             label: "KNOWS".to_string(),
             properties: None,
+            provenance: None,
         });
 
         let response = server.get_incoming_edges(GetIncomingEdgesRequest {
@@ -921,6 +959,7 @@ mod traversal_tests {
                         m.insert("name".to_string(), serde_json::json!(format!("Node{}", i)));
                         m
                     }),
+                    provenance: None,
                 });
                 let node: NodeResponse = parse_response(&response).unwrap();
                 node.id
@@ -935,6 +974,7 @@ mod traversal_tests {
                 target_id: nodes[i + 1],
                 label: "NEXT".to_string(),
                 properties: None,
+                provenance: None,
             });
         }
 
@@ -1110,6 +1150,7 @@ mod vector_tests {
                 valid_time: None,
                 label: "Document".to_string(),
                 properties: Some(props),
+                provenance: None,
             });
         }
 
@@ -1143,6 +1184,7 @@ mod temporal_tests {
             valid_time: None,
             label: "Person".to_string(),
             properties: None,
+            provenance: None,
         });
         let node: NodeResponse = parse_response(&node_response).unwrap();
 
@@ -1170,6 +1212,7 @@ mod temporal_tests {
                 m.insert("name".to_string(), serde_json::json!("Alice"));
                 m
             }),
+            provenance: None,
         });
         let node: NodeResponse = parse_response(&node_response).unwrap();
 
@@ -1199,6 +1242,7 @@ mod temporal_tests {
             valid_time: None,
             label: "Person".to_string(),
             properties: None,
+            provenance: None,
         });
         let n1: NodeResponse = parse_response(&n1_response).unwrap();
 
@@ -1206,6 +1250,7 @@ mod temporal_tests {
             valid_time: None,
             label: "Person".to_string(),
             properties: None,
+            provenance: None,
         });
         let n2: NodeResponse = parse_response(&n2_response).unwrap();
 
@@ -1215,6 +1260,7 @@ mod temporal_tests {
             target_id: n2.id,
             label: "KNOWS".to_string(),
             properties: None,
+            provenance: None,
         });
         let edge: EdgeResponse = parse_response(&edge_response).unwrap();
 
@@ -1256,6 +1302,7 @@ mod temporal_tests {
             valid_time: None,
             label: "Person".to_string(),
             properties: None,
+            provenance: None,
         });
 
         let response = server.list_changes(list_changes_req());
@@ -1294,6 +1341,7 @@ mod temporal_tests {
             valid_time: None,
             label: "Person".to_string(),
             properties: None,
+            provenance: None,
         });
         let mut req = list_changes_req();
         req.tx_from = "1000000".to_string();
@@ -1356,6 +1404,7 @@ mod hybrid_tests {
                 m.insert("name".to_string(), serde_json::json!("Alice"));
                 m
             }),
+            provenance: None,
         });
         let n1: NodeResponse = parse_response(&n1_response).unwrap();
 
@@ -1367,6 +1416,7 @@ mod hybrid_tests {
                 m.insert("name".to_string(), serde_json::json!("Bob"));
                 m
             }),
+            provenance: None,
         });
         let _n2: NodeResponse = parse_response(&n2_response).unwrap();
 
@@ -1399,6 +1449,7 @@ mod hybrid_tests {
                 valid_time: None,
                 label: "Person".to_string(),
                 properties: None,
+                provenance: None,
             });
         }
 
@@ -1407,6 +1458,7 @@ mod hybrid_tests {
                 valid_time: None,
                 label: "Document".to_string(),
                 properties: None,
+                provenance: None,
             });
         }
 
@@ -1469,6 +1521,7 @@ mod hybrid_tests {
             valid_time: None,
             label: "Person".to_string(),
             properties: None,
+            provenance: None,
         });
         let n1: NodeResponse = parse_response(&n1_response).unwrap();
 
@@ -1476,6 +1529,7 @@ mod hybrid_tests {
             valid_time: None,
             label: "Person".to_string(),
             properties: None,
+            provenance: None,
         });
         let n2: NodeResponse = parse_response(&n2_response).unwrap();
 
@@ -1485,6 +1539,7 @@ mod hybrid_tests {
             target_id: n2.id,
             label: "KNOWS".to_string(),
             properties: None,
+            provenance: None,
         });
 
         // Query with traversal
@@ -1530,6 +1585,7 @@ mod conversion_tests {
             valid_time: None,
             label: "Test".to_string(),
             properties: Some(props),
+            provenance: None,
         });
 
         let node: NodeResponse = parse_response(&response).expect("Failed to create node");
@@ -1563,6 +1619,7 @@ mod conversion_tests {
             valid_time: None,
             label: "Document".to_string(),
             properties: Some(props),
+            provenance: None,
         });
 
         let node: NodeResponse = parse_response(&response).expect("Failed to create node");
@@ -1662,6 +1719,7 @@ mod coverage_tests {
             valid_time: None,
             label: "Event".to_string(),
             properties: None,
+            provenance: None,
         });
         let node: NodeResponse = parse_response(&response).expect("Failed to create node");
 
@@ -1695,6 +1753,7 @@ mod coverage_tests {
             valid_time: None,
             label: "Event".to_string(),
             properties: None,
+            provenance: None,
         });
         let node: NodeResponse = parse_response(&response).expect("Failed to create node");
 
@@ -1726,6 +1785,7 @@ mod coverage_tests {
             valid_time: None,
             label: "Event".to_string(),
             properties: None,
+            provenance: None,
         });
         let node: NodeResponse = parse_response(&response).expect("Failed to create node");
 
@@ -1784,6 +1844,7 @@ mod coverage_tests {
                     props.insert("index".to_string(), serde_json::json!(i));
                     props
                 }),
+                provenance: None,
             });
         }
 
@@ -1821,6 +1882,7 @@ mod coverage_tests {
                     props.insert("level".to_string(), serde_json::json!(i));
                     props
                 }),
+                provenance: None,
             });
             let node: NodeResponse = parse_response(&response).unwrap();
 
@@ -1831,6 +1893,7 @@ mod coverage_tests {
                     target_id: node.id,
                     label: "NEXT".to_string(),
                     properties: None,
+                    provenance: None,
                 });
             }
             prev_id = Some(node.id);
@@ -1904,6 +1967,7 @@ mod error_handling_tests {
             valid_time: None,
             node_id: 999999,
             properties: HashMap::new(),
+            provenance: None,
         };
 
         let response = server.update_node(req);
@@ -1951,6 +2015,7 @@ mod error_handling_tests {
             valid_time: None,
             edge_id: 999999,
             properties: HashMap::new(),
+            provenance: None,
         };
 
         let response = server.update_edge(req);
@@ -1983,6 +2048,7 @@ mod error_handling_tests {
             valid_time: None,
             label: "Target".to_string(),
             properties: None,
+            provenance: None,
         });
         let target: NodeResponse = parse_response(&target_resp).unwrap();
 
@@ -1993,6 +2059,7 @@ mod error_handling_tests {
             target_id: target.id,
             label: "KNOWS".to_string(),
             properties: None,
+            provenance: None,
         };
 
         let response = server.create_edge(req);
@@ -2010,6 +2077,7 @@ mod error_handling_tests {
             valid_time: None,
             label: "Source".to_string(),
             properties: None,
+            provenance: None,
         });
         let source: NodeResponse = parse_response(&source_resp).unwrap();
 
@@ -2020,6 +2088,7 @@ mod error_handling_tests {
             target_id: 999999,
             label: "KNOWS".to_string(),
             properties: None,
+            provenance: None,
         };
 
         let response = server.create_edge(req);
@@ -2151,6 +2220,7 @@ mod temporal_extended_tests {
                 m.insert("title".to_string(), serde_json::json!("Conference"));
                 m
             }),
+            provenance: None,
         });
         let node: NodeResponse = parse_response(&node_response).unwrap();
 
@@ -2190,6 +2260,7 @@ mod temporal_extended_tests {
             valid_time: None,
             label: "Person".to_string(),
             properties: None,
+            provenance: None,
         });
         let n1: NodeResponse = parse_response(&n1_response).unwrap();
 
@@ -2197,6 +2268,7 @@ mod temporal_extended_tests {
             valid_time: None,
             label: "Person".to_string(),
             properties: None,
+            provenance: None,
         });
         let n2: NodeResponse = parse_response(&n2_response).unwrap();
 
@@ -2206,6 +2278,7 @@ mod temporal_extended_tests {
             target_id: n2.id,
             label: "KNOWS".to_string(),
             properties: None,
+            provenance: None,
         });
         let edge: EdgeResponse = parse_response(&edge_response).unwrap();
 
@@ -2236,6 +2309,7 @@ mod temporal_extended_tests {
             valid_time: None,
             label: "Test".to_string(),
             properties: None,
+            provenance: None,
         });
         let node: NodeResponse = parse_response(&node_response).unwrap();
 
@@ -2265,6 +2339,7 @@ mod temporal_extended_tests {
             valid_time: None,
             label: "Person".to_string(),
             properties: None,
+            provenance: None,
         });
         let n1: NodeResponse = parse_response(&n1_response).unwrap();
 
@@ -2272,6 +2347,7 @@ mod temporal_extended_tests {
             valid_time: None,
             label: "Person".to_string(),
             properties: None,
+            provenance: None,
         });
         let n2: NodeResponse = parse_response(&n2_response).unwrap();
 
@@ -2281,6 +2357,7 @@ mod temporal_extended_tests {
             target_id: n2.id,
             label: "KNOWS".to_string(),
             properties: None,
+            provenance: None,
         });
         let edge: EdgeResponse = parse_response(&edge_response).unwrap();
 
@@ -2303,6 +2380,7 @@ mod temporal_extended_tests {
             valid_time: None,
             label: "Event".to_string(),
             properties: None,
+            provenance: None,
         });
         let node: NodeResponse = parse_response(&node_response).unwrap();
 
@@ -2344,6 +2422,7 @@ mod traversal_extended_tests {
                         m.insert("name".to_string(), serde_json::json!(format!("Node{}", i)));
                         m
                     }),
+                    provenance: None,
                 });
                 let node: NodeResponse = parse_response(&response).unwrap();
                 node.id
@@ -2358,6 +2437,7 @@ mod traversal_extended_tests {
                 target_id: nodes[i + 1],
                 label: "CONNECTED".to_string(),
                 properties: None,
+                provenance: None,
             });
             server.create_edge(CreateEdgeRequest {
                 valid_time: None,
@@ -2365,6 +2445,7 @@ mod traversal_extended_tests {
                 target_id: nodes[i],
                 label: "CONNECTED".to_string(),
                 properties: None,
+                provenance: None,
             });
         }
 
@@ -2404,6 +2485,7 @@ mod traversal_extended_tests {
             valid_time: None,
             label: "Lonely".to_string(),
             properties: None,
+            provenance: None,
         });
         let node: NodeResponse = parse_response(&node_response).unwrap();
 
@@ -2432,6 +2514,7 @@ mod traversal_extended_tests {
             valid_time: None,
             label: "Node".to_string(),
             properties: None,
+            provenance: None,
         });
         let n1: NodeResponse = parse_response(&n1_response).unwrap();
 
@@ -2439,6 +2522,7 @@ mod traversal_extended_tests {
             valid_time: None,
             label: "Node".to_string(),
             properties: None,
+            provenance: None,
         });
         let n2: NodeResponse = parse_response(&n2_response).unwrap();
 
@@ -2448,6 +2532,7 @@ mod traversal_extended_tests {
             target_id: n2.id,
             label: "NEXT".to_string(),
             properties: None,
+            provenance: None,
         });
 
         // Traverse without specifying direction (should default to outgoing)
@@ -2474,6 +2559,7 @@ mod traversal_extended_tests {
             valid_time: None,
             label: "Center".to_string(),
             properties: None,
+            provenance: None,
         });
         let center: NodeResponse = parse_response(&center_response).unwrap();
 
@@ -2486,6 +2572,7 @@ mod traversal_extended_tests {
                     m.insert("index".to_string(), serde_json::json!(i));
                     m
                 }),
+                provenance: None,
             });
             let spoke: NodeResponse = parse_response(&spoke_response).unwrap();
 
@@ -2495,6 +2582,7 @@ mod traversal_extended_tests {
                 target_id: spoke.id,
                 label: "SPOKE".to_string(),
                 properties: None,
+                provenance: None,
             });
         }
 
@@ -2534,6 +2622,7 @@ mod hybrid_extended_tests {
                 m.insert("name".to_string(), serde_json::json!("Alice"));
                 m
             }),
+            provenance: None,
         });
         let node: NodeResponse = parse_response(&node_response).unwrap();
 
@@ -2582,6 +2671,7 @@ mod hybrid_extended_tests {
                         m.insert("level".to_string(), serde_json::json!(i));
                         m
                     }),
+                    provenance: None,
                 });
                 let node: NodeResponse = parse_response(&response).unwrap();
                 node.id
@@ -2595,6 +2685,7 @@ mod hybrid_extended_tests {
                 target_id: nodes[i + 1],
                 label: "CHAIN".to_string(),
                 properties: None,
+                provenance: None,
             });
         }
 
@@ -2628,6 +2719,7 @@ mod hybrid_extended_tests {
             valid_time: None,
             label: "Test".to_string(),
             properties: None,
+            provenance: None,
         });
         let node: NodeResponse = parse_response(&node_response).unwrap();
 
@@ -2663,6 +2755,7 @@ mod hybrid_extended_tests {
             valid_time: None,
             label: "Test".to_string(),
             properties: None,
+            provenance: None,
         });
         let node: NodeResponse = parse_response(&node_response).unwrap();
 
@@ -2704,6 +2797,7 @@ mod hybrid_extended_tests {
                     m.insert("index".to_string(), serde_json::json!(i));
                     m
                 }),
+                provenance: None,
             });
         }
 
@@ -2775,6 +2869,7 @@ mod edge_extended_tests {
             valid_time: None,
             label: "Person".to_string(),
             properties: None,
+            provenance: None,
         });
         let n1: NodeResponse = parse_response(&n1_response).unwrap();
 
@@ -2782,6 +2877,7 @@ mod edge_extended_tests {
             valid_time: None,
             label: "Person".to_string(),
             properties: None,
+            provenance: None,
         });
         let n2: NodeResponse = parse_response(&n2_response).unwrap();
 
@@ -2792,6 +2888,7 @@ mod edge_extended_tests {
             target_id: n2.id,
             label: "KNOWS".to_string(),
             properties: None,
+            provenance: None,
         });
         server.create_edge(CreateEdgeRequest {
             valid_time: None,
@@ -2799,6 +2896,7 @@ mod edge_extended_tests {
             target_id: n2.id,
             label: "WORKS_WITH".to_string(),
             properties: None,
+            provenance: None,
         });
 
         // List edges with label filter
@@ -2824,6 +2922,7 @@ mod edge_extended_tests {
             valid_time: None,
             label: "Person".to_string(),
             properties: None,
+            provenance: None,
         });
         let n1: NodeResponse = parse_response(&n1_response).unwrap();
 
@@ -2831,6 +2930,7 @@ mod edge_extended_tests {
             valid_time: None,
             label: "Person".to_string(),
             properties: None,
+            provenance: None,
         });
         let n2: NodeResponse = parse_response(&n2_response).unwrap();
 
@@ -2840,6 +2940,7 @@ mod edge_extended_tests {
             target_id: n2.id,
             label: "KNOWS".to_string(),
             properties: None,
+            provenance: None,
         });
 
         // Count edges with label (should return message about not being supported)
@@ -2868,6 +2969,7 @@ mod edge_extended_tests {
             valid_time: None,
             label: "Person".to_string(),
             properties: None,
+            provenance: None,
         });
         let n1: NodeResponse = parse_response(&n1_response).unwrap();
 
@@ -2875,6 +2977,7 @@ mod edge_extended_tests {
             valid_time: None,
             label: "Person".to_string(),
             properties: None,
+            provenance: None,
         });
         let n2: NodeResponse = parse_response(&n2_response).unwrap();
 
@@ -2882,6 +2985,7 @@ mod edge_extended_tests {
             valid_time: None,
             label: "Person".to_string(),
             properties: None,
+            provenance: None,
         });
         let n3: NodeResponse = parse_response(&n3_response).unwrap();
 
@@ -2892,6 +2996,7 @@ mod edge_extended_tests {
             target_id: n2.id,
             label: "KNOWS".to_string(),
             properties: None,
+            provenance: None,
         });
         server.create_edge(CreateEdgeRequest {
             valid_time: None,
@@ -2899,6 +3004,7 @@ mod edge_extended_tests {
             target_id: n2.id,
             label: "WORKS_WITH".to_string(),
             properties: None,
+            provenance: None,
         });
 
         // Get incoming edges with label filter
@@ -2934,6 +3040,7 @@ mod list_nodes_extended_tests {
                 valid_time: None,
                 label: format!("Type{}", i),
                 properties: None,
+                provenance: None,
             });
         }
 
@@ -2970,6 +3077,7 @@ mod list_nodes_extended_tests {
                     m.insert("index".to_string(), serde_json::json!(i));
                     m
                 }),
+                provenance: None,
             });
         }
 
@@ -3008,6 +3116,7 @@ mod list_nodes_extended_tests {
                 m.insert("name".to_string(), serde_json::json!("Alice"));
                 m
             }),
+            provenance: None,
         });
         server.create_node(CreateNodeRequest {
             valid_time: None,
@@ -3017,6 +3126,7 @@ mod list_nodes_extended_tests {
                 m.insert("name".to_string(), serde_json::json!("Bob"));
                 m
             }),
+            provenance: None,
         });
         server.create_node(CreateNodeRequest {
             valid_time: None,
@@ -3026,6 +3136,7 @@ mod list_nodes_extended_tests {
                 m.insert("name".to_string(), serde_json::json!("Alice"));
                 m
             }),
+            provenance: None,
         });
 
         // Filter by property
@@ -3055,6 +3166,7 @@ mod list_nodes_extended_tests {
                 m.insert("reading".to_string(), serde_json::json!(42));
                 m
             }),
+            provenance: None,
         });
         server.create_node(CreateNodeRequest {
             valid_time: None,
@@ -3064,6 +3176,7 @@ mod list_nodes_extended_tests {
                 m.insert("reading".to_string(), serde_json::json!(99));
                 m
             }),
+            provenance: None,
         });
 
         let response = server.list_nodes(ListNodesRequest {
@@ -3096,6 +3209,7 @@ mod list_nodes_extended_tests {
                 m.insert("color".to_string(), serde_json::json!("red"));
                 m
             }),
+            provenance: None,
         });
 
         let response = server.list_nodes(ListNodesRequest {
@@ -3168,6 +3282,7 @@ mod list_nodes_extended_tests {
                     m.insert("status".to_string(), serde_json::json!("active"));
                     m
                 }),
+                provenance: None,
             });
         }
 
@@ -3230,6 +3345,7 @@ mod query_tool_tests {
             valid_time: None,
             label: label.to_string(),
             properties: Some(props),
+            provenance: None,
         });
         let node: NodeResponse = parse_response(&resp).expect("seed node should succeed");
         node.id
@@ -3909,11 +4025,13 @@ mod constraint_tests {
             valid_time: None,
             label: "Person".to_string(),
             properties: Some(props.clone()),
+            provenance: None,
         });
         server.create_node(CreateNodeRequest {
             valid_time: None,
             label: "Person".to_string(),
             properties: Some(props),
+            provenance: None,
         });
 
         let response = server.enable_unique_constraint(EnableUniqueConstraintRequest {
@@ -3985,6 +4103,7 @@ mod constraint_tests {
             valid_time: None,
             label: "Person".to_string(),
             properties: Some(props.clone()),
+            provenance: None,
         });
         let first: NodeResponse =
             parse_response(&first_response).expect("first create must succeed");
@@ -3993,6 +4112,7 @@ mod constraint_tests {
             valid_time: None,
             label: "Person".to_string(),
             properties: Some(props),
+            provenance: None,
         });
 
         let v = parse_json(&dup_response);
@@ -4027,6 +4147,7 @@ mod constraint_tests {
             valid_time: None,
             label: "Person".to_string(),
             properties: Some(props_a),
+            provenance: None,
         });
         let node_a: NodeResponse = parse_response(&resp_a).expect("node A must be created");
 
@@ -4036,6 +4157,7 @@ mod constraint_tests {
             valid_time: None,
             label: "Person".to_string(),
             properties: Some(props_b),
+            provenance: None,
         });
 
         let mut collision = HashMap::new();
@@ -4044,6 +4166,7 @@ mod constraint_tests {
             valid_time: None,
             node_id: node_a.id,
             properties: collision,
+            provenance: None,
         });
 
         let v = parse_json(&update_response);
@@ -4072,6 +4195,7 @@ mod constraint_tests {
             valid_time: None,
             node_id: 99999,
             properties: HashMap::new(),
+            provenance: None,
         });
 
         let v = parse_json(&response);
@@ -4132,6 +4256,7 @@ mod schema_tests {
                 m.insert("name".to_string(), serde_json::json!("Alice"));
                 m
             }),
+            provenance: None,
         });
         let alice: NodeResponse = parse_response(&alice_response).unwrap();
 
@@ -4143,6 +4268,7 @@ mod schema_tests {
                 m.insert("email".to_string(), serde_json::json!("bob@example.com"));
                 m
             }),
+            provenance: None,
         });
         let bob: NodeResponse = parse_response(&bob_response).unwrap();
 
@@ -4156,6 +4282,7 @@ mod schema_tests {
                 m.insert("since".to_string(), serde_json::json!(2020));
                 m
             }),
+            provenance: None,
         });
 
         let response = server.get_schema(schema_req(None, None));
@@ -4209,6 +4336,7 @@ mod schema_tests {
             valid_time: None,
             label: "Report".to_string(),
             properties: None,
+            provenance: None,
         });
 
         let now_micros = std::time::SystemTime::now()
@@ -4244,6 +4372,7 @@ mod schema_tests {
             valid_time: None,
             label: "Invoice".to_string(),
             properties: None,
+            provenance: None,
         });
 
         let now_micros = std::time::SystemTime::now()
@@ -4283,6 +4412,7 @@ mod schema_tests {
             valid_time: None,
             label: "Gadget".to_string(),
             properties: None,
+            provenance: None,
         });
 
         // Still as of the epoch: "Gadget" must remain absent (recorded later).
@@ -4333,6 +4463,7 @@ mod schema_tests {
                 valid_time: None,
                 label: "Person".to_string(),
                 properties: None,
+                provenance: None,
             });
         }
         for _ in 0..2 {
@@ -4340,18 +4471,21 @@ mod schema_tests {
                 valid_time: None,
                 label: "Company".to_string(),
                 properties: None,
+                provenance: None,
             });
         }
         let n1: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
             valid_time: None,
             label: "Person".to_string(),
             properties: None,
+            provenance: None,
         }))
         .unwrap();
         let n2: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
             valid_time: None,
             label: "Company".to_string(),
             properties: None,
+            provenance: None,
         }))
         .unwrap();
         server.create_edge(CreateEdgeRequest {
@@ -4360,6 +4494,7 @@ mod schema_tests {
             target_id: n2.id,
             label: "WORKS_AT".to_string(),
             properties: None,
+            provenance: None,
         });
 
         let schema_value: serde_json::Value =
@@ -4417,6 +4552,7 @@ mod vector_elision_tests {
             valid_time: None,
             label: "Document".to_string(),
             properties: Some(props),
+            provenance: None,
         });
         let node: NodeResponse = parse_response(&response).expect("Failed to create node");
         (node.id, embedding)
@@ -4518,12 +4654,14 @@ mod vector_elision_tests {
             valid_time: None,
             label: "Person".to_string(),
             properties: None,
+            provenance: None,
         }))
         .unwrap();
         let n2: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
             valid_time: None,
             label: "Person".to_string(),
             properties: None,
+            provenance: None,
         }))
         .unwrap();
 
@@ -4536,6 +4674,7 @@ mod vector_elision_tests {
             target_id: n2.id,
             label: "SIMILAR_TO".to_string(),
             properties: Some(props),
+            provenance: None,
         });
         let edge: EdgeResponse = parse_response(&edge_response).unwrap();
 
@@ -4624,6 +4763,7 @@ mod vector_elision_tests {
             target_id: n2_id,
             label: "NEXT".to_string(),
             properties: None,
+            provenance: None,
         });
 
         let response = server.traverse(TraverseRequest {
@@ -4685,6 +4825,7 @@ mod vector_elision_tests {
                 valid_time: None,
                 label: "Document".to_string(),
                 properties: Some(props),
+                provenance: None,
             });
         }
 
@@ -4747,6 +4888,7 @@ mod vector_elision_tests {
                 valid_time: None,
                 label: "Document".to_string(),
                 properties: Some(props),
+                provenance: None,
             });
         }
 
@@ -4810,6 +4952,7 @@ mod vector_elision_tests {
             target_id: n2_id,
             label: "NEXT".to_string(),
             properties: None,
+            provenance: None,
         });
 
         let response = server.hybrid_query(HybridQueryRequest {
@@ -4911,6 +5054,7 @@ mod vector_elision_tests {
             valid_time: None,
             label: "Document".to_string(),
             properties: Some(props),
+            provenance: None,
         });
         let node: NodeResponse = parse_response(&response).expect("Failed to create node");
         assert_eq!(
@@ -4932,6 +5076,7 @@ mod vector_elision_tests {
             valid_time: None,
             node_id: node.id,
             properties: new_props,
+            provenance: None,
         });
         let updated: NodeResponse =
             parse_response(&update_response).expect("Failed to update node");
@@ -4960,6 +5105,7 @@ mod vector_elision_tests {
             valid_time: None,
             label: "Person".to_string(),
             properties: Some(props),
+            provenance: None,
         });
         let node: NodeResponse = parse_response(&response).expect("Failed to create node");
 
@@ -5008,6 +5154,7 @@ mod valid_time_write_tests {
             label: "Person".to_string(),
             properties: None,
             valid_time: Some(rfc3339_hours_ago(now, 1)),
+            provenance: None,
         });
         let node: NodeResponse = parse_response(&response).expect("create should succeed");
 
@@ -5043,6 +5190,7 @@ mod valid_time_write_tests {
             label: "Person".to_string(),
             properties: None,
             valid_time: None,
+            provenance: None,
         });
         let node: NodeResponse = parse_response(&response).expect("create should succeed");
         assert_eq!(node.label, "Person");
@@ -5064,6 +5212,7 @@ mod valid_time_write_tests {
             label: "Person".to_string(),
             properties: None,
             valid_time: Some("not-a-timestamp".to_string()),
+            provenance: None,
         });
 
         let value: serde_json::Value = serde_json::from_str(&response).unwrap();
@@ -5081,6 +5230,7 @@ mod valid_time_write_tests {
             label: "Person".to_string(),
             properties: None,
             valid_time: Some(rfc3339_hours_from_now(now, 24 * 400)), // > 1 year
+            provenance: None,
         });
 
         let value: serde_json::Value = serde_json::from_str(&response).unwrap();
@@ -5098,12 +5248,14 @@ mod valid_time_write_tests {
             label: "Person".to_string(),
             properties: None,
             valid_time: None,
+            provenance: None,
         }))
         .unwrap();
         let n2: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
             label: "Person".to_string(),
             properties: None,
             valid_time: None,
+            provenance: None,
         }))
         .unwrap();
 
@@ -5113,6 +5265,7 @@ mod valid_time_write_tests {
             label: "KNOWS".to_string(),
             properties: None,
             valid_time: Some(rfc3339_hours_ago(now, 1)),
+            provenance: None,
         });
         let edge: EdgeResponse = parse_response(&response).expect("create_edge should succeed");
 
@@ -5144,6 +5297,7 @@ mod valid_time_write_tests {
             label: "Person".to_string(),
             properties: Some(props),
             valid_time: Some(rfc3339_hours_ago(now, 2)),
+            provenance: None,
         }))
         .unwrap();
 
@@ -5154,6 +5308,7 @@ mod valid_time_write_tests {
             node_id: node.id,
             properties: update_props,
             valid_time: Some(update_valid_time.clone()),
+            provenance: None,
         });
         let updated: NodeResponse = parse_response(&response).expect("update should succeed");
         assert_eq!(
@@ -5183,6 +5338,7 @@ mod valid_time_write_tests {
             label: "Person".to_string(),
             properties: None,
             valid_time: None,
+            provenance: None,
         }))
         .unwrap();
 
@@ -5193,6 +5349,7 @@ mod valid_time_write_tests {
             properties: update_props,
             // Far enough in the past to precede the node's creation time.
             valid_time: Some("1970-01-01T00:00:01Z".to_string()),
+            provenance: None,
         });
 
         let value: serde_json::Value = serde_json::from_str(&response).unwrap();
@@ -5209,6 +5366,7 @@ mod valid_time_write_tests {
             label: "Person".to_string(),
             properties: None,
             valid_time: Some(rfc3339_hours_ago(now, 1)),
+            provenance: None,
         }))
         .unwrap();
 
@@ -5242,12 +5400,14 @@ mod valid_time_write_tests {
             label: "Person".to_string(),
             properties: None,
             valid_time: None,
+            provenance: None,
         }))
         .unwrap();
         let n2: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
             label: "Person".to_string(),
             properties: None,
             valid_time: None,
+            provenance: None,
         }))
         .unwrap();
 
@@ -5259,6 +5419,7 @@ mod valid_time_write_tests {
             label: "KNOWS".to_string(),
             properties: Some(props),
             valid_time: Some(rfc3339_hours_ago(now, 2)),
+            provenance: None,
         }))
         .unwrap();
 
@@ -5269,6 +5430,7 @@ mod valid_time_write_tests {
             edge_id: edge.id,
             properties: update_props,
             valid_time: Some(update_valid_time.clone()),
+            provenance: None,
         });
         let updated: EdgeResponse = parse_response(&response).expect("update should succeed");
         assert_eq!(
@@ -5302,12 +5464,14 @@ mod valid_time_write_tests {
             label: "Person".to_string(),
             properties: None,
             valid_time: None,
+            provenance: None,
         }))
         .unwrap();
         let n2: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
             label: "Person".to_string(),
             properties: None,
             valid_time: None,
+            provenance: None,
         }))
         .unwrap();
 
@@ -5317,6 +5481,7 @@ mod valid_time_write_tests {
             label: "KNOWS".to_string(),
             properties: None,
             valid_time: Some(rfc3339_hours_from_now(now, 24 * 400)), // > 1 year
+            provenance: None,
         });
 
         let value: serde_json::Value = serde_json::from_str(&response).unwrap();
@@ -5340,6 +5505,7 @@ mod valid_time_write_tests {
             label: "Person".to_string(),
             properties: None,
             valid_time: Some(rfc3339_hours_ago(now, 2)),
+            provenance: None,
         }))
         .unwrap();
 
@@ -5388,12 +5554,14 @@ mod valid_time_write_tests {
             label: "Person".to_string(),
             properties: None,
             valid_time: None,
+            provenance: None,
         }))
         .unwrap();
         let n2: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
             label: "Person".to_string(),
             properties: None,
             valid_time: None,
+            provenance: None,
         }))
         .unwrap();
         let edge: EdgeResponse = parse_response(&server.create_edge(CreateEdgeRequest {
@@ -5402,6 +5570,7 @@ mod valid_time_write_tests {
             label: "KNOWS".to_string(),
             properties: None,
             valid_time: Some(rfc3339_hours_ago(now, 2)),
+            provenance: None,
         }))
         .unwrap();
 
@@ -5450,12 +5619,14 @@ mod valid_time_write_tests {
             label: "Person".to_string(),
             properties: None,
             valid_time: None,
+            provenance: None,
         }))
         .unwrap();
         let n2: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
             label: "Person".to_string(),
             properties: None,
             valid_time: None,
+            provenance: None,
         }))
         .unwrap();
         parse_response::<EdgeResponse>(&server.create_edge(CreateEdgeRequest {
@@ -5464,6 +5635,7 @@ mod valid_time_write_tests {
             label: "KNOWS".to_string(),
             properties: None,
             valid_time: None,
+            provenance: None,
         }))
         .unwrap();
 
@@ -5495,12 +5667,14 @@ mod valid_time_write_tests {
             label: "Person".to_string(),
             properties: None,
             valid_time: None,
+            provenance: None,
         }))
         .unwrap();
         let n2: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
             label: "Person".to_string(),
             properties: None,
             valid_time: None,
+            provenance: None,
         }))
         .unwrap();
         parse_response::<EdgeResponse>(&server.create_edge(CreateEdgeRequest {
@@ -5509,6 +5683,7 @@ mod valid_time_write_tests {
             label: "KNOWS".to_string(),
             properties: None,
             valid_time: None,
+            provenance: None,
         }))
         .unwrap();
 
@@ -5521,5 +5696,549 @@ mod valid_time_write_tests {
         assert_eq!(value.get("success"), Some(&serde_json::json!(true)));
         assert_eq!(value.get("edges_removed"), Some(&serde_json::json!(1)));
         assert_eq!(value.get("detached"), Some(&serde_json::json!(true)));
+    }
+}
+
+// ============================================================================
+// Write-Time Provenance Tests (Issue #3224)
+// ============================================================================
+
+mod provenance_write_tests {
+    use super::*;
+
+    #[test]
+    fn test_create_node_with_provenance_persists() {
+        let server = create_test_server();
+
+        let node: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            label: "Person".to_string(),
+            properties: None,
+            valid_time: None,
+            provenance: Some(ProvenanceRequest {
+                source: Some("hr-system".to_string()),
+                confidence: Some(0.95),
+                note: None,
+                correlation_id: Some("batch-2026-06".to_string()),
+            }),
+        }))
+        .unwrap();
+
+        // Returned directly on the create response.
+        let provenance = node.provenance.expect("provenance should be present");
+        assert_eq!(provenance.source(), Some("hr-system"));
+        assert_eq!(provenance.confidence(), Some(0.95));
+        assert_eq!(provenance.correlation_id(), Some("batch-2026-06"));
+
+        // And retrievable via history (per-version).
+        let history = server.get_node_history(GetNodeHistoryRequest { node_id: node.id });
+        let value: serde_json::Value = serde_json::from_str(&history).unwrap();
+        let versions = value["versions"].as_array().unwrap();
+        assert_eq!(versions.len(), 1);
+        assert_eq!(versions[0]["provenance"]["source"], "hr-system");
+        assert_eq!(versions[0]["provenance"]["confidence"], 0.95);
+    }
+
+    #[test]
+    fn test_create_node_without_provenance_response_unchanged() {
+        let server = create_test_server();
+
+        let response = server.create_node(CreateNodeRequest {
+            label: "Person".to_string(),
+            properties: None,
+            valid_time: None,
+            provenance: None,
+        });
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert!(
+            value.get("provenance").is_none(),
+            "provenance key must be omitted, not null, when absent; got {value}"
+        );
+    }
+
+    #[test]
+    fn test_create_node_empty_provenance_object_treated_as_absent() {
+        let server = create_test_server();
+
+        let response = server.create_node(CreateNodeRequest {
+            label: "Person".to_string(),
+            properties: None,
+            valid_time: None,
+            provenance: Some(ProvenanceRequest {
+                source: None,
+                confidence: None,
+                note: None,
+                correlation_id: None,
+            }),
+        });
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert!(
+            value.get("provenance").is_none(),
+            "an all-absent bundle must never be persisted/returned as a fabricated object; got {value}"
+        );
+    }
+
+    #[test]
+    fn test_create_node_provenance_confidence_above_one_rejected() {
+        let server = create_test_server();
+
+        let response = server.create_node(CreateNodeRequest {
+            label: "Person".to_string(),
+            properties: None,
+            valid_time: None,
+            provenance: Some(ProvenanceRequest {
+                source: None,
+                confidence: Some(1.5),
+                note: None,
+                correlation_id: None,
+            }),
+        });
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        let error = value.get("error").and_then(|e| e.as_str()).unwrap();
+        assert!(error.contains("confidence"), "got: {error}");
+        assert!(
+            error.contains("0.0") && error.contains("1.0"),
+            "got: {error}"
+        );
+        assert_eq!(server.db().node_count(), 0, "no node should be created");
+    }
+
+    #[test]
+    fn test_create_node_provenance_confidence_below_zero_rejected() {
+        let server = create_test_server();
+
+        let response = server.create_node(CreateNodeRequest {
+            label: "Person".to_string(),
+            properties: None,
+            valid_time: None,
+            provenance: Some(ProvenanceRequest {
+                source: None,
+                confidence: Some(-0.1),
+                note: None,
+                correlation_id: None,
+            }),
+        });
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        let error = value.get("error").and_then(|e| e.as_str()).unwrap();
+        assert!(error.contains("confidence"), "got: {error}");
+        assert_eq!(server.db().node_count(), 0);
+    }
+
+    #[test]
+    fn test_create_node_provenance_confidence_boundaries_accepted() {
+        let server = create_test_server();
+
+        for confidence in [0.0, 1.0] {
+            let node: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+                label: "Person".to_string(),
+                properties: None,
+                valid_time: None,
+                provenance: Some(ProvenanceRequest {
+                    source: None,
+                    confidence: Some(confidence),
+                    note: None,
+                    correlation_id: None,
+                }),
+            }))
+            .expect("boundary confidence should be accepted");
+            assert_eq!(node.provenance.unwrap().confidence(), Some(confidence));
+        }
+    }
+
+    #[test]
+    fn test_update_node_with_provenance_history_per_version() {
+        let server = create_test_server();
+
+        let node: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            label: "Person".to_string(),
+            properties: None,
+            valid_time: None,
+            provenance: None,
+        }))
+        .unwrap();
+
+        let updated: NodeResponse = parse_response(&server.update_node(UpdateNodeRequest {
+            node_id: node.id,
+            properties: HashMap::new(),
+            valid_time: None,
+            provenance: Some(ProvenanceRequest {
+                source: Some("csv-import:2026-06".to_string()),
+                confidence: Some(0.4),
+                note: None,
+                correlation_id: None,
+            }),
+        }))
+        .unwrap();
+        assert_eq!(
+            updated.provenance.unwrap().source(),
+            Some("csv-import:2026-06")
+        );
+
+        let history = server.get_node_history(GetNodeHistoryRequest { node_id: node.id });
+        let value: serde_json::Value = serde_json::from_str(&history).unwrap();
+        let versions = value["versions"].as_array().unwrap();
+        assert_eq!(versions.len(), 2);
+        assert!(
+            versions[0].get("provenance").is_none(),
+            "v1 (plain create) should have no provenance"
+        );
+        assert_eq!(versions[1]["provenance"]["source"], "csv-import:2026-06");
+    }
+
+    #[test]
+    fn test_update_node_provenance_confidence_out_of_range_rejected() {
+        let server = create_test_server();
+
+        let node: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            label: "Person".to_string(),
+            properties: None,
+            valid_time: None,
+            provenance: None,
+        }))
+        .unwrap();
+
+        let response = server.update_node(UpdateNodeRequest {
+            node_id: node.id,
+            properties: HashMap::new(),
+            valid_time: None,
+            provenance: Some(ProvenanceRequest {
+                source: None,
+                confidence: Some(2.0),
+                note: None,
+                correlation_id: None,
+            }),
+        });
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert!(value.get("error").is_some());
+
+        // The node's properties must be unchanged by the rejected update.
+        let history = server.get_node_history(GetNodeHistoryRequest { node_id: node.id });
+        let history_value: serde_json::Value = serde_json::from_str(&history).unwrap();
+        assert_eq!(history_value["versions"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_create_edge_with_provenance_persists() {
+        let server = create_test_server();
+
+        let n1: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            label: "Person".to_string(),
+            properties: None,
+            valid_time: None,
+            provenance: None,
+        }))
+        .unwrap();
+        let n2: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            label: "Person".to_string(),
+            properties: None,
+            valid_time: None,
+            provenance: None,
+        }))
+        .unwrap();
+
+        let edge: EdgeResponse = parse_response(&server.create_edge(CreateEdgeRequest {
+            source_id: n1.id,
+            target_id: n2.id,
+            label: "KNOWS".to_string(),
+            properties: None,
+            valid_time: None,
+            provenance: Some(ProvenanceRequest {
+                source: Some("claude-mcp".to_string()),
+                confidence: Some(0.7),
+                note: Some("inferred from document".to_string()),
+                correlation_id: None,
+            }),
+        }))
+        .unwrap();
+
+        let provenance = edge.provenance.expect("provenance should be present");
+        assert_eq!(provenance.source(), Some("claude-mcp"));
+        assert_eq!(provenance.note(), Some("inferred from document"));
+
+        let history = server.get_edge_history(GetEdgeHistoryRequest { edge_id: edge.id });
+        let value: serde_json::Value = serde_json::from_str(&history).unwrap();
+        assert_eq!(value["versions"][0]["provenance"]["source"], "claude-mcp");
+    }
+
+    #[test]
+    fn test_create_edge_provenance_confidence_above_one_rejected() {
+        let server = create_test_server();
+
+        let n1: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            label: "Person".to_string(),
+            properties: None,
+            valid_time: None,
+            provenance: None,
+        }))
+        .unwrap();
+        let n2: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            label: "Person".to_string(),
+            properties: None,
+            valid_time: None,
+            provenance: None,
+        }))
+        .unwrap();
+
+        let response = server.create_edge(CreateEdgeRequest {
+            source_id: n1.id,
+            target_id: n2.id,
+            label: "KNOWS".to_string(),
+            properties: None,
+            valid_time: None,
+            provenance: Some(ProvenanceRequest {
+                source: None,
+                confidence: Some(1.1),
+                note: None,
+                correlation_id: None,
+            }),
+        });
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert!(value.get("error").is_some());
+        assert_eq!(server.db().edge_count(), 0, "no edge should be created");
+    }
+
+    #[test]
+    fn test_update_edge_with_provenance_history_per_version() {
+        let server = create_test_server();
+
+        let n1: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            label: "Person".to_string(),
+            properties: None,
+            valid_time: None,
+            provenance: None,
+        }))
+        .unwrap();
+        let n2: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            label: "Person".to_string(),
+            properties: None,
+            valid_time: None,
+            provenance: None,
+        }))
+        .unwrap();
+        let edge: EdgeResponse = parse_response(&server.create_edge(CreateEdgeRequest {
+            source_id: n1.id,
+            target_id: n2.id,
+            label: "KNOWS".to_string(),
+            properties: None,
+            valid_time: None,
+            provenance: None,
+        }))
+        .unwrap();
+
+        let _updated: EdgeResponse = parse_response(&server.update_edge(UpdateEdgeRequest {
+            edge_id: edge.id,
+            properties: HashMap::new(),
+            valid_time: None,
+            provenance: Some(ProvenanceRequest {
+                source: Some("hr-system".to_string()),
+                confidence: None,
+                note: None,
+                correlation_id: None,
+            }),
+        }))
+        .unwrap();
+
+        let history = server.get_edge_history(GetEdgeHistoryRequest { edge_id: edge.id });
+        let value: serde_json::Value = serde_json::from_str(&history).unwrap();
+        let versions = value["versions"].as_array().unwrap();
+        assert_eq!(versions.len(), 2);
+        assert!(versions[0].get("provenance").is_none());
+        assert_eq!(versions[1]["provenance"]["source"], "hr-system");
+    }
+
+    #[test]
+    fn test_get_node_returns_current_provenance() {
+        let server = create_test_server();
+
+        let node: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            label: "Person".to_string(),
+            properties: None,
+            valid_time: None,
+            provenance: Some(ProvenanceRequest {
+                source: Some("hr-system".to_string()),
+                confidence: None,
+                note: None,
+                correlation_id: None,
+            }),
+        }))
+        .unwrap();
+
+        let fetched: NodeResponse = parse_response(&server.get_node(GetNodeRequest {
+            node_id: node.id,
+            include_vectors: None,
+        }))
+        .unwrap();
+        assert_eq!(fetched.provenance.unwrap().source(), Some("hr-system"));
+    }
+
+    #[test]
+    fn test_get_node_without_provenance_omits_key() {
+        let server = create_test_server();
+
+        let node: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            label: "Person".to_string(),
+            properties: None,
+            valid_time: None,
+            provenance: None,
+        }))
+        .unwrap();
+
+        let response = server.get_node(GetNodeRequest {
+            node_id: node.id,
+            include_vectors: None,
+        });
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert!(value.get("provenance").is_none());
+    }
+
+    #[test]
+    fn test_get_node_history_omits_provenance_when_absent() {
+        let server = create_test_server();
+
+        let node: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            label: "Person".to_string(),
+            properties: None,
+            valid_time: None,
+            provenance: None,
+        }))
+        .unwrap();
+
+        let history = server.get_node_history(GetNodeHistoryRequest { node_id: node.id });
+        let value: serde_json::Value = serde_json::from_str(&history).unwrap();
+        assert!(value["versions"][0].get("provenance").is_none());
+    }
+
+    /// Regression test: `node_to_response`/`edge_to_response` used to
+    /// hardcode `provenance: None`, and only `get_node`/`create_node`/
+    /// `update_node` (and edge equivalents) patched it back in afterward.
+    /// `list_nodes` (and every other read path built on `node_to_response`)
+    /// silently omitted provenance even when it existed. See Issue #3224.
+    #[test]
+    fn test_list_nodes_returns_provenance() {
+        let server = create_test_server();
+
+        let node: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            label: "ListProvenanceTest".to_string(),
+            properties: None,
+            valid_time: None,
+            provenance: Some(ProvenanceRequest {
+                source: Some("csv-import".to_string()),
+                confidence: None,
+                note: None,
+                correlation_id: None,
+            }),
+        }))
+        .unwrap();
+
+        let response = server.list_nodes(ListNodesRequest {
+            label: Some("ListProvenanceTest".to_string()),
+            property_key: None,
+            property_value: None,
+            limit: None,
+            offset: None,
+            include_vectors: None,
+        });
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        let nodes = value["nodes"].as_array().unwrap();
+        let found = nodes.iter().find(|n| n["id"] == node.id).unwrap();
+        assert_eq!(found["provenance"]["source"], "csv-import");
+    }
+
+    /// See [`test_list_nodes_returns_provenance`] -- same gap, `traverse` path.
+    #[test]
+    fn test_traverse_returns_provenance() {
+        let server = create_test_server();
+
+        let start: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            label: "Person".to_string(),
+            properties: None,
+            valid_time: None,
+            provenance: None,
+        }))
+        .unwrap();
+        let end: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            label: "Person".to_string(),
+            properties: None,
+            valid_time: None,
+            provenance: Some(ProvenanceRequest {
+                source: Some("graph-import".to_string()),
+                confidence: None,
+                note: None,
+                correlation_id: None,
+            }),
+        }))
+        .unwrap();
+        parse_response::<EdgeResponse>(&server.create_edge(CreateEdgeRequest {
+            source_id: start.id,
+            target_id: end.id,
+            label: "KNOWS".to_string(),
+            properties: None,
+            valid_time: None,
+            provenance: None,
+        }))
+        .unwrap();
+
+        let response = server.traverse(TraverseRequest {
+            start_node_id: start.id,
+            edge_label: "KNOWS".to_string(),
+            direction: Some("outgoing".to_string()),
+            depth: Some(1),
+            limit: None,
+            include_vectors: None,
+        });
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        let results = value["results"].as_array().unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0]["node"]["provenance"]["source"], "graph-import");
+    }
+
+    /// See [`test_list_nodes_returns_provenance`] -- same gap, the bi-temporal
+    /// `get_node_at_time` path. This one matters especially: `get_node_at_time`
+    /// resolves the *as-of* version, not necessarily the node's current head,
+    /// so the returned provenance must be attached to that exact historical
+    /// version rather than "whatever is current now".
+    #[test]
+    fn test_get_node_at_time_returns_provenance_for_that_version() {
+        let server = create_test_server();
+
+        let node: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            label: "Person".to_string(),
+            properties: None,
+            valid_time: None,
+            provenance: Some(ProvenanceRequest {
+                source: Some("initial-load".to_string()),
+                confidence: None,
+                note: None,
+                correlation_id: None,
+            }),
+        }))
+        .unwrap();
+
+        let as_of_micros = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_micros() as i64;
+
+        // Update with different provenance; the as-of query above must still
+        // report the *original* version's provenance, not this new one.
+        parse_response::<NodeResponse>(&server.update_node(UpdateNodeRequest {
+            node_id: node.id,
+            properties: HashMap::new(),
+            valid_time: None,
+            provenance: Some(ProvenanceRequest {
+                source: Some("manual-correction".to_string()),
+                confidence: None,
+                note: None,
+                correlation_id: None,
+            }),
+        }))
+        .unwrap();
+
+        let response = server.get_node_at_time(GetNodeAtTimeRequest {
+            node_id: node.id,
+            valid_time: as_of_micros.to_string(),
+            transaction_time: Some(as_of_micros.to_string()),
+        });
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(value["node"]["provenance"]["source"], "initial-load");
     }
 }
