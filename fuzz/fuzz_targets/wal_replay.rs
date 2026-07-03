@@ -52,6 +52,7 @@ fuzz_target!(|case: WalReplayCase| {
                         label,
                         properties: int_properties(value),
                         valid_from: timestamp_from_step(step),
+                        provenance: None,
                     })
                 }
             }
@@ -68,6 +69,7 @@ fuzz_target!(|case: WalReplayCase| {
                         label,
                         properties: int_properties(value),
                         valid_from: timestamp_from_step(step),
+                        provenance: None,
                     })
                 } else {
                     None
