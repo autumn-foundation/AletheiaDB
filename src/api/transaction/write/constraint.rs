@@ -25,11 +25,14 @@ pub(crate) fn check_constraints(
     tx: &WriteTransaction,
     registry: &Arc<ConstraintRegistry>,
 ) -> std::result::Result<ReservationGuard, ConstraintError> {
+    // ⚡ Bolt Optimization: Pre-allocate vectors based on buffer size to prevent heap reallocations during constraint checking on the hot commit path.
+
     // Borrow property maps directly from the buffer to avoid cloning on the hot path.
-    let mut added_refs: Vec<(InternedString, &PropertyMap, NodeId)> = Vec::new();
+    let mut added_refs: Vec<(InternedString, &PropertyMap, NodeId)> =
+        Vec::with_capacity(tx.buffer.len());
 
     // Pre-tx nodes whose constraint keys are freed on a successful commit.
-    let mut removed_nodes: Vec<Node> = Vec::new();
+    let mut removed_nodes: Vec<Node> = Vec::with_capacity(tx.buffer.len());
 
     for op in tx.buffer.operations() {
         match op {
