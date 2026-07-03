@@ -1841,6 +1841,37 @@ fn test_node_version_decode_error_path() {
     assert!(result.is_err());
 }
 
+/// Regression test: a record whose leading bytes match `COLD_RECORD_MAGIC_V2`
+/// is unambiguously a V2 record. If the bytes *after* the magic fail to
+/// decode as `SerializableNodeVersion` (corruption), `decode_node_version`
+/// must surface that error immediately rather than falling through to the
+/// legacy V1 decoder, which would misinterpret the magic-prefixed buffer.
+#[test]
+fn test_decode_node_version_v2_magic_match_with_corrupt_payload_errors_immediately() {
+    let mut data = COLD_RECORD_MAGIC_V2.to_vec();
+    data.extend_from_slice(&[0xFF; 8]);
+    let err = decode_node_version(&data).unwrap_err();
+    let message = format!("{err}");
+    assert!(
+        message.contains("V2"),
+        "expected a V2-specific decode error, got: {message}"
+    );
+}
+
+/// Edge counterpart of
+/// [`test_decode_node_version_v2_magic_match_with_corrupt_payload_errors_immediately`].
+#[test]
+fn test_decode_edge_version_v2_magic_match_with_corrupt_payload_errors_immediately() {
+    let mut data = COLD_RECORD_MAGIC_V2.to_vec();
+    data.extend_from_slice(&[0xFF; 8]);
+    let err = decode_edge_version(&data).unwrap_err();
+    let message = format!("{err}");
+    assert!(
+        message.contains("V2"),
+        "expected a V2-specific decode error, got: {message}"
+    );
+}
+
 #[test]
 fn test_edge_version_decode_error_path() {
     // Test decode error for edges

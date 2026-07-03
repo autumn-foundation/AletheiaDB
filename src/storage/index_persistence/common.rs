@@ -42,7 +42,15 @@ pub fn save_encoded_with_crc<T: Encode>(data: &T, path: &Path) -> Result<()> {
     atomic_write(path, &data_with_checksum)
 }
 
-/// Load encoded data from disk and validate CRC32 checksum.
+/// Read a file from disk and validate its trailing CRC32 checksum, returning
+/// the checksum-verified payload bytes (with the checksum suffix stripped)
+/// without decoding them.
+///
+/// Exposed separately from [`load_encoded_with_crc`] so callers that may need
+/// to try decoding the same verified bytes as more than one candidate shape
+/// (e.g. a current format falling back to a frozen legacy shape) can read the
+/// file and validate its checksum exactly once, rather than re-reading from
+/// disk and re-verifying the checksum for each candidate decode attempt.
 ///
 /// # Arguments
 ///
@@ -56,12 +64,7 @@ pub fn save_encoded_with_crc<T: Encode>(data: &T, path: &Path) -> Result<()> {
 /// - File size exceeds `max_size`
 /// - File is too small (missing checksum)
 /// - CRC32 checksum mismatch
-/// - Deserialization fails
-pub fn load_encoded_with_crc<T: for<'a> Decode<'a>>(
-    path: &Path,
-    max_size: u64,
-    context: &str,
-) -> Result<T> {
+pub fn read_and_verify_crc(path: &Path, max_size: u64, context: &str) -> Result<Vec<u8>> {
     // Check file size before reading to prevent OOM/DoS
     let metadata = fs::metadata(path)?;
     if metadata.len() > max_size {
@@ -110,8 +113,33 @@ pub fn load_encoded_with_crc<T: for<'a> Decode<'a>>(
         });
     }
 
-    // Decode
-    let decoded: T = bitcode::decode(data)?;
+    let mut data = bytes;
+    data.truncate(data.len() - 4);
+    Ok(data)
+}
+
+/// Load encoded data from disk and validate CRC32 checksum.
+///
+/// # Arguments
+///
+/// * `path` - The file path to read from
+/// * `max_size` - Maximum allowed file size (DoS protection)
+/// * `context` - Context name for error messages (e.g., "Vector index")
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - File size exceeds `max_size`
+/// - File is too small (missing checksum)
+/// - CRC32 checksum mismatch
+/// - Deserialization fails
+pub fn load_encoded_with_crc<T: for<'a> Decode<'a>>(
+    path: &Path,
+    max_size: u64,
+    context: &str,
+) -> Result<T> {
+    let data = read_and_verify_crc(path, max_size, context)?;
+    let decoded: T = bitcode::decode(&data)?;
     Ok(decoded)
 }
 

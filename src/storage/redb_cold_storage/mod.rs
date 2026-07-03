@@ -1954,6 +1954,12 @@ pub fn decode_node_version(data: &[u8]) -> Result<NodeVersion> {
     // pre-provenance and are decoded via the frozen `..V1` shape instead.
     // There is no version marker on legacy records at all, so the magic
     // sequence itself is the only signal -- see `COLD_RECORD_MAGIC_V2`.
+    //
+    // A magic-byte match means this is unambiguously a V2 record (legacy
+    // records never carry this prefix), so a decode failure past the magic
+    // indicates real corruption -- it must be surfaced directly rather than
+    // falling through to the V1 decoder, which would otherwise misinterpret
+    // the remaining bytes (magic-matched-but-corrupt is not "maybe legacy").
     let (
         label,
         temporal_valid_start,
@@ -1966,10 +1972,11 @@ pub fn decode_node_version(data: &[u8]) -> Result<NodeVersion> {
         next_version,
         prev_version,
         provenance,
-    ) = if data.starts_with(&COLD_RECORD_MAGIC_V2)
-        && let Ok(s) =
-            bitcode::decode::<SerializableNodeVersion>(&data[COLD_RECORD_MAGIC_V2.len()..])
-    {
+    ) = if data.starts_with(&COLD_RECORD_MAGIC_V2) {
+        let s: SerializableNodeVersion = bitcode::decode(&data[COLD_RECORD_MAGIC_V2.len()..])
+            .map_err(|e| {
+                StorageError::corruption(format!("Failed to decode node version V2: {}", e))
+            })?;
         (
             s.label,
             s.temporal_valid_start,
@@ -1985,7 +1992,7 @@ pub fn decode_node_version(data: &[u8]) -> Result<NodeVersion> {
         )
     } else {
         let s: SerializableNodeVersionV1 = bitcode::decode(data).map_err(|e| {
-            StorageError::corruption(format!("Failed to decode node version: {}", e))
+            StorageError::corruption(format!("Failed to decode node version V1: {}", e))
         })?;
         (
             s.label,
@@ -2081,8 +2088,9 @@ pub fn decode_edge_version(data: &[u8]) -> Result<EdgeVersion> {
     use crate::core::interning::GLOBAL_INTERNER;
     use crate::core::temporal::{BiTemporalInterval, TimeRange};
 
-    // See `decode_node_version` for why this tries the tagged (Issue #3224)
-    // shape first and falls back to the untagged legacy shape.
+    // See `decode_node_version` for why a magic-byte match means a decode
+    // failure past the magic must be surfaced immediately rather than
+    // falling back to the untagged legacy shape.
     #[allow(clippy::type_complexity)]
     let (
         label,
@@ -2098,10 +2106,11 @@ pub fn decode_edge_version(data: &[u8]) -> Result<EdgeVersion> {
         next_version,
         prev_version,
         provenance,
-    ) = if data.starts_with(&COLD_RECORD_MAGIC_V2)
-        && let Ok(s) =
-            bitcode::decode::<SerializableEdgeVersion>(&data[COLD_RECORD_MAGIC_V2.len()..])
-    {
+    ) = if data.starts_with(&COLD_RECORD_MAGIC_V2) {
+        let s: SerializableEdgeVersion = bitcode::decode(&data[COLD_RECORD_MAGIC_V2.len()..])
+            .map_err(|e| {
+                StorageError::corruption(format!("Failed to decode edge version V2: {}", e))
+            })?;
         (
             s.label,
             s.temporal_valid_start,
@@ -2119,7 +2128,7 @@ pub fn decode_edge_version(data: &[u8]) -> Result<EdgeVersion> {
         )
     } else {
         let s: SerializableEdgeVersionV1 = bitcode::decode(data).map_err(|e| {
-            StorageError::corruption(format!("Failed to decode edge version: {}", e))
+            StorageError::corruption(format!("Failed to decode edge version V1: {}", e))
         })?;
         (
             s.label,

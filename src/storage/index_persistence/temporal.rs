@@ -586,22 +586,30 @@ pub fn load_temporal_index(path: &Path) -> Result<TemporalIndexData> {
 /// (`provenance: None`) -- this is the same magic+version cross-check used
 /// throughout this module, just applied across two candidate shapes instead
 /// of one.
+///
+/// The file is read from disk and CRC32-verified exactly once via
+/// [`super::common::read_and_verify_crc`]; both candidate decodes are
+/// attempted against that single in-memory buffer, avoiding a second disk
+/// read and checksum pass on the (common, cheap) legacy-fallback path.
 fn decode_temporal_blob(path: &Path) -> Result<TemporalIndexData> {
-    if let Ok(data) = super::common::load_encoded_with_crc::<TemporalIndexData>(
+    let bytes = super::common::read_and_verify_crc(
         path,
         super::MAX_TEMPORAL_INDEX_FILE_SIZE,
         "Temporal index",
-    ) && data.magic == TEMPORAL_MAGIC
+    )?;
+
+    if let Ok(data) = bitcode::decode::<TemporalIndexData>(&bytes)
+        && data.magic == TEMPORAL_MAGIC
         && data.version == MANIFEST_VERSION
     {
         return Ok(data);
     }
 
-    let legacy: TemporalIndexDataV1 = super::common::load_encoded_with_crc(
-        path,
-        super::MAX_TEMPORAL_INDEX_FILE_SIZE,
-        "Temporal index",
-    )?;
+    let legacy: TemporalIndexDataV1 =
+        bitcode::decode(&bytes).map_err(|e| IndexPersistenceError::Corrupted {
+            path: path.to_path_buf(),
+            source: format!("Failed to decode temporal index: {e}").into(),
+        })?;
 
     if legacy.magic != TEMPORAL_MAGIC {
         return Err(IndexPersistenceError::InvalidMagic {
