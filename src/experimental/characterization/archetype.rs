@@ -90,10 +90,8 @@ impl<'a> Archetype<'a> {
         // 2. Calculate Purity Scores
         let mut node_results = Vec::with_capacity(valid_nodes.len());
         for (i, vec) in vectors.iter().enumerate() {
-            let mut normalized_vec = vec.clone();
-            ops::normalize_in_place(&mut normalized_vec);
-
-            let similarity = ops::cosine_similarity(&centroid, &normalized_vec)?;
+            // ⚡ Bolt Optimization: Removing redundant vector clone and normalization per node since cosine_similarity is scale-invariant and already computes magnitudes internally.
+            let similarity = ops::cosine_similarity(&centroid, vec)?;
             // Cosine similarity ranges from -1.0 to 1.0. We normalize it to 0.0 - 1.0 for purity.
             let purity_score = ((similarity + 1.0) / 2.0).clamp(0.0, 1.0);
 

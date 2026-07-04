@@ -77,3 +77,9 @@
 **Pre-allocating Vec Capacities in Hot Paths**
 **Learning:** Pre-allocating standard Rust `Vec` objects using `Vec::with_capacity` in hot-paths like parsers and query planners eliminates unnecessary heap reallocations (0 -> 4 -> 8 -> 16 etc.), without changing semantics or causing borrow checker issues. However, if the expected bounds are wildly incorrect it could lead to memory bloat. A small capacity for small collections minimizes performance impacts in hot loops.
 **Action:** When a loop dynamically pushes elements to a new empty Vector (especially in repeated execution domains like parsers and network/storage iterators), replace `Vec::new()` with `Vec::with_capacity(n)` if a typical or max size `n` is roughly known.
+**[Archetype Similarity Optimization]**
+**Learning:**  computes vector magnitudes internally. Pre-normalizing input vectors is mathematically redundant and introduces expensive O(N) heap allocations ().
+**Action:** Remove redundant clones and in-place normalization when iterating over vectors to calculate cosine similarity.
+**[Archetype Similarity Optimization]**
+**Learning:** `ops::cosine_similarity` computes vector magnitudes internally. Pre-normalizing input vectors is mathematically redundant and introduces expensive O(N) heap allocations (`vec.clone()`).
+**Action:** Remove redundant clones and in-place normalization when iterating over vectors to calculate cosine similarity.
