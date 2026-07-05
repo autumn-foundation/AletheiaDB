@@ -111,7 +111,10 @@ impl PropagationModel for LinearPropagation {
             return current_self.map(|v| v.to_vec());
         }
 
-        let avg: Vec<f32> = sum.iter().map(|x| x / count as f32).collect();
+        // ⚡ Bolt Optimization: Perform scalar division in-place to avoid allocating a new vector for the average.
+        for val in &mut sum {
+            *val /= count as f32;
+        }
 
         match current_self {
             Some(self_vec) => {
@@ -121,19 +124,17 @@ impl PropagationModel for LinearPropagation {
                     return Some(self_vec.to_vec());
                 }
 
-                // Blend: (1 - alpha) * self + alpha * avg
-                let new_vec: Vec<f32> = self_vec
-                    .iter()
-                    .zip(avg.iter())
-                    .map(|(s, a)| (1.0 - self.alpha) * s + self.alpha * a)
-                    .collect();
-                Some(new_vec)
+                // ⚡ Bolt Optimization: Reuse the `sum` vector to store the blended state, eliminating another heap allocation via .collect().
+                for (s_val, self_val) in sum.iter_mut().zip(self_vec.iter()) {
+                    *s_val = (1.0 - self.alpha) * self_val + self.alpha * (*s_val);
+                }
+                Some(sum)
             }
             None => {
                 // If we didn't have a state, we "adopt" the average (if alpha allows adoption)
                 // Interpretation: If I have no opinion, do I adopt neighbors'?
                 // For this model, yes, let's say we adopt the average directly.
-                Some(avg)
+                Some(sum)
             }
         }
     }

@@ -77,3 +77,6 @@
 **Pre-allocating Vec Capacities in Hot Paths**
 **Learning:** Pre-allocating standard Rust `Vec` objects using `Vec::with_capacity` in hot-paths like parsers and query planners eliminates unnecessary heap reallocations (0 -> 4 -> 8 -> 16 etc.), without changing semantics or causing borrow checker issues. However, if the expected bounds are wildly incorrect it could lead to memory bloat. A small capacity for small collections minimizes performance impacts in hot loops.
 **Action:** When a loop dynamically pushes elements to a new empty Vector (especially in repeated execution domains like parsers and network/storage iterators), replace `Vec::new()` with `Vec::with_capacity(n)` if a typical or max size `n` is roughly known.
+**[In-place mutations]
+**Learning:** Reuse existing intermediate vectors like `sum` by mutating them in-place for scalar divisions and blending instead of allocating new vectors via `.collect::<Vec<_>>()`.
+**Action:** When calculating averages or combining states, perform the operations directly on existing buffers to avoid heap allocations on hot paths.
