@@ -545,7 +545,7 @@ impl HistoricalStorage {
     }
 
     /// Add a new version of a node, optionally attaching a write-time
-    /// [`Provenance`](crate::core::provenance::Provenance) bundle (Issue #3224).
+    /// [`Provenance`] bundle (Issue #3224).
     ///
     /// Behaves identically to [`add_node_version`](Self::add_node_version) other
     /// than persisting `provenance` on the created version (anchor or delta).
@@ -774,7 +774,7 @@ impl HistoricalStorage {
     }
 
     /// Add a new version of an edge, optionally attaching a write-time
-    /// [`Provenance`](crate::core::provenance::Provenance) bundle (Issue #3224).
+    /// [`Provenance`] bundle (Issue #3224).
     ///
     /// Behaves identically to [`add_edge_version`](Self::add_edge_version) other
     /// than persisting `provenance` on the created version (anchor or delta).
