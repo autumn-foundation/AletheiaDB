@@ -2740,7 +2740,7 @@ impl AletheiaMcpServer {
                     // silently coerced to Int by as_i64(), which would succeed for
                     // whole-number floats in some representations.
                     if n.is_f64() {
-                        CypherParameterValue::Float(n.as_f64().unwrap())
+                        CypherParameterValue::Float(n.as_f64().unwrap_or(0.0))
                     } else if let Some(i) = n.as_i64() {
                         CypherParameterValue::Int(i)
                     } else if let Some(f) = n.as_f64() {
@@ -3465,5 +3465,28 @@ mod server_unit_tests {
             result.is_error.unwrap_or(false),
             "Null JSON input must produce an error result"
         );
+    }
+
+    #[test]
+    fn test_sentry_json_to_cypher_params_float_handling() {
+        let server = make_server();
+        let mut params = std::collections::HashMap::new();
+        params.insert(
+            "float_val".to_string(),
+            serde_json::Value::Number(serde_json::Number::from_f64(1.0).unwrap()),
+        );
+        params.insert(
+            "int_val".to_string(),
+            serde_json::Value::Number(serde_json::Number::from(1)),
+        );
+
+        let converted = server.json_to_cypher_params(Some(&params)).unwrap();
+        assert!(
+            matches!(converted.get("float_val"), Some(crate::cypher::CypherParameterValue::Float(f)) if *f == 1.0)
+        );
+        assert!(matches!(
+            converted.get("int_val"),
+            Some(crate::cypher::CypherParameterValue::Int(1))
+        ));
     }
 }

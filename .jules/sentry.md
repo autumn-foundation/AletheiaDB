@@ -37,3 +37,6 @@
 **[Fix `execute_traversal` target shards bug]**
 **Learning:** `plan.steps` from `route_traversal` returns empty list, and we need `involved_shards`
 **Action:** Replace `steps` with `involved_shards` and update the test.
+## Lexer and JSON Parameter unwrap Panics
+**Learning:** `cargo mutants` or thorough code reading reveals that unwrap calls during lexical analysis (e.g. `read_string`) when encountering premature EOFs, or when casting values in JSON deserialization routines, pose subtle panic vectors that can crash an entire server process. Rust's `Iterator::next` combined with `unwrap()` assumes valid syntax paths that malicious or malformed inputs can easily violate.
+**Action:** Replace `unwrap()` calls on iterators with `ok_or_else` returning a strongly-typed error (like `CypherError::lex_error`), and replace `unwrap()` on JSON value casts with `unwrap_or` or `unwrap_or_default` with safe fallback defaults. Always write failing regression tests demonstrating the panic before fixing.

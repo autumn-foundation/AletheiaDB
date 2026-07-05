@@ -500,7 +500,9 @@ impl<'a> CypherLexer<'a> {
     // -----------------------------------------------------------------------
 
     fn read_string(&mut self, start: usize) -> Result<Token, CypherError> {
-        let (_, quote) = self.advance().unwrap(); // consume opening quote
+        let (_, quote) = self.advance().ok_or_else(|| {
+            self.lex_error(start, "Unexpected EOF while reading string".to_string())
+        })?; // consume opening quote
         let mut value = String::new();
 
         loop {
@@ -745,5 +747,11 @@ mod unit_tests {
                 "{kw} should be a keyword, not an identifier"
             );
         }
+    }
+
+    #[test]
+    fn test_sentry_lexer_read_string_eof() {
+        let lexer = CypherLexer::tokenize("'");
+        assert!(lexer.is_err());
     }
 }
