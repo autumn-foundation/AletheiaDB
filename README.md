@@ -58,6 +58,40 @@ See the [Getting Started guide](docs/guides/getting-started.md) for a full walkt
 
 ---
 
+
+## Narrative Generation (Experimental)
+
+> ⚠️ **REQUIRES FEATURE: nova**
+> Ensure you have `features = ["nova"]` enabled in your `Cargo.toml` before running this code.
+
+```rust,ignore
+// Requires "nova" feature in Cargo.toml
+use aletheiadb::prelude::*;
+use aletheiadb::experimental::temporal_narrative::NarrativeGenerator;
+
+fn main() -> Result<()> {
+    let db = AletheiaDB::new()?;
+
+    let alice = db.create_node("Person", properties! {
+        "name" => "Alice",
+        "age" => 30,
+    })?;
+
+    db.write(|tx| {
+        tx.update_node(alice, properties! { "age" => 31, "city" => "London" })
+    })?;
+
+    let generator = NarrativeGenerator::new(&db);
+    let narrative = generator.generate_node_narrative(alice)?;
+
+    for event in narrative {
+        println!("Version {}: {}", event.version_number, event.description);
+    }
+
+    Ok(())
+}
+```
+
 ## Hybrid Queries
 
 Graph traversal, vector ranking, and temporal snapshots compose into a single

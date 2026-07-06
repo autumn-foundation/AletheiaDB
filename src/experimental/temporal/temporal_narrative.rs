@@ -26,6 +26,7 @@ pub struct NarrativeEvent {
     pub changes: Vec<String>,
 }
 
+#[cfg(feature = "semantic-temporal")]
 /// Generator for creating natural language narratives from temporal history.
 #[cfg(feature = "semantic-temporal")]
 /// Generates human-readable summaries of temporal graph mutations.
@@ -38,20 +39,6 @@ pub struct NarrativeGenerator<'a> {
     db: &'a AletheiaDB,
 }
 
-#[cfg(not(feature = "semantic-temporal"))]
-/// Generator for creating natural language narratives from temporal history.
-#[deprecated(
-    note = "NarrativeGenerator requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
-)]
-/// Generates human-readable summaries of temporal graph mutations.
-///
-/// # Why?
-/// When analyzing a `BiTemporalInterval`, users often need to understand
-/// the sequence of events (e.g., "Alice liked the post, then Bob deleted it").
-/// This struct translates raw `VersionMetadata` into a chronological narrative.
-pub struct NarrativeGenerator<'a> {
-    _marker: std::marker::PhantomData<&'a AletheiaDB>,
-}
 
 #[cfg(feature = "semantic-temporal")]
 impl<'a> NarrativeGenerator<'a> {
@@ -155,35 +142,6 @@ impl<'a> NarrativeGenerator<'a> {
     }
 }
 
-#[cfg(not(feature = "semantic-temporal"))]
-#[allow(deprecated)]
-impl<'a> NarrativeGenerator<'a> {
-    /// Create a new narrative generator.
-    ///
-    /// # Panics
-    ///
-    /// This method panics if the `nova` feature is not enabled.
-    #[allow(unused_variables)]
-    #[track_caller]
-    pub fn new(db: &'a AletheiaDB) -> Self {
-        panic!(
-            "NarrativeGenerator requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
-        );
-    }
-
-    /// Generate a narrative for a specific node.
-    ///
-    /// # Panics
-    ///
-    /// This method panics if the `nova` feature is not enabled.
-    #[allow(unused_variables)]
-    #[track_caller]
-    pub fn generate_node_narrative(&self, node_id: NodeId) -> Result<Vec<NarrativeEvent>> {
-        panic!(
-            "NarrativeGenerator requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
-        );
-    }
-}
 
 #[cfg(all(test, feature = "semantic-temporal"))]
 mod tests {
@@ -303,33 +261,3 @@ mod tests {
     }
 }
 
-#[cfg(all(test, not(feature = "semantic-temporal")))]
-#[allow(deprecated)]
-mod stub_tests {
-    use super::*;
-
-    #[test]
-    #[should_panic(
-        expected = "NarrativeGenerator requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
-    )]
-    fn test_stub_panic_on_new() {
-        let db = AletheiaDB::new().unwrap();
-        // This should panic
-        let _ = NarrativeGenerator::new(&db);
-    }
-
-    #[test]
-    #[should_panic(
-        expected = "NarrativeGenerator requires the 'nova' feature. Add 'features = [\"nova\"]' to your Cargo.toml."
-    )]
-    fn test_stub_panic_on_generate() {
-        // Construct a fake NarrativeGenerator to test method panic
-        // Safety: NarrativeGenerator is a ZST with PhantomData, so it's valid to transmute from unit or zeroed.
-        // We just need it to call the method.
-        let generator: NarrativeGenerator<'_> = NarrativeGenerator {
-            _marker: std::marker::PhantomData,
-        };
-        // This should panic
-        let _ = generator.generate_node_narrative(NodeId::new(0).unwrap());
-    }
-}
