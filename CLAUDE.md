@@ -308,7 +308,7 @@ cargo run --bin aletheia-mcp --features mcp-server
 |----------|-------|
 | **Nodes** | `get_node`, `create_node`, `update_node`, `delete_node`, `delete_node_cascade`, `list_nodes`, `count_nodes` |
 | **Edges** | `get_edge`, `create_edge`, `update_edge`, `delete_edge`, `get_outgoing_edges`, `get_incoming_edges` |
-| **Traversal** | `traverse` (multi-hop graph traversal) |
+| **Traversal** | `traverse` (multi-hop graph traversal; optional bi-temporal `as_of_valid_time`/`as_of_transaction_time`) |
 | **Vector** | `find_similar`, `enable_vector_index`, `list_vector_indexes` |
 | **Temporal** | `get_node_at_time`, `get_edge_at_time` |
 | **Hybrid** | `hybrid_query` (combined graph + vector + temporal) |
@@ -341,6 +341,20 @@ behavior exactly (valid time defaults to the transaction time). On
 (cascade delete does not support backdating). Transaction time is always
 system-assigned and cannot be set. See
 [docs/guides/mcp-query-tool.md](docs/guides/mcp-query-tool.md#recording-facts-at-a-specific-valid-time).
+
+**Point-in-time (AS OF) traversal (Issue #3225)**: `traverse` accepts optional
+`as_of_valid_time` / `as_of_transaction_time` (ISO 8601 / RFC 3339 or
+microseconds since epoch), independently settable (valid-time only, tx-time
+only, both, or neither), so an LLM can ask "who did Alice know on
+2024-01-01?" in one call instead of stitching together point-in-time node
+lookups edge-by-edge. When a temporal coordinate is supplied, traversal
+follows only edges and nodes valid at that bi-temporal point (edges created
+after the coordinate, or whose valid interval doesn't contain it, are
+excluded) and node properties reflect their state at that coordinate; when
+neither is supplied, behavior is unchanged (current-state traversal). Each
+dimension defaults independently to the current time when the *other* one is
+supplied but it isn't, mirroring `get_schema`'s `as_of_*` convention. See
+[docs/guides/mcp-query-tool.md](docs/guides/mcp-query-tool.md#point-in-time-as-of-graph-traversal).
 
 **Vector properties are elided by default (Issue #3220)**: `get_node`,
 `list_nodes`, `get_edge`, `list_edges`, `get_outgoing_edges`,

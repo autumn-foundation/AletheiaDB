@@ -1674,6 +1674,80 @@ impl AletheiaMcpServer {
         }))
     }
 
+    /// Fetch a node, optionally as of a bi-temporal coordinate.
+    fn get_node_maybe_at(
+        &self,
+        node_id: NodeId,
+        temporal: Option<(Timestamp, Timestamp)>,
+    ) -> Result<crate::core::Node, crate::core::error::Error> {
+        match temporal {
+            Some((vt, tt)) => self.db.get_node_at_time(node_id, vt, tt),
+            None => self.db.get_node(node_id),
+        }
+    }
+
+    /// Fetch an edge, optionally as of a bi-temporal coordinate.
+    fn get_edge_maybe_at(
+        &self,
+        edge_id: EdgeId,
+        temporal: Option<(Timestamp, Timestamp)>,
+    ) -> Result<crate::core::Edge, crate::core::error::Error> {
+        match temporal {
+            Some((vt, tt)) => self.db.get_edge_at_time(edge_id, vt, tt),
+            None => self.db.get_edge(edge_id),
+        }
+    }
+
+    /// Enumerate candidate edge ids for a traversal hop, optionally as of a
+    /// bi-temporal coordinate. Current-state lookups are pre-filtered by
+    /// label at the storage layer; the temporal index has no such
+    /// label-aware variant, so temporal candidates are filtered afterwards
+    /// by fetching each edge and checking its label.
+    fn traversal_edge_ids(
+        &self,
+        current_id: NodeId,
+        edge_label: &str,
+        direction: &str,
+        temporal: Option<(Timestamp, Timestamp)>,
+    ) -> Vec<EdgeId> {
+        let matches_label_at = |eid: &EdgeId| {
+            self.get_edge_maybe_at(*eid, temporal)
+                .map(|e| self.matches_label(e.label, edge_label))
+                .unwrap_or(false)
+        };
+
+        let outgoing = |current_id: NodeId| match temporal {
+            Some((vt, tt)) => self
+                .db
+                .get_outgoing_edges_at_time(current_id, vt, tt)
+                .into_iter()
+                .filter(|eid| matches_label_at(eid))
+                .collect::<Vec<_>>(),
+            None => self
+                .db
+                .get_outgoing_edges_with_label(current_id, edge_label),
+        };
+        let incoming = |current_id: NodeId| -> Vec<EdgeId> {
+            match temporal {
+                Some((vt, tt)) => self.db.get_incoming_edges_at_time(current_id, vt, tt),
+                None => self.db.get_incoming_edges(current_id),
+            }
+            .into_iter()
+            .filter(|eid| matches_label_at(eid))
+            .collect()
+        };
+
+        match direction {
+            "incoming" => incoming(current_id),
+            "both" => {
+                let mut edges = outgoing(current_id);
+                edges.extend(incoming(current_id));
+                edges
+            }
+            _ => outgoing(current_id),
+        }
+    }
+
     fn handle_traverse(&self, args: serde_json::Value) -> CallToolResult {
         let req: TraverseRequest = match serde_json::from_value(args) {
             Ok(r) => r,
@@ -1683,6 +1757,24 @@ impl AletheiaMcpServer {
         let start_id = match NodeId::new(req.start_node_id) {
             Ok(id) => id,
             Err(e) => return self.error_json(&e.to_string()),
+        };
+
+        let valid_time = match self.parse_opt_timestamp("as_of_valid_time", &req.as_of_valid_time) {
+            Ok(t) => t,
+            Err(result) => return result,
+        };
+        let transaction_time =
+            match self.parse_opt_timestamp("as_of_transaction_time", &req.as_of_transaction_time) {
+                Ok(t) => t,
+                Err(result) => return result,
+            };
+        // Bi-temporal defaulting mirrors get_schema: if only one axis is
+        // supplied, the other defaults to "now". If both are absent, this is
+        // a plain current-state traversal (byte-for-byte identical to prior
+        // behavior).
+        let temporal: Option<(Timestamp, Timestamp)> = match (valid_time, transaction_time) {
+            (None, None) => None,
+            (vt, tt) => Some((vt.unwrap_or_else(time::now), tt.unwrap_or_else(time::now))),
         };
 
         // Apply resource limits to prevent DoS
@@ -1705,7 +1797,7 @@ impl AletheiaMcpServer {
         while let Some((current_id, path, current_depth)) = frontier.pop() {
             if current_depth > 0 && !visited.contains(&current_id.as_u64()) {
                 visited.insert(current_id.as_u64());
-                if let Ok(node) = self.db.get_node(current_id) {
+                if let Ok(node) = self.get_node_maybe_at(current_id, temporal) {
                     results.push(TraversalResult {
                         node: self.node_to_response(&node, req.include_vectors.unwrap_or(false)),
                         path: path.clone(),
@@ -1718,45 +1810,11 @@ impl AletheiaMcpServer {
             }
 
             if current_depth < depth {
-                let edge_ids: Vec<EdgeId> = match direction {
-                    "incoming" => {
-                        // Filter incoming edges by label manually
-                        self.db
-                            .get_incoming_edges(current_id)
-                            .into_iter()
-                            .filter(|eid| {
-                                self.db
-                                    .get_edge(*eid)
-                                    .map(|e| self.matches_label(e.label, &req.edge_label))
-                                    .unwrap_or(false)
-                            })
-                            .collect()
-                    }
-                    "both" => {
-                        let mut edges = self
-                            .db
-                            .get_outgoing_edges_with_label(current_id, &req.edge_label);
-                        let incoming: Vec<EdgeId> = self
-                            .db
-                            .get_incoming_edges(current_id)
-                            .into_iter()
-                            .filter(|eid| {
-                                self.db
-                                    .get_edge(*eid)
-                                    .map(|e| self.matches_label(e.label, &req.edge_label))
-                                    .unwrap_or(false)
-                            })
-                            .collect();
-                        edges.extend(incoming);
-                        edges
-                    }
-                    _ => self
-                        .db
-                        .get_outgoing_edges_with_label(current_id, &req.edge_label),
-                };
+                let edge_ids =
+                    self.traversal_edge_ids(current_id, &req.edge_label, direction, temporal);
 
                 for edge_id in edge_ids {
-                    if let Ok(edge) = self.db.get_edge(edge_id) {
+                    if let Ok(edge) = self.get_edge_maybe_at(edge_id, temporal) {
                         let next_id = match direction {
                             "incoming" => edge.source,
                             _ => edge.target,
@@ -1771,10 +1829,18 @@ impl AletheiaMcpServer {
             }
         }
 
-        self.success_json(json!({
-            "results": results,
-            "count": results.len()
-        }))
+        match temporal {
+            Some((vt, tt)) => self.success_json(json!({
+                "results": results,
+                "count": results.len(),
+                "as_of_valid_time": time::to_iso8601(vt),
+                "as_of_transaction_time": time::to_iso8601(tt),
+            })),
+            None => self.success_json(json!({
+                "results": results,
+                "count": results.len()
+            })),
+        }
     }
 
     fn handle_find_similar(&self, args: serde_json::Value) -> CallToolResult {
@@ -3170,7 +3236,12 @@ fn tool_definitions() -> Vec<Tool> {
             "Traverse the graph starting from a node. Vector/embedding properties are \
                      elided by default (replaced with a `{type, dim, elided:true}` descriptor) to \
                      protect LLM context; pass `include_vectors: true` to receive the full float \
-                     arrays.",
+                     arrays. Accepts optional as_of_valid_time / as_of_transaction_time (ISO 8601 \
+                     or microseconds since epoch) to walk the graph as it existed at that \
+                     bi-temporal instant instead of the current state -- e.g. \"Alice's KNOWS \
+                     network as of last year\". Edges/nodes not valid at that instant are \
+                     excluded; omitting both parameters reproduces today's current-state behavior \
+                     exactly.",
             make_input_schema::<TraverseRequest>(),
         ),
         Tool::new(

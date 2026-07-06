@@ -172,6 +172,52 @@ structured error, e.g.:
 { "error": "valid_from ... is before entity creation time ... for node:7" }
 ```
 
+## Point-in-time (AS OF) graph traversal
+
+`traverse` accepts optional `as_of_valid_time` / `as_of_transaction_time`
+fields (same formats as every other MCP temporal field), independently
+settable, so an LLM can explore *relationships* as they existed at a past
+bi-temporal instant in a single call instead of stitching together
+`get_node_at_time`/`get_edge_at_time` lookups edge-by-edge. Omitting both
+reproduces today's current-state traversal exactly.
+
+**Example:** Alice and Bob became connected on 2021-03-01, backdated when
+recorded via `create_edge`'s `valid_time` (see above). An LLM later asks for
+Alice's `KNOWS` network as of last year:
+
+```jsonc
+// tools/call -> "traverse"
+{
+  "start_node_id": 7,
+  "edge_label": "KNOWS",
+  "direction": "outgoing",
+  "depth": 1,
+  "as_of_valid_time": "2025-07-06T00:00:00Z"
+}
+// -> {
+//      "results": [ { "node": { "id": 8, "label": "Person", "properties": {"name": "Bob"} },
+//                     "path": [7, 8], "depth": 1 } ],
+//      "count": 1,
+//      "as_of_valid_time": "2025-07-06T00:00:00Z",
+//      "as_of_transaction_time": "<now, since only as_of_valid_time was supplied>"
+//    }
+```
+
+Querying with `as_of_valid_time` set to a point *before* 2021-03-01 returns
+`{"results": [], "count": 0}` -- the relationship, and Bob himself if he
+didn't exist yet, are correctly excluded rather than silently falling back to
+the current state. An edge that was later deleted is still recalled by a
+coordinate that predates its retirement; an edge created after the coordinate
+is excluded. As with every other `as_of_*` field, an unparseable timestamp
+returns a structured error instead of silently traversing current state:
+
+```jsonc
+{ "error": "Invalid as_of_valid_time: Invalid timestamp format: 'not-a-timestamp'. ..." }
+```
+
+`MAX_TRAVERSAL_DEPTH` and `MAX_RESULT_LIMIT` apply identically whether or not
+a temporal coordinate is supplied.
+
 ## Notes
 
 - **AQL has no parameter binding.** Sending `params` with `language: "aql"`

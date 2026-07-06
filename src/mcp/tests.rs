@@ -993,6 +993,8 @@ mod traversal_tests {
             depth: Some(1),
             limit: None,
             include_vectors: None,
+            as_of_valid_time: None,
+            as_of_transaction_time: None,
         });
 
         let value: serde_json::Value = serde_json::from_str(&response).unwrap();
@@ -1013,6 +1015,8 @@ mod traversal_tests {
             depth: Some(3),
             limit: None,
             include_vectors: None,
+            as_of_valid_time: None,
+            as_of_transaction_time: None,
         });
 
         let value: serde_json::Value = serde_json::from_str(&response).unwrap();
@@ -1034,6 +1038,8 @@ mod traversal_tests {
             depth: Some(1),
             limit: None,
             include_vectors: None,
+            as_of_valid_time: None,
+            as_of_transaction_time: None,
         });
 
         let value: serde_json::Value = serde_json::from_str(&response).unwrap();
@@ -1053,6 +1059,8 @@ mod traversal_tests {
             depth: Some(3),
             limit: Some(2),
             include_vectors: None,
+            as_of_valid_time: None,
+            as_of_transaction_time: None,
         });
 
         let value: serde_json::Value = serde_json::from_str(&response).unwrap();
@@ -1907,6 +1915,8 @@ mod coverage_tests {
             direction: Some("outgoing".to_string()),
             limit: Some(50),
             include_vectors: None,
+            as_of_valid_time: None,
+            as_of_transaction_time: None,
         });
 
         // Should not error
@@ -2465,6 +2475,8 @@ mod traversal_extended_tests {
             depth: Some(1),
             limit: None,
             include_vectors: None,
+            as_of_valid_time: None,
+            as_of_transaction_time: None,
         });
 
         let value: serde_json::Value = serde_json::from_str(&response).unwrap();
@@ -2497,6 +2509,8 @@ mod traversal_extended_tests {
             depth: Some(3),
             limit: None,
             include_vectors: None,
+            as_of_valid_time: None,
+            as_of_transaction_time: None,
         });
 
         let value: serde_json::Value = serde_json::from_str(&response).unwrap();
@@ -2543,6 +2557,8 @@ mod traversal_extended_tests {
             depth: Some(1),
             limit: None,
             include_vectors: None,
+            as_of_valid_time: None,
+            as_of_transaction_time: None,
         });
 
         let value: serde_json::Value = serde_json::from_str(&response).unwrap();
@@ -2594,6 +2610,8 @@ mod traversal_extended_tests {
             depth: Some(1),
             limit: Some(5),
             include_vectors: None,
+            as_of_valid_time: None,
+            as_of_transaction_time: None,
         });
 
         let value: serde_json::Value = serde_json::from_str(&response).unwrap();
@@ -4773,6 +4791,8 @@ mod vector_elision_tests {
             depth: Some(1),
             limit: None,
             include_vectors: None,
+            as_of_valid_time: None,
+            as_of_transaction_time: None,
         });
         let value: serde_json::Value = serde_json::from_str(&response).unwrap();
         let results = value["results"].as_array().expect("results array");
@@ -4789,6 +4809,8 @@ mod vector_elision_tests {
             depth: Some(1),
             limit: None,
             include_vectors: Some(true),
+            as_of_valid_time: None,
+            as_of_transaction_time: None,
         });
         let value: serde_json::Value = serde_json::from_str(&response).unwrap();
         let results = value["results"].as_array().unwrap();
@@ -6184,6 +6206,8 @@ mod provenance_write_tests {
             depth: Some(1),
             limit: None,
             include_vectors: None,
+            as_of_valid_time: None,
+            as_of_transaction_time: None,
         });
         let value: serde_json::Value = serde_json::from_str(&response).unwrap();
         let results = value["results"].as_array().unwrap();
@@ -6240,5 +6264,441 @@ mod provenance_write_tests {
         });
         let value: serde_json::Value = serde_json::from_str(&response).unwrap();
         assert_eq!(value["node"]["provenance"]["source"], "initial-load");
+    }
+}
+
+// ============================================================================
+// Point-in-time (AS OF) graph traversal (Issue #3225)
+// ============================================================================
+
+mod traverse_as_of_tests {
+    use super::*;
+    use chrono::{DateTime, Duration, Utc};
+
+    /// `now` is the caller's own `Utc::now()`, captured once at the start of the test
+    /// and reused for every offset it computes, so relative orderings between offsets
+    /// stay deterministic regardless of how long the test takes to run.
+    fn hours_ago(now: DateTime<Utc>, hours: i64) -> String {
+        (now - Duration::hours(hours)).to_rfc3339()
+    }
+
+    fn create_node_at(server: &AletheiaMcpServer, label: &str, valid_time: &str) -> u64 {
+        let response = server.create_node(CreateNodeRequest {
+            label: label.to_string(),
+            properties: None,
+            valid_time: Some(valid_time.to_string()),
+            provenance: None,
+        });
+        let node: NodeResponse = parse_response(&response).expect("create_node should succeed");
+        node.id
+    }
+
+    fn create_edge_at(
+        server: &AletheiaMcpServer,
+        source_id: u64,
+        target_id: u64,
+        label: &str,
+        valid_time: &str,
+    ) -> u64 {
+        let response = server.create_edge(CreateEdgeRequest {
+            source_id,
+            target_id,
+            label: label.to_string(),
+            properties: None,
+            valid_time: Some(valid_time.to_string()),
+            provenance: None,
+        });
+        let edge: EdgeResponse = parse_response(&response).expect("create_edge should succeed");
+        edge.id
+    }
+
+    fn traverse_count(
+        server: &AletheiaMcpServer,
+        req: TraverseRequest,
+    ) -> (usize, serde_json::Value) {
+        let response = server.traverse(req);
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert!(value.get("error").is_none(), "unexpected error: {value}");
+        let count = value["count"].as_u64().unwrap() as usize;
+        (count, value)
+    }
+
+    #[test]
+    fn test_traverse_as_of_excludes_edge_created_after_coordinate() {
+        let server = create_test_server();
+        let now = Utc::now();
+
+        let a = create_node_at(&server, "Person", &hours_ago(now, 10));
+        let b = create_node_at(&server, "Person", &hours_ago(now, 10));
+        create_edge_at(&server, a, b, "KNOWS", &hours_ago(now, 2));
+
+        // Before the edge was created: excluded.
+        let (count_before, _) = traverse_count(
+            &server,
+            TraverseRequest {
+                start_node_id: a,
+                edge_label: "KNOWS".to_string(),
+                direction: Some("outgoing".to_string()),
+                depth: Some(1),
+                limit: None,
+                include_vectors: None,
+                as_of_valid_time: Some(hours_ago(now, 5)),
+                as_of_transaction_time: None,
+            },
+        );
+        assert_eq!(
+            count_before, 0,
+            "edge created after coordinate must be excluded"
+        );
+
+        // After the edge was created: included.
+        let (count_after, _) = traverse_count(
+            &server,
+            TraverseRequest {
+                start_node_id: a,
+                edge_label: "KNOWS".to_string(),
+                direction: Some("outgoing".to_string()),
+                depth: Some(1),
+                limit: None,
+                include_vectors: None,
+                as_of_valid_time: Some(hours_ago(now, 1)),
+                as_of_transaction_time: None,
+            },
+        );
+        assert_eq!(
+            count_after, 1,
+            "edge valid as of coordinate must be included"
+        );
+    }
+
+    #[test]
+    fn test_traverse_as_of_excludes_retired_edge_but_recalls_it_before_retirement() {
+        let server = create_test_server();
+        let now = Utc::now();
+
+        let a = create_node_at(&server, "Person", &hours_ago(now, 10));
+        let b = create_node_at(&server, "Person", &hours_ago(now, 10));
+        let edge_id = create_edge_at(&server, a, b, "KNOWS", &hours_ago(now, 5));
+        // Anchor a transaction-time coordinate right after the edge was created but
+        // before it is (really, physically) deleted below.
+        let tx_time_before_delete = Utc::now().to_rfc3339();
+
+        // Retire (delete) the edge, backdating the retirement itself.
+        let delete_response = server.delete_edge(DeleteEdgeRequest {
+            edge_id,
+            valid_time: Some(hours_ago(now, 2)),
+        });
+        let delete_value: serde_json::Value = serde_json::from_str(&delete_response).unwrap();
+        assert!(
+            delete_value.get("error").is_none(),
+            "delete_edge should succeed: {delete_value}"
+        );
+
+        // Between creation (5h ago) and retirement (2h ago), as recorded by a
+        // transaction time before the deletion was committed: still valid --
+        // recall must be 1.0 even though the edge has since been deleted for real
+        // (mirrors tests/temporal_adjacency_default_enabled_test.rs's recall check).
+        let (count_before_retirement, _) = traverse_count(
+            &server,
+            TraverseRequest {
+                start_node_id: a,
+                edge_label: "KNOWS".to_string(),
+                direction: Some("outgoing".to_string()),
+                depth: Some(1),
+                limit: None,
+                include_vectors: None,
+                as_of_valid_time: Some(hours_ago(now, 3)),
+                as_of_transaction_time: Some(tx_time_before_delete),
+            },
+        );
+        assert_eq!(
+            count_before_retirement, 1,
+            "edge valid at coordinate must be recalled despite later deletion"
+        );
+
+        // After retirement (2h ago): excluded.
+        let (count_after_retirement, _) = traverse_count(
+            &server,
+            TraverseRequest {
+                start_node_id: a,
+                edge_label: "KNOWS".to_string(),
+                direction: Some("outgoing".to_string()),
+                depth: Some(1),
+                limit: None,
+                include_vectors: None,
+                as_of_valid_time: Some(hours_ago(now, 1)),
+                as_of_transaction_time: None,
+            },
+        );
+        assert_eq!(
+            count_after_retirement, 0,
+            "edge retired before coordinate must be excluded"
+        );
+    }
+
+    #[test]
+    fn test_traverse_as_of_valid_time_vs_transaction_time_disagreement() {
+        let server = create_test_server();
+        let now = Utc::now();
+
+        let a = create_node_at(&server, "Person", &hours_ago(now, 10));
+        let b = create_node_at(&server, "Person", &hours_ago(now, 10));
+        // Valid time is backdated to 5h ago; the *actual* commit (transaction time)
+        // happens for real, right now.
+        create_edge_at(&server, a, b, "KNOWS", &hours_ago(now, 5));
+
+        // valid_time is satisfied (5h ago has passed), but transaction_time asks
+        // "as recorded by 20h ago" -- long before the edge was actually committed.
+        let (count_tx_gate_fails, _) = traverse_count(
+            &server,
+            TraverseRequest {
+                start_node_id: a,
+                edge_label: "KNOWS".to_string(),
+                direction: Some("outgoing".to_string()),
+                depth: Some(1),
+                limit: None,
+                include_vectors: None,
+                as_of_valid_time: Some(hours_ago(now, 5)),
+                as_of_transaction_time: Some(hours_ago(now, 20)),
+            },
+        );
+        assert_eq!(
+            count_tx_gate_fails, 0,
+            "transaction-time coordinate before the real commit must exclude the edge \
+             even though valid_time alone would admit it"
+        );
+
+        // valid_time asks for 8h ago (not yet valid), transaction_time defaults to now
+        // (satisfied, since the edge is already committed for real).
+        let (count_vt_gate_fails, _) = traverse_count(
+            &server,
+            TraverseRequest {
+                start_node_id: a,
+                edge_label: "KNOWS".to_string(),
+                direction: Some("outgoing".to_string()),
+                depth: Some(1),
+                limit: None,
+                include_vectors: None,
+                as_of_valid_time: Some(hours_ago(now, 8)),
+                as_of_transaction_time: None,
+            },
+        );
+        assert_eq!(
+            count_vt_gate_fails, 0,
+            "valid-time coordinate before the fact became true must exclude the edge \
+             even though transaction_time alone would admit it"
+        );
+
+        // Both axes satisfied: included.
+        let (count_both_satisfied, _) = traverse_count(
+            &server,
+            TraverseRequest {
+                start_node_id: a,
+                edge_label: "KNOWS".to_string(),
+                direction: Some("outgoing".to_string()),
+                depth: Some(1),
+                limit: None,
+                include_vectors: None,
+                as_of_valid_time: Some(hours_ago(now, 5)),
+                as_of_transaction_time: None,
+            },
+        );
+        assert_eq!(
+            count_both_satisfied, 1,
+            "both axes satisfied must include the edge"
+        );
+    }
+
+    #[test]
+    fn test_traverse_as_of_empty_when_start_node_not_yet_existing() {
+        let server = create_test_server();
+        let now = Utc::now();
+
+        let a = create_node_at(&server, "Person", &hours_ago(now, 3));
+        let b = create_node_at(&server, "Person", &hours_ago(now, 3));
+        create_edge_at(&server, a, b, "KNOWS", &hours_ago(now, 3));
+
+        // 5h ago: neither node nor edge existed yet.
+        let (count, _) = traverse_count(
+            &server,
+            TraverseRequest {
+                start_node_id: a,
+                edge_label: "KNOWS".to_string(),
+                direction: Some("outgoing".to_string()),
+                depth: Some(1),
+                limit: None,
+                include_vectors: None,
+                as_of_valid_time: Some(hours_ago(now, 5)),
+                as_of_transaction_time: None,
+            },
+        );
+        assert_eq!(
+            count, 0,
+            "start node not yet existing must yield empty results, not an error"
+        );
+    }
+
+    #[test]
+    fn test_traverse_as_of_invalid_valid_time_returns_structured_error() {
+        let server = create_test_server();
+        let a = create_node_at(&server, "Person", &Utc::now().to_rfc3339());
+
+        let response = server.traverse(TraverseRequest {
+            start_node_id: a,
+            edge_label: "KNOWS".to_string(),
+            direction: Some("outgoing".to_string()),
+            depth: Some(1),
+            limit: None,
+            include_vectors: None,
+            as_of_valid_time: Some("not-a-timestamp".to_string()),
+            as_of_transaction_time: None,
+        });
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        let error = value
+            .get("error")
+            .and_then(|e| e.as_str())
+            .expect("expected a structured error, got no error field");
+        assert!(
+            error.contains("as_of_valid_time"),
+            "error should identify the offending field: {error}"
+        );
+    }
+
+    #[test]
+    fn test_traverse_as_of_invalid_transaction_time_returns_structured_error() {
+        let server = create_test_server();
+        let a = create_node_at(&server, "Person", &Utc::now().to_rfc3339());
+
+        let response = server.traverse(TraverseRequest {
+            start_node_id: a,
+            edge_label: "KNOWS".to_string(),
+            direction: Some("outgoing".to_string()),
+            depth: Some(1),
+            limit: None,
+            include_vectors: None,
+            as_of_valid_time: None,
+            as_of_transaction_time: Some("not-a-timestamp".to_string()),
+        });
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        let error = value
+            .get("error")
+            .and_then(|e| e.as_str())
+            .expect("expected a structured error, got no error field");
+        assert!(
+            error.contains("as_of_transaction_time"),
+            "error should identify the offending field: {error}"
+        );
+    }
+
+    #[test]
+    fn test_traverse_as_of_respects_resource_limits() {
+        let server = create_test_server();
+        let now = Utc::now();
+        let valid_time = hours_ago(now, 3);
+
+        // Chain of 5 nodes (4 hops), all backdated to the same valid_time.
+        let mut prev_id: Option<u64> = None;
+        for _ in 0..5 {
+            let node_id = create_node_at(&server, "ChainNode", &valid_time);
+            if let Some(source_id) = prev_id {
+                create_edge_at(&server, source_id, node_id, "NEXT", &valid_time);
+            }
+            prev_id = Some(node_id);
+        }
+        let start = 0u64; // first node created in a fresh server has id 0
+
+        // Depth far beyond MAX_TRAVERSAL_DEPTH must be clamped, not error, on the
+        // temporal path exactly as it is on the current-state path.
+        let (count, _) = traverse_count(
+            &server,
+            TraverseRequest {
+                start_node_id: start,
+                edge_label: "NEXT".to_string(),
+                direction: Some("outgoing".to_string()),
+                depth: Some(100),
+                limit: Some(50),
+                include_vectors: None,
+                as_of_valid_time: Some(hours_ago(now, 1)),
+                as_of_transaction_time: None,
+            },
+        );
+        assert_eq!(count, 4, "clamped depth should still reach the full chain");
+    }
+
+    #[test]
+    fn test_traverse_as_of_no_temporal_params_matches_current_state() {
+        let server = create_test_server();
+
+        let a = create_node_at(&server, "Person", &Utc::now().to_rfc3339());
+        let b = create_node_at(&server, "Person", &Utc::now().to_rfc3339());
+        create_edge_at(&server, a, b, "KNOWS", &Utc::now().to_rfc3339());
+        let now_after_creation = Utc::now();
+
+        let (count_no_temporal, value_no_temporal) = traverse_count(
+            &server,
+            TraverseRequest {
+                start_node_id: a,
+                edge_label: "KNOWS".to_string(),
+                direction: Some("outgoing".to_string()),
+                depth: Some(1),
+                limit: None,
+                include_vectors: None,
+                as_of_valid_time: None,
+                as_of_transaction_time: None,
+            },
+        );
+
+        let (count_as_of_now, value_as_of_now) = traverse_count(
+            &server,
+            TraverseRequest {
+                start_node_id: a,
+                edge_label: "KNOWS".to_string(),
+                direction: Some("outgoing".to_string()),
+                depth: Some(1),
+                limit: None,
+                include_vectors: None,
+                as_of_valid_time: Some(now_after_creation.to_rfc3339()),
+                as_of_transaction_time: Some(now_after_creation.to_rfc3339()),
+            },
+        );
+
+        assert_eq!(count_no_temporal, 1);
+        assert_eq!(count_no_temporal, count_as_of_now);
+        assert_eq!(
+            value_no_temporal["results"][0]["node"]["id"],
+            value_as_of_now["results"][0]["node"]["id"],
+            "explicit as_of=now must reproduce the identical current-state answer"
+        );
+    }
+
+    #[test]
+    fn test_traverse_as_of_multi_hop() {
+        let server = create_test_server();
+        let now = Utc::now();
+        let valid_time = hours_ago(now, 3);
+
+        let a = create_node_at(&server, "Person", &valid_time);
+        let b = create_node_at(&server, "Person", &valid_time);
+        let c = create_node_at(&server, "Person", &valid_time);
+        create_edge_at(&server, a, b, "KNOWS", &valid_time);
+        create_edge_at(&server, b, c, "KNOWS", &valid_time);
+
+        let (count, _) = traverse_count(
+            &server,
+            TraverseRequest {
+                start_node_id: a,
+                edge_label: "KNOWS".to_string(),
+                direction: Some("outgoing".to_string()),
+                depth: Some(2),
+                limit: None,
+                include_vectors: None,
+                as_of_valid_time: Some(hours_ago(now, 1)),
+                as_of_transaction_time: None,
+            },
+        );
+        assert_eq!(
+            count, 2,
+            "both hops should be reachable as of the coordinate"
+        );
     }
 }
