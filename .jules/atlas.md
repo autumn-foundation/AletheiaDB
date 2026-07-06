@@ -90,3 +90,7 @@
 ## 2026-06-21 - Splitting Redb Cold Storage Blob
 **Tangle:** `src/storage/redb_cold_storage.rs` was over 4100 lines long, a "Blob" module holding both core cold storage logic and over 2000 lines of tests. It made navigation and understanding the core operations difficult.
 **Blueprint:** Refactored into a `src/storage/redb_cold_storage/` module. Kept the core data definitions and implementation in `mod.rs` (reduced to ~2000 lines) and moved all tests to `tests.rs` (~2000 lines), maintaining the `#[cfg(test)]` block functionality but with better physical separation.
+
+## 2026-07-06 - Splitting Blob modules
+**Tangle:** Several files in the codebase (`src/storage/checkpoint.rs`, `src/storage/migration.rs`, `src/index/vector/temporal/mod.rs`, and `src/query/executor/iterators.rs`) had grown into "Blob" modules, each containing over 3000 lines of code, heavily mixed with their tests, making navigation and maintenance difficult.
+**Blueprint:** Extracted the large inline `#[cfg(test)] mod tests { ... }` blocks into dedicated `tests.rs` files for each of these modules and replaced them with `#[cfg(test)] mod tests;`, converting the files into module directories (e.g., `src/storage/checkpoint/mod.rs` and `src/storage/checkpoint/tests.rs`). This drastically reduced the noise and improved readability while maintaining proper module structures.
