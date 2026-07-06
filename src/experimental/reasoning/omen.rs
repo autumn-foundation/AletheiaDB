@@ -126,20 +126,26 @@ impl<'a> Omen<'a> {
 
         // 2. Physics Math
         // Relative Position P = Pb - Pa (at t=0, which is window.end)
-        let rel_pos: Vec<f32> = pos_b.iter().zip(pos_a.iter()).map(|(b, a)| b - a).collect();
-
         // Relative Velocity V = Vb - Va
-        let rel_vel: Vec<f32> = vel_b.iter().zip(vel_a.iter()).map(|(b, a)| b - a).collect();
 
-        // Calculate dot products
-        let p_dot_v: f32 = rel_pos.iter().zip(rel_vel.iter()).map(|(p, v)| p * v).sum();
+        let mut p_dot_v = 0.0;
+        let mut v_dot_v = 0.0;
+        let mut current_dist_sq = 0.0;
 
-        let v_dot_v: f32 = rel_vel.iter().map(|v| v * v).sum();
+        // Iterate once to compute dot products and current distance to avoid allocating intermediate Vecs
+        // Reduces heap allocations by 3 per encounter prediction
+        for (((&pb, &pa), &vb), &va) in pos_b.iter().zip(&pos_a).zip(&vel_b).zip(&vel_a) {
+            let p = pb - pa;
+            let v = vb - va;
+            p_dot_v += p * v;
+            v_dot_v += v * v;
+            current_dist_sq += p * p;
+        }
 
         // If relative velocity is effectively zero, paths are parallel.
         // Closest distance is current distance. t = 0.
         if v_dot_v < 1e-9 {
-            let current_dist = rel_pos.iter().map(|x| x * x).sum::<f32>().sqrt();
+            let current_dist = current_dist_sq.sqrt();
             return Ok(Some(Encounter {
                 time_to_encounter: Duration::from_secs(0),
                 is_past: false,
@@ -150,13 +156,16 @@ impl<'a> Omen<'a> {
         // t = -(P . V) / ||V||^2
         let t_secs = -p_dot_v / v_dot_v;
 
-        // Calculate closest distance at t
+        // Calculate closest distance at t without allocating a new Vec
         // Pos(t) = P + V*t
-        let mut pos_at_t = Vec::with_capacity(rel_pos.len());
-        for (p, v) in rel_pos.iter().zip(rel_vel.iter()) {
-            pos_at_t.push(p + v * t_secs);
+        let mut min_dist_sq = 0.0;
+        for (((&pb, &pa), &vb), &va) in pos_b.iter().zip(&pos_a).zip(&vel_b).zip(&vel_a) {
+            let p = pb - pa;
+            let v = vb - va;
+            let pos_at_t = p + v * t_secs;
+            min_dist_sq += pos_at_t * pos_at_t;
         }
-        let min_dist = pos_at_t.iter().map(|x| x * x).sum::<f32>().sqrt();
+        let min_dist = min_dist_sq.sqrt();
 
         let is_past = t_secs < 0.0;
         let abs_secs = t_secs.abs();
