@@ -310,7 +310,7 @@ cargo run --bin aletheia-mcp --features mcp-server
 | **Edges** | `get_edge`, `create_edge`, `update_edge`, `delete_edge`, `get_outgoing_edges`, `get_incoming_edges` |
 | **Traversal** | `traverse` (multi-hop graph traversal; optional bi-temporal `as_of_valid_time`/`as_of_transaction_time`) |
 | **Vector** | `find_similar`, `enable_vector_index`, `list_vector_indexes` |
-| **Temporal** | `get_node_at_time`, `get_edge_at_time` |
+| **Temporal** | `get_node_at_time`, `get_edge_at_time`, `temporal_extent` (dataset's queryable bi-temporal extent — earliest/latest valid-time and transaction-time bounds as RFC3339, explicit `null`s on an empty DB; optional `by_label: true` for per-label/per-edge-type bounds; covers all recorded history incl. expired/superseded versions) |
 | **Hybrid** | `hybrid_query` (combined graph + vector + temporal) |
 | **Query** | `query` (execute a single read-only Cypher/AQL statement; see below) |
 | **Schema** | `get_schema` (node labels, edge types, and property keys, each with counts; optional bi-temporal `as_of_valid_time`/`as_of_transaction_time`) |

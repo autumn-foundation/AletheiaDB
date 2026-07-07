@@ -22,7 +22,7 @@
 //! | **Nodes** | `get_node`, `create_node`, `update_node` | CRUD operations for nodes |
 //! | **Edges** | `get_edge`, `create_edge`, `traverse` | CRUD and traversal for edges |
 //! | **Vector** | `find_similar`, `enable_vector_index` | Semantic similarity search |
-//! | **Temporal** | `get_node_at_time`, `get_node_history` | Time-travel queries and history |
+//! | **Temporal** | `get_node_at_time`, `get_node_history`, `temporal_extent` | Time-travel queries, history, and dataset extent |
 //! | **Hybrid** | `hybrid_query` | Combined graph + vector + temporal queries |
 //! | **Schema** | `get_schema` | Discover node labels, edge types, and property keys (optionally bi-temporal) |
 //!
@@ -626,6 +626,18 @@ impl AletheiaMcpServer {
     /// instant. Never errors on an empty database.
     pub fn get_schema(&self, req: GetSchemaRequest) -> String {
         Self::extract_text(self.handle_get_schema(
+            serde_json::to_value(req).expect("request serialization should not fail"),
+        ))
+    }
+
+    /// Report the dataset's queryable bi-temporal extent: earliest/latest
+    /// valid-time and transaction-time bounds across all recorded history
+    /// (including expired/superseded versions), as RFC3339 strings.
+    ///
+    /// Pass `by_label: true` for a per-node-label / per-edge-type breakdown.
+    /// An empty database returns explicit `null` bounds, never epoch 0.
+    pub fn temporal_extent(&self, req: TemporalExtentRequest) -> String {
+        Self::extract_text(self.handle_temporal_extent(
             serde_json::to_value(req).expect("request serialization should not fail"),
         ))
     }
@@ -2862,6 +2874,95 @@ impl AletheiaMcpServer {
         }
     }
 
+    /// Render a finite timestamp as an RFC3339 string (UTC, microsecond
+    /// precision). Falls back to a raw microsecond form for coordinates
+    /// outside chrono's representable range rather than panicking.
+    fn timestamp_to_rfc3339(ts: Timestamp) -> String {
+        let micros = ts.wallclock();
+        DateTime::<Utc>::from_timestamp_micros(micros)
+            .map(|dt| dt.to_rfc3339_opts(chrono::SecondsFormat::Micros, true))
+            .unwrap_or_else(|| format!("{micros}us"))
+    }
+
+    /// Serialize one dimension's bounds; `None` bounds become explicit JSON
+    /// `null`s (never `0`/epoch), so an empty database is unambiguous.
+    fn time_bounds_to_json(bounds: &crate::db::TimeBounds) -> serde_json::Value {
+        json!({
+            "earliest": bounds.earliest.map(Self::timestamp_to_rfc3339),
+            "latest": bounds.latest.map(Self::timestamp_to_rfc3339),
+        })
+    }
+
+    /// Convert a [`crate::db::TemporalExtent`] into its JSON wire
+    /// representation. Serialization only — all bounds are computed by
+    /// [`AletheiaDB::temporal_extent`]/[`AletheiaDB::temporal_extent_by_label`].
+    fn temporal_extent_to_json(extent: &crate::db::TemporalExtent) -> serde_json::Value {
+        let mut value = json!({
+            "valid_time": Self::time_bounds_to_json(&extent.valid_time),
+            "transaction_time": Self::time_bounds_to_json(&extent.transaction_time),
+        });
+
+        let label_extents_to_json = |extents: &[crate::db::LabelExtent], key: &str| {
+            extents
+                .iter()
+                .map(|e| {
+                    json!({
+                        key: e.label,
+                        "valid_time": Self::time_bounds_to_json(&e.valid_time),
+                        "transaction_time": Self::time_bounds_to_json(&e.transaction_time),
+                    })
+                })
+                .collect::<Vec<_>>()
+        };
+
+        if let Some(obj) = value.as_object_mut() {
+            if let Some(node_labels) = &extent.node_labels {
+                obj.insert(
+                    "node_labels".to_string(),
+                    serde_json::Value::Array(label_extents_to_json(node_labels, "label")),
+                );
+            }
+            if let Some(edge_types) = &extent.edge_types {
+                obj.insert(
+                    "edge_types".to_string(),
+                    serde_json::Value::Array(label_extents_to_json(edge_types, "edge_type")),
+                );
+            }
+        }
+
+        value
+    }
+
+    /// Report the dataset's queryable bi-temporal extent (Issue #3238).
+    ///
+    /// The handler only serializes: bounds come from the public
+    /// `AletheiaDB::temporal_extent` / `temporal_extent_by_label` API.
+    fn handle_temporal_extent(&self, args: serde_json::Value) -> CallToolResult {
+        // The tool has no required arguments: a call with no `arguments`
+        // object at all must behave like `{}`.
+        let args = if args.is_null() {
+            serde_json::Value::Object(serde_json::Map::new())
+        } else {
+            args
+        };
+
+        let req: TemporalExtentRequest = match serde_json::from_value(args) {
+            Ok(r) => r,
+            Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
+        };
+
+        let result = if req.by_label.unwrap_or(false) {
+            self.db.temporal_extent_by_label()
+        } else {
+            self.db.temporal_extent()
+        };
+
+        match result {
+            Ok(extent) => self.success_json(Self::temporal_extent_to_json(&extent)),
+            Err(e) => self.db_error(e),
+        }
+    }
+
     fn handle_hybrid_query(&self, args: serde_json::Value) -> CallToolResult {
         let req: HybridQueryRequest = match serde_json::from_value(args) {
             Ok(r) => r,
@@ -3432,6 +3533,7 @@ impl AletheiaMcpServer {
             "hybrid_query" => self.handle_hybrid_query(args),
             "query" => self.handle_query(args),
             "get_schema" => self.handle_get_schema(args),
+            "temporal_extent" => self.handle_temporal_extent(args),
             _ => self.error_result(
                 McpError::new(McpErrorCode::NotFound, format!("Unknown tool: {}", name))
                     .details(json!({ "tool": name })),
@@ -3840,6 +3942,24 @@ fn tool_definitions() -> Vec<Tool> {
              Returns a well-formed empty summary on an empty database, never an error.",
             make_input_schema::<GetSchemaRequest>(),
         ),
+        Tool::new(
+            "temporal_extent",
+            "Report the dataset's queryable bi-temporal extent: valid_time {earliest, latest} \
+             and transaction_time {earliest, latest} as RFC3339 strings, in one call. Call \
+             this BEFORE issuing AS OF queries so the target instant lands inside recorded \
+             data — an AS OF before valid_time.earliest returns empty results that are \
+             otherwise indistinguishable from 'the fact never existed'. Bounds cover ALL \
+             recorded history, including expired/superseded versions and deletions (a 2019 \
+             fact later corrected still counts toward earliest); this is a calendar RANGE, \
+             not a current-state count. Convention: earliest = the minimum interval start in \
+             that dimension; latest = the maximum of interval starts and CLOSED interval \
+             ends. Open-ended intervals (still-valid facts / still-current records) \
+             contribute only their start, so latest is the newest finite recorded event \
+             coordinate, never +infinity. An empty database returns explicit nulls for every \
+             bound, never 0/epoch-1970. Pass by_label: true to also receive the same bounds \
+             per node label (node_labels) and per edge type (edge_types).",
+            make_input_schema::<TemporalExtentRequest>(),
+        ),
     ]
 }
 
@@ -3994,5 +4114,51 @@ mod server_unit_tests {
             result.is_error.unwrap_or(false),
             "Null JSON input must produce an error result"
         );
+    }
+
+    #[test]
+    fn handle_temporal_extent_invalid_by_label_type_routes_through_invalid_argument() {
+        // A mistyped argument (string instead of bool) must produce the
+        // structured Issue #3234 error payload with code INVALID_ARGUMENT
+        // (Issue #3238).
+        let server = make_server();
+        let result = server.handle_temporal_extent(serde_json::json!({"by_label": "yes"}));
+        assert!(
+            result.is_error.unwrap_or(false),
+            "mistyped by_label must produce an error result"
+        );
+        let text = AletheiaMcpServer::extract_text(result);
+        let val: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(
+            val["error"]["code"], "INVALID_ARGUMENT",
+            "mistyped by_label must classify as INVALID_ARGUMENT: {val}"
+        );
+        assert_eq!(
+            val["error"]["retriable"], false,
+            "INVALID_ARGUMENT must not be retriable: {val}"
+        );
+        assert!(
+            val["error"]["message"]
+                .as_str()
+                .is_some_and(|m| m.contains("Invalid arguments")),
+            "message must preserve the free-text detail: {val}"
+        );
+    }
+
+    #[test]
+    fn handle_temporal_extent_null_args_behaves_like_no_arguments() {
+        // The tool has no required arguments: an MCP call with the
+        // `arguments` object omitted entirely (routed here as Null) must
+        // succeed exactly like `{}`.
+        let server = make_server();
+        let result = server.handle_temporal_extent(serde_json::Value::Null);
+        assert!(
+            !result.is_error.unwrap_or(false),
+            "temporal_extent with no arguments must succeed"
+        );
+        let text = AletheiaMcpServer::extract_text(result);
+        let val: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert!(val["valid_time"]["earliest"].is_null());
+        assert!(val["transaction_time"]["latest"].is_null());
     }
 }

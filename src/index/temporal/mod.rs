@@ -37,9 +37,28 @@
 
 use crate::core::error::{Result, StorageError};
 use crate::core::id::{EdgeId, EntityId, NodeId, VersionId};
-use crate::core::temporal::{BiTemporalInterval, TimeRange, Timestamp};
+use crate::core::temporal::{BiTemporalInterval, TIMESTAMP_MAX, TimeRange, Timestamp};
 use dashmap::DashMap;
 use smallvec::SmallVec;
+
+/// The earliest/latest finite temporal coordinates observed across every
+/// version recorded in the indexes, per temporal dimension (Issue #3238).
+///
+/// Produced by [`TemporalIndexes::extent`]. `*_latest` follows the extent
+/// convention: the maximum of interval starts and *closed* interval ends;
+/// open-ended intervals (`end == TIMESTAMP_MAX`) contribute only their
+/// start, so the open-interval sentinel never appears here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IndexTemporalExtent {
+    /// Minimum valid-time interval start observed.
+    pub valid_earliest: Timestamp,
+    /// Maximum finite valid-time coordinate observed.
+    pub valid_latest: Timestamp,
+    /// Minimum transaction-time interval start observed.
+    pub tx_earliest: Timestamp,
+    /// Maximum finite transaction-time coordinate observed.
+    pub tx_latest: Timestamp,
+}
 
 /// Policy for handling duplicate versions during batch insertion.
 ///
@@ -412,6 +431,23 @@ impl EntityTimeline {
             .iter()
             .filter(move |entry| entry.end > range_start)
             .map(|entry| entry.metadata_idx)
+    }
+
+    /// Fold this timeline's `(start, end)` intervals into running
+    /// earliest/latest bounds per the extent convention (Issue #3238):
+    /// `earliest` tracks the minimum start; `latest` tracks the maximum of
+    /// starts and *closed* ends — an open end (`TIMESTAMP_MAX`) contributes
+    /// only its interval's start, so the sentinel never leaks into bounds.
+    fn fold_extent(&self, earliest: &mut Option<Timestamp>, latest: &mut Option<Timestamp>) {
+        for entry in &self.versions {
+            *earliest = Some(earliest.map_or(entry.start, |e| e.min(entry.start)));
+
+            let mut candidate = entry.start;
+            if entry.end != TIMESTAMP_MAX {
+                candidate = candidate.max(entry.end);
+            }
+            *latest = Some(latest.map_or(candidate, |l| l.max(candidate)));
+        }
     }
 
     /// Find all metadata indices in this timeline that overlap with the given time range.
@@ -1324,6 +1360,52 @@ impl TemporalIndexes {
             use std::collections::HashSet;
             let b_set: HashSet<_> = b.iter().copied().collect();
             a.iter().copied().filter(|v| b_set.contains(v)).collect()
+        }
+    }
+
+    /// Compute the bi-temporal extent across every version ever recorded in
+    /// these indexes (Issue #3238).
+    ///
+    /// Index entries are inserted for every committed write (including
+    /// delete tombstones) and are retained even after a version's payload
+    /// migrates to cold storage, so the returned bounds cover **all recorded
+    /// history** — including expired/superseded versions.
+    ///
+    /// Returns `None` when no versions have ever been recorded (empty
+    /// database), so callers can report explicit "no data" instead of a
+    /// misleading epoch-0 bound. See [`IndexTemporalExtent`] for the
+    /// `latest` convention (closed ends count; open ends contribute only
+    /// their start).
+    ///
+    /// # Performance
+    ///
+    /// A single O(total versions) pass over the in-memory timeline vectors;
+    /// no storage I/O. DashMap shard guards are held only transiently per
+    /// entity.
+    pub fn extent(&self) -> Option<IndexTemporalExtent> {
+        let mut valid_earliest = None;
+        let mut valid_latest = None;
+        let mut tx_earliest = None;
+        let mut tx_latest = None;
+
+        for entry in self.index.iter() {
+            let timelines = entry.value();
+            timelines
+                .valid
+                .fold_extent(&mut valid_earliest, &mut valid_latest);
+            timelines.tx.fold_extent(&mut tx_earliest, &mut tx_latest);
+        }
+
+        match (valid_earliest, valid_latest, tx_earliest, tx_latest) {
+            (Some(valid_earliest), Some(valid_latest), Some(tx_earliest), Some(tx_latest)) => {
+                Some(IndexTemporalExtent {
+                    valid_earliest,
+                    valid_latest,
+                    tx_earliest,
+                    tx_latest,
+                })
+            }
+            _ => None,
         }
     }
 
