@@ -6658,15 +6658,17 @@ mod traverse_as_of_tests {
         let valid_time = hours_ago(now, 3);
 
         // Chain of 5 nodes (4 hops), all backdated to the same valid_time.
+        let mut start = None;
         let mut prev_id: Option<u64> = None;
         for _ in 0..5 {
             let node_id = create_node_at(&server, "ChainNode", &valid_time);
+            start.get_or_insert(node_id);
             if let Some(source_id) = prev_id {
                 create_edge_at(&server, source_id, node_id, "NEXT", &valid_time);
             }
             prev_id = Some(node_id);
         }
-        let start = 0u64; // first node created in a fresh server has id 0
+        let start = start.unwrap();
 
         // Depth far beyond MAX_TRAVERSAL_DEPTH must be clamped, not error, on the
         // temporal path exactly as it is on the current-state path.
