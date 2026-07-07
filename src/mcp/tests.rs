@@ -992,6 +992,7 @@ mod traversal_tests {
             direction: Some("outgoing".to_string()),
             depth: Some(1),
             limit: None,
+            offset: None,
             include_vectors: None,
             as_of_valid_time: None,
             as_of_transaction_time: None,
@@ -1014,6 +1015,7 @@ mod traversal_tests {
             direction: Some("outgoing".to_string()),
             depth: Some(3),
             limit: None,
+            offset: None,
             include_vectors: None,
             as_of_valid_time: None,
             as_of_transaction_time: None,
@@ -1037,6 +1039,7 @@ mod traversal_tests {
             direction: Some("incoming".to_string()),
             depth: Some(1),
             limit: None,
+            offset: None,
             include_vectors: None,
             as_of_valid_time: None,
             as_of_transaction_time: None,
@@ -1058,6 +1061,7 @@ mod traversal_tests {
             direction: None,
             depth: Some(3),
             limit: Some(2),
+            offset: None,
             include_vectors: None,
             as_of_valid_time: None,
             as_of_transaction_time: None,
@@ -1122,6 +1126,7 @@ mod vector_tests {
             property_name: "embedding".to_string(),
             embedding: vec![0.1, 0.2, 0.3, 0.4],
             k: Some(5),
+            offset: None,
             include_vectors: None,
         });
 
@@ -1167,6 +1172,7 @@ mod vector_tests {
             property_name: "embedding".to_string(),
             embedding: vec![0.1, 0.2, 0.3, 0.4],
             k: Some(3),
+            offset: None,
             include_vectors: None,
         });
 
@@ -1666,6 +1672,7 @@ mod coverage_tests {
             property_name: "embedding".to_string(),
             embedding: vec![0.1, 0.2, 0.3], // Wrong: 3 dimensions instead of 4
             k: Some(5),
+            offset: None,
             include_vectors: None,
         });
 
@@ -1914,6 +1921,7 @@ mod coverage_tests {
             depth: Some(100), // Very large depth, should be capped
             direction: Some("outgoing".to_string()),
             limit: Some(50),
+            offset: None,
             include_vectors: None,
             as_of_valid_time: None,
             as_of_transaction_time: None,
@@ -2196,6 +2204,7 @@ mod vector_distance_tests {
             property_name: "embedding".to_string(),
             embedding: vec![0.1, 0.2, 0.3, 0.4],
             k: Some(10000), // Much larger than MAX_VECTOR_K,
+            offset: None,
             include_vectors: None,
         });
 
@@ -2474,6 +2483,7 @@ mod traversal_extended_tests {
             direction: Some("both".to_string()),
             depth: Some(1),
             limit: None,
+            offset: None,
             include_vectors: None,
             as_of_valid_time: None,
             as_of_transaction_time: None,
@@ -2534,6 +2544,7 @@ mod traversal_extended_tests {
             direction: Some("both".to_string()),
             depth: Some(1),
             limit: None,
+            offset: None,
             include_vectors: None,
             as_of_valid_time: None,
             as_of_transaction_time: None,
@@ -2569,6 +2580,7 @@ mod traversal_extended_tests {
             direction: None,
             depth: Some(3),
             limit: None,
+            offset: None,
             include_vectors: None,
             as_of_valid_time: None,
             as_of_transaction_time: None,
@@ -2617,6 +2629,7 @@ mod traversal_extended_tests {
             direction: None, // Default to outgoing
             depth: Some(1),
             limit: None,
+            offset: None,
             include_vectors: None,
             as_of_valid_time: None,
             as_of_transaction_time: None,
@@ -2670,6 +2683,7 @@ mod traversal_extended_tests {
             direction: Some("outgoing".to_string()),
             depth: Some(1),
             limit: Some(5),
+            offset: None,
             include_vectors: None,
             as_of_valid_time: None,
             as_of_transaction_time: None,
@@ -4851,6 +4865,7 @@ mod vector_elision_tests {
             direction: None,
             depth: Some(1),
             limit: None,
+            offset: None,
             include_vectors: None,
             as_of_valid_time: None,
             as_of_transaction_time: None,
@@ -4869,6 +4884,7 @@ mod vector_elision_tests {
             direction: None,
             depth: Some(1),
             limit: None,
+            offset: None,
             include_vectors: Some(true),
             as_of_valid_time: None,
             as_of_transaction_time: None,
@@ -4916,6 +4932,7 @@ mod vector_elision_tests {
             property_name: "embedding".to_string(),
             embedding: vec![0.1, 0.2, 0.3, 0.4],
             k: Some(3),
+            offset: None,
             include_vectors: None,
         });
         let value: serde_json::Value = serde_json::from_str(&response).unwrap();
@@ -4933,6 +4950,7 @@ mod vector_elision_tests {
             property_name: "embedding".to_string(),
             embedding: vec![0.1, 0.2, 0.3, 0.4],
             k: Some(3),
+            offset: None,
             include_vectors: Some(true),
         });
         let value: serde_json::Value = serde_json::from_str(&response).unwrap();
@@ -6266,6 +6284,7 @@ mod provenance_write_tests {
             direction: Some("outgoing".to_string()),
             depth: Some(1),
             limit: None,
+            offset: None,
             include_vectors: None,
             as_of_valid_time: None,
             as_of_transaction_time: None,
@@ -6402,6 +6421,7 @@ mod traverse_as_of_tests {
                 direction: Some("outgoing".to_string()),
                 depth: Some(1),
                 limit: None,
+                offset: None,
                 include_vectors: None,
                 as_of_valid_time: Some(hours_ago(now, 5)),
                 as_of_transaction_time: None,
@@ -6421,6 +6441,7 @@ mod traverse_as_of_tests {
                 direction: Some("outgoing".to_string()),
                 depth: Some(1),
                 limit: None,
+                offset: None,
                 include_vectors: None,
                 as_of_valid_time: Some(hours_ago(now, 1)),
                 as_of_transaction_time: None,
@@ -6467,6 +6488,7 @@ mod traverse_as_of_tests {
                 direction: Some("outgoing".to_string()),
                 depth: Some(1),
                 limit: None,
+                offset: None,
                 include_vectors: None,
                 as_of_valid_time: Some(hours_ago(now, 3)),
                 as_of_transaction_time: Some(tx_time_before_delete),
@@ -6486,6 +6508,7 @@ mod traverse_as_of_tests {
                 direction: Some("outgoing".to_string()),
                 depth: Some(1),
                 limit: None,
+                offset: None,
                 include_vectors: None,
                 as_of_valid_time: Some(hours_ago(now, 1)),
                 as_of_transaction_time: None,
@@ -6518,6 +6541,7 @@ mod traverse_as_of_tests {
                 direction: Some("outgoing".to_string()),
                 depth: Some(1),
                 limit: None,
+                offset: None,
                 include_vectors: None,
                 as_of_valid_time: Some(hours_ago(now, 5)),
                 as_of_transaction_time: Some(hours_ago(now, 20)),
@@ -6539,6 +6563,7 @@ mod traverse_as_of_tests {
                 direction: Some("outgoing".to_string()),
                 depth: Some(1),
                 limit: None,
+                offset: None,
                 include_vectors: None,
                 as_of_valid_time: Some(hours_ago(now, 8)),
                 as_of_transaction_time: None,
@@ -6559,6 +6584,7 @@ mod traverse_as_of_tests {
                 direction: Some("outgoing".to_string()),
                 depth: Some(1),
                 limit: None,
+                offset: None,
                 include_vectors: None,
                 as_of_valid_time: Some(hours_ago(now, 5)),
                 as_of_transaction_time: None,
@@ -6588,6 +6614,7 @@ mod traverse_as_of_tests {
                 direction: Some("outgoing".to_string()),
                 depth: Some(1),
                 limit: None,
+                offset: None,
                 include_vectors: None,
                 as_of_valid_time: Some(hours_ago(now, 5)),
                 as_of_transaction_time: None,
@@ -6610,6 +6637,7 @@ mod traverse_as_of_tests {
             direction: Some("outgoing".to_string()),
             depth: Some(1),
             limit: None,
+            offset: None,
             include_vectors: None,
             as_of_valid_time: Some("not-a-timestamp".to_string()),
             as_of_transaction_time: None,
@@ -6636,6 +6664,7 @@ mod traverse_as_of_tests {
             direction: Some("outgoing".to_string()),
             depth: Some(1),
             limit: None,
+            offset: None,
             include_vectors: None,
             as_of_valid_time: None,
             as_of_transaction_time: Some("not-a-timestamp".to_string()),
@@ -6680,6 +6709,7 @@ mod traverse_as_of_tests {
                 direction: Some("outgoing".to_string()),
                 depth: Some(100),
                 limit: Some(50),
+                offset: None,
                 include_vectors: None,
                 as_of_valid_time: Some(hours_ago(now, 1)),
                 as_of_transaction_time: None,
@@ -6705,6 +6735,7 @@ mod traverse_as_of_tests {
                 direction: Some("outgoing".to_string()),
                 depth: Some(1),
                 limit: None,
+                offset: None,
                 include_vectors: None,
                 as_of_valid_time: None,
                 as_of_transaction_time: None,
@@ -6719,6 +6750,7 @@ mod traverse_as_of_tests {
                 direction: Some("outgoing".to_string()),
                 depth: Some(1),
                 limit: None,
+                offset: None,
                 include_vectors: None,
                 as_of_valid_time: Some(now_after_creation.to_rfc3339()),
                 as_of_transaction_time: Some(now_after_creation.to_rfc3339()),
@@ -6754,6 +6786,7 @@ mod traverse_as_of_tests {
                 direction: Some("outgoing".to_string()),
                 depth: Some(2),
                 limit: None,
+                offset: None,
                 include_vectors: None,
                 as_of_valid_time: Some(hours_ago(now, 1)),
                 as_of_transaction_time: None,
@@ -6788,6 +6821,7 @@ mod traverse_as_of_tests {
                 direction: Some("both".to_string()),
                 depth: Some(1),
                 limit: None,
+                offset: None,
                 include_vectors: None,
                 as_of_valid_time: Some(hours_ago(now, 1)),
                 as_of_transaction_time: None,
@@ -6835,6 +6869,7 @@ mod traverse_as_of_tests {
                 direction: Some("outgoing".to_string()),
                 depth: Some(2),
                 limit: None,
+                offset: None,
                 include_vectors: None,
                 as_of_valid_time: Some(after_delete),
                 as_of_transaction_time: None,
@@ -6844,5 +6879,607 @@ mod traverse_as_of_tests {
             count, 0,
             "traversal must not continue past a node absent at the coordinate: {value}"
         );
+    }
+}
+
+// ============================================================================
+// Result-Completeness Signal Tests (Issue #3226)
+//
+// Every bounded MCP read tool must let a single call reveal whether more
+// results exist (`has_more`), how to fetch them (`next_offset`, for
+// offset-paginated tools), and, where cheaply derivable, the total matching
+// count (`total_matching`). These tests pin that contract per tool.
+// ============================================================================
+
+mod completeness_tests {
+    use super::*;
+
+    /// Read `has_more` as a bool (defaults to a sentinel that fails assertions
+    /// when the field is entirely absent, so the red phase is meaningful).
+    fn has_more(value: &serde_json::Value) -> Option<bool> {
+        value.get("has_more").and_then(|v| v.as_bool())
+    }
+
+    /// Read `next_offset` as a number when present; `None` when absent or null.
+    fn next_offset(value: &serde_json::Value) -> Option<u64> {
+        value.get("next_offset").and_then(|v| v.as_u64())
+    }
+
+    fn parse(response: &str) -> serde_json::Value {
+        serde_json::from_str(response).expect("valid JSON response")
+    }
+
+    fn seed_labeled(server: &AletheiaMcpServer, label: &str, n: usize) {
+        for i in 0..n {
+            let mut props = HashMap::new();
+            props.insert("index".to_string(), serde_json::json!(i));
+            server.create_node(CreateNodeRequest {
+                valid_time: None,
+                label: label.to_string(),
+                properties: Some(props),
+                provenance: None,
+            });
+        }
+    }
+
+    // --- list_nodes: label scan ------------------------------------------
+
+    #[test]
+    fn test_list_nodes_has_more_and_next_offset() {
+        let server = create_test_server();
+        seed_labeled(&server, "PersonHM", 250);
+
+        // Page 1: full page, more remains.
+        let page1 = parse(&server.list_nodes(ListNodesRequest {
+            label: Some("PersonHM".to_string()),
+            property_key: None,
+            property_value: None,
+            limit: Some(100),
+            offset: Some(0),
+            include_vectors: None,
+        }));
+        assert_eq!(page1.get("count"), Some(&serde_json::json!(100)));
+        assert_eq!(
+            has_more(&page1),
+            Some(true),
+            "page 1 of 250 has more: {page1}"
+        );
+        assert_eq!(
+            next_offset(&page1),
+            Some(100),
+            "next_offset points at page 2"
+        );
+
+        // Page 2: full page, still more.
+        let page2 = parse(&server.list_nodes(ListNodesRequest {
+            label: Some("PersonHM".to_string()),
+            property_key: None,
+            property_value: None,
+            limit: Some(100),
+            offset: Some(100),
+            include_vectors: None,
+        }));
+        assert_eq!(has_more(&page2), Some(true));
+        assert_eq!(next_offset(&page2), Some(200));
+
+        // Page 3: partial final page, no more.
+        let page3 = parse(&server.list_nodes(ListNodesRequest {
+            label: Some("PersonHM".to_string()),
+            property_key: None,
+            property_value: None,
+            limit: Some(100),
+            offset: Some(200),
+            include_vectors: None,
+        }));
+        assert_eq!(page3.get("count"), Some(&serde_json::json!(50)));
+        assert_eq!(
+            has_more(&page3),
+            Some(false),
+            "final page has no more: {page3}"
+        );
+        assert_eq!(next_offset(&page3), None, "no next_offset on final page");
+    }
+
+    #[test]
+    fn test_list_nodes_label_scan_omits_total_matching() {
+        // A label scan cannot cheaply know the total without a full scan, so
+        // `total_matching` is omitted (not faked); `has_more` carries the signal.
+        let server = create_test_server();
+        seed_labeled(&server, "ScanHM", 5);
+
+        let value = parse(&server.list_nodes(ListNodesRequest {
+            label: Some("ScanHM".to_string()),
+            property_key: None,
+            property_value: None,
+            limit: Some(2),
+            offset: Some(0),
+            include_vectors: None,
+        }));
+        assert_eq!(has_more(&value), Some(true));
+        assert!(
+            value.get("total_matching").is_none(),
+            "label scan must omit total_matching: {value}"
+        );
+    }
+
+    // --- list_nodes: property path ---------------------------------------
+
+    #[test]
+    fn test_list_nodes_property_path_reports_total_matching() {
+        let server = create_test_server();
+        for _ in 0..150 {
+            server.create_node(CreateNodeRequest {
+                valid_time: None,
+                label: "WidgetHM".to_string(),
+                properties: Some({
+                    let mut m = HashMap::new();
+                    m.insert("status".to_string(), serde_json::json!("active"));
+                    m
+                }),
+                provenance: None,
+            });
+        }
+
+        let page1 = parse(&server.list_nodes(ListNodesRequest {
+            label: Some("WidgetHM".to_string()),
+            property_key: Some("status".to_string()),
+            property_value: Some(serde_json::json!("active")),
+            limit: Some(100),
+            offset: Some(0),
+            include_vectors: None,
+        }));
+        assert_eq!(page1.get("count"), Some(&serde_json::json!(100)));
+        assert_eq!(
+            page1.get("total_matching"),
+            Some(&serde_json::json!(150)),
+            "property path materializes the full id list, so total is cheap: {page1}"
+        );
+        assert_eq!(has_more(&page1), Some(true));
+        assert_eq!(next_offset(&page1), Some(100));
+
+        let page2 = parse(&server.list_nodes(ListNodesRequest {
+            label: Some("WidgetHM".to_string()),
+            property_key: Some("status".to_string()),
+            property_value: Some(serde_json::json!("active")),
+            limit: Some(100),
+            offset: Some(100),
+            include_vectors: None,
+        }));
+        assert_eq!(page2.get("count"), Some(&serde_json::json!(50)));
+        assert_eq!(page2.get("total_matching"), Some(&serde_json::json!(150)));
+        assert_eq!(has_more(&page2), Some(false));
+        assert_eq!(next_offset(&page2), None);
+    }
+
+    // --- list_nodes / list_edges guidance paths --------------------------
+
+    #[test]
+    fn test_list_nodes_unfiltered_has_more_false() {
+        let server = create_test_server();
+        seed_labeled(&server, "AnyHM", 3);
+        let value = parse(&server.list_nodes(ListNodesRequest {
+            label: None,
+            property_key: None,
+            property_value: None,
+            limit: None,
+            offset: None,
+            include_vectors: None,
+        }));
+        assert_eq!(
+            has_more(&value),
+            Some(false),
+            "unfiltered guidance path carries has_more:false for shape consistency: {value}"
+        );
+        assert_eq!(next_offset(&value), None);
+    }
+
+    #[test]
+    fn test_list_edges_has_more_false() {
+        let server = create_test_server();
+        let value = parse(&server.list_edges(ListEdgesRequest {
+            label: None,
+            limit: None,
+            offset: None,
+            include_vectors: None,
+        }));
+        assert_eq!(
+            has_more(&value),
+            Some(false),
+            "list_edges guidance: {value}"
+        );
+        assert_eq!(next_offset(&value), None);
+    }
+
+    // --- outgoing / incoming edges (additive only, never truncated) ------
+
+    fn seed_star(server: &AletheiaMcpServer, out: usize) -> u64 {
+        let center = {
+            let r = server.create_node(CreateNodeRequest {
+                valid_time: None,
+                label: "Hub".to_string(),
+                properties: None,
+                provenance: None,
+            });
+            let n: NodeResponse = parse_response(&r).unwrap();
+            n.id
+        };
+        for _ in 0..out {
+            let leaf = {
+                let r = server.create_node(CreateNodeRequest {
+                    valid_time: None,
+                    label: "Leaf".to_string(),
+                    properties: None,
+                    provenance: None,
+                });
+                let n: NodeResponse = parse_response(&r).unwrap();
+                n.id
+            };
+            server.create_edge(CreateEdgeRequest {
+                valid_time: None,
+                source_id: center,
+                target_id: leaf,
+                label: "LINK".to_string(),
+                properties: None,
+                provenance: None,
+            });
+        }
+        center
+    }
+
+    #[test]
+    fn test_get_outgoing_edges_completeness() {
+        let server = create_test_server();
+        let center = seed_star(&server, 3);
+        let value = parse(&server.get_outgoing_edges(GetOutgoingEdgesRequest {
+            node_id: center,
+            label: None,
+            include_vectors: None,
+        }));
+        assert_eq!(value.get("count"), Some(&serde_json::json!(3)));
+        assert_eq!(
+            has_more(&value),
+            Some(false),
+            "outgoing edges return the full set: {value}"
+        );
+        assert_eq!(
+            value.get("total_matching"),
+            Some(&serde_json::json!(3)),
+            "total_matching equals the complete count: {value}"
+        );
+    }
+
+    #[test]
+    fn test_get_incoming_edges_completeness() {
+        let server = create_test_server();
+        // Build a hub with 2 incoming edges.
+        let sink = {
+            let r = server.create_node(CreateNodeRequest {
+                valid_time: None,
+                label: "Sink".to_string(),
+                properties: None,
+                provenance: None,
+            });
+            let n: NodeResponse = parse_response(&r).unwrap();
+            n.id
+        };
+        for _ in 0..2 {
+            let src = {
+                let r = server.create_node(CreateNodeRequest {
+                    valid_time: None,
+                    label: "Src".to_string(),
+                    properties: None,
+                    provenance: None,
+                });
+                let n: NodeResponse = parse_response(&r).unwrap();
+                n.id
+            };
+            server.create_edge(CreateEdgeRequest {
+                valid_time: None,
+                source_id: src,
+                target_id: sink,
+                label: "LINK".to_string(),
+                properties: None,
+                provenance: None,
+            });
+        }
+        let value = parse(&server.get_incoming_edges(GetIncomingEdgesRequest {
+            node_id: sink,
+            label: None,
+            include_vectors: None,
+        }));
+        assert_eq!(value.get("count"), Some(&serde_json::json!(2)));
+        assert_eq!(has_more(&value), Some(false));
+        assert_eq!(value.get("total_matching"), Some(&serde_json::json!(2)));
+    }
+
+    // --- traverse ---------------------------------------------------------
+
+    /// Build a chain start -> n1 -> n2 -> ... of `len` NEXT edges; return ids.
+    fn seed_chain(server: &AletheiaMcpServer, len: usize) -> Vec<u64> {
+        let ids: Vec<u64> = (0..=len)
+            .map(|_| {
+                let r = server.create_node(CreateNodeRequest {
+                    valid_time: None,
+                    label: "ChainHM".to_string(),
+                    properties: None,
+                    provenance: None,
+                });
+                let n: NodeResponse = parse_response(&r).unwrap();
+                n.id
+            })
+            .collect();
+        for w in ids.windows(2) {
+            server.create_edge(CreateEdgeRequest {
+                valid_time: None,
+                source_id: w[0],
+                target_id: w[1],
+                label: "NEXT".to_string(),
+                properties: None,
+                provenance: None,
+            });
+        }
+        ids
+    }
+
+    #[test]
+    fn test_traverse_has_more_and_next_offset_when_truncated() {
+        let server = create_test_server();
+        // start -> 5 further nodes reachable via NEXT.
+        let ids = seed_chain(&server, 5);
+
+        // Truncate at 2 of the 5 reachable nodes.
+        let truncated = parse(&server.traverse(TraverseRequest {
+            start_node_id: ids[0],
+            edge_label: "NEXT".to_string(),
+            direction: None,
+            depth: Some(5),
+            limit: Some(2),
+            offset: None,
+            include_vectors: None,
+            as_of_valid_time: None,
+            as_of_transaction_time: None,
+        }));
+        assert_eq!(truncated.get("count"), Some(&serde_json::json!(2)));
+        assert_eq!(
+            has_more(&truncated),
+            Some(true),
+            "traversal truncated by limit signals more: {truncated}"
+        );
+        assert_eq!(next_offset(&truncated), Some(2));
+
+        // A limit above the reachable count exhausts the traversal.
+        let complete = parse(&server.traverse(TraverseRequest {
+            start_node_id: ids[0],
+            edge_label: "NEXT".to_string(),
+            direction: None,
+            depth: Some(5),
+            limit: Some(100),
+            offset: None,
+            include_vectors: None,
+            as_of_valid_time: None,
+            as_of_transaction_time: None,
+        }));
+        assert_eq!(complete.get("count"), Some(&serde_json::json!(5)));
+        assert_eq!(has_more(&complete), Some(false), "exhausted: {complete}");
+        assert_eq!(next_offset(&complete), None);
+    }
+
+    #[test]
+    fn test_traverse_offset_paginates() {
+        let server = create_test_server();
+        let ids = seed_chain(&server, 5); // 5 reachable nodes
+
+        // Collect the ids returned across two offset pages of size 2 plus a
+        // final page; the union must equal the single-shot full traversal.
+        let full = parse(&server.traverse(TraverseRequest {
+            start_node_id: ids[0],
+            edge_label: "NEXT".to_string(),
+            direction: None,
+            depth: Some(5),
+            limit: Some(100),
+            offset: None,
+            include_vectors: None,
+            as_of_valid_time: None,
+            as_of_transaction_time: None,
+        }));
+        let full_count = full.get("count").and_then(|c| c.as_u64()).unwrap();
+        assert_eq!(full_count, 5);
+
+        let page2 = parse(&server.traverse(TraverseRequest {
+            start_node_id: ids[0],
+            edge_label: "NEXT".to_string(),
+            direction: None,
+            depth: Some(5),
+            limit: Some(2),
+            offset: Some(2),
+            include_vectors: None,
+            as_of_valid_time: None,
+            as_of_transaction_time: None,
+        }));
+        assert_eq!(page2.get("count"), Some(&serde_json::json!(2)));
+        assert_eq!(
+            has_more(&page2),
+            Some(true),
+            "offset 2 of 5 has more: {page2}"
+        );
+        assert_eq!(next_offset(&page2), Some(4));
+
+        let page3 = parse(&server.traverse(TraverseRequest {
+            start_node_id: ids[0],
+            edge_label: "NEXT".to_string(),
+            direction: None,
+            depth: Some(5),
+            limit: Some(2),
+            offset: Some(4),
+            include_vectors: None,
+            as_of_valid_time: None,
+            as_of_transaction_time: None,
+        }));
+        assert_eq!(page3.get("count"), Some(&serde_json::json!(1)));
+        assert_eq!(has_more(&page3), Some(false), "last page: {page3}");
+        assert_eq!(next_offset(&page3), None);
+    }
+
+    // --- find_similar -----------------------------------------------------
+
+    fn seed_vectors(server: &AletheiaMcpServer, n: usize) {
+        server.enable_vector_index(EnableVectorIndexRequest {
+            property_name: "embedding".to_string(),
+            dimensions: 4,
+            distance_metric: Some("cosine".to_string()),
+        });
+        for i in 0..n {
+            let mut props = HashMap::new();
+            props.insert("name".to_string(), serde_json::json!(format!("Doc{i}")));
+            props.insert(
+                "embedding".to_string(),
+                serde_json::json!([
+                    (i as f32) * 0.1 + 0.01,
+                    (i as f32) * 0.2 + 0.01,
+                    (i as f32) * 0.3 + 0.01,
+                    (i as f32) * 0.4 + 0.01
+                ]),
+            );
+            server.create_node(CreateNodeRequest {
+                valid_time: None,
+                label: "Document".to_string(),
+                properties: Some(props),
+                provenance: None,
+            });
+        }
+    }
+
+    #[test]
+    fn test_find_similar_has_more_and_offset_paginates() {
+        let server = create_test_server();
+        seed_vectors(&server, 5);
+        let query = vec![0.1_f32, 0.2, 0.3, 0.4];
+
+        // k=2 of 5 available -> more remains.
+        let page1 = parse(&server.find_similar(FindSimilarRequest {
+            property_name: "embedding".to_string(),
+            embedding: query.clone(),
+            k: Some(2),
+            offset: None,
+            include_vectors: None,
+        }));
+        assert_eq!(page1.get("count"), Some(&serde_json::json!(2)));
+        assert_eq!(has_more(&page1), Some(true), "2 of 5 similar: {page1}");
+        assert_eq!(next_offset(&page1), Some(2));
+
+        // Offset into the middle.
+        let page2 = parse(&server.find_similar(FindSimilarRequest {
+            property_name: "embedding".to_string(),
+            embedding: query.clone(),
+            k: Some(2),
+            offset: Some(2),
+            include_vectors: None,
+        }));
+        assert_eq!(page2.get("count"), Some(&serde_json::json!(2)));
+        assert_eq!(has_more(&page2), Some(true));
+        assert_eq!(next_offset(&page2), Some(4));
+
+        // k beyond the available set exhausts it.
+        let complete = parse(&server.find_similar(FindSimilarRequest {
+            property_name: "embedding".to_string(),
+            embedding: query,
+            k: Some(50),
+            offset: None,
+            include_vectors: None,
+        }));
+        assert_eq!(has_more(&complete), Some(false), "exhausted: {complete}");
+        assert_eq!(next_offset(&complete), None);
+    }
+
+    // --- success-metric sweep --------------------------------------------
+
+    #[test]
+    fn test_all_bounded_read_tools_carry_has_more() {
+        let server = create_test_server();
+        // Minimal data touching every tool.
+        let center = seed_star(&server, 2);
+        seed_vectors(&server, 2);
+
+        let responses = vec![
+            (
+                "list_nodes(label)",
+                server.list_nodes(ListNodesRequest {
+                    label: Some("Leaf".to_string()),
+                    property_key: None,
+                    property_value: None,
+                    limit: Some(1),
+                    offset: None,
+                    include_vectors: None,
+                }),
+            ),
+            (
+                "list_nodes(unfiltered)",
+                server.list_nodes(ListNodesRequest {
+                    label: None,
+                    property_key: None,
+                    property_value: None,
+                    limit: None,
+                    offset: None,
+                    include_vectors: None,
+                }),
+            ),
+            (
+                "list_edges",
+                server.list_edges(ListEdgesRequest {
+                    label: None,
+                    limit: None,
+                    offset: None,
+                    include_vectors: None,
+                }),
+            ),
+            (
+                "get_outgoing_edges",
+                server.get_outgoing_edges(GetOutgoingEdgesRequest {
+                    node_id: center,
+                    label: None,
+                    include_vectors: None,
+                }),
+            ),
+            (
+                "get_incoming_edges",
+                server.get_incoming_edges(GetIncomingEdgesRequest {
+                    node_id: center,
+                    label: None,
+                    include_vectors: None,
+                }),
+            ),
+            (
+                "traverse",
+                server.traverse(TraverseRequest {
+                    start_node_id: center,
+                    edge_label: "LINK".to_string(),
+                    direction: None,
+                    depth: Some(1),
+                    limit: Some(1),
+                    offset: None,
+                    include_vectors: None,
+                    as_of_valid_time: None,
+                    as_of_transaction_time: None,
+                }),
+            ),
+            (
+                "find_similar",
+                server.find_similar(FindSimilarRequest {
+                    property_name: "embedding".to_string(),
+                    embedding: vec![0.1, 0.2, 0.3, 0.4],
+                    k: Some(1),
+                    offset: None,
+                    include_vectors: None,
+                }),
+            ),
+        ];
+
+        for (name, resp) in responses {
+            let value = parse(&resp);
+            assert!(
+                value.get("has_more").and_then(|v| v.as_bool()).is_some(),
+                "{name} response must carry a boolean has_more: {value}"
+            );
+        }
     }
 }

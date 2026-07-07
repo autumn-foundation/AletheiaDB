@@ -429,6 +429,14 @@ pub struct TraverseRequest {
     #[schemars(description = "Maximum number of results to return (default: 100)")]
     pub limit: Option<usize>,
 
+    /// Number of results to skip (for pagination).
+    #[schemars(
+        description = "Number of results to skip (for pagination). Pass the `next_offset` from a \
+                       prior response to fetch the next page; the response's `has_more` tells you \
+                       whether another page exists."
+    )]
+    pub offset: Option<usize>,
+
     /// When true, return full vector/embedding properties instead of the
     /// elided descriptor (default: false).
     #[schemars(
@@ -478,6 +486,14 @@ pub struct FindSimilarRequest {
     /// Number of similar results to return.
     #[schemars(description = "Number of similar results to return (default: 10)")]
     pub k: Option<usize>,
+
+    /// Number of results to skip (for pagination).
+    #[schemars(
+        description = "Number of results to skip (for pagination). Pass the `next_offset` from a \
+                       prior response to fetch the next page; the response's `has_more` tells you \
+                       whether another page exists."
+    )]
+    pub offset: Option<usize>,
 
     /// When true, return full vector/embedding properties instead of the
     /// elided descriptor (default: false). Does not affect the similarity
