@@ -25,9 +25,11 @@
 //! server.serve_stdio().await?;
 //! ```
 
+mod error;
 mod server;
 mod tools;
 
+pub use error::{McpError, McpErrorCode};
 pub use server::AletheiaMcpServer;
 
 // Re-export tool request/response types for testing (alphabetically sorted)

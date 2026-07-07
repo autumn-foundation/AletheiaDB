@@ -40,7 +40,12 @@ fn parse_response<T: serde::de::DeserializeOwned>(response: &str) -> Result<T, S
         serde_json::from_str(response).map_err(|e| format!("Failed to parse JSON: {}", e))?;
 
     if let Some(error) = value.get("error") {
-        return Err(error.as_str().unwrap_or("Unknown error").to_string());
+        // Structured error shape (Issue #3234): `{code, message, retriable}`.
+        return Err(error
+            .get("message")
+            .and_then(|m| m.as_str())
+            .unwrap_or("Unknown error")
+            .to_string());
     }
 
     serde_json::from_value(value).map_err(|e| format!("Failed to deserialize: {}", e))
@@ -1750,7 +1755,7 @@ mod coverage_tests {
         // Either we get the node back or a "not found" type error (since we're querying at a past time)
         // but we should NOT get a timestamp parsing error
         if let Some(error) = value.get("error") {
-            let err_str = error.as_str().unwrap_or("");
+            let err_str = error["message"].as_str().unwrap_or("");
             assert!(
                 !err_str.contains("Invalid timestamp format"),
                 "ISO 8601 timestamp should be parsed correctly, got error: {}",
@@ -1782,7 +1787,7 @@ mod coverage_tests {
         // Should not contain a parsing error
         let value: serde_json::Value = serde_json::from_str(&response).unwrap();
         if let Some(error) = value.get("error") {
-            let err_str = error.as_str().unwrap_or("");
+            let err_str = error["message"].as_str().unwrap_or("");
             assert!(
                 !err_str.contains("Invalid timestamp format"),
                 "ISO 8601 timestamp without TZ should be parsed correctly, got error: {}",
@@ -2341,7 +2346,7 @@ mod temporal_extended_tests {
 
         let value: serde_json::Value = serde_json::from_str(&response).unwrap();
         assert!(value.get("error").is_some());
-        let error_str = value["error"].as_str().unwrap();
+        let error_str = value["error"]["message"].as_str().unwrap();
         assert!(
             error_str.contains("Invalid timestamp format"),
             "Should report invalid timestamp: {}",
@@ -2412,7 +2417,7 @@ mod temporal_extended_tests {
 
         let value: serde_json::Value = serde_json::from_str(&response).unwrap();
         if let Some(error) = value.get("error") {
-            let err_str = error.as_str().unwrap_or("");
+            let err_str = error["message"].as_str().unwrap_or("");
             assert!(
                 !err_str.contains("Invalid timestamp format"),
                 "Offset timezone should be parsed correctly, got error: {}",
@@ -2833,7 +2838,7 @@ mod hybrid_extended_tests {
 
         let value: serde_json::Value = serde_json::from_str(&response).unwrap();
         assert!(value.get("error").is_some());
-        let error = value["error"].as_str().unwrap();
+        let error = value["error"]["message"].as_str().unwrap();
         assert!(
             error.contains("Invalid valid_time"),
             "Should report invalid valid_time"
@@ -2869,7 +2874,7 @@ mod hybrid_extended_tests {
 
         let value: serde_json::Value = serde_json::from_str(&response).unwrap();
         assert!(value.get("error").is_some());
-        let error = value["error"].as_str().unwrap();
+        let error = value["error"]["message"].as_str().unwrap();
         assert!(
             error.contains("Invalid transaction_time"),
             "Should report invalid transaction_time"
@@ -2938,7 +2943,7 @@ mod hybrid_extended_tests {
 
         let value: serde_json::Value = serde_json::from_str(&response).unwrap();
         assert!(value.get("error").is_some());
-        let error = value["error"].as_str().unwrap();
+        let error = value["error"]["message"].as_str().unwrap();
         assert!(
             error.contains("Vector index not enabled"),
             "Should report missing vector index"
@@ -4274,14 +4279,14 @@ mod constraint_tests {
 
     #[test]
     fn test_update_node_non_constraint_error_fallthrough() {
-        // Covers server.rs:
-        //   • constraint_violation_result() `else { None }` branch (non-constraint error)
-        //   • handle_update_node `self.error_json(...)` fallthrough (when
-        //     constraint_violation_result returns None)
+        // Covers server.rs: the `db_error(...)` fallthrough in
+        // handle_update_node for non-constraint errors — db_error only emits
+        // the legacy constraint top-level fields (constraint_violation,
+        // existing_node_id, ...) for a ConstraintError::UniqueViolation.
         //
         // We call update_node with a valid-format but non-existent node ID so that
         // `tx.update_node` returns StorageError::NodeNotFound — which is NOT a
-        // ConstraintError::UniqueViolation — and constraint_violation_result returns None.
+        // ConstraintError::UniqueViolation — and db_error takes the plain path.
         let server = create_test_server();
 
         let response = server.update_node(UpdateNodeRequest {
@@ -5306,7 +5311,7 @@ mod valid_time_write_tests {
     }
 
     #[test]
-    fn test_create_node_malformed_valid_time_error_json() {
+    fn test_create_node_malformed_valid_time_structured_error() {
         let server = create_test_server();
 
         let response = server.create_node(CreateNodeRequest {
@@ -5317,7 +5322,10 @@ mod valid_time_write_tests {
         });
 
         let value: serde_json::Value = serde_json::from_str(&response).unwrap();
-        let error = value.get("error").and_then(|e| e.as_str()).unwrap();
+        let error = value
+            .get("error")
+            .and_then(|e| e["message"].as_str())
+            .unwrap();
         assert!(error.contains("Invalid valid_time"), "got: {error}");
         assert_eq!(server.db().node_count(), 0, "no node should be created");
     }
@@ -5335,7 +5343,10 @@ mod valid_time_write_tests {
         });
 
         let value: serde_json::Value = serde_json::from_str(&response).unwrap();
-        let error = value.get("error").and_then(|e| e.as_str()).unwrap();
+        let error = value
+            .get("error")
+            .and_then(|e| e["message"].as_str())
+            .unwrap();
         assert!(error.contains("too far in future"), "got: {error}");
         assert_eq!(server.db().node_count(), 0);
     }
@@ -5454,7 +5465,10 @@ mod valid_time_write_tests {
         });
 
         let value: serde_json::Value = serde_json::from_str(&response).unwrap();
-        let error = value.get("error").and_then(|e| e.as_str()).unwrap();
+        let error = value
+            .get("error")
+            .and_then(|e| e["message"].as_str())
+            .unwrap();
         assert!(error.contains("before entity creation"), "got: {error}");
     }
 
@@ -5586,7 +5600,10 @@ mod valid_time_write_tests {
         });
 
         let value: serde_json::Value = serde_json::from_str(&response).unwrap();
-        let error = value.get("error").and_then(|e| e.as_str()).unwrap();
+        let error = value
+            .get("error")
+            .and_then(|e| e["message"].as_str())
+            .unwrap();
         assert!(error.contains("too far in future"), "got: {error}");
         assert_eq!(server.db().edge_count(), 0);
     }
@@ -5894,7 +5911,10 @@ mod provenance_write_tests {
             }),
         });
         let value: serde_json::Value = serde_json::from_str(&response).unwrap();
-        let error = value.get("error").and_then(|e| e.as_str()).unwrap();
+        let error = value
+            .get("error")
+            .and_then(|e| e["message"].as_str())
+            .unwrap();
         assert!(error.contains("confidence"), "got: {error}");
         assert!(
             error.contains("0.0") && error.contains("1.0"),
@@ -5919,7 +5939,10 @@ mod provenance_write_tests {
             }),
         });
         let value: serde_json::Value = serde_json::from_str(&response).unwrap();
-        let error = value.get("error").and_then(|e| e.as_str()).unwrap();
+        let error = value
+            .get("error")
+            .and_then(|e| e["message"].as_str())
+            .unwrap();
         assert!(error.contains("confidence"), "got: {error}");
         assert_eq!(server.db().node_count(), 0);
     }
@@ -6645,7 +6668,7 @@ mod traverse_as_of_tests {
         let value: serde_json::Value = serde_json::from_str(&response).unwrap();
         let error = value
             .get("error")
-            .and_then(|e| e.as_str())
+            .and_then(|e| e["message"].as_str())
             .expect("expected a structured error, got no error field");
         assert!(
             error.contains("as_of_valid_time"),
@@ -6672,7 +6695,7 @@ mod traverse_as_of_tests {
         let value: serde_json::Value = serde_json::from_str(&response).unwrap();
         let error = value
             .get("error")
-            .and_then(|e| e.as_str())
+            .and_then(|e| e["message"].as_str())
             .expect("expected a structured error, got no error field");
         assert!(
             error.contains("as_of_transaction_time"),
@@ -7612,5 +7635,825 @@ mod completeness_tests {
             "a pending (even if unresolved) frontier candidate must not be silently \
              reported as has_more:false: {response}"
         );
+    }
+}
+
+// ============================================================================
+// Structured Error Codes with Retriable Flag (Issue #3234)
+// ============================================================================
+//
+// Every MCP error response must be `{ "error": { "code", "message",
+// "retriable", "details"? } }` where `code` is drawn from the documented,
+// stable enum and `retriable` is `true` only for transient failure classes.
+// These tests drive every distinct MCP error path and assert the exact code,
+// plus a registry-driven sweep that automatically covers newly added tools.
+
+mod structured_error_tests {
+    use super::*;
+    use serde_json::json;
+
+    /// Every code documented for the MCP error contract (Issue #3234).
+    const DOCUMENTED_CODES: &[&str] = &[
+        "NOT_FOUND",
+        "INVALID_ARGUMENT",
+        "CONSTRAINT_VIOLATION",
+        "FAILED_PRECONDITION",
+        "CONFLICT",
+        "UNAVAILABLE",
+        "INTERNAL",
+    ];
+
+    /// Dispatch a tool through the same table `call_tool` uses and parse the
+    /// JSON payload. Returns `(parsed_json, is_error)`.
+    fn dispatch(
+        server: &AletheiaMcpServer,
+        tool: &str,
+        args: serde_json::Value,
+    ) -> (serde_json::Value, bool) {
+        let result = server.dispatch_tool(tool, args);
+        let is_error = result.is_error.unwrap_or(false);
+        let text = result
+            .content
+            .first()
+            .and_then(|c| c.as_text().map(|t| t.text.clone()))
+            .expect("tool result should carry text content");
+        let value = serde_json::from_str(&text).expect("tool response should be valid JSON");
+        (value, is_error)
+    }
+
+    /// Assert the response carries the Issue #3234 structured error shape and
+    /// return `(code, retriable, message)`.
+    fn assert_structured_error(value: &serde_json::Value, context: &str) -> (String, bool, String) {
+        let error = value
+            .get("error")
+            .unwrap_or_else(|| panic!("[{context}] expected an `error` payload, got: {value}"));
+        let obj = error.as_object().unwrap_or_else(|| {
+            panic!("[{context}] `error` must be a structured object, not free text: {error}")
+        });
+        let code = obj
+            .get("code")
+            .and_then(|c| c.as_str())
+            .unwrap_or_else(|| panic!("[{context}] error must carry a string `code`: {error}"))
+            .to_string();
+        assert!(
+            DOCUMENTED_CODES.contains(&code.as_str()),
+            "[{context}] code {code:?} is not in the documented enum"
+        );
+        let retriable = obj
+            .get("retriable")
+            .and_then(|r| r.as_bool())
+            .unwrap_or_else(|| {
+                panic!("[{context}] error must carry a boolean `retriable`: {error}")
+            });
+        let message = obj
+            .get("message")
+            .and_then(|m| m.as_str())
+            .unwrap_or_else(|| panic!("[{context}] error must carry a string `message`: {error}"))
+            .to_string();
+        assert!(
+            !message.is_empty(),
+            "[{context}] error message must not be empty"
+        );
+        (code, retriable, message)
+    }
+
+    /// Convenience: dispatch, require an error, assert shape + expected code.
+    fn assert_error_code(
+        server: &AletheiaMcpServer,
+        tool: &str,
+        args: serde_json::Value,
+        expected_code: &str,
+    ) -> serde_json::Value {
+        let (value, is_error) = dispatch(server, tool, args);
+        assert!(is_error, "[{tool}] expected an error result, got: {value}");
+        let (code, retriable, _msg) = assert_structured_error(&value, tool);
+        assert_eq!(code, expected_code, "[{tool}] wrong code: {value}");
+        // Caller-fault classes are never advisorily retriable.
+        if matches!(
+            expected_code,
+            "NOT_FOUND" | "INVALID_ARGUMENT" | "CONSTRAINT_VIOLATION" | "FAILED_PRECONDITION"
+        ) {
+            assert!(!retriable, "[{tool}] {expected_code} must not be retriable");
+        }
+        value
+    }
+
+    fn seed_node(server: &AletheiaMcpServer, label: &str, name: &str) -> u64 {
+        let node: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            label: label.to_string(),
+            properties: Some(HashMap::from([(
+                "name".to_string(),
+                serde_json::Value::String(name.to_string()),
+            )])),
+            valid_time: None,
+            provenance: None,
+        }))
+        .expect("seed node should succeed");
+        node.id
+    }
+
+    // ------------------------------------------------------------------
+    // Registry-driven sweep: every advertised tool, present and future,
+    // must return the structured shape on its invalid-arguments path.
+    // A tool added to `tool_definitions()`/`dispatch_tool` is covered
+    // here automatically, with zero test changes.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn every_advertised_tool_returns_structured_error_on_invalid_arguments() {
+        let server = create_test_server();
+        let mut errored = 0;
+        for tool in server.list_tools_for_test() {
+            let (value, is_error) = dispatch(&server, &tool, serde_json::Value::Null);
+            if is_error {
+                errored += 1;
+                let (code, _, message) = assert_structured_error(&value, &tool);
+                // A tool present in tool_definitions() but missing from
+                // dispatch_tool's match would fall into the "Unknown tool"
+                // NOT_FOUND arm and silently pass a shape-only sweep. Catch
+                // that drift explicitly.
+                assert!(
+                    !message.contains("Unknown tool"),
+                    "[{tool}] advertised but not dispatched: {message}"
+                );
+                // Null args can only fail argument deserialization, so the
+                // code must be exactly INVALID_ARGUMENT.
+                assert_eq!(
+                    code, "INVALID_ARGUMENT",
+                    "[{tool}] null args must classify as INVALID_ARGUMENT: {value}"
+                );
+            }
+        }
+        assert!(
+            errored > 0,
+            "sweep must exercise at least one error path (null args should fail deserialization)"
+        );
+    }
+
+    #[test]
+    fn unknown_tool_returns_not_found() {
+        let server = create_test_server();
+        let value = assert_error_code(
+            &server,
+            "definitely_not_a_tool",
+            serde_json::Value::Null,
+            "NOT_FOUND",
+        );
+        let (_, _, message) = assert_structured_error(&value, "unknown tool");
+        assert!(message.contains("Unknown tool"), "got: {message}");
+    }
+
+    // ------------------------------------------------------------------
+    // INVALID_ARGUMENT paths
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn malformed_arguments_return_invalid_argument() {
+        let server = create_test_server();
+        let value = assert_error_code(
+            &server,
+            "get_node",
+            json!({"node_id": "not-a-number"}),
+            "INVALID_ARGUMENT",
+        );
+        let (_, _, message) = assert_structured_error(&value, "get_node malformed");
+        assert!(message.contains("Invalid arguments"), "got: {message}");
+    }
+
+    #[test]
+    fn out_of_range_id_returns_invalid_argument() {
+        let server = create_test_server();
+        let value = assert_error_code(
+            &server,
+            "get_node",
+            json!({"node_id": u64::MAX}),
+            "INVALID_ARGUMENT",
+        );
+        // Message fidelity: the bare StorageError text, byte-for-byte
+        // identical to what pre-#3234 releases returned as the whole `error`
+        // value — no "Storage error: " wrapper prefix.
+        let (_, _, message) = assert_structured_error(&value, "get_node out-of-range");
+        let expected = crate::core::error::StorageError::InvalidId {
+            id: u64::MAX,
+            id_type: "node",
+        }
+        .to_string();
+        assert_eq!(message, expected, "got: {message}");
+        assert!(
+            message.starts_with("Invalid node ID"),
+            "message must be the bare StorageError text: {message}"
+        );
+        assert!(
+            !message.starts_with("Storage error: "),
+            "message must not gain a Storage error prefix: {message}"
+        );
+
+        let value = assert_error_code(
+            &server,
+            "get_edge",
+            json!({"edge_id": u64::MAX}),
+            "INVALID_ARGUMENT",
+        );
+        let (_, _, message) = assert_structured_error(&value, "get_edge out-of-range");
+        assert!(
+            message.starts_with("Invalid edge ID"),
+            "message must be the bare StorageError text: {message}"
+        );
+    }
+
+    #[test]
+    fn invalid_timestamp_returns_invalid_argument() {
+        let server = create_test_server();
+        let value = assert_error_code(
+            &server,
+            "create_node",
+            json!({"label": "Person", "valid_time": "not-a-timestamp"}),
+            "INVALID_ARGUMENT",
+        );
+        let (_, _, message) = assert_structured_error(&value, "create_node bad valid_time");
+        assert!(message.contains("Invalid valid_time"), "got: {message}");
+
+        let node_id = seed_node(&server, "Person", "Alice");
+        assert_error_code(
+            &server,
+            "get_node_at_time",
+            json!({"node_id": node_id, "valid_time": "not-a-timestamp"}),
+            "INVALID_ARGUMENT",
+        );
+        assert_error_code(
+            &server,
+            "traverse",
+            json!({
+                "start_node_id": node_id,
+                "edge_label": "KNOWS",
+                "as_of_valid_time": "not-a-timestamp"
+            }),
+            "INVALID_ARGUMENT",
+        );
+        assert_error_code(
+            &server,
+            "list_changes",
+            json!({"tx_from": "not-a-timestamp", "tx_to": "2026-01-01T00:00:00Z"}),
+            "INVALID_ARGUMENT",
+        );
+    }
+
+    #[test]
+    fn invalid_provenance_confidence_returns_invalid_argument() {
+        let server = create_test_server();
+        let value = assert_error_code(
+            &server,
+            "create_node",
+            json!({"label": "Person", "provenance": {"confidence": 1.5}}),
+            "INVALID_ARGUMENT",
+        );
+        let (_, _, message) = assert_structured_error(&value, "create_node bad provenance");
+        assert!(message.contains("confidence"), "got: {message}");
+    }
+
+    #[test]
+    fn list_nodes_inconsistent_property_filter_returns_invalid_argument() {
+        let server = create_test_server();
+        assert_error_code(
+            &server,
+            "list_nodes",
+            json!({"label": "Person", "property_key": "name"}),
+            "INVALID_ARGUMENT",
+        );
+        // Property filter without label is likewise a caller fault.
+        assert_error_code(
+            &server,
+            "list_nodes",
+            json!({"property_key": "name", "property_value": "Alice"}),
+            "INVALID_ARGUMENT",
+        );
+    }
+
+    #[test]
+    fn delete_node_valid_time_with_detach_returns_invalid_argument() {
+        let server = create_test_server();
+        let node_id = seed_node(&server, "Person", "Alice");
+        assert_error_code(
+            &server,
+            "delete_node",
+            json!({
+                "node_id": node_id,
+                "detach": true,
+                "valid_time": "2024-01-01T00:00:00Z"
+            }),
+            "INVALID_ARGUMENT",
+        );
+    }
+
+    #[test]
+    fn hybrid_query_without_entry_point_returns_invalid_argument() {
+        let server = create_test_server();
+        assert_error_code(&server, "hybrid_query", json!({}), "INVALID_ARGUMENT");
+    }
+
+    #[test]
+    fn find_similar_dimension_mismatch_returns_invalid_argument() {
+        let server = create_test_server();
+        let (_, is_error) = dispatch(
+            &server,
+            "enable_vector_index",
+            json!({"property_name": "embedding", "dimensions": 4}),
+        );
+        assert!(!is_error, "enabling the index should succeed");
+        assert_error_code(
+            &server,
+            "find_similar",
+            json!({"property_name": "embedding", "embedding": [0.1, 0.2, 0.3]}),
+            "INVALID_ARGUMENT",
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // NOT_FOUND paths
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn missing_entities_return_not_found() {
+        let server = create_test_server();
+        let value = assert_error_code(&server, "get_node", json!({"node_id": 424242}), "NOT_FOUND");
+        let (_, _, message) = assert_structured_error(&value, "get_node missing");
+        assert!(message.contains("Node not found"), "got: {message}");
+
+        assert_error_code(&server, "get_edge", json!({"edge_id": 424242}), "NOT_FOUND");
+        assert_error_code(
+            &server,
+            "update_node",
+            json!({"node_id": 424242, "properties": {"a": 1}}),
+            "NOT_FOUND",
+        );
+        assert_error_code(
+            &server,
+            "update_edge",
+            json!({"edge_id": 424242, "properties": {"a": 1}}),
+            "NOT_FOUND",
+        );
+        assert_error_code(
+            &server,
+            "delete_node",
+            json!({"node_id": 424242}),
+            "NOT_FOUND",
+        );
+        assert_error_code(
+            &server,
+            "delete_edge",
+            json!({"edge_id": 424242}),
+            "NOT_FOUND",
+        );
+        // A missing endpoint surfaces from the transaction layer as a
+        // validation failure: the request is well-formed, but the graph is
+        // not in the state it requires -> FAILED_PRECONDITION.
+        assert_error_code(
+            &server,
+            "create_edge",
+            json!({"source_id": 424242, "target_id": 424243, "label": "KNOWS"}),
+            "FAILED_PRECONDITION",
+        );
+    }
+
+    #[test]
+    fn node_absent_at_temporal_coordinate_returns_not_found() {
+        let server = create_test_server();
+        let node_id = seed_node(&server, "Person", "Alice");
+        // Long before the node's creation: not found at that coordinate.
+        assert_error_code(
+            &server,
+            "get_node_at_time",
+            json!({"node_id": node_id, "valid_time": "2000-01-01T00:00:00Z"}),
+            "NOT_FOUND",
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // FAILED_PRECONDITION paths
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn find_similar_without_index_returns_failed_precondition() {
+        let server = create_test_server();
+        let value = assert_error_code(
+            &server,
+            "find_similar",
+            json!({"property_name": "missing_prop", "embedding": [0.1, 0.2]}),
+            "FAILED_PRECONDITION",
+        );
+        let (_, _, message) = assert_structured_error(&value, "find_similar no index");
+        assert!(
+            message.contains("Vector index not enabled"),
+            "got: {message}"
+        );
+
+        // Same precondition through the hybrid query path.
+        assert_error_code(
+            &server,
+            "hybrid_query",
+            json!({"query_embedding": [0.1, 0.2], "vector_property": "missing_prop"}),
+            "FAILED_PRECONDITION",
+        );
+    }
+
+    /// Issue #3209's DETACH-delete refusal migrated to the structured shape:
+    /// `FAILED_PRECONDITION` with `details.connected_edges`, while the legacy
+    /// top-level `connected_edges` / `detach_required` fields remain (no loss).
+    #[test]
+    fn detach_refusal_returns_failed_precondition_with_connected_edges_details() {
+        let server = create_test_server();
+        let a = seed_node(&server, "Person", "Alice");
+        let b = seed_node(&server, "Person", "Bob");
+        let (_, is_error) = dispatch(
+            &server,
+            "create_edge",
+            json!({"source_id": a, "target_id": b, "label": "KNOWS"}),
+        );
+        assert!(!is_error, "edge creation should succeed");
+
+        let value = assert_error_code(
+            &server,
+            "delete_node",
+            json!({"node_id": a}),
+            "FAILED_PRECONDITION",
+        );
+
+        // Structured details carry the machine-readable count.
+        assert_eq!(
+            value["error"]["details"]["connected_edges"].as_u64(),
+            Some(1),
+            "details.connected_edges must report the edge count: {value}"
+        );
+        // Legacy #3209 fields are preserved additively at the top level.
+        assert_eq!(value["connected_edges"].as_u64(), Some(1), "got: {value}");
+        assert_eq!(value["detach_required"].as_bool(), Some(true));
+        assert_eq!(value["success"].as_bool(), Some(false));
+        assert_eq!(value["node_id"].as_u64(), Some(a));
+        // Free text is preserved as error.message.
+        let (_, _, message) = assert_structured_error(&value, "detach refusal");
+        assert!(message.contains("connected edge"), "got: {message}");
+        assert!(message.contains("detach"), "got: {message}");
+    }
+
+    // ------------------------------------------------------------------
+    // CONSTRAINT_VIOLATION paths
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn unique_violation_returns_constraint_violation_with_details() {
+        let server = create_test_server();
+        let (_, is_error) = dispatch(
+            &server,
+            "enable_unique_constraint",
+            json!({"label": "Person", "property": "email"}),
+        );
+        assert!(!is_error, "enabling the constraint should succeed");
+
+        let (_, is_error) = dispatch(
+            &server,
+            "create_node",
+            json!({"label": "Person", "properties": {"email": "a@example.com"}}),
+        );
+        assert!(!is_error, "first node should succeed");
+
+        let value = assert_error_code(
+            &server,
+            "create_node",
+            json!({"label": "Person", "properties": {"email": "a@example.com"}}),
+            "CONSTRAINT_VIOLATION",
+        );
+        // Structured details carry the constraint metadata.
+        assert_eq!(
+            value["error"]["details"]["label"].as_str(),
+            Some("Person"),
+            "got: {value}"
+        );
+        assert_eq!(
+            value["error"]["details"]["property"].as_str(),
+            Some("email")
+        );
+        assert!(value["error"]["details"]["existing_node_id"].is_u64());
+        // Legacy top-level fields are preserved additively.
+        assert_eq!(value["constraint_violation"].as_bool(), Some(true));
+        assert_eq!(value["label"].as_str(), Some("Person"));
+        assert_eq!(value["property"].as_str(), Some("email"));
+        assert!(value["existing_node_id"].is_u64());
+    }
+
+    #[test]
+    fn enable_constraint_over_duplicates_returns_failed_precondition() {
+        // DuplicateOnEnable is a *state* problem — duplicates already exist
+        // in the graph, so the enable cannot succeed until the data is fixed.
+        // That is FAILED_PRECONDITION, not a constraint rejecting this write.
+        let server = create_test_server();
+        for _ in 0..2 {
+            let (_, is_error) = dispatch(
+                &server,
+                "create_node",
+                json!({"label": "Person", "properties": {"email": "dup@example.com"}}),
+            );
+            assert!(!is_error);
+        }
+        assert_error_code(
+            &server,
+            "enable_unique_constraint",
+            json!({"label": "Person", "property": "email"}),
+            "FAILED_PRECONDITION",
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // The `query` tool: `kind` is preserved verbatim (its own contract,
+    // Issue #3213) while `code`/`retriable` are added additively.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn query_tool_errors_keep_kind_and_gain_code_and_retriable() {
+        let server = create_test_server();
+
+        // read_only_violation
+        let (value, is_error) = dispatch(
+            &server,
+            "query",
+            json!({"language": "aql", "query": "CREATE (n:Person) RETURN n"}),
+        );
+        assert!(is_error);
+        assert_eq!(
+            value["error"]["kind"].as_str(),
+            Some("read_only_violation"),
+            "the query tool's kind field must be preserved: {value}"
+        );
+        let (code, retriable, _) = assert_structured_error(&value, "query read-only");
+        assert_eq!(code, "INVALID_ARGUMENT");
+        assert!(!retriable);
+
+        // invalid_request (unsupported language)
+        let (value, is_error) = dispatch(
+            &server,
+            "query",
+            json!({"language": "sparql", "query": "SELECT ?s WHERE { ?s ?p ?o }"}),
+        );
+        assert!(is_error);
+        assert_eq!(value["error"]["kind"].as_str(), Some("invalid_request"));
+        let (code, _, _) = assert_structured_error(&value, "query bad language");
+        assert_eq!(code, "INVALID_ARGUMENT");
+
+        // parse_error
+        let (value, is_error) = dispatch(
+            &server,
+            "query",
+            json!({"language": "aql", "query": "THIS IS NOT A QUERY"}),
+        );
+        assert!(is_error);
+        assert_eq!(
+            value["error"]["kind"].as_str(),
+            Some("parse_error"),
+            "got: {value}"
+        );
+        let (code, _, _) = assert_structured_error(&value, "query parse error");
+        assert_eq!(code, "INVALID_ARGUMENT");
+    }
+
+    // ------------------------------------------------------------------
+    // History / independent-dimension temporal tools (Phase 11)
+    // ------------------------------------------------------------------
+
+    fn seed_edge(server: &AletheiaMcpServer, source: u64, target: u64) -> u64 {
+        let (value, is_error) = dispatch(
+            server,
+            "create_edge",
+            json!({"source_id": source, "target_id": target, "label": "KNOWS"}),
+        );
+        assert!(!is_error, "seed edge should succeed: {value}");
+        value["id"].as_u64().expect("created edge must carry an id")
+    }
+
+    /// Every history/temporal tool must classify a missing entity as
+    /// NOT_FOUND. Note the message here still flows through `db_error` (the
+    /// storage lookup fails, not the ID parse), so assert the code, not the
+    /// message text.
+    #[test]
+    fn history_tools_missing_entity_returns_not_found() {
+        let server = create_test_server();
+        let ts = "2026-01-01T00:00:00Z";
+        let cases: Vec<(&str, serde_json::Value)> = vec![
+            (
+                "get_node_at_valid_time",
+                json!({"node_id": 424242, "valid_time": ts}),
+            ),
+            (
+                "get_node_at_transaction_time",
+                json!({"node_id": 424242, "transaction_time": ts}),
+            ),
+            ("get_node_history", json!({"node_id": 424242})),
+            (
+                "diff_node_versions",
+                json!({"node_id": 424242, "from_version": 1, "to_version": 2}),
+            ),
+            (
+                "get_edge_at_valid_time",
+                json!({"edge_id": 424242, "valid_time": ts}),
+            ),
+            (
+                "get_edge_at_transaction_time",
+                json!({"edge_id": 424242, "transaction_time": ts}),
+            ),
+            ("get_edge_history", json!({"edge_id": 424242})),
+            (
+                "diff_edge_versions",
+                json!({"edge_id": 424242, "from_version": 1, "to_version": 2}),
+            ),
+        ];
+        for (tool, args) in cases {
+            assert_error_code(&server, tool, args, "NOT_FOUND");
+        }
+    }
+
+    /// Every history/temporal tool that takes a timestamp must classify an
+    /// unparseable one as INVALID_ARGUMENT — even when the entity exists.
+    #[test]
+    fn history_tools_bad_timestamp_returns_invalid_argument() {
+        let server = create_test_server();
+        let a = seed_node(&server, "Person", "Alice");
+        let b = seed_node(&server, "Person", "Bob");
+        let edge_id = seed_edge(&server, a, b);
+        let cases: Vec<(&str, serde_json::Value)> = vec![
+            (
+                "get_node_at_valid_time",
+                json!({"node_id": a, "valid_time": "not-a-timestamp"}),
+            ),
+            (
+                "get_node_at_transaction_time",
+                json!({"node_id": a, "transaction_time": "not-a-timestamp"}),
+            ),
+            (
+                "get_edge_at_valid_time",
+                json!({"edge_id": edge_id, "valid_time": "not-a-timestamp"}),
+            ),
+            (
+                "get_edge_at_transaction_time",
+                json!({"edge_id": edge_id, "transaction_time": "not-a-timestamp"}),
+            ),
+        ];
+        for (tool, args) in cases {
+            assert_error_code(&server, tool, args, "INVALID_ARGUMENT");
+        }
+    }
+
+    #[test]
+    fn edge_absent_at_temporal_coordinate_returns_not_found() {
+        let server = create_test_server();
+        let a = seed_node(&server, "Person", "Alice");
+        let b = seed_node(&server, "Person", "Bob");
+        let edge_id = seed_edge(&server, a, b);
+        // Long before the edge's creation: not found at that coordinate.
+        assert_error_code(
+            &server,
+            "get_edge_at_time",
+            json!({"edge_id": edge_id, "valid_time": "2000-01-01T00:00:00Z"}),
+            "NOT_FOUND",
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // hybrid_query argument classification
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn hybrid_query_bad_temporal_arguments_return_invalid_argument() {
+        let server = create_test_server();
+        let node_id = seed_node(&server, "Person", "Alice");
+        let value = assert_error_code(
+            &server,
+            "hybrid_query",
+            json!({"start_node_id": node_id, "valid_time": "not-a-timestamp"}),
+            "INVALID_ARGUMENT",
+        );
+        let (_, _, message) = assert_structured_error(&value, "hybrid_query bad valid_time");
+        assert!(message.contains("Invalid valid_time"), "got: {message}");
+
+        let value = assert_error_code(
+            &server,
+            "hybrid_query",
+            json!({"start_node_id": node_id, "transaction_time": "not-a-timestamp"}),
+            "INVALID_ARGUMENT",
+        );
+        let (_, _, message) = assert_structured_error(&value, "hybrid_query bad tx_time");
+        assert!(
+            message.contains("Invalid transaction_time"),
+            "got: {message}"
+        );
+    }
+
+    #[test]
+    fn hybrid_query_embedding_dimension_mismatch_returns_invalid_argument() {
+        let server = create_test_server();
+        let (_, is_error) = dispatch(
+            &server,
+            "enable_vector_index",
+            json!({"property_name": "embedding", "dimensions": 4}),
+        );
+        assert!(!is_error, "enabling the index should succeed");
+        assert_error_code(
+            &server,
+            "hybrid_query",
+            json!({"query_embedding": [0.1, 0.2, 0.3], "vector_property": "embedding"}),
+            "INVALID_ARGUMENT",
+        );
+    }
+
+    #[test]
+    fn hybrid_query_missing_start_node_returns_not_found() {
+        let server = create_test_server();
+        assert_error_code(
+            &server,
+            "hybrid_query",
+            json!({"start_node_id": 424242}),
+            "NOT_FOUND",
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Adjacency, schema, create_edge endpoint parsing, list_changes
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn adjacency_tools_out_of_range_id_returns_invalid_argument() {
+        let server = create_test_server();
+        for tool in ["get_outgoing_edges", "get_incoming_edges"] {
+            let value = assert_error_code(
+                &server,
+                tool,
+                json!({"node_id": u64::MAX}),
+                "INVALID_ARGUMENT",
+            );
+            let (_, _, message) = assert_structured_error(&value, tool);
+            assert!(
+                message.starts_with("Invalid node ID"),
+                "[{tool}] bare StorageError text expected: {message}"
+            );
+        }
+        // Pin the current contract for an in-range but *missing* node: the
+        // adjacency tools return an empty adjacency (success), not NOT_FOUND.
+        for tool in ["get_outgoing_edges", "get_incoming_edges"] {
+            let (value, is_error) = dispatch(&server, tool, json!({"node_id": 424242}));
+            assert!(
+                !is_error,
+                "[{tool}] missing node currently yields an empty adjacency: {value}"
+            );
+            assert_eq!(value["count"].as_u64(), Some(0), "got: {value}");
+        }
+    }
+
+    #[test]
+    fn get_schema_bad_as_of_returns_invalid_argument() {
+        let server = create_test_server();
+        assert_error_code(
+            &server,
+            "get_schema",
+            json!({"as_of_valid_time": "not-a-timestamp"}),
+            "INVALID_ARGUMENT",
+        );
+        assert_error_code(
+            &server,
+            "get_schema",
+            json!({"as_of_transaction_time": "not-a-timestamp"}),
+            "INVALID_ARGUMENT",
+        );
+    }
+
+    #[test]
+    fn create_edge_out_of_range_endpoints_return_invalid_argument() {
+        let server = create_test_server();
+        let value = assert_error_code(
+            &server,
+            "create_edge",
+            json!({"source_id": u64::MAX, "target_id": 1, "label": "KNOWS"}),
+            "INVALID_ARGUMENT",
+        );
+        let (_, _, message) = assert_structured_error(&value, "create_edge bad source_id");
+        assert!(message.contains("Invalid source_id"), "got: {message}");
+
+        let value = assert_error_code(
+            &server,
+            "create_edge",
+            json!({"source_id": 1, "target_id": u64::MAX, "label": "KNOWS"}),
+            "INVALID_ARGUMENT",
+        );
+        let (_, _, message) = assert_structured_error(&value, "create_edge bad target_id");
+        assert!(message.contains("Invalid target_id"), "got: {message}");
+    }
+
+    #[test]
+    fn list_changes_bad_tx_to_returns_invalid_argument() {
+        let server = create_test_server();
+        let value = assert_error_code(
+            &server,
+            "list_changes",
+            json!({"tx_from": "2026-01-01T00:00:00Z", "tx_to": "not-a-timestamp"}),
+            "INVALID_ARGUMENT",
+        );
+        let (_, _, message) = assert_structured_error(&value, "list_changes bad tx_to");
+        assert!(message.contains("Invalid tx_to"), "got: {message}");
     }
 }

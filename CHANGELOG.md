@@ -22,6 +22,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   prior behavior exactly. On `delete_node`, `valid_time` is not supported
   together with `detach: true` (cascade delete does not support backdating).
 
+### Changed
+
+- MCP tool error responses are now structured (Issue #3234): every error is
+  `{"error": {"code", "message", "retriable", "details"?}}` instead of
+  `{"error": "<string>"}`. `code` is drawn from a stable seven-value enum
+  (`NOT_FOUND`, `INVALID_ARGUMENT`, `CONSTRAINT_VIOLATION`,
+  `FAILED_PRECONDITION`, `CONFLICT`, `UNAVAILABLE`, `INTERNAL`); `retriable`
+  is `true` only for transient classes (timeouts, clock skew,
+  serialization/write conflicts) and always `false` for caller-fault classes;
+  `details` carries optional per-code metadata (e.g. the DETACH refusal's
+  `connected_edges`, a unique violation's `existing_node_id`). The previous
+  free-text error message is preserved verbatim at `error.message`. The
+  `query` tool keeps its own `kind` field verbatim, with `code`/`retriable`
+  added additively alongside it. **Breaking for consumers that read `error`
+  as a string** (e.g. `error.as_str()`): the JSON type of the `error` value
+  changed from string to object. See
+  [docs/guides/mcp-query-tool.md](docs/guides/mcp-query-tool.md#structured-error-codes-and-the-retriable-contract).
+
 ### Fixed
 
 - `create_edge_with_valid_time` now enforces the same "not more than one

@@ -132,7 +132,7 @@ use std::sync::Arc;
 use base64::Engine;
 use chrono::{DateTime, Utc};
 use rmcp::{
-    ErrorData as McpError, ServerHandler,
+    ErrorData as RmcpErrorData, ServerHandler,
     model::{
         CallToolRequestParams, CallToolResult, Content, Implementation, ListToolsResult,
         PaginatedRequestParams, ProtocolVersion, ServerCapabilities, ServerInfo, Tool,
@@ -151,6 +151,7 @@ use crate::db::AletheiaDB;
 use crate::index::vector::{DistanceMetric, HnswConfig};
 use crate::query::executor::{EntityId as ResultEntityId, EntityResult};
 
+use super::error::{McpError, McpErrorCode, query_kind_classification};
 use super::tools::*;
 
 // ============================================================================
@@ -249,7 +250,13 @@ impl AletheiaMcpServer {
             .content
             .first()
             .and_then(|c| c.as_text().map(|s| s.text.clone()))
-            .unwrap_or_else(|| r#"{"error": "No content in response"}"#.to_string())
+            .unwrap_or_else(|| {
+                json!({
+                    "error": McpError::new(McpErrorCode::Internal, "No content in response")
+                        .to_json()
+                })
+                .to_string()
+            })
     }
 
     /// Get a node by its ID.
@@ -271,9 +278,16 @@ impl AletheiaMcpServer {
     ///
     /// # Errors
     ///
-    /// Returns a JSON object with an "error" key if the node is not found.
+    /// Returns a JSON object with a structured "error" object if the node is
+    /// not found (Issue #3234 error contract):
     /// ```json
-    /// { "error": "Node not found: 123" }
+    /// {
+    ///   "error": {
+    ///     "code": "NOT_FOUND",
+    ///     "message": "Storage error: Node not found: Node(123)",
+    ///     "retriable": false
+    ///   }
+    /// }
     /// ```
     pub fn get_node(&self, req: GetNodeRequest) -> String {
         Self::extract_text(self.handle_get_node(
@@ -677,8 +691,10 @@ impl AletheiaMcpServer {
     /// Execute a read-only declarative query (Cypher or AQL).
     ///
     /// Returns the engine's structured rows plus column metadata as JSON, or a
-    /// structured `{error:{kind,message,clause?,language}}` payload. Mutating
-    /// statements are rejected before execution and never write.
+    /// structured `{error:{kind,code,retriable,message,clause?,language}}`
+    /// payload (`kind` per the query tool's own contract, `code`/`retriable`
+    /// per the uniform Issue #3234 error contract). Mutating statements are
+    /// rejected before execution and never write.
     pub fn query(&self, req: QueryRequest) -> String {
         Self::extract_text(self.handle_query(
             serde_json::to_value(req).expect("request serialization should not fail"),
@@ -887,7 +903,7 @@ impl AletheiaMcpServer {
         ))
     }
 
-    /// Parse an optional timestamp argument, returning an `error_json` result on a parse failure.
+    /// Parse an optional timestamp argument, returning a structured INVALID_ARGUMENT error result on a parse failure.
     ///
     /// Collapses the otherwise-duplicated "if present, parse, else None" handling for the
     /// changefeed's optional time bounds.
@@ -900,7 +916,7 @@ impl AletheiaMcpServer {
             .as_deref()
             .map(|s| self.parse_timestamp(s))
             .transpose()
-            .map_err(|e| self.error_json(&format!("Invalid {label}: {e}")))
+            .map_err(|e| self.invalid_argument(&format!("Invalid {label}: {e}")))
     }
 
     /// Resolve a pair of independently-optional `as_of_valid_time` /
@@ -933,7 +949,7 @@ impl AletheiaMcpServer {
     /// core [`Provenance`](crate::core::provenance::Provenance).
     ///
     /// Mirrors [`parse_opt_timestamp`](Self::parse_opt_timestamp): returns
-    /// `Err(error_json(...))` with a clear message when `confidence` is out
+    /// `Err(invalid_argument(...))` with a clear message when `confidence` is out
     /// of `[0.0, 1.0]` (Issue #3224), rather than a generic deserialization
     /// error. An entirely empty bundle (all fields omitted) is normalized to
     /// `None` -- never persisted as a fabricated empty object.
@@ -947,7 +963,7 @@ impl AletheiaMcpServer {
         let provenance =
             Provenance::from_parts(req.source, req.confidence, req.note, req.correlation_id)
                 .map_err(|e| {
-                    self.error_json(&format!(
+                    self.invalid_argument(&format!(
                         "Invalid provenance: confidence must be between 0.0 and 1.0 ({e})"
                     ))
                 })?;
@@ -1011,8 +1027,78 @@ impl AletheiaMcpServer {
         )])
     }
 
-    fn error_json(&self, msg: &str) -> CallToolResult {
-        CallToolResult::error(vec![Content::text(json!({"error": msg}).to_string())])
+    /// Serialize a structured [`McpError`] into an error `CallToolResult`
+    /// with the Issue #3234 shape:
+    /// `{"error": {"code", "message", "retriable", "details"?}}`.
+    fn error_result(&self, err: McpError) -> CallToolResult {
+        Self::error_result_with_top_level(err, serde_json::Map::new())
+    }
+
+    /// Like [`error_result`](Self::error_result), but preserving additional
+    /// legacy top-level fields alongside the structured `error` object (e.g.
+    /// the #3209 DETACH refusal's `connected_edges`), so pre-#3234 consumers
+    /// lose nothing.
+    fn error_result_with_top_level(
+        err: McpError,
+        mut top_level: serde_json::Map<String, serde_json::Value>,
+    ) -> CallToolResult {
+        top_level.insert("error".to_string(), err.to_json());
+        let value = serde_json::Value::Object(top_level);
+        // Compact serialization, matching both the pre-#3234 error payloads
+        // and the query tool's error path (success payloads stay pretty).
+        CallToolResult::error(vec![Content::text(
+            serde_json::to_string(&value).unwrap_or_else(|_| value.to_string()),
+        )])
+    }
+
+    /// Caller-fault error: malformed arguments, bad IDs, unparseable
+    /// timestamps, inconsistent parameter combinations. Never retriable.
+    fn invalid_argument(&self, msg: &str) -> CallToolResult {
+        self.error_result(McpError::new(McpErrorCode::InvalidArgument, msg))
+    }
+
+    /// The request is well-formed but the system is not in the required
+    /// state (e.g. a vector index is not enabled). Never retriable as-is.
+    fn failed_precondition(&self, msg: &str) -> CallToolResult {
+        self.error_result(McpError::new(McpErrorCode::FailedPrecondition, msg))
+    }
+
+    /// Classify an internal database error into the structured MCP shape.
+    ///
+    /// A `UniqueViolation` additionally carries its constraint metadata under
+    /// `error.details` and (for backward compatibility) as legacy top-level
+    /// fields, exactly as before #3234.
+    fn db_error(&self, e: impl Into<crate::core::error::Error>) -> CallToolResult {
+        let e = e.into();
+        if let Some(crate::core::error::ConstraintError::UniqueViolation {
+            label,
+            property,
+            value,
+            existing_node_id,
+        }) = e.as_constraint()
+        {
+            let details = json!({
+                "label": label,
+                "property": property,
+                "value": value,
+                "existing_node_id": existing_node_id.as_u64()
+            });
+            let mut top_level = serde_json::Map::new();
+            top_level.insert("success".to_string(), json!(false));
+            top_level.insert("constraint_violation".to_string(), json!(true));
+            top_level.insert("label".to_string(), json!(label));
+            top_level.insert("property".to_string(), json!(property));
+            top_level.insert("value".to_string(), json!(value));
+            top_level.insert(
+                "existing_node_id".to_string(),
+                json!(existing_node_id.as_u64()),
+            );
+            return Self::error_result_with_top_level(
+                McpError::from_db_error(&e).details(details),
+                top_level,
+            );
+        }
+        self.error_result(McpError::from_db_error(&e))
     }
 
     /// Attach result-completeness signals (Issue #3226) to a bounded read
@@ -1056,33 +1142,6 @@ impl AletheiaMcpServer {
         }
     }
 
-    /// Build a structured `CallToolResult` for a `UniqueViolation` constraint error.
-    /// Returns `None` if `e` is not a `UniqueViolation`.
-    fn constraint_violation_result(&self, e: &crate::core::error::Error) -> Option<CallToolResult> {
-        if let Some(crate::core::error::ConstraintError::UniqueViolation {
-            label,
-            property,
-            value,
-            existing_node_id,
-        }) = e.as_constraint()
-        {
-            Some(CallToolResult::error(vec![Content::text(
-                serde_json::to_string_pretty(&json!({
-                    "error": e.to_string(),
-                    "success": false,
-                    "constraint_violation": true,
-                    "label": label,
-                    "property": property,
-                    "value": value,
-                    "existing_node_id": existing_node_id.as_u64()
-                }))
-                .unwrap_or_else(|_| "{\"error\":\"serialization failed\"}".to_string()),
-            )]))
-        } else {
-            None
-        }
-    }
-
     // ========================================================================
     // Tool Implementations
     // ========================================================================
@@ -1090,12 +1149,16 @@ impl AletheiaMcpServer {
     fn handle_get_node(&self, args: serde_json::Value) -> CallToolResult {
         let req: GetNodeRequest = match serde_json::from_value(args) {
             Ok(r) => r,
-            Err(e) => return self.error_json(&format!("Invalid arguments: {}", e)),
+            Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
         };
 
         let node_id = match NodeId::new(req.node_id) {
             Ok(id) => id,
-            Err(e) => return self.error_json(&e.to_string()),
+            // An out-of-range ID is a caller fault; emit the bare
+            // `StorageError` text verbatim (`db_error` would wrap it in
+            // `Error::Storage`, prefixing "Storage error: " — a message
+            // regression vs pre-#3234 responses).
+            Err(e) => return self.invalid_argument(&e.to_string()),
         };
 
         match self.db.get_node(node_id) {
@@ -1106,20 +1169,20 @@ impl AletheiaMcpServer {
                         .expect("response serialization should not fail"),
                 )
             }
-            Err(e) => self.error_json(&e.to_string()),
+            Err(e) => self.db_error(e),
         }
     }
 
     fn handle_create_node(&self, args: serde_json::Value) -> CallToolResult {
         let req: CreateNodeRequest = match serde_json::from_value(args) {
             Ok(r) => r,
-            Err(e) => return self.error_json(&format!("Invalid arguments: {}", e)),
+            Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
         };
 
         let properties = match req.properties {
             Some(p) => match self.json_to_property_map(&p) {
                 Ok(map) => map,
-                Err(e) => return self.error_json(&format!("Invalid properties: {}", e)),
+                Err(e) => return self.invalid_argument(&format!("Invalid properties: {}", e)),
             },
             None => PropertyMap::default(),
         };
@@ -1153,31 +1216,30 @@ impl AletheiaMcpServer {
                             .expect("response serialization should not fail"),
                     )
                 }
-                Err(e) => self.error_json(&e.to_string()),
+                Err(e) => self.db_error(e),
             },
-            Err(ref e) => {
-                if let Some(result) = self.constraint_violation_result(e) {
-                    return result;
-                }
-                self.error_json(&e.to_string())
-            }
+            Err(e) => self.db_error(e),
         }
     }
 
     fn handle_update_node(&self, args: serde_json::Value) -> CallToolResult {
         let req: UpdateNodeRequest = match serde_json::from_value(args) {
             Ok(r) => r,
-            Err(e) => return self.error_json(&format!("Invalid arguments: {}", e)),
+            Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
         };
 
         let node_id = match NodeId::new(req.node_id) {
             Ok(id) => id,
-            Err(e) => return self.error_json(&e.to_string()),
+            // An out-of-range ID is a caller fault; emit the bare
+            // `StorageError` text verbatim (`db_error` would wrap it in
+            // `Error::Storage`, prefixing "Storage error: " — a message
+            // regression vs pre-#3234 responses).
+            Err(e) => return self.invalid_argument(&e.to_string()),
         };
 
         let properties = match self.json_to_property_map(&req.properties) {
             Ok(map) => map,
-            Err(e) => return self.error_json(&format!("Invalid properties: {}", e)),
+            Err(e) => return self.invalid_argument(&format!("Invalid properties: {}", e)),
         };
 
         let valid_from = match self.parse_opt_timestamp("valid_time", &req.valid_time) {
@@ -1209,26 +1271,25 @@ impl AletheiaMcpServer {
                             .expect("response serialization should not fail"),
                     )
                 }
-                Err(e) => self.error_json(&e.to_string()),
+                Err(e) => self.db_error(e),
             },
-            Err(ref e) => {
-                if let Some(result) = self.constraint_violation_result(e) {
-                    return result;
-                }
-                self.error_json(&e.to_string())
-            }
+            Err(e) => self.db_error(e),
         }
     }
 
     fn handle_delete_node(&self, args: serde_json::Value) -> CallToolResult {
         let req: DeleteNodeRequest = match serde_json::from_value(args) {
             Ok(r) => r,
-            Err(e) => return self.error_json(&format!("Invalid arguments: {}", e)),
+            Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
         };
 
         let node_id = match NodeId::new(req.node_id) {
             Ok(id) => id,
-            Err(e) => return self.error_json(&e.to_string()),
+            // An out-of-range ID is a caller fault; emit the bare
+            // `StorageError` text verbatim (`db_error` would wrap it in
+            // `Error::Storage`, prefixing "Storage error: " — a message
+            // regression vs pre-#3234 responses).
+            Err(e) => return self.invalid_argument(&e.to_string()),
         };
 
         let detach = req.detach.unwrap_or(false);
@@ -1239,7 +1300,7 @@ impl AletheiaMcpServer {
         };
 
         if detach && valid_from.is_some() {
-            return self.error_json(
+            return self.invalid_argument(
                 "valid_time is not supported together with detach:true; cascade delete does \
                  not support backdating. Delete the connected edges individually with \
                  valid_time, or omit valid_time to cascade-delete at now.",
@@ -1285,25 +1346,34 @@ impl AletheiaMcpServer {
 
         let outcome = match outcome {
             Ok(o) => o,
-            Err(e) => return self.error_json(&e.to_string()),
+            Err(e) => return self.db_error(e),
         };
 
         match outcome {
-            Outcome::Refused { connected_edges } => CallToolResult::error(vec![Content::text(
-                serde_json::to_string_pretty(&json!({
-                    "error": format!(
-                        "Node {} has {} connected edge(s); refusing to delete. \
-                         Pass `detach: true` to delete the node and its connected edges, \
-                         or remove the edges first.",
-                        req.node_id, connected_edges
-                    ),
-                    "success": false,
-                    "node_id": req.node_id,
-                    "connected_edges": connected_edges,
-                    "detach_required": true
-                }))
-                .unwrap_or_else(|_| "{\"error\":\"serialization failed\"}".to_string()),
-            )]),
+            // The #3209 refusal in the #3234 structured shape:
+            // `FAILED_PRECONDITION` with `details.connected_edges`, while the
+            // legacy top-level fields are preserved additively (no loss).
+            Outcome::Refused { connected_edges } => {
+                let message = format!(
+                    "Node {} has {} connected edge(s); refusing to delete. \
+                     Pass `detach: true` to delete the node and its connected edges, \
+                     or remove the edges first.",
+                    req.node_id, connected_edges
+                );
+                let mut top_level = serde_json::Map::new();
+                top_level.insert("success".to_string(), json!(false));
+                top_level.insert("node_id".to_string(), json!(req.node_id));
+                top_level.insert("connected_edges".to_string(), json!(connected_edges));
+                top_level.insert("detach_required".to_string(), json!(true));
+                Self::error_result_with_top_level(
+                    McpError::new(McpErrorCode::FailedPrecondition, message).details(json!({
+                        "node_id": req.node_id,
+                        "connected_edges": connected_edges,
+                        "detach_required": true
+                    })),
+                    top_level,
+                )
+            }
             Outcome::Deleted { edges_removed } => self.success_json(json!({
                 "success": true,
                 "deleted_node_id": req.node_id,
@@ -1316,12 +1386,16 @@ impl AletheiaMcpServer {
     fn handle_delete_node_cascade(&self, args: serde_json::Value) -> CallToolResult {
         let req: DeleteNodeCascadeRequest = match serde_json::from_value(args) {
             Ok(r) => r,
-            Err(e) => return self.error_json(&format!("Invalid arguments: {}", e)),
+            Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
         };
 
         let node_id = match NodeId::new(req.node_id) {
             Ok(id) => id,
-            Err(e) => return self.error_json(&e.to_string()),
+            // An out-of-range ID is a caller fault; emit the bare
+            // `StorageError` text verbatim (`db_error` would wrap it in
+            // `Error::Storage`, prefixing "Storage error: " — a message
+            // regression vs pre-#3234 responses).
+            Err(e) => return self.invalid_argument(&e.to_string()),
         };
 
         match self.db.write(|tx| tx.delete_node_cascade(node_id)) {
@@ -1330,14 +1404,14 @@ impl AletheiaMcpServer {
                 "deleted_node_id": req.node_id,
                 "cascade": true
             })),
-            Err(e) => self.error_json(&e.to_string()),
+            Err(e) => self.db_error(e),
         }
     }
 
     fn handle_list_nodes(&self, args: serde_json::Value) -> CallToolResult {
         let req: ListNodesRequest = match serde_json::from_value(args) {
             Ok(r) => r,
-            Err(e) => return self.error_json(&format!("Invalid arguments: {}", e)),
+            Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
         };
 
         // Apply resource limits. A page must be able to carry a continuation
@@ -1352,11 +1426,12 @@ impl AletheiaMcpServer {
 
         // Validate property filter: both key and value are required together with label
         if req.property_key.is_some() != req.property_value.is_some() {
-            return self
-                .error_json("Both 'property_key' and 'property_value' are required together");
+            return self.invalid_argument(
+                "Both 'property_key' and 'property_value' are required together",
+            );
         }
         if req.property_key.is_some() && req.label.is_none() {
-            return self.error_json("Property filtering requires 'label' to be specified");
+            return self.invalid_argument("Property filtering requires 'label' to be specified");
         }
 
         // Property-based lookup: label + property_key + property_value
@@ -1366,7 +1441,7 @@ impl AletheiaMcpServer {
             let property_value =
                 match self.json_to_property_value(prop_val) {
                     Some(v) => v,
-                    None => return self.error_json(
+                    None => return self.invalid_argument(
                         "Unsupported property_value type. Use strings, numbers, booleans, or null.",
                     ),
                 };
@@ -1437,7 +1512,7 @@ impl AletheiaMcpServer {
                                     nodes.push(self.node_to_response(&node, include_vectors));
                                 }
                             }
-                            Err(e) => return self.error_json(&e.to_string()),
+                            Err(e) => return self.db_error(e),
                         }
                     }
 
@@ -1453,7 +1528,7 @@ impl AletheiaMcpServer {
                     Self::attach_completeness(&mut response, offset, nodes.len(), has_more, None);
                     self.success_json(response)
                 }
-                Err(e) => self.error_json(&e.to_string()),
+                Err(e) => self.db_error(e),
             }
         } else {
             // Without a label filter, we cannot efficiently list all nodes
@@ -1474,7 +1549,7 @@ impl AletheiaMcpServer {
     fn handle_count_nodes(&self, args: serde_json::Value) -> CallToolResult {
         let req: CountNodesRequest = match serde_json::from_value(args) {
             Ok(r) => r,
-            Err(e) => return self.error_json(&format!("Invalid arguments: {}", e)),
+            Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
         };
 
         if let Some(label) = &req.label {
@@ -1485,16 +1560,15 @@ impl AletheiaMcpServer {
                     // Efficiently count without allocating a Vec
                     match results.try_fold(0usize, |acc, row| row.map(|_| acc + 1)) {
                         Ok(count) => self.success_json(json!({"count": count, "label": label})),
-                        Err(e) => self.error_json(&format!(
-                            "Error counting nodes with label '{}': {}",
-                            label, e
+                        Err(e) => self.error_result(McpError::from_db_error(&e).with_message(
+                            format!("Error counting nodes with label '{}': {}", label, e),
                         )),
                     }
                 }
-                Err(e) => self.error_json(&format!(
+                Err(e) => self.error_result(McpError::from_db_error(&e).with_message(format!(
                     "Error executing count query for label '{}': {}",
                     label, e
-                )),
+                ))),
             }
         } else {
             self.success_json(json!({"count": self.db.node_count()}))
@@ -1504,12 +1578,16 @@ impl AletheiaMcpServer {
     fn handle_get_edge(&self, args: serde_json::Value) -> CallToolResult {
         let req: GetEdgeRequest = match serde_json::from_value(args) {
             Ok(r) => r,
-            Err(e) => return self.error_json(&format!("Invalid arguments: {}", e)),
+            Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
         };
 
         let edge_id = match EdgeId::new(req.edge_id) {
             Ok(id) => id,
-            Err(e) => return self.error_json(&e.to_string()),
+            // An out-of-range ID is a caller fault; emit the bare
+            // `StorageError` text verbatim (`db_error` would wrap it in
+            // `Error::Storage`, prefixing "Storage error: " — a message
+            // regression vs pre-#3234 responses).
+            Err(e) => return self.invalid_argument(&e.to_string()),
         };
 
         match self.db.get_edge(edge_id) {
@@ -1520,30 +1598,30 @@ impl AletheiaMcpServer {
                         .expect("response serialization should not fail"),
                 )
             }
-            Err(e) => self.error_json(&e.to_string()),
+            Err(e) => self.db_error(e),
         }
     }
 
     fn handle_create_edge(&self, args: serde_json::Value) -> CallToolResult {
         let req: CreateEdgeRequest = match serde_json::from_value(args) {
             Ok(r) => r,
-            Err(e) => return self.error_json(&format!("Invalid arguments: {}", e)),
+            Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
         };
 
         let source_id = match NodeId::new(req.source_id) {
             Ok(id) => id,
-            Err(e) => return self.error_json(&format!("Invalid source_id: {}", e)),
+            Err(e) => return self.invalid_argument(&format!("Invalid source_id: {}", e)),
         };
 
         let target_id = match NodeId::new(req.target_id) {
             Ok(id) => id,
-            Err(e) => return self.error_json(&format!("Invalid target_id: {}", e)),
+            Err(e) => return self.invalid_argument(&format!("Invalid target_id: {}", e)),
         };
 
         let properties = match req.properties {
             Some(p) => match self.json_to_property_map(&p) {
                 Ok(map) => map,
-                Err(e) => return self.error_json(&format!("Invalid properties: {}", e)),
+                Err(e) => return self.invalid_argument(&format!("Invalid properties: {}", e)),
             },
             None => PropertyMap::default(),
         };
@@ -1577,26 +1655,30 @@ impl AletheiaMcpServer {
                             .expect("response serialization should not fail"),
                     )
                 }
-                Err(e) => self.error_json(&e.to_string()),
+                Err(e) => self.db_error(e),
             },
-            Err(e) => self.error_json(&e.to_string()),
+            Err(e) => self.db_error(e),
         }
     }
 
     fn handle_update_edge(&self, args: serde_json::Value) -> CallToolResult {
         let req: UpdateEdgeRequest = match serde_json::from_value(args) {
             Ok(r) => r,
-            Err(e) => return self.error_json(&format!("Invalid arguments: {}", e)),
+            Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
         };
 
         let edge_id = match EdgeId::new(req.edge_id) {
             Ok(id) => id,
-            Err(e) => return self.error_json(&e.to_string()),
+            // An out-of-range ID is a caller fault; emit the bare
+            // `StorageError` text verbatim (`db_error` would wrap it in
+            // `Error::Storage`, prefixing "Storage error: " — a message
+            // regression vs pre-#3234 responses).
+            Err(e) => return self.invalid_argument(&e.to_string()),
         };
 
         let properties = match self.json_to_property_map(&req.properties) {
             Ok(map) => map,
-            Err(e) => return self.error_json(&format!("Invalid properties: {}", e)),
+            Err(e) => return self.invalid_argument(&format!("Invalid properties: {}", e)),
         };
 
         let valid_from = match self.parse_opt_timestamp("valid_time", &req.valid_time) {
@@ -1628,21 +1710,25 @@ impl AletheiaMcpServer {
                             .expect("response serialization should not fail"),
                     )
                 }
-                Err(e) => self.error_json(&e.to_string()),
+                Err(e) => self.db_error(e),
             },
-            Err(e) => self.error_json(&e.to_string()),
+            Err(e) => self.db_error(e),
         }
     }
 
     fn handle_delete_edge(&self, args: serde_json::Value) -> CallToolResult {
         let req: DeleteEdgeRequest = match serde_json::from_value(args) {
             Ok(r) => r,
-            Err(e) => return self.error_json(&format!("Invalid arguments: {}", e)),
+            Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
         };
 
         let edge_id = match EdgeId::new(req.edge_id) {
             Ok(id) => id,
-            Err(e) => return self.error_json(&e.to_string()),
+            // An out-of-range ID is a caller fault; emit the bare
+            // `StorageError` text verbatim (`db_error` would wrap it in
+            // `Error::Storage`, prefixing "Storage error: " — a message
+            // regression vs pre-#3234 responses).
+            Err(e) => return self.invalid_argument(&e.to_string()),
         };
 
         let valid_from = match self.parse_opt_timestamp("valid_time", &req.valid_time) {
@@ -1658,14 +1744,14 @@ impl AletheiaMcpServer {
                 "success": true,
                 "deleted_edge_id": req.edge_id
             })),
-            Err(e) => self.error_json(&e.to_string()),
+            Err(e) => self.db_error(e),
         }
     }
 
     fn handle_list_edges(&self, args: serde_json::Value) -> CallToolResult {
         let req: ListEdgesRequest = match serde_json::from_value(args) {
             Ok(r) => r,
-            Err(e) => return self.error_json(&format!("Invalid arguments: {}", e)),
+            Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
         };
 
         // Apply resource limits
@@ -1693,7 +1779,7 @@ impl AletheiaMcpServer {
     fn handle_count_edges(&self, args: serde_json::Value) -> CallToolResult {
         let req: CountEdgesRequest = match serde_json::from_value(args) {
             Ok(r) => r,
-            Err(e) => return self.error_json(&format!("Invalid arguments: {}", e)),
+            Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
         };
 
         // Note: Counting by label is not efficiently supported without iterating all edges.
@@ -1712,12 +1798,16 @@ impl AletheiaMcpServer {
     fn handle_get_outgoing_edges(&self, args: serde_json::Value) -> CallToolResult {
         let req: GetOutgoingEdgesRequest = match serde_json::from_value(args) {
             Ok(r) => r,
-            Err(e) => return self.error_json(&format!("Invalid arguments: {}", e)),
+            Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
         };
 
         let node_id = match NodeId::new(req.node_id) {
             Ok(id) => id,
-            Err(e) => return self.error_json(&e.to_string()),
+            // An out-of-range ID is a caller fault; emit the bare
+            // `StorageError` text verbatim (`db_error` would wrap it in
+            // `Error::Storage`, prefixing "Storage error: " — a message
+            // regression vs pre-#3234 responses).
+            Err(e) => return self.invalid_argument(&e.to_string()),
         };
 
         let edge_ids = if let Some(label) = &req.label {
@@ -1748,12 +1838,16 @@ impl AletheiaMcpServer {
     fn handle_get_incoming_edges(&self, args: serde_json::Value) -> CallToolResult {
         let req: GetIncomingEdgesRequest = match serde_json::from_value(args) {
             Ok(r) => r,
-            Err(e) => return self.error_json(&format!("Invalid arguments: {}", e)),
+            Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
         };
 
         let node_id = match NodeId::new(req.node_id) {
             Ok(id) => id,
-            Err(e) => return self.error_json(&e.to_string()),
+            // An out-of-range ID is a caller fault; emit the bare
+            // `StorageError` text verbatim (`db_error` would wrap it in
+            // `Error::Storage`, prefixing "Storage error: " — a message
+            // regression vs pre-#3234 responses).
+            Err(e) => return self.invalid_argument(&e.to_string()),
         };
 
         let edge_ids = self.db.get_incoming_edges(node_id);
@@ -1892,12 +1986,16 @@ impl AletheiaMcpServer {
     fn handle_traverse(&self, args: serde_json::Value) -> CallToolResult {
         let req: TraverseRequest = match serde_json::from_value(args) {
             Ok(r) => r,
-            Err(e) => return self.error_json(&format!("Invalid arguments: {}", e)),
+            Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
         };
 
         let start_id = match NodeId::new(req.start_node_id) {
             Ok(id) => id,
-            Err(e) => return self.error_json(&e.to_string()),
+            // An out-of-range ID is a caller fault; emit the bare
+            // `StorageError` text verbatim (`db_error` would wrap it in
+            // `Error::Storage`, prefixing "Storage error: " — a message
+            // regression vs pre-#3234 responses).
+            Err(e) => return self.invalid_argument(&e.to_string()),
         };
 
         let temporal = match self
@@ -2028,7 +2126,7 @@ impl AletheiaMcpServer {
     fn handle_find_similar(&self, args: serde_json::Value) -> CallToolResult {
         let req: FindSimilarRequest = match serde_json::from_value(args) {
             Ok(r) => r,
-            Err(e) => return self.error_json(&format!("Invalid arguments: {}", e)),
+            Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
         };
 
         // Apply resource limits. A page must be able to carry a continuation
@@ -2049,7 +2147,7 @@ impl AletheiaMcpServer {
             .min(MAX_VECTOR_K.saturating_sub(k));
 
         if !self.db.is_vector_index_enabled_for(&req.property_name) {
-            return self.error_json(&format!(
+            return self.failed_precondition(&format!(
                 "Vector index not enabled for property '{}'. Use enable_vector_index first.",
                 req.property_name
             ));
@@ -2057,7 +2155,7 @@ impl AletheiaMcpServer {
 
         // Validate embedding dimensions
         if let Err(e) = self.validate_embedding_dimensions(&req.embedding, &req.property_name) {
-            return self.error_json(&e);
+            return self.invalid_argument(&e);
         }
 
         // Over-fetch one past the requested page (offset + k + 1, capped at
@@ -2099,14 +2197,14 @@ impl AletheiaMcpServer {
                 Self::attach_completeness(&mut response, offset, k, has_more, None);
                 self.success_json(response)
             }
-            Err(e) => self.error_json(&e.to_string()),
+            Err(e) => self.db_error(e),
         }
     }
 
     fn handle_enable_vector_index(&self, args: serde_json::Value) -> CallToolResult {
         let req: EnableVectorIndexRequest = match serde_json::from_value(args) {
             Ok(r) => r,
-            Err(e) => return self.error_json(&format!("Invalid arguments: {}", e)),
+            Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
         };
 
         let distance_metric = match req.distance_metric.as_deref().unwrap_or("cosine") {
@@ -2124,7 +2222,7 @@ impl AletheiaMcpServer {
                 "dimensions": req.dimensions,
                 "distance_metric": req.distance_metric.unwrap_or_else(|| "cosine".to_string())
             })),
-            Err(e) => self.error_json(&e.to_string()),
+            Err(e) => self.db_error(e),
         }
     }
 
@@ -2149,7 +2247,7 @@ impl AletheiaMcpServer {
     fn handle_enable_unique_constraint(&self, args: serde_json::Value) -> CallToolResult {
         let req: EnableUniqueConstraintRequest = match serde_json::from_value(args) {
             Ok(r) => r,
-            Err(e) => return self.error_json(&format!("Invalid arguments: {}", e)),
+            Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
         };
 
         match self
@@ -2162,7 +2260,7 @@ impl AletheiaMcpServer {
                 "label": req.label,
                 "property": req.property
             })),
-            Err(e) => self.error_json(&e.to_string()),
+            Err(e) => self.db_error(e),
         }
     }
 
@@ -2181,22 +2279,26 @@ impl AletheiaMcpServer {
     fn handle_get_node_at_time(&self, args: serde_json::Value) -> CallToolResult {
         let req: GetNodeAtTimeRequest = match serde_json::from_value(args) {
             Ok(r) => r,
-            Err(e) => return self.error_json(&format!("Invalid arguments: {}", e)),
+            Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
         };
 
         let node_id = match NodeId::new(req.node_id) {
             Ok(id) => id,
-            Err(e) => return self.error_json(&e.to_string()),
+            // An out-of-range ID is a caller fault; emit the bare
+            // `StorageError` text verbatim (`db_error` would wrap it in
+            // `Error::Storage`, prefixing "Storage error: " — a message
+            // regression vs pre-#3234 responses).
+            Err(e) => return self.invalid_argument(&e.to_string()),
         };
 
         let valid_time = match self.parse_timestamp(&req.valid_time) {
             Ok(t) => t,
-            Err(e) => return self.error_json(&e),
+            Err(e) => return self.invalid_argument(&e),
         };
 
         let tx_time = match self.parse_optional_tx_time(req.transaction_time.as_deref()) {
             Ok(t) => t,
-            Err(e) => return self.error_json(&e),
+            Err(e) => return self.invalid_argument(&e),
         };
 
         match self.db.get_node_at_time(node_id, valid_time, tx_time) {
@@ -2208,29 +2310,33 @@ impl AletheiaMcpServer {
                     "transaction_time": Self::format_tx_time_response(req.transaction_time)
                 }))
             }
-            Err(e) => self.error_json(&e.to_string()),
+            Err(e) => self.db_error(e),
         }
     }
 
     fn handle_get_edge_at_time(&self, args: serde_json::Value) -> CallToolResult {
         let req: GetEdgeAtTimeRequest = match serde_json::from_value(args) {
             Ok(r) => r,
-            Err(e) => return self.error_json(&format!("Invalid arguments: {}", e)),
+            Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
         };
 
         let edge_id = match EdgeId::new(req.edge_id) {
             Ok(id) => id,
-            Err(e) => return self.error_json(&e.to_string()),
+            // An out-of-range ID is a caller fault; emit the bare
+            // `StorageError` text verbatim (`db_error` would wrap it in
+            // `Error::Storage`, prefixing "Storage error: " — a message
+            // regression vs pre-#3234 responses).
+            Err(e) => return self.invalid_argument(&e.to_string()),
         };
 
         let valid_time = match self.parse_timestamp(&req.valid_time) {
             Ok(t) => t,
-            Err(e) => return self.error_json(&e),
+            Err(e) => return self.invalid_argument(&e),
         };
 
         let tx_time = match self.parse_optional_tx_time(req.transaction_time.as_deref()) {
             Ok(t) => t,
-            Err(e) => return self.error_json(&e),
+            Err(e) => return self.invalid_argument(&e),
         };
 
         match self.db.get_edge_at_time(edge_id, valid_time, tx_time) {
@@ -2242,23 +2348,23 @@ impl AletheiaMcpServer {
                     "transaction_time": Self::format_tx_time_response(req.transaction_time)
                 }))
             }
-            Err(e) => self.error_json(&e.to_string()),
+            Err(e) => self.db_error(e),
         }
     }
 
     fn handle_list_changes(&self, args: serde_json::Value) -> CallToolResult {
         let req: ListChangesRequest = match serde_json::from_value(args) {
             Ok(r) => r,
-            Err(e) => return self.error_json(&format!("Invalid arguments: {}", e)),
+            Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
         };
 
         let tx_from = match self.parse_timestamp(&req.tx_from) {
             Ok(t) => t,
-            Err(e) => return self.error_json(&format!("Invalid tx_from: {}", e)),
+            Err(e) => return self.invalid_argument(&format!("Invalid tx_from: {}", e)),
         };
         let tx_to = match self.parse_timestamp(&req.tx_to) {
             Ok(t) => t,
-            Err(e) => return self.error_json(&format!("Invalid tx_to: {}", e)),
+            Err(e) => return self.invalid_argument(&format!("Invalid tx_to: {}", e)),
         };
 
         let valid_from = match self.parse_opt_timestamp("valid_from", &req.valid_from) {
@@ -2317,7 +2423,7 @@ impl AletheiaMcpServer {
                     "next_cursor": page.next_cursor,
                 }))
             }
-            Err(e) => self.error_json(&e.to_string()),
+            Err(e) => self.db_error(e),
         }
     }
 
@@ -2328,17 +2434,21 @@ impl AletheiaMcpServer {
     fn handle_get_node_at_valid_time(&self, args: serde_json::Value) -> CallToolResult {
         let req: GetNodeAtValidTimeRequest = match serde_json::from_value(args) {
             Ok(r) => r,
-            Err(e) => return self.error_json(&format!("Invalid arguments: {}", e)),
+            Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
         };
 
         let node_id = match NodeId::new(req.node_id) {
             Ok(id) => id,
-            Err(e) => return self.error_json(&e.to_string()),
+            // An out-of-range ID is a caller fault; emit the bare
+            // `StorageError` text verbatim (`db_error` would wrap it in
+            // `Error::Storage`, prefixing "Storage error: " — a message
+            // regression vs pre-#3234 responses).
+            Err(e) => return self.invalid_argument(&e.to_string()),
         };
 
         let valid_time = match self.parse_timestamp(&req.valid_time) {
             Ok(t) => t,
-            Err(e) => return self.error_json(&e),
+            Err(e) => return self.invalid_argument(&e),
         };
 
         match self.db.get_node_at_valid_time(node_id, valid_time) {
@@ -2349,24 +2459,28 @@ impl AletheiaMcpServer {
                     "valid_time": req.valid_time
                 }))
             }
-            Err(e) => self.error_json(&e.to_string()),
+            Err(e) => self.db_error(e),
         }
     }
 
     fn handle_get_node_at_transaction_time(&self, args: serde_json::Value) -> CallToolResult {
         let req: GetNodeAtTransactionTimeRequest = match serde_json::from_value(args) {
             Ok(r) => r,
-            Err(e) => return self.error_json(&format!("Invalid arguments: {}", e)),
+            Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
         };
 
         let node_id = match NodeId::new(req.node_id) {
             Ok(id) => id,
-            Err(e) => return self.error_json(&e.to_string()),
+            // An out-of-range ID is a caller fault; emit the bare
+            // `StorageError` text verbatim (`db_error` would wrap it in
+            // `Error::Storage`, prefixing "Storage error: " — a message
+            // regression vs pre-#3234 responses).
+            Err(e) => return self.invalid_argument(&e.to_string()),
         };
 
         let tx_time = match self.parse_timestamp(&req.transaction_time) {
             Ok(t) => t,
-            Err(e) => return self.error_json(&e),
+            Err(e) => return self.invalid_argument(&e),
         };
 
         match self.db.get_node_at_transaction_time(node_id, tx_time) {
@@ -2377,19 +2491,23 @@ impl AletheiaMcpServer {
                     "transaction_time": req.transaction_time
                 }))
             }
-            Err(e) => self.error_json(&e.to_string()),
+            Err(e) => self.db_error(e),
         }
     }
 
     fn handle_get_node_history(&self, args: serde_json::Value) -> CallToolResult {
         let req: GetNodeHistoryRequest = match serde_json::from_value(args) {
             Ok(r) => r,
-            Err(e) => return self.error_json(&format!("Invalid arguments: {}", e)),
+            Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
         };
 
         let node_id = match NodeId::new(req.node_id) {
             Ok(id) => id,
-            Err(e) => return self.error_json(&e.to_string()),
+            // An out-of-range ID is a caller fault; emit the bare
+            // `StorageError` text verbatim (`db_error` would wrap it in
+            // `Error::Storage`, prefixing "Storage error: " — a message
+            // regression vs pre-#3234 responses).
+            Err(e) => return self.invalid_argument(&e.to_string()),
         };
 
         match self.db.get_node_history(node_id) {
@@ -2406,29 +2524,41 @@ impl AletheiaMcpServer {
                     "version_count": versions.len()
                 }))
             }
-            Err(e) => self.error_json(&e.to_string()),
+            Err(e) => self.db_error(e),
         }
     }
 
     fn handle_diff_node_versions(&self, args: serde_json::Value) -> CallToolResult {
         let req: DiffNodeVersionsRequest = match serde_json::from_value(args) {
             Ok(r) => r,
-            Err(e) => return self.error_json(&format!("Invalid arguments: {}", e)),
+            Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
         };
 
         let node_id = match NodeId::new(req.node_id) {
             Ok(id) => id,
-            Err(e) => return self.error_json(&e.to_string()),
+            // An out-of-range ID is a caller fault; emit the bare
+            // `StorageError` text verbatim (`db_error` would wrap it in
+            // `Error::Storage`, prefixing "Storage error: " — a message
+            // regression vs pre-#3234 responses).
+            Err(e) => return self.invalid_argument(&e.to_string()),
         };
 
         let from_version = match crate::core::id::VersionId::new(req.from_version) {
             Ok(id) => id,
-            Err(e) => return self.error_json(&e.to_string()),
+            // An out-of-range ID is a caller fault; emit the bare
+            // `StorageError` text verbatim (`db_error` would wrap it in
+            // `Error::Storage`, prefixing "Storage error: " — a message
+            // regression vs pre-#3234 responses).
+            Err(e) => return self.invalid_argument(&e.to_string()),
         };
 
         let to_version = match crate::core::id::VersionId::new(req.to_version) {
             Ok(id) => id,
-            Err(e) => return self.error_json(&e.to_string()),
+            // An out-of-range ID is a caller fault; emit the bare
+            // `StorageError` text verbatim (`db_error` would wrap it in
+            // `Error::Storage`, prefixing "Storage error: " — a message
+            // regression vs pre-#3234 responses).
+            Err(e) => return self.invalid_argument(&e.to_string()),
         };
 
         match self
@@ -2439,24 +2569,28 @@ impl AletheiaMcpServer {
                 let response = self.version_diff_to_response(&diff);
                 self.success_json(json!(response))
             }
-            Err(e) => self.error_json(&e.to_string()),
+            Err(e) => self.db_error(e),
         }
     }
 
     fn handle_get_edge_at_valid_time(&self, args: serde_json::Value) -> CallToolResult {
         let req: GetEdgeAtValidTimeRequest = match serde_json::from_value(args) {
             Ok(r) => r,
-            Err(e) => return self.error_json(&format!("Invalid arguments: {}", e)),
+            Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
         };
 
         let edge_id = match EdgeId::new(req.edge_id) {
             Ok(id) => id,
-            Err(e) => return self.error_json(&e.to_string()),
+            // An out-of-range ID is a caller fault; emit the bare
+            // `StorageError` text verbatim (`db_error` would wrap it in
+            // `Error::Storage`, prefixing "Storage error: " — a message
+            // regression vs pre-#3234 responses).
+            Err(e) => return self.invalid_argument(&e.to_string()),
         };
 
         let valid_time = match self.parse_timestamp(&req.valid_time) {
             Ok(t) => t,
-            Err(e) => return self.error_json(&e),
+            Err(e) => return self.invalid_argument(&e),
         };
 
         match self.db.get_edge_at_valid_time(edge_id, valid_time) {
@@ -2467,24 +2601,28 @@ impl AletheiaMcpServer {
                     "valid_time": req.valid_time
                 }))
             }
-            Err(e) => self.error_json(&e.to_string()),
+            Err(e) => self.db_error(e),
         }
     }
 
     fn handle_get_edge_at_transaction_time(&self, args: serde_json::Value) -> CallToolResult {
         let req: GetEdgeAtTransactionTimeRequest = match serde_json::from_value(args) {
             Ok(r) => r,
-            Err(e) => return self.error_json(&format!("Invalid arguments: {}", e)),
+            Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
         };
 
         let edge_id = match EdgeId::new(req.edge_id) {
             Ok(id) => id,
-            Err(e) => return self.error_json(&e.to_string()),
+            // An out-of-range ID is a caller fault; emit the bare
+            // `StorageError` text verbatim (`db_error` would wrap it in
+            // `Error::Storage`, prefixing "Storage error: " — a message
+            // regression vs pre-#3234 responses).
+            Err(e) => return self.invalid_argument(&e.to_string()),
         };
 
         let tx_time = match self.parse_timestamp(&req.transaction_time) {
             Ok(t) => t,
-            Err(e) => return self.error_json(&e),
+            Err(e) => return self.invalid_argument(&e),
         };
 
         match self.db.get_edge_at_transaction_time(edge_id, tx_time) {
@@ -2495,19 +2633,23 @@ impl AletheiaMcpServer {
                     "transaction_time": req.transaction_time
                 }))
             }
-            Err(e) => self.error_json(&e.to_string()),
+            Err(e) => self.db_error(e),
         }
     }
 
     fn handle_get_edge_history(&self, args: serde_json::Value) -> CallToolResult {
         let req: GetEdgeHistoryRequest = match serde_json::from_value(args) {
             Ok(r) => r,
-            Err(e) => return self.error_json(&format!("Invalid arguments: {}", e)),
+            Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
         };
 
         let edge_id = match EdgeId::new(req.edge_id) {
             Ok(id) => id,
-            Err(e) => return self.error_json(&e.to_string()),
+            // An out-of-range ID is a caller fault; emit the bare
+            // `StorageError` text verbatim (`db_error` would wrap it in
+            // `Error::Storage`, prefixing "Storage error: " — a message
+            // regression vs pre-#3234 responses).
+            Err(e) => return self.invalid_argument(&e.to_string()),
         };
 
         match self.db.get_edge_history(edge_id) {
@@ -2524,29 +2666,41 @@ impl AletheiaMcpServer {
                     "version_count": versions.len()
                 }))
             }
-            Err(e) => self.error_json(&e.to_string()),
+            Err(e) => self.db_error(e),
         }
     }
 
     fn handle_diff_edge_versions(&self, args: serde_json::Value) -> CallToolResult {
         let req: DiffEdgeVersionsRequest = match serde_json::from_value(args) {
             Ok(r) => r,
-            Err(e) => return self.error_json(&format!("Invalid arguments: {}", e)),
+            Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
         };
 
         let edge_id = match EdgeId::new(req.edge_id) {
             Ok(id) => id,
-            Err(e) => return self.error_json(&e.to_string()),
+            // An out-of-range ID is a caller fault; emit the bare
+            // `StorageError` text verbatim (`db_error` would wrap it in
+            // `Error::Storage`, prefixing "Storage error: " — a message
+            // regression vs pre-#3234 responses).
+            Err(e) => return self.invalid_argument(&e.to_string()),
         };
 
         let from_version = match crate::core::id::VersionId::new(req.from_version) {
             Ok(id) => id,
-            Err(e) => return self.error_json(&e.to_string()),
+            // An out-of-range ID is a caller fault; emit the bare
+            // `StorageError` text verbatim (`db_error` would wrap it in
+            // `Error::Storage`, prefixing "Storage error: " — a message
+            // regression vs pre-#3234 responses).
+            Err(e) => return self.invalid_argument(&e.to_string()),
         };
 
         let to_version = match crate::core::id::VersionId::new(req.to_version) {
             Ok(id) => id,
-            Err(e) => return self.error_json(&e.to_string()),
+            // An out-of-range ID is a caller fault; emit the bare
+            // `StorageError` text verbatim (`db_error` would wrap it in
+            // `Error::Storage`, prefixing "Storage error: " — a message
+            // regression vs pre-#3234 responses).
+            Err(e) => return self.invalid_argument(&e.to_string()),
         };
 
         match self
@@ -2557,7 +2711,7 @@ impl AletheiaMcpServer {
                 let response = self.version_diff_to_response(&diff);
                 self.success_json(json!(response))
             }
-            Err(e) => self.error_json(&e.to_string()),
+            Err(e) => self.db_error(e),
         }
     }
 
@@ -2687,7 +2841,7 @@ impl AletheiaMcpServer {
     fn handle_get_schema(&self, args: serde_json::Value) -> CallToolResult {
         let req: GetSchemaRequest = match serde_json::from_value(args) {
             Ok(r) => r,
-            Err(e) => return self.error_json(&format!("Invalid arguments: {}", e)),
+            Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
         };
 
         let temporal = match self
@@ -2704,14 +2858,14 @@ impl AletheiaMcpServer {
 
         match result {
             Ok(schema) => self.success_json(self.schema_to_json(&schema)),
-            Err(e) => self.error_json(&e.to_string()),
+            Err(e) => self.db_error(e),
         }
     }
 
     fn handle_hybrid_query(&self, args: serde_json::Value) -> CallToolResult {
         let req: HybridQueryRequest = match serde_json::from_value(args) {
             Ok(r) => r,
-            Err(e) => return self.error_json(&format!("Invalid arguments: {}", e)),
+            Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
         };
 
         // Apply resource limits
@@ -2726,7 +2880,7 @@ impl AletheiaMcpServer {
         let valid_time = if let Some(ref vt) = req.valid_time {
             match self.parse_timestamp(vt) {
                 Ok(t) => Some(t),
-                Err(e) => return self.error_json(&format!("Invalid valid_time: {}", e)),
+                Err(e) => return self.invalid_argument(&format!("Invalid valid_time: {}", e)),
             }
         } else {
             None
@@ -2735,7 +2889,9 @@ impl AletheiaMcpServer {
         let tx_time = if let Some(ref tt) = req.transaction_time {
             match self.parse_timestamp(tt) {
                 Ok(t) => Some(t),
-                Err(e) => return self.error_json(&format!("Invalid transaction_time: {}", e)),
+                Err(e) => {
+                    return self.invalid_argument(&format!("Invalid transaction_time: {}", e));
+                }
             }
         } else {
             None
@@ -2773,7 +2929,9 @@ impl AletheiaMcpServer {
         if let Some(start_id) = req.start_node_id {
             let node_id = match NodeId::new(start_id) {
                 Ok(id) => id,
-                Err(e) => return self.error_json(&e.to_string()),
+                // Bare StorageError text verbatim — see the note on the other
+                // ID-validation sites.
+                Err(e) => return self.invalid_argument(&e.to_string()),
             };
 
             // If temporal filtering requested, use temporal query
@@ -2796,7 +2954,7 @@ impl AletheiaMcpServer {
                             }
                         }))
                     }
-                    Err(e) => self.error_json(&e.to_string()),
+                    Err(e) => self.db_error(e),
                 };
             }
 
@@ -2824,7 +2982,7 @@ impl AletheiaMcpServer {
                             "count": 1
                         }))
                     }
-                    Err(e) => self.error_json(&e.to_string()),
+                    Err(e) => self.db_error(e),
                 };
             };
 
@@ -2838,9 +2996,9 @@ impl AletheiaMcpServer {
                             "count": hybrid_results.len()
                         }))
                     }
-                    Err(e) => self.error_json(&e.to_string()),
+                    Err(e) => self.db_error(e),
                 },
-                Err(e) => self.error_json(&e.to_string()),
+                Err(e) => self.db_error(e),
             }
         } else if let Some(ref embedding) = req.query_embedding {
             // Vector-first query
@@ -2849,7 +3007,7 @@ impl AletheiaMcpServer {
 
             // Check if vector index is enabled for the property
             if !self.db.is_vector_index_enabled_for(property_name) {
-                return self.error_json(&format!(
+                return self.failed_precondition(&format!(
                     "Vector index not enabled for property '{}'. Use enable_vector_index first.",
                     property_name
                 ));
@@ -2857,7 +3015,7 @@ impl AletheiaMcpServer {
 
             // Validate embedding dimensions
             if let Err(e) = self.validate_embedding_dimensions(embedding, property_name) {
-                return self.error_json(&e);
+                return self.invalid_argument(&e);
             }
 
             let builder = crate::query::QueryBuilder::new().find_similar(embedding, k);
@@ -2872,9 +3030,9 @@ impl AletheiaMcpServer {
                             "vector_property": property_name
                         }))
                     }
-                    Err(e) => self.error_json(&e.to_string()),
+                    Err(e) => self.db_error(e),
                 },
-                Err(e) => self.error_json(&e.to_string()),
+                Err(e) => self.db_error(e),
             }
         } else if let Some(ref label) = req.filter_label {
             // Label scan query
@@ -2889,12 +3047,14 @@ impl AletheiaMcpServer {
                             "count": hybrid_results.len()
                         }))
                     }
-                    Err(e) => self.error_json(&e.to_string()),
+                    Err(e) => self.db_error(e),
                 },
-                Err(e) => self.error_json(&e.to_string()),
+                Err(e) => self.db_error(e),
             }
         } else {
-            self.error_json("Must specify either start_node_id, query_embedding, or filter_label")
+            self.invalid_argument(
+                "Must specify either start_node_id, query_embedding, or filter_label",
+            )
         }
     }
 
@@ -2907,6 +3067,10 @@ impl AletheiaMcpServer {
     /// Distinct `kind`s let an LLM self-correct on retry: `invalid_request`,
     /// `read_only_violation`, `language_unavailable`, `parse_error`,
     /// `unsupported_construct`, `invalid_params`, `runtime_error`.
+    ///
+    /// The `kind` field is the query tool's own published contract (Issue
+    /// #3213) and is preserved verbatim; the uniform `code`/`retriable`
+    /// fields (Issue #3234) are added additively, derived from `kind`.
     fn query_error(
         &self,
         kind: &str,
@@ -2914,8 +3078,27 @@ impl AletheiaMcpServer {
         clause: Option<&str>,
         language: Option<&str>,
     ) -> CallToolResult {
+        let (code, retriable) = query_kind_classification(kind);
+        self.query_error_classified(kind, code, retriable, message, clause, language)
+    }
+
+    /// [`query_error`](Self::query_error) with an explicit `code`/`retriable`
+    /// classification, for callers that can classify more precisely than the
+    /// kind-derived default (e.g. a `runtime_error` caused by a timeout is
+    /// `UNAVAILABLE`/retriable rather than `INTERNAL`).
+    fn query_error_classified(
+        &self,
+        kind: &str,
+        code: McpErrorCode,
+        retriable: bool,
+        message: &str,
+        clause: Option<&str>,
+        language: Option<&str>,
+    ) -> CallToolResult {
         let mut obj = serde_json::Map::new();
         obj.insert("kind".to_string(), json!(kind));
+        obj.insert("code".to_string(), json!(code.as_str()));
+        obj.insert("retriable".to_string(), json!(retriable));
         obj.insert("message".to_string(), json!(message));
         if let Some(clause) = clause {
             obj.insert("clause".to_string(), json!(clause));
@@ -2950,7 +3133,20 @@ impl AletheiaMcpServer {
             Error::Query(QueryError::ExecutionError { message }) => {
                 self.query_error("runtime_error", &message, None, Some(language))
             }
-            other => self.query_error("runtime_error", &other.to_string(), None, Some(language)),
+            // Anything else keeps kind "runtime_error" (the tool's own
+            // contract) but classifies code/retriable from the actual error,
+            // so e.g. a timeout is UNAVAILABLE/retriable, not INTERNAL.
+            other => {
+                let classified = McpError::from_db_error(&other);
+                self.query_error_classified(
+                    "runtime_error",
+                    classified.code(),
+                    classified.is_retriable(),
+                    &other.to_string(),
+                    None,
+                    Some(language),
+                )
+            }
         }
     }
 
@@ -3189,6 +3385,58 @@ impl AletheiaMcpServer {
             .iter()
             .map(|tool| tool.name.to_string())
             .collect()
+    }
+
+    /// Dispatch a tool call by name to its handler.
+    ///
+    /// Shared between [`ServerHandler::call_tool`] and tests so that every
+    /// advertised tool (including ones added later) can be driven through the
+    /// exact same dispatch table the MCP transport uses — e.g. the
+    /// registry-driven error-shape test iterates [`tool_definitions`] and
+    /// calls this for each tool, guaranteeing new tools are automatically
+    /// covered by the structured-error contract (Issue #3234).
+    pub(crate) fn dispatch_tool(&self, name: &str, args: serde_json::Value) -> CallToolResult {
+        match name {
+            "get_node" => self.handle_get_node(args),
+            "create_node" => self.handle_create_node(args),
+            "update_node" => self.handle_update_node(args),
+            "delete_node" => self.handle_delete_node(args),
+            "delete_node_cascade" => self.handle_delete_node_cascade(args),
+            "list_nodes" => self.handle_list_nodes(args),
+            "count_nodes" => self.handle_count_nodes(args),
+            "get_edge" => self.handle_get_edge(args),
+            "create_edge" => self.handle_create_edge(args),
+            "update_edge" => self.handle_update_edge(args),
+            "delete_edge" => self.handle_delete_edge(args),
+            "list_edges" => self.handle_list_edges(args),
+            "count_edges" => self.handle_count_edges(args),
+            "get_outgoing_edges" => self.handle_get_outgoing_edges(args),
+            "get_incoming_edges" => self.handle_get_incoming_edges(args),
+            "traverse" => self.handle_traverse(args),
+            "find_similar" => self.handle_find_similar(args),
+            "enable_vector_index" => self.handle_enable_vector_index(args),
+            "list_vector_indexes" => self.handle_list_vector_indexes(args),
+            "enable_unique_constraint" => self.handle_enable_unique_constraint(args),
+            "list_unique_constraints" => self.handle_list_unique_constraints(args),
+            "get_node_at_time" => self.handle_get_node_at_time(args),
+            "get_edge_at_time" => self.handle_get_edge_at_time(args),
+            "list_changes" => self.handle_list_changes(args),
+            "get_node_at_valid_time" => self.handle_get_node_at_valid_time(args),
+            "get_node_at_transaction_time" => self.handle_get_node_at_transaction_time(args),
+            "get_node_history" => self.handle_get_node_history(args),
+            "diff_node_versions" => self.handle_diff_node_versions(args),
+            "get_edge_at_valid_time" => self.handle_get_edge_at_valid_time(args),
+            "get_edge_at_transaction_time" => self.handle_get_edge_at_transaction_time(args),
+            "get_edge_history" => self.handle_get_edge_history(args),
+            "diff_edge_versions" => self.handle_diff_edge_versions(args),
+            "hybrid_query" => self.handle_hybrid_query(args),
+            "query" => self.handle_query(args),
+            "get_schema" => self.handle_get_schema(args),
+            _ => self.error_result(
+                McpError::new(McpErrorCode::NotFound, format!("Unknown tool: {}", name))
+                    .details(json!({ "tool": name })),
+            ),
+        }
     }
 }
 
@@ -3575,9 +3823,10 @@ fn tool_definitions() -> Vec<Tool> {
              Mutating statements (CREATE/MERGE/SET/DELETE/REMOVE/DETACH/DROP/CALL/FOREACH/LOAD) \
              are rejected before execution and never write. Results are capped (default 100, \
              max 10000 rows; `truncated` indicates a cap hit). Errors are returned as a \
-             structured {error:{kind,message,clause?,language}} payload \
+             structured {error:{kind,code,retriable,message,clause?,language}} payload \
              (kinds: invalid_request, read_only_violation, language_unavailable, parse_error, \
-             unsupported_construct, invalid_params, runtime_error) so callers can self-correct.",
+             unsupported_construct, invalid_params, runtime_error; code/retriable follow the \
+             uniform MCP error contract) so callers can self-correct.",
             make_input_schema::<QueryRequest>(),
         ),
         Tool::new(
@@ -3610,7 +3859,7 @@ impl ServerHandler for AletheiaMcpServer {
         &self,
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
-    ) -> Result<ListToolsResult, McpError> {
+    ) -> Result<ListToolsResult, RmcpErrorData> {
         Ok(ListToolsResult {
             tools: tool_definitions(),
             next_cursor: None,
@@ -3622,52 +3871,13 @@ impl ServerHandler for AletheiaMcpServer {
         &self,
         request: CallToolRequestParams,
         _context: RequestContext<RoleServer>,
-    ) -> Result<CallToolResult, McpError> {
+    ) -> Result<CallToolResult, RmcpErrorData> {
         let args = request
             .arguments
             .map(serde_json::Value::Object)
             .unwrap_or(serde_json::Value::Null);
 
-        let result = match request.name.as_ref() {
-            "get_node" => self.handle_get_node(args),
-            "create_node" => self.handle_create_node(args),
-            "update_node" => self.handle_update_node(args),
-            "delete_node" => self.handle_delete_node(args),
-            "delete_node_cascade" => self.handle_delete_node_cascade(args),
-            "list_nodes" => self.handle_list_nodes(args),
-            "count_nodes" => self.handle_count_nodes(args),
-            "get_edge" => self.handle_get_edge(args),
-            "create_edge" => self.handle_create_edge(args),
-            "update_edge" => self.handle_update_edge(args),
-            "delete_edge" => self.handle_delete_edge(args),
-            "list_edges" => self.handle_list_edges(args),
-            "count_edges" => self.handle_count_edges(args),
-            "get_outgoing_edges" => self.handle_get_outgoing_edges(args),
-            "get_incoming_edges" => self.handle_get_incoming_edges(args),
-            "traverse" => self.handle_traverse(args),
-            "find_similar" => self.handle_find_similar(args),
-            "enable_vector_index" => self.handle_enable_vector_index(args),
-            "list_vector_indexes" => self.handle_list_vector_indexes(args),
-            "enable_unique_constraint" => self.handle_enable_unique_constraint(args),
-            "list_unique_constraints" => self.handle_list_unique_constraints(args),
-            "get_node_at_time" => self.handle_get_node_at_time(args),
-            "get_edge_at_time" => self.handle_get_edge_at_time(args),
-            "list_changes" => self.handle_list_changes(args),
-            "get_node_at_valid_time" => self.handle_get_node_at_valid_time(args),
-            "get_node_at_transaction_time" => self.handle_get_node_at_transaction_time(args),
-            "get_node_history" => self.handle_get_node_history(args),
-            "diff_node_versions" => self.handle_diff_node_versions(args),
-            "get_edge_at_valid_time" => self.handle_get_edge_at_valid_time(args),
-            "get_edge_at_transaction_time" => self.handle_get_edge_at_transaction_time(args),
-            "get_edge_history" => self.handle_get_edge_history(args),
-            "diff_edge_versions" => self.handle_diff_edge_versions(args),
-            "hybrid_query" => self.handle_hybrid_query(args),
-            "query" => self.handle_query(args),
-            "get_schema" => self.handle_get_schema(args),
-            _ => self.error_json(&format!("Unknown tool: {}", request.name)),
-        };
-
-        Ok(result)
+        Ok(self.dispatch_tool(request.name.as_ref(), args))
     }
 }
 
@@ -3690,6 +3900,15 @@ mod server_unit_tests {
         let text = AletheiaMcpServer::extract_text(result);
         let val: serde_json::Value = serde_json::from_str(&text).unwrap();
         val["error"]["kind"].as_str().unwrap_or("").to_string()
+    }
+
+    /// Like [`error_kind`], but returning the whole serialized `error` object
+    /// so tests can assert `code`/`retriable` alongside `kind`.
+    fn error_payload(server: &AletheiaMcpServer, err: Error) -> serde_json::Value {
+        let result = server.map_query_error(err, "aql");
+        let text = AletheiaMcpServer::extract_text(result);
+        let val: serde_json::Value = serde_json::from_str(&text).unwrap();
+        val["error"].clone()
     }
 
     #[test]
@@ -3729,6 +3948,22 @@ mod server_unit_tests {
     }
 
     #[test]
+    fn map_query_error_timeout_yields_retriable_unavailable_runtime_error() {
+        // A timeout keeps the query tool's own `kind` contract
+        // ("runtime_error") but is classified UNAVAILABLE/retriable from the
+        // underlying engine error — and `retriable: true` must survive the
+        // query-tool serialization path, not just the in-memory struct.
+        let server = make_server();
+        let error = error_payload(
+            &server,
+            Error::Query(QueryError::Timeout { duration_ms: 5000 }),
+        );
+        assert_eq!(error["kind"], "runtime_error", "got: {error}");
+        assert_eq!(error["code"], "UNAVAILABLE", "got: {error}");
+        assert_eq!(error["retriable"], true, "got: {error}");
+    }
+
+    #[test]
     fn query_row_to_json_node_id_variant() {
         let server = make_server();
         let row = QueryRow::from_entity(EntityResult::NodeId(NodeId::new(42).unwrap()));
@@ -3748,7 +3983,7 @@ mod server_unit_tests {
 
     #[test]
     fn handle_enable_unique_constraint_invalid_json_returns_error() {
-        // Covers the `Err(e) => return self.error_json(...)` parse-error arm of
+        // Covers the `Err(e) => return self.invalid_argument(...)` parse-error arm of
         // handle_enable_unique_constraint (added for Issue #3218).  The public
         // `enable_unique_constraint(req)` API always serialises a valid struct,
         // so this arm is only reachable via the internal handle_ function.
