@@ -59,12 +59,23 @@ Errors are returned as a machine-readable payload so the LLM can self-correct:
 ```json
 { "error": { "kind": "read_only_violation", "clause": "CREATE",
              "language": "cypher",
+             "code": "INVALID_ARGUMENT", "retriable": false,
              "message": "The `query` tool is read-only; the `CREATE` clause ..." } }
 ```
 
 `kind` is one of: `invalid_request`, `read_only_violation`,
 `language_unavailable`, `parse_error`, `unsupported_construct`,
 `invalid_params`, `runtime_error`.
+
+`kind` is the query tool's own execution-layer contract (Issue #3213) and is
+preserved verbatim. The uniform `code` / `retriable` fields shared by **every**
+MCP tool (Issue #3234, see
+[Structured error codes](#structured-error-codes-and-the-retriable-contract))
+are carried additively alongside it: `invalid_request`, `read_only_violation`,
+`parse_error`, `unsupported_construct`, and `invalid_params` map to
+`INVALID_ARGUMENT`; `language_unavailable` maps to `FAILED_PRECONDITION`; and
+`runtime_error` is classified from the underlying engine error (`INTERNAL`,
+or `UNAVAILABLE`/retriable for a timeout).
 
 ## Supported read-only subset
 
@@ -154,7 +165,8 @@ absent before it:
 
 // tools/call -> "get_node_at_time"
 { "node_id": 7, "valid_time": "2021-01-01T00:00:00Z" }
-// -> { "error": "..." }  (not yet true at this valid time)
+// -> { "error": { "code": "NOT_FOUND", "retriable": false, "message": "..." } }
+//    (not yet true at this valid time)
 ```
 
 `valid_time` accepts the same formats as every other MCP temporal field
@@ -167,9 +179,12 @@ in-the-future, or before-entity-creation `valid_time` is rejected with a
 structured error, e.g.:
 
 ```jsonc
-{ "error": "Invalid valid_time: Invalid timestamp format: 'not-a-timestamp'. ..." }
-{ "error": "valid_from ... is too far in future (current: ..., max offset: ...)" }
-{ "error": "valid_from ... is before entity creation time ... for node:7" }
+{ "error": { "code": "INVALID_ARGUMENT", "retriable": false,
+             "message": "Invalid valid_time: Invalid timestamp format: 'not-a-timestamp'. ..." } }
+{ "error": { "code": "INVALID_ARGUMENT", "retriable": false,
+             "message": "valid_from ... is too far in future (current: ..., max offset: ...)" } }
+{ "error": { "code": "INVALID_ARGUMENT", "retriable": false,
+             "message": "valid_from ... is before entity creation time ... for node:7" } }
 ```
 
 ## Point-in-time (AS OF) graph traversal
@@ -229,11 +244,86 @@ As with every other `as_of_*` field, an unparseable timestamp
 returns a structured error instead of silently traversing current state:
 
 ```jsonc
-{ "error": "Invalid as_of_valid_time: Invalid timestamp format: 'not-a-timestamp'. ..." }
+{ "error": { "code": "INVALID_ARGUMENT", "retriable": false,
+             "message": "Invalid as_of_valid_time: Invalid timestamp format: 'not-a-timestamp'. ..." } }
 ```
 
 `MAX_TRAVERSAL_DEPTH` and `MAX_RESULT_LIMIT` apply identically whether or not
 a temporal coordinate is supplied.
+
+## Structured error codes and the retriable contract
+
+Every MCP tool error — across **all** tools, not just `query` — is a JSON
+object of this shape (Issue #3234):
+
+```json
+{
+  "error": {
+    "code": "FAILED_PRECONDITION",
+    "message": "Node 7 has 2 connected edge(s); refusing to delete. ...",
+    "retriable": false,
+    "details": { "node_id": 7, "connected_edges": 2, "detach_required": true }
+  }
+}
+```
+
+- **`code`** is drawn from a small, stable enum (below). Branch on `code`,
+  never on `message` — the free text may be reworded; the codes never change
+  meaning or spelling.
+- **`message`** preserves the human-readable text that older releases
+  returned as the entire `error` value (the change is additive — nothing is
+  lost).
+- **`retriable`** is the server's advisory classification: `true` **only**
+  for transient failure classes (timeouts, clock skew, serialization/write
+  conflicts) where an identical retry can succeed. It is always `false` for
+  caller-fault classes — retrying the same not-found lookup or malformed
+  argument cannot succeed. The client owns the retry loop (backoff, attempt
+  caps); the server never retries on its behalf.
+- **`details`** is optional structured metadata for specific codes, e.g. the
+  DETACH-delete refusal's `connected_edges` or a unique-constraint
+  violation's `existing_node_id`.
+
+### The code enum
+
+| Code | Meaning | `retriable` | What the caller should do |
+|------|---------|-------------|---------------------------|
+| `NOT_FOUND` | Entity (or tool) doesn't exist, or didn't exist at the requested bi-temporal coordinate | `false` | Re-check the ID / coordinate, or surface to the user |
+| `INVALID_ARGUMENT` | Malformed arguments: bad JSON, out-of-range ID, unparseable timestamp, invalid query text, inconsistent parameter combination | `false` | Fix the arguments and re-issue |
+| `CONSTRAINT_VIOLATION` | A declared uniqueness constraint rejected the write (`details` carries `label`, `property`, `value`, `existing_node_id`) | `false` | Use the existing entity or change the value |
+| `FAILED_PRECONDITION` | Valid request, wrong system state: vector index not enabled, node still has connected edges without `detach: true`, referenced edge endpoint missing, feature not compiled in | `false` | Change the state (enable the index, pass `detach`, create the endpoint), then re-issue |
+| `CONFLICT` | Concurrency conflict: serialization failure, write-write conflict, aborted transaction | usually `true` | Retry the operation (a duplicate-ID conflict is the exception: `retriable: false`) |
+| `UNAVAILABLE` | Transient condition: query timeout, clock skew | `true` | Retry, ideally with backoff |
+| `INTERNAL` | Unexpected internal failure: I/O, corruption, poisoned lock | `false` | Report; do not blind-retry |
+
+Codes may be **added** over time; existing codes never change. Treat an
+unrecognized code as non-retriable.
+
+### Recovery loop example (LLM-style)
+
+An agent driving AletheiaDB branches on `code` — zero substring matching:
+
+```jsonc
+// 1. tools/call -> "delete_node" { "node_id": 7 }
+// -> { "error": { "code": "FAILED_PRECONDITION", "retriable": false,
+//                 "message": "Node 7 has 2 connected edge(s); refusing to delete. ...",
+//                 "details": { "connected_edges": 2, "detach_required": true } },
+//      "connected_edges": 2, "detach_required": true, "success": false }
+
+// 2. code == "FAILED_PRECONDITION" and details.detach_required
+//    -> repair the call, don't retry blindly:
+// tools/call -> "delete_node" { "node_id": 7, "detach": true }
+// -> { "success": true, "deleted_node_id": 7, "edges_removed": 2 }
+```
+
+The general loop: `retriable: true` → retry with backoff (bounded attempts);
+`INVALID_ARGUMENT` / `FAILED_PRECONDITION` / `CONSTRAINT_VIOLATION` → repair
+the request using `message` + `details`, then re-issue; `NOT_FOUND` /
+`INTERNAL` → escalate to the user.
+
+Legacy top-level fields that predate this contract (the DETACH refusal's
+`connected_edges` / `detach_required`, the unique-violation's
+`constraint_violation` / `existing_node_id`) remain present alongside
+`error.details`, so pre-#3234 consumers keep working.
 
 ## Notes
 

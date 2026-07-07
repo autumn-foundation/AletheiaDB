@@ -328,8 +328,30 @@ before execution and never write. Errors come back as a structured
 `read_only_violation`, `language_unavailable`, `parse_error`,
 `unsupported_construct`, `invalid_params`, `runtime_error`) so the caller can
 self-correct. When the `cypher` feature is not compiled in, `language:"cypher"`
-returns `language_unavailable` (AQL is always available). See
+returns `language_unavailable` (AQL is always available). The query tool's
+`kind` field is preserved verbatim; the uniform `code`/`retriable` fields
+below are carried additively alongside it. See
 [docs/guides/mcp-query-tool.md](docs/guides/mcp-query-tool.md).
+
+**Structured error codes with retriable flag (Issue #3234)**: Every MCP tool
+error response is `{"error": {"code", "message", "retriable", "details"?}}`.
+`code` is drawn from a small, stable enum -- `NOT_FOUND`, `INVALID_ARGUMENT`,
+`CONSTRAINT_VIOLATION`, `FAILED_PRECONDITION`, `CONFLICT`, `UNAVAILABLE`,
+`INTERNAL` -- so an LLM/caller branches on category (retry transient errors,
+repair invalid arguments, escalate the rest) with zero substring matching.
+`message` preserves the pre-existing free text (the change is additive);
+`retriable` is `true` **only** for transient classes (timeouts, clock skew,
+serialization/write conflicts -- `UNAVAILABLE` and most `CONFLICT`s), always
+`false` for caller-fault classes (not-found, invalid-argument, constraint,
+failed-precondition); `details` carries per-code structured metadata (e.g.
+the #3209 DETACH refusal is `FAILED_PRECONDITION` with
+`details.connected_edges`; a unique violation is `CONSTRAINT_VIOLATION` with
+`details.existing_node_id` -- the legacy top-level fields remain alongside).
+Recovery loop: `retriable: true` -> retry with backoff; `INVALID_ARGUMENT` /
+`FAILED_PRECONDITION` / `CONSTRAINT_VIOLATION` -> repair the call from
+`message` + `details` and re-issue; otherwise escalate. Codes may be added
+over time but never change meaning; treat unknown codes as non-retriable. See
+[docs/guides/mcp-query-tool.md](docs/guides/mcp-query-tool.md#structured-error-codes-and-the-retriable-contract).
 
 **Valid-time writes (Issue #3221)**: `create_node`, `create_edge`,
 `update_node`, `update_edge`, `delete_node`, and `delete_edge` accept an
