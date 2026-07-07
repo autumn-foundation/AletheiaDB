@@ -916,6 +916,17 @@ pub struct TemporalExtentRequest {
 }
 
 // ============================================================================
+// Database Stats (Issue #3222)
+// ============================================================================
+
+/// Request for a holistic database statistics snapshot.
+///
+/// Takes no arguments — the tool always returns the full snapshot in a
+/// single call.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
+pub struct DatabaseStatsRequest {}
+
+// ============================================================================
 // Response Types (for serialization)
 // ============================================================================
 

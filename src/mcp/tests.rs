@@ -8759,3 +8759,253 @@ mod temporal_extent_tests {
         assert_eq!(labels[0]["label"], serde_json::json!("Person"));
     }
 }
+
+// ============================================================================
+// Database Stats Tests (Issue #3222)
+// ============================================================================
+
+mod database_stats_tests {
+    use super::*;
+
+    fn stats_response(server: &AletheiaMcpServer) -> serde_json::Value {
+        let response = server.database_stats(DatabaseStatsRequest {});
+        serde_json::from_str(&response).expect("database_stats must return valid JSON")
+    }
+
+    /// AC1 + AC9 (empty DB well-formed): the tool takes no required arguments
+    /// and returns a single well-formed JSON object even on an empty database.
+    #[test]
+    fn test_database_stats_empty_db_well_formed() {
+        let server = create_test_server();
+        let value = stats_response(&server);
+
+        assert!(value.get("error").is_none(), "unexpected error: {value}");
+        assert_eq!(value["current"]["node_count"], serde_json::json!(0));
+        assert_eq!(value["current"]["edge_count"], serde_json::json!(0));
+        assert_eq!(
+            value["historical"]["total_node_versions"],
+            serde_json::json!(0)
+        );
+        assert_eq!(
+            value["historical"]["total_edge_versions"],
+            serde_json::json!(0)
+        );
+        assert_eq!(value["historical"]["unique_nodes"], serde_json::json!(0));
+        assert_eq!(value["historical"]["unique_edges"], serde_json::json!(0));
+        assert_eq!(value["historical"]["anchor_count"], serde_json::json!(0));
+        assert_eq!(value["historical"]["delta_count"], serde_json::json!(0));
+        // Disabled subsystems must be tagged, never zero-reported (AC7).
+        assert_eq!(value["cold_storage"]["enabled"], serde_json::json!(false));
+        assert_eq!(value["wal"]["enabled"], serde_json::json!(true));
+    }
+
+    /// AC3 + AC9 (populated DB shape): counts reflect data, version counters
+    /// track updates, and anchors + deltas always sum to the version totals.
+    #[test]
+    fn test_database_stats_populated_db_shape() {
+        let server = create_test_server();
+
+        let (a, b) = {
+            let a: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+                valid_time: None,
+                label: "Person".to_string(),
+                properties: None,
+                provenance: None,
+            }))
+            .unwrap();
+            let b: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+                valid_time: None,
+                label: "Person".to_string(),
+                properties: None,
+                provenance: None,
+            }))
+            .unwrap();
+            (a.id, b.id)
+        };
+        server.create_edge(CreateEdgeRequest {
+            valid_time: None,
+            source_id: a,
+            target_id: b,
+            label: "KNOWS".to_string(),
+            properties: None,
+            provenance: None,
+        });
+        // An update creates an extra node version beyond the creates.
+        server.update_node(UpdateNodeRequest {
+            valid_time: None,
+            node_id: a,
+            properties: {
+                let mut m = HashMap::new();
+                m.insert("name".to_string(), serde_json::json!("Alice"));
+                m
+            },
+            provenance: None,
+        });
+
+        let value = stats_response(&server);
+        assert!(value.get("error").is_none(), "unexpected error: {value}");
+
+        assert_eq!(value["current"]["node_count"], serde_json::json!(2));
+        assert_eq!(value["current"]["edge_count"], serde_json::json!(1));
+
+        let hist = &value["historical"];
+        assert_eq!(hist["unique_nodes"], serde_json::json!(2));
+        assert_eq!(hist["unique_edges"], serde_json::json!(1));
+        let total_node_versions = hist["total_node_versions"].as_u64().unwrap();
+        assert!(
+            total_node_versions >= 3,
+            "2 creates + 1 update must yield >= 3 node versions: {value}"
+        );
+        assert_eq!(hist["total_edge_versions"], serde_json::json!(1));
+
+        // Compression accounting must be internally consistent.
+        let anchors = hist["anchor_count"].as_u64().unwrap();
+        let deltas = hist["delta_count"].as_u64().unwrap();
+        let total_versions = total_node_versions + hist["total_edge_versions"].as_u64().unwrap();
+        assert_eq!(
+            anchors + deltas,
+            total_versions,
+            "anchors + deltas must equal total versions: {value}"
+        );
+        assert!(anchors >= 1, "at least one anchor expected: {value}");
+        assert!(
+            hist["compression_ratio"].as_f64().unwrap() > 0.0,
+            "compression_ratio must be present and positive: {value}"
+        );
+    }
+
+    /// AC4 + AC7 + AC9 (disabled tier tagged): a database without cold
+    /// storage must report `cold_storage: {"enabled": false}` with NO count
+    /// fields, so an LLM can never mistake "disabled" for "0 cold versions".
+    #[test]
+    fn test_database_stats_cold_storage_disabled_is_tagged_not_zero() {
+        let server = create_test_server();
+        let value = stats_response(&server);
+
+        let cold = value["cold_storage"]
+            .as_object()
+            .expect("cold_storage must always be present as an object");
+        assert_eq!(cold["enabled"], serde_json::json!(false));
+        assert!(
+            !cold.contains_key("node_versions_stored"),
+            "disabled tier must not report counts: {value}"
+        );
+        assert!(
+            !cold.contains_key("tier_access"),
+            "disabled tier must not report tier distribution: {value}"
+        );
+    }
+
+    /// AC4 (enabled tier reports distribution): with cold storage configured,
+    /// the snapshot reports cold counts and the hot/warm/cold access
+    /// distribution.
+    #[test]
+    fn test_database_stats_cold_storage_enabled_reports_tiers() {
+        use crate::config::{AletheiaDBConfig, HistoricalConfigBuilder, WalConfigBuilder};
+
+        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let config = AletheiaDBConfig::builder()
+            .wal(
+                WalConfigBuilder::new()
+                    .wal_dir(temp_dir.path().join("wal"))
+                    .build(),
+            )
+            .persistence(crate::storage::index_persistence::PersistenceConfig {
+                enabled: false,
+                ..Default::default()
+            })
+            .historical(
+                HistoricalConfigBuilder::new()
+                    .enable_cold_storage(true)
+                    .cold_storage_path(temp_dir.path().join("cold.redb"))
+                    .build(),
+            )
+            .build();
+        let db = Arc::new(AletheiaDB::with_unified_config(config).expect("db init"));
+        let server = AletheiaMcpServer::new(db);
+
+        let value = stats_response(&server);
+        assert!(value.get("error").is_none(), "unexpected error: {value}");
+
+        let cold = value["cold_storage"]
+            .as_object()
+            .expect("cold_storage must be an object");
+        assert_eq!(cold["enabled"], serde_json::json!(true));
+        assert_eq!(cold["node_versions_stored"], serde_json::json!(0));
+        assert_eq!(cold["edge_versions_stored"], serde_json::json!(0));
+        let tier_access = cold["tier_access"]
+            .as_object()
+            .expect("enabled cold storage must report tier_access distribution");
+        for key in ["hot_hits", "warm_hits", "cold_hits", "misses"] {
+            assert!(
+                tier_access.contains_key(key),
+                "tier_access must contain {key}: {value}"
+            );
+        }
+    }
+
+    /// AC5 (WAL state): durability mode is a stable token and the latest LSN
+    /// is reported and advances with writes.
+    #[test]
+    fn test_database_stats_wal_state_reported() {
+        let server = create_test_server();
+        let value = stats_response(&server);
+
+        let wal = value["wal"].as_object().expect("wal must be an object");
+        assert_eq!(wal["enabled"], serde_json::json!(true));
+        let mode = wal["durability_mode"].as_str().unwrap();
+        assert!(
+            ["synchronous", "async", "group_commit", "async_batched"].contains(&mode),
+            "durability_mode must be a stable token, got: {mode}"
+        );
+        let lsn_before = wal["current_lsn"].as_u64().unwrap();
+        assert!(lsn_before >= 1, "LSN starts at 1: {value}");
+
+        server.create_node(CreateNodeRequest {
+            valid_time: None,
+            label: "Person".to_string(),
+            properties: None,
+            provenance: None,
+        });
+
+        let value_after = stats_response(&server);
+        let lsn_after = value_after["wal"]["current_lsn"].as_u64().unwrap();
+        assert!(
+            lsn_after > lsn_before,
+            "LSN must advance after a write: {lsn_before} -> {lsn_after}"
+        );
+        assert!(value_after["wal"]["healthy"].as_bool().unwrap());
+    }
+
+    /// AC1: the tool is advertised in the MCP tool list.
+    #[test]
+    fn test_database_stats_registered_in_tool_list() {
+        let server = create_test_server();
+        let tools = server.list_tools_for_test();
+        assert!(
+            tools.iter().any(|t| t == "database_stats"),
+            "database_stats must be advertised: {tools:?}"
+        );
+    }
+
+    /// AC2: the MCP tool is a thin aggregator over the public API — both
+    /// surfaces must report identical numbers on the same database.
+    #[test]
+    fn test_database_stats_matches_public_api() {
+        let server = create_test_server();
+        server.create_node(CreateNodeRequest {
+            valid_time: None,
+            label: "Person".to_string(),
+            properties: None,
+            provenance: None,
+        });
+
+        let value = stats_response(&server);
+        let api_stats = server.db().stats();
+        let api_value = serde_json::to_value(&api_stats).expect("DatabaseStats must serialize");
+        assert_eq!(
+            value, api_value,
+            "MCP response must be exactly the serialized public DatabaseStats"
+        );
+    }
+}

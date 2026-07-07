@@ -37,6 +37,8 @@ pub mod query;
 pub mod schema;
 /// Unified vector similarity query builder.
 pub mod similarity_query;
+/// Database-wide statistics snapshot (Issue #3222).
+pub mod stats;
 /// Temporal query operations.
 pub mod temporal;
 #[cfg(test)]
@@ -54,6 +56,10 @@ pub use constraint_builder::UniqueConstraintBuilder;
 pub use extent::{LabelExtent, TemporalExtent, TimeBounds};
 pub use schema::{EdgeTypeSchema, GraphSchema, LabelSchema, SchemaInstant};
 pub use similarity_query::{SimilarityQuery, SimilaritySource};
+pub use stats::{
+    ColdStorageDetails, ColdStorageTierStats, CurrentStateStats, DatabaseStats,
+    HistoricalDepthStats, TierAccessStats, WalStateStats,
+};
 pub use vector_builder::VectorIndexBuilder;
 
 /// Main AletheiaDB database.

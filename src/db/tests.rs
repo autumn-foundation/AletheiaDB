@@ -2529,3 +2529,108 @@ fn test_schema_as_of_entity_cap_is_configurable_and_discloses_sampling() {
     assert!(!current.sampled);
     assert_eq!(current.total_nodes, 3);
 }
+
+// ============================================================================
+// DatabaseStats unit tests (Issue #3222)
+// ============================================================================
+
+/// `AletheiaDB::stats()` must serialize to the documented shape, with
+/// disabled subsystems explicitly tagged (`enabled: false`, no count keys)
+/// and enabled subsystems carrying their counters.
+#[test]
+fn test_stats_serialization_shape_empty_db() {
+    let db = AletheiaDB::new().unwrap();
+    let stats = db.stats();
+    let value = serde_json::to_value(&stats).expect("DatabaseStats must be serializable");
+
+    assert_eq!(value["current"]["node_count"], serde_json::json!(0));
+    assert_eq!(value["current"]["edge_count"], serde_json::json!(0));
+    assert_eq!(
+        value["historical"]["total_node_versions"],
+        serde_json::json!(0)
+    );
+    assert_eq!(value["historical"]["anchor_count"], serde_json::json!(0));
+    assert_eq!(value["historical"]["delta_count"], serde_json::json!(0));
+
+    let cold = value["cold_storage"].as_object().unwrap();
+    assert_eq!(cold["enabled"], serde_json::json!(false));
+    assert!(
+        !cold.contains_key("node_versions_stored"),
+        "disabled cold storage must not report counts: {value}"
+    );
+
+    let wal = value["wal"].as_object().unwrap();
+    assert_eq!(wal["enabled"], serde_json::json!(true));
+    assert!(wal["current_lsn"].as_u64().unwrap() >= 1);
+    assert!(wal["durability_mode"].is_string());
+}
+
+/// Populated DB: `stats()` mirrors the underlying O(1) counters exactly.
+#[test]
+fn test_stats_populated_matches_underlying_counters() {
+    let db = AletheiaDB::new().unwrap();
+    let n1 = db
+        .create_node("Person", PropertyMapBuilder::new().build())
+        .unwrap();
+    let _n2 = db
+        .create_node("Person", PropertyMapBuilder::new().build())
+        .unwrap();
+    db.update_node_with_valid_time(
+        n1,
+        PropertyMapBuilder::new().insert("name", "Alice").build(),
+        None,
+    )
+    .unwrap();
+
+    let stats = db.stats();
+    assert_eq!(stats.current.node_count, 2);
+    assert_eq!(stats.current.edge_count, 0);
+
+    let hist = db.historical_stats().unwrap();
+    assert_eq!(
+        stats.historical.total_node_versions,
+        hist.total_node_versions
+    );
+    assert_eq!(stats.historical.unique_nodes, hist.unique_nodes);
+    assert_eq!(
+        stats.historical.anchor_count,
+        hist.node_anchor_count + hist.edge_anchor_count
+    );
+    assert_eq!(
+        stats.historical.delta_count,
+        hist.node_delta_count + hist.edge_delta_count
+    );
+}
+
+/// With cold storage configured, `stats()` reports the cold tier as enabled
+/// with counters and the hot/warm/cold access distribution.
+#[test]
+fn test_stats_cold_storage_enabled() {
+    use crate::config::{AletheiaDBConfig, HistoricalConfigBuilder, WalConfigBuilder};
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let config = AletheiaDBConfig::builder()
+        .wal(
+            WalConfigBuilder::new()
+                .wal_dir(temp_dir.path().join("wal"))
+                .build(),
+        )
+        .persistence(crate::storage::index_persistence::PersistenceConfig {
+            enabled: false,
+            ..Default::default()
+        })
+        .historical(
+            HistoricalConfigBuilder::new()
+                .enable_cold_storage(true)
+                .cold_storage_path(temp_dir.path().join("cold.redb"))
+                .build(),
+        )
+        .build();
+    let db = AletheiaDB::with_unified_config(config).unwrap();
+
+    let value = serde_json::to_value(db.stats()).unwrap();
+    let cold = value["cold_storage"].as_object().unwrap();
+    assert_eq!(cold["enabled"], serde_json::json!(true));
+    assert_eq!(cold["node_versions_stored"], serde_json::json!(0));
+    assert!(cold["tier_access"].is_object());
+}

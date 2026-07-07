@@ -642,6 +642,19 @@ impl AletheiaMcpServer {
         ))
     }
 
+    /// Get a holistic database statistics snapshot.
+    ///
+    /// Returns current graph size, bi-temporal depth (version counts and
+    /// anchor/delta compression), storage-tier presence/distribution
+    /// (hot / warm-cache / cold), and WAL durability state in a single call.
+    /// Thin aggregator over [`AletheiaDB::stats`] — all values are O(1)/cached
+    /// counter reads, never a version scan.
+    pub fn database_stats(&self, req: DatabaseStatsRequest) -> String {
+        Self::extract_text(self.handle_database_stats(
+            serde_json::to_value(req).expect("request serialization should not fail"),
+        ))
+    }
+
     /// List graph-wide changes within a transaction-time window.
     ///
     /// Enumerates the nodes and edges whose versions were committed in `[tx_from, tx_to)`,
@@ -2963,6 +2976,35 @@ impl AletheiaMcpServer {
         }
     }
 
+    /// Handle the `database_stats` tool (Issue #3222).
+    ///
+    /// Thin aggregator: delegates entirely to the public
+    /// [`AletheiaDB::stats`] snapshot and serializes it — no storage logic
+    /// lives here. The underlying getters are all O(1)/cached (see
+    /// `src/db/stats.rs`), so this never triggers a version scan.
+    fn handle_database_stats(&self, args: serde_json::Value) -> CallToolResult {
+        // The tool takes no required arguments; clients may send no
+        // `arguments` at all (surfaced here as JSON null) or an empty
+        // object. Normalize null so both forms are accepted.
+        let args = if args.is_null() {
+            serde_json::Value::Object(serde_json::Map::new())
+        } else {
+            args
+        };
+        let _req: DatabaseStatsRequest = match serde_json::from_value(args) {
+            Ok(r) => r,
+            Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
+        };
+
+        match serde_json::to_value(self.db.stats()) {
+            Ok(value) => self.success_json(value),
+            Err(e) => self.error_result(McpError::new(
+                McpErrorCode::Internal,
+                format!("Failed to serialize database stats: {}", e),
+            )),
+        }
+    }
+
     fn handle_hybrid_query(&self, args: serde_json::Value) -> CallToolResult {
         let req: HybridQueryRequest = match serde_json::from_value(args) {
             Ok(r) => r,
@@ -3534,6 +3576,7 @@ impl AletheiaMcpServer {
             "query" => self.handle_query(args),
             "get_schema" => self.handle_get_schema(args),
             "temporal_extent" => self.handle_temporal_extent(args),
+            "database_stats" => self.handle_database_stats(args),
             _ => self.error_result(
                 McpError::new(McpErrorCode::NotFound, format!("Unknown tool: {}", name))
                     .details(json!({ "tool": name })),
@@ -3965,6 +4008,29 @@ fn tool_definitions() -> Vec<Tool> {
              (edge_types); per-label bounds are computed from hot-tier history only and may \
              be narrower than the overall bounds (or a label absent) after cold migration.",
             make_input_schema::<TemporalExtentRequest>(),
+        ),
+        Tool::new(
+            "database_stats",
+            "Get a holistic database statistics snapshot in one call (no arguments). Use it \
+             to orient yourself before querying: how big is the dataset, how much history \
+             exists to time-travel through, where that history lives, and what durability \
+             is active. Returns: `current` {node_count, edge_count} (current-state graph \
+             size); `historical` {total_node_versions, total_edge_versions, unique_nodes, \
+             unique_edges, anchor_count, delta_count, node/edge anchor+delta breakdowns, \
+             compression_ratio} (bi-temporal depth of the in-RAM store; anchors are full \
+             snapshots, deltas are changes — anchor_count + delta_count always equals total \
+             versions, and compression_ratio = anchors/total, lower is better); \
+             `cold_storage` — `{enabled: false}` when no cold (disk) tier is configured \
+             (this means NOT CONFIGURED, never '0 cold versions'), or `{enabled: true, \
+             node_versions_stored, edge_versions_stored, compression_ratio, tier_access: \
+             {hot_hits, warm_hits, cold_hits, misses}}` showing how many versions migrated \
+             to disk and how reads distribute across the hot/warm-cache/cold tiers; `wal` \
+             {enabled, durability_mode (synchronous|async|group_commit|async_batched), \
+             current_lsn (latest log sequence number), total_appends, healthy}. All values \
+             are O(1)/cached counter reads — this call never scans versions and is safe to \
+             call frequently. Counts only, point-in-time: for the calendar RANGE of stored \
+             history use temporal_extent; for per-label breakdowns use get_schema.",
+            make_input_schema::<DatabaseStatsRequest>(),
         ),
     ]
 }

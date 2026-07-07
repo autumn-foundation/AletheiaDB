@@ -409,6 +409,92 @@ guaranteed to be out of recorded range — its empty result means "before our
 records begin," not "nothing existed." Rerun the query at an instant inside
 the extent (or report the range mismatch) instead of concluding absence.
 
+## Database stats and storage-tier health (`database_stats`)
+
+*(Issue #3222)* The `database_stats` tool takes **no arguments** and returns a
+holistic snapshot of dataset size, bi-temporal depth, storage-tier
+distribution, and WAL state in a single call. Use it to orient yourself before
+querying ("how big is this dataset? is there history to time-travel through?
+is cold migration even on?") instead of stitching together `count_nodes` +
+`count_edges` — which cannot reveal version depth, tier distribution, or WAL
+state at all. It is backed by the public Rust API `AletheiaDB::stats()`, which
+returns the same data as a serializable `DatabaseStats`; the MCP handler only
+serializes that snapshot.
+
+### Response shape
+
+```jsonc
+{
+  "current": {                    // current-state (hot, in-RAM) graph size
+    "node_count": 10000,
+    "edge_count": 50000
+  },
+  "historical": {                 // bi-temporal depth of the in-RAM store
+    "total_node_versions": 12500, // every recorded node state, ever
+    "total_edge_versions": 50000,
+    "unique_nodes": 10000,        // distinct nodes with any history
+    "unique_edges": 50000,
+    "anchor_count": 11000,        // full property snapshots (node + edge)
+    "delta_count": 51500,         // change-only versions (node + edge)
+    "node_anchor_count": 10500,   // per-entity-type breakdowns of the above
+    "node_delta_count": 2000,
+    "edge_anchor_count": 500,
+    "edge_delta_count": 49500,
+    "compression_ratio": 0.176    // anchors / total versions; LOWER = better
+  },
+  "cold_storage": {               // disk tier; see "disabled tiers" below
+    "enabled": true,
+    "node_versions_stored": 800,  // versions migrated to disk
+    "edge_versions_stored": 3200,
+    "compression_ratio": 3.8,     // raw/compressed bytes; HIGHER = better
+    "tier_access": {              // where historical reads were served from
+      "hot_hits": 90210,
+      "warm_hits": 4310,
+      "cold_hits": 122,
+      "misses": 0
+    }
+  },
+  "wal": {
+    "enabled": true,              // always true in current builds
+    "durability_mode": "group_commit", // synchronous | async | group_commit | async_batched
+    "current_lsn": 62501,         // latest (next-to-be-allocated) LSN
+    "total_appends": 62500,
+    "healthy": true               // false = outstanding WAL flush errors
+  }
+}
+```
+
+### Disabled tiers are tagged, never zero-reported
+
+When no cold-storage tier is configured, the response contains exactly
+`"cold_storage": { "enabled": false }` — the count fields are **absent**, not
+zero. Never interpret a disabled tier as "0 cold versions"; it means the
+database retains history only in RAM (`historical`) and nothing has been (or
+can be) migrated to disk. The same contract applies to `wal.enabled`, which is
+always `true` in current builds (AletheiaDB has no no-WAL construction path)
+but is emitted explicitly so consumers never have to infer WAL presence.
+
+### Every field is O(1) — safe to call frequently
+
+All values are reads of counters the storage engines already maintain
+incrementally: current counts are index-length reads, historical counts come
+from `HistoricalStorage::stats()` (cached counters per Issue #212 — never a
+version scan), tier counters are atomic snapshots, and WAL fields are atomic
+loads. A `database_stats` call completes in microseconds regardless of
+database size.
+
+Note the two `compression_ratio` fields measure different things:
+`historical.compression_ratio` is the anchor share of versions (lower is
+better delta compression); `cold_storage.compression_ratio` is the byte-level
+Zstd/LZ4 ratio on disk (higher is better).
+
+### Scope
+
+`database_stats` reports magnitude/counts and tier health at a point in time.
+It does **not** report the calendar range of stored history (earliest/latest
+timestamps) — use `temporal_extent` for that — and it does not break counts
+down per label; use `get_schema` for per-label/per-edge-type counts.
+
 ## Notes
 
 - **AQL has no parameter binding.** Sending `params` with `language: "aql"`
