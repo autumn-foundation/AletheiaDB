@@ -3956,8 +3956,14 @@ fn tool_definitions() -> Vec<Tool> {
              ends. Open-ended intervals (still-valid facts / still-current records) \
              contribute only their start, so latest is the newest finite recorded event \
              coordinate, never +infinity. An empty database returns explicit nulls for every \
-             bound, never 0/epoch-1970. Pass by_label: true to also receive the same bounds \
-             per node label (node_labels) and per edge type (edge_types).",
+             bound, never 0/epoch-1970. Bounds only ever widen while the server runs, so \
+             callers can cache the result for a session. Coverage caveat: bounds span all \
+             history recorded during the current process lifetime plus hot-tier history \
+             restored at startup; on databases with cold-storage migration, versions migrated \
+             to cold storage before the last restart are not reflected. Pass by_label: true \
+             to also receive the same bounds per node label (node_labels) and per edge type \
+             (edge_types); per-label bounds are computed from hot-tier history only and may \
+             be narrower than the overall bounds (or a label absent) after cold migration.",
             make_input_schema::<TemporalExtentRequest>(),
         ),
     ]
@@ -4114,6 +4120,22 @@ mod server_unit_tests {
             result.is_error.unwrap_or(false),
             "Null JSON input must produce an error result"
         );
+    }
+
+    #[test]
+    fn timestamp_to_rfc3339_out_of_chrono_range_falls_back_to_micros() {
+        // Coordinates outside chrono's representable range must render as
+        // the raw-microseconds fallback instead of panicking. Timestamps up
+        // to MAX_VALID_TIMESTAMP (i64::MAX - 1000 µs) are storable but far
+        // beyond chrono's ~year-262143 ceiling.
+        let ts = crate::core::temporal::Timestamp::from(i64::MAX - 1000);
+        let rendered = AletheiaMcpServer::timestamp_to_rfc3339(ts);
+        assert_eq!(rendered, format!("{}us", i64::MAX - 1000));
+
+        // Sanity: an in-range coordinate renders as RFC3339, not the fallback.
+        let ts = crate::core::temporal::Timestamp::from(1_614_556_800_000_000); // 2021-03-01
+        let rendered = AletheiaMcpServer::timestamp_to_rfc3339(ts);
+        assert_eq!(rendered, "2021-03-01T00:00:00.000000Z");
     }
 
     #[test]

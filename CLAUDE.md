@@ -310,7 +310,7 @@ cargo run --bin aletheia-mcp --features mcp-server
 | **Edges** | `get_edge`, `create_edge`, `update_edge`, `delete_edge`, `get_outgoing_edges`, `get_incoming_edges` |
 | **Traversal** | `traverse` (multi-hop graph traversal; optional bi-temporal `as_of_valid_time`/`as_of_transaction_time`) |
 | **Vector** | `find_similar`, `enable_vector_index`, `list_vector_indexes` |
-| **Temporal** | `get_node_at_time`, `get_edge_at_time`, `temporal_extent` (dataset's queryable bi-temporal extent — earliest/latest valid-time and transaction-time bounds as RFC3339, explicit `null`s on an empty DB; optional `by_label: true` for per-label/per-edge-type bounds; covers all recorded history incl. expired/superseded versions) |
+| **Temporal** | `get_node_at_time`, `get_edge_at_time`, `temporal_extent` (dataset's queryable bi-temporal extent; optional by_label breakdown) |
 | **Hybrid** | `hybrid_query` (combined graph + vector + temporal) |
 | **Query** | `query` (execute a single read-only Cypher/AQL statement; see below) |
 | **Schema** | `get_schema` (node labels, edge types, and property keys, each with counts; optional bi-temporal `as_of_valid_time`/`as_of_transaction_time`) |
@@ -394,6 +394,22 @@ not affect `find_similar`'s `score` or `hybrid_query`'s `similarity_score`,
 which are always returned in full, nor the write path (`create_node`,
 `update_node`, `create_edge`, `update_edge`) or temporal/history tools,
 which are unaffected by this flag and always return full vectors.
+
+**Temporal extent (Issue #3238)**: `temporal_extent` reports the dataset's
+queryable bi-temporal extent — the earliest/latest valid-time and
+transaction-time coordinates across recorded history (including
+expired/superseded versions and delete tombstones) as RFC3339 strings — so
+an LLM can calibrate `AS OF` queries to land inside real data instead of
+misreading an out-of-range empty result as "the fact never existed". An
+empty database returns explicit `null`s (never epoch 0); `latest` is the
+max of interval starts and *closed* ends, so the open-interval sentinel
+never leaks. Overall bounds are O(1) reads of a write-time-maintained
+aggregate and only ever widen while the server runs (cacheable per
+session). Optional `by_label: true` adds per-node-label / per-edge-type
+bounds folded from hot-tier history. Coverage caveat: bounds span the
+current process lifetime plus hot-tier history restored at startup —
+versions cold-migrated before the last restart are not reflected. See
+[docs/guides/mcp-query-tool.md](docs/guides/mcp-query-tool.md#discovering-the-queryable-temporal-extent-temporal_extent).
 
 **Programmatic Usage:**
 ```rust

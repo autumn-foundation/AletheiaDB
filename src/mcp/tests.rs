@@ -8674,6 +8674,50 @@ mod temporal_extent_tests {
     }
 
     #[test]
+    fn test_temporal_extent_deleted_node_tombstone_still_counts() {
+        // Deletions count toward the extent: a node backdated to 2021 and
+        // then deleted must still bound valid_time.earliest, and both
+        // dimensions' latest must reflect the deletion event.
+        let server = create_test_server();
+
+        let alice = create_node_at(&server, "Person", "2021-03-01T00:00:00Z");
+        let delete_response = server.delete_node(DeleteNodeRequest {
+            node_id: alice.id,
+            detach: None,
+            valid_time: None,
+        });
+        let delete_value: serde_json::Value = serde_json::from_str(&delete_response).unwrap();
+        assert!(
+            delete_value.get("error").is_none(),
+            "unexpected delete error: {delete_value}"
+        );
+
+        let response = server.temporal_extent(extent_req(None));
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert!(value.get("error").is_none(), "unexpected error: {value}");
+
+        assert_eq!(
+            value["valid_time"]["earliest"],
+            serde_json::json!("2021-03-01T00:00:00.000000Z"),
+            "a deleted node's backdated start must still bound earliest"
+        );
+
+        // The deletion closed the valid interval at ~now and recorded the
+        // tombstone: both latest bounds move past the 2021 backdate.
+        for dim in ["valid_time", "transaction_time"] {
+            assert_rfc3339(&value[dim]["latest"], &format!("{dim} latest"));
+            let latest =
+                chrono::DateTime::parse_from_rfc3339(value[dim]["latest"].as_str().unwrap())
+                    .unwrap();
+            let backdate = chrono::DateTime::parse_from_rfc3339("2022-01-01T00:00:00Z").unwrap();
+            assert!(
+                latest > backdate,
+                "{dim} latest must reflect the deletion event, got {latest}"
+            );
+        }
+    }
+
+    #[test]
     fn test_as_of_before_extent_is_empty_inside_extent_has_data() {
         // The answerability contract the extent exists to provide: an AS OF
         // query strictly before valid_time.earliest returns empty, while the

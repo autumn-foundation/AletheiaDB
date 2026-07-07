@@ -370,6 +370,13 @@ harness = false
 path = "benches/temporal_query.rs"
 required-features = []
 
+# Queryable bi-temporal extent (Issue #3238) - O(1) aggregate read + by-label fold
+[[bench]]
+name = "temporal_extent"
+harness = false
+path = "benches/temporal_extent.rs"
+required-features = []
+
 [[bench]]
 name = "changefeed"
 harness = false
