@@ -8890,17 +8890,12 @@ mod database_stats_tests {
         let server = create_test_server();
         let value = stats_response(&server);
 
-        let cold = value["cold_storage"]
-            .as_object()
-            .expect("cold_storage must always be present as an object");
-        assert_eq!(cold["enabled"], serde_json::json!(false));
-        assert!(
-            !cold.contains_key("node_versions_stored"),
-            "disabled tier must not report counts: {value}"
-        );
-        assert!(
-            !cold.contains_key("tier_access"),
-            "disabled tier must not report tier distribution: {value}"
+        // Exact shape: no counts, no tier distribution, no extra keys --
+        // anything beyond the tag could be mistaken for real (zero) data.
+        assert_eq!(
+            value["cold_storage"],
+            serde_json::json!({"enabled": false}),
+            "disabled cold_storage must be exactly {{\"enabled\": false}}: {value}"
         );
     }
 
