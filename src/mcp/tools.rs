@@ -397,6 +397,14 @@ pub struct GetIncomingEdgesRequest {
 // ============================================================================
 
 /// Request to perform graph traversal.
+///
+/// With no `as_of_*` fields, traversal walks current-state adjacency (identical
+/// to prior behavior). With either field supplied, traversal instead follows
+/// only edges and nodes valid at that bi-temporal instant -- edges created
+/// after the coordinate, or whose valid interval does not contain it, are
+/// excluded, and node properties reflect their state at that instant. Each
+/// dimension defaults independently to the current time when the *other* one
+/// is supplied but it isn't, mirroring `get_schema`'s `as_of_*` convention.
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct TraverseRequest {
     /// Starting node ID for traversal.
@@ -428,6 +436,26 @@ pub struct TraverseRequest {
                        {type, dim, elided:true} descriptor (default: false)"
     )]
     pub include_vectors: Option<bool>,
+
+    /// Optional valid time as ISO 8601 timestamp or microseconds since epoch.
+    /// If supplied (alone or with `as_of_transaction_time`), traversal follows
+    /// only edges/nodes valid as of this bi-temporal instant instead of the
+    /// current state. If omitted while `as_of_transaction_time` is set,
+    /// defaults to the current time.
+    #[schemars(
+        description = "Optional valid time (ISO 8601 or microseconds since epoch). Supplying this or as_of_transaction_time switches to a bi-temporal, point-in-time traversal. If omitted while as_of_transaction_time is set, defaults to the current time."
+    )]
+    pub as_of_valid_time: Option<String>,
+
+    /// Optional transaction time as ISO 8601 timestamp or microseconds since
+    /// epoch. If supplied (alone or with `as_of_valid_time`), traversal
+    /// follows only edges/nodes recorded as of this bi-temporal instant
+    /// instead of the current state. If omitted while `as_of_valid_time` is
+    /// set, defaults to the current time.
+    #[schemars(
+        description = "Optional transaction time (ISO 8601 or microseconds since epoch). Supplying this or as_of_valid_time switches to a bi-temporal, point-in-time traversal. If omitted while as_of_valid_time is set, defaults to the current time."
+    )]
+    pub as_of_transaction_time: Option<String>,
 }
 
 // ============================================================================

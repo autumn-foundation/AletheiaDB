@@ -172,6 +172,69 @@ structured error, e.g.:
 { "error": "valid_from ... is before entity creation time ... for node:7" }
 ```
 
+## Point-in-time (AS OF) graph traversal
+
+`traverse` accepts optional `as_of_valid_time` / `as_of_transaction_time`
+fields (same formats as every other MCP temporal field), independently
+settable, so an LLM can explore *relationships* as they existed at a past
+bi-temporal instant in a single call instead of stitching together
+`get_node_at_time`/`get_edge_at_time` lookups edge-by-edge. Omitting both
+reproduces today's current-state traversal exactly.
+
+**Example:** Alice and Bob became connected on 2021-03-01, backdated when
+recorded via `create_edge`'s `valid_time` (see above). An LLM later asks for
+Alice's `KNOWS` network as of last year:
+
+```jsonc
+// tools/call -> "traverse"
+{
+  "start_node_id": 7,
+  "edge_label": "KNOWS",
+  "direction": "outgoing",
+  "depth": 1,
+  "as_of_valid_time": "2025-07-06T00:00:00Z"
+}
+// -> {
+//      "results": [ { "node": { "id": 8, "label": "Person", "properties": {"name": "Bob"} },
+//                     "path": [7, 8], "depth": 1 } ],
+//      "count": 1,
+//      "as_of_valid_time": "2025-07-06T00:00:00Z",
+//      "as_of_transaction_time": "<now, since only as_of_valid_time was supplied>"
+//    }
+```
+
+Querying with `as_of_valid_time` set to a point *before* 2021-03-01 returns
+`{"results": [], "count": 0}` -- the relationship, and Bob himself if he
+didn't exist yet, are correctly excluded rather than silently falling back to
+the current state. An edge created after the coordinate is excluded, and a
+node no longer valid at the coordinate stops the traversal from continuing
+past it (nothing reachable only through that node is reported).
+
+**Recalling a since-deleted edge requires anchoring *both* dimensions before
+the deletion.** `as_of_transaction_time` selects *which recorded version* of
+the edge you see; `as_of_valid_time` is then checked against that version's
+own valid-time interval. If Alice and Bob's edge above is later deleted for
+real, the only version visible once `as_of_transaction_time` is at or after
+that deletion is the tombstone -- and a tombstone has no valid-time interval
+at all, so it can never match *any* `as_of_valid_time`, no matter how far in
+the past. Concretely: supplying only `as_of_valid_time` (as the example
+above does) lets `as_of_transaction_time` default to *now*, which is after
+any real deletion -- so a since-deleted edge will **not** come back even for
+an `as_of_valid_time` that falls squarely between its creation and
+retirement. To see the relationship "as it was known before the deletion,"
+also supply `as_of_transaction_time` anchored to a point before the deletion
+was committed.
+
+As with every other `as_of_*` field, an unparseable timestamp
+returns a structured error instead of silently traversing current state:
+
+```jsonc
+{ "error": "Invalid as_of_valid_time: Invalid timestamp format: 'not-a-timestamp'. ..." }
+```
+
+`MAX_TRAVERSAL_DEPTH` and `MAX_RESULT_LIMIT` apply identically whether or not
+a temporal coordinate is supplied.
+
 ## Notes
 
 - **AQL has no parameter binding.** Sending `params` with `language: "aql"`
