@@ -405,7 +405,13 @@ pub struct GetIncomingEdgesRequest {
 /// excluded, and node properties reflect their state at that instant. Each
 /// dimension defaults independently to the current time when the *other* one
 /// is supplied but it isn't, mirroring `get_schema`'s `as_of_*` convention.
+///
+/// Marked `#[non_exhaustive]` because Issue #3226 added the `offset` field
+/// after this struct's initial release; struct-literal construction from
+/// outside this crate would otherwise be a semver break on every future
+/// field addition.
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[non_exhaustive]
 pub struct TraverseRequest {
     /// Starting node ID for traversal.
     #[schemars(description = "Starting node ID for traversal")]
@@ -428,6 +434,14 @@ pub struct TraverseRequest {
     /// Maximum number of results to return.
     #[schemars(description = "Maximum number of results to return (default: 100)")]
     pub limit: Option<usize>,
+
+    /// Number of results to skip (for pagination).
+    #[schemars(
+        description = "Number of results to skip (for pagination). Pass the `next_offset` from a \
+                       prior response to fetch the next page; the response's `has_more` tells you \
+                       whether another page exists."
+    )]
+    pub offset: Option<usize>,
 
     /// When true, return full vector/embedding properties instead of the
     /// elided descriptor (default: false).
@@ -463,7 +477,13 @@ pub struct TraverseRequest {
 // ============================================================================
 
 /// Request to find similar nodes by vector embedding.
+///
+/// Marked `#[non_exhaustive]` because Issue #3226 added the `offset` field
+/// after this struct's initial release; struct-literal construction from
+/// outside this crate would otherwise be a semver break on every future
+/// field addition.
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[non_exhaustive]
 pub struct FindSimilarRequest {
     /// The property name that contains the vector embedding.
     #[schemars(
@@ -478,6 +498,14 @@ pub struct FindSimilarRequest {
     /// Number of similar results to return.
     #[schemars(description = "Number of similar results to return (default: 10)")]
     pub k: Option<usize>,
+
+    /// Number of results to skip (for pagination).
+    #[schemars(
+        description = "Number of results to skip (for pagination). Pass the `next_offset` from a \
+                       prior response to fetch the next page; the response's `has_more` tells you \
+                       whether another page exists."
+    )]
+    pub offset: Option<usize>,
 
     /// When true, return full vector/embedding properties instead of the
     /// elided descriptor (default: false). Does not affect the similarity
