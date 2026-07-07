@@ -1026,10 +1026,19 @@ impl AletheiaMcpServer {
     /// - `total_matching` is set only when a matching total is cheaply known;
     ///   it is omitted (never faked) when computing it would require an
     ///   expensive full scan.
+    ///
+    /// `consumed` is the number of underlying candidates the page advanced
+    /// past -- i.e. the requested page window (e.g. `limit` or `k`), NOT the
+    /// number of items actually returned in the body. These differ when an
+    /// id resolved from an index (property lookup, vector search) turns out
+    /// to be a since-deleted node and is dropped: the page still consumed a
+    /// full window of candidates, so `next_offset` must advance by the window
+    /// size, not the smaller returned count, or the next call would re-skip
+    /// into already-consumed candidates and duplicate a row across pages.
     fn attach_completeness(
         value: &mut serde_json::Value,
         offset: usize,
-        count: usize,
+        consumed: usize,
         has_more: bool,
         total_matching: Option<usize>,
     ) {
@@ -1038,7 +1047,7 @@ impl AletheiaMcpServer {
             if has_more {
                 obj.insert(
                     "next_offset".to_string(),
-                    json!(offset.saturating_add(count)),
+                    json!(offset.saturating_add(consumed)),
                 );
             }
             if let Some(total) = total_matching {
@@ -1331,11 +1340,14 @@ impl AletheiaMcpServer {
             Err(e) => return self.error_json(&format!("Invalid arguments: {}", e)),
         };
 
-        // Apply resource limits
+        // Apply resource limits. A page must be able to carry a continuation
+        // cursor, so the limit is at least 1 (limit:0 would otherwise report
+        // has_more:true with next_offset==offset, a non-progressing page that
+        // traps a paginating caller in an infinite loop).
         let limit = req
             .limit
             .unwrap_or(DEFAULT_RESULT_LIMIT)
-            .min(MAX_RESULT_LIMIT);
+            .clamp(1, MAX_RESULT_LIMIT);
         let offset = req.offset.unwrap_or(0).min(MAX_PAGINATION_OFFSET);
 
         // Validate property filter: both key and value are required together with label
@@ -1374,20 +1386,21 @@ impl AletheiaMcpServer {
                 }
             }
 
-            let has_more = offset.saturating_add(nodes.len()) < total_matching;
+            // `has_more`/`next_offset` are derived from the requested window
+            // (`limit`) against `total_matching`, not from `nodes.len()`: a
+            // stale property-index entry pointing at a since-deleted node is
+            // still one of the `limit` ids this page consumed, so basing
+            // `next_offset` on the (possibly smaller) resolved count would
+            // re-skip into already-consumed ids and duplicate a row on the
+            // next page.
+            let has_more = offset.saturating_add(limit) < total_matching;
             let mut response = json!({
                 "nodes": nodes,
                 "count": nodes.len(),
                 "offset": offset,
                 "limit": limit
             });
-            Self::attach_completeness(
-                &mut response,
-                offset,
-                nodes.len(),
-                has_more,
-                Some(total_matching),
-            );
+            Self::attach_completeness(&mut response, offset, limit, has_more, Some(total_matching));
             return self.success_json(response);
         }
 
@@ -1445,15 +1458,16 @@ impl AletheiaMcpServer {
         } else {
             // Without a label filter, we cannot efficiently list all nodes
             // Return a helpful message
-            self.success_json(json!({
+            let mut response = json!({
                 "message": "Use 'label' filter to list nodes by type, or use 'count_nodes' for total count",
                 "total_count": self.db.node_count(),
                 "nodes": [],
                 "count": 0,
                 "offset": offset,
-                "limit": limit,
-                "has_more": false
-            }))
+                "limit": limit
+            });
+            Self::attach_completeness(&mut response, offset, 0, false, None);
+            self.success_json(response)
         }
     }
 
@@ -1663,16 +1677,17 @@ impl AletheiaMcpServer {
 
         // Edges cannot be efficiently listed without knowing source/target nodes.
         // Provide helpful guidance to use get_outgoing_edges or get_incoming_edges.
-        self.success_json(json!({
+        let mut response = json!({
             "message": "Use 'get_outgoing_edges' or 'get_incoming_edges' from a known node to list edges",
             "total_count": self.db.edge_count(),
             "edges": [],
             "count": 0,
             "offset": offset,
             "limit": limit,
-            "label_filter": req.label,
-            "has_more": false
-        }))
+            "label_filter": req.label
+        });
+        Self::attach_completeness(&mut response, offset, 0, false, None);
+        self.success_json(response)
     }
 
     fn handle_count_edges(&self, args: serde_json::Value) -> CallToolResult {
@@ -1722,12 +1737,12 @@ impl AletheiaMcpServer {
         // result is never truncated: `has_more` is always false and
         // `total_matching` equals the returned count.
         let count = edges.len();
-        self.success_json(json!({
+        let mut response = json!({
             "edges": edges,
-            "count": count,
-            "has_more": false,
-            "total_matching": count
-        }))
+            "count": count
+        });
+        Self::attach_completeness(&mut response, 0, 0, false, Some(count));
+        self.success_json(response)
     }
 
     fn handle_get_incoming_edges(&self, args: serde_json::Value) -> CallToolResult {
@@ -1760,12 +1775,12 @@ impl AletheiaMcpServer {
         // Complete adjacency (no limit/offset): never truncated, so
         // `has_more` is always false and `total_matching` equals the count.
         let count = edges.len();
-        self.success_json(json!({
+        let mut response = json!({
             "edges": edges,
-            "count": count,
-            "has_more": false,
-            "total_matching": count
-        }))
+            "count": count
+        });
+        Self::attach_completeness(&mut response, 0, 0, false, Some(count));
+        self.success_json(response)
     }
 
     /// Fetch a node, optionally as of a bi-temporal coordinate.
@@ -1892,12 +1907,15 @@ impl AletheiaMcpServer {
             Err(result) => return result,
         };
 
-        // Apply resource limits to prevent DoS
+        // Apply resource limits to prevent DoS. A page must be able to carry a
+        // continuation cursor, so the limit is at least 1 (limit:0 would
+        // otherwise report has_more:true with next_offset==offset, a
+        // non-progressing page that traps a paginating caller in a loop).
         let depth = req.depth.unwrap_or(1).min(MAX_TRAVERSAL_DEPTH);
         let limit = req
             .limit
             .unwrap_or(DEFAULT_RESULT_LIMIT)
-            .min(MAX_RESULT_LIMIT);
+            .clamp(1, MAX_RESULT_LIMIT);
         let offset = req.offset.unwrap_or(0).min(MAX_PAGINATION_OFFSET);
         let direction = req.direction.as_deref().unwrap_or("outgoing");
 
@@ -1920,8 +1938,19 @@ impl AletheiaMcpServer {
             std::collections::HashMap::new();
         // Offset pagination + completeness: `produced` counts every resolved
         // result node in traversal order; the first `offset` are skipped (a
-        // prior page), the next `limit` are collected, and resolving one more
-        // beyond a full page sets `has_more` (the has-more sentinel).
+        // prior page), the next `limit` are collected. Once the page is full
+        // we expand the last collected node's own out-edges as usual (so
+        // graph structure discovery for this hop isn't cut short), then stop:
+        // `has_more` is read off whatever remains on `frontier` rather than by
+        // resolving one further node. That peek-by-resolution would otherwise
+        // force expansion through dangling/orphaned edges (current-state mode
+        // keeps expanding past unresolvable nodes -- see the Err(_) arm below)
+        // in search of a single confirmable result, which can walk the entire
+        // remaining reachable subgraph just to answer `has_more`. Reading the
+        // frontier instead is O(1) and conservative: it may say `true` when
+        // the remaining candidates are all dangling and the next page would
+        // in fact be empty, but it never requires unbounded work and never
+        // under-reports.
         let mut produced: usize = 0;
         let mut has_more = false;
 
@@ -1932,21 +1961,13 @@ impl AletheiaMcpServer {
                 match self.get_node_maybe_at(current_id, temporal) {
                     Ok(node) => {
                         produced += 1;
-                        if produced > offset {
-                            if results.len() < limit {
-                                results.push(TraversalResult {
-                                    node: self.node_to_response(
-                                        &node,
-                                        req.include_vectors.unwrap_or(false),
-                                    ),
-                                    path: path.clone(),
-                                    depth: current_depth,
-                                });
-                            } else {
-                                // One result beyond the page exists.
-                                has_more = true;
-                                break;
-                            }
+                        if produced > offset && results.len() < limit {
+                            results.push(TraversalResult {
+                                node: self
+                                    .node_to_response(&node, req.include_vectors.unwrap_or(false)),
+                                path: path.clone(),
+                                depth: current_depth,
+                            });
                         }
                     }
                     // Non-temporal: preserve the historical "keep expanding
@@ -1977,6 +1998,11 @@ impl AletheiaMcpServer {
                     }
                 }
             }
+
+            if results.len() >= limit {
+                has_more = !frontier.is_empty();
+                break;
+            }
         }
 
         let count = results.len();
@@ -2005,9 +2031,22 @@ impl AletheiaMcpServer {
             Err(e) => return self.error_json(&format!("Invalid arguments: {}", e)),
         };
 
-        // Apply resource limits
-        let k = req.k.unwrap_or(DEFAULT_VECTOR_K).min(MAX_VECTOR_K);
-        let offset = req.offset.unwrap_or(0).min(MAX_PAGINATION_OFFSET);
+        // Apply resource limits. A page must be able to carry a continuation
+        // cursor, so k is at least 1 (k:0 would otherwise report
+        // has_more:true with next_offset==offset, a non-progressing page).
+        let k = req.k.unwrap_or(DEFAULT_VECTOR_K).clamp(1, MAX_VECTOR_K);
+        // Bound the total pagination window (offset+k) by MAX_VECTOR_K so the
+        // over-fetch below never asks the vector index for more than
+        // MAX_VECTOR_K+1 candidates regardless of offset -- otherwise a large
+        // offset could force a search far past the MAX_VECTOR_K resource
+        // budget the cap is meant to enforce. Vector-similarity pagination is
+        // therefore bounded to the top MAX_VECTOR_K matches; an offset beyond
+        // that horizon returns an empty, complete (`has_more: false`) page.
+        let offset = req
+            .offset
+            .unwrap_or(0)
+            .min(MAX_PAGINATION_OFFSET)
+            .min(MAX_VECTOR_K.saturating_sub(k));
 
         if !self.db.is_vector_index_enabled_for(&req.property_name) {
             return self.error_json(&format!(
@@ -2021,9 +2060,10 @@ impl AletheiaMcpServer {
             return self.error_json(&e);
         }
 
-        // Over-fetch one past the requested page (offset + k + 1) so we can tell
-        // whether more similar nodes exist beyond this page (`has_more`) without
-        // a second query. The matching total would need a full index scan, so
+        // Over-fetch one past the requested page (offset + k + 1, capped at
+        // MAX_VECTOR_K + 1 by the offset bound above) so we can tell whether
+        // more similar nodes exist beyond this page (`has_more`) without a
+        // second query. The matching total would need a full index scan, so
         // `total_matching` is omitted.
         let fetch_k = k.saturating_add(offset).saturating_add(1);
         match self
@@ -2050,7 +2090,13 @@ impl AletheiaMcpServer {
                     "results": similarity_results,
                     "count": count
                 });
-                Self::attach_completeness(&mut response, offset, count, has_more, None);
+                // `next_offset` advances by the requested window `k`, not the
+                // (possibly smaller) resolved `count`: a since-deleted node
+                // behind a stale vector-index entry is still one of the `k`
+                // candidates this page consumed, so basing next_offset on
+                // `count` would re-skip into already-consumed candidates and
+                // duplicate a row on the next page.
+                Self::attach_completeness(&mut response, offset, k, has_more, None);
                 self.success_json(response)
             }
             Err(e) => self.error_json(&e.to_string()),
@@ -3420,7 +3466,10 @@ fn tool_definitions() -> Vec<Tool> {
             "find_similar",
             "Find nodes similar to a query embedding. The response carries `has_more` \
                      (true when more similar nodes exist beyond the returned `k`); when true, \
-                     `next_offset` gives the `offset` to pass for the next page. The similarity \
+                     `next_offset` gives the `offset` to pass for the next page. Pagination via \
+                     `offset` only reaches the top-ranked matches up to the server's k cap \
+                     (`offset + k` bounded); querying past that horizon returns an empty page with \
+                     `has_more: false` rather than an unbounded search. The similarity \
                      `score` is always returned in full. Vector/embedding properties on the \
                      returned nodes are elided by default (replaced with a \
                      `{type, dim, elided:true}` descriptor) to protect LLM context; pass \

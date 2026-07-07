@@ -7322,7 +7322,18 @@ mod completeness_tests {
 
     // --- find_similar -----------------------------------------------------
 
+    /// Seed up to 5 documents with well-separated (near-orthogonal) 4-dim
+    /// embeddings: the four axis-aligned unit vectors plus the all-ones
+    /// vector. Against a query embedding like `[0.1, 0.2, 0.3, 0.4]`, cosine
+    /// similarity to each is strictly distinct (0.183, 0.365, 0.548, 0.730,
+    /// 0.913) with wide gaps between them, so ranking is unambiguous and a
+    /// deterministic count/`has_more` assertion never depends on HNSW
+    /// (approximate) search resolving a near-tied score consistently.
     fn seed_vectors(server: &AletheiaMcpServer, n: usize) {
+        assert!(
+            n <= 5,
+            "seed_vectors only defines 5 well-separated directions"
+        );
         server.enable_vector_index(EnableVectorIndexRequest {
             property_name: "embedding".to_string(),
             dimensions: 4,
@@ -7331,15 +7342,14 @@ mod completeness_tests {
         for i in 0..n {
             let mut props = HashMap::new();
             props.insert("name".to_string(), serde_json::json!(format!("Doc{i}")));
-            props.insert(
-                "embedding".to_string(),
-                serde_json::json!([
-                    (i as f32) * 0.1 + 0.01,
-                    (i as f32) * 0.2 + 0.01,
-                    (i as f32) * 0.3 + 0.01,
-                    (i as f32) * 0.4 + 0.01
-                ]),
-            );
+            let embedding: [f32; 4] = if i < 4 {
+                let mut e = [0.0_f32; 4];
+                e[i] = 1.0;
+                e
+            } else {
+                [1.0; 4]
+            };
+            props.insert("embedding".to_string(), serde_json::json!(embedding));
             server.create_node(CreateNodeRequest {
                 valid_time: None,
                 label: "Document".to_string(),
@@ -7481,5 +7491,126 @@ mod completeness_tests {
                 "{name} response must carry a boolean has_more: {value}"
             );
         }
+    }
+
+    // --- limit/k==0 must not produce a non-progressing page --------------
+    //
+    // A page must be able to carry a continuation cursor: limit/k:0 with
+    // has_more:true and next_offset==offset (an unchanged offset) would trap
+    // a paginating caller in an infinite loop. `limit`/`k` are clamped to a
+    // minimum of 1 so a page always advances.
+
+    #[test]
+    fn test_list_nodes_limit_zero_is_clamped_to_one() {
+        let server = create_test_server();
+        seed_labeled(&server, "ClampHM", 3);
+        let value = parse(&server.list_nodes(ListNodesRequest {
+            label: Some("ClampHM".to_string()),
+            property_key: None,
+            property_value: None,
+            limit: Some(0),
+            offset: None,
+            include_vectors: None,
+        }));
+        assert_eq!(
+            value.get("count"),
+            Some(&serde_json::json!(1)),
+            "limit:0 must be clamped to at least 1, not return an empty page: {value}"
+        );
+        assert_eq!(has_more(&value), Some(true));
+        assert_eq!(next_offset(&value), Some(1), "page must advance: {value}");
+    }
+
+    #[test]
+    fn test_traverse_limit_zero_is_clamped_to_one() {
+        let server = create_test_server();
+        let ids = seed_chain(&server, 3);
+        let value = parse(&server.traverse(TraverseRequest {
+            start_node_id: ids[0],
+            edge_label: "NEXT".to_string(),
+            direction: None,
+            depth: Some(3),
+            limit: Some(0),
+            offset: None,
+            include_vectors: None,
+            as_of_valid_time: None,
+            as_of_transaction_time: None,
+        }));
+        assert_eq!(
+            value.get("count"),
+            Some(&serde_json::json!(1)),
+            "limit:0 must be clamped to at least 1, not return an empty page: {value}"
+        );
+        assert_eq!(has_more(&value), Some(true));
+        assert_eq!(next_offset(&value), Some(1), "page must advance: {value}");
+    }
+
+    #[test]
+    fn test_find_similar_k_zero_is_clamped_to_one() {
+        let server = create_test_server();
+        seed_vectors(&server, 3);
+        let value = parse(&server.find_similar(FindSimilarRequest {
+            property_name: "embedding".to_string(),
+            embedding: vec![0.1, 0.2, 0.3, 0.4],
+            k: Some(0),
+            offset: None,
+            include_vectors: None,
+        }));
+        assert_eq!(
+            value.get("count"),
+            Some(&serde_json::json!(1)),
+            "k:0 must be clamped to at least 1, not return an empty page: {value}"
+        );
+        assert_eq!(has_more(&value), Some(true));
+        assert_eq!(next_offset(&value), Some(1), "page must advance: {value}");
+    }
+
+    // --- traverse must not walk unboundedly through dangling edges -------
+
+    #[test]
+    fn test_traverse_bounded_peek_past_dangling_edges() {
+        let server = create_test_server();
+        // start -> n1 -> n2 -> n3 -> n4, then n2..n4 are deleted via the
+        // low-level (non-cascade) API, which per CLAUDE.md's "Orphaned
+        // Edges" section leaves their connecting edges dangling in storage.
+        let ids = seed_chain(&server, 4);
+        for &dangling_id in &ids[2..=4] {
+            server
+                .db()
+                .delete_node_with_valid_time(
+                    crate::core::id::NodeId::new(dangling_id).unwrap(),
+                    None,
+                )
+                .unwrap();
+        }
+
+        // n1 is the sole live node beyond `start` and becomes the one-item
+        // page (limit:1). Before this fix, proving `has_more` required
+        // resolving one MORE node beyond the page -- but every node past n1
+        // is dangling, so the old code would walk the entire dangling chain
+        // (n2, n3, n4) via "keep expanding regardless", find nothing
+        // resolvable, and wrongly report has_more:false. The fix instead
+        // reads `has_more` off whatever `traversal_next_hops` already queued
+        // for n1 (the edge to n2) without resolving it, so it correctly
+        // reports uncertainty as has_more:true in O(1) extra work rather
+        // than an O(dangling-chain-length) walk that still gets it wrong.
+        let response = parse(&server.traverse(TraverseRequest {
+            start_node_id: ids[0],
+            edge_label: "NEXT".to_string(),
+            direction: None,
+            depth: Some(10),
+            limit: Some(1),
+            offset: None,
+            include_vectors: None,
+            as_of_valid_time: None,
+            as_of_transaction_time: None,
+        }));
+        assert_eq!(response.get("count"), Some(&serde_json::json!(1)));
+        assert_eq!(
+            has_more(&response),
+            Some(true),
+            "a pending (even if unresolved) frontier candidate must not be silently \
+             reported as has_more:false: {response}"
+        );
     }
 }
