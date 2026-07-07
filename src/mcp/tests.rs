@@ -2489,6 +2489,67 @@ mod traversal_extended_tests {
     }
 
     #[test]
+    fn test_traverse_both_direction_finds_node_reachable_only_via_incoming_edge() {
+        // Regression test: direction:"both" must resolve the correct
+        // neighbor for edges discovered through the *incoming* side too, not
+        // just fall back to `edge.target` (which is `current_id` itself for
+        // an incoming edge, silently dropping the neighbor). Build a graph
+        // with NO reciprocal outgoing edge, so this can only pass if the
+        // incoming half of "both" is resolved correctly.
+        let server = create_test_server();
+
+        let a = {
+            let response = server.create_node(CreateNodeRequest {
+                valid_time: None,
+                label: "Node".to_string(),
+                properties: None,
+                provenance: None,
+            });
+            let node: NodeResponse = parse_response(&response).unwrap();
+            node.id
+        };
+        let b = {
+            let response = server.create_node(CreateNodeRequest {
+                valid_time: None,
+                label: "Node".to_string(),
+                properties: None,
+                provenance: None,
+            });
+            let node: NodeResponse = parse_response(&response).unwrap();
+            node.id
+        };
+        // Only B -> A exists; A has no outgoing edge back to B.
+        server.create_edge(CreateEdgeRequest {
+            valid_time: None,
+            source_id: b,
+            target_id: a,
+            label: "POINTS_AT".to_string(),
+            properties: None,
+            provenance: None,
+        });
+
+        let response = server.traverse(TraverseRequest {
+            start_node_id: a,
+            edge_label: "POINTS_AT".to_string(),
+            direction: Some("both".to_string()),
+            depth: Some(1),
+            limit: None,
+            include_vectors: None,
+            as_of_valid_time: None,
+            as_of_transaction_time: None,
+        });
+
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert!(value.get("error").is_none(), "unexpected error: {value}");
+        let count = value["count"].as_u64().unwrap();
+        assert_eq!(
+            count, 1,
+            "direction:\"both\" must find B via the incoming B->A edge, not drop it: {value}"
+        );
+        assert_eq!(value["results"][0]["node"]["id"], b);
+    }
+
+    #[test]
     fn test_traverse_nonexistent_edge_label() {
         let server = create_test_server();
 
@@ -6699,6 +6760,87 @@ mod traverse_as_of_tests {
         assert_eq!(
             count, 2,
             "both hops should be reachable as of the coordinate"
+        );
+    }
+
+    #[test]
+    fn test_traverse_as_of_both_direction_finds_node_reachable_only_via_incoming_edge() {
+        // Temporal-path variant of the direction:"both" fix: a node reachable
+        // only through an edge pointing AT the current node (not away from
+        // it) must still be found, not silently dropped because `next_id`
+        // was resolved from the top-level `direction` string alone.
+        let server = create_test_server();
+        let now = Utc::now();
+        let valid_time = hours_ago(now, 3);
+
+        let a = create_node_at(&server, "Person", &valid_time);
+        let b = create_node_at(&server, "Person", &valid_time);
+        // Only B -> A exists; A has no reciprocal outgoing edge.
+        create_edge_at(&server, b, a, "POINTS_AT", &valid_time);
+
+        let (count, value) = traverse_count(
+            &server,
+            TraverseRequest {
+                start_node_id: a,
+                edge_label: "POINTS_AT".to_string(),
+                direction: Some("both".to_string()),
+                depth: Some(1),
+                limit: None,
+                include_vectors: None,
+                as_of_valid_time: Some(hours_ago(now, 1)),
+                as_of_transaction_time: None,
+            },
+        );
+        assert_eq!(
+            count, 1,
+            "as_of direction:\"both\" must find B via the incoming B->A edge: {value}"
+        );
+        assert_eq!(value["results"][0]["node"]["id"], b);
+    }
+
+    #[test]
+    fn test_traverse_as_of_stops_at_intermediate_node_missing_at_coordinate() {
+        // A node deleted (without cascading its edges) via the low-level
+        // Rust API -- bypassing the MCP delete_node tool's own
+        // connected-edges safety check, exactly the documented "Orphaned
+        // Edges on Node Deletion" behavior of that API -- must stop a
+        // temporal traversal from continuing past it, even though its
+        // dangling edge was never itself retired.
+        use crate::api::transaction::WriteOps;
+
+        let server = create_test_server();
+        let now = Utc::now();
+        let far_past = hours_ago(now, 10);
+
+        let a = create_node_at(&server, "Person", &far_past);
+        let b = create_node_at(&server, "Person", &far_past);
+        let c = create_node_at(&server, "Person", &far_past);
+        create_edge_at(&server, a, b, "KNOWS", &far_past);
+        create_edge_at(&server, b, c, "KNOWS", &far_past);
+
+        let b_node_id = crate::core::id::NodeId::new(b).unwrap();
+        server
+            .db()
+            .write_with_timestamp(|tx| tx.delete_node(b_node_id))
+            .expect("low-level delete_node should succeed");
+        let after_delete = Utc::now().to_rfc3339();
+
+        let (count, value) = traverse_count(
+            &server,
+            TraverseRequest {
+                start_node_id: a,
+                edge_label: "KNOWS".to_string(),
+                direction: Some("outgoing".to_string()),
+                depth: Some(2),
+                limit: None,
+                include_vectors: None,
+                as_of_valid_time: Some(after_delete),
+                as_of_transaction_time: None,
+            },
+        );
+        assert_eq!(
+            count, 0,
+            "traversal must not continue past a node absent at the coordinate: {value}"
         );
     }
 }

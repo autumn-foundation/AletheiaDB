@@ -206,9 +206,26 @@ Alice's `KNOWS` network as of last year:
 Querying with `as_of_valid_time` set to a point *before* 2021-03-01 returns
 `{"results": [], "count": 0}` -- the relationship, and Bob himself if he
 didn't exist yet, are correctly excluded rather than silently falling back to
-the current state. An edge that was later deleted is still recalled by a
-coordinate that predates its retirement; an edge created after the coordinate
-is excluded. As with every other `as_of_*` field, an unparseable timestamp
+the current state. An edge created after the coordinate is excluded, and a
+node no longer valid at the coordinate stops the traversal from continuing
+past it (nothing reachable only through that node is reported).
+
+**Recalling a since-deleted edge requires anchoring *both* dimensions before
+the deletion.** `as_of_transaction_time` selects *which recorded version* of
+the edge you see; `as_of_valid_time` is then checked against that version's
+own valid-time interval. If Alice and Bob's edge above is later deleted for
+real, the only version visible once `as_of_transaction_time` is at or after
+that deletion is the tombstone -- and a tombstone has no valid-time interval
+at all, so it can never match *any* `as_of_valid_time`, no matter how far in
+the past. Concretely: supplying only `as_of_valid_time` (as the example
+above does) lets `as_of_transaction_time` default to *now*, which is after
+any real deletion -- so a since-deleted edge will **not** come back even for
+an `as_of_valid_time` that falls squarely between its creation and
+retirement. To see the relationship "as it was known before the deletion,"
+also supply `as_of_transaction_time` anchored to a point before the deletion
+was committed.
+
+As with every other `as_of_*` field, an unparseable timestamp
 returns a structured error instead of silently traversing current state:
 
 ```jsonc

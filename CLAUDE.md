@@ -350,10 +350,14 @@ only, both, or neither), so an LLM can ask "who did Alice know on
 lookups edge-by-edge. When a temporal coordinate is supplied, traversal
 follows only edges and nodes valid at that bi-temporal point (edges created
 after the coordinate, or whose valid interval doesn't contain it, are
-excluded) and node properties reflect their state at that coordinate; when
-neither is supplied, behavior is unchanged (current-state traversal). Each
-dimension defaults independently to the current time when the *other* one is
-supplied but it isn't, mirroring `get_schema`'s `as_of_*` convention. See
+excluded; a node no longer valid at the coordinate stops traversal from
+continuing past it) and node properties reflect their state at that
+coordinate; when neither is supplied, behavior is unchanged (current-state
+traversal). Each dimension defaults independently to the current time when
+the *other* one is supplied but it isn't, mirroring `get_schema`'s `as_of_*`
+convention -- note that recalling a since-deleted edge requires anchoring
+*both* dimensions before the deletion, not just `as_of_valid_time` (see the
+guide below for why). See
 [docs/guides/mcp-query-tool.md](docs/guides/mcp-query-tool.md#point-in-time-as-of-graph-traversal).
 
 **Vector properties are elided by default (Issue #3220)**: `get_node`,

@@ -903,6 +903,32 @@ impl AletheiaMcpServer {
             .map_err(|e| self.error_json(&format!("Invalid {label}: {e}")))
     }
 
+    /// Resolve a pair of independently-optional `as_of_valid_time` /
+    /// `as_of_transaction_time` request fields into a single bi-temporal
+    /// coordinate, shared by every MCP tool that supports point-in-time
+    /// queries (`get_schema`, `traverse`, ...).
+    ///
+    /// Returns `None` when both fields are absent (current-state / no
+    /// temporal filtering). When either field is supplied, the other
+    /// defaults to the current time -- e.g. `as_of_valid_time` alone answers
+    /// "using everything recorded so far, what was valid at this instant"
+    /// (transaction_time defaults to now), matching the Rust API's
+    /// `get_node_at_valid_time`/`get_node_at_transaction_time` convenience
+    /// methods, which default the unspecified dimension the same way.
+    fn resolve_bitemporal_as_of(
+        &self,
+        as_of_valid_time: &Option<String>,
+        as_of_transaction_time: &Option<String>,
+    ) -> std::result::Result<Option<(Timestamp, Timestamp)>, CallToolResult> {
+        let valid_time = self.parse_opt_timestamp("as_of_valid_time", as_of_valid_time)?;
+        let transaction_time =
+            self.parse_opt_timestamp("as_of_transaction_time", as_of_transaction_time)?;
+        Ok(match (valid_time, transaction_time) {
+            (None, None) => None,
+            (vt, tt) => Some((vt.unwrap_or_else(time::now), tt.unwrap_or_else(time::now))),
+        })
+    }
+
     /// Validate and convert an optional MCP [`ProvenanceRequest`] into a
     /// core [`Provenance`](crate::core::provenance::Provenance).
     ///
@@ -1698,53 +1724,85 @@ impl AletheiaMcpServer {
         }
     }
 
-    /// Enumerate candidate edge ids for a traversal hop, optionally as of a
-    /// bi-temporal coordinate. Current-state lookups are pre-filtered by
-    /// label at the storage layer; the temporal index has no such
-    /// label-aware variant, so temporal candidates are filtered afterwards
-    /// by fetching each edge and checking its label.
-    fn traversal_edge_ids(
+    /// Fetch one candidate edge exactly once, check its label (unless the id
+    /// list is already known to be label-filtered), and resolve the "next"
+    /// node for this hop via `next_of` -- e.g. `|e| e.target` for an edge
+    /// reached through the outgoing side, `|e| e.source` for the incoming
+    /// side. Folding the label check and the source/target extraction into
+    /// a single fetch avoids reconstructing the same edge twice per hop on
+    /// the temporal path (each `get_edge_at_time` call is an index lookup
+    /// plus a property reconstruction), and resolving `next_of` per-edge
+    /// (rather than from the caller's top-level `direction` string) is what
+    /// keeps a `"both"`-direction traversal correct: an edge discovered via
+    /// the incoming side must resolve to `edge.source`, never `edge.target`.
+    fn resolve_edge_hop(
+        &self,
+        edge_id: EdgeId,
+        edge_label: &str,
+        already_label_filtered: bool,
+        next_of: impl Fn(&crate::core::Edge) -> NodeId,
+        temporal: Option<(Timestamp, Timestamp)>,
+    ) -> Option<NodeId> {
+        let edge = self.get_edge_maybe_at(edge_id, temporal).ok()?;
+        if !already_label_filtered && !self.matches_label(edge.label, edge_label) {
+            return None;
+        }
+        Some(next_of(&edge))
+    }
+
+    /// Enumerate the next-hop node ids for a traversal step, optionally as
+    /// of a bi-temporal coordinate. Current-state outgoing lookups are
+    /// pre-filtered by label at the storage layer; every other combination
+    /// (incoming, or the temporal index -- which has no label-aware
+    /// incoming variant and, for outgoing, an existing
+    /// `TemporalAdjacencyIndex::get_outgoing_with_label_at_time` that isn't
+    /// yet plumbed through `HistoricalStorage`/`AletheiaDB`'s public API) is
+    /// filtered by fetching each candidate edge once via `resolve_edge_hop`.
+    fn traversal_next_hops(
         &self,
         current_id: NodeId,
         edge_label: &str,
         direction: &str,
         temporal: Option<(Timestamp, Timestamp)>,
-    ) -> Vec<EdgeId> {
-        let matches_label_at = |eid: &EdgeId| {
-            self.get_edge_maybe_at(*eid, temporal)
-                .map(|e| self.matches_label(e.label, edge_label))
-                .unwrap_or(false)
+    ) -> Vec<NodeId> {
+        let outgoing = || -> Vec<NodeId> {
+            match temporal {
+                Some((vt, tt)) => self
+                    .db
+                    .get_outgoing_edges_at_time(current_id, vt, tt)
+                    .into_iter()
+                    .filter_map(|eid| {
+                        self.resolve_edge_hop(eid, edge_label, false, |e| e.target, temporal)
+                    })
+                    .collect(),
+                None => self
+                    .db
+                    .get_outgoing_edges_with_label(current_id, edge_label)
+                    .into_iter()
+                    .filter_map(|eid| {
+                        self.resolve_edge_hop(eid, edge_label, true, |e| e.target, temporal)
+                    })
+                    .collect(),
+            }
         };
-
-        let outgoing = |current_id: NodeId| match temporal {
-            Some((vt, tt)) => self
-                .db
-                .get_outgoing_edges_at_time(current_id, vt, tt)
-                .into_iter()
-                .filter(|eid| matches_label_at(eid))
-                .collect::<Vec<_>>(),
-            None => self
-                .db
-                .get_outgoing_edges_with_label(current_id, edge_label),
-        };
-        let incoming = |current_id: NodeId| -> Vec<EdgeId> {
+        let incoming = || -> Vec<NodeId> {
             match temporal {
                 Some((vt, tt)) => self.db.get_incoming_edges_at_time(current_id, vt, tt),
                 None => self.db.get_incoming_edges(current_id),
             }
             .into_iter()
-            .filter(|eid| matches_label_at(eid))
+            .filter_map(|eid| self.resolve_edge_hop(eid, edge_label, false, |e| e.source, temporal))
             .collect()
         };
 
         match direction {
-            "incoming" => incoming(current_id),
+            "incoming" => incoming(),
             "both" => {
-                let mut edges = outgoing(current_id);
-                edges.extend(incoming(current_id));
-                edges
+                let mut hops = outgoing();
+                hops.extend(incoming());
+                hops
             }
-            _ => outgoing(current_id),
+            _ => outgoing(),
         }
     }
 
@@ -1759,22 +1817,11 @@ impl AletheiaMcpServer {
             Err(e) => return self.error_json(&e.to_string()),
         };
 
-        let valid_time = match self.parse_opt_timestamp("as_of_valid_time", &req.as_of_valid_time) {
+        let temporal = match self
+            .resolve_bitemporal_as_of(&req.as_of_valid_time, &req.as_of_transaction_time)
+        {
             Ok(t) => t,
             Err(result) => return result,
-        };
-        let transaction_time =
-            match self.parse_opt_timestamp("as_of_transaction_time", &req.as_of_transaction_time) {
-                Ok(t) => t,
-                Err(result) => return result,
-            };
-        // Bi-temporal defaulting mirrors get_schema: if only one axis is
-        // supplied, the other defaults to "now". If both are absent, this is
-        // a plain current-state traversal (byte-for-byte identical to prior
-        // behavior).
-        let temporal: Option<(Timestamp, Timestamp)> = match (valid_time, transaction_time) {
-            (None, None) => None,
-            (vt, tt) => Some((vt.unwrap_or_else(time::now), tt.unwrap_or_else(time::now))),
         };
 
         // Apply resource limits to prevent DoS
@@ -1793,37 +1840,57 @@ impl AletheiaMcpServer {
         let mut visited: std::collections::HashSet<u64> = std::collections::HashSet::new();
         let mut frontier: Vec<(NodeId, Vec<u64>, usize)> =
             vec![(start_id, vec![start_id.as_u64()], 0)];
+        // Caches whether a node exists as of `temporal`, so a node already
+        // resolved (via the results-push lookup below, or a prior visit) is
+        // never re-fetched just to decide whether to keep expanding past it.
+        // Only consulted on the temporal path: the current-state path never
+        // gated edge-following on node existence (an edge left dangling by a
+        // non-cascade delete_node is documented, pre-existing behavior --
+        // see CLAUDE.md's "Orphaned Edges" section -- and stays unchanged).
+        let mut node_exists_cache: std::collections::HashMap<u64, bool> =
+            std::collections::HashMap::new();
 
         while let Some((current_id, path, current_depth)) = frontier.pop() {
+            let mut current_exists = true;
             if current_depth > 0 && !visited.contains(&current_id.as_u64()) {
                 visited.insert(current_id.as_u64());
-                if let Ok(node) = self.get_node_maybe_at(current_id, temporal) {
-                    results.push(TraversalResult {
-                        node: self.node_to_response(&node, req.include_vectors.unwrap_or(false)),
-                        path: path.clone(),
-                        depth: current_depth,
-                    });
-                    if results.len() >= limit {
-                        break;
+                match self.get_node_maybe_at(current_id, temporal) {
+                    Ok(node) => {
+                        results.push(TraversalResult {
+                            node: self
+                                .node_to_response(&node, req.include_vectors.unwrap_or(false)),
+                            path: path.clone(),
+                            depth: current_depth,
+                        });
+                        if results.len() >= limit {
+                            break;
+                        }
                     }
+                    // Non-temporal: preserve the historical "keep expanding
+                    // regardless" behavior. Temporal: a node absent at the
+                    // coordinate must not have its edges followed further --
+                    // otherwise nodes only reachable through it would
+                    // surface despite being excluded from `results`.
+                    Err(_) => current_exists = temporal.is_none(),
                 }
+                if temporal.is_some() {
+                    node_exists_cache.insert(current_id.as_u64(), current_exists);
+                }
+            } else if temporal.is_some() {
+                current_exists = *node_exists_cache
+                    .entry(current_id.as_u64())
+                    .or_insert_with(|| self.get_node_maybe_at(current_id, temporal).is_ok());
             }
 
-            if current_depth < depth {
-                let edge_ids =
-                    self.traversal_edge_ids(current_id, &req.edge_label, direction, temporal);
+            if current_depth < depth && current_exists {
+                let next_ids =
+                    self.traversal_next_hops(current_id, &req.edge_label, direction, temporal);
 
-                for edge_id in edge_ids {
-                    if let Ok(edge) = self.get_edge_maybe_at(edge_id, temporal) {
-                        let next_id = match direction {
-                            "incoming" => edge.source,
-                            _ => edge.target,
-                        };
-                        if !visited.contains(&next_id.as_u64()) {
-                            let mut new_path = path.clone();
-                            new_path.push(next_id.as_u64());
-                            frontier.push((next_id, new_path, current_depth + 1));
-                        }
+                for next_id in next_ids {
+                    if !visited.contains(&next_id.as_u64()) {
+                        let mut new_path = path.clone();
+                        new_path.push(next_id.as_u64());
+                        frontier.push((next_id, new_path, current_depth + 1));
                     }
                 }
             }
@@ -2476,25 +2543,16 @@ impl AletheiaMcpServer {
             Err(e) => return self.error_json(&format!("Invalid arguments: {}", e)),
         };
 
-        let valid_time = match self.parse_opt_timestamp("as_of_valid_time", &req.as_of_valid_time) {
+        let temporal = match self
+            .resolve_bitemporal_as_of(&req.as_of_valid_time, &req.as_of_transaction_time)
+        {
             Ok(t) => t,
             Err(result) => return result,
         };
-        let transaction_time =
-            match self.parse_opt_timestamp("as_of_transaction_time", &req.as_of_transaction_time) {
-                Ok(t) => t,
-                Err(result) => return result,
-            };
 
-        let result = match (valid_time, transaction_time) {
-            (None, None) => self.db.schema(),
-            // Only one axis supplied: default the other to "now", matching
-            // db.get_node_at_valid_time()/get_node_at_transaction_time()'s
-            // independent-dimension convention (see GetSchemaRequest's doc
-            // comment for the exact semantics this produces).
-            (vt, tt) => self
-                .db
-                .schema_as_of(vt.unwrap_or_else(time::now), tt.unwrap_or_else(time::now)),
+        let result = match temporal {
+            None => self.db.schema(),
+            Some((vt, tt)) => self.db.schema_as_of(vt, tt),
         };
 
         match result {
