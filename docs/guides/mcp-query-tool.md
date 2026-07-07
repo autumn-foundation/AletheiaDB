@@ -409,6 +409,78 @@ guaranteed to be out of recorded range — its empty result means "before our
 records begin," not "nothing existed." Rerun the query at an instant inside
 the extent (or report the range mismatch) instead of concluding absence.
 
+## Temporal bounds on read responses
+
+Every node/edge read response carries a `temporal` block describing the
+bi-temporal bounds of the *exact version* the response reflects
+(Issue #3232), so an LLM/caller always knows when the returned fact was true
+in reality (valid time) and when it was recorded (transaction time) without
+a follow-up `get_node_history` call.
+
+Covered tools: `get_node`, `create_node`, `update_node`, `get_edge`,
+`create_edge`, `update_edge`, `list_nodes`, `traverse`, `get_outgoing_edges`,
+`get_incoming_edges`, `find_similar`, `hybrid_query`, `get_node_at_time`,
+`get_edge_at_time`, `get_node_at_valid_time`, `get_node_at_transaction_time`,
+`get_edge_at_valid_time`, and `get_edge_at_transaction_time` — the block has
+the identical shape on nodes and edges, for current-state and point-in-time
+reads alike.
+
+```jsonc
+// tools/call -> "get_node"
+{ "node_id": 7 }
+// -> {
+//      "id": 7,
+//      "label": "Person",
+//      "properties": { "name": "Alice" },
+//      "temporal": {
+//        "valid_from": "2026-07-07T12:00:00.000000+00:00",
+//        "valid_to": null,
+//        "transaction_from": "2026-07-07T12:00:00.000000+00:00",
+//        "transaction_to": null,
+//        "is_current": true
+//      }
+//    }
+```
+
+Conventions:
+
+- **Timestamps are RFC 3339 strings** with microsecond precision. Intervals
+  are half-open (`[start, end)`).
+- **Open-ended bounds are explicit JSON `null`** — `valid_to`/`transaction_to`
+  are always present, never omitted. `null` means "still valid" / "still the
+  recorded version".
+- **`is_current`** is `true` iff both the valid-time and transaction-time
+  intervals contain the current time — i.e. the response reflects the live,
+  current version. A superseded version returned by a point-in-time read, or
+  a fact whose `valid_to` has passed, reports `is_current: false` with its
+  closed bounds:
+
+```jsonc
+// tools/call -> "get_node_at_time" (anchored before an update)
+{ "node_id": 7, "valid_time": "2026-07-01T00:00:00Z", "transaction_time": "2026-07-01T00:00:00Z" }
+// -> {
+//      "node": {
+//        "id": 7,
+//        "label": "Person",
+//        "properties": { "name": "Alice" },
+//        "temporal": {
+//          "valid_from": "2026-06-01T09:30:00.000000+00:00",
+//          "valid_to": "2026-07-03T08:15:27.412000+00:00",
+//          "transaction_from": "2026-06-01T09:30:00.000000+00:00",
+//          "transaction_to": "2026-07-03T08:15:27.412000+00:00",
+//          "is_current": false
+//        }
+//      },
+//      "valid_time": "...", "transaction_time": "..."
+//    }
+```
+
+The bounds always describe the version actually returned and decode to the
+same microsecond values `get_node_history` reports for that version (history
+keeps its existing microseconds-as-string format — that contract is
+unchanged). The block is purely additive: no existing field moved or changed
+shape.
+
 ## Notes
 
 - **AQL has no parameter binding.** Sending `params` with `language: "aql"`

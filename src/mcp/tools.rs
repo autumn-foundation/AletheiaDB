@@ -919,6 +919,70 @@ pub struct TemporalExtentRequest {
 // Response Types (for serialization)
 // ============================================================================
 
+/// Bi-temporal bounds of the exact version a read response reflects
+/// (Issue #3232).
+///
+/// Stamped on every node/edge read response so an LLM/caller always knows
+/// *when* the returned fact was true in reality (valid time) and *when* it
+/// was recorded (transaction time), without a follow-up history call.
+///
+/// Bounds are RFC 3339 strings with microsecond precision. Open-ended bounds
+/// (a still-valid fact / a still-recorded version) are serialized as explicit
+/// JSON `null` -- the keys are always present, never omitted. Intervals are
+/// half-open (`[start, end)`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TemporalBounds {
+    /// When the fact became true in reality (RFC 3339).
+    pub valid_from: String,
+    /// When the fact stopped being true, or `null` if still valid.
+    pub valid_to: Option<String>,
+    /// When this version was recorded in the database (RFC 3339).
+    pub transaction_from: String,
+    /// When this version was superseded/removed, or `null` if still current
+    /// in the database.
+    pub transaction_to: Option<String>,
+    /// `true` iff both the valid-time and transaction-time intervals contain
+    /// the current time -- i.e. the returned version is the live, current
+    /// version. `false` for superseded versions returned by point-in-time
+    /// reads and for facts whose valid time has ended (or not yet begun).
+    pub is_current: bool,
+}
+
+impl TemporalBounds {
+    /// Format a timestamp's wallclock microseconds as an RFC 3339 string
+    /// with microsecond precision (e.g. `2026-07-07T12:00:00.000000+00:00`).
+    fn to_rfc3339_micros(ts: crate::core::temporal::Timestamp) -> String {
+        chrono::DateTime::from_timestamp_micros(ts.wallclock())
+            .unwrap_or_default()
+            .to_rfc3339_opts(chrono::SecondsFormat::Micros, false)
+    }
+
+    /// Convert a range end bound: `TIMESTAMP_MAX` (open-ended) becomes
+    /// `None` (serialized as JSON `null`), anything else an RFC 3339 string.
+    fn end_bound(ts: crate::core::temporal::Timestamp) -> Option<String> {
+        if ts == crate::core::temporal::TIMESTAMP_MAX {
+            None
+        } else {
+            Some(Self::to_rfc3339_micros(ts))
+        }
+    }
+}
+
+impl From<&crate::core::temporal::BiTemporalInterval> for TemporalBounds {
+    fn from(interval: &crate::core::temporal::BiTemporalInterval) -> Self {
+        // One shared "now" so both dimensions are judged at the same instant.
+        let now = crate::core::temporal::time::now();
+        TemporalBounds {
+            valid_from: Self::to_rfc3339_micros(interval.valid_time().start()),
+            valid_to: Self::end_bound(interval.valid_time().end()),
+            transaction_from: Self::to_rfc3339_micros(interval.transaction_time().start()),
+            transaction_to: Self::end_bound(interval.transaction_time().end()),
+            is_current: interval.valid_time().contains(now)
+                && interval.transaction_time().contains(now),
+        }
+    }
+}
+
 /// Serializable node representation for MCP responses.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeResponse {
@@ -929,6 +993,11 @@ pub struct NodeResponse {
     /// (never a fabricated `null`) when the version has none (Issue #3224).
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub provenance: Option<crate::core::provenance::Provenance>,
+    /// Bi-temporal bounds of the exact version this response reflects
+    /// (Issue #3232). Always present on normal reads; `None` only as a
+    /// best-effort degrade when the version metadata could not be loaded.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub temporal: Option<TemporalBounds>,
 }
 
 /// Serializable edge representation for MCP responses.
@@ -943,6 +1012,11 @@ pub struct EdgeResponse {
     /// (never a fabricated `null`) when the version has none (Issue #3224).
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub provenance: Option<crate::core::provenance::Provenance>,
+    /// Bi-temporal bounds of the exact version this response reflects
+    /// (Issue #3232). Always present on normal reads; `None` only as a
+    /// best-effort degrade when the version metadata could not be loaded.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub temporal: Option<TemporalBounds>,
 }
 
 /// Similarity search result.

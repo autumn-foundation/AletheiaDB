@@ -1473,6 +1473,46 @@ impl HistoricalStorage {
         Ok(provenance)
     }
 
+    /// Get the provenance bundle and bi-temporal interval of a specific node
+    /// version in a single lookup (Issue #3232).
+    ///
+    /// Like [`get_node_version_provenance`](Self::get_node_version_provenance),
+    /// this resolves an exact, caller-supplied version (typically a `Node`
+    /// snapshot's `current_version`) so the returned metadata is consistent
+    /// with the properties already read from that snapshot -- including for
+    /// point-in-time reads, whose lookup paths set `current_version` to the
+    /// matched historical version. Fetching both fields together keeps read
+    /// responses at one historical lookup per entity.
+    ///
+    /// Returns `Ok(None)` when the version cannot be found in any tier.
+    pub fn get_node_version_read_metadata(
+        &self,
+        version_id: VersionId,
+    ) -> Result<Option<(Option<Provenance>, BiTemporalInterval)>> {
+        if let Some(v) = self.node_versions.get(&version_id) {
+            // Fast path: read from hot storage without cloning version data.
+            return Ok(Some((v.provenance.as_deref().cloned(), v.temporal)));
+        }
+        Ok(self
+            .get_node_version_tiered(version_id)?
+            .map(|v| (v.provenance.as_deref().cloned(), v.temporal)))
+    }
+
+    /// Edge counterpart of
+    /// [`get_node_version_read_metadata`](Self::get_node_version_read_metadata).
+    pub fn get_edge_version_read_metadata(
+        &self,
+        version_id: VersionId,
+    ) -> Result<Option<(Option<Provenance>, BiTemporalInterval)>> {
+        if let Some(v) = self.edge_versions.get(&version_id) {
+            // Fast path: read from hot storage without cloning version data.
+            return Ok(Some((v.provenance.as_deref().cloned(), v.temporal)));
+        }
+        Ok(self
+            .get_edge_version_tiered(version_id)?
+            .map(|v| (v.provenance.as_deref().cloned(), v.temporal)))
+    }
+
     /// Get the node's true creation time: the `valid_from` of its first-ever version.
     ///
     /// Walks `prev_version` links from the current head back to the terminal (oldest)

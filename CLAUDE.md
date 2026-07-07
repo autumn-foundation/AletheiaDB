@@ -382,6 +382,21 @@ convention -- note that recalling a since-deleted edge requires anchoring
 guide below for why). See
 [docs/guides/mcp-query-tool.md](docs/guides/mcp-query-tool.md#point-in-time-as-of-graph-traversal).
 
+**Temporal bounds on read responses (Issue #3232)**: every node/edge read
+response (`get_node`, `create_node`, `update_node`, `get_edge`, `create_edge`,
+`update_edge`, `list_nodes`, `traverse`, `get_outgoing_edges`,
+`get_incoming_edges`, `find_similar`, `hybrid_query`, and all
+`get_*_at_time`/`at_valid_time`/`at_transaction_time` tools) carries an
+additive `temporal` block stamping the bi-temporal bounds of the exact
+version returned: `valid_from`/`valid_to`/`transaction_from`/`transaction_to`
+as RFC 3339 strings plus `is_current`. Open-ended bounds are explicit JSON
+`null` (present, never omitted); `is_current` is `true` iff both intervals
+contain the current time (false for superseded versions returned by
+point-in-time reads and for expired facts). The shape is identical for nodes
+and edges, current and point-in-time; `get_node_history` keeps its existing
+microseconds-as-string format. See
+[docs/guides/mcp-query-tool.md](docs/guides/mcp-query-tool.md#temporal-bounds-on-read-responses).
+
 **Vector properties are elided by default (Issue #3220)**: `get_node`,
 `list_nodes`, `get_edge`, `list_edges`, `get_outgoing_edges`,
 `get_incoming_edges`, `traverse`, `find_similar`, and `hybrid_query` replace

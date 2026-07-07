@@ -7,7 +7,7 @@ use crate::core::graph::{Edge, Node};
 use crate::core::id::{EdgeId, NodeId, VersionId};
 use crate::core::interning::GLOBAL_INTERNER;
 use crate::core::property::{PropertyMap, PropertyValue};
-use crate::core::temporal::Timestamp;
+use crate::core::temporal::{BiTemporalInterval, Timestamp};
 use crate::db::AletheiaDB;
 use crate::storage::current::{IncomingEdgesIter, OutgoingEdgesIter};
 use crate::storage::wal::WalOperation;
@@ -423,6 +423,51 @@ impl AletheiaDB {
         self.historical
             .read()
             .get_edge_version_provenance(version_id)
+            .record_error_metric()
+    }
+
+    /// Get the provenance bundle and bi-temporal interval of a *specific*
+    /// node version in a single historical-storage read (Issue #3232).
+    ///
+    /// Like [`get_node_version_provenance`](Self::get_node_version_provenance),
+    /// this resolves the exact version already captured in a [`Node`]
+    /// snapshot's `current_version` -- which the point-in-time read paths set
+    /// to the matched historical version -- so the returned interval reflects
+    /// the version the caller is actually holding, for current-state and
+    /// at-time reads alike.
+    ///
+    /// Returns `Ok(None)` when the version cannot be found in any tier.
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
+    pub fn get_node_version_read_metadata(
+        &self,
+        version_id: VersionId,
+    ) -> Result<
+        Option<(
+            Option<crate::core::provenance::Provenance>,
+            BiTemporalInterval,
+        )>,
+    > {
+        self.historical
+            .read()
+            .get_node_version_read_metadata(version_id)
+            .record_error_metric()
+    }
+
+    /// Edge counterpart of
+    /// [`get_node_version_read_metadata`](Self::get_node_version_read_metadata).
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
+    pub fn get_edge_version_read_metadata(
+        &self,
+        version_id: VersionId,
+    ) -> Result<
+        Option<(
+            Option<crate::core::provenance::Provenance>,
+            BiTemporalInterval,
+        )>,
+    > {
+        self.historical
+            .read()
+            .get_edge_version_read_metadata(version_id)
             .record_error_metric()
     }
 

@@ -8759,3 +8759,398 @@ mod temporal_extent_tests {
         assert_eq!(labels[0]["label"], serde_json::json!("Person"));
     }
 }
+
+// ============================================================================
+// Temporal bounds on read responses (Issue #3232)
+// ============================================================================
+
+mod temporal_bounds_tests {
+    use super::*;
+
+    /// Extract the `temporal` block from an entity JSON object, failing the
+    /// test if it is absent.
+    fn temporal_of(entity: &serde_json::Value) -> serde_json::Value {
+        entity
+            .get("temporal")
+            .unwrap_or_else(|| panic!("response must carry a `temporal` block: {entity}"))
+            .clone()
+    }
+
+    /// Parse an RFC3339 string back to microseconds since epoch.
+    fn rfc3339_to_micros(s: &str) -> i64 {
+        chrono::DateTime::parse_from_rfc3339(s)
+            .unwrap_or_else(|e| panic!("`{s}` must be RFC3339: {e}"))
+            .timestamp_micros()
+    }
+
+    /// Assert the shape shared by every current (live) version: RFC3339
+    /// `*_from` bounds, explicit-null open `*_to` bounds (present, never
+    /// omitted), and `is_current: true`.
+    fn assert_current_open_bounds(temporal: &serde_json::Value) {
+        for key in ["valid_from", "transaction_from"] {
+            let s = temporal[key]
+                .as_str()
+                .unwrap_or_else(|| panic!("`{key}` must be an RFC3339 string: {temporal}"));
+            rfc3339_to_micros(s);
+        }
+        for key in ["valid_to", "transaction_to"] {
+            let v = temporal.get(key).unwrap_or_else(|| {
+                panic!("`{key}` must be present (as null), not omitted: {temporal}")
+            });
+            assert!(
+                v.is_null(),
+                "`{key}` must be JSON null for open bounds: {temporal}"
+            );
+        }
+        assert_eq!(
+            temporal["is_current"],
+            serde_json::json!(true),
+            "a live version must report is_current: true: {temporal}"
+        );
+    }
+
+    fn create_person(server: &AletheiaMcpServer, name: &str) -> serde_json::Value {
+        let mut props = HashMap::new();
+        props.insert("name".to_string(), serde_json::json!(name));
+        let response = server.create_node(CreateNodeRequest {
+            valid_time: None,
+            label: "Person".to_string(),
+            properties: Some(props),
+            provenance: None,
+        });
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert!(value.get("error").is_none(), "create_node failed: {value}");
+        value
+    }
+
+    fn create_knows_edge(
+        server: &AletheiaMcpServer,
+        source_id: u64,
+        target_id: u64,
+    ) -> serde_json::Value {
+        let response = server.create_edge(CreateEdgeRequest {
+            source_id,
+            target_id,
+            label: "KNOWS".to_string(),
+            properties: None,
+            valid_time: None,
+            provenance: None,
+        });
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert!(value.get("error").is_none(), "create_edge failed: {value}");
+        value
+    }
+
+    fn now_micros() -> i64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_micros() as i64
+    }
+
+    #[test]
+    fn test_create_and_get_node_carry_temporal_bounds() {
+        let server = create_test_server();
+
+        let created = create_person(&server, "Alice");
+        assert_current_open_bounds(&temporal_of(&created));
+
+        let get_response = server.get_node(GetNodeRequest {
+            node_id: created["id"].as_u64().unwrap(),
+            include_vectors: None,
+        });
+        let retrieved: serde_json::Value = serde_json::from_str(&get_response).unwrap();
+        assert_current_open_bounds(&temporal_of(&retrieved));
+
+        // Existing top-level fields are unchanged (additive contract) and the
+        // typed response still round-trips.
+        let typed: NodeResponse = parse_response(&get_response).expect("typed parse must work");
+        assert_eq!(typed.label, "Person");
+        assert_eq!(
+            typed.properties.get("name"),
+            Some(&serde_json::json!("Alice"))
+        );
+    }
+
+    #[test]
+    fn test_create_and_get_edge_carry_temporal_bounds() {
+        let server = create_test_server();
+
+        let a = create_person(&server, "Alice")["id"].as_u64().unwrap();
+        let b = create_person(&server, "Bob")["id"].as_u64().unwrap();
+
+        let created = create_knows_edge(&server, a, b);
+        assert_current_open_bounds(&temporal_of(&created));
+
+        let get_response = server.get_edge(GetEdgeRequest {
+            edge_id: created["id"].as_u64().unwrap(),
+            include_vectors: None,
+        });
+        let retrieved: serde_json::Value = serde_json::from_str(&get_response).unwrap();
+        assert_current_open_bounds(&temporal_of(&retrieved));
+
+        let typed: EdgeResponse = parse_response(&get_response).expect("typed parse must work");
+        assert_eq!(typed.label, "KNOWS");
+        assert_eq!(typed.source_id, a);
+        assert_eq!(typed.target_id, b);
+
+        // Point-in-time edge read carries the block too.
+        let at_time_response = server.get_edge_at_time(GetEdgeAtTimeRequest {
+            edge_id: created["id"].as_u64().unwrap(),
+            valid_time: now_micros().to_string(),
+            transaction_time: Some(now_micros().to_string()),
+        });
+        let at_time: serde_json::Value = serde_json::from_str(&at_time_response).unwrap();
+        assert!(
+            at_time.get("error").is_none(),
+            "get_edge_at_time failed: {at_time}"
+        );
+        assert_current_open_bounds(&temporal_of(&at_time["edge"]));
+    }
+
+    #[test]
+    fn test_list_nodes_and_traverse_stamp_each_node() {
+        let server = create_test_server();
+
+        let a = create_person(&server, "Alice")["id"].as_u64().unwrap();
+        let b = create_person(&server, "Bob")["id"].as_u64().unwrap();
+        create_knows_edge(&server, a, b);
+
+        let list_response = server.list_nodes(ListNodesRequest {
+            label: Some("Person".to_string()),
+            property_key: None,
+            property_value: None,
+            limit: None,
+            offset: None,
+            include_vectors: None,
+        });
+        let listed: serde_json::Value = serde_json::from_str(&list_response).unwrap();
+        let nodes = listed["nodes"].as_array().expect("nodes array");
+        assert_eq!(nodes.len(), 2);
+        for node in nodes {
+            assert_current_open_bounds(&temporal_of(node));
+        }
+
+        let traverse_response = server.traverse(TraverseRequest {
+            start_node_id: a,
+            edge_label: "KNOWS".to_string(),
+            direction: None,
+            depth: None,
+            limit: None,
+            offset: None,
+            include_vectors: None,
+            as_of_valid_time: None,
+            as_of_transaction_time: None,
+        });
+        let traversed: serde_json::Value = serde_json::from_str(&traverse_response).unwrap();
+        let results = traversed["results"].as_array().expect("results array");
+        assert_eq!(results.len(), 1);
+        for result in results {
+            assert_current_open_bounds(&temporal_of(&result["node"]));
+        }
+    }
+
+    #[test]
+    fn test_adjacency_and_update_responses_carry_temporal_bounds() {
+        let server = create_test_server();
+
+        let a = create_person(&server, "Alice")["id"].as_u64().unwrap();
+        let b = create_person(&server, "Bob")["id"].as_u64().unwrap();
+        let edge_id = create_knows_edge(&server, a, b)["id"].as_u64().unwrap();
+
+        for response in [
+            server.get_outgoing_edges(GetOutgoingEdgesRequest {
+                node_id: a,
+                label: None,
+                include_vectors: None,
+            }),
+            server.get_incoming_edges(GetIncomingEdgesRequest {
+                node_id: b,
+                label: None,
+                include_vectors: None,
+            }),
+        ] {
+            let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+            let edges = value["edges"].as_array().expect("edges array");
+            assert_eq!(edges.len(), 1);
+            for edge in edges {
+                assert_current_open_bounds(&temporal_of(edge));
+            }
+        }
+
+        // update_node / update_edge responses reflect the NEW version's
+        // bounds: still open-ended and current.
+        let mut props = HashMap::new();
+        props.insert("age".to_string(), serde_json::json!(31));
+        let update_node_response = server.update_node(UpdateNodeRequest {
+            valid_time: None,
+            node_id: a,
+            properties: props.clone(),
+            provenance: None,
+        });
+        let updated_node: serde_json::Value = serde_json::from_str(&update_node_response).unwrap();
+        assert_current_open_bounds(&temporal_of(&updated_node));
+
+        let update_edge_response = server.update_edge(UpdateEdgeRequest {
+            edge_id,
+            properties: props,
+            valid_time: None,
+            provenance: None,
+        });
+        let updated_edge: serde_json::Value = serde_json::from_str(&update_edge_response).unwrap();
+        assert_current_open_bounds(&temporal_of(&updated_edge));
+    }
+
+    #[test]
+    fn test_superseded_version_has_closed_bounds_and_is_not_current() {
+        let server = create_test_server();
+
+        let node_id = create_person(&server, "Alice")["id"].as_u64().unwrap();
+
+        // Anchor a bi-temporal coordinate strictly after the create and
+        // strictly before the update.
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let anchor = now_micros();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+
+        let mut props = HashMap::new();
+        props.insert("name".to_string(), serde_json::json!("Alice v2"));
+        parse_response::<NodeResponse>(&server.update_node(UpdateNodeRequest {
+            valid_time: None,
+            node_id,
+            properties: props,
+            provenance: None,
+        }))
+        .expect("update must succeed");
+
+        // The at-time read anchored before the update returns the superseded
+        // version: both bounds closed, not current.
+        let at_time_response = server.get_node_at_time(GetNodeAtTimeRequest {
+            node_id,
+            valid_time: anchor.to_string(),
+            transaction_time: Some(anchor.to_string()),
+        });
+        let at_time: serde_json::Value = serde_json::from_str(&at_time_response).unwrap();
+        assert!(
+            at_time.get("error").is_none(),
+            "get_node_at_time failed: {at_time}"
+        );
+        let superseded = temporal_of(&at_time["node"]);
+        let valid_to = superseded["valid_to"].as_str().unwrap_or_else(|| {
+            panic!("superseded valid_to must be a closed RFC3339 bound: {superseded}")
+        });
+        let transaction_to = superseded["transaction_to"].as_str().unwrap_or_else(|| {
+            panic!("superseded transaction_to must be a closed RFC3339 bound: {superseded}")
+        });
+        assert!(rfc3339_to_micros(valid_to) > anchor - 60_000_000);
+        assert!(rfc3339_to_micros(transaction_to) > anchor - 60_000_000);
+        assert_eq!(
+            superseded["is_current"],
+            serde_json::json!(false),
+            "a superseded version must report is_current: false: {superseded}"
+        );
+
+        // A current read after the update shows the NEW version's bounds:
+        // open-ended, current, and starting after the anchor.
+        let current_response = server.get_node(GetNodeRequest {
+            node_id,
+            include_vectors: None,
+        });
+        let current: serde_json::Value = serde_json::from_str(&current_response).unwrap();
+        let current_temporal = temporal_of(&current);
+        assert_current_open_bounds(&current_temporal);
+        assert!(
+            rfc3339_to_micros(current_temporal["transaction_from"].as_str().unwrap()) > anchor,
+            "current version must start after the anchor: {current_temporal}"
+        );
+    }
+
+    #[test]
+    fn test_temporal_bounds_agree_with_node_history() {
+        let server = create_test_server();
+
+        let node_id = create_person(&server, "Alice")["id"].as_u64().unwrap();
+
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let anchor = now_micros();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+
+        let mut props = HashMap::new();
+        props.insert("name".to_string(), serde_json::json!("Alice v2"));
+        parse_response::<NodeResponse>(&server.update_node(UpdateNodeRequest {
+            valid_time: None,
+            node_id,
+            properties: props,
+            provenance: None,
+        }))
+        .expect("update must succeed");
+
+        let history_response = server.get_node_history(GetNodeHistoryRequest { node_id });
+        let history: serde_json::Value = serde_json::from_str(&history_response).unwrap();
+        let versions = history["versions"].as_array().expect("versions array");
+        assert_eq!(versions.len(), 2, "expected two versions: {history}");
+
+        // History emits micros-as-string; the temporal block's RFC3339 must
+        // decode to the same microsecond values for the same version.
+        let history_micros = |v: &serde_json::Value, key: &str| -> Option<i64> {
+            let field = v.get(key).unwrap_or(&serde_json::Value::Null);
+            if field.is_null() {
+                None
+            } else {
+                Some(field.as_str().unwrap().parse::<i64>().unwrap())
+            }
+        };
+        let temporal_micros = |t: &serde_json::Value, key: &str| -> Option<i64> {
+            let field = t.get(key).unwrap_or_else(|| {
+                panic!("temporal block must always carry `{key}` (null when open): {t}")
+            });
+            if field.is_null() {
+                None
+            } else {
+                Some(rfc3339_to_micros(field.as_str().unwrap()))
+            }
+        };
+
+        let superseded_history = versions
+            .iter()
+            .find(|v| !v["transaction_to"].is_null())
+            .expect("one superseded version");
+        let current_history = versions
+            .iter()
+            .find(|v| v["transaction_to"].is_null())
+            .expect("one current version");
+
+        let at_time_response = server.get_node_at_time(GetNodeAtTimeRequest {
+            node_id,
+            valid_time: anchor.to_string(),
+            transaction_time: Some(anchor.to_string()),
+        });
+        let at_time: serde_json::Value = serde_json::from_str(&at_time_response).unwrap();
+        let superseded_temporal = temporal_of(&at_time["node"]);
+
+        let current_response = server.get_node(GetNodeRequest {
+            node_id,
+            include_vectors: None,
+        });
+        let current: serde_json::Value = serde_json::from_str(&current_response).unwrap();
+        let current_temporal = temporal_of(&current);
+
+        for key in [
+            "valid_from",
+            "valid_to",
+            "transaction_from",
+            "transaction_to",
+        ] {
+            assert_eq!(
+                temporal_micros(&superseded_temporal, key),
+                history_micros(superseded_history, key),
+                "superseded `{key}` must agree with history: {superseded_temporal} vs {superseded_history}"
+            );
+            assert_eq!(
+                temporal_micros(&current_temporal, key),
+                history_micros(current_history, key),
+                "current `{key}` must agree with history: {current_temporal} vs {current_history}"
+            );
+        }
+    }
+}
