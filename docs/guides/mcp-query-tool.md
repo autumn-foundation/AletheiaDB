@@ -430,7 +430,9 @@ serializes that snapshot.
     "edge_count": 50000
   },
   "historical": {                 // bi-temporal depth of the in-RAM store
-    "total_node_versions": 12500, // every recorded node state, ever
+    "total_node_versions": 12500, // node states retained in RAM (versions
+                                  // migrated to the cold tier are counted
+                                  // under cold_storage, not here)
     "total_edge_versions": 50000,
     "unique_nodes": 10000,        // distinct nodes with any history
     "unique_edges": 50000,
@@ -444,10 +446,12 @@ serializes that snapshot.
   },
   "cold_storage": {               // disk tier; see "disabled tiers" below
     "enabled": true,
-    "node_versions_stored": 800,  // versions migrated to disk
+    "node_versions_stored": 800,  // versions on disk (persists across restarts)
     "edge_versions_stored": 3200,
-    "compression_ratio": 3.8,     // raw/compressed bytes; HIGHER = better
-    "tier_access": {              // where historical reads were served from
+    "compression_ratio": 3.8,     // raw/compressed bytes written since this
+                                  // process opened the DB; HIGHER = better
+    "tier_access": {              // where historical reads were served from,
+                                  // counted since this process opened the DB
       "hot_hits": 90210,
       "warm_hits": 4310,
       "cold_hits": 122,
@@ -457,12 +461,19 @@ serializes that snapshot.
   "wal": {
     "enabled": true,              // always true in current builds
     "durability_mode": "group_commit", // synchronous | async | group_commit | async_batched
-    "current_lsn": 62501,         // latest (next-to-be-allocated) LSN
+    "current_lsn": 62501,         // NEXT LSN to be allocated
     "total_appends": 62500,
     "healthy": true               // false = outstanding WAL flush errors
   }
 }
 ```
+
+The cold-tier version counts are seeded from the persisted tables when the
+database is opened (an O(1) metadata read), so a restarted process reports its
+full on-disk cold history rather than zero. The byte-level
+`compression_ratio` and the `tier_access` counters are **not** persisted:
+they describe activity since the current process opened the database
+(`compression_ratio` is `1.0` until this process writes to the cold tier).
 
 ### Disabled tiers are tagged, never zero-reported
 
@@ -492,7 +503,9 @@ Zstd/LZ4 ratio on disk (higher is better).
 
 `database_stats` reports magnitude/counts and tier health at a point in time.
 It does **not** report the calendar range of stored history (earliest/latest
-timestamps) — use `temporal_extent` for that — and it does not break counts
+timestamps) — use
+[`temporal_extent`](#discovering-the-queryable-temporal-extent-temporal_extent)
+for that — and it does not break counts
 down per label; use `get_schema` for per-label/per-edge-type counts.
 
 ## Notes

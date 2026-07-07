@@ -358,7 +358,8 @@ over time but never change meaning; treat unknown codes as non-retriable. See
 holistic snapshot in one call so an LLM/operator can orient itself before
 querying: `current` (node/edge counts), `historical` (total/unique version
 counts plus anchor/delta breakdown and `compression_ratio` — the bi-temporal
-depth available for time travel), `cold_storage` (`{enabled: false}` when the
+depth held **in RAM**; versions migrated to the cold tier are counted under
+`cold_storage` instead), `cold_storage` (`{enabled: false}` when the
 disk tier is not configured — never misleading zeros — or counters plus a
 `tier_access` hot/warm/cold read distribution when it is), and `wal`
 (`enabled`, `durability_mode` token, `current_lsn`, `total_appends`,

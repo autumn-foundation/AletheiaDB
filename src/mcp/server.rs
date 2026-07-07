@@ -655,6 +655,15 @@ impl AletheiaMcpServer {
         ))
     }
 
+    /// Test-only access to the raw `database_stats` handler, bypassing typed
+    /// request construction so tests can exercise wire-level argument edge
+    /// cases (null arguments, non-object arguments, unknown keys) exactly as
+    /// `call_tool` delivers them.
+    #[cfg(test)]
+    pub(crate) fn database_stats_raw(&self, args: serde_json::Value) -> String {
+        Self::extract_text(self.handle_database_stats(args))
+    }
+
     /// List graph-wide changes within a transaction-time window.
     ///
     /// Enumerates the nodes and edges whose versions were committed in `[tx_from, tx_to)`,
@@ -4023,13 +4032,16 @@ fn tool_definitions() -> Vec<Tool> {
              `cold_storage` — `{enabled: false}` when no cold (disk) tier is configured \
              (this means NOT CONFIGURED, never '0 cold versions'), or `{enabled: true, \
              node_versions_stored, edge_versions_stored, compression_ratio, tier_access: \
-             {hot_hits, warm_hits, cold_hits, misses}}` showing how many versions migrated \
-             to disk and how reads distribute across the hot/warm-cache/cold tiers; `wal` \
-             {enabled, durability_mode (synchronous|async|group_commit|async_batched), \
-             current_lsn (latest log sequence number), total_appends, healthy}. All values \
-             are O(1)/cached counter reads — this call never scans versions and is safe to \
-             call frequently. Counts only, point-in-time: for the calendar RANGE of stored \
-             history use temporal_extent; for per-label breakdowns use get_schema.",
+             {hot_hits, warm_hits, cold_hits, misses}}` showing how many versions live on \
+             disk (counts persist across restarts) and how reads distribute across the \
+             hot/warm-cache/cold tiers (compression_ratio and tier_access count activity \
+             since the current process opened the database); `wal` {enabled, \
+             durability_mode (synchronous|async|group_commit|async_batched), current_lsn \
+             (the NEXT log sequence number to be allocated), total_appends, healthy}. All \
+             values are O(1)/cached counter reads — this call never scans versions and is \
+             safe to call frequently. Counts only, point-in-time: for the calendar RANGE \
+             of stored history (earliest/latest timestamps) use temporal_extent; \
+             for per-label breakdowns use get_schema.",
             make_input_schema::<DatabaseStatsRequest>(),
         ),
     ]

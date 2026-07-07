@@ -8852,9 +8852,9 @@ mod database_stats_tests {
         assert_eq!(hist["unique_nodes"], serde_json::json!(2));
         assert_eq!(hist["unique_edges"], serde_json::json!(1));
         let total_node_versions = hist["total_node_versions"].as_u64().unwrap();
-        assert!(
-            total_node_versions >= 3,
-            "2 creates + 1 update must yield >= 3 node versions: {value}"
+        assert_eq!(
+            total_node_versions, 3,
+            "2 creates + 1 update must yield exactly 3 node versions: {value}"
         );
         assert_eq!(hist["total_edge_versions"], serde_json::json!(1));
 
@@ -8868,9 +8868,17 @@ mod database_stats_tests {
             "anchors + deltas must equal total versions: {value}"
         );
         assert!(anchors >= 1, "at least one anchor expected: {value}");
+        // With the default anchor interval (10), the update after a create is
+        // stored as a delta: the anchor/delta split must actually engage, and
+        // the anchor share must therefore drop below 1.0.
         assert!(
-            hist["compression_ratio"].as_f64().unwrap() > 0.0,
-            "compression_ratio must be present and positive: {value}"
+            deltas >= 1,
+            "an update following a create must be stored as a delta: {value}"
+        );
+        let ratio = hist["compression_ratio"].as_f64().unwrap();
+        assert!(
+            ratio > 0.0 && ratio < 1.0,
+            "compression_ratio must be in (0.0, 1.0) once a delta exists: {value}"
         );
     }
 
@@ -8944,8 +8952,8 @@ mod database_stats_tests {
         }
     }
 
-    /// AC5 (WAL state): durability mode is a stable token and the latest LSN
-    /// is reported and advances with writes.
+    /// AC5 (WAL state): durability mode is a stable token and the
+    /// next-to-be-allocated LSN is reported and advances with writes.
     #[test]
     fn test_database_stats_wal_state_reported() {
         let server = create_test_server();
@@ -9006,6 +9014,229 @@ mod database_stats_tests {
         assert_eq!(
             value, api_value,
             "MCP response must be exactly the serialized public DatabaseStats"
+        );
+    }
+
+    /// Wire-level argument handling: `call_tool` delivers missing arguments
+    /// as JSON null, and clients may also send an empty object or extra
+    /// unknown keys — all must succeed. A non-object argument value must be
+    /// rejected with a structured error, not a panic.
+    #[test]
+    fn test_database_stats_raw_argument_edge_cases() {
+        let server = create_test_server();
+
+        // No `arguments` at all (call_tool surfaces this as null).
+        let value: serde_json::Value =
+            serde_json::from_str(&server.database_stats_raw(serde_json::Value::Null))
+                .expect("null args must yield valid JSON");
+        assert!(
+            value.get("error").is_none(),
+            "null arguments must succeed: {value}"
+        );
+        assert!(value.get("current").is_some());
+
+        // Empty object.
+        let value: serde_json::Value =
+            serde_json::from_str(&server.database_stats_raw(serde_json::json!({})))
+                .expect("empty-object args must yield valid JSON");
+        assert!(
+            value.get("error").is_none(),
+            "empty-object arguments must succeed: {value}"
+        );
+
+        // Unknown keys are tolerated (the request struct is not
+        // deny_unknown_fields), so a slightly-wrong client still gets stats.
+        let value: serde_json::Value =
+            serde_json::from_str(&server.database_stats_raw(serde_json::json!({"unexpected": 1})))
+                .expect("unknown-key args must yield valid JSON");
+        assert!(
+            value.get("error").is_none(),
+            "unknown keys must be tolerated: {value}"
+        );
+        assert!(value.get("wal").is_some());
+
+        // A non-object argument value is a malformed request: structured
+        // error, never a panic or silent success.
+        let value: serde_json::Value =
+            serde_json::from_str(&server.database_stats_raw(serde_json::json!("bogus")))
+                .expect("invalid args must still yield valid JSON");
+        let error = value
+            .get("error")
+            .and_then(|e| e.as_str())
+            .expect("non-object arguments must produce an error");
+        assert!(
+            error.contains("Invalid arguments"),
+            "error must identify the argument problem: {value}"
+        );
+    }
+
+    /// Schema contract: the exact key sets of every response object are
+    /// load-bearing for MCP consumers — a renamed or dropped key is a
+    /// breaking change that must fail this test.
+    #[test]
+    fn test_database_stats_key_sets_are_stable() {
+        use crate::config::{AletheiaDBConfig, HistoricalConfigBuilder, WalConfigBuilder};
+
+        fn keys(value: &serde_json::Value) -> Vec<&str> {
+            let mut keys: Vec<&str> = value
+                .as_object()
+                .expect("expected a JSON object")
+                .keys()
+                .map(String::as_str)
+                .collect();
+            keys.sort_unstable();
+            keys
+        }
+
+        // Cold-enabled server so the flattened details keys are present too.
+        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let config = AletheiaDBConfig::builder()
+            .wal(
+                WalConfigBuilder::new()
+                    .wal_dir(temp_dir.path().join("wal"))
+                    .build(),
+            )
+            .persistence(crate::storage::index_persistence::PersistenceConfig {
+                enabled: false,
+                ..Default::default()
+            })
+            .historical(
+                HistoricalConfigBuilder::new()
+                    .enable_cold_storage(true)
+                    .cold_storage_path(temp_dir.path().join("cold.redb"))
+                    .build(),
+            )
+            .build();
+        let db = Arc::new(AletheiaDB::with_unified_config(config).expect("db init"));
+        let server = AletheiaMcpServer::new(db);
+
+        let value = stats_response(&server);
+        assert_eq!(
+            keys(&value),
+            vec!["cold_storage", "current", "historical", "wal"]
+        );
+        assert_eq!(keys(&value["current"]), vec!["edge_count", "node_count"]);
+        assert_eq!(
+            keys(&value["historical"]),
+            vec![
+                "anchor_count",
+                "compression_ratio",
+                "delta_count",
+                "edge_anchor_count",
+                "edge_delta_count",
+                "node_anchor_count",
+                "node_delta_count",
+                "total_edge_versions",
+                "total_node_versions",
+                "unique_edges",
+                "unique_nodes",
+            ]
+        );
+        assert_eq!(
+            keys(&value["cold_storage"]),
+            vec![
+                "compression_ratio",
+                "edge_versions_stored",
+                "enabled",
+                "node_versions_stored",
+                "tier_access",
+            ]
+        );
+        assert_eq!(
+            keys(&value["cold_storage"]["tier_access"]),
+            vec!["cold_hits", "hot_hits", "misses", "warm_hits"]
+        );
+        assert_eq!(
+            keys(&value["wal"]),
+            vec![
+                "current_lsn",
+                "durability_mode",
+                "enabled",
+                "healthy",
+                "total_appends",
+            ]
+        );
+    }
+
+    /// Deletions through the MCP surface must be reflected coherently:
+    /// current-state counts shrink, while the bi-temporal record (unique
+    /// entities and their versions) is retained and grows — a delete is a
+    /// recorded change, not an erasure.
+    #[test]
+    fn test_database_stats_reflects_deletions() {
+        let server = create_test_server();
+
+        let (a, b) = {
+            let a: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+                valid_time: None,
+                label: "Person".to_string(),
+                properties: None,
+                provenance: None,
+            }))
+            .unwrap();
+            let b: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+                valid_time: None,
+                label: "Person".to_string(),
+                properties: None,
+                provenance: None,
+            }))
+            .unwrap();
+            (a.id, b.id)
+        };
+        let edge: EdgeResponse = parse_response(&server.create_edge(CreateEdgeRequest {
+            valid_time: None,
+            source_id: a,
+            target_id: b,
+            label: "KNOWS".to_string(),
+            properties: None,
+            provenance: None,
+        }))
+        .unwrap();
+
+        let before = stats_response(&server);
+        assert_eq!(before["current"]["node_count"], serde_json::json!(2));
+        assert_eq!(before["current"]["edge_count"], serde_json::json!(1));
+        let node_versions_before = before["historical"]["total_node_versions"]
+            .as_u64()
+            .unwrap();
+        let edge_versions_before = before["historical"]["total_edge_versions"]
+            .as_u64()
+            .unwrap();
+
+        // Delete the edge, then node `a` (now unconnected).
+        let del_edge: serde_json::Value =
+            serde_json::from_str(&server.delete_edge(DeleteEdgeRequest {
+                edge_id: edge.id,
+                valid_time: None,
+            }))
+            .unwrap();
+        assert_eq!(del_edge.get("success"), Some(&serde_json::json!(true)));
+        let del_node: serde_json::Value =
+            serde_json::from_str(&server.delete_node(DeleteNodeRequest {
+                node_id: a,
+                detach: None,
+                valid_time: None,
+            }))
+            .unwrap();
+        assert_eq!(del_node.get("success"), Some(&serde_json::json!(true)));
+
+        let after = stats_response(&server);
+        assert_eq!(after["current"]["node_count"], serde_json::json!(1));
+        assert_eq!(after["current"]["edge_count"], serde_json::json!(0));
+
+        // The bi-temporal record is retained: both nodes and the edge still
+        // have history, and the deletions were recorded as new versions.
+        assert_eq!(after["historical"]["unique_nodes"], serde_json::json!(2));
+        assert_eq!(after["historical"]["unique_edges"], serde_json::json!(1));
+        assert!(
+            after["historical"]["total_node_versions"].as_u64().unwrap() > node_versions_before,
+            "a node deletion must be recorded as a version, not an erasure: \
+             before={node_versions_before}, after={after}"
+        );
+        assert!(
+            after["historical"]["total_edge_versions"].as_u64().unwrap() > edge_versions_before,
+            "an edge deletion must be recorded as a version, not an erasure: \
+             before={edge_versions_before}, after={after}"
         );
     }
 }

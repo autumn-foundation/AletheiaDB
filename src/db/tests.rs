@@ -2537,6 +2537,12 @@ fn test_schema_as_of_entity_cap_is_configurable_and_discloses_sampling() {
 /// `AletheiaDB::stats()` must serialize to the documented shape, with
 /// disabled subsystems explicitly tagged (`enabled: false`, no count keys)
 /// and enabled subsystems carrying their counters.
+///
+/// Serialization (`serde::Serialize` on `DatabaseStats`) only exists when
+/// `config-toml` or `mcp-server` is enabled, so this test is gated the same
+/// way; `test_stats_populated_matches_underlying_counters` keeps the
+/// non-serde behavior covered in minimal builds.
+#[cfg(any(feature = "config-toml", feature = "mcp-server"))]
 #[test]
 fn test_stats_serialization_shape_empty_db() {
     let db = AletheiaDB::new().unwrap();
@@ -2591,6 +2597,8 @@ fn test_stats_populated_matches_underlying_counters() {
         stats.historical.total_node_versions,
         hist.total_node_versions
     );
+    // 2 creates + 1 update = exactly 3 node versions.
+    assert_eq!(stats.historical.total_node_versions, 3);
     assert_eq!(stats.historical.unique_nodes, hist.unique_nodes);
     assert_eq!(
         stats.historical.anchor_count,
@@ -2600,10 +2608,25 @@ fn test_stats_populated_matches_underlying_counters() {
         stats.historical.delta_count,
         hist.node_delta_count + hist.edge_delta_count
     );
+    // With the default anchor interval (10), the update after a create is
+    // stored as a delta — the compression machinery must actually engage.
+    assert!(
+        stats.historical.delta_count >= 1,
+        "an update following a create must produce at least one delta, got: {stats:?}"
+    );
+    assert!(
+        stats.historical.compression_ratio < 1.0,
+        "with >= 1 delta the anchor share must drop below 1.0, got: {}",
+        stats.historical.compression_ratio
+    );
 }
 
 /// With cold storage configured, `stats()` reports the cold tier as enabled
 /// with counters and the hot/warm/cold access distribution.
+///
+/// Gated like `test_stats_serialization_shape_empty_db`: the serde derive
+/// this test exercises only exists under `config-toml`/`mcp-server`.
+#[cfg(any(feature = "config-toml", feature = "mcp-server"))]
 #[test]
 fn test_stats_cold_storage_enabled() {
     use crate::config::{AletheiaDBConfig, HistoricalConfigBuilder, WalConfigBuilder};
@@ -2633,4 +2656,64 @@ fn test_stats_cold_storage_enabled() {
     assert_eq!(cold["enabled"], serde_json::json!(true));
     assert_eq!(cold["node_versions_stored"], serde_json::json!(0));
     assert!(cold["tier_access"].is_object());
+}
+
+/// After versions actually migrate to the cold tier, `stats()` must report
+/// them under `cold_storage` (and the hot historical counters must shrink
+/// accordingly) — the enabled-tier path with nonzero counters.
+#[test]
+fn test_stats_cold_storage_reports_migrated_versions() {
+    use crate::storage::migration::{MigrationPolicyBuilder, MigrationService};
+    use crate::storage::redb_cold_storage::RedbColdStorage;
+    use crate::storage::tiered_storage::TieredStorage;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    let db = AletheiaDB::new().unwrap();
+    let n1 = db
+        .create_node("Person", PropertyMapBuilder::new().build())
+        .unwrap();
+    db.update_node_with_valid_time(
+        n1,
+        PropertyMapBuilder::new().insert("name", "Alice").build(),
+        None,
+    )
+    .unwrap();
+
+    // Attach a cold tier and migrate everything older than the head version.
+    let temp_dir = tempfile::tempdir().unwrap();
+    let cold =
+        Arc::new(RedbColdStorage::with_default_config(temp_dir.path().join("cold.redb")).unwrap());
+    let tiered = Arc::new(TieredStorage::with_default_config(Arc::clone(&cold)));
+    db.__test_historical_storage()
+        .write()
+        .set_tiered_storage(tiered);
+
+    let policy = MigrationPolicyBuilder::new()
+        .age_threshold(Duration::ZERO)
+        .build();
+    let service = MigrationService::new(Arc::clone(&cold), policy);
+    let hot_versions_before = db.stats().historical.total_node_versions;
+    let migrated = db
+        .__test_historical_storage()
+        .write()
+        .migrate_to_cold(&service)
+        .unwrap();
+    assert!(migrated >= 1, "at least the non-head version must migrate");
+
+    let stats = db.stats();
+    assert!(stats.cold_storage.enabled);
+    let details = stats
+        .cold_storage
+        .details
+        .expect("enabled cold storage must carry details");
+    assert_eq!(
+        details.node_versions_stored, migrated as u64,
+        "cold tier must report exactly the migrated versions"
+    );
+    assert_eq!(
+        stats.historical.total_node_versions,
+        hot_versions_before - migrated,
+        "migrated versions must leave the hot historical counters"
+    );
 }

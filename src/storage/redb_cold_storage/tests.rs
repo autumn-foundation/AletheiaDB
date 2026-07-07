@@ -2282,3 +2282,53 @@ fn test_no_cipher_backward_compatible() {
 
     assert_eq!(loaded.version_id(), version.version_id());
 }
+
+// ========================================================================
+// Version-counter seeding at open (Issue #3222 review follow-up)
+// ========================================================================
+
+/// Reopening an existing cold store must seed `node_versions_stored` /
+/// `edge_versions_stored` from the persisted tables — a restarted process
+/// must never report `0` cold versions over a database that holds history.
+#[test]
+fn test_stats_version_counters_seeded_on_reopen() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let db_path = temp_dir.path().join("reopen.redb");
+
+    {
+        let storage = RedbColdStorage::with_default_config(&db_path).unwrap();
+        for i in 1..=3 {
+            storage
+                .store_node_version(&create_test_node_version(i))
+                .unwrap();
+        }
+        storage
+            .store_edge_version(&create_test_edge_version(10))
+            .unwrap();
+
+        let stats = storage.stats();
+        assert_eq!(stats.node_versions_stored, 3);
+        assert_eq!(stats.edge_versions_stored, 1);
+    } // drop: close the database
+
+    let reopened = RedbColdStorage::with_default_config(&db_path).unwrap();
+    let stats = reopened.stats();
+    assert_eq!(
+        stats.node_versions_stored, 3,
+        "reopened store must report persisted node versions, not 0"
+    );
+    assert_eq!(
+        stats.edge_versions_stored, 1,
+        "reopened store must report persisted edge versions, not 0"
+    );
+    // Byte counters are process-lifetime (not persisted): the ratio is 1.0
+    // until this process writes something.
+    assert_eq!(stats.bytes_written_raw, 0);
+    assert_eq!(stats.compression_ratio(), 1.0);
+
+    // Storing more versions on the reopened handle continues from the seed.
+    reopened
+        .store_node_version(&create_test_node_version(4))
+        .unwrap();
+    assert_eq!(reopened.stats().node_versions_stored, 4);
+}

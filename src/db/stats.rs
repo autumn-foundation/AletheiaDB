@@ -21,7 +21,10 @@
 //!   (see `src/storage/historical/mod.rs`).
 //! - Cold-tier counters and hot/warm/cold access distribution: atomic
 //!   counter snapshots from `TieredStorage::metrics()` and
-//!   `RedbColdStorage::stats()`.
+//!   `RedbColdStorage::stats()`. The cold version counts are seeded from the
+//!   persisted tables when the database is opened (an O(1) B-tree metadata
+//!   read), so they survive restarts; byte and access counters are
+//!   process-lifetime.
 //! - WAL state: a field copy (`durability_mode`) plus atomic loads
 //!   (`current_lsn`, `total_appends`, `consecutive_flush_errors`).
 //!
@@ -54,6 +57,7 @@ use crate::storage::wal::DurabilityMode;
     any(feature = "config-toml", feature = "mcp-server"),
     derive(serde::Serialize)
 )]
+#[non_exhaustive]
 pub struct DatabaseStats {
     /// Current-state graph size (the hot, in-RAM tier queried by
     /// current-state operations).
@@ -75,6 +79,7 @@ pub struct DatabaseStats {
     any(feature = "config-toml", feature = "mcp-server"),
     derive(serde::Serialize)
 )]
+#[non_exhaustive]
 pub struct CurrentStateStats {
     /// Number of nodes in the current state. O(1) index-length read.
     pub node_count: usize,
@@ -93,6 +98,7 @@ pub struct CurrentStateStats {
     any(feature = "config-toml", feature = "mcp-server"),
     derive(serde::Serialize)
 )]
+#[non_exhaustive]
 pub struct HistoricalDepthStats {
     /// Total node versions retained in the hot historical store.
     pub total_node_versions: usize,
@@ -133,6 +139,7 @@ pub struct HistoricalDepthStats {
     any(feature = "config-toml", feature = "mcp-server"),
     derive(serde::Serialize)
 )]
+#[non_exhaustive]
 pub struct ColdStorageTierStats {
     /// Whether a cold-storage tier (tiered storage + Redb backend) is
     /// configured for this database.
@@ -149,15 +156,24 @@ pub struct ColdStorageTierStats {
     any(feature = "config-toml", feature = "mcp-server"),
     derive(serde::Serialize)
 )]
+#[non_exhaustive]
 pub struct ColdStorageDetails {
-    /// Node versions migrated to the cold (disk) tier.
+    /// Node versions in the cold (disk) tier. Seeded from the persisted
+    /// tables when the database is opened (an O(1) metadata read), then
+    /// incremented per migration — a restarted process reports its full
+    /// on-disk cold history, not zero.
     pub node_versions_stored: u64,
-    /// Edge versions migrated to the cold (disk) tier.
+    /// Edge versions in the cold (disk) tier. Seeded from the persisted
+    /// tables at open, like [`node_versions_stored`](Self::node_versions_stored).
     pub edge_versions_stored: u64,
-    /// Cold-tier write compression ratio (raw bytes / compressed bytes;
-    /// 1.0 when nothing has been written). Higher is better.
+    /// Cold-tier write compression ratio (raw bytes / compressed bytes).
+    /// Higher is better. The underlying byte counters are **not** persisted,
+    /// so this covers writes since the current process opened the database
+    /// (1.0 when this process has not written anything yet).
     pub compression_ratio: f64,
-    /// Distribution of historical-version reads across storage tiers.
+    /// Distribution of historical-version reads across storage tiers,
+    /// counted since the current process opened the database (access
+    /// counters are not persisted).
     pub tier_access: TierAccessStats,
 }
 
@@ -168,6 +184,7 @@ pub struct ColdStorageDetails {
     any(feature = "config-toml", feature = "mcp-server"),
     derive(serde::Serialize)
 )]
+#[non_exhaustive]
 pub struct TierAccessStats {
     /// Reads served from the hot (in-RAM) tier.
     pub hot_hits: u64,
@@ -190,6 +207,7 @@ pub struct TierAccessStats {
     any(feature = "config-toml", feature = "mcp-server"),
     derive(serde::Serialize)
 )]
+#[non_exhaustive]
 pub struct WalStateStats {
     /// Whether a WAL is active. Always `true` in current builds (see type
     /// docs); a hypothetical no-WAL build would report `false` here instead
@@ -198,7 +216,8 @@ pub struct WalStateStats {
     /// Active durability mode as a stable token: `"synchronous"`,
     /// `"async"`, `"group_commit"`, or `"async_batched"`.
     pub durability_mode: String,
-    /// Latest (next-to-be-allocated) log sequence number. Atomic read.
+    /// The **next** log sequence number to be allocated (one past the most
+    /// recently assigned LSN; starts at 1 on an empty log). Atomic read.
     pub current_lsn: u64,
     /// Total WAL entries appended since startup. Atomic read.
     pub total_appends: u64,
@@ -358,6 +377,30 @@ mod tests {
             }),
             "async_batched"
         );
+    }
+
+    /// WAL counters are `u64`; extreme values must survive JSON
+    /// serialization without precision loss or sign flips.
+    #[cfg(any(feature = "config-toml", feature = "mcp-server"))]
+    #[test]
+    fn wal_stats_u64_max_survives_json_round_trip() {
+        let stats = WalStateStats {
+            enabled: true,
+            durability_mode: "synchronous".to_string(),
+            current_lsn: u64::MAX,
+            total_appends: u64::MAX,
+            healthy: true,
+        };
+        let value = serde_json::to_value(&stats).unwrap();
+        assert_eq!(value["current_lsn"].as_u64(), Some(u64::MAX));
+        assert_eq!(value["total_appends"].as_u64(), Some(u64::MAX));
+
+        // Through text and back: serde_json must keep full u64 precision
+        // (arbitrary-precision integer handling, not f64).
+        let text = serde_json::to_string(&stats).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(parsed["current_lsn"].as_u64(), Some(u64::MAX));
+        assert_eq!(parsed["total_appends"].as_u64(), Some(u64::MAX));
     }
 
     /// Disabled cold storage serializes as exactly `{"enabled": false}` —
