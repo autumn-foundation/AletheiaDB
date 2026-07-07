@@ -10,3 +10,9 @@
 ## 2024-05-14 - [Adding Examples to HLC and documenting src/main.rs]
 **Confusion:** The `src/main.rs` file was missing module-level documentation (`//!`), which triggers the `missing_docs` lint, but was hidden by the lint configurations inside `src/lib.rs` affecting `src/main.rs`. Also `HybridTimestamp::send` lacked an example showing the behavior of its logical counter.
 **Clarification:** Added `//! The AletheiaDB binary.` to `src/main.rs` and added an executable `## Examples` block to `HybridTimestamp::send` in `src/core/hlc.rs`.
+## 2024-05-15 - [Intra-doc links broken path and redundancy warnings]
+**Confusion:** Sometimes using explicit paths for intra-doc links can cause issues. For instance, linking to conditionally available items, or putting explicit paths when the item is already in scope, triggers `rustdoc::redundant_explicit_links`. In addition, links to `pub(crate)` items trigger `rustdoc::private_intra_doc_links`.
+**Clarification:** Fixed various broken or redundant links across the codebase:
+- Replaced the redundant explicit path `[`Provenance`](crate::core::provenance::Provenance)` with just `[`Provenance`]` in `src/storage/historical/mod.rs` since it was already imported. Same for `[`ChangeRecord`]` in `src/db/temporal.rs`.
+- Fixed the broken explicit link `crate::storage::StorageError` to `crate::core::error::StorageError` in `src/db/ops.rs`.
+- Replaced the intra-doc link `[`BackupPayloadV1`]` to private item with standard backticks `` `BackupPayloadV1` ``.
