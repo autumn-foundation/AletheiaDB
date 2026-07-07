@@ -153,6 +153,16 @@ aletheiadb = { version = "0.1", features = ["nova", "semantic-search"] }
 
 ---
 
+## ⚠️ Experimental Features (Nova)
+
+> **REQUIRES FEATURE NOVA:** Examples and APIs in the experimental `nova` module (such as the NarrativeGenerator in `story_demo.rs`) require the `nova` feature flag to be enabled in your `Cargo.toml`. Attempting to run `cargo run --example story_demo` or use these APIs without this flag will result in a hard panic.
+
+```toml
+aletheiadb = { version = "0.1", features = ["nova"] }
+```
+
+---
+
 ## MCP Server (Claude / LLM Integration)
 
 ```bash
