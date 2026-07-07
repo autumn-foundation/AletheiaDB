@@ -74,8 +74,10 @@ MCP tool (Issue #3234, see
 are carried additively alongside it: `invalid_request`, `read_only_violation`,
 `parse_error`, `unsupported_construct`, and `invalid_params` map to
 `INVALID_ARGUMENT`; `language_unavailable` maps to `FAILED_PRECONDITION`; and
-`runtime_error` is classified from the underlying engine error (`INTERNAL`,
-or `UNAVAILABLE`/retriable for a timeout).
+`runtime_error` is classified from the underlying engine error, so **any**
+code from the enum is possible — e.g. `INTERNAL` for an unexpected execution
+failure, `UNAVAILABLE`/retriable for a timeout, or `NOT_FOUND` if an entity
+vanishes mid-execution.
 
 ## Supported read-only subset
 
@@ -281,18 +283,19 @@ object of this shape (Issue #3234):
   caps); the server never retries on its behalf.
 - **`details`** is optional structured metadata for specific codes, e.g. the
   DETACH-delete refusal's `connected_edges` or a unique-constraint
-  violation's `existing_node_id`.
+  violation's `existing_node_id`. When absent it is omitted entirely — never
+  `null`.
 
 ### The code enum
 
 | Code | Meaning | `retriable` | What the caller should do |
 |------|---------|-------------|---------------------------|
-| `NOT_FOUND` | Entity (or tool) doesn't exist, or didn't exist at the requested bi-temporal coordinate | `false` | Re-check the ID / coordinate, or surface to the user |
-| `INVALID_ARGUMENT` | Malformed arguments: bad JSON, out-of-range ID, unparseable timestamp, invalid query text, inconsistent parameter combination | `false` | Fix the arguments and re-issue |
+| `NOT_FOUND` | Entity doesn't exist, or didn't exist at the requested bi-temporal coordinate; also an unknown tool name | `false` | Re-check the ID / coordinate or the tool name, or surface to the user |
+| `INVALID_ARGUMENT` | Malformed arguments: bad JSON, out-of-range ID, unparseable timestamp, invalid query text, inconsistent parameter combination, unsupported constraint key type | `false` | Fix the arguments and re-issue |
 | `CONSTRAINT_VIOLATION` | A declared uniqueness constraint rejected the write (`details` carries `label`, `property`, `value`, `existing_node_id`) | `false` | Use the existing entity or change the value |
-| `FAILED_PRECONDITION` | Valid request, wrong system state: vector index not enabled, node still has connected edges without `detach: true`, referenced edge endpoint missing, feature not compiled in | `false` | Change the state (enable the index, pass `detach`, create the endpoint), then re-issue |
+| `FAILED_PRECONDITION` | Valid request, wrong system state: vector index not enabled, node still has connected edges without `detach: true`, referenced edge endpoint missing, enabling a unique constraint over already-existing duplicate values, feature not compiled in | `false` | Change the state (enable the index, pass `detach`, create the endpoint, dedupe the data), then re-issue |
 | `CONFLICT` | Concurrency conflict: serialization failure, write-write conflict, aborted transaction | usually `true` | Retry the operation (a duplicate-ID conflict is the exception: `retriable: false`) |
-| `UNAVAILABLE` | Transient condition: query timeout, clock skew | `true` | Retry, ideally with backoff |
+| `UNAVAILABLE` | Transient condition: query timeout, clock skew, and other clock-related hiccups (non-monotonic transaction time, logical counter overflow) | `true` | Retry, ideally with backoff |
 | `INTERNAL` | Unexpected internal failure: I/O, corruption, poisoned lock | `false` | Report; do not blind-retry |
 
 Codes may be **added** over time; existing codes never change. Treat an
@@ -306,13 +309,13 @@ An agent driving AletheiaDB branches on `code` — zero substring matching:
 // 1. tools/call -> "delete_node" { "node_id": 7 }
 // -> { "error": { "code": "FAILED_PRECONDITION", "retriable": false,
 //                 "message": "Node 7 has 2 connected edge(s); refusing to delete. ...",
-//                 "details": { "connected_edges": 2, "detach_required": true } },
-//      "connected_edges": 2, "detach_required": true, "success": false }
+//                 "details": { "node_id": 7, "connected_edges": 2, "detach_required": true } },
+//      "node_id": 7, "connected_edges": 2, "detach_required": true, "success": false }
 
 // 2. code == "FAILED_PRECONDITION" and details.detach_required
 //    -> repair the call, don't retry blindly:
 // tools/call -> "delete_node" { "node_id": 7, "detach": true }
-// -> { "success": true, "deleted_node_id": 7, "edges_removed": 2 }
+// -> { "success": true, "deleted_node_id": 7, "detached": true, "edges_removed": 2 }
 ```
 
 The general loop: `retriable: true` → retry with backoff (bounded attempts);

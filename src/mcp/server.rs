@@ -284,7 +284,7 @@ impl AletheiaMcpServer {
     /// {
     ///   "error": {
     ///     "code": "NOT_FOUND",
-    ///     "message": "Node not found: Node(123)",
+    ///     "message": "Storage error: Node not found: Node(123)",
     ///     "retriable": false
     ///   }
     /// }
@@ -1044,8 +1044,10 @@ impl AletheiaMcpServer {
     ) -> CallToolResult {
         top_level.insert("error".to_string(), err.to_json());
         let value = serde_json::Value::Object(top_level);
+        // Compact serialization, matching both the pre-#3234 error payloads
+        // and the query tool's error path (success payloads stay pretty).
         CallToolResult::error(vec![Content::text(
-            serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string()),
+            serde_json::to_string(&value).unwrap_or_else(|_| value.to_string()),
         )])
     }
 
@@ -1152,7 +1154,11 @@ impl AletheiaMcpServer {
 
         let node_id = match NodeId::new(req.node_id) {
             Ok(id) => id,
-            Err(e) => return self.db_error(e),
+            // An out-of-range ID is a caller fault; emit the bare
+            // `StorageError` text verbatim (`db_error` would wrap it in
+            // `Error::Storage`, prefixing "Storage error: " — a message
+            // regression vs pre-#3234 responses).
+            Err(e) => return self.invalid_argument(&e.to_string()),
         };
 
         match self.db.get_node(node_id) {
@@ -1224,7 +1230,11 @@ impl AletheiaMcpServer {
 
         let node_id = match NodeId::new(req.node_id) {
             Ok(id) => id,
-            Err(e) => return self.db_error(e),
+            // An out-of-range ID is a caller fault; emit the bare
+            // `StorageError` text verbatim (`db_error` would wrap it in
+            // `Error::Storage`, prefixing "Storage error: " — a message
+            // regression vs pre-#3234 responses).
+            Err(e) => return self.invalid_argument(&e.to_string()),
         };
 
         let properties = match self.json_to_property_map(&req.properties) {
@@ -1275,7 +1285,11 @@ impl AletheiaMcpServer {
 
         let node_id = match NodeId::new(req.node_id) {
             Ok(id) => id,
-            Err(e) => return self.db_error(e),
+            // An out-of-range ID is a caller fault; emit the bare
+            // `StorageError` text verbatim (`db_error` would wrap it in
+            // `Error::Storage`, prefixing "Storage error: " — a message
+            // regression vs pre-#3234 responses).
+            Err(e) => return self.invalid_argument(&e.to_string()),
         };
 
         let detach = req.detach.unwrap_or(false);
@@ -1377,7 +1391,11 @@ impl AletheiaMcpServer {
 
         let node_id = match NodeId::new(req.node_id) {
             Ok(id) => id,
-            Err(e) => return self.db_error(e),
+            // An out-of-range ID is a caller fault; emit the bare
+            // `StorageError` text verbatim (`db_error` would wrap it in
+            // `Error::Storage`, prefixing "Storage error: " — a message
+            // regression vs pre-#3234 responses).
+            Err(e) => return self.invalid_argument(&e.to_string()),
         };
 
         match self.db.write(|tx| tx.delete_node_cascade(node_id)) {
@@ -1565,7 +1583,11 @@ impl AletheiaMcpServer {
 
         let edge_id = match EdgeId::new(req.edge_id) {
             Ok(id) => id,
-            Err(e) => return self.db_error(e),
+            // An out-of-range ID is a caller fault; emit the bare
+            // `StorageError` text verbatim (`db_error` would wrap it in
+            // `Error::Storage`, prefixing "Storage error: " — a message
+            // regression vs pre-#3234 responses).
+            Err(e) => return self.invalid_argument(&e.to_string()),
         };
 
         match self.db.get_edge(edge_id) {
@@ -1647,7 +1669,11 @@ impl AletheiaMcpServer {
 
         let edge_id = match EdgeId::new(req.edge_id) {
             Ok(id) => id,
-            Err(e) => return self.db_error(e),
+            // An out-of-range ID is a caller fault; emit the bare
+            // `StorageError` text verbatim (`db_error` would wrap it in
+            // `Error::Storage`, prefixing "Storage error: " — a message
+            // regression vs pre-#3234 responses).
+            Err(e) => return self.invalid_argument(&e.to_string()),
         };
 
         let properties = match self.json_to_property_map(&req.properties) {
@@ -1698,7 +1724,11 @@ impl AletheiaMcpServer {
 
         let edge_id = match EdgeId::new(req.edge_id) {
             Ok(id) => id,
-            Err(e) => return self.db_error(e),
+            // An out-of-range ID is a caller fault; emit the bare
+            // `StorageError` text verbatim (`db_error` would wrap it in
+            // `Error::Storage`, prefixing "Storage error: " — a message
+            // regression vs pre-#3234 responses).
+            Err(e) => return self.invalid_argument(&e.to_string()),
         };
 
         let valid_from = match self.parse_opt_timestamp("valid_time", &req.valid_time) {
@@ -1773,7 +1803,11 @@ impl AletheiaMcpServer {
 
         let node_id = match NodeId::new(req.node_id) {
             Ok(id) => id,
-            Err(e) => return self.db_error(e),
+            // An out-of-range ID is a caller fault; emit the bare
+            // `StorageError` text verbatim (`db_error` would wrap it in
+            // `Error::Storage`, prefixing "Storage error: " — a message
+            // regression vs pre-#3234 responses).
+            Err(e) => return self.invalid_argument(&e.to_string()),
         };
 
         let edge_ids = if let Some(label) = &req.label {
@@ -1809,7 +1843,11 @@ impl AletheiaMcpServer {
 
         let node_id = match NodeId::new(req.node_id) {
             Ok(id) => id,
-            Err(e) => return self.db_error(e),
+            // An out-of-range ID is a caller fault; emit the bare
+            // `StorageError` text verbatim (`db_error` would wrap it in
+            // `Error::Storage`, prefixing "Storage error: " — a message
+            // regression vs pre-#3234 responses).
+            Err(e) => return self.invalid_argument(&e.to_string()),
         };
 
         let edge_ids = self.db.get_incoming_edges(node_id);
@@ -1953,7 +1991,11 @@ impl AletheiaMcpServer {
 
         let start_id = match NodeId::new(req.start_node_id) {
             Ok(id) => id,
-            Err(e) => return self.db_error(e),
+            // An out-of-range ID is a caller fault; emit the bare
+            // `StorageError` text verbatim (`db_error` would wrap it in
+            // `Error::Storage`, prefixing "Storage error: " — a message
+            // regression vs pre-#3234 responses).
+            Err(e) => return self.invalid_argument(&e.to_string()),
         };
 
         let temporal = match self
@@ -2242,7 +2284,11 @@ impl AletheiaMcpServer {
 
         let node_id = match NodeId::new(req.node_id) {
             Ok(id) => id,
-            Err(e) => return self.db_error(e),
+            // An out-of-range ID is a caller fault; emit the bare
+            // `StorageError` text verbatim (`db_error` would wrap it in
+            // `Error::Storage`, prefixing "Storage error: " — a message
+            // regression vs pre-#3234 responses).
+            Err(e) => return self.invalid_argument(&e.to_string()),
         };
 
         let valid_time = match self.parse_timestamp(&req.valid_time) {
@@ -2276,7 +2322,11 @@ impl AletheiaMcpServer {
 
         let edge_id = match EdgeId::new(req.edge_id) {
             Ok(id) => id,
-            Err(e) => return self.db_error(e),
+            // An out-of-range ID is a caller fault; emit the bare
+            // `StorageError` text verbatim (`db_error` would wrap it in
+            // `Error::Storage`, prefixing "Storage error: " — a message
+            // regression vs pre-#3234 responses).
+            Err(e) => return self.invalid_argument(&e.to_string()),
         };
 
         let valid_time = match self.parse_timestamp(&req.valid_time) {
@@ -2389,7 +2439,11 @@ impl AletheiaMcpServer {
 
         let node_id = match NodeId::new(req.node_id) {
             Ok(id) => id,
-            Err(e) => return self.db_error(e),
+            // An out-of-range ID is a caller fault; emit the bare
+            // `StorageError` text verbatim (`db_error` would wrap it in
+            // `Error::Storage`, prefixing "Storage error: " — a message
+            // regression vs pre-#3234 responses).
+            Err(e) => return self.invalid_argument(&e.to_string()),
         };
 
         let valid_time = match self.parse_timestamp(&req.valid_time) {
@@ -2417,7 +2471,11 @@ impl AletheiaMcpServer {
 
         let node_id = match NodeId::new(req.node_id) {
             Ok(id) => id,
-            Err(e) => return self.db_error(e),
+            // An out-of-range ID is a caller fault; emit the bare
+            // `StorageError` text verbatim (`db_error` would wrap it in
+            // `Error::Storage`, prefixing "Storage error: " — a message
+            // regression vs pre-#3234 responses).
+            Err(e) => return self.invalid_argument(&e.to_string()),
         };
 
         let tx_time = match self.parse_timestamp(&req.transaction_time) {
@@ -2445,7 +2503,11 @@ impl AletheiaMcpServer {
 
         let node_id = match NodeId::new(req.node_id) {
             Ok(id) => id,
-            Err(e) => return self.db_error(e),
+            // An out-of-range ID is a caller fault; emit the bare
+            // `StorageError` text verbatim (`db_error` would wrap it in
+            // `Error::Storage`, prefixing "Storage error: " — a message
+            // regression vs pre-#3234 responses).
+            Err(e) => return self.invalid_argument(&e.to_string()),
         };
 
         match self.db.get_node_history(node_id) {
@@ -2474,17 +2536,29 @@ impl AletheiaMcpServer {
 
         let node_id = match NodeId::new(req.node_id) {
             Ok(id) => id,
-            Err(e) => return self.db_error(e),
+            // An out-of-range ID is a caller fault; emit the bare
+            // `StorageError` text verbatim (`db_error` would wrap it in
+            // `Error::Storage`, prefixing "Storage error: " — a message
+            // regression vs pre-#3234 responses).
+            Err(e) => return self.invalid_argument(&e.to_string()),
         };
 
         let from_version = match crate::core::id::VersionId::new(req.from_version) {
             Ok(id) => id,
-            Err(e) => return self.db_error(e),
+            // An out-of-range ID is a caller fault; emit the bare
+            // `StorageError` text verbatim (`db_error` would wrap it in
+            // `Error::Storage`, prefixing "Storage error: " — a message
+            // regression vs pre-#3234 responses).
+            Err(e) => return self.invalid_argument(&e.to_string()),
         };
 
         let to_version = match crate::core::id::VersionId::new(req.to_version) {
             Ok(id) => id,
-            Err(e) => return self.db_error(e),
+            // An out-of-range ID is a caller fault; emit the bare
+            // `StorageError` text verbatim (`db_error` would wrap it in
+            // `Error::Storage`, prefixing "Storage error: " — a message
+            // regression vs pre-#3234 responses).
+            Err(e) => return self.invalid_argument(&e.to_string()),
         };
 
         match self
@@ -2507,7 +2581,11 @@ impl AletheiaMcpServer {
 
         let edge_id = match EdgeId::new(req.edge_id) {
             Ok(id) => id,
-            Err(e) => return self.db_error(e),
+            // An out-of-range ID is a caller fault; emit the bare
+            // `StorageError` text verbatim (`db_error` would wrap it in
+            // `Error::Storage`, prefixing "Storage error: " — a message
+            // regression vs pre-#3234 responses).
+            Err(e) => return self.invalid_argument(&e.to_string()),
         };
 
         let valid_time = match self.parse_timestamp(&req.valid_time) {
@@ -2535,7 +2613,11 @@ impl AletheiaMcpServer {
 
         let edge_id = match EdgeId::new(req.edge_id) {
             Ok(id) => id,
-            Err(e) => return self.db_error(e),
+            // An out-of-range ID is a caller fault; emit the bare
+            // `StorageError` text verbatim (`db_error` would wrap it in
+            // `Error::Storage`, prefixing "Storage error: " — a message
+            // regression vs pre-#3234 responses).
+            Err(e) => return self.invalid_argument(&e.to_string()),
         };
 
         let tx_time = match self.parse_timestamp(&req.transaction_time) {
@@ -2563,7 +2645,11 @@ impl AletheiaMcpServer {
 
         let edge_id = match EdgeId::new(req.edge_id) {
             Ok(id) => id,
-            Err(e) => return self.db_error(e),
+            // An out-of-range ID is a caller fault; emit the bare
+            // `StorageError` text verbatim (`db_error` would wrap it in
+            // `Error::Storage`, prefixing "Storage error: " — a message
+            // regression vs pre-#3234 responses).
+            Err(e) => return self.invalid_argument(&e.to_string()),
         };
 
         match self.db.get_edge_history(edge_id) {
@@ -2592,17 +2678,29 @@ impl AletheiaMcpServer {
 
         let edge_id = match EdgeId::new(req.edge_id) {
             Ok(id) => id,
-            Err(e) => return self.db_error(e),
+            // An out-of-range ID is a caller fault; emit the bare
+            // `StorageError` text verbatim (`db_error` would wrap it in
+            // `Error::Storage`, prefixing "Storage error: " — a message
+            // regression vs pre-#3234 responses).
+            Err(e) => return self.invalid_argument(&e.to_string()),
         };
 
         let from_version = match crate::core::id::VersionId::new(req.from_version) {
             Ok(id) => id,
-            Err(e) => return self.db_error(e),
+            // An out-of-range ID is a caller fault; emit the bare
+            // `StorageError` text verbatim (`db_error` would wrap it in
+            // `Error::Storage`, prefixing "Storage error: " — a message
+            // regression vs pre-#3234 responses).
+            Err(e) => return self.invalid_argument(&e.to_string()),
         };
 
         let to_version = match crate::core::id::VersionId::new(req.to_version) {
             Ok(id) => id,
-            Err(e) => return self.db_error(e),
+            // An out-of-range ID is a caller fault; emit the bare
+            // `StorageError` text verbatim (`db_error` would wrap it in
+            // `Error::Storage`, prefixing "Storage error: " — a message
+            // regression vs pre-#3234 responses).
+            Err(e) => return self.invalid_argument(&e.to_string()),
         };
 
         match self
@@ -2831,7 +2929,9 @@ impl AletheiaMcpServer {
         if let Some(start_id) = req.start_node_id {
             let node_id = match NodeId::new(start_id) {
                 Ok(id) => id,
-                Err(e) => return self.db_error(e),
+                // Bare StorageError text verbatim — see the note on the other
+                // ID-validation sites.
+                Err(e) => return self.invalid_argument(&e.to_string()),
             };
 
             // If temporal filtering requested, use temporal query
@@ -3802,6 +3902,15 @@ mod server_unit_tests {
         val["error"]["kind"].as_str().unwrap_or("").to_string()
     }
 
+    /// Like [`error_kind`], but returning the whole serialized `error` object
+    /// so tests can assert `code`/`retriable` alongside `kind`.
+    fn error_payload(server: &AletheiaMcpServer, err: Error) -> serde_json::Value {
+        let result = server.map_query_error(err, "aql");
+        let text = AletheiaMcpServer::extract_text(result);
+        let val: serde_json::Value = serde_json::from_str(&text).unwrap();
+        val["error"].clone()
+    }
+
     #[test]
     fn map_query_error_unsupported_feature_yields_unsupported_construct() {
         let server = make_server();
@@ -3836,6 +3945,22 @@ mod server_unit_tests {
         // Error::Other is a variant not matched by any specific arm — falls through to `other`.
         let err = Error::Other("unexpected situation".to_string());
         assert_eq!(error_kind(&server, err), "runtime_error");
+    }
+
+    #[test]
+    fn map_query_error_timeout_yields_retriable_unavailable_runtime_error() {
+        // A timeout keeps the query tool's own `kind` contract
+        // ("runtime_error") but is classified UNAVAILABLE/retriable from the
+        // underlying engine error — and `retriable: true` must survive the
+        // query-tool serialization path, not just the in-memory struct.
+        let server = make_server();
+        let error = error_payload(
+            &server,
+            Error::Query(QueryError::Timeout { duration_ms: 5000 }),
+        );
+        assert_eq!(error["kind"], "runtime_error", "got: {error}");
+        assert_eq!(error["code"], "UNAVAILABLE", "got: {error}");
+        assert_eq!(error["retriable"], true, "got: {error}");
     }
 
     #[test]

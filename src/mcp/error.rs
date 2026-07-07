@@ -6,7 +6,7 @@
 //! {
 //!   "error": {
 //!     "code": "NOT_FOUND",
-//!     "message": "Node not found: Node(123)",
+//!     "message": "Storage error: Node not found: Node(123)",
 //!     "retriable": false,
 //!     "details": { "...": "optional, structured, per-code metadata" }
 //!   }
@@ -29,10 +29,8 @@
 //! codes happens only at this boundary — the library's `thiserror` enums are
 //! unchanged.
 
-use serde_json::json;
-
 use crate::core::error::{
-    Error, QueryError, StorageError, TemporalError, TransactionError, VectorError,
+    ConstraintError, Error, QueryError, StorageError, TemporalError, TransactionError, VectorError,
 };
 
 /// Stable, machine-readable error codes for the MCP surface.
@@ -155,9 +153,9 @@ impl McpError {
     /// Serialize the inner error object (the value of the `"error"` key).
     pub fn to_json(&self) -> serde_json::Value {
         let mut obj = serde_json::Map::new();
-        obj.insert("code".to_string(), json!(self.code.as_str()));
-        obj.insert("message".to_string(), json!(self.message));
-        obj.insert("retriable".to_string(), json!(self.retriable));
+        obj.insert("code".to_string(), self.code.as_str().into());
+        obj.insert("message".to_string(), self.message.clone().into());
+        obj.insert("retriable".to_string(), self.retriable.into());
         if let Some(details) = &self.details {
             obj.insert("details".to_string(), details.clone());
         }
@@ -195,7 +193,7 @@ fn classify_db_error(e: &Error) -> (McpErrorCode, bool) {
         Error::Query(qe) => classify_query_error(qe),
         Error::Transaction(te) => classify_transaction_error(te),
         Error::Vector(ve) => classify_vector_error(ve),
-        Error::Constraint(_) => (McpErrorCode::ConstraintViolation, false),
+        Error::Constraint(ce) => classify_constraint_error(ce),
         // A provenance bundle failing validation is a caller fault.
         Error::Provenance(_) => (McpErrorCode::InvalidArgument, false),
         Error::Io(_) | Error::Backup(_) => (McpErrorCode::Internal, false),
@@ -240,7 +238,6 @@ fn classify_temporal_error(e: &TemporalError) -> (McpErrorCode, bool) {
         }
         TemporalError::InvalidTimeRange { .. }
         | TemporalError::InvalidTimestamp { .. }
-        | TemporalError::TemporalParadox { .. }
         | TemporalError::ValidTimeBeforeCreation { .. }
         | TemporalError::ValidTimeTooFarInFuture { .. }
         | TemporalError::ValidTimeBeforeEntityCreation { .. } => {
@@ -251,9 +248,28 @@ fn classify_temporal_error(e: &TemporalError) -> (McpErrorCode, bool) {
         // later wallclock/logical tick can succeed.
         TemporalError::NonMonotonicTransactionTime { .. }
         | TemporalError::LogicalCounterOverflow { .. } => (McpErrorCode::Unavailable, true),
-        TemporalError::CorruptedVersionChain { .. }
+        // Despite its caller-fault-sounding name, `TemporalParadox` is only
+        // raised when the system clock reads before the Unix epoch — a
+        // server-environment fault, not something the caller can repair.
+        TemporalError::TemporalParadox { .. }
+        | TemporalError::CorruptedVersionChain { .. }
         | TemporalError::MissingAnchor { .. }
         | TemporalError::MaxDepthExceeded { .. } => (McpErrorCode::Internal, false),
+    }
+}
+
+/// Classify a [`ConstraintError`] per variant.
+///
+/// Only a `UniqueViolation` is a true `CONSTRAINT_VIOLATION` (a declared
+/// constraint rejecting *this* write). `UnsupportedKeyType` is a caller
+/// fault in the enable request itself, and `DuplicateOnEnable` is a state
+/// problem — duplicates already exist in the graph, so the caller must fix
+/// the data (or drop the request) before the enable can succeed.
+fn classify_constraint_error(e: &ConstraintError) -> (McpErrorCode, bool) {
+    match e {
+        ConstraintError::UniqueViolation { .. } => (McpErrorCode::ConstraintViolation, false),
+        ConstraintError::UnsupportedKeyType { .. } => (McpErrorCode::InvalidArgument, false),
+        ConstraintError::DuplicateOnEnable { .. } => (McpErrorCode::FailedPrecondition, false),
     }
 }
 
@@ -308,13 +324,19 @@ fn classify_vector_error(e: &VectorError) -> (McpErrorCode, bool) {
 /// request problem except `language_unavailable` (a build/deployment
 /// precondition) and `runtime_error` (engine-side, classified from the
 /// underlying error where available).
-pub fn query_kind_classification(kind: &str) -> (McpErrorCode, bool) {
+pub(crate) fn query_kind_classification(kind: &str) -> (McpErrorCode, bool) {
     match kind {
+        "invalid_request"
+        | "read_only_violation"
+        | "parse_error"
+        | "unsupported_construct"
+        | "invalid_params" => (McpErrorCode::InvalidArgument, false),
         "language_unavailable" => (McpErrorCode::FailedPrecondition, false),
         "runtime_error" => (McpErrorCode::Internal, false),
-        // invalid_request, read_only_violation, parse_error,
-        // unsupported_construct, invalid_params — all caller faults.
-        _ => (McpErrorCode::InvalidArgument, false),
+        // Fail-safe: a future kind added without updating this mapping is
+        // reported as INTERNAL (non-retriable) rather than silently blamed
+        // on the caller as INVALID_ARGUMENT.
+        _ => (McpErrorCode::Internal, false),
     }
 }
 
@@ -486,6 +508,37 @@ mod tests {
                 StorageError::CorruptedData("bad checksum".into()).into(),
                 McpErrorCode::Internal,
             ),
+            // TemporalParadox's only raise site is a system-clock-before-epoch
+            // fault — a server-environment problem, not a caller fault.
+            (
+                TemporalError::TemporalParadox {
+                    reason: "System clock is before Unix epoch".into(),
+                }
+                .into(),
+                McpErrorCode::Internal,
+            ),
+            // An unsupported constraint key type is a fault in the request.
+            (
+                ConstraintError::UnsupportedKeyType {
+                    label: "Person".into(),
+                    property: "avatar".into(),
+                    type_name: "Vector".into(),
+                }
+                .into(),
+                McpErrorCode::InvalidArgument,
+            ),
+            // Enabling over existing duplicates is a state problem: fix the
+            // data, then re-issue the enable.
+            (
+                ConstraintError::DuplicateOnEnable {
+                    label: "Person".into(),
+                    property: "email".into(),
+                    value: "dup".into(),
+                    node_ids: vec![NodeId::new(1).unwrap(), NodeId::new(2).unwrap()],
+                }
+                .into(),
+                McpErrorCode::FailedPrecondition,
+            ),
             (
                 VectorError::DimensionMismatch {
                     expected: 4,
@@ -536,5 +589,36 @@ mod tests {
             query_kind_classification("runtime_error"),
             (McpErrorCode::Internal, false)
         );
+    }
+
+    #[test]
+    fn query_kind_classification_unknown_kind_is_internal() {
+        // Fail-safe: a kind added in the future without updating the mapping
+        // must surface as INTERNAL, never be blamed on the caller.
+        assert_eq!(
+            query_kind_classification("some_future_kind"),
+            (McpErrorCode::Internal, false)
+        );
+    }
+
+    #[test]
+    fn retriable_true_serializes_through_to_json() {
+        // Transient classes must carry `retriable: true` all the way through
+        // the JSON serialization path, not just in the in-memory struct.
+        let timeout = McpError::from_db_error(&QueryError::Timeout { duration_ms: 5000 }.into());
+        let json = timeout.to_json();
+        assert_eq!(json["code"], "UNAVAILABLE");
+        assert_eq!(json["retriable"], true);
+
+        let serialization = McpError::from_db_error(
+            &TransactionError::SerializationFailure {
+                entity: "node-1".into(),
+                reason: "concurrent commit".into(),
+            }
+            .into(),
+        );
+        let json = serialization.to_json();
+        assert_eq!(json["code"], "CONFLICT");
+        assert_eq!(json["retriable"], true);
     }
 }
