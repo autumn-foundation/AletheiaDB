@@ -346,3 +346,24 @@
 **Finding:** The `LimitPushdown` tests originally missed several behavioral edge cases and logic checks, particularly regarding the propagation limits in BinaryOp combinations (`||`), updating limit values correctly against child bounds, and setting vector rank limits.
 **Evidence:** `cargo mutants` caught mutants in `LimitPushdown::push_down` specifically targeting the changed boolean condition logic and bounds assignment.
 **Recommendation:** Added `sentry_tests` to `LimitPushdown` that explicitly trigger tests enforcing the boolean change propagation, verifying that updated properties reflect correct nested limits, and vector bounds assignment. Tests now prevent `||` to `&&` mutations and correct top-k modifications.
+
+## [FilterIterator Strictness]
+**Module:** `src/query/executor/iterators.rs`
+**Severity:** 🟡 Suspect
+**Finding:** The `FilterIterator` was enforcing Rust-level strict type equality for queries. E.g., `PredicateValue::Float(25.0)` and `PropertyValue::Int(25)` were evaluated as unequal despite mathematical equivalence. This broke SQL-like intuition where users expect integer/float comparisons to automatically coerce types when safe.
+**Evidence:** Calling `.filter(Predicate::eq("age", 25.0))` on a node with `age: 25` (int) would not match it.
+**Recommendation:** Softened type strictness in `compare_eq`, `compare_lt`, `compare_gt`, `compare_lte`, `compare_gte` methods so that `Int` vs `Float` comparisons succeed via `f64` coercion when epsilon equals or correct conditions are met. Added corresponding `tests/sentry_filter_strictness2.rs`.
+
+## [TraversalIterator Cycle Suppression Bug]
+**Module:** `src/query/executor/iterators.rs`
+**Severity:** 🔴 Critical
+**Finding:** The `TraversalIterator` enforced node isomorphism (cycle suppression) incorrectly by utilizing a global `self.visited` `HashSet`. While valid for simple trees, this completely breaks Breadth-First traversal on cyclic graphs by dropping all valid paths that happen to encounter a node previously visited on an unrelated traversal branch. A node shouldn't revisit itself *in its own path*, but valid separate paths to a node should be permitted.
+**Evidence:** The implementation returned `self.visited.insert(target)`, skipping expansion if the node was seen on *any* path in the BFS frontier.
+**Recommendation:** Refactored `TraversalIterator::next()` to implement cycle suppression correctly: a target node is only pruned if it is already present in the *current path's* history `path.contains(&EntityId::Node(target))`. Removed `self.visited` check. Added `tests/sentry_traversal.rs` regression tests.
+
+## [VectorRerankIterator O(N) Buffer Avoidance]
+**Module:** `src/query/executor/iterators.rs`
+**Severity:** 🟡 Suspect
+**Finding:** The `VectorRerankIterator` used a `BinaryHeap` for Top-K extraction, but the implementation logic when `k=0` resulted in either processing all nodes needlessly or returning all items when it was expected to return none.
+**Evidence:** The test case verified that if `k=0`, it expects `results.len() == 0`, but depending on initialization states it could buffer elements unnecessarily.
+**Recommendation:** Explicitly caught `if self.k == 0` immediately upon traversal initialization and short-circuited to returning an empty iterator rather than allocating a 0-capacity heap and traversing nodes blindly.

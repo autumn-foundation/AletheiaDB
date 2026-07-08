@@ -130,3 +130,58 @@ mod tests {
         assert_eq!(rows[1].entity.node_id(), Some(b));
     }
 }
+
+#[test]
+fn test_traversal_cycle_suppression() {
+    use aletheiadb::AletheiaDB;
+    use aletheiadb::core::property::PropertyMapBuilder;
+
+    let db = AletheiaDB::new().unwrap();
+    let n1 = db.create_node("Node", PropertyMapBuilder::new().build()).unwrap();
+    let n2 = db.create_node("Node", PropertyMapBuilder::new().build()).unwrap();
+
+    db.create_edge(n1, n2, "KNOWS", PropertyMapBuilder::new().build()).unwrap();
+    db.create_edge(n2, n1, "KNOWS", PropertyMapBuilder::new().build()).unwrap();
+
+    let results = db.query()
+        .start(n1)
+        .traverse("KNOWS")
+        .execute(&db)
+        .unwrap();
+
+    let mut visited = vec![];
+    for row in results {
+        let node_id = row.unwrap().entity.node_id().unwrap();
+        visited.push(node_id);
+    }
+
+    assert_eq!(visited, vec![n2]);
+}
+
+#[test]
+fn test_traversal_cycle_suppression_depth_2() {
+    use aletheiadb::AletheiaDB;
+    use aletheiadb::core::property::PropertyMapBuilder;
+
+    let db = AletheiaDB::new().unwrap();
+    let n1 = db.create_node("Node", PropertyMapBuilder::new().build()).unwrap();
+    let n2 = db.create_node("Node", PropertyMapBuilder::new().build()).unwrap();
+
+    db.create_edge(n1, n2, "KNOWS", PropertyMapBuilder::new().build()).unwrap();
+    db.create_edge(n2, n1, "KNOWS", PropertyMapBuilder::new().build()).unwrap();
+
+    let results = db.query()
+        .start(n1)
+        .traverse_n("KNOWS", 2)
+        .execute(&db)
+        .unwrap();
+
+    let mut visited = vec![];
+    for row in results {
+        let node_id = row.unwrap().entity.node_id().unwrap();
+        visited.push(node_id);
+    }
+
+    // N1 -> N2 -> N1 (N1 is suppressed because it's already visited, so nothing at depth 2)
+    assert_eq!(visited, vec![]);
+}
