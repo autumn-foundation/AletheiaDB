@@ -811,7 +811,13 @@ fn test_checkpoint_restore_only_preserves_node_bitemporal_fidelity() -> Result<(
     }
 
     // Simulated restart: restore from the checkpoint with NOTHING left to
-    // replay after the checkpoint LSN (restore-only recovery).
+    // replay after the checkpoint LSN (restore-only recovery). Assert that
+    // explicitly, so an off-by-one silently replaying the retraction cannot
+    // weaken this test into a WAL-replay test.
+    assert!(
+        wal.read_from(checkpoint_lsn.next())?.is_empty(),
+        "restore-only precondition: no WAL entries past the checkpoint LSN"
+    );
     let config = UnifiedCheckpointConfig::with_data_dir(&data_dir);
     let mut manager = CheckpointManager::new(config)?;
     assert!(manager.has_persisted_state());
@@ -957,6 +963,11 @@ fn test_checkpoint_restore_only_preserves_edge_bitemporal_fidelity() -> Result<(
         manager.create_checkpoint(checkpoint_lsn, &current, &historical)?;
     }
 
+    // Restore-only precondition (see the node fidelity test above).
+    assert!(
+        wal.read_from(checkpoint_lsn.next())?.is_empty(),
+        "restore-only precondition: no WAL entries past the checkpoint LSN"
+    );
     let config = UnifiedCheckpointConfig::with_data_dir(&data_dir);
     let mut manager = CheckpointManager::new(config)?;
     let (_recovered_current, recovered_historical, _final_lsn) = manager.recover(&wal)?;
@@ -991,6 +1002,120 @@ fn test_checkpoint_restore_only_preserves_edge_bitemporal_fidelity() -> Result<(
         Some(1),
         "probe between create and update must see the pre-update state"
     );
+
+    Ok(())
+}
+
+/// Issue #3387 availability regression: a routine small embedding edit
+/// produces a `VectorDelta::Sparse` in hot history (changed*2 < dim); the
+/// checkpoint must MATERIALIZE it in the persisted copy (not hard-fail,
+/// which would stall checkpoints and WAL truncation for vector workloads)
+/// and the vector must round-trip a restore-only recovery.
+#[test]
+fn test_checkpoint_materializes_sparse_vector_delta_and_round_trips() -> Result<()> {
+    use aletheiadb::core::version::{VectorDelta, VersionData};
+
+    let temp_dir = TempDir::new().unwrap();
+    let wal_dir = temp_dir.path().join("wal");
+    let data_dir = temp_dir.path().join("data");
+
+    let wal_config = ConcurrentWalSystemConfig::new(&wal_dir);
+    let wal = ConcurrentWalSystem::new(wal_config)?;
+
+    let node_id = NodeId::new(1)?;
+    let dim = 128usize;
+    let base_vec: Vec<f32> = (0..dim).map(|i| i as f32 * 0.01).collect();
+    let mut updated_vec = base_vec.clone();
+    updated_vec[3] = 42.0; // 1 change * 2 < 128 -> sparse delta
+
+    wal.append(WalOperation::CreateNode {
+        node_id,
+        label: GLOBAL_INTERNER.intern("SparseVecNode").unwrap(),
+        properties: PropertyMapBuilder::new()
+            .insert("name", "doc")
+            .insert_vector("embedding", &base_vec)
+            .build(),
+        valid_from: time::now(),
+        provenance: None,
+    })?;
+    wal.append(WalOperation::UpdateNode {
+        node_id,
+        version_id: VersionId::new(800)?,
+        label: GLOBAL_INTERNER.intern("SparseVecNode").unwrap(),
+        properties: PropertyMapBuilder::new()
+            .insert("name", "doc")
+            .insert_vector("embedding", &updated_vec)
+            .build(),
+        valid_from: time::now(),
+        provenance: None,
+    })?;
+    wal.flush()?;
+
+    let checkpoint_lsn = LSN(wal.current_lsn().0.saturating_sub(1));
+    {
+        let config = UnifiedCheckpointConfig::with_data_dir(&data_dir);
+        let mut manager = CheckpointManager::new(config)?;
+        let (current, historical, _final_lsn) = manager.recover(&wal)?;
+
+        // Precondition: the update really produced a SPARSE vector delta in
+        // hot history -- otherwise this test would not exercise
+        // materialization at all.
+        let head_id = historical
+            .get_current_node_version(node_id)
+            .expect("head version");
+        let head = historical.get_node_version(head_id).unwrap();
+        let VersionData::Delta { delta } = &head.data else {
+            panic!("precondition: update version must be a delta");
+        };
+        assert!(
+            delta
+                .vector_deltas
+                .values()
+                .any(|d| matches!(d, VectorDelta::Sparse { .. })),
+            "precondition: small embedding edit must produce VectorDelta::Sparse"
+        );
+
+        // The checkpoint must succeed (pre-fix: hard error demanding
+        // materialize_vector_deltas, stalling checkpoints persistently).
+        manager.create_checkpoint(checkpoint_lsn, &current, &historical)?;
+
+        // The LIVE in-memory version keeps its sparse delta untouched.
+        let head_after = historical.get_node_version(head_id).unwrap();
+        let VersionData::Delta { delta } = &head_after.data else {
+            panic!("live version must remain a delta");
+        };
+        assert!(
+            delta
+                .vector_deltas
+                .values()
+                .any(|d| matches!(d, VectorDelta::Sparse { .. })),
+            "checkpoint must not mutate live in-memory state"
+        );
+    }
+
+    // Restore-only recovery: the updated vector must round-trip.
+    let config = UnifiedCheckpointConfig::with_data_dir(&data_dir);
+    let mut manager = CheckpointManager::new(config)?;
+    let (_current, restored, _final_lsn) = manager.recover(&wal)?;
+
+    let history = restored.get_node_history(node_id)?;
+    assert_eq!(history.version_count(), 2);
+    let restored_updated = history.versions[1]
+        .properties
+        .get("embedding")
+        .and_then(|v| v.as_vector().map(<[f32]>::to_vec))
+        .expect("restored head must carry the embedding");
+    assert_eq!(
+        restored_updated, updated_vec,
+        "sparse vector delta must be materialized into the checkpoint and \
+         reconstruct to the updated embedding after restore"
+    );
+    let restored_base = history.versions[0]
+        .properties
+        .get("embedding")
+        .and_then(|v| v.as_vector().map(<[f32]>::to_vec))
+        .expect("restored anchor must carry the embedding");
+    assert_eq!(restored_base, base_vec);
 
     Ok(())
 }

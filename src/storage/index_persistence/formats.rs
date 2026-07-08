@@ -114,6 +114,10 @@ pub struct TemporalAdjacencyIndexManifestEntry {
 // ============================================================================
 
 /// Persisted string interner data.
+///
+/// FORMAT-FROZEN: reused verbatim inside `BackupPayloadV1`/`BackupPayloadV2`
+/// (`storage::backup`). Changing this struct's wire layout requires freezing
+/// a copy for those legacy artifact shapes first.
 #[derive(Debug, Clone, Encode, Decode)]
 pub struct StringInternerData {
     /// Magic bytes: "GSTR"
@@ -131,6 +135,10 @@ pub struct StringInternerData {
 // ============================================================================
 
 /// Persisted graph index data.
+///
+/// FORMAT-FROZEN: reused verbatim inside `BackupPayloadV1`/`BackupPayloadV2`
+/// (`storage::backup`). Changing this struct's wire layout requires freezing
+/// a copy for those legacy artifact shapes first.
 #[derive(Debug, Clone, Encode, Decode)]
 pub struct GraphIndexData {
     /// Magic bytes: "GGRP"
@@ -226,6 +234,11 @@ pub struct PersistedEdge {
 }
 
 /// Persisted property map.
+///
+/// FORMAT-FROZEN: reused verbatim by the frozen legacy temporal shapes
+/// (`legacy_v1`, `legacy_v2`) and the legacy backup payloads
+/// (`BackupPayloadV1`/`V2`). Changing its wire layout silently changes what
+/// those frozen shapes decode -- freeze a copy for them first.
 #[derive(Debug, Clone, Default, PartialEq, Encode, Decode)]
 pub struct PersistedPropertyMap {
     /// Property entries: (key_index, value)
@@ -263,6 +276,9 @@ pub enum PersistedPropertyValue {
 /// Mirrors [`crate::core::provenance::Provenance`]'s fields exactly; kept as
 /// a separate bitcode-encodable type since `Provenance` itself has private
 /// fields and validates on construction (not on persistence).
+///
+/// FORMAT-FROZEN: reused verbatim by `legacy_v2` and `BackupPayloadV2`.
+/// Changing its wire layout requires freezing a copy for those shapes first.
 #[derive(Debug, Clone, Encode, Decode)]
 pub struct PersistedProvenance {
     /// Source system/identifier that produced the write, if any.
@@ -334,6 +350,10 @@ pub struct NodeVersionEntry {
 }
 
 /// Persisted node anchor entry.
+///
+/// FORMAT-FROZEN: reused verbatim (unchanged since v1) by the frozen legacy
+/// temporal shapes (`legacy_v1`, `legacy_v2`) and the legacy backup
+/// payloads. Changing its wire layout requires freezing a copy first.
 #[derive(Debug, Clone, Encode, Decode)]
 pub struct NodeAnchorEntry {
     /// Node ID
@@ -347,6 +367,10 @@ pub struct NodeAnchorEntry {
 }
 
 /// Persisted version type.
+///
+/// FORMAT-FROZEN: reused verbatim by the frozen legacy temporal shapes
+/// (`legacy_v1`, `legacy_v2`) and the legacy backup payloads. Changing its
+/// wire layout requires freezing a copy for those shapes first.
 #[derive(Debug, Clone, Encode, Decode)]
 pub enum PersistedVersionType {
     /// Delta referencing a base anchor
@@ -404,6 +428,10 @@ pub struct EdgeVersionEntry {
 }
 
 /// Persisted edge anchor entry.
+///
+/// FORMAT-FROZEN: reused verbatim (unchanged since v1) by the frozen legacy
+/// temporal shapes (`legacy_v1`, `legacy_v2`) and the legacy backup
+/// payloads. Changing its wire layout requires freezing a copy first.
 #[derive(Debug, Clone, Encode, Decode)]
 pub struct EdgeAnchorEntry {
     /// Edge ID
@@ -857,7 +885,10 @@ pub mod legacy_v1 {
 /// closures via `rebuild_version_chains`, exactly as v2 binaries did).
 ///
 /// Do not modify these types -- they exist purely to describe historical
-/// on-disk bytes.
+/// on-disk bytes. Frozen reference: the live `NodeVersionEntry`/
+/// `EdgeVersionEntry`/`TemporalIndexData` structs as of trunk commit
+/// d54eb25 (the last pre-#3387 commit). If these drift from those bytes,
+/// the legacy-read round-trip tests become tautological.
 pub mod legacy_v2 {
     use super::{
         EdgeAnchorEntry, NodeAnchorEntry, PersistedPropertyMap, PersistedProvenance,

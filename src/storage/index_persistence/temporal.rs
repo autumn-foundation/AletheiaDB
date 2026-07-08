@@ -37,7 +37,7 @@ use std::sync::Arc;
 
 use crate::core::id::{EdgeId, NodeId};
 use crate::core::interning::InternedString;
-use crate::core::property::PropertyValue;
+use crate::core::property::{PropertyMap, PropertyValue};
 use crate::core::provenance::Provenance;
 use crate::core::temporal::{BiTemporalInterval, TIMESTAMP_MAX, TimeRange};
 use crate::core::version::{EdgeVersion, NodeVersion, PropertyDelta, VersionData};
@@ -76,6 +76,48 @@ pub(crate) fn restore_provenance(
             IndexPersistenceError::Serialization(format!("Invalid persisted provenance: {}", e))
         })?;
     Ok(Some(Arc::new(provenance)))
+}
+
+/// True if this version data carries a `VectorDelta::Sparse`, which cannot be
+/// persisted without first materializing it against its base vector
+/// (Issue #3387 availability fix: callers materialize instead of failing the
+/// whole checkpoint/save).
+pub fn needs_sparse_vector_materialization(data: &VersionData) -> bool {
+    match data {
+        VersionData::Delta { delta } => delta
+            .vector_deltas
+            .values()
+            .any(|d| matches!(d, crate::core::version::VectorDelta::Sparse { .. })),
+        VersionData::Anchor { .. } => false,
+    }
+}
+
+/// Return a copy of `data` with all vector deltas materialized against
+/// `base` (the fully reconstructed property state of the *previous* version),
+/// ready for persistence. The live in-memory version is never mutated --
+/// only the persisted copy carries the materialized (Full) vectors.
+///
+/// # Errors
+///
+/// Returns an error if a sparse delta cannot be resolved against `base`
+/// (missing or non-vector base property) -- persisting it anyway would be
+/// silent data loss.
+pub fn materialize_version_data_for_persistence(
+    data: &VersionData,
+    base: &PropertyMap,
+) -> Result<VersionData> {
+    match data {
+        VersionData::Delta { delta } => {
+            let mut materialized = delta.clone();
+            materialized
+                .materialize_vector_deltas(base)
+                .map_err(IndexPersistenceError::Serialization)?;
+            Ok(VersionData::Delta {
+                delta: materialized,
+            })
+        }
+        anchor @ VersionData::Anchor { .. } => Ok(anchor.clone()),
+    }
 }
 
 /// Convert NodeVersion to NodeVersionEntry for persistence.
@@ -345,16 +387,24 @@ pub fn restore_node_version(entry: &NodeVersionEntry) -> Result<NodeVersion> {
     // Issue #3387: restore the persisted transaction-time closure
     // (None = still current knowledge, open-ended interval).
     let tx_time = match entry.tx_end {
-        Some(end) => TimeRange::new(
-            tx_start,
-            HybridTimestamp::new_unchecked(end, entry.tx_end_logical.unwrap_or(0)),
-        )
-        .map_err(|e| {
-            IndexPersistenceError::Serialization(format!(
-                "Invalid transaction time range [{}, {}]: {}",
-                entry.tx_time, end, e
-            ))
-        })?,
+        Some(end) => {
+            // The writer always persists the pair together; a lone tx_end is
+            // on-disk corruption, not a value to default.
+            let end_logical = entry.tx_end_logical.ok_or_else(|| {
+                IndexPersistenceError::Serialization(format!(
+                    "Corrupt version entry {}: tx_end is set but tx_end_logical is missing",
+                    entry.version_id
+                ))
+            })?;
+            TimeRange::new(tx_start, HybridTimestamp::new_unchecked(end, end_logical)).map_err(
+                |e| {
+                    IndexPersistenceError::Serialization(format!(
+                        "Invalid transaction time range [{}, {}]: {}",
+                        entry.tx_time, end, e
+                    ))
+                },
+            )?
+        }
         None => TimeRange::from(tx_start),
     };
     let temporal = BiTemporalInterval::new(valid_time, tx_time);
@@ -481,16 +531,24 @@ pub fn restore_edge_version(entry: &EdgeVersionEntry) -> Result<EdgeVersion> {
     // Issue #3387: restore the persisted transaction-time closure
     // (None = still current knowledge, open-ended interval).
     let tx_time = match entry.tx_end {
-        Some(end) => TimeRange::new(
-            tx_start,
-            HybridTimestamp::new_unchecked(end, entry.tx_end_logical.unwrap_or(0)),
-        )
-        .map_err(|e| {
-            IndexPersistenceError::Serialization(format!(
-                "Invalid transaction time range [{}, {}]: {}",
-                entry.tx_time, end, e
-            ))
-        })?,
+        Some(end) => {
+            // The writer always persists the pair together; a lone tx_end is
+            // on-disk corruption, not a value to default.
+            let end_logical = entry.tx_end_logical.ok_or_else(|| {
+                IndexPersistenceError::Serialization(format!(
+                    "Corrupt version entry {}: tx_end is set but tx_end_logical is missing",
+                    entry.version_id
+                ))
+            })?;
+            TimeRange::new(tx_start, HybridTimestamp::new_unchecked(end, end_logical)).map_err(
+                |e| {
+                    IndexPersistenceError::Serialization(format!(
+                        "Invalid transaction time range [{}, {}]: {}",
+                        entry.tx_time, end, e
+                    ))
+                },
+            )?
+        }
         None => TimeRange::from(tx_start),
     };
     let temporal = BiTemporalInterval::new(valid_time, tx_time);
@@ -695,7 +753,11 @@ fn decode_temporal_blob(path: &Path) -> Result<TemporalIndexData> {
             got: legacy.magic,
         });
     }
-    if legacy.version > MANIFEST_VERSION {
+    // The V1 shape is the last candidate: only an exact version-1 stamp may
+    // decode through it. Anything else (0, or a 2/3 whose proper-shape decode
+    // failed above, or a future version) would be a misdecode, not a legacy
+    // file.
+    if legacy.version != 1 {
         return Err(IndexPersistenceError::UnsupportedVersion {
             found: legacy.version,
             supported: MANIFEST_VERSION,

@@ -46,16 +46,26 @@ fn bootstrap_timestamp(
 
     let historical = historical.read();
     for node_version in historical.get_node_versions().values() {
-        let commit_ts = node_version.temporal.transaction_time().start();
-        if commit_ts > max_timestamp {
-            max_timestamp = commit_ts;
+        let tx_time = node_version.temporal.transaction_time();
+        if tx_time.start() > max_timestamp {
+            max_timestamp = tx_time.start();
+        }
+        // Issue #3387: restored versions carry CLOSED tx ends too. A closure
+        // stamped by a superseding version that was since cold-migrated may
+        // exceed every restored tx start; fold it in so the HLC seed stays
+        // monotonic under clock skew.
+        if !tx_time.is_current() && tx_time.end() > max_timestamp {
+            max_timestamp = tx_time.end();
         }
     }
 
     for edge_version in historical.get_edge_versions().values() {
-        let commit_ts = edge_version.temporal.transaction_time().start();
-        if commit_ts > max_timestamp {
-            max_timestamp = commit_ts;
+        let tx_time = edge_version.temporal.transaction_time();
+        if tx_time.start() > max_timestamp {
+            max_timestamp = tx_time.start();
+        }
+        if !tx_time.is_current() && tx_time.end() > max_timestamp {
+            max_timestamp = tx_time.end();
         }
     }
 

@@ -5181,3 +5181,145 @@ fn test_get_edge_version_read_metadata_cold_tier_fallback() {
     assert_eq!(interval.valid_time().start(), 3_000.into());
     assert_eq!(interval.transaction_time().start(), 4_000.into());
 }
+
+// ============================================================================
+// Issue #3387: rebuild_version_chains preserves restored (persisted) state
+// ============================================================================
+
+/// Restored chain links pointing at a version ABSENT from the hot map
+/// (cold-migrated) must survive `rebuild_version_chains`: the heuristic must
+/// fill only MISSING links, never rewire hot versions around the gap, and
+/// must not touch an already-closed transaction time.
+///
+/// Chain on disk: v1 <-> v2 <-> v3, with v2 cold-migrated (absent here).
+/// v1: tx [1000, 2000) CLOSED, next = Some(v2)
+/// v3: tx [3000, open),        prev = Some(v2)
+#[test]
+fn test_rebuild_version_chains_preserves_restored_links_across_cold_gap() {
+    let mut storage = HistoricalStorage::new();
+    let node_id = NodeId::new(1).unwrap();
+    let label = GLOBAL_INTERNER.intern("ColdGapNode").unwrap();
+
+    let v1_id = VersionId::new(1).unwrap();
+    let v2_id = VersionId::new(2).unwrap(); // cold-migrated: never inserted
+    let v3_id = VersionId::new(3).unwrap();
+
+    let v1_tx_end: Timestamp = 2000.into();
+    let mut v1 = NodeVersion::new_anchor(
+        v1_id,
+        node_id,
+        BiTemporalInterval::current(1000.into())
+            .close_transaction_time(v1_tx_end)
+            .unwrap(),
+        label,
+        PropertyMapBuilder::new().insert("name", "v1").build(),
+    );
+    v1.next_version = Some(v2_id);
+
+    let mut v3 = NodeVersion::new_anchor(
+        v3_id,
+        node_id,
+        BiTemporalInterval::current(3000.into()),
+        label,
+        PropertyMapBuilder::new().insert("name", "v3").build(),
+    );
+    v3.prev_version = Some(v2_id);
+
+    storage.insert_restored_node_version(v1).unwrap();
+    storage.insert_restored_node_version(v3).unwrap();
+
+    storage.rebuild_version_chains();
+
+    let v1 = storage.node_versions.get(&v1_id).unwrap();
+    assert_eq!(
+        v1.next_version,
+        Some(v2_id),
+        "restored next link into the cold tier must not be rewired to v3"
+    );
+    assert_eq!(v1.prev_version, None, "v1 is the oldest: prev stays None");
+    assert_eq!(
+        v1.temporal.transaction_time().end(),
+        v1_tx_end,
+        "already-closed tx end must not be re-closed at v3's tx start"
+    );
+
+    let v3 = storage.node_versions.get(&v3_id).unwrap();
+    assert_eq!(
+        v3.prev_version,
+        Some(v2_id),
+        "restored prev link into the cold tier must not be rewired to v1"
+    );
+    assert_eq!(v3.next_version, None, "v3 is the head: next stays None");
+    assert!(v3.temporal.transaction_time().is_current());
+
+    // Head still resolves to the latest-tx version.
+    assert_eq!(storage.get_current_node_version(node_id), Some(v3_id));
+}
+
+/// Edge mirror of
+/// [`test_rebuild_version_chains_preserves_restored_links_across_cold_gap`]:
+/// the edge section of `rebuild_version_chains` has its own fill-only-missing
+/// guards that a node-only test would not exercise.
+#[test]
+fn test_rebuild_edge_version_chains_preserves_restored_links_across_cold_gap() {
+    let mut storage = HistoricalStorage::new();
+    let edge_id = EdgeId::new(1).unwrap();
+    let source = NodeId::new(1).unwrap();
+    let target = NodeId::new(2).unwrap();
+    let label = GLOBAL_INTERNER.intern("COLD_GAP_EDGE").unwrap();
+
+    let v1_id = VersionId::new(11).unwrap();
+    let v2_id = VersionId::new(12).unwrap(); // cold-migrated: never inserted
+    let v3_id = VersionId::new(13).unwrap();
+
+    let v1_tx_end: Timestamp = 2000.into();
+    let mut v1 = EdgeVersion::new_anchor(
+        v1_id,
+        edge_id,
+        BiTemporalInterval::current(1000.into())
+            .close_transaction_time(v1_tx_end)
+            .unwrap(),
+        label,
+        source,
+        target,
+        PropertyMapBuilder::new().insert("w", 1i64).build(),
+    );
+    v1.next_version = Some(v2_id);
+
+    let mut v3 = EdgeVersion::new_anchor(
+        v3_id,
+        edge_id,
+        BiTemporalInterval::current(3000.into()),
+        label,
+        source,
+        target,
+        PropertyMapBuilder::new().insert("w", 3i64).build(),
+    );
+    v3.prev_version = Some(v2_id);
+
+    storage.insert_restored_edge_version(v1).unwrap();
+    storage.insert_restored_edge_version(v3).unwrap();
+
+    storage.rebuild_version_chains();
+
+    let v1 = storage.edge_versions.get(&v1_id).unwrap();
+    assert_eq!(
+        v1.next_version,
+        Some(v2_id),
+        "restored next link into the cold tier must not be rewired to v3"
+    );
+    assert_eq!(
+        v1.temporal.transaction_time().end(),
+        v1_tx_end,
+        "already-closed tx end must not be re-closed at v3's tx start"
+    );
+
+    let v3 = storage.edge_versions.get(&v3_id).unwrap();
+    assert_eq!(
+        v3.prev_version,
+        Some(v2_id),
+        "restored prev link into the cold tier must not be rewired to v1"
+    );
+    assert_eq!(v3.next_version, None);
+    assert_eq!(storage.get_current_edge_version(edge_id), Some(v3_id));
+}

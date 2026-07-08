@@ -198,6 +198,12 @@ impl From<BackupPayloadV1> for BackupPayload {
 /// [`crate::storage::index_persistence::formats::legacy_v2::TemporalIndexDataV2`]
 /// shape (no tx-end / chain-link fields). Kept only so `read_artifact` can
 /// restore version-2 artifacts.
+///
+/// Frozen reference: the live `BackupPayload` as of trunk commit d54eb25
+/// (the last pre-#3387 commit). Note this shape reuses the LIVE
+/// `StringInternerData`/`GraphIndexData` structs (FORMAT-FROZEN, see
+/// `index_persistence::formats`): they are unchanged since v1, and any
+/// future layout change to them must freeze copies here first.
 #[derive(Debug, Clone, Encode, Decode)]
 pub(crate) struct BackupPayloadV2 {
     /// Unix timestamp (microseconds) when the backup was created.

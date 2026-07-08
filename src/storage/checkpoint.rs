@@ -58,7 +58,7 @@ use crate::storage::index_persistence::{
         GraphIndexData, GraphIndexManifestEntry, IndexManifest, StringInternerManifestEntry,
         TemporalIndexData, TemporalIndexManifestEntry,
     },
-    graph::{persist_property_map, restore_property_map},
+    graph::restore_property_map,
 };
 use crate::storage::redb_cold_storage::RedbColdStorage;
 use crate::storage::wal::LSN;
@@ -77,6 +77,120 @@ fn persistence_err(e: IndexPersistenceError) -> crate::core::error::Error {
         reason: e.to_string(),
     }
     .into()
+}
+
+/// Reconstruct the full property state of the version PRECEDING `version`,
+/// using only versions captured in the checkpoint snapshot (Issue #3387).
+///
+/// Used to materialize sparse vector deltas at checkpoint-extract time:
+/// walks `prev_version` links back to the nearest anchor, then re-applies
+/// the intervening deltas oldest-first. Fails (rather than persisting a
+/// silently-lossy entry) if the chain leaves the snapshot (e.g. the base
+/// was cold-migrated) or carries no anchor.
+fn reconstruct_node_base_properties(
+    by_id: &std::collections::HashMap<VersionId, Arc<crate::core::version::NodeVersion>>,
+    version: &crate::core::version::NodeVersion,
+) -> Result<crate::core::property::PropertyMap> {
+    let chain_err = |reason: String| StorageError::CheckpointError { reason };
+
+    let mut chain: Vec<&Arc<crate::core::version::NodeVersion>> = Vec::new();
+    let mut cur = version.prev_version;
+    while let Some(vid) = cur {
+        if chain.len() >= crate::storage::historical::MAX_RECONSTRUCTION_DEPTH {
+            return Err(chain_err(format!(
+                "Version chain for node {} exceeds max reconstruction depth \
+                 while materializing sparse vector deltas",
+                version.node_id
+            ))
+            .into());
+        }
+        let v = by_id.get(&vid).ok_or_else(|| {
+            chain_err(format!(
+                "Cannot materialize sparse vector delta for node version {}: \
+                 base version {} is not in the checkpoint snapshot (cold-migrated?)",
+                version.id, vid
+            ))
+        })?;
+        chain.push(v);
+        if v.is_anchor() {
+            break;
+        }
+        cur = v.prev_version;
+    }
+
+    let anchor_props = match chain.last().map(|v| &v.data) {
+        Some(VersionData::Anchor { properties, .. }) => properties.clone(),
+        _ => {
+            return Err(chain_err(format!(
+                "Cannot materialize sparse vector delta for node version {}: \
+                 no anchor found in its version chain",
+                version.id
+            ))
+            .into());
+        }
+    };
+
+    // Re-apply the deltas between the anchor and `version` oldest-first.
+    let mut props = anchor_props;
+    for v in chain.iter().rev().skip(1) {
+        if let VersionData::Delta { delta } = &v.data {
+            props = delta.apply(&props);
+        }
+    }
+    Ok(props)
+}
+
+/// Edge mirror of [`reconstruct_node_base_properties`].
+fn reconstruct_edge_base_properties(
+    by_id: &std::collections::HashMap<VersionId, Arc<crate::core::version::EdgeVersion>>,
+    version: &crate::core::version::EdgeVersion,
+) -> Result<crate::core::property::PropertyMap> {
+    let chain_err = |reason: String| StorageError::CheckpointError { reason };
+
+    let mut chain: Vec<&Arc<crate::core::version::EdgeVersion>> = Vec::new();
+    let mut cur = version.prev_version;
+    while let Some(vid) = cur {
+        if chain.len() >= crate::storage::historical::MAX_RECONSTRUCTION_DEPTH {
+            return Err(chain_err(format!(
+                "Version chain for edge {} exceeds max reconstruction depth \
+                 while materializing sparse vector deltas",
+                version.edge_id
+            ))
+            .into());
+        }
+        let v = by_id.get(&vid).ok_or_else(|| {
+            chain_err(format!(
+                "Cannot materialize sparse vector delta for edge version {}: \
+                 base version {} is not in the checkpoint snapshot (cold-migrated?)",
+                version.id, vid
+            ))
+        })?;
+        chain.push(v);
+        if v.is_anchor() {
+            break;
+        }
+        cur = v.prev_version;
+    }
+
+    let anchor_props = match chain.last().map(|v| &v.data) {
+        Some(VersionData::Anchor { properties, .. }) => properties.clone(),
+        _ => {
+            return Err(chain_err(format!(
+                "Cannot materialize sparse vector delta for edge version {}: \
+                 no anchor found in its version chain",
+                version.id
+            ))
+            .into());
+        }
+    };
+
+    let mut props = anchor_props;
+    for v in chain.iter().rev().skip(1) {
+        if let VersionData::Delta { delta } = &v.data {
+            props = delta.apply(&props);
+        }
+    }
+    Ok(props)
 }
 
 /// Configuration for checkpoint behavior.
@@ -710,15 +824,45 @@ impl CheckpointManager {
         &self,
         snapshot: &crate::storage::snapshot::HistoricalStorageSnapshot,
     ) -> Result<TemporalIndexData> {
-        use crate::storage::index_persistence::formats::{EdgeAnchorEntry, NodeAnchorEntry};
+        use crate::storage::index_persistence::formats::{
+            EdgeAnchorEntry, NodeAnchorEntry, PersistedVersionType,
+        };
         use crate::storage::index_persistence::temporal::{
-            convert_edge_version, convert_node_version,
+            convert_edge_version, convert_node_version, materialize_version_data_for_persistence,
+            needs_sparse_vector_materialization,
         };
 
         let mut node_versions = Vec::with_capacity(snapshot.node_version_count());
         let mut node_anchors = Vec::with_capacity(snapshot.node_version_count());
         let mut edge_versions = Vec::with_capacity(snapshot.edge_version_count());
         let mut edge_anchors = Vec::with_capacity(snapshot.edge_version_count());
+
+        // Sparse vector deltas cannot be persisted as-is (Issue #3387
+        // availability fix): materialize them against the base state
+        // reconstructed WITHIN the snapshot, in the persisted copy only.
+        // The common case (no sparse deltas) pays only this detection scan.
+        let node_by_id: std::collections::HashMap<
+            VersionId,
+            Arc<crate::core::version::NodeVersion>,
+        > = if snapshot
+            .iter_node_versions()
+            .any(|v| needs_sparse_vector_materialization(&v.data))
+        {
+            snapshot.iter_node_versions().map(|v| (v.id, v)).collect()
+        } else {
+            std::collections::HashMap::new()
+        };
+        let edge_by_id: std::collections::HashMap<
+            VersionId,
+            Arc<crate::core::version::EdgeVersion>,
+        > = if snapshot
+            .iter_edge_versions()
+            .any(|v| needs_sparse_vector_materialization(&v.data))
+        {
+            snapshot.iter_edge_versions().map(|v| (v.id, v)).collect()
+        } else {
+            std::collections::HashMap::new()
+        };
 
         // Extract node versions from snapshot (isolated from concurrent
         // writes). Entry conversion is delegated to the canonical
@@ -727,32 +871,46 @@ impl CheckpointManager {
         // Issue #3387 tx-time closures and version chain links.
         for version_arc in snapshot.iter_node_versions() {
             let version = &*version_arc;
-            if let VersionData::Anchor {
-                properties,
-                vector_snapshot_id,
-            } = &version.data
-            {
+            let entry = if needs_sparse_vector_materialization(&version.data) {
+                let base = reconstruct_node_base_properties(&node_by_id, version)?;
+                let mut persisted = version.clone();
+                persisted.data = materialize_version_data_for_persistence(&version.data, &base)
+                    .map_err(persistence_err)?;
+                convert_node_version(&persisted).map_err(persistence_err)?
+            } else {
+                convert_node_version(version).map_err(persistence_err)?
+            };
+            if matches!(entry.version_type, PersistedVersionType::Anchor) {
                 node_anchors.push(NodeAnchorEntry {
-                    node_id: version.node_id.as_u64(),
-                    anchor_tx_time: version.temporal.transaction_time().start().wallclock(),
-                    full_state: persist_property_map(properties).map_err(persistence_err)?,
-                    vector_snapshot_id: vector_snapshot_id.map(|id| id as u64),
+                    node_id: entry.node_id,
+                    anchor_tx_time: entry.tx_time,
+                    full_state: entry.properties.clone(),
+                    vector_snapshot_id: entry.vector_snapshot_id,
                 });
             }
-            node_versions.push(convert_node_version(version).map_err(persistence_err)?);
+            node_versions.push(entry);
         }
 
         // Extract edge versions from snapshot (isolated from concurrent writes)
         for version_arc in snapshot.iter_edge_versions() {
             let version = &*version_arc;
-            if let VersionData::Anchor { properties, .. } = &version.data {
+            let entry = if needs_sparse_vector_materialization(&version.data) {
+                let base = reconstruct_edge_base_properties(&edge_by_id, version)?;
+                let mut persisted = version.clone();
+                persisted.data = materialize_version_data_for_persistence(&version.data, &base)
+                    .map_err(persistence_err)?;
+                convert_edge_version(&persisted).map_err(persistence_err)?
+            } else {
+                convert_edge_version(version).map_err(persistence_err)?
+            };
+            if matches!(entry.version_type, PersistedVersionType::Anchor) {
                 edge_anchors.push(EdgeAnchorEntry {
-                    edge_id: version.edge_id.as_u64(),
-                    anchor_tx_time: version.temporal.transaction_time().start().wallclock(),
-                    full_state: persist_property_map(properties).map_err(persistence_err)?,
+                    edge_id: entry.edge_id,
+                    anchor_tx_time: entry.tx_time,
+                    full_state: entry.properties.clone(),
                 });
             }
-            edge_versions.push(convert_edge_version(version).map_err(persistence_err)?);
+            edge_versions.push(entry);
         }
 
         Ok(TemporalIndexData {
@@ -2875,5 +3033,145 @@ mod tests {
         assert!(result.used_cold_storage());
         assert!(!result.used_checkpoint());
         assert_eq!(result.wal_entries_skipped_from_cold(), 75);
+    }
+
+    /// Issue #3387 mixed-matrix cell: a LEGACY (pre-#3387, `version == 2`)
+    /// temporal blob restored by the current binary, followed by a WAL
+    /// replay tail that updates a checkpointed node. The legacy restore
+    /// leaves tx intervals open (heuristic rebuild), and the replayed update
+    /// must close the restored head's tx time and chain onto it correctly.
+    #[test]
+    fn test_recover_legacy_v2_checkpoint_with_wal_replay_tail() -> Result<()> {
+        use crate::core::id::VersionId;
+        use crate::storage::index_persistence::formats::PersistedVersionType;
+        use crate::storage::index_persistence::formats::legacy_v2::{
+            NodeVersionEntryV2, TemporalIndexDataV2,
+        };
+        use crate::storage::index_persistence::graph::persist_property_map;
+
+        let temp_dir = TempDir::new().unwrap();
+        let wal_dir = temp_dir.path().join("wal");
+        let data_dir = temp_dir.path().join("data");
+
+        let wal = ConcurrentWalSystem::new(ConcurrentWalSystemConfig::new(&wal_dir))?;
+        let node_id = NodeId::new(1)?;
+        let label = GLOBAL_INTERNER.intern("LegacyTail").unwrap();
+
+        wal.append(WalOperation::CreateNode {
+            node_id,
+            label,
+            properties: PropertyMapBuilder::new().insert("name", "Alice").build(),
+            valid_from: time::now(),
+            provenance: None,
+        })?;
+        wal.flush()?;
+
+        // Checkpoint the replayed state, then REWRITE the temporal blob in
+        // the byte-exact pre-#3387 (version == 2) layout, built from the
+        // actual checkpointed version.
+        let checkpoint_lsn = LSN(wal.current_lsn().0.saturating_sub(1));
+        let (v1_id, v1_props, v1_valid, v1_tx);
+        {
+            let config = CheckpointConfig::with_data_dir(&data_dir);
+            let mut manager = CheckpointManager::new(config)?;
+            let (current, historical, _final) = manager.recover(&wal)?;
+            manager.create_checkpoint(checkpoint_lsn, &current, &historical)?;
+
+            let head_id = historical
+                .get_current_node_version(node_id)
+                .expect("head version");
+            let head = historical.get_node_version(head_id).unwrap();
+            v1_id = head.id;
+            v1_valid = head.temporal.valid_time().start();
+            v1_tx = head.temporal.transaction_time().start();
+            let VersionData::Anchor { properties, .. } = &head.data else {
+                panic!("create version must be an anchor");
+            };
+            v1_props = properties.clone();
+
+            let legacy = TemporalIndexDataV2 {
+                magic: TEMPORAL_MAGIC,
+                version: 2,
+                node_versions: vec![NodeVersionEntryV2 {
+                    version_id: v1_id.as_u64(),
+                    node_id: node_id.as_u64(),
+                    label_idx: label.as_u32(),
+                    valid_from: v1_valid.wallclock(),
+                    valid_from_logical: v1_valid.logical(),
+                    valid_to: None,
+                    valid_to_logical: None,
+                    tx_time: v1_tx.wallclock(),
+                    tx_time_logical: v1_tx.logical(),
+                    version_type: PersistedVersionType::Anchor,
+                    properties: persist_property_map(&v1_props).map_err(persistence_err)?,
+                    vector_snapshot_id: None,
+                    provenance: None,
+                }],
+                node_anchors: vec![],
+                edge_versions: vec![],
+                edge_anchors: vec![],
+            };
+            let temporal_path = manager
+                .persistence_manager
+                .temporal_path()
+                .join("versions.idx");
+            crate::storage::index_persistence::common::save_encoded_with_crc(
+                &legacy,
+                &temporal_path,
+            )
+            .map_err(persistence_err)?;
+        }
+
+        // The update lands in the WAL AFTER the (now legacy-format) checkpoint.
+        wal.append(WalOperation::UpdateNode {
+            node_id,
+            version_id: VersionId::new(50)?,
+            label,
+            properties: PropertyMapBuilder::new().insert("name", "Alice2").build(),
+            valid_from: time::now(),
+            provenance: None,
+        })?;
+        wal.flush()?;
+
+        // Recovery: legacy-blob restore (heuristic chain rebuild, open tx)
+        // + replay of the update tail on top of it.
+        let config = CheckpointConfig::with_data_dir(&data_dir);
+        let mut manager = CheckpointManager::new(config)?;
+        let (current, historical, _final) = manager.recover(&wal)?;
+
+        let node = current.get_node(node_id)?;
+        assert_eq!(
+            node.get_property("name").and_then(|v| v.as_str()),
+            Some("Alice2"),
+            "replay tail must apply on top of the legacy-restored state"
+        );
+
+        let history = historical.get_node_history(node_id)?;
+        assert_eq!(
+            history.version_count(),
+            2,
+            "legacy-restored create + replayed update"
+        );
+        let v1 = &history.versions[0];
+        let v2 = &history.versions[1];
+        assert_eq!(v1.version_id, v1_id);
+        assert!(
+            !v1.temporal.transaction_time().is_current(),
+            "replayed update must close the legacy-restored head's tx time"
+        );
+        assert_eq!(
+            v1.temporal.transaction_time().end(),
+            v2.temporal.transaction_time().start(),
+            "closure must land exactly at the superseding tx start"
+        );
+
+        // AS OF SYSTEM_TIME at the original commit still sees Alice.
+        let at_create = historical.get_node_at_time(node_id, v1_valid, v1_tx)?;
+        assert_eq!(
+            at_create.get_property("name").and_then(|v| v.as_str()),
+            Some("Alice")
+        );
+
+        Ok(())
     }
 }
