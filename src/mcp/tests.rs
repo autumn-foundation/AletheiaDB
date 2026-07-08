@@ -9412,4 +9412,126 @@ mod temporal_bounds_tests {
              transaction interval: {bounds:?}"
         );
     }
+
+    #[test]
+    fn test_wallclock_beyond_chrono_range_falls_back_to_raw_micros() {
+        // chrono can only represent dates up to ~year 262143 (~8.2e18
+        // micros), while valid HLC wallclocks extend to MAX_VALID_TIMESTAMP
+        // (i64::MAX - 1000). A bound past chrono's range must fall back to
+        // the raw microsecond count as a string instead of silently
+        // rendering the 1970 epoch.
+        let huge_micros = 9_000_000_000_000_000_000i64;
+        let far_future = HybridTimestamp::new(huge_micros, 0).expect("legal HLC wallclock");
+        let interval = BiTemporalInterval::new(
+            TimeRange::from(far_future),
+            TimeRange::from(HybridTimestamp::new(1_000_000, 0).expect("valid stamp")),
+        );
+
+        let bounds = TemporalBounds::from(&interval);
+        assert_eq!(
+            bounds.valid_from,
+            huge_micros.to_string(),
+            "out-of-chrono-range wallclock must serialize as raw micros: {bounds:?}"
+        );
+        assert!(
+            bounds.valid_to.is_none(),
+            "open-ended valid_to must stay None: {bounds:?}"
+        );
+        // The in-range transaction bound must still be RFC3339.
+        assert_eq!(rfc3339_to_micros(&bounds.transaction_from), 1_000_000);
+        // A fact whose valid time hasn't begun is not current.
+        assert!(!bounds.is_current, "far-future fact is not current");
+    }
+
+    #[test]
+    fn test_node_with_unresolvable_version_omits_temporal_and_provenance() {
+        // Best-effort degrade path (mirrors provenance, Issue #3224): when
+        // the version metadata cannot be loaded from any tier, the read must
+        // still succeed with the `temporal` and `provenance` blocks omitted
+        // -- never a fabricated value, never a whole-response failure.
+        use crate::core::id::{NodeId, VersionId};
+
+        let server = create_test_server();
+        let created = create_person(&server, "Ghost");
+        let node_id = created["id"].as_u64().unwrap();
+
+        // Re-point the stored node's current_version at a version id that
+        // exists in no tier, simulating unreadable version metadata.
+        let mut node = server
+            .db()
+            .current
+            .get_node(NodeId::new(node_id).unwrap())
+            .unwrap();
+        node.current_version = VersionId::new(9_999_999).unwrap();
+        server
+            .db()
+            .current
+            .update_node_direct(node, time::now())
+            .unwrap();
+
+        let response = server.get_node(GetNodeRequest {
+            node_id,
+            include_vectors: None,
+        });
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert!(
+            value.get("error").is_none(),
+            "read must still succeed when metadata is unreadable: {value}"
+        );
+        assert_eq!(value["id"].as_u64(), Some(node_id));
+        assert_eq!(value["label"], "Person");
+        assert_eq!(value["properties"]["name"], "Ghost");
+        assert!(
+            value.get("temporal").is_none(),
+            "temporal must be omitted, not fabricated: {value}"
+        );
+        assert!(
+            value.get("provenance").is_none(),
+            "provenance must be omitted, not fabricated: {value}"
+        );
+    }
+
+    #[test]
+    fn test_edge_with_unresolvable_version_omits_temporal_and_provenance() {
+        // Edge mirror of the node degrade case above.
+        use crate::core::id::{EdgeId, VersionId};
+
+        let server = create_test_server();
+        let alice = create_person(&server, "Alice");
+        let bob = create_person(&server, "Bob");
+        let edge = create_knows_edge(
+            &server,
+            alice["id"].as_u64().unwrap(),
+            bob["id"].as_u64().unwrap(),
+        );
+        let edge_id = edge["id"].as_u64().unwrap();
+
+        let mut stored = server
+            .db()
+            .current
+            .get_edge(EdgeId::new(edge_id).unwrap())
+            .unwrap();
+        stored.current_version = VersionId::new(9_999_998).unwrap();
+        server.db().current.update_edge_direct(stored).unwrap();
+
+        let response = server.get_edge(GetEdgeRequest {
+            edge_id,
+            include_vectors: None,
+        });
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert!(
+            value.get("error").is_none(),
+            "read must still succeed when metadata is unreadable: {value}"
+        );
+        assert_eq!(value["id"].as_u64(), Some(edge_id));
+        assert_eq!(value["label"], "KNOWS");
+        assert!(
+            value.get("temporal").is_none(),
+            "temporal must be omitted, not fabricated: {value}"
+        );
+        assert!(
+            value.get("provenance").is_none(),
+            "provenance must be omitted, not fabricated: {value}"
+        );
+    }
 }
