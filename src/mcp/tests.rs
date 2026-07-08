@@ -9051,16 +9051,30 @@ mod database_stats_tests {
         assert!(value.get("wal").is_some());
 
         // A non-object argument value is a malformed request: structured
-        // error, never a panic or silent success.
+        // error (Issue #3234 shape), never a panic or silent success.
         let value: serde_json::Value =
             serde_json::from_str(&server.database_stats_raw(serde_json::json!("bogus")))
                 .expect("invalid args must still yield valid JSON");
         let error = value
             .get("error")
-            .and_then(|e| e.as_str())
-            .expect("non-object arguments must produce an error");
+            .and_then(|e| e.as_object())
+            .expect("non-object arguments must produce a structured error object");
+        assert_eq!(
+            error.get("code").and_then(|c| c.as_str()),
+            Some("INVALID_ARGUMENT"),
+            "malformed arguments must be INVALID_ARGUMENT: {value}"
+        );
+        assert_eq!(
+            error.get("retriable").and_then(|r| r.as_bool()),
+            Some(false),
+            "INVALID_ARGUMENT is never retriable: {value}"
+        );
+        let message = error
+            .get("message")
+            .and_then(|m| m.as_str())
+            .expect("structured error must carry a message");
         assert!(
-            error.contains("Invalid arguments"),
+            message.contains("Invalid arguments"),
             "error must identify the argument problem: {value}"
         );
     }
