@@ -73,6 +73,32 @@ fn seed_startup_current_timestamp(db: &AletheiaDB) -> Result<()> {
     Ok(())
 }
 
+/// Seed the WAL LSN allocator from durable state at startup (Issue #3420).
+///
+/// Scans the WAL directory for the maximum LSN present in existing segments
+/// and moves the allocator to `max + 1` (never backwards). Must run after WAL
+/// construction and **before any write is accepted**; otherwise a restarted
+/// process starts allocating at LSN 1 again, producing duplicate LSNs across
+/// segments and writes that land below the index manifest LSN — which the
+/// next startup's differential replay then silently skips.
+///
+/// Seeding policy lives here (in the database startup path), not inside the
+/// WAL constructor, so WAL-crate users keep full control over allocator state.
+fn seed_lsn_allocator_from_segments(
+    wal: &ConcurrentWalSystem,
+    cipher: Option<&Arc<dyn crate::encryption::cipher::Cipher>>,
+) -> Result<()> {
+    if let Some(max_lsn) =
+        crate::storage::wal::segment_reader::max_lsn_in_dir(wal.wal_dir(), cipher)?
+    {
+        let next = crate::storage::wal::LSN(max_lsn.0.saturating_add(1));
+        if next > wal.current_lsn() {
+            wal.set_next_lsn(next);
+        }
+    }
+    Ok(())
+}
+
 /// Extract the effective flush interval from a durability mode, falling back to a default.
 fn flush_interval_from_durability(mode: DurabilityMode, default_ms: u64) -> u64 {
     match mode {
@@ -334,10 +360,18 @@ impl AletheiaDB {
                 ),
                 durability_mode,
                 write_buffer_size: config.wal.write_buffer_size,
-                wal_cipher,
+                wal_cipher: wal_cipher.clone(),
             };
 
             let wal = Arc::new(ConcurrentWalSystem::new(wal_system_config)?);
+
+            // Issue #3420: seed the LSN allocator past every LSN already durable
+            // in existing WAL segments, BEFORE any write is accepted. Without
+            // this, a restarted process re-allocates LSNs starting at 1,
+            // breaking LSN total ordering across segments and placing new
+            // writes below the index manifest LSN (so the next startup's
+            // differential replay silently skips them).
+            seed_lsn_allocator_from_segments(&wal, wal_cipher.as_ref())?;
 
             // Create persistence manager if enabled
             let persistence_manager = if config.persistence.enabled {
@@ -400,6 +434,20 @@ impl AletheiaDB {
                         &db.edge_id_gen,
                         &db.version_id_gen,
                     );
+
+                // Issue #3420: the manifest LSN is a second durability floor for
+                // the allocator. Normally the segment scan above already seeded
+                // the allocator higher, but if the WAL was truncated below the
+                // manifest LSN (e.g. LSN-based truncation after cold-storage
+                // migration), the segments alone under-seed it. The manifest
+                // stores the next-to-allocate LSN captured at snapshot time
+                // (see `IndexManifest::lsn`), so it is itself a valid "next".
+                if let Some(lsn) = loaded_lsn {
+                    let manifest_floor = crate::storage::wal::LSN(lsn);
+                    if manifest_floor > db.wal.current_lsn() {
+                        db.wal.set_next_lsn(manifest_floor);
+                    }
+                }
 
                 // Initialize tracker LSNs from the loaded manifest
                 if let Some(ref tracker) = persistence_tracker
@@ -609,6 +657,12 @@ impl AletheiaDB {
             };
 
             let wal = Arc::new(ConcurrentWalSystem::new(wal_system_config)?);
+
+            // Issue #3420: seed the LSN allocator from existing WAL segments
+            // before any write is accepted (see with_unified_config for details).
+            // This construction path never configures a WAL cipher, matching
+            // its (pre-existing) cipher-less read path.
+            seed_lsn_allocator_from_segments(&wal, None)?;
 
             let db = AletheiaDB {
                 current: Arc::new(CurrentStorage::new()),

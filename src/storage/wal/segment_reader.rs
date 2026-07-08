@@ -219,6 +219,32 @@ pub fn read_entries_from_dir_with_cipher(
     Ok(entries)
 }
 
+/// Scan a WAL directory for the maximum LSN present in any segment file.
+///
+/// Standalone, additive helper for Issue #3420: on startup the LSN allocator
+/// must be seeded past every LSN already durable on disk, otherwise a
+/// restarted process re-allocates LSNs that already exist in older segments
+/// (breaking LSN total ordering) and new writes land *below* the manifest
+/// LSN, causing the next startup's differential replay to skip them.
+///
+/// Reuses the existing segment decoding path ([`read_entries_from_dir_with_cipher`])
+/// without modifying it. Encrypted (version 2/4) segments require `cipher`,
+/// exactly like every other reader in this module; a missing cipher for an
+/// encrypted segment propagates the same error the recovery read path would
+/// produce.
+///
+/// # Returns
+///
+/// `Ok(None)` when the directory contains no segments or no entries;
+/// otherwise the maximum LSN across all decodable entries.
+pub fn max_lsn_in_dir(
+    wal_dir: &Path,
+    cipher: Option<&Arc<dyn crate::encryption::cipher::Cipher>>,
+) -> Result<Option<LSN>> {
+    let entries = read_entries_from_dir_with_cipher(wal_dir, LSN::initial(), cipher)?;
+    Ok(entries.iter().map(|entry| entry.lsn).max())
+}
+
 /// Read WAL entries from a single segment file.
 ///
 /// This function uses memory-mapped I/O for efficient reading without loading

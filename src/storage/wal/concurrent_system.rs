@@ -684,6 +684,16 @@ impl ConcurrentWalSystem {
         self.wal.current_lsn()
     }
 
+    /// Set the next LSN to allocate.
+    ///
+    /// **Warning**: Recovery-only (Issue #3420). Call this during startup —
+    /// before any write is accepted — to seed the allocator past every LSN
+    /// already durable on disk (WAL segments and/or index manifest). Calling
+    /// it during normal operation will cause duplicate LSNs.
+    pub fn set_next_lsn(&self, lsn: LSN) {
+        self.wal.set_next_lsn(lsn);
+    }
+
     /// Get total entries appended.
     pub fn total_appends(&self) -> u64 {
         self.wal.total_appends()
