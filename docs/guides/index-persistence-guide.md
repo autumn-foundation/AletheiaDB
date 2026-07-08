@@ -91,7 +91,7 @@ let db = AletheiaDB::with_unified_config(config)?;
 └── indexes/       # Persisted indexes (fast restart)
     ├── graph.bin.zst        # Graph structure (compressed)
     ├── temporal.bin.zst     # Temporal indexes
-    └── vector_*.bin         # Vector HNSW indexes
+    └── vector/{prop}/       # Vector HNSW indexes (per property)
 ```
 
 **Benefits:**
@@ -180,6 +180,36 @@ data/my-database/
 └── wal/                       # Write-ahead log (separate)
     └── ...
 ```
+
+### Vector Index Persistence
+
+Each vector-indexed property gets its own directory under `indexes/vector/`
+containing three files:
+
+| File | Format | Contents |
+|------|--------|----------|
+| `meta.idx` | bitcode + CRC32 (`GVEC` magic, versioned) | Property name, dimensions, distance metric, HNSW hyper-parameters (`m`, `ef_construction`, `ef_search`), vector count |
+| `mappings.idx` | bitcode + CRC32 | `NodeId` <-> usearch key translation table |
+| `current.usearch` | usearch native binary | The HNSW graph itself (vectors + links) |
+
+**Save:** vector indexes are persisted by `persist_indexes()`, the background
+persistence worker (per the vector persistence policy), and shutdown
+persistence — no separate call needed.
+
+**Load (Issue #451):** on startup with `load_on_startup: true`, all
+per-property vector indexes are loaded **in parallel** (one rayon task per
+property) and registered before the database becomes ready. The full HNSW
+graph is restored from `current.usearch` — vectors are **not** re-indexed
+from node properties, so startup cost is disk I/O, not index construction.
+After the restart, `find_similar` / `find_similar_in` work immediately and
+newly created nodes with vector properties are indexed as usual.
+
+**Per-index error isolation:** a corrupted or unreadable vector index
+(bad `meta.idx`, `mappings.idx`, or `current.usearch`, unknown metric) is
+skipped with a warning; it never aborts startup and never prevents the
+remaining vector indexes from loading. A skipped index is simply not
+registered — re-enable it and rebuild from node properties
+(`db.rebuild_vector_index("property")`) to recover.
 
 ### Persistence Config Options
 
@@ -355,7 +385,7 @@ fn setup_shutdown_handler(
 1. **Use parallel loading** - `load_indexes_parallel()` loads graph, temporal, and vector indexes concurrently (~3x faster)
 2. **Use memory-mapped loading** - `load_graph_index_mmap()` for multi-GB indexes that exceed available RAM
 3. **Use SSD storage** for index files
-4. **Enable multiple vector indexes** (they load in parallel)
+4. **Multiple vector indexes load in parallel** on startup (one rayon task per property, Issue #451)
 5. **Keep manifest small** (it loads first)
 6. **Prewarm the page cache** (OS-level optimization)
 

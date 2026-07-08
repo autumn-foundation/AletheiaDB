@@ -63,6 +63,133 @@ fn test_persist_vector_indexes_with_tracker() {
     // This test mainly verifies signature compatibility.
 }
 
+/// Issue #451: a corrupted vector index on disk must not abort loading of the
+/// remaining (valid) vector indexes. `load_vector_indexes` documents that
+/// "errors during loading of individual indexes are logged but do not abort
+/// the process", so a single corrupt `meta.idx` must be skipped while every
+/// valid sibling index is still registered with `CurrentStorage`.
+#[test]
+fn test_load_vector_indexes_skips_corrupt_and_loads_valid() {
+    use crate::index::vector::{DistanceMetric, HnswConfig};
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let manager = Arc::new(IndexPersistenceManager::new(temp_dir.path()));
+    manager.ensure_directories().unwrap();
+
+    // Build and persist a valid vector index with one indexed node.
+    let current = Arc::new(CurrentStorage::new());
+    current
+        .enable_vector_index("embedding", HnswConfig::new(4, DistanceMetric::Cosine))
+        .expect("failed to enable vector index");
+    current
+        .create_node(
+            "Doc",
+            PropertyMapBuilder::new()
+                .insert_vector("embedding", &[1.0f32, 0.0, 0.0, 0.0])
+                .build(),
+        )
+        .expect("failed to create node with embedding");
+    persist_vector_indexes(&current, &manager, None, 0).expect("failed to persist vector indexes");
+
+    // Fabricate a corrupted sibling vector index directory.
+    let corrupt_dir = manager.vector_path("corrupt_embedding");
+    std::fs::create_dir_all(&corrupt_dir).unwrap();
+    std::fs::write(corrupt_dir.join("meta.idx"), b"not a valid meta file").unwrap();
+
+    // Load into a fresh storage: the corrupt index must be skipped, the
+    // valid one must load.
+    let fresh = Arc::new(CurrentStorage::new());
+    let result = load_vector_indexes(&fresh, &manager);
+    let summary = match result {
+        Ok(summary) => summary,
+        Err(e) => {
+            panic!("a corrupt vector index must be skipped, not abort all vector loading: {e}")
+        }
+    };
+    assert_eq!(summary.loaded, 1, "exactly one valid index should load");
+    assert_eq!(
+        summary.skipped, 1,
+        "exactly one corrupt index should be skipped"
+    );
+    assert!(
+        fresh.is_vector_index_enabled_for("embedding"),
+        "the valid vector index must still be loaded when a sibling is corrupt"
+    );
+    assert!(
+        !fresh.is_vector_index_enabled_for("corrupt_embedding"),
+        "the corrupt vector index must not be registered"
+    );
+}
+
+/// Issue #451: loading from a directory tree with no vector indexes must
+/// succeed with an all-zero summary (fresh database startup path).
+#[test]
+fn test_load_vector_indexes_no_vector_dir_returns_empty_summary() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let manager = Arc::new(IndexPersistenceManager::new(temp_dir.path()));
+
+    let fresh = Arc::new(CurrentStorage::new());
+    let summary = load_vector_indexes(&fresh, &manager).expect("empty data dir must load cleanly");
+    assert_eq!(summary.loaded, 0);
+    assert_eq!(summary.skipped, 0);
+    assert!(!fresh.is_vector_index_enabled());
+}
+
+/// Issue #451: multiple per-property vector indexes are loaded (in parallel)
+/// in one pass, each restored with its persisted configuration (dimensions,
+/// distance metric) and its indexed vectors.
+#[test]
+fn test_load_vector_indexes_multi_property_round_trip() {
+    use crate::index::vector::{DistanceMetric, HnswConfig, VectorIndex};
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let manager = Arc::new(IndexPersistenceManager::new(temp_dir.path()));
+    manager.ensure_directories().unwrap();
+
+    // Three properties with distinct dimensions and metrics.
+    let specs: [(&str, usize, DistanceMetric); 3] = [
+        ("title_embedding", 4, DistanceMetric::Cosine),
+        ("body_embedding", 8, DistanceMetric::Euclidean),
+        ("summary_embedding", 6, DistanceMetric::DotProduct),
+    ];
+
+    let current = Arc::new(CurrentStorage::new());
+    for (property, dims, metric) in specs {
+        current
+            .enable_vector_index(property, HnswConfig::new(dims, metric))
+            .unwrap_or_else(|e| panic!("failed to enable index for {property}: {e}"));
+        let mut builder = PropertyMapBuilder::new();
+        let mut embedding = vec![0.0f32; dims];
+        embedding[0] = 1.0;
+        builder = builder.insert_vector(property, &embedding);
+        current
+            .create_node("Doc", builder.build())
+            .unwrap_or_else(|e| panic!("failed to create node for {property}: {e}"));
+    }
+    persist_vector_indexes(&current, &manager, None, 0).expect("failed to persist vector indexes");
+
+    // Load into a fresh storage and verify every index round-tripped.
+    let fresh = Arc::new(CurrentStorage::new());
+    let summary = load_vector_indexes(&fresh, &manager).expect("load must succeed");
+    assert_eq!(summary.loaded, 3, "all three indexes must load");
+    assert_eq!(summary.skipped, 0);
+
+    for (property, dims, metric) in specs {
+        let config = fresh
+            .get_hnsw_config_for(property)
+            .unwrap_or_else(|| panic!("index config for {property} must survive the round trip"));
+        assert_eq!(config.dimensions, dims, "dimensions for {property}");
+        assert_eq!(config.metric, metric, "metric for {property}");
+
+        let (index, _, count, mappings) = fresh
+            .get_vector_index_for_persistence(property)
+            .unwrap_or_else(|| panic!("index for {property} must be registered"));
+        assert_eq!(count, 1, "vector count for {property}");
+        assert_eq!(mappings.len(), 1, "id mappings for {property}");
+        assert_eq!(index.len(), 1, "HNSW length for {property}");
+    }
+}
+
 #[test]
 fn test_graph_persist_keeps_interner_consistent_with_graph_string_ids() {
     let temp_dir = tempfile::tempdir().unwrap();

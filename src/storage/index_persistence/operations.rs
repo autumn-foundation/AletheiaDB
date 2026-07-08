@@ -158,146 +158,224 @@ pub(crate) fn persist_vector_indexes(
     Ok(())
 }
 
-/// Load vector indexes from disk.
+/// Outcome of [`load_vector_indexes`]: how many per-property vector indexes
+/// were restored and how many were skipped because of per-index errors
+/// (corrupted or missing files, unknown metric, invalid directory name).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct VectorIndexLoadSummary {
+    /// Number of vector indexes successfully loaded and registered.
+    pub loaded: usize,
+    /// Number of vector index directories skipped due to errors.
+    pub skipped: usize,
+}
+
+/// A vector index staged in memory, ready to be registered with `CurrentStorage`.
+struct LoadedVectorIndex {
+    property_name: String,
+    index: crate::index::vector::HnswIndex,
+    config: crate::index::vector::HnswConfig,
+    dimensions: u32,
+    vector_count: u64,
+}
+
+/// Load a single per-property vector index from its directory.
+///
+/// Returns `None` (after logging a warning) if the directory does not contain
+/// a loadable index: missing/corrupted metadata, unknown distance metric,
+/// corrupted HNSW file or mappings, or an invalid directory name. Errors here
+/// are intentionally non-fatal so one bad index never prevents its siblings
+/// from loading (a skipped index can be rebuilt from node properties via
+/// `rebuild_vector_index`).
+fn load_single_vector_index(vec_path: &std::path::Path) -> Option<LoadedVectorIndex> {
+    use crate::index::vector::{DistanceMetric, HnswConfig, HnswIndex};
+    use crate::storage::index_persistence::vector::{load_vector_mappings, load_vector_meta};
+
+    let property_name = match vec_path.file_name().and_then(|n| n.to_str()) {
+        Some(name) => name.to_string(),
+        None => {
+            eprintln!(
+                "Warning: Skipping vector index at {:?}: invalid directory name",
+                vec_path
+            );
+            return None;
+        }
+    };
+
+    // Load metadata
+    let meta_path = vec_path.join("meta.idx");
+    if !meta_path.exists() {
+        eprintln!(
+            "Warning: Skipping vector index '{}': metadata not found",
+            property_name
+        );
+        return None;
+    }
+
+    let meta = match load_vector_meta(&meta_path) {
+        Ok(meta) => meta,
+        Err(e) => {
+            eprintln!(
+                "Warning: Skipping vector index '{}': failed to load metadata: {}",
+                property_name, e
+            );
+            return None;
+        }
+    };
+
+    // Convert metric from u8 to DistanceMetric using from_u8()
+    let metric = match DistanceMetric::from_u8(meta.metric) {
+        Ok(m) => m,
+        Err(_) => {
+            eprintln!(
+                "Warning: Skipping vector index '{}': unknown metric {}",
+                property_name, meta.metric
+            );
+            return None;
+        }
+    };
+
+    // Create config from metadata
+    let config = HnswConfig::new(meta.dimensions as usize, metric)
+        .with_m(meta.hnsw_config.m as usize)
+        .with_ef_construction(meta.hnsw_config.ef_construction as usize)
+        .with_ef_search(meta.hnsw_config.ef_search as usize);
+
+    // Load or create index
+    let usearch_path = vec_path.join("current.usearch");
+    let index_result = if usearch_path.exists() {
+        // Load existing index
+        HnswIndex::load(&usearch_path, config.clone())
+    } else {
+        // Create new empty index
+        HnswIndex::new(config.clone())
+    };
+    let index = match index_result {
+        Ok(index) => index,
+        Err(e) => {
+            eprintln!(
+                "Warning: Skipping vector index '{}': failed to load HNSW index: {}",
+                property_name, e
+            );
+            return None;
+        }
+    };
+
+    // Load mappings and restore them to the index
+    let mappings_path = vec_path.join("mappings.idx");
+    if mappings_path.exists() {
+        let mappings_data = match load_vector_mappings(&mappings_path) {
+            Ok(data) => data,
+            Err(e) => {
+                eprintln!(
+                    "Warning: Skipping vector index '{}': failed to load mappings: {}",
+                    property_name, e
+                );
+                return None;
+            }
+        };
+
+        // Restore ID mappings
+        // Note: The usearch index already has the vectors loaded from disk,
+        // but we need to restore the NodeId <-> usearch_key mappings
+        use crate::core::id::NodeId;
+        for mapping in &mappings_data.mappings {
+            match NodeId::new(mapping.node_id) {
+                Ok(node_id) => {
+                    index.restore_mapping(node_id, mapping.usearch_key);
+                }
+                Err(e) => {
+                    eprintln!(
+                        "Warning: Skipping invalid NodeId {} in vector index '{}': {}",
+                        mapping.node_id, property_name, e
+                    );
+                }
+            }
+        }
+    }
+
+    Some(LoadedVectorIndex {
+        property_name,
+        index,
+        config,
+        dimensions: meta.dimensions,
+        vector_count: meta.vector_count,
+    })
+}
+
+/// Load vector indexes from disk (Issue #451).
 ///
 /// This function:
-/// 1. Scans the vector index directory.
-/// 2. For each subdirectory (representing a property), loads metadata and mappings.
-/// 3. Reconstructs the HNSW index using `usearch`.
-/// 4. Restores the `NodeId` <-> `u64` key mappings.
-/// 5. Registers the index with `CurrentStorage`, making it immediately available for search.
+/// 1. Scans the vector index directory for per-property subdirectories.
+/// 2. Loads each property's index **in parallel** (rayon): metadata,
+///    mappings, and the HNSW graph via `usearch`.
+/// 3. Restores the `NodeId` <-> `u64` key mappings.
+/// 4. Registers each index with `CurrentStorage`, making it immediately
+///    available for search.
 ///
-/// Errors during loading of individual indexes are logged but do not abort the process,
-/// allowing valid indexes to be loaded even if some are corrupted.
+/// # Error Isolation
+///
+/// Errors while loading an individual index (corrupted metadata, HNSW file,
+/// or mappings; unknown metric) are logged and that index is skipped — they
+/// never abort loading of the remaining indexes. The returned
+/// [`VectorIndexLoadSummary`] reports how many indexes loaded vs. were
+/// skipped. Only infrastructure failures (the vector directory itself is
+/// unreadable) return `Err`.
 pub(crate) fn load_vector_indexes(
     current: &Arc<CurrentStorage>,
     manager: &IndexPersistenceManager,
-) -> Result<()> {
-    use crate::index::vector::{DistanceMetric, HnswConfig, HnswIndex};
-    use crate::storage::index_persistence::vector::{load_vector_mappings, load_vector_meta};
+) -> Result<VectorIndexLoadSummary> {
+    use rayon::prelude::*;
 
     // Get vector directory
     let vector_base = manager.indexes_path().join("vector");
     if !vector_base.exists() {
-        return Ok(()); // No vector indexes to load
+        return Ok(VectorIndexLoadSummary::default()); // No vector indexes to load
     }
 
-    // Iterate through all subdirectories (one per property)
+    // Collect per-property subdirectories first so the (potentially
+    // expensive) HNSW loads can run in parallel afterwards.
     let entries = std::fs::read_dir(&vector_base).map_err(|e| {
         StorageError::PersistenceError(format!("Failed to read vector directory: {}", e))
     })?;
 
+    let mut index_dirs = Vec::new();
     for entry in entries {
         let entry = entry.map_err(|e| {
             StorageError::PersistenceError(format!("Failed to read directory entry: {}", e))
         })?;
 
         let vec_path = entry.path();
-        if !vec_path.is_dir() {
-            continue;
+        if vec_path.is_dir() {
+            index_dirs.push(vec_path);
         }
-
-        let property_name = vec_path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .ok_or_else(|| {
-                StorageError::PersistenceError("Invalid vector directory name".to_string())
-            })?;
-
-        // Load metadata
-        let meta_path = vec_path.join("meta.idx");
-        if !meta_path.exists() {
-            eprintln!(
-                "Warning: Skipping vector index '{}': metadata not found",
-                property_name
-            );
-            continue;
-        }
-
-        let meta = load_vector_meta(&meta_path).map_err(|e| {
-            StorageError::PersistenceError(format!(
-                "Failed to load vector metadata for {}: {}",
-                property_name, e
-            ))
-        })?;
-
-        // Convert metric from u8 to DistanceMetric using from_u8()
-        let metric = match DistanceMetric::from_u8(meta.metric) {
-            Ok(m) => m,
-            Err(_) => {
-                eprintln!(
-                    "Warning: Skipping vector index '{}': unknown metric {}",
-                    property_name, meta.metric
-                );
-                continue;
-            }
-        };
-
-        // Create config from metadata
-        let config = HnswConfig::new(meta.dimensions as usize, metric)
-            .with_m(meta.hnsw_config.m as usize)
-            .with_ef_construction(meta.hnsw_config.ef_construction as usize)
-            .with_ef_search(meta.hnsw_config.ef_search as usize);
-
-        // Load or create index
-        let usearch_path = vec_path.join("current.usearch");
-        let index = if usearch_path.exists() {
-            // Load existing index
-            HnswIndex::load(&usearch_path, config.clone()).map_err(|e| {
-                StorageError::PersistenceError(format!(
-                    "Failed to load usearch index for {}: {}",
-                    property_name, e
-                ))
-            })?
-        } else {
-            // Create new empty index
-            HnswIndex::new(config.clone()).map_err(|e| {
-                StorageError::PersistenceError(format!(
-                    "Failed to create HNSW index for {}: {}",
-                    property_name, e
-                ))
-            })?
-        };
-
-        // Load mappings and restore them to the index
-        let mappings_path = vec_path.join("mappings.idx");
-        if mappings_path.exists() {
-            let mappings_data = load_vector_mappings(&mappings_path).map_err(|e| {
-                StorageError::PersistenceError(format!(
-                    "Failed to load vector mappings for {}: {}",
-                    property_name, e
-                ))
-            })?;
-
-            // Restore ID mappings
-            // Note: The usearch index already has the vectors loaded from disk,
-            // but we need to restore the NodeId <-> usearch_key mappings
-            use crate::core::id::NodeId;
-            for mapping in &mappings_data.mappings {
-                match NodeId::new(mapping.node_id) {
-                    Ok(node_id) => {
-                        index.restore_mapping(node_id, mapping.usearch_key);
-                    }
-                    Err(e) => {
-                        eprintln!(
-                            "Warning: Skipping invalid NodeId {} in vector index '{}': {}",
-                            mapping.node_id, property_name, e
-                        );
-                    }
-                }
-            }
-        }
-
-        // Register index with CurrentStorage
-        current.register_vector_index(property_name, index, config);
-
-        eprintln!(
-            "✓ Loaded vector index '{}': {} dimensions, {} vectors",
-            property_name, meta.dimensions, meta.vector_count
-        );
     }
 
-    Ok(())
+    // Load every per-property index in parallel. Each load is independent
+    // (separate files, separate in-memory structures), so loading scales with
+    // the number of vector-indexed properties.
+    let staged: Vec<Option<LoadedVectorIndex>> = index_dirs
+        .par_iter()
+        .map(|path| load_single_vector_index(path))
+        .collect();
+
+    // Register the successfully loaded indexes sequentially (cheap: a DashMap
+    // insert per index) so registration and logging stay deterministic.
+    let mut summary = VectorIndexLoadSummary::default();
+    for loaded in staged {
+        match loaded {
+            Some(loaded) => {
+                current.register_vector_index(&loaded.property_name, loaded.index, loaded.config);
+                eprintln!(
+                    "✓ Loaded vector index '{}': {} dimensions, {} vectors",
+                    loaded.property_name, loaded.dimensions, loaded.vector_count
+                );
+                summary.loaded += 1;
+            }
+            None => summary.skipped += 1,
+        }
+    }
+
+    Ok(summary)
 }
 
 /// Persist graph index to disk.
@@ -955,9 +1033,20 @@ pub(crate) fn load_indexes_startup(
         }
     }
 
-    // Load vector indexes
-    if let Err(e) = load_vector_indexes(current, manager) {
-        eprintln!("Warning: Failed to load vector indexes: {}", e);
+    // Load vector indexes (parallel, per-index error isolation; Issue #451)
+    match load_vector_indexes(current, manager) {
+        Ok(summary) => {
+            if summary.skipped > 0 {
+                eprintln!(
+                    "Warning: Skipped {} corrupted/unreadable vector index(es); {} loaded. \
+                     Skipped indexes can be re-enabled and rebuilt from node properties.",
+                    summary.skipped, summary.loaded
+                );
+            }
+        }
+        Err(e) => {
+            eprintln!("Warning: Failed to load vector indexes: {}", e);
+        }
     }
 
     // Load temporal adjacency index

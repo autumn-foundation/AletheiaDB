@@ -56,6 +56,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Vector index loading at startup is now parallel with per-index error
+  isolation (Issue #451): with index persistence enabled, all per-property
+  HNSW vector indexes are loaded concurrently (one rayon task per property)
+  and a corrupted or unreadable vector index (bad `meta.idx`,
+  `mappings.idx`, or `current.usearch`, unknown metric) is skipped with a
+  warning instead of aborting the loading of every remaining vector index.
+  Startup now also logs a loaded/skipped summary when any index is skipped.
+  A skipped index can be re-enabled and rebuilt from node properties. See
+  [docs/guides/index-persistence-guide.md](docs/guides/index-persistence-guide.md#vector-index-persistence).
+
 - MCP tool error responses are now structured (Issue #3234): every error is
   `{"error": {"code", "message", "retriable", "details"?}}` instead of
   `{"error": "<string>"}`. `code` is drawn from a stable seven-value enum
