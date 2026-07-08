@@ -314,6 +314,7 @@ cargo run --bin aletheia-mcp --features mcp-server
 | **Hybrid** | `hybrid_query` (combined graph + vector + temporal) |
 | **Query** | `query` (execute a single read-only Cypher/AQL statement; see below) |
 | **Schema** | `get_schema` (node labels, edge types, and property keys, each with counts; optional bi-temporal `as_of_valid_time`/`as_of_transaction_time`) |
+| **Stats** | `database_stats` (holistic snapshot: current size, bi-temporal depth + anchor/delta compression, hot/warm/cold tier distribution, WAL state; no arguments) |
 
 **`query` tool (read-only Cypher/AQL):** Lets an LLM answer a multi-hop,
 filtered, temporally-scoped question with **one declarative statement** instead
@@ -352,6 +353,20 @@ Recovery loop: `retriable: true` -> retry with backoff; `INVALID_ARGUMENT` /
 `message` + `details` and re-issue; otherwise escalate. Codes may be added
 over time but never change meaning; treat unknown codes as non-retriable. See
 [docs/guides/mcp-query-tool.md](docs/guides/mcp-query-tool.md#structured-error-codes-and-the-retriable-contract).
+
+**Database stats (Issue #3222)**: `database_stats` (no arguments) returns a
+holistic snapshot in one call so an LLM/operator can orient itself before
+querying: `current` (node/edge counts), `historical` (total/unique version
+counts plus anchor/delta breakdown and `compression_ratio` — the bi-temporal
+depth held **in RAM**; versions migrated to the cold tier are counted under
+`cold_storage` instead), `cold_storage` (`{enabled: false}` when the
+disk tier is not configured — never misleading zeros — or counters plus a
+`tier_access` hot/warm/cold read distribution when it is), and `wal`
+(`enabled`, `durability_mode` token, `current_lsn`, `total_appends`,
+`healthy`). Backed by the public `AletheiaDB::stats()` returning a
+serializable `DatabaseStats`; every field is an O(1)/cached counter read
+(no version scans; see Issue #212), so it is safe to call frequently. See
+[docs/guides/mcp-query-tool.md](docs/guides/mcp-query-tool.md#database-stats-and-storage-tier-health-database_stats).
 
 **Valid-time writes (Issue #3221)**: `create_node`, `create_edge`,
 `update_node`, `update_edge`, `delete_node`, and `delete_edge` accept an
