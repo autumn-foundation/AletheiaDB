@@ -2854,3 +2854,159 @@ fn test_batch_insert_exact_capacity_sentinel() {
         "Should accept batch that fits exactly into capacity"
     );
 }
+
+// ============================================================================
+// Extent aggregate tests (Issue #3238): write-time maintained O(1) bounds
+// ============================================================================
+
+/// Convenience: build an interval with the given valid/tx ranges.
+fn extent_interval(valid: (i64, i64), tx: (i64, i64)) -> BiTemporalInterval {
+    BiTemporalInterval::new(
+        TimeRange::new(valid.0.into(), valid.1.into()).unwrap(),
+        TimeRange::new(tx.0.into(), tx.1.into()).unwrap(),
+    )
+}
+
+#[test]
+fn extent_batch_insert_publishes_aggregated_bounds() {
+    // Batch insertion accumulates locally and publishes via merge();
+    // the resulting extent must equal a per-version fold, including a
+    // closed valid end beyond every start.
+    let indexes = TemporalIndexes::new();
+    let node_id = NodeId::new(1).unwrap();
+
+    let batch = vec![
+        (
+            VersionId::new(1).unwrap(),
+            extent_interval((100, 500), (10, TIMESTAMP_MAX.wallclock())),
+        ),
+        (
+            VersionId::new(2).unwrap(),
+            // Closed valid end (900) strictly beyond every start.
+            extent_interval((200, 900), (20, TIMESTAMP_MAX.wallclock())),
+        ),
+    ];
+    indexes.insert_node_versions_batch(node_id, batch).unwrap();
+
+    let extent = indexes.extent().expect("non-empty extent");
+    assert_eq!(extent.valid_earliest, 100.into());
+    assert_eq!(
+        extent.valid_latest,
+        900.into(),
+        "closed end must bound latest"
+    );
+    assert_eq!(extent.tx_earliest, 10.into());
+    assert_eq!(
+        extent.tx_latest,
+        20.into(),
+        "open tx intervals contribute only their start"
+    );
+
+    // A second batch merges into the already-Some aggregate (both
+    // merge_dim arms with an existing value).
+    let batch2 = vec![(
+        VersionId::new(3).unwrap(),
+        extent_interval((50, TIMESTAMP_MAX.wallclock()), (5, 30)),
+    )];
+    indexes.insert_node_versions_batch(node_id, batch2).unwrap();
+
+    let extent = indexes.extent().expect("non-empty extent");
+    assert_eq!(
+        extent.valid_earliest,
+        50.into(),
+        "batch merge must lower earliest"
+    );
+    assert_eq!(extent.valid_latest, 900.into());
+    assert_eq!(extent.tx_earliest, 5.into());
+    assert_eq!(
+        extent.tx_latest,
+        30.into(),
+        "closed tx end must raise latest"
+    );
+}
+
+#[test]
+fn extent_close_with_open_sentinel_is_ignored() {
+    // Closing an interval "to" TIMESTAMP_MAX (re-opening) must not leak the
+    // sentinel into `latest`: observe_closed_end ignores open ends.
+    let indexes = TemporalIndexes::new();
+    let node_id = NodeId::new(1).unwrap();
+    let v1 = VersionId::new(1).unwrap();
+
+    indexes
+        .insert_node_version(node_id, v1, extent_interval((100, 500), (10, 40)))
+        .unwrap();
+    let before = indexes.extent().expect("non-empty extent");
+
+    indexes.update_node_valid_time_end(node_id, v1, TIMESTAMP_MAX);
+    indexes.update_node_transaction_time_end(node_id, v1, TIMESTAMP_MAX);
+
+    let after = indexes.extent().expect("non-empty extent");
+    assert_eq!(
+        after, before,
+        "TIMESTAMP_MAX closes must not move the extent"
+    );
+    assert!(after.valid_latest < TIMESTAMP_MAX);
+    assert!(after.tx_latest < TIMESTAMP_MAX);
+}
+
+#[test]
+fn extent_edge_interval_closes_extend_latest() {
+    // The edge close paths must extend `latest` exactly like the node ones.
+    let indexes = TemporalIndexes::new();
+    let edge_id = EdgeId::new(7).unwrap();
+    let v1 = VersionId::new(1).unwrap();
+
+    indexes
+        .insert_edge_version(
+            edge_id,
+            v1,
+            extent_interval(
+                (100, TIMESTAMP_MAX.wallclock()),
+                (10, TIMESTAMP_MAX.wallclock()),
+            ),
+        )
+        .unwrap();
+
+    indexes.update_edge_valid_time_end(edge_id, v1, 700.into());
+    indexes.update_edge_transaction_time_end(edge_id, v1, 800.into());
+
+    let extent = indexes.extent().expect("non-empty extent");
+    assert_eq!(
+        extent.valid_latest,
+        700.into(),
+        "edge valid close must extend latest"
+    );
+    assert_eq!(
+        extent.tx_latest,
+        800.into(),
+        "edge tx close must extend latest"
+    );
+
+    // Closing an absent entity/version is a no-op on the extent.
+    indexes.update_edge_valid_time_end(EdgeId::new(999).unwrap(), v1, 5_000.into());
+    let unchanged = indexes.extent().expect("non-empty extent");
+    assert_eq!(unchanged.valid_latest, 700.into());
+}
+
+#[test]
+fn extent_clear_resets_aggregate_to_empty() {
+    let indexes = TemporalIndexes::new();
+    let node_id = NodeId::new(1).unwrap();
+
+    indexes
+        .insert_node_version(
+            node_id,
+            VersionId::new(1).unwrap(),
+            extent_interval((100, 500), (10, TIMESTAMP_MAX.wallclock())),
+        )
+        .unwrap();
+    assert!(indexes.extent().is_some());
+
+    indexes.clear();
+    assert_eq!(
+        indexes.extent(),
+        None,
+        "clear() must reset the extent aggregate, not just the index"
+    );
+}
