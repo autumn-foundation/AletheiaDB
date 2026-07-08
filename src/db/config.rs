@@ -474,8 +474,19 @@ impl AletheiaDB {
 
                 // Replay WAL entries that occurred after the persisted snapshot
                 // This ensures no data loss if the WAL is ahead of the indexes (e.g. crash before persist)
+                //
+                // Issue #3419: the manifest LSN is the NEXT-to-allocate LSN
+                // captured *before* the snapshot was taken (see
+                // `IndexManifest::lsn`). Entries with LSN < manifest.lsn are
+                // guaranteed to be in the snapshot; entries with LSN >=
+                // manifest.lsn may or may not be. Replay therefore starts AT
+                // the manifest LSN (inclusive) — the previous `.next()` here
+                // skipped the first post-persist write entirely — and the
+                // replay itself is idempotent for already-applied entries
+                // (see the re-application guards in
+                // `replay_wal_into_storage_with_constraints`).
                 let start_lsn = match loaded_lsn {
-                    Some(lsn) => crate::storage::wal::LSN(lsn).next(),
+                    Some(lsn) => crate::storage::wal::LSN(lsn),
                     None => {
                         // Safety check: if we have data but no LSN, replaying from initial is dangerous
                         // as it might overwrite existing data with old WAL entries or duplicate IDs.
@@ -899,26 +910,21 @@ mod ephemeral_tests {
                 .expect("background thread running");
             let _ = handle.join();
 
-            // persist_all_indexes records safe_lsn = wal.current_lsn() which is the
-            // NEXT-to-allocate LSN (call it L).  On the second session startup,
-            // start_lsn = L+1.  Any WAL entry at LSN < L+1 is below the replay window
-            // and will NOT be recovered from the incremental replay.
-            //
-            // To place the edge inside the replay window we first allocate LSN=L with a
-            // throwaway node (key "x" is unique and does not conflict with "a"/"b").
-            // The edge then receives LSN=L+1 and will be seen by the incremental replay.
-            db.create_node("P", PropertyMapBuilder::new().insert("k", "x").build())
-                .expect("dummy node must succeed (key 'x' not yet reserved)");
-
-            // Edge at LSN=L+1 — will be in the incremental replay window on restart.
+            // persist_all_indexes records safe_lsn = wal.current_lsn(), the
+            // NEXT-to-allocate LSN (call it L).  The edge below receives LSN=L
+            // — the exact Issue #3419 boundary.  Startup replays from the
+            // manifest LSN INCLUSIVE, so the very first post-persist write is
+            // recovered without burning a throwaway LSN (the old workaround
+            // that this test now guards against regressing).
             db.write(|tx| tx.create_edge(n1, n2, "R", PropertyMapBuilder::new().build()))
                 .unwrap();
             (n1, n2)
         };
         let _ = (n1, n2);
 
-        // Session 2: startup loads snapshot (n1+n2 only, no edge, no dummy) then replays
-        // incremental WAL from LSN L+1 (edge) → max_edge_id = Some(_) → line 435 fires.
+        // Session 2: startup loads snapshot (n1+n2 only, no edge) then replays
+        // incremental WAL from LSN L INCLUSIVE (the edge, Issue #3419) →
+        // max_edge_id = Some(_) → the edge_id_gen bump fires.
         {
             let db = AletheiaDB::with_unified_config(make_config()).unwrap();
             assert_eq!(

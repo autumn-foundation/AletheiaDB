@@ -174,33 +174,59 @@ pub(crate) fn replay_wal_into_storage_with_constraints(
                     None => node_id.as_u64(),
                 });
 
+                // Idempotent re-application guard (Issue #3419). Replay starts
+                // AT the manifest LSN (inclusive) because the snapshot may or
+                // may not contain effects of entries at/after that LSN. Node
+                // IDs are never reused, so an existing node/version means this
+                // exact create was already applied; re-applying it blindly
+                // would append a duplicate version to the node's bi-temporal
+                // history. The two stores are guarded independently because
+                // background persistence may snapshot them at different LSNs.
+                let in_current = current.get_node(node_id).is_ok();
+                let historical_head = historical.get_current_node_version(node_id);
+                if in_current && historical_head.is_some() {
+                    continue;
+                }
+
                 let interned_label = label;
 
                 // Transaction time comes from when the WAL entry was logged
                 let commit_timestamp = entry.timestamp;
                 let metadata = VersionMetadata::new(TxId::new(RECOVERY_TX_ID), commit_timestamp);
-                let version_id = VersionId::new(next_version_id)?;
-                next_version_id += 1;
+                // Reuse the already-persisted version id when the historical
+                // side was applied, so current and historical stay aligned.
+                let version_id = match historical_head {
+                    Some(existing) => existing,
+                    None => {
+                        let fresh = VersionId::new(next_version_id)?;
+                        next_version_id += 1;
+                        fresh
+                    }
+                };
 
-                let node = Node::with_metadata(
-                    node_id,
-                    interned_label,
-                    properties.clone(),
-                    version_id,
-                    metadata,
-                );
+                if !in_current {
+                    let node = Node::with_metadata(
+                        node_id,
+                        interned_label,
+                        properties.clone(),
+                        version_id,
+                        metadata,
+                    );
+                    current.insert_node_direct(node, commit_timestamp)?;
+                }
 
-                current.insert_node_direct(node, commit_timestamp)?;
-                historical.add_node_version_with_provenance(
-                    node_id,
-                    version_id,
-                    valid_from,
-                    commit_timestamp,
-                    interned_label,
-                    properties,
-                    false, // not a tombstone
-                    provenance.map(std::sync::Arc::new),
-                )?;
+                if historical_head.is_none() {
+                    historical.add_node_version_with_provenance(
+                        node_id,
+                        version_id,
+                        valid_from,
+                        commit_timestamp,
+                        interned_label,
+                        properties,
+                        false, // not a tombstone
+                        provenance.map(std::sync::Arc::new),
+                    )?;
+                }
             }
             WalOperation::CreateEdge {
                 edge_id,
@@ -216,36 +242,54 @@ pub(crate) fn replay_wal_into_storage_with_constraints(
                     None => edge_id.as_u64(),
                 });
 
+                // Idempotent re-application guard (Issue #3419) — see the
+                // CreateNode arm above; edge IDs are likewise never reused.
+                let in_current = current.get_edge(edge_id).is_ok();
+                let historical_head = historical.get_current_edge_version(edge_id);
+                if in_current && historical_head.is_some() {
+                    continue;
+                }
+
                 let interned_label = label;
 
                 let commit_timestamp = entry.timestamp;
                 let metadata = VersionMetadata::new(TxId::new(RECOVERY_TX_ID), commit_timestamp);
-                let version_id = VersionId::new(next_version_id)?;
-                next_version_id += 1;
+                let version_id = match historical_head {
+                    Some(existing) => existing,
+                    None => {
+                        let fresh = VersionId::new(next_version_id)?;
+                        next_version_id += 1;
+                        fresh
+                    }
+                };
 
-                let edge = Edge::with_metadata(
-                    edge_id,
-                    interned_label,
-                    source,
-                    target,
-                    properties.clone(),
-                    version_id,
-                    metadata,
-                );
+                if !in_current {
+                    let edge = Edge::with_metadata(
+                        edge_id,
+                        interned_label,
+                        source,
+                        target,
+                        properties.clone(),
+                        version_id,
+                        metadata,
+                    );
+                    current.insert_edge_direct(edge)?;
+                }
 
-                current.insert_edge_direct(edge)?;
-                historical.add_edge_version_with_provenance(
-                    edge_id,
-                    version_id,
-                    valid_from,
-                    commit_timestamp,
-                    interned_label,
-                    source,
-                    target,
-                    properties,
-                    false, // not a tombstone
-                    provenance.map(std::sync::Arc::new),
-                )?;
+                if historical_head.is_none() {
+                    historical.add_edge_version_with_provenance(
+                        edge_id,
+                        version_id,
+                        valid_from,
+                        commit_timestamp,
+                        interned_label,
+                        source,
+                        target,
+                        properties,
+                        false, // not a tombstone
+                        provenance.map(std::sync::Arc::new),
+                    )?;
+                }
             }
             WalOperation::UpdateNode {
                 node_id,
@@ -270,23 +314,37 @@ pub(crate) fn replay_wal_into_storage_with_constraints(
                     metadata,
                 );
 
+                // Overwriting current state with the logged version is
+                // idempotent; always apply so a lagging graph snapshot
+                // converges to the logged state.
                 current.update_node_direct(node, commit_timestamp)?;
 
-                if let Some(prev_version_id) = historical.get_current_node_version(node_id) {
-                    historical
-                        .close_node_version_transaction_time(prev_version_id, commit_timestamp)?;
-                }
+                // Idempotent re-application guard (Issue #3419): updates log
+                // their version_id, so "this exact version already exists in
+                // history" means the update was already applied. Re-applying
+                // it blindly would append the version AGAIN with ITSELF as
+                // the previous head — a self-referential delta chain that
+                // makes history reconstruction loop forever (observed
+                // empirically: get_node_history OOMs after a double replay).
+                if historical.get_node_version(version_id).is_none() {
+                    if let Some(prev_version_id) = historical.get_current_node_version(node_id) {
+                        historical.close_node_version_transaction_time(
+                            prev_version_id,
+                            commit_timestamp,
+                        )?;
+                    }
 
-                historical.add_node_version_with_provenance(
-                    node_id,
-                    version_id,
-                    valid_from,
-                    commit_timestamp,
-                    interned_label,
-                    properties,
-                    false, // not a tombstone
-                    provenance.map(std::sync::Arc::new),
-                )?;
+                    historical.add_node_version_with_provenance(
+                        node_id,
+                        version_id,
+                        valid_from,
+                        commit_timestamp,
+                        interned_label,
+                        properties,
+                        false, // not a tombstone
+                        provenance.map(std::sync::Arc::new),
+                    )?;
+                }
             }
             WalOperation::UpdateEdge {
                 edge_id,
@@ -317,23 +375,30 @@ pub(crate) fn replay_wal_into_storage_with_constraints(
 
                 current.update_edge_direct(edge)?;
 
-                if let Some(prev_version_id) = historical.get_current_edge_version(edge_id) {
-                    historical
-                        .close_edge_version_transaction_time(prev_version_id, commit_timestamp)?;
-                }
+                // Idempotent re-application guard (Issue #3419) — see the
+                // UpdateNode arm above for why an already-present version_id
+                // must not be appended to history a second time.
+                if historical.get_edge_version(version_id).is_none() {
+                    if let Some(prev_version_id) = historical.get_current_edge_version(edge_id) {
+                        historical.close_edge_version_transaction_time(
+                            prev_version_id,
+                            commit_timestamp,
+                        )?;
+                    }
 
-                historical.add_edge_version_with_provenance(
-                    edge_id,
-                    version_id,
-                    valid_from,
-                    commit_timestamp,
-                    interned_label,
-                    current_edge.source,
-                    current_edge.target,
-                    properties,
-                    false, // not a tombstone
-                    provenance.map(std::sync::Arc::new),
-                )?;
+                    historical.add_edge_version_with_provenance(
+                        edge_id,
+                        version_id,
+                        valid_from,
+                        commit_timestamp,
+                        interned_label,
+                        current_edge.source,
+                        current_edge.target,
+                        properties,
+                        false, // not a tombstone
+                        provenance.map(std::sync::Arc::new),
+                    )?;
+                }
             }
             WalOperation::DeleteNode {
                 node_id,
@@ -779,6 +844,122 @@ mod tests {
         assert!(
             registry.is_constrained(label, prop),
             "declare without drop must leave constraint active after replay"
+        );
+    }
+
+    /// Issue #3419 boundary semantics pin: WAL replay must be **idempotent**
+    /// for entries whose effects are already present in storage.
+    ///
+    /// Since the manifest LSN is the next-to-allocate LSN captured *before*
+    /// the snapshot is read, an entry at LSN >= manifest.lsn can already be
+    /// reflected in the snapshot (a write racing a background persist), and
+    /// startup replays from the manifest LSN inclusive. Re-applying such an
+    /// entry must be a no-op. Replaying the same WAL twice into the same
+    /// storage is exactly that boundary case, maximized.
+    ///
+    /// Empirically observed WITHOUT the guards:
+    /// - a re-applied `CreateNode` appended a duplicate version to the node's
+    ///   bi-temporal history (1 version became 2 for a node created once);
+    /// - a re-applied `UpdateNode` appended its version with ITSELF as the
+    ///   previous head, creating a self-referential delta chain that made
+    ///   `get_node_history` loop until the process was OOM-killed.
+    #[test]
+    fn replay_is_idempotent_for_already_applied_entries() {
+        use crate::core::property::PropertyMapBuilder;
+        use crate::core::temporal::time;
+
+        let dir = tempdir().unwrap();
+        let config = ConcurrentWalSystemConfig::new(dir.path());
+        let wal = ConcurrentWalSystem::new(config).unwrap();
+
+        let node_id = crate::core::NodeId::new(1).unwrap();
+        let node_label = GLOBAL_INTERNER.intern("RcvIdemNode").unwrap();
+        let other_id = crate::core::NodeId::new(2).unwrap();
+        let edge_id = crate::core::EdgeId::new(1).unwrap();
+        let edge_label = GLOBAL_INTERNER.intern("RCV_IDEM_EDGE").unwrap();
+
+        wal.append(WalOperation::CreateNode {
+            node_id,
+            label: node_label,
+            properties: PropertyMapBuilder::new().insert("v", 1i64).build(),
+            valid_from: time::now(),
+            provenance: None,
+        })
+        .unwrap();
+        wal.append(WalOperation::CreateNode {
+            node_id: other_id,
+            label: node_label,
+            properties: PropertyMapBuilder::new().build(),
+            valid_from: time::now(),
+            provenance: None,
+        })
+        .unwrap();
+        wal.append(WalOperation::CreateEdge {
+            edge_id,
+            source: node_id,
+            target: other_id,
+            label: edge_label,
+            properties: PropertyMapBuilder::new().build(),
+            valid_from: time::now(),
+            provenance: None,
+        })
+        .unwrap();
+        wal.append(WalOperation::UpdateNode {
+            node_id,
+            version_id: crate::core::VersionId::new(50).unwrap(),
+            label: node_label,
+            properties: PropertyMapBuilder::new().insert("v", 2i64).build(),
+            valid_from: time::now(),
+            provenance: None,
+        })
+        .unwrap();
+        wal.append(WalOperation::UpdateEdge {
+            edge_id,
+            version_id: crate::core::VersionId::new(51).unwrap(),
+            label: edge_label,
+            properties: PropertyMapBuilder::new().insert("w", 1i64).build(),
+            valid_from: time::now(),
+            provenance: None,
+        })
+        .unwrap();
+        wal.flush().unwrap();
+
+        let current = CurrentStorage::new();
+        let mut historical = HistoricalStorage::new();
+        let (_, _, _, next_vid) =
+            replay_wal_into_storage(&wal, &current, &mut historical, LSN::initial(), 1).unwrap();
+
+        let node_history_len = historical.get_node_history(node_id).unwrap().versions.len();
+        let edge_history_len = historical.get_edge_history(edge_id).unwrap().versions.len();
+        assert_eq!(node_history_len, 2, "create + update");
+        assert_eq!(edge_history_len, 2, "create + update");
+
+        // Boundary re-application: replay the SAME entries again.
+        replay_wal_into_storage(&wal, &current, &mut historical, LSN::initial(), next_vid)
+            .expect("re-replay of already-applied entries must succeed");
+
+        // History must not grow, and reconstruction must still terminate.
+        assert_eq!(
+            historical.get_node_history(node_id).unwrap().versions.len(),
+            node_history_len,
+            "re-applied entries must not duplicate node history"
+        );
+        assert_eq!(
+            historical.get_edge_history(edge_id).unwrap().versions.len(),
+            edge_history_len,
+            "re-applied entries must not duplicate edge history"
+        );
+
+        // Current state converged to the logged updates.
+        let node = current.get_node(node_id).unwrap();
+        assert_eq!(
+            node.current_version,
+            crate::core::VersionId::new(50).unwrap()
+        );
+        let edge = current.get_edge(edge_id).unwrap();
+        assert_eq!(
+            edge.current_version,
+            crate::core::VersionId::new(51).unwrap()
         );
     }
 }
