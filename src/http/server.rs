@@ -30,6 +30,7 @@ use std::time::Duration;
 
 use autumn_web::prelude::AppState as AutumnAppState;
 use axum::Router;
+use axum::extract::DefaultBodyLimit;
 use axum::http::{HeaderName, HeaderValue, Method};
 use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, CorsLayer};
 use tower_http::set_header::SetResponseHeaderLayer;
@@ -159,6 +160,12 @@ pub async fn run_server(config: ServerConfig) -> std::io::Result<()> {
             }
         })
         .routes(all_routes())
+        // Reject oversized request bodies with 413 before they are buffered /
+        // deserialized (payload-amplification DoS prevention — Issue #3108).
+        // `DefaultBodyLimit` is axum-native and keeps the request type as
+        // `axum::extract::Request`, so it satisfies autumn's `IntoAppLayer`
+        // bound (unlike `RequestBodyLimitLayer`, which rewrites the body type).
+        .layer(DefaultBodyLimit::max(config.max_request_body_bytes()))
         .run()
         .await;
 
@@ -272,7 +279,11 @@ pub fn build_test_router(state: AppState, config: &ServerConfig) -> Result<Route
             HeaderValue::from_static("default-src 'none'; frame-ancestors 'none'"),
         ))
         .layer(build_cors_layer(config.cors()))
-        .layer(TraceLayer::new_for_http());
+        .layer(TraceLayer::new_for_http())
+        // Reject oversized request bodies with 413 before they are buffered /
+        // deserialized, bounding the memory a single request can force us to
+        // allocate (payload-amplification DoS prevention — Issue #3108).
+        .layer(DefaultBodyLimit::max(config.max_request_body_bytes()));
 
     Ok(router.with_state(autumn_state))
 }

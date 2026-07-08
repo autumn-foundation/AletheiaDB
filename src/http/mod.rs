@@ -27,7 +27,9 @@ pub mod handlers;
 mod server;
 mod state;
 
-pub use config::{CorsConfig, RateLimitConfig, ServerConfig, ServerConfigBuilder};
+pub use config::{
+    CorsConfig, DEFAULT_MAX_REQUEST_BODY_BYTES, RateLimitConfig, ServerConfig, ServerConfigBuilder,
+};
 pub use error::AletheiaHttpError;
 pub use handlers::{ApiResponse, QueryRequest, handle_query, health_check};
 pub use server::{build_test_router, run_server};
