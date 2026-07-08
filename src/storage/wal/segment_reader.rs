@@ -1115,6 +1115,55 @@ mod tests {
         assert!(entries.is_empty());
     }
 
+    /// Issue #3420 / PR #3428 review: `max_lsn_in_dir` on an empty directory
+    /// (no segments at all) must report `None`, not a phantom LSN.
+    #[test]
+    fn test_max_lsn_in_dir_empty_directory() {
+        let dir = TempDir::new().unwrap();
+        assert_eq!(max_lsn_in_dir(dir.path(), None).unwrap(), None);
+    }
+
+    /// Issue #3420 / PR #3428 review: `max_lsn_in_dir` must return the max
+    /// LSN across ALL rotated segments — with the maximum deliberately placed
+    /// in a MIDDLE segment, so returning the first (or last) segment's max
+    /// would fail.
+    #[test]
+    fn test_max_lsn_in_dir_multi_segment_returns_global_max() {
+        use std::io::Write;
+
+        let dir = TempDir::new().unwrap();
+
+        // Segment 0: LSNs 1..=3; segment 1: LSNs 40..=42 (global max);
+        // segment 2: LSNs 10..=12.
+        let lsn_ranges: [&[u64]; 3] = [&[1, 2, 3], &[40, 41, 42], &[10, 11, 12]];
+        for (seg_id, lsns) in lsn_ranges.iter().enumerate() {
+            let segment_path = dir.path().join(format!("{}.log", seg_id));
+            let mut file = File::create(&segment_path).unwrap();
+            file.write_all(&WAL_MAGIC).unwrap();
+            file.write_all(&[WAL_VERSION_PROVENANCE]).unwrap();
+            for lsn in *lsns {
+                let operation = WalOperation::CreateNode {
+                    node_id: NodeId::new(*lsn).unwrap(),
+                    label: GLOBAL_INTERNER.intern("MaxLsnTest").unwrap(),
+                    properties: PropertyMap::new(),
+                    valid_from: time::now(),
+                    provenance: None,
+                };
+                let entry = WalEntry::new(LSN(*lsn), operation);
+                let mut buffer = Vec::new();
+                serialize_entry_into(&entry, &mut buffer).unwrap();
+                file.write_all(&buffer).unwrap();
+            }
+            file.sync_all().unwrap();
+        }
+
+        assert_eq!(
+            max_lsn_in_dir(dir.path(), None).unwrap(),
+            Some(LSN(42)),
+            "max must be taken across ALL segments, not the first or last"
+        );
+    }
+
     // =============================================================================
     // TDD Tests for parse_entry_at() - Issue #218
     // =============================================================================

@@ -28,13 +28,14 @@
 
 use aletheiadb::config::{AletheiaDBConfig, WalConfigBuilder};
 use aletheiadb::core::id::NodeId;
+use aletheiadb::index::vector::{DistanceMetric, HnswConfig};
 use aletheiadb::storage::index_persistence::formats::{
     GraphPersistencePolicy, PersistencePolicies, StringPersistencePolicy,
     TemporalPersistencePolicy, VectorPersistencePolicy,
 };
 use aletheiadb::storage::index_persistence::{IndexPersistenceManager, PersistenceConfig};
 use aletheiadb::storage::wal::DurabilityMode;
-use aletheiadb::{AletheiaDB, PropertyMapBuilder};
+use aletheiadb::{AletheiaDB, PropertyMapBuilder, SimilarityQuery, WriteOps};
 use std::path::Path;
 use std::sync::Mutex;
 use tempfile::tempdir;
@@ -124,6 +125,17 @@ fn create(db: &AletheiaDB, name: &str) -> NodeId {
     .unwrap_or_else(|e| panic!("create_node({name}) failed: {e}"))
 }
 
+fn create_with_embedding(db: &AletheiaDB, name: &str, embedding: &[f32]) -> NodeId {
+    db.create_node(
+        "LsnRegression",
+        PropertyMapBuilder::new()
+            .insert("name", name)
+            .insert_vector("embedding", embedding)
+            .build(),
+    )
+    .unwrap_or_else(|e| panic!("create_node({name}) with embedding failed: {e}"))
+}
+
 /// Read the on-disk manifest LSN directly (bypassing any live database).
 fn manifest_lsn(db_path: &Path) -> u64 {
     IndexPersistenceManager::new(db_path.join("indexes"))
@@ -166,18 +178,33 @@ fn assert_history_len(db: &AletheiaDB, id: NodeId, name: &str, expected: usize) 
 /// Pre-fix failure mode: manifest stored next-to-allocate LSN N; replay
 /// started at N+1; B (the first post-persist write, at LSN N) was silently
 /// dropped even though its WAL append was fsync-acknowledged.
+///
+/// Vector coverage (PR #3428 review): Issue #3419's original report cites a
+/// node with an EMBEDDING vanishing from `find_similar` after crash+reopen.
+/// A and B carry embeddings and the post-recovery assertion includes the
+/// vector index (B must be findable via `find_similar` from A), so this test
+/// guards the HNSW re-indexing path of replayed writes, not just the graph.
 #[test]
 fn t1_first_post_persist_write_survives_crash() {
     let _g = lock();
     let tmp = tempdir().unwrap();
     let db_path = tmp.path();
 
+    let embedding_a: [f32; 4] = [1.0, 0.0, 0.0, 0.0];
+    let embedding_b: [f32; 4] = [0.9, 0.1, 0.0, 0.0];
+
     let (a, b, c, manifest_after_persist) = {
         let db = open(db_path);
-        let a = create(&db, "A");
+        db.vector_index("embedding")
+            .hnsw(HnswConfig::new(4, DistanceMetric::Cosine))
+            .enable()
+            .expect("enable vector index");
+        let a = create_with_embedding(&db, "A", &embedding_a);
         db.persist_indexes().expect("manual persist");
         let manifest_after_persist = manifest_lsn(db_path);
-        let b = create(&db, "B");
+        // B is the #3419 boundary victim — WITH an embedding, per the
+        // issue's original repro.
+        let b = create_with_embedding(&db, "B", &embedding_b);
         let c = create(&db, "C");
         // Hard crash: no Drop, no shutdown persist.
         std::mem::forget(db);
@@ -197,6 +224,17 @@ fn t1_first_post_persist_write_survives_crash() {
         assert_node_present(&db, id, name);
         assert_history_len(&db, id, name, 1);
     }
+
+    // The replayed post-persist write must be back in the VECTOR index too:
+    // this is the exact loss mode Issue #3419 was reported with.
+    let similar = db
+        .similarity_search(SimilarityQuery::from_node(a).k(5))
+        .expect("similarity search must work after crash recovery");
+    assert!(
+        similar.iter().any(|(id, _)| *id == b),
+        "node B (the post-persist boundary victim) must be findable via \
+         find_similar after crash+reopen; got: {similar:?}"
+    );
 }
 
 /// T2 — Issue #3420 three-session repro: LSNs must continue monotonically
@@ -292,6 +330,26 @@ fn t3_multi_cycle_zero_loss_and_monotonic_lsns() {
         expected.len(),
         "cumulative node count mismatch: loss or duplication across cycles"
     );
+
+    // PR #3428 review: LSN TOTAL ORDERING across all sessions. Read every
+    // entry back from the on-disk segments through the public segment reader
+    // and assert no LSN was ever issued twice — the #3420 failure mode was
+    // precisely duplicate LSNs across restart-created segments.
+    let entries = aletheiadb::storage::wal::segment_reader::read_entries_from_dir(
+        &db_path.join("wal"),
+        aletheiadb::storage::wal::LSN(1),
+    )
+    .expect("read all WAL entries from disk");
+    assert!(!entries.is_empty(), "expected durable WAL entries on disk");
+    let mut seen = std::collections::HashSet::new();
+    for entry in &entries {
+        assert!(
+            seen.insert(entry.lsn),
+            "duplicate LSN {} found across WAL segments — allocator was \
+             re-seeded incorrectly across sessions",
+            entry.lsn.0
+        );
+    }
 }
 
 /// T4 — edge: persist then crash with NO post-persist writes. Reopen must be
@@ -449,4 +507,241 @@ fn t7_write_racing_persist_is_neither_lost_nor_duplicated() {
         assert_node_present(&db, *id, name);
         assert_history_len(&db, *id, name, 1);
     }
+}
+
+/// T8 — manifest-LSN floor (PR #3428 review; kills the surviving mutant in
+/// the `db/config.rs` manifest-floor seeding).
+///
+/// Session 1 writes, persists, and drops CLEANLY; then every WAL segment is
+/// deleted (simulating LSN-based WAL truncation after cold-storage
+/// migration). On reopen the segment scan finds NOTHING, so the allocator
+/// would restart at LSN 1 — BELOW the manifest LSN — unless the manifest
+/// floor re-seeds it. A new write must then survive one more crash cycle:
+/// without the floor, the write's LSN lands below the manifest LSN and the
+/// next startup's differential replay silently skips it.
+#[test]
+fn t8_manifest_lsn_floor_survives_wal_truncation() {
+    let _g = lock();
+    let tmp = tempdir().unwrap();
+    let db_path = tmp.path();
+
+    // Session 1: clean shutdown (final persist runs, manifest advances).
+    let a = {
+        let db = open(db_path);
+        let a = create(&db, "A");
+        db.persist_indexes().expect("manual persist");
+        a
+        // clean drop
+    };
+
+    // Simulate WAL truncation: remove every segment file.
+    let wal_dir = db_path.join("wal");
+    let mut removed = 0usize;
+    for entry in std::fs::read_dir(&wal_dir).expect("read wal dir") {
+        let entry = entry.expect("dir entry");
+        if entry.file_name().to_string_lossy().contains(".log") {
+            std::fs::remove_file(entry.path()).expect("remove segment");
+            removed += 1;
+        }
+    }
+    assert!(removed > 0, "expected at least one WAL segment to remove");
+
+    let manifest = manifest_lsn(db_path);
+    assert!(manifest > 1, "manifest LSN must have advanced in session 1");
+
+    // Session 2: allocator must be floored at the manifest LSN even though
+    // the segment scan found nothing; the new write must survive a crash.
+    let b = {
+        let db = open(db_path);
+        assert_node_present(&db, a, "A");
+        let next_lsn = db.__test_current_wal_lsn();
+        assert!(
+            next_lsn >= manifest,
+            "allocator not floored at manifest LSN after WAL truncation: \
+             next LSN {next_lsn} < manifest {manifest}"
+        );
+        let b = create(&db, "B");
+        std::mem::forget(db);
+        b
+    };
+
+    // Session 3: B must have survived.
+    let db = open(db_path);
+    assert_node_present(&db, a, "A");
+    assert_node_present(&db, b, "B");
+    assert_history_len(&db, b, "B", 1);
+}
+
+/// T9 — multi-segment WAL rotation (PR #3428 review): recovery and allocator
+/// seeding must span ALL rotated segments — `max_lsn_in_dir` has to return
+/// the maximum across every segment, not just the first one it reads.
+///
+/// A tiny segment size forces rotation mid-session; after a crash the reopen
+/// must recover every write and keep allocating LSNs above everything on
+/// disk, then survive one more crash cycle.
+#[test]
+fn t9_recovery_and_seeding_across_rotated_segments() {
+    let _g = lock();
+    let tmp = tempdir().unwrap();
+    let db_path = tmp.path();
+
+    const WRITES: usize = 40;
+
+    let rotating_config = || {
+        AletheiaDBConfig::builder()
+            .wal(
+                WalConfigBuilder::new()
+                    .wal_dir(db_path.join("wal"))
+                    .durability_mode(DurabilityMode::Synchronous)
+                    .segment_size(2048)
+                    .expect("segment size >= minimum")
+                    .build(),
+            )
+            .persistence(PersistenceConfig {
+                enabled: true,
+                data_dir: db_path.join("indexes"),
+                load_on_startup: true,
+                policies: inert_policies(),
+                use_mmap: false,
+            })
+            .build()
+    };
+    let open_rotating =
+        || AletheiaDB::with_unified_config(rotating_config()).expect("open database");
+
+    // Session 1: enough padded writes to force several rotations, then crash.
+    let ids: Vec<(NodeId, String)> = {
+        let db = open_rotating();
+        let padding = "x".repeat(200);
+        let ids = (0..WRITES)
+            .map(|i| {
+                let name = format!("seg-{i}");
+                let id = db
+                    .create_node(
+                        "LsnRegression",
+                        PropertyMapBuilder::new()
+                            .insert("name", name.as_str())
+                            .insert("padding", padding.as_str())
+                            .build(),
+                    )
+                    .unwrap_or_else(|e| panic!("create_node({name}) failed: {e}"));
+                (id, name)
+            })
+            .collect();
+        std::mem::forget(db);
+        ids
+    };
+
+    // Rotation must actually have happened: multiple segments on disk.
+    let segment_count = std::fs::read_dir(db_path.join("wal"))
+        .expect("read wal dir")
+        .filter(|e| {
+            e.as_ref()
+                .map(|e| e.file_name().to_string_lossy().contains(".log"))
+                .unwrap_or(false)
+        })
+        .count();
+    assert!(
+        segment_count > 1,
+        "test setup must force WAL rotation (found {segment_count} segment)"
+    );
+
+    // Session 2: recovery must restore every write from all segments and the
+    // allocator must be seeded above the global max LSN.
+    let session_end_lsn;
+    let extra = {
+        let db = open_rotating();
+        for (id, name) in &ids {
+            assert_node_present(&db, *id, name);
+            assert_history_len(&db, *id, name, 1);
+        }
+        assert_eq!(db.node_count(), WRITES);
+        let extra = create(&db, "post-rotation");
+        session_end_lsn = db.__test_current_wal_lsn();
+        std::mem::forget(db);
+        extra
+    };
+
+    // Session 3: the post-rotation write survived, LSNs stayed monotonic and
+    // unique across all segments.
+    let db = open_rotating();
+    assert!(db.__test_current_wal_lsn() >= session_end_lsn);
+    assert_node_present(&db, extra, "post-rotation");
+    assert_history_len(&db, extra, "post-rotation", 1);
+
+    let entries = aletheiadb::storage::wal::segment_reader::read_entries_from_dir(
+        &db_path.join("wal"),
+        aletheiadb::storage::wal::LSN(1),
+    )
+    .expect("read all WAL entries");
+    let mut seen = std::collections::HashSet::new();
+    for entry in &entries {
+        assert!(
+            seen.insert(entry.lsn),
+            "duplicate LSN {} across rotated segments",
+            entry.lsn.0
+        );
+    }
+}
+
+/// T10 — deleted-entity id reuse across restart (PR #3428 review probe;
+/// guards fix 1 — historical id-generator seeding — and fix 2 — the
+/// tombstone-aware create guard — end-to-end).
+///
+/// S1: create A, B; delete B; persist; crash.
+/// S2: reopen; create C. Pre-fix, the id generators were seeded from the
+///     LIVE snapshot only (A), so C RE-USED deleted B's NodeId; crash.
+/// S3: reopen; replaying C's create found B's tombstone at the head of the
+///     shared id's history and (pre-fix) skipped appending any version — C
+///     silently pointed at B's tombstone: bi-temporal corruption.
+#[test]
+fn t10_deleted_node_id_is_never_reissued_across_restart() {
+    let _g = lock();
+    let tmp = tempdir().unwrap();
+    let db_path = tmp.path();
+
+    // S1: A and B live; B deleted; persist (snapshot: A live, B only in
+    // history); crash.
+    let (a, b) = {
+        let db = open(db_path);
+        let a = create(&db, "A");
+        let b = create(&db, "B");
+        db.write(|tx| tx.delete_node(b)).expect("delete B");
+        db.persist_indexes().expect("manual persist");
+        std::mem::forget(db);
+        (a, b)
+    };
+
+    // S2: C must get a FRESH id, not deleted B's.
+    let c = {
+        let db = open(db_path);
+        assert_node_present(&db, a, "A");
+        let c = create(&db, "C");
+        assert_ne!(
+            c, b,
+            "id generator reissued deleted node B's id to C — seeding must \
+             cover HISTORICAL (deleted) entities, not just the live snapshot"
+        );
+        std::mem::forget(db);
+        c
+    };
+
+    // S3: everything intact after replaying C's create.
+    let db = open(db_path);
+    assert_node_present(&db, a, "A");
+    assert_node_present(&db, c, "C");
+    assert_history_len(&db, c, "C", 1);
+    assert!(
+        db.get_node(b).is_err(),
+        "deleted node B must not resurrect in current state"
+    );
+    // B's bi-temporal history is intact: create + delete tombstone.
+    let b_history = db
+        .get_node_history(b)
+        .expect("deleted B's history must remain queryable");
+    assert_eq!(
+        b_history.versions.len(),
+        2,
+        "B's history must be exactly create + tombstone"
+    );
 }
