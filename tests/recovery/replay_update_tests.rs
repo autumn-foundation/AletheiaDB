@@ -11,19 +11,36 @@ use aletheiadb::{
     GLOBAL_INTERNER,
     core::error::Result,
     core::{
+        hlc::HybridTimestamp,
         id::{EdgeId, NodeId, VersionId},
-        property::{PropertyMap, PropertyMapBuilder},
-        temporal::time,
+        property::{PropertyMap, PropertyMapBuilder, PropertyValue},
+        temporal::{Timestamp, time},
     },
     storage::{
         checkpoint::{CheckpointConfig, CheckpointManager},
         wal::{
-            WalOperation,
+            LSN, WalOperation,
             concurrent_system::{ConcurrentWalSystem, ConcurrentWalSystemConfig},
         },
     },
 };
 use tempfile::TempDir;
+
+/// Read back the LOGGED timestamp of the first WAL entry matching `pred`.
+///
+/// Replay stamps transaction time with the WAL entry's logged timestamp (not
+/// the replay time), so interval assertions must anchor on this value.
+fn logged_timestamp(
+    wal: &ConcurrentWalSystem,
+    pred: impl Fn(&WalOperation) -> bool,
+) -> Result<Timestamp> {
+    let entries = wal.read_from(LSN::initial())?;
+    Ok(entries
+        .iter()
+        .find(|e| pred(&e.operation))
+        .expect("expected a matching WAL entry")
+        .timestamp)
+}
 
 #[test]
 fn test_replay_update_node_basic() -> Result<()> {
@@ -375,6 +392,186 @@ fn test_replay_update_edge_label_change() -> Result<()> {
     // Then: Current storage has updated label
     let edge = current.get_edge(edge_id)?;
     assert!(edge.has_label_str("FRIENDS_WITH"));
+
+    Ok(())
+}
+
+#[test]
+fn test_replay_update_preserves_temporal_intervals() -> Result<()> {
+    // Issue #452: after replaying Create + Update, the version chain must
+    // carry exact bi-temporal intervals:
+    // - superseded version: valid [vf1, vf2) — appending a later-valid
+    //   version closes the predecessor's valid time at the successor's
+    //   valid_from — with transaction time closed at the update entry's
+    //   LOGGED timestamp (the tx-time closure must survive replay);
+    // - new head: valid [vf2, open), transaction [update ts, open).
+    let temp_dir = TempDir::new().unwrap();
+    let wal_dir = temp_dir.path().join("wal");
+
+    let wal_config = ConcurrentWalSystemConfig::new(wal_dir);
+    let wal = ConcurrentWalSystem::new(wal_config)?;
+
+    let node_id = NodeId::new(1).unwrap();
+    let now = time::now().wallclock();
+    let vf1 = HybridTimestamp::new(now - 7_200_000_000, 0).unwrap(); // 2h ago
+    let vf2 = HybridTimestamp::new(now - 3_600_000_000, 0).unwrap(); // 1h ago
+
+    wal.append(WalOperation::CreateNode {
+        node_id,
+        label: GLOBAL_INTERNER.intern("Counter").unwrap(),
+        properties: PropertyMapBuilder::new().insert("count", 1_i64).build(),
+        valid_from: vf1,
+        provenance: None,
+    })?;
+    wal.append(WalOperation::UpdateNode {
+        node_id,
+        version_id: VersionId::new(2).unwrap(),
+        label: GLOBAL_INTERNER.intern("Counter").unwrap(),
+        properties: PropertyMapBuilder::new().insert("count", 2_i64).build(),
+        valid_from: vf2,
+        provenance: None,
+    })?;
+    wal.flush()?;
+
+    let create_ts = logged_timestamp(&wal, |op| matches!(op, WalOperation::CreateNode { .. }))?;
+    let update_ts = logged_timestamp(&wal, |op| matches!(op, WalOperation::UpdateNode { .. }))?;
+
+    let config = CheckpointConfig::with_data_dir(temp_dir.path().join("checkpoints"));
+    let mut manager = CheckpointManager::new(config)?;
+    let (_current, historical, _lsn) = manager.recover(&wal)?;
+
+    let history = historical.get_node_history(node_id)?;
+    assert_eq!(history.version_count(), 2);
+
+    let superseded = &history.versions[0];
+    assert_eq!(superseded.temporal.valid_time().start(), vf1);
+    assert_eq!(
+        superseded.temporal.valid_time().end(),
+        vf2,
+        "superseded version's valid time must be closed at the successor's LOGGED valid_from"
+    );
+    assert_eq!(superseded.temporal.transaction_time().start(), create_ts);
+    assert_eq!(
+        superseded.temporal.transaction_time().end(),
+        update_ts,
+        "superseded version's tx-time closure must survive replay at the LOGGED update timestamp"
+    );
+
+    let head = &history.versions[1];
+    assert_eq!(head.temporal.valid_time().start(), vf2);
+    assert!(head.temporal.valid_time().is_current());
+    assert_eq!(head.temporal.transaction_time().start(), update_ts);
+    assert!(
+        head.temporal.transaction_time().is_current(),
+        "new head's transaction time must be open-ended after replay"
+    );
+
+    // Historical query API: anchoring transaction time BEFORE the update
+    // returns the superseded state; the current coordinate returns the new.
+    let old = historical.get_node_at_time(node_id, vf1, create_ts)?;
+    assert!(matches!(
+        old.properties.get("count"),
+        Some(PropertyValue::Int(1))
+    ));
+    let new = historical.get_node_at_time(node_id, time::now(), time::now())?;
+    assert!(matches!(
+        new.properties.get("count"),
+        Some(PropertyValue::Int(2))
+    ));
+
+    Ok(())
+}
+
+#[test]
+fn test_replay_update_edge_preserves_temporal_intervals() -> Result<()> {
+    // Issue #452: edge mirror of test_replay_update_preserves_temporal_intervals.
+    let temp_dir = TempDir::new().unwrap();
+    let wal_dir = temp_dir.path().join("wal");
+
+    let wal_config = ConcurrentWalSystemConfig::new(wal_dir);
+    let wal = ConcurrentWalSystem::new(wal_config)?;
+
+    let source_id = NodeId::new(1).unwrap();
+    let target_id = NodeId::new(2).unwrap();
+    let edge_id = EdgeId::new(1).unwrap();
+    let now = time::now().wallclock();
+    let vf1 = HybridTimestamp::new(now - 7_200_000_000, 0).unwrap();
+    let vf2 = HybridTimestamp::new(now - 3_600_000_000, 0).unwrap();
+
+    for node_id in [source_id, target_id] {
+        wal.append(WalOperation::CreateNode {
+            node_id,
+            label: GLOBAL_INTERNER.intern("Person").unwrap(),
+            properties: PropertyMap::new(),
+            valid_from: vf1,
+            provenance: None,
+        })?;
+    }
+    wal.append(WalOperation::CreateEdge {
+        edge_id,
+        source: source_id,
+        target: target_id,
+        label: GLOBAL_INTERNER.intern("KNOWS").unwrap(),
+        properties: PropertyMapBuilder::new().insert("weight", 1_i64).build(),
+        valid_from: vf1,
+        provenance: None,
+    })?;
+    wal.append(WalOperation::UpdateEdge {
+        edge_id,
+        version_id: VersionId::new(4).unwrap(),
+        label: GLOBAL_INTERNER.intern("KNOWS").unwrap(),
+        properties: PropertyMapBuilder::new().insert("weight", 2_i64).build(),
+        valid_from: vf2,
+        provenance: None,
+    })?;
+    wal.flush()?;
+
+    let create_edge_ts =
+        logged_timestamp(&wal, |op| matches!(op, WalOperation::CreateEdge { .. }))?;
+    let update_edge_ts =
+        logged_timestamp(&wal, |op| matches!(op, WalOperation::UpdateEdge { .. }))?;
+
+    let config = CheckpointConfig::with_data_dir(temp_dir.path().join("checkpoints"));
+    let mut manager = CheckpointManager::new(config)?;
+    let (_current, historical, _lsn) = manager.recover(&wal)?;
+
+    let history = historical.get_edge_history(edge_id)?;
+    assert_eq!(history.version_count(), 2);
+
+    let superseded = &history.versions[0];
+    assert_eq!(superseded.temporal.valid_time().start(), vf1);
+    assert_eq!(
+        superseded.temporal.valid_time().end(),
+        vf2,
+        "superseded edge version's valid time must be closed at the successor's LOGGED valid_from"
+    );
+    assert_eq!(
+        superseded.temporal.transaction_time().start(),
+        create_edge_ts
+    );
+    assert_eq!(
+        superseded.temporal.transaction_time().end(),
+        update_edge_ts,
+        "superseded edge version's tx-time closure must survive replay"
+    );
+
+    let head = &history.versions[1];
+    assert_eq!(head.temporal.valid_time().start(), vf2);
+    assert!(head.temporal.valid_time().is_current());
+    assert_eq!(head.temporal.transaction_time().start(), update_edge_ts);
+    assert!(head.temporal.transaction_time().is_current());
+
+    // Point-in-time reads before/after the update return old/new state.
+    let old = historical.get_edge_at_time(edge_id, vf1, create_edge_ts)?;
+    assert!(matches!(
+        old.properties.get("weight"),
+        Some(PropertyValue::Int(1))
+    ));
+    let new = historical.get_edge_at_time(edge_id, time::now(), time::now())?;
+    assert!(matches!(
+        new.properties.get("weight"),
+        Some(PropertyValue::Int(2))
+    ));
 
     Ok(())
 }

@@ -11,19 +11,36 @@ use aletheiadb::{
     GLOBAL_INTERNER,
     core::error::Result,
     core::{
+        hlc::HybridTimestamp,
         id::{EdgeId, NodeId, VersionId},
         property::{PropertyMap, PropertyMapBuilder},
-        temporal::time,
+        temporal::{Timestamp, time},
     },
     storage::{
         checkpoint::{CheckpointConfig, CheckpointManager},
         wal::{
-            WalOperation,
+            LSN, WalOperation,
             concurrent_system::{ConcurrentWalSystem, ConcurrentWalSystemConfig},
         },
     },
 };
 use tempfile::TempDir;
+
+/// Read back the LOGGED timestamp of the first WAL entry matching `pred`.
+///
+/// Replay stamps transaction time with the WAL entry's logged timestamp (not
+/// the replay time), so interval assertions must anchor on this value.
+fn logged_timestamp(
+    wal: &ConcurrentWalSystem,
+    pred: impl Fn(&WalOperation) -> bool,
+) -> Result<Timestamp> {
+    let entries = wal.read_from(LSN::initial())?;
+    Ok(entries
+        .iter()
+        .find(|e| pred(&e.operation))
+        .expect("expected a matching WAL entry")
+        .timestamp)
+}
 
 #[test]
 fn test_replay_delete_node_basic() -> Result<()> {
@@ -190,6 +207,197 @@ fn test_replay_delete_edge_basic() -> Result<()> {
     assert_eq!(
         hist_stats.total_edge_versions, 2,
         "Should have 2 edge versions (create + tombstone)"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn test_replay_delete_node_preserves_temporal_intervals() -> Result<()> {
+    // Issue #452: after replaying Create + Delete, the version chain must
+    // carry exact bi-temporal intervals:
+    // - prior head: valid_from preserved, valid time closed at the
+    //   tombstone's valid_from, transaction time closed at the delete
+    //   entry's LOGGED timestamp;
+    // - tombstone: empty valid interval, transaction [delete ts, open).
+    //
+    // NOTE: we deliberately do NOT assert the tombstone's exact valid_from
+    // (nor, therefore, the prior head's exact valid_to, which is closed at
+    // the tombstone's valid_from). The live write path honors a
+    // user-supplied (possibly backdated, Issue #3221) valid_from for the
+    // tombstone, while replay currently drops the logged value and
+    // substitutes the entry timestamp — that divergence is pinned by the
+    // ignored test `backdated_delete_valid_from_survives_replay` in
+    // tests/wal_recovery_integration.rs.
+    let temp_dir = TempDir::new().unwrap();
+    let wal_dir = temp_dir.path().join("wal");
+
+    let wal_config = ConcurrentWalSystemConfig::new(wal_dir);
+    let wal = ConcurrentWalSystem::new(wal_config)?;
+
+    let node_id = NodeId::new(1).unwrap();
+    let now = time::now().wallclock();
+    let vf = HybridTimestamp::new(now - 7_200_000_000, 0).unwrap(); // 2h ago
+
+    wal.append(WalOperation::CreateNode {
+        node_id,
+        label: GLOBAL_INTERNER.intern("Person").unwrap(),
+        properties: PropertyMapBuilder::new().insert("name", "Alice").build(),
+        valid_from: vf,
+        provenance: None,
+    })?;
+    wal.append(WalOperation::DeleteNode {
+        node_id,
+        valid_from: time::now(),
+    })?;
+    wal.flush()?;
+
+    let create_ts = logged_timestamp(&wal, |op| matches!(op, WalOperation::CreateNode { .. }))?;
+    let delete_ts = logged_timestamp(&wal, |op| matches!(op, WalOperation::DeleteNode { .. }))?;
+
+    let config = CheckpointConfig::with_data_dir(temp_dir.path().join("checkpoints"));
+    let mut manager = CheckpointManager::new(config)?;
+    let (current, historical, _lsn) = manager.recover(&wal)?;
+
+    assert!(current.get_node(node_id).is_err());
+
+    let history = historical.get_node_history(node_id)?;
+    assert_eq!(history.version_count(), 2, "create + delete tombstone");
+
+    let prior = &history.versions[0];
+    let tombstone = &history.versions[1];
+
+    assert_eq!(prior.temporal.valid_time().start(), vf);
+    assert_eq!(
+        prior.temporal.valid_time().end(),
+        tombstone.temporal.valid_time().start(),
+        "prior head's valid time must be closed exactly at the tombstone's valid_from"
+    );
+    assert_eq!(prior.temporal.transaction_time().start(), create_ts);
+    assert_eq!(
+        prior.temporal.transaction_time().end(),
+        delete_ts,
+        "prior head's tx-time closure must survive replay at the LOGGED delete timestamp"
+    );
+
+    assert!(
+        tombstone.temporal.valid_time().is_empty(),
+        "tombstone must carry an empty valid interval"
+    );
+    assert_eq!(tombstone.temporal.transaction_time().start(), delete_ts);
+    assert!(tombstone.temporal.transaction_time().is_current());
+
+    // Point-in-time visibility matrix:
+    // - anchored (in both dimensions) before the delete: visible;
+    // - anchored at the delete's commit or now: gone.
+    assert!(
+        historical.get_node_at_time(node_id, vf, create_ts).is_ok(),
+        "node must be visible when anchored before the delete"
+    );
+    assert!(
+        historical.get_node_at_time(node_id, vf, delete_ts).is_err(),
+        "node must be gone when anchored at the delete's commit"
+    );
+    assert!(
+        historical
+            .get_node_at_time(node_id, time::now(), time::now())
+            .is_err()
+    );
+
+    Ok(())
+}
+
+#[test]
+fn test_replay_delete_edge_preserves_temporal_intervals() -> Result<()> {
+    // Issue #452: edge mirror of test_replay_delete_node_preserves_temporal_intervals.
+    let temp_dir = TempDir::new().unwrap();
+    let wal_dir = temp_dir.path().join("wal");
+
+    let wal_config = ConcurrentWalSystemConfig::new(wal_dir);
+    let wal = ConcurrentWalSystem::new(wal_config)?;
+
+    let source_id = NodeId::new(1).unwrap();
+    let target_id = NodeId::new(2).unwrap();
+    let edge_id = EdgeId::new(1).unwrap();
+    let now = time::now().wallclock();
+    let vf = HybridTimestamp::new(now - 7_200_000_000, 0).unwrap();
+
+    for node_id in [source_id, target_id] {
+        wal.append(WalOperation::CreateNode {
+            node_id,
+            label: GLOBAL_INTERNER.intern("Person").unwrap(),
+            properties: PropertyMap::new(),
+            valid_from: vf,
+            provenance: None,
+        })?;
+    }
+    wal.append(WalOperation::CreateEdge {
+        edge_id,
+        source: source_id,
+        target: target_id,
+        label: GLOBAL_INTERNER.intern("KNOWS").unwrap(),
+        properties: PropertyMap::new(),
+        valid_from: vf,
+        provenance: None,
+    })?;
+    wal.append(WalOperation::DeleteEdge {
+        edge_id,
+        valid_from: time::now(),
+    })?;
+    wal.flush()?;
+
+    let create_edge_ts =
+        logged_timestamp(&wal, |op| matches!(op, WalOperation::CreateEdge { .. }))?;
+    let delete_edge_ts =
+        logged_timestamp(&wal, |op| matches!(op, WalOperation::DeleteEdge { .. }))?;
+
+    let config = CheckpointConfig::with_data_dir(temp_dir.path().join("checkpoints"));
+    let mut manager = CheckpointManager::new(config)?;
+    let (current, historical, _lsn) = manager.recover(&wal)?;
+
+    assert!(current.get_edge(edge_id).is_err());
+
+    let history = historical.get_edge_history(edge_id)?;
+    assert_eq!(history.version_count(), 2, "create + delete tombstone");
+
+    let prior = &history.versions[0];
+    let tombstone = &history.versions[1];
+
+    assert_eq!(prior.temporal.valid_time().start(), vf);
+    assert_eq!(
+        prior.temporal.valid_time().end(),
+        tombstone.temporal.valid_time().start(),
+        "prior head's valid time must be closed exactly at the tombstone's valid_from"
+    );
+    assert_eq!(prior.temporal.transaction_time().start(), create_edge_ts);
+    assert_eq!(
+        prior.temporal.transaction_time().end(),
+        delete_edge_ts,
+        "prior head's tx-time closure must survive replay at the LOGGED delete timestamp"
+    );
+
+    assert!(tombstone.temporal.valid_time().is_empty());
+    assert_eq!(
+        tombstone.temporal.transaction_time().start(),
+        delete_edge_ts
+    );
+    assert!(tombstone.temporal.transaction_time().is_current());
+
+    // Point-in-time visibility matrix.
+    assert!(
+        historical
+            .get_edge_at_time(edge_id, vf, create_edge_ts)
+            .is_ok()
+    );
+    assert!(
+        historical
+            .get_edge_at_time(edge_id, vf, delete_edge_ts)
+            .is_err()
+    );
+    assert!(
+        historical
+            .get_edge_at_time(edge_id, time::now(), time::now())
+            .is_err()
     );
 
     Ok(())

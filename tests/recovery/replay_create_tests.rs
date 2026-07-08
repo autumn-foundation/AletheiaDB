@@ -12,19 +12,36 @@ use aletheiadb::{
     GLOBAL_INTERNER,
     core::error::Result,
     core::{
+        hlc::HybridTimestamp,
         id::{EdgeId, NodeId},
         property::{PropertyMap, PropertyMapBuilder},
-        temporal::time,
+        temporal::{Timestamp, time},
     },
     storage::{
         checkpoint::{CheckpointConfig, CheckpointManager},
         wal::{
-            WalOperation,
+            LSN, WalOperation,
             concurrent_system::{ConcurrentWalSystem, ConcurrentWalSystemConfig},
         },
     },
 };
 use tempfile::TempDir;
+
+/// Read back the LOGGED timestamp of the first WAL entry matching `pred`.
+///
+/// Replay stamps transaction time with the WAL entry's logged timestamp (not
+/// the replay time), so interval assertions must anchor on this value.
+fn logged_timestamp(
+    wal: &ConcurrentWalSystem,
+    pred: impl Fn(&WalOperation) -> bool,
+) -> Result<Timestamp> {
+    let entries = wal.read_from(LSN::initial())?;
+    Ok(entries
+        .iter()
+        .find(|e| pred(&e.operation))
+        .expect("expected a matching WAL entry")
+        .timestamp)
+}
 
 #[test]
 fn test_replay_create_node_basic() -> Result<()> {
@@ -375,7 +392,10 @@ fn test_replay_create_node_tracks_max_id() -> Result<()> {
 
 #[test]
 fn test_replay_preserves_temporal_interval() -> Result<()> {
-    // Given: WAL with CreateNode using specific temporal interval
+    // Issue #452: verify the reconstructed bi-temporal interval exactly,
+    // not merely that a version exists.
+    //
+    // Given: WAL with CreateNode using a specific valid_from
     let temp_dir = TempDir::new().unwrap();
     let wal_dir = temp_dir.path().join("wal");
 
@@ -383,38 +403,205 @@ fn test_replay_preserves_temporal_interval() -> Result<()> {
     let wal = ConcurrentWalSystem::new(wal_config)?;
 
     let node_id = NodeId::new(1).unwrap();
-    let timestamp = time::now();
+    let valid_from = time::now();
 
     wal.append(WalOperation::CreateNode {
         node_id,
         label: GLOBAL_INTERNER.intern("Test").unwrap(),
         properties: PropertyMap::new(),
-        valid_from: timestamp,
+        valid_from,
         provenance: None,
     })?;
     wal.flush()?;
+
+    // The transaction time after replay must equal the entry's LOGGED
+    // timestamp (assigned by the WAL at append time), not the replay time.
+    let create_ts = logged_timestamp(&wal, |op| matches!(op, WalOperation::CreateNode { .. }))?;
 
     // When: recover()
     let config = CheckpointConfig::with_data_dir(temp_dir.path().join("checkpoints"));
     let mut manager = CheckpointManager::new(config)?;
     let (_current, historical, _lsn) = manager.recover(&wal)?;
 
-    // Then: Historical version has correct temporal interval
-    let all_versions = historical.get_all_node_versions();
-    let node_versions = all_versions
-        .get(&node_id)
-        .expect("Node should exist in historical storage");
+    // Then: exactly one version, with the exact bi-temporal interval:
+    // valid time [valid_from, open), transaction time [logged create ts, open).
+    let history = historical.get_node_history(node_id)?;
+    assert_eq!(history.version_count(), 1);
+    let version = &history.versions[0];
+    assert_eq!(
+        version.temporal.valid_time().start(),
+        valid_from,
+        "valid_from must equal the LOGGED valid_from"
+    );
+    assert!(
+        version.temporal.valid_time().is_current(),
+        "valid time must remain open-ended after replay"
+    );
+    assert_eq!(
+        version.temporal.transaction_time().start(),
+        create_ts,
+        "transaction time must start at the entry's LOGGED timestamp"
+    );
+    assert!(
+        version.temporal.transaction_time().is_current(),
+        "transaction time must remain open-ended after replay"
+    );
 
-    if let [_version] = node_versions.as_slice() {
-        // Version exists with correct valid_from timestamp
-        // (temporal interval is constructed from valid_from + commit time)
-    } else {
-        panic!(
-            "Expected exactly one version for node {}, but found {}",
+    // And: the historical query API agrees — the node is visible at the
+    // bi-temporal coordinate (valid_from, create_ts) and any point after.
+    assert!(
+        historical
+            .get_node_at_time(node_id, valid_from, create_ts)
+            .is_ok()
+    );
+    assert!(
+        historical
+            .get_node_at_time(node_id, time::now(), time::now())
+            .is_ok()
+    );
+
+    Ok(())
+}
+
+#[test]
+fn test_replay_preserves_backdated_create_valid_from() -> Result<()> {
+    // Issue #452 + #3221: a BACKDATED create (valid_from in the past) must
+    // survive replay with its exact valid_from — replay must honor the
+    // logged valid_from, never substitute the entry/replay timestamp.
+    let temp_dir = TempDir::new().unwrap();
+    let wal_dir = temp_dir.path().join("wal");
+
+    let wal_config = ConcurrentWalSystemConfig::new(wal_dir);
+    let wal = ConcurrentWalSystem::new(wal_config)?;
+
+    let node_id = NodeId::new(1).unwrap();
+    let now = time::now().wallclock();
+    // Backdate by one hour so wallclock races cannot flake the assertions.
+    let valid_from = HybridTimestamp::new(now - 3_600_000_000, 0).unwrap();
+
+    wal.append(WalOperation::CreateNode {
+        node_id,
+        label: GLOBAL_INTERNER.intern("BackdatedTest").unwrap(),
+        properties: PropertyMapBuilder::new().insert("name", "Alice").build(),
+        valid_from,
+        provenance: None,
+    })?;
+    wal.flush()?;
+
+    let create_ts = logged_timestamp(&wal, |op| matches!(op, WalOperation::CreateNode { .. }))?;
+    assert!(
+        valid_from < create_ts,
+        "test premise: valid_from is backdated relative to the logged entry timestamp"
+    );
+
+    let config = CheckpointConfig::with_data_dir(temp_dir.path().join("checkpoints"));
+    let mut manager = CheckpointManager::new(config)?;
+    let (_current, historical, _lsn) = manager.recover(&wal)?;
+
+    let history = historical.get_node_history(node_id)?;
+    assert_eq!(history.version_count(), 1);
+    let version = &history.versions[0];
+    assert_eq!(
+        version.temporal.valid_time().start(),
+        valid_from,
+        "backdated valid_from must survive replay exactly"
+    );
+    assert!(version.temporal.valid_time().is_current());
+    assert_eq!(version.temporal.transaction_time().start(), create_ts);
+    assert!(version.temporal.transaction_time().is_current());
+
+    // Point-in-time visibility: visible between the backdate and now,
+    // invisible strictly before the backdated valid_from.
+    let probe_within = HybridTimestamp::new(now - 1_800_000_000, 0).unwrap();
+    let probe_before = HybridTimestamp::new(now - 7_200_000_000, 0).unwrap();
+    assert!(
+        historical
+            .get_node_at_time(node_id, probe_within, time::now())
+            .is_ok(),
+        "node must be visible at a valid time after the backdated valid_from"
+    );
+    assert!(
+        historical
+            .get_node_at_time(node_id, probe_before, time::now())
+            .is_err(),
+        "node must NOT be visible at a valid time before the backdated valid_from"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn test_replay_preserves_create_edge_temporal_interval() -> Result<()> {
+    // Issue #452: edge mirror of test_replay_preserves_temporal_interval,
+    // with a backdated valid_from.
+    let temp_dir = TempDir::new().unwrap();
+    let wal_dir = temp_dir.path().join("wal");
+
+    let wal_config = ConcurrentWalSystemConfig::new(wal_dir);
+    let wal = ConcurrentWalSystem::new(wal_config)?;
+
+    let source_id = NodeId::new(1).unwrap();
+    let target_id = NodeId::new(2).unwrap();
+    let edge_id = EdgeId::new(1).unwrap();
+    let now = time::now().wallclock();
+    let valid_from = HybridTimestamp::new(now - 3_600_000_000, 0).unwrap();
+
+    for node_id in [source_id, target_id] {
+        wal.append(WalOperation::CreateNode {
             node_id,
-            node_versions.len()
-        );
+            label: GLOBAL_INTERNER.intern("Person").unwrap(),
+            properties: PropertyMap::new(),
+            valid_from,
+            provenance: None,
+        })?;
     }
+    wal.append(WalOperation::CreateEdge {
+        edge_id,
+        source: source_id,
+        target: target_id,
+        label: GLOBAL_INTERNER.intern("KNOWS").unwrap(),
+        properties: PropertyMap::new(),
+        valid_from,
+        provenance: None,
+    })?;
+    wal.flush()?;
+
+    let create_edge_ts =
+        logged_timestamp(&wal, |op| matches!(op, WalOperation::CreateEdge { .. }))?;
+
+    let config = CheckpointConfig::with_data_dir(temp_dir.path().join("checkpoints"));
+    let mut manager = CheckpointManager::new(config)?;
+    let (_current, historical, _lsn) = manager.recover(&wal)?;
+
+    let history = historical.get_edge_history(edge_id)?;
+    assert_eq!(history.version_count(), 1);
+    let version = &history.versions[0];
+    assert_eq!(
+        version.temporal.valid_time().start(),
+        valid_from,
+        "edge valid_from must equal the LOGGED valid_from"
+    );
+    assert!(version.temporal.valid_time().is_current());
+    assert_eq!(
+        version.temporal.transaction_time().start(),
+        create_edge_ts,
+        "edge transaction time must start at the entry's LOGGED timestamp"
+    );
+    assert!(version.temporal.transaction_time().is_current());
+
+    // Historical query API agrees on visibility.
+    let probe_within = HybridTimestamp::new(now - 1_800_000_000, 0).unwrap();
+    let probe_before = HybridTimestamp::new(now - 7_200_000_000, 0).unwrap();
+    assert!(
+        historical
+            .get_edge_at_time(edge_id, probe_within, time::now())
+            .is_ok()
+    );
+    assert!(
+        historical
+            .get_edge_at_time(edge_id, probe_before, time::now())
+            .is_err()
+    );
 
     Ok(())
 }
