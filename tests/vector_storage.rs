@@ -1355,3 +1355,280 @@ fn test_concurrent_index_operations() {
     // Should have all nodes indexed
     assert_eq!(results.len(), (num_threads * nodes_per_thread) as usize);
 }
+
+// ============================================================
+// Delete Node Vector Cleanup Tests (Issue #367)
+// ============================================================
+//
+// Issue #367 asks for coverage that delete_node properly handles
+// vector-indexed nodes. The core cases (transaction delete_node removes
+// vectors from the HNSW index, deleted nodes absent from search results,
+// repeated create/delete memory stability, multi-index removal) are covered
+// by the Issue #323 tests above. The tests below close the remaining gaps:
+// cascade deletion, deletion of never-indexed nodes, re-creation after
+// deletion, querying from a deleted node, and bi-temporal history
+// preservation across deletion.
+
+/// Test that delete_node_cascade() removes the node's vector from the HNSW
+/// index in addition to deleting the node and its connected edges.
+///
+/// delete_node_cascade() is the recommended deletion API (it prevents
+/// orphaned edges), and it is the path the MCP `delete_node` tool takes with
+/// `detach: true`. The Issue #323 tests only cover plain `tx.delete_node()`.
+#[test]
+fn test_delete_node_cascade_removes_from_vector_index() {
+    use aletheiadb::core::PropertyMap;
+
+    let db = setup_indexed_db(128);
+
+    let emb1 = generate_embedding(128, 1.0);
+    let emb2 = generate_embedding(128, 2.0);
+
+    let node1 = db
+        .create_node(
+            "Document",
+            PropertyMapBuilder::new()
+                .insert("title", "Doc 1")
+                .insert_vector("embedding", &emb1)
+                .build(),
+        )
+        .unwrap();
+    let node2 = db
+        .create_node(
+            "Document",
+            PropertyMapBuilder::new()
+                .insert("title", "Doc 2")
+                .insert_vector("embedding", &emb2)
+                .build(),
+        )
+        .unwrap();
+
+    // Connect the nodes so the cascade actually has edges to remove.
+    let edge_id = db
+        .create_edge(node1, node2, "REFERENCES", PropertyMap::new())
+        .unwrap();
+
+    // Sanity: both nodes indexed before deletion.
+    let results_before = db.find_similar_by_embedding(&emb1, 10).unwrap();
+    assert_eq!(results_before.len(), 2, "Both nodes indexed before cascade");
+
+    // Cascade-delete node1 (removes node + connected edges).
+    db.write(|tx| {
+        tx.delete_node_cascade(node1)?;
+        Ok::<_, Error>(())
+    })
+    .unwrap();
+
+    // Node, edge, and vector must all be gone.
+    assert!(db.get_node(node1).is_err(), "Node should be deleted");
+    assert!(db.get_edge(edge_id).is_err(), "Edge should be deleted");
+
+    let results_after = db.find_similar_by_embedding(&emb1, 10).unwrap();
+    assert_eq!(
+        results_after.len(),
+        1,
+        "Cascade delete should remove node1 from the HNSW index"
+    );
+    assert_eq!(results_after[0].0, node2, "Only node2 should remain");
+}
+
+/// Test that deleting a node WITHOUT a vector property in a vector-indexed
+/// database succeeds and leaves the index untouched.
+///
+/// The vector-removal path runs for every deletion; a node that was never
+/// indexed must not cause an error, and indexed nodes must stay searchable.
+#[test]
+fn test_delete_node_never_indexed_leaves_index_intact() {
+    let db = setup_indexed_db(128);
+
+    let emb = generate_embedding(128, 1.0);
+    let indexed_node = db
+        .create_node(
+            "Document",
+            PropertyMapBuilder::new()
+                .insert("title", "Indexed")
+                .insert_vector("embedding", &emb)
+                .build(),
+        )
+        .unwrap();
+
+    // This node has no "embedding" property, so it never enters the index.
+    let plain_node = db
+        .create_node(
+            "Document",
+            PropertyMapBuilder::new().insert("title", "Plain").build(),
+        )
+        .unwrap();
+
+    // Deleting the never-indexed node must succeed.
+    db.write(|tx| {
+        tx.delete_node(plain_node)?;
+        Ok::<_, Error>(())
+    })
+    .expect("Deleting a node without a vector property should succeed");
+
+    // The indexed node must remain searchable.
+    let results = db.find_similar_by_embedding(&emb, 10).unwrap();
+    assert_eq!(results.len(), 1, "Index should be unaffected");
+    assert_eq!(results[0].0, indexed_node);
+}
+
+/// Test delete-then-recreate: after deleting a vector-indexed node and
+/// creating a new node with the same embedding, searches must return only
+/// the new node id and never resurrect the deleted id.
+///
+/// This exercises HNSW id-mapping consistency at the database level (the
+/// index-level re-add case is covered in vector_native_delete_tests.rs).
+#[test]
+fn test_recreate_after_delete_returns_only_new_node() {
+    let db = setup_indexed_db(128);
+
+    let emb = generate_embedding(128, 3.0);
+
+    let old_node = db
+        .create_node(
+            "Document",
+            PropertyMapBuilder::new()
+                .insert("title", "Original")
+                .insert_vector("embedding", &emb)
+                .build(),
+        )
+        .unwrap();
+
+    db.write(|tx| {
+        tx.delete_node(old_node)?;
+        Ok::<_, Error>(())
+    })
+    .unwrap();
+
+    // Re-create with the SAME embedding; a fresh node id is assigned.
+    let new_node = db
+        .create_node(
+            "Document",
+            PropertyMapBuilder::new()
+                .insert("title", "Recreated")
+                .insert_vector("embedding", &emb)
+                .build(),
+        )
+        .unwrap();
+    assert_ne!(old_node, new_node, "New node must get a fresh id");
+
+    let results = db.find_similar_by_embedding(&emb, 10).unwrap();
+    assert_eq!(results.len(), 1, "Exactly one node should be indexed");
+    assert_eq!(results[0].0, new_node, "Search must return the new node");
+    assert!(
+        !results.iter().any(|(id, _)| *id == old_node),
+        "Deleted node id must never reappear in search results"
+    );
+}
+
+/// Test that find_similar() anchored on a deleted node returns an error
+/// (node not found) instead of panicking or returning stale results.
+#[test]
+fn test_find_similar_from_deleted_node_errors() {
+    let db = setup_indexed_db(128);
+
+    let emb = generate_embedding(128, 4.0);
+    let node_id = db
+        .create_node(
+            "Document",
+            PropertyMapBuilder::new()
+                .insert_vector("embedding", &emb)
+                .build(),
+        )
+        .unwrap();
+
+    db.write(|tx| {
+        tx.delete_node(node_id)?;
+        Ok::<_, Error>(())
+    })
+    .unwrap();
+
+    // Using the deleted node as the query anchor must fail cleanly.
+    let result = db.find_similar(node_id, 10);
+    assert!(
+        result.is_err(),
+        "find_similar on a deleted node should return an error, got: {result:?}"
+    );
+}
+
+/// Test that deleting a node preserves bi-temporal vector history: a
+/// point-in-time similarity query BEFORE the deletion timestamp must still
+/// find the node, while a query AFTER the deletion must not.
+///
+/// This is the bi-temporal contract for vector storage -- deletion closes
+/// the fact going forward but never rewrites recorded history.
+#[test]
+fn test_temporal_vector_history_preserved_across_delete() {
+    use aletheiadb::index::vector::temporal::{
+        RetentionPolicy, SnapshotStrategy, TemporalVectorConfig,
+    };
+    use aletheiadb::index::vector::{DistanceMetric, HnswConfig};
+
+    let db = AletheiaDB::new().unwrap();
+
+    // Snapshot on every transaction so create and delete each get a snapshot.
+    let hnsw_config = HnswConfig::new(4, DistanceMetric::Cosine).with_capacity(100);
+    db.vector_index("embedding")
+        .hnsw(hnsw_config.clone())
+        .temporal(TemporalVectorConfig {
+            snapshot_strategy: SnapshotStrategy::TransactionInterval(1),
+            retention_policy: RetentionPolicy::KeepN(100),
+            max_snapshots: 100,
+            full_snapshot_interval: 10,
+            hnsw_config: Some(hnsw_config),
+        })
+        .enable()
+        .expect("Should enable temporal vector index");
+
+    let emb = vec![1.0f32, 0.0, 0.0, 0.0];
+    let node_id = db
+        .create_node(
+            "Document",
+            PropertyMapBuilder::new()
+                .insert_vector("embedding", &emb)
+                .build(),
+        )
+        .unwrap();
+
+    // Let time pass so "before delete" is strictly after the create snapshot.
+    advance_time();
+    let before_delete = aletheiadb::core::temporal::time::now();
+    advance_time();
+
+    db.write(|tx| {
+        tx.delete_node(node_id)?;
+        Ok::<_, Error>(())
+    })
+    .unwrap();
+
+    advance_time();
+    let after_delete = aletheiadb::core::temporal::time::now();
+
+    // History BEFORE the deletion must still contain the node.
+    let results_before = db
+        .find_similar_as_of(&emb, 10, before_delete)
+        .expect("Temporal query before deletion should succeed");
+    assert!(
+        results_before.iter().any(|(id, _)| *id == node_id),
+        "Point-in-time query before deletion must still find the node \
+         (bi-temporal history must be preserved), got: {results_before:?}"
+    );
+
+    // AFTER the deletion the node must be absent.
+    let results_after = db
+        .find_similar_as_of(&emb, 10, after_delete)
+        .expect("Temporal query after deletion should succeed");
+    assert!(
+        !results_after.iter().any(|(id, _)| *id == node_id),
+        "Point-in-time query after deletion must not return the deleted node, \
+         got: {results_after:?}"
+    );
+
+    // Current-state search must also be clean.
+    let current = db.find_similar_by_embedding(&emb, 10).unwrap();
+    assert!(
+        !current.iter().any(|(id, _)| *id == node_id),
+        "Current-state search must not return the deleted node"
+    );
+}
