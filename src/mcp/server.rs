@@ -22,7 +22,7 @@
 //! | **Nodes** | `get_node`, `create_node`, `update_node` | CRUD operations for nodes |
 //! | **Edges** | `get_edge`, `create_edge`, `traverse` | CRUD and traversal for edges |
 //! | **Vector** | `find_similar`, `enable_vector_index` | Semantic similarity search |
-//! | **Temporal** | `get_node_at_time`, `get_node_history`, `temporal_extent` | Time-travel queries, history, and dataset extent |
+//! | **Temporal** | `get_node_at_time`, `find_nodes_at_time`, `get_node_history`, `temporal_extent` | Time-travel queries, history, and dataset extent |
 //! | **Hybrid** | `hybrid_query` | Combined graph + vector + temporal queries |
 //! | **Schema** | `get_schema` | Discover node labels, edge types, and property keys (optionally bi-temporal) |
 //!
@@ -618,6 +618,18 @@ impl AletheiaMcpServer {
         ))
     }
 
+    /// Find nodes by label (and optional exact property match) as of a
+    /// bi-temporal point (Issue #3236).
+    ///
+    /// The entry-point resolver for "the Person named Alice, as of
+    /// 2024-01-01" when no `NodeId` is known: each returned node is
+    /// reconstructed as it existed at `(valid_time, transaction_time)`.
+    pub fn find_nodes_at_time(&self, req: FindNodesAtTimeRequest) -> String {
+        Self::extract_text(self.handle_find_nodes_at_time(
+            serde_json::to_value(req).expect("request serialization should not fail"),
+        ))
+    }
+
     /// Discover the graph's schema: distinct node labels and edge types,
     /// their counts, and the property keys observed on each.
     ///
@@ -996,6 +1008,20 @@ impl AletheiaMcpServer {
     /// Format transaction time for response, using the constant for current time.
     fn format_tx_time_response(tx_time: Option<String>) -> String {
         tx_time.unwrap_or_else(|| TRANSACTION_TIME_NOW.to_string())
+    }
+
+    /// Format a resolved bi-temporal coordinate as an RFC 3339 UTC string
+    /// with microsecond precision and a `Z` suffix (e.g.
+    /// `2024-01-15T10:00:00.000000Z`).
+    ///
+    /// Total: a wallclock value outside chrono's representable range degrades
+    /// to the raw microsecond count rather than silently rendering the 1970
+    /// epoch.
+    fn format_timestamp_rfc3339(ts: Timestamp) -> String {
+        match DateTime::<Utc>::from_timestamp_micros(ts.wallclock()) {
+            Some(dt) => dt.to_rfc3339_opts(chrono::SecondsFormat::Micros, true),
+            None => ts.wallclock().to_string(),
+        }
     }
 
     fn matches_label(&self, interned: crate::core::InternedString, label: &str) -> bool {
@@ -2364,6 +2390,104 @@ impl AletheiaMcpServer {
         }
     }
 
+    /// Find nodes by label (and optional exact property match) as of a
+    /// bi-temporal point (Issue #3236).
+    ///
+    /// Validation mirrors `handle_list_nodes` (both-or-neither property
+    /// filter, same limit/offset clamps); the temporal reconstruction is
+    /// delegated to `AletheiaDB::find_nodes_at_time` /
+    /// `find_nodes_by_property_at`, which reconstruct each candidate from
+    /// the historical version visible at the queried coordinate -- so nodes
+    /// deleted from current state are still found when both dimensions
+    /// anchor before the deletion.
+    fn handle_find_nodes_at_time(&self, args: serde_json::Value) -> CallToolResult {
+        let req: FindNodesAtTimeRequest = match serde_json::from_value(args) {
+            Ok(r) => r,
+            Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
+        };
+
+        // Validate property filter: both key and value are required together
+        // (mirroring list_nodes).
+        if req.property_key.is_some() != req.property_value.is_some() {
+            return self.invalid_argument(
+                "Both 'property_key' and 'property_value' are required together",
+            );
+        }
+
+        let valid_time = match self.parse_timestamp(&req.valid_time) {
+            Ok(t) => t,
+            Err(e) => return self.invalid_argument(&format!("Invalid valid_time: {}", e)),
+        };
+        let tx_time = match self.parse_optional_tx_time(req.transaction_time.as_deref()) {
+            Ok(t) => t,
+            Err(e) => return self.invalid_argument(&format!("Invalid transaction_time: {}", e)),
+        };
+
+        // Apply resource limits exactly like list_nodes: a page must be able
+        // to carry a continuation cursor, so the limit is at least 1.
+        let limit = req
+            .limit
+            .unwrap_or(DEFAULT_RESULT_LIMIT)
+            .clamp(1, MAX_RESULT_LIMIT);
+        let offset = req.offset.unwrap_or(0).min(MAX_PAGINATION_OFFSET);
+
+        let matches =
+            if let (Some(prop_key), Some(prop_val)) = (&req.property_key, &req.property_value) {
+                let property_value = match self.json_to_property_value(prop_val) {
+                    Some(v) => v,
+                    None => return self.invalid_argument(
+                        "Unsupported property_value type. Use strings, numbers, booleans, or null.",
+                    ),
+                };
+                self.db.find_nodes_by_property_at(
+                    &req.label,
+                    prop_key,
+                    &property_value,
+                    valid_time,
+                    tx_time,
+                )
+            } else {
+                self.db.find_nodes_at_time(&req.label, valid_time, tx_time)
+            };
+
+        match matches {
+            Ok(matches) => {
+                // The full matching set is already materialized (sorted by
+                // node id for stable pagination), so the total is cheap to
+                // report and `has_more` is exact.
+                let total_matching = matches.len();
+                let include_vectors = req.include_vectors.unwrap_or(false);
+                let nodes: Vec<NodeResponse> = matches
+                    .iter()
+                    .skip(offset)
+                    .take(limit)
+                    .map(|node| self.node_to_response(node, include_vectors))
+                    .collect();
+
+                let has_more = offset.saturating_add(limit) < total_matching;
+                let mut response = json!({
+                    "nodes": nodes,
+                    "count": nodes.len(),
+                    "offset": offset,
+                    "limit": limit,
+                    // The resolved coordinate this answer holds at -- the
+                    // omitted transaction_time resolves to a concrete "now".
+                    "valid_time": Self::format_timestamp_rfc3339(valid_time),
+                    "transaction_time": Self::format_timestamp_rfc3339(tx_time),
+                });
+                Self::attach_completeness(
+                    &mut response,
+                    offset,
+                    limit,
+                    has_more,
+                    Some(total_matching),
+                );
+                self.success_json(response)
+            }
+            Err(e) => self.db_error(e),
+        }
+    }
+
     fn handle_list_changes(&self, args: serde_json::Value) -> CallToolResult {
         let req: ListChangesRequest = match serde_json::from_value(args) {
             Ok(r) => r,
@@ -3521,6 +3645,7 @@ impl AletheiaMcpServer {
             "list_unique_constraints" => self.handle_list_unique_constraints(args),
             "get_node_at_time" => self.handle_get_node_at_time(args),
             "get_edge_at_time" => self.handle_get_edge_at_time(args),
+            "find_nodes_at_time" => self.handle_find_nodes_at_time(args),
             "list_changes" => self.handle_list_changes(args),
             "get_node_at_valid_time" => self.handle_get_node_at_valid_time(args),
             "get_node_at_transaction_time" => self.handle_get_node_at_transaction_time(args),
@@ -3855,6 +3980,22 @@ fn tool_definitions() -> Vec<Tool> {
             "get_edge_at_time",
             "Get edge state at a specific time.",
             make_input_schema::<GetEdgeAtTimeRequest>(),
+        ),
+        Tool::new(
+            "find_nodes_at_time",
+            "Find nodes by label (and optional exact property_key/property_value match) as of \
+                     a bi-temporal point -- resolve e.g. \"the Person named Alice as of \
+                     2024-01-01\" in one call, without knowing any node ID. `valid_time` is \
+                     required (ISO 8601 or microseconds since epoch); `transaction_time` is \
+                     optional and defaults to now. Each returned node is reconstructed AS IT \
+                     EXISTED at that coordinate (not its current state); nodes that did not \
+                     exist, or whose property value did not hold, at that point are excluded. \
+                     Recalling a since-deleted node requires anchoring BOTH dimensions before \
+                     the deletion. Results are sorted by node id; the response echoes the \
+                     resolved valid_time/transaction_time and carries `has_more`/`next_offset`/\
+                     `total_matching` pagination metadata. Vector/embedding properties are \
+                     elided by default; pass `include_vectors: true` for full arrays.",
+            make_input_schema::<FindNodesAtTimeRequest>(),
         ),
         Tool::new(
             "list_changes",

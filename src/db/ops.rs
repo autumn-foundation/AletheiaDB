@@ -652,6 +652,122 @@ impl AletheiaDB {
         self.current.get_nodes_by_label(label)
     }
 
+    /// Find nodes by label as of a bi-temporal point (AS OF scan, Issue #3236).
+    ///
+    /// Returns every node with the given label **as it existed** at
+    /// `(valid_time, transaction_time)`, with properties reconstructed from
+    /// the historical version visible at that coordinate. Nodes that did not
+    /// exist at the queried point are excluded; nodes since deleted from
+    /// current state are still found when both dimensions anchor before the
+    /// deletion.
+    ///
+    /// Results are sorted by node ID so pagination over the result set is
+    /// deterministic. A label that has never been written yields an empty
+    /// result, never an error.
+    ///
+    /// # Performance
+    ///
+    /// Iterates every node that has ever had a version recorded (the same
+    /// candidate enumeration [`schema_as_of`](Self::schema_as_of) uses) and
+    /// reconstructs each at the queried coordinate. A dedicated temporal
+    /// label index is a deliberate follow-up if this path proves too slow at
+    /// scale.
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
+    pub fn find_nodes_at_time(
+        &self,
+        label: &str,
+        valid_time: Timestamp,
+        transaction_time: Timestamp,
+    ) -> Result<Vec<Node>> {
+        self.find_nodes_at_time_filtered(label, None, valid_time, transaction_time)
+    }
+
+    /// Find nodes by label and exact property match as of a bi-temporal
+    /// point (Issue #3236).
+    ///
+    /// The bi-temporal counterpart of
+    /// [`find_nodes_by_property`](Self::find_nodes_by_property): the property
+    /// comparison runs against each node's state **at**
+    /// `(valid_time, transaction_time)`, so a node whose property only
+    /// matched before (or after) the queried point is excluded. With both
+    /// dimensions at the current time this returns the same node set as
+    /// `find_nodes_by_property`.
+    ///
+    /// See [`find_nodes_at_time`](Self::find_nodes_at_time) for ordering,
+    /// completeness, and performance characteristics.
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
+    pub fn find_nodes_by_property_at(
+        &self,
+        label: &str,
+        property_key: &str,
+        property_value: &PropertyValue,
+        valid_time: Timestamp,
+        transaction_time: Timestamp,
+    ) -> Result<Vec<Node>> {
+        self.find_nodes_at_time_filtered(
+            label,
+            Some((property_key, property_value)),
+            valid_time,
+            transaction_time,
+        )
+    }
+
+    /// Shared implementation for the AS OF node-find methods: enumerate every
+    /// node that has ever had a version recorded, reconstruct each at the
+    /// queried bi-temporal coordinate, and keep those whose *at-time* state
+    /// matches the label (and optional exact property) filter.
+    fn find_nodes_at_time_filtered(
+        &self,
+        label: &str,
+        property_filter: Option<(&str, &PropertyValue)>,
+        valid_time: Timestamp,
+        transaction_time: Timestamp,
+    ) -> Result<Vec<Node>> {
+        // A label (or property key) that has never been interned has never
+        // been written anywhere -- current or historical -- so the result is
+        // an empty set, never an error (mirroring `find_nodes_by_property`).
+        let Some(label_id) = GLOBAL_INTERNER.get_id(label) else {
+            return Ok(Vec::new());
+        };
+        let key_filter = match property_filter {
+            Some((key, value)) => match GLOBAL_INTERNER.get_id(key) {
+                Some(key_id) => Some((key_id, value)),
+                None => return Ok(Vec::new()),
+            },
+            None => None,
+        };
+
+        // Candidate set: every node that has ever had a version recorded.
+        // Unlike the current-state label index, this stays complete for nodes
+        // deleted from current state (deletion closes the version's
+        // transaction interval but the version head remains), so anchoring
+        // both dimensions before a deletion still recalls the node. Sorted so
+        // the result order (and thus pagination) is deterministic.
+        let mut node_ids = self.historical.read().versioned_node_ids();
+        node_ids.sort_unstable();
+
+        let mut matches = Vec::new();
+        for (_, node) in self.get_nodes_at_time(&node_ids, valid_time, transaction_time)? {
+            // `None` = not visible at the queried bi-temporal point.
+            let Some(node) = node else {
+                continue;
+            };
+            if node.label != label_id {
+                continue;
+            }
+            if let Some((key_id, expected)) = &key_filter
+                && !node
+                    .properties
+                    .get_by_interned_key(key_id)
+                    .is_some_and(|v| v == *expected)
+            {
+                continue;
+            }
+            matches.push(node);
+        }
+        Ok(matches)
+    }
+
     // ========================================================================
     // Uniqueness constraint API
     // ========================================================================
@@ -1143,6 +1259,218 @@ mod tests {
                 .create_edge(source, target, "KNOWS", PropertyMapBuilder::new().build())
                 .unwrap();
             assert!(db.get_edge_at_valid_time(edge_id, time::now()).is_ok());
+        }
+    }
+
+    /// Tests for the point-in-time (AS OF) node find API (Issue #3236):
+    /// `find_nodes_at_time` (label-only) and `find_nodes_by_property_at`
+    /// (label + exact property match), both reconstructing each candidate
+    /// node from the historical version visible at `(valid_time,
+    /// transaction_time)`.
+    mod find_nodes_at_time_tests {
+        use super::*;
+        use crate::core::id::NodeId;
+        use crate::core::property::PropertyValue;
+        use crate::core::temporal::time;
+
+        fn name_props(name: &str) -> crate::core::property::PropertyMap {
+            PropertyMapBuilder::new().insert("name", name).build()
+        }
+
+        fn ids(nodes: &[crate::core::graph::Node]) -> Vec<NodeId> {
+            nodes.iter().map(|n| n.id).collect()
+        }
+
+        /// Capture a bi-temporal anchor strictly after every previously
+        /// committed write. A bare `time::now()` carries logical component 0,
+        /// while an HLC commit stamp in the *same microsecond* carries a
+        /// logical component > 0 and therefore orders *after* the anchor;
+        /// sleeping past the microsecond boundary first makes the anchor's
+        /// wallclock strictly greater than all prior commit wallclocks.
+        fn anchor_after_commits() -> crate::core::temporal::Timestamp {
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            time::now()
+        }
+
+        #[test]
+        fn property_changed_across_versions_matches_value_at_t_only() {
+            let (_tmp, db) = create_test_db().unwrap();
+            let alice = PropertyValue::from("Alice");
+            let bob = PropertyValue::from("Bob");
+
+            let id = db.create_node("Person", name_props("Alice")).unwrap();
+            let t1 = anchor_after_commits();
+            db.update_node_with_valid_time(id, name_props("Bob"), None)
+                .unwrap();
+            let t2 = anchor_after_commits();
+
+            // At (t1, t1) the name was still "Alice"...
+            let found = db
+                .find_nodes_by_property_at("Person", "name", &alice, t1, t1)
+                .unwrap();
+            assert_eq!(ids(&found), vec![id]);
+            // ...and the returned node carries the AT-TIME property value,
+            // not the current one.
+            assert_eq!(found[0].properties.get("name"), Some(&alice));
+            // "Bob" did not hold yet at t1.
+            assert!(
+                db.find_nodes_by_property_at("Person", "name", &bob, t1, t1)
+                    .unwrap()
+                    .is_empty()
+            );
+
+            // At (t2, t2) the situation is exactly reversed.
+            let found = db
+                .find_nodes_by_property_at("Person", "name", &bob, t2, t2)
+                .unwrap();
+            assert_eq!(ids(&found), vec![id]);
+            assert_eq!(found[0].properties.get("name"), Some(&bob));
+            assert!(
+                db.find_nodes_by_property_at("Person", "name", &alice, t2, t2)
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+
+        #[test]
+        fn node_created_after_t_is_excluded() {
+            let (_tmp, db) = create_test_db().unwrap();
+            let alice = PropertyValue::from("Alice");
+
+            let t0 = anchor_after_commits();
+            let id = db.create_node("Person", name_props("Alice")).unwrap();
+            let t1 = anchor_after_commits();
+
+            assert!(
+                db.find_nodes_by_property_at("Person", "name", &alice, t0, t0)
+                    .unwrap()
+                    .is_empty(),
+                "a node created after T must not be found at T"
+            );
+            assert_eq!(
+                ids(&db
+                    .find_nodes_by_property_at("Person", "name", &alice, t1, t1)
+                    .unwrap()),
+                vec![id]
+            );
+        }
+
+        #[test]
+        fn node_deleted_before_t_found_when_both_dimensions_anchor_before_deletion() {
+            let (_tmp, db) = create_test_db().unwrap();
+            let alice = PropertyValue::from("Alice");
+
+            let id = db.create_node("Person", name_props("Alice")).unwrap();
+            let t_before = anchor_after_commits();
+            db.delete_node_with_valid_time(id, None).unwrap();
+            let t_after = anchor_after_commits();
+
+            // Anchoring both dimensions before the deletion recalls the node
+            // -- this is the case a current-state label index alone would
+            // miss, since the node no longer exists in current storage.
+            assert_eq!(
+                ids(&db
+                    .find_nodes_by_property_at("Person", "name", &alice, t_before, t_before)
+                    .unwrap()),
+                vec![id]
+            );
+
+            // At a coordinate after the deletion it is gone.
+            assert!(
+                db.find_nodes_by_property_at("Person", "name", &alice, t_after, t_after)
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+
+        #[test]
+        fn label_only_as_of_scan_without_property_filter() {
+            let (_tmp, db) = create_test_db().unwrap();
+
+            let a = db.create_node("Person", name_props("Alice")).unwrap();
+            let b = db.create_node("Person", name_props("Bob")).unwrap();
+            let c = db.create_node("Company", name_props("Acme")).unwrap();
+            let t1 = anchor_after_commits();
+            db.delete_node_with_valid_time(b, None).unwrap();
+            let t2 = anchor_after_commits();
+
+            // Before the deletion both Person nodes are visible (sorted by id).
+            assert_eq!(
+                ids(&db.find_nodes_at_time("Person", t1, t1).unwrap()),
+                vec![a, b]
+            );
+            // After the deletion only `a` remains.
+            assert_eq!(
+                ids(&db.find_nodes_at_time("Person", t2, t2).unwrap()),
+                vec![a]
+            );
+            // Label filtering holds on the AS OF path.
+            assert_eq!(
+                ids(&db.find_nodes_at_time("Company", t1, t1).unwrap()),
+                vec![c]
+            );
+        }
+
+        #[test]
+        fn current_state_equivalence_with_find_nodes_by_property() {
+            let (_tmp, db) = create_test_db().unwrap();
+            let alice = PropertyValue::from("Alice");
+
+            let _a = db.create_node("Person", name_props("Alice")).unwrap();
+            let _b = db.create_node("Person", name_props("Bob")).unwrap();
+            let _c = db.create_node("Person", name_props("Alice")).unwrap();
+            let d = db.create_node("Person", name_props("Alice")).unwrap();
+            db.delete_node_with_valid_time(d, None).unwrap();
+
+            let now = anchor_after_commits();
+            let mut current = db.find_nodes_by_property("Person", "name", &alice);
+            current.sort_unstable();
+            let at_now = ids(&db
+                .find_nodes_by_property_at("Person", "name", &alice, now, now)
+                .unwrap());
+
+            assert_eq!(
+                at_now, current,
+                "valid_time=now + transaction_time=now must equal the current-state result set"
+            );
+        }
+
+        #[test]
+        fn unknown_label_or_property_key_returns_empty_not_error() {
+            let (_tmp, db) = create_test_db().unwrap();
+            let _ = db.create_node("Person", name_props("Alice")).unwrap();
+            let now = anchor_after_commits();
+
+            assert!(
+                db.find_nodes_at_time("NeverInternedLabel3236", now, now)
+                    .unwrap()
+                    .is_empty()
+            );
+            assert!(
+                db.find_nodes_by_property_at(
+                    "Person",
+                    "never_interned_key_3236",
+                    &PropertyValue::from("x"),
+                    now,
+                    now
+                )
+                .unwrap()
+                .is_empty()
+            );
+        }
+
+        #[test]
+        fn results_are_sorted_by_node_id_for_stable_pagination() {
+            let (_tmp, db) = create_test_db().unwrap();
+            let mut created = Vec::new();
+            for _ in 0..5 {
+                created.push(db.create_node("Person", name_props("Alice")).unwrap());
+            }
+            created.sort_unstable();
+
+            let now = anchor_after_commits();
+            let found = ids(&db.find_nodes_at_time("Person", now, now).unwrap());
+            assert_eq!(found, created, "results must be sorted by node id");
         }
     }
 }

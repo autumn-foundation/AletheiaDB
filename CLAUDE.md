@@ -310,7 +310,7 @@ cargo run --bin aletheia-mcp --features mcp-server
 | **Edges** | `get_edge`, `create_edge`, `update_edge`, `delete_edge`, `get_outgoing_edges`, `get_incoming_edges` |
 | **Traversal** | `traverse` (multi-hop graph traversal; optional bi-temporal `as_of_valid_time`/`as_of_transaction_time`) |
 | **Vector** | `find_similar`, `enable_vector_index`, `list_vector_indexes` |
-| **Temporal** | `get_node_at_time`, `get_edge_at_time`, `temporal_extent` (dataset's queryable bi-temporal extent; optional by_label breakdown) |
+| **Temporal** | `get_node_at_time`, `get_edge_at_time`, `find_nodes_at_time` (point-in-time find by label/property, no NodeId needed), `temporal_extent` (dataset's queryable bi-temporal extent; optional by_label breakdown) |
 | **Hybrid** | `hybrid_query` (combined graph + vector + temporal) |
 | **Query** | `query` (execute a single read-only Cypher/AQL statement; see below) |
 | **Schema** | `get_schema` (node labels, edge types, and property keys, each with counts; optional bi-temporal `as_of_valid_time`/`as_of_transaction_time`) |
@@ -381,6 +381,28 @@ convention -- note that recalling a since-deleted edge requires anchoring
 *both* dimensions before the deletion, not just `as_of_valid_time` (see the
 guide below for why). See
 [docs/guides/mcp-query-tool.md](docs/guides/mcp-query-tool.md#point-in-time-as-of-graph-traversal).
+
+**Point-in-time (AS OF) node find (Issue #3236)**: `find_nodes_at_time`
+resolves *"the Person named Alice, as of 2024-01-01"* in one call, without a
+prior `NodeId` -- the entry-point resolver the #3225 AS OF traversal assumes
+the caller already has. It accepts `label` (required), optional
+`property_key` + `property_value` (both-or-neither, mirroring `list_nodes`),
+`valid_time` (required, ISO 8601 / RFC 3339 or microseconds since epoch),
+optional `transaction_time` (defaults to now), and `limit`/`offset` (same
+clamps as `list_nodes`; results sorted by node id for stable pagination).
+Each returned node is reconstructed **as it existed** at
+`(valid_time, transaction_time)` -- not its current state -- and nodes that
+did not exist (or whose property value did not hold) at that point are
+excluded. With both dimensions at now, the result set equals the
+current-state `list_nodes` property lookup. The response echoes the resolved
+`valid_time`/`transaction_time` (RFC 3339). Nodes since deleted from current
+state are found too (candidates come from history, not the live index), but
+recalling superseded or deleted states requires anchoring *both* dimensions
+before the superseding write, exactly as with #3225. Backed by the
+`AletheiaDB::find_nodes_at_time` / `find_nodes_by_property_at` convenience
+API. v1 iterates historical version heads (a scan; a temporal label index is
+a deliberate follow-up). See
+[docs/guides/mcp-query-tool.md](docs/guides/mcp-query-tool.md#point-in-time-as-of-node-find-by-label-and-property).
 
 **Vector properties are elided by default (Issue #3220)**: `get_node`,
 `list_nodes`, `get_edge`, `list_edges`, `get_outgoing_edges`,

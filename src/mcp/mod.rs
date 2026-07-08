@@ -35,11 +35,11 @@ pub use server::AletheiaMcpServer;
 // Re-export tool request/response types for testing (alphabetically sorted)
 pub use tools::{
     CountEdgesRequest, CountNodesRequest, CreateEdgeRequest, CreateNodeRequest, DeleteEdgeRequest,
-    DeleteNodeCascadeRequest, DeleteNodeRequest, EnableVectorIndexRequest, FindSimilarRequest,
-    GetEdgeAtTimeRequest, GetEdgeRequest, GetIncomingEdgesRequest, GetNodeAtTimeRequest,
-    GetNodeRequest, GetOutgoingEdgesRequest, HybridQueryRequest, ListChangesRequest,
-    ListEdgesRequest, ListNodesRequest, ListVectorIndexesRequest, QueryRequest, TraverseRequest,
-    UpdateEdgeRequest, UpdateNodeRequest,
+    DeleteNodeCascadeRequest, DeleteNodeRequest, EnableVectorIndexRequest, FindNodesAtTimeRequest,
+    FindSimilarRequest, GetEdgeAtTimeRequest, GetEdgeRequest, GetIncomingEdgesRequest,
+    GetNodeAtTimeRequest, GetNodeRequest, GetOutgoingEdgesRequest, HybridQueryRequest,
+    ListChangesRequest, ListEdgesRequest, ListNodesRequest, ListVectorIndexesRequest, QueryRequest,
+    TraverseRequest, UpdateEdgeRequest, UpdateNodeRequest,
 };
 
 #[cfg(test)]
