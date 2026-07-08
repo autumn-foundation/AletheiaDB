@@ -46,13 +46,15 @@ kept in lockstep with the code by CI conformance tests.
   structured create/update operations: MCP `create_node` /
   `update_node` / `create_edge` / `update_edge`, and HTTP `/query`
   `create_node` / `bulk_create_nodes` / `bulk_update_nodes`.
-  **Not stamped (known gap, follow-up work)**: deletes and retracts
-  (the #3224 provenance mechanism has no slot on them — destructive
-  operations currently carry no principal attribution), and mutating
-  AQL statements via HTTP `execute_query` / `bulk_execute_query`
-  (identity is not yet threaded into the query executor). Those writes
-  are still authorized by role; they just aren't attributed in
-  provenance.
+  **Not stamped (known gap, tracked as Issue #3427)**: deletes and
+  retracts — the delete/retract WAL entries carry no provenance slot,
+  so a stamp would not survive WAL-replay crash recovery; durable
+  destructive-op attribution needs a WAL payload extension and is
+  deliberately deferred rather than shipped half-durable — and
+  mutating AQL statements via HTTP `execute_query` /
+  `bulk_execute_query` (identity is not yet threaded into the query
+  executor; also noted in #3427). Those writes are still authorized by
+  role; they just aren't attributed in provenance.
 
 ## Step 1 — Bootstrap the first admin credential
 

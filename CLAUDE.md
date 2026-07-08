@@ -509,7 +509,8 @@ version provenance (`provenance.principal`, composing with the
 caller-supplied `source`) on the structured create/update node/edge
 paths of both surfaces — deletes/retracts and HTTP AQL-statement writes
 (`execute_query`/`bulk_execute_query`) do NOT stamp a principal yet
-(destructive-op attribution is a known follow-up gap); anonymous writes
+(destructive-op attribution needs a WAL payload extension to survive
+crash recovery; tracked as Issue #3427); anonymous writes
 record no principal. MCP
 sessions authenticate via `ALETHEIADB_MCP_API_KEY`; key lifecycle is served
 by the HTTP `/admin/keys*` endpoints. Programmatic
