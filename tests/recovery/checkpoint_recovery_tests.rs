@@ -483,3 +483,175 @@ fn test_checkpoint_get_persisted_lsn() -> Result<()> {
 
     Ok(())
 }
+
+// ============================================================================
+// Valid-Time Retraction x Checkpoint Interplay (Issue #3230, fix-round #7)
+// ============================================================================
+
+/// retract -> checkpoint -> restart/recover: the closed valid interval and
+/// the retraction version must survive a recovery that restores state from
+/// the checkpoint alone (no WAL entries left to replay past the checkpoint).
+#[test]
+fn test_retraction_then_checkpoint_survives_recovery() -> Result<()> {
+    use aletheiadb::core::hlc::HybridTimestamp;
+
+    let temp_dir = TempDir::new().unwrap();
+    let wal_dir = temp_dir.path().join("wal");
+    let data_dir = temp_dir.path().join("data");
+
+    let wal_config = ConcurrentWalSystemConfig::new(&wal_dir);
+    let wal = ConcurrentWalSystem::new(wal_config)?;
+
+    let node_id = NodeId::new(1)?;
+    let now = time::now().wallclock();
+    let valid_from = HybridTimestamp::new(now - 3_600_000_000, 0).unwrap();
+    let valid_to = HybridTimestamp::new(now - 1_800_000_000, 0).unwrap();
+
+    wal.append(WalOperation::CreateNode {
+        node_id,
+        label: GLOBAL_INTERNER.intern("RetractCkpt").unwrap(),
+        properties: PropertyMapBuilder::new().insert("name", "Alice").build(),
+        valid_from,
+        provenance: None,
+    })?;
+    wal.append(WalOperation::RetractNode { node_id, valid_to })?;
+    wal.flush()?;
+
+    // First recovery replays the create + retraction, then we checkpoint
+    // the post-retraction state at the WAL head.
+    let checkpoint_lsn = LSN(wal.current_lsn().0.saturating_sub(1));
+    {
+        let config = UnifiedCheckpointConfig::with_data_dir(&data_dir);
+        let mut manager = CheckpointManager::new(config)?;
+        let (current, historical, _final_lsn) = manager.recover(&wal)?;
+        assert!(
+            current.get_node(node_id).is_err(),
+            "retracted before checkpoint"
+        );
+        manager.create_checkpoint(checkpoint_lsn, &current, &historical)?;
+    }
+
+    // Simulated restart: a fresh manager restores from the checkpoint with
+    // nothing left to replay after the checkpoint LSN.
+    let config = UnifiedCheckpointConfig::with_data_dir(&data_dir);
+    let mut manager = CheckpointManager::new(config)?;
+    assert!(manager.has_persisted_state());
+    let (recovered_current, recovered_historical, _final_lsn) = manager.recover(&wal)?;
+
+    // Current state: still absent.
+    assert!(recovered_current.get_node(node_id).is_err());
+
+    // The retraction version's closed interval [valid_from, valid_to)
+    // survived the checkpoint round trip.
+    let head_id = recovered_historical
+        .get_current_node_version(node_id)
+        .expect("retraction version must survive the checkpoint");
+    let head = recovered_historical.get_node_version(head_id).unwrap();
+    assert_eq!(head.temporal.valid_time().start(), valid_from);
+    assert_eq!(
+        head.temporal.valid_time().end(),
+        valid_to,
+        "closed valid interval must survive checkpoint + recovery"
+    );
+
+    // Both versions (create + retraction) survived as temporal metadata.
+    let stats = recovered_historical.stats();
+    assert_eq!(
+        stats.total_node_versions, 2,
+        "create + retraction versions must both survive the checkpoint"
+    );
+
+    // NOTE (pre-existing checkpoint-restore limitation, not retraction-
+    // specific): the persisted temporal index does not carry version-chain
+    // links (`prev_version`) or transaction-time closures, so restored
+    // DELTA versions cannot reconstruct their properties and
+    // `get_node_at_time` point reads are not guaranteed across a
+    // restore-only recovery — for updates and deletes exactly as for
+    // retractions. Full bi-temporal point reads after recovery are covered
+    // by the WAL-replay path instead (see
+    // `test_retraction_replayed_after_checkpoint` below and
+    // `retraction_survives_wal_replay_crash_recovery` in `src/db/ops.rs`).
+
+    Ok(())
+}
+
+/// checkpoint -> retract -> recover: a RetractNode WAL entry appended AFTER
+/// the checkpoint must replay on top of the checkpoint-restored state,
+/// honoring the logged valid_to.
+#[test]
+fn test_retraction_replayed_after_checkpoint() -> Result<()> {
+    use aletheiadb::core::hlc::HybridTimestamp;
+
+    let temp_dir = TempDir::new().unwrap();
+    let wal_dir = temp_dir.path().join("wal");
+    let data_dir = temp_dir.path().join("data");
+
+    let wal_config = ConcurrentWalSystemConfig::new(&wal_dir);
+    let wal = ConcurrentWalSystem::new(wal_config)?;
+
+    let node_id = NodeId::new(1)?;
+    let now = time::now().wallclock();
+    let valid_from = HybridTimestamp::new(now - 3_600_000_000, 0).unwrap();
+    let valid_to = HybridTimestamp::new(now - 1_800_000_000, 0).unwrap();
+
+    wal.append(WalOperation::CreateNode {
+        node_id,
+        label: GLOBAL_INTERNER.intern("RetractCkptReplay").unwrap(),
+        properties: PropertyMapBuilder::new().insert("name", "Bob").build(),
+        valid_from,
+        provenance: None,
+    })?;
+    wal.flush()?;
+
+    // Checkpoint the PRE-retraction state (node present).
+    let checkpoint_lsn = LSN(wal.current_lsn().0.saturating_sub(1));
+    {
+        let config = UnifiedCheckpointConfig::with_data_dir(&data_dir);
+        let mut manager = CheckpointManager::new(config)?;
+        let (current, historical, _final_lsn) = manager.recover(&wal)?;
+        assert!(
+            current.get_node(node_id).is_ok(),
+            "present before checkpoint"
+        );
+        manager.create_checkpoint(checkpoint_lsn, &current, &historical)?;
+    }
+
+    // The retraction lands in the WAL after the checkpoint.
+    wal.append(WalOperation::RetractNode { node_id, valid_to })?;
+    wal.flush()?;
+
+    // Recovery loads the checkpoint, then replays ONLY the retraction.
+    let config = UnifiedCheckpointConfig::with_data_dir(&data_dir);
+    let mut manager = CheckpointManager::new(config)?;
+    let (recovered_current, recovered_historical, _final_lsn) = manager.recover(&wal)?;
+
+    assert!(
+        recovered_current.get_node(node_id).is_err(),
+        "retraction replayed from the checkpoint must remove the node from current state"
+    );
+
+    let head_id = recovered_historical
+        .get_current_node_version(node_id)
+        .expect("retraction version must exist after replay-from-checkpoint");
+    let head = recovered_historical.get_node_version(head_id).unwrap();
+    assert_eq!(head.temporal.valid_time().start(), valid_from);
+    assert_eq!(
+        head.temporal.valid_time().end(),
+        valid_to,
+        "replay-from-checkpoint must honor the logged valid_to"
+    );
+
+    let probe_before = HybridTimestamp::new(now - 2_700_000_000, 0).unwrap();
+    assert!(
+        recovered_historical
+            .get_node_at_time(node_id, probe_before, time::now())
+            .is_ok()
+    );
+    assert!(
+        recovered_historical
+            .get_node_at_time(node_id, valid_to, time::now())
+            .is_err()
+    );
+
+    Ok(())
+}

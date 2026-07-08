@@ -114,6 +114,28 @@ impl WriteRequestOptions {
     }
 }
 
+/// Outcome of a valid-time retraction (Issue #3230).
+///
+/// Returned by [`WriteTransaction::retract_node`]/[`WriteTransaction::retract_edge`]
+/// and the [`AletheiaDB`](crate::db::AletheiaDB) convenience wrappers. The
+/// closed valid interval is half-open: `[valid_from, valid_to)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RetractionResult {
+    /// Start of the entity's (now closed) valid-time interval.
+    pub valid_from: Timestamp,
+    /// End of the entity's valid-time interval (exclusive). For an
+    /// idempotent re-retraction this is the *existing* end, regardless of
+    /// the `valid_to` passed to the call.
+    pub valid_to: Timestamp,
+    /// `true` when the entity was already retracted (or deleted) and this
+    /// call was a no-op: no new version was appended and no WAL entry was
+    /// written.
+    pub already_retracted: bool,
+    /// Number of connected edges co-retracted alongside a node (only set by
+    /// the detach form; `0` otherwise and for edge retractions).
+    pub edges_retracted: usize,
+}
+
 /// Common read operations available in all transaction types
 pub trait ReadOps {
     /// Get a node by ID.

@@ -570,6 +570,52 @@ impl HistoricalStorage {
             temporal = temporal.close_valid_time(valid_from)?;
         }
 
+        self.add_node_version_with_interval(
+            node_id, version_id, temporal, label, properties, provenance,
+        )
+    }
+
+    /// Add a *retraction* version of a node (Issue #3230): a real (non-tombstone)
+    /// version whose valid-time interval is closed at `valid_to` —
+    /// `[valid_from, valid_to)` — recorded at transaction time `tx_time`.
+    ///
+    /// Unlike a delete tombstone (whose valid interval is empty,
+    /// `[valid_from, valid_from)`), a retraction preserves the fact's
+    /// pre-`valid_to` validity: `AS OF VALID_TIME` queries strictly before
+    /// `valid_to` continue to see the entity.
+    ///
+    /// `valid_to == valid_from` is allowed and yields an empty interval.
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_retracted_node_version(
+        &mut self,
+        node_id: NodeId,
+        version_id: VersionId,
+        valid_from: Timestamp,
+        valid_to: Timestamp,
+        tx_time: Timestamp,
+        label: InternedString,
+        properties: PropertyMap,
+    ) -> Result<()> {
+        let temporal =
+            BiTemporalInterval::with_valid_time(valid_from, tx_time).close_valid_time(valid_to)?;
+        self.add_node_version_with_interval(node_id, version_id, temporal, label, properties, None)
+    }
+
+    /// Shared implementation for appending a node version with a fully
+    /// constructed bi-temporal interval. See
+    /// [`add_node_version_with_provenance`](Self::add_node_version_with_provenance)
+    /// for the standard open/tombstone intervals and
+    /// [`add_retracted_node_version`](Self::add_retracted_node_version) for
+    /// retraction intervals (Issue #3230).
+    fn add_node_version_with_interval(
+        &mut self,
+        node_id: NodeId,
+        version_id: VersionId,
+        temporal: BiTemporalInterval,
+        label: InternedString,
+        properties: PropertyMap,
+        provenance: Option<Arc<Provenance>>,
+    ) -> Result<()> {
         // Check capacity limit using cached count (O(1) operation, DoS protection)
         let version_count = self.node_version_counts.get(&node_id).copied().unwrap_or(0);
         if version_count >= self.retention_policy.max_versions_per_entity {
@@ -801,6 +847,65 @@ impl HistoricalStorage {
             temporal = temporal.close_valid_time(valid_from)?;
         }
 
+        self.add_edge_version_with_interval(
+            edge_id,
+            version_id,
+            temporal,
+            label,
+            source,
+            target,
+            properties,
+            is_tombstone,
+            provenance,
+        )
+    }
+
+    /// Add a *retraction* version of an edge (Issue #3230). See
+    /// [`add_retracted_node_version`](Self::add_retracted_node_version) for
+    /// the retraction semantics; the edge variant additionally keeps the
+    /// closed interval visible to the temporal adjacency index so AS OF
+    /// traversals strictly before `valid_to` still follow the edge.
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_retracted_edge_version(
+        &mut self,
+        edge_id: EdgeId,
+        version_id: VersionId,
+        valid_from: Timestamp,
+        valid_to: Timestamp,
+        tx_time: Timestamp,
+        label: InternedString,
+        source: NodeId,
+        target: NodeId,
+        properties: PropertyMap,
+    ) -> Result<()> {
+        let temporal =
+            BiTemporalInterval::with_valid_time(valid_from, tx_time).close_valid_time(valid_to)?;
+        self.add_edge_version_with_interval(
+            edge_id, version_id, temporal, label, source, target, properties,
+            false, // not a tombstone: the closed interval must stay traversable pre-valid_to
+            None,
+        )
+    }
+
+    /// Shared implementation for appending an edge version with a fully
+    /// constructed bi-temporal interval.
+    ///
+    /// `is_tombstone` only controls whether the version is skipped when
+    /// inserting into the temporal adjacency index (tombstones represent
+    /// deletions and must not appear in traversal queries).
+    #[allow(clippy::too_many_arguments)]
+    fn add_edge_version_with_interval(
+        &mut self,
+        edge_id: EdgeId,
+        version_id: VersionId,
+        temporal: BiTemporalInterval,
+        label: InternedString,
+        source: NodeId,
+        target: NodeId,
+        properties: PropertyMap,
+        is_tombstone: bool,
+        provenance: Option<Arc<Provenance>>,
+    ) -> Result<()> {
         // Check capacity limit using cached count (O(1) operation, DoS protection)
         let version_count = self.edge_version_counts.get(&edge_id).copied().unwrap_or(0);
         if version_count >= self.retention_policy.max_versions_per_entity {

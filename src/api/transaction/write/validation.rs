@@ -75,11 +75,16 @@ pub(crate) fn validate(tx: &WriteTransaction) -> Result<()> {
                 // They might exist in current storage or be created in this transaction
                 let node_exists = |node_id: &crate::core::NodeId| -> bool {
                     if tx.buffer.has_modified_node(*node_id) {
-                        // Check buffered operation - fail if deleted
+                        // Check buffered operation - fail if deleted or
+                        // retracted (Issue #3230: a retracted node leaves
+                        // current state exactly like a deleted one, so an
+                        // edge created/updated against it in the same
+                        // transaction would commit as an orphan).
                         match tx.buffer.get_node_write(*node_id) {
-                            Some(crate::api::transaction::BufferedWrite::DeleteNode { .. }) => {
-                                false
-                            }
+                            Some(
+                                crate::api::transaction::BufferedWrite::DeleteNode { .. }
+                                | crate::api::transaction::BufferedWrite::RetractNode { .. },
+                            ) => false,
                             _ => true, // Created or Updated means it exists
                         }
                     } else {

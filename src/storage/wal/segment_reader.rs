@@ -56,7 +56,8 @@ use crate::core::provenance::Provenance;
 
 use super::serialization::{
     OP_CHECKPOINT, OP_CREATE_EDGE, OP_CREATE_NODE, OP_DECLARE_UNIQUE_CONSTRAINT, OP_DELETE_EDGE,
-    OP_DELETE_NODE, OP_DROP_UNIQUE_CONSTRAINT, OP_UPDATE_EDGE, OP_UPDATE_NODE,
+    OP_DELETE_NODE, OP_DROP_UNIQUE_CONSTRAINT, OP_RETRACT_EDGE, OP_RETRACT_NODE, OP_UPDATE_EDGE,
+    OP_UPDATE_NODE,
 };
 use super::{LSN, WalEntry, WalOperation};
 
@@ -858,6 +859,29 @@ fn parse_delete_edge_op(
     })
 }
 
+/// Parse a `RetractNode` payload: `[node_id: 8][valid_to: 12]`.
+///
+/// No version gating is needed: the `OP_RETRACT_NODE` tag (Issue #3230) only
+/// ever appears in segments written by versions that serialize `valid_to`.
+fn parse_retract_node_op(buffer: &[u8], offset: &mut usize) -> Result<WalOperation> {
+    let node_id = deserialize_node_id(buffer, *offset, "RetractNode")?;
+    advance(offset, 8)?;
+    let (valid_to, ts_len) = HybridTimestamp::deserialize(&buffer[*offset..])?;
+    advance(offset, ts_len)?;
+    Ok(WalOperation::RetractNode { node_id, valid_to })
+}
+
+/// Parse a `RetractEdge` payload: `[edge_id: 8][valid_to: 12]`.
+///
+/// See [`parse_retract_node_op`] for why no version gating is needed.
+fn parse_retract_edge_op(buffer: &[u8], offset: &mut usize) -> Result<WalOperation> {
+    let edge_id = deserialize_edge_id(buffer, *offset, "RetractEdge")?;
+    advance(offset, 8)?;
+    let (valid_to, ts_len) = HybridTimestamp::deserialize(&buffer[*offset..])?;
+    advance(offset, ts_len)?;
+    Ok(WalOperation::RetractEdge { edge_id, valid_to })
+}
+
 fn parse_checkpoint_op(buffer: &[u8], offset: &mut usize) -> Result<WalOperation> {
     // LSN (8 bytes) + HybridTimestamp (12 bytes) = 20 bytes
     require_bytes(buffer, *offset, 20, "Checkpoint")?;
@@ -940,6 +964,8 @@ pub(crate) fn parse_entry_at(
         OP_UPDATE_EDGE => parse_update_edge_op(buffer, &mut cur, version, timestamp)?,
         OP_DELETE_NODE => parse_delete_node_op(buffer, &mut cur, version, timestamp)?,
         OP_DELETE_EDGE => parse_delete_edge_op(buffer, &mut cur, version, timestamp)?,
+        OP_RETRACT_NODE => parse_retract_node_op(buffer, &mut cur)?,
+        OP_RETRACT_EDGE => parse_retract_edge_op(buffer, &mut cur)?,
         OP_CHECKPOINT => parse_checkpoint_op(buffer, &mut cur)?,
         OP_DECLARE_UNIQUE_CONSTRAINT => {
             let label = read_label(buffer, &mut cur, "DeclareUniqueConstraint.label")?;
@@ -1150,6 +1176,62 @@ mod tests {
                 assert_eq!(label, GLOBAL_INTERNER.intern("KNOWS").unwrap());
             }
             _ => panic!("Expected CreateEdge operation"),
+        }
+    }
+
+    #[test]
+    fn test_parse_entry_at_retract_node_roundtrip() {
+        // Issue #3230: RetractNode must round-trip its valid_to exactly.
+        let node_id = NodeId::new(7).unwrap();
+        let valid_to = crate::core::hlc::HybridTimestamp::new(1_234_567, 42).unwrap();
+        let operation = WalOperation::RetractNode { node_id, valid_to };
+        let entry = WalEntry::new(LSN(10), operation);
+
+        let mut buffer = Vec::new();
+        serialize_entry_into(&entry, &mut buffer).unwrap();
+
+        let (parsed_entry, bytes_consumed) =
+            parse_entry_at(&buffer, 0, WAL_VERSION_PROVENANCE).unwrap();
+
+        assert_eq!(parsed_entry.lsn, LSN(10));
+        assert_eq!(bytes_consumed, buffer.len());
+        match parsed_entry.operation {
+            WalOperation::RetractNode {
+                node_id: parsed_id,
+                valid_to: parsed_valid_to,
+            } => {
+                assert_eq!(parsed_id, node_id);
+                assert_eq!(parsed_valid_to, valid_to, "valid_to must survive verbatim");
+            }
+            other => panic!("Expected RetractNode operation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parse_entry_at_retract_edge_roundtrip() {
+        // Issue #3230: RetractEdge must round-trip its valid_to exactly.
+        let edge_id = EdgeId::new(11).unwrap();
+        let valid_to = crate::core::hlc::HybridTimestamp::new(9_876_543, 3).unwrap();
+        let operation = WalOperation::RetractEdge { edge_id, valid_to };
+        let entry = WalEntry::new(LSN(11), operation);
+
+        let mut buffer = Vec::new();
+        serialize_entry_into(&entry, &mut buffer).unwrap();
+
+        let (parsed_entry, bytes_consumed) =
+            parse_entry_at(&buffer, 0, WAL_VERSION_PROVENANCE).unwrap();
+
+        assert_eq!(parsed_entry.lsn, LSN(11));
+        assert_eq!(bytes_consumed, buffer.len());
+        match parsed_entry.operation {
+            WalOperation::RetractEdge {
+                edge_id: parsed_id,
+                valid_to: parsed_valid_to,
+            } => {
+                assert_eq!(parsed_id, edge_id);
+                assert_eq!(parsed_valid_to, valid_to, "valid_to must survive verbatim");
+            }
+            other => panic!("Expected RetractEdge operation, got {other:?}"),
         }
     }
 

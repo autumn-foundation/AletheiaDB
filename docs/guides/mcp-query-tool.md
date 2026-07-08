@@ -189,6 +189,130 @@ structured error, e.g.:
              "message": "valid_from ... is before entity creation time ... for node:7" } }
 ```
 
+## Retracting a fact (closing valid time)
+
+`retract_node` and `retract_edge` (Issue #3230) are the symmetric counterpart
+to the valid-time **writes** above: those open a fact's valid interval,
+retraction **closes** it. Retracting an entity at valid time `T` records
+"this fact stopped being true in the real world at `T`" **without deleting
+its history** — the correct way to model churn, an employment ending, a
+contract expiring, or a sensor being decommissioned. Compare `delete_node`,
+which is the right tool when the entity should end *now* and disappear as a
+current fact; retraction is the right tool when you need `AS OF VALID_TIME`
+reads before `T` to keep working.
+
+The bi-temporal contract:
+
+- **Valid time:** `AS OF VALID_TIME` queries strictly before `T` still return
+  the entity; queries at or after `T` do not (the closed interval is
+  half-open: `[valid_from, T)`). One qualifier for entities that were
+  **updated** before being retracted: with a current `AS OF SYSTEM_TIME`,
+  this visibility extends back to the *current head version's* `valid_from`
+  (the last update's effective date), not all the way to the entity's
+  original creation — earlier valid times were already superseded by the
+  update, and recalling them requires anchoring `AS OF SYSTEM_TIME` before
+  that update (pre-existing supersession semantics, unrelated to
+  retraction).
+- **Transaction time:** retraction is append-only. The pre-retraction record
+  keeps its open-ended valid interval with its transaction time closed at the
+  retraction's commit, so `AS OF SYSTEM_TIME` queries positioned *before* the
+  retraction still show the fact as currently valid — the past record is
+  never rewritten.
+- **Current state:** like a delete, a retracted entity is absent from
+  current-state tools (`get_node`, `list_nodes`, `traverse`, ...), while its
+  full history remains queryable via `get_node_history` /
+  `get_node_at_time`. This holds even when `valid_time` is in the
+  **future**: current state reflects post-retraction *knowledge*, not
+  post-`T` reality — an entity retracted at `now + 1h` disappears from
+  current-state tools immediately (parity with `delete_node` +
+  `valid_time`), even though `get_node_at_time` at today's valid time still
+  returns it until `T` arrives.
+
+**Parameters:** `node_id` / `edge_id` (required); `valid_time` (optional,
+same formats as every other MCP temporal field; defaults to now; must not
+precede the entity's `valid_from` — equality is allowed and yields an empty
+interval — and must not be more than one year in the future, which is
+rejected with `INVALID_ARGUMENT`); and, on `retract_node` only, `detach`
+(default `false`). Transaction time is always system-assigned.
+
+**Referential safety (mirrors `delete_node`'s #3209 contract):** retracting
+a node that still has connected edges without `detach: true` is **refused**
+with `FAILED_PRECONDITION` and `details.connected_edges` — never a `success`
+that leaves edges pointing at a retracted node. `connected_edges` counts
+**distinct** edges: a self-loop occupies both adjacency directions but is
+one edge and counts once, so the refusal count always equals what
+`detach: true` would retract. Passing `detach: true` co-retracts every
+connected edge at the same `valid_time` and reports `edges_retracted`.
+
+The detach form is **atomic**: every co-retracted edge is validated against
+the same `valid_time`, and if ANY connected edge has a `valid_from` later
+than `T` (retracting it at `T` would end it before it began), the whole
+call fails with `INVALID_ARGUMENT` and **nothing** is retracted — not the
+node, not the other edges. The fix is to retract that newer edge separately
+at a `valid_time` at or after its own `valid_from`, then retry the detach.
+
+```jsonc
+// tools/call -> "retract_node"   (Alice churned on 2026-05-31)
+{ "node_id": 7, "valid_time": "2026-05-31T00:00:00Z" }
+// -> {
+//      "success": true,
+//      "node_id": 7,
+//      "retracted": true,
+//      "already_retracted": false,
+//      "valid_from": "2021-03-01T00:00:00.000000Z",   // half-open interval
+//      "valid_to":   "2026-05-31T00:00:00.000000Z",   // [valid_from, valid_to)
+//      "edges_retracted": 0
+//    }
+```
+
+Interval bounds are RFC 3339 strings with microsecond precision and a `Z`
+suffix; both keys are always present in a retraction response (`null` would
+denote an open-ended bound elsewhere).
+
+The refusal, when connected edges exist and `detach` was not passed:
+
+```jsonc
+{
+  "success": false, "node_id": 7, "connected_edges": 3, "detach_required": true,
+  "error": {
+    "code": "FAILED_PRECONDITION", "retriable": false,
+    "message": "Node 7 has 3 connected edge(s); refusing to retract. ...",
+    "details": { "node_id": 7, "connected_edges": 3, "detach_required": true }
+  }
+}
+```
+
+**Idempotency:** re-retracting an already-retracted (or deleted) entity is a
+no-op that returns the **existing** `valid_to` — regardless of the
+`valid_time` passed to the second call — with `already_retracted: true`. No
+new version is appended and nothing is written, so an LLM retrying a
+retraction can never accidentally move the end of a fact. One caveat when
+the entity was **deleted** rather than retracted: the returned interval is
+the delete tombstone's degenerate `[d, d)` — `valid_from` and `valid_to`
+both equal the deletion's valid time, not the entity's original
+`valid_from`.
+
+**Errors:** a malformed `valid_time` is `INVALID_ARGUMENT`; a `valid_time`
+before the entity's `valid_from` is `INVALID_ARGUMENT` (same
+before-entity-creation family as the write tools above); a nonexistent
+entity is `NOT_FOUND`.
+
+Verifying the round trip:
+
+```jsonc
+// tools/call -> "get_node_at_time"   (before T: still true)
+{ "node_id": 7, "valid_time": "2025-01-01T00:00:00Z" }
+// -> { "node": { "id": 7, ... }, ... }
+
+// tools/call -> "get_node_at_time"   (at/after T: no longer true)
+{ "node_id": 7, "valid_time": "2026-06-01T00:00:00Z" }
+// -> { "error": { "code": "NOT_FOUND", ... } }
+
+// tools/call -> "get_node_history"   (zero version loss; the closed
+// interval is visible as a distinct historical state)
+{ "node_id": 7 }
+```
+
 ## Point-in-time (AS OF) graph traversal
 
 `traverse` accepts optional `as_of_valid_time` / `as_of_transaction_time`

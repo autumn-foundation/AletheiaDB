@@ -755,7 +755,8 @@ impl ReadOps for WriteTransaction {
                         commit_timestamp: None,
                     },
                 ))),
-                super::BufferedWrite::DeleteNode { .. } => {
+                super::BufferedWrite::DeleteNode { .. }
+                | super::BufferedWrite::RetractNode { .. } => {
                     Some(Err(StorageError::NodeNotFound(id).into()))
                 }
                 _ => None, // Not a node operation
@@ -830,7 +831,8 @@ impl ReadOps for WriteTransaction {
                         commit_timestamp: None,
                     },
                 ))),
-                super::BufferedWrite::DeleteEdge { .. } => {
+                super::BufferedWrite::DeleteEdge { .. }
+                | super::BufferedWrite::RetractEdge { .. } => {
                     Some(Err(StorageError::EdgeNotFound(id).into()))
                 }
                 _ => None, // Not an edge operation
@@ -1355,6 +1357,294 @@ impl WriteOps for WriteTransaction {
         })();
 
         result.record_error_metric()
+    }
+}
+
+/// Valid-time retraction (Issue #3230).
+///
+/// Retraction closes an entity's valid-time interval at `valid_to` without
+/// deleting its history. It is a first-class bi-temporal operation, distinct
+/// from deletion:
+///
+/// - The pre-retraction head version's **transaction time** is closed at the
+///   retraction's commit time while its valid interval stays open-ended, so
+///   `AS OF SYSTEM_TIME` queries positioned before the retraction still show
+///   the fact as currently valid (append-only — the past record is never
+///   rewritten).
+/// - A **new version** is appended with the same properties and the closed
+///   valid interval `[valid_from, valid_to)`, so `AS OF VALID_TIME` queries
+///   strictly before `valid_to` keep returning the entity, while queries at
+///   or after `valid_to` do not.
+/// - The entity is removed from **current storage**: like a delete, a
+///   retracted entity is absent from current-state queries — but its full
+///   history remains queryable.
+impl WriteTransaction {
+    /// Buffer a valid-time retraction of a node.
+    ///
+    /// Idempotency: retracting an already-retracted (or deleted) node is a
+    /// no-op that returns the *existing* `valid_to` (with
+    /// `already_retracted: true`) — no version is appended and no WAL entry
+    /// is written, regardless of the `valid_to` passed here. This holds for
+    /// writes already buffered in THIS transaction too: a second
+    /// `retract_node` of the same node returns the first call's buffered
+    /// `valid_to`, and retracting a node this transaction has already
+    /// `delete_node`-ed mirrors the committed-delete case (a degenerate
+    /// `[d, d)` interval where `d` is the buffered deletion's valid time)
+    /// rather than double-buffering a write.
+    ///
+    /// # Errors
+    ///
+    /// - [`TemporalError::ValidTimeBeforeEntityCreation`](crate::core::error::TemporalError::ValidTimeBeforeEntityCreation)
+    ///   if `valid_to` precedes the node's current `valid_from`
+    ///   (`valid_to == valid_from` is allowed and yields an empty interval).
+    /// - [`TemporalError::ValidTimeTooFarInFuture`](crate::core::error::TemporalError::ValidTimeTooFarInFuture)
+    ///   if `valid_to` is more than one year in the future.
+    /// - [`StorageError::NodeNotFound`](crate::core::error::StorageError::NodeNotFound)
+    ///   if the node never existed.
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
+    pub fn retract_node(
+        &mut self,
+        node_id: NodeId,
+        valid_to: Timestamp,
+    ) -> Result<super::RetractionResult> {
+        let result = (|| {
+            // Check transaction state
+            if self.state != TxState::Active {
+                return Err(TransactionError::InvalidState {
+                    current: format!("{:?}", self.state),
+                    expected: "Active".to_string(),
+                }
+                .into());
+            }
+
+            // A retraction or deletion already buffered in THIS transaction
+            // is a no-op (mirrors the committed already-retracted/deleted
+            // cases below): without this guard a double retract — or a
+            // delete followed by a retract — would buffer two writes for
+            // the same node, WAL-appending twice and risking a half-applied
+            // state if the commit fails between them.
+            match self.buffer.get_node_write(node_id) {
+                Some(super::BufferedWrite::RetractNode {
+                    valid_to: buffered_valid_to,
+                    ..
+                }) => {
+                    let buffered_valid_to = *buffered_valid_to;
+                    let valid_from = self.head_node_valid_from(node_id);
+                    return Ok(super::RetractionResult {
+                        valid_from,
+                        valid_to: buffered_valid_to,
+                        already_retracted: true,
+                        edges_retracted: 0,
+                    });
+                }
+                Some(super::BufferedWrite::DeleteNode { valid_from, .. }) => {
+                    // Delete-parity: a committed delete leaves a tombstone
+                    // with the degenerate interval [d, d); report the same
+                    // shape for a deletion still sitting in this buffer.
+                    let deleted_at = *valid_from;
+                    return Ok(super::RetractionResult {
+                        valid_from: deleted_at,
+                        valid_to: deleted_at,
+                        already_retracted: true,
+                        edges_retracted: 0,
+                    });
+                }
+                _ => {}
+            }
+
+            match self.current.get_node(node_id) {
+                Ok(node) => {
+                    // If the node being retracted contains vector properties, mark
+                    // the buffer so the temporal vector index is notified on commit.
+                    if !self.buffer.has_vector_operations() && node.properties.contains_vector() {
+                        self.buffer.mark_has_vector_operations();
+                    }
+
+                    // The closed interval starts at the head version's
+                    // valid_from; `valid_to` must not precede it.
+                    let valid_from = self.head_node_valid_from(node_id);
+
+                    validation::validate_valid_from_future(valid_to)?;
+                    validation::validate_valid_from_not_before_creation(
+                        &format!("node:{}", node_id.as_u64()),
+                        valid_from,
+                        valid_to,
+                    )?;
+
+                    self.buffer
+                        .add(super::BufferedWrite::RetractNode { node_id, valid_to })?;
+
+                    Ok(super::RetractionResult {
+                        valid_from,
+                        valid_to,
+                        already_retracted: false,
+                        edges_retracted: 0,
+                    })
+                }
+                Err(err) => {
+                    // Absent from current state: either already retracted or
+                    // deleted (idempotent no-op) or it never existed.
+                    if let Some(interval) = self.closed_node_valid_interval(node_id) {
+                        return Ok(super::RetractionResult {
+                            valid_from: interval.start(),
+                            valid_to: interval.end(),
+                            already_retracted: true,
+                            edges_retracted: 0,
+                        });
+                    }
+                    Err(err)
+                }
+            }
+        })();
+
+        result.record_error_metric()
+    }
+
+    /// Buffer a valid-time retraction of an edge.
+    ///
+    /// See [`retract_node`](Self::retract_node) for the bi-temporal
+    /// semantics, idempotency contract, and errors (with
+    /// [`StorageError::EdgeNotFound`](crate::core::error::StorageError::EdgeNotFound)
+    /// for a never-existing edge).
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
+    pub fn retract_edge(
+        &mut self,
+        edge_id: EdgeId,
+        valid_to: Timestamp,
+    ) -> Result<super::RetractionResult> {
+        let result = (|| {
+            // Check transaction state
+            if self.state != TxState::Active {
+                return Err(TransactionError::InvalidState {
+                    current: format!("{:?}", self.state),
+                    expected: "Active".to_string(),
+                }
+                .into());
+            }
+
+            // A retraction already buffered in THIS transaction (e.g. the
+            // detach form visiting a self-loop from both adjacency
+            // directions) is a no-op returning the buffered end; a deletion
+            // already buffered in this transaction mirrors the
+            // committed-delete case (degenerate [d, d) tombstone interval)
+            // — see the identical guard in retract_node.
+            match self.buffer.get_edge_write(edge_id) {
+                Some(super::BufferedWrite::RetractEdge {
+                    valid_to: buffered_valid_to,
+                    ..
+                }) => {
+                    let buffered_valid_to = *buffered_valid_to;
+                    let valid_from = self.head_edge_valid_from(edge_id);
+                    return Ok(super::RetractionResult {
+                        valid_from,
+                        valid_to: buffered_valid_to,
+                        already_retracted: true,
+                        edges_retracted: 0,
+                    });
+                }
+                Some(super::BufferedWrite::DeleteEdge { valid_from, .. }) => {
+                    let deleted_at = *valid_from;
+                    return Ok(super::RetractionResult {
+                        valid_from: deleted_at,
+                        valid_to: deleted_at,
+                        already_retracted: true,
+                        edges_retracted: 0,
+                    });
+                }
+                _ => {}
+            }
+
+            match self.current.get_edge(edge_id) {
+                Ok(edge) => {
+                    if !self.buffer.has_vector_operations() && edge.properties.contains_vector() {
+                        self.buffer.mark_has_vector_operations();
+                    }
+
+                    let valid_from = self.head_edge_valid_from(edge_id);
+
+                    validation::validate_valid_from_future(valid_to)?;
+                    validation::validate_valid_from_not_before_creation(
+                        &format!("edge:{}", edge_id.as_u64()),
+                        valid_from,
+                        valid_to,
+                    )?;
+
+                    self.buffer
+                        .add(super::BufferedWrite::RetractEdge { edge_id, valid_to })?;
+
+                    Ok(super::RetractionResult {
+                        valid_from,
+                        valid_to,
+                        already_retracted: false,
+                        edges_retracted: 0,
+                    })
+                }
+                Err(err) => {
+                    if let Some(interval) = self.closed_edge_valid_interval(edge_id) {
+                        return Ok(super::RetractionResult {
+                            valid_from: interval.start(),
+                            valid_to: interval.end(),
+                            already_retracted: true,
+                            edges_retracted: 0,
+                        });
+                    }
+                    Err(err)
+                }
+            }
+        })();
+
+        result.record_error_metric()
+    }
+
+    /// The head version's `valid_from` for a node, falling back to the
+    /// transaction start time when the node has no recorded versions (e.g.
+    /// storage assembled without historical bookkeeping in tests).
+    fn head_node_valid_from(&self, node_id: NodeId) -> Timestamp {
+        let historical = self.historical.read();
+        historical
+            .get_current_node_version(node_id)
+            .and_then(|vid| historical.get_node_version(vid))
+            .map(|v| v.temporal.valid_time().start())
+            .unwrap_or(self.start_timestamp)
+    }
+
+    /// The head version's `valid_from` for an edge; see
+    /// [`head_node_valid_from`](Self::head_node_valid_from).
+    fn head_edge_valid_from(&self, edge_id: EdgeId) -> Timestamp {
+        let historical = self.historical.read();
+        historical
+            .get_current_edge_version(edge_id)
+            .and_then(|vid| historical.get_edge_version(vid))
+            .map(|v| v.temporal.valid_time().start())
+            .unwrap_or(self.start_timestamp)
+    }
+
+    /// If the node's head version carries a CLOSED valid interval (it was
+    /// retracted, or deleted via a tombstone), return that interval.
+    fn closed_node_valid_interval(
+        &self,
+        node_id: NodeId,
+    ) -> Option<crate::core::temporal::TimeRange> {
+        let historical = self.historical.read();
+        historical
+            .get_current_node_version(node_id)
+            .and_then(|vid| historical.get_node_version(vid))
+            .map(|v| v.temporal.valid_time())
+            .filter(|valid| !valid.is_current())
+    }
+
+    /// Edge counterpart of
+    /// [`closed_node_valid_interval`](Self::closed_node_valid_interval).
+    fn closed_edge_valid_interval(
+        &self,
+        edge_id: EdgeId,
+    ) -> Option<crate::core::temporal::TimeRange> {
+        let historical = self.historical.read();
+        historical
+            .get_current_edge_version(edge_id)
+            .and_then(|vid| historical.get_edge_version(vid))
+            .map(|v| v.temporal.valid_time())
+            .filter(|valid| !valid.is_current())
     }
 }
 

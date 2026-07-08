@@ -318,6 +318,156 @@ impl AletheiaDB {
         self.write(|tx| tx.delete_edge_with_valid_time(edge_id, valid_from))
     }
 
+    /// Retract a node as of valid time `valid_to` (Issue #3230): close its
+    /// valid-time interval at `valid_to` without deleting its history.
+    ///
+    /// After retraction, `AS OF VALID_TIME` queries strictly before
+    /// `valid_to` still return the node; queries at or after `valid_to` do
+    /// not. `AS OF SYSTEM_TIME` queries positioned before the retraction's
+    /// commit still show the fact as open-ended (append-only — retraction
+    /// never rewrites the past record). The node is absent from
+    /// current-state queries, like a delete, while its full history remains
+    /// queryable via [`get_node_history`](Self::get_node_history).
+    ///
+    /// Note that this holds even when `valid_to` is in the **future**:
+    /// current state reflects post-retraction *knowledge*, not post-`T`
+    /// reality. A node retracted at `now + 1h` is absent from current-state
+    /// queries immediately (parity with
+    /// [`delete_node_with_valid_time`](Self::delete_node_with_valid_time)),
+    /// even though `get_node_at_valid_time(id, now)` still returns it.
+    ///
+    /// # Referential safety (mirrors the #3209 DETACH contract)
+    ///
+    /// If the node has connected edges, this method **refuses** with a
+    /// [`TransactionError::ValidationFailed`](crate::core::error::TransactionError::ValidationFailed)
+    /// naming the connected-edge count (**distinct** edges — a self-loop
+    /// counts once, matching what the detach form would retract) — it never
+    /// silently strands edges pointing at a retracted node. Use
+    /// [`retract_node_detach`](Self::retract_node_detach) to co-retract the
+    /// connected edges at the same `valid_to`.
+    ///
+    /// # Idempotency
+    ///
+    /// Retracting an already-retracted (or deleted) node is a no-op that
+    /// returns the *existing* `valid_to` with `already_retracted: true`.
+    /// For a node that was **deleted** (rather than retracted), the
+    /// returned interval is the tombstone's degenerate `[d, d)` — both
+    /// bounds equal the deletion's valid time, not the node's original
+    /// `valid_from`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed [`TemporalError`](crate::core::error::TemporalError)
+    /// if `valid_to` precedes the node's `valid_from` (equality is allowed,
+    /// yielding an empty interval) or is more than one year in the future;
+    /// a nonexistent node is
+    /// [`StorageError::NodeNotFound`](crate::core::error::StorageError::NodeNotFound).
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
+    pub fn retract_node(
+        &self,
+        node_id: NodeId,
+        valid_to: Timestamp,
+    ) -> Result<crate::api::transaction::RetractionResult> {
+        // The connected-edge check and the retraction run inside a single
+        // write transaction so they observe the same storage state — no
+        // check-then-act gap for a concurrent writer to slip an edge into
+        // (same rationale as the MCP delete_node handler, Issue #3209).
+        self.write(|tx| {
+            use crate::api::transaction::ReadOps;
+            if tx.get_node(node_id).is_ok() {
+                // Count DISTINCT connected edges with the same sort/dedup
+                // enumeration the detach form uses, so the refusal count
+                // always equals what retract_node_detach would retract (a
+                // self-loop appears in both adjacency directions but is one
+                // edge — count_connected_edges would report 2).
+                let mut edge_ids = tx.get_outgoing_edges(node_id);
+                edge_ids.extend(tx.get_incoming_edges(node_id));
+                edge_ids.sort_unstable();
+                edge_ids.dedup();
+                let connected_edges = edge_ids.len();
+                if connected_edges > 0 {
+                    return Err(crate::core::error::TransactionError::ValidationFailed {
+                        reason: format!(
+                            "Node {} has {} connected edge(s); refusing to retract. \
+                             Use retract_node_detach to co-retract the connected edges \
+                             at the same valid time, or retract the edges first.",
+                            node_id.as_u64(),
+                            connected_edges
+                        ),
+                    }
+                    .into());
+                }
+            }
+            tx.retract_node(node_id, valid_to)
+        })
+    }
+
+    /// Retract a node and co-retract every connected edge at the same
+    /// `valid_to` (Issue #3230) — the retraction analog of
+    /// `DETACH DELETE` / [`delete_node_cascade`](crate::api::transaction::WriteOps::delete_node_cascade).
+    ///
+    /// The returned
+    /// [`RetractionResult::edges_retracted`](crate::api::transaction::RetractionResult::edges_retracted)
+    /// reports how many edges were newly retracted alongside the node
+    /// (edges already retracted beforehand are not double-counted).
+    ///
+    /// See [`retract_node`](Self::retract_node) for the bi-temporal
+    /// semantics, idempotency, and validation errors. Note that every
+    /// co-retracted edge is validated too: `valid_to` must not precede any
+    /// connected edge's own `valid_from`. If ANY connected edge fails that
+    /// check, the whole detach **fails atomically** — neither the node nor
+    /// any edge is retracted; retract the offending edge separately at a
+    /// later `valid_to` first.
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
+    pub fn retract_node_detach(
+        &self,
+        node_id: NodeId,
+        valid_to: Timestamp,
+    ) -> Result<crate::api::transaction::RetractionResult> {
+        self.write(|tx| {
+            use crate::api::transaction::ReadOps;
+            // Enumerate connected edges INSIDE the write transaction (same
+            // no-check-then-act rationale as retract_node). Deduplicate so a
+            // self-loop (present in both adjacency directions) is retracted
+            // once.
+            let mut edge_ids = tx.get_outgoing_edges(node_id);
+            edge_ids.extend(tx.get_incoming_edges(node_id));
+            edge_ids.sort_unstable();
+            edge_ids.dedup();
+
+            let mut edges_retracted = 0;
+            for edge_id in edge_ids {
+                let edge_result = tx.retract_edge(edge_id, valid_to)?;
+                if !edge_result.already_retracted {
+                    edges_retracted += 1;
+                }
+            }
+
+            let mut result = tx.retract_node(node_id, valid_to)?;
+            result.edges_retracted = edges_retracted;
+            Ok(result)
+        })
+    }
+
+    /// Retract an edge as of valid time `valid_to` (Issue #3230): close its
+    /// valid-time interval at `valid_to` without deleting its history.
+    ///
+    /// See [`retract_node`](Self::retract_node) for the bi-temporal
+    /// semantics, idempotency, and validation errors (edges have no
+    /// connected-entity concern, so there is no refusing/detach split).
+    /// As with nodes, a **future** `valid_to` removes the edge from
+    /// current-state queries immediately — current state reflects
+    /// post-retraction knowledge, not post-`T` reality — while
+    /// `get_edge_at_valid_time` before `valid_to` keeps returning it.
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
+    pub fn retract_edge(
+        &self,
+        edge_id: EdgeId,
+        valid_to: Timestamp,
+    ) -> Result<crate::api::transaction::RetractionResult> {
+        self.write(|tx| tx.retract_edge(edge_id, valid_to))
+    }
+
     /// Create a node with an optional [`WriteRequestOptions`](crate::api::transaction::WriteRequestOptions)
     /// bundle: a backdated `valid_from` and/or a write-time [`Provenance`] bundle (Issue #3224).
     ///
@@ -1383,6 +1533,1088 @@ mod tests {
                 .create_edge(source, target, "KNOWS", PropertyMapBuilder::new().build())
                 .unwrap();
             assert!(db.get_edge_at_valid_time(edge_id, time::now()).is_ok());
+        }
+    }
+
+    /// Valid-time retraction tests (Issue #3230).
+    ///
+    /// Retraction closes an entity's valid-time interval at `T` without
+    /// deleting its history: `AS OF VALID_TIME < T` still shows the fact,
+    /// `>= T` does not, and `AS OF SYSTEM_TIME` before the retraction's
+    /// commit still shows the fact as open-ended (append-only, never
+    /// rewrite).
+    mod retraction_tests {
+        use super::*;
+        use crate::core::error::{Error, TemporalError, TransactionError};
+        use crate::core::hlc::HybridTimestamp;
+        use crate::core::id::NodeId;
+        use crate::core::temporal::time;
+
+        fn hours_ago(now: i64, hours: i64) -> HybridTimestamp {
+            HybridTimestamp::new(now - hours * 3_600_000_000, 0).unwrap()
+        }
+
+        fn hours_from_now(now: i64, hours: i64) -> HybridTimestamp {
+            HybridTimestamp::new(now + hours * 3_600_000_000, 0).unwrap()
+        }
+
+        /// AC #1: retract node at T -> visible strictly before T, not
+        /// visible at exactly T (half-open boundary), not visible after T.
+        #[test]
+        fn retract_node_before_at_after_valid_time_boundary() {
+            let (_tmp, db) = create_test_db().unwrap();
+            let now = time::now().wallclock();
+            let t_create = hours_ago(now, 3);
+            let t_retract = hours_ago(now, 1);
+
+            let id = db
+                .create_node_with_valid_time(
+                    "Person",
+                    PropertyMapBuilder::new().insert("name", "Alice").build(),
+                    Some(t_create),
+                )
+                .unwrap();
+
+            let result = db.retract_node(id, t_retract).unwrap();
+            assert!(!result.already_retracted);
+            assert_eq!(result.valid_from, t_create);
+            assert_eq!(result.valid_to, t_retract);
+            assert_eq!(result.edges_retracted, 0);
+
+            // Visible strictly before T.
+            assert!(db.get_node_at_valid_time(id, hours_ago(now, 2)).is_ok());
+            // NOT visible at exactly T (half-open [valid_from, T)).
+            assert!(db.get_node_at_valid_time(id, t_retract).is_err());
+            // NOT visible after T.
+            assert!(db.get_node_at_valid_time(id, time::now()).is_err());
+            // Gone from current state.
+            assert!(db.get_node(id).is_err());
+        }
+
+        /// AC #2: history preserved — every prior version present, and the
+        /// closed interval is visible as a distinct historical state.
+        #[test]
+        fn retract_node_history_preserves_versions_and_shows_closed_interval() {
+            let (_tmp, db) = create_test_db().unwrap();
+            let now = time::now().wallclock();
+            let t_create = hours_ago(now, 3);
+            let t_update = hours_ago(now, 2);
+            let t_retract = hours_ago(now, 1);
+
+            let id = db
+                .create_node_with_valid_time(
+                    "Person",
+                    PropertyMapBuilder::new().insert("city", "Paris").build(),
+                    Some(t_create),
+                )
+                .unwrap();
+            db.update_node_with_valid_time(
+                id,
+                PropertyMapBuilder::new().insert("city", "London").build(),
+                Some(t_update),
+            )
+            .unwrap();
+
+            db.retract_node(id, t_retract).unwrap();
+
+            let history = db.get_node_history(id).unwrap();
+            assert_eq!(
+                history.version_count(),
+                3,
+                "create + update + retraction = 3 versions, zero loss"
+            );
+
+            // v1: [t_create, t_update) — closed by the update.
+            let v1 = &history.versions[0];
+            assert_eq!(v1.temporal.valid_time().start(), t_create);
+            assert_eq!(v1.temporal.valid_time().end(), t_update);
+
+            // v2: the pre-retraction head. Its VALID interval must remain
+            // open-ended (append-only: retraction never rewrites the past
+            // record), while its TRANSACTION time is closed by the
+            // retraction commit.
+            let v2 = &history.versions[1];
+            assert_eq!(v2.temporal.valid_time().start(), t_update);
+            assert!(
+                v2.temporal.valid_time().is_current(),
+                "pre-retraction head's valid interval must stay open-ended"
+            );
+            assert!(
+                !v2.temporal.transaction_time().is_current(),
+                "pre-retraction head's transaction time must be closed"
+            );
+
+            // v3: the retraction version — closed valid interval
+            // [t_update, t_retract), open transaction time.
+            let v3 = &history.versions[2];
+            assert_eq!(v3.temporal.valid_time().start(), t_update);
+            assert_eq!(v3.temporal.valid_time().end(), t_retract);
+            assert!(v3.temporal.transaction_time().is_current());
+        }
+
+        /// AC #3: AS OF SYSTEM_TIME positioned before the retraction's
+        /// transaction time still shows the fact as currently valid
+        /// (open-ended); positioned after, the valid interval is closed.
+        #[test]
+        fn retract_node_as_of_system_time_before_retraction_shows_open_ended() {
+            let (_tmp, db) = create_test_db().unwrap();
+            let now = time::now().wallclock();
+            let t_create = hours_ago(now, 3);
+            let t_retract = hours_ago(now, 1);
+
+            let id = db
+                .create_node_with_valid_time(
+                    "Person",
+                    PropertyMapBuilder::new().build(),
+                    Some(t_create),
+                )
+                .unwrap();
+            // A system-time coordinate strictly after the create commit and
+            // strictly before the retraction commit.
+            let tx_before_retraction = time::now();
+
+            let (_, tx_retraction) = db
+                .write_with_timestamp(|tx| tx.retract_node(id, t_retract))
+                .unwrap();
+
+            // Before the retraction was recorded, the fact was believed
+            // valid — even at valid times >= T.
+            assert!(
+                db.get_node_at_time(id, time::now(), tx_before_retraction)
+                    .is_ok(),
+                "AS OF SYSTEM_TIME before retraction must show the fact open-ended"
+            );
+
+            // After the retraction was recorded: valid < T still visible,
+            // valid >= T not.
+            assert!(
+                db.get_node_at_time(id, hours_ago(now, 2), tx_retraction)
+                    .is_ok()
+            );
+            assert!(db.get_node_at_time(id, time::now(), tx_retraction).is_err());
+        }
+
+        /// AC (idempotency): re-retracting returns the EXISTING valid_to,
+        /// even when the second call passes a different T; no new version.
+        #[test]
+        fn double_retract_is_idempotent_and_returns_original_valid_to() {
+            let (_tmp, db) = create_test_db().unwrap();
+            let now = time::now().wallclock();
+            let t1 = hours_ago(now, 2);
+            let t2 = hours_ago(now, 1);
+
+            let id = db
+                .create_node_with_valid_time(
+                    "Person",
+                    PropertyMapBuilder::new().build(),
+                    Some(hours_ago(now, 3)),
+                )
+                .unwrap();
+
+            let first = db.retract_node(id, t1).unwrap();
+            assert!(!first.already_retracted);
+            assert_eq!(first.valid_to, t1);
+            let versions_after_first = db.get_node_history(id).unwrap().version_count();
+
+            // Second retraction with a DIFFERENT T: no-op, original end.
+            let second = db.retract_node(id, t2).unwrap();
+            assert!(second.already_retracted);
+            assert_eq!(second.valid_to, t1, "must return the existing valid_to");
+
+            assert_eq!(
+                db.get_node_history(id).unwrap().version_count(),
+                versions_after_first,
+                "idempotent re-retract must not append a version"
+            );
+        }
+
+        /// AC (validation): T earlier than valid_from is rejected; T equal
+        /// to valid_from succeeds (empty interval); far-future T rejected;
+        /// nonexistent entity is not-found.
+        #[test]
+        fn retract_node_validation_boundaries() {
+            let (_tmp, db) = create_test_db().unwrap();
+            let now = time::now().wallclock();
+            let t_create = hours_ago(now, 2);
+
+            let id = db
+                .create_node_with_valid_time(
+                    "Person",
+                    PropertyMapBuilder::new().build(),
+                    Some(t_create),
+                )
+                .unwrap();
+
+            // T < valid_from: clear typed error.
+            let err = db.retract_node(id, hours_ago(now, 3)).unwrap_err();
+            match err {
+                Error::Temporal(TemporalError::ValidTimeBeforeEntityCreation { .. }) => {}
+                other => panic!("Expected ValidTimeBeforeEntityCreation, got: {other:?}"),
+            }
+
+            // Far-future T: rejected.
+            let err = db
+                .retract_node(id, hours_from_now(now, 24 * 400))
+                .unwrap_err();
+            match err {
+                Error::Temporal(TemporalError::ValidTimeTooFarInFuture { .. }) => {}
+                other => panic!("Expected ValidTimeTooFarInFuture, got: {other:?}"),
+            }
+
+            // T == valid_from: allowed, yields an empty interval — the node
+            // was never valid at any instant.
+            let result = db.retract_node(id, t_create).unwrap();
+            assert_eq!(result.valid_from, t_create);
+            assert_eq!(result.valid_to, t_create);
+            assert!(db.get_node_at_valid_time(id, t_create).is_err());
+
+            // Nonexistent entity: typed not-found (never a generic error).
+            let missing = NodeId::new(999_999).unwrap();
+            let err = db.retract_node(missing, time::now()).unwrap_err();
+            match err {
+                Error::Storage(crate::core::error::StorageError::NodeNotFound(id)) => {
+                    assert_eq!(id, missing);
+                }
+                other => panic!("Expected StorageError::NodeNotFound, got: {other:?}"),
+            }
+        }
+
+        /// AC (referential safety): plain retract_node refuses when the node
+        /// has connected edges; retract_node_detach co-retracts them at the
+        /// same T and reports edges_retracted.
+        #[test]
+        fn retract_node_refuses_with_connected_edges_and_detach_coretracts() {
+            let (_tmp, db) = create_test_db().unwrap();
+            let now = time::now().wallclock();
+            let t_create = hours_ago(now, 3);
+            let t_retract = hours_ago(now, 1);
+
+            let a = db
+                .create_node_with_valid_time(
+                    "Person",
+                    PropertyMapBuilder::new().build(),
+                    Some(t_create),
+                )
+                .unwrap();
+            let b = db
+                .create_node_with_valid_time(
+                    "Person",
+                    PropertyMapBuilder::new().build(),
+                    Some(t_create),
+                )
+                .unwrap();
+            let edge_id = db
+                .create_edge_with_valid_time(
+                    a,
+                    b,
+                    "KNOWS",
+                    PropertyMapBuilder::new().build(),
+                    Some(t_create),
+                )
+                .unwrap();
+
+            // Refuse-by-default: the error names the connected-edge count.
+            let err = db.retract_node(a, t_retract).unwrap_err();
+            match &err {
+                Error::Transaction(TransactionError::ValidationFailed { reason }) => {
+                    assert!(reason.contains("1 connected edge"), "got: {reason}");
+                }
+                other => panic!("Expected ValidationFailed refusal, got: {other:?}"),
+            }
+            // Nothing was retracted by the refusal.
+            assert!(db.get_node(a).is_ok());
+            assert!(db.get_edge(edge_id).is_ok());
+
+            // Detach form co-retracts the edge at the same T.
+            let result = db.retract_node_detach(a, t_retract).unwrap();
+            assert!(!result.already_retracted);
+            assert_eq!(result.edges_retracted, 1);
+
+            // Edge queryable strictly before T, gone at/after T.
+            assert!(
+                db.get_edge_at_valid_time(edge_id, hours_ago(now, 2))
+                    .is_ok()
+            );
+            assert!(db.get_edge_at_valid_time(edge_id, t_retract).is_err());
+            assert!(db.get_edge_at_valid_time(edge_id, time::now()).is_err());
+            // Node likewise.
+            assert!(db.get_node_at_valid_time(a, hours_ago(now, 2)).is_ok());
+            assert!(db.get_node_at_valid_time(a, time::now()).is_err());
+        }
+
+        /// AC: retract_edge direct — same before/at/after matrix, plus
+        /// idempotency and history preservation.
+        #[test]
+        fn retract_edge_before_at_after_matrix() {
+            let (_tmp, db) = create_test_db().unwrap();
+            let now = time::now().wallclock();
+            let t_create = hours_ago(now, 3);
+            let t_retract = hours_ago(now, 1);
+
+            let a = db
+                .create_node("Person", PropertyMapBuilder::new().build())
+                .unwrap();
+            let b = db
+                .create_node("Person", PropertyMapBuilder::new().build())
+                .unwrap();
+            let edge_id = db
+                .create_edge_with_valid_time(
+                    a,
+                    b,
+                    "KNOWS",
+                    PropertyMapBuilder::new().build(),
+                    Some(t_create),
+                )
+                .unwrap();
+
+            let result = db.retract_edge(edge_id, t_retract).unwrap();
+            assert!(!result.already_retracted);
+            assert_eq!(result.valid_from, t_create);
+            assert_eq!(result.valid_to, t_retract);
+
+            assert!(
+                db.get_edge_at_valid_time(edge_id, hours_ago(now, 2))
+                    .is_ok()
+            );
+            assert!(db.get_edge_at_valid_time(edge_id, t_retract).is_err());
+            assert!(db.get_edge_at_valid_time(edge_id, time::now()).is_err());
+            assert!(db.get_edge(edge_id).is_err());
+
+            // History: create + retraction version, closed interval visible.
+            let history = db.get_edge_history(edge_id).unwrap();
+            assert_eq!(history.version_count(), 2);
+            let head = &history.versions[1];
+            assert_eq!(head.temporal.valid_time().start(), t_create);
+            assert_eq!(head.temporal.valid_time().end(), t_retract);
+
+            // Idempotent re-retract returns the original end.
+            let second = db.retract_edge(edge_id, hours_ago(now, 2)).unwrap();
+            assert!(second.already_retracted);
+            assert_eq!(second.valid_to, t_retract);
+        }
+
+        /// AC (crash recovery): after a WAL replay into a fresh database,
+        /// the full before/at/after + history matrix still holds, honoring
+        /// the retraction's valid_to faithfully.
+        #[test]
+        fn retraction_survives_wal_replay_crash_recovery() {
+            use crate::config::WalConfigBuilder;
+            use crate::storage::wal::DurabilityMode;
+            use crate::{AletheiaDB, AletheiaDBConfig};
+
+            let temp_dir = tempfile::tempdir().unwrap();
+            let wal_dir = temp_dir.path().join("wal");
+            let make_config = || {
+                AletheiaDBConfig::builder()
+                    .wal(
+                        WalConfigBuilder::new()
+                            .wal_dir(wal_dir.clone())
+                            .durability_mode(DurabilityMode::Synchronous)
+                            .build(),
+                    )
+                    // Isolate from index persistence: the default config is
+                    // ENABLED with a cwd-relative "data" dir, so a stray
+                    // ./data left by unrelated tests would be loaded on
+                    // "restart" and skip the WAL replay under test.
+                    .persistence(crate::storage::index_persistence::PersistenceConfig {
+                        enabled: false,
+                        ..Default::default()
+                    })
+                    .build()
+            };
+
+            let now = time::now().wallclock();
+            let t_create = hours_ago(now, 3);
+            let t_retract = hours_ago(now, 1);
+
+            let (node_id, edge_id, other_id);
+            {
+                let db = AletheiaDB::with_unified_config(make_config()).unwrap();
+                node_id = db
+                    .create_node_with_valid_time(
+                        "Person",
+                        PropertyMapBuilder::new().insert("name", "Alice").build(),
+                        Some(t_create),
+                    )
+                    .unwrap();
+                other_id = db
+                    .create_node_with_valid_time(
+                        "Person",
+                        PropertyMapBuilder::new().build(),
+                        Some(t_create),
+                    )
+                    .unwrap();
+                edge_id = db
+                    .create_edge_with_valid_time(
+                        node_id,
+                        other_id,
+                        "KNOWS",
+                        PropertyMapBuilder::new().build(),
+                        Some(t_create),
+                    )
+                    .unwrap();
+                let result = db.retract_node_detach(node_id, t_retract).unwrap();
+                assert_eq!(result.edges_retracted, 1);
+                // Simulate a crash: drop without a checkpoint.
+            }
+
+            // "Restart": recovery replays the WAL into fresh storage.
+            let db = AletheiaDB::with_unified_config(make_config()).unwrap();
+
+            // Current state: retracted entities are absent.
+            assert!(db.get_node(node_id).is_err());
+            assert!(db.get_edge(edge_id).is_err());
+            assert!(db.get_node(other_id).is_ok());
+
+            // Valid-time matrix, honoring the retraction's backdated T
+            // (NOT the replay/commit time).
+            assert!(
+                db.get_node_at_valid_time(node_id, hours_ago(now, 2))
+                    .is_ok()
+            );
+            assert!(db.get_node_at_valid_time(node_id, t_retract).is_err());
+            assert!(db.get_node_at_valid_time(node_id, time::now()).is_err());
+            assert!(
+                db.get_edge_at_valid_time(edge_id, hours_ago(now, 2))
+                    .is_ok()
+            );
+            assert!(db.get_edge_at_valid_time(edge_id, t_retract).is_err());
+            assert!(db.get_edge_at_valid_time(edge_id, time::now()).is_err());
+
+            // History: create + retraction versions, closed interval intact.
+            let history = db.get_node_history(node_id).unwrap();
+            assert_eq!(history.version_count(), 2);
+            let head = &history.versions[1];
+            assert_eq!(head.temporal.valid_time().start(), t_create);
+            assert_eq!(
+                head.temporal.valid_time().end(),
+                t_retract,
+                "replay must honor the retraction's valid_to faithfully"
+            );
+
+            // Idempotency survives recovery too.
+            let again = db.retract_node(node_id, time::now()).unwrap();
+            assert!(again.already_retracted);
+            assert_eq!(again.valid_to, t_retract);
+        }
+
+        /// Regression (fix-round #1): an edge CREATED in the same
+        /// transaction that retracts one of its endpoints must fail commit
+        /// validation. Previously a buffered `RetractNode` fell through
+        /// `node_exists` as "exists" and the edge committed as an orphan
+        /// (the delete equivalent was already rejected).
+        #[test]
+        fn retract_then_create_edge_in_same_tx_fails_validation() {
+            use crate::api::transaction::WriteOps;
+            let (_tmp, db) = create_test_db().unwrap();
+            let now = time::now().wallclock();
+
+            let a = db
+                .create_node_with_valid_time(
+                    "Person",
+                    PropertyMapBuilder::new().build(),
+                    Some(hours_ago(now, 3)),
+                )
+                .unwrap();
+            let b = db
+                .create_node("Person", PropertyMapBuilder::new().build())
+                .unwrap();
+
+            let err = db
+                .write(|tx| {
+                    tx.retract_node(a, hours_ago(now, 1))?;
+                    tx.create_edge(a, b, "KNOWS", PropertyMapBuilder::new().build())?;
+                    Ok(())
+                })
+                .unwrap_err();
+            match &err {
+                Error::Transaction(TransactionError::ValidationFailed { reason }) => {
+                    assert!(reason.contains("does not exist"), "got: {reason}");
+                }
+                other => panic!("Expected ValidationFailed, got: {other:?}"),
+            }
+
+            // The failed transaction rolled back atomically: the node was
+            // NOT retracted and no orphan edge exists.
+            assert!(db.get_node(a).is_ok());
+            assert_eq!(db.count_connected_edges(a).unwrap(), 0);
+        }
+
+        /// Regression (fix-round #1): same contract for UPDATING an edge
+        /// whose endpoint is retracted in the same transaction.
+        #[test]
+        fn retract_then_update_edge_in_same_tx_fails_validation() {
+            use crate::api::transaction::WriteOps;
+            let (_tmp, db) = create_test_db().unwrap();
+            let now = time::now().wallclock();
+            let t_create = hours_ago(now, 3);
+
+            let a = db
+                .create_node_with_valid_time(
+                    "Person",
+                    PropertyMapBuilder::new().build(),
+                    Some(t_create),
+                )
+                .unwrap();
+            let b = db
+                .create_node_with_valid_time(
+                    "Person",
+                    PropertyMapBuilder::new().build(),
+                    Some(t_create),
+                )
+                .unwrap();
+            let edge_id = db
+                .create_edge_with_valid_time(
+                    a,
+                    b,
+                    "KNOWS",
+                    PropertyMapBuilder::new().build(),
+                    Some(t_create),
+                )
+                .unwrap();
+
+            let err = db
+                .write(|tx| {
+                    // Note: the low-level tx.retract_node has no
+                    // connected-edge refusal (that lives in the AletheiaDB /
+                    // MCP wrappers), so this buffers cleanly.
+                    tx.retract_node(a, hours_ago(now, 1))?;
+                    tx.update_edge(
+                        edge_id,
+                        PropertyMapBuilder::new().insert("weight", 1i64).build(),
+                    )?;
+                    Ok(())
+                })
+                .unwrap_err();
+            match &err {
+                Error::Transaction(TransactionError::ValidationFailed { reason }) => {
+                    assert!(reason.contains("does not exist"), "got: {reason}");
+                }
+                other => panic!("Expected ValidationFailed, got: {other:?}"),
+            }
+
+            // Rolled back: node present, edge untouched.
+            assert!(db.get_node(a).is_ok());
+            let edge = db.get_edge(edge_id).unwrap();
+            assert!(edge.get_property("weight").is_none());
+        }
+
+        /// Fix-round #2: the refusal count is DISTINCT connected edges — a
+        /// self-loop appears in both adjacency directions but is ONE edge,
+        /// so the refusal reports 1 and detach retracts 1. The two numbers
+        /// must always agree.
+        #[test]
+        fn retract_node_self_loop_refusal_count_matches_detach() {
+            let (_tmp, db) = create_test_db().unwrap();
+            let now = time::now().wallclock();
+            let t_create = hours_ago(now, 3);
+            let t_retract = hours_ago(now, 1);
+
+            let a = db
+                .create_node_with_valid_time(
+                    "Person",
+                    PropertyMapBuilder::new().build(),
+                    Some(t_create),
+                )
+                .unwrap();
+            let loop_edge = db
+                .create_edge_with_valid_time(
+                    a,
+                    a,
+                    "SELF",
+                    PropertyMapBuilder::new().build(),
+                    Some(t_create),
+                )
+                .unwrap();
+
+            let err = db.retract_node(a, t_retract).unwrap_err();
+            match &err {
+                Error::Transaction(TransactionError::ValidationFailed { reason }) => {
+                    assert!(
+                        reason.contains("1 connected edge"),
+                        "a self-loop must count once, got: {reason}"
+                    );
+                }
+                other => panic!("Expected ValidationFailed refusal, got: {other:?}"),
+            }
+
+            let result = db.retract_node_detach(a, t_retract).unwrap();
+            assert_eq!(
+                result.edges_retracted, 1,
+                "detach must retract exactly the refusal count"
+            );
+            assert!(
+                db.get_edge_at_valid_time(loop_edge, hours_ago(now, 2))
+                    .is_ok()
+            );
+            assert!(db.get_edge_at_valid_time(loop_edge, t_retract).is_err());
+        }
+
+        /// Fix-round #2: one outgoing + one incoming edge from different
+        /// peers — refusal reports 2, detach retracts 2, and BOTH edges obey
+        /// the before/at-after-T temporal matrix.
+        #[test]
+        fn retract_node_multi_edge_refusal_two_and_detach_two() {
+            let (_tmp, db) = create_test_db().unwrap();
+            let now = time::now().wallclock();
+            let t_create = hours_ago(now, 3);
+            let t_retract = hours_ago(now, 1);
+
+            let mk_node = |db: &crate::AletheiaDB| {
+                db.create_node_with_valid_time(
+                    "Person",
+                    PropertyMapBuilder::new().build(),
+                    Some(t_create),
+                )
+                .unwrap()
+            };
+            let x = mk_node(&db);
+            let b = mk_node(&db);
+            let c = mk_node(&db);
+            let e_out = db
+                .create_edge_with_valid_time(
+                    x,
+                    b,
+                    "KNOWS",
+                    PropertyMapBuilder::new().build(),
+                    Some(t_create),
+                )
+                .unwrap();
+            let e_in = db
+                .create_edge_with_valid_time(
+                    c,
+                    x,
+                    "KNOWS",
+                    PropertyMapBuilder::new().build(),
+                    Some(t_create),
+                )
+                .unwrap();
+
+            let err = db.retract_node(x, t_retract).unwrap_err();
+            match &err {
+                Error::Transaction(TransactionError::ValidationFailed { reason }) => {
+                    assert!(reason.contains("2 connected edge"), "got: {reason}");
+                }
+                other => panic!("Expected ValidationFailed refusal, got: {other:?}"),
+            }
+
+            let result = db.retract_node_detach(x, t_retract).unwrap();
+            assert_eq!(result.edges_retracted, 2);
+
+            for edge_id in [e_out, e_in] {
+                assert!(
+                    db.get_edge_at_valid_time(edge_id, hours_ago(now, 2))
+                        .is_ok(),
+                    "edge must remain queryable strictly before T"
+                );
+                assert!(
+                    db.get_edge_at_valid_time(edge_id, t_retract).is_err(),
+                    "edge must be gone at T (half-open interval)"
+                );
+                assert!(
+                    db.get_edge_at_valid_time(edge_id, time::now()).is_err(),
+                    "edge must be gone after T"
+                );
+                assert!(db.get_edge(edge_id).is_err());
+            }
+        }
+
+        /// Fix-round #4 pin: retracting at a FUTURE T removes the entity
+        /// from current-state queries IMMEDIATELY — current state reflects
+        /// post-retraction knowledge, not post-T reality (parity with
+        /// delete_node_with_valid_time) — while valid-time reads before T
+        /// still return it.
+        #[test]
+        fn retract_node_future_t_absent_from_current_state_immediately() {
+            let (_tmp, db) = create_test_db().unwrap();
+            let now = time::now().wallclock();
+            let t_future = hours_from_now(now, 1);
+
+            let id = db
+                .create_node_with_valid_time(
+                    "Person",
+                    PropertyMapBuilder::new().build(),
+                    Some(hours_ago(now, 1)),
+                )
+                .unwrap();
+
+            let result = db.retract_node(id, t_future).unwrap();
+            assert_eq!(result.valid_to, t_future);
+
+            // Current state: absent immediately, though T has not arrived.
+            assert!(
+                db.get_node(id).is_err(),
+                "future-T retraction must hide the node from current state immediately"
+            );
+            // Valid-time reads before T still return it...
+            assert!(
+                db.get_node_at_valid_time(id, time::now()).is_ok(),
+                "still valid at today's valid time (T is in the future)"
+            );
+            // ...and at/after T do not.
+            assert!(db.get_node_at_valid_time(id, t_future).is_err());
+        }
+
+        /// Fix-round #5 pin: retracting a node that was DELETED returns
+        /// already_retracted with the tombstone's DEGENERATE interval
+        /// [d, d) — both bounds equal the deletion's valid time, not the
+        /// node's original valid_from.
+        #[test]
+        fn retract_after_delete_returns_degenerate_tombstone_interval() {
+            let (_tmp, db) = create_test_db().unwrap();
+            let now = time::now().wallclock();
+            let t_create = hours_ago(now, 3);
+            let d = hours_ago(now, 2);
+
+            let id = db
+                .create_node_with_valid_time(
+                    "Person",
+                    PropertyMapBuilder::new().build(),
+                    Some(t_create),
+                )
+                .unwrap();
+            db.delete_node_with_valid_time(id, Some(d)).unwrap();
+
+            let result = db.retract_node(id, hours_ago(now, 1)).unwrap();
+            assert!(result.already_retracted);
+            assert_eq!(
+                result.valid_from, d,
+                "interval start is the deletion time, not the original valid_from"
+            );
+            assert_eq!(result.valid_to, d, "degenerate [d, d) tombstone interval");
+        }
+
+        /// Fix-round #6c pin: detach fails ATOMICALLY when any connected
+        /// edge is newer than T — neither the node nor any edge is
+        /// retracted; the caller must retract the newer edge separately at
+        /// a later T first.
+        #[test]
+        fn retract_node_detach_atomic_failure_when_edge_newer_than_t() {
+            let (_tmp, db) = create_test_db().unwrap();
+            let now = time::now().wallclock();
+            let t_create = hours_ago(now, 3);
+
+            let a = db
+                .create_node_with_valid_time(
+                    "Person",
+                    PropertyMapBuilder::new().build(),
+                    Some(t_create),
+                )
+                .unwrap();
+            let b = db
+                .create_node_with_valid_time(
+                    "Person",
+                    PropertyMapBuilder::new().build(),
+                    Some(t_create),
+                )
+                .unwrap();
+            // Edge's valid_from defaults to now — LATER than T = -1h.
+            let e = db
+                .create_edge(a, b, "KNOWS", PropertyMapBuilder::new().build())
+                .unwrap();
+
+            let err = db.retract_node_detach(a, hours_ago(now, 1)).unwrap_err();
+            match err {
+                Error::Temporal(TemporalError::ValidTimeBeforeEntityCreation { .. }) => {}
+                other => panic!("Expected ValidTimeBeforeEntityCreation, got: {other:?}"),
+            }
+
+            // NOTHING was retracted.
+            assert!(db.get_node(a).is_ok(), "node must not be retracted");
+            assert!(db.get_edge(e).is_ok(), "edge must not be retracted");
+        }
+
+        /// Fix-round #9 pin: the retraction version carries the LATEST
+        /// properties. Paris -> London -> Berlin -> retract must
+        /// reconstruct Berlin inside [last_update, T).
+        #[test]
+        fn retraction_version_reconstructs_latest_properties() {
+            let (_tmp, db) = create_test_db().unwrap();
+            let now = time::now().wallclock();
+            let t_create = hours_ago(now, 4);
+            let t_london = hours_ago(now, 3);
+            let t_berlin = hours_ago(now, 2);
+            let t_retract = hours_ago(now, 1);
+
+            let id = db
+                .create_node_with_valid_time(
+                    "City",
+                    PropertyMapBuilder::new().insert("city", "Paris").build(),
+                    Some(t_create),
+                )
+                .unwrap();
+            db.update_node_with_valid_time(
+                id,
+                PropertyMapBuilder::new().insert("city", "London").build(),
+                Some(t_london),
+            )
+            .unwrap();
+            db.update_node_with_valid_time(
+                id,
+                PropertyMapBuilder::new().insert("city", "Berlin").build(),
+                Some(t_berlin),
+            )
+            .unwrap();
+
+            db.retract_node(id, t_retract).unwrap();
+
+            // Point-in-time read inside [t_berlin, t_retract) reconstructs
+            // Berlin (the latest pre-retraction state), post-retraction.
+            let probe = HybridTimestamp::new(now - 90 * 60_000_000, 0).unwrap();
+            let node = db.get_node_at_valid_time(id, probe).unwrap();
+            assert_eq!(
+                node.get_property("city").and_then(|v| v.as_str()),
+                Some("Berlin")
+            );
+
+            // The retraction version itself carries Berlin with the closed
+            // interval [t_berlin, t_retract).
+            let history = db.get_node_history(id).unwrap();
+            assert_eq!(history.version_count(), 4);
+            let retraction_version = &history.versions[3];
+            assert_eq!(retraction_version.temporal.valid_time().start(), t_berlin);
+            assert_eq!(retraction_version.temporal.valid_time().end(), t_retract);
+            assert_eq!(
+                retraction_version
+                    .properties
+                    .get("city")
+                    .and_then(|v| v.as_str()),
+                Some("Berlin")
+            );
+        }
+
+        /// Fix-round #11 pin: double retract with the SAME T is an
+        /// idempotent no-op (the different-T case is covered above).
+        #[test]
+        fn same_t_double_retract_is_idempotent() {
+            let (_tmp, db) = create_test_db().unwrap();
+            let now = time::now().wallclock();
+            let t = hours_ago(now, 1);
+
+            let id = db
+                .create_node_with_valid_time(
+                    "Person",
+                    PropertyMapBuilder::new().build(),
+                    Some(hours_ago(now, 2)),
+                )
+                .unwrap();
+
+            let first = db.retract_node(id, t).unwrap();
+            assert!(!first.already_retracted);
+            let versions = db.get_node_history(id).unwrap().version_count();
+
+            let second = db.retract_node(id, t).unwrap();
+            assert!(second.already_retracted);
+            assert_eq!(second.valid_to, t);
+            assert_eq!(db.get_node_history(id).unwrap().version_count(), versions);
+        }
+
+        /// Fix-round #11 pin: updating a retracted node is a typed
+        /// NodeNotFound — retraction removes it from current state.
+        #[test]
+        fn update_after_retract_is_node_not_found() {
+            let (_tmp, db) = create_test_db().unwrap();
+            let now = time::now().wallclock();
+
+            let id = db
+                .create_node_with_valid_time(
+                    "Person",
+                    PropertyMapBuilder::new().build(),
+                    Some(hours_ago(now, 2)),
+                )
+                .unwrap();
+            db.retract_node(id, hours_ago(now, 1)).unwrap();
+
+            let err = db
+                .update_node_with_valid_time(
+                    id,
+                    PropertyMapBuilder::new().insert("x", 1i64).build(),
+                    None,
+                )
+                .unwrap_err();
+            match err {
+                Error::Storage(crate::core::error::StorageError::NodeNotFound(nid)) => {
+                    assert_eq!(nid, id);
+                }
+                other => panic!("Expected StorageError::NodeNotFound, got: {other:?}"),
+            }
+        }
+
+        /// Fix-round #11 pin: detach on a node with ZERO connected edges
+        /// succeeds and reports edges_retracted: 0.
+        #[test]
+        fn retract_node_detach_with_zero_edges_succeeds() {
+            let (_tmp, db) = create_test_db().unwrap();
+            let now = time::now().wallclock();
+
+            let id = db
+                .create_node_with_valid_time(
+                    "Person",
+                    PropertyMapBuilder::new().build(),
+                    Some(hours_ago(now, 2)),
+                )
+                .unwrap();
+
+            let result = db.retract_node_detach(id, hours_ago(now, 1)).unwrap();
+            assert!(!result.already_retracted);
+            assert_eq!(result.edges_retracted, 0);
+            assert!(db.get_node(id).is_err());
+        }
+
+        /// Fix-round #11 pin: a buffered retraction in a transaction that
+        /// ABORTS (closure error, never committed) leaves the node fully
+        /// present with no version appended.
+        #[test]
+        fn aborted_transaction_leaves_node_present() {
+            let (_tmp, db) = create_test_db().unwrap();
+            let now = time::now().wallclock();
+
+            let id = db
+                .create_node_with_valid_time(
+                    "Person",
+                    PropertyMapBuilder::new().build(),
+                    Some(hours_ago(now, 2)),
+                )
+                .unwrap();
+
+            let err = db
+                .write(|tx| -> crate::core::error::Result<()> {
+                    tx.retract_node(id, hours_ago(now, 1))?;
+                    Err(TransactionError::ValidationFailed {
+                        reason: "deliberate abort".to_string(),
+                    }
+                    .into())
+                })
+                .unwrap_err();
+            assert!(format!("{err:?}").contains("deliberate abort"));
+
+            assert!(
+                db.get_node(id).is_ok(),
+                "aborted tx must leave the node present"
+            );
+            assert_eq!(db.get_node_history(id).unwrap().version_count(), 1);
+        }
+
+        /// Fix-round #3: a SECOND retract_node of the same node inside ONE
+        /// transaction is an idempotent no-op returning the first call's
+        /// buffered valid_to — not a second buffered write (which would
+        /// WAL-append twice and could half-apply on commit failure).
+        #[test]
+        fn double_retract_node_in_same_tx_buffers_once() {
+            let (_tmp, db) = create_test_db().unwrap();
+            let now = time::now().wallclock();
+            let t1 = hours_ago(now, 2);
+            let t2 = hours_ago(now, 1);
+
+            let id = db
+                .create_node_with_valid_time(
+                    "Person",
+                    PropertyMapBuilder::new().build(),
+                    Some(hours_ago(now, 3)),
+                )
+                .unwrap();
+
+            let (r1, r2) = db
+                .write(|tx| -> crate::core::error::Result<_> {
+                    let r1 = tx.retract_node(id, t1)?;
+                    let r2 = tx.retract_node(id, t2)?;
+                    Ok((r1, r2))
+                })
+                .unwrap();
+            assert!(!r1.already_retracted);
+            assert!(r2.already_retracted);
+            assert_eq!(r2.valid_to, t1, "second call returns the buffered valid_to");
+
+            // Exactly ONE retraction version was applied on commit.
+            assert!(db.get_node(id).is_err());
+            let history = db.get_node_history(id).unwrap();
+            assert_eq!(history.version_count(), 2, "create + one retraction");
+            assert_eq!(history.versions[1].temporal.valid_time().end(), t1);
+        }
+
+        /// Fix-round #3 (delete parity): retracting a node this transaction
+        /// has already delete_node-ed is an idempotent no-op reporting the
+        /// buffered deletion's degenerate [d, d) interval; only the delete
+        /// is applied on commit.
+        #[test]
+        fn retract_after_delete_in_same_tx_is_noop_with_degenerate_interval() {
+            use crate::api::transaction::WriteOps;
+            let (_tmp, db) = create_test_db().unwrap();
+            let now = time::now().wallclock();
+            let d = hours_ago(now, 2);
+
+            let id = db
+                .create_node_with_valid_time(
+                    "Person",
+                    PropertyMapBuilder::new().build(),
+                    Some(hours_ago(now, 3)),
+                )
+                .unwrap();
+
+            let result = db
+                .write(|tx| {
+                    tx.delete_node_with_valid_time(id, Some(d))?;
+                    tx.retract_node(id, hours_ago(now, 1))
+                })
+                .unwrap();
+            assert!(result.already_retracted);
+            assert_eq!(result.valid_from, d);
+            assert_eq!(
+                result.valid_to, d,
+                "degenerate [d, d), matching a committed delete"
+            );
+
+            // Commit applied ONLY the delete: create + tombstone versions.
+            assert!(db.get_node(id).is_err());
+            assert_eq!(db.get_node_history(id).unwrap().version_count(), 2);
+        }
+
+        /// Fix-round #3 (edge variant): same-tx delete-then-retract of an
+        /// edge is an idempotent no-op with the degenerate interval.
+        #[test]
+        fn retract_after_delete_edge_in_same_tx_is_noop_with_degenerate_interval() {
+            use crate::api::transaction::WriteOps;
+            let (_tmp, db) = create_test_db().unwrap();
+            let now = time::now().wallclock();
+            let t_create = hours_ago(now, 3);
+            let d = hours_ago(now, 2);
+
+            let a = db
+                .create_node_with_valid_time(
+                    "Person",
+                    PropertyMapBuilder::new().build(),
+                    Some(t_create),
+                )
+                .unwrap();
+            let b = db
+                .create_node_with_valid_time(
+                    "Person",
+                    PropertyMapBuilder::new().build(),
+                    Some(t_create),
+                )
+                .unwrap();
+            let e = db
+                .create_edge_with_valid_time(
+                    a,
+                    b,
+                    "KNOWS",
+                    PropertyMapBuilder::new().build(),
+                    Some(t_create),
+                )
+                .unwrap();
+
+            let result = db
+                .write(|tx| {
+                    tx.delete_edge_with_valid_time(e, Some(d))?;
+                    tx.retract_edge(e, hours_ago(now, 1))
+                })
+                .unwrap();
+            assert!(result.already_retracted);
+            assert_eq!(result.valid_from, d);
+            assert_eq!(result.valid_to, d);
+
+            assert!(db.get_edge(e).is_err());
+            assert_eq!(db.get_edge_history(e).unwrap().version_count(), 2);
         }
     }
 

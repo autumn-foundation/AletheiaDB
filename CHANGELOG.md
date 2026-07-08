@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Valid-time retraction (Issue #3230): `AletheiaDB::retract_node`,
+  `retract_node_detach`, and `retract_edge` (plus
+  `WriteTransaction::retract_node`/`retract_edge` and the MCP
+  `retract_node`/`retract_edge` tools) close an entity's valid-time
+  interval at a chosen `valid_to` (default now; backdating and
+  up-to-one-year future dating supported) **without deleting its history**.
+  `AS OF VALID_TIME` before `valid_to` still returns the fact; at/after it
+  does not; `AS OF SYSTEM_TIME` before the retraction's commit still shows
+  the fact open-ended (append-only — the past record is never rewritten).
+  `retract_node` mirrors the #3209 safe-by-default contract: it refuses
+  with the count of **distinct** connected edges (a self-loop counts once)
+  unless `detach` co-retracts them atomically at the same `valid_to`.
+  Re-retracting an already-retracted (or deleted) entity is an idempotent
+  no-op returning the existing interval. New WAL operations
+  `RetractNode`/`RetractEdge` replay faithfully on crash recovery, honoring
+  the logged `valid_to`. See
+  [docs/guides/mcp-query-tool.md](docs/guides/mcp-query-tool.md#retracting-a-fact-closing-valid-time).
+
 - Queryable bi-temporal extent (Issue #3238):
   `AletheiaDB::temporal_extent()` / `temporal_extent_by_label()` and the MCP
   `temporal_extent` tool report the dataset's earliest/latest valid-time and

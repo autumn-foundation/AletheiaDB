@@ -291,6 +291,116 @@ pub(crate) fn apply_edge_delete(
     Ok(())
 }
 
+/// Apply a node retraction (Issue #3230).
+///
+/// Retraction closes the node's valid-time interval at `valid_to` without
+/// deleting its history:
+/// 1.  Closes the head version's TRANSACTION time at the commit timestamp,
+///     leaving its valid interval untouched (still open-ended) — this is
+///     what makes `AS OF SYSTEM_TIME` before the retraction show the fact
+///     open-ended (append-only, never rewrite).
+/// 2.  Appends a NEW version with the same properties and the closed valid
+///     interval `[valid_from, valid_to)` (tx time `[commit, infinity)`).
+/// 3.  Removes the node from current storage and updates temporal indexes.
+///
+/// After retraction the node is absent from current-state queries, like a
+/// delete, while the full history remains queryable.
+pub(crate) fn apply_node_retract(
+    tx: &WriteTransaction,
+    node_id: NodeId,
+    valid_to: Timestamp,
+    commit_timestamp: Timestamp,
+    retraction_version_id: VersionId,
+    historical: &mut HistoricalStorage,
+) -> Result<()> {
+    // Get the node before removing it from current storage
+    let node = tx.current.get_node(node_id)?;
+
+    // Capture the head's valid_from BEFORE mutating, so the retraction
+    // version reproduces the same interval start.
+    let head_version_id = historical.get_current_node_version(node_id);
+    let valid_from = head_version_id
+        .and_then(|vid| historical.get_node_version(vid))
+        .map(|v| v.temporal.valid_time().start())
+        .unwrap_or(commit_timestamp);
+
+    // (1) Close the head version's transaction time only.
+    if let Some(current_version_id) = head_version_id {
+        historical.close_node_version_transaction_time(current_version_id, commit_timestamp)?;
+    }
+
+    // (2) Append the retraction version with the closed valid interval.
+    historical.add_retracted_node_version(
+        node_id,
+        retraction_version_id,
+        valid_from,
+        valid_to,
+        commit_timestamp,
+        node.label,
+        node.properties.clone(),
+    )?;
+
+    // Index the retraction version with the same closed interval.
+    let temporal = BiTemporalInterval::with_valid_time(valid_from, commit_timestamp)
+        .close_valid_time(valid_to)?;
+    tx.temporal_indexes
+        .insert_node_version(node_id, retraction_version_id, temporal)?;
+
+    // (3) Remove from current storage.
+    tx.current.delete_node_direct(node_id, commit_timestamp)?;
+
+    Ok(())
+}
+
+/// Apply an edge retraction (Issue #3230).
+///
+/// See [`apply_node_retract`] for the bi-temporal contract.
+pub(crate) fn apply_edge_retract(
+    tx: &WriteTransaction,
+    edge_id: EdgeId,
+    valid_to: Timestamp,
+    commit_timestamp: Timestamp,
+    retraction_version_id: VersionId,
+    historical: &mut HistoricalStorage,
+) -> Result<()> {
+    // Get the edge before removing it from current storage
+    let edge = tx.current.get_edge(edge_id)?;
+
+    let head_version_id = historical.get_current_edge_version(edge_id);
+    let valid_from = head_version_id
+        .and_then(|vid| historical.get_edge_version(vid))
+        .map(|v| v.temporal.valid_time().start())
+        .unwrap_or(commit_timestamp);
+
+    // (1) Close the head version's transaction time only.
+    if let Some(current_version_id) = head_version_id {
+        historical.close_edge_version_transaction_time(current_version_id, commit_timestamp)?;
+    }
+
+    // (2) Append the retraction version with the closed valid interval.
+    historical.add_retracted_edge_version(
+        edge_id,
+        retraction_version_id,
+        valid_from,
+        valid_to,
+        commit_timestamp,
+        edge.label,
+        edge.source,
+        edge.target,
+        edge.properties.clone(),
+    )?;
+
+    let temporal = BiTemporalInterval::with_valid_time(valid_from, commit_timestamp)
+        .close_valid_time(valid_to)?;
+    tx.temporal_indexes
+        .insert_edge_version(edge_id, retraction_version_id, temporal)?;
+
+    // (3) Remove from current storage.
+    tx.current.delete_edge_direct(edge_id)?;
+
+    Ok(())
+}
+
 /// Apply a single buffered write operation.
 ///
 /// Dispatches to the appropriate `apply_*` function based on the operation type.
@@ -426,6 +536,46 @@ pub(crate) fn apply_single_write(
                 historical,
             )?;
         }
+        crate::api::transaction::BufferedWrite::RetractNode { node_id, valid_to } => {
+            // Retractions draw from the same pre-generated version ID pool
+            // as deletes (both append exactly one closing version).
+            let retraction_version_id = VersionId::new_unchecked(tombstone_ids.next().ok_or_else(|| {
+                StorageError::InconsistentState {
+                    reason: format!(
+                        "Version ID exhaustion for RetractNode: expected {} closing versions, iterator depleted at node_id {:?}",
+                        num_deletes, node_id
+                    ),
+                }
+            })?);
+
+            apply_node_retract(
+                tx,
+                *node_id,
+                *valid_to,
+                commit_timestamp,
+                retraction_version_id,
+                historical,
+            )?;
+        }
+        crate::api::transaction::BufferedWrite::RetractEdge { edge_id, valid_to } => {
+            let retraction_version_id = VersionId::new_unchecked(tombstone_ids.next().ok_or_else(|| {
+                StorageError::InconsistentState {
+                    reason: format!(
+                        "Version ID exhaustion for RetractEdge: expected {} closing versions, iterator depleted at edge_id {:?}",
+                        num_deletes, edge_id
+                    ),
+                }
+            })?);
+
+            apply_edge_retract(
+                tx,
+                *edge_id,
+                *valid_to,
+                commit_timestamp,
+                retraction_version_id,
+                historical,
+            )?;
+        }
     }
     Ok(())
 }
@@ -453,7 +603,8 @@ pub(crate) fn apply_changes(tx: &WriteTransaction, commit_timestamp: Timestamp) 
     // Acquire lock on historical storage once before processing all operations.
     let mut historical = tx.historical.write();
 
-    // Pre-generate all tombstone version IDs at once to reduce lock contention
+    // Pre-generate all closing-version IDs (delete tombstones + retraction
+    // versions) at once to reduce lock contention
     let num_deletes = tx
         .buffer
         .operations()
@@ -463,6 +614,8 @@ pub(crate) fn apply_changes(tx: &WriteTransaction, commit_timestamp: Timestamp) 
                 op,
                 crate::api::transaction::BufferedWrite::DeleteNode { .. }
                     | crate::api::transaction::BufferedWrite::DeleteEdge { .. }
+                    | crate::api::transaction::BufferedWrite::RetractNode { .. }
+                    | crate::api::transaction::BufferedWrite::RetractEdge { .. }
             )
         })
         .count();

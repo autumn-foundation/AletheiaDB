@@ -368,6 +368,36 @@ impl AletheiaMcpServer {
         ))
     }
 
+    /// Retract a node as of a valid time (Issue #3230).
+    ///
+    /// Closes the node's valid-time interval at `valid_time` (default: now)
+    /// WITHOUT deleting its history: `AS OF VALID_TIME` queries strictly
+    /// before that instant still return the node, and `AS OF SYSTEM_TIME`
+    /// queries positioned before the retraction still show it open-ended.
+    ///
+    /// Mirrors the `delete_node` DETACH contract (Issue #3209): if the node
+    /// has connected edges and `detach` is not `true`, the retraction is
+    /// **refused** and the JSON response reports `connected_edges`. Pass
+    /// `detach: true` to co-retract every connected edge at the same valid
+    /// time; the response then reports `edges_retracted`. Re-retracting an
+    /// already-retracted node is an idempotent no-op returning the existing
+    /// interval with `already_retracted: true`.
+    pub fn retract_node(&self, req: RetractNodeRequest) -> String {
+        Self::extract_text(self.handle_retract_node(
+            serde_json::to_value(req).expect("request serialization should not fail"),
+        ))
+    }
+
+    /// Retract an edge as of a valid time (Issue #3230).
+    ///
+    /// See [`retract_node`](Self::retract_node) for the bi-temporal
+    /// semantics and idempotency; edges have no detach concern.
+    pub fn retract_edge(&self, req: RetractEdgeRequest) -> String {
+        Self::extract_text(self.handle_retract_edge(
+            serde_json::to_value(req).expect("request serialization should not fail"),
+        ))
+    }
+
     /// Delete a node and all its connected edges (cascade delete).
     ///
     /// Removes the node and any edges connected to it, maintaining referential integrity.
@@ -1058,6 +1088,16 @@ impl AletheiaMcpServer {
         tx_time.unwrap_or_else(|| TRANSACTION_TIME_NOW.to_string())
     }
 
+    /// Serialize a timestamp as an RFC 3339 `Z`-suffixed microsecond-precision
+    /// JSON string — the interval-bound convention used by retraction
+    /// responses (half-open `[start, end)`; `null` would denote an
+    /// open-ended bound). Delegates to
+    /// [`format_timestamp_rfc3339`](Self::format_timestamp_rfc3339) so all
+    /// MCP tools share one formatter.
+    fn timestamp_to_rfc3339_micros(ts: Timestamp) -> serde_json::Value {
+        json!(Self::format_timestamp_rfc3339(ts))
+    }
+
     /// Format a resolved bi-temporal coordinate as an RFC 3339 UTC string
     /// with microsecond precision and a `Z` suffix (e.g.
     /// `2024-01-15T10:00:00.000000Z`).
@@ -1466,6 +1506,157 @@ impl AletheiaMcpServer {
                 "detached": detach,
                 "edges_removed": edges_removed
             })),
+        }
+    }
+
+    fn handle_retract_node(&self, args: serde_json::Value) -> CallToolResult {
+        let req: RetractNodeRequest = match serde_json::from_value(args) {
+            Ok(r) => r,
+            Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
+        };
+
+        let node_id = match NodeId::new(req.node_id) {
+            Ok(id) => id,
+            // An out-of-range ID is a caller fault; emit the bare
+            // `StorageError` text verbatim (see handle_delete_node).
+            Err(e) => return self.invalid_argument(&e.to_string()),
+        };
+
+        let detach = req.detach.unwrap_or(false);
+
+        // Matching the #3221 convention: valid_time defaults to now.
+        let valid_to = match self.parse_opt_timestamp("valid_time", &req.valid_time) {
+            Ok(v) => v.unwrap_or_else(time::now),
+            Err(result) => return result,
+        };
+
+        // Perform the connected-edge check and the retraction inside a single
+        // write transaction so they observe the same storage state — no
+        // check-then-act gap for a concurrent writer to slip an edge into
+        // (same rationale as handle_delete_node, Issue #3209).
+        enum Outcome {
+            Refused { connected_edges: usize },
+            Retracted(crate::api::transaction::RetractionResult),
+        }
+
+        let outcome = self.db.write(|tx| -> crate::core::error::Result<Outcome> {
+            use crate::api::transaction::ReadOps;
+
+            // The connected-edge contract only applies to a currently-present
+            // node; an already-retracted node short-circuits below to the
+            // idempotent result (and a nonexistent one to NOT_FOUND). All
+            // reads go through the transaction itself (buffer-aware,
+            // snapshot-isolated) rather than back through `self.db`.
+            if tx.get_node(node_id).is_ok() {
+                // Enumerate DISTINCT connected edges once — the refusal
+                // count and the detach co-retraction share the same
+                // sort/dedup list, so `connected_edges` always equals what
+                // `detach: true` would retract (a self-loop appears in both
+                // adjacency directions but is one edge).
+                let mut edge_ids = tx.get_outgoing_edges(node_id);
+                edge_ids.extend(tx.get_incoming_edges(node_id));
+                edge_ids.sort_unstable();
+                edge_ids.dedup();
+                let connected_edges = edge_ids.len();
+
+                // Refuse-by-default: never report a bare success that leaves
+                // edges pointing at a retracted node. The caller must opt
+                // into co-retraction via `detach`.
+                if connected_edges > 0 && !detach {
+                    return Ok(Outcome::Refused { connected_edges });
+                }
+
+                if detach && connected_edges > 0 {
+                    // Co-retract every connected edge at the same valid time.
+                    let mut edges_retracted = 0;
+                    for edge_id in edge_ids {
+                        let edge_result = tx.retract_edge(edge_id, valid_to)?;
+                        if !edge_result.already_retracted {
+                            edges_retracted += 1;
+                        }
+                    }
+
+                    let mut result = tx.retract_node(node_id, valid_to)?;
+                    result.edges_retracted = edges_retracted;
+                    return Ok(Outcome::Retracted(result));
+                }
+            }
+
+            Ok(Outcome::Retracted(tx.retract_node(node_id, valid_to)?))
+        });
+
+        let outcome = match outcome {
+            Ok(o) => o,
+            Err(e) => return self.db_error(e),
+        };
+
+        match outcome {
+            // The refusal in the #3234 structured shape: FAILED_PRECONDITION
+            // with `details.connected_edges`, legacy top-level fields
+            // preserved additively (byte-for-byte parallel to the
+            // handle_delete_node refusal).
+            Outcome::Refused { connected_edges } => {
+                let message = format!(
+                    "Node {} has {} connected edge(s); refusing to retract. \
+                     Pass `detach: true` to retract the node and its connected edges \
+                     at the same valid time, or retract the edges first.",
+                    req.node_id, connected_edges
+                );
+                let mut top_level = serde_json::Map::new();
+                top_level.insert("success".to_string(), json!(false));
+                top_level.insert("node_id".to_string(), json!(req.node_id));
+                top_level.insert("connected_edges".to_string(), json!(connected_edges));
+                top_level.insert("detach_required".to_string(), json!(true));
+                Self::error_result_with_top_level(
+                    McpError::new(McpErrorCode::FailedPrecondition, message).details(json!({
+                        "node_id": req.node_id,
+                        "connected_edges": connected_edges,
+                        "detach_required": true
+                    })),
+                    top_level,
+                )
+            }
+            Outcome::Retracted(result) => self.success_json(json!({
+                "success": true,
+                "node_id": req.node_id,
+                "retracted": true,
+                "already_retracted": result.already_retracted,
+                "valid_from": Self::timestamp_to_rfc3339_micros(result.valid_from),
+                "valid_to": Self::timestamp_to_rfc3339_micros(result.valid_to),
+                "edges_retracted": result.edges_retracted
+            })),
+        }
+    }
+
+    fn handle_retract_edge(&self, args: serde_json::Value) -> CallToolResult {
+        let req: RetractEdgeRequest = match serde_json::from_value(args) {
+            Ok(r) => r,
+            Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
+        };
+
+        let edge_id = match EdgeId::new(req.edge_id) {
+            Ok(id) => id,
+            // An out-of-range ID is a caller fault; emit the bare
+            // `StorageError` text verbatim (see handle_delete_node).
+            Err(e) => return self.invalid_argument(&e.to_string()),
+        };
+
+        // Matching the #3221 convention: valid_time defaults to now.
+        let valid_to = match self.parse_opt_timestamp("valid_time", &req.valid_time) {
+            Ok(v) => v.unwrap_or_else(time::now),
+            Err(result) => return result,
+        };
+
+        match self.db.retract_edge(edge_id, valid_to) {
+            Ok(result) => self.success_json(json!({
+                "success": true,
+                "edge_id": req.edge_id,
+                "retracted": true,
+                "already_retracted": result.already_retracted,
+                "valid_from": Self::timestamp_to_rfc3339_micros(result.valid_from),
+                "valid_to": Self::timestamp_to_rfc3339_micros(result.valid_to)
+            })),
+            Err(e) => self.db_error(e),
         }
     }
 
@@ -3715,6 +3906,8 @@ impl AletheiaMcpServer {
             "create_node" => self.handle_create_node(args),
             "update_node" => self.handle_update_node(args),
             "delete_node" => self.handle_delete_node(args),
+            "retract_node" => self.handle_retract_node(args),
+            "retract_edge" => self.handle_retract_edge(args),
             "delete_node_cascade" => self.handle_delete_node_cascade(args),
             "list_nodes" => self.handle_list_nodes(args),
             "count_nodes" => self.handle_count_nodes(args),
@@ -3923,6 +4116,35 @@ fn tool_definitions() -> Vec<Tool> {
                      the real world; omit it to default to the transaction time. Not supported \
                      together with `detach: true` (cascade delete does not support backdating).",
             make_input_schema::<DeleteNodeRequest>(),
+        ),
+        Tool::new(
+            "retract_node",
+            "Retract a node as of a valid time (bi-temporal, safe-by-default): close its \
+                     valid-time interval at `valid_time` (ISO 8601 or microseconds since epoch; \
+                     defaults to now) WITHOUT deleting its history. Unlike delete_node, queries \
+                     AS OF a valid time strictly before `valid_time` still return the node, and \
+                     AS OF SYSTEM_TIME queries positioned before the retraction still show it \
+                     open-ended. If the node has connected edges and `detach` is not true, the \
+                     retraction is refused and the response reports `connected_edges`; pass \
+                     `detach: true` to co-retract every connected edge at the same valid time \
+                     (`edges_retracted` reports how many). Re-retracting is an idempotent no-op \
+                     returning the existing interval with `already_retracted: true`. The response \
+                     carries the closed half-open interval as `valid_from`/`valid_to` RFC 3339 \
+                     strings. Transaction time is always system-assigned.",
+            make_input_schema::<RetractNodeRequest>(),
+        ),
+        Tool::new(
+            "retract_edge",
+            "Retract an edge as of a valid time (bi-temporal): close its valid-time interval \
+                     at `valid_time` (ISO 8601 or microseconds since epoch; defaults to now) \
+                     WITHOUT deleting its history. Queries AS OF a valid time strictly before \
+                     `valid_time` still return the edge; AS OF SYSTEM_TIME queries positioned \
+                     before the retraction still show it open-ended. Re-retracting is an \
+                     idempotent no-op returning the existing interval with \
+                     `already_retracted: true`. The response carries the closed half-open \
+                     interval as `valid_from`/`valid_to` RFC 3339 strings. Transaction time is \
+                     always system-assigned.",
+            make_input_schema::<RetractEdgeRequest>(),
         ),
         Tool::new(
             "delete_node_cascade",

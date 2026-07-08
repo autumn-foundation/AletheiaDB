@@ -50,6 +50,8 @@ pub(crate) const OP_DELETE_NODE: u8 = 6;
 pub(crate) const OP_DELETE_EDGE: u8 = 7;
 pub(crate) const OP_DECLARE_UNIQUE_CONSTRAINT: u8 = 8;
 pub(crate) const OP_DROP_UNIQUE_CONSTRAINT: u8 = 9;
+pub(crate) const OP_RETRACT_NODE: u8 = 10;
+pub(crate) const OP_RETRACT_EDGE: u8 = 11;
 
 /// Helper to serialize an InternedString into the buffer (4-byte ID)
 #[inline(always)]
@@ -248,6 +250,14 @@ pub(crate) fn estimate_entry_capacity(operation: &WalOperation) -> usize {
             // op type (1) + edge_id (8) + valid_from (12)
             1 + 8 + TIMESTAMP_SIZE
         }
+        WalOperation::RetractNode { .. } => {
+            // op type (1) + node_id (8) + valid_to (12)
+            1 + 8 + TIMESTAMP_SIZE
+        }
+        WalOperation::RetractEdge { .. } => {
+            // op type (1) + edge_id (8) + valid_to (12)
+            1 + 8 + TIMESTAMP_SIZE
+        }
         WalOperation::Checkpoint { .. } => {
             // op type (1) + lsn (8) + timestamp (12)
             1 + 8 + 12
@@ -407,6 +417,16 @@ pub(crate) fn serialize_operation_into(
             buffer.extend_from_slice(&edge_id.as_u64().to_le_bytes());
             valid_from.serialize_into(buffer);
         }
+        WalOperation::RetractNode { node_id, valid_to } => {
+            buffer.push(OP_RETRACT_NODE);
+            buffer.extend_from_slice(&node_id.as_u64().to_le_bytes());
+            valid_to.serialize_into(buffer);
+        }
+        WalOperation::RetractEdge { edge_id, valid_to } => {
+            buffer.push(OP_RETRACT_EDGE);
+            buffer.extend_from_slice(&edge_id.as_u64().to_le_bytes());
+            valid_to.serialize_into(buffer);
+        }
         WalOperation::Checkpoint { lsn, timestamp } => {
             buffer.push(OP_CHECKPOINT);
             buffer.extend_from_slice(&lsn.0.to_le_bytes());
@@ -501,6 +521,52 @@ mod tests {
         assert_eq!(estimated, 45, "DeleteNode should be exactly 45 bytes");
 
         // Verify by actually serializing
+        let entry = WalEntry::new(LSN(1), op);
+        let mut buffer = Vec::new();
+        serialize_entry_into(&entry, &mut buffer).unwrap();
+        assert!(
+            buffer.len() <= estimated,
+            "Actual size {} should not exceed estimate {}",
+            buffer.len(),
+            estimated
+        );
+    }
+
+    #[test]
+    fn test_estimate_capacity_retract_node() {
+        // RetractNode: op type (1) + node_id (8) + valid_to (12) = 21 bytes
+        // Fixed overhead: 24 bytes => 45 total (same shape as DeleteNode).
+        let op = WalOperation::RetractNode {
+            node_id: NodeId::new(1).unwrap(),
+            valid_to: test_timestamp(),
+        };
+
+        let estimated = estimate_entry_capacity(&op);
+        assert_eq!(estimated, 45, "RetractNode should be exactly 45 bytes");
+
+        let entry = WalEntry::new(LSN(1), op);
+        let mut buffer = Vec::new();
+        serialize_entry_into(&entry, &mut buffer).unwrap();
+        assert!(
+            buffer.len() <= estimated,
+            "Actual size {} should not exceed estimate {}",
+            buffer.len(),
+            estimated
+        );
+    }
+
+    #[test]
+    fn test_estimate_capacity_retract_edge() {
+        // RetractEdge: op type (1) + edge_id (8) + valid_to (12) = 21 bytes
+        // Fixed overhead: 24 bytes => 45 total (same shape as DeleteEdge).
+        let op = WalOperation::RetractEdge {
+            edge_id: EdgeId::new(1).unwrap(),
+            valid_to: test_timestamp(),
+        };
+
+        let estimated = estimate_entry_capacity(&op);
+        assert_eq!(estimated, 45, "RetractEdge should be exactly 45 bytes");
+
         let entry = WalEntry::new(LSN(1), op);
         let mut buffer = Vec::new();
         serialize_entry_into(&entry, &mut buffer).unwrap();

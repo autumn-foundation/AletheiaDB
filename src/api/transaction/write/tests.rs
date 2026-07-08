@@ -2413,6 +2413,162 @@ mod conflict_detection_tests {
             "Storage should consistently show latest committed state"
         );
     }
+
+    /// Assert a commit failed with `SerializationFailure`.
+    fn assert_serialization_failure(result: crate::core::error::Result<()>, context: &str) {
+        let err = result.expect_err(context);
+        let err_str = format!("{:?}", err);
+        assert!(
+            err_str.contains("SerializationFailure"),
+            "{context}: expected SerializationFailure, got: {err_str}"
+        );
+    }
+
+    /// Issue #3230 conflict arm: a buffered RetractNode must abort when a
+    /// concurrent UPDATE of the same node committed after our snapshot —
+    /// the valid_from the retraction was validated against is stale.
+    #[test]
+    fn test_retract_node_conflicts_with_concurrent_update() {
+        let harness = TestHarness::new();
+
+        let node_id = {
+            let mut tx = harness.create_tx();
+            let id = tx
+                .create_node("Person", PropertyMapBuilder::new().build())
+                .unwrap();
+            tx.commit().unwrap();
+            id
+        };
+
+        // tx1 buffers a retraction.
+        let mut tx1 = harness.create_tx();
+        tx1.retract_node(node_id, time::now()).unwrap();
+
+        // tx2 updates and commits first.
+        let mut tx2 = harness.create_tx();
+        tx2.update_node(
+            node_id,
+            PropertyMapBuilder::new().insert("age", 31i64).build(),
+        )
+        .unwrap();
+        tx2.commit().unwrap();
+
+        assert_serialization_failure(
+            tx1.commit(),
+            "retract must lose to a concurrent committed update",
+        );
+
+        // First committer wins: the node is still present with tx2's state.
+        let node = harness.current.get_node(node_id).unwrap();
+        assert_eq!(node.get_property("age").and_then(|v| v.as_int()), Some(31));
+    }
+
+    /// Issue #3230 conflict arm: a buffered RetractNode must abort when a
+    /// concurrent DELETE of the same node committed first (the
+    /// entity-gone branch of the RetractNode arm).
+    #[test]
+    fn test_retract_node_conflicts_with_concurrent_delete() {
+        let harness = TestHarness::new();
+
+        let node_id = {
+            let mut tx = harness.create_tx();
+            let id = tx
+                .create_node("Person", PropertyMapBuilder::new().build())
+                .unwrap();
+            tx.commit().unwrap();
+            id
+        };
+
+        let mut tx1 = harness.create_tx();
+        tx1.retract_node(node_id, time::now()).unwrap();
+
+        let mut tx2 = harness.create_tx();
+        tx2.delete_node(node_id).unwrap();
+        tx2.commit().unwrap();
+
+        assert_serialization_failure(
+            tx1.commit(),
+            "retract must lose to a concurrent committed delete",
+        );
+        assert!(harness.current.get_node(node_id).is_err());
+    }
+
+    /// Issue #3230 conflict arm: RetractEdge vs concurrent edge update.
+    #[test]
+    fn test_retract_edge_conflicts_with_concurrent_update() {
+        let harness = TestHarness::new();
+
+        let edge_id = {
+            let mut tx = harness.create_tx();
+            let n1 = tx
+                .create_node("Person", PropertyMapBuilder::new().build())
+                .unwrap();
+            let n2 = tx
+                .create_node("Person", PropertyMapBuilder::new().build())
+                .unwrap();
+            let e = tx
+                .create_edge(n1, n2, "KNOWS", PropertyMapBuilder::new().build())
+                .unwrap();
+            tx.commit().unwrap();
+            e
+        };
+
+        let mut tx1 = harness.create_tx();
+        tx1.retract_edge(edge_id, time::now()).unwrap();
+
+        let mut tx2 = harness.create_tx();
+        tx2.update_edge(
+            edge_id,
+            PropertyMapBuilder::new().insert("weight", 2i64).build(),
+        )
+        .unwrap();
+        tx2.commit().unwrap();
+
+        assert_serialization_failure(
+            tx1.commit(),
+            "edge retract must lose to a concurrent committed update",
+        );
+        let edge = harness.current.get_edge(edge_id).unwrap();
+        assert_eq!(
+            edge.get_property("weight").and_then(|v| v.as_int()),
+            Some(2)
+        );
+    }
+
+    /// Issue #3230 conflict arm: RetractEdge vs concurrent edge delete
+    /// (the entity-gone branch of the RetractEdge arm).
+    #[test]
+    fn test_retract_edge_conflicts_with_concurrent_delete() {
+        let harness = TestHarness::new();
+
+        let edge_id = {
+            let mut tx = harness.create_tx();
+            let n1 = tx
+                .create_node("Person", PropertyMapBuilder::new().build())
+                .unwrap();
+            let n2 = tx
+                .create_node("Person", PropertyMapBuilder::new().build())
+                .unwrap();
+            let e = tx
+                .create_edge(n1, n2, "KNOWS", PropertyMapBuilder::new().build())
+                .unwrap();
+            tx.commit().unwrap();
+            e
+        };
+
+        let mut tx1 = harness.create_tx();
+        tx1.retract_edge(edge_id, time::now()).unwrap();
+
+        let mut tx2 = harness.create_tx();
+        tx2.delete_edge(edge_id).unwrap();
+        tx2.commit().unwrap();
+
+        assert_serialization_failure(
+            tx1.commit(),
+            "edge retract must lose to a concurrent committed delete",
+        );
+        assert!(harness.current.get_edge(edge_id).is_err());
+    }
 }
 
 mod clock_skew_tests {
