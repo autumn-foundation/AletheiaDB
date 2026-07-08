@@ -1061,6 +1061,22 @@ impl CurrentStorage {
         }
     }
 
+    /// Fast-path existence check using the compact node header.
+    ///
+    /// Returns `true` iff a live node with `node_id` exists, reading only the
+    /// 16-byte header instead of loading and cloning the full node. Returns
+    /// `false` for a missing/invalid id, so callers can use it to cheaply skip
+    /// gaps in a sparse id space. This mirrors [`Self::node_has_label`] but
+    /// omits the label comparison. Acquires only a brief DashMap shard lock,
+    /// which is released before returning.
+    #[inline]
+    pub fn contains_node(&self, node_id: u64) -> bool {
+        match NodeId::new(node_id) {
+            Ok(id) => self.indexes.get_node_header(id).is_some(),
+            Err(_) => false,
+        }
+    }
+
     /// Get the number of edges.
     #[inline]
     pub fn edge_count(&self) -> usize {

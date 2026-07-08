@@ -129,8 +129,22 @@ enum ScanFilter {
 /// very large graphs.
 ///
 /// Ids with no live node (gaps from deletion, or ids reserved but never used)
-/// are skipped cheaply: label scans reject them via the header fast path, and
-/// unfiltered scans treat `NodeNotFound` as a skip rather than an error.
+/// are skipped cheaply: both label and unfiltered scans reject them via the
+/// compact 16-byte header fast path before loading any full node.
+///
+/// # Performance
+///
+/// Resident memory is O(1), but the scan is **O(max_id) in time**: it visits
+/// every id in `[0, max_id)`, including ids with no live node. Node ids are
+/// monotonic and never reused (recovery `reset` sets the next id to
+/// `max_id + 1`), so `max_id` is the high-water mark of ids ever allocated,
+/// not the current live count. When `max_id` greatly exceeds the live node
+/// count -- e.g. after a bulk delete, or when post-compaction leaves a sparse
+/// id space -- the scan spends most of its time skipping dead ids and is
+/// pathologically slow relative to the number of nodes actually yielded. This
+/// is a deliberate trade: the old eager `Vec<NodeId>` path could hard-OOM on a
+/// large id range, whereas this streaming scan degrades only to a soft
+/// slowdown proportional to `max_id`.
 ///
 /// # Concurrency
 ///
@@ -202,6 +216,17 @@ impl ResultIterator for NodeScanIterator {
             if let ScanFilter::Label(label_id) = self.filter
                 && !self.current.node_has_label(id_val, label_id)
             {
+                continue;
+            }
+
+            // Fast path: for an unfiltered scan, skip gaps in the sparse id
+            // space with a cheap O(1) header existence check. This avoids
+            // allocating and immediately dropping a `NodeNotFound`
+            // `StorageError` for every dead id, which dominates when
+            // `max_id` greatly exceeds the live node count. The `get_node`
+            // `NodeNotFound` arm below still guards against a node deleted
+            // concurrently between this check and the load.
+            if matches!(self.filter, ScanFilter::All) && !self.current.contains_node(id_val) {
                 continue;
             }
 
