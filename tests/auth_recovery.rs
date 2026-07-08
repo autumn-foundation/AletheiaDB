@@ -157,3 +157,118 @@ fn recovery_preserves_data_provenance_principal_and_key_store() {
     assert_eq!(read["provenance"]["principal"], "recovery-writer");
     assert_eq!(read["provenance"]["source"], "hr-system");
 }
+
+/// Crash-style variant: NO `persist_indexes()` checkpoint before the
+/// restart, so round 2 must reconstruct state purely from WAL replay.
+/// The write, its `provenance.principal`, and the key-store state must all
+/// survive.
+#[test]
+fn crash_recovery_via_wal_replay_preserves_provenance_principal_and_key_store() {
+    let tempdir = tempfile::tempdir().expect("create tempdir");
+    let data_dir = tempdir.path().join("db");
+    let keys_path = data_dir.join("auth").join("keys.json");
+
+    let node_id: u64;
+    let writer_key: String;
+    let revoked_key: String;
+
+    // ── Round 1: durable DB + persistent key store + authenticated write,
+    //    then "crash" (drop with no index checkpoint) ──
+    {
+        let db = Arc::new(AletheiaDB::open(&data_dir).expect("open durable db"));
+        let store =
+            Arc::new(AuthStore::with_persistence(&keys_path).expect("open persistent store"));
+
+        let (_writer, key) = store
+            .create_key("crash-writer", Role::Writer)
+            .expect("create writer key");
+        writer_key = key.to_string();
+
+        let (victim, key) = store
+            .create_key("crash-victim", Role::Reader)
+            .expect("create victim key");
+        revoked_key = key.to_string();
+        assert!(store.revoke(&victim.id).expect("revoke"), "key existed");
+
+        let server = AletheiaMcpServer::with_auth(
+            Arc::clone(&db),
+            McpAuthConfig::new(AuthMode::Required, Arc::clone(&store))
+                .with_credential(SecretString::new(writer_key.as_str())),
+        );
+
+        let response = server.create_node(CreateNodeRequest {
+            label: "Person".to_string(),
+            properties: Some(
+                [("name".to_string(), Value::String("Bob".to_string()))]
+                    .into_iter()
+                    .collect(),
+            ),
+            valid_time: None,
+            provenance: Some(ProvenanceRequest {
+                source: Some("crm".to_string()),
+                confidence: None,
+                note: None,
+                correlation_id: None,
+            }),
+        });
+        let created: Value = serde_json::from_str(&response).expect("create_node JSON");
+        assert!(
+            created.get("error").is_none(),
+            "authenticated create must succeed: {created}"
+        );
+        node_id = created["id"].as_u64().expect("created node id");
+
+        // Deliberately NO db.persist_indexes(): recovery must come from
+        // the WAL alone (the group-commit WAL has fsynced the write by the
+        // time create_node returned).
+        drop(server);
+        drop(db);
+        drop(store);
+    }
+
+    // ── Round 2: reopen — forces WAL replay (no index snapshot exists) ──
+    let db = Arc::new(AletheiaDB::open(&data_dir).expect("reopen durable db"));
+    let store = Arc::new(AuthStore::with_persistence(&keys_path).expect("reload key store"));
+
+    // Data replayed from the WAL.
+    let nid = NodeId::new(node_id).expect("node id");
+    let node = db.get_node(nid).expect("node survives WAL replay");
+    assert_eq!(node.id.as_u64(), node_id);
+
+    // The stamped principal survives WAL replay (v5 payload format).
+    let provenance = db
+        .get_node_provenance(nid)
+        .expect("provenance lookup")
+        .expect("provenance survives WAL replay");
+    assert_eq!(provenance.principal(), Some("crash-writer"));
+    assert_eq!(provenance.source(), Some("crm"));
+
+    // Key store state survives independently of the DB.
+    let principal = store
+        .verify(&writer_key)
+        .expect("writer key must still verify after crash restart");
+    assert_eq!(principal.name, "crash-writer");
+    assert_eq!(principal.role, Role::Writer);
+    assert!(
+        store.verify(&revoked_key).is_none(),
+        "revoked key must stay revoked across crash restarts"
+    );
+
+    // The recovered stack serves authenticated traffic end-to-end.
+    let server = AletheiaMcpServer::with_auth(
+        Arc::clone(&db),
+        McpAuthConfig::new(AuthMode::Required, Arc::clone(&store))
+            .with_credential(SecretString::new(writer_key.as_str())),
+    );
+    let response = server.get_node(aletheiadb::mcp::GetNodeRequest {
+        node_id,
+        include_vectors: None,
+    });
+    let read: Value = serde_json::from_str(&response).expect("get_node JSON");
+    assert!(
+        read.get("error").is_none(),
+        "recovered server must serve the recovered key: {read}"
+    );
+    assert_eq!(read["provenance"]["principal"], "crash-writer");
+    assert_eq!(read["provenance"]["source"], "crm");
+}
