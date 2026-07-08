@@ -1360,7 +1360,8 @@ impl AletheiaMcpServer {
         {
             Ok(node_id) => match self.db.get_node(node_id) {
                 Ok(node) => {
-                    let response = self.node_to_response(&node, true, time::now());
+                    let now = time::now();
+                    let response = self.node_to_response(&node, true, now);
                     self.success_json(
                         serde_json::to_value(&response)
                             .expect("response serialization should not fail"),
@@ -1415,7 +1416,8 @@ impl AletheiaMcpServer {
         {
             Ok(()) => match self.db.get_node(node_id) {
                 Ok(node) => {
-                    let response = self.node_to_response(&node, true, time::now());
+                    let now = time::now();
+                    let response = self.node_to_response(&node, true, now);
                     self.success_json(
                         serde_json::to_value(&response)
                             .expect("response serialization should not fail"),
@@ -1956,7 +1958,8 @@ impl AletheiaMcpServer {
         {
             Ok(edge_id) => match self.db.get_edge(edge_id) {
                 Ok(edge) => {
-                    let response = self.edge_to_response(&edge, true, time::now());
+                    let now = time::now();
+                    let response = self.edge_to_response(&edge, true, now);
                     self.success_json(
                         serde_json::to_value(&response)
                             .expect("response serialization should not fail"),
@@ -2011,7 +2014,8 @@ impl AletheiaMcpServer {
         {
             Ok(()) => match self.db.get_edge(edge_id) {
                 Ok(edge) => {
-                    let response = self.edge_to_response(&edge, true, time::now());
+                    let now = time::now();
+                    let response = self.edge_to_response(&edge, true, now);
                     self.success_json(
                         serde_json::to_value(&response)
                             .expect("response serialization should not fail"),
@@ -2625,7 +2629,8 @@ impl AletheiaMcpServer {
 
         match self.db.get_node_at_time(node_id, valid_time, tx_time) {
             Ok(node) => {
-                let response = self.node_to_response(&node, true, time::now());
+                let now = time::now();
+                let response = self.node_to_response(&node, true, now);
                 self.success_json(json!({
                     "node": response,
                     "valid_time": req.valid_time,
@@ -2663,7 +2668,8 @@ impl AletheiaMcpServer {
 
         match self.db.get_edge_at_time(edge_id, valid_time, tx_time) {
             Ok(edge) => {
-                let response = self.edge_to_response(&edge, true, time::now());
+                let now = time::now();
+                let response = self.edge_to_response(&edge, true, now);
                 self.success_json(json!({
                     "edge": response,
                     "valid_time": req.valid_time,
@@ -2888,7 +2894,8 @@ impl AletheiaMcpServer {
 
         match self.db.get_node_at_valid_time(node_id, valid_time) {
             Ok(node) => {
-                let response = self.node_to_response(&node, true, time::now());
+                let now = time::now();
+                let response = self.node_to_response(&node, true, now);
                 self.success_json(json!({
                     "node": response,
                     "valid_time": req.valid_time
@@ -2920,7 +2927,8 @@ impl AletheiaMcpServer {
 
         match self.db.get_node_at_transaction_time(node_id, tx_time) {
             Ok(node) => {
-                let response = self.node_to_response(&node, true, time::now());
+                let now = time::now();
+                let response = self.node_to_response(&node, true, now);
                 self.success_json(json!({
                     "node": response,
                     "transaction_time": req.transaction_time
@@ -3030,7 +3038,8 @@ impl AletheiaMcpServer {
 
         match self.db.get_edge_at_valid_time(edge_id, valid_time) {
             Ok(edge) => {
-                let response = self.edge_to_response(&edge, true, time::now());
+                let now = time::now();
+                let response = self.edge_to_response(&edge, true, now);
                 self.success_json(json!({
                     "edge": response,
                     "valid_time": req.valid_time
@@ -3062,7 +3071,8 @@ impl AletheiaMcpServer {
 
         match self.db.get_edge_at_transaction_time(edge_id, tx_time) {
             Ok(edge) => {
-                let response = self.edge_to_response(&edge, true, time::now());
+                let now = time::now();
+                let response = self.edge_to_response(&edge, true, now);
                 self.success_json(json!({
                     "edge": response,
                     "transaction_time": req.transaction_time

@@ -56,6 +56,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Bulk MCP read responses now evaluate `is_current` against a single
+  per-request timestamp (Issue #3391): the wallclock is captured once per
+  tool call and every entity's `temporal.is_current` in that response
+  (`list_nodes`, `traverse`, `get_outgoing_edges`/`get_incoming_edges`,
+  `find_similar`, `find_nodes_at_time`, `hybrid_query`, ...) is judged
+  against the same instant, instead of one clock read per serialized
+  entity. See
+  [docs/guides/mcp-query-tool.md](docs/guides/mcp-query-tool.md#temporal-bounds-on-read-responses).
+
 - MCP tool error responses are now structured (Issue #3234): every error is
   `{"error": {"code", "message", "retriable", "details"?}}` instead of
   `{"error": "<string>"}`. `code` is drawn from a stable seven-value enum

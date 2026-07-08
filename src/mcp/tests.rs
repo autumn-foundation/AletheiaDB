@@ -11260,4 +11260,303 @@ mod per_request_now_tests {
              {crowd_reads} reads)"
         );
     }
+
+    // ------------------------------------------------------------------
+    // Scale-invariance regression coverage for the other bulk handlers
+    // (review follow-up on #3391): each handler captures `now` once per
+    // request, so its clock-read count must not grow with the number of
+    // entities in the response.
+    // ------------------------------------------------------------------
+
+    /// Create a node and return its id.
+    fn create_node_id(server: &AletheiaMcpServer, label: &str, name: &str) -> u64 {
+        let mut props = HashMap::new();
+        props.insert("name".to_string(), serde_json::json!(name));
+        let response = server.create_node(CreateNodeRequest {
+            label: label.to_string(),
+            properties: Some(props),
+            valid_time: None,
+            provenance: None,
+        });
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert!(value.get("error").is_none(), "create_node failed: {value}");
+        value["id"].as_u64().expect("node id must be a u64")
+    }
+
+    /// Create an edge between two nodes.
+    fn create_test_edge(server: &AletheiaMcpServer, source_id: u64, target_id: u64) {
+        let response = server.create_edge(CreateEdgeRequest {
+            source_id,
+            target_id,
+            label: "NEXT".to_string(),
+            properties: None,
+            valid_time: None,
+            provenance: None,
+        });
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert!(value.get("error").is_none(), "create_edge failed: {value}");
+    }
+
+    /// Run `small` and `large` under a frozen simulated clock (resetting the
+    /// read counter before each measured request) and assert the handler's
+    /// clock-read count does not scale with the entity count of the
+    /// response. `entities_key` is the response field holding the entity
+    /// array (e.g. `"nodes"`, `"edges"`, `"results"`).
+    fn assert_clock_reads_do_not_scale(
+        handler: &str,
+        entities_key: &str,
+        small_count: usize,
+        small: impl Fn() -> String,
+        large_count: usize,
+        large: impl Fn() -> String,
+    ) {
+        let clock = SimulatedClock::new(now_micros());
+        let _guard = clock.inject(); // frozen clock; we only count reads
+
+        reset_simulated_read_count();
+        let small_value: serde_json::Value = serde_json::from_str(&small()).unwrap();
+        let small_reads = simulated_read_count();
+
+        reset_simulated_read_count();
+        let large_value: serde_json::Value = serde_json::from_str(&large()).unwrap();
+        let large_reads = simulated_read_count();
+
+        for (value, expected) in [(&small_value, small_count), (&large_value, large_count)] {
+            assert!(value.get("error").is_none(), "{handler} failed: {value}");
+            let len = value[entities_key].as_array().map(|a| a.len());
+            assert_eq!(
+                len,
+                Some(expected),
+                "{handler}: unexpected entity count under '{entities_key}': {value}"
+            );
+        }
+
+        assert_eq!(
+            large_reads, small_reads,
+            "{handler}: clock reads must not scale with the entity count of \
+             the response ({small_count} entities: {small_reads} reads, \
+             {large_count} entities: {large_reads} reads)"
+        );
+    }
+
+    #[test]
+    fn test_traverse_clock_reads_do_not_scale_with_entity_count() {
+        let server = create_test_server();
+
+        let solo_hub = create_node_id(&server, "Hub", "solo-hub");
+        let crowd_hub = create_node_id(&server, "Hub", "crowd-hub");
+        let leaf = create_node_id(&server, "Leaf", "solo-leaf");
+        create_test_edge(&server, solo_hub, leaf);
+        for i in 0..6 {
+            let leaf = create_node_id(&server, "Leaf", &format!("crowd-leaf-{i}"));
+            create_test_edge(&server, crowd_hub, leaf);
+        }
+
+        let traverse = |start_node_id: u64| {
+            server.traverse(TraverseRequest {
+                start_node_id,
+                edge_label: "NEXT".to_string(),
+                direction: Some("outgoing".to_string()),
+                depth: Some(1),
+                limit: None,
+                offset: None,
+                include_vectors: None,
+                as_of_valid_time: None,
+                as_of_transaction_time: None,
+            })
+        };
+
+        assert_clock_reads_do_not_scale(
+            "traverse",
+            "results",
+            1,
+            || traverse(solo_hub),
+            6,
+            || traverse(crowd_hub),
+        );
+    }
+
+    #[test]
+    fn test_get_outgoing_edges_clock_reads_do_not_scale_with_entity_count() {
+        let server = create_test_server();
+
+        let solo_src = create_node_id(&server, "Src", "solo-src");
+        let crowd_src = create_node_id(&server, "Src", "crowd-src");
+        let target = create_node_id(&server, "Dst", "solo-target");
+        create_test_edge(&server, solo_src, target);
+        for i in 0..6 {
+            let target = create_node_id(&server, "Dst", &format!("crowd-target-{i}"));
+            create_test_edge(&server, crowd_src, target);
+        }
+
+        let outgoing = |node_id: u64| {
+            server.get_outgoing_edges(GetOutgoingEdgesRequest {
+                node_id,
+                label: None,
+                include_vectors: None,
+            })
+        };
+
+        assert_clock_reads_do_not_scale(
+            "get_outgoing_edges",
+            "edges",
+            1,
+            || outgoing(solo_src),
+            6,
+            || outgoing(crowd_src),
+        );
+    }
+
+    #[test]
+    fn test_get_incoming_edges_clock_reads_do_not_scale_with_entity_count() {
+        let server = create_test_server();
+
+        let solo_dst = create_node_id(&server, "Dst", "solo-dst");
+        let crowd_dst = create_node_id(&server, "Dst", "crowd-dst");
+        let source = create_node_id(&server, "Src", "solo-source");
+        create_test_edge(&server, source, solo_dst);
+        for i in 0..6 {
+            let source = create_node_id(&server, "Src", &format!("crowd-source-{i}"));
+            create_test_edge(&server, source, crowd_dst);
+        }
+
+        let incoming = |node_id: u64| {
+            server.get_incoming_edges(GetIncomingEdgesRequest {
+                node_id,
+                label: None,
+                include_vectors: None,
+            })
+        };
+
+        assert_clock_reads_do_not_scale(
+            "get_incoming_edges",
+            "edges",
+            1,
+            || incoming(solo_dst),
+            6,
+            || incoming(crowd_dst),
+        );
+    }
+
+    #[test]
+    fn test_find_similar_clock_reads_do_not_scale_with_entity_count() {
+        let server = create_test_server();
+
+        let response = server.enable_vector_index(EnableVectorIndexRequest {
+            property_name: "embedding".to_string(),
+            dimensions: 4,
+            distance_metric: Some("cosine".to_string()),
+        });
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert!(
+            value.get("error").is_none(),
+            "enable_vector_index failed: {value}"
+        );
+
+        for i in 1..=8 {
+            let mut props = HashMap::new();
+            props.insert("name".to_string(), serde_json::json!(format!("Doc{i}")));
+            props.insert(
+                "embedding".to_string(),
+                serde_json::json!([
+                    (i as f32) * 0.1,
+                    (i as f32) * 0.2,
+                    (i as f32) * 0.3,
+                    (i as f32) * 0.4
+                ]),
+            );
+            let response = server.create_node(CreateNodeRequest {
+                label: "Document".to_string(),
+                properties: Some(props),
+                valid_time: None,
+                provenance: None,
+            });
+            let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+            assert!(value.get("error").is_none(), "create_node failed: {value}");
+        }
+
+        let find = |k: usize| {
+            server.find_similar(FindSimilarRequest {
+                property_name: "embedding".to_string(),
+                embedding: vec![0.1, 0.2, 0.3, 0.4],
+                k: Some(k),
+                offset: None,
+                include_vectors: None,
+            })
+        };
+
+        assert_clock_reads_do_not_scale("find_similar", "results", 1, || find(1), 6, || find(6));
+    }
+
+    #[test]
+    fn test_find_nodes_at_time_clock_reads_do_not_scale_with_entity_count() {
+        let server = create_test_server();
+
+        create_node_id(&server, "FSolo", "only");
+        for i in 0..6 {
+            create_node_id(&server, "FCrowd", &format!("member-{i}"));
+        }
+
+        // Anchor the point-in-time lookup at (now, now); the frozen
+        // simulated clock in the helper starts at the same real instant, so
+        // every node created above is visible.
+        let valid_time = now_micros().to_string();
+
+        let find = |label: &str| {
+            server.find_nodes_at_time(FindNodesAtTimeRequest {
+                label: label.to_string(),
+                property_key: None,
+                property_value: None,
+                valid_time: valid_time.clone(),
+                transaction_time: None,
+                limit: None,
+                offset: None,
+                include_vectors: None,
+            })
+        };
+
+        assert_clock_reads_do_not_scale(
+            "find_nodes_at_time",
+            "nodes",
+            1,
+            || find("FSolo"),
+            6,
+            || find("FCrowd"),
+        );
+    }
+
+    #[test]
+    fn test_hybrid_query_clock_reads_do_not_scale_with_entity_count() {
+        let server = create_test_server();
+
+        create_node_id(&server, "HSolo", "only");
+        for i in 0..6 {
+            create_node_id(&server, "HCrowd", &format!("member-{i}"));
+        }
+
+        let query = |label: &str| {
+            server.hybrid_query(HybridQueryRequest {
+                start_node_id: None,
+                traverse_edge: None,
+                traverse_depth: None,
+                vector_property: None,
+                query_embedding: None,
+                top_k: None,
+                valid_time: None,
+                transaction_time: None,
+                filter_label: Some(label.to_string()),
+                limit: Some(100),
+                include_vectors: None,
+            })
+        };
+
+        assert_clock_reads_do_not_scale(
+            "hybrid_query",
+            "results",
+            1,
+            || query("HSolo"),
+            6,
+            || query("HCrowd"),
+        );
+    }
 }
