@@ -3276,6 +3276,17 @@ impl HistoricalStorage {
     /// - `prev_version` points to the temporally previous version (earlier tx_time)
     /// - `next_version` points to the temporally next version (later tx_time)
     /// - Version heads point to the version with the latest tx_time
+    ///
+    /// # Persisted state is authoritative (Issue #3387)
+    ///
+    /// Current-format checkpoints persist chain links and tx-time closures
+    /// exactly; only *missing* links are filled and only *open* tx intervals
+    /// are heuristically closed here, so faithful restored state is never
+    /// overwritten. Legacy (pre-#3387) files restore with all links `None`
+    /// and all tx intervals open, and get the full heuristic rebuild exactly
+    /// as before. Preserving restored links also keeps links that point at
+    /// cold-migrated versions absent from the hot map (the heuristic would
+    /// rewire around them).
     pub(crate) fn rebuild_version_chains(&mut self) {
         // === Rebuild node version chains ===
 
@@ -3319,8 +3330,14 @@ impl HistoricalStorage {
                 };
 
                 if let Some(version) = self.node_versions.get_mut(&vid) {
-                    version.prev_version = prev;
-                    version.next_version = next;
+                    // Fill only missing links: restored links are exact
+                    // (Issue #3387) and must not be overwritten.
+                    if version.prev_version.is_none() {
+                        version.prev_version = prev;
+                    }
+                    if version.next_version.is_none() {
+                        version.next_version = next;
+                    }
                 }
             }
 
@@ -3413,8 +3430,14 @@ impl HistoricalStorage {
                 };
 
                 if let Some(version) = self.edge_versions.get_mut(&vid) {
-                    version.prev_version = prev;
-                    version.next_version = next;
+                    // Fill only missing links: restored links are exact
+                    // (Issue #3387) and must not be overwritten.
+                    if version.prev_version.is_none() {
+                        version.prev_version = prev;
+                    }
+                    if version.next_version.is_none() {
+                        version.next_version = next;
+                    }
                 }
             }
 

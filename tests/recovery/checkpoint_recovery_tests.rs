@@ -561,16 +561,13 @@ fn test_retraction_then_checkpoint_survives_recovery() -> Result<()> {
         "create + retraction versions must both survive the checkpoint"
     );
 
-    // NOTE (pre-existing checkpoint-restore limitation, not retraction-
-    // specific): the persisted temporal index does not carry version-chain
-    // links (`prev_version`) or transaction-time closures, so restored
-    // DELTA versions cannot reconstruct their properties and
-    // `get_node_at_time` point reads are not guaranteed across a
-    // restore-only recovery — for updates and deletes exactly as for
-    // retractions. Full bi-temporal point reads after recovery are covered
-    // by the WAL-replay path instead (see
+    // Full bi-temporal fidelity across a restore-only recovery (version
+    // chain links, transaction-time closures, delta reconstruction, and
+    // AS OF SYSTEM_TIME point reads) is covered by the Issue #3387 tests
+    // below (`test_checkpoint_restore_only_preserves_*_bitemporal_fidelity`);
+    // the WAL-replay path is covered by
     // `test_retraction_replayed_after_checkpoint` below and
-    // `retraction_survives_wal_replay_crash_recovery` in `src/db/ops.rs`).
+    // `retraction_survives_wal_replay_crash_recovery` in `src/db/ops.rs`.
 
     Ok(())
 }
@@ -651,6 +648,348 @@ fn test_retraction_replayed_after_checkpoint() -> Result<()> {
         recovered_historical
             .get_node_at_time(node_id, valid_to, time::now())
             .is_err()
+    );
+
+    Ok(())
+}
+
+// ============================================================================
+// Checkpoint Bi-Temporal Fidelity (Issue #3387)
+// ============================================================================
+//
+// Checkpoint restore must round-trip transaction-time interval closures and
+// version chain links so a recovery that restores state from the checkpoint
+// ALONE (no WAL entries left to replay past the checkpoint LSN) serves the
+// exact same full bi-temporal reads as the pre-checkpoint state:
+// `get_node_history` / `get_edge_history` must return the identical version
+// chain (including reconstructed delta properties), and AS OF SYSTEM_TIME
+// point reads positioned between a version's creation and its supersession
+// must resolve to the same version.
+
+/// Assert two entity histories are identical version-by-version: same version
+/// ids in the same order, same bi-temporal intervals (including closed
+/// transaction-time ends), same reconstructed properties, same labels.
+fn assert_history_identical(
+    pre: &aletheiadb::core::history::EntityHistory,
+    post: &aletheiadb::core::history::EntityHistory,
+    ctx: &str,
+) {
+    assert_eq!(
+        pre.version_count(),
+        post.version_count(),
+        "{ctx}: version count must survive a restore-only recovery \
+         (chain links lost => history truncated to the head version)"
+    );
+    for (a, b) in pre.versions.iter().zip(post.versions.iter()) {
+        let vctx = format!("{ctx}: version_id {}", a.version_id.as_u64());
+        assert_eq!(a.version_id, b.version_id, "{vctx}: version id");
+        assert_eq!(
+            a.temporal, b.temporal,
+            "{vctx}: bi-temporal interval (incl. tx-time closure) must round-trip"
+        );
+        assert_eq!(
+            a.properties, b.properties,
+            "{vctx}: reconstructed properties must round-trip"
+        );
+        assert_eq!(a.label, b.label, "{vctx}: label");
+    }
+}
+
+/// create -> update -> retract -> checkpoint -> restore-only recovery:
+/// node history and AS OF SYSTEM_TIME reads must be identical to
+/// pre-checkpoint (Issue #3387).
+#[test]
+fn test_checkpoint_restore_only_preserves_node_bitemporal_fidelity() -> Result<()> {
+    use aletheiadb::core::hlc::HybridTimestamp;
+
+    let temp_dir = TempDir::new().unwrap();
+    let wal_dir = temp_dir.path().join("wal");
+    let data_dir = temp_dir.path().join("data");
+
+    let wal_config = ConcurrentWalSystemConfig::new(&wal_dir);
+    let wal = ConcurrentWalSystem::new(wal_config)?;
+
+    let node_id = NodeId::new(1)?;
+    let now = time::now().wallclock();
+    let valid_from = HybridTimestamp::new(now - 3_600_000_000, 0).unwrap();
+    let valid_to = HybridTimestamp::new(now - 1_800_000_000, 0).unwrap();
+
+    wal.append(WalOperation::CreateNode {
+        node_id,
+        label: GLOBAL_INTERNER.intern("CkptFidelityNode").unwrap(),
+        properties: PropertyMapBuilder::new().insert("name", "Alice").build(),
+        valid_from,
+        provenance: None,
+    })?;
+    wal.append(WalOperation::UpdateNode {
+        node_id,
+        version_id: VersionId::new(500)?,
+        label: GLOBAL_INTERNER.intern("CkptFidelityNode").unwrap(),
+        properties: PropertyMapBuilder::new()
+            .insert("name", "Alice Updated")
+            .insert("role", "admin")
+            .build(),
+        valid_from,
+        provenance: None,
+    })?;
+    wal.append(WalOperation::RetractNode { node_id, valid_to })?;
+    wal.flush()?;
+
+    // First recovery replays the full WAL (the known-good path), giving the
+    // reference bi-temporal state we checkpoint and then must reproduce.
+    let checkpoint_lsn = LSN(wal.current_lsn().0.saturating_sub(1));
+    let pre_history;
+    let pre_probes: Vec<(
+        HybridTimestamp,
+        u64,
+        aletheiadb::core::property::PropertyMap,
+    )>;
+    {
+        let config = UnifiedCheckpointConfig::with_data_dir(&data_dir);
+        let mut manager = CheckpointManager::new(config)?;
+        let (current, historical, _final_lsn) = manager.recover(&wal)?;
+
+        pre_history = historical.get_node_history(node_id)?;
+        assert_eq!(
+            pre_history.version_count(),
+            3,
+            "precondition: create + update + retraction versions"
+        );
+        // Preconditions that make the fidelity comparison meaningful: the two
+        // superseded versions have CLOSED transaction time, the head is open.
+        assert!(
+            !pre_history.versions[0]
+                .temporal
+                .transaction_time()
+                .is_current(),
+            "precondition: create version tx-time closed by the update"
+        );
+        assert!(
+            !pre_history.versions[1]
+                .temporal
+                .transaction_time()
+                .is_current(),
+            "precondition: update version tx-time closed by the retraction"
+        );
+        assert!(
+            pre_history.versions[2]
+                .temporal
+                .transaction_time()
+                .is_current(),
+            "precondition: retraction (head) version tx-time open"
+        );
+        assert_eq!(
+            pre_history.versions[0]
+                .properties
+                .get("name")
+                .and_then(|v| v.as_str().map(str::to_string)),
+            Some("Alice".to_string()),
+        );
+        assert_eq!(
+            pre_history.versions[1]
+                .properties
+                .get("name")
+                .and_then(|v| v.as_str().map(str::to_string)),
+            Some("Alice Updated".to_string()),
+        );
+
+        // AS OF SYSTEM_TIME probes at each version's tx start: positioned
+        // exactly inside [creation, supersession) of each version.
+        pre_probes = pre_history
+            .versions
+            .iter()
+            .map(|v| {
+                let tx = v.temporal.transaction_time().start();
+                let node = historical
+                    .get_node_at_time(node_id, valid_from, tx)
+                    .expect("pre-checkpoint AS OF SYSTEM_TIME probe must resolve");
+                (tx, v.version_id.as_u64(), node.properties)
+            })
+            .collect();
+
+        manager.create_checkpoint(checkpoint_lsn, &current, &historical)?;
+    }
+
+    // Simulated restart: restore from the checkpoint with NOTHING left to
+    // replay after the checkpoint LSN (restore-only recovery).
+    let config = UnifiedCheckpointConfig::with_data_dir(&data_dir);
+    let mut manager = CheckpointManager::new(config)?;
+    assert!(manager.has_persisted_state());
+    let (_recovered_current, recovered_historical, _final_lsn) = manager.recover(&wal)?;
+
+    // (1) Full history identical: chain links + tx-time closures round-trip.
+    let post_history = recovered_historical.get_node_history(node_id)?;
+    assert_history_identical(&pre_history, &post_history, "node history");
+
+    // (2) AS OF SYSTEM_TIME point reads identical to pre-checkpoint.
+    for (tx, _expected_vid, expected_props) in &pre_probes {
+        let node = recovered_historical
+            .get_node_at_time(node_id, valid_from, *tx)
+            .unwrap_or_else(|e| {
+                panic!(
+                    "AS OF SYSTEM_TIME probe at tx {tx:?} must resolve after \
+                     restore-only recovery: {e}"
+                )
+            });
+        assert_eq!(
+            &node.properties, expected_props,
+            "AS OF SYSTEM_TIME probe at tx {tx:?} must return the same state \
+             as before the checkpoint"
+        );
+    }
+
+    // (3) The mid-history probe specifically returns the SUPERSEDED state,
+    // not the head: this is the read the dropped tx-time closure corrupts.
+    let (tx_create, _, _) = pre_probes[0];
+    let node_at_create = recovered_historical.get_node_at_time(node_id, valid_from, tx_create)?;
+    assert_eq!(
+        node_at_create
+            .properties
+            .get("name")
+            .and_then(|v| v.as_str().map(str::to_string)),
+        Some("Alice".to_string()),
+        "probe between create and update must see the pre-update state"
+    );
+
+    // (4) Valid-time retraction still enforced at the head.
+    let head_tx = pre_probes[2].0;
+    assert!(
+        recovered_historical
+            .get_node_at_time(node_id, valid_to, head_tx)
+            .is_err(),
+        "valid-time probe at/after valid_to must not resolve"
+    );
+
+    Ok(())
+}
+
+/// Edge mirror of the node fidelity test: create -> update -> retract an
+/// edge, checkpoint, restore-only recovery, assert `get_edge_history` and
+/// AS OF SYSTEM_TIME reads identical to pre-checkpoint (Issue #3387).
+#[test]
+fn test_checkpoint_restore_only_preserves_edge_bitemporal_fidelity() -> Result<()> {
+    use aletheiadb::core::hlc::HybridTimestamp;
+
+    let temp_dir = TempDir::new().unwrap();
+    let wal_dir = temp_dir.path().join("wal");
+    let data_dir = temp_dir.path().join("data");
+
+    let wal_config = ConcurrentWalSystemConfig::new(&wal_dir);
+    let wal = ConcurrentWalSystem::new(wal_config)?;
+
+    let source = NodeId::new(1)?;
+    let target = NodeId::new(2)?;
+    let edge_id = EdgeId::new(1)?;
+    let now = time::now().wallclock();
+    let valid_from = HybridTimestamp::new(now - 3_600_000_000, 0).unwrap();
+    let valid_to = HybridTimestamp::new(now - 1_800_000_000, 0).unwrap();
+
+    for node_id in [source, target] {
+        wal.append(WalOperation::CreateNode {
+            node_id,
+            label: GLOBAL_INTERNER.intern("CkptFidelityEdgeNode").unwrap(),
+            properties: PropertyMap::new(),
+            valid_from,
+            provenance: None,
+        })?;
+    }
+    wal.append(WalOperation::CreateEdge {
+        edge_id,
+        source,
+        target,
+        label: GLOBAL_INTERNER.intern("CKPT_FIDELITY_KNOWS").unwrap(),
+        properties: PropertyMapBuilder::new().insert("weight", 1i64).build(),
+        valid_from,
+        provenance: None,
+    })?;
+    wal.append(WalOperation::UpdateEdge {
+        edge_id,
+        version_id: VersionId::new(600)?,
+        label: GLOBAL_INTERNER.intern("CKPT_FIDELITY_KNOWS").unwrap(),
+        properties: PropertyMapBuilder::new().insert("weight", 2i64).build(),
+        valid_from,
+        provenance: None,
+    })?;
+    wal.append(WalOperation::RetractEdge { edge_id, valid_to })?;
+    wal.flush()?;
+
+    let checkpoint_lsn = LSN(wal.current_lsn().0.saturating_sub(1));
+    let pre_history;
+    let pre_probes: Vec<(HybridTimestamp, aletheiadb::core::property::PropertyMap)>;
+    {
+        let config = UnifiedCheckpointConfig::with_data_dir(&data_dir);
+        let mut manager = CheckpointManager::new(config)?;
+        let (current, historical, _final_lsn) = manager.recover(&wal)?;
+
+        pre_history = historical.get_edge_history(edge_id)?;
+        assert_eq!(
+            pre_history.version_count(),
+            3,
+            "precondition: create + update + retraction edge versions"
+        );
+        assert!(
+            !pre_history.versions[0]
+                .temporal
+                .transaction_time()
+                .is_current(),
+            "precondition: create version tx-time closed by the update"
+        );
+        assert!(
+            !pre_history.versions[1]
+                .temporal
+                .transaction_time()
+                .is_current(),
+            "precondition: update version tx-time closed by the retraction"
+        );
+
+        pre_probes = pre_history
+            .versions
+            .iter()
+            .map(|v| {
+                let tx = v.temporal.transaction_time().start();
+                let edge = historical
+                    .get_edge_at_time(edge_id, valid_from, tx)
+                    .expect("pre-checkpoint AS OF SYSTEM_TIME edge probe must resolve");
+                (tx, edge.properties)
+            })
+            .collect();
+
+        manager.create_checkpoint(checkpoint_lsn, &current, &historical)?;
+    }
+
+    let config = UnifiedCheckpointConfig::with_data_dir(&data_dir);
+    let mut manager = CheckpointManager::new(config)?;
+    let (_recovered_current, recovered_historical, _final_lsn) = manager.recover(&wal)?;
+
+    let post_history = recovered_historical.get_edge_history(edge_id)?;
+    assert_history_identical(&pre_history, &post_history, "edge history");
+
+    for (tx, expected_props) in &pre_probes {
+        let edge = recovered_historical
+            .get_edge_at_time(edge_id, valid_from, *tx)
+            .unwrap_or_else(|e| {
+                panic!(
+                    "AS OF SYSTEM_TIME edge probe at tx {tx:?} must resolve after \
+                     restore-only recovery: {e}"
+                )
+            });
+        assert_eq!(
+            &edge.properties, expected_props,
+            "AS OF SYSTEM_TIME edge probe at tx {tx:?} must return the same \
+             state as before the checkpoint"
+        );
+    }
+
+    // Mid-history probe returns the superseded weight, not the head's.
+    let (tx_create, _) = pre_probes[0];
+    let edge_at_create = recovered_historical.get_edge_at_time(edge_id, valid_from, tx_create)?;
+    assert_eq!(
+        edge_at_create
+            .properties
+            .get("weight")
+            .and_then(|v| v.as_int()),
+        Some(1),
+        "probe between create and update must see the pre-update state"
     );
 
     Ok(())

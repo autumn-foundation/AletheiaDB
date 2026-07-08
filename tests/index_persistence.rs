@@ -2492,6 +2492,10 @@ fn test_version_chain_reconstruction() {
             properties: PersistedPropertyMap { entries: vec![] },
             vector_snapshot_id: None,
             provenance: None,
+            tx_end: None,
+            tx_end_logical: None,
+            prev_version: None,
+            next_version: None,
         },
         // Version 3 (newest) - inserted second
         NodeVersionEntry {
@@ -2512,6 +2516,10 @@ fn test_version_chain_reconstruction() {
             properties: PersistedPropertyMap { entries: vec![] },
             vector_snapshot_id: None,
             provenance: None,
+            tx_end: None,
+            tx_end_logical: None,
+            prev_version: None,
+            next_version: None,
         },
         // Version 1 (oldest) - inserted last
         NodeVersionEntry {
@@ -2528,6 +2536,10 @@ fn test_version_chain_reconstruction() {
             properties: PersistedPropertyMap { entries: vec![] },
             vector_snapshot_id: None,
             provenance: None,
+            tx_end: None,
+            tx_end_logical: None,
+            prev_version: None,
+            next_version: None,
         },
     ];
 

@@ -45,7 +45,7 @@ use crate::core::version::{EdgeVersion, NodeVersion, PropertyDelta, VersionData}
 use super::error::{IndexPersistenceError, Result};
 use super::formats::{
     EdgeVersionEntry, NodeVersionEntry, PersistedProvenance, PersistedVersionType,
-    TemporalIndexData, legacy_v1::TemporalIndexDataV1,
+    TemporalIndexData, legacy_v1::TemporalIndexDataV1, legacy_v2::TemporalIndexDataV2,
 };
 use super::graph::{persist_property_map, restore_property_map};
 use super::{MANIFEST_VERSION, TEMPORAL_MAGIC};
@@ -182,6 +182,20 @@ pub fn convert_node_version(version: &NodeVersion) -> Result<NodeVersionEntry> {
         properties,
         vector_snapshot_id,
         provenance: persist_provenance(version.provenance.as_deref()),
+        // Issue #3387: round-trip the tx-time closure and chain links so a
+        // restore-only recovery serves correct AS OF SYSTEM_TIME reads.
+        tx_end: if tx_time.is_current() {
+            None
+        } else {
+            Some(tx_time.end().wallclock())
+        },
+        tx_end_logical: if tx_time.is_current() {
+            None
+        } else {
+            Some(tx_time.end().logical())
+        },
+        prev_version: version.prev_version.map(|v| v.as_u64()),
+        next_version: version.next_version.map(|v| v.as_u64()),
     })
 }
 
@@ -270,6 +284,20 @@ pub fn convert_edge_version(version: &EdgeVersion) -> Result<EdgeVersionEntry> {
         version_type,
         properties,
         provenance: persist_provenance(version.provenance.as_deref()),
+        // Issue #3387: round-trip the tx-time closure and chain links so a
+        // restore-only recovery serves correct AS OF SYSTEM_TIME reads.
+        tx_end: if tx_time.is_current() {
+            None
+        } else {
+            Some(tx_time.end().wallclock())
+        },
+        tx_end_logical: if tx_time.is_current() {
+            None
+        } else {
+            Some(tx_time.end().logical())
+        },
+        prev_version: version.prev_version.map(|v| v.as_u64()),
+        next_version: version.next_version.map(|v| v.as_u64()),
     })
 }
 
@@ -313,10 +341,22 @@ pub fn restore_node_version(entry: &NodeVersionEntry) -> Result<NodeVersion> {
         ))
     })?;
 
-    let tx_time = TimeRange::from(HybridTimestamp::new_unchecked(
-        entry.tx_time,
-        entry.tx_time_logical,
-    ));
+    let tx_start = HybridTimestamp::new_unchecked(entry.tx_time, entry.tx_time_logical);
+    // Issue #3387: restore the persisted transaction-time closure
+    // (None = still current knowledge, open-ended interval).
+    let tx_time = match entry.tx_end {
+        Some(end) => TimeRange::new(
+            tx_start,
+            HybridTimestamp::new_unchecked(end, entry.tx_end_logical.unwrap_or(0)),
+        )
+        .map_err(|e| {
+            IndexPersistenceError::Serialization(format!(
+                "Invalid transaction time range [{}, {}]: {}",
+                entry.tx_time, end, e
+            ))
+        })?,
+        None => TimeRange::from(tx_start),
+    };
     let temporal = BiTemporalInterval::new(valid_time, tx_time);
 
     // Use the preserved version ID from the persisted entry
@@ -365,10 +405,24 @@ pub fn restore_node_version(entry: &NodeVersionEntry) -> Result<NodeVersion> {
         temporal,
         label,
         data,
-        next_version: None,
-        prev_version: None,
+        // Issue #3387: restore the persisted chain links (legacy formats
+        // carry None here; `rebuild_version_chains` re-derives them).
+        next_version: restore_version_link(entry.next_version, "next_version")?,
+        prev_version: restore_version_link(entry.prev_version, "prev_version")?,
         provenance: restore_provenance(entry.provenance.clone())?,
     })
+}
+
+/// Restore an optional persisted version-chain link, validating the raw ID.
+fn restore_version_link(
+    raw: Option<u64>,
+    field: &str,
+) -> Result<Option<crate::core::id::VersionId>> {
+    raw.map(crate::core::id::VersionId::new)
+        .transpose()
+        .map_err(|e| {
+            IndexPersistenceError::Serialization(format!("Invalid {} ID {:?}: {}", field, raw, e))
+        })
 }
 
 /// Restore EdgeVersionEntry back to EdgeVersion.
@@ -423,10 +477,22 @@ pub fn restore_edge_version(entry: &EdgeVersionEntry) -> Result<EdgeVersion> {
         ))
     })?;
 
-    let tx_time = TimeRange::from(HybridTimestamp::new_unchecked(
-        entry.tx_time,
-        entry.tx_time_logical,
-    ));
+    let tx_start = HybridTimestamp::new_unchecked(entry.tx_time, entry.tx_time_logical);
+    // Issue #3387: restore the persisted transaction-time closure
+    // (None = still current knowledge, open-ended interval).
+    let tx_time = match entry.tx_end {
+        Some(end) => TimeRange::new(
+            tx_start,
+            HybridTimestamp::new_unchecked(end, entry.tx_end_logical.unwrap_or(0)),
+        )
+        .map_err(|e| {
+            IndexPersistenceError::Serialization(format!(
+                "Invalid transaction time range [{}, {}]: {}",
+                entry.tx_time, end, e
+            ))
+        })?,
+        None => TimeRange::from(tx_start),
+    };
     let temporal = BiTemporalInterval::new(valid_time, tx_time);
 
     // Use the preserved version ID from the persisted entry
@@ -473,8 +539,10 @@ pub fn restore_edge_version(entry: &EdgeVersionEntry) -> Result<EdgeVersion> {
         source,
         target,
         data,
-        next_version: None,
-        prev_version: None,
+        // Issue #3387: restore the persisted chain links (legacy formats
+        // carry None here; `rebuild_version_chains` re-derives them).
+        next_version: restore_version_link(entry.next_version, "next_version")?,
+        prev_version: restore_version_link(entry.prev_version, "prev_version")?,
         provenance: restore_provenance(entry.provenance.clone())?,
     })
 }
@@ -574,21 +642,22 @@ pub fn load_temporal_index(path: &Path) -> Result<TemporalIndexData> {
     decode_temporal_blob(path)
 }
 
-/// Decode temporal index bytes, transparently upgrading pre-provenance
-/// (Issue #3224, `MANIFEST_VERSION == 1`) files.
+/// Decode temporal index bytes, transparently upgrading pre-fidelity
+/// (Issue #3387, `version == 2`) and pre-provenance (Issue #3224,
+/// `version == 1`) files.
 ///
-/// `bitcode` is positional and non-self-describing, so a `version == 1` file
-/// cannot decode directly as the current [`TemporalIndexData`] (whose
-/// `NodeVersionEntry`/`EdgeVersionEntry` gained a `provenance` field). We
-/// first try decoding as the current shape; if that fails, or produces an
-/// implausible magic/version (a decode "succeeding" on bytes it wasn't meant
-/// for), we fall back to the frozen `legacy_v1` shape and convert
-/// (`provenance: None`) -- this is the same magic+version cross-check used
-/// throughout this module, just applied across two candidate shapes instead
-/// of one.
+/// `bitcode` is positional and non-self-describing, so an older file cannot
+/// decode directly as the current [`TemporalIndexData`] (whose
+/// `NodeVersionEntry`/`EdgeVersionEntry` gained a `provenance` field at v2
+/// and tx-end/chain-link fields at v3). We first try decoding as the current
+/// shape; if that fails, or produces an implausible magic/version (a decode
+/// "succeeding" on bytes it wasn't meant for), we fall back to the frozen
+/// `legacy_v2` shape (new fields `None`), then `legacy_v1` (additionally
+/// `provenance: None`) -- the same magic+version cross-check used throughout
+/// this module, just applied across the candidate shapes newest-first.
 ///
 /// The file is read from disk and CRC32-verified exactly once via
-/// [`super::common::read_and_verify_crc`]; both candidate decodes are
+/// [`super::common::read_and_verify_crc`]; all candidate decodes are
 /// attempted against that single in-memory buffer, avoiding a second disk
 /// read and checksum pass on the (common, cheap) legacy-fallback path.
 fn decode_temporal_blob(path: &Path) -> Result<TemporalIndexData> {
@@ -603,6 +672,14 @@ fn decode_temporal_blob(path: &Path) -> Result<TemporalIndexData> {
         && data.version == MANIFEST_VERSION
     {
         return Ok(data);
+    }
+
+    // Pre-fidelity (Issue #3387) layout: no tx-end / chain-link fields.
+    if let Ok(v2) = bitcode::decode::<TemporalIndexDataV2>(&bytes)
+        && v2.magic == TEMPORAL_MAGIC
+        && v2.version == 2
+    {
+        return Ok(v2.into());
     }
 
     let legacy: TemporalIndexDataV1 =
@@ -676,6 +753,10 @@ mod tests {
             properties: PersistedPropertyMap { entries: vec![] },
             vector_snapshot_id: Some(42),
             provenance: None,
+            tx_end: None,
+            tx_end_logical: None,
+            prev_version: None,
+            next_version: None,
         });
         data.node_anchors.push(NodeAnchorEntry {
             node_id: 1,
@@ -719,6 +800,10 @@ mod tests {
                 note: None,
                 correlation_id: Some("batch-42".to_string()),
             }),
+            tx_end: None,
+            tx_end_logical: None,
+            prev_version: None,
+            next_version: None,
         });
 
         save_temporal_index(&data, &path).unwrap();
@@ -949,6 +1034,10 @@ mod tests {
             properties,
             vector_snapshot_id: Some(42),
             provenance: None,
+            tx_end: None,
+            tx_end_logical: None,
+            prev_version: None,
+            next_version: None,
         };
 
         let version = restore_node_version(&entry).unwrap();
@@ -1006,6 +1095,10 @@ mod tests {
             properties,
             vector_snapshot_id: None,
             provenance: None,
+            tx_end: None,
+            tx_end_logical: None,
+            prev_version: None,
+            next_version: None,
         };
 
         let version = restore_node_version(&entry).unwrap();
@@ -1050,6 +1143,10 @@ mod tests {
             version_type: PersistedVersionType::Anchor,
             properties,
             provenance: None,
+            tx_end: None,
+            tx_end_logical: None,
+            prev_version: None,
+            next_version: None,
         };
 
         let version = restore_edge_version(&entry).unwrap();
@@ -1107,6 +1204,10 @@ mod tests {
             properties,
             vector_snapshot_id: Some(42),
             provenance: None,
+            tx_end: None,
+            tx_end_logical: None,
+            prev_version: None,
+            next_version: None,
         };
 
         // Create temporal data (labels are now stored in entries)
@@ -1471,5 +1572,205 @@ mod tests {
             logical,
             "Logical counter should be preserved"
         );
+    }
+
+    /// Issue #3387: tx-time closures and version chain links must round-trip
+    /// through convert -> save -> load -> restore for node versions.
+    #[test]
+    fn test_node_tx_closure_and_chain_links_round_trip() {
+        use crate::core::GLOBAL_INTERNER;
+        use crate::core::hlc::HybridTimestamp;
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("fidelity_node.idx");
+
+        let label = GLOBAL_INTERNER.intern("Person").unwrap();
+        let tx_start = HybridTimestamp::new(1000, 3).unwrap();
+        let tx_end = HybridTimestamp::new(2000, 7).unwrap();
+        let temporal = BiTemporalInterval::new(
+            TimeRange::new(500.into(), TIMESTAMP_MAX).unwrap(),
+            TimeRange::new(tx_start, tx_end).unwrap(),
+        );
+        let version = NodeVersion {
+            id: VersionId::new(10).unwrap(),
+            node_id: NodeId::new(1).unwrap(),
+            commit_timestamp: tx_start,
+            temporal,
+            label,
+            data: VersionData::Anchor {
+                properties: PropertyMapBuilder::new().insert("name", "Alice").build(),
+                vector_snapshot_id: None,
+            },
+            next_version: Some(VersionId::new(11).unwrap()),
+            prev_version: Some(VersionId::new(9).unwrap()),
+            provenance: None,
+        };
+
+        let entry = convert_node_version(&version).unwrap();
+        assert_eq!(entry.tx_end, Some(2000));
+        assert_eq!(entry.tx_end_logical, Some(7));
+        assert_eq!(entry.prev_version, Some(9));
+        assert_eq!(entry.next_version, Some(11));
+
+        let mut data = new_temporal_index_data();
+        data.node_versions.push(entry);
+        save_temporal_index(&data, &path).unwrap();
+        let loaded = load_temporal_index(&path).unwrap();
+
+        let restored = restore_node_version(&loaded.node_versions[0]).unwrap();
+        let restored_tx = restored.temporal.transaction_time();
+        assert!(!restored_tx.is_current(), "tx-time closure must round-trip");
+        assert_eq!(restored_tx.start(), tx_start);
+        assert_eq!(restored_tx.end(), tx_end, "closed tx end (incl. logical)");
+        assert_eq!(restored.prev_version, Some(VersionId::new(9).unwrap()));
+        assert_eq!(restored.next_version, Some(VersionId::new(11).unwrap()));
+    }
+
+    /// Issue #3387: same round-trip contract for edge versions.
+    #[test]
+    fn test_edge_tx_closure_and_chain_links_round_trip() {
+        use crate::core::GLOBAL_INTERNER;
+        use crate::core::hlc::HybridTimestamp;
+
+        let label = GLOBAL_INTERNER.intern("KNOWS").unwrap();
+        let tx_start = HybridTimestamp::new(1000, 0).unwrap();
+        let tx_end = HybridTimestamp::new(1500, 2).unwrap();
+        let temporal = BiTemporalInterval::new(
+            TimeRange::new(500.into(), TIMESTAMP_MAX).unwrap(),
+            TimeRange::new(tx_start, tx_end).unwrap(),
+        );
+        let version = EdgeVersion {
+            id: VersionId::new(20).unwrap(),
+            edge_id: EdgeId::new(5).unwrap(),
+            source: NodeId::new(1).unwrap(),
+            target: NodeId::new(2).unwrap(),
+            commit_timestamp: tx_start,
+            temporal,
+            label,
+            data: VersionData::Anchor {
+                properties: PropertyMapBuilder::new().insert("weight", 1i64).build(),
+                vector_snapshot_id: None,
+            },
+            next_version: Some(VersionId::new(21).unwrap()),
+            prev_version: None,
+            provenance: None,
+        };
+
+        let entry = convert_edge_version(&version).unwrap();
+        assert_eq!(entry.tx_end, Some(1500));
+        assert_eq!(entry.tx_end_logical, Some(2));
+        assert_eq!(entry.prev_version, None);
+        assert_eq!(entry.next_version, Some(21));
+
+        let restored = restore_edge_version(&entry).unwrap();
+        let restored_tx = restored.temporal.transaction_time();
+        assert!(!restored_tx.is_current(), "tx-time closure must round-trip");
+        assert_eq!(restored_tx.end(), tx_end);
+        assert_eq!(restored.prev_version, None);
+        assert_eq!(restored.next_version, Some(VersionId::new(21).unwrap()));
+    }
+
+    /// Issue #3387: an open (current) tx interval persists as None and
+    /// restores open -- the closure fields never fabricate an end.
+    #[test]
+    fn test_open_tx_interval_round_trips_open() {
+        use crate::core::GLOBAL_INTERNER;
+
+        let label = GLOBAL_INTERNER.intern("Person").unwrap();
+        let temporal = BiTemporalInterval::new(
+            TimeRange::new(500.into(), TIMESTAMP_MAX).unwrap(),
+            TimeRange::new(1000.into(), TIMESTAMP_MAX).unwrap(),
+        );
+        let version = NodeVersion {
+            id: VersionId::new(10).unwrap(),
+            node_id: NodeId::new(1).unwrap(),
+            commit_timestamp: temporal.transaction_time().start(),
+            temporal,
+            label,
+            data: VersionData::Anchor {
+                properties: PropertyMapBuilder::new().build(),
+                vector_snapshot_id: None,
+            },
+            next_version: None,
+            prev_version: None,
+            provenance: None,
+        };
+
+        let entry = convert_node_version(&version).unwrap();
+        assert_eq!(entry.tx_end, None);
+        assert_eq!(entry.tx_end_logical, None);
+
+        let restored = restore_node_version(&entry).unwrap();
+        assert!(restored.temporal.transaction_time().is_current());
+        assert_eq!(restored.prev_version, None);
+        assert_eq!(restored.next_version, None);
+    }
+
+    /// Issue #3387: a `version == 2` file (pre-fidelity layout, written by a
+    /// pre-#3387 binary) still loads, upgrading in memory with the new
+    /// fields `None` and provenance preserved.
+    #[test]
+    fn test_load_v2_temporal_index_file_defaults_fidelity_fields_none() {
+        use crate::core::GLOBAL_INTERNER;
+        use crate::storage::index_persistence::formats::legacy_v2::{
+            NodeVersionEntryV2, TemporalIndexDataV2,
+        };
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("legacy_v2_temporal.idx");
+
+        let label = GLOBAL_INTERNER.intern("Person").unwrap();
+        let legacy = TemporalIndexDataV2 {
+            magic: TEMPORAL_MAGIC,
+            version: 2,
+            node_versions: vec![NodeVersionEntryV2 {
+                version_id: 100,
+                node_id: 1,
+                label_idx: label.as_u32(),
+                valid_from: 1000,
+                valid_from_logical: 0,
+                valid_to: None,
+                valid_to_logical: None,
+                tx_time: 1000,
+                tx_time_logical: 0,
+                version_type: PersistedVersionType::Anchor,
+                properties: PersistedPropertyMap { entries: vec![] },
+                vector_snapshot_id: Some(7),
+                provenance: Some(PersistedProvenance {
+                    source: Some("hr-system".to_string()),
+                    confidence: Some(0.95),
+                    note: None,
+                    correlation_id: None,
+                }),
+            }],
+            node_anchors: vec![],
+            edge_versions: vec![],
+            edge_anchors: vec![],
+        };
+
+        // Write bytes exactly as a pre-#3387 binary would have: no tx-end /
+        // chain-link fields exist in this shape at all.
+        crate::storage::index_persistence::common::save_encoded_with_crc(&legacy, &path).unwrap();
+
+        let loaded = load_temporal_index(&path).unwrap();
+
+        assert_eq!(loaded.node_versions.len(), 1);
+        let entry = &loaded.node_versions[0];
+        assert_eq!(entry.vector_snapshot_id, Some(7));
+        assert!(
+            entry.provenance.is_some(),
+            "v2 provenance must be preserved"
+        );
+        assert_eq!(entry.tx_end, None);
+        assert_eq!(entry.tx_end_logical, None);
+        assert_eq!(entry.prev_version, None);
+        assert_eq!(entry.next_version, None);
+
+        // Restored version: open tx interval, no links (the historical
+        // storage rebuild heuristic then reconstructs chains as before).
+        let version = restore_node_version(entry).unwrap();
+        assert!(version.temporal.transaction_time().is_current());
+        assert!(version.prev_version.is_none());
+        assert!(version.next_version.is_none());
     }
 }

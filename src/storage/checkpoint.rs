@@ -710,167 +710,49 @@ impl CheckpointManager {
         &self,
         snapshot: &crate::storage::snapshot::HistoricalStorageSnapshot,
     ) -> Result<TemporalIndexData> {
-        use crate::core::property::PropertyMapBuilder;
-        use crate::storage::index_persistence::formats::{
-            EdgeAnchorEntry, EdgeVersionEntry, NodeAnchorEntry, NodeVersionEntry,
-            PersistedVersionType,
+        use crate::storage::index_persistence::formats::{EdgeAnchorEntry, NodeAnchorEntry};
+        use crate::storage::index_persistence::temporal::{
+            convert_edge_version, convert_node_version,
         };
-        use crate::storage::index_persistence::temporal::persist_provenance;
 
         let mut node_versions = Vec::with_capacity(snapshot.node_version_count());
         let mut node_anchors = Vec::with_capacity(snapshot.node_version_count());
         let mut edge_versions = Vec::with_capacity(snapshot.edge_version_count());
         let mut edge_anchors = Vec::with_capacity(snapshot.edge_version_count());
 
-        // Extract node versions from snapshot (isolated from concurrent writes)
+        // Extract node versions from snapshot (isolated from concurrent
+        // writes). Entry conversion is delegated to the canonical
+        // `convert_node_version` so the checkpoint path persists exactly the
+        // same shape as the index-persistence save path, including the
+        // Issue #3387 tx-time closures and version chain links.
         for version_arc in snapshot.iter_node_versions() {
             let version = &*version_arc;
-            let version_id = version.id;
-            let (version_type, properties, vector_snapshot_id) = match &version.data {
-                VersionData::Anchor {
-                    properties,
-                    vector_snapshot_id,
-                } => {
-                    // Also add to anchors list
-                    node_anchors.push(NodeAnchorEntry {
-                        node_id: version.node_id.as_u64(),
-                        anchor_tx_time: version.temporal.transaction_time().start().wallclock(),
-                        full_state: persist_property_map(properties).map_err(persistence_err)?,
-                        vector_snapshot_id: vector_snapshot_id.map(|id| id as u64),
-                    });
-                    (
-                        PersistedVersionType::Anchor,
-                        persist_property_map(properties).map_err(persistence_err)?,
-                        vector_snapshot_id.map(|id| id as u64),
-                    )
-                }
-                VersionData::Delta { delta } => {
-                    // Convert delta to PropertyMap for persistence
-                    let mut builder = PropertyMapBuilder::new();
-                    for (key, value) in &delta.changed {
-                        builder = builder.insert_by_key(*key, value.clone());
-                    }
-                    let changed_props = builder.build();
-                    let removed_keys: Vec<u32> = delta
-                        .removed
-                        .iter()
-                        .map(|k: &crate::core::interning::InternedString| k.as_u32())
-                        .collect();
-
-                    (
-                        PersistedVersionType::Delta {
-                            base_anchor_tx: version.temporal.transaction_time().start().wallclock(),
-                            base_anchor_tx_logical: version
-                                .temporal
-                                .transaction_time()
-                                .start()
-                                .logical(),
-                            removed_keys,
-                        },
-                        persist_property_map(&changed_props).map_err(persistence_err)?,
-                        None,
-                    )
-                }
-            };
-
-            let valid_time = version.temporal.valid_time();
-            let entry = NodeVersionEntry {
-                version_id: version_id.as_u64(),
-                node_id: version.node_id.as_u64(),
-                label_idx: version.label.as_u32(),
-                valid_from: valid_time.start().wallclock(),
-                valid_from_logical: valid_time.start().logical(),
-                valid_to: if valid_time.is_current() {
-                    None
-                } else {
-                    Some(valid_time.end().wallclock())
-                },
-                valid_to_logical: if valid_time.is_current() {
-                    None
-                } else {
-                    Some(valid_time.end().logical())
-                },
-                tx_time: version.temporal.transaction_time().start().wallclock(),
-                tx_time_logical: version.temporal.transaction_time().start().logical(),
-                version_type,
+            if let VersionData::Anchor {
                 properties,
                 vector_snapshot_id,
-                provenance: persist_provenance(version.provenance.as_deref()),
-            };
-            node_versions.push(entry);
+            } = &version.data
+            {
+                node_anchors.push(NodeAnchorEntry {
+                    node_id: version.node_id.as_u64(),
+                    anchor_tx_time: version.temporal.transaction_time().start().wallclock(),
+                    full_state: persist_property_map(properties).map_err(persistence_err)?,
+                    vector_snapshot_id: vector_snapshot_id.map(|id| id as u64),
+                });
+            }
+            node_versions.push(convert_node_version(version).map_err(persistence_err)?);
         }
 
         // Extract edge versions from snapshot (isolated from concurrent writes)
         for version_arc in snapshot.iter_edge_versions() {
             let version = &*version_arc;
-            let version_id = version.id;
-            let (version_type, properties) = match &version.data {
-                VersionData::Anchor { properties, .. } => {
-                    // Also add to anchors list
-                    edge_anchors.push(EdgeAnchorEntry {
-                        edge_id: version.edge_id.as_u64(),
-                        anchor_tx_time: version.temporal.transaction_time().start().wallclock(),
-                        full_state: persist_property_map(properties).map_err(persistence_err)?,
-                    });
-                    (
-                        PersistedVersionType::Anchor,
-                        persist_property_map(properties).map_err(persistence_err)?,
-                    )
-                }
-                VersionData::Delta { delta } => {
-                    // Convert delta to PropertyMap for persistence
-                    let mut builder = PropertyMapBuilder::new();
-                    for (key, value) in &delta.changed {
-                        builder = builder.insert_by_key(*key, value.clone());
-                    }
-                    let changed_props = builder.build();
-                    let removed_keys: Vec<u32> = delta
-                        .removed
-                        .iter()
-                        .map(|k: &crate::core::interning::InternedString| k.as_u32())
-                        .collect();
-
-                    (
-                        PersistedVersionType::Delta {
-                            base_anchor_tx: version.temporal.transaction_time().start().wallclock(),
-                            base_anchor_tx_logical: version
-                                .temporal
-                                .transaction_time()
-                                .start()
-                                .logical(),
-                            removed_keys,
-                        },
-                        persist_property_map(&changed_props).map_err(persistence_err)?,
-                    )
-                }
-            };
-
-            let valid_time = version.temporal.valid_time();
-            let entry = EdgeVersionEntry {
-                version_id: version_id.as_u64(),
-                edge_id: version.edge_id.as_u64(),
-                source_id: version.source.as_u64(),
-                target_id: version.target.as_u64(),
-                label_idx: version.label.as_u32(),
-                valid_from: valid_time.start().wallclock(),
-                valid_from_logical: valid_time.start().logical(),
-                valid_to: if valid_time.is_current() {
-                    None
-                } else {
-                    Some(valid_time.end().wallclock())
-                },
-                valid_to_logical: if valid_time.is_current() {
-                    None
-                } else {
-                    Some(valid_time.end().logical())
-                },
-                tx_time: version.temporal.transaction_time().start().wallclock(),
-                tx_time_logical: version.temporal.transaction_time().start().logical(),
-                version_type,
-                properties,
-                provenance: persist_provenance(version.provenance.as_deref()),
-            };
-            edge_versions.push(entry);
+            if let VersionData::Anchor { properties, .. } = &version.data {
+                edge_anchors.push(EdgeAnchorEntry {
+                    edge_id: version.edge_id.as_u64(),
+                    anchor_tx_time: version.temporal.transaction_time().start().wallclock(),
+                    full_state: persist_property_map(properties).map_err(persistence_err)?,
+                });
+            }
+            edge_versions.push(convert_edge_version(version).map_err(persistence_err)?);
         }
 
         Ok(TemporalIndexData {
@@ -960,8 +842,6 @@ impl CheckpointManager {
         &self,
         manifest: &IndexManifest,
     ) -> Result<(HistoricalStorage, u64)> {
-        use crate::core::version::PropertyDelta;
-
         let mut historical = HistoricalStorage::new();
         let mut max_version_id: u64 = 0;
 
@@ -974,160 +854,24 @@ impl CheckpointManager {
                 crate::storage::index_persistence::temporal::load_temporal_index(&temporal_path)
                     .map_err(persistence_err)?;
 
-            // Reserve capacity for efficient bulk insertion
-            historical.reserve_restoration_capacity(
-                temporal_data.node_versions.len(),
-                temporal_data.edge_versions.len(),
-            );
+            max_version_id = temporal_data
+                .node_versions
+                .iter()
+                .map(|e| e.version_id)
+                .chain(temporal_data.edge_versions.iter().map(|e| e.version_id))
+                .max()
+                .unwrap_or(0);
 
-            // Restore node versions
-            for entry in &temporal_data.node_versions {
-                max_version_id = max_version_id.max(entry.version_id);
-
-                let version_id = VersionId::new(entry.version_id)?;
-                let node_id = NodeId::new(entry.node_id)?;
-
-                use crate::core::hlc::HybridTimestamp;
-                use crate::core::temporal::{TIMESTAMP_MAX, TimeRange};
-
-                let valid_start =
-                    HybridTimestamp::new_unchecked(entry.valid_from, entry.valid_from_logical);
-                let valid_end = entry
-                    .valid_to
-                    .map(|t| HybridTimestamp::new_unchecked(t, entry.valid_to_logical.unwrap_or(0)))
-                    .unwrap_or(TIMESTAMP_MAX);
-                let valid_time = TimeRange::new(valid_start, valid_end).map_err(|e| {
-                    StorageError::CheckpointError {
-                        reason: format!("Invalid valid time range: {}", e),
-                    }
-                })?;
-
-                let tx_start = HybridTimestamp::new_unchecked(entry.tx_time, entry.tx_time_logical);
-                let tx_time = TimeRange::from(tx_start);
-
-                let temporal = crate::core::temporal::BiTemporalInterval::new(valid_time, tx_time);
-
-                let properties =
-                    restore_property_map(&entry.properties).map_err(persistence_err)?;
-                let label = InternedString::from_raw(entry.label_idx);
-
-                let data = match &entry.version_type {
-                    crate::storage::index_persistence::formats::PersistedVersionType::Anchor => {
-                        let vector_snapshot_id = entry.vector_snapshot_id.map(|id| id as usize);
-                        VersionData::Anchor {
-                            properties,
-                            vector_snapshot_id,
-                        }
-                    }
-                    crate::storage::index_persistence::formats::PersistedVersionType::Delta {
-                        removed_keys,
-                        ..
-                    } => {
-                        // Convert properties to PropertyDelta
-                        let mut delta = PropertyDelta::new();
-                        for (key, value) in properties.iter() {
-                            delta.changed.insert(*key, value.clone());
-                        }
-                        for key_idx in removed_keys {
-                            delta.removed.insert(InternedString::from_raw(*key_idx));
-                        }
-                        VersionData::Delta { delta }
-                    }
-                };
-
-                let version = crate::core::version::NodeVersion {
-                    id: version_id,
-                    node_id,
-                    commit_timestamp: temporal.transaction_time().start(),
-                    temporal,
-                    label,
-                    data,
-                    next_version: None,
-                    prev_version: None,
-                    provenance: crate::storage::index_persistence::temporal::restore_provenance(
-                        entry.provenance.clone(),
-                    )
-                    .map_err(persistence_err)?,
-                };
-
-                historical.insert_restored_node_version(version)?;
-            }
-
-            // Restore edge versions
-            for entry in &temporal_data.edge_versions {
-                max_version_id = max_version_id.max(entry.version_id);
-
-                let version_id = VersionId::new(entry.version_id)?;
-                let edge_id = EdgeId::new(entry.edge_id)?;
-                let source = NodeId::new(entry.source_id)?;
-                let target = NodeId::new(entry.target_id)?;
-
-                use crate::core::hlc::HybridTimestamp;
-                use crate::core::temporal::{TIMESTAMP_MAX, TimeRange};
-
-                let valid_start =
-                    HybridTimestamp::new_unchecked(entry.valid_from, entry.valid_from_logical);
-                let valid_end = entry
-                    .valid_to
-                    .map(|t| HybridTimestamp::new_unchecked(t, entry.valid_to_logical.unwrap_or(0)))
-                    .unwrap_or(TIMESTAMP_MAX);
-                let valid_time = TimeRange::new(valid_start, valid_end).map_err(|e| {
-                    StorageError::CheckpointError {
-                        reason: format!("Invalid valid time range: {}", e),
-                    }
-                })?;
-
-                let tx_start = HybridTimestamp::new_unchecked(entry.tx_time, entry.tx_time_logical);
-                let tx_time = TimeRange::from(tx_start);
-
-                let temporal = crate::core::temporal::BiTemporalInterval::new(valid_time, tx_time);
-
-                let properties =
-                    restore_property_map(&entry.properties).map_err(persistence_err)?;
-                let label = InternedString::from_raw(entry.label_idx);
-
-                let data = match &entry.version_type {
-                    crate::storage::index_persistence::formats::PersistedVersionType::Anchor => {
-                        VersionData::Anchor {
-                            properties,
-                            vector_snapshot_id: None,
-                        }
-                    }
-                    crate::storage::index_persistence::formats::PersistedVersionType::Delta {
-                        removed_keys,
-                        ..
-                    } => {
-                        // Convert properties to PropertyDelta
-                        let mut delta = PropertyDelta::new();
-                        for (key, value) in properties.iter() {
-                            delta.changed.insert(*key, value.clone());
-                        }
-                        for key_idx in removed_keys {
-                            delta.removed.insert(InternedString::from_raw(*key_idx));
-                        }
-                        VersionData::Delta { delta }
-                    }
-                };
-
-                let version = crate::core::version::EdgeVersion {
-                    id: version_id,
-                    edge_id,
-                    source,
-                    target,
-                    commit_timestamp: temporal.transaction_time().start(),
-                    temporal,
-                    label,
-                    data,
-                    next_version: None,
-                    prev_version: None,
-                    provenance: crate::storage::index_persistence::temporal::restore_provenance(
-                        entry.provenance.clone(),
-                    )
-                    .map_err(persistence_err)?,
-                };
-
-                historical.insert_restored_edge_version(version)?;
-            }
+            // Restore via the canonical index-persistence path (Issue #3387):
+            // it restores the persisted tx-time closures and version chain
+            // links and finalizes version heads via `rebuild_version_chains`,
+            // so a restore-only recovery (no WAL replay) serves the same full
+            // bi-temporal reads as before the checkpoint.
+            crate::storage::index_persistence::temporal::restore_into_historical_storage(
+                &temporal_data,
+                &mut historical,
+            )
+            .map_err(persistence_err)?;
         }
 
         Ok((historical, max_version_id))
