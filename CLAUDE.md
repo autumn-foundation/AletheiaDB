@@ -487,6 +487,27 @@ current process lifetime plus hot-tier history restored at startup —
 versions cold-migrated before the last restart are not reflected. See
 [docs/guides/mcp-query-tool.md](docs/guides/mcp-query-tool.md#discovering-the-queryable-temporal-extent-temporal_extent).
 
+**Authentication & RBAC (Issue #3350)**: both server surfaces (MCP and
+HTTP) require an API key by default and refuse to start with zero
+credentials; anonymous access is an explicit opt-in
+(`ALETHEIADB_AUTH_MODE=anonymous`) with a prominent warning. Four roles
+(admin/writer/reader/metrics) gate every tool/route via a classification
+kept in lockstep with [docs/guides/access-control-matrix.md](docs/guides/access-control-matrix.md)
+by CI conformance tests. Keys are stored as SHA-256 hashes
+(`{data_dir}/auth/keys.json`, 0600), verified constant-time and re-verified
+per call (revocation is immediate); auth failures are a uniform
+`UNAUTHENTICATED` (never distinguishing missing/unknown/revoked), role
+denials are `PERMISSION_DENIED` with `details.required_class` /
+`details.principal_role` — both additive to the #3234 enum, both
+`retriable: false`. Authenticated writes stamp the principal's name into
+version provenance (`provenance.principal`, composing with the
+caller-supplied `source`); anonymous writes record no principal. MCP
+sessions authenticate via `ALETHEIADB_MCP_API_KEY`; key lifecycle is served
+by the HTTP `/admin/keys*` endpoints. Programmatic
+`AletheiaMcpServer::new()` stays anonymous (embedded API); use
+`with_auth(db, McpAuthConfig)` to serve. See
+[docs/guides/security-quickstart.md](docs/guides/security-quickstart.md).
+
 **Programmatic Usage:**
 ```rust
 use aletheiadb::mcp::AletheiaMcpServer;
@@ -977,6 +998,8 @@ unless `detach: true` / `retract_node_detach` co-retracts the connected edges.
 - **[docs/guides/tiered-storage-guide.md](docs/guides/tiered-storage-guide.md)** - Tiered storage configuration and usage
 - **[docs/guides/sharding-guide.md](docs/guides/sharding-guide.md)** - Graph sharding and distributed deployment
 - **[docs/guides/query-pipeline-guide.md](docs/guides/query-pipeline-guide.md)** - Query execution pipeline
+- **[docs/guides/security-quickstart.md](docs/guides/security-quickstart.md)** - Authentication, RBAC roles, API-key lifecycle
+- **[docs/guides/access-control-matrix.md](docs/guides/access-control-matrix.md)** - Canonical role/operation authorization matrix
 
 ### Architecture Decision Records (ADRs)
 See `docs/adr/` for all architectural decisions.

@@ -11,8 +11,10 @@ classification is enforced by the exhaustive match in
 `src/http/handlers.rs::query_access_class` plus the route-inventory
 conformance test in the same file.
 
-A full security quickstart (key lifecycle, bootstrap flow, deployment
-guidance) is Phase 3; this document is the matrix it will be built around.
+The full security quickstart (key lifecycle, bootstrap flow, deployment
+guidance) lives in
+[docs/guides/security-quickstart.md](security-quickstart.md); this document
+is the matrix it is built around.
 
 ## Roles × access classes
 

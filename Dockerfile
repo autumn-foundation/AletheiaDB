@@ -55,10 +55,20 @@ ENV ALETHEIADB_HOST=0.0.0.0 \
     ALETHEIADB_PORT=1963 \
     ALETHEIADB_DATA_DIR=/var/lib/aletheiadb
 
+# Authentication is REQUIRED by default (Issue #3350): the server refuses to
+# start with zero credentials. Supply ALETHEIADB_BOOTSTRAP_ADMIN_KEY at run
+# time (docker run -e / compose), then mint role-scoped keys over
+# POST /admin/keys — see docs/guides/security-quickstart.md. Anonymous mode
+# is an explicit opt-in (ALETHEIADB_AUTH_MODE=anonymous) that grants every
+# caller full access; do not use it outside isolated local development.
+
 EXPOSE 1963
 VOLUME ["/var/lib/aletheiadb"]
 
+# /status is metrics-class: in required-auth mode the probe needs a
+# credential (any role). The x-api-key header is ignored in anonymous mode,
+# so this works in both.
 HEALTHCHECK --interval=10s --timeout=3s --start-period=5s --retries=3 \
-    CMD curl --fail --silent --show-error http://127.0.0.1:${ALETHEIADB_PORT}/status || exit 1
+    CMD curl --fail --silent --show-error --header "x-api-key: ${ALETHEIADB_BOOTSTRAP_ADMIN_KEY}" http://127.0.0.1:${ALETHEIADB_PORT}/status || exit 1
 
 CMD ["aletheia-server"]
