@@ -493,6 +493,164 @@ fn validate_mcp_auth_startup_accepts_required_with_a_key_and_anonymous() {
 }
 
 // ============================================================================
+// 5. Provenance principal stamping (AC4, Issue #3350 Phase 3)
+// ============================================================================
+
+/// AC4: a write through an authenticated MCP session stamps the verified
+/// principal's name into that version's provenance, COMPOSING with the
+/// caller-supplied `source`/`confidence` (never replacing them), and the
+/// stamp is answerable from history (visible on read responses and history
+/// entries, not just an in-memory side effect).
+#[test]
+fn authenticated_write_stamps_principal_composing_with_source() {
+    let (server, _store, _id) = server_with_role(Role::Writer);
+
+    let (created, is_error) = dispatch(
+        &server,
+        "create_node",
+        json!({
+            "label": "Person",
+            "properties": {"name": "Alice"},
+            "provenance": {"source": "hr-system", "confidence": 0.9}
+        }),
+    );
+    assert!(!is_error, "writer create_node must succeed: {created}");
+    let node_id = created["id"].as_u64().expect("created node id");
+
+    // Read back: provenance carries BOTH the caller's source semantics and
+    // the server-stamped principal.
+    let (node, is_error) = dispatch(&server, "get_node", json!({"node_id": node_id}));
+    assert!(!is_error, "get_node must succeed: {node}");
+    let provenance = &node["provenance"];
+    assert_eq!(provenance["source"], json!("hr-system"), "{node}");
+    assert_eq!(provenance["confidence"], json!(0.9), "{node}");
+    assert_eq!(provenance["principal"], json!("test-writer"), "{node}");
+
+    // Update creates a second version; its provenance is stamped too.
+    let (updated, is_error) = dispatch(
+        &server,
+        "update_node",
+        json!({
+            "node_id": node_id,
+            "properties": {"name": "Alice Smith"},
+            "provenance": {"source": "manual-correction"}
+        }),
+    );
+    assert!(!is_error, "update_node must succeed: {updated}");
+
+    // "Who wrote this fact" is answerable from HISTORY: every version's
+    // provenance bundle carries the principal.
+    let (history, is_error) = dispatch(&server, "get_node_history", json!({"node_id": node_id}));
+    assert!(!is_error, "get_node_history must succeed: {history}");
+    let versions = history["versions"].as_array().expect("history versions");
+    assert!(versions.len() >= 2, "expected >= 2 versions: {history}");
+    for version in versions {
+        assert_eq!(
+            version["provenance"]["principal"],
+            json!("test-writer"),
+            "every historical version must carry the stamping principal: {version}"
+        );
+    }
+    // The caller-supplied sources are preserved per version, proving the
+    // stamp composed rather than replaced.
+    let sources: Vec<&str> = versions
+        .iter()
+        .filter_map(|v| v["provenance"]["source"].as_str())
+        .collect();
+    assert!(sources.contains(&"hr-system"), "{history}");
+    assert!(sources.contains(&"manual-correction"), "{history}");
+}
+
+/// A write with NO caller-supplied provenance still records the principal
+/// (a principal-only bundle) when the session is authenticated.
+#[test]
+fn authenticated_write_without_provenance_records_principal_only() {
+    let (server, _store, _id) = server_with_role(Role::Writer);
+    let (created, is_error) = dispatch(&server, "create_node", json!({"label": "Doc"}));
+    assert!(!is_error, "{created}");
+    let node_id = created["id"].as_u64().expect("id");
+
+    let (node, is_error) = dispatch(&server, "get_node", json!({"node_id": node_id}));
+    assert!(!is_error, "{node}");
+    assert_eq!(
+        node["provenance"]["principal"],
+        json!("test-writer"),
+        "{node}"
+    );
+    assert!(
+        node["provenance"].get("source").is_none(),
+        "no fabricated source: {node}"
+    );
+}
+
+/// Anonymous-mode writes record NO principal: the field is absent (not an
+/// empty string), and caller-supplied provenance is preserved verbatim.
+#[test]
+fn anonymous_write_records_no_principal() {
+    let server = AletheiaMcpServer::new(db());
+    let (created, is_error) = dispatch(
+        &server,
+        "create_node",
+        json!({
+            "label": "Person",
+            "provenance": {"source": "csv-import"}
+        }),
+    );
+    assert!(!is_error, "{created}");
+    let node_id = created["id"].as_u64().expect("id");
+
+    let (node, is_error) = dispatch(&server, "get_node", json!({"node_id": node_id}));
+    assert!(!is_error, "{node}");
+    assert_eq!(node["provenance"]["source"], json!("csv-import"), "{node}");
+    assert!(
+        node["provenance"].get("principal").is_none(),
+        "anonymous write must not carry a principal field: {node}"
+    );
+
+    // And with no provenance at all, none is fabricated.
+    let (created, is_error) = dispatch(&server, "create_node", json!({"label": "Doc"}));
+    assert!(!is_error, "{created}");
+    let node_id = created["id"].as_u64().expect("id");
+    let (node, is_error) = dispatch(&server, "get_node", json!({"node_id": node_id}));
+    assert!(!is_error, "{node}");
+    assert!(
+        node.get("provenance").is_none(),
+        "anonymous write without provenance must record none: {node}"
+    );
+}
+
+/// Edge writes are stamped the same way as node writes.
+#[test]
+fn authenticated_edge_write_stamps_principal() {
+    let (server, _store, _id) = server_with_role(Role::Writer);
+    let (a, _) = dispatch(&server, "create_node", json!({"label": "Person"}));
+    let (b, _) = dispatch(&server, "create_node", json!({"label": "Person"}));
+    let (edge, is_error) = dispatch(
+        &server,
+        "create_edge",
+        json!({
+            "source_id": a["id"], "target_id": b["id"], "label": "KNOWS",
+            "provenance": {"source": "social-import"}
+        }),
+    );
+    assert!(!is_error, "{edge}");
+    let edge_id = edge["id"].as_u64().expect("edge id");
+
+    let (read, is_error) = dispatch(&server, "get_edge", json!({"edge_id": edge_id}));
+    assert!(!is_error, "{read}");
+    assert_eq!(
+        read["provenance"]["source"],
+        json!("social-import"),
+        "{read}"
+    );
+    assert_eq!(
+        read["provenance"]["principal"],
+        json!("test-writer"),
+        "{read}"
+    );
+}
+
+// ============================================================================
 // AccessClass sanity: the classification only uses classes the role matrix
 // covers (guards against a future class being added without matrix review).
 // ============================================================================

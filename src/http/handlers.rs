@@ -188,10 +188,32 @@ where
 // Sub-handlers — each returns a JSON data payload or an error with a status.
 // ============================================================================
 
+/// Build the [`WriteRequestOptions`](crate::api::transaction::WriteRequestOptions)
+/// for an authenticated `/query` write: when the request carried a verified
+/// principal, its name is stamped into a write-time provenance bundle
+/// (Issue #3350) so "who wrote this fact" is answerable from history.
+/// Anonymous-mode requests get default options (no provenance).
+fn write_options_for(principal: Option<&str>) -> crate::api::transaction::WriteRequestOptions {
+    let options = crate::api::transaction::WriteRequestOptions::new();
+    match principal.and_then(|name| {
+        // A principal-only bundle cannot fail validation (only `confidence`
+        // is validated, and it is unset here); `.ok()` keeps this
+        // non-panicking regardless.
+        crate::core::provenance::Provenance::builder()
+            .principal(name)
+            .build()
+            .ok()
+    }) {
+        Some(provenance) => options.with_provenance(provenance),
+        None => options,
+    }
+}
+
 async fn handle_create_node(
     db: Arc<crate::AletheiaDB>,
     label: String,
     properties: Option<HashMap<String, Value>>,
+    principal: Option<String>,
 ) -> Result<Value, AletheiaHttpError> {
     let props = match properties {
         Some(p) => json_to_property_map(&p).map_err(AletheiaHttpError::BadRequest)?,
@@ -200,7 +222,7 @@ async fn handle_create_node(
 
     blocking(move || {
         let node_id = db
-            .create_node(&label, props)
+            .create_node_with_options(&label, props, write_options_for(principal.as_deref()))
             .map_err(|e| AletheiaHttpError::BadRequest(e.to_string()))?;
         let node = db
             .get_node(node_id)
@@ -408,6 +430,7 @@ fn validate_bulk_size<T>(items: &[T], name: &str) -> Result<(), AletheiaHttpErro
 async fn handle_bulk_create_nodes(
     db: Arc<crate::AletheiaDB>,
     nodes: Vec<CreateNodeInput>,
+    principal: Option<String>,
 ) -> Result<Value, AletheiaHttpError> {
     validate_bulk_size(&nodes, "nodes")?;
     blocking(move || {
@@ -420,7 +443,11 @@ async fn handle_bulk_create_nodes(
                             .map_err(|e| crate::core::error::Error::other(e.to_string()))?,
                         None => crate::core::PropertyMap::new(),
                     };
-                    ids.push(tx.create_node(&node.label, props)?);
+                    ids.push(tx.create_node_with_options(
+                        &node.label,
+                        props,
+                        write_options_for(principal.as_deref()),
+                    )?);
                 }
                 Ok::<_, crate::core::error::Error>(ids)
             })
@@ -467,6 +494,7 @@ async fn handle_bulk_get_nodes(
 async fn handle_bulk_update_nodes(
     db: Arc<crate::AletheiaDB>,
     updates: Vec<UpdateNodeInput>,
+    principal: Option<String>,
 ) -> Result<Value, AletheiaHttpError> {
     validate_bulk_size(&updates, "updates")?;
     blocking(move || {
@@ -480,7 +508,11 @@ async fn handle_bulk_update_nodes(
                             .map_err(|e| crate::core::error::Error::other(e.to_string()))?,
                         None => crate::core::PropertyMap::new(),
                     };
-                    tx.update_node(node_id, props)?;
+                    tx.update_node_with_options(
+                        node_id,
+                        props,
+                        write_options_for(principal.as_deref()),
+                    )?;
                     ids.push(node_id);
                 }
                 Ok::<_, crate::core::error::Error>(ids)
@@ -640,15 +672,22 @@ pub async fn handle_query(
 ) -> Result<Json<ApiResponse>, AletheiaHttpError> {
     auth.authorize(query_access_class(&req))?;
     let db = state.db_arc();
+    // Verified principal name (if any) for provenance stamping on write
+    // operations (Issue #3350). Anonymous mode yields None.
+    let principal = auth.principal().map(|p| p.name.clone());
 
     let data = match req {
         QueryRequest::CreateNode { label, properties } => {
-            handle_create_node(db, label, properties).await?
+            handle_create_node(db, label, properties, principal).await?
         }
         QueryRequest::GetNode { node_id } => handle_get_node(db, node_id).await?,
-        QueryRequest::BulkCreateNodes { nodes } => handle_bulk_create_nodes(db, nodes).await?,
+        QueryRequest::BulkCreateNodes { nodes } => {
+            handle_bulk_create_nodes(db, nodes, principal).await?
+        }
         QueryRequest::BulkGetNodes { node_ids } => handle_bulk_get_nodes(db, node_ids).await?,
-        QueryRequest::BulkUpdateNodes { updates } => handle_bulk_update_nodes(db, updates).await?,
+        QueryRequest::BulkUpdateNodes { updates } => {
+            handle_bulk_update_nodes(db, updates, principal).await?
+        }
         QueryRequest::BulkDeleteNodes { node_ids, cascade } => {
             handle_bulk_delete_nodes(db, node_ids, cascade).await?
         }

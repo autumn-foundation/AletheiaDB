@@ -469,3 +469,80 @@ fn startup_validation_refuses_required_mode_with_no_keys() {
     // Anonymous mode never refuses.
     assert!(validate_auth_startup(AuthMode::Anonymous, &AuthStore::new()).is_ok());
 }
+
+// ---------------------------------------------------------------------------
+// Provenance principal stamping (AC4, Issue #3350 Phase 3)
+// ---------------------------------------------------------------------------
+
+/// A write through the authenticated HTTP surface stamps the verified
+/// principal's name into that version's provenance; anonymous-mode writes
+/// record no principal.
+#[tokio::test]
+async fn authenticated_http_write_stamps_principal_into_provenance() {
+    use aletheiadb::core::NodeId;
+
+    let (client, store, db) = required_client();
+    let key = mint(&store, "http-writer", Role::Writer);
+
+    let (status, body) = post_query_with_key(&client, &key, &create_node_op()).await;
+    assert_eq!(status, 200, "{body}");
+    let node_id = body["data"]["id"].as_u64().expect("created node id");
+
+    let provenance = db
+        .get_node_provenance(NodeId::new(node_id).expect("node id"))
+        .expect("provenance lookup")
+        .expect("authenticated write must record provenance");
+    assert_eq!(provenance.principal(), Some("http-writer"));
+    // Nothing was fabricated in the caller-facing fields.
+    assert_eq!(provenance.source(), None);
+
+    // Bulk create stamps every node in the batch.
+    let bulk = json!({
+        "operation": "bulk_create_nodes",
+        "nodes": [{"label": "Person"}, {"label": "Person"}]
+    });
+    let (status, body) = post_query_with_key(&client, &key, &bulk).await;
+    assert_eq!(status, 200, "{body}");
+    for created in body["data"].as_array().expect("created array") {
+        let id = created["id"].as_u64().expect("id");
+        let provenance = db
+            .get_node_provenance(NodeId::new(id).expect("node id"))
+            .expect("lookup")
+            .expect("bulk write must record provenance");
+        assert_eq!(provenance.principal(), Some("http-writer"));
+    }
+
+    // Bulk update stamps the NEW version's provenance too.
+    let update = json!({
+        "operation": "bulk_update_nodes",
+        "updates": [{"node_id": node_id, "properties": {"name": "Y"}}]
+    });
+    let (status, body) = post_query_with_key(&client, &key, &update).await;
+    assert_eq!(status, 200, "{body}");
+    let provenance = db
+        .get_node_provenance(NodeId::new(node_id).expect("node id"))
+        .expect("lookup")
+        .expect("updated version must record provenance");
+    assert_eq!(provenance.principal(), Some("http-writer"));
+}
+
+/// Anonymous-mode HTTP writes record no provenance principal (absent, not
+/// an empty string).
+#[tokio::test]
+async fn anonymous_http_write_records_no_principal() {
+    use aletheiadb::core::NodeId;
+
+    let (client, _store, db) = client_with_auth(AuthMode::Anonymous);
+    let resp = client.post("/query").json(&create_node_op()).send().await;
+    assert_eq!(resp.status.as_u16(), 200);
+    let body: Value = serde_json::from_slice(&resp.body).expect("json");
+    let node_id = body["data"]["id"].as_u64().expect("id");
+
+    let provenance = db
+        .get_node_provenance(NodeId::new(node_id).expect("node id"))
+        .expect("lookup");
+    assert!(
+        provenance.is_none(),
+        "anonymous write must not fabricate provenance: {provenance:?}"
+    );
+}

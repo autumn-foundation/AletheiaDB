@@ -302,3 +302,60 @@ fn debug_output_contains_no_digests() {
         "Debug should not dump digest material"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Performance evidence (Issue #3350 success metric: auth overhead per call
+// well under 0.5 ms)
+// ---------------------------------------------------------------------------
+
+/// `verify` (SHA-256 + constant-time scan over all records) plus the role
+/// check is the entire per-call auth overhead on both server surfaces. The
+/// success metric budgets < 0.5 ms per call; assert a generous CI-safe
+/// margin (mean < 100 µs over 10k iterations against a store holding 25
+/// keys — larger than any realistic deployment of this store).
+#[test]
+fn verify_and_role_check_latency_is_well_under_budget() {
+    use crate::auth::AccessClass;
+    use std::time::Instant;
+
+    let store = AuthStore::new();
+    let mut target_key = String::new();
+    for i in 0..25 {
+        let (_p, key) = store
+            .create_key(&format!("perf-{i}"), Role::Writer)
+            .expect("create");
+        if i == 12 {
+            target_key = key.to_string();
+        }
+    }
+
+    // Warmup.
+    for _ in 0..1_000 {
+        let principal = store.verify(&target_key).expect("valid key");
+        assert!(principal.role.allows(AccessClass::Write));
+    }
+
+    const ITERATIONS: u32 = 10_000;
+    let start = Instant::now();
+    for _ in 0..ITERATIONS {
+        let principal = store.verify(&target_key).expect("valid key");
+        // The role check is part of the measured per-call overhead.
+        assert!(principal.role.allows(AccessClass::Write));
+    }
+    let elapsed = start.elapsed();
+    let mean = elapsed / ITERATIONS;
+
+    // Success metric is < 500 µs per call; assert 5x headroom on the mean
+    // so the test stays deterministic on slow/shared CI machines while
+    // still catching an accidental O(expensive) regression (e.g. a rehash
+    // or disk touch per verify).
+    assert!(
+        mean < std::time::Duration::from_micros(100),
+        "mean verify+role-check latency {mean:?} (over {ITERATIONS} iterations, \
+         total {elapsed:?}) exceeds the 100µs CI bound (budget: 500µs)"
+    );
+    eprintln!(
+        "auth verify+role-check: mean {mean:?} over {ITERATIONS} iterations \
+         (25-key store, budget 500µs)"
+    );
+}

@@ -40,8 +40,9 @@ pub use tools::{
     DeleteNodeCascadeRequest, DeleteNodeRequest, EnableVectorIndexRequest, FindNodesAtTimeRequest,
     FindSimilarRequest, GetEdgeAtTimeRequest, GetEdgeRequest, GetIncomingEdgesRequest,
     GetNodeAtTimeRequest, GetNodeRequest, GetOutgoingEdgesRequest, HybridQueryRequest,
-    ListChangesRequest, ListEdgesRequest, ListNodesRequest, ListVectorIndexesRequest, QueryRequest,
-    TemporalBounds, TraverseRequest, UpdateEdgeRequest, UpdateNodeRequest,
+    ListChangesRequest, ListEdgesRequest, ListNodesRequest, ListVectorIndexesRequest,
+    ProvenanceRequest, QueryRequest, TemporalBounds, TraverseRequest, UpdateEdgeRequest,
+    UpdateNodeRequest,
 };
 
 #[cfg(test)]

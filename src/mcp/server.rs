@@ -1110,31 +1110,64 @@ impl AletheiaMcpServer {
     }
 
     /// Validate and convert an optional MCP [`ProvenanceRequest`] into a
-    /// core [`Provenance`](crate::core::provenance::Provenance).
+    /// core [`Provenance`](crate::core::provenance::Provenance), stamping
+    /// the authenticated session principal (Issue #3350).
     ///
     /// Mirrors [`parse_opt_timestamp`](Self::parse_opt_timestamp): returns
     /// `Err(invalid_argument(...))` with a clear message when `confidence` is out
     /// of `[0.0, 1.0]` (Issue #3224), rather than a generic deserialization
     /// error. An entirely empty bundle (all fields omitted) is normalized to
     /// `None` -- never persisted as a fabricated empty object.
+    ///
+    /// **Principal stamping**: when the session has a verified principal
+    /// (see [`session_principal`](Self::session_principal)), its *name* is
+    /// recorded as the bundle's `principal` field -- composing with (never
+    /// replacing) whatever `source`/`confidence`/`note`/`correlation_id`
+    /// the caller supplied. A write with no caller-supplied provenance
+    /// still records a principal-only bundle. The principal is
+    /// server-stamped from the verified credential; [`ProvenanceRequest`]
+    /// deliberately has no `principal` field, so callers cannot forge it.
+    /// Anonymous-mode sessions (and the embedded `new()` constructor)
+    /// record no principal -- the field is absent, not an empty string.
     fn parse_opt_provenance(
         &self,
         value: Option<crate::mcp::tools::ProvenanceRequest>,
     ) -> std::result::Result<Option<Provenance>, CallToolResult> {
-        let Some(req) = value else {
-            return Ok(None);
-        };
-        let provenance =
-            Provenance::from_parts(req.source, req.confidence, req.note, req.correlation_id)
+        let principal = self.session_principal().map(|p| p.name);
+        let supplied = match value {
+            Some(req) => {
+                let provenance = Provenance::from_parts(
+                    req.source,
+                    req.confidence,
+                    req.note,
+                    req.correlation_id,
+                    None,
+                )
                 .map_err(|e| {
                     self.invalid_argument(&format!(
                         "Invalid provenance: confidence must be between 0.0 and 1.0 ({e})"
                     ))
                 })?;
-        if provenance.is_empty() {
-            return Ok(None);
-        }
-        Ok(Some(provenance))
+                // Normalize an all-empty caller bundle away *before*
+                // stamping, so "caller sent {}" and "caller sent nothing"
+                // behave identically.
+                if provenance.is_empty() {
+                    None
+                } else {
+                    Some(provenance)
+                }
+            }
+            None => None,
+        };
+        Ok(match (supplied, principal) {
+            (Some(p), Some(name)) => Some(p.with_principal(name)),
+            (Some(p), None) => Some(p),
+            // A principal-only bundle cannot fail validation (only
+            // `confidence` is validated, and it is unset here); `.ok()`
+            // keeps this non-panicking regardless.
+            (None, Some(name)) => Provenance::builder().principal(name).build().ok(),
+            (None, None) => None,
+        })
     }
 
     /// Parse an optional transaction time, returning the current time if not specified.
