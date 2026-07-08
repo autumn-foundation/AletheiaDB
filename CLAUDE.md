@@ -555,7 +555,10 @@ let results = db.execute_cypher_with_params("MATCH (n:Person {name: $name}) RETU
 - Left-outer patterns (Issue #557): `OPTIONAL MATCH (a)-[:KNOWS]->(x)` -- unmatched
   patterns preserve the base row and bind null; the clause's `WHERE` and inline
   properties are scoped inside the optional pattern (they decide matched vs
-  unmatched); multiple/leading `OPTIONAL MATCH` clauses supported
+  unmatched); multiple/leading `OPTIONAL MATCH` clauses supported. The first
+  node of a subsequent `OPTIONAL MATCH` must be an unlabeled bound variable
+  (e.g. `(a)`), and comma-separated patterns per optional clause are rejected
+  (no variable-binding analysis yet -- both would silently produce wrong rows)
 - Variable-depth: `-[:KNOWS*1..3]->`
 - Directions: `->` (outgoing), `<-` (incoming), `-` (both)
 - Filtering: `WHERE n.age > 18 AND n.name = 'Alice'`

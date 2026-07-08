@@ -388,6 +388,11 @@ impl CypherParser {
                 // `*N..` or `*N..M`
                 if self.at(TokenKind::IntegerLiteral) {
                     let m = self.parse_usize("expected integer after '..'")?;
+                    if n > m {
+                        return Err(
+                            self.error(&format!("invalid depth range: min ({n}) > max ({m})"))
+                        );
+                    }
                     Ok(CypherDepth::Range { min: n, max: m })
                 } else {
                     Ok(CypherDepth::Min(n))

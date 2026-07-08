@@ -1937,3 +1937,218 @@ fn test_e2e_plain_match_unchanged_regression() {
     );
     assert_eq!(rows.len(), 0);
 }
+
+// ============================================================================
+// OPTIONAL MATCH: rejected unsupported constructs (review findings, PR #3401)
+// ============================================================================
+
+#[test]
+fn test_convert_optional_match_multiple_patterns_rejected() {
+    // Without variable-binding analysis, comma-separated patterns in a
+    // subsequent OPTIONAL MATCH would silently chain positionally
+    // (`(a)-[:KNOWS]->(x), (a)-[:KNOWS]->(y)` would traverse x's result,
+    // not re-seed from `a`), returning the wrong entity for `y`. Reject
+    // rather than answer wrongly.
+    let err = parse_cypher(
+        "MATCH (a:Person) OPTIONAL MATCH (a)-[:KNOWS]->(x), (a)-[:KNOWS]->(y) RETURN y",
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, CypherError::UnsupportedFeature(_)),
+        "expected UnsupportedFeature, got {err:?}"
+    );
+    assert!(
+        err.to_string().contains("OPTIONAL MATCH"),
+        "error should name the offending construct: {err}"
+    );
+}
+
+#[test]
+fn test_convert_optional_match_labeled_first_node_rejected() {
+    // The first node of a subsequent OPTIONAL MATCH is bound positionally to
+    // the current row; a label on it cannot be honored without
+    // variable-binding analysis (`MATCH (a:Person) OPTIONAL MATCH (b:City)
+    // RETURN b` would silently return `a`). Reject rather than drop the label.
+    let err = parse_cypher("MATCH (a:Person) OPTIONAL MATCH (b:City) RETURN b").unwrap_err();
+    assert!(
+        matches!(err, CypherError::UnsupportedFeature(_)),
+        "expected UnsupportedFeature, got {err:?}"
+    );
+    assert!(
+        err.to_string().contains("label"),
+        "error should explain the label restriction: {err}"
+    );
+
+    // Same restriction when the labeled first node starts a traversal pattern.
+    let err =
+        parse_cypher("MATCH (a:Person) OPTIONAL MATCH (b:City)-[:NEAR]->(c) RETURN c").unwrap_err();
+    assert!(matches!(err, CypherError::UnsupportedFeature(_)));
+
+    // An unlabeled first node (positional reference to the current row)
+    // still works.
+    assert!(parse_cypher("MATCH (a:Person) OPTIONAL MATCH (a)-[:KNOWS]->(x) RETURN x").is_ok());
+}
+
+#[test]
+fn test_parse_depth_range_inverted_rejected() {
+    // `*3..1` is an inverted variable-length range; the AQL parser rejects
+    // min > max, and the Cypher parser must too instead of silently
+    // accepting it.
+    let err = CypherParser::parse("MATCH (a)-[:KNOWS*3..1]->(b) RETURN b").unwrap_err();
+    assert!(
+        matches!(err, CypherError::ParseError { .. }),
+        "expected ParseError, got {err:?}"
+    );
+    assert!(
+        err.to_string().contains("min"),
+        "error should describe the inverted range: {err}"
+    );
+
+    // Valid ranges still parse (min == max and min < max).
+    assert!(CypherParser::parse("MATCH (a)-[:KNOWS*1..3]->(b) RETURN b").is_ok());
+    assert!(CypherParser::parse("MATCH (a)-[:KNOWS*2..2]->(b) RETURN b").is_ok());
+}
+
+// ============================================================================
+// OPTIONAL MATCH: fan-out, null-predicate, and parameter e2e coverage
+// ============================================================================
+
+/// Alice (Person) -KNOWS-> Bob (Friend) and Alice -KNOWS-> Eve (Friend);
+/// Dave (Person) has no outgoing edges.
+fn fan_out_test_db() -> AletheiaDB {
+    let db = AletheiaDB::new().unwrap();
+    let alice = db
+        .create_node(
+            "Person",
+            PropertyMapBuilder::new().insert("name", "Alice").build(),
+        )
+        .unwrap();
+    let _dave = db
+        .create_node(
+            "Person",
+            PropertyMapBuilder::new().insert("name", "Dave").build(),
+        )
+        .unwrap();
+    let bob = db
+        .create_node(
+            "Friend",
+            PropertyMapBuilder::new().insert("name", "Bob").build(),
+        )
+        .unwrap();
+    let eve = db
+        .create_node(
+            "Friend",
+            PropertyMapBuilder::new().insert("name", "Eve").build(),
+        )
+        .unwrap();
+    db.create_edge(alice, bob, "KNOWS", CorePropertyMap::new())
+        .unwrap();
+    db.create_edge(alice, eve, "KNOWS", CorePropertyMap::new())
+        .unwrap();
+    db
+}
+
+#[test]
+fn test_e2e_optional_match_fan_out_two_matches() {
+    let db = fan_out_test_db();
+    // One seed (Alice) with TWO optional matches: exactly 2 non-null rows,
+    // one per matched edge, carrying both names.
+    let rows = collect_rows(
+        db.execute_cypher(
+            "MATCH (a:Person {name: 'Alice'}) OPTIONAL MATCH (a)-[:KNOWS]->(x) RETURN x",
+        )
+        .unwrap(),
+    );
+    assert_eq!(rows.len(), 2, "fan-out must yield one row per match");
+    assert!(rows.iter().all(|r| !r.entity.is_null()));
+    let names: Vec<_> = rows.iter().filter_map(row_name).collect();
+    assert!(names.contains(&"Bob".to_string()), "names: {names:?}");
+    assert!(names.contains(&"Eve".to_string()), "names: {names:?}");
+}
+
+#[test]
+fn test_e2e_optional_match_fan_out_with_unmatched_seed() {
+    let db = fan_out_test_db();
+    // Two seeds: Alice fans out to 2 matches, Dave is unmatched -> exactly
+    // 3 rows, of which 1 is null.
+    let rows = collect_rows(
+        db.execute_cypher("MATCH (a:Person) OPTIONAL MATCH (a)-[:KNOWS]->(x) RETURN x")
+            .unwrap(),
+    );
+    assert_eq!(rows.len(), 3, "2 matched + 1 null row expected");
+    let nulls = rows.iter().filter(|r| r.entity.is_null()).count();
+    assert_eq!(nulls, 1);
+    let names: Vec<_> = rows.iter().filter_map(row_name).collect();
+    assert!(names.contains(&"Bob".to_string()));
+    assert!(names.contains(&"Eve".to_string()));
+}
+
+#[test]
+fn test_e2e_optional_match_is_not_null_keeps_only_matched() {
+    let db = optional_match_test_db();
+    // `x IS NOT NULL` after the optional segment keeps exactly the matched
+    // rows (Alice->Bob, Bob->Carol) and drops the null rows (Carol, Dave).
+    let rows = collect_rows(
+        db.execute_cypher(
+            "MATCH (a:Person) OPTIONAL MATCH (a)-[:KNOWS]->(x) WITH x WHERE x IS NOT NULL RETURN x",
+        )
+        .unwrap(),
+    );
+    assert_eq!(rows.len(), 2);
+    assert!(rows.iter().all(|r| !r.entity.is_null()));
+    let names: Vec<_> = rows.iter().filter_map(row_name).collect();
+    assert!(names.contains(&"Bob".to_string()));
+    assert!(names.contains(&"Carol".to_string()));
+}
+
+#[test]
+fn test_e2e_optional_match_null_in_boolean_connective() {
+    let db = optional_match_test_db();
+    // Boolean connective over a null binding: `x IS NULL` is true for the two
+    // null rows; `x.age > 100` is not-true for every matched row (Bob is 40,
+    // Carol is 50) and not-true for null rows. The OR keeps exactly the nulls.
+    let rows = collect_rows(
+        db.execute_cypher(
+            "MATCH (a:Person) OPTIONAL MATCH (a)-[:KNOWS]->(x) WITH x WHERE x IS NULL OR x.age > 100 RETURN x",
+        )
+        .unwrap(),
+    );
+    assert_eq!(rows.len(), 2);
+    assert!(rows.iter().all(|r| r.entity.is_null()));
+}
+
+#[test]
+fn test_e2e_optional_match_where_with_param() {
+    use std::collections::HashMap;
+
+    let db = optional_match_test_db();
+
+    // A `$param` inside the optional clause's WHERE resolves and is scoped
+    // inside the optional segment: Bob (age 40) passes `x.age > $minAge`.
+    let mut params = HashMap::new();
+    params.insert("minAge".to_string(), CypherParameterValue::Int(35));
+    let rows = collect_rows(
+        db.execute_cypher_with_params(
+            "MATCH (a:Person {name: 'Alice'}) OPTIONAL MATCH (a)-[:KNOWS]->(x) WHERE x.age > $minAge RETURN x",
+            params,
+        )
+        .unwrap(),
+    );
+    assert_eq!(rows.len(), 1);
+    assert_eq!(row_name(&rows[0]).as_deref(), Some("Bob"));
+
+    // A binding that eliminates every match yields a null row (never a
+    // dropped row): the parameterized WHERE participates in the
+    // matched/unmatched decision.
+    let mut params = HashMap::new();
+    params.insert("minAge".to_string(), CypherParameterValue::Int(100));
+    let rows = collect_rows(
+        db.execute_cypher_with_params(
+            "MATCH (a:Person {name: 'Alice'}) OPTIONAL MATCH (a)-[:KNOWS]->(x) WHERE x.age > $minAge RETURN x",
+            params,
+        )
+        .unwrap(),
+    );
+    assert_eq!(rows.len(), 1);
+    assert!(rows[0].entity.is_null());
+}

@@ -185,6 +185,19 @@ impl CypherConverter {
                         self.convert_with_clause(&with_clauses[with_idx], &mut ops)?;
                         with_idx += 1;
                     }
+                    // Without variable-binding analysis, comma-separated
+                    // patterns in one OPTIONAL MATCH clause would silently
+                    // chain positionally (the second pattern would traverse
+                    // the first pattern's result instead of re-seeding from
+                    // the bound variable), returning wrong entities. Reject
+                    // until binding analysis exists.
+                    if opt_match.pattern.len() > 1 {
+                        return Err(CypherError::UnsupportedFeature(
+                            "comma-separated patterns in an OPTIONAL MATCH clause; \
+                             use one pattern per OPTIONAL MATCH clause instead"
+                                .to_string(),
+                        ));
+                    }
                     let mut sub_ops = Vec::new();
                     for pat in &opt_match.pattern {
                         self.convert_optional_pattern(pat, &mut sub_ops)?;
@@ -303,15 +316,33 @@ impl CypherConverter {
     /// inside the optional segment and therefore participate in the
     /// matched/unmatched decision.
     ///
-    /// Limitation: like the rest of the converter, this performs no variable
-    /// binding analysis -- an OPTIONAL MATCH pattern starting from a variable
-    /// not bound by the preceding pipeline is treated positionally as if it
-    /// referred to the current row.
+    /// Limitation and design choice: the converter performs no variable
+    /// binding analysis, so the first node is bound purely positionally to
+    /// the current row. A **label** on that node therefore cannot be honored
+    /// (there is no label predicate to lower it to), and silently dropping it
+    /// would turn `MATCH (a:Person) OPTIONAL MATCH (b:City) RETURN b` into a
+    /// query that returns `a`. Such clauses are **rejected** with
+    /// [`CypherError::UnsupportedFeature`] rather than answered wrongly;
+    /// inline properties on the first node remain supported because they
+    /// lower cheaply and correctly to seed-row filters.
     fn convert_optional_pattern(
         &self,
         pattern: &CypherPattern,
         ops: &mut Vec<QueryOp>,
     ) -> Result<(), CypherError> {
+        // Reject a labeled first node: it is bound positionally to the seed
+        // row and its label would be silently ignored (see rustdoc above).
+        if let Some(CypherPatternElement::Node(first)) = pattern.elements.first()
+            && !first.labels.is_empty()
+        {
+            return Err(CypherError::UnsupportedFeature(format!(
+                "label ':{}' on the first node of a subsequent OPTIONAL MATCH; \
+                 the first node refers to the current row and must be an \
+                 unlabeled bound variable (e.g. `(a)`) -- move the constraint \
+                 into the preceding MATCH or a WHERE clause",
+                first.labels.join(":"),
+            )));
+        }
         for element in &pattern.elements {
             match element {
                 CypherPatternElement::Node(node) => {

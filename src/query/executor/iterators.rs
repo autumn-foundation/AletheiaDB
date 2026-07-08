@@ -1317,6 +1317,10 @@ pub struct OptionalApplyIterator {
     inner_matched: bool,
     /// Set when the input (or the single standalone run) is exhausted.
     done: bool,
+    /// The seed row currently being processed, kept so an unmatched fallback
+    /// preserves its metadata (score, path, timestamp). `None` in the
+    /// standalone form, which has no seed row.
+    current_seed: Option<QueryRow>,
 }
 
 impl OptionalApplyIterator {
@@ -1329,7 +1333,7 @@ impl OptionalApplyIterator {
     ) -> Self {
         use crate::query::planner::physical::OptionalPhysicalStep;
         let standalone = matches!(steps.first(), Some(OptionalPhysicalStep::Scan { .. }));
-        OptionalApplyIterator {
+        Self {
             input,
             steps,
             current,
@@ -1338,6 +1342,7 @@ impl OptionalApplyIterator {
             inner: None,
             inner_matched: false,
             done: false,
+            current_seed: None,
         }
     }
 
@@ -1394,14 +1399,28 @@ impl ResultIterator for OptionalApplyIterator {
                         self.inner_matched = true;
                         return Some(Ok(row));
                     }
-                    Some(Err(e)) => return Some(Err(e)),
+                    Some(Err(e)) => {
+                        // Abandon the errored seed entirely: a consumer that
+                        // iterates past the error must not receive a
+                        // fabricated null row for it.
+                        self.inner = None;
+                        self.inner_matched = false;
+                        self.current_seed = None;
+                        return Some(Err(e));
+                    }
                     None => {
                         let unmatched = !self.inner_matched;
                         self.inner = None;
+                        let seed = self.current_seed.take();
                         if unmatched {
-                            // Left-outer semantics: preserve the input row
-                            // with a null binding.
-                            return Some(Ok(QueryRow::from_entity(EntityResult::Null)));
+                            // Left-outer semantics: preserve the input row --
+                            // including its metadata (score, path, timestamp)
+                            // -- with a null binding. The standalone form has
+                            // no seed row, so it falls back to a bare null row.
+                            let mut row =
+                                seed.unwrap_or_else(|| QueryRow::from_entity(EntityResult::Null));
+                            row.entity = EntityResult::Null;
+                            return Some(Ok(row));
                         }
                         continue;
                     }
@@ -1423,6 +1442,7 @@ impl ResultIterator for OptionalApplyIterator {
             // Pull the next seed row from the input.
             match self.input.next() {
                 Some(Ok(seed)) => {
+                    self.current_seed = Some(seed.clone());
                     self.inner = Some(self.build_pipeline(Some(seed)));
                     self.inner_matched = false;
                 }
@@ -3706,6 +3726,176 @@ mod tests {
         iter.sorted = None; // Force re-initialization
 
         // This used to unwrap and panic because input was taken in the first call
+        assert!(iter.next().is_none());
+    }
+
+    // ==================== evaluate_null Tests ====================
+
+    /// Exhaustively covers every arm of [`FilterIterator::evaluate_null`]:
+    /// comparisons/membership/string predicates over a null binding are
+    /// not-true, `IS NULL` (encoded `Eq { value: Null }`) is true,
+    /// `IS NOT NULL` (encoded `Ne { value: Null }`) is false, a null binding
+    /// has no properties (`Exists` false / `NotExists` true), and the
+    /// boolean connectives compose (with `Not` documented as two-valued).
+    #[test]
+    fn test_evaluate_null_all_predicate_arms() {
+        let filter = FilterIterator::new(Box::new(EmptyIterator), Predicate::True);
+        let eval = |p: &Predicate| filter.evaluate_null(p);
+
+        // Constants.
+        assert!(eval(&Predicate::True));
+        assert!(!eval(&Predicate::False));
+
+        // IS NULL / IS NOT NULL encodings.
+        assert!(eval(&Predicate::Eq {
+            key: "x".into(),
+            value: PredicateValue::Null,
+        }));
+        assert!(!eval(&Predicate::Ne {
+            key: "x".into(),
+            value: PredicateValue::Null,
+        }));
+
+        // Eq/Ne against non-null values are not-true.
+        assert!(!eval(&Predicate::eq("x", 1i64)));
+        assert!(!eval(&Predicate::ne("x", 1i64)));
+
+        // Ordering comparisons are not-true.
+        assert!(!eval(&Predicate::Gt {
+            key: "x".into(),
+            value: PredicateValue::Int(1),
+        }));
+        assert!(!eval(&Predicate::Lt {
+            key: "x".into(),
+            value: PredicateValue::Int(1),
+        }));
+        assert!(!eval(&Predicate::Gte {
+            key: "x".into(),
+            value: PredicateValue::Int(1),
+        }));
+        assert!(!eval(&Predicate::Lte {
+            key: "x".into(),
+            value: PredicateValue::Int(1),
+        }));
+
+        // Membership and string predicates are not-true.
+        assert!(!eval(&Predicate::In {
+            key: "x".into(),
+            values: vec![PredicateValue::Int(1), PredicateValue::Null],
+        }));
+        assert!(!eval(&Predicate::Contains {
+            key: "x".into(),
+            substring: "a".into(),
+        }));
+        assert!(!eval(&Predicate::StartsWith {
+            key: "x".into(),
+            prefix: "a".into(),
+        }));
+        assert!(!eval(&Predicate::EndsWith {
+            key: "x".into(),
+            suffix: "a".into(),
+        }));
+
+        // A null binding has no properties.
+        assert!(!eval(&Predicate::Exists("x".into())));
+        assert!(eval(&Predicate::NotExists("x".into())));
+
+        // Connectives compose.
+        assert!(eval(&Predicate::And(vec![
+            Predicate::True,
+            Predicate::NotExists("x".into()),
+        ])));
+        assert!(!eval(&Predicate::And(vec![
+            Predicate::True,
+            Predicate::eq("x", 1i64),
+        ])));
+        assert!(eval(&Predicate::Or(vec![
+            Predicate::eq("x", 1i64),
+            Predicate::Eq {
+                key: "x".into(),
+                value: PredicateValue::Null,
+            },
+        ])));
+        assert!(!eval(&Predicate::Or(vec![
+            Predicate::False,
+            Predicate::eq("x", 1i64),
+        ])));
+
+        // Not is two-valued (documented deviation from openCypher 3VL):
+        // NOT (not-true) is true.
+        assert!(eval(&Predicate::Not(Box::new(Predicate::eq("x", 1i64)))));
+        assert!(!eval(&Predicate::Not(Box::new(Predicate::True))));
+    }
+
+    // ==================== OptionalApplyIterator Tests ====================
+
+    fn optional_test_storages() -> (
+        Arc<CurrentStorage>,
+        Arc<RwLock<crate::storage::historical::HistoricalStorage>>,
+    ) {
+        let current = Arc::new(CurrentStorage::new());
+        let historical = Arc::new(RwLock::new(
+            crate::storage::historical::HistoricalStorage::with_config(
+                crate::core::version::AnchorConfig::default(),
+            ),
+        ));
+        (current, historical)
+    }
+
+    /// The unmatched fallback row must preserve the seed row's metadata
+    /// (score, path, timestamp), with only the entity replaced by Null.
+    #[test]
+    fn test_optional_apply_unmatched_preserves_seed_metadata() {
+        use crate::query::planner::physical::OptionalPhysicalStep;
+
+        let (current, historical) = optional_test_storages();
+
+        let seed = QueryRow::with_score(EntityResult::Node(test_node(1, "Alice")), 0.75)
+            .at_time(Timestamp::from(12345i64));
+        let input = Box::new(MockIterator::from_results(vec![Ok(seed)]));
+
+        // A Filter(False) step can never match: the seed row falls back to
+        // the null form.
+        let mut iter = OptionalApplyIterator::new(
+            input,
+            vec![OptionalPhysicalStep::Filter(Predicate::False)],
+            current,
+            historical,
+        );
+
+        let row = iter.next().expect("one row expected").expect("no error");
+        assert!(row.entity.is_null(), "unmatched seed must bind null");
+        assert_eq!(row.score, Some(0.75), "seed score must be preserved");
+        assert_eq!(
+            row.timestamp,
+            Some(Timestamp::from(12345i64)),
+            "seed timestamp must be preserved"
+        );
+        assert!(iter.next().is_none());
+    }
+
+    /// The standalone (leading OPTIONAL MATCH) form has no seed row: the
+    /// unmatched fallback is a bare null row.
+    #[test]
+    fn test_optional_apply_standalone_unmatched_bare_null_row() {
+        use crate::query::planner::physical::OptionalPhysicalStep;
+
+        let (current, historical) = optional_test_storages();
+
+        let mut iter = OptionalApplyIterator::new(
+            Box::new(EmptyIterator),
+            vec![OptionalPhysicalStep::Scan {
+                label: Some("Person".to_string()),
+            }],
+            current,
+            historical,
+        );
+
+        let row = iter.next().expect("one row expected").expect("no error");
+        assert!(row.entity.is_null());
+        assert!(row.score.is_none());
+        assert!(row.path.is_none());
+        assert!(row.timestamp.is_none());
         assert!(iter.next().is_none());
     }
 }

@@ -92,6 +92,18 @@ pub fn execute_cypher(
                 d.set_item("kind", "edge_id")?;
                 d.set_item("entity", id.as_u64())?;
             }
+            // Null binding from an unmatched OPTIONAL MATCH pattern (left-outer
+            // semantics): the row is preserved but carries no entity.
+            EntityResult::Null => {
+                d.set_item("kind", "null")?;
+                d.set_item("entity", py.None())?;
+            }
+            // EntityResult is #[non_exhaustive]; surface future variants
+            // rather than failing the whole result set.
+            _ => {
+                d.set_item("kind", "unknown")?;
+                d.set_item("entity", py.None())?;
+            }
         }
         if let Some(score) = row.score {
             d.set_item("score", score as f64)?;
@@ -128,6 +140,18 @@ pub fn execute_aql(py: Python<'_>, db: &crate::db::PyAletheiaDB, query: &str) ->
             EntityResult::EdgeId(id) => {
                 d.set_item("kind", "edge_id")?;
                 d.set_item("entity", id.as_u64())?;
+            }
+            // Null binding from an unmatched OPTIONAL MATCH pattern (left-outer
+            // semantics): the row is preserved but carries no entity.
+            EntityResult::Null => {
+                d.set_item("kind", "null")?;
+                d.set_item("entity", py.None())?;
+            }
+            // EntityResult is #[non_exhaustive]; surface future variants
+            // rather than failing the whole result set.
+            _ => {
+                d.set_item("kind", "unknown")?;
+                d.set_item("entity", py.None())?;
             }
         }
         if let Some(score) = row.score {

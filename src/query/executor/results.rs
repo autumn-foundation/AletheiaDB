@@ -66,7 +66,12 @@ pub enum EntityId {
 }
 
 /// Query result entity (full node or edge).
+///
+/// Marked `#[non_exhaustive]`: downstream crates must include a wildcard arm
+/// when matching, so future variants (like the [`EntityResult::Null`] binding
+/// added for `OPTIONAL MATCH`) are not semver-breaking.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum EntityResult {
     /// Full node data
     Node(Node),
@@ -86,7 +91,6 @@ pub enum EntityResult {
 
 impl EntityResult {
     /// Get the entity ID, or `None` for a null binding.
-    #[must_use]
     pub fn id(&self) -> Option<EntityId> {
         match self {
             EntityResult::Node(n) => Some(EntityId::Node(n.id)),

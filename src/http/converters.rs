@@ -497,4 +497,23 @@ mod tests {
         // Should hit vector limit, not array limit
         assert!(res.unwrap_err().contains("Vector dimension"));
     }
+
+    #[test]
+    fn test_query_row_to_json_null_binding() {
+        // A null binding from an unmatched OPTIONAL MATCH serializes as
+        // documented: `{"null": true}` with no entity payload key.
+        let row = QueryRow::from_entity(EntityResult::Null);
+        let value = query_row_to_json(row).unwrap();
+        assert_eq!(value.get("null"), Some(&json!(true)));
+        assert!(value.get("node").is_none());
+        assert!(value.get("edge").is_none());
+        assert!(value.get("node_id").is_none());
+        assert!(value.get("edge_id").is_none());
+
+        // Row metadata still serializes alongside the null marker.
+        let row = QueryRow::with_score(EntityResult::Null, 0.5);
+        let value = query_row_to_json(row).unwrap();
+        assert_eq!(value.get("null"), Some(&json!(true)));
+        assert_eq!(value.get("score"), Some(&json!(0.5)));
+    }
 }
