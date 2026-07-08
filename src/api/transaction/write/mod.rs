@@ -863,15 +863,67 @@ impl ReadOps for WriteTransaction {
     }
 
     fn get_outgoing_edges(&self, node_id: NodeId) -> Vec<EdgeId> {
-        self.current.get_outgoing_edges(node_id)
+        let mut edges = self.current.get_outgoing_edges(node_id);
+
+        for op in self.buffer.operations() {
+            if let crate::api::transaction::BufferedWrite::CreateEdge { edge_id, source, .. } = op {
+                if *source == node_id && !edges.contains(edge_id) {
+                    edges.push(*edge_id);
+                }
+            }
+        }
+
+        edges.retain(|edge_id| {
+            !matches!(self.buffer.get_edge_write(*edge_id), Some(crate::api::transaction::BufferedWrite::DeleteEdge { .. }))
+        });
+
+        edges
     }
 
     fn get_incoming_edges(&self, node_id: NodeId) -> Vec<EdgeId> {
-        self.current.get_incoming_edges(node_id)
+        let mut edges = self.current.get_incoming_edges(node_id);
+
+        for op in self.buffer.operations() {
+            if let crate::api::transaction::BufferedWrite::CreateEdge { edge_id, target, .. } = op {
+                if *target == node_id && !edges.contains(edge_id) {
+                    edges.push(*edge_id);
+                }
+            }
+        }
+
+        edges.retain(|edge_id| {
+            !matches!(self.buffer.get_edge_write(*edge_id), Some(crate::api::transaction::BufferedWrite::DeleteEdge { .. }))
+        });
+
+        edges
     }
 
     fn get_outgoing_edges_with_label(&self, node_id: NodeId, label: &str) -> Vec<EdgeId> {
-        self.current.get_outgoing_edges_with_label(node_id, label)
+        let mut edges = self.current.get_outgoing_edges_with_label(node_id, label);
+
+        for op in self.buffer.operations() {
+            if let crate::api::transaction::BufferedWrite::CreateEdge {
+                edge_id,
+                source,
+                label: op_label,
+                ..
+            } = op {
+                if *source == node_id
+                    && crate::core::interning::GLOBAL_INTERNER
+                        .resolve_with(*op_label, |s| s == label)
+                        .unwrap_or(false)
+                    && !edges.contains(edge_id)
+                {
+                    edges.push(*edge_id);
+                }
+            }
+        }
+
+        edges.retain(|edge_id| {
+            !matches!(self.buffer.get_edge_write(*edge_id), Some(crate::api::transaction::BufferedWrite::DeleteEdge { .. }))
+        });
+
+        edges
     }
 
     fn node_count(&self) -> usize {
@@ -1225,11 +1277,19 @@ impl WriteOps for WriteTransaction {
             }
 
             // Verify node exists and check for vector properties
-            let node = self.current.get_node(node_id)?;
+            let contains_vector = match self.buffer.get_node_write(node_id) {
+                Some(crate::api::transaction::BufferedWrite::CreateNode { properties, .. } | crate::api::transaction::BufferedWrite::UpdateNode { properties, .. }) => {
+                    properties.contains_vector()
+                }
+                _ => {
+                    let node = self.current.get_node(node_id)?;
+                    node.properties.contains_vector()
+                }
+            };
 
             // If the node being deleted contains vector properties, mark the buffer
             // to ensure the temporal vector index is notified on commit
-            if !self.buffer.has_vector_operations() && node.properties.contains_vector() {
+            if !self.buffer.has_vector_operations() && contains_vector {
                 self.buffer.mark_has_vector_operations();
             }
 
@@ -1276,7 +1336,9 @@ impl WriteOps for WriteTransaction {
         }
 
         // Verify node exists before attempting deletion
-        let _node = self.current.get_node(node_id)?;
+        if !matches!(self.buffer.get_node_write(node_id), Some(crate::api::transaction::BufferedWrite::CreateNode { .. } | crate::api::transaction::BufferedWrite::UpdateNode { .. })) {
+            self.current.get_node(node_id)?;
+        }
 
         // Collect all edges connected to this node (both outgoing and incoming)
         // We do this before any deletions to avoid borrowing issues
@@ -1319,11 +1381,19 @@ impl WriteOps for WriteTransaction {
             }
 
             // Verify edge exists and check for vector properties
-            let edge = self.current.get_edge(edge_id)?;
+            let contains_vector = match self.buffer.get_edge_write(edge_id) {
+                Some(crate::api::transaction::BufferedWrite::CreateEdge { properties, .. } | crate::api::transaction::BufferedWrite::UpdateEdge { properties, .. }) => {
+                    properties.contains_vector()
+                }
+                _ => {
+                    let edge = self.current.get_edge(edge_id)?;
+                    edge.properties.contains_vector()
+                }
+            };
 
             // If the edge being deleted contains vector properties, mark the buffer
             // to ensure the temporal vector index is notified on commit
-            if !self.buffer.has_vector_operations() && edge.properties.contains_vector() {
+            if !self.buffer.has_vector_operations() && contains_vector {
                 self.buffer.mark_has_vector_operations();
             }
 
