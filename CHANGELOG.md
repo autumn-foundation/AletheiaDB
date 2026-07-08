@@ -68,7 +68,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `AletheiaDB::open(path)` / `durable_config_for_data_dir(path)`, which are
   unaffected. **Breaking for callers that relied on the implicit default:**
   a config that never touches `PersistenceConfig` no longer persists indexes
-  (the WAL still provides durability when configured).
+  (the WAL still provides durability when configured). TOML configs must now
+  set `enabled = true` under `[persistence]`; a `[persistence]` section that
+  omits `enabled` (even one that sets `data_dir` or `load_on_startup`) is
+  treated as disabled.
 
 - MCP tool error responses are now structured (Issue #3234): every error is
   `{"error": {"code", "message", "retriable", "details"?}}` instead of

@@ -226,7 +226,10 @@ max_batch_size = 1000
 > instances that share a working directory observe each other's data. If you
 > relied on that implicit default, opt in explicitly with `enabled: true`
 > and an explicit `data_dir`, or use `AletheiaDB::open(path)` /
-> `durable_config_for_data_dir(path)`.
+> `durable_config_for_data_dir(path)`. TOML configs must now set
+> `enabled = true` under `[persistence]`; a `[persistence]` section that
+> omits `enabled` (even one that sets `data_dir` or `load_on_startup`) is
+> treated as disabled.
 
 #### Persistence Policies
 

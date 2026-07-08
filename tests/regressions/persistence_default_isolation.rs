@@ -31,19 +31,37 @@ fn persistence_config_default_is_disabled() {
         "AletheiaDBConfig::default() (and thus builder configs without \
          .persistence(...)) must not enable persistence (Issue #3388)"
     );
+    assert_eq!(
+        PersistenceConfig::default().data_dir,
+        std::path::PathBuf::from("data"),
+        "the default data_dir is a cwd-relative placeholder that must stay \
+         inert while enabled is false (Issue #3388); if this changes, revisit \
+         the migration notes and the isolation test below"
+    );
 }
 
 /// Two independent database instances created from default configs must not
-/// observe each other's data through the shared cwd-relative `./data`
-/// directory.
+/// leak data to each other through the *index-persistence* channel — the
+/// shared cwd-relative `./data` directory the old enabled-by-default
+/// `PersistenceConfig` wrote to and loaded from.
 ///
-/// Each instance gets its own WAL directory (WAL isolation is orthogonal to
-/// this issue); persistence is deliberately left at its default. Before the
-/// fix, instance A's shutdown snapshot landed in `./data` and instance B
-/// loaded it on startup (`load_on_startup` combined with the enabled
-/// default), so B saw A's node.
+/// Scope: this proves the persistence channel is closed. It does NOT cover
+/// the WAL channel: `WalConfig::default().wal_dir` is still the cwd-relative
+/// `"aletheiadb/wal"`, a separate known footgun through which two default
+/// configs sharing a cwd could still observe each other's data via WAL
+/// replay — which is exactly why each instance below is given its own
+/// isolated WAL directory. Fixing that default is a follow-up candidate.
+///
+/// Persistence is deliberately left at its default. Before the fix, instance
+/// A's shutdown snapshot landed in `./data` and instance B loaded it on
+/// startup (`load_on_startup` combined with the enabled default), so B saw
+/// A's node.
+///
+/// Note: if the fix were reverted, the first failure here is clean (B
+/// observes A's node), but the failed run leaves a stray `./data` directory
+/// behind in the checkout.
 #[test]
-fn default_config_instances_cannot_observe_each_others_data() {
+fn default_persistence_cannot_leak_between_instances() {
     let cwd_data = std::path::Path::new("data");
     let data_preexisted = cwd_data.exists();
 

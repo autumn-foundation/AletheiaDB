@@ -1534,6 +1534,34 @@ wal_dir = "/custom/path/to/wal"
         assert_eq!(config.wal.wal_dir, PathBuf::from("/custom/path/to/wal"));
     }
 
+    /// Issue #3388: with `#[serde(default)]`, a TOML `[persistence]` section
+    /// that sets other fields but omits `enabled` must inherit the disabled
+    /// default — it must not silently re-enable persistence.
+    #[test]
+    #[cfg(feature = "config-toml")]
+    fn toml_persistence_omitting_enabled_stays_disabled() {
+        let c = AletheiaDBConfig::from_toml_str("[persistence]\ndata_dir = \"custom\"\n").unwrap();
+        assert!(
+            !c.persistence.enabled,
+            "TOML [persistence] without `enabled` must inherit the disabled default (Issue #3388)"
+        );
+        let c = AletheiaDBConfig::from_toml_str("").unwrap();
+        assert!(!c.persistence.enabled);
+    }
+
+    /// The canonical durable entry point must keep persistence enabled with
+    /// explicit directories, unaffected by the Issue #3388 default flip.
+    #[test]
+    fn durable_config_keeps_persistence_enabled() {
+        let c = durable_config_for_data_dir("/some/root");
+        assert!(c.persistence.enabled);
+        assert_eq!(
+            c.persistence.data_dir,
+            std::path::Path::new("/some/root/indexes")
+        );
+        assert!(c.persistence.load_on_startup);
+    }
+
     // Validation error tests
 
     #[test]
