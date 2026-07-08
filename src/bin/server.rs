@@ -32,6 +32,17 @@
 //!   the server persists state across restarts. When unset (and `ALETHEIADB_CONFIG`
 //!   is also unset), runs in-memory (ephemeral — useful for demos, useless
 //!   for production).
+//! - `ALETHEIADB_AUTH_MODE`: `required` (default) or `anonymous`. In
+//!   `required` mode every request must present a valid API key
+//!   (`Authorization: Bearer <key>` or `x-api-key`), and the server refuses
+//!   to start with zero credentials. `anonymous` disables authentication
+//!   entirely (explicit opt-in; a prominent warning is logged). Invalid
+//!   values fall back to `required` (fail-closed) with a warning.
+//! - `ALETHEIADB_BOOTSTRAP_ADMIN_KEY`: Plaintext admin key installed at
+//!   startup as principal `bootstrap-admin` (role `admin`). Memory-only —
+//!   re-supply it on every start, or use it once to mint persisted keys via
+//!   `POST /admin/keys` (persisted under `{data_dir}/auth/keys.json` when a
+//!   data dir is configured).
 //!
 //! # Endpoints
 //!
@@ -48,6 +59,7 @@
 //! The server handles SIGTERM and SIGINT signals for graceful shutdown,
 //! allowing in-flight requests to complete before terminating.
 
+use aletheiadb::auth::{AuthMode, SecretString};
 use aletheiadb::http::{CorsConfig, ServerConfig, run_server};
 use std::env;
 use std::path::PathBuf;
@@ -112,6 +124,30 @@ fn parse_data_dir() -> Option<PathBuf> {
     aletheiadb::config::data_dir_from_env()
 }
 
+/// Parse `ALETHEIADB_AUTH_MODE`. Unset → `Required` (the conservative
+/// default). An invalid value also falls back to `Required` — never to
+/// anonymous — so a typo cannot silently disable authentication.
+fn parse_auth_mode() -> AuthMode {
+    match env::var("ALETHEIADB_AUTH_MODE") {
+        Ok(raw) => match raw.parse::<AuthMode>() {
+            Ok(mode) => mode,
+            Err(e) => {
+                eprintln!("WARNING: {e}. Falling back to auth mode 'required'.");
+                AuthMode::Required
+            }
+        },
+        Err(_) => AuthMode::Required,
+    }
+}
+
+/// Parse `ALETHEIADB_BOOTSTRAP_ADMIN_KEY` into a redacted secret, if set.
+fn parse_bootstrap_admin_key() -> Option<SecretString> {
+    match env::var("ALETHEIADB_BOOTSTRAP_ADMIN_KEY") {
+        Ok(raw) if !raw.trim().is_empty() => Some(SecretString::new(raw)),
+        _ => None,
+    }
+}
+
 #[autumn_web::main]
 async fn main() {
     let port = parse_port();
@@ -119,9 +155,16 @@ async fn main() {
     let cors = parse_cors_config();
     let data_dir = parse_data_dir();
 
-    let mut builder = ServerConfig::builder().port(port).host(host).cors(cors);
+    let mut builder = ServerConfig::builder()
+        .port(port)
+        .host(host)
+        .cors(cors)
+        .auth_mode(parse_auth_mode());
     if let Some(path) = data_dir {
         builder = builder.data_dir(path);
+    }
+    if let Some(key) = parse_bootstrap_admin_key() {
+        builder = builder.bootstrap_admin_key(key);
     }
     let config = builder.build();
 

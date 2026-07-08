@@ -11,6 +11,7 @@
 use std::sync::Arc;
 
 use aletheiadb::AletheiaDB;
+use aletheiadb::auth::AuthMode;
 use aletheiadb::http::{AppState, ServerConfig, build_test_router};
 use autumn_web::test::TestApp;
 use axum::http::StatusCode;
@@ -19,7 +20,11 @@ use serde_json::Value;
 fn test_client() -> autumn_web::test::TestClient {
     let db = Arc::new(AletheiaDB::new().unwrap());
     let state = AppState::new(db);
-    let config = ServerConfig::default();
+    // Explicit anonymous opt-in (Issue #3350); auth behavior is covered
+    // by tests/http_auth.rs.
+    let config = ServerConfig::builder()
+        .auth_mode(AuthMode::Anonymous)
+        .build();
     let router = build_test_router(state, &config).expect("router builds");
     TestApp::from_router(router)
 }
@@ -60,6 +65,7 @@ async fn cors_headers_present() {
     let db = Arc::new(AletheiaDB::new().unwrap());
     let state = AppState::new(db);
     let config = ServerConfig::builder()
+        .auth_mode(AuthMode::Anonymous)
         .cors(aletheiadb::http::CorsConfig::permissive())
         .build();
     let router = build_test_router(state, &config).unwrap();

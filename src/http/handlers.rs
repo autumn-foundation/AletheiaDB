@@ -16,7 +16,9 @@
 //! ```
 
 use crate::api::transaction::WriteOps;
+use crate::auth::AccessClass;
 use crate::core::NodeId;
+use crate::http::auth::AuthContext;
 use crate::http::converters::{
     interned_to_string, json_to_parameter_map, json_to_property_map, property_map_to_json,
     query_row_to_json,
@@ -26,6 +28,7 @@ use crate::http::state::AppState;
 use crate::query::QueryBuilder;
 use crate::query::converter::{parse_query, parse_query_with_params};
 use crate::query::ir::{Predicate, PredicateValue};
+use crate::query::read_only::detect_mutating_clause;
 use autumn_web::Route;
 use autumn_web::prelude::{get, post, routes};
 use axum::Json;
@@ -48,11 +51,15 @@ pub struct HealthResponse {
 }
 
 /// Health check endpoint. Returns `{"status": "healthy"}` with HTTP 200.
+///
+/// Classified [`AccessClass::Metrics`]: every role may probe liveness, but
+/// (in required-auth mode) only with a valid credential.
 #[get("/status")]
-pub async fn health_check() -> Json<HealthResponse> {
-    Json(HealthResponse {
+pub async fn health_check(auth: AuthContext) -> Result<Json<HealthResponse>, AletheiaHttpError> {
+    auth.authorize(AccessClass::Metrics)?;
+    Ok(Json(HealthResponse {
         status: "healthy".to_string(),
-    })
+    }))
 }
 
 // ============================================================================
@@ -139,7 +146,7 @@ pub struct ApiResponse {
 }
 
 impl ApiResponse {
-    fn success(data: Value) -> Self {
+    pub(crate) fn success(data: Value) -> Self {
         Self {
             success: true,
             data: Some(data),
@@ -579,12 +586,59 @@ fn classify_query_error(msg: String) -> AletheiaHttpError {
     }
 }
 
+/// Classify a `/query` operation into the [`AccessClass`] it requires.
+///
+/// Exhaustive match — no wildcard arm — so adding a new `QueryRequest`
+/// variant forces an explicit classification decision at compile time.
+/// This mapping is the seed of the authorization conformance matrix.
+fn query_access_class(req: &QueryRequest) -> AccessClass {
+    match req {
+        // Read-only lookups and traversals.
+        QueryRequest::FindNode { .. }
+        | QueryRequest::GetNode { .. }
+        | QueryRequest::BulkGetNodes { .. }
+        | QueryRequest::FindNeighbors { .. } => AccessClass::Read,
+        // Graph mutations.
+        QueryRequest::CreateNode { .. }
+        | QueryRequest::BulkCreateNodes { .. }
+        | QueryRequest::BulkUpdateNodes { .. }
+        | QueryRequest::BulkDeleteNodes { .. } => AccessClass::Write,
+        // Query-string execution: classify per statement using the shared
+        // read-only guard (the same one the MCP `query` tool uses). A
+        // statement with no mutating clause needs only Read.
+        QueryRequest::ExecuteQuery { query, .. } => {
+            if detect_mutating_clause(query).is_none() {
+                AccessClass::Read
+            } else {
+                AccessClass::Write
+            }
+        }
+        // A bulk batch is Read only if *every* statement is read-only.
+        QueryRequest::BulkExecuteQuery { queries } => {
+            if queries
+                .iter()
+                .all(|q| detect_mutating_clause(&q.query).is_none())
+            {
+                AccessClass::Read
+            } else {
+                AccessClass::Write
+            }
+        }
+    }
+}
+
 /// Polymorphic `/query` endpoint. Dispatches on the `operation` tag.
+///
+/// Authorization happens *before* any database work: the request's operation
+/// is classified via [`query_access_class`] and checked against the caller's
+/// role.
 #[post("/query")]
 pub async fn handle_query(
+    auth: AuthContext,
     state: AppState,
     Json(req): Json<QueryRequest>,
 ) -> Result<Json<ApiResponse>, AletheiaHttpError> {
+    auth.authorize(query_access_class(&req))?;
     let db = state.db_arc();
 
     let data = match req {
@@ -627,7 +681,9 @@ pub async fn handle_query(
 /// handlers are declared.
 #[must_use]
 pub fn all_routes() -> Vec<Route> {
-    routes![health_check, handle_query]
+    let mut r = routes![health_check, handle_query];
+    r.extend(crate::http::admin::admin_routes());
+    r
 }
 
 #[cfg(test)]
@@ -669,6 +725,46 @@ mod tests {
             json_to_predicate_value(&Value::Object(serde_json::Map::new())),
             None
         );
+    }
+
+    /// Conformance matrix: every `/query` operation maps to the expected
+    /// access class (Issue #3350). The match in `query_access_class` has no
+    /// wildcard arm, so new operations cannot silently skip classification.
+    #[test]
+    fn query_access_class_conformance_matrix() {
+        use AccessClass::{Read, Write};
+
+        let read_ops = [
+            json!({"operation": "find_node", "label": "Person"}),
+            json!({"operation": "get_node", "node_id": 1}),
+            json!({"operation": "bulk_get_nodes", "node_ids": [1, 2]}),
+            json!({"operation": "find_neighbors", "node_id": 1}),
+            json!({"operation": "execute_query", "query": "MATCH (n:Person) RETURN n"}),
+            json!({"operation": "bulk_execute_query", "queries": [
+                {"query": "MATCH (n) RETURN n"},
+                {"query": "MATCH (m:X) RETURN m"},
+            ]}),
+        ];
+        for op in &read_ops {
+            let req: QueryRequest = serde_json::from_value(op.clone()).expect("deserialize");
+            assert_eq!(query_access_class(&req), Read, "expected Read for {op}");
+        }
+
+        let write_ops = [
+            json!({"operation": "create_node", "label": "Person"}),
+            json!({"operation": "bulk_create_nodes", "nodes": [{"label": "P"}]}),
+            json!({"operation": "bulk_update_nodes", "updates": [{"node_id": 1}]}),
+            json!({"operation": "bulk_delete_nodes", "node_ids": [1]}),
+            json!({"operation": "execute_query", "query": "CREATE (n:Person {name: 'X'})"}),
+            json!({"operation": "bulk_execute_query", "queries": [
+                {"query": "MATCH (n) RETURN n"},
+                {"query": "MATCH (n) DETACH DELETE n"},
+            ]}),
+        ];
+        for op in &write_ops {
+            let req: QueryRequest = serde_json::from_value(op.clone()).expect("deserialize");
+            assert_eq!(query_access_class(&req), Write, "expected Write for {op}");
+        }
     }
 
     #[test]
