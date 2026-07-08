@@ -27,7 +27,7 @@ pub use iterators::*;
 pub use stats::CurrentStats;
 use stats::FilterStats;
 pub use vector::VectorIndexInfo;
-use vector::{TemporalVectorIndexEntry, TemporalVectorIndexState, VectorIndexEntry};
+use vector::{TemporalVectorIndexEntry, VectorIndexEntry};
 
 /// Maximum number of vector-indexed properties allowed per database.
 ///
@@ -58,8 +58,6 @@ pub struct CurrentStorage {
     /// Multi-property temporal vector indexes (Issue #389 fix)
     /// Maps property name -> TemporalVectorIndexEntry
     temporal_vector_indexes: DashMap<String, TemporalVectorIndexEntry>,
-    /// Legacy temporal vector index state (for backward compatibility)
-    temporal_vector_index_state: Arc<RwLock<TemporalVectorIndexState>>,
     /// Adaptive over-fetch statistics per label (Issue #334)
     /// Maps label -> FilterStats for tracking label-specific filter pass rates
     ///
@@ -85,7 +83,6 @@ impl CurrentStorage {
             version_id_gen: IdGenerator::new(),
             vector_indexes: DashMap::new(),
             temporal_vector_indexes: DashMap::new(),
-            temporal_vector_index_state: Arc::new(RwLock::new(TemporalVectorIndexState::new())),
             filter_stats: DashMap::new(),
             snapshot_lock: RwLock::new(()),
         }
@@ -1440,18 +1437,8 @@ impl CurrentStorage {
         // Insert into multi-property DashMap
         self.temporal_vector_indexes.insert(
             property_name.to_string(),
-            TemporalVectorIndexEntry {
-                index: Arc::clone(&index),
-                config: config.clone(),
-            },
+            TemporalVectorIndexEntry { index, config },
         );
-
-        // Also update legacy state for backward compatibility
-        // (uses the most recently added index)
-        let mut state = self.temporal_vector_index_state.write();
-        state.index = Some(index);
-        state.property_name = Some(property_name.to_string());
-        state.config = Some(config);
 
         Ok(())
     }
@@ -1488,18 +1475,47 @@ impl CurrentStorage {
             .map(|entry| Arc::clone(&entry.index))
     }
 
-    /// Get a reference to the temporal vector index if enabled (legacy single-property API).
+    /// Get the default property name for temporal vector indexing.
     ///
-    /// Returns `None` if temporal vector indexing is not enabled.
-    /// For multi-property support, use `get_temporal_vector_index_for` instead.
-    pub(crate) fn get_temporal_vector_index(&self) -> Option<Arc<TemporalVectorIndex>> {
-        let state = self.temporal_vector_index_state.read();
-        state.index.clone()
+    /// This backs the property-less temporal query APIs (`find_similar_as_of`,
+    /// `find_similar_in_range`). It deterministically selects the alphabetically
+    /// first property name from the enabled temporal vector indexes, mirroring
+    /// [`get_default_vector_property_name`](Self::get_default_vector_property_name).
+    ///
+    /// Returns `None` if no temporal vector indexes are enabled.
+    fn get_default_temporal_vector_property_name(&self) -> Option<String> {
+        if self.temporal_vector_indexes.is_empty() {
+            return None;
+        }
+
+        // Optimization: if len == 1, just take it (no sorting needed)
+        if self.temporal_vector_indexes.len() == 1 {
+            return self
+                .temporal_vector_indexes
+                .iter()
+                .next()
+                .map(|r| r.key().clone());
+        }
+
+        // Find min key alphabetically. Use `.fold` instead of `.min_by` so each
+        // DashMap guard is dropped immediately (see get_default_vector_property_name).
+        self.temporal_vector_indexes
+            .iter()
+            .fold(None, |min: Option<String>, current| {
+                let key = current.key();
+                match min {
+                    Some(m) if m.as_str() <= key.as_str() => Some(m),
+                    _ => Some(key.clone()),
+                }
+            })
     }
 
     /// Find k most similar nodes at a specific point in time.
     ///
     /// Returns nodes similar to the query embedding as they existed at the given timestamp.
+    /// Queries the default temporal vector index (the alphabetically first indexed
+    /// property when multiple temporal indexes are enabled). Use
+    /// [`find_similar_as_of_in`](Self::find_similar_as_of_in) to target a specific property.
     ///
     /// # Arguments
     ///
@@ -1533,15 +1549,16 @@ impl CurrentStorage {
         k: usize,
         timestamp: Timestamp,
     ) -> Result<Vec<(NodeId, f32)>> {
-        let state = self.temporal_vector_index_state.read();
-        let index = state.index.as_ref().ok_or_else(|| {
-            crate::core::error::Error::Vector(crate::core::error::VectorError::IndexError(
+        let property_name = self
+            .get_default_temporal_vector_property_name()
+            .ok_or_else(|| {
+                crate::core::error::Error::Vector(crate::core::error::VectorError::IndexError(
                 "Temporal vector index is not enabled. Call enable_temporal_vector_index() first."
                     .to_string(),
             ))
-        })?;
+            })?;
 
-        index.find_similar_as_of(embedding, k, timestamp)
+        self.find_similar_as_of_in(&property_name, embedding, k, timestamp)
     }
 
     /// Find k most similar nodes at a specific point in time for a specific property.
@@ -1734,51 +1751,71 @@ impl CurrentStorage {
         k: usize,
         time_range: crate::core::temporal::TimeRange,
     ) -> Result<TemporalSearchResults> {
-        let state = self.temporal_vector_index_state.read();
-        let index = state.index.as_ref().ok_or_else(|| {
-            crate::core::error::Error::Vector(crate::core::error::VectorError::IndexError(
+        let property_name = self
+            .get_default_temporal_vector_property_name()
+            .ok_or_else(|| {
+                crate::core::error::Error::Vector(crate::core::error::VectorError::IndexError(
                 "Temporal vector index is not enabled. Call enable_temporal_vector_index() first."
                     .to_string(),
             ))
-        })?;
+            })?;
+
+        let index = self
+            .get_temporal_vector_index_for(&property_name)
+            .ok_or_else(|| {
+                crate::core::error::Error::Vector(crate::core::error::VectorError::IndexError(
+                "Temporal vector index is not enabled. Call enable_temporal_vector_index() first."
+                    .to_string(),
+            ))
+            })?;
 
         index.find_similar_in_range(embedding, k, time_range)
     }
 
-    /// Notify the temporal vector index of a transaction.
+    /// Notify all temporal vector indexes of a transaction.
     ///
     /// This should be called after committing a transaction to trigger snapshot
-    /// creation based on the configured strategy.
+    /// creation based on each index's configured strategy.
     #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn on_temporal_vector_transaction(&self) -> Result<()> {
-        let state = self.temporal_vector_index_state.read();
-        if let Some(index) = &state.index {
+        for (_, index) in self.collect_temporal_vector_indexes() {
             index.on_transaction()?;
         }
         Ok(())
     }
 
-    /// Helper to index a vector in the temporal index.
+    /// Collect `(property_name, index)` pairs for all enabled temporal vector indexes.
+    ///
+    /// Snapshots the DashMap into a `Vec` so callers never invoke index operations
+    /// while holding DashMap shard guards.
+    fn collect_temporal_vector_indexes(&self) -> Vec<(String, Arc<TemporalVectorIndex>)> {
+        if self.temporal_vector_indexes.is_empty() {
+            return Vec::new();
+        }
+        self.temporal_vector_indexes
+            .iter()
+            .map(|entry| (entry.key().clone(), Arc::clone(&entry.value().index)))
+            .collect()
+    }
+
+    /// Helper to index a node's vectors in every enabled temporal vector index.
     fn try_index_temporal_vector(
         &self,
         node_id: NodeId,
         properties: &PropertyMap,
         timestamp: Timestamp,
     ) -> Result<()> {
-        let state = self.temporal_vector_index_state.read();
-        if let Some(index) = &state.index
-            && let Some(prop_name) = &state.property_name
-            && let Some(vector) = properties.get(prop_name).and_then(|v| v.as_vector())
-        {
-            index.add(node_id, vector, timestamp)?;
+        for (property_name, index) in self.collect_temporal_vector_indexes() {
+            if let Some(vector) = properties.get(&property_name).and_then(|v| v.as_vector()) {
+                index.add(node_id, vector, timestamp)?;
+            }
         }
         Ok(())
     }
 
-    /// Helper to remove a vector from the temporal index.
+    /// Helper to remove a node's vectors from every enabled temporal vector index.
     fn try_remove_temporal_vector(&self, node_id: NodeId, timestamp: Timestamp) -> Result<()> {
-        let state = self.temporal_vector_index_state.read();
-        if let Some(index) = &state.index {
+        for (_, index) in self.collect_temporal_vector_indexes() {
             index.remove(node_id, timestamp)?;
         }
         Ok(())

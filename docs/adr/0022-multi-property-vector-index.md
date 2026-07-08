@@ -170,16 +170,20 @@ CurrentStorage
 │   ├── "content_embedding" → VectorIndexEntry { index: HnswIndex, config: HnswConfig(768, Cosine) }
 │   └── "image_embedding" → VectorIndexEntry { index: HnswIndex, config: HnswConfig(512, Euclidean) }
 │
-├── temporal_vector_indexes: DashMap<String, TemporalVectorIndexEntry>
-│   ├── "embedding" → TemporalVectorIndexEntry { index: TemporalVectorIndex, config: TemporalVectorConfig }
-│   └── ... (one entry per enabled temporal property)
-│
-└── temporal_vector_index_state: RwLock<TemporalVectorIndexState>  // For backwards compatibility
-    ├── index: Option<Arc<TemporalVectorIndex>>  // Points to first enabled temporal index
-    └── property_name: Option<String>
+└── temporal_vector_indexes: DashMap<String, TemporalVectorIndexEntry>
+    ├── "embedding" → TemporalVectorIndexEntry { index: TemporalVectorIndex, config: TemporalVectorConfig }
+    └── ... (one entry per enabled temporal property)
 ```
 
-**Note:** The `temporal_vector_index_state` maintains backwards compatibility with the original single-property API while `temporal_vector_indexes` DashMap provides true multi-property temporal support.
+**Note (updated by Issue #450):** The legacy `temporal_vector_index_state`
+(`RwLock<TemporalVectorIndexState>`), which mirrored the most recently enabled
+temporal index for the original single-property API, has been removed. The
+`temporal_vector_indexes` DashMap is now the single source of truth: write-path
+indexing, removals, and transaction snapshot notifications fan out to every
+enabled temporal index, and the property-less APIs (`find_similar_as_of`,
+`find_similar_in_range`) resolve the default property deterministically as the
+alphabetically first temporal index (mirroring the non-temporal default-property
+rule) instead of the last enabled one.
 
 ### API Method Naming Convention
 

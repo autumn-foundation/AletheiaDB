@@ -1224,6 +1224,168 @@ fn test_multi_property_temporal_indexes() {
     );
 }
 
+/// Helper for the multi-property write-path tests: enables a temporal vector
+/// index that snapshots on every transaction.
+fn enable_temporal_index_every_tx(db: &AletheiaDB, property: &str) {
+    let hnsw_config = HnswConfig::new(4, DistanceMetric::Cosine).with_capacity(100);
+    db.vector_index(property)
+        .hnsw(hnsw_config.clone())
+        .temporal(TemporalVectorConfig {
+            snapshot_strategy: SnapshotStrategy::TransactionInterval(1),
+            retention_policy: RetentionPolicy::KeepN(100),
+            max_snapshots: 100,
+            full_snapshot_interval: 10,
+            hnsw_config: Some(hnsw_config),
+        })
+        .enable()
+        .unwrap_or_else(|e| panic!("Should enable temporal index for {property}: {e}"));
+}
+
+/// Issue #450: with multiple temporal vector indexes enabled, EVERY index must
+/// receive write-path updates -- not just the most recently enabled one (the
+/// behavior of the removed legacy single-property state).
+#[test]
+fn test_multi_property_temporal_indexes_all_receive_writes() {
+    let db = AletheiaDB::new().unwrap();
+
+    // Enable temporal indexes for two properties. The first-enabled property is
+    // the one the legacy single-property state used to drop writes for.
+    enable_temporal_index_every_tx(&db, "title_embedding");
+    enable_temporal_index_every_tx(&db, "content_embedding");
+
+    // Create a node carrying vectors for BOTH properties.
+    let title_emb = vec![1.0f32, 0.0, 0.0, 0.0];
+    let content_emb = vec![0.0f32, 1.0, 0.0, 0.0];
+    let node_id = db
+        .create_node(
+            "Doc",
+            PropertyMapBuilder::new()
+                .insert_vector("title_embedding", &title_emb)
+                .insert_vector("content_embedding", &content_emb)
+                .build(),
+        )
+        .unwrap();
+
+    let now = aletheiadb::core::temporal::time::now();
+
+    // The FIRST-enabled property's temporal index must contain the node.
+    let title_results = db
+        .find_similar_as_of_in("title_embedding", &title_emb, 10, now)
+        .expect("temporal query on first-enabled property should succeed");
+    assert!(
+        title_results.iter().any(|(id, _)| *id == node_id),
+        "first-enabled temporal index must receive write-path updates, got: {title_results:?}"
+    );
+
+    // The SECOND-enabled property's temporal index must contain the node too.
+    let content_results = db
+        .find_similar_as_of_in("content_embedding", &content_emb, 10, now)
+        .expect("temporal query on second-enabled property should succeed");
+    assert!(
+        content_results.iter().any(|(id, _)| *id == node_id),
+        "second-enabled temporal index must receive write-path updates, got: {content_results:?}"
+    );
+}
+
+/// Issue #450: node deletion must remove the node's vectors from ALL temporal
+/// vector indexes, not just the most recently enabled one.
+#[test]
+fn test_multi_property_temporal_indexes_all_receive_removals() {
+    let db = AletheiaDB::new().unwrap();
+
+    enable_temporal_index_every_tx(&db, "title_embedding");
+    enable_temporal_index_every_tx(&db, "content_embedding");
+
+    let title_emb = vec![1.0f32, 0.0, 0.0, 0.0];
+    let content_emb = vec![0.0f32, 1.0, 0.0, 0.0];
+    let node_id = db
+        .create_node(
+            "Doc",
+            PropertyMapBuilder::new()
+                .insert_vector("title_embedding", &title_emb)
+                .insert_vector("content_embedding", &content_emb)
+                .build(),
+        )
+        .unwrap();
+
+    db.write(|tx| tx.delete_node(node_id)).unwrap();
+    let after_delete = aletheiadb::core::temporal::time::now();
+
+    for (property, query) in [
+        ("title_embedding", &title_emb),
+        ("content_embedding", &content_emb),
+    ] {
+        let results = db
+            .find_similar_as_of_in(property, query, 10, after_delete)
+            .unwrap_or_default();
+        assert!(
+            !results.iter().any(|(id, _)| *id == node_id),
+            "deleted node must be absent from '{property}' temporal index, got: {results:?}"
+        );
+    }
+}
+
+/// Issue #450: the property-less `find_similar_as_of` must keep working after
+/// the legacy single-property state removal (single index enabled).
+#[test]
+fn test_find_similar_as_of_default_property_single_index() {
+    let db = AletheiaDB::new().unwrap();
+
+    enable_temporal_index_every_tx(&db, "embedding");
+
+    let emb = vec![1.0f32, 0.0, 0.0, 0.0];
+    let node_id = db
+        .create_node(
+            "Doc",
+            PropertyMapBuilder::new()
+                .insert_vector("embedding", &emb)
+                .build(),
+        )
+        .unwrap();
+
+    let now = aletheiadb::core::temporal::time::now();
+    let results = db
+        .find_similar_as_of(&emb, 10, now)
+        .expect("property-less temporal query should resolve the only temporal index");
+    assert!(
+        results.iter().any(|(id, _)| *id == node_id),
+        "property-less find_similar_as_of should find the node, got: {results:?}"
+    );
+}
+
+/// Issue #450: with multiple temporal indexes, the property-less
+/// `find_similar_as_of` deterministically uses the alphabetically-first
+/// property (mirroring the non-temporal default-property rule), instead of the
+/// legacy "most recently enabled" behavior.
+#[test]
+fn test_find_similar_as_of_default_property_is_alphabetical() {
+    let db = AletheiaDB::new().unwrap();
+
+    // Enable in reverse-alphabetical order so "last enabled" != "alphabetical".
+    enable_temporal_index_every_tx(&db, "b_embedding");
+    enable_temporal_index_every_tx(&db, "a_embedding");
+
+    // Node only has a vector for the alphabetically-first property.
+    let emb = vec![1.0f32, 0.0, 0.0, 0.0];
+    let node_id = db
+        .create_node(
+            "Doc",
+            PropertyMapBuilder::new()
+                .insert_vector("a_embedding", &emb)
+                .build(),
+        )
+        .unwrap();
+
+    let now = aletheiadb::core::temporal::time::now();
+    let results = db
+        .find_similar_as_of(&emb, 10, now)
+        .expect("property-less temporal query should use the alphabetically-first index");
+    assert!(
+        results.iter().any(|(id, _)| *id == node_id),
+        "find_similar_as_of should query 'a_embedding' (alphabetically first), got: {results:?}"
+    );
+}
+
 /// Test that temporal queries on non-existent property fail gracefully.
 #[test]
 fn test_temporal_query_nonexistent_property() {

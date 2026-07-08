@@ -56,6 +56,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Removed the legacy single-property temporal vector index state (Issue
+  #450): the internal `TemporalVectorIndexState` (which mirrored only the
+  most recently enabled temporal index) is gone, and the multi-property
+  `temporal_vector_indexes` DashMap introduced by Issue #389 is now the
+  single source of truth. No public types were removed, but one behavior
+  changed when **multiple** temporal vector indexes are enabled: the
+  property-less temporal APIs — `AletheiaDB::find_similar_as_of`
+  (deprecated), `similarity_search(...).at_time(...)`, and
+  `CurrentStorage::find_similar_as_of` / `find_similar_in_range` — now
+  deterministically query the **alphabetically first** temporal-indexed
+  property (mirroring the non-temporal default-property rule) instead of
+  the most recently enabled one. Migration: name the property explicitly.
+
+  ```rust
+  // Before (ambiguous with several temporal indexes -- used the
+  // index that happened to be enabled last):
+  let results = db.find_similar_as_of(&query, 10, ts)?;
+
+  // After (explicit property -- recommended):
+  let results = db.find_similar_as_of_in("content_embedding", &query, 10, ts)?;
+  ```
+
 - MCP tool error responses are now structured (Issue #3234): every error is
   `{"error": {"code", "message", "retriable", "details"?}}` instead of
   `{"error": "<string>"}`. `code` is drawn from a stable seven-value enum
@@ -74,6 +96,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Multi-property temporal vector indexes now all receive write-path updates
+  (Issue #450): with two or more temporal vector indexes enabled, node
+  creates/updates now index vectors into **every** matching property index,
+  deletes remove the node from every index, and post-commit snapshot
+  notifications reach every index. Previously only the most recently enabled
+  temporal index was maintained, silently leaving earlier-enabled temporal
+  indexes empty for point-in-time queries.
 - `create_edge_with_valid_time` now enforces the same "not more than one
   year in the future" cap as every other `*_with_valid_time` operation; it
   previously accepted an arbitrarily-far-future `valid_time` on edges.

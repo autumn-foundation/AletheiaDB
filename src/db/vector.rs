@@ -138,12 +138,15 @@ impl AletheiaDB {
             self.current
                 .enable_temporal_vector_index(property_name, resolved_config)?;
 
-            // Get the temporal vector index from current storage
-            let temporal_index = self.current.get_temporal_vector_index().ok_or_else(|| {
-                crate::core::error::Error::Vector(crate::core::error::VectorError::IndexError(
-                    "Temporal vector index not found after enabling".to_string(),
-                ))
-            })?;
+            // Get the temporal vector index for this property from current storage
+            let temporal_index = self
+                .current
+                .get_temporal_vector_index_for(property_name)
+                .ok_or_else(|| {
+                    crate::core::error::Error::Vector(crate::core::error::VectorError::IndexError(
+                        "Temporal vector index not found after enabling".to_string(),
+                    ))
+                })?;
 
             // Register pre-anchor hooks with historical storage (for strong consistency)
             // Both node and edge hooks perform the same action, so we create one and clone it
