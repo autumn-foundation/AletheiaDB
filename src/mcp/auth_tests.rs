@@ -561,6 +561,53 @@ fn authenticated_write_stamps_principal_composing_with_source() {
     assert!(sources.contains(&"manual-correction"), "{history}");
 }
 
+/// Provenance forging: `ProvenanceRequest` has no `principal` field, so an
+/// extra `"principal"` key in the caller's JSON is ignored by serde — the
+/// stored principal is server-derived only (session identity or absent),
+/// never the forged value.
+#[test]
+fn forged_principal_key_in_provenance_request_is_ignored() {
+    // Anonymous session: forged key must not surface at all.
+    let anon = AletheiaMcpServer::new(db());
+    let (created, is_error) = dispatch(
+        &anon,
+        "create_node",
+        json!({
+            "label": "Doc",
+            "provenance": {"source": "import", "principal": "forged-admin"}
+        }),
+    );
+    assert!(!is_error, "{created}");
+    let node_id = created["id"].as_u64().expect("node id");
+    let (node, _) = dispatch(&anon, "get_node", json!({"node_id": node_id}));
+    assert_eq!(node["provenance"]["source"], json!("import"), "{node}");
+    assert_eq!(
+        node["provenance"].get("principal"),
+        None,
+        "forged principal must not be stored: {node}"
+    );
+
+    // Authenticated session: stored principal is the SESSION's, not the
+    // forged value.
+    let (server, _store, _id) = server_with_role(Role::Writer);
+    let (created, is_error) = dispatch(
+        &server,
+        "create_node",
+        json!({
+            "label": "Doc",
+            "provenance": {"source": "import", "principal": "forged-admin"}
+        }),
+    );
+    assert!(!is_error, "{created}");
+    let node_id = created["id"].as_u64().expect("node id");
+    let (node, _) = dispatch(&server, "get_node", json!({"node_id": node_id}));
+    assert_eq!(
+        node["provenance"]["principal"],
+        json!("test-writer"),
+        "principal must come from the verified session, never the caller: {node}"
+    );
+}
+
 /// A write with NO caller-supplied provenance still records the principal
 /// (a principal-only bundle) when the session is authenticated.
 #[test]
@@ -654,6 +701,64 @@ fn authenticated_edge_write_stamps_principal() {
 // AccessClass sanity: the classification only uses classes the role matrix
 // covers (guards against a future class being added without matrix review).
 // ============================================================================
+
+/// Independent snapshot of the privileged classifications, as hard-coded
+/// literals. The other conformance tests compare the table, the dispatch
+/// inventory, and the docs matrix against *each other* — a closed loop that
+/// would not notice a reviewed-in mistake propagated to all three. This
+/// test is the loop-breaker: reclassifying any tool's privilege level (or
+/// adding a Write/Metrics tool) must touch this literal list too.
+#[test]
+fn write_and_metrics_sets_match_hardcoded_snapshot() {
+    const EXPECTED_WRITE: [&str; 11] = [
+        "create_node",
+        "update_node",
+        "delete_node",
+        "delete_node_cascade",
+        "retract_node",
+        "create_edge",
+        "update_edge",
+        "delete_edge",
+        "retract_edge",
+        "enable_vector_index",
+        "enable_unique_constraint",
+    ];
+    const EXPECTED_METRICS: [&str; 1] = ["database_stats"];
+
+    let mut actual_write: Vec<&str> = TOOL_ACCESS_CLASSES
+        .iter()
+        .filter(|(_, class)| *class == AccessClass::Write)
+        .map(|(tool, _)| *tool)
+        .collect();
+    actual_write.sort_unstable();
+    let mut expected_write = EXPECTED_WRITE.to_vec();
+    expected_write.sort_unstable();
+    assert_eq!(
+        actual_write, expected_write,
+        "the Write tool set changed — this is a privilege-level change; \
+         review it deliberately, then update this snapshot"
+    );
+
+    let actual_metrics: Vec<&str> = TOOL_ACCESS_CLASSES
+        .iter()
+        .filter(|(_, class)| *class == AccessClass::Metrics)
+        .map(|(tool, _)| *tool)
+        .collect();
+    assert_eq!(
+        actual_metrics,
+        EXPECTED_METRICS.to_vec(),
+        "the Metrics tool set changed — review deliberately, then update \
+         this snapshot"
+    );
+
+    // Everything else must be Read (no fourth class sneaking in).
+    assert_eq!(
+        TOOL_ACCESS_CLASSES.len(),
+        actual_write.len() + actual_metrics.len() + 28,
+        "Read tool count changed (expected 28); if a tool was added or \
+         removed, re-verify its classification and update this count"
+    );
+}
 
 #[test]
 fn classification_uses_known_classes_only() {

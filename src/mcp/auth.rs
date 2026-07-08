@@ -14,9 +14,12 @@
 //!    within the sub-millisecond budget), so revoking the key in the store
 //!    takes effect on the very next call. A missing, unknown, or revoked
 //!    credential yields a uniform `UNAUTHENTICATED` error for every tool —
-//!    including unknown tool names, so the tool inventory is never leaked
-//!    to unauthenticated callers — and the error never reveals whether a
-//!    presented key exists nor echoes credential material.
+//!    including unknown tool names, so unauthenticated callers cannot probe
+//!    tool *existence* via error-shape differences (the inventory itself is
+//!    available through the ungated `tools/list`; the uniformity here is
+//!    about not leaking anything through per-name error variance) — and the
+//!    error never reveals whether a presented key exists nor echoes
+//!    credential material.
 //! 2. **Authorization** — the tool name is classified into an
 //!    [`AccessClass`] via [`TOOL_ACCESS_CLASSES`] and checked against the
 //!    principal's [`Role::allows`] matrix; a denial yields
@@ -215,8 +218,10 @@ impl SessionAuth {
     /// check the tool's [`AccessClass`] against the principal's role.
     ///
     /// Ordering is deliberate: authentication happens before (and
-    /// independently of) tool-name resolution, so an unknown tool name
-    /// cannot be used to probe the tool inventory without a credential.
+    /// independently of) tool-name resolution, so unauthenticated callers
+    /// cannot probe tool existence via error-shape differences (`tools/list`
+    /// itself is ungated — the property enforced here is uniform errors,
+    /// not inventory secrecy).
     /// For authenticated callers an unknown name returns `Ok(())` here and
     /// falls through to the dispatcher's normal unknown-tool error.
     pub(crate) fn authorize_tool(&self, tool_name: &str) -> Result<(), McpError> {

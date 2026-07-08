@@ -167,6 +167,223 @@ async fn x_api_key_header_is_accepted() {
 }
 
 // ---------------------------------------------------------------------------
+// Credential transport semantics (Authorization vs x-api-key)
+// ---------------------------------------------------------------------------
+
+/// The `Authorization` header, when present, SHADOWS `x-api-key`: a
+/// malformed `Authorization` is a hard 401 even when a valid `x-api-key`
+/// accompanies it. This pins the semantics so a future refactor cannot
+/// silently start falling back to the secondary header.
+#[tokio::test]
+async fn malformed_authorization_shadows_valid_x_api_key() {
+    let (client, store, _db) = required_client();
+    let key = mint(&store, "svc", Role::Reader);
+
+    let resp = client
+        .post("/query")
+        .header("Authorization", "Basic garbage")
+        .header("x-api-key", &key)
+        .json(&find_node_op())
+        .send()
+        .await;
+    assert_eq!(
+        resp.status.as_u16(),
+        401,
+        "a malformed Authorization header must not fall back to x-api-key"
+    );
+    let body: Value = serde_json::from_slice(&resp.body).expect("json body");
+    assert_eq!(body["code"], "UNAUTHENTICATED");
+}
+
+/// When BOTH headers carry valid keys, `Authorization` wins. Observable via
+/// roles: Authorization carries a reader key, x-api-key a writer key — a
+/// write must be denied with the READER's 403.
+#[tokio::test]
+async fn authorization_header_wins_over_x_api_key_when_both_valid() {
+    let (client, store, _db) = required_client();
+    let reader_key = mint(&store, "reader", Role::Reader);
+    let writer_key = mint(&store, "writer", Role::Writer);
+
+    let resp = client
+        .post("/query")
+        .header("Authorization", &format!("Bearer {reader_key}"))
+        .header("x-api-key", &writer_key)
+        .json(&create_node_op())
+        .send()
+        .await;
+    assert_eq!(
+        resp.status.as_u16(),
+        403,
+        "Authorization (reader) must win over x-api-key (writer)"
+    );
+    let body: Value = serde_json::from_slice(&resp.body).expect("json body");
+    assert_eq!(body["code"], "PERMISSION_DENIED");
+    assert!(
+        body["error"]
+            .as_str()
+            .expect("error string")
+            .contains("reader"),
+        "the denial must reflect the Authorization key's role: {body}"
+    );
+}
+
+/// The bearer scheme is case-insensitive (`bearer`, `BEARER`, `Bearer`).
+#[tokio::test]
+async fn bearer_scheme_is_case_insensitive() {
+    let (client, store, _db) = required_client();
+    let key = mint(&store, "svc", Role::Reader);
+
+    for scheme in ["bearer", "BEARER", "Bearer", "BeArEr"] {
+        let resp = client
+            .post("/query")
+            .header("Authorization", &format!("{scheme} {key}"))
+            .json(&find_node_op())
+            .send()
+            .await;
+        assert_eq!(
+            resp.status.as_u16(),
+            200,
+            "scheme casing '{scheme}' must be accepted"
+        );
+    }
+}
+
+/// An empty bearer token (`Authorization: Bearer ` / bare `Bearer`) is a 401.
+#[tokio::test]
+async fn empty_bearer_token_returns_401() {
+    let (client, _store, _db) = required_client();
+
+    for header_value in ["Bearer ", "Bearer", "Bearer   "] {
+        let resp = client
+            .post("/query")
+            .header("Authorization", header_value)
+            .json(&find_node_op())
+            .send()
+            .await;
+        assert_eq!(
+            resp.status.as_u16(),
+            401,
+            "empty bearer token ({header_value:?}) must be rejected"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Full route-inventory probes (closes the "future handler forgets the
+// AuthContext extractor" hole)
+// ---------------------------------------------------------------------------
+
+/// Every route in the real registry returns the uniform 401 body when no
+/// credential is presented — iterating `all_routes()` means a newly added
+/// handler that forgets the `AuthContext` extractor fails this test.
+#[tokio::test]
+async fn every_registered_route_returns_uniform_401_without_credential() {
+    let (client, _store, _db) = required_client();
+
+    let routes = aletheiadb::http::handlers::all_routes();
+    assert!(!routes.is_empty(), "route registry must not be empty");
+
+    let mut reference_body: Option<Vec<u8>> = None;
+    for route in &routes {
+        let builder = match route.method.as_str() {
+            "GET" => client.get(route.path),
+            // An empty JSON body is fine: the AuthContext extractor runs
+            // (and rejects) before body deserialization.
+            "POST" => client.post(route.path).json(&json!({})),
+            other => panic!(
+                "route {} {} uses method {other}: extend this test to cover it",
+                route.method, route.path
+            ),
+        };
+        let resp = builder.send().await;
+        assert_eq!(
+            resp.status.as_u16(),
+            401,
+            "route {} {} must return 401 without a credential",
+            route.method,
+            route.path
+        );
+        assert_eq!(
+            resp.header("www-authenticate"),
+            Some("Bearer"),
+            "route {} {} must carry WWW-Authenticate",
+            route.method,
+            route.path
+        );
+        let body: Value = serde_json::from_slice(&resp.body).expect("json 401 body");
+        assert_eq!(body["code"], "UNAUTHENTICATED");
+        match &reference_body {
+            None => reference_body = Some(resp.body.clone()),
+            Some(reference) => assert_eq!(
+                &resp.body, reference,
+                "401 body must be byte-identical across the whole inventory \
+                 (diverged on {} {})",
+                route.method, route.path
+            ),
+        }
+    }
+}
+
+/// With reader and metrics keys, every `/admin/keys*` route in the registry
+/// returns 403 PERMISSION_DENIED.
+#[tokio::test]
+async fn non_admin_roles_get_403_on_every_admin_route() {
+    let (client, store, _db) = required_client();
+    let reader_key = mint(&store, "reader", Role::Reader);
+    let metrics_key = mint(&store, "metrics", Role::Metrics);
+
+    let admin_routes: Vec<_> = aletheiadb::http::handlers::all_routes()
+        .into_iter()
+        .filter(|r| r.path.starts_with("/admin/keys"))
+        .collect();
+    assert_eq!(
+        admin_routes.len(),
+        3,
+        "admin route inventory changed — update this test"
+    );
+
+    // A body deserializable as BOTH CreateKeyRequest and RevokeKeyRequest,
+    // so extraction succeeds and the role check is what rejects.
+    let probe_body = json!({ "name": "probe", "role": "reader", "id": "nonexistent" });
+
+    for (role_name, key) in [("reader", &reader_key), ("metrics", &metrics_key)] {
+        for route in &admin_routes {
+            let builder = match route.method.as_str() {
+                "GET" => client.get(route.path),
+                "POST" => client.post(route.path).json(&probe_body),
+                other => panic!(
+                    "admin route {} {} uses method {other}: extend this test",
+                    route.method, route.path
+                ),
+            };
+            let resp = builder
+                .header("Authorization", &format!("Bearer {key}"))
+                .send()
+                .await;
+            assert_eq!(
+                resp.status.as_u16(),
+                403,
+                "{role_name} on {} {} must be 403",
+                route.method,
+                route.path
+            );
+            let body: Value = serde_json::from_slice(&resp.body).expect("json 403 body");
+            assert_eq!(body["code"], "PERMISSION_DENIED");
+            assert!(
+                body["error"]
+                    .as_str()
+                    .expect("error string")
+                    .contains(role_name),
+                "403 must name the denied role: {body}"
+            );
+        }
+    }
+
+    // Sanity: nothing was created by the probe attempts.
+    assert_eq!(store.len(), 2, "denied requests must not mint keys");
+}
+
+// ---------------------------------------------------------------------------
 // Role enforcement on /query and /status
 // ---------------------------------------------------------------------------
 
@@ -408,6 +625,34 @@ async fn admin_key_lifecycle_end_to_end() {
     let (status, body) = post_query_with_key(&client, &reader_key, &find_node_op()).await;
     assert_eq!(status, 401);
     assert_eq!(body["code"], "UNAUTHENTICATED");
+}
+
+/// Invalid create-key input (empty or overlong name) is a 400 BadRequest,
+/// not a 500 — the caller can repair the request.
+#[tokio::test]
+async fn create_key_with_invalid_name_returns_400() {
+    let (client, store, _db) = required_client();
+    let admin_key = mint(&store, "root", Role::Admin);
+
+    for name in ["".to_string(), "x".repeat(300)] {
+        let resp = client
+            .post("/admin/keys")
+            .header("Authorization", &format!("Bearer {admin_key}"))
+            .json(&json!({ "name": name, "role": "reader" }))
+            .send()
+            .await;
+        assert_eq!(
+            resp.status.as_u16(),
+            400,
+            "invalid key name (len {}) must be a 400, not a 500",
+            name.len()
+        );
+        let body: Value = serde_json::from_slice(&resp.body).expect("json body");
+        assert_eq!(body["success"], false);
+    }
+
+    // No key was minted by the rejected requests.
+    assert_eq!(store.len(), 1, "only the admin key should exist");
 }
 
 #[tokio::test]
