@@ -221,12 +221,26 @@ pub trait ReadOps {
     ///
     /// # Snapshot Isolation
     ///
-    /// This method filters edges to ensure only those visible in the current transaction
-    /// snapshot are returned. Edges created by concurrent transactions will not be seen.
+    /// In a read transaction, this method filters edges to ensure only those visible
+    /// in the current transaction snapshot are returned. Edges created by concurrent
+    /// transactions will not be seen.
+    ///
+    /// # Write transactions
+    ///
+    /// In a write transaction, only the **node existence check** is buffer-aware;
+    /// the returned edge list is read directly from committed current storage
+    /// **without snapshot filtering**. Consequently:
+    ///
+    /// - edges committed by concurrent transactions after this transaction
+    ///   started **are** returned,
+    /// - edges created in this transaction (still buffered, not yet committed)
+    ///   are **not** returned, and
+    /// - edges deleted in this transaction are **still** listed until commit.
     ///
     /// # Performance
     ///
-    /// - **Time**: O(degree) to collect visible edges, plus an O(1) node existence check
+    /// - **Time**: O(degree) to collect visible edges, plus a node existence check
+    ///   (O(1) fast path; may consult historical storage, O(log N), on a miss)
     /// - **Space**: Allocates a new `Vec` containing all edge IDs
     ///
     /// # Example
@@ -286,12 +300,25 @@ pub trait ReadOps {
     ///
     /// # Snapshot Isolation
     ///
-    /// This method filters edges to ensure only those visible in the current transaction
-    /// snapshot are returned.
+    /// In a read transaction, this method filters edges to ensure only those visible
+    /// in the current transaction snapshot are returned.
+    ///
+    /// # Write transactions
+    ///
+    /// In a write transaction, only the **node existence check** is buffer-aware;
+    /// the returned edge list is read directly from committed current storage
+    /// **without snapshot filtering**. Consequently:
+    ///
+    /// - edges committed by concurrent transactions after this transaction
+    ///   started **are** returned,
+    /// - edges created in this transaction (still buffered, not yet committed)
+    ///   are **not** returned, and
+    /// - edges deleted in this transaction are **still** listed until commit.
     ///
     /// # Performance
     ///
-    /// - **Time**: O(degree) to collect visible edges, plus an O(1) node existence check
+    /// - **Time**: O(degree) to collect visible edges, plus a node existence check
+    ///   (O(1) fast path; may consult historical storage, O(log N), on a miss)
     /// - **Space**: Allocates a new `Vec` containing all edge IDs
     ///
     /// # Example
@@ -343,9 +370,22 @@ pub trait ReadOps {
     ///
     /// The order of edges is **not guaranteed**.
     ///
+    /// # Write transactions
+    ///
+    /// In a write transaction, only the **node existence check** is buffer-aware;
+    /// the returned edge list is read directly from committed current storage
+    /// **without snapshot filtering**. Consequently:
+    ///
+    /// - edges committed by concurrent transactions after this transaction
+    ///   started **are** returned,
+    /// - edges created in this transaction (still buffered, not yet committed)
+    ///   are **not** returned, and
+    /// - edges deleted in this transaction are **still** listed until commit.
+    ///
     /// # Performance
     ///
-    /// - **Time**: O(degree) scan with label filtering, plus an O(1) node existence check
+    /// - **Time**: O(degree) scan with label filtering, plus a node existence check
+    ///   (O(1) fast path; may consult historical storage, O(log N), on a miss)
     /// - **Space**: Allocates a new `Vec` containing matching edge IDs
     ///
     /// # Example
@@ -380,7 +420,8 @@ pub trait ReadOps {
     ///
     /// The count of nodes currently committed in the storage engine. Returns `0`
     /// for an empty database. Deleted nodes are not counted. Nodes created in
-    /// this transaction but not yet committed are **not** included.
+    /// this transaction but not yet committed are **not** included. Conversely,
+    /// nodes deleted in this transaction but not yet committed are still included.
     ///
     /// # Consistency Note
     ///
@@ -411,7 +452,8 @@ pub trait ReadOps {
     ///
     /// The count of edges currently committed in the storage engine. Returns `0`
     /// for an empty database. Deleted edges are not counted. Edges created in
-    /// this transaction but not yet committed are **not** included.
+    /// this transaction but not yet committed are **not** included. Conversely,
+    /// edges deleted in this transaction but not yet committed are still included.
     ///
     /// # Consistency Note
     ///

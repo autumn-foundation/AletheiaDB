@@ -174,7 +174,6 @@ impl<'a> Alchemist<'a> {
                 // Actually ReadOps allows reading while WriteTx is active
                 let outgoing = tx.get_outgoing_edges(victim)?;
                 for edge_id in outgoing {
-                    // Safe to unwrap here because get_outgoing_edges returns existing edges
                     if let Ok(edge) = tx.get_edge(edge_id) {
                         // Resolve label to string for creation
                         let label_str = GLOBAL_INTERNER

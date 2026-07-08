@@ -2465,6 +2465,83 @@ mod tests {
             assert!(db.get_node(id).is_err());
         }
 
+        /// Review follow-up (#358/#359 fix round): retract_node_detach is
+        /// idempotent — a second detach on an already-retracted node is a
+        /// no-op returning already_retracted with edges_retracted: 0 (a
+        /// retracted node has no enumerable edges left to co-retract).
+        #[test]
+        fn double_retract_node_detach_is_idempotent() {
+            let (_tmp, db) = create_test_db().unwrap();
+            let now = time::now().wallclock();
+            let t_create = hours_ago(now, 3);
+            let t_retract = hours_ago(now, 1);
+
+            let a = db
+                .create_node_with_valid_time(
+                    "Person",
+                    PropertyMapBuilder::new().build(),
+                    Some(t_create),
+                )
+                .unwrap();
+            let b = db
+                .create_node_with_valid_time(
+                    "Person",
+                    PropertyMapBuilder::new().build(),
+                    Some(t_create),
+                )
+                .unwrap();
+            db.create_edge_with_valid_time(
+                a,
+                b,
+                "KNOWS",
+                PropertyMapBuilder::new().build(),
+                Some(t_create),
+            )
+            .unwrap();
+
+            let first = db.retract_node_detach(a, t_retract).unwrap();
+            assert!(!first.already_retracted);
+            assert_eq!(first.edges_retracted, 1);
+            let versions = db.get_node_history(a).unwrap().version_count();
+
+            let second = db.retract_node_detach(a, t_retract).unwrap();
+            assert!(second.already_retracted);
+            assert_eq!(
+                second.edges_retracted, 0,
+                "an idempotent re-detach must not re-count edges"
+            );
+            assert_eq!(
+                second.valid_to, t_retract,
+                "must return the existing valid_to"
+            );
+            assert_eq!(
+                db.get_node_history(a).unwrap().version_count(),
+                versions,
+                "idempotent re-detach must not append a version"
+            );
+        }
+
+        /// Review follow-up (#358/#359 fix round): retract_node_detach on a
+        /// NodeId that never existed is a typed NodeNotFound (the edge
+        /// enumeration tolerates the missing node; retract_node owns the
+        /// not-found semantics).
+        #[test]
+        fn retract_node_detach_nonexistent_node_is_node_not_found() {
+            let (_tmp, db) = create_test_db().unwrap();
+            let now = time::now().wallclock();
+            let missing = NodeId::new(999_999).unwrap();
+
+            let err = db
+                .retract_node_detach(missing, hours_ago(now, 1))
+                .unwrap_err();
+            match err {
+                Error::Storage(crate::core::error::StorageError::NodeNotFound(nid)) => {
+                    assert_eq!(nid, missing);
+                }
+                other => panic!("Expected StorageError::NodeNotFound, got: {other:?}"),
+            }
+        }
+
         /// Fix-round #11 pin: a buffered retraction in a transaction that
         /// ABORTS (closure error, never committed) leaves the node fully
         /// present with no version appended.

@@ -618,10 +618,16 @@ mod tests {
         let current = Arc::new(CurrentStorage::new());
         let tx = create_test_read_tx(TxId::new(1), current);
 
-        let result = tx.get_outgoing_edges(NodeId::new(999).unwrap());
+        let missing = NodeId::new(999).unwrap();
+        let result = tx.get_outgoing_edges(missing);
         assert!(
-            result.is_err(),
-            "get_outgoing_edges on a nonexistent node must return Err, got {result:?}"
+            matches!(
+                result,
+                Err(crate::core::error::Error::Storage(
+                    crate::core::error::StorageError::NodeNotFound(id)
+                )) if id == missing
+            ),
+            "get_outgoing_edges on a nonexistent node must return Err(NodeNotFound), got {result:?}"
         );
     }
 
