@@ -281,9 +281,17 @@ The "Mutation Testing" workflow (`.github/workflows/mutants.yml`) has two paths:
   shard `i % k`) so any subset of shards is a systematic, project-wide
   sample. Each weekly run therefore publishes an unbiased project-wide score
   estimate (`mutants-weekly-score` artifact containing `score.json`), and
-  the rotating start index walks through all 96 shards every 8 weeks, so
-  the whole project is covered every 8 weeks. Shard indexes are 0-based
-  (`--shard 0/96` … `--shard 95/96`).
+  the rotating start index walks through all 96 shards so the whole project
+  is covered **approximately** every 8 weeks (approximately: GitHub pauses
+  cron on repository inactivity, a failed week skips its window, and code
+  churn reassigns round-robin positions between weeks). Shard indexes are
+  0-based (`--shard 0/96` … `--shard 95/96`). The epoch-week number and
+  rotating start are pinned **once per run** by a small setup job and passed
+  to the shard jobs and the aggregate via job outputs, so re-running a
+  failed shard hours later (even across the epoch-week boundary) stays in
+  the same weekly window. If any shard artifact is missing or unusable, the
+  published summary and `score.json` are marked **partial** rather than
+  passed off as a full weekly estimate.
 - Both paths run tests under **cargo-nextest** (`--test-tool nextest`) for
   faster per-mutant test runs. Note: nextest does not run doctests, so a
   mutant only caught by a doctest would be reported as missed.
@@ -316,7 +324,8 @@ Run it locally against any `mutants.out` with `just mutants-gate`.
 Mutant exclusions are configured in `.cargo/mutants.toml`. Currently excluded:
 
 - `fmt` methods of `Display`/`Debug` impls (cosmetic output; asserting exact
-  strings adds brittleness, not correctness)
+  strings adds brittleness, not correctness) — 73 mutants at the time of
+  writing (12,301 → 12,228)
 
 `src/mcp/**` is deliberately **not** excluded — it is the actively developed
 LLM-facing surface and must stay under mutation pressure.

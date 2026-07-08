@@ -183,9 +183,15 @@ What changed (2026-07-08):
 - **Weekly run redesigned as a rotating sample**: 12 of 96 shards per week
   with `--sharding round-robin` (the default `slice` sharding is contiguous
   and would bias the sample), 0-indexed shard math, and a 350-minute
-  timeout. An aggregate job combines the 12 shard artifacts into a published
-  project-wide score estimate (`mutants-weekly-score` artifact); the
-  rotating window covers all 96 shards every 8 weeks.
+  timeout. The epoch week and rotating start are pinned once per run by a
+  setup job (so shard re-runs across the epoch-week boundary stay in their
+  window). An aggregate job combines the 12 shard artifacts into a published
+  project-wide score estimate (`mutants-weekly-score` artifact), marked
+  partial when shards are missing; the rotating window covers all 96 shards
+  approximately every 8 weeks (cron pauses on repo inactivity, failed weeks
+  skip their window, and code churn reassigns round-robin positions). The
+  shard-count geometry is provisional pending measured per-mutant nextest
+  timing.
 - **`.cargo/mutants.toml` created**, excluding only `Display`/`Debug` `fmt`
   impls. Deliberate deviation from the original ADR text: `src/mcp/**` is
   **not** excluded — it is the actively developed LLM-facing surface and

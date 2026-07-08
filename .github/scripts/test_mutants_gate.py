@@ -104,6 +104,29 @@ class TestGate(GateTestBase):
         # Missed mutants must be listed for diagnosis.
         self.assertIn("thing_missed_0", r.stdout)
 
+    def test_exact_threshold_pathological_float_ratio_passes(self):
+        # 29 / 50 is exactly 58% but 29/50*100 = 57.99999999999999 in floats.
+        # The gate must compare without division (detected*100 >= threshold*viable).
+        self.config.write_text("threshold = 58.0\nmin_mutants = 10\n")
+        out = self.tmp / "mutants.out"
+        write_mutants_out(out, caught=29, missed=21)
+        r = self.run_gate(out)
+        self.assertEqual(r.returncode, EXIT_PASS, r.stdout + r.stderr)
+        self.assertIn("PASS", r.stdout)
+        # Near-threshold scores are displayed with 2 decimals to avoid the
+        # nonsensical-looking "58.0% < 58.0%".
+        self.assertIn("58.00", r.stdout)
+
+    def test_pathological_ratio_against_other_thresholds(self):
+        for threshold, expected in ((57.0, EXIT_PASS), (29.0, EXIT_PASS),
+                                    (58.5, EXIT_GATE_FAIL)):
+            with self.subTest(threshold=threshold):
+                self.config.write_text(f"threshold = {threshold}\nmin_mutants = 10\n")
+                out = self.tmp / f"mutants-{threshold}.out"
+                write_mutants_out(out, caught=29, missed=21)
+                r = self.run_gate(out)
+                self.assertEqual(r.returncode, expected, r.stdout + r.stderr)
+
     def test_timeout_counts_toward_caught(self):
         # (5 caught + 2 timeout) / (5+2+3) = 70.0% >= 60%.
         out = self.tmp / "mutants.out"
@@ -137,6 +160,35 @@ class TestGate(GateTestBase):
         r = self.run_gate(self.tmp / "does-not-exist", "--allow-missing")
         self.assertEqual(r.returncode, EXIT_PASS, r.stdout + r.stderr)
         self.assertIn("no mutants", r.stdout.lower())
+
+    def test_allow_missing_rejects_existing_non_directory(self):
+        # A FILE at the mutants.out path is not "no mutants in diff" — it is
+        # an infrastructure problem even with --allow-missing.
+        bogus = self.tmp / "mutants.out"
+        bogus.write_text("i am not a directory\n")
+        r = self.run_gate(bogus, "--allow-missing")
+        self.assertEqual(r.returncode, EXIT_INFRA, r.stdout + r.stderr)
+
+    def test_missed_list_truncated_at_200_lines(self):
+        # GitHub silently drops step summaries over 1 MiB; the missed list is
+        # capped at 200 entries with a pointer to the artifact.
+        self.config.write_text("threshold = 99.0\nmin_mutants = 10\n")
+        out = self.tmp / "mutants.out"
+        write_mutants_out(out, caught=1, missed=250)
+        r = self.run_gate(out)
+        self.assertEqual(r.returncode, EXIT_GATE_FAIL, r.stdout + r.stderr)
+        self.assertIn("thing_missed_199 ", r.stdout)      # 200th entry shown
+        self.assertNotIn("thing_missed_200 ", r.stdout)   # 201st entry cut
+        self.assertIn("and 50 more", r.stdout)
+        self.assertIn("artifact", r.stdout)
+
+    def test_unknown_config_key_is_infra_error(self):
+        self.config.write_text(GOOD_CONFIG + "treshold = 90.0\n")
+        out = self.tmp / "mutants.out"
+        write_mutants_out(out, caught=10)
+        r = self.run_gate(out)
+        self.assertEqual(r.returncode, EXIT_INFRA, r.stdout + r.stderr)
+        self.assertIn("treshold", r.stderr)
 
     def test_dir_without_any_outcome_files_is_infra_error(self):
         out = self.tmp / "mutants.out"
@@ -181,9 +233,9 @@ class TestSummarize(GateTestBase):
                           missed=10, omit_empty=True)
         return shards
 
-    def run_summarize(self, shards):
+    def run_summarize(self, shards, *extra):
         return self.run_cmd("summarize", "--shards-dir", str(shards),
-                            "--config", str(self.config))
+                            "--config", str(self.config), *extra)
 
     def test_summarize_aggregates_three_shards(self):
         shards = self.make_shards()
@@ -226,6 +278,46 @@ class TestSummarize(GateTestBase):
         self.assertEqual(r.returncode, EXIT_PASS)
         combined = (shards / "combined-missed.txt").read_text()
         self.assertEqual(len(combined.splitlines()), 20)
+
+    def test_summarize_week_flag_recorded_in_score_json(self):
+        # The workflow pins WEEK once in a setup job and passes it down;
+        # summarize must record exactly that value, not time.time().
+        shards = self.make_shards()
+        r = self.run_summarize(shards, "--week", "2948")
+        self.assertEqual(r.returncode, EXIT_PASS, r.stdout + r.stderr)
+        data = json.loads((shards / "score.json").read_text())
+        self.assertEqual(data["week"], 2948)
+
+    def test_summarize_partial_when_fewer_shards_than_expected(self):
+        shards = self.make_shards()  # 3 shard artifacts
+        r = self.run_summarize(shards, "--expected-shards", "12")
+        self.assertEqual(r.returncode, EXIT_PASS, r.stdout + r.stderr)
+        self.assertIn("PARTIAL", r.stdout)
+        data = json.loads((shards / "score.json").read_text())
+        self.assertIs(data["partial"], True)
+        self.assertEqual(data["expected_shards"], 12)
+
+    def test_summarize_not_partial_when_expected_met(self):
+        shards = self.make_shards()
+        r = self.run_summarize(shards, "--expected-shards", "3")
+        self.assertEqual(r.returncode, EXIT_PASS, r.stdout + r.stderr)
+        self.assertNotIn("PARTIAL", r.stdout)
+        data = json.loads((shards / "score.json").read_text())
+        self.assertIs(data["partial"], False)
+
+    def test_summarize_reports_skipped_shard_dirs(self):
+        # A shard directory with no outcome files (e.g. empty artifact from a
+        # crashed job) must be surfaced, not silently dropped.
+        shards = self.make_shards()
+        (shards / "mutants-weekly-shard-3").mkdir()
+        r = self.run_summarize(shards, "--expected-shards", "4")
+        self.assertEqual(r.returncode, EXIT_PASS, r.stdout + r.stderr)
+        self.assertIn("PARTIAL", r.stdout)
+        self.assertIn("mutants-weekly-shard-3", r.stdout)
+        data = json.loads((shards / "score.json").read_text())
+        self.assertIs(data["partial"], True)
+        self.assertEqual(data["skipped_shards"], ["mutants-weekly-shard-3"])
+        self.assertEqual(data["shards"], 3)
 
 
 if __name__ == "__main__":

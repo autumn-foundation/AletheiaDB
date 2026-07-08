@@ -25,7 +25,6 @@ import argparse
 import json
 import os
 import sys
-import time
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -36,7 +35,11 @@ EXIT_GATE_FAIL = 2
 
 OUTCOME_FILES = ("caught.txt", "missed.txt", "timeout.txt", "unviable.txt")
 
-SECONDS_PER_WEEK = 7 * 24 * 3600
+CONFIG_KEYS = {"threshold", "min_mutants"}
+
+# GitHub silently drops step summaries larger than 1 MiB; cap the rendered
+# missed-mutant list and point at the uploaded artifact for the rest.
+MAX_MISSED_LINES = 200
 
 
 class InfraError(Exception):
@@ -60,10 +63,24 @@ class Counts:
         return self.caught + self.timeout
 
     def score(self) -> float | None:
-        """Mutation score in percent, or None when there are no viable mutants."""
+        """Mutation score in percent, FOR DISPLAY ONLY (float division).
+
+        Never compare this against the threshold — 29/50*100 is
+        57.99999999999999 in floats and would fail a 58.0 threshold it
+        actually meets. Use meets() for the verdict.
+        """
         if self.viable == 0:
             return None
         return self.detected / self.viable * 100.0
+
+    def meets(self, threshold: float) -> bool:
+        """Exact threshold comparison without division.
+
+        detected/viable*100 >= threshold  <=>  detected*100 >= threshold*viable
+        (viable > 0; one float multiplication of exact integers is exact for
+        all realistic counts, unlike the divided form).
+        """
+        return self.detected * 100 >= threshold * self.viable
 
     def add(self, other: "Counts") -> None:
         self.caught += other.caught
@@ -81,6 +98,13 @@ def load_config(path: Path) -> dict:
         raise InfraError(f"cannot read gate config {path}: {e}") from e
     except tomllib.TOMLDecodeError as e:
         raise InfraError(f"malformed gate config {path}: {e}") from e
+
+    unknown = sorted(set(raw) - CONFIG_KEYS)
+    if unknown:
+        raise InfraError(
+            f"gate config {path}: unknown key(s) {', '.join(unknown)} "
+            f"(allowed: {', '.join(sorted(CONFIG_KEYS))}) — check for typos"
+        )
 
     threshold = raw.get("threshold")
     min_mutants = raw.get("min_mutants")
@@ -145,14 +169,33 @@ def emit(markdown: str) -> None:
             print(f"warning: could not write GITHUB_STEP_SUMMARY: {e}", file=sys.stderr)
 
 
-def fmt_score(score: float | None) -> str:
-    return "n/a" if score is None else f"{score:.1f}%"
+def fmt_score(score: float | None, threshold: float | None = None) -> str:
+    """Format a score for display.
+
+    When the score sits within 0.05 of the threshold, use 2 decimals so the
+    message never reads like the nonsensical "58.0% < 58.0%".
+    """
+    if score is None:
+        return "n/a"
+    if threshold is not None and abs(score - threshold) < 0.05:
+        return f"{score:.2f}%"
+    return f"{score:.1f}%"
+
+
+def fmt_threshold(threshold: float, score: float | None) -> str:
+    if score is not None and abs(score - threshold) < 0.05:
+        return f"{threshold:.2f}%"
+    return f"{threshold:.1f}%"
 
 
 def missed_details(missed_lines: tuple[str, ...]) -> str:
     if not missed_lines:
         return ""
-    body = "\n".join(missed_lines)
+    shown = missed_lines[:MAX_MISSED_LINES]
+    body = "\n".join(shown)
+    hidden = len(missed_lines) - len(shown)
+    if hidden > 0:
+        body += f"\n… and {hidden} more — see the mutants artifact"
     return (
         "\n<details><summary>Missed mutants "
         f"({len(missed_lines)})</summary>\n\n```\n{body}\n```\n</details>\n"
@@ -165,7 +208,10 @@ def cmd_gate(args: argparse.Namespace) -> int:
     min_mutants: int = config["min_mutants"]
 
     mutants_out = Path(args.mutants_out)
-    if not mutants_out.is_dir() and args.allow_missing:
+    if not mutants_out.exists() and args.allow_missing:
+        # Only a truly ABSENT path counts as "no mutants in diff"; a file
+        # sitting where the directory should be is an infrastructure problem
+        # and falls through to read_counts, which rejects non-directories.
         emit(
             "## Mutation-score gate: PASS\n\n"
             "No mutants output directory was produced — no mutants in diff.\n"
@@ -174,6 +220,8 @@ def cmd_gate(args: argparse.Namespace) -> int:
 
     counts = read_counts(mutants_out)
     score = counts.score()
+    score_s = fmt_score(score, threshold)
+    threshold_s = fmt_threshold(threshold, score)
 
     if counts.viable == 0:
         verdict, reason, code = "PASS", "no mutants in diff", EXIT_PASS
@@ -183,12 +231,12 @@ def cmd_gate(args: argparse.Namespace) -> int:
             f"only {counts.viable} viable mutants (< min_mutants = {min_mutants}); "
             "sample too small to enforce — reported for information only"
         )
-    elif score >= threshold:
+    elif counts.meets(threshold):
         verdict, code = "PASS", EXIT_PASS
-        reason = f"score {fmt_score(score)} >= threshold {threshold:.1f}%"
+        reason = f"score {score_s} >= threshold {threshold_s}"
     else:
         verdict, code = "FAIL", EXIT_GATE_FAIL
-        reason = f"score {fmt_score(score)} < threshold {threshold:.1f}%"
+        reason = f"score {score_s} < threshold {threshold_s}"
 
     lines = [
         f"## Mutation-score gate: {verdict}",
@@ -202,8 +250,8 @@ def cmd_gate(args: argparse.Namespace) -> int:
         f"| Missed | {counts.missed} |",
         f"| Unviable (excluded) | {counts.unviable} |",
         f"| Viable total | {counts.viable} |",
-        f"| Score | {fmt_score(score)} |",
-        f"| Threshold | {threshold:.1f}% |",
+        f"| Score | {score_s} |",
+        f"| Threshold | {threshold_s} |",
         f"| min_mutants floor | {min_mutants} |",
         missed_details(counts.missed_lines),
     ]
@@ -211,25 +259,31 @@ def cmd_gate(args: argparse.Namespace) -> int:
     return code
 
 
-def find_shard_outputs(shards_dir: Path) -> dict[str, Path]:
+def find_shard_outputs(shards_dir: Path) -> tuple[dict[str, Path], list[str]]:
     """Map shard-artifact name -> mutants.out-style directory.
 
     Each immediate subdirectory of shards_dir is one downloaded artifact.
     Outcome files may sit at the artifact root or under a nested mutants.out/.
+    Returns (found, skipped) where skipped lists subdirectories that contain
+    no outcome files at all (e.g. an empty artifact from a crashed job) —
+    these must be surfaced to the caller, never silently dropped.
     """
     if not shards_dir.is_dir():
         raise InfraError(f"shards directory not found: {shards_dir}")
     found: dict[str, Path] = {}
+    skipped: list[str] = []
     for sub in sorted(p for p in shards_dir.iterdir() if p.is_dir()):
         for candidate in (sub, sub / "mutants.out"):
             if candidate.is_dir() and any((candidate / n).is_file() for n in OUTCOME_FILES):
                 found[sub.name] = candidate
                 break
+        else:
+            skipped.append(sub.name)
     if not found:
         raise InfraError(
             f"no shard artifacts with mutants output found under {shards_dir}"
         )
-    return found
+    return found, skipped
 
 
 def cmd_summarize(args: argparse.Namespace) -> int:
@@ -237,7 +291,7 @@ def cmd_summarize(args: argparse.Namespace) -> int:
     threshold: float = config["threshold"]
     shards_dir = Path(args.shards_dir)
 
-    shard_outputs = find_shard_outputs(shards_dir)
+    shard_outputs, skipped = find_shard_outputs(shards_dir)
     total = Counts()
     rows = []
     for name, out_dir in shard_outputs.items():
@@ -248,11 +302,16 @@ def cmd_summarize(args: argparse.Namespace) -> int:
         )
 
     score = total.score()
-    week = int(time.time()) // SECONDS_PER_WEEK
+    week = args.week  # pinned once by the workflow's setup job; may be None locally
+    expected = args.expected_shards
+    partial = bool(skipped) or (expected is not None and len(shard_outputs) < expected)
 
     score_json = {
         "week": week,
         "shards": len(shard_outputs),
+        "expected_shards": expected,
+        "partial": partial,
+        "skipped_shards": skipped,
         "caught": total.caught,
         "timeout": total.timeout,
         "missed": total.missed,
@@ -272,21 +331,35 @@ def cmd_summarize(args: argparse.Namespace) -> int:
     comparison = (
         "no viable mutants in this sample"
         if score is None
-        else f"{fmt_score(score)} vs PR-gate threshold {threshold:.1f}% "
-        + ("(at or above)" if score >= threshold else "(below — informational, does not fail this run)")
+        else f"{fmt_score(score, threshold)} vs PR-gate threshold {fmt_threshold(threshold, score)} "
+        + ("(at or above)" if total.meets(threshold) else "(below — informational, does not fail this run)")
     )
+    week_label = f"week {week}" if week is not None else "week unknown"
+    warnings = []
+    if partial:
+        found_of = f"{len(shard_outputs)}" + (f" of {expected} expected" if expected is not None else "")
+        warnings.append(
+            f"> **:warning: PARTIAL result** — only {found_of} shard artifacts held usable output; "
+            "the score below underestimates the sample and must not be treated as the weekly estimate."
+        )
+    if skipped:
+        warnings.append(
+            "> Skipped shard artifacts with no outcome files: " + ", ".join(skipped)
+        )
     lines = [
-        f"## Weekly mutation score (rotating sample, week {week})",
+        f"## Weekly mutation score (rotating sample, {week_label})",
         "",
-        f"Combined score across {len(shard_outputs)} shard(s): **{fmt_score(score)}** — {comparison}",
+        *warnings,
+        "" if warnings else None,
+        f"Combined score across {len(shard_outputs)} shard(s): **{fmt_score(score, threshold)}** — {comparison}",
         "",
         "| Shard | Caught | Timeout | Missed | Unviable | Score |",
         "|---|---|---|---|---|---|",
         *rows,
-        f"| **Total** | {total.caught} | {total.timeout} | {total.missed} | {total.unviable} | {fmt_score(score)} |",
+        f"| **Total** | {total.caught} | {total.timeout} | {total.missed} | {total.unviable} | {fmt_score(score, threshold)} |",
         missed_details(total.missed_lines),
     ]
-    emit("\n".join(lines))
+    emit("\n".join(line for line in lines if line is not None))
     return EXIT_PASS
 
 
@@ -308,6 +381,20 @@ def main(argv: list[str] | None = None) -> int:
     p_sum = sub.add_parser("summarize", help="aggregate weekly shard artifacts (informational)")
     p_sum.add_argument("--shards-dir", required=True, help="directory of downloaded shard artifacts")
     p_sum.add_argument("--config", required=True, help="path to mutants-gate.toml")
+    p_sum.add_argument(
+        "--week",
+        type=int,
+        default=None,
+        help="epoch-week number pinned by the workflow's setup job "
+        "(recorded verbatim in score.json; never derived from the current time)",
+    )
+    p_sum.add_argument(
+        "--expected-shards",
+        type=int,
+        default=None,
+        help="number of shard artifacts expected this run; fewer usable ones "
+        "marks the published summary and score.json as partial",
+    )
     p_sum.set_defaults(func=cmd_summarize)
 
     args = parser.parse_args(argv)

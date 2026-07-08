@@ -262,9 +262,11 @@ audit:
     cargo audit
 
 # === Mutation Testing ===
-# CI runs these with --test-tool nextest; locally we stay on cargo test so the
-# recipes work without cargo-nextest installed. Install nextest and add
-# `--test-tool nextest` for CI-identical (and faster) runs.
+# CI runs these with --test-tool nextest and with
+# --features config-toml,mcp-server,sharding-rpc; locally we stay on plain
+# cargo test with default features so the recipes work without cargo-nextest
+# installed. For runs closer to CI, install nextest and add
+# `--test-tool nextest --features config-toml,mcp-server,sharding-rpc`.
 
 # Run mutation tests on all code
 mutants:
@@ -286,7 +288,7 @@ mutants-branch:
 
 # Run the CI mutation-score gate against a local mutants.out directory
 mutants-gate dir="mutants.out":
-    python3 .github/scripts/mutants_gate.py gate --mutants-out {{dir}} --config .github/mutants-gate.toml
+    python3 .github/scripts/mutants_gate.py gate --mutants-out "{{dir}}" --config .github/mutants-gate.toml
 
 # Run the gate script's unit tests
 mutants-gate-test:
