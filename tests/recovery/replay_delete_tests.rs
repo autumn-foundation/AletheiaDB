@@ -229,9 +229,9 @@ fn test_replay_delete_node_preserves_temporal_intervals() -> Result<()> {
     let wal = ConcurrentWalSystem::new(wal_config)?;
 
     let node_id = NodeId::new(1).unwrap();
-    let now = time::now().wallclock();
-    let vf = HybridTimestamp::new(now - 7_200_000_000, 0).unwrap(); // 2h ago
-    let delete_vf = time::now();
+    let now_ts = time::now();
+    let vf = HybridTimestamp::new(now_ts.wallclock() - 7_200_000_000, 0).unwrap(); // 2h ago
+    let delete_vf = now_ts;
 
     wal.append(WalOperation::CreateNode {
         node_id,
@@ -316,9 +316,10 @@ fn test_replay_delete_node_preserves_temporal_intervals() -> Result<()> {
         historical.get_node_at_time(node_id, vf, delete_ts).is_err(),
         "node must be gone when anchored at the delete's commit"
     );
+    let now_after_replay = time::now();
     assert!(
         historical
-            .get_node_at_time(node_id, time::now(), time::now())
+            .get_node_at_time(node_id, now_after_replay, now_after_replay)
             .is_err()
     );
 
@@ -337,9 +338,9 @@ fn test_replay_delete_edge_preserves_temporal_intervals() -> Result<()> {
     let source_id = NodeId::new(1).unwrap();
     let target_id = NodeId::new(2).unwrap();
     let edge_id = EdgeId::new(1).unwrap();
-    let now = time::now().wallclock();
-    let vf = HybridTimestamp::new(now - 7_200_000_000, 0).unwrap();
-    let delete_vf = time::now();
+    let now_ts = time::now();
+    let vf = HybridTimestamp::new(now_ts.wallclock() - 7_200_000_000, 0).unwrap();
+    let delete_vf = now_ts;
 
     for node_id in [source_id, target_id] {
         wal.append(WalOperation::CreateNode {
@@ -439,9 +440,10 @@ fn test_replay_delete_edge_preserves_temporal_intervals() -> Result<()> {
             .is_err(),
         "edge must be gone when anchored at the delete's commit"
     );
+    let now_after_replay = time::now();
     assert!(
         historical
-            .get_edge_at_time(edge_id, time::now(), time::now())
+            .get_edge_at_time(edge_id, now_after_replay, now_after_replay)
             .is_err()
     );
 

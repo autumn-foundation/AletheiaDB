@@ -461,9 +461,10 @@ fn test_replay_preserves_temporal_interval() -> Result<()> {
             .is_ok(),
         "node must be visible at its creation bi-temporal coordinate after replay"
     );
+    let now_after_replay = time::now();
     assert!(
         historical
-            .get_node_at_time(node_id, time::now(), time::now())
+            .get_node_at_time(node_id, now_after_replay, now_after_replay)
             .is_ok(),
         "node must be visible at the current bi-temporal coordinate after replay"
     );

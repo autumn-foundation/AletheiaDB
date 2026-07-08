@@ -23,7 +23,8 @@
 //! Exact transaction-time equality across a crash is impossible by design:
 //! the live path stamps historical versions with the HLC *commit* timestamp,
 //! while replay stamps them with the WAL entry's *logged* timestamp (assigned
-//! at append time, a few microseconds earlier). Both are correct
+//! at append time, which can differ by a few microseconds in either
+//! direction). Both are correct
 //! representations of "when the fact was recorded"; the tests therefore
 //! assert transaction-time *structure* (open/closed flags, chain continuity)
 //! rather than exact bounds. Valid-time bounds ARE asserted exactly for every
@@ -492,8 +493,9 @@ fn test_wal_recovery_on_reopen() {
             .is_ok(),
         "deleted node must remain recallable at pre-delete coordinates"
     );
+    let carol_now_probe = time::now();
     assert!(
-        db.get_node_at_time(carol, time::now(), time::now())
+        db.get_node_at_time(carol, carol_now_probe, carol_now_probe)
             .is_err()
     );
 
@@ -515,8 +517,9 @@ fn test_wal_recovery_on_reopen() {
         db.get_edge_at_time(e_likes, e_likes_valid_from, e_likes_create_tx)
             .is_ok()
     );
+    let e_likes_now_probe = time::now();
     assert!(
-        db.get_edge_at_time(e_likes, time::now(), time::now())
+        db.get_edge_at_time(e_likes, e_likes_now_probe, e_likes_now_probe)
             .is_err()
     );
 
@@ -557,8 +560,9 @@ fn test_wal_recovery_on_reopen() {
         db.get_node_at_time(erin, t2, erin_delete_tx).is_err(),
         "erin must be gone when transaction time is anchored at the delete's commit"
     );
+    let now_probe = time::now();
     assert!(
-        db.get_node_at_time(erin, time::now(), time::now()).is_err(),
+        db.get_node_at_time(erin, now_probe, now_probe).is_err(),
         "erin must be gone at the current bi-temporal coordinate"
     );
 
@@ -592,6 +596,7 @@ fn backdated_delete_valid_from_survives_replay() {
 
     let node_id;
     let pre_tombstone_valid_from;
+    let probe_in_window;
     {
         let db = AletheiaDB::with_unified_config(crash_recovery_config(&wal_dir)).unwrap();
         node_id = db
@@ -611,6 +616,33 @@ fn backdated_delete_valid_from_survives_replay() {
             pre_tombstone_valid_from, t_delete,
             "live path stamps the tombstone with the backdated valid_from"
         );
+
+        // Divergence window: the pre-fix bug (replay substituting the entry
+        // timestamp for the LOGGED valid_from) is user-visible exactly at
+        // valid times strictly between the backdated t_delete and the
+        // delete's commit timestamp, with transaction time anchored before
+        // the delete's commit (here: at the create's tx start). At that
+        // coordinate the node must be invisible — the buggy replay would
+        // leave the prior head's valid_to open until the commit timestamp
+        // and make it visible.
+        let create_tx = history.versions[0].temporal.transaction_time().start();
+        let tombstone_tx = history.versions[1].temporal.transaction_time().start();
+        assert!(
+            t_delete < tombstone_tx,
+            "premise: the backdated valid_from must precede the delete's commit timestamp"
+        );
+        probe_in_window =
+            HybridTimestamp::new((t_delete.wallclock() + tombstone_tx.wallclock()) / 2, 0)
+                .expect("divergence-window probe timestamp must be valid");
+        assert!(
+            t_delete < probe_in_window && probe_in_window < tombstone_tx,
+            "premise: probe must fall strictly inside the backdate-to-commit window"
+        );
+        assert!(
+            db.get_node_at_time(node_id, probe_in_window, create_tx)
+                .is_err(),
+            "AS OF in the backdate-to-commit window must be invisible (live)"
+        );
         // Simulated crash: drop without a checkpoint.
     }
 
@@ -621,6 +653,17 @@ fn backdated_delete_valid_from_survives_replay() {
         history.versions[1].temporal.valid_time().start(),
         t_delete,
         "replay must honor the LOGGED backdated delete valid_from, not the entry timestamp"
+    );
+    // Re-derive the tx anchor from the RECOVERED history: replay stamps
+    // transaction time with the WAL entry's logged timestamp, which can
+    // differ from the live commit timestamp by a few microseconds in either
+    // direction, so the pre-crash anchor may fall outside the recovered
+    // create version's tx interval.
+    let recovered_create_tx = history.versions[0].temporal.transaction_time().start();
+    assert!(
+        db.get_node_at_time(node_id, probe_in_window, recovered_create_tx)
+            .is_err(),
+        "AS OF in the backdate-to-commit window must be invisible (post-replay)"
     );
 }
 
@@ -638,6 +681,7 @@ fn backdated_edge_delete_valid_from_survives_replay() {
     let t_delete = hours_ago(now, 1); // backdated: fact stopped being true 1h ago
 
     let edge_id;
+    let probe_in_window;
     {
         let db = AletheiaDB::with_unified_config(crash_recovery_config(&wal_dir)).unwrap();
         let source = db
@@ -673,6 +717,29 @@ fn backdated_edge_delete_valid_from_survives_replay() {
             t_delete,
             "live path stamps the tombstone with the backdated valid_from"
         );
+
+        // Divergence window (see the node twin above): a valid-time probe
+        // strictly between the backdated t_delete and the delete's commit
+        // timestamp, with transaction time anchored at the create's tx
+        // start, must NOT see the edge.
+        let create_tx = history.versions[0].temporal.transaction_time().start();
+        let tombstone_tx = history.versions[1].temporal.transaction_time().start();
+        assert!(
+            t_delete < tombstone_tx,
+            "premise: the backdated valid_from must precede the delete's commit timestamp"
+        );
+        probe_in_window =
+            HybridTimestamp::new((t_delete.wallclock() + tombstone_tx.wallclock()) / 2, 0)
+                .expect("divergence-window probe timestamp must be valid");
+        assert!(
+            t_delete < probe_in_window && probe_in_window < tombstone_tx,
+            "premise: probe must fall strictly inside the backdate-to-commit window"
+        );
+        assert!(
+            db.get_edge_at_time(edge_id, probe_in_window, create_tx)
+                .is_err(),
+            "AS OF in the backdate-to-commit window must be invisible (live)"
+        );
         // Simulated crash: drop without a checkpoint.
     }
 
@@ -688,5 +755,13 @@ fn backdated_edge_delete_valid_from_survives_replay() {
         history.versions[0].temporal.valid_time().end(),
         t_delete,
         "prior head's valid_to must be closed at the backdated tombstone valid_from after replay"
+    );
+    // Re-derive the tx anchor from the RECOVERED history (see the node twin
+    // above for why the pre-crash anchor is not reusable post-replay).
+    let recovered_create_tx = history.versions[0].temporal.transaction_time().start();
+    assert!(
+        db.get_edge_at_time(edge_id, probe_in_window, recovered_create_tx)
+            .is_err(),
+        "AS OF in the backdate-to-commit window must be invisible (post-replay)"
     );
 }
