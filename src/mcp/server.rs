@@ -151,8 +151,10 @@ use crate::db::AletheiaDB;
 use crate::index::vector::{DistanceMetric, HnswConfig};
 use crate::query::executor::{EntityId as ResultEntityId, EntityResult};
 
+use super::auth::{McpAuthConfig, SessionAuth};
 use super::error::{McpError, McpErrorCode, query_kind_classification};
 use super::tools::*;
+use crate::auth::{AuthMode, Principal};
 
 // ============================================================================
 // Resource Limits (to prevent DoS attacks)
@@ -205,10 +207,20 @@ const TRANSACTION_TIME_NOW: &str = "now";
 #[derive(Clone)]
 pub struct AletheiaMcpServer {
     db: Arc<AletheiaDB>,
+    auth: SessionAuth,
 }
 
 impl AletheiaMcpServer {
     /// Create a new MCP server wrapping a AletheiaDB instance.
+    ///
+    /// # Authentication
+    ///
+    /// This constructor is the **embedded/programmatic** entry point and is
+    /// deliberately source-compatible with pre-#3350 behavior: it runs in
+    /// anonymous mode (no authentication — a Rust caller holding the
+    /// `Arc<AletheiaDB>` can already do anything the tools can). Serving
+    /// deployments should use [`with_auth`](Self::with_auth); the
+    /// `aletheia-mcp` binary requires authentication by default.
     ///
     /// # Arguments
     ///
@@ -228,7 +240,57 @@ impl AletheiaMcpServer {
     /// # }
     /// ```
     pub fn new(db: Arc<AletheiaDB>) -> Self {
-        Self { db }
+        Self {
+            db,
+            auth: SessionAuth::Anonymous,
+        }
+    }
+
+    /// Create an MCP server with authentication and role-based
+    /// authorization (Issue #3350, Phase 2).
+    ///
+    /// The MCP transport is stdio, so the credential is **session-scoped**:
+    /// supplied once at construction (see
+    /// [`McpAuthConfig::with_credential`]) and re-verified against the
+    /// [`AuthStore`](crate::auth::AuthStore) on every tool call, so a
+    /// revocation in the (possibly HTTP-shared) store takes effect on the
+    /// next call.
+    ///
+    /// Behavior per [`AuthMode`]:
+    ///
+    /// - `Required` + valid credential → every tool call is authorized
+    ///   against the principal's role (see the matrix in
+    ///   `docs/guides/access-control-matrix.md`).
+    /// - `Required` + missing/invalid/revoked credential → the server still
+    ///   serves, but **every** tool call (including unknown tool names)
+    ///   returns the uniform `UNAUTHENTICATED` error.
+    /// - `Anonymous` → full access, exactly like [`new`](Self::new); a
+    ///   prominent warning is emitted on stderr (never stdout — that is the
+    ///   MCP protocol channel).
+    pub fn with_auth(db: Arc<AletheiaDB>, auth: McpAuthConfig) -> Self {
+        if auth.mode() == AuthMode::Anonymous {
+            // PROMINENT warning: the operator explicitly opted out of auth.
+            // stderr only — stdout carries the MCP protocol.
+            eprintln!(
+                "WARNING: AUTHENTICATION IS DISABLED (auth mode: anonymous). \
+                 Every MCP tool call has full, unauthenticated access to the \
+                 database. Do not expose this server to untrusted callers."
+            );
+        }
+        Self {
+            db,
+            auth: SessionAuth::from(auth),
+        }
+    }
+
+    /// The verified session principal, if any.
+    ///
+    /// Re-verifies the session credential against the store, so a revoked
+    /// key yields `None`. Always `None` in anonymous mode. Principal `id`
+    /// and `name` are safe to log or stamp into provenance; key material
+    /// never reaches this type.
+    pub fn session_principal(&self) -> Option<Principal> {
+        self.auth.principal()
     }
 
     /// Get a reference to the underlying database.
@@ -3900,7 +3962,20 @@ impl AletheiaMcpServer {
     /// registry-driven error-shape test iterates [`tool_definitions`] and
     /// calls this for each tool, guaranteeing new tools are automatically
     /// covered by the structured-error contract (Issue #3234).
+    ///
+    /// # Authentication & authorization (Issue #3350)
+    ///
+    /// This is the single enforcement point for the MCP surface: the session
+    /// credential is (re-)verified and the tool's access class checked
+    /// against the principal's role **before** any handler runs — including
+    /// before tool-name resolution, so an unknown tool name cannot bypass
+    /// authentication or probe the tool inventory. The per-tool public Rust
+    /// methods (e.g. [`get_node`](Self::get_node)) are the embedded API and
+    /// are not gated — a Rust caller already holds the `Arc<AletheiaDB>`.
     pub(crate) fn dispatch_tool(&self, name: &str, args: serde_json::Value) -> CallToolResult {
+        if let Err(err) = self.auth.authorize_tool(name) {
+            return self.error_result(err);
+        }
         match name {
             "get_node" => self.handle_get_node(args),
             "create_node" => self.handle_create_node(args),

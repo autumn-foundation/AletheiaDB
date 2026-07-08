@@ -25,10 +25,12 @@
 //! server.serve_stdio().await?;
 //! ```
 
+mod auth;
 mod error;
 mod server;
 mod tools;
 
+pub use auth::{McpAuthConfig, validate_mcp_auth_startup};
 pub use error::{McpError, McpErrorCode};
 pub use server::AletheiaMcpServer;
 
@@ -42,5 +44,7 @@ pub use tools::{
     TemporalBounds, TraverseRequest, UpdateEdgeRequest, UpdateNodeRequest,
 };
 
+#[cfg(test)]
+mod auth_tests;
 #[cfg(test)]
 mod tests;
