@@ -217,18 +217,11 @@ fn test_replay_delete_node_preserves_temporal_intervals() -> Result<()> {
     // Issue #452: after replaying Create + Delete, the version chain must
     // carry exact bi-temporal intervals:
     // - prior head: valid_from preserved, valid time closed at the
-    //   tombstone's valid_from, transaction time closed at the delete
+    //   tombstone's LOGGED valid_from, transaction time closed at the delete
     //   entry's LOGGED timestamp;
-    // - tombstone: empty valid interval, transaction [delete ts, open).
-    //
-    // NOTE: we deliberately do NOT assert the tombstone's exact valid_from
-    // (nor, therefore, the prior head's exact valid_to, which is closed at
-    // the tombstone's valid_from). The live write path honors a
-    // user-supplied (possibly backdated, Issue #3221) valid_from for the
-    // tombstone, while replay currently drops the logged value and
-    // substitutes the entry timestamp — that divergence is pinned by the
-    // ignored test `backdated_delete_valid_from_survives_replay` in
-    // tests/wal_recovery_integration.rs.
+    // - tombstone: empty valid interval anchored at the LOGGED valid_from
+    //   (issue #3400: replay honors the logged value, mirroring the live
+    //   path), transaction [delete ts, open).
     let temp_dir = TempDir::new().unwrap();
     let wal_dir = temp_dir.path().join("wal");
 
@@ -238,6 +231,7 @@ fn test_replay_delete_node_preserves_temporal_intervals() -> Result<()> {
     let node_id = NodeId::new(1).unwrap();
     let now = time::now().wallclock();
     let vf = HybridTimestamp::new(now - 7_200_000_000, 0).unwrap(); // 2h ago
+    let delete_vf = time::now();
 
     wal.append(WalOperation::CreateNode {
         node_id,
@@ -248,7 +242,7 @@ fn test_replay_delete_node_preserves_temporal_intervals() -> Result<()> {
     })?;
     wal.append(WalOperation::DeleteNode {
         node_id,
-        valid_from: time::now(),
+        valid_from: delete_vf,
     })?;
     wal.flush()?;
 
@@ -278,8 +272,8 @@ fn test_replay_delete_node_preserves_temporal_intervals() -> Result<()> {
     );
     assert_eq!(
         prior.temporal.valid_time().end(),
-        tombstone.temporal.valid_time().start(),
-        "prior head's valid time must be closed exactly at the tombstone's valid_from"
+        delete_vf,
+        "prior head's valid time must be closed exactly at the tombstone's LOGGED valid_from"
     );
     assert_eq!(
         prior.temporal.transaction_time().start(),
@@ -292,6 +286,11 @@ fn test_replay_delete_node_preserves_temporal_intervals() -> Result<()> {
         "prior head's tx-time closure must survive replay at the LOGGED delete timestamp"
     );
 
+    assert_eq!(
+        tombstone.temporal.valid_time().start(),
+        delete_vf,
+        "tombstone valid_from must equal the LOGGED delete valid_from (issue #3400)"
+    );
     assert!(
         tombstone.temporal.valid_time().is_empty(),
         "tombstone must carry an empty valid interval"
@@ -340,6 +339,7 @@ fn test_replay_delete_edge_preserves_temporal_intervals() -> Result<()> {
     let edge_id = EdgeId::new(1).unwrap();
     let now = time::now().wallclock();
     let vf = HybridTimestamp::new(now - 7_200_000_000, 0).unwrap();
+    let delete_vf = time::now();
 
     for node_id in [source_id, target_id] {
         wal.append(WalOperation::CreateNode {
@@ -361,7 +361,7 @@ fn test_replay_delete_edge_preserves_temporal_intervals() -> Result<()> {
     })?;
     wal.append(WalOperation::DeleteEdge {
         edge_id,
-        valid_from: time::now(),
+        valid_from: delete_vf,
     })?;
     wal.flush()?;
 
@@ -393,8 +393,8 @@ fn test_replay_delete_edge_preserves_temporal_intervals() -> Result<()> {
     );
     assert_eq!(
         prior.temporal.valid_time().end(),
-        tombstone.temporal.valid_time().start(),
-        "prior head's valid time must be closed exactly at the tombstone's valid_from"
+        delete_vf,
+        "prior head's valid time must be closed exactly at the tombstone's LOGGED valid_from"
     );
     assert_eq!(
         prior.temporal.transaction_time().start(),
@@ -407,6 +407,11 @@ fn test_replay_delete_edge_preserves_temporal_intervals() -> Result<()> {
         "prior head's tx-time closure must survive replay at the LOGGED delete timestamp"
     );
 
+    assert_eq!(
+        tombstone.temporal.valid_time().start(),
+        delete_vf,
+        "tombstone valid_from must equal the LOGGED delete valid_from (issue #3400)"
+    );
     assert!(
         tombstone.temporal.valid_time().is_empty(),
         "tombstone must carry an empty valid interval"
@@ -438,6 +443,168 @@ fn test_replay_delete_edge_preserves_temporal_intervals() -> Result<()> {
         historical
             .get_edge_at_time(edge_id, time::now(), time::now())
             .is_err()
+    );
+
+    Ok(())
+}
+
+#[test]
+fn test_replay_delete_node_honors_logged_valid_from() -> Result<()> {
+    // Issue #3400: a backdated delete (Issue #3221) logs a user-supplied
+    // valid_from that differs from the WAL entry's timestamp. Replay must
+    // stamp the tombstone with the LOGGED valid_from — mirroring the live
+    // path (`apply_node_delete`) — not the entry timestamp.
+    let temp_dir = TempDir::new().unwrap();
+    let wal_dir = temp_dir.path().join("wal");
+
+    let wal_config = ConcurrentWalSystemConfig::new(wal_dir);
+    let wal = ConcurrentWalSystem::new(wal_config)?;
+
+    let node_id = NodeId::new(1).unwrap();
+    let now = time::now().wallclock();
+    let create_vf = HybridTimestamp::new(now - 7_200_000_000, 0).unwrap(); // 2h ago
+    let delete_vf = HybridTimestamp::new(now - 3_600_000_000, 0).unwrap(); // 1h ago (backdated)
+
+    wal.append(WalOperation::CreateNode {
+        node_id,
+        label: GLOBAL_INTERNER.intern("Person").unwrap(),
+        properties: PropertyMapBuilder::new().insert("name", "Zoe").build(),
+        valid_from: create_vf,
+        provenance: None,
+    })?;
+    wal.append(WalOperation::DeleteNode {
+        node_id,
+        valid_from: delete_vf,
+    })?;
+    wal.flush()?;
+
+    let delete_ts = logged_timestamp(&wal, |op| matches!(op, WalOperation::DeleteNode { .. }))?;
+    assert!(
+        delete_vf < delete_ts,
+        "premise: the backdated valid_from must differ from the entry timestamp"
+    );
+
+    let config = CheckpointConfig::with_data_dir(temp_dir.path().join("checkpoints"));
+    let mut manager = CheckpointManager::new(config)?;
+    let (current, historical, _lsn) = manager.recover(&wal)?;
+
+    assert!(current.get_node(node_id).is_err());
+
+    let history = historical.get_node_history(node_id)?;
+    assert_eq!(history.version_count(), 2, "create + delete tombstone");
+
+    let prior = &history.versions[0];
+    let tombstone = &history.versions[1];
+
+    assert_eq!(
+        tombstone.temporal.valid_time().start(),
+        delete_vf,
+        "tombstone valid_from must equal the LOGGED backdated valid_from, not the entry timestamp"
+    );
+    assert!(
+        tombstone.temporal.valid_time().is_empty(),
+        "tombstone must carry an empty valid interval"
+    );
+    assert_eq!(
+        prior.temporal.valid_time().end(),
+        delete_vf,
+        "prior head's valid_to must be closed at the LOGGED backdated valid_from"
+    );
+    assert_eq!(
+        tombstone.temporal.transaction_time().start(),
+        delete_ts,
+        "tombstone tx time must still start at the LOGGED delete entry timestamp"
+    );
+    assert_eq!(
+        prior.temporal.transaction_time().end(),
+        delete_ts,
+        "prior head's tx-time closure must still use the LOGGED delete entry timestamp"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn test_replay_delete_edge_honors_logged_valid_from() -> Result<()> {
+    // Issue #3400: edge mirror of test_replay_delete_node_honors_logged_valid_from.
+    let temp_dir = TempDir::new().unwrap();
+    let wal_dir = temp_dir.path().join("wal");
+
+    let wal_config = ConcurrentWalSystemConfig::new(wal_dir);
+    let wal = ConcurrentWalSystem::new(wal_config)?;
+
+    let source_id = NodeId::new(1).unwrap();
+    let target_id = NodeId::new(2).unwrap();
+    let edge_id = EdgeId::new(1).unwrap();
+    let now = time::now().wallclock();
+    let create_vf = HybridTimestamp::new(now - 7_200_000_000, 0).unwrap(); // 2h ago
+    let delete_vf = HybridTimestamp::new(now - 3_600_000_000, 0).unwrap(); // 1h ago (backdated)
+
+    for node_id in [source_id, target_id] {
+        wal.append(WalOperation::CreateNode {
+            node_id,
+            label: GLOBAL_INTERNER.intern("Person").unwrap(),
+            properties: PropertyMap::new(),
+            valid_from: create_vf,
+            provenance: None,
+        })?;
+    }
+    wal.append(WalOperation::CreateEdge {
+        edge_id,
+        source: source_id,
+        target: target_id,
+        label: GLOBAL_INTERNER.intern("KNOWS").unwrap(),
+        properties: PropertyMap::new(),
+        valid_from: create_vf,
+        provenance: None,
+    })?;
+    wal.append(WalOperation::DeleteEdge {
+        edge_id,
+        valid_from: delete_vf,
+    })?;
+    wal.flush()?;
+
+    let delete_ts = logged_timestamp(&wal, |op| matches!(op, WalOperation::DeleteEdge { .. }))?;
+    assert!(
+        delete_vf < delete_ts,
+        "premise: the backdated valid_from must differ from the entry timestamp"
+    );
+
+    let config = CheckpointConfig::with_data_dir(temp_dir.path().join("checkpoints"));
+    let mut manager = CheckpointManager::new(config)?;
+    let (current, historical, _lsn) = manager.recover(&wal)?;
+
+    assert!(current.get_edge(edge_id).is_err());
+
+    let history = historical.get_edge_history(edge_id)?;
+    assert_eq!(history.version_count(), 2, "create + delete tombstone");
+
+    let prior = &history.versions[0];
+    let tombstone = &history.versions[1];
+
+    assert_eq!(
+        tombstone.temporal.valid_time().start(),
+        delete_vf,
+        "tombstone valid_from must equal the LOGGED backdated valid_from, not the entry timestamp"
+    );
+    assert!(
+        tombstone.temporal.valid_time().is_empty(),
+        "tombstone must carry an empty valid interval"
+    );
+    assert_eq!(
+        prior.temporal.valid_time().end(),
+        delete_vf,
+        "prior head's valid_to must be closed at the LOGGED backdated valid_from"
+    );
+    assert_eq!(
+        tombstone.temporal.transaction_time().start(),
+        delete_ts,
+        "tombstone tx time must still start at the LOGGED delete entry timestamp"
+    );
+    assert_eq!(
+        prior.temporal.transaction_time().end(),
+        delete_ts,
+        "prior head's tx-time closure must still use the LOGGED delete entry timestamp"
     );
 
     Ok(())

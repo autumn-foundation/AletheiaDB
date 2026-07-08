@@ -26,10 +26,10 @@
 //! at append time, a few microseconds earlier). Both are correct
 //! representations of "when the fact was recorded"; the tests therefore
 //! assert transaction-time *structure* (open/closed flags, chain continuity)
-//! rather than exact bounds. Valid-time bounds ARE asserted exactly — they
-//! are logged in the WAL and must be honored faithfully (the one known gap,
-//! delete tombstone valid_from, is pinned by the ignored test at the bottom
-//! of this file).
+//! rather than exact bounds. Valid-time bounds ARE asserted exactly for every
+//! version, including delete tombstones — they are logged in the WAL and must
+//! be honored faithfully (issue #3400, pinned by the backdated-delete tests
+//! at the bottom of this file).
 
 use aletheiadb::config::WalConfigBuilder;
 use aletheiadb::core::history::EntityHistory;
@@ -96,15 +96,10 @@ fn snapshot_history(history: &EntityHistory) -> Vec<VersionSnapshot> {
 
 /// Assert a recovered history matches its pre-crash snapshot.
 ///
-/// Valid-time bounds are compared exactly, with a single carve-out around
-/// delete tombstones: a tombstone's (empty) valid interval — and therefore
-/// the valid_to of the version it closes, which is stamped from the
-/// tombstone's valid_from — is compared structurally rather than exactly.
-/// Replay currently stamps delete tombstones with the entry timestamp
-/// instead of the logged valid_from (see
-/// `backdated_delete_valid_from_survives_replay` below), and even the
-/// non-backdated tombstone valid_from differs by microseconds (transaction
-/// start time vs WAL entry timestamp).
+/// Valid-time bounds are compared exactly for EVERY version, including delete
+/// tombstones: the tombstone's valid_from is logged in the WAL and honored by
+/// replay (issue #3400), so both its (empty) valid interval and the valid_to
+/// of the version it closes must survive recovery bit-for-bit.
 ///
 /// Transaction-time bounds are compared structurally (open/closed + chain
 /// continuity), not exactly — see the module docs for why exact equality
@@ -133,22 +128,14 @@ fn assert_history_matches(entity: &str, pre: &[VersionSnapshot], recovered: &Ent
             p.valid_open, q.valid_open,
             "{entity} v{i}: valid-time openness must survive recovery"
         );
-        let next_is_tombstone = pre.get(i + 1).is_some_and(|n| n.valid_empty);
-        if !p.valid_empty {
-            assert_eq!(
-                p.valid_start, q.valid_start,
-                "{entity} v{i}: valid_from must survive recovery exactly"
-            );
-            if !next_is_tombstone {
-                assert_eq!(
-                    p.valid_end, q.valid_end,
-                    "{entity} v{i}: valid_to must survive recovery exactly"
-                );
-            }
-            // else: this version was closed by a delete tombstone; its exact
-            // valid_to inherits the tombstone valid_from divergence (openness
-            // is asserted above, continuity is asserted below).
-        }
+        assert_eq!(
+            p.valid_start, q.valid_start,
+            "{entity} v{i}: valid_from must survive recovery exactly"
+        );
+        assert_eq!(
+            p.valid_end, q.valid_end,
+            "{entity} v{i}: valid_to must survive recovery exactly"
+        );
         assert_eq!(
             p.tx_open, q.tx_open,
             "{entity} v{i}: transaction-time openness must survive recovery"
@@ -586,27 +573,15 @@ fn test_wal_recovery_on_reopen() {
     assert!(db.get_edge_at_valid_time(e_respects, t1).is_err());
 }
 
-/// Pins the known live-path/replay divergence for BACKDATED deletes
-/// (Issues #3221 + #452 follow-up):
-///
-/// - the live write path logs the user-supplied `valid_from` for
-///   `DeleteNode`/`DeleteEdge` (src/api/transaction/write_buffer.rs) and
-///   stamps the tombstone with it (src/api/transaction/write/apply.rs,
-///   `apply_node_delete`);
-/// - WAL replay destructures the logged field as `valid_from: _` and
-///   substitutes the entry timestamp (src/storage/recovery.rs, DeleteNode /
-///   DeleteEdge arms).
-///
-/// So a backdated delete's tombstone `valid_from` (when the fact stopped
-/// being true in reality) is silently replaced by the delete's commit time
-/// after crash recovery. This test FAILS until replay honors the logged
-/// value; run it with `--ignored` to observe the divergence.
+/// Pins the fix for issue #3400 (BACKDATED deletes, Issues #3221 + #452
+/// follow-up): the live write path logs the user-supplied `valid_from` for
+/// `DeleteNode`/`DeleteEdge` (src/api/transaction/write_buffer.rs) and stamps
+/// the tombstone with it (src/api/transaction/write/apply.rs,
+/// `apply_node_delete`); WAL replay (src/storage/recovery.rs, DeleteNode /
+/// DeleteEdge arms) must honor that logged value rather than substituting the
+/// entry timestamp, so a backdated delete's tombstone `valid_from` (when the
+/// fact stopped being true in reality) survives crash recovery exactly.
 #[test]
-#[ignore = "known divergence (see issue #3400): WAL replay drops the logged valid_from for \
-            DeleteNode/DeleteEdge (src/storage/recovery.rs destructures `valid_from: _` and \
-            stamps the tombstone with entry.timestamp), while the live path honors the #3221 \
-            backdated valid_time. Un-ignore once issue #3400 is fixed and replay honors the \
-            logged delete valid_from."]
 fn backdated_delete_valid_from_survives_replay() {
     let temp_dir = tempfile::tempdir().unwrap();
     let wal_dir = temp_dir.path().join("wal");
@@ -646,5 +621,72 @@ fn backdated_delete_valid_from_survives_replay() {
         history.versions[1].temporal.valid_time().start(),
         t_delete,
         "replay must honor the LOGGED backdated delete valid_from, not the entry timestamp"
+    );
+}
+
+/// Edge counterpart of `backdated_delete_valid_from_survives_replay`
+/// (issue #3400): a backdated `delete_edge_with_valid_time` must recover with
+/// the tombstone stamped at the LOGGED backdated `valid_from`, and the prior
+/// head's valid_to closed at that same point.
+#[test]
+fn backdated_edge_delete_valid_from_survives_replay() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let wal_dir = temp_dir.path().join("wal");
+
+    let now = time::now().wallclock();
+    let t_create = hours_ago(now, 3);
+    let t_delete = hours_ago(now, 1); // backdated: fact stopped being true 1h ago
+
+    let edge_id;
+    {
+        let db = AletheiaDB::with_unified_config(crash_recovery_config(&wal_dir)).unwrap();
+        let source = db
+            .create_node_with_valid_time(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "Ann").build(),
+                Some(t_create),
+            )
+            .unwrap();
+        let target = db
+            .create_node_with_valid_time(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "Ben").build(),
+                Some(t_create),
+            )
+            .unwrap();
+        edge_id = db
+            .create_edge_with_valid_time(
+                source,
+                target,
+                "KNOWS",
+                PropertyMapBuilder::new().build(),
+                Some(t_create),
+            )
+            .unwrap();
+        db.delete_edge_with_valid_time(edge_id, Some(t_delete))
+            .unwrap();
+
+        let history = db.get_edge_history(edge_id).unwrap();
+        assert_eq!(history.version_count(), 2);
+        assert_eq!(
+            history.versions[1].temporal.valid_time().start(),
+            t_delete,
+            "live path stamps the tombstone with the backdated valid_from"
+        );
+        // Simulated crash: drop without a checkpoint.
+    }
+
+    let db = AletheiaDB::with_unified_config(crash_recovery_config(&wal_dir)).unwrap();
+    let history = db.get_edge_history(edge_id).unwrap();
+    assert_eq!(history.version_count(), 2);
+    assert_eq!(
+        history.versions[1].temporal.valid_time().start(),
+        t_delete,
+        "replay must honor the LOGGED backdated edge-delete valid_from, not the entry timestamp"
+    );
+    assert_eq!(
+        history.versions[0].temporal.valid_time().end(),
+        t_delete,
+        "prior head's valid_to must be closed at the backdated tombstone valid_from after replay"
     );
 }
