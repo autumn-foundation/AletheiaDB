@@ -115,12 +115,12 @@ impl<'a> HorizonEngine<'a> {
 
                 // Get all neighbors (both outgoing and incoming for true semantic reach)
                 let outgoing = tx
-                    .get_outgoing_edges(current_node_id)
+                    .get_outgoing_edges(current_node_id)?
                     .into_iter()
                     .filter_map(|e| tx.get_edge(e).ok().map(|edge| edge.target));
 
                 let incoming = tx
-                    .get_incoming_edges(current_node_id)
+                    .get_incoming_edges(current_node_id)?
                     .into_iter()
                     .filter_map(|e| tx.get_edge(e).ok().map(|edge| edge.source));
 

@@ -296,25 +296,34 @@ impl ReadOps for ReadTransaction {
         result.record_error_metric()
     }
 
-    fn get_outgoing_edges(&self, node_id: NodeId) -> Vec<EdgeId> {
+    fn get_outgoing_edges(&self, node_id: NodeId) -> Result<Vec<EdgeId>> {
+        // Existence check (Issue #359): a missing node is an error, so callers can
+        // distinguish "node has no edges" (Ok(empty)) from "node doesn't exist".
+        self.get_node(node_id)?;
         // Filter edges to only return those visible in our snapshot
         // This prevents phantom reads where we see edges created after our snapshot
         // Note: CurrentStorage::get_outgoing_edges() uses frozen view when available
         let edge_ids = self.current.get_outgoing_edges(node_id);
-        self.filter_visible_edges(edge_ids)
+        Ok(self.filter_visible_edges(edge_ids))
     }
 
-    fn get_incoming_edges(&self, node_id: NodeId) -> Vec<EdgeId> {
+    fn get_incoming_edges(&self, node_id: NodeId) -> Result<Vec<EdgeId>> {
+        // Existence check (Issue #359): a missing node is an error.
+        self.get_node(node_id)?;
         // Filter edges to only return those visible in our snapshot
         // Note: CurrentStorage::get_incoming_edges() uses frozen view when available
         let edge_ids = self.current.get_incoming_edges(node_id);
-        self.filter_visible_edges(edge_ids)
+        Ok(self.filter_visible_edges(edge_ids))
     }
 
-    fn get_outgoing_edges_with_label(&self, node_id: NodeId, label: &str) -> Vec<EdgeId> {
+    fn get_outgoing_edges_with_label(&self, node_id: NodeId, label: &str) -> Result<Vec<EdgeId>> {
+        // Existence check (Issue #359): a missing node is an error. An existing
+        // node with no edges matching `label` is Ok(empty) - the label is a
+        // filter, not an existence check.
+        self.get_node(node_id)?;
         // Filter edges to only return those visible in our snapshot
         let edge_ids = self.current.get_outgoing_edges_with_label(node_id, label);
-        self.filter_visible_edges(edge_ids)
+        Ok(self.filter_visible_edges(edge_ids))
     }
 
     fn node_count(&self) -> usize {
@@ -461,12 +470,12 @@ mod tests {
         assert_eq!(edge.target, node2);
 
         // Get outgoing edges
-        let outgoing = tx.get_outgoing_edges(node1);
+        let outgoing = tx.get_outgoing_edges(node1).unwrap();
         assert_eq!(outgoing.len(), 1);
         assert_eq!(outgoing[0], edge_id);
 
         // Get incoming edges
-        let incoming = tx.get_incoming_edges(node2);
+        let incoming = tx.get_incoming_edges(node2).unwrap();
         assert_eq!(incoming.len(), 1);
         assert_eq!(incoming[0], edge_id);
     }
@@ -489,12 +498,12 @@ mod tests {
         let tx = create_test_read_tx(TxId::new(1), current);
 
         // Get only KNOWS edges
-        let knows_edges = tx.get_outgoing_edges_with_label(node1, "KNOWS");
+        let knows_edges = tx.get_outgoing_edges_with_label(node1, "KNOWS").unwrap();
         assert_eq!(knows_edges.len(), 1);
         assert_eq!(knows_edges[0], edge1);
 
         // Get only FOLLOWS edges
-        let follows_edges = tx.get_outgoing_edges_with_label(node1, "FOLLOWS");
+        let follows_edges = tx.get_outgoing_edges_with_label(node1, "FOLLOWS").unwrap();
         assert_eq!(follows_edges.len(), 1);
     }
 
@@ -599,6 +608,88 @@ mod tests {
             &crate::core::property::PropertyValue::String("Alice".into()),
         );
         assert_eq!(results, vec![alice_id]);
+    }
+
+    // Issue #359: edge-listing methods return Result so callers can
+    // distinguish "node doesn't exist" (Err) from "node has no edges" (Ok(empty)).
+
+    #[test]
+    fn test_get_outgoing_edges_nonexistent_node_errors() {
+        let current = Arc::new(CurrentStorage::new());
+        let tx = create_test_read_tx(TxId::new(1), current);
+
+        let result = tx.get_outgoing_edges(NodeId::new(999).unwrap());
+        assert!(
+            result.is_err(),
+            "get_outgoing_edges on a nonexistent node must return Err, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_get_incoming_edges_nonexistent_node_errors() {
+        let current = Arc::new(CurrentStorage::new());
+        let tx = create_test_read_tx(TxId::new(1), current);
+
+        let result = tx.get_incoming_edges(NodeId::new(999).unwrap());
+        assert!(
+            result.is_err(),
+            "get_incoming_edges on a nonexistent node must return Err, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_get_outgoing_edges_with_label_nonexistent_node_errors() {
+        let current = Arc::new(CurrentStorage::new());
+        let tx = create_test_read_tx(TxId::new(1), current);
+
+        let result = tx.get_outgoing_edges_with_label(NodeId::new(999).unwrap(), "KNOWS");
+        assert!(
+            result.is_err(),
+            "get_outgoing_edges_with_label on a nonexistent node must return Err, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_get_outgoing_edges_existing_node_no_edges_ok_empty() {
+        let current = Arc::new(CurrentStorage::new());
+        let props = PropertyMapBuilder::new().build();
+        let node = current.create_node("Person", props).unwrap();
+
+        let tx = create_test_read_tx(TxId::new(1), current);
+        let edges = tx
+            .get_outgoing_edges(node)
+            .expect("existing node with no edges must be Ok");
+        assert!(edges.is_empty(), "expected Ok(empty), got {edges:?}");
+    }
+
+    #[test]
+    fn test_get_incoming_edges_existing_node_no_edges_ok_empty() {
+        let current = Arc::new(CurrentStorage::new());
+        let props = PropertyMapBuilder::new().build();
+        let node = current.create_node("Person", props).unwrap();
+
+        let tx = create_test_read_tx(TxId::new(1), current);
+        let edges = tx
+            .get_incoming_edges(node)
+            .expect("existing node with no edges must be Ok");
+        assert!(edges.is_empty(), "expected Ok(empty), got {edges:?}");
+    }
+
+    #[test]
+    fn test_get_outgoing_edges_with_label_no_match_ok_empty() {
+        let current = Arc::new(CurrentStorage::new());
+        let props = PropertyMapBuilder::new().build();
+        let node1 = current.create_node("Person", props.clone()).unwrap();
+        let node2 = current.create_node("Person", props.clone()).unwrap();
+        current.create_edge(node1, node2, "KNOWS", props).unwrap();
+
+        let tx = create_test_read_tx(TxId::new(1), current);
+        // Node exists and has edges, but none with this label: the label is a
+        // filter, not an existence check, so this is Ok(empty) and not an error.
+        let edges = tx
+            .get_outgoing_edges_with_label(node1, "FOLLOWS")
+            .expect("existing node with no matching label must be Ok");
+        assert!(edges.is_empty(), "expected Ok(empty), got {edges:?}");
     }
 
     #[test]

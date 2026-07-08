@@ -197,6 +197,22 @@ pub trait ReadOps {
     ///
     /// Returns all edges where `source == node_id` that are visible in the current snapshot.
     ///
+    /// # Arguments
+    ///
+    /// * `node_id` - The source node to get edges from
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(edge_ids)` - The node exists (is visible in this transaction's snapshot).
+    ///   The vector is **empty if the node has no outgoing edges** - that is a valid
+    ///   state, not an error.
+    /// - `Err(NodeNotFound)` - The node does not exist (or is not visible in this
+    ///   transaction's snapshot).
+    ///
+    /// This mirrors [`get_node`](Self::get_node): the same condition (a missing node)
+    /// produces an error, so callers can distinguish "node has no edges" from
+    /// "node doesn't exist" (Issue #359).
+    ///
     /// # Ordering
     ///
     /// The order of edges is **not guaranteed**. Do not rely on edges being returned
@@ -210,30 +226,59 @@ pub trait ReadOps {
     ///
     /// # Performance
     ///
-    /// - **Time**: O(degree) to collect visible edges
+    /// - **Time**: O(degree) to collect visible edges, plus an O(1) node existence check
     /// - **Space**: Allocates a new `Vec` containing all edge IDs
     ///
     /// # Example
     ///
-    /// ```rust,no_run
-    /// # use aletheiadb::{AletheiaDB, core::NodeId, api::transaction::ReadOps};
+    /// ```rust
+    /// # use aletheiadb::{AletheiaDB, properties, core::NodeId};
+    /// # use aletheiadb::api::transaction::{ReadOps, WriteOps};
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// # let db = AletheiaDB::new()?;
-    /// # let tx = db.read_transaction()?;
-    /// # let node_id = NodeId::new(1)?;
-    /// let edges = tx.get_outgoing_edges(node_id);
+    /// let (alice, bob) = db.write(|tx| {
+    ///     let alice = tx.create_node("Person", properties! { "name" => "Alice" })?;
+    ///     let bob = tx.create_node("Person", properties! { "name" => "Bob" })?;
+    ///     tx.create_edge(alice, bob, "KNOWS", properties! {})?;
+    ///     Ok::<_, aletheiadb::Error>((alice, bob))
+    /// })?;
+    ///
+    /// let tx = db.read_transaction()?;
+    ///
+    /// // Alice has one outgoing edge:
+    /// let edges = tx.get_outgoing_edges(alice)?;
+    /// assert_eq!(edges.len(), 1);
     /// for edge_id in edges {
     ///     let edge = tx.get_edge(edge_id)?;
-    ///     println!("-> {}", edge.target);
+    ///     assert_eq!(edge.target, bob);
     /// }
+    ///
+    /// // Bob exists but has no outgoing edges: Ok(empty), not an error.
+    /// assert!(tx.get_outgoing_edges(bob)?.is_empty());
+    ///
+    /// // A node that doesn't exist is an error, distinguishable from "no edges".
+    /// let missing = NodeId::new(999_999)?;
+    /// assert!(tx.get_outgoing_edges(missing).is_err());
     /// # Ok(())
     /// # }
     /// ```
-    fn get_outgoing_edges(&self, node_id: NodeId) -> Vec<EdgeId>;
+    fn get_outgoing_edges(&self, node_id: NodeId) -> Result<Vec<EdgeId>>;
 
     /// Get incoming edges to a node.
     ///
     /// Returns all edges where `target == node_id` that are visible in the current snapshot.
+    ///
+    /// # Arguments
+    ///
+    /// * `node_id` - The target node to get edges to
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(edge_ids)` - The node exists (is visible in this transaction's snapshot).
+    ///   The vector is **empty if the node has no incoming edges** - that is a valid
+    ///   state, not an error.
+    /// - `Err(NodeNotFound)` - The node does not exist (or is not visible in this
+    ///   transaction's snapshot).
     ///
     /// # Ordering
     ///
@@ -246,14 +291,53 @@ pub trait ReadOps {
     ///
     /// # Performance
     ///
-    /// - **Time**: O(degree) to collect visible edges
+    /// - **Time**: O(degree) to collect visible edges, plus an O(1) node existence check
     /// - **Space**: Allocates a new `Vec` containing all edge IDs
-    fn get_incoming_edges(&self, node_id: NodeId) -> Vec<EdgeId>;
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// # use aletheiadb::{AletheiaDB, properties};
+    /// # use aletheiadb::api::transaction::{ReadOps, WriteOps};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// let (alice, bob) = db.write(|tx| {
+    ///     let alice = tx.create_node("Person", properties! { "name" => "Alice" })?;
+    ///     let bob = tx.create_node("Person", properties! { "name" => "Bob" })?;
+    ///     tx.create_edge(alice, bob, "KNOWS", properties! {})?;
+    ///     Ok::<_, aletheiadb::Error>((alice, bob))
+    /// })?;
+    ///
+    /// let tx = db.read_transaction()?;
+    ///
+    /// // Bob has one incoming edge (from Alice):
+    /// assert_eq!(tx.get_incoming_edges(bob)?.len(), 1);
+    ///
+    /// // Alice exists but has no incoming edges: Ok(empty), not an error.
+    /// assert!(tx.get_incoming_edges(alice)?.is_empty());
+    /// # Ok(())
+    /// # }
+    /// ```
+    fn get_incoming_edges(&self, node_id: NodeId) -> Result<Vec<EdgeId>>;
 
     /// Get outgoing edges with a specific label.
     ///
     /// Returns all edges where `source == node_id` AND `label == label` that are
     /// visible in the current snapshot.
+    ///
+    /// # Arguments
+    ///
+    /// * `node_id` - The source node
+    /// * `label` - Edge label to filter by (e.g., "KNOWS", "CREATED")
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(edge_ids)` - The node exists (is visible in this transaction's snapshot).
+    ///   The vector is **empty if no outgoing edges carry the given label** - the
+    ///   label is a filter, not an existence check, so an unmatched label on an
+    ///   existing node is a valid state, not an error.
+    /// - `Err(NodeNotFound)` - The node does not exist (or is not visible in this
+    ///   transaction's snapshot).
     ///
     /// # Ordering
     ///
@@ -261,11 +345,42 @@ pub trait ReadOps {
     ///
     /// # Performance
     ///
-    /// - **Time**: O(degree) scan with label filtering
+    /// - **Time**: O(degree) scan with label filtering, plus an O(1) node existence check
     /// - **Space**: Allocates a new `Vec` containing matching edge IDs
-    fn get_outgoing_edges_with_label(&self, node_id: NodeId, label: &str) -> Vec<EdgeId>;
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// # use aletheiadb::{AletheiaDB, properties};
+    /// # use aletheiadb::api::transaction::{ReadOps, WriteOps};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// let (alice, bob) = db.write(|tx| {
+    ///     let alice = tx.create_node("Person", properties! { "name" => "Alice" })?;
+    ///     let bob = tx.create_node("Person", properties! { "name" => "Bob" })?;
+    ///     tx.create_edge(alice, bob, "KNOWS", properties! {})?;
+    ///     Ok::<_, aletheiadb::Error>((alice, bob))
+    /// })?;
+    ///
+    /// let tx = db.read_transaction()?;
+    ///
+    /// // One outgoing KNOWS edge:
+    /// assert_eq!(tx.get_outgoing_edges_with_label(alice, "KNOWS")?.len(), 1);
+    ///
+    /// // No FOLLOWS edges, but Alice exists: Ok(empty), not an error.
+    /// assert!(tx.get_outgoing_edges_with_label(alice, "FOLLOWS")?.is_empty());
+    /// # Ok(())
+    /// # }
+    /// ```
+    fn get_outgoing_edges_with_label(&self, node_id: NodeId, label: &str) -> Result<Vec<EdgeId>>;
 
     /// Get the approximate number of nodes in the database.
+    ///
+    /// # Returns
+    ///
+    /// The count of nodes currently committed in the storage engine. Returns `0`
+    /// for an empty database. Deleted nodes are not counted. Nodes created in
+    /// this transaction but not yet committed are **not** included.
     ///
     /// # Consistency Note
     ///
@@ -291,6 +406,12 @@ pub trait ReadOps {
     fn node_count(&self) -> usize;
 
     /// Get the approximate number of edges in the database.
+    ///
+    /// # Returns
+    ///
+    /// The count of edges currently committed in the storage engine. Returns `0`
+    /// for an empty database. Deleted edges are not counted. Edges created in
+    /// this transaction but not yet committed are **not** included.
     ///
     /// # Consistency Note
     ///

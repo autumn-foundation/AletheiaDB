@@ -380,8 +380,8 @@ impl AletheiaDB {
                 // always equals what retract_node_detach would retract (a
                 // self-loop appears in both adjacency directions but is one
                 // edge — count_connected_edges would report 2).
-                let mut edge_ids = tx.get_outgoing_edges(node_id);
-                edge_ids.extend(tx.get_incoming_edges(node_id));
+                let mut edge_ids = tx.get_outgoing_edges(node_id)?;
+                edge_ids.extend(tx.get_incoming_edges(node_id)?);
                 edge_ids.sort_unstable();
                 edge_ids.dedup();
                 let connected_edges = edge_ids.len();
@@ -430,8 +430,12 @@ impl AletheiaDB {
             // no-check-then-act rationale as retract_node). Deduplicate so a
             // self-loop (present in both adjacency directions) is retracted
             // once.
-            let mut edge_ids = tx.get_outgoing_edges(node_id);
-            edge_ids.extend(tx.get_incoming_edges(node_id));
+            // A node that is not visible (e.g. already retracted or never
+            // created) has no enumerable edges; `retract_node` below still
+            // owns the idempotency / not-found semantics for that case, so a
+            // NodeNotFound here must not fail the detach early (Issue #359).
+            let mut edge_ids = tx.get_outgoing_edges(node_id).unwrap_or_default();
+            edge_ids.extend(tx.get_incoming_edges(node_id).unwrap_or_default());
             edge_ids.sort_unstable();
             edge_ids.dedup();
 
