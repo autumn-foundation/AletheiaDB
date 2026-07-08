@@ -2399,7 +2399,11 @@ impl AletheiaMcpServer {
     /// `find_nodes_by_property_at`, which reconstruct each candidate from
     /// the historical version visible at the queried coordinate -- so nodes
     /// deleted from current state are still found when both dimensions
-    /// anchor before the deletion.
+    /// anchor before the deletion. The candidate set is capped at the same
+    /// `max_schema_as_of_entities` limit bi-temporal `get_schema` uses; when
+    /// truncated, the response discloses it via `sampled: true` and
+    /// `total_matching`/`has_more` count matches within the sampled
+    /// candidate set only.
     fn handle_find_nodes_at_time(&self, args: serde_json::Value) -> CallToolResult {
         let req: FindNodesAtTimeRequest = match serde_json::from_value(args) {
             Ok(r) => r,
@@ -2452,9 +2456,14 @@ impl AletheiaMcpServer {
 
         match matches {
             Ok(matches) => {
-                // The full matching set is already materialized (sorted by
-                // node id for stable pagination), so the total is cheap to
-                // report and `has_more` is exact.
+                // The matching set is already materialized (sorted by node
+                // id for stable pagination), so the total is cheap to report
+                // and `has_more` is exact *within the candidate set*. When
+                // `sampled` is true the candidate enumeration was truncated
+                // at the configured cap, so `total_matching` is honest only
+                // about the sampled candidates -- the flag discloses that.
+                let sampled = matches.sampled;
+                let matches = matches.nodes;
                 let total_matching = matches.len();
                 let include_vectors = req.include_vectors.unwrap_or(false);
                 let nodes: Vec<NodeResponse> = matches
@@ -2470,6 +2479,9 @@ impl AletheiaMcpServer {
                     "count": nodes.len(),
                     "offset": offset,
                     "limit": limit,
+                    // Candidate-set truncation disclosure, mirroring
+                    // get_schema's `sampled` (same underlying cap).
+                    "sampled": sampled,
                     // The resolved coordinate this answer holds at -- the
                     // omitted transaction_time resolves to a concrete "now".
                     "valid_time": Self::format_timestamp_rfc3339(valid_time),
@@ -3993,7 +4005,10 @@ fn tool_definitions() -> Vec<Tool> {
                      Recalling a since-deleted node requires anchoring BOTH dimensions before \
                      the deletion. Results are sorted by node id; the response echoes the \
                      resolved valid_time/transaction_time and carries `has_more`/`next_offset`/\
-                     `total_matching` pagination metadata. Vector/embedding properties are \
+                     `total_matching` pagination metadata. On databases with very large \
+                     bi-temporal history the candidate scan is capped; the response then sets \
+                     `sampled: true` and `total_matching` counts matches within the sampled \
+                     candidate set only. Vector/embedding properties are \
                      elided by default; pass `include_vectors: true` for full arrays.",
             make_input_schema::<FindNodesAtTimeRequest>(),
         ),

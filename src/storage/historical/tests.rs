@@ -4907,3 +4907,89 @@ fn test_reconstruct_nonexistent_edge_version_returns_version_not_found() {
         err => panic!("Expected VersionNotFound for a never-added edge version, got: {err:?}"),
     }
 }
+
+#[test]
+fn test_get_nodes_at_time_with_label_filters_on_version_label_before_reconstruction() {
+    // Unit test for the label-aware batch lookup (Issue #3236): the label
+    // check runs on the version record itself, so off-label and not-visible
+    // candidates are skipped (no `None` placeholders) and only label
+    // matches come back, reconstructed at the queried coordinate.
+    let mut storage = HistoricalStorage::new();
+
+    let person = GLOBAL_INTERNER.intern("Person").unwrap();
+    let company = GLOBAL_INTERNER.intern("Company").unwrap();
+
+    let person_id = NodeId::new(1).unwrap();
+    let company_id = NodeId::new(2).unwrap();
+    let late_person_id = NodeId::new(3).unwrap();
+    let never_versioned = NodeId::new(4).unwrap();
+
+    // Two nodes visible from t=1000, one Person created only at t=3000.
+    storage
+        .add_node_version(
+            person_id,
+            VersionId::new(100).unwrap(),
+            1000.into(),
+            1000.into(),
+            person,
+            PropertyMapBuilder::new().insert("name", "Alice").build(),
+            false,
+        )
+        .unwrap();
+    storage
+        .add_node_version(
+            company_id,
+            VersionId::new(101).unwrap(),
+            1000.into(),
+            1000.into(),
+            company,
+            PropertyMapBuilder::new().insert("name", "Acme").build(),
+            false,
+        )
+        .unwrap();
+    storage
+        .add_node_version(
+            late_person_id,
+            VersionId::new(102).unwrap(),
+            3000.into(),
+            3000.into(),
+            person,
+            PropertyMapBuilder::new().insert("name", "Bob").build(),
+            false,
+        )
+        .unwrap();
+
+    let candidates = [person_id, company_id, late_person_id, never_versioned];
+
+    // At t=2000 only the first Person matches: the Company is filtered by
+    // label, the late Person is not yet visible, and the never-versioned id
+    // is skipped without error.
+    let found = storage
+        .get_nodes_at_time_with_label(&candidates, person, 2000.into(), 2000.into())
+        .unwrap();
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].id, person_id);
+    assert_eq!(found[0].label, person);
+    assert_eq!(
+        found[0].properties.get("name"),
+        Some(&crate::core::property::PropertyValue::from("Alice"))
+    );
+
+    // At t=4000 both Person nodes match, in input order.
+    let found = storage
+        .get_nodes_at_time_with_label(&candidates, person, 4000.into(), 4000.into())
+        .unwrap();
+    assert_eq!(
+        found.iter().map(|n| n.id).collect::<Vec<_>>(),
+        vec![person_id, late_person_id]
+    );
+
+    // The Company label sees only the company node.
+    let found = storage
+        .get_nodes_at_time_with_label(&candidates, company, 2000.into(), 2000.into())
+        .unwrap();
+    assert_eq!(
+        found.iter().map(|n| n.id).collect::<Vec<_>>(),
+        vec![company_id]
+    );
+}

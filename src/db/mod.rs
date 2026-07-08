@@ -52,6 +52,7 @@ pub mod vector_builder;
 pub use crate::storage::backup::BackupSummary;
 pub use constraint_builder::UniqueConstraintBuilder;
 pub use extent::{LabelExtent, TemporalExtent, TimeBounds};
+pub use ops::NodesAtTime;
 pub use schema::{EdgeTypeSchema, GraphSchema, LabelSchema, SchemaInstant};
 pub use similarity_query::{SimilarityQuery, SimilaritySource};
 pub use vector_builder::VectorIndexBuilder;

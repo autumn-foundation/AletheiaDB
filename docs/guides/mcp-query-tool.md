@@ -282,7 +282,11 @@ historical version visible at that coordinate. Nodes that did not exist at
 the queried point, or whose property value did not hold there, are excluded:
 a node whose `name` became "Alice" only after T is not returned for a query
 at T. With both dimensions at the current time, the result set equals the
-current-state `list_nodes` property lookup.
+current-state `list_nodes` property lookup **for nodes whose valid interval
+has begun** -- the one divergence is future-dated facts: a node created with
+a `valid_from` in the future (Issue #3221) is already present in current
+state (so `list_nodes` returns it) but is not yet visible at `(now, now)` in
+the bi-temporal view, so this tool excludes it until its valid time arrives.
 
 ```jsonc
 // tools/call -> "find_nodes_at_time"
@@ -299,6 +303,7 @@ current-state `list_nodes` property lookup.
 //      "count": 1,
 //      "offset": 0,
 //      "limit": 100,
+//      "sampled": false,  // true if the candidate scan was capped (see below)
 //      "valid_time": "2024-01-01T00:00:00.000000Z",       // resolved coordinate,
 //      "transaction_time": "2024-01-01T00:00:00.000000Z", // echoed as RFC 3339
 //      "has_more": false,
@@ -334,12 +339,19 @@ Validation errors are structured, consistent with `list_nodes`:
              "message": "Invalid valid_time: Invalid timestamp format: 'not-a-timestamp'. ..." } }
 ```
 
-Performance note (v1): the tool iterates every node that has ever had a
-version recorded (the same candidate enumeration bi-temporal `get_schema`
-uses) and reconstructs each at the queried coordinate -- complete, including
-deleted nodes, but a scan. A dedicated temporal label index is a deliberate
-follow-up if this misses its latency target at scale. The edge equivalent
-(`find_edges_at_time`) is a planned fast-follow.
+Performance note (v1): the tool scans every node that has ever had a version
+recorded (the same candidate enumeration bi-temporal `get_schema` uses,
+**capped at the same configurable limit** -- `max_schema_as_of_entities`,
+default 50,000), resolving each candidate's version at the queried coordinate
+and reconstructing properties only for candidates whose at-time label
+matches -- complete, including deleted nodes, but a scan. When the cap is
+hit, the lowest `cap` node ids are kept (a deterministic subset, so
+pagination stays stable) and the response sets `sampled: true`, exactly as
+`get_schema`'s AS OF form does; `total_matching` and `has_more` are then
+honest only about the **sampled candidate set**, so a `sampled: true`
+response may be missing matches with higher node ids. A dedicated temporal
+label index is a deliberate follow-up if this misses its latency target at
+scale. The edge equivalent (`find_edges_at_time`) is a planned fast-follow.
 
 ## Structured error codes and the retriable contract
 

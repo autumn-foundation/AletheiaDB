@@ -7796,6 +7796,32 @@ mod find_nodes_at_time_tests {
         assert_eq!(node_ids(&value), vec![id]);
     }
 
+    /// T2 (review): the "both dimensions required" contract as a NEGATIVE
+    /// test. Anchoring only `valid_time` before a deletion while
+    /// `transaction_time` defaults to now must NOT recall the deleted node
+    /// -- the deletion already closed the version's transaction interval.
+    #[test]
+    fn deleted_node_not_recalled_when_transaction_time_omitted() {
+        let server = create_test_server();
+        let id = create_named(&server, "Person", "Alice");
+        let t_before = anchor_after_commits();
+        delete(&server, id);
+        std::thread::sleep(std::time::Duration::from_millis(2));
+
+        // valid_time anchored before the deletion, transaction_time omitted
+        // (defaults to now): empty, per the documented contract.
+        let value = find(&server, name_req("Person", "Alice", &t_before));
+        assert!(
+            node_ids(&value).is_empty(),
+            "past valid_time + defaulted transaction_time must not recall a deleted node: {value}"
+        );
+        assert_eq!(value["total_matching"], serde_json::json!(0));
+
+        // Label-only path obeys the same contract.
+        let value = find(&server, base_req("Person", &t_before));
+        assert!(node_ids(&value).is_empty(), "{value}");
+    }
+
     #[test]
     fn node_deleted_before_t_recalled_when_both_dimensions_anchored() {
         let server = create_test_server();
@@ -7907,7 +7933,9 @@ mod find_nodes_at_time_tests {
         assert_eq!(page1["has_more"], serde_json::json!(true));
         assert_eq!(page1["next_offset"], serde_json::json!(1));
 
-        // Page 2 continues where page 1 left off.
+        // Page 2 continues where page 1 left off, and its continuation
+        // metadata advances from the requested offset (T6: next_offset must
+        // be exercised at offset > 0, not just on page 1).
         let page2 = find(
             &server,
             FindNodesAtTimeRequest {
@@ -7917,6 +7945,8 @@ mod find_nodes_at_time_tests {
             },
         );
         assert_eq!(node_ids(&page2), vec![created[1]], "{page2}");
+        assert_eq!(page2["has_more"], serde_json::json!(true));
+        assert_eq!(page2["next_offset"], serde_json::json!(2));
 
         // Final page reports has_more: false.
         let page3 = find(
@@ -7929,6 +7959,36 @@ mod find_nodes_at_time_tests {
         );
         assert_eq!(node_ids(&page3), vec![created[2]], "{page3}");
         assert_eq!(page3["has_more"], serde_json::json!(false));
+    }
+
+    /// T4 (review, mutation killer): `limit: 0` is clamped UP to 1 (a page
+    /// must be able to carry a continuation cursor), exactly like
+    /// `list_nodes` -- one node comes back, not zero.
+    #[test]
+    fn limit_zero_is_clamped_up_to_one() {
+        let server = create_test_server();
+        let mut created: Vec<u64> = (0..2)
+            .map(|_| create_named(&server, "Person", "Alice"))
+            .collect();
+        created.sort_unstable();
+        let now = anchor_after_commits();
+
+        let value = find(
+            &server,
+            FindNodesAtTimeRequest {
+                limit: Some(0),
+                ..name_req("Person", "Alice", &now)
+            },
+        );
+        assert!(value.get("error").is_none(), "{value}");
+        assert_eq!(value["limit"], serde_json::json!(1));
+        assert_eq!(
+            node_ids(&value),
+            vec![created[0]],
+            "limit 0 must clamp to 1 and return one node, not zero: {value}"
+        );
+        assert_eq!(value["count"], serde_json::json!(1));
+        assert_eq!(value["has_more"], serde_json::json!(true));
     }
 
     #[test]
@@ -8044,6 +8104,87 @@ mod find_nodes_at_time_tests {
         assert!(node_ids(&value).is_empty());
         assert_eq!(value["total_matching"], serde_json::json!(0));
         assert_eq!(value["has_more"], serde_json::json!(false));
+        assert_eq!(value["sampled"], serde_json::json!(false));
+    }
+
+    /// T3 (review): vector/embedding properties follow the #3220 elision
+    /// convention on this tool -- elided `{type, dim, elided: true}`
+    /// descriptor by default, full float array with `include_vectors: true`.
+    #[test]
+    fn vector_properties_elided_by_default_and_full_with_include_vectors() {
+        let server = create_test_server();
+        let embedding: Vec<f32> = (0..16).map(|i| (i as f32) * 0.001 + 0.1).collect();
+        let node: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            label: "Document".to_string(),
+            properties: Some(HashMap::from([
+                ("name".to_string(), serde_json::json!("Doc1")),
+                ("embedding".to_string(), serde_json::json!(embedding)),
+            ])),
+            valid_time: None,
+            provenance: None,
+        }))
+        .expect("create should succeed");
+        let now = anchor_after_commits();
+
+        // Default: elided descriptor, exactly like list_nodes.
+        let value = find(&server, base_req("Document", &now));
+        assert_eq!(node_ids(&value), vec![node.id], "{value}");
+        assert_eq!(
+            value["nodes"][0]["properties"]["embedding"],
+            serde_json::json!({"type": "vector", "dim": 16, "elided": true})
+        );
+        // Non-vector properties are untouched.
+        assert_eq!(value["nodes"][0]["properties"]["name"], "Doc1");
+
+        // include_vectors: true restores the full, lossless array.
+        let value = find(
+            &server,
+            FindNodesAtTimeRequest {
+                include_vectors: Some(true),
+                ..base_req("Document", &now)
+            },
+        );
+        let returned: Vec<f32> = value["nodes"][0]["properties"]["embedding"]
+            .as_array()
+            .expect("embedding should be a full array")
+            .iter()
+            .map(|v| v.as_f64().unwrap() as f32)
+            .collect();
+        assert_eq!(returned, embedding);
+    }
+
+    /// T7 (review): candidate-set truncation (the C1 cap) is disclosed via
+    /// `sampled: true`, with `total_matching` counting matches within the
+    /// sampled candidate set only. The cap is the same configurable
+    /// `max_schema_as_of_entities` bi-temporal `get_schema` uses, injected
+    /// small here (mirroring the schema_as_of cap test).
+    #[test]
+    fn truncated_candidate_scan_discloses_sampled_true() {
+        use crate::config::{AletheiaDBConfig, HistoricalConfigBuilder};
+        use crate::test_utils::create_test_db_with_config;
+
+        let config = AletheiaDBConfig::builder()
+            .historical(
+                HistoricalConfigBuilder::new()
+                    .max_schema_as_of_entities(2)
+                    .build(),
+            )
+            .build();
+        let (_tmp, db) = create_test_db_with_config(config).unwrap();
+        let server = AletheiaMcpServer::new(Arc::new(db));
+
+        let mut created: Vec<u64> = (0..4)
+            .map(|_| create_named(&server, "Person", "Alice"))
+            .collect();
+        created.sort_unstable();
+        let now = anchor_after_commits();
+
+        let value = find(&server, name_req("Person", "Alice", &now));
+        assert_eq!(value["sampled"], serde_json::json!(true), "{value}");
+        // total_matching is honest about the sampled candidate set: the cap
+        // keeps the lowest 2 node ids, both of which match.
+        assert_eq!(value["total_matching"], serde_json::json!(2));
+        assert_eq!(node_ids(&value), created[..2].to_vec(), "{value}");
     }
 }
 

@@ -394,28 +394,37 @@ Each returned node is reconstructed **as it existed** at
 `(valid_time, transaction_time)` -- not its current state -- and nodes that
 did not exist (or whose property value did not hold) at that point are
 excluded. With both dimensions at now, the result set equals the
-current-state `list_nodes` property lookup. The response echoes the resolved
+current-state `list_nodes` property lookup *for nodes whose valid interval
+has begun* (a #3221 future-dated `valid_from` node is in current state but
+not yet visible at `(now, now)`). The response echoes the resolved
 `valid_time`/`transaction_time` (RFC 3339). Nodes since deleted from current
 state are found too (candidates come from history, not the live index), but
 recalling superseded or deleted states requires anchoring *both* dimensions
 before the superseding write, exactly as with #3225. Backed by the
 `AletheiaDB::find_nodes_at_time` / `find_nodes_by_property_at` convenience
-API. v1 iterates historical version heads (a scan; a temporal label index is
-a deliberate follow-up). See
+API (returning `NodesAtTime`). v1 scans historical version heads, capped at
+the same `max_schema_as_of_entities` limit bi-temporal `get_schema` uses
+(default 50,000, lowest node ids kept); when truncated the response sets
+`sampled: true` and `total_matching` counts matches within the sampled
+candidate set only. Properties are reconstructed only for label matches; a
+temporal label index is a deliberate follow-up. See
 [docs/guides/mcp-query-tool.md](docs/guides/mcp-query-tool.md#point-in-time-as-of-node-find-by-label-and-property).
 
 **Vector properties are elided by default (Issue #3220)**: `get_node`,
 `list_nodes`, `get_edge`, `list_edges`, `get_outgoing_edges`,
-`get_incoming_edges`, `traverse`, `find_similar`, and `hybrid_query` replace
-vector/embedding properties with a `{type, dim, elided: true}` descriptor
+`get_incoming_edges`, `traverse`, `find_similar`, `hybrid_query`, and
+`find_nodes_at_time` replace vector/embedding properties with a
+`{type, dim, elided: true}` descriptor
 (or `{type: "sparse_vector", dim, nnz, elided: true}` for sparse vectors)
 instead of the raw float array -- a single embedding can otherwise cost
 thousands of tokens of context an LLM can't reason over. Pass
 `include_vectors: true` on the request to receive the full array. This does
 not affect `find_similar`'s `score` or `hybrid_query`'s `similarity_score`,
 which are always returned in full, nor the write path (`create_node`,
-`update_node`, `create_edge`, `update_edge`) or temporal/history tools,
-which are unaffected by this flag and always return full vectors.
+`update_node`, `create_edge`, `update_edge`) or the single-entity
+temporal/history tools (`get_node_at_time`, `get_edge_at_time`,
+`get_node_history`), which have no `include_vectors` flag and always return
+full vectors.
 
 **Temporal extent (Issue #3238)**: `temporal_extent` reports the dataset's
 queryable bi-temporal extent — the earliest/latest valid-time and

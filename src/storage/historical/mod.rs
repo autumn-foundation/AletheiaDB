@@ -2295,6 +2295,60 @@ impl HistoricalStorage {
         Ok(results)
     }
 
+    /// Batch point-in-time node lookup restricted to a single label
+    /// (Issue #3236).
+    ///
+    /// For each candidate id, resolves the version visible at
+    /// `(valid_time, transaction_time)` and checks the version's recorded
+    /// `label` **before** reconstructing properties, so an off-label
+    /// candidate costs only the version-at-time lookup, never a property
+    /// chain replay. Candidates that are not visible at the coordinate, or
+    /// whose at-time label differs, are simply skipped (no `None`
+    /// placeholders), so the output length may be shorter than the input.
+    /// Output order follows input order.
+    ///
+    /// Like [`get_nodes_at_time`](Self::get_nodes_at_time), a property
+    /// reconstruction failure is a systemic error and propagates as `Err`.
+    pub(crate) fn get_nodes_at_time_with_label(
+        &self,
+        node_ids: &[NodeId],
+        label: InternedString,
+        valid_time: Timestamp,
+        transaction_time: Timestamp,
+    ) -> Result<Vec<Node>> {
+        #[cfg(feature = "observability")]
+        let _span =
+            crate::observability::historical_storage_query_span("get_nodes_at_time_with_label")
+                .entered();
+
+        let mut results = Vec::new();
+
+        for &node_id in node_ids {
+            let Some(version_id) =
+                self.find_node_version_at_time(node_id, valid_time, transaction_time)
+            else {
+                continue;
+            };
+            let version = self
+                .node_versions
+                .get(&version_id)
+                .ok_or(StorageError::VersionNotFound(version_id))?;
+            if version.label != label {
+                continue;
+            }
+            let (matched_node_id, matched_label) = (version.node_id, version.label);
+            let properties = self.reconstruct_node_properties(version_id)?;
+            results.push(Node::new(
+                matched_node_id,
+                matched_label,
+                properties,
+                version_id,
+            ));
+        }
+
+        Ok(results)
+    }
+
     /// Get multiple edges as they existed at a specific point in bi-temporal space.
     ///
     /// This retrieves edges in batch to minimize overhead.

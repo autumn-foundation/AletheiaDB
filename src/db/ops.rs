@@ -12,6 +12,39 @@ use crate::db::AletheiaDB;
 use crate::storage::current::{IncomingEdgesIter, OutgoingEdgesIter};
 use crate::storage::wal::WalOperation;
 
+/// How many candidate node ids the AS OF node-find scan reconstructs per
+/// historical read-guard acquisition (Issue #3236). Chunking keeps cold-tier
+/// I/O during property reconstruction from pinning the guard -- and thereby
+/// blocking writers -- for the whole scan.
+const AS_OF_FIND_CHUNK_SIZE: usize = 4096;
+
+/// Result of a point-in-time (AS OF) node find (Issue #3236): the matching
+/// nodes plus a disclosure flag for candidate-set truncation.
+///
+/// Returned by [`AletheiaDB::find_nodes_at_time`] and
+/// [`AletheiaDB::find_nodes_by_property_at`].
+#[derive(Debug, Clone, Default)]
+pub struct NodesAtTime {
+    /// Matching nodes, reconstructed at the queried bi-temporal coordinate
+    /// and sorted by node id (so pagination over the set is deterministic).
+    pub nodes: Vec<Node>,
+    /// `true` when the candidate set (every node that has ever had a version
+    /// recorded) exceeded the configured cap
+    /// ([`crate::config::HistoricalConfigBuilder::max_schema_as_of_entities`],
+    /// default 50,000) and was truncated to the lowest `cap` node ids before
+    /// scanning. When set, `nodes` -- and any count derived from it -- may
+    /// be incomplete: they reflect only the sampled candidate set. Mirrors
+    /// [`GraphSchema::sampled`](crate::db::schema::GraphSchema::sampled).
+    pub sampled: bool,
+}
+
+impl NodesAtTime {
+    /// An empty, un-truncated result (e.g. for a never-interned label).
+    fn empty() -> Self {
+        Self::default()
+    }
+}
+
 impl AletheiaDB {
     /// Create a node with the given label and properties.
     ///
@@ -665,20 +698,32 @@ impl AletheiaDB {
     /// deterministic. A label that has never been written yields an empty
     /// result, never an error.
     ///
+    /// # Completeness and the candidate cap
+    ///
+    /// Candidates are every node that has ever had a version recorded (the
+    /// same enumeration [`schema_as_of`](Self::schema_as_of) uses), capped
+    /// at the same configurable limit
+    /// ([`crate::config::HistoricalConfigBuilder::max_schema_as_of_entities`],
+    /// default 50,000) to keep a single call bounded on databases with
+    /// substantial bi-temporal history. When the cap is hit, the lowest
+    /// `cap` node ids are kept (a deterministic set, so pagination stays
+    /// stable) and [`NodesAtTime::sampled`] is `true` to disclose that the
+    /// result -- including its length -- reflects only the sampled
+    /// candidate set.
+    ///
     /// # Performance
     ///
-    /// Iterates every node that has ever had a version recorded (the same
-    /// candidate enumeration [`schema_as_of`](Self::schema_as_of) uses) and
-    /// reconstructs each at the queried coordinate. A dedicated temporal
-    /// label index is a deliberate follow-up if this path proves too slow at
-    /// scale.
+    /// Version-at-time resolution runs for every candidate, but property
+    /// reconstruction runs only for candidates whose at-time label matches.
+    /// A dedicated temporal label index is a deliberate follow-up if this
+    /// path proves too slow at scale.
     #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn find_nodes_at_time(
         &self,
         label: &str,
         valid_time: Timestamp,
         transaction_time: Timestamp,
-    ) -> Result<Vec<Node>> {
+    ) -> Result<NodesAtTime> {
         self.find_nodes_at_time_filtered(label, None, valid_time, transaction_time)
     }
 
@@ -689,12 +734,19 @@ impl AletheiaDB {
     /// [`find_nodes_by_property`](Self::find_nodes_by_property): the property
     /// comparison runs against each node's state **at**
     /// `(valid_time, transaction_time)`, so a node whose property only
-    /// matched before (or after) the queried point is excluded. With both
-    /// dimensions at the current time this returns the same node set as
-    /// `find_nodes_by_property`.
+    /// matched before (or after) the queried point is excluded.
+    ///
+    /// With both dimensions at the current time this returns the same node
+    /// set as `find_nodes_by_property` **for nodes whose valid interval has
+    /// begun**. The one divergence is future-dated facts: a node created
+    /// with a `valid_from` in the future is already present in current
+    /// storage (and thus in `find_nodes_by_property`) but is not yet visible
+    /// at `(now, now)` in the bi-temporal view, so this method excludes it
+    /// until its valid time arrives.
     ///
     /// See [`find_nodes_at_time`](Self::find_nodes_at_time) for ordering,
-    /// completeness, and performance characteristics.
+    /// completeness (including the candidate cap and
+    /// [`NodesAtTime::sampled`]), and performance characteristics.
     #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn find_nodes_by_property_at(
         &self,
@@ -703,7 +755,7 @@ impl AletheiaDB {
         property_value: &PropertyValue,
         valid_time: Timestamp,
         transaction_time: Timestamp,
-    ) -> Result<Vec<Node>> {
+    ) -> Result<NodesAtTime> {
         self.find_nodes_at_time_filtered(
             label,
             Some((property_key, property_value)),
@@ -713,26 +765,28 @@ impl AletheiaDB {
     }
 
     /// Shared implementation for the AS OF node-find methods: enumerate every
-    /// node that has ever had a version recorded, reconstruct each at the
-    /// queried bi-temporal coordinate, and keep those whose *at-time* state
-    /// matches the label (and optional exact property) filter.
+    /// node that has ever had a version recorded (capped, see
+    /// [`find_nodes_at_time`](Self::find_nodes_at_time)), resolve each
+    /// candidate's version at the queried bi-temporal coordinate, and
+    /// reconstruct properties only for those whose *at-time* label matches,
+    /// then apply the optional exact-property filter.
     fn find_nodes_at_time_filtered(
         &self,
         label: &str,
         property_filter: Option<(&str, &PropertyValue)>,
         valid_time: Timestamp,
         transaction_time: Timestamp,
-    ) -> Result<Vec<Node>> {
+    ) -> Result<NodesAtTime> {
         // A label (or property key) that has never been interned has never
         // been written anywhere -- current or historical -- so the result is
         // an empty set, never an error (mirroring `find_nodes_by_property`).
         let Some(label_id) = GLOBAL_INTERNER.get_id(label) else {
-            return Ok(Vec::new());
+            return Ok(NodesAtTime::empty());
         };
         let key_filter = match property_filter {
             Some((key, value)) => match GLOBAL_INTERNER.get_id(key) {
                 Some(key_id) => Some((key_id, value)),
-                None => return Ok(Vec::new()),
+                None => return Ok(NodesAtTime::empty()),
             },
             None => None,
         };
@@ -741,31 +795,56 @@ impl AletheiaDB {
         // Unlike the current-state label index, this stays complete for nodes
         // deleted from current state (deletion closes the version's
         // transaction interval but the version head remains), so anchoring
-        // both dimensions before a deletion still recalls the node. Sorted so
-        // the result order (and thus pagination) is deterministic.
-        let mut node_ids = self.historical.read().versioned_node_ids();
-        node_ids.sort_unstable();
+        // both dimensions before a deletion still recalls the node.
+        //
+        // The set is capped at the same configurable limit `schema_as_of`
+        // uses, keeping the lowest `cap` ids -- a deterministic subset, so
+        // pagination over a sampled result is still stable. Sorted so the
+        // result order (and thus pagination) is deterministic.
+        let (node_ids, sampled) = {
+            let historical = self.historical.read();
+            let mut ids = historical.versioned_node_ids();
+            let cap = historical.max_schema_as_of_entities();
+            drop(historical);
+            let sampled = crate::db::schema::cap_ids(&mut ids, cap);
+            ids.sort_unstable();
+            (ids, sampled)
+        };
 
+        // Reconstruct in chunks, re-acquiring the historical read guard per
+        // chunk, so cold-tier I/O during property reconstruction cannot pin
+        // the guard (and block writers) for the entire scan. Recorded
+        // history is immutable and every candidate is resolved at the same
+        // fixed bi-temporal coordinate, so for a past `transaction_time`
+        // anchor the chunked scan is exactly as consistent as a
+        // single-acquisition scan. The only skew window is a
+        // `transaction_time` at/near now: a write committed between chunks
+        // can be visible to later chunks but not earlier ones -- the same
+        // race a caller already has against writes committed immediately
+        // before or after a single-acquisition call.
         let mut matches = Vec::new();
-        for (_, node) in self.get_nodes_at_time(&node_ids, valid_time, transaction_time)? {
-            // `None` = not visible at the queried bi-temporal point.
-            let Some(node) = node else {
-                continue;
-            };
-            if node.label != label_id {
-                continue;
+        for chunk in node_ids.chunks(AS_OF_FIND_CHUNK_SIZE) {
+            let chunk_nodes = self
+                .historical
+                .read()
+                .get_nodes_at_time_with_label(chunk, label_id, valid_time, transaction_time)
+                .record_error_metric()?;
+            for node in chunk_nodes {
+                if let Some((key_id, expected)) = &key_filter
+                    && !node
+                        .properties
+                        .get_by_interned_key(key_id)
+                        .is_some_and(|v| v == *expected)
+                {
+                    continue;
+                }
+                matches.push(node);
             }
-            if let Some((key_id, expected)) = &key_filter
-                && !node
-                    .properties
-                    .get_by_interned_key(key_id)
-                    .is_some_and(|v| v == *expected)
-            {
-                continue;
-            }
-            matches.push(node);
         }
-        Ok(matches)
+        Ok(NodesAtTime {
+            nodes: matches,
+            sampled,
+        })
     }
 
     // ========================================================================
@@ -1277,8 +1356,8 @@ mod tests {
             PropertyMapBuilder::new().insert("name", name).build()
         }
 
-        fn ids(nodes: &[crate::core::graph::Node]) -> Vec<NodeId> {
-            nodes.iter().map(|n| n.id).collect()
+        fn ids(found: &crate::db::NodesAtTime) -> Vec<NodeId> {
+            found.nodes.iter().map(|n| n.id).collect()
         }
 
         /// Capture a bi-temporal anchor strictly after every previously
@@ -1311,11 +1390,12 @@ mod tests {
             assert_eq!(ids(&found), vec![id]);
             // ...and the returned node carries the AT-TIME property value,
             // not the current one.
-            assert_eq!(found[0].properties.get("name"), Some(&alice));
+            assert_eq!(found.nodes[0].properties.get("name"), Some(&alice));
             // "Bob" did not hold yet at t1.
             assert!(
                 db.find_nodes_by_property_at("Person", "name", &bob, t1, t1)
                     .unwrap()
+                    .nodes
                     .is_empty()
             );
 
@@ -1324,10 +1404,11 @@ mod tests {
                 .find_nodes_by_property_at("Person", "name", &bob, t2, t2)
                 .unwrap();
             assert_eq!(ids(&found), vec![id]);
-            assert_eq!(found[0].properties.get("name"), Some(&bob));
+            assert_eq!(found.nodes[0].properties.get("name"), Some(&bob));
             assert!(
                 db.find_nodes_by_property_at("Person", "name", &alice, t2, t2)
                     .unwrap()
+                    .nodes
                     .is_empty()
             );
         }
@@ -1344,6 +1425,7 @@ mod tests {
             assert!(
                 db.find_nodes_by_property_at("Person", "name", &alice, t0, t0)
                     .unwrap()
+                    .nodes
                     .is_empty(),
                 "a node created after T must not be found at T"
             );
@@ -1379,7 +1461,32 @@ mod tests {
             assert!(
                 db.find_nodes_by_property_at("Person", "name", &alice, t_after, t_after)
                     .unwrap()
+                    .nodes
                     .is_empty()
+            );
+        }
+
+        /// T2 (review): the documented "both dimensions required" contract,
+        /// pinned as a *negative* test -- a deleted node must NOT be
+        /// recalled when only `valid_time` is anchored before the deletion
+        /// and `transaction_time` stays at now (the MCP default), because
+        /// the deletion already closed the version's transaction interval.
+        #[test]
+        fn deleted_node_not_recalled_with_only_valid_time_anchored() {
+            let (_tmp, db) = create_test_db().unwrap();
+            let alice = PropertyValue::from("Alice");
+
+            let _id = db.create_node("Person", name_props("Alice")).unwrap();
+            let v_before = anchor_after_commits();
+            db.delete_node_with_valid_time(_id, None).unwrap();
+            let tx_now = anchor_after_commits();
+
+            assert!(
+                db.find_nodes_by_property_at("Person", "name", &alice, v_before, tx_now)
+                    .unwrap()
+                    .nodes
+                    .is_empty(),
+                "past valid_time + current transaction_time must NOT recall a deleted node"
             );
         }
 
@@ -1435,6 +1542,110 @@ mod tests {
             );
         }
 
+        /// D1 regression (review): the current-state equivalence claim does
+        /// NOT hold for future-dated facts, and the documentation says so.
+        /// A node created with `valid_from` in the future is present in
+        /// current storage (so `find_nodes_by_property` returns it) but its
+        /// valid interval has not begun, so the bi-temporal view at
+        /// `(now, now)` must exclude it.
+        #[test]
+        fn future_valid_from_node_visible_currently_but_not_at_now_now() {
+            let (_tmp, db) = create_test_db().unwrap();
+            let alice = PropertyValue::from("FutureAlice");
+
+            let future = crate::core::temporal::Timestamp::from(
+                time::now().wallclock() + 3_600_000_000, // now + 1 hour
+            );
+            let id = db
+                .create_node_with_valid_time("Person", name_props("FutureAlice"), Some(future))
+                .unwrap();
+            let now = anchor_after_commits();
+
+            // Current-state lookup sees the future-dated node...
+            assert_eq!(
+                db.find_nodes_by_property("Person", "name", &alice),
+                vec![id],
+                "current storage must contain the future-dated node"
+            );
+            // ...but the bi-temporal view at (now, now) must not: its valid
+            // interval has not begun yet.
+            assert!(
+                db.find_nodes_by_property_at("Person", "name", &alice, now, now)
+                    .unwrap()
+                    .nodes
+                    .is_empty(),
+                "a future-dated valid_from node must be invisible at (now, now)"
+            );
+            // Once the valid dimension reaches the fact's start, it appears
+            // (transaction dimension already contains the write).
+            let after_start = crate::core::temporal::Timestamp::from(future.wallclock() + 1);
+            assert_eq!(
+                ids(&db
+                    .find_nodes_by_property_at("Person", "name", &alice, after_start, now)
+                    .unwrap()),
+                vec![id]
+            );
+        }
+
+        /// T1 (review, mutation killer): the two temporal dimensions are
+        /// passed in the correct order. A backdated `valid_from` makes the
+        /// dimensions observably different: (valid=past-but-after-valid_from,
+        /// tx=now) finds the node, while swapping the arguments would anchor
+        /// the *transaction* dimension before the write was recorded and
+        /// find nothing.
+        #[test]
+        fn backdated_valid_time_distinguishes_the_two_dimensions() {
+            let (_tmp, db) = create_test_db().unwrap();
+            let alice = PropertyValue::from("BackdatedAlice");
+
+            // valid_from one hour in the past; the write itself is recorded now.
+            let v0 = crate::core::temporal::Timestamp::from(
+                time::now().wallclock() - 3_600_000_000, // now - 1 hour
+            );
+            // A wall-clock instant after v0 but strictly before the write is
+            // recorded: inside the valid interval, outside the tx interval.
+            let t_mid = anchor_after_commits();
+            let id = db
+                .create_node_with_valid_time("Person", name_props("BackdatedAlice"), Some(v0))
+                .unwrap();
+            let t_now = anchor_after_commits();
+
+            // (valid = t_mid, tx = t_now): valid interval [v0, inf) contains
+            // t_mid and the write is recorded by t_now -> FOUND. With the
+            // dimensions swapped this becomes (valid = t_now, tx = t_mid),
+            // anchoring the transaction dimension before the write existed
+            // -> empty, so a dimension-swap mutation fails here.
+            assert_eq!(
+                ids(&db
+                    .find_nodes_by_property_at("Person", "name", &alice, t_mid, t_now)
+                    .unwrap()),
+                vec![id],
+                "backdated fact must be found at (valid=past, tx=now)"
+            );
+
+            // And the genuinely-swapped coordinate must be empty: at
+            // transaction time t_mid nothing had been recorded yet.
+            assert!(
+                db.find_nodes_by_property_at("Person", "name", &alice, t_now, t_mid)
+                    .unwrap()
+                    .nodes
+                    .is_empty(),
+                "(valid=now, tx=before-the-write) must find nothing"
+            );
+
+            // Same discrimination for the label-only path.
+            assert_eq!(
+                ids(&db.find_nodes_at_time("Person", t_mid, t_now).unwrap()),
+                vec![id]
+            );
+            assert!(
+                db.find_nodes_at_time("Person", t_now, t_mid)
+                    .unwrap()
+                    .nodes
+                    .is_empty()
+            );
+        }
+
         #[test]
         fn unknown_label_or_property_key_returns_empty_not_error() {
             let (_tmp, db) = create_test_db().unwrap();
@@ -1444,6 +1655,7 @@ mod tests {
             assert!(
                 db.find_nodes_at_time("NeverInternedLabel3236", now, now)
                     .unwrap()
+                    .nodes
                     .is_empty()
             );
             assert!(
@@ -1455,6 +1667,7 @@ mod tests {
                     now
                 )
                 .unwrap()
+                .nodes
                 .is_empty()
             );
         }
@@ -1462,15 +1675,97 @@ mod tests {
         #[test]
         fn results_are_sorted_by_node_id_for_stable_pagination() {
             let (_tmp, db) = create_test_db().unwrap();
+
+            // Many nodes with delete + recreate interleaving, so the
+            // sorted-order contract is pinned across a realistic churn
+            // pattern (guards against future changes to the version-head
+            // map's iteration order; today's identity-hashed map happens to
+            // iterate sequential ids in order, so the deterministic
+            // sort-removal killer is the capped test below, where
+            // `cap_ids`'s select_nth_unstable provably scrambles the ids).
             let mut created = Vec::new();
-            for _ in 0..5 {
+            for _ in 0..60 {
                 created.push(db.create_node("Person", name_props("Alice")).unwrap());
             }
-            created.sort_unstable();
+            let mut expected: Vec<NodeId> = Vec::new();
+            for (i, &id) in created.iter().enumerate() {
+                if i % 3 == 0 {
+                    db.delete_node_with_valid_time(id, None).unwrap();
+                } else {
+                    expected.push(id);
+                }
+            }
+            for _ in 0..30 {
+                expected.push(db.create_node("Person", name_props("Alice")).unwrap());
+            }
+            expected.sort_unstable();
 
             let now = anchor_after_commits();
             let found = ids(&db.find_nodes_at_time("Person", now, now).unwrap());
-            assert_eq!(found, created, "results must be sorted by node id");
+            assert_eq!(found, expected, "results must be sorted by node id");
+        }
+
+        /// T7 (review): candidate-set truncation (C1) is disclosed. Reuses
+        /// the `max_schema_as_of_entities` cap exactly like
+        /// `schema_as_of`, injected small so the test doesn't need 50,000+
+        /// entities.
+        ///
+        /// Sized deliberately (cap 32, 64 candidates): `cap_ids`'s
+        /// `select_nth_unstable` provably scrambles a pre-sorted id vector
+        /// at this size, so this test also verifies the post-cap
+        /// `sort_unstable` is load-bearing (a sort-removal mutant fails
+        /// here deterministically -- the identity-hashed head map otherwise
+        /// yields sequential ids in already-sorted order).
+        #[test]
+        fn candidate_cap_truncates_deterministically_and_discloses_sampling() {
+            use crate::config::{AletheiaDBConfig, HistoricalConfigBuilder};
+            use crate::test_utils::create_test_db_with_config;
+
+            let config = AletheiaDBConfig::builder()
+                .historical(
+                    HistoricalConfigBuilder::new()
+                        .max_schema_as_of_entities(32)
+                        .build(),
+                )
+                .build();
+            let (_tmp, db) = create_test_db_with_config(config).unwrap();
+
+            let mut created = Vec::new();
+            for _ in 0..64 {
+                created.push(db.create_node("Person", name_props("Alice")).unwrap());
+            }
+            created.sort_unstable();
+            let now = anchor_after_commits();
+
+            let found = db.find_nodes_at_time("Person", now, now).unwrap();
+            assert!(
+                found.sampled,
+                "a cap of 32 with 64 versioned nodes must disclose truncation"
+            );
+            // The cap keeps the LOWEST ids, returned in sorted order -- a
+            // deterministic subset, so pagination over a sampled result is
+            // stable.
+            assert_eq!(
+                ids(&found),
+                created[..32].to_vec(),
+                "the sampled candidate set must be the lowest node ids, sorted"
+            );
+
+            // Under the cap, results are complete and sampled is false.
+            let alice = PropertyValue::from("Alice");
+            let filtered = db
+                .find_nodes_by_property_at("Person", "name", &alice, now, now)
+                .unwrap();
+            assert!(filtered.sampled, "property path shares the same cap");
+
+            // A db whose history fits under the cap never reports sampling.
+            let (_tmp2, small_db) = create_test_db().unwrap();
+            let id = small_db.create_node("Person", name_props("Alice")).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            let now2 = time::now();
+            let small = small_db.find_nodes_at_time("Person", now2, now2).unwrap();
+            assert!(!small.sampled);
+            assert_eq!(ids(&small), vec![id]);
         }
     }
 }
