@@ -158,6 +158,62 @@ pub struct DeleteNodeRequest {
     pub valid_time: Option<String>,
 }
 
+/// Request to retract a node: close its valid-time interval without
+/// deleting its history (Issue #3230).
+///
+/// Safe-by-default (mirrors the #3209 `delete_node` DETACH contract): if the
+/// node has connected edges and `detach` is not `true`, the retraction is
+/// refused and the response reports `connected_edges`. Set `detach: true` to
+/// co-retract every connected edge at the same valid time.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct RetractNodeRequest {
+    /// The unique identifier of the node to retract.
+    #[schemars(description = "The unique identifier of the node to retract")]
+    pub node_id: u64,
+
+    /// Optional valid time: when this fact stopped being true in the real world.
+    #[schemars(
+        description = "Optional valid time: when this fact stopped being true in the real world, \
+                       as an ISO 8601 / RFC 3339 timestamp (e.g., '2024-01-15T10:00:00Z') or integer \
+                       microseconds since epoch. Omit to default to now. Must not precede the \
+                       node's valid_from (equality is allowed). History before this instant \
+                       remains fully queryable. Transaction time is always system-assigned and \
+                       cannot be set."
+    )]
+    pub valid_time: Option<String>,
+
+    /// When `true`, also retract every edge connected to the node at the
+    /// same valid time. When omitted or `false`, retracting a node that has
+    /// connected edges is refused and the response reports `connected_edges`.
+    #[schemars(
+        description = "When true, also retract all edges connected to the node at the same valid \
+                       time (detach retraction). When false/omitted, retraction is refused if the \
+                       node has connected edges, and the response reports the connected edge count \
+                       so the caller can decide."
+    )]
+    pub detach: Option<bool>,
+}
+
+/// Request to retract an edge: close its valid-time interval without
+/// deleting its history (Issue #3230).
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct RetractEdgeRequest {
+    /// The unique identifier of the edge to retract.
+    #[schemars(description = "The unique identifier of the edge to retract")]
+    pub edge_id: u64,
+
+    /// Optional valid time: when this relationship stopped being true in the real world.
+    #[schemars(
+        description = "Optional valid time: when this relationship stopped being true in the real \
+                       world, as an ISO 8601 / RFC 3339 timestamp (e.g., '2024-01-15T10:00:00Z') or \
+                       integer microseconds since epoch. Omit to default to now. Must not precede \
+                       the edge's valid_from (equality is allowed). History before this instant \
+                       remains fully queryable. Transaction time is always system-assigned and \
+                       cannot be set."
+    )]
+    pub valid_time: Option<String>,
+}
+
 /// Request to delete a node and all its connected edges (cascade delete).
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct DeleteNodeCascadeRequest {

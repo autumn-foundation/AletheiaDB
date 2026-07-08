@@ -5235,6 +5235,392 @@ mod vector_elision_tests {
 // Valid-Time Write Tests (Issue #3221)
 // ============================================================================
 
+/// MCP surface tests for valid-time retraction (Issue #3230).
+mod retraction_tests {
+    use super::*;
+    use chrono::{DateTime, Duration, Utc};
+
+    fn rfc3339_hours_ago(now: DateTime<Utc>, hours: i64) -> String {
+        (now - Duration::hours(hours)).to_rfc3339()
+    }
+
+    /// Create a Person node whose valid_from is `hours` hours before `now`.
+    fn create_person_at(server: &AletheiaMcpServer, now: DateTime<Utc>, hours: i64) -> u64 {
+        let node: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            label: "Person".to_string(),
+            properties: None,
+            valid_time: Some(rfc3339_hours_ago(now, hours)),
+            provenance: None,
+        }))
+        .expect("create should succeed");
+        node.id
+    }
+
+    /// Parse an interval bound from a retraction response and return its
+    /// microseconds since epoch, asserting the RFC 3339 `Z`-suffixed
+    /// microsecond-precision convention.
+    fn parse_bound_micros(value: &serde_json::Value, key: &str) -> i64 {
+        let s = value[key]
+            .as_str()
+            .unwrap_or_else(|| panic!("{key} must be an RFC 3339 string, got {value}"));
+        assert!(s.ends_with('Z'), "{key} must carry a Z suffix, got {s}");
+        s.parse::<DateTime<Utc>>()
+            .unwrap_or_else(|e| panic!("{key} must parse as RFC 3339 ({e}): {s}"))
+            .timestamp_micros()
+    }
+
+    #[test]
+    fn retract_node_happy_path_returns_rfc3339_interval() {
+        let server = create_test_server();
+        let now = Utc::now();
+        let node_id = create_person_at(&server, now, 2);
+        let t_retract = rfc3339_hours_ago(now, 1);
+
+        let response = server.retract_node(RetractNodeRequest {
+            node_id,
+            valid_time: Some(t_retract.clone()),
+            detach: None,
+        });
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert!(
+            value.get("error").is_none(),
+            "expected success, got {value}"
+        );
+        assert_eq!(value["success"], true);
+        assert_eq!(value["node_id"], node_id);
+        assert_eq!(value["retracted"], true);
+        assert_eq!(value["already_retracted"], false);
+        assert_eq!(value["edges_retracted"], 0);
+
+        // The closed half-open interval [valid_from, valid_to) comes back as
+        // RFC 3339 microsecond-precision strings matching the request times.
+        let valid_from_us = parse_bound_micros(&value, "valid_from");
+        let valid_to_us = parse_bound_micros(&value, "valid_to");
+        assert_eq!(valid_from_us, (now - Duration::hours(2)).timestamp_micros());
+        assert_eq!(valid_to_us, (now - Duration::hours(1)).timestamp_micros());
+
+        // Gone from current state (structured NOT_FOUND).
+        let after = server.get_node(GetNodeRequest {
+            node_id,
+            include_vectors: None,
+        });
+        let after: serde_json::Value = serde_json::from_str(&after).unwrap();
+        assert_eq!(after["error"]["code"], "NOT_FOUND", "got {after}");
+    }
+
+    #[test]
+    fn retract_node_backdated_round_trip_via_get_node_at_time() {
+        let server = create_test_server();
+        let now = Utc::now();
+        let node_id = create_person_at(&server, now, 3);
+
+        let response = server.retract_node(RetractNodeRequest {
+            node_id,
+            valid_time: Some(rfc3339_hours_ago(now, 1)),
+            detach: None,
+        });
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert!(
+            value.get("error").is_none(),
+            "expected success, got {value}"
+        );
+
+        // Still visible at a valid time strictly before T...
+        let before = server.get_node_at_time(GetNodeAtTimeRequest {
+            node_id,
+            valid_time: rfc3339_hours_ago(now, 2),
+            transaction_time: None,
+        });
+        let before: serde_json::Value = serde_json::from_str(&before).unwrap();
+        assert!(before.get("error").is_none(), "expected node, got {before}");
+
+        // ...and not at/after T.
+        let at = server.get_node_at_time(GetNodeAtTimeRequest {
+            node_id,
+            valid_time: rfc3339_hours_ago(now, 1),
+            transaction_time: None,
+        });
+        let at: serde_json::Value = serde_json::from_str(&at).unwrap();
+        assert!(
+            at.get("error").is_some(),
+            "expected not-valid at T, got {at}"
+        );
+
+        let after = server.get_node_at_time(GetNodeAtTimeRequest {
+            node_id,
+            valid_time: rfc3339_hours_ago(now, 0),
+            transaction_time: None,
+        });
+        let after: serde_json::Value = serde_json::from_str(&after).unwrap();
+        assert!(
+            after.get("error").is_some(),
+            "expected not-valid, got {after}"
+        );
+    }
+
+    #[test]
+    fn retract_node_with_connected_edges_refused_failed_precondition() {
+        let server = create_test_server();
+        let now = Utc::now();
+        let a = create_person_at(&server, now, 2);
+        let b = create_person_at(&server, now, 2);
+        let _edge: EdgeResponse = parse_response(&server.create_edge(CreateEdgeRequest {
+            source_id: a,
+            target_id: b,
+            label: "KNOWS".to_string(),
+            properties: None,
+            valid_time: Some(rfc3339_hours_ago(now, 2)),
+            provenance: None,
+        }))
+        .unwrap();
+
+        let response = server.retract_node(RetractNodeRequest {
+            node_id: a,
+            valid_time: Some(rfc3339_hours_ago(now, 1)),
+            detach: None,
+        });
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+
+        // Structured shape (#3234): FAILED_PRECONDITION + details.
+        assert_eq!(value["error"]["code"], "FAILED_PRECONDITION", "got {value}");
+        assert_eq!(value["error"]["retriable"], false);
+        assert_eq!(value["error"]["details"]["connected_edges"], 1);
+        assert_eq!(value["error"]["details"]["detach_required"], true);
+        assert_eq!(value["error"]["details"]["node_id"], a);
+
+        // Legacy top-level fields preserved additively (#3209 parallel).
+        assert_eq!(value["success"], false);
+        assert_eq!(value["connected_edges"], 1);
+        assert_eq!(value["detach_required"], true);
+        assert_eq!(value["node_id"], a);
+
+        // Never a success that strands edges: node is still present.
+        let still_there = server.get_node(GetNodeRequest {
+            node_id: a,
+            include_vectors: None,
+        });
+        let still_there: serde_json::Value = serde_json::from_str(&still_there).unwrap();
+        assert!(still_there.get("error").is_none(), "got {still_there}");
+    }
+
+    #[test]
+    fn retract_node_detach_coretracts_edges_and_reports_count() {
+        let server = create_test_server();
+        let now = Utc::now();
+        let a = create_person_at(&server, now, 3);
+        let b = create_person_at(&server, now, 3);
+        let edge: EdgeResponse = parse_response(&server.create_edge(CreateEdgeRequest {
+            source_id: a,
+            target_id: b,
+            label: "KNOWS".to_string(),
+            properties: None,
+            valid_time: Some(rfc3339_hours_ago(now, 3)),
+            provenance: None,
+        }))
+        .unwrap();
+
+        let t_retract = rfc3339_hours_ago(now, 1);
+        let response = server.retract_node(RetractNodeRequest {
+            node_id: a,
+            valid_time: Some(t_retract),
+            detach: Some(true),
+        });
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert!(
+            value.get("error").is_none(),
+            "expected success, got {value}"
+        );
+        assert_eq!(value["edges_retracted"], 1);
+        assert_eq!(value["already_retracted"], false);
+
+        // The co-retracted edge: queryable strictly before T, gone after.
+        let before = server.get_edge_at_time(GetEdgeAtTimeRequest {
+            edge_id: edge.id,
+            valid_time: rfc3339_hours_ago(now, 2),
+            transaction_time: None,
+        });
+        let before: serde_json::Value = serde_json::from_str(&before).unwrap();
+        assert!(before.get("error").is_none(), "expected edge, got {before}");
+
+        let after = server.get_edge_at_time(GetEdgeAtTimeRequest {
+            edge_id: edge.id,
+            valid_time: rfc3339_hours_ago(now, 0),
+            transaction_time: None,
+        });
+        let after: serde_json::Value = serde_json::from_str(&after).unwrap();
+        assert!(
+            after.get("error").is_some(),
+            "expected not-valid, got {after}"
+        );
+
+        // Re-retracting the co-retracted edge is an idempotent no-op
+        // reporting the original valid_to.
+        let re_retract = server.retract_edge(RetractEdgeRequest {
+            edge_id: edge.id,
+            valid_time: Some(rfc3339_hours_ago(now, 0)),
+        });
+        let re_retract: serde_json::Value = serde_json::from_str(&re_retract).unwrap();
+        assert!(re_retract.get("error").is_none(), "got {re_retract}");
+        assert_eq!(re_retract["already_retracted"], true);
+        assert_eq!(
+            parse_bound_micros(&re_retract, "valid_to"),
+            (now - Duration::hours(1)).timestamp_micros(),
+            "idempotent re-retract must return the original valid_to"
+        );
+    }
+
+    #[test]
+    fn retract_node_idempotent_second_call_returns_existing_interval() {
+        let server = create_test_server();
+        let now = Utc::now();
+        let node_id = create_person_at(&server, now, 3);
+
+        let first = server.retract_node(RetractNodeRequest {
+            node_id,
+            valid_time: Some(rfc3339_hours_ago(now, 2)),
+            detach: None,
+        });
+        let first: serde_json::Value = serde_json::from_str(&first).unwrap();
+        assert!(first.get("error").is_none(), "got {first}");
+        assert_eq!(first["already_retracted"], false);
+
+        // Different T on the second call: the EXISTING end comes back.
+        let second = server.retract_node(RetractNodeRequest {
+            node_id,
+            valid_time: Some(rfc3339_hours_ago(now, 1)),
+            detach: None,
+        });
+        let second: serde_json::Value = serde_json::from_str(&second).unwrap();
+        assert!(second.get("error").is_none(), "got {second}");
+        assert_eq!(second["success"], true);
+        assert_eq!(second["already_retracted"], true);
+        assert_eq!(
+            parse_bound_micros(&second, "valid_to"),
+            (now - Duration::hours(2)).timestamp_micros()
+        );
+    }
+
+    #[test]
+    fn retract_node_malformed_valid_time_invalid_argument() {
+        let server = create_test_server();
+        let now = Utc::now();
+        let node_id = create_person_at(&server, now, 2);
+
+        let response = server.retract_node(RetractNodeRequest {
+            node_id,
+            valid_time: Some("not-a-timestamp".to_string()),
+            detach: None,
+        });
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(value["error"]["code"], "INVALID_ARGUMENT", "got {value}");
+        let message = value["error"]["message"].as_str().unwrap();
+        assert!(message.contains("Invalid valid_time"), "got: {message}");
+
+        // Nothing was retracted.
+        let still_there = server.get_node(GetNodeRequest {
+            node_id,
+            include_vectors: None,
+        });
+        let still_there: serde_json::Value = serde_json::from_str(&still_there).unwrap();
+        assert!(still_there.get("error").is_none(), "got {still_there}");
+    }
+
+    #[test]
+    fn retract_node_valid_time_before_valid_from_invalid_argument() {
+        let server = create_test_server();
+        let now = Utc::now();
+        let node_id = create_person_at(&server, now, 1);
+
+        // T strictly before the node's valid_from.
+        let response = server.retract_node(RetractNodeRequest {
+            node_id,
+            valid_time: Some(rfc3339_hours_ago(now, 2)),
+            detach: None,
+        });
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        // Matches #3221's existing mapping for the
+        // ValidTimeBeforeEntityCreation family: INVALID_ARGUMENT.
+        assert_eq!(value["error"]["code"], "INVALID_ARGUMENT", "got {value}");
+        let message = value["error"]["message"].as_str().unwrap();
+        assert!(message.contains("before entity creation"), "got: {message}");
+    }
+
+    #[test]
+    fn retract_node_nonexistent_not_found() {
+        let server = create_test_server();
+        let response = server.retract_node(RetractNodeRequest {
+            node_id: 999_999,
+            valid_time: None,
+            detach: None,
+        });
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(value["error"]["code"], "NOT_FOUND", "got {value}");
+    }
+
+    #[test]
+    fn retract_edge_happy_path_and_omitted_valid_time_defaults_to_now() {
+        let server = create_test_server();
+        let now = Utc::now();
+        let a = create_person_at(&server, now, 2);
+        let b = create_person_at(&server, now, 2);
+        let edge: EdgeResponse = parse_response(&server.create_edge(CreateEdgeRequest {
+            source_id: a,
+            target_id: b,
+            label: "KNOWS".to_string(),
+            properties: None,
+            valid_time: Some(rfc3339_hours_ago(now, 2)),
+            provenance: None,
+        }))
+        .unwrap();
+
+        // Omitted valid_time defaults to now (#3221 convention).
+        let response = server.retract_edge(RetractEdgeRequest {
+            edge_id: edge.id,
+            valid_time: None,
+        });
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert!(
+            value.get("error").is_none(),
+            "expected success, got {value}"
+        );
+        assert_eq!(value["success"], true);
+        assert_eq!(value["edge_id"], edge.id);
+        assert_eq!(value["retracted"], true);
+        assert_eq!(value["already_retracted"], false);
+
+        let valid_to_us = parse_bound_micros(&value, "valid_to");
+        let delta = (valid_to_us - now.timestamp_micros()).abs();
+        assert!(
+            delta < 60_000_000,
+            "omitted valid_time must default to (approximately) now; delta {delta}us"
+        );
+        assert_eq!(
+            parse_bound_micros(&value, "valid_from"),
+            (now - Duration::hours(2)).timestamp_micros()
+        );
+
+        // History still shows the edge before the retraction instant.
+        let before = server.get_edge_at_time(GetEdgeAtTimeRequest {
+            edge_id: edge.id,
+            valid_time: rfc3339_hours_ago(now, 1),
+            transaction_time: None,
+        });
+        let before: serde_json::Value = serde_json::from_str(&before).unwrap();
+        assert!(before.get("error").is_none(), "expected edge, got {before}");
+    }
+
+    #[test]
+    fn retract_edge_nonexistent_not_found() {
+        let server = create_test_server();
+        let response = server.retract_edge(RetractEdgeRequest {
+            edge_id: 999_999,
+            valid_time: None,
+        });
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(value["error"]["code"], "NOT_FOUND", "got {value}");
+    }
+}
+
 mod valid_time_write_tests {
     use super::*;
     use chrono::{DateTime, Duration, Utc};
