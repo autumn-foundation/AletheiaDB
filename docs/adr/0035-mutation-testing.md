@@ -154,10 +154,51 @@ Focus on `missed.txt` — each entry indicates code where a behavioral change we
 - **PR comments**: Add a bot that posts mutation results as PR comments for visibility
 - **Revisit exclusions**: As MCP server tests mature, consider removing the `src/mcp/**` exclusion
 
+## Addendum (2026-07-08): Weekly run was broken since inception; PR gate added
+
+An audit found that the implementation shipped by PR #888 diverged from this
+ADR in several ways, and that the weekly run had **failed on every scheduled
+execution since it was introduced** (all 22 runs):
+
+1. **0-indexed shard bug**: cargo-mutants shards are 0-indexed (`--shard 0/4`
+   … `--shard 3/4`), but the workflow matrix passed `1..4`. Shard `4/4`
+   errored immediately ("shard k must be less than n") and shard 0 never ran.
+2. **Timeout far too small**: with ~12,000 mutants (~3,000 per shard at
+   4 shards) and ~4–5 minutes per mutant on CI runners, the 90-minute
+   timeout covered only ~20 mutants per shard. A true full run was never
+   feasible in this shape.
+3. **`.cargo/mutants.toml` never shipped**: the exclusions described in this
+   ADR (benches/examples, `src/mcp/**`, `Display`/`Debug` fmt impls) were
+   never actually in effect.
+
+What changed (2026-07-08):
+
+- **PR gate**: the PR-diff job is no longer informational. It computes a
+  mutation score over the diff's mutants —
+  `(caught + timeout) / (caught + timeout + missed) × 100` — and fails below
+  the threshold in `.github/mutants-gate.toml` (with a `min_mutants` floor to
+  avoid small-sample noise). This realizes the "enforce mutation score"
+  future consideration above. The threshold now exists and is maintained in
+  that one file.
+- **Weekly run redesigned as a rotating sample**: 12 of 96 shards per week
+  with `--sharding round-robin` (the default `slice` sharding is contiguous
+  and would bias the sample), 0-indexed shard math, and a 350-minute
+  timeout. An aggregate job combines the 12 shard artifacts into a published
+  project-wide score estimate (`mutants-weekly-score` artifact); the
+  rotating window covers all 96 shards every 8 weeks.
+- **`.cargo/mutants.toml` created**, excluding only `Display`/`Debug` `fmt`
+  impls. Deliberate deviation from the original ADR text: `src/mcp/**` is
+  **not** excluded — it is the actively developed LLM-facing surface and
+  must stay under mutation pressure (the exclusion this ADR described never
+  shipped anyway). Benches/examples/tests need no exclusion; cargo-mutants
+  does not generate mutants there by default.
+- Both CI paths now run tests via `--test-tool nextest`.
+
 ## References
 
 - PR #888: Implementation
 - [cargo-mutants documentation](https://mutants.rs/)
+- [cargo-mutants exit codes](https://mutants.rs/exit-codes.html)
 - [Mutation Testing overview (Wikipedia)](https://en.wikipedia.org/wiki/Mutation_testing)
 - ADR-0015: CI/CD Automation Workflow
 - TESTING.md: Testing and coverage guide

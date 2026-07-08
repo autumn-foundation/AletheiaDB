@@ -268,16 +268,58 @@ Focus on **`missed.txt`** — each entry is a code location where a behavioral c
 
 ### CI Integration
 
-- **On PRs**: `cargo mutants --in-diff` runs on changed code only (informational, non-blocking)
-- **Weekly**: Full sharded run across 4 runners for comprehensive mutation score tracking
-- Results are uploaded as artifacts and summarized in the GitHub job summary
+The "Mutation Testing" workflow (`.github/workflows/mutants.yml`) has two paths:
+
+- **On PRs (blocking gate)**: `cargo mutants --in-diff` runs on the code the PR
+  touches, then `.github/scripts/mutants_gate.py gate` enforces a minimum
+  mutation score. The check name is **`Mutants (PR diff)`**; it fails the PR
+  when the diff's score is below the threshold.
+- **Weekly (informational rotating sample)**: every Sunday, 12 of 96
+  round-robin shards run (~12.5% of all mutants). cargo-mutants' *default*
+  sharding is `slice` (contiguous chunks of the mutant list in file order —
+  a biased sample); we pass `--sharding round-robin` (mutant `i` runs on
+  shard `i % k`) so any subset of shards is a systematic, project-wide
+  sample. Each weekly run therefore publishes an unbiased project-wide score
+  estimate (`mutants-weekly-score` artifact containing `score.json`), and
+  the rotating start index walks through all 96 shards every 8 weeks, so
+  the whole project is covered every 8 weeks. Shard indexes are 0-based
+  (`--shard 0/96` … `--shard 95/96`).
+- Both paths run tests under **cargo-nextest** (`--test-tool nextest`) for
+  faster per-mutant test runs. Note: nextest does not run doctests, so a
+  mutant only caught by a doctest would be reported as missed.
+- Results are uploaded as artifacts and summarized in the GitHub job summary.
+
+### The Mutation-Score Gate
+
+The gate's tuning knobs live in **`.github/mutants-gate.toml`**:
+
+- `threshold` — minimum mutation score (%) for the mutants produced by a PR
+  diff. Score formula:
+
+  ```
+  score = (caught + timeout) / (caught + timeout + missed) × 100
+  ```
+
+  Timeouts count as caught (the mutant made the test suite hang, i.e. it was
+  detected). Unviable mutants (failed to compile) are excluded entirely.
+- `min_mutants` — the gate only enforces when the diff produces at least this
+  many viable mutants; below the floor, results are reported but never fail
+  the check (small-sample noise).
+
+A PR whose diff produces zero mutants (docs-only, CI-only, test-only) always
+passes. The gate distinguishes real gate failures (exit 2) from
+infrastructure errors (exit 1, e.g. unreadable output or malformed config).
+Run it locally against any `mutants.out` with `just mutants-gate`.
 
 ### Configuration
 
-Exclusions are configured in `.cargo/mutants.toml`. Currently excluded:
-- Benchmarks, examples, and integration test helpers
-- MCP server (IO-heavy, tested via integration)
-- `Display`/`Debug` impls and `fmt` methods
+Mutant exclusions are configured in `.cargo/mutants.toml`. Currently excluded:
+
+- `fmt` methods of `Display`/`Debug` impls (cosmetic output; asserting exact
+  strings adds brittleness, not correctness)
+
+`src/mcp/**` is deliberately **not** excluded — it is the actively developed
+LLM-facing surface and must stay under mutation pressure.
 
 ## Profiling
 

@@ -262,6 +262,9 @@ audit:
     cargo audit
 
 # === Mutation Testing ===
+# CI runs these with --test-tool nextest; locally we stay on cargo test so the
+# recipes work without cargo-nextest installed. Install nextest and add
+# `--test-tool nextest` for CI-identical (and faster) runs.
 
 # Run mutation tests on all code
 mutants:
@@ -280,6 +283,14 @@ mutants-branch:
     trap 'rm -f mutants-diff.tmp' EXIT
     git diff origin/trunk.. > mutants-diff.tmp
     cargo mutants --in-place -vV --in-diff mutants-diff.tmp
+
+# Run the CI mutation-score gate against a local mutants.out directory
+mutants-gate dir="mutants.out":
+    python3 .github/scripts/mutants_gate.py gate --mutants-out {{dir}} --config .github/mutants-gate.toml
+
+# Run the gate script's unit tests
+mutants-gate-test:
+    python3 .github/scripts/test_mutants_gate.py
 
 # === Miri (Undefined Behavior Detection) ===
 
