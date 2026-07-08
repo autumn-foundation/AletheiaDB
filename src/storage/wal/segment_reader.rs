@@ -1160,6 +1160,99 @@ mod tests {
         }
     }
 
+    /// Issue #3350/#3423: a provenance bundle carrying an authenticated
+    /// principal must round-trip byte-exactly through WAL serialization
+    /// when parsed at the principal-carrying payload version.
+    #[test]
+    fn test_parse_entry_at_provenance_principal_roundtrip() {
+        let node_id = NodeId::new(77).unwrap();
+        let operation = WalOperation::CreateNode {
+            node_id,
+            label: GLOBAL_INTERNER.intern("Fact").unwrap(),
+            properties: PropertyMap::new(),
+            valid_from: time::now(),
+            provenance: Some(
+                Provenance::builder()
+                    .source("mcp")
+                    .confidence(0.75)
+                    .correlation_id("req-1")
+                    .principal("svc-writer")
+                    .build()
+                    .unwrap(),
+            ),
+        };
+        let entry = WalEntry::new(LSN(5), operation);
+
+        let mut buffer = Vec::new();
+        serialize_entry_into(&entry, &mut buffer).unwrap();
+
+        let (parsed_entry, bytes_consumed) =
+            parse_entry_at(&buffer, 0, WAL_VERSION_PROVENANCE_PRINCIPAL).unwrap();
+
+        assert_eq!(parsed_entry.lsn, LSN(5));
+        assert_eq!(bytes_consumed, buffer.len());
+        match parsed_entry.operation {
+            WalOperation::CreateNode { provenance, .. } => {
+                let p = provenance.expect("provenance bundle must round-trip");
+                assert_eq!(p.source(), Some("mcp"));
+                assert_eq!(p.confidence(), Some(0.75));
+                assert_eq!(p.correlation_id(), Some("req-1"));
+                assert_eq!(p.principal(), Some("svc-writer"));
+            }
+            other => panic!("Expected CreateNode operation, got {other:?}"),
+        }
+    }
+
+    /// Issue #3350/#3423: pre-v5 bytes (a provenance bundle that ends at
+    /// `correlation_id`, with no principal slot) must parse successfully at
+    /// their own payload version with `principal: None`.
+    #[test]
+    fn test_parse_pre_v5_provenance_bytes_yields_no_principal() {
+        // Build genuine v3-format bytes. Start from the current (v5)
+        // serializer with `principal: None` -- whose only difference from
+        // v3 is a single trailing absent-principal presence byte -- drop
+        // that byte, and re-stamp the CRC (bytes 20..24, computed over
+        // LSN+timestamp and the operation data).
+        let operation = WalOperation::CreateNode {
+            node_id: NodeId::new(9).unwrap(),
+            label: GLOBAL_INTERNER.intern("Doc").unwrap(),
+            properties: PropertyMap::new(),
+            valid_from: time::now(),
+            provenance: Some(Provenance::builder().source("importer").build().unwrap()),
+        };
+        let entry = WalEntry::new(LSN(9), operation);
+        let mut buffer = Vec::new();
+        serialize_entry_into(&entry, &mut buffer).unwrap();
+        assert_eq!(
+            *buffer.last().unwrap(),
+            0,
+            "v5 buffer must end with the absent-principal presence byte"
+        );
+        buffer.pop(); // v3 bundles end at correlation_id
+        let mut hasher = crc32fast::Hasher::new();
+        hasher.update(&buffer[0..20]);
+        hasher.update(&buffer[24..]);
+        let checksum = hasher.finalize();
+        buffer[20..24].copy_from_slice(&checksum.to_le_bytes());
+
+        let (parsed_entry, bytes_consumed) =
+            parse_entry_at(&buffer, 0, WAL_VERSION_PROVENANCE).unwrap();
+
+        assert_eq!(bytes_consumed, buffer.len());
+        match parsed_entry.operation {
+            WalOperation::CreateNode { provenance, .. } => {
+                let p = provenance.expect("v3 provenance bundle must parse");
+                assert_eq!(p.source(), Some("importer"));
+                assert_eq!(
+                    p.principal(),
+                    None,
+                    "pre-v5 bytes must parse with principal: None"
+                );
+            }
+            other => panic!("Expected CreateNode operation, got {other:?}"),
+        }
+    }
+
     #[test]
     fn test_parse_entry_at_create_edge() {
         // Create a CreateEdge entry
