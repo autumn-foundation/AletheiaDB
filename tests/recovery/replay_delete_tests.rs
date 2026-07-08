@@ -254,6 +254,10 @@ fn test_replay_delete_node_preserves_temporal_intervals() -> Result<()> {
 
     let create_ts = logged_timestamp(&wal, |op| matches!(op, WalOperation::CreateNode { .. }))?;
     let delete_ts = logged_timestamp(&wal, |op| matches!(op, WalOperation::DeleteNode { .. }))?;
+    assert!(
+        create_ts < delete_ts,
+        "premise: WAL entry timestamps must be strictly ordered (clock anomaly?)"
+    );
 
     let config = CheckpointConfig::with_data_dir(temp_dir.path().join("checkpoints"));
     let mut manager = CheckpointManager::new(config)?;
@@ -267,13 +271,21 @@ fn test_replay_delete_node_preserves_temporal_intervals() -> Result<()> {
     let prior = &history.versions[0];
     let tombstone = &history.versions[1];
 
-    assert_eq!(prior.temporal.valid_time().start(), vf);
+    assert_eq!(
+        prior.temporal.valid_time().start(),
+        vf,
+        "prior head's valid_from must survive replay exactly"
+    );
     assert_eq!(
         prior.temporal.valid_time().end(),
         tombstone.temporal.valid_time().start(),
         "prior head's valid time must be closed exactly at the tombstone's valid_from"
     );
-    assert_eq!(prior.temporal.transaction_time().start(), create_ts);
+    assert_eq!(
+        prior.temporal.transaction_time().start(),
+        create_ts,
+        "prior head's transaction time must start at the LOGGED create timestamp"
+    );
     assert_eq!(
         prior.temporal.transaction_time().end(),
         delete_ts,
@@ -284,8 +296,15 @@ fn test_replay_delete_node_preserves_temporal_intervals() -> Result<()> {
         tombstone.temporal.valid_time().is_empty(),
         "tombstone must carry an empty valid interval"
     );
-    assert_eq!(tombstone.temporal.transaction_time().start(), delete_ts);
-    assert!(tombstone.temporal.transaction_time().is_current());
+    assert_eq!(
+        tombstone.temporal.transaction_time().start(),
+        delete_ts,
+        "tombstone tx time must start at the LOGGED delete timestamp"
+    );
+    assert!(
+        tombstone.temporal.transaction_time().is_current(),
+        "tombstone's transaction time must be open-ended after replay"
+    );
 
     // Point-in-time visibility matrix:
     // - anchored (in both dimensions) before the delete: visible;
@@ -350,6 +369,10 @@ fn test_replay_delete_edge_preserves_temporal_intervals() -> Result<()> {
         logged_timestamp(&wal, |op| matches!(op, WalOperation::CreateEdge { .. }))?;
     let delete_edge_ts =
         logged_timestamp(&wal, |op| matches!(op, WalOperation::DeleteEdge { .. }))?;
+    assert!(
+        create_edge_ts < delete_edge_ts,
+        "premise: WAL entry timestamps must be strictly ordered (clock anomaly?)"
+    );
 
     let config = CheckpointConfig::with_data_dir(temp_dir.path().join("checkpoints"));
     let mut manager = CheckpointManager::new(config)?;
@@ -363,36 +386,53 @@ fn test_replay_delete_edge_preserves_temporal_intervals() -> Result<()> {
     let prior = &history.versions[0];
     let tombstone = &history.versions[1];
 
-    assert_eq!(prior.temporal.valid_time().start(), vf);
+    assert_eq!(
+        prior.temporal.valid_time().start(),
+        vf,
+        "prior head's valid_from must survive replay exactly"
+    );
     assert_eq!(
         prior.temporal.valid_time().end(),
         tombstone.temporal.valid_time().start(),
         "prior head's valid time must be closed exactly at the tombstone's valid_from"
     );
-    assert_eq!(prior.temporal.transaction_time().start(), create_edge_ts);
+    assert_eq!(
+        prior.temporal.transaction_time().start(),
+        create_edge_ts,
+        "prior head's transaction time must start at the LOGGED create timestamp"
+    );
     assert_eq!(
         prior.temporal.transaction_time().end(),
         delete_edge_ts,
         "prior head's tx-time closure must survive replay at the LOGGED delete timestamp"
     );
 
-    assert!(tombstone.temporal.valid_time().is_empty());
+    assert!(
+        tombstone.temporal.valid_time().is_empty(),
+        "tombstone must carry an empty valid interval"
+    );
     assert_eq!(
         tombstone.temporal.transaction_time().start(),
-        delete_edge_ts
+        delete_edge_ts,
+        "tombstone tx time must start at the LOGGED delete timestamp"
     );
-    assert!(tombstone.temporal.transaction_time().is_current());
+    assert!(
+        tombstone.temporal.transaction_time().is_current(),
+        "tombstone's transaction time must be open-ended after replay"
+    );
 
     // Point-in-time visibility matrix.
     assert!(
         historical
             .get_edge_at_time(edge_id, vf, create_edge_ts)
-            .is_ok()
+            .is_ok(),
+        "edge must be visible when anchored before the delete"
     );
     assert!(
         historical
             .get_edge_at_time(edge_id, vf, delete_edge_ts)
-            .is_err()
+            .is_err(),
+        "edge must be gone when anchored at the delete's commit"
     );
     assert!(
         historical

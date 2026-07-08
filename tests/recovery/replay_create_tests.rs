@@ -403,7 +403,9 @@ fn test_replay_preserves_temporal_interval() -> Result<()> {
     let wal = ConcurrentWalSystem::new(wal_config)?;
 
     let node_id = NodeId::new(1).unwrap();
-    let valid_from = time::now();
+    let now = time::now().wallclock();
+    // Backdate by one hour so wallclock races cannot flake the assertions.
+    let valid_from = HybridTimestamp::new(now - 3_600_000_000, 0).unwrap();
 
     wal.append(WalOperation::CreateNode {
         node_id,
@@ -417,6 +419,10 @@ fn test_replay_preserves_temporal_interval() -> Result<()> {
     // The transaction time after replay must equal the entry's LOGGED
     // timestamp (assigned by the WAL at append time), not the replay time.
     let create_ts = logged_timestamp(&wal, |op| matches!(op, WalOperation::CreateNode { .. }))?;
+    assert!(
+        valid_from < create_ts,
+        "premise: the backdated valid_from must precede the logged entry timestamp (clock anomaly?)"
+    );
 
     // When: recover()
     let config = CheckpointConfig::with_data_dir(temp_dir.path().join("checkpoints"));
@@ -452,12 +458,14 @@ fn test_replay_preserves_temporal_interval() -> Result<()> {
     assert!(
         historical
             .get_node_at_time(node_id, valid_from, create_ts)
-            .is_ok()
+            .is_ok(),
+        "node must be visible at its creation bi-temporal coordinate after replay"
     );
     assert!(
         historical
             .get_node_at_time(node_id, time::now(), time::now())
-            .is_ok()
+            .is_ok(),
+        "node must be visible at the current bi-temporal coordinate after replay"
     );
 
     Ok(())
@@ -506,9 +514,19 @@ fn test_replay_preserves_backdated_create_valid_from() -> Result<()> {
         valid_from,
         "backdated valid_from must survive replay exactly"
     );
-    assert!(version.temporal.valid_time().is_current());
-    assert_eq!(version.temporal.transaction_time().start(), create_ts);
-    assert!(version.temporal.transaction_time().is_current());
+    assert!(
+        version.temporal.valid_time().is_current(),
+        "valid time must remain open-ended after replay"
+    );
+    assert_eq!(
+        version.temporal.transaction_time().start(),
+        create_ts,
+        "transaction time must start at the entry's LOGGED timestamp"
+    );
+    assert!(
+        version.temporal.transaction_time().is_current(),
+        "transaction time must remain open-ended after replay"
+    );
 
     // Point-in-time visibility: visible between the backdate and now,
     // invisible strictly before the backdated valid_from.
@@ -581,13 +599,19 @@ fn test_replay_preserves_create_edge_temporal_interval() -> Result<()> {
         valid_from,
         "edge valid_from must equal the LOGGED valid_from"
     );
-    assert!(version.temporal.valid_time().is_current());
+    assert!(
+        version.temporal.valid_time().is_current(),
+        "edge valid time must remain open-ended after replay"
+    );
     assert_eq!(
         version.temporal.transaction_time().start(),
         create_edge_ts,
         "edge transaction time must start at the entry's LOGGED timestamp"
     );
-    assert!(version.temporal.transaction_time().is_current());
+    assert!(
+        version.temporal.transaction_time().is_current(),
+        "edge transaction time must remain open-ended after replay"
+    );
 
     // Historical query API agrees on visibility.
     let probe_within = HybridTimestamp::new(now - 1_800_000_000, 0).unwrap();
@@ -595,12 +619,14 @@ fn test_replay_preserves_create_edge_temporal_interval() -> Result<()> {
     assert!(
         historical
             .get_edge_at_time(edge_id, probe_within, time::now())
-            .is_ok()
+            .is_ok(),
+        "edge must be visible at a valid time after the backdated valid_from"
     );
     assert!(
         historical
             .get_edge_at_time(edge_id, probe_before, time::now())
-            .is_err()
+            .is_err(),
+        "edge must NOT be visible at a valid time before the backdated valid_from"
     );
 
     Ok(())

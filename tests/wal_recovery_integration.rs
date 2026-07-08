@@ -192,14 +192,18 @@ fn test_wal_recovery_on_reopen() {
     let t1 = hours_ago(now, 1);
 
     // ---------- Phase 1: pre-crash writes + state capture ----------
-    let (alice, bob, carol, dave, e_knows, e_likes, e_mentors, e_respects);
+    let (alice, bob, carol, dave, erin, e_knows, e_likes, e_mentors, e_respects);
     let (pre_node_count, pre_edge_count);
-    let (alice_hist, bob_hist, carol_hist, dave_hist);
+    let (alice_hist, bob_hist, carol_hist, dave_hist, erin_hist);
     let (e_knows_hist, e_likes_hist, e_mentors_hist, e_respects_hist);
     {
-        let db = AletheiaDB::with_unified_config(crash_recovery_config(&wal_dir)).unwrap();
+        let db = AletheiaDB::with_unified_config(crash_recovery_config(&wal_dir))
+            .expect("initial open with a fresh WAL dir must succeed");
 
-        // Creates: one backdated (Issue #3221), one plain.
+        // Creates, both backdated (Issue #3221). Bob is backdated to t3 —
+        // the earliest valid_from of any edge touching him (e_mentors at t3;
+        // e_knows / e_respects at t2) — so both endpoints of every edge are
+        // valid whenever the edge itself is valid.
         alice = db
             .create_node_with_valid_time(
                 "Person",
@@ -208,9 +212,10 @@ fn test_wal_recovery_on_reopen() {
             )
             .unwrap();
         bob = db
-            .create_node(
+            .create_node_with_valid_time(
                 "Person",
                 PropertyMapBuilder::new().insert("name", "Bob").build(),
+                Some(t3),
             )
             .unwrap();
 
@@ -285,12 +290,33 @@ fn test_wal_recovery_on_reopen() {
         let edge_retraction = db.retract_edge(e_respects, t1).unwrap();
         assert!(!edge_retraction.already_retracted);
 
+        // A full version chain closed by a tombstone: create -> update ->
+        // delete on the same (isolated, edge-free) node. This is the only
+        // entity whose delete tombstone closes an already-superseded chain.
+        erin = db
+            .create_node_with_valid_time(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "Erin").build(),
+                Some(t3),
+            )
+            .unwrap();
+        db.update_node_with_valid_time(
+            erin,
+            PropertyMapBuilder::new()
+                .insert("name", "Erin")
+                .insert("role", "admin")
+                .build(),
+            Some(t2),
+        )
+        .unwrap();
+        db.delete_node_with_valid_time(erin, None).unwrap();
+
         // Capture current state.
         pre_node_count = db.node_count();
         pre_edge_count = db.edge_count();
         assert_eq!(
             pre_node_count, 2,
-            "alice + bob live; carol deleted, dave retracted"
+            "alice + bob live; carol + erin deleted, dave retracted"
         );
         assert_eq!(pre_edge_count, 1, "only KNOWS live");
 
@@ -299,6 +325,7 @@ fn test_wal_recovery_on_reopen() {
         bob_hist = snapshot_history(&db.get_node_history(bob).unwrap());
         carol_hist = snapshot_history(&db.get_node_history(carol).unwrap());
         dave_hist = snapshot_history(&db.get_node_history(dave).unwrap());
+        erin_hist = snapshot_history(&db.get_node_history(erin).unwrap());
         e_knows_hist = snapshot_history(&db.get_edge_history(e_knows).unwrap());
         e_likes_hist = snapshot_history(&db.get_edge_history(e_likes).unwrap());
         e_mentors_hist = snapshot_history(&db.get_edge_history(e_mentors).unwrap());
@@ -308,6 +335,7 @@ fn test_wal_recovery_on_reopen() {
         assert_eq!(bob_hist.len(), 1);
         assert_eq!(carol_hist.len(), 2, "create + delete tombstone");
         assert_eq!(dave_hist.len(), 2, "create + retraction");
+        assert_eq!(erin_hist.len(), 3, "create + update + delete tombstone");
         assert_eq!(e_knows_hist.len(), 1);
         assert_eq!(e_likes_hist.len(), 2, "create + delete tombstone");
         assert_eq!(e_mentors_hist.len(), 2, "create + co-retraction");
@@ -318,7 +346,8 @@ fn test_wal_recovery_on_reopen() {
     }
 
     // ---------- Phase 3: reopen (full WAL replay from LSN 0) ----------
-    let db = AletheiaDB::with_unified_config(crash_recovery_config(&wal_dir)).unwrap();
+    let db = AletheiaDB::with_unified_config(crash_recovery_config(&wal_dir))
+        .expect("reopen after simulated crash must succeed (WAL replay)");
 
     // (d) No data corruption: counts identical.
     assert_eq!(
@@ -364,6 +393,10 @@ fn test_wal_recovery_on_reopen() {
         "retracted node must stay absent"
     );
     assert!(
+        db.get_node(erin).is_err(),
+        "deleted node (with an update chain) must stay deleted"
+    );
+    assert!(
         db.get_edge(e_likes).is_err(),
         "deleted edge must stay deleted"
     );
@@ -379,11 +412,14 @@ fn test_wal_recovery_on_reopen() {
     // (b) Every captured history matches.
     let alice_recovered = db.get_node_history(alice).unwrap();
     assert_history_matches("alice", &alice_hist, &alice_recovered);
-    assert_history_matches("bob", &bob_hist, &db.get_node_history(bob).unwrap());
+    let bob_recovered = db.get_node_history(bob).unwrap();
+    assert_history_matches("bob", &bob_hist, &bob_recovered);
     let carol_recovered = db.get_node_history(carol).unwrap();
     assert_history_matches("carol", &carol_hist, &carol_recovered);
     let dave_recovered = db.get_node_history(dave).unwrap();
     assert_history_matches("dave", &dave_hist, &dave_recovered);
+    let erin_recovered = db.get_node_history(erin).unwrap();
+    assert_history_matches("erin", &erin_hist, &erin_recovered);
     assert_history_matches(
         "e_knows",
         &e_knows_hist,
@@ -412,6 +448,11 @@ fn test_wal_recovery_on_reopen() {
         alice_recovered.versions[1].temporal.valid_time().start(),
         t2
     );
+    assert_eq!(
+        bob_recovered.versions[0].temporal.valid_time().start(),
+        t3,
+        "bob's backdated valid_from must survive replay exactly"
+    );
     assert_eq!(dave_recovered.versions[1].temporal.valid_time().start(), t3);
     assert_eq!(
         dave_recovered.versions[1].temporal.valid_time().end(),
@@ -427,6 +468,14 @@ fn test_wal_recovery_on_reopen() {
         .temporal
         .transaction_time()
         .start();
+    assert!(
+        alice_create_tx
+            < alice_recovered.versions[1]
+                .temporal
+                .transaction_time()
+                .start(),
+        "premise: create/update WAL entry timestamps must be strictly ordered (clock anomaly?)"
+    );
     let alice_old = db.get_node_at_time(alice, t3, alice_create_tx).unwrap();
     assert!(
         alice_old.properties.get("age").is_none(),
@@ -442,6 +491,14 @@ fn test_wal_recovery_on_reopen() {
         .temporal
         .transaction_time()
         .start();
+    assert!(
+        carol_create_tx
+            < carol_recovered.versions[1]
+                .temporal
+                .transaction_time()
+                .start(),
+        "premise: create/delete WAL entry timestamps must be strictly ordered (clock anomaly?)"
+    );
     let carol_valid_from = carol_recovered.versions[0].temporal.valid_time().start();
     assert!(
         db.get_node_at_time(carol, carol_valid_from, carol_create_tx)
@@ -458,6 +515,14 @@ fn test_wal_recovery_on_reopen() {
         .temporal
         .transaction_time()
         .start();
+    assert!(
+        e_likes_create_tx
+            < e_likes_recovered.versions[1]
+                .temporal
+                .transaction_time()
+                .start(),
+        "premise: create/delete WAL entry timestamps must be strictly ordered (clock anomaly?)"
+    );
     let e_likes_valid_from = e_likes_recovered.versions[0].temporal.valid_time().start();
     assert!(
         db.get_edge_at_time(e_likes, e_likes_valid_from, e_likes_create_tx)
@@ -466,6 +531,48 @@ fn test_wal_recovery_on_reopen() {
     assert!(
         db.get_edge_at_time(e_likes, time::now(), time::now())
             .is_err()
+    );
+
+    // Tombstone closing a superseded chain (erin: create -> update ->
+    // delete). Point-in-time visibility matrix over the recovered chain:
+    // the ORIGINAL state anchored at the creation coordinates, the UPDATED
+    // state anchored at the update coordinates, gone at/after the delete.
+    let erin_create_tx = erin_recovered.versions[0]
+        .temporal
+        .transaction_time()
+        .start();
+    let erin_update_tx = erin_recovered.versions[1]
+        .temporal
+        .transaction_time()
+        .start();
+    let erin_delete_tx = erin_recovered.versions[2]
+        .temporal
+        .transaction_time()
+        .start();
+    assert!(
+        erin_create_tx < erin_update_tx && erin_update_tx < erin_delete_tx,
+        "premise: create/update/delete WAL entry timestamps must be strictly ordered (clock anomaly?)"
+    );
+    let erin_original = db.get_node_at_time(erin, t3, erin_create_tx).unwrap();
+    assert!(
+        matches!(erin_original.properties.get("name"), Some(PropertyValue::String(s)) if s.as_ref() == "Erin")
+    );
+    assert!(
+        erin_original.properties.get("role").is_none(),
+        "anchored at the creation coordinates, erin must be in her ORIGINAL state"
+    );
+    let erin_updated = db.get_node_at_time(erin, t2, erin_update_tx).unwrap();
+    assert!(
+        matches!(erin_updated.properties.get("role"), Some(PropertyValue::String(s)) if s.as_ref() == "admin"),
+        "anchored at the update coordinates, erin must be in her UPDATED state"
+    );
+    assert!(
+        db.get_node_at_time(erin, t2, erin_delete_tx).is_err(),
+        "erin must be gone when transaction time is anchored at the delete's commit"
+    );
+    assert!(
+        db.get_node_at_time(erin, time::now(), time::now()).is_err(),
+        "erin must be gone at the current bi-temporal coordinate"
     );
 
     // Retracted entities: valid-time semantics honored after replay —
@@ -495,10 +602,11 @@ fn test_wal_recovery_on_reopen() {
 /// after crash recovery. This test FAILS until replay honors the logged
 /// value; run it with `--ignored` to observe the divergence.
 #[test]
-#[ignore = "known divergence: WAL replay drops the logged valid_from for DeleteNode/DeleteEdge \
-            (src/storage/recovery.rs destructures `valid_from: _` and stamps the tombstone with \
-            entry.timestamp), while the live path honors the #3221 backdated valid_time. \
-            Un-ignore once replay honors the logged delete valid_from."]
+#[ignore = "known divergence (see issue #3400): WAL replay drops the logged valid_from for \
+            DeleteNode/DeleteEdge (src/storage/recovery.rs destructures `valid_from: _` and \
+            stamps the tombstone with entry.timestamp), while the live path honors the #3221 \
+            backdated valid_time. Un-ignore once issue #3400 is fixed and replay honors the \
+            logged delete valid_from."]
 fn backdated_delete_valid_from_survives_replay() {
     let temp_dir = tempfile::tempdir().unwrap();
     let wal_dir = temp_dir.path().join("wal");

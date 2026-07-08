@@ -435,6 +435,10 @@ fn test_replay_update_preserves_temporal_intervals() -> Result<()> {
 
     let create_ts = logged_timestamp(&wal, |op| matches!(op, WalOperation::CreateNode { .. }))?;
     let update_ts = logged_timestamp(&wal, |op| matches!(op, WalOperation::UpdateNode { .. }))?;
+    assert!(
+        create_ts < update_ts,
+        "premise: WAL entry timestamps must be strictly ordered (clock anomaly?)"
+    );
 
     let config = CheckpointConfig::with_data_dir(temp_dir.path().join("checkpoints"));
     let mut manager = CheckpointManager::new(config)?;
@@ -444,13 +448,21 @@ fn test_replay_update_preserves_temporal_intervals() -> Result<()> {
     assert_eq!(history.version_count(), 2);
 
     let superseded = &history.versions[0];
-    assert_eq!(superseded.temporal.valid_time().start(), vf1);
+    assert_eq!(
+        superseded.temporal.valid_time().start(),
+        vf1,
+        "superseded version's valid_from must survive replay exactly"
+    );
     assert_eq!(
         superseded.temporal.valid_time().end(),
         vf2,
         "superseded version's valid time must be closed at the successor's LOGGED valid_from"
     );
-    assert_eq!(superseded.temporal.transaction_time().start(), create_ts);
+    assert_eq!(
+        superseded.temporal.transaction_time().start(),
+        create_ts,
+        "superseded version's transaction time must start at the LOGGED create timestamp"
+    );
     assert_eq!(
         superseded.temporal.transaction_time().end(),
         update_ts,
@@ -458,9 +470,20 @@ fn test_replay_update_preserves_temporal_intervals() -> Result<()> {
     );
 
     let head = &history.versions[1];
-    assert_eq!(head.temporal.valid_time().start(), vf2);
-    assert!(head.temporal.valid_time().is_current());
-    assert_eq!(head.temporal.transaction_time().start(), update_ts);
+    assert_eq!(
+        head.temporal.valid_time().start(),
+        vf2,
+        "new head's valid_from must equal the LOGGED update valid_from"
+    );
+    assert!(
+        head.temporal.valid_time().is_current(),
+        "new head's valid time must be open-ended after replay"
+    );
+    assert_eq!(
+        head.temporal.transaction_time().start(),
+        update_ts,
+        "new head's transaction time must start at the LOGGED update timestamp"
+    );
     assert!(
         head.temporal.transaction_time().is_current(),
         "new head's transaction time must be open-ended after replay"
@@ -530,6 +553,10 @@ fn test_replay_update_edge_preserves_temporal_intervals() -> Result<()> {
         logged_timestamp(&wal, |op| matches!(op, WalOperation::CreateEdge { .. }))?;
     let update_edge_ts =
         logged_timestamp(&wal, |op| matches!(op, WalOperation::UpdateEdge { .. }))?;
+    assert!(
+        create_edge_ts < update_edge_ts,
+        "premise: WAL entry timestamps must be strictly ordered (clock anomaly?)"
+    );
 
     let config = CheckpointConfig::with_data_dir(temp_dir.path().join("checkpoints"));
     let mut manager = CheckpointManager::new(config)?;
@@ -539,7 +566,11 @@ fn test_replay_update_edge_preserves_temporal_intervals() -> Result<()> {
     assert_eq!(history.version_count(), 2);
 
     let superseded = &history.versions[0];
-    assert_eq!(superseded.temporal.valid_time().start(), vf1);
+    assert_eq!(
+        superseded.temporal.valid_time().start(),
+        vf1,
+        "superseded edge version's valid_from must survive replay exactly"
+    );
     assert_eq!(
         superseded.temporal.valid_time().end(),
         vf2,
@@ -547,7 +578,8 @@ fn test_replay_update_edge_preserves_temporal_intervals() -> Result<()> {
     );
     assert_eq!(
         superseded.temporal.transaction_time().start(),
-        create_edge_ts
+        create_edge_ts,
+        "superseded edge version's transaction time must start at the LOGGED create timestamp"
     );
     assert_eq!(
         superseded.temporal.transaction_time().end(),
@@ -556,10 +588,24 @@ fn test_replay_update_edge_preserves_temporal_intervals() -> Result<()> {
     );
 
     let head = &history.versions[1];
-    assert_eq!(head.temporal.valid_time().start(), vf2);
-    assert!(head.temporal.valid_time().is_current());
-    assert_eq!(head.temporal.transaction_time().start(), update_edge_ts);
-    assert!(head.temporal.transaction_time().is_current());
+    assert_eq!(
+        head.temporal.valid_time().start(),
+        vf2,
+        "new edge head's valid_from must equal the LOGGED update valid_from"
+    );
+    assert!(
+        head.temporal.valid_time().is_current(),
+        "new edge head's valid time must be open-ended after replay"
+    );
+    assert_eq!(
+        head.temporal.transaction_time().start(),
+        update_edge_ts,
+        "new edge head's transaction time must start at the LOGGED update timestamp"
+    );
+    assert!(
+        head.temporal.transaction_time().is_current(),
+        "new edge head's transaction time must be open-ended after replay"
+    );
 
     // Point-in-time reads before/after the update return old/new state.
     let old = historical.get_edge_at_time(edge_id, vf1, create_edge_ts)?;
