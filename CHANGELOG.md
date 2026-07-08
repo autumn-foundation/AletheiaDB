@@ -56,6 +56,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `PersistenceConfig::default()` no longer enables index persistence
+  (Issue #3388). The old default (`enabled: true` with the cwd-relative
+  `data_dir: "data"`) made every database built from a default or builder
+  config silently write index snapshots into `./data` on shutdown and load
+  whatever `./data` happened to contain on startup, so unrelated instances
+  sharing a working directory could observe each other's data and a stale
+  `./data` could short-circuit WAL replay (this caused a real CI flake).
+  Index persistence is now opt-in: set `enabled: true` together with an
+  explicit `data_dir`, or use the canonical durable entry points
+  `AletheiaDB::open(path)` / `durable_config_for_data_dir(path)`, which are
+  unaffected. **Breaking for callers that relied on the implicit default:**
+  a config that never touches `PersistenceConfig` no longer persists indexes
+  (the WAL still provides durability when configured).
+
 - MCP tool error responses are now structured (Issue #3234): every error is
   `{"error": {"code", "message", "retriable", "details"?}}` instead of
   `{"error": "<string>"}`. `code` is drawn from a stable seven-value enum
