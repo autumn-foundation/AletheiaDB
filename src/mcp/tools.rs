@@ -950,11 +950,18 @@ pub struct TemporalBounds {
 
 impl TemporalBounds {
     /// Format a timestamp's wallclock microseconds as an RFC 3339 string
-    /// with microsecond precision (e.g. `2026-07-07T12:00:00.000000+00:00`).
+    /// with microsecond precision (e.g. `2026-07-07T12:00:00.000000Z`).
+    ///
+    /// Total: a wallclock value outside chrono's representable range falls
+    /// back to the raw microsecond count as a string (mirroring
+    /// `time::to_iso8601`'s totality) instead of silently rendering the
+    /// 1970 epoch.
     fn to_rfc3339_micros(ts: crate::core::temporal::Timestamp) -> String {
-        chrono::DateTime::from_timestamp_micros(ts.wallclock())
-            .unwrap_or_default()
-            .to_rfc3339_opts(chrono::SecondsFormat::Micros, false)
+        let micros = ts.wallclock();
+        match chrono::DateTime::from_timestamp_micros(micros) {
+            Some(dt) => dt.to_rfc3339_opts(chrono::SecondsFormat::Micros, true),
+            None => micros.to_string(),
+        }
     }
 
     /// Convert a range end bound: `TIMESTAMP_MAX` (open-ended) becomes

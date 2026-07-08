@@ -38,8 +38,8 @@ pub use tools::{
     DeleteNodeCascadeRequest, DeleteNodeRequest, EnableVectorIndexRequest, FindSimilarRequest,
     GetEdgeAtTimeRequest, GetEdgeRequest, GetIncomingEdgesRequest, GetNodeAtTimeRequest,
     GetNodeRequest, GetOutgoingEdgesRequest, HybridQueryRequest, ListChangesRequest,
-    ListEdgesRequest, ListNodesRequest, ListVectorIndexesRequest, QueryRequest, TraverseRequest,
-    UpdateEdgeRequest, UpdateNodeRequest,
+    ListEdgesRequest, ListNodesRequest, ListVectorIndexesRequest, QueryRequest, TemporalBounds,
+    TraverseRequest, UpdateEdgeRequest, UpdateNodeRequest,
 };
 
 #[cfg(test)]

@@ -433,9 +433,9 @@ reads alike.
 //      "label": "Person",
 //      "properties": { "name": "Alice" },
 //      "temporal": {
-//        "valid_from": "2026-07-07T12:00:00.000000+00:00",
+//        "valid_from": "2026-07-07T12:00:00.000000Z",
 //        "valid_to": null,
-//        "transaction_from": "2026-07-07T12:00:00.000000+00:00",
+//        "transaction_from": "2026-07-07T12:00:00.000000Z",
 //        "transaction_to": null,
 //        "is_current": true
 //      }
@@ -444,11 +444,14 @@ reads alike.
 
 Conventions:
 
-- **Timestamps are RFC 3339 strings** with microsecond precision. Intervals
-  are half-open (`[start, end)`).
+- **Timestamps are RFC 3339 strings** with microsecond precision and a `Z`
+  (UTC) suffix. Intervals are half-open (`[start, end)`).
 - **Open-ended bounds are explicit JSON `null`** — `valid_to`/`transaction_to`
   are always present, never omitted. `null` means "still valid" / "still the
-  recorded version".
+  recorded version". In the rare case the version metadata for a returned
+  entity cannot be loaded, the whole `temporal` block is omitted (mirroring
+  `provenance`), while open bounds within a present block are always explicit
+  `null`.
 - **`is_current`** is `true` iff both the valid-time and transaction-time
   intervals contain the current time — i.e. the response reflects the live,
   current version. A superseded version returned by a point-in-time read, or
@@ -464,10 +467,10 @@ Conventions:
 //        "label": "Person",
 //        "properties": { "name": "Alice" },
 //        "temporal": {
-//          "valid_from": "2026-06-01T09:30:00.000000+00:00",
-//          "valid_to": "2026-07-03T08:15:27.412000+00:00",
-//          "transaction_from": "2026-06-01T09:30:00.000000+00:00",
-//          "transaction_to": "2026-07-03T08:15:27.412000+00:00",
+//          "valid_from": "2026-06-01T09:30:00.000000Z",
+//          "valid_to": "2026-07-03T08:15:27.412000Z",
+//          "transaction_from": "2026-06-01T09:30:00.000000Z",
+//          "transaction_to": "2026-07-03T08:15:27.412000Z",
 //          "is_current": false
 //        }
 //      },

@@ -8894,11 +8894,13 @@ mod temporal_bounds_tests {
         assert_eq!(typed.source_id, a);
         assert_eq!(typed.target_id, b);
 
-        // Point-in-time edge read carries the block too.
+        // Point-in-time edge read carries the block too. Capture one shared
+        // "now" so both dimensions anchor the same bi-temporal instant.
+        let now = now_micros().to_string();
         let at_time_response = server.get_edge_at_time(GetEdgeAtTimeRequest {
             edge_id: created["id"].as_u64().unwrap(),
-            valid_time: now_micros().to_string(),
-            transaction_time: Some(now_micros().to_string()),
+            valid_time: now.clone(),
+            transaction_time: Some(now),
         });
         let at_time: serde_json::Value = serde_json::from_str(&at_time_response).unwrap();
         assert!(
@@ -9042,8 +9044,8 @@ mod temporal_bounds_tests {
         let transaction_to = superseded["transaction_to"].as_str().unwrap_or_else(|| {
             panic!("superseded transaction_to must be a closed RFC3339 bound: {superseded}")
         });
-        assert!(rfc3339_to_micros(valid_to) > anchor - 60_000_000);
-        assert!(rfc3339_to_micros(transaction_to) > anchor - 60_000_000);
+        assert!(rfc3339_to_micros(valid_to) > anchor);
+        assert!(rfc3339_to_micros(transaction_to) > anchor);
         assert_eq!(
             superseded["is_current"],
             serde_json::json!(false),
@@ -9152,5 +9154,155 @@ mod temporal_bounds_tests {
                 "current `{key}` must agree with history: {current_temporal} vs {current_history}"
             );
         }
+    }
+
+    #[test]
+    fn test_not_yet_valid_fact_reports_is_current_false() {
+        let server = create_test_server();
+
+        // A fact that only becomes true one hour from now: both bounds are
+        // open, yet the valid interval does not contain the current time, so
+        // is_current must be false. This isolates the valid-time conjunct of
+        // is_current -- a transaction-time-only implementation would wrongly
+        // report true here.
+        let future = now_micros() + 3_600_000_000;
+        let mut props = HashMap::new();
+        props.insert("name".to_string(), serde_json::json!("Alice"));
+        let response = server.create_node(CreateNodeRequest {
+            valid_time: Some(future.to_string()),
+            label: "Person".to_string(),
+            properties: Some(props),
+            provenance: None,
+        });
+        let created: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert!(
+            created.get("error").is_none(),
+            "create_node with a future valid_time must succeed: {created}"
+        );
+
+        let assert_future_not_current = |temporal: &serde_json::Value| {
+            for key in ["valid_to", "transaction_to"] {
+                let v = temporal.get(key).unwrap_or_else(|| {
+                    panic!("`{key}` must be present (as null), not omitted: {temporal}")
+                });
+                assert!(
+                    v.is_null(),
+                    "`{key}` must be JSON null for open bounds: {temporal}"
+                );
+            }
+            assert_eq!(
+                rfc3339_to_micros(temporal["valid_from"].as_str().unwrap()),
+                future,
+                "valid_from must decode to the future valid time exactly: {temporal}"
+            );
+            assert_eq!(
+                temporal["is_current"],
+                serde_json::json!(false),
+                "a not-yet-valid fact must report is_current: false even though \
+                 both bounds are open: {temporal}"
+            );
+        };
+        assert_future_not_current(&temporal_of(&created));
+
+        let get_response = server.get_node(GetNodeRequest {
+            node_id: created["id"].as_u64().unwrap(),
+            include_vectors: None,
+        });
+        let retrieved: serde_json::Value = serde_json::from_str(&get_response).unwrap();
+        assert_future_not_current(&temporal_of(&retrieved));
+    }
+
+    #[test]
+    fn test_backdated_create_reflects_valid_time_in_temporal_block() {
+        let server = create_test_server();
+
+        // A fact backdated one hour: valid since then (and still valid), so
+        // it is current, but valid_from must reflect the caller-supplied
+        // valid time while transaction_from is the (later) system-assigned
+        // commit time.
+        let backdated = now_micros() - 3_600_000_000;
+        let mut props = HashMap::new();
+        props.insert("name".to_string(), serde_json::json!("Alice"));
+        let response = server.create_node(CreateNodeRequest {
+            valid_time: Some(backdated.to_string()),
+            label: "Person".to_string(),
+            properties: Some(props),
+            provenance: None,
+        });
+        let created: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert!(
+            created.get("error").is_none(),
+            "create_node with a backdated valid_time must succeed: {created}"
+        );
+
+        let temporal = temporal_of(&created);
+        assert_current_open_bounds(&temporal);
+        assert_eq!(
+            rfc3339_to_micros(temporal["valid_from"].as_str().unwrap()),
+            backdated,
+            "valid_from must decode to the backdated valid time exactly: {temporal}"
+        );
+        assert!(
+            rfc3339_to_micros(temporal["transaction_from"].as_str().unwrap()) > backdated,
+            "transaction_from is system-assigned and must be later than the \
+             backdated valid time: {temporal}"
+        );
+    }
+
+    #[test]
+    fn test_deleted_node_at_time_read_has_closed_transaction_to() {
+        let server = create_test_server();
+
+        let node_id = create_person(&server, "Alice")["id"].as_u64().unwrap();
+
+        // Anchor a bi-temporal coordinate strictly after the create and
+        // strictly before the delete.
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let anchor = now_micros();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+
+        let delete_response = server.delete_node(DeleteNodeRequest {
+            node_id,
+            detach: None,
+            valid_time: None,
+        });
+        let deleted: serde_json::Value = serde_json::from_str(&delete_response).unwrap();
+        assert!(
+            deleted.get("error").is_none(),
+            "delete_node failed: {deleted}"
+        );
+
+        // The at-time read anchored before the delete returns the pre-delete
+        // version. The delete writer closes that version's transaction_time
+        // at the delete's commit timestamp, so transaction_to must be a
+        // closed RFC3339 bound strictly after the anchor and the version must
+        // no longer be current. (valid_to is implementation-dependent for
+        // deletes -- the tombstone carries the valid-time closure -- so it is
+        // deliberately not asserted here.)
+        let at_time_response = server.get_node_at_time(GetNodeAtTimeRequest {
+            node_id,
+            valid_time: anchor.to_string(),
+            transaction_time: Some(anchor.to_string()),
+        });
+        let at_time: serde_json::Value = serde_json::from_str(&at_time_response).unwrap();
+        assert!(
+            at_time.get("error").is_none(),
+            "get_node_at_time anchored before the delete must still see the \
+             pre-delete version: {at_time}"
+        );
+        let temporal = temporal_of(&at_time["node"]);
+        let transaction_to = temporal["transaction_to"].as_str().unwrap_or_else(|| {
+            panic!("deleted version's transaction_to must be a closed RFC3339 bound: {temporal}")
+        });
+        assert!(
+            rfc3339_to_micros(transaction_to) > anchor,
+            "transaction_to must be the delete's commit time, strictly after \
+             the anchor: {temporal}"
+        );
+        assert_eq!(
+            temporal["is_current"],
+            serde_json::json!(false),
+            "a deleted version must report is_current: false: {temporal}"
+        );
     }
 }
