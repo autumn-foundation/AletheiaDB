@@ -767,6 +767,44 @@ mod tests {
         }
     }
 
+    /// Runtime route-inventory conformance (Issue #3350 Phase 2): every
+    /// route the HTTP server actually registers must be a route the auth
+    /// matrix classifies. `query_access_class` covers `/query`'s operation
+    /// enum exhaustively at compile time; this test closes the remaining
+    /// gap — a brand-new *route* (a new handler in `all_routes`) cannot ship
+    /// without an explicit classification decision here and in
+    /// `docs/guides/access-control-matrix.md`.
+    #[test]
+    fn all_registered_routes_are_classified() {
+        // (method, path), mirroring docs/guides/access-control-matrix.md:
+        //   GET /status              -> metrics
+        //   POST /query              -> per-operation (query_access_class)
+        //   POST/GET /admin/keys and POST /admin/keys/revoke -> admin
+        let classified = [
+            ("GET", "/status"),
+            ("POST", "/query"),
+            ("POST", "/admin/keys"),
+            ("GET", "/admin/keys"),
+            ("POST", "/admin/keys/revoke"),
+        ];
+        let routes = all_routes();
+        assert_eq!(
+            routes.len(),
+            classified.len(),
+            "route inventory changed — update the classification set (and the \
+             documented matrix in docs/guides/access-control-matrix.md)"
+        );
+        for route in &routes {
+            assert!(
+                classified.contains(&(route.method.as_str(), route.path)),
+                "unclassified HTTP route: {} {} — classify it in \
+                 docs/guides/access-control-matrix.md and add it here",
+                route.method,
+                route.path
+            );
+        }
+    }
+
     #[test]
     fn classify_query_error_routes_parse_errors_to_bad_request() {
         assert!(matches!(
