@@ -59,3 +59,81 @@ fn deeply_nested_arrays_semantically_equal_without_overflow() {
         "NaN != NaN under PartialEq, even when deeply nested"
     );
 }
+
+#[test]
+fn deeply_nested_arrays_semantically_unequal_without_overflow() {
+    // Complements the deep-equal case above: a deeply nested value that differs
+    // only at the leaf must be reported unequal by `semantically_equal` (still
+    // NaN-aware) without overflowing the stack.
+    let a = nest(PropertyValue::Float(1.0), DEEP);
+    let b = nest(PropertyValue::Float(2.0), DEEP);
+    assert!(
+        !a.semantically_equal(&b),
+        "deep arrays differing at the leaf must be semantically unequal"
+    );
+
+    // Also exercise a NaN-vs-number leaf mismatch: NaN is only equal to NaN.
+    let nan = nest(PropertyValue::Float(f64::NAN), DEEP);
+    let num = nest(PropertyValue::Float(1.0), DEEP);
+    assert!(
+        !nan.semantically_equal(&num),
+        "NaN leaf must not be semantically equal to a numeric leaf"
+    );
+}
+
+/// Branching depth for the wide+deep tree. Kept modest because the node count
+/// grows as `BRANCH^WIDE_DEEP`; the point is to exercise the work stack holding
+/// many pending pairs at once (multiple children pushed per level), not raw
+/// depth (already covered by the single-chain `DEEP` tests above).
+const BRANCH: usize = 3;
+const WIDE_DEEP: usize = 10;
+
+/// Build a balanced tree where every internal node is an `Array` of `BRANCH`
+/// children, `depth` levels deep, with every leaf equal to `leaf`.
+fn wide_nest(leaf: &PropertyValue, depth: usize) -> PropertyValue {
+    if depth == 0 {
+        return leaf.clone();
+    }
+    let child = wide_nest(leaf, depth - 1);
+    PropertyValue::Array(Arc::new(vec![child; BRANCH]))
+}
+
+#[test]
+fn wide_and_deep_arrays_compare_equal_without_overflow() {
+    // A branching tree forces the iterative work stack to actually grow with
+    // multiple pending element pairs per level (unlike the depth-1 chain in the
+    // other tests, which never holds more than one pending pair).
+    let a = wide_nest(&PropertyValue::Int(7), WIDE_DEEP);
+    let b = wide_nest(&PropertyValue::Int(7), WIDE_DEEP);
+    assert!(a == b, "identical wide+deep trees must be equal");
+    assert!(
+        a.semantically_equal(&b),
+        "identical wide+deep trees must be semantically equal"
+    );
+}
+
+#[test]
+fn wide_and_deep_arrays_detect_inequality_without_overflow() {
+    // Differ at a single leaf buried in one branch: the comparison must still
+    // return `false` cleanly while the work stack holds many pending pairs.
+    let a = wide_nest(&PropertyValue::Int(7), WIDE_DEEP);
+
+    // Build a same-shaped tree whose top level mixes identical subtrees with a
+    // differing one, so the walk descends several branches (the work stack
+    // holds many pending pairs) before finding the buried leaf difference.
+    let identical_subtree = wide_nest(&PropertyValue::Int(7), WIDE_DEEP - 1);
+    let differing_leaf_tree = PropertyValue::Array(Arc::new(vec![
+        identical_subtree.clone(),
+        identical_subtree,
+        wide_nest(&PropertyValue::Int(8), WIDE_DEEP - 1),
+    ]));
+
+    assert!(
+        a != differing_leaf_tree,
+        "wide+deep trees differing at a buried leaf must be unequal"
+    );
+    assert!(
+        !a.semantically_equal(&differing_leaf_tree),
+        "wide+deep trees differing at a buried leaf must be semantically unequal"
+    );
+}

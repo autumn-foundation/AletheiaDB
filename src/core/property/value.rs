@@ -63,67 +63,64 @@ pub enum PropertyValue {
 
 impl PartialEq for PropertyValue {
     fn eq(&self, other: &Self) -> bool {
-        // Compare iteratively using an explicit work stack rather than recursing
-        // one stack frame per nesting level. Deeply nested `Array` values (which
-        // can be built programmatically well past the serialization
-        // `MAX_RECURSION_DEPTH` guard) would otherwise overflow the thread stack
-        // and abort the process. This mirrors the iterative `Drop` impl below.
-        let mut stack: Vec<(&PropertyValue, &PropertyValue)> = vec![(self, other)];
-
+        // Compare the root pair directly and only allocate a work stack when we
+        // actually descend into nested `Array` values (the sole recursive
+        // variant). Scalar-vs-scalar and shallow comparisons therefore perform
+        // zero heap allocations, while deeply nested `Array`s -- which can be
+        // built programmatically well past the serialization
+        // `MAX_RECURSION_DEPTH` guard -- are still walked iteratively rather
+        // than recursing one stack frame per level (which would overflow the
+        // thread stack and abort the process). This mirrors the iterative
+        // `Drop` impl below.
+        let mut stack: Vec<(&PropertyValue, &PropertyValue)> = Vec::new();
+        if !Self::eq_pair(self, other, &mut stack) {
+            return false;
+        }
         while let Some((a, b)) = stack.pop() {
-            match (a, b) {
-                (PropertyValue::Null, PropertyValue::Null) => {}
-                (PropertyValue::Bool(a), PropertyValue::Bool(b)) => {
-                    if a != b {
-                        return false;
-                    }
-                }
-                (PropertyValue::Int(a), PropertyValue::Int(b)) => {
-                    if a != b {
-                        return false;
-                    }
-                }
-                (PropertyValue::Float(a), PropertyValue::Float(b)) => {
-                    if a != b {
-                        return false;
-                    }
-                }
-                (PropertyValue::String(a), PropertyValue::String(b)) => {
-                    if !(Arc::ptr_eq(a, b) || a == b) {
-                        return false;
-                    }
-                }
-                (PropertyValue::Bytes(a), PropertyValue::Bytes(b)) => {
-                    if !(Arc::ptr_eq(a, b) || a == b) {
-                        return false;
-                    }
-                }
-                (PropertyValue::Vector(a), PropertyValue::Vector(b)) => {
-                    if !(Arc::ptr_eq(a, b) || a == b) {
-                        return false;
-                    }
-                }
-                (PropertyValue::SparseVector(a), PropertyValue::SparseVector(b)) => {
-                    if !(Arc::ptr_eq(a, b) || a == b) {
-                        return false;
-                    }
-                }
-                (PropertyValue::Array(a), PropertyValue::Array(b)) => {
-                    // Same allocation => structurally identical, skip element walk.
-                    if Arc::ptr_eq(a, b) {
-                        continue;
-                    }
-                    if a.len() != b.len() {
-                        return false;
-                    }
-                    stack.extend(a.iter().zip(b.iter()));
-                }
-                // Variant mismatch between the two sides.
-                _ => return false,
+            if !Self::eq_pair(a, b, &mut stack) {
+                return false;
             }
         }
-
         true
+    }
+}
+
+impl PropertyValue {
+    /// Compare a single `PartialEq` pair, enqueuing element pairs when both
+    /// sides are equal-length `Array`s (deferred to the caller's work stack)
+    /// instead of recursing. Returns `false` on any inequality or variant
+    /// mismatch. `Array` children are the only values ever pushed, so no
+    /// allocation happens unless a nested array is actually encountered.
+    fn eq_pair<'a>(
+        a: &'a PropertyValue,
+        b: &'a PropertyValue,
+        stack: &mut Vec<(&'a PropertyValue, &'a PropertyValue)>,
+    ) -> bool {
+        match (a, b) {
+            (PropertyValue::Null, PropertyValue::Null) => true,
+            (PropertyValue::Bool(a), PropertyValue::Bool(b)) => a == b,
+            (PropertyValue::Int(a), PropertyValue::Int(b)) => a == b,
+            (PropertyValue::Float(a), PropertyValue::Float(b)) => a == b,
+            (PropertyValue::String(a), PropertyValue::String(b)) => Arc::ptr_eq(a, b) || a == b,
+            (PropertyValue::Bytes(a), PropertyValue::Bytes(b)) => Arc::ptr_eq(a, b) || a == b,
+            (PropertyValue::Vector(a), PropertyValue::Vector(b)) => Arc::ptr_eq(a, b) || a == b,
+            (PropertyValue::SparseVector(a), PropertyValue::SparseVector(b)) => {
+                Arc::ptr_eq(a, b) || a == b
+            }
+            (PropertyValue::Array(a), PropertyValue::Array(b)) => {
+                // Same allocation => structurally identical, skip element walk.
+                if Arc::ptr_eq(a, b) {
+                    return true;
+                }
+                if a.len() != b.len() {
+                    return false;
+                }
+                stack.extend(a.iter().zip(b.iter()));
+                true
+            }
+            // Variant mismatch between the two sides.
+            _ => false,
+        }
     }
 }
 
@@ -445,56 +442,67 @@ impl PropertyValue {
     /// - `Vector` containing `NaN` at index `i` is equal to `Vector` containing `NaN` at index `i`
     /// - `SparseVector`: Guaranteed not to contain `NaN` (enforced at construction), so standard equality applies.
     pub fn semantically_equal(&self, other: &Self) -> bool {
-        // Iterative (explicit-stack) walk so deeply nested `Array` values do not
-        // overflow the thread stack, matching the iterative `PartialEq` impl.
-        // Element pairs are pushed back onto the stack, preserving the recursive
-        // NaN-aware semantics (nested floats keep NaN==NaN treatment).
-        let mut stack: Vec<(&PropertyValue, &PropertyValue)> = vec![(self, other)];
-
+        // Compare the root pair directly and only allocate a work stack when we
+        // descend into nested `Array` values, so scalar/shallow comparisons on
+        // this delta-computation hot path perform zero heap allocations. Deeply
+        // nested `Array`s are still walked iteratively (matching `PartialEq`) so
+        // they cannot overflow the thread stack, and the NaN-aware semantics are
+        // preserved because nested floats are compared through the same helper.
+        let mut stack: Vec<(&PropertyValue, &PropertyValue)> = Vec::new();
+        if !Self::semantically_eq_pair(self, other, &mut stack) {
+            return false;
+        }
         while let Some((a, b)) = stack.pop() {
-            match (a, b) {
-                (PropertyValue::Float(a), PropertyValue::Float(b)) => {
-                    let eq = if a.is_nan() { b.is_nan() } else { a == b };
-                    if !eq {
-                        return false;
-                    }
-                }
-                (PropertyValue::Vector(a), PropertyValue::Vector(b)) => {
-                    // Optimization: If they point to the same allocation, they must be equal.
-                    if Arc::ptr_eq(a, b) {
-                        continue;
-                    }
-                    if a.len() != b.len() {
-                        return false;
-                    }
-                    let all_eq = a
-                        .iter()
-                        .zip(b.iter())
-                        .all(|(x, y)| if x.is_nan() { y.is_nan() } else { x == y });
-                    if !all_eq {
-                        return false;
-                    }
-                }
-                (PropertyValue::Array(a), PropertyValue::Array(b)) => {
-                    // Optimization: If they point to the same allocation, they must be equal.
-                    if Arc::ptr_eq(a, b) {
-                        continue;
-                    }
-                    if a.len() != b.len() {
-                        return false;
-                    }
-                    stack.extend(a.iter().zip(b.iter()));
-                }
-                // For other types, fall back to PartialEq (itself iterative).
-                (a, b) => {
-                    if a != b {
-                        return false;
-                    }
-                }
+            if !Self::semantically_eq_pair(a, b, &mut stack) {
+                return false;
             }
         }
-
         true
+    }
+
+    /// Compare a single `semantically_equal` pair (NaN treated as equal),
+    /// enqueuing element pairs when both sides are equal-length `Array`s
+    /// instead of recursing. `Array` children are the only values ever pushed,
+    /// so no allocation happens unless a nested array is actually encountered.
+    fn semantically_eq_pair<'a>(
+        a: &'a PropertyValue,
+        b: &'a PropertyValue,
+        stack: &mut Vec<(&'a PropertyValue, &'a PropertyValue)>,
+    ) -> bool {
+        match (a, b) {
+            (PropertyValue::Float(a), PropertyValue::Float(b)) => {
+                if a.is_nan() {
+                    b.is_nan()
+                } else {
+                    a == b
+                }
+            }
+            (PropertyValue::Vector(a), PropertyValue::Vector(b)) => {
+                // Optimization: If they point to the same allocation, they must be equal.
+                if Arc::ptr_eq(a, b) {
+                    return true;
+                }
+                if a.len() != b.len() {
+                    return false;
+                }
+                a.iter()
+                    .zip(b.iter())
+                    .all(|(x, y)| if x.is_nan() { y.is_nan() } else { x == y })
+            }
+            (PropertyValue::Array(a), PropertyValue::Array(b)) => {
+                // Optimization: If they point to the same allocation, they must be equal.
+                if Arc::ptr_eq(a, b) {
+                    return true;
+                }
+                if a.len() != b.len() {
+                    return false;
+                }
+                stack.extend(a.iter().zip(b.iter()));
+                true
+            }
+            // For other types, fall back to PartialEq (itself iterative).
+            (a, b) => a == b,
+        }
     }
 
     // ========================================================================
