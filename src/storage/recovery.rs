@@ -405,6 +405,86 @@ pub(crate) fn replay_wal_into_storage_with_constraints(
                     current.delete_edge_direct(edge_id)?;
                 }
             }
+            WalOperation::RetractNode { node_id, valid_to } => {
+                // Valid-time retraction (Issue #3230). Reconstruct exactly what
+                // the original commit did:
+                //   (a) close the head version's TRANSACTION time (its valid
+                //       interval stays untouched — append-only, never rewrite);
+                //   (b) append a new version with the same properties whose
+                //       valid interval is closed at the logged `valid_to`
+                //       (honored faithfully — NOT the replay/commit time);
+                //   (c) remove the node from current storage.
+                if let Ok(node) = current.get_node(node_id) {
+                    let commit_timestamp = entry.timestamp;
+
+                    // Capture the head's valid_from BEFORE appending, so the
+                    // retraction version reproduces the same interval start.
+                    let head_version_id = historical.get_current_node_version(node_id);
+                    let valid_from = head_version_id
+                        .and_then(|vid| historical.get_node_version(vid))
+                        .map(|v| v.temporal.valid_time().start())
+                        .unwrap_or(commit_timestamp);
+
+                    if let Some(current_version_id) = head_version_id {
+                        historical.close_node_version_transaction_time(
+                            current_version_id,
+                            commit_timestamp,
+                        )?;
+                    }
+
+                    let retraction_version_id = VersionId::new(next_version_id)?;
+                    next_version_id += 1;
+
+                    historical.add_retracted_node_version(
+                        node_id,
+                        retraction_version_id,
+                        valid_from,
+                        valid_to,
+                        commit_timestamp,
+                        node.label,
+                        node.properties.clone(),
+                    )?;
+
+                    current.delete_node_direct(node_id, commit_timestamp)?;
+                }
+            }
+            WalOperation::RetractEdge { edge_id, valid_to } => {
+                // Valid-time retraction of an edge (Issue #3230); mirrors the
+                // RetractNode arm above, honoring the logged `valid_to`.
+                if let Ok(edge) = current.get_edge(edge_id) {
+                    let commit_timestamp = entry.timestamp;
+
+                    let head_version_id = historical.get_current_edge_version(edge_id);
+                    let valid_from = head_version_id
+                        .and_then(|vid| historical.get_edge_version(vid))
+                        .map(|v| v.temporal.valid_time().start())
+                        .unwrap_or(commit_timestamp);
+
+                    if let Some(current_version_id) = head_version_id {
+                        historical.close_edge_version_transaction_time(
+                            current_version_id,
+                            commit_timestamp,
+                        )?;
+                    }
+
+                    let retraction_version_id = VersionId::new(next_version_id)?;
+                    next_version_id += 1;
+
+                    historical.add_retracted_edge_version(
+                        edge_id,
+                        retraction_version_id,
+                        valid_from,
+                        valid_to,
+                        commit_timestamp,
+                        edge.label,
+                        edge.source,
+                        edge.target,
+                        edge.properties.clone(),
+                    )?;
+
+                    current.delete_edge_direct(edge_id)?;
+                }
+            }
             WalOperation::Checkpoint { .. } => {
                 // Checkpoint markers are informational only during replay
             }
@@ -488,6 +568,143 @@ mod tests {
         assert!(
             !registry.is_constrained(label, prop),
             "net declare+drop must leave constraint inactive"
+        );
+    }
+
+    /// Issue #3230: `RetractNode`/`RetractEdge` replay must reconstruct the
+    /// retraction exactly — close the head's transaction time, append a
+    /// version whose valid interval honors the logged `valid_to` (NOT the
+    /// replay/commit time, unlike the historical DeleteNode behavior), and
+    /// remove the entity from current storage.
+    #[test]
+    fn replay_retract_node_honors_valid_to() {
+        use crate::core::interning::GLOBAL_INTERNER;
+        use crate::core::property::PropertyMap;
+        use crate::core::temporal::time;
+
+        let dir = tempdir().unwrap();
+        let config = ConcurrentWalSystemConfig::new(dir.path());
+        let wal = ConcurrentWalSystem::new(config).unwrap();
+
+        let node_id = crate::core::NodeId::new(1).unwrap();
+        let label = GLOBAL_INTERNER.intern("RcvRetractNode").unwrap();
+        let now = time::now().wallclock();
+        let valid_from = crate::core::hlc::HybridTimestamp::new(now - 3_600_000_000, 0).unwrap();
+        let valid_to = crate::core::hlc::HybridTimestamp::new(now - 1_800_000_000, 0).unwrap();
+
+        wal.append(WalOperation::CreateNode {
+            node_id,
+            label,
+            properties: PropertyMap::new(),
+            valid_from,
+            provenance: None,
+        })
+        .unwrap();
+        wal.append(WalOperation::RetractNode { node_id, valid_to })
+            .unwrap();
+        wal.flush().unwrap();
+
+        let current = CurrentStorage::new();
+        let mut historical = HistoricalStorage::new();
+        replay_wal_into_storage(&wal, &current, &mut historical, LSN::initial(), 1).unwrap();
+
+        // Removed from current state.
+        assert!(current.get_node(node_id).is_err());
+
+        // The head version carries the closed valid interval
+        // [valid_from, valid_to) — honoring the logged valid_to.
+        let head_id = historical.get_current_node_version(node_id).unwrap();
+        let head = historical.get_node_version(head_id).unwrap();
+        assert_eq!(head.temporal.valid_time().start(), valid_from);
+        assert_eq!(
+            head.temporal.valid_time().end(),
+            valid_to,
+            "replay must honor the logged valid_to, not the replay time"
+        );
+
+        // Bi-temporal reads: visible strictly before valid_to, not at/after.
+        let probe_before = crate::core::hlc::HybridTimestamp::new(now - 2_700_000_000, 0).unwrap();
+        assert!(
+            historical
+                .get_node_at_time(node_id, probe_before, time::now())
+                .is_ok()
+        );
+        assert!(
+            historical
+                .get_node_at_time(node_id, valid_to, time::now())
+                .is_err()
+        );
+        assert!(
+            historical
+                .get_node_at_time(node_id, time::now(), time::now())
+                .is_err()
+        );
+    }
+
+    /// Issue #3230: RetractEdge replay — same contract as RetractNode.
+    #[test]
+    fn replay_retract_edge_honors_valid_to() {
+        use crate::core::interning::GLOBAL_INTERNER;
+        use crate::core::property::PropertyMap;
+        use crate::core::temporal::time;
+
+        let dir = tempdir().unwrap();
+        let config = ConcurrentWalSystemConfig::new(dir.path());
+        let wal = ConcurrentWalSystem::new(config).unwrap();
+
+        let source = crate::core::NodeId::new(1).unwrap();
+        let target = crate::core::NodeId::new(2).unwrap();
+        let edge_id = crate::core::EdgeId::new(1).unwrap();
+        let node_label = GLOBAL_INTERNER.intern("RcvRetractEdgeNode").unwrap();
+        let edge_label = GLOBAL_INTERNER.intern("RCV_RETRACT_EDGE").unwrap();
+        let now = time::now().wallclock();
+        let valid_from = crate::core::hlc::HybridTimestamp::new(now - 3_600_000_000, 0).unwrap();
+        let valid_to = crate::core::hlc::HybridTimestamp::new(now - 1_800_000_000, 0).unwrap();
+
+        for node_id in [source, target] {
+            wal.append(WalOperation::CreateNode {
+                node_id,
+                label: node_label,
+                properties: PropertyMap::new(),
+                valid_from,
+                provenance: None,
+            })
+            .unwrap();
+        }
+        wal.append(WalOperation::CreateEdge {
+            edge_id,
+            source,
+            target,
+            label: edge_label,
+            properties: PropertyMap::new(),
+            valid_from,
+            provenance: None,
+        })
+        .unwrap();
+        wal.append(WalOperation::RetractEdge { edge_id, valid_to })
+            .unwrap();
+        wal.flush().unwrap();
+
+        let current = CurrentStorage::new();
+        let mut historical = HistoricalStorage::new();
+        replay_wal_into_storage(&wal, &current, &mut historical, LSN::initial(), 1).unwrap();
+
+        assert!(current.get_edge(edge_id).is_err());
+        let head_id = historical.get_current_edge_version(edge_id).unwrap();
+        let head = historical.get_edge_version(head_id).unwrap();
+        assert_eq!(head.temporal.valid_time().start(), valid_from);
+        assert_eq!(head.temporal.valid_time().end(), valid_to);
+
+        let probe_before = crate::core::hlc::HybridTimestamp::new(now - 2_700_000_000, 0).unwrap();
+        assert!(
+            historical
+                .get_edge_at_time(edge_id, probe_before, time::now())
+                .is_ok()
+        );
+        assert!(
+            historical
+                .get_edge_at_time(edge_id, valid_to, time::now())
+                .is_err()
         );
     }
 

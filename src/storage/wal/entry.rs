@@ -112,6 +112,22 @@ pub enum WalOperation {
         /// When the deletion became valid (typically commit time)
         valid_from: Timestamp,
     },
+    /// Retract a node: close its valid-time interval at `valid_to` without
+    /// deleting its history (Issue #3230).
+    RetractNode {
+        /// The node ID
+        node_id: NodeId,
+        /// When the fact stopped being true in the real world (user-controlled)
+        valid_to: Timestamp,
+    },
+    /// Retract an edge: close its valid-time interval at `valid_to` without
+    /// deleting its history (Issue #3230).
+    RetractEdge {
+        /// The edge ID
+        edge_id: EdgeId,
+        /// When the relationship stopped being true in the real world (user-controlled)
+        valid_to: Timestamp,
+    },
     /// Checkpoint marker - indicates a snapshot was taken
     Checkpoint {
         /// The LSN at checkpoint

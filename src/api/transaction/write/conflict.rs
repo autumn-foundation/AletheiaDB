@@ -134,6 +134,63 @@ pub(crate) fn detect_conflicts(tx: &WriteTransaction) -> Result<()> {
                 }
             }
 
+            // RetractNode: like UpdateNode, the entity must still exist and
+            // be unmodified since our snapshot. A concurrent delete/retract
+            // (entity gone) or a concurrent update (newer commit) both
+            // invalidate the valid_from this retraction was validated against.
+            crate::api::transaction::BufferedWrite::RetractNode { node_id, .. } => {
+                match tx.current.get_node(*node_id) {
+                    Ok(current_node) => {
+                        if let Some(commit_ts) = current_node.metadata.commit_timestamp
+                            && commit_ts > tx.snapshot.snapshot_timestamp
+                        {
+                            return Err(TransactionError::SerializationFailure {
+                                entity: format!("{:?}", node_id),
+                                reason: format!(
+                                    "Version committed at {} after snapshot at {}",
+                                    commit_ts, tx.snapshot.snapshot_timestamp
+                                ),
+                            }
+                            .into());
+                        }
+                    }
+                    Err(_) => {
+                        return Err(TransactionError::SerializationFailure {
+                            entity: format!("{:?}", node_id),
+                            reason: "Node was deleted by another transaction".to_string(),
+                        }
+                        .into());
+                    }
+                }
+            }
+
+            // RetractEdge: same contract as RetractNode.
+            crate::api::transaction::BufferedWrite::RetractEdge { edge_id, .. } => {
+                match tx.current.get_edge(*edge_id) {
+                    Ok(current_edge) => {
+                        if let Some(commit_ts) = current_edge.metadata.commit_timestamp
+                            && commit_ts > tx.snapshot.snapshot_timestamp
+                        {
+                            return Err(TransactionError::SerializationFailure {
+                                entity: format!("{:?}", edge_id),
+                                reason: format!(
+                                    "Version committed at {} after snapshot at {}",
+                                    commit_ts, tx.snapshot.snapshot_timestamp
+                                ),
+                            }
+                            .into());
+                        }
+                    }
+                    Err(_) => {
+                        return Err(TransactionError::SerializationFailure {
+                            entity: format!("{:?}", edge_id),
+                            reason: "Edge was deleted by another transaction".to_string(),
+                        }
+                        .into());
+                    }
+                }
+            }
+
             // CreateNode and CreateEdge don't need conflict detection
             // since they're creating new entities that didn't exist before
             _ => {}

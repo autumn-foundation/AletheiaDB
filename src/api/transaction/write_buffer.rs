@@ -108,6 +108,22 @@ pub enum BufferedWrite {
         /// When the deletion became valid in reality (user-controlled)
         valid_from: Timestamp,
     },
+    /// Retract a node: close its valid-time interval at `valid_to` without
+    /// deleting its history (Issue #3230).
+    RetractNode {
+        /// Node ID to retract
+        node_id: NodeId,
+        /// When the fact stopped being true in reality (user-controlled)
+        valid_to: Timestamp,
+    },
+    /// Retract an edge: close its valid-time interval at `valid_to` without
+    /// deleting its history (Issue #3230).
+    RetractEdge {
+        /// Edge ID to retract
+        edge_id: EdgeId,
+        /// When the relationship stopped being true in reality (user-controlled)
+        valid_to: Timestamp,
+    },
 }
 
 impl BufferedWrite {
@@ -117,6 +133,7 @@ impl BufferedWrite {
             Self::CreateNode { node_id, .. } => Some(*node_id),
             Self::UpdateNode { node_id, .. } => Some(*node_id),
             Self::DeleteNode { node_id, .. } => Some(*node_id),
+            Self::RetractNode { node_id, .. } => Some(*node_id),
             _ => None,
         }
     }
@@ -127,6 +144,7 @@ impl BufferedWrite {
             Self::CreateEdge { edge_id, .. } => Some(*edge_id),
             Self::UpdateEdge { edge_id, .. } => Some(*edge_id),
             Self::DeleteEdge { edge_id, .. } => Some(*edge_id),
+            Self::RetractEdge { edge_id, .. } => Some(*edge_id),
             _ => None,
         }
     }
@@ -146,7 +164,10 @@ impl BufferedWrite {
     pub fn is_node_operation(&self) -> bool {
         matches!(
             self,
-            Self::CreateNode { .. } | Self::UpdateNode { .. } | Self::DeleteNode { .. }
+            Self::CreateNode { .. }
+                | Self::UpdateNode { .. }
+                | Self::DeleteNode { .. }
+                | Self::RetractNode { .. }
         )
     }
 
@@ -154,13 +175,22 @@ impl BufferedWrite {
     pub fn is_edge_operation(&self) -> bool {
         matches!(
             self,
-            Self::CreateEdge { .. } | Self::UpdateEdge { .. } | Self::DeleteEdge { .. }
+            Self::CreateEdge { .. }
+                | Self::UpdateEdge { .. }
+                | Self::DeleteEdge { .. }
+                | Self::RetractEdge { .. }
         )
     }
 
     /// Check if this operation modifies edge structure
+    ///
+    /// RetractEdge counts: like DeleteEdge, it removes the edge from
+    /// current storage, changing the adjacency topology.
     pub fn is_edge_structure_modification(&self) -> bool {
-        matches!(self, Self::CreateEdge { .. } | Self::DeleteEdge { .. })
+        matches!(
+            self,
+            Self::CreateEdge { .. } | Self::DeleteEdge { .. } | Self::RetractEdge { .. }
+        )
     }
 }
 
@@ -481,6 +511,18 @@ impl From<&BufferedWrite> for crate::storage::wal::WalOperation {
                 edge_id: *edge_id,
                 valid_from: *valid_from,
             },
+            BufferedWrite::RetractNode { node_id, valid_to } => {
+                crate::storage::wal::WalOperation::RetractNode {
+                    node_id: *node_id,
+                    valid_to: *valid_to,
+                }
+            }
+            BufferedWrite::RetractEdge { edge_id, valid_to } => {
+                crate::storage::wal::WalOperation::RetractEdge {
+                    edge_id: *edge_id,
+                    valid_to: *valid_to,
+                }
+            }
         }
     }
 }
