@@ -452,11 +452,15 @@ Conventions:
   entity cannot be loaded, the whole `temporal` block is omitted (mirroring
   `provenance`), while open bounds within a present block are always explicit
   `null`.
-- **`is_current`** is `true` iff both the valid-time and transaction-time
-  intervals contain the current time — i.e. the response reflects the live,
-  current version. A superseded version returned by a point-in-time read, or
-  a fact whose `valid_to` has passed, reports `is_current: false` with its
-  closed bounds:
+- **`is_current`** is `true` iff the version's transaction interval is still
+  open (it *is* the currently-recorded version) and the wallclock now falls
+  within its valid interval — i.e. the response reflects the live, current
+  version. A superseded version returned by a point-in-time read, or a fact
+  whose `valid_to` has passed (or whose `valid_from` has not yet arrived),
+  reports `is_current: false` with its closed bounds. The valid-time
+  comparison is at wallclock (microsecond) granularity, so the logical
+  component of a hybrid-logical-clock commit timestamp never affects the
+  answer:
 
 ```jsonc
 // tools/call -> "get_node_at_time" (anchored before an update)

@@ -390,9 +390,10 @@ response (`get_node`, `create_node`, `update_node`, `get_edge`, `create_edge`,
 additive `temporal` block stamping the bi-temporal bounds of the exact
 version returned: `valid_from`/`valid_to`/`transaction_from`/`transaction_to`
 as RFC 3339 strings (UTC, `Z` suffix) plus `is_current`. Open-ended bounds are
-explicit JSON `null` (present, never omitted); `is_current` is `true` iff both
-intervals contain the current time (false for superseded versions returned by
-point-in-time reads and for expired facts). In the rare case version metadata
+explicit JSON `null` (present, never omitted); `is_current` is `true` iff the
+version's transaction interval is open AND the wallclock now falls within its
+valid interval (false for superseded versions returned by point-in-time reads
+and for expired or not-yet-valid facts). In the rare case version metadata
 cannot be loaded, the whole `temporal` block is omitted (mirroring
 `provenance`). The shape is identical for nodes
 and edges, current and point-in-time; `get_node_history` keeps its existing

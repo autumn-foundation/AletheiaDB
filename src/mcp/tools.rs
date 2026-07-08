@@ -941,10 +941,14 @@ pub struct TemporalBounds {
     /// When this version was superseded/removed, or `null` if still current
     /// in the database.
     pub transaction_to: Option<String>,
-    /// `true` iff both the valid-time and transaction-time intervals contain
-    /// the current time -- i.e. the returned version is the live, current
-    /// version. `false` for superseded versions returned by point-in-time
-    /// reads and for facts whose valid time has ended (or not yet begun).
+    /// `true` iff the version's transaction interval is still open (it *is*
+    /// the currently-recorded version) AND the current wallclock time falls
+    /// within its valid interval -- i.e. the returned version is the live,
+    /// current version. `false` for superseded versions returned by
+    /// point-in-time reads and for facts whose valid time has ended (or not
+    /// yet begun). The valid-time comparison is at wallclock (microsecond)
+    /// granularity, so the HLC logical component of a commit timestamp never
+    /// affects the answer.
     pub is_current: bool,
 }
 
@@ -977,15 +981,36 @@ impl TemporalBounds {
 
 impl From<&crate::core::temporal::BiTemporalInterval> for TemporalBounds {
     fn from(interval: &crate::core::temporal::BiTemporalInterval) -> Self {
-        // One shared "now" so both dimensions are judged at the same instant.
+        // `is_current` semantics (Issue #3232):
+        //
+        // Transaction dimension: current iff the transaction interval is
+        // open-ended. An open transaction interval IS by definition the
+        // currently-recorded version; comparing the HLC commit timestamp
+        // against SystemTime-now would be a clock artifact (HLC stamps carry
+        // a logical component that orders after SystemTime-now within the
+        // same microsecond, and the HLC frontier can legitimately run ahead
+        // of SystemTime for a while after a tolerated backward OS-clock
+        // step), transiently misreporting a live head version as not
+        // current.
+        //
+        // Valid dimension: still distinguishes not-yet-valid (future
+        // valid_from) and expired (past valid_to) facts, but compared at
+        // wallclock (microsecond) granularity so the HLC logical component
+        // cannot flip the answer within the current microsecond.
+        // Sub-microsecond edge rounding toward "current" is acceptable for a
+        // convenience boolean; the authoritative data is the bounds
+        // themselves.
         let now = crate::core::temporal::time::now();
+        let valid = interval.valid_time();
+        let tx_open = interval.transaction_time().is_current();
+        let valid_contains_now = valid.start().wallclock() <= now.wallclock()
+            && (valid.is_current() || now.wallclock() < valid.end().wallclock());
         TemporalBounds {
-            valid_from: Self::to_rfc3339_micros(interval.valid_time().start()),
-            valid_to: Self::end_bound(interval.valid_time().end()),
+            valid_from: Self::to_rfc3339_micros(valid.start()),
+            valid_to: Self::end_bound(valid.end()),
             transaction_from: Self::to_rfc3339_micros(interval.transaction_time().start()),
             transaction_to: Self::end_bound(interval.transaction_time().end()),
-            is_current: interval.valid_time().contains(now)
-                && interval.transaction_time().contains(now),
+            is_current: tx_open && valid_contains_now,
         }
     }
 }

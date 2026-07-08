@@ -9305,4 +9305,111 @@ mod temporal_bounds_tests {
             "a deleted version must report is_current: false: {temporal}"
         );
     }
+
+    // ------------------------------------------------------------------
+    // Conversion-level unit tests for `is_current` on hand-constructed
+    // `BiTemporalInterval`s (HLC-robust semantics: transaction dimension is
+    // judged by interval openness, valid dimension at wallclock granularity).
+    // ------------------------------------------------------------------
+
+    use crate::core::hlc::HybridTimestamp;
+    use crate::core::temporal::{BiTemporalInterval, TimeRange, time};
+
+    #[test]
+    fn test_is_current_true_for_hlc_logical_component_in_current_microsecond() {
+        // An HLC commit stamp in the CURRENT microsecond with logical > 0
+        // orders strictly after SystemTime-now (logical = 0) in the same
+        // microsecond. Under the old `contains(now)` rule this live,
+        // open-ended head version reported is_current: false; it must now
+        // report true.
+        let now = time::now();
+        let commit = HybridTimestamp::new(now.wallclock(), 5).expect("valid HLC stamp");
+        let interval = BiTemporalInterval::now(commit, commit);
+        let bounds = TemporalBounds::from(&interval);
+        assert!(
+            bounds.is_current,
+            "an open head version committed in the current microsecond with \
+             logical > 0 must be current: {bounds:?}"
+        );
+    }
+
+    #[test]
+    fn test_is_current_true_when_hlc_frontier_runs_ahead_of_wallclock() {
+        // After a tolerated backward OS-clock step, the HLC frontier runs
+        // AHEAD of SystemTime, so commit stamps land slightly in the
+        // wallclock future (here: +50ms) while the fact's valid time is not
+        // skewed. The transaction interval is open -- by definition the
+        // currently-recorded version -- so is_current must be true; the old
+        // tx_from-vs-now comparison misreported false for minutes.
+        let now = time::now();
+        let skewed_commit =
+            HybridTimestamp::new(now.wallclock() + 50_000, 0).expect("valid skewed stamp");
+        let interval = BiTemporalInterval::with_valid_time(now, skewed_commit);
+        let bounds = TemporalBounds::from(&interval);
+        assert!(
+            bounds.is_current,
+            "an open head version whose commit stamp runs ahead of the OS \
+             clock must be current: {bounds:?}"
+        );
+    }
+
+    #[test]
+    fn test_is_current_false_for_explicit_future_valid_time() {
+        // An explicitly backdated-to-the-future fact (valid_from = now + 1h)
+        // is not yet true in reality, so is_current must be false even
+        // though both intervals are open-ended.
+        let now = time::now();
+        let future_valid =
+            HybridTimestamp::new(now.wallclock() + 3_600_000_000, 0).expect("valid future stamp");
+        let interval = BiTemporalInterval::with_valid_time(future_valid, now);
+        let bounds = TemporalBounds::from(&interval);
+        assert!(
+            !bounds.is_current,
+            "a not-yet-valid fact must not be current even with open \
+             intervals: {bounds:?}"
+        );
+    }
+
+    #[test]
+    fn test_is_current_false_for_closed_transaction_interval() {
+        // A superseded version (closed transaction interval) is never
+        // current, even if its valid interval still contains now.
+        let now = time::now();
+        let hour_ago =
+            HybridTimestamp::new(now.wallclock() - 3_600_000_000, 0).expect("valid past stamp");
+        let second_ago =
+            HybridTimestamp::new(now.wallclock() - 1_000_000, 0).expect("valid past stamp");
+        let interval = BiTemporalInterval::new(
+            TimeRange::from(hour_ago),
+            TimeRange::new(hour_ago, second_ago).expect("valid closed range"),
+        );
+        let bounds = TemporalBounds::from(&interval);
+        assert!(
+            !bounds.is_current,
+            "a superseded (closed-transaction) version must not be current \
+             even while still valid: {bounds:?}"
+        );
+    }
+
+    #[test]
+    fn test_is_current_false_for_expired_valid_interval() {
+        // A fact whose valid time ended in the past is not current, even
+        // though its transaction interval is still open (it is still the
+        // recorded version of that fact).
+        let now = time::now();
+        let two_hours_ago =
+            HybridTimestamp::new(now.wallclock() - 7_200_000_000, 0).expect("valid past stamp");
+        let hour_ago =
+            HybridTimestamp::new(now.wallclock() - 3_600_000_000, 0).expect("valid past stamp");
+        let interval = BiTemporalInterval::new(
+            TimeRange::new(two_hours_ago, hour_ago).expect("valid closed range"),
+            TimeRange::from(two_hours_ago),
+        );
+        let bounds = TemporalBounds::from(&interval);
+        assert!(
+            !bounds.is_current,
+            "an expired fact must not be current even with an open \
+             transaction interval: {bounds:?}"
+        );
+    }
 }
