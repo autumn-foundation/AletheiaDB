@@ -51,6 +51,7 @@ lint:
 
 # Verify each Nova/semantic-search category compiles standalone
 check-features:
+    @echo "=== no default features ===" && cargo check --no-default-features --tests
     @echo "=== semantic-search ===" && cargo check --features semantic-search
     @echo "=== semantic-reasoning ===" && cargo check --features semantic-reasoning
     @echo "=== semantic-temporal ===" && cargo check --features semantic-temporal
