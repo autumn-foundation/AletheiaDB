@@ -69,6 +69,11 @@ pub trait GraphView {
     // Vector methods
 
     /// Find k most similar nodes at a specific point in time.
+    ///
+    /// With multiple temporal vector indexes enabled and no property specified,
+    /// implementations query the alphabetically first indexed property; prefer
+    /// `AletheiaDB::find_similar_as_of_in` with an explicit property when more
+    /// than one temporal index exists.
     fn find_similar_as_of(
         &self,
         embedding: &[f32],

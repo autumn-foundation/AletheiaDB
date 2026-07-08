@@ -1308,6 +1308,22 @@ fn test_multi_property_temporal_indexes_all_receive_removals() {
         )
         .unwrap();
 
+    // Guard against a vacuous pass: the node must be PRESENT in both indexes
+    // before the delete, so the post-delete absence check is meaningful.
+    let before_delete = aletheiadb::core::temporal::time::now();
+    for (property, query) in [
+        ("title_embedding", &title_emb),
+        ("content_embedding", &content_emb),
+    ] {
+        let results = db
+            .find_similar_as_of_in(property, query, 10, before_delete)
+            .unwrap_or_else(|e| panic!("pre-delete temporal query on '{property}' failed: {e}"));
+        assert!(
+            results.iter().any(|(id, _)| *id == node_id),
+            "node must be present in '{property}' temporal index before delete, got: {results:?}"
+        );
+    }
+
     db.write(|tx| tx.delete_node(node_id)).unwrap();
     let after_delete = aletheiadb::core::temporal::time::now();
 
@@ -1317,7 +1333,7 @@ fn test_multi_property_temporal_indexes_all_receive_removals() {
     ] {
         let results = db
             .find_similar_as_of_in(property, query, 10, after_delete)
-            .unwrap_or_default();
+            .expect("post-delete temporal query should succeed rather than mask a failure");
         assert!(
             !results.iter().any(|(id, _)| *id == node_id),
             "deleted node must be absent from '{property}' temporal index, got: {results:?}"
@@ -1357,21 +1373,35 @@ fn test_find_similar_as_of_default_property_single_index() {
 /// `find_similar_as_of` deterministically uses the alphabetically-first
 /// property (mirroring the non-temporal default-property rule), instead of the
 /// legacy "most recently enabled" behavior.
+///
+/// The test is order-independent: `node_a` only has `a_embedding` and `node_b`
+/// only has `b_embedding` (with the same vector value), so the results reveal
+/// WHICH index was consulted regardless of enable order. A regression to any
+/// other dispatch rule (e.g. the legacy "last enabled" state) would return
+/// `node_b` instead of `node_a` and fail both assertions.
 #[test]
 fn test_find_similar_as_of_default_property_is_alphabetical() {
     let db = AletheiaDB::new().unwrap();
 
-    // Enable in reverse-alphabetical order so "last enabled" != "alphabetical".
     enable_temporal_index_every_tx(&db, "b_embedding");
     enable_temporal_index_every_tx(&db, "a_embedding");
 
-    // Node only has a vector for the alphabetically-first property.
+    // The same vector value in two different properties, on two different
+    // nodes, so the query result identifies which index answered.
     let emb = vec![1.0f32, 0.0, 0.0, 0.0];
-    let node_id = db
+    let node_a = db
         .create_node(
             "Doc",
             PropertyMapBuilder::new()
                 .insert_vector("a_embedding", &emb)
+                .build(),
+        )
+        .unwrap();
+    let node_b = db
+        .create_node(
+            "Doc",
+            PropertyMapBuilder::new()
+                .insert_vector("b_embedding", &emb)
                 .build(),
         )
         .unwrap();
@@ -1381,8 +1411,84 @@ fn test_find_similar_as_of_default_property_is_alphabetical() {
         .find_similar_as_of(&emb, 10, now)
         .expect("property-less temporal query should use the alphabetically-first index");
     assert!(
-        results.iter().any(|(id, _)| *id == node_id),
-        "find_similar_as_of should query 'a_embedding' (alphabetically first), got: {results:?}"
+        results.iter().any(|(id, _)| *id == node_a),
+        "find_similar_as_of must query 'a_embedding' (alphabetically first), got: {results:?}"
+    );
+    assert!(
+        !results.iter().any(|(id, _)| *id == node_b),
+        "find_similar_as_of must NOT query 'b_embedding' (node_b has no 'a_embedding' vector), \
+         got: {results:?}"
+    );
+}
+
+/// Issue #450: deleting a node that has a vector for only SOME of the
+/// temporal-indexed properties must succeed -- removal from indexes that never
+/// contained the node stays a no-op -- and the node must be absent from the
+/// index that did contain it afterwards.
+#[test]
+fn test_delete_node_with_partial_vector_properties() {
+    let db = AletheiaDB::new().unwrap();
+
+    enable_temporal_index_every_tx(&db, "title_embedding");
+    enable_temporal_index_every_tx(&db, "content_embedding");
+
+    // The node only carries a vector for 'title_embedding'.
+    let title_emb = vec![1.0f32, 0.0, 0.0, 0.0];
+    let node_id = db
+        .create_node(
+            "Doc",
+            PropertyMapBuilder::new()
+                .insert_vector("title_embedding", &title_emb)
+                .build(),
+        )
+        .unwrap();
+
+    // Sanity: present in the index that has its vector.
+    let before_delete = aletheiadb::core::temporal::time::now();
+    let present = db
+        .find_similar_as_of_in("title_embedding", &title_emb, 10, before_delete)
+        .expect("pre-delete temporal query should succeed");
+    assert!(
+        present.iter().any(|(id, _)| *id == node_id),
+        "node must be present in 'title_embedding' temporal index before delete, got: {present:?}"
+    );
+
+    // Delete must succeed even though 'content_embedding' never contained the node.
+    db.write(|tx| tx.delete_node(node_id))
+        .expect("delete_node must succeed for a node with partial vector properties");
+
+    let after_delete = aletheiadb::core::temporal::time::now();
+    let results = db
+        .find_similar_as_of_in("title_embedding", &title_emb, 10, after_delete)
+        .expect("post-delete temporal query should succeed");
+    assert!(
+        !results.iter().any(|(id, _)| *id == node_id),
+        "deleted node must be absent from 'title_embedding' temporal index, got: {results:?}"
+    );
+}
+
+/// Issue #450: a node supplying a wrong-dimension vector for ONE of several
+/// temporal-indexed properties must make `create_node` return an error -- not
+/// panic -- when the fan-out reaches the mismatched index.
+#[test]
+fn test_create_node_wrong_dim_for_one_temporal_index_errors() {
+    let db = AletheiaDB::new().unwrap();
+
+    enable_temporal_index_every_tx(&db, "a_embedding");
+    enable_temporal_index_every_tx(&db, "b_embedding");
+
+    // Both indexes expect dimension 4; 'b_embedding' gets a 3-dim vector.
+    let result = db.create_node(
+        "Doc",
+        PropertyMapBuilder::new()
+            .insert_vector("a_embedding", &[1.0f32, 0.0, 0.0, 0.0])
+            .insert_vector("b_embedding", &[1.0f32, 0.0, 0.0])
+            .build(),
+    );
+    assert!(
+        result.is_err(),
+        "create_node with a wrong-dimension vector for one temporal-indexed property \
+         must return Err, got: {result:?}"
     );
 }
 

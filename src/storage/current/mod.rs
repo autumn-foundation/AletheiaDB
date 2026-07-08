@@ -654,13 +654,18 @@ impl CurrentStorage {
     pub fn insert_node_direct(&self, node: Node, timestamp: Timestamp) -> Result<()> {
         // Synchronize with snapshot creation
         let _lock = self.snapshot_lock.read();
-        // CRITICAL: Index vector BEFORE inserting node. If vector indexing fails,
-        // we have not modified any graph state, so we can safely return error without rollback.
-        // This prevents the VS-030 bug where transaction-created nodes bypassed indexing,
-        // causing them to be missing from HNSW index and invisible to find_similar queries.
+        // CRITICAL: Index vectors BEFORE inserting the node so an indexing
+        // failure never leaves a node visible in the graph but missing from an
+        // index. This prevents the VS-030 bug where transaction-created nodes
+        // bypassed indexing, causing them to be missing from the HNSW index and
+        // invisible to find_similar queries.
+        // NOTE: with multiple vector/temporal indexes enabled, a mid-fan-out
+        // failure returns Err with indexes visited earlier already updated
+        // (partial work); the node itself is never inserted into the main
+        // indexes.
         self.try_index_vector(node.id, &node.properties)?;
 
-        // Index in temporal vector index if enabled
+        // Index in every enabled temporal vector index
         self.try_index_temporal_vector(node.id, &node.properties, timestamp)?;
 
         // Vector indexing succeeded, now insert the node into the main indexes.
@@ -687,13 +692,16 @@ impl CurrentStorage {
         // Save old node for vector index update
         let old_props = self.indexes.with_node(node.id, |n| n.properties.clone());
 
-        // Update vector index BEFORE updating node in main indexes.
-        // If vector indexing fails, we haven't modified any state yet.
+        // Update vector indexes BEFORE updating the node in the main indexes,
+        // so the node's visible state never gets ahead of the indexes.
+        // NOTE: with multiple vector/temporal indexes enabled, a mid-fan-out
+        // failure returns Err with indexes visited earlier already updated
+        // (partial work); the node update itself is not applied.
         if let Some(old_p) = old_props {
             self.update_vector_index(node.id, &node.properties, &old_p)?;
         }
 
-        // Update temporal vector index if enabled
+        // Update every enabled temporal vector index
         self.try_index_temporal_vector(node.id, &node.properties, timestamp)?;
 
         // Finally, insert node into main indexes. This avoids node.clone().
@@ -1799,6 +1807,11 @@ impl CurrentStorage {
     }
 
     /// Helper to index a node's vectors in every enabled temporal vector index.
+    ///
+    /// Returns `Err` on the first index that fails; indexes visited earlier in
+    /// the fan-out will have already been updated (partial work), matching the
+    /// behavior of [`try_index_vector`](Self::try_index_vector). Callers must
+    /// not assume a failure left every temporal index untouched.
     fn try_index_temporal_vector(
         &self,
         node_id: NodeId,
@@ -1814,11 +1827,25 @@ impl CurrentStorage {
     }
 
     /// Helper to remove a node's vectors from every enabled temporal vector index.
+    ///
+    /// Mirrors [`try_remove_from_index`](Self::try_remove_from_index): removal is
+    /// attempted on ALL indexes even when one fails, so a per-index error never
+    /// leaves stale entries behind in the remaining indexes. The first error
+    /// encountered is returned after every index has been attempted. Note that
+    /// `remove` may fail for an index that never contained the node; callers
+    /// treating removal as best-effort (e.g. `delete_node_direct`) ignore the
+    /// returned error for this reason.
     fn try_remove_temporal_vector(&self, node_id: NodeId, timestamp: Timestamp) -> Result<()> {
+        let mut first_err = None;
         for (_, index) in self.collect_temporal_vector_indexes() {
-            index.remove(node_id, timestamp)?;
+            if let Err(e) = index.remove(node_id, timestamp) {
+                first_err.get_or_insert(e);
+            }
         }
-        Ok(())
+        match first_err {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
     }
 
     /// Get statistics about the current storage

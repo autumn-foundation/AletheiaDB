@@ -378,6 +378,12 @@ impl AletheiaDB {
     /// supported (currently: a node-based temporal search, or a label-filtered
     /// temporal search).
     ///
+    /// Note: a temporal search built with `.at_time(..)` has no property
+    /// selector; with multiple temporal vector indexes enabled it queries the
+    /// alphabetically first indexed property. Use
+    /// [`find_similar_as_of_in`](Self::find_similar_as_of_in) to target a
+    /// specific property.
+    ///
     /// # Example
     ///
     /// ```ignore
@@ -645,6 +651,11 @@ impl AletheiaDB {
     ///
     /// This method performs a temporal vector search, finding nodes with embeddings
     /// most similar to the query embedding as they existed at the specified timestamp.
+    ///
+    /// With multiple temporal vector indexes enabled and no property specified,
+    /// the alphabetically first indexed property is queried. Prefer
+    /// [`find_similar_as_of_in`](Self::find_similar_as_of_in) with an explicit
+    /// property to make the target index unambiguous.
     ///
     /// # Arguments
     ///

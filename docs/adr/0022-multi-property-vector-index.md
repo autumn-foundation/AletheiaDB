@@ -33,6 +33,7 @@ struct CurrentStorage {
     vector_indexes: DashMap<String, HnswIndex>,
 
     // Single temporal index (validated against property name)
+    // (since removed by Issue #450 -- see the note under Implementation Notes)
     temporal_vector_index_state: RwLock<TemporalVectorIndexState>,
 }
 ```

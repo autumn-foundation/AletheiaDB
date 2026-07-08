@@ -63,7 +63,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   single source of truth. No public types were removed, but one behavior
   changed when **multiple** temporal vector indexes are enabled: the
   property-less temporal APIs — `AletheiaDB::find_similar_as_of`
-  (deprecated), `similarity_search(...).at_time(...)`, and
+  (deprecated), `similarity_search(...).at_time(...)`,
+  `GraphView::find_similar_as_of`, `query::hybrid::find_similar_as_of`, and
   `CurrentStorage::find_similar_as_of` / `find_similar_in_range` — now
   deterministically query the **alphabetically first** temporal-indexed
   property (mirroring the non-temporal default-property rule) instead of

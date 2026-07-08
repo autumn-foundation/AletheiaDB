@@ -927,6 +927,69 @@ fn test_find_similar_as_of_in() {
     assert_eq!(results[0].0, node_id);
 }
 
+/// Issue #450: `on_temporal_vector_transaction` must notify EVERY enabled
+/// temporal vector index -- not just one (the removed legacy single-index
+/// state only notified the most recently enabled index). With
+/// `SnapshotStrategy::TransactionInterval(1)`, each notification must advance
+/// the snapshot count of BOTH indexes.
+#[test]
+fn test_on_temporal_vector_transaction_notifies_all_indexes() {
+    use crate::index::vector::temporal::{SnapshotStrategy, TemporalVectorConfig};
+    use crate::index::vector::{DistanceMetric, HnswConfig};
+
+    let db = AletheiaDB::new().unwrap();
+
+    for property in ["a_embedding", "b_embedding"] {
+        let hnsw_config = HnswConfig::new(4, DistanceMetric::Cosine);
+        let temporal_config = TemporalVectorConfig {
+            snapshot_strategy: SnapshotStrategy::TransactionInterval(1),
+            ..TemporalVectorConfig::default_with_hnsw(hnsw_config)
+        };
+        db.enable_temporal_vector_index(property, temporal_config)
+            .unwrap();
+    }
+
+    // Add a vector to each temporal index.
+    db.create_node(
+        "Doc",
+        PropertyMapBuilder::new()
+            .insert_vector("a_embedding", &[1.0f32, 0.0, 0.0, 0.0])
+            .build(),
+    )
+    .unwrap();
+    db.create_node(
+        "Doc",
+        PropertyMapBuilder::new()
+            .insert_vector("b_embedding", &[0.0f32, 1.0, 0.0, 0.0])
+            .build(),
+    )
+    .unwrap();
+
+    let a_index = db
+        .current
+        .get_temporal_vector_index_for("a_embedding")
+        .expect("temporal index for 'a_embedding' should exist");
+    let b_index = db
+        .current
+        .get_temporal_vector_index_for("b_embedding")
+        .expect("temporal index for 'b_embedding' should exist");
+    let a_before = a_index.snapshot_count();
+    let b_before = b_index.snapshot_count();
+
+    db.current.on_temporal_vector_transaction().unwrap();
+
+    assert!(
+        a_index.snapshot_count() > a_before,
+        "transaction notification must reach the 'a_embedding' temporal index \
+         (snapshot count stayed at {a_before})"
+    );
+    assert!(
+        b_index.snapshot_count() > b_before,
+        "transaction notification must reach the 'b_embedding' temporal index \
+         (snapshot count stayed at {b_before})"
+    );
+}
+
 #[test]
 fn test_find_nodes_by_property_facade() {
     let db = AletheiaDB::new().unwrap();
