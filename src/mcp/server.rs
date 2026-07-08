@@ -22,7 +22,7 @@
 //! | **Nodes** | `get_node`, `create_node`, `update_node` | CRUD operations for nodes |
 //! | **Edges** | `get_edge`, `create_edge`, `traverse` | CRUD and traversal for edges |
 //! | **Vector** | `find_similar`, `enable_vector_index` | Semantic similarity search |
-//! | **Temporal** | `get_node_at_time`, `get_node_history`, `temporal_extent` | Time-travel queries, history, and dataset extent |
+//! | **Temporal** | `get_node_at_time`, `find_nodes_at_time`, `get_node_history`, `temporal_extent` | Time-travel queries, history, and dataset extent |
 //! | **Hybrid** | `hybrid_query` | Combined graph + vector + temporal queries |
 //! | **Schema** | `get_schema` | Discover node labels, edge types, and property keys (optionally bi-temporal) |
 //!
@@ -648,6 +648,18 @@ impl AletheiaMcpServer {
         ))
     }
 
+    /// Find nodes by label (and optional exact property match) as of a
+    /// bi-temporal point (Issue #3236).
+    ///
+    /// The entry-point resolver for "the Person named Alice, as of
+    /// 2024-01-01" when no `NodeId` is known: each returned node is
+    /// reconstructed as it existed at `(valid_time, transaction_time)`.
+    pub fn find_nodes_at_time(&self, req: FindNodesAtTimeRequest) -> String {
+        Self::extract_text(self.handle_find_nodes_at_time(
+            serde_json::to_value(req).expect("request serialization should not fail"),
+        ))
+    }
+
     /// Discover the graph's schema: distinct node labels and edge types,
     /// their counts, and the property keys observed on each.
     ///
@@ -670,6 +682,28 @@ impl AletheiaMcpServer {
         Self::extract_text(self.handle_temporal_extent(
             serde_json::to_value(req).expect("request serialization should not fail"),
         ))
+    }
+
+    /// Get a holistic database statistics snapshot.
+    ///
+    /// Returns current graph size, bi-temporal depth (version counts and
+    /// anchor/delta compression), storage-tier presence/distribution
+    /// (hot / warm-cache / cold), and WAL durability state in a single call.
+    /// Thin aggregator over [`AletheiaDB::stats`] — all values are O(1)/cached
+    /// counter reads, never a version scan.
+    pub fn database_stats(&self, req: DatabaseStatsRequest) -> String {
+        Self::extract_text(self.handle_database_stats(
+            serde_json::to_value(req).expect("request serialization should not fail"),
+        ))
+    }
+
+    /// Test-only access to the raw `database_stats` handler, bypassing typed
+    /// request construction so tests can exercise wire-level argument edge
+    /// cases (null arguments, non-object arguments, unknown keys) exactly as
+    /// `call_tool` delivers them.
+    #[cfg(test)]
+    pub(crate) fn database_stats_raw(&self, args: serde_json::Value) -> String {
+        Self::extract_text(self.handle_database_stats(args))
     }
 
     /// List graph-wide changes within a transaction-time window.
@@ -1028,16 +1062,27 @@ impl AletheiaMcpServer {
         tx_time.unwrap_or_else(|| TRANSACTION_TIME_NOW.to_string())
     }
 
-    /// Serialize a timestamp as an RFC 3339 string with microsecond
-    /// precision and a `Z` suffix (e.g. `"2024-01-15T10:00:00.000000Z"`),
-    /// the interval-bound convention used by retraction responses
-    /// (half-open `[start, end)`; `null` would denote an open-ended bound).
-    /// Falls back to raw microseconds-since-epoch for timestamps outside
-    /// chrono's representable range.
+    /// Serialize a timestamp as an RFC 3339 `Z`-suffixed microsecond-precision
+    /// JSON string — the interval-bound convention used by retraction
+    /// responses (half-open `[start, end)`; `null` would denote an
+    /// open-ended bound). Delegates to
+    /// [`format_timestamp_rfc3339`](Self::format_timestamp_rfc3339) so all
+    /// MCP tools share one formatter.
     fn timestamp_to_rfc3339_micros(ts: Timestamp) -> serde_json::Value {
+        json!(Self::format_timestamp_rfc3339(ts))
+    }
+
+    /// Format a resolved bi-temporal coordinate as an RFC 3339 UTC string
+    /// with microsecond precision and a `Z` suffix (e.g.
+    /// `2024-01-15T10:00:00.000000Z`).
+    ///
+    /// Total: a wallclock value outside chrono's representable range degrades
+    /// to the raw microsecond count rather than silently rendering the 1970
+    /// epoch.
+    fn format_timestamp_rfc3339(ts: Timestamp) -> String {
         match DateTime::<Utc>::from_timestamp_micros(ts.wallclock()) {
-            Some(dt) => json!(dt.to_rfc3339_opts(chrono::SecondsFormat::Micros, true)),
-            None => json!(ts.wallclock()),
+            Some(dt) => dt.to_rfc3339_opts(chrono::SecondsFormat::Micros, true),
+            None => ts.wallclock().to_string(),
         }
     }
 
@@ -2558,6 +2603,116 @@ impl AletheiaMcpServer {
         }
     }
 
+    /// Find nodes by label (and optional exact property match) as of a
+    /// bi-temporal point (Issue #3236).
+    ///
+    /// Validation mirrors `handle_list_nodes` (both-or-neither property
+    /// filter, same limit/offset clamps); the temporal reconstruction is
+    /// delegated to `AletheiaDB::find_nodes_at_time` /
+    /// `find_nodes_by_property_at`, which reconstruct each candidate from
+    /// the historical version visible at the queried coordinate -- so nodes
+    /// deleted from current state are still found when both dimensions
+    /// anchor before the deletion. The candidate set is capped at the same
+    /// `max_schema_as_of_entities` limit bi-temporal `get_schema` uses; when
+    /// truncated, the response discloses it via `sampled: true` and
+    /// `total_matching`/`has_more` count matches within the sampled
+    /// candidate set only.
+    fn handle_find_nodes_at_time(&self, args: serde_json::Value) -> CallToolResult {
+        let req: FindNodesAtTimeRequest = match serde_json::from_value(args) {
+            Ok(r) => r,
+            Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
+        };
+
+        // Validate property filter: both key and value are required together
+        // (mirroring list_nodes).
+        if req.property_key.is_some() != req.property_value.is_some() {
+            return self.invalid_argument(
+                "Both 'property_key' and 'property_value' are required together",
+            );
+        }
+
+        let valid_time = match self.parse_timestamp(&req.valid_time) {
+            Ok(t) => t,
+            Err(e) => return self.invalid_argument(&format!("Invalid valid_time: {}", e)),
+        };
+        let tx_time = match self.parse_optional_tx_time(req.transaction_time.as_deref()) {
+            Ok(t) => t,
+            Err(e) => return self.invalid_argument(&format!("Invalid transaction_time: {}", e)),
+        };
+
+        // Apply resource limits exactly like list_nodes: a page must be able
+        // to carry a continuation cursor, so the limit is at least 1.
+        let limit = req
+            .limit
+            .unwrap_or(DEFAULT_RESULT_LIMIT)
+            .clamp(1, MAX_RESULT_LIMIT);
+        let offset = req.offset.unwrap_or(0).min(MAX_PAGINATION_OFFSET);
+
+        let matches =
+            if let (Some(prop_key), Some(prop_val)) = (&req.property_key, &req.property_value) {
+                let property_value = match self.json_to_property_value(prop_val) {
+                    Some(v) => v,
+                    None => return self.invalid_argument(
+                        "Unsupported property_value type. Use strings, numbers, booleans, or null.",
+                    ),
+                };
+                self.db.find_nodes_by_property_at(
+                    &req.label,
+                    prop_key,
+                    &property_value,
+                    valid_time,
+                    tx_time,
+                )
+            } else {
+                self.db.find_nodes_at_time(&req.label, valid_time, tx_time)
+            };
+
+        match matches {
+            Ok(matches) => {
+                // The matching set is already materialized (sorted by node
+                // id for stable pagination), so the total is cheap to report
+                // and `has_more` is exact *within the candidate set*. When
+                // `sampled` is true the candidate enumeration was truncated
+                // at the configured cap, so `total_matching` is honest only
+                // about the sampled candidates -- the flag discloses that.
+                let sampled = matches.sampled;
+                let matches = matches.nodes;
+                let total_matching = matches.len();
+                let include_vectors = req.include_vectors.unwrap_or(false);
+                let nodes: Vec<NodeResponse> = matches
+                    .iter()
+                    .skip(offset)
+                    .take(limit)
+                    .map(|node| self.node_to_response(node, include_vectors))
+                    .collect();
+
+                let has_more = offset.saturating_add(limit) < total_matching;
+                let mut response = json!({
+                    "nodes": nodes,
+                    "count": nodes.len(),
+                    "offset": offset,
+                    "limit": limit,
+                    // Candidate-set truncation disclosure, mirroring
+                    // get_schema's `sampled` (same underlying cap).
+                    "sampled": sampled,
+                    // The resolved coordinate this answer holds at -- the
+                    // omitted transaction_time resolves to a concrete "now".
+                    "valid_time": Self::format_timestamp_rfc3339(valid_time),
+                    "transaction_time": Self::format_timestamp_rfc3339(tx_time),
+                });
+                Self::attach_completeness(
+                    &mut response,
+                    offset,
+                    limit,
+                    has_more,
+                    Some(total_matching),
+                );
+                self.success_json(response)
+            }
+            Err(e) => self.db_error(e),
+        }
+    }
+
     fn handle_list_changes(&self, args: serde_json::Value) -> CallToolResult {
         let req: ListChangesRequest = match serde_json::from_value(args) {
             Ok(r) => r,
@@ -3157,6 +3312,35 @@ impl AletheiaMcpServer {
         }
     }
 
+    /// Handle the `database_stats` tool (Issue #3222).
+    ///
+    /// Thin aggregator: delegates entirely to the public
+    /// [`AletheiaDB::stats`] snapshot and serializes it — no storage logic
+    /// lives here. The underlying getters are all O(1)/cached (see
+    /// `src/db/stats.rs`), so this never triggers a version scan.
+    fn handle_database_stats(&self, args: serde_json::Value) -> CallToolResult {
+        // The tool takes no required arguments; clients may send no
+        // `arguments` at all (surfaced here as JSON null) or an empty
+        // object. Normalize null so both forms are accepted.
+        let args = if args.is_null() {
+            serde_json::Value::Object(serde_json::Map::new())
+        } else {
+            args
+        };
+        let _req: DatabaseStatsRequest = match serde_json::from_value(args) {
+            Ok(r) => r,
+            Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
+        };
+
+        match serde_json::to_value(self.db.stats()) {
+            Ok(value) => self.success_json(value),
+            Err(e) => self.error_result(McpError::new(
+                McpErrorCode::Internal,
+                format!("Failed to serialize database stats: {}", e),
+            )),
+        }
+    }
+
     fn handle_hybrid_query(&self, args: serde_json::Value) -> CallToolResult {
         let req: HybridQueryRequest = match serde_json::from_value(args) {
             Ok(r) => r,
@@ -3717,6 +3901,7 @@ impl AletheiaMcpServer {
             "list_unique_constraints" => self.handle_list_unique_constraints(args),
             "get_node_at_time" => self.handle_get_node_at_time(args),
             "get_edge_at_time" => self.handle_get_edge_at_time(args),
+            "find_nodes_at_time" => self.handle_find_nodes_at_time(args),
             "list_changes" => self.handle_list_changes(args),
             "get_node_at_valid_time" => self.handle_get_node_at_valid_time(args),
             "get_node_at_transaction_time" => self.handle_get_node_at_transaction_time(args),
@@ -3730,6 +3915,7 @@ impl AletheiaMcpServer {
             "query" => self.handle_query(args),
             "get_schema" => self.handle_get_schema(args),
             "temporal_extent" => self.handle_temporal_extent(args),
+            "database_stats" => self.handle_database_stats(args),
             _ => self.error_result(
                 McpError::new(McpErrorCode::NotFound, format!("Unknown tool: {}", name))
                     .details(json!({ "tool": name })),
@@ -4082,6 +4268,25 @@ fn tool_definitions() -> Vec<Tool> {
             make_input_schema::<GetEdgeAtTimeRequest>(),
         ),
         Tool::new(
+            "find_nodes_at_time",
+            "Find nodes by label (and optional exact property_key/property_value match) as of \
+                     a bi-temporal point -- resolve e.g. \"the Person named Alice as of \
+                     2024-01-01\" in one call, without knowing any node ID. `valid_time` is \
+                     required (ISO 8601 or microseconds since epoch); `transaction_time` is \
+                     optional and defaults to now. Each returned node is reconstructed AS IT \
+                     EXISTED at that coordinate (not its current state); nodes that did not \
+                     exist, or whose property value did not hold, at that point are excluded. \
+                     Recalling a since-deleted node requires anchoring BOTH dimensions before \
+                     the deletion. Results are sorted by node id; the response echoes the \
+                     resolved valid_time/transaction_time and carries `has_more`/`next_offset`/\
+                     `total_matching` pagination metadata. On databases with very large \
+                     bi-temporal history the candidate scan is capped; the response then sets \
+                     `sampled: true` and `total_matching` counts matches within the sampled \
+                     candidate set only. Vector/embedding properties are \
+                     elided by default; pass `include_vectors: true` for full arrays.",
+            make_input_schema::<FindNodesAtTimeRequest>(),
+        ),
+        Tool::new(
             "list_changes",
             "List graph-wide changes (node & edge versions) committed in a transaction-time window, with optional valid-time and label filters and stable cursor pagination. Discover what changed without knowing entity IDs.",
             make_input_schema::<ListChangesRequest>(),
@@ -4190,6 +4395,32 @@ fn tool_definitions() -> Vec<Tool> {
              (edge_types); per-label bounds are computed from hot-tier history only and may \
              be narrower than the overall bounds (or a label absent) after cold migration.",
             make_input_schema::<TemporalExtentRequest>(),
+        ),
+        Tool::new(
+            "database_stats",
+            "Get a holistic database statistics snapshot in one call (no arguments). Use it \
+             to orient yourself before querying: how big is the dataset, how much history \
+             exists to time-travel through, where that history lives, and what durability \
+             is active. Returns: `current` {node_count, edge_count} (current-state graph \
+             size); `historical` {total_node_versions, total_edge_versions, unique_nodes, \
+             unique_edges, anchor_count, delta_count, node/edge anchor+delta breakdowns, \
+             compression_ratio} (bi-temporal depth of the in-RAM store; anchors are full \
+             snapshots, deltas are changes — anchor_count + delta_count always equals total \
+             versions, and compression_ratio = anchors/total, lower is better); \
+             `cold_storage` — `{enabled: false}` when no cold (disk) tier is configured \
+             (this means NOT CONFIGURED, never '0 cold versions'), or `{enabled: true, \
+             node_versions_stored, edge_versions_stored, compression_ratio, tier_access: \
+             {hot_hits, warm_hits, cold_hits, misses}}` showing how many versions live on \
+             disk (counts persist across restarts) and how reads distribute across the \
+             hot/warm-cache/cold tiers (compression_ratio and tier_access count activity \
+             since the current process opened the database); `wal` {enabled, \
+             durability_mode (synchronous|async|group_commit|async_batched), current_lsn \
+             (the NEXT log sequence number to be allocated), total_appends, healthy}. All \
+             values are O(1)/cached counter reads — this call never scans versions and is \
+             safe to call frequently. Counts only, point-in-time: for the calendar RANGE \
+             of stored history (earliest/latest timestamps) use temporal_extent; \
+             for per-label breakdowns use get_schema.",
+            make_input_schema::<DatabaseStatsRequest>(),
         ),
     ]
 }
