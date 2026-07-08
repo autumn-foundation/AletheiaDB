@@ -1029,15 +1029,24 @@ impl CurrentStorage {
         self.indexes.node_count()
     }
 
-    /// Get an upper bound on allocated node ids (the next id to be handed out).
+    /// Get an exclusive upper bound on node ids present in current storage.
     ///
     /// Used by the query executor's full-scan iterator to bound a lazy id sweep
-    /// over `[0, max_id)` without materializing the id set. This is a relaxed,
-    /// approximate read (see [`IdGenerator::current_approximate`]); it must not
-    /// be used for snapshot-isolation decisions.
+    /// over `[0, max_id)` without materializing the id set.
+    ///
+    /// This reads the index's insert-maintained high-water-mark
+    /// ([`CurrentIndexes::max_node_id_exclusive`]), **not** this storage's own
+    /// `node_id_gen`. In the transactional write path node ids are allocated by
+    /// a database-level generator and applied here via
+    /// [`Self::insert_node_direct`], so the storage-local `node_id_gen` is never
+    /// advanced and would report `0` -- collapsing every full scan to zero rows.
+    /// The index high-water-mark is advanced by every insert regardless of where
+    /// the id originated, so it is the correct scan bound. It is a relaxed,
+    /// monotonically non-decreasing read and must not be used for
+    /// snapshot-isolation decisions.
     #[inline]
     pub fn get_max_node_id(&self) -> u64 {
-        self.node_id_gen.current_approximate()
+        self.indexes.max_node_id_exclusive()
     }
 
     /// Fast-path label check using the compact node header.

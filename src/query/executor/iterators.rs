@@ -122,7 +122,8 @@ enum ScanFilter {
 /// # Memory Behavior
 ///
 /// This iterator streams node ids lazily over the half-open range
-/// `[0, max_id)`, where `max_id` is captured from the id generator at
+/// `[0, max_id)`, where `max_id` is current storage's insert-maintained node-id
+/// high-water-mark (see [`CurrentStorage::get_max_node_id`]), captured once at
 /// construction. It never materializes the full id set, so each `next()` call
 /// allocates O(1) regardless of graph size. This makes a full scan immune to
 /// the out-of-memory failure that eager `Vec<NodeId>` materialization caused on
@@ -176,8 +177,11 @@ pub struct NodeScanIterator {
 impl NodeScanIterator {
     /// Create a new NodeScanIterator.
     pub fn new(label: Option<String>, current: Arc<CurrentStorage>) -> Self {
-        // Snapshot the id upper bound once. Ids start at 0 and are handed out
-        // densely, so scanning `[0, max_id)` covers every id allocated so far.
+        // Snapshot the id upper bound once. `get_max_node_id` returns the
+        // index's insert-maintained high-water-mark (`max id ever inserted + 1`)
+        // rather than any id generator, so scanning `[0, max_id)` covers every
+        // node present regardless of which generator allocated its id. Ids start
+        // at 0, so the range is `[0, max_id)`.
         let max_id = current.get_max_node_id();
 
         // Resolve the label to an interned id exactly once. A requested-but-
@@ -2837,6 +2841,59 @@ mod tests {
         }
 
         assert_eq!(ids, vec![a, c], "scan should skip the deleted id {b:?}");
+    }
+
+    #[test]
+    fn test_node_scan_iterator_bounds_by_index_not_storage_id_gen() {
+        // Regression (PR #3418): the scan bound must come from the index's
+        // insert-maintained high-water-mark, NOT CurrentStorage's own
+        // `node_id_gen`. The transactional write path allocates node ids from a
+        // database-level generator and applies them via `insert_node_direct`,
+        // leaving the storage-local generator at 0. If the scan bounded itself
+        // by that generator it would see `max_id == 0` and yield zero rows for
+        // every node in the database. Here we reproduce that path directly:
+        // insert nodes whose ids did NOT come from `current.node_id_gen`.
+        let current = Arc::new(CurrentStorage::new());
+        let ts = crate::core::temporal::time::now();
+        let label = GLOBAL_INTERNER.intern("Person").unwrap();
+
+        let expected: Vec<NodeId> = (0u64..3)
+            .map(|i| {
+                let id = NodeId::new(i).unwrap();
+                let node = Node::new(
+                    id,
+                    label,
+                    PropertyMapBuilder::new()
+                        .insert("n", format!("{i}"))
+                        .build(),
+                    VersionId::new(i + 1).unwrap(),
+                );
+                current.insert_node_direct(node, ts).unwrap();
+                id
+            })
+            .collect();
+
+        // The scan bound must reflect the ids inserted (index high-water-mark),
+        // not the storage's own id generator (which insert_node_direct never
+        // advances, so it is still 0). Under the pre-fix implementation this
+        // returned 0 and the scan below yielded nothing.
+        assert_eq!(
+            current.get_max_node_id(),
+            3,
+            "scan bound must come from the index high-water-mark, not the storage id generator"
+        );
+
+        let mut iter = NodeScanIterator::new(None, Arc::clone(&current));
+        let mut ids = Vec::new();
+        while let Some(Ok(row)) = iter.next() {
+            ids.push(row.entity.node_id().unwrap());
+        }
+
+        assert_eq!(
+            ids, expected,
+            "full scan must find nodes applied via insert_node_direct, \
+             proving the bound comes from the index not the storage id generator"
+        );
     }
 
     #[test]
