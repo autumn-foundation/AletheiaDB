@@ -306,8 +306,8 @@ cargo run --bin aletheia-mcp --features mcp-server
 **Available Tools:**
 | Category | Tools |
 |----------|-------|
-| **Nodes** | `get_node`, `create_node`, `update_node`, `delete_node`, `delete_node_cascade`, `list_nodes`, `count_nodes` |
-| **Edges** | `get_edge`, `create_edge`, `update_edge`, `delete_edge`, `get_outgoing_edges`, `get_incoming_edges` |
+| **Nodes** | `get_node`, `create_node`, `update_node`, `delete_node`, `delete_node_cascade`, `retract_node`, `list_nodes`, `count_nodes` |
+| **Edges** | `get_edge`, `create_edge`, `update_edge`, `delete_edge`, `retract_edge`, `get_outgoing_edges`, `get_incoming_edges` |
 | **Traversal** | `traverse` (multi-hop graph traversal; optional bi-temporal `as_of_valid_time`/`as_of_transaction_time`) |
 | **Vector** | `find_similar`, `enable_vector_index`, `list_vector_indexes` |
 | **Temporal** | `get_node_at_time`, `get_edge_at_time` |
@@ -363,6 +363,18 @@ behavior exactly (valid time defaults to the transaction time). On
 (cascade delete does not support backdating). Transaction time is always
 system-assigned and cannot be set. See
 [docs/guides/mcp-query-tool.md](docs/guides/mcp-query-tool.md#recording-facts-at-a-specific-valid-time).
+
+**Valid-time retraction (Issue #3230)**: `retract_node` / `retract_edge`
+close an entity's valid-time interval at an optional `valid_time` (default
+now) **without deleting its history** -- `AS OF VALID_TIME` before `T` still
+returns the fact, at/after `T` does not, and `AS OF SYSTEM_TIME` before the
+retraction's commit still shows it open-ended (append-only). `retract_node`
+mirrors the #3209 safe-by-default contract (refuses with `connected_edges`
+unless `detach: true`, which co-retracts edges and reports
+`edges_retracted`); re-retraction is an idempotent no-op returning the
+existing `[valid_from, valid_to)` interval. Rust API:
+`retract_node(_detach)` / `retract_edge` on `AletheiaDB`. See
+[docs/guides/mcp-query-tool.md](docs/guides/mcp-query-tool.md#retracting-a-fact-closing-valid-time).
 
 **Point-in-time (AS OF) traversal (Issue #3225)**: `traverse` accepts optional
 `as_of_valid_time` / `as_of_transaction_time` (ISO 8601 / RFC 3339 or
