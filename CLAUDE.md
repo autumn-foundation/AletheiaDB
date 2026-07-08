@@ -299,8 +299,13 @@ Model Context Protocol server enabling LLMs to interact with AletheiaDB.
 
 **Quick Start:**
 ```bash
-# Run the MCP server (communicates over stdio)
-cargo run --bin aletheia-mcp --features mcp-server
+# Run the MCP server (communicates over stdio). Authentication is required
+# by default: without a credential the server exits 1 at startup.
+ALETHEIADB_BOOTSTRAP_ADMIN_KEY="$(openssl rand -base64 32)" \
+  cargo run --bin aletheia-mcp --features mcp-server
+
+# Or explicitly opt into anonymous mode (local development only):
+ALETHEIADB_AUTH_MODE=anonymous cargo run --bin aletheia-mcp --features mcp-server
 ```
 
 **Available Tools:**
@@ -501,7 +506,11 @@ denials are `PERMISSION_DENIED` with `details.required_class` /
 `details.principal_role` — both additive to the #3234 enum, both
 `retriable: false`. Authenticated writes stamp the principal's name into
 version provenance (`provenance.principal`, composing with the
-caller-supplied `source`); anonymous writes record no principal. MCP
+caller-supplied `source`) on the structured create/update node/edge
+paths of both surfaces — deletes/retracts and HTTP AQL-statement writes
+(`execute_query`/`bulk_execute_query`) do NOT stamp a principal yet
+(destructive-op attribution is a known follow-up gap); anonymous writes
+record no principal. MCP
 sessions authenticate via `ALETHEIADB_MCP_API_KEY`; key lifecycle is served
 by the HTTP `/admin/keys*` endpoints. Programmatic
 `AletheiaMcpServer::new()` stays anonymous (embedded API); use

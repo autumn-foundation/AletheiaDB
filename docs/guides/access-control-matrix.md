@@ -116,3 +116,22 @@ The HTTP credential is per-request (`Authorization: Bearer <key>` or
 | `POST /admin/keys` (create key) | admin |
 | `GET /admin/keys` (list keys, masked) | admin |
 | `POST /admin/keys/revoke` | admin |
+
+## Framework endpoints outside this matrix (HTTP)
+
+autumn-web (the HTTP framework) mounts its own routes **outside**
+AletheiaDB's authentication layer; they answer without any AletheiaDB
+credential and are not part of the role matrix above:
+
+| Framework route | Exposure |
+|-----------------|----------|
+| `GET /health`, `/live`, `/ready`, `/startup` | liveness/readiness probes |
+| `GET /actuator/health`, `/actuator/info`, `/actuator/metrics`, `/actuator/a11y`, `/actuator/ui`, `/actuator/ui/metrics` | service health, framework version/profile, request metrics |
+
+The framework's *sensitive* actuator group (`/actuator/env`,
+`/actuator/configprops`, `PUT /actuator/loggers/{name}`,
+`/actuator/tasks`, `/actuator/jobs`, `/actuator/prometheus`) is
+force-disabled by AletheiaDB in every profile (`HardenedConfigLoader`
+in `src/http/server.rs`). Block `/actuator` and the probe paths at your
+reverse proxy if they must not be publicly reachable — see the
+[security quickstart](security-quickstart.md#framework-endpoints-that-bypass-api-key-auth-http-server).

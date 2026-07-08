@@ -38,11 +38,21 @@ kept in lockstep with the code by CI conformance tests.
 - **Revocation is immediate.** Credentials are re-verified on every
   call (HTTP request / MCP tool call); revoking a key takes effect on
   the very next call, with no cached sessions to wait out.
-- **Writes are attributed.** A write made with an authenticated key
-  stamps the principal's name into that version's provenance
-  (`provenance.principal`), composing with any caller-supplied
-  provenance `source` — "who wrote this fact" stays answerable from
-  bi-temporal history.
+- **Writes are attributed — on the structured write paths.** A write
+  made with an authenticated key stamps the principal's name into that
+  version's provenance (`provenance.principal`), composing with any
+  caller-supplied provenance `source` — "who wrote this fact" stays
+  answerable from bi-temporal history. The stamped paths are the
+  structured create/update operations: MCP `create_node` /
+  `update_node` / `create_edge` / `update_edge`, and HTTP `/query`
+  `create_node` / `bulk_create_nodes` / `bulk_update_nodes`.
+  **Not stamped (known gap, follow-up work)**: deletes and retracts
+  (the #3224 provenance mechanism has no slot on them — destructive
+  operations currently carry no principal attribution), and mutating
+  AQL statements via HTTP `execute_query` / `bulk_execute_query`
+  (identity is not yet threaded into the query executor). Those writes
+  are still authorized by role; they just aren't attributed in
+  provenance.
 
 ## Step 1 — Bootstrap the first admin credential
 
@@ -62,7 +72,12 @@ Without it, startup is refused with a message naming both the variable
 and the anonymous opt-out:
 
 ```
-error: auth mode is 'required' but the key store holds zero credentials ...
+aletheia-server failed: authentication is required (the default) but no
+credentials are available: set a bootstrap admin key
+(ALETHEIADB_BOOTSTRAP_ADMIN_KEY or
+ServerConfig::builder().bootstrap_admin_key(...)), point the server at an
+existing persisted key store, or explicitly opt into anonymous mode
+(ALETHEIADB_AUTH_MODE=anonymous)
 ```
 
 The bootstrap key is **memory-only**: it never enters the persisted
@@ -160,6 +175,35 @@ Revocation is durable (persisted immediately) and effective on the next
 call on both surfaces — including MCP sessions already running with
 that key.
 
+## Framework endpoints that bypass API-key auth (HTTP server)
+
+The HTTP server is built on the autumn-web framework, which mounts a
+set of **its own** routes outside AletheiaDB's authentication layer.
+These respond **without any AletheiaDB credential**, in every auth
+mode — so "every route requires a credential" is true of AletheiaDB's
+routes (`/query`, `/status`, `/admin/keys*`), not of the whole port:
+
+- Health probes: `GET /health`, `/live`, `/ready`, `/startup`
+- Actuator (health/metadata group): `GET /actuator/health`,
+  `/actuator/info`, `/actuator/metrics`, `/actuator/a11y`,
+  `/actuator/ui`, `/actuator/ui/metrics`
+
+These expose service liveness, framework version/profile, and request
+metrics — no database contents and no credentials. The framework's
+**sensitive** actuator group (`/actuator/env` — a full config dump —
+`/actuator/configprops`, an unauthenticated `PUT
+/actuator/loggers/{name}`, `/actuator/tasks`, `/actuator/jobs`,
+`/actuator/prometheus`), which autumn's dev profile would otherwise
+enable, is **force-disabled by AletheiaDB in every profile** (the
+server pins `actuator.sensitive = false` through its config loader; an
+`autumn.toml` cannot re-enable it). The server prints the exact list of
+unauthenticated framework routes at startup.
+
+**Recommendation**: if these paths must not be publicly reachable,
+block `/actuator` and the probe paths (`/health`, `/live`, `/ready`,
+`/startup`) at your reverse proxy, allowing them only from your
+orchestrator/monitoring networks.
+
 ## Anonymous mode (explicit opt-in only)
 
 For local development you can disable authentication entirely:
@@ -214,3 +258,22 @@ non-leaking auth errors.
 - The HTTP `GET /status` health check is `metrics`-class: in `required`
   mode probes need a credential (any role). The shipped Docker health
   check passes the bootstrap key via `x-api-key`.
+- **`ALETHEIADB_CONFIG`-only deployments get a memory-only key store**:
+  the persisted key-store path derives from `ALETHEIADB_DATA_DIR` only,
+  so set `ALETHEIADB_DATA_DIR` (or the explicit auth persist path) too
+  if minted keys must survive restarts.
+- **If a revoke returns a 5xx**, the revocation still holds in memory
+  (fail-secure) but may not have reached disk: verify with
+  `GET /admin/keys` and re-issue the revoke after fixing the disk
+  problem, or the key can come back on the next restart.
+- **Docker health checks on persisted-store deployments**: the shipped
+  `HEALTHCHECK` sends the bootstrap key; if you run without
+  `ALETHEIADB_BOOTSTRAP_ADMIN_KEY` (relying on the persisted store
+  alone), override the health check with a real credential — ideally a
+  dedicated `metrics`-role key.
+- **Release builds run under autumn's `prod` profile and require
+  `AUTUMN_SECURITY__SIGNING_SECRET`** (≥32 bytes; the server exits at
+  startup without it). AletheiaDB's API is token-based and stateless —
+  the framework uses this secret for its session/CSRF machinery — but
+  it must still be set; the shipped Dockerfile/compose require it
+  alongside the bootstrap key (`openssl rand -hex 32`).

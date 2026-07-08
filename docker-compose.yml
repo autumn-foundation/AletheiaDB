@@ -30,6 +30,12 @@ services:
       # every caller full unauthenticated access and is not suitable outside
       # isolated local development.)
       ALETHEIADB_BOOTSTRAP_ADMIN_KEY: "${ALETHEIADB_BOOTSTRAP_ADMIN_KEY:?set ALETHEIADB_BOOTSTRAP_ADMIN_KEY (see docs/guides/security-quickstart.md)}"
+      # The image is a release build, which runs under the web framework's
+      # `prod` profile — and that profile refuses to start without a signing
+      # secret (used by the framework's session/CSRF machinery; AletheiaDB's
+      # own API is token-based). Must be >=32 bytes and not a demo value:
+      # generate with `openssl rand -hex 32`.
+      AUTUMN_SECURITY__SIGNING_SECRET: "${AUTUMN_SECURITY__SIGNING_SECRET:?set AUTUMN_SECURITY__SIGNING_SECRET, e.g. from openssl rand -hex 32 (required by the release/prod profile)}"
       # Override for remote clients during development. Leave unset (or set
       # to false) for production — restrictive CORS is the default.
       ALETHEIADB_CORS_PERMISSIVE: "${ALETHEIADB_CORS_PERMISSIVE:-false}"

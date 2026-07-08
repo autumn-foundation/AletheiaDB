@@ -61,6 +61,13 @@ ENV ALETHEIADB_HOST=0.0.0.0 \
 # POST /admin/keys — see docs/guides/security-quickstart.md. Anonymous mode
 # is an explicit opt-in (ALETHEIADB_AUTH_MODE=anonymous) that grants every
 # caller full access; do not use it outside isolated local development.
+#
+# This is a release build, which runs under the web framework's `prod`
+# profile — and that profile also refuses to start without
+# AUTUMN_SECURITY__SIGNING_SECRET (>=32 bytes, not a demo value; generate
+# with `openssl rand -hex 32`). The secret drives the framework's
+# session/CSRF machinery, not AletheiaDB's token-based API, but it must be
+# supplied at run time all the same (docker run -e / compose).
 
 EXPOSE 1963
 VOLUME ["/var/lib/aletheiadb"]
