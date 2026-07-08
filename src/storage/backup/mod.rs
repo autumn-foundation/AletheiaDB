@@ -1086,6 +1086,29 @@ mod tests {
         assert_eq!(entry.next_version, None);
     }
 
+    /// A version-2 header whose payload does not decode as the frozen
+    /// `BackupPayloadV2` shape is a decode error, not a silent fallback.
+    #[test]
+    fn read_artifact_rejects_corrupt_v2_payload() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("corrupt_v2.albk");
+
+        // Valid header claiming version 2, but the zstd payload holds bytes
+        // that are not a bitcode-encoded BackupPayloadV2.
+        let garbage = zstd::encode_all(&b"not a backup payload"[..], 3).unwrap();
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&BACKUP_MAGIC);
+        bytes.extend_from_slice(&2u16.to_le_bytes());
+        bytes.extend_from_slice(&garbage);
+        std::fs::write(&path, &bytes).unwrap();
+
+        let err = read_artifact(&path).unwrap_err();
+        assert!(
+            matches!(err, BackupError::Serialization(_)),
+            "unexpected error: {err:?}"
+        );
+    }
+
     #[test]
     fn read_artifact_rejects_future_version() {
         let dir = TempDir::new().unwrap();

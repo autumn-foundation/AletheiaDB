@@ -1119,3 +1119,104 @@ fn test_checkpoint_materializes_sparse_vector_delta_and_round_trips() -> Result<
 
     Ok(())
 }
+
+/// Edge mirror of the sparse-vector materialization regression test: the
+/// checkpoint's edge extract path (snapshot base reconstruction +
+/// materialization) is separate code from the node path and must be
+/// exercised in its own right (Issue #3387).
+#[test]
+fn test_checkpoint_materializes_sparse_edge_vector_delta_and_round_trips() -> Result<()> {
+    use aletheiadb::core::version::{VectorDelta, VersionData};
+
+    let temp_dir = TempDir::new().unwrap();
+    let wal_dir = temp_dir.path().join("wal");
+    let data_dir = temp_dir.path().join("data");
+
+    let wal_config = ConcurrentWalSystemConfig::new(&wal_dir);
+    let wal = ConcurrentWalSystem::new(wal_config)?;
+
+    let source = NodeId::new(1)?;
+    let target = NodeId::new(2)?;
+    let edge_id = EdgeId::new(1)?;
+    let dim = 128usize;
+    let base_vec: Vec<f32> = (0..dim).map(|i| i as f32 * 0.02).collect();
+    let mut updated_vec = base_vec.clone();
+    updated_vec[11] = 7.0; // 1 change * 2 < 128 -> sparse delta
+
+    for node_id in [source, target] {
+        wal.append(WalOperation::CreateNode {
+            node_id,
+            label: GLOBAL_INTERNER.intern("SparseVecEdgeNode").unwrap(),
+            properties: PropertyMap::new(),
+            valid_from: time::now(),
+            provenance: None,
+        })?;
+    }
+    wal.append(WalOperation::CreateEdge {
+        edge_id,
+        source,
+        target,
+        label: GLOBAL_INTERNER.intern("SPARSE_VEC_EDGE").unwrap(),
+        properties: PropertyMapBuilder::new()
+            .insert_vector("embedding", &base_vec)
+            .build(),
+        valid_from: time::now(),
+        provenance: None,
+    })?;
+    wal.append(WalOperation::UpdateEdge {
+        edge_id,
+        version_id: VersionId::new(900)?,
+        label: GLOBAL_INTERNER.intern("SPARSE_VEC_EDGE").unwrap(),
+        properties: PropertyMapBuilder::new()
+            .insert_vector("embedding", &updated_vec)
+            .build(),
+        valid_from: time::now(),
+        provenance: None,
+    })?;
+    wal.flush()?;
+
+    let checkpoint_lsn = LSN(wal.current_lsn().0.saturating_sub(1));
+    {
+        let config = UnifiedCheckpointConfig::with_data_dir(&data_dir);
+        let mut manager = CheckpointManager::new(config)?;
+        let (current, historical, _final_lsn) = manager.recover(&wal)?;
+
+        // Precondition: the edge update really produced a SPARSE delta.
+        let head_id = historical
+            .get_current_edge_version(edge_id)
+            .expect("edge head version");
+        let head = historical.get_edge_version(head_id).unwrap();
+        let VersionData::Delta { delta } = &head.data else {
+            panic!("precondition: edge update version must be a delta");
+        };
+        assert!(
+            delta
+                .vector_deltas
+                .values()
+                .any(|d| matches!(d, VectorDelta::Sparse { .. })),
+            "precondition: small edge embedding edit must produce VectorDelta::Sparse"
+        );
+
+        manager.create_checkpoint(checkpoint_lsn, &current, &historical)?;
+    }
+
+    // Restore-only recovery: the updated edge vector must round-trip.
+    let config = UnifiedCheckpointConfig::with_data_dir(&data_dir);
+    let mut manager = CheckpointManager::new(config)?;
+    let (_current, restored, _final_lsn) = manager.recover(&wal)?;
+
+    let history = restored.get_edge_history(edge_id)?;
+    assert_eq!(history.version_count(), 2);
+    let restored_updated = history.versions[1]
+        .properties
+        .get("embedding")
+        .and_then(|v| v.as_vector().map(<[f32]>::to_vec))
+        .expect("restored edge head must carry the embedding");
+    assert_eq!(
+        restored_updated, updated_vec,
+        "sparse edge vector delta must be materialized into the checkpoint \
+         and reconstruct after restore"
+    );
+
+    Ok(())
+}

@@ -888,7 +888,7 @@ mod tests {
     fn test_load_v1_temporal_index_file_defaults_provenance_none() {
         use crate::core::GLOBAL_INTERNER;
         use crate::storage::index_persistence::formats::legacy_v1::{
-            NodeVersionEntryV1, TemporalIndexDataV1,
+            EdgeVersionEntryV1, NodeVersionEntryV1, TemporalIndexDataV1,
         };
 
         let dir = tempdir().unwrap();
@@ -913,7 +913,21 @@ mod tests {
                 vector_snapshot_id: Some(7),
             }],
             node_anchors: vec![],
-            edge_versions: vec![],
+            edge_versions: vec![EdgeVersionEntryV1 {
+                version_id: 101,
+                edge_id: 10,
+                source_id: 1,
+                target_id: 2,
+                label_idx: label.as_u32(),
+                valid_from: 1000,
+                valid_from_logical: 0,
+                valid_to: None,
+                valid_to_logical: None,
+                tx_time: 1000,
+                tx_time_logical: 0,
+                version_type: PersistedVersionType::Anchor,
+                properties: PersistedPropertyMap { entries: vec![] },
+            }],
             edge_anchors: vec![],
         };
 
@@ -931,6 +945,17 @@ mod tests {
 
         let version = restore_node_version(&loaded.node_versions[0]).unwrap();
         assert!(version.provenance.is_none());
+
+        // The v1 EDGE entry upgrades the same way: provenance and the
+        // Issue #3387 fidelity fields default to None.
+        assert_eq!(loaded.edge_versions.len(), 1);
+        let edge_entry = &loaded.edge_versions[0];
+        assert!(edge_entry.provenance.is_none());
+        assert_eq!(edge_entry.tx_end, None);
+        assert_eq!(edge_entry.prev_version, None);
+        let edge = restore_edge_version(edge_entry).unwrap();
+        assert!(edge.temporal.transaction_time().is_current());
+        assert!(edge.prev_version.is_none());
     }
 
     #[test]
@@ -1775,7 +1800,7 @@ mod tests {
     fn test_load_v2_temporal_index_file_defaults_fidelity_fields_none() {
         use crate::core::GLOBAL_INTERNER;
         use crate::storage::index_persistence::formats::legacy_v2::{
-            NodeVersionEntryV2, TemporalIndexDataV2,
+            EdgeVersionEntryV2, NodeVersionEntryV2, TemporalIndexDataV2,
         };
 
         let dir = tempdir().unwrap();
@@ -1806,7 +1831,27 @@ mod tests {
                 }),
             }],
             node_anchors: vec![],
-            edge_versions: vec![],
+            edge_versions: vec![EdgeVersionEntryV2 {
+                version_id: 101,
+                edge_id: 10,
+                source_id: 1,
+                target_id: 2,
+                label_idx: label.as_u32(),
+                valid_from: 1000,
+                valid_from_logical: 0,
+                valid_to: Some(2000),
+                valid_to_logical: Some(0),
+                tx_time: 1000,
+                tx_time_logical: 0,
+                version_type: PersistedVersionType::Anchor,
+                properties: PersistedPropertyMap { entries: vec![] },
+                provenance: Some(PersistedProvenance {
+                    source: Some("edge-system".to_string()),
+                    confidence: None,
+                    note: None,
+                    correlation_id: None,
+                }),
+            }],
             edge_anchors: vec![],
         };
 
@@ -1834,5 +1879,201 @@ mod tests {
         assert!(version.temporal.transaction_time().is_current());
         assert!(version.prev_version.is_none());
         assert!(version.next_version.is_none());
+
+        // The v2 EDGE entry upgrades identically: provenance preserved,
+        // fidelity fields None, closed valid interval kept.
+        assert_eq!(loaded.edge_versions.len(), 1);
+        let edge_entry = &loaded.edge_versions[0];
+        assert!(edge_entry.provenance.is_some());
+        assert_eq!(edge_entry.valid_to, Some(2000));
+        assert_eq!(edge_entry.tx_end, None);
+        assert_eq!(edge_entry.next_version, None);
+        let edge = restore_edge_version(edge_entry).unwrap();
+        assert!(edge.temporal.transaction_time().is_current());
+        assert_eq!(edge.temporal.valid_time().end().wallclock(), 2000);
+    }
+
+    // ------------------------------------------------------------------
+    // Issue #3387 hardening: corrupt-entry and helper arms
+    // ------------------------------------------------------------------
+
+    fn minimal_node_entry() -> NodeVersionEntry {
+        use crate::core::GLOBAL_INTERNER;
+        NodeVersionEntry {
+            version_id: 100,
+            node_id: 1,
+            label_idx: GLOBAL_INTERNER.intern("CorruptNode").unwrap().as_u32(),
+            valid_from: 1000,
+            valid_from_logical: 0,
+            valid_to: None,
+            valid_to_logical: None,
+            tx_time: 1000,
+            tx_time_logical: 0,
+            version_type: PersistedVersionType::Anchor,
+            properties: PersistedPropertyMap { entries: vec![] },
+            vector_snapshot_id: None,
+            provenance: None,
+            tx_end: None,
+            tx_end_logical: None,
+            prev_version: None,
+            next_version: None,
+        }
+    }
+
+    fn minimal_edge_entry() -> EdgeVersionEntry {
+        use crate::core::GLOBAL_INTERNER;
+        EdgeVersionEntry {
+            version_id: 200,
+            edge_id: 1,
+            source_id: 1,
+            target_id: 2,
+            label_idx: GLOBAL_INTERNER.intern("CORRUPT_EDGE").unwrap().as_u32(),
+            valid_from: 1000,
+            valid_from_logical: 0,
+            valid_to: None,
+            valid_to_logical: None,
+            tx_time: 1000,
+            tx_time_logical: 0,
+            version_type: PersistedVersionType::Anchor,
+            properties: PersistedPropertyMap { entries: vec![] },
+            provenance: None,
+            tx_end: None,
+            tx_end_logical: None,
+            prev_version: None,
+            next_version: None,
+        }
+    }
+
+    /// A persisted tx_end without its logical component is corruption, not
+    /// a value to default (node variant).
+    #[test]
+    fn test_restore_node_version_rejects_tx_end_without_logical() {
+        let mut entry = minimal_node_entry();
+        entry.tx_end = Some(2000);
+        entry.tx_end_logical = None;
+
+        let err = restore_node_version(&entry).unwrap_err();
+        assert!(
+            err.to_string().contains("tx_end_logical is missing"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// Edge mirror of the lone-tx_end corruption check.
+    #[test]
+    fn test_restore_edge_version_rejects_tx_end_without_logical() {
+        let mut entry = minimal_edge_entry();
+        entry.tx_end = Some(2000);
+        entry.tx_end_logical = None;
+
+        let err = restore_edge_version(&entry).unwrap_err();
+        assert!(
+            err.to_string().contains("tx_end_logical is missing"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// A persisted tx interval that closes at/before its start is invalid.
+    #[test]
+    fn test_restore_node_version_rejects_inverted_tx_interval() {
+        let mut entry = minimal_node_entry();
+        entry.tx_end = Some(500); // < tx_time (1000)
+        entry.tx_end_logical = Some(0);
+
+        let err = restore_node_version(&entry).unwrap_err();
+        assert!(
+            err.to_string().contains("Invalid transaction time range"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// Edge mirror of the inverted-interval check.
+    #[test]
+    fn test_restore_edge_version_rejects_inverted_tx_interval() {
+        let mut entry = minimal_edge_entry();
+        entry.tx_end = Some(500);
+        entry.tx_end_logical = Some(0);
+
+        let err = restore_edge_version(&entry).unwrap_err();
+        assert!(
+            err.to_string().contains("Invalid transaction time range"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// A persisted chain link exceeding MAX_VALID_ID is rejected, per the
+    /// crate-wide ID validation contract (node prev + edge next variants).
+    #[test]
+    fn test_restore_version_rejects_invalid_chain_link_ids() {
+        let mut entry = minimal_node_entry();
+        entry.prev_version = Some(u64::MAX);
+        let err = restore_node_version(&entry).unwrap_err();
+        assert!(
+            err.to_string().contains("Invalid prev_version ID"),
+            "unexpected error: {err}"
+        );
+
+        let mut entry = minimal_edge_entry();
+        entry.next_version = Some(u64::MAX);
+        let err = restore_edge_version(&entry).unwrap_err();
+        assert!(
+            err.to_string().contains("Invalid next_version ID"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// The materialization helpers' non-delta arms: anchors need no
+    /// materialization and pass through unchanged.
+    #[test]
+    fn test_materialization_helpers_anchor_and_full_arms() {
+        use crate::core::GLOBAL_INTERNER;
+        use crate::core::version::VectorDelta;
+
+        let anchor = VersionData::anchor(PropertyMapBuilder::new().insert("k", "v").build());
+        assert!(!needs_sparse_vector_materialization(&anchor));
+
+        let base = PropertyMapBuilder::new().build();
+        let out = materialize_version_data_for_persistence(&anchor, &base).unwrap();
+        assert!(matches!(out, VersionData::Anchor { .. }));
+
+        // A delta carrying only FULL vector deltas needs no materialization.
+        let mut delta = PropertyDelta::new();
+        delta.vector_deltas.insert(
+            GLOBAL_INTERNER.intern("embedding").unwrap(),
+            VectorDelta::Full(Arc::from(vec![1.0f32, 2.0].as_slice())),
+        );
+        let full_only = VersionData::Delta { delta };
+        assert!(!needs_sparse_vector_materialization(&full_only));
+
+        // A delta with a SPARSE vector delta does.
+        let mut delta = PropertyDelta::new();
+        delta.vector_deltas.insert(
+            GLOBAL_INTERNER.intern("embedding").unwrap(),
+            VectorDelta::Sparse {
+                dimension: 4,
+                changes: Arc::new(vec![(1, 9.0)]),
+            },
+        );
+        let sparse = VersionData::Delta { delta };
+        assert!(needs_sparse_vector_materialization(&sparse));
+
+        // Materializing the sparse delta against a matching base succeeds
+        // and folds the full vector into `changed`.
+        let base = PropertyMapBuilder::new()
+            .insert_vector("embedding", &[0.0, 0.0, 0.0, 0.0])
+            .build();
+        let out = materialize_version_data_for_persistence(&sparse, &base).unwrap();
+        let VersionData::Delta { delta } = out else {
+            panic!("materialized delta must stay a delta");
+        };
+        assert!(delta.vector_deltas.is_empty());
+
+        // Materializing against a base MISSING the vector fails loudly.
+        let empty_base = PropertyMapBuilder::new().build();
+        let err = materialize_version_data_for_persistence(&sparse, &empty_base).unwrap_err();
+        assert!(
+            err.to_string().contains("base property not found"),
+            "unexpected error: {err}"
+        );
     }
 }

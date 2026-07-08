@@ -3174,4 +3174,200 @@ mod tests {
 
         Ok(())
     }
+
+    // ------------------------------------------------------------------
+    // Issue #3387: snapshot base-reconstruction walker error branches
+    // ------------------------------------------------------------------
+
+    fn walker_node(
+        vid: u64,
+        prev: Option<u64>,
+        anchor: bool,
+    ) -> Arc<crate::core::version::NodeVersion> {
+        use crate::core::version::{NodeVersion, PropertyDelta};
+        let label = GLOBAL_INTERNER.intern("WalkerNode").unwrap();
+        let mut v = if anchor {
+            NodeVersion::new_anchor(
+                VersionId::new(vid).unwrap(),
+                NodeId::new(1).unwrap(),
+                BiTemporalInterval::current((1000 + vid as i64).into()),
+                label,
+                PropertyMapBuilder::new().insert("k", "v").build(),
+            )
+        } else {
+            let mut delta_version = NodeVersion::new_anchor(
+                VersionId::new(vid).unwrap(),
+                NodeId::new(1).unwrap(),
+                BiTemporalInterval::current((1000 + vid as i64).into()),
+                label,
+                PropertyMapBuilder::new().build(),
+            );
+            delta_version.data = VersionData::Delta {
+                delta: PropertyDelta::new(),
+            };
+            delta_version
+        };
+        v.prev_version = prev.map(|p| VersionId::new(p).unwrap());
+        Arc::new(v)
+    }
+
+    fn walker_edge(
+        vid: u64,
+        prev: Option<u64>,
+        anchor: bool,
+    ) -> Arc<crate::core::version::EdgeVersion> {
+        use crate::core::version::{EdgeVersion, PropertyDelta};
+        let label = GLOBAL_INTERNER.intern("WALKER_EDGE").unwrap();
+        let mut v = EdgeVersion::new_anchor(
+            VersionId::new(vid).unwrap(),
+            EdgeId::new(1).unwrap(),
+            BiTemporalInterval::current((1000 + vid as i64).into()),
+            label,
+            NodeId::new(1).unwrap(),
+            NodeId::new(2).unwrap(),
+            PropertyMapBuilder::new().insert("k", "v").build(),
+        );
+        if !anchor {
+            v.data = VersionData::Delta {
+                delta: PropertyDelta::new(),
+            };
+        }
+        v.prev_version = prev.map(|p| VersionId::new(p).unwrap());
+        Arc::new(v)
+    }
+
+    /// A base version missing from the snapshot map (cold-migrated) must
+    /// fail loudly, not persist a silently-lossy entry.
+    #[test]
+    fn test_reconstruct_node_base_fails_when_base_left_snapshot() {
+        let mut by_id = std::collections::HashMap::new();
+        // delta version 3 with prev = 2, but 2 is absent from the map
+        let v3 = walker_node(3, Some(2), false);
+        by_id.insert(v3.id, Arc::clone(&v3));
+
+        let err = reconstruct_node_base_properties(&by_id, &v3).unwrap_err();
+        assert!(
+            err.to_string().contains("not in the checkpoint snapshot"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// Edge mirror of the missing-base error branch.
+    #[test]
+    fn test_reconstruct_edge_base_fails_when_base_left_snapshot() {
+        let mut by_id = std::collections::HashMap::new();
+        let v3 = walker_edge(3, Some(2), false);
+        by_id.insert(v3.id, Arc::clone(&v3));
+
+        let err = reconstruct_edge_base_properties(&by_id, &v3).unwrap_err();
+        assert!(
+            err.to_string().contains("not in the checkpoint snapshot"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// A chain that terminates without an anchor (corrupt links) must fail.
+    #[test]
+    fn test_reconstruct_node_base_fails_without_anchor() {
+        let mut by_id = std::collections::HashMap::new();
+        // v2 is a delta whose prev is None: chain ends anchor-less.
+        let v2 = walker_node(2, None, false);
+        let v3 = walker_node(3, Some(2), false);
+        by_id.insert(v2.id, Arc::clone(&v2));
+        by_id.insert(v3.id, Arc::clone(&v3));
+
+        let err = reconstruct_node_base_properties(&by_id, &v3).unwrap_err();
+        assert!(
+            err.to_string().contains("no anchor found"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// Edge mirror of the anchor-less chain error branch.
+    #[test]
+    fn test_reconstruct_edge_base_fails_without_anchor() {
+        let mut by_id = std::collections::HashMap::new();
+        let v2 = walker_edge(2, None, false);
+        let v3 = walker_edge(3, Some(2), false);
+        by_id.insert(v2.id, Arc::clone(&v2));
+        by_id.insert(v3.id, Arc::clone(&v3));
+
+        let err = reconstruct_edge_base_properties(&by_id, &v3).unwrap_err();
+        assert!(
+            err.to_string().contains("no anchor found"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// A chain longer than MAX_RECONSTRUCTION_DEPTH must be cut off (cycle /
+    /// corruption guard), not walked forever.
+    #[test]
+    fn test_reconstruct_node_base_fails_beyond_max_depth() {
+        use crate::storage::historical::MAX_RECONSTRUCTION_DEPTH;
+        let mut by_id = std::collections::HashMap::new();
+        let n = MAX_RECONSTRUCTION_DEPTH as u64 + 2;
+        // delta chain v2 <- v3 <- ... <- v(n+1), no anchor within depth
+        for vid in 2..=(n + 1) {
+            let prev = if vid == 2 { None } else { Some(vid - 1) };
+            let v = walker_node(vid, prev, false);
+            by_id.insert(v.id, v);
+        }
+        let head = by_id.get(&VersionId::new(n + 1).unwrap()).cloned().unwrap();
+
+        let err = reconstruct_node_base_properties(&by_id, &head).unwrap_err();
+        assert!(
+            err.to_string().contains("max reconstruction depth"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// Edge mirror of the depth-cap error branch.
+    #[test]
+    fn test_reconstruct_edge_base_fails_beyond_max_depth() {
+        use crate::storage::historical::MAX_RECONSTRUCTION_DEPTH;
+        let mut by_id = std::collections::HashMap::new();
+        let n = MAX_RECONSTRUCTION_DEPTH as u64 + 2;
+        for vid in 2..=(n + 1) {
+            let prev = if vid == 2 { None } else { Some(vid - 1) };
+            let v = walker_edge(vid, prev, false);
+            by_id.insert(v.id, v);
+        }
+        let head = by_id.get(&VersionId::new(n + 1).unwrap()).cloned().unwrap();
+
+        let err = reconstruct_edge_base_properties(&by_id, &head).unwrap_err();
+        assert!(
+            err.to_string().contains("max reconstruction depth"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// Happy path through the multi-hop walker: anchor -> delta -> delta,
+    /// base state for the head is anchor + intermediate delta applied.
+    #[test]
+    fn test_reconstruct_node_base_applies_intermediate_deltas() {
+        use crate::core::version::PropertyDelta;
+
+        let mut by_id = std::collections::HashMap::new();
+        let v1 = walker_node(1, None, true); // anchor: k=v
+        // v2: delta changing k -> v2
+        let mut delta = PropertyDelta::new();
+        delta.changed.insert(
+            GLOBAL_INTERNER.intern("k").unwrap(),
+            crate::core::property::PropertyValue::String(std::sync::Arc::from("v2")),
+        );
+        let mut v2_inner = (*walker_node(2, Some(1), false)).clone();
+        v2_inner.data = VersionData::Delta { delta };
+        let v2 = Arc::new(v2_inner);
+        let v3 = walker_node(3, Some(2), false);
+        by_id.insert(v1.id, v1);
+        by_id.insert(v2.id, v2);
+        by_id.insert(v3.id, Arc::clone(&v3));
+
+        let base = reconstruct_node_base_properties(&by_id, &v3).unwrap();
+        assert_eq!(
+            base.get("k").and_then(|v| v.as_str()),
+            Some("v2"),
+            "base for v3 must include v2's delta applied on the anchor"
+        );
+    }
 }
