@@ -205,7 +205,14 @@ The bi-temporal contract:
 
 - **Valid time:** `AS OF VALID_TIME` queries strictly before `T` still return
   the entity; queries at or after `T` do not (the closed interval is
-  half-open: `[valid_from, T)`).
+  half-open: `[valid_from, T)`). One qualifier for entities that were
+  **updated** before being retracted: with a current `AS OF SYSTEM_TIME`,
+  this visibility extends back to the *current head version's* `valid_from`
+  (the last update's effective date), not all the way to the entity's
+  original creation — earlier valid times were already superseded by the
+  update, and recalling them requires anchoring `AS OF SYSTEM_TIME` before
+  that update (pre-existing supersession semantics, unrelated to
+  retraction).
 - **Transaction time:** retraction is append-only. The pre-retraction record
   keeps its open-ended valid interval with its transaction time closed at the
   retraction's commit, so `AS OF SYSTEM_TIME` queries positioned *before* the
@@ -214,20 +221,35 @@ The bi-temporal contract:
 - **Current state:** like a delete, a retracted entity is absent from
   current-state tools (`get_node`, `list_nodes`, `traverse`, ...), while its
   full history remains queryable via `get_node_history` /
-  `get_node_at_time`.
+  `get_node_at_time`. This holds even when `valid_time` is in the
+  **future**: current state reflects post-retraction *knowledge*, not
+  post-`T` reality — an entity retracted at `now + 1h` disappears from
+  current-state tools immediately (parity with `delete_node` +
+  `valid_time`), even though `get_node_at_time` at today's valid time still
+  returns it until `T` arrives.
 
 **Parameters:** `node_id` / `edge_id` (required); `valid_time` (optional,
 same formats as every other MCP temporal field; defaults to now; must not
 precede the entity's `valid_from` — equality is allowed and yields an empty
-interval); and, on `retract_node` only, `detach` (default `false`).
-Transaction time is always system-assigned.
+interval — and must not be more than one year in the future, which is
+rejected with `INVALID_ARGUMENT`); and, on `retract_node` only, `detach`
+(default `false`). Transaction time is always system-assigned.
 
 **Referential safety (mirrors `delete_node`'s #3209 contract):** retracting
 a node that still has connected edges without `detach: true` is **refused**
 with `FAILED_PRECONDITION` and `details.connected_edges` — never a `success`
-that leaves edges pointing at a retracted node. Passing `detach: true`
-co-retracts every connected edge at the same `valid_time` and reports
-`edges_retracted`.
+that leaves edges pointing at a retracted node. `connected_edges` counts
+**distinct** edges: a self-loop occupies both adjacency directions but is
+one edge and counts once, so the refusal count always equals what
+`detach: true` would retract. Passing `detach: true` co-retracts every
+connected edge at the same `valid_time` and reports `edges_retracted`.
+
+The detach form is **atomic**: every co-retracted edge is validated against
+the same `valid_time`, and if ANY connected edge has a `valid_from` later
+than `T` (retracting it at `T` would end it before it began), the whole
+call fails with `INVALID_ARGUMENT` and **nothing** is retracted — not the
+node, not the other edges. The fix is to retract that newer edge separately
+at a `valid_time` at or after its own `valid_from`, then retry the detach.
 
 ```jsonc
 // tools/call -> "retract_node"   (Alice churned on 2026-05-31)
@@ -264,7 +286,11 @@ The refusal, when connected edges exist and `detach` was not passed:
 no-op that returns the **existing** `valid_to` — regardless of the
 `valid_time` passed to the second call — with `already_retracted: true`. No
 new version is appended and nothing is written, so an LLM retrying a
-retraction can never accidentally move the end of a fact.
+retraction can never accidentally move the end of a fact. One caveat when
+the entity was **deleted** rather than retracted: the returned interval is
+the delete tombstone's degenerate `[d, d)` — `valid_from` and `valid_to`
+both equal the deletion's valid time, not the entity's original
+`valid_from`.
 
 **Errors:** a malformed `valid_time` is `INVALID_ARGUMENT`; a `valid_time`
 before the entity's `valid_from` is `INVALID_ARGUMENT` (same
@@ -425,6 +451,87 @@ Legacy top-level fields that predate this contract (the DETACH refusal's
 `connected_edges` / `detach_required`, the unique-violation's
 `constraint_violation` / `existing_node_id`) remain present alongside
 `error.details`, so pre-#3234 consumers keep working.
+
+## Discovering the queryable temporal extent (`temporal_extent`)
+
+Every `AS OF` field above shares a silent failure mode: an instant *before
+the data begins* returns an empty result that is indistinguishable from "the
+fact never existed." The `temporal_extent` tool (Issue #3238) closes that gap
+by reporting, in one call, the calendar range the dataset actually covers, so
+a caller can check "does this dataset even reach time T?" *before* issuing an
+`AS OF` query. It is backed by the additive public API
+`AletheiaDB::temporal_extent()` / `temporal_extent_by_label()`.
+
+```jsonc
+// tools/call -> "temporal_extent" (no required arguments)
+{}
+// -> {
+//      "valid_time":       { "earliest": "2021-03-01T00:00:00.000000Z",
+//                            "latest":   "2026-07-01T09:15:00.123456Z" },
+//      "transaction_time": { "earliest": "2026-06-20T08:00:00.000000Z",
+//                            "latest":   "2026-07-01T09:15:00.123456Z" }
+//    }
+```
+
+Semantics (also stated in the tool's description so an LLM can interpret the
+snapshot without reading source):
+
+- **Extent, not current state.** Bounds cover recorded history — including
+  expired/superseded versions and deletions — not just the current state. A
+  fact written for 2019 and later corrected still counts toward
+  `valid_time.earliest`. This is a calendar *range*; for counts/magnitude use
+  `count_nodes` (a dedicated stats tool is tracked in issue #3222).
+- **Open-interval convention.** `earliest` is the minimum interval start in
+  that dimension. `latest` is the maximum of interval starts and *closed*
+  interval ends; open-ended intervals (still-valid facts / still-current
+  records) contribute only their start. `latest` is therefore the newest
+  finite recorded event coordinate — never `+infinity`, and never the
+  open-interval sentinel.
+- **Empty database.** All four bounds come back as explicit `null` — never
+  `0`/`1970-01-01` — so "no data" cannot be misread as "data since the epoch."
+
+Pass `by_label: true` to additionally receive the same
+`{valid_time, transaction_time}` bounds per node label (`node_labels`) and per
+edge type (`edge_types`), so calibration can be scoped to exactly the labels a
+query touches:
+
+```jsonc
+// tools/call -> "temporal_extent"
+{ "by_label": true }
+// -> {
+//      "valid_time": { ... }, "transaction_time": { ... },
+//      "node_labels": [
+//        { "label": "Company", "valid_time": { ... }, "transaction_time": { ... } },
+//        { "label": "Person",  "valid_time": { ... }, "transaction_time": { ... } }
+//      ],
+//      "edge_types": [
+//        { "edge_type": "WORKS_AT", "valid_time": { ... }, "transaction_time": { ... } }
+//      ]
+//    }
+```
+
+The overall bounds are read in O(1) from an aggregate the temporal indexes
+maintain at write time; bounds only ever widen while the server runs, so a
+caller can cache the result for the duration of a session. The per-label
+breakdown is folded from the hot-tier historical version store.
+
+**Coverage caveat (cold storage + restarts).** Bounds cover all history
+recorded during the **current process lifetime**, plus the hot-tier history
+restored at startup. On databases with cold-storage migration enabled,
+versions migrated to the cold tier *before the last restart* are **not**
+reflected — the temporal indexes (and their extent aggregate) are rebuilt at
+startup from hot-tier versions only. Within a single process lifetime,
+cold-tier migration never shrinks the bounds. The per-label breakdown is
+additionally hot-tier-only even within a process lifetime: after cold
+migration a label's bounds may be narrower than the overall bounds, or a
+label may be absent entirely. A follow-up could persist cold-tier bounds
+metadata to close the restart gap.
+
+**Calibration pattern:** if `temporal_extent` reports
+`valid_time.earliest = 2021-03-01`, an `AS OF '2019-01-01'` query is
+guaranteed to be out of recorded range — its empty result means "before our
+records begin," not "nothing existed." Rerun the query at an instant inside
+the extent (or report the range mismatch) instead of concluding absence.
 
 ## Notes
 

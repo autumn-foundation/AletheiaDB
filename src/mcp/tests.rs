@@ -5619,6 +5619,142 @@ mod retraction_tests {
         let value: serde_json::Value = serde_json::from_str(&response).unwrap();
         assert_eq!(value["error"]["code"], "NOT_FOUND", "got {value}");
     }
+
+    /// Fix-round #2: `connected_edges` counts DISTINCT edges. A self-loop
+    /// occupies both adjacency directions but is one edge, so the refusal
+    /// must report 1 — the same number `detach: true` then retracts.
+    #[test]
+    fn retract_node_self_loop_refusal_reports_one_and_detach_retracts_one() {
+        let server = create_test_server();
+        let now = Utc::now();
+        let a = create_person_at(&server, now, 3);
+        let _self_loop: EdgeResponse = parse_response(&server.create_edge(CreateEdgeRequest {
+            source_id: a,
+            target_id: a,
+            label: "SELF".to_string(),
+            properties: None,
+            valid_time: Some(rfc3339_hours_ago(now, 3)),
+            provenance: None,
+        }))
+        .unwrap();
+
+        // Refusal: 1 distinct edge, everywhere the count appears.
+        let refusal = server.retract_node(RetractNodeRequest {
+            node_id: a,
+            valid_time: Some(rfc3339_hours_ago(now, 1)),
+            detach: None,
+        });
+        let refusal: serde_json::Value = serde_json::from_str(&refusal).unwrap();
+        assert_eq!(
+            refusal["error"]["code"], "FAILED_PRECONDITION",
+            "got {refusal}"
+        );
+        assert_eq!(
+            refusal["error"]["details"]["connected_edges"], 1,
+            "a self-loop must count once (distinct edges), got {refusal}"
+        );
+        assert_eq!(refusal["connected_edges"], 1);
+
+        // Detach retracts exactly the refusal count.
+        let detach = server.retract_node(RetractNodeRequest {
+            node_id: a,
+            valid_time: Some(rfc3339_hours_ago(now, 1)),
+            detach: Some(true),
+        });
+        let detach: serde_json::Value = serde_json::from_str(&detach).unwrap();
+        assert!(detach.get("error").is_none(), "got {detach}");
+        assert_eq!(
+            detach["edges_retracted"], 1,
+            "detach must retract the same count the refusal reported"
+        );
+    }
+
+    /// Fix-round #2: one outgoing + one incoming edge from different peers
+    /// — the refusal reports 2, detach retracts 2, and BOTH edges obey the
+    /// before/after-T temporal matrix.
+    #[test]
+    fn retract_node_multi_edge_refusal_reports_two_and_detach_retracts_two() {
+        let server = create_test_server();
+        let now = Utc::now();
+        let x = create_person_at(&server, now, 3);
+        let b = create_person_at(&server, now, 3);
+        let c = create_person_at(&server, now, 3);
+        let e_out: EdgeResponse = parse_response(&server.create_edge(CreateEdgeRequest {
+            source_id: x,
+            target_id: b,
+            label: "KNOWS".to_string(),
+            properties: None,
+            valid_time: Some(rfc3339_hours_ago(now, 3)),
+            provenance: None,
+        }))
+        .unwrap();
+        let e_in: EdgeResponse = parse_response(&server.create_edge(CreateEdgeRequest {
+            source_id: c,
+            target_id: x,
+            label: "KNOWS".to_string(),
+            properties: None,
+            valid_time: Some(rfc3339_hours_ago(now, 3)),
+            provenance: None,
+        }))
+        .unwrap();
+
+        let refusal = server.retract_node(RetractNodeRequest {
+            node_id: x,
+            valid_time: Some(rfc3339_hours_ago(now, 1)),
+            detach: None,
+        });
+        let refusal: serde_json::Value = serde_json::from_str(&refusal).unwrap();
+        assert_eq!(
+            refusal["error"]["code"], "FAILED_PRECONDITION",
+            "got {refusal}"
+        );
+        assert_eq!(refusal["error"]["details"]["connected_edges"], 2);
+        assert_eq!(refusal["connected_edges"], 2);
+
+        let detach = server.retract_node(RetractNodeRequest {
+            node_id: x,
+            valid_time: Some(rfc3339_hours_ago(now, 1)),
+            detach: Some(true),
+        });
+        let detach: serde_json::Value = serde_json::from_str(&detach).unwrap();
+        assert!(detach.get("error").is_none(), "got {detach}");
+        assert_eq!(detach["edges_retracted"], 2);
+
+        // Both edges: queryable strictly before T, gone at/after T.
+        for edge_id in [e_out.id, e_in.id] {
+            let before = server.get_edge_at_time(GetEdgeAtTimeRequest {
+                edge_id,
+                valid_time: rfc3339_hours_ago(now, 2),
+                transaction_time: None,
+            });
+            let before: serde_json::Value = serde_json::from_str(&before).unwrap();
+            assert!(
+                before.get("error").is_none(),
+                "edge {edge_id} must remain queryable strictly before T, got {before}"
+            );
+
+            let after = server.get_edge_at_time(GetEdgeAtTimeRequest {
+                edge_id,
+                valid_time: rfc3339_hours_ago(now, 0),
+                transaction_time: None,
+            });
+            let after: serde_json::Value = serde_json::from_str(&after).unwrap();
+            assert!(
+                after.get("error").is_some(),
+                "edge {edge_id} must be gone after T, got {after}"
+            );
+
+            let current = server.get_edge(GetEdgeRequest {
+                edge_id,
+                include_vectors: None,
+            });
+            let current: serde_json::Value = serde_json::from_str(&current).unwrap();
+            assert_eq!(
+                current["error"]["code"], "NOT_FOUND",
+                "edge {edge_id} must be absent from current state, got {current}"
+            );
+        }
+    }
 }
 
 mod valid_time_write_tests {
@@ -8841,5 +8977,307 @@ mod structured_error_tests {
         );
         let (_, _, message) = assert_structured_error(&value, "list_changes bad tx_to");
         assert!(message.contains("Invalid tx_to"), "got: {message}");
+    }
+}
+
+// ============================================================================
+// Temporal Extent Tests (temporal_extent, Issue #3238)
+// ============================================================================
+
+mod temporal_extent_tests {
+    use super::*;
+
+    fn extent_req(by_label: Option<bool>) -> TemporalExtentRequest {
+        TemporalExtentRequest { by_label }
+    }
+
+    fn create_node_at(server: &AletheiaMcpServer, label: &str, valid_time: &str) -> NodeResponse {
+        let response = server.create_node(CreateNodeRequest {
+            valid_time: Some(valid_time.to_string()),
+            label: label.to_string(),
+            properties: Some({
+                let mut m = HashMap::new();
+                m.insert("name".to_string(), serde_json::json!("x"));
+                m
+            }),
+            provenance: None,
+        });
+        parse_response(&response).expect("create node")
+    }
+
+    fn assert_rfc3339(value: &serde_json::Value, context: &str) {
+        let s = value
+            .as_str()
+            .unwrap_or_else(|| panic!("{context} must be a string: {value}"));
+        chrono::DateTime::parse_from_rfc3339(s)
+            .unwrap_or_else(|e| panic!("{context} must be RFC3339, got '{s}': {e}"));
+    }
+
+    #[test]
+    fn test_temporal_extent_tool_listed_in_registry() {
+        let server = create_test_server();
+        let tools = server.list_tools_for_test();
+        assert!(
+            tools.iter().any(|name| name == "temporal_extent"),
+            "temporal_extent must be registered in the tool list"
+        );
+    }
+
+    #[test]
+    fn test_temporal_extent_empty_database_returns_null_bounds() {
+        let server = create_test_server();
+
+        let response = server.temporal_extent(extent_req(None));
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+
+        assert!(value.get("error").is_none(), "unexpected error: {value}");
+        // Bounds must be explicit nulls -- present in the payload, and
+        // definitely not epoch/1970 strings.
+        for dim in ["valid_time", "transaction_time"] {
+            for bound in ["earliest", "latest"] {
+                let b = value[dim]
+                    .get(bound)
+                    .unwrap_or_else(|| panic!("{dim}.{bound} must be present"));
+                assert!(
+                    b.is_null(),
+                    "{dim}.{bound} on an empty DB must be null, got {b}"
+                );
+            }
+        }
+        // Without by_label, no breakdown keys appear at all.
+        assert!(value.get("node_labels").is_none());
+        assert!(value.get("edge_types").is_none());
+    }
+
+    #[test]
+    fn test_temporal_extent_empty_database_by_label_returns_empty_breakdown() {
+        let server = create_test_server();
+
+        let response = server.temporal_extent(extent_req(Some(true)));
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+
+        assert!(value.get("error").is_none(), "unexpected error: {value}");
+        assert!(value["valid_time"]["earliest"].is_null());
+        assert!(value["transaction_time"]["latest"].is_null());
+        assert_eq!(value["node_labels"].as_array().unwrap().len(), 0);
+        assert_eq!(value["edge_types"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn test_temporal_extent_populated_shape_and_rfc3339() {
+        let server = create_test_server();
+
+        let alice = create_node_at(&server, "Person", "2021-03-01T00:00:00Z");
+        let acme = create_node_at(&server, "Company", "2023-06-15T00:00:00Z");
+        server.create_edge(CreateEdgeRequest {
+            valid_time: Some("2024-01-01T00:00:00Z".to_string()),
+            source_id: alice.id,
+            target_id: acme.id,
+            label: "WORKS_AT".to_string(),
+            properties: None,
+            provenance: None,
+        });
+
+        let response = server.temporal_extent(extent_req(None));
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+
+        assert!(value.get("error").is_none(), "unexpected error: {value}");
+
+        // Valid-time bounds reflect the backdated writes exactly (all
+        // intervals are open-ended, so only their starts count).
+        assert_eq!(
+            value["valid_time"]["earliest"],
+            serde_json::json!("2021-03-01T00:00:00.000000Z")
+        );
+        assert_eq!(
+            value["valid_time"]["latest"],
+            serde_json::json!("2024-01-01T00:00:00.000000Z")
+        );
+
+        // Transaction-time bounds are system-assigned but must be real,
+        // parseable RFC3339 strings (not sentinels, not micros integers).
+        assert_rfc3339(&value["transaction_time"]["earliest"], "tx earliest");
+        assert_rfc3339(&value["transaction_time"]["latest"], "tx latest");
+
+        // No breakdown without by_label.
+        assert!(value.get("node_labels").is_none());
+        assert!(value.get("edge_types").is_none());
+    }
+
+    #[test]
+    fn test_temporal_extent_expired_version_still_counts_toward_earliest() {
+        let server = create_test_server();
+
+        let alice = create_node_at(&server, "Person", "2021-03-01T00:00:00Z");
+        // Supersede the original version: its interval is closed, but its
+        // backdated start must still bound `earliest` (extent covers ALL
+        // recorded history, not just current state).
+        server.update_node(UpdateNodeRequest {
+            valid_time: Some("2025-01-01T00:00:00Z".to_string()),
+            node_id: alice.id,
+            properties: {
+                let mut m = HashMap::new();
+                m.insert("name".to_string(), serde_json::json!("Alice v2"));
+                m
+            },
+            provenance: None,
+        });
+
+        let response = server.temporal_extent(extent_req(None));
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+
+        assert!(value.get("error").is_none(), "unexpected error: {value}");
+        assert_eq!(
+            value["valid_time"]["earliest"],
+            serde_json::json!("2021-03-01T00:00:00.000000Z"),
+            "superseded version must still count toward earliest"
+        );
+        assert_eq!(
+            value["valid_time"]["latest"],
+            serde_json::json!("2025-01-01T00:00:00.000000Z")
+        );
+    }
+
+    #[test]
+    fn test_temporal_extent_by_label_breakdown() {
+        let server = create_test_server();
+
+        let alice = create_node_at(&server, "Person", "2021-03-01T00:00:00Z");
+        let acme = create_node_at(&server, "Company", "2023-06-15T00:00:00Z");
+        server.create_edge(CreateEdgeRequest {
+            valid_time: Some("2024-01-01T00:00:00Z".to_string()),
+            source_id: alice.id,
+            target_id: acme.id,
+            label: "WORKS_AT".to_string(),
+            properties: None,
+            provenance: None,
+        });
+
+        let response = server.temporal_extent(extent_req(Some(true)));
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+
+        assert!(value.get("error").is_none(), "unexpected error: {value}");
+
+        let node_labels = value["node_labels"].as_array().unwrap();
+        assert_eq!(node_labels.len(), 2);
+        // Sorted by label: Company before Person.
+        assert_eq!(node_labels[0]["label"], serde_json::json!("Company"));
+        assert_eq!(
+            node_labels[0]["valid_time"]["earliest"],
+            serde_json::json!("2023-06-15T00:00:00.000000Z")
+        );
+        assert_eq!(node_labels[1]["label"], serde_json::json!("Person"));
+        assert_eq!(
+            node_labels[1]["valid_time"]["earliest"],
+            serde_json::json!("2021-03-01T00:00:00.000000Z")
+        );
+        assert_rfc3339(
+            &node_labels[1]["transaction_time"]["earliest"],
+            "Person tx earliest",
+        );
+
+        let edge_types = value["edge_types"].as_array().unwrap();
+        assert_eq!(edge_types.len(), 1);
+        assert_eq!(edge_types[0]["edge_type"], serde_json::json!("WORKS_AT"));
+        assert_eq!(
+            edge_types[0]["valid_time"]["earliest"],
+            serde_json::json!("2024-01-01T00:00:00.000000Z")
+        );
+
+        // Overall bounds still cover the union of all labels.
+        assert_eq!(
+            value["valid_time"]["earliest"],
+            serde_json::json!("2021-03-01T00:00:00.000000Z")
+        );
+        assert_eq!(
+            value["valid_time"]["latest"],
+            serde_json::json!("2024-01-01T00:00:00.000000Z")
+        );
+    }
+
+    #[test]
+    fn test_temporal_extent_deleted_node_tombstone_still_counts() {
+        // Deletions count toward the extent: a node backdated to 2021 and
+        // then deleted must still bound valid_time.earliest, and both
+        // dimensions' latest must reflect the deletion event.
+        let server = create_test_server();
+
+        let alice = create_node_at(&server, "Person", "2021-03-01T00:00:00Z");
+        let delete_response = server.delete_node(DeleteNodeRequest {
+            node_id: alice.id,
+            detach: None,
+            valid_time: None,
+        });
+        let delete_value: serde_json::Value = serde_json::from_str(&delete_response).unwrap();
+        assert!(
+            delete_value.get("error").is_none(),
+            "unexpected delete error: {delete_value}"
+        );
+
+        let response = server.temporal_extent(extent_req(None));
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert!(value.get("error").is_none(), "unexpected error: {value}");
+
+        assert_eq!(
+            value["valid_time"]["earliest"],
+            serde_json::json!("2021-03-01T00:00:00.000000Z"),
+            "a deleted node's backdated start must still bound earliest"
+        );
+
+        // The deletion closed the valid interval at ~now and recorded the
+        // tombstone: both latest bounds move past the 2021 backdate.
+        for dim in ["valid_time", "transaction_time"] {
+            assert_rfc3339(&value[dim]["latest"], &format!("{dim} latest"));
+            let latest =
+                chrono::DateTime::parse_from_rfc3339(value[dim]["latest"].as_str().unwrap())
+                    .unwrap();
+            let backdate = chrono::DateTime::parse_from_rfc3339("2022-01-01T00:00:00Z").unwrap();
+            assert!(
+                latest > backdate,
+                "{dim} latest must reflect the deletion event, got {latest}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_as_of_before_extent_is_empty_inside_extent_has_data() {
+        // The answerability contract the extent exists to provide: an AS OF
+        // query strictly before valid_time.earliest returns empty, while the
+        // same query inside the extent returns data.
+        let server = create_test_server();
+
+        create_node_at(&server, "Person", "2021-03-01T00:00:00Z");
+
+        let response = server.temporal_extent(extent_req(None));
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(
+            value["valid_time"]["earliest"],
+            serde_json::json!("2021-03-01T00:00:00.000000Z")
+        );
+
+        // AS OF before the extent: empty (indistinguishable from "never
+        // existed" -- exactly why temporal_extent must be consulted first).
+        let before = server.get_schema(GetSchemaRequest {
+            as_of_valid_time: Some("2019-01-01T00:00:00Z".to_string()),
+            as_of_transaction_time: None,
+        });
+        let before: serde_json::Value = serde_json::from_str(&before).unwrap();
+        assert!(before.get("error").is_none(), "unexpected error: {before}");
+        assert_eq!(
+            before["node_labels"].as_array().unwrap().len(),
+            0,
+            "AS OF before valid_time.earliest must return empty"
+        );
+
+        // The same query inside the extent returns the data.
+        let inside = server.get_schema(GetSchemaRequest {
+            as_of_valid_time: Some("2022-01-01T00:00:00Z".to_string()),
+            as_of_transaction_time: None,
+        });
+        let inside: serde_json::Value = serde_json::from_str(&inside).unwrap();
+        assert!(inside.get("error").is_none(), "unexpected error: {inside}");
+        let labels = inside["node_labels"].as_array().unwrap();
+        assert_eq!(labels.len(), 1, "AS OF inside the extent must return data");
+        assert_eq!(labels[0]["label"], serde_json::json!("Person"));
     }
 }

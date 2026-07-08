@@ -1384,7 +1384,13 @@ impl WriteTransaction {
     /// Idempotency: retracting an already-retracted (or deleted) node is a
     /// no-op that returns the *existing* `valid_to` (with
     /// `already_retracted: true`) — no version is appended and no WAL entry
-    /// is written, regardless of the `valid_to` passed here.
+    /// is written, regardless of the `valid_to` passed here. This holds for
+    /// writes already buffered in THIS transaction too: a second
+    /// `retract_node` of the same node returns the first call's buffered
+    /// `valid_to`, and retracting a node this transaction has already
+    /// `delete_node`-ed mirrors the committed-delete case (a degenerate
+    /// `[d, d)` interval where `d` is the buffered deletion's valid time)
+    /// rather than double-buffering a write.
     ///
     /// # Errors
     ///
@@ -1409,6 +1415,41 @@ impl WriteTransaction {
                     expected: "Active".to_string(),
                 }
                 .into());
+            }
+
+            // A retraction or deletion already buffered in THIS transaction
+            // is a no-op (mirrors the committed already-retracted/deleted
+            // cases below): without this guard a double retract — or a
+            // delete followed by a retract — would buffer two writes for
+            // the same node, WAL-appending twice and risking a half-applied
+            // state if the commit fails between them.
+            match self.buffer.get_node_write(node_id) {
+                Some(super::BufferedWrite::RetractNode {
+                    valid_to: buffered_valid_to,
+                    ..
+                }) => {
+                    let buffered_valid_to = *buffered_valid_to;
+                    let valid_from = self.head_node_valid_from(node_id);
+                    return Ok(super::RetractionResult {
+                        valid_from,
+                        valid_to: buffered_valid_to,
+                        already_retracted: true,
+                        edges_retracted: 0,
+                    });
+                }
+                Some(super::BufferedWrite::DeleteNode { valid_from, .. }) => {
+                    // Delete-parity: a committed delete leaves a tombstone
+                    // with the degenerate interval [d, d); report the same
+                    // shape for a deletion still sitting in this buffer.
+                    let deleted_at = *valid_from;
+                    return Ok(super::RetractionResult {
+                        valid_from: deleted_at,
+                        valid_to: deleted_at,
+                        already_retracted: true,
+                        edges_retracted: 0,
+                    });
+                }
+                _ => {}
             }
 
             match self.current.get_node(node_id) {
@@ -1483,20 +1524,34 @@ impl WriteTransaction {
 
             // A retraction already buffered in THIS transaction (e.g. the
             // detach form visiting a self-loop from both adjacency
-            // directions) is a no-op returning the buffered end.
-            if let Some(super::BufferedWrite::RetractEdge {
-                valid_to: buffered_valid_to,
-                ..
-            }) = self.buffer.get_edge_write(edge_id)
-            {
-                let buffered_valid_to = *buffered_valid_to;
-                let valid_from = self.head_edge_valid_from(edge_id);
-                return Ok(super::RetractionResult {
-                    valid_from,
+            // directions) is a no-op returning the buffered end; a deletion
+            // already buffered in this transaction mirrors the
+            // committed-delete case (degenerate [d, d) tombstone interval)
+            // — see the identical guard in retract_node.
+            match self.buffer.get_edge_write(edge_id) {
+                Some(super::BufferedWrite::RetractEdge {
                     valid_to: buffered_valid_to,
-                    already_retracted: true,
-                    edges_retracted: 0,
-                });
+                    ..
+                }) => {
+                    let buffered_valid_to = *buffered_valid_to;
+                    let valid_from = self.head_edge_valid_from(edge_id);
+                    return Ok(super::RetractionResult {
+                        valid_from,
+                        valid_to: buffered_valid_to,
+                        already_retracted: true,
+                        edges_retracted: 0,
+                    });
+                }
+                Some(super::BufferedWrite::DeleteEdge { valid_from, .. }) => {
+                    let deleted_at = *valid_from;
+                    return Ok(super::RetractionResult {
+                        valid_from: deleted_at,
+                        valid_to: deleted_at,
+                        already_retracted: true,
+                        edges_retracted: 0,
+                    });
+                }
+                _ => {}
             }
 
             match self.current.get_edge(edge_id) {

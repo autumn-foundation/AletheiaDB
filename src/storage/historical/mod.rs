@@ -1665,6 +1665,32 @@ impl HistoricalStorage {
         result
     }
 
+    /// Visit every node version retained in hot historical storage
+    /// (read-only, unordered).
+    ///
+    /// Includes expired/superseded versions and delete tombstones — hot
+    /// storage never prunes versions (the retention policy only rejects
+    /// over-limit writes). Versions whose payload has been migrated to cold
+    /// storage are not visited. Used by `AletheiaDB::temporal_extent_by_label`
+    /// (Issue #3238) to fold per-label temporal bounds without allocating an
+    /// intermediate map.
+    pub fn visit_node_versions(&self, mut f: impl FnMut(&NodeVersion)) {
+        for version in self.node_versions.values() {
+            f(version);
+        }
+    }
+
+    /// Visit every edge version retained in hot historical storage
+    /// (read-only, unordered).
+    ///
+    /// Edge counterpart of [`visit_node_versions`](Self::visit_node_versions);
+    /// the same coverage notes apply.
+    pub fn visit_edge_versions(&self, mut f: impl FnMut(&EdgeVersion)) {
+        for version in self.edge_versions.values() {
+            f(version);
+        }
+    }
+
     /// Collect changefeed records for every committed version that falls within the given
     /// transaction-time window, optionally constrained by a valid-time window and/or a
     /// node-label / edge-type filter (Issue #3216).

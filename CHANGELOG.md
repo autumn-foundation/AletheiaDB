@@ -9,6 +9,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Valid-time retraction (Issue #3230): `AletheiaDB::retract_node`,
+  `retract_node_detach`, and `retract_edge` (plus
+  `WriteTransaction::retract_node`/`retract_edge` and the MCP
+  `retract_node`/`retract_edge` tools) close an entity's valid-time
+  interval at a chosen `valid_to` (default now; backdating and
+  up-to-one-year future dating supported) **without deleting its history**.
+  `AS OF VALID_TIME` before `valid_to` still returns the fact; at/after it
+  does not; `AS OF SYSTEM_TIME` before the retraction's commit still shows
+  the fact open-ended (append-only — the past record is never rewritten).
+  `retract_node` mirrors the #3209 safe-by-default contract: it refuses
+  with the count of **distinct** connected edges (a self-loop counts once)
+  unless `detach` co-retracts them atomically at the same `valid_to`.
+  Re-retracting an already-retracted (or deleted) entity is an idempotent
+  no-op returning the existing interval. New WAL operations
+  `RetractNode`/`RetractEdge` replay faithfully on crash recovery, honoring
+  the logged `valid_to`. See
+  [docs/guides/mcp-query-tool.md](docs/guides/mcp-query-tool.md#retracting-a-fact-closing-valid-time).
+
+- Queryable bi-temporal extent (Issue #3238):
+  `AletheiaDB::temporal_extent()` / `temporal_extent_by_label()` and the MCP
+  `temporal_extent` tool report the dataset's earliest/latest valid-time and
+  transaction-time coordinates across recorded history — including
+  expired/superseded versions and delete tombstones — so a caller (notably
+  an LLM over MCP) can calibrate `AS OF` queries to land inside real data.
+  Overall bounds are O(1) reads of an aggregate the temporal indexes
+  maintain at write time and only ever widen while the process runs; an
+  empty database returns explicit `null`s/`None`s, never epoch 0. Optional
+  `by_label: true` adds per-node-label / per-edge-type bounds folded from
+  hot-tier history. Known limitation: on databases with cold-storage
+  migration, versions migrated to the cold tier before the last restart are
+  not reflected (the indexes rebuild from hot-tier versions at startup).
+
 - Valid-time writes on the convenience API and MCP tools (Issue #3221):
   `AletheiaDB::create_node_with_valid_time`, `create_edge_with_valid_time`,
   `update_node_with_valid_time`, `update_edge_with_valid_time`,

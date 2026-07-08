@@ -639,6 +639,55 @@ mod tests {
                 .get_node_at_time(node_id, time::now(), time::now())
                 .is_err()
         );
+
+        // Append-only AS OF SYSTEM_TIME contract, post-replay (fix-round
+        // #8): the PRE-retraction head must still carry an OPEN valid
+        // interval with its transaction time closed at the LOGGED
+        // RetractNode entry timestamp — replay must not substitute the
+        // replay time, and must never rewrite the pre-retraction record.
+        let entries = wal.read_from(LSN::initial()).unwrap();
+        let logged_retract_ts = entries
+            .iter()
+            .find(|e| matches!(e.operation, WalOperation::RetractNode { .. }))
+            .expect("RetractNode entry must be in the WAL")
+            .timestamp;
+        let logged_create_ts = entries
+            .iter()
+            .find(|e| matches!(e.operation, WalOperation::CreateNode { .. }))
+            .expect("CreateNode entry must be in the WAL")
+            .timestamp;
+
+        let history = historical.get_node_history(node_id).unwrap();
+        assert_eq!(history.version_count(), 2, "create + retraction versions");
+        let pre_retraction_head = &history.versions[0];
+        assert!(
+            pre_retraction_head.temporal.valid_time().is_current(),
+            "pre-retraction head's valid interval must stay open-ended after replay"
+        );
+        assert!(
+            !pre_retraction_head.temporal.transaction_time().is_current(),
+            "pre-retraction head's transaction time must be closed after replay"
+        );
+        assert_eq!(
+            pre_retraction_head.temporal.transaction_time().end(),
+            logged_retract_ts,
+            "transaction time must close at the LOGGED entry timestamp, not the replay time"
+        );
+
+        // Anchoring AS OF SYSTEM_TIME before the retraction's logged commit
+        // shows the fact open-ended (valid even at valid times >= valid_to);
+        // anchoring at the retraction's commit does not.
+        assert!(
+            historical
+                .get_node_at_time(node_id, time::now(), logged_create_ts)
+                .is_ok(),
+            "AS OF SYSTEM_TIME before the retraction must show the fact open-ended"
+        );
+        assert!(
+            historical
+                .get_node_at_time(node_id, time::now(), logged_retract_ts)
+                .is_err()
+        );
     }
 
     /// Issue #3230: RetractEdge replay — same contract as RetractNode.
