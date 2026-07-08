@@ -8,6 +8,7 @@
 
 use aletheiadb::Error;
 use aletheiadb::{AletheiaDB, PropertyMapBuilder, WriteOps};
+use aletheiadb::{SimilarityQuery, StorageError};
 
 // ============================================================
 // Helper Functions
@@ -1408,9 +1409,20 @@ fn test_delete_node_cascade_removes_from_vector_index() {
         .create_edge(node1, node2, "REFERENCES", PropertyMap::new())
         .unwrap();
 
-    // Sanity: both nodes indexed before deletion.
-    let results_before = db.find_similar_by_embedding(&emb1, 10).unwrap();
-    assert_eq!(results_before.len(), 2, "Both nodes indexed before cascade");
+    // Sanity: exactly {node1, node2} indexed before deletion. Similarity
+    // results are score-ordered and the two nodes' ordering is not part of
+    // this test's contract, so compare sorted ids (order-robust exact set).
+    let results_before = db
+        .similarity_search(SimilarityQuery::from_embedding(emb1.as_slice()).k(10))
+        .unwrap();
+    let mut ids_before: Vec<_> = results_before.iter().map(|(id, _)| *id).collect();
+    ids_before.sort_unstable();
+    let mut expected_before = vec![node1, node2];
+    expected_before.sort_unstable();
+    assert_eq!(
+        ids_before, expected_before,
+        "Both nodes indexed before cascade"
+    );
 
     // Cascade-delete node1 (removes node + connected edges).
     db.write(|tx| {
@@ -1423,20 +1435,26 @@ fn test_delete_node_cascade_removes_from_vector_index() {
     assert!(db.get_node(node1).is_err(), "Node should be deleted");
     assert!(db.get_edge(edge_id).is_err(), "Edge should be deleted");
 
-    let results_after = db.find_similar_by_embedding(&emb1, 10).unwrap();
+    let results_after = db
+        .similarity_search(SimilarityQuery::from_embedding(emb1.as_slice()).k(10))
+        .unwrap();
+    let ids_after: Vec<_> = results_after.iter().map(|(id, _)| *id).collect();
     assert_eq!(
-        results_after.len(),
-        1,
-        "Cascade delete should remove node1 from the HNSW index"
+        ids_after,
+        vec![node2],
+        "Cascade delete should remove node1 from the HNSW index, leaving only node2"
     );
-    assert_eq!(results_after[0].0, node2, "Only node2 should remain");
 }
 
 /// Test that deleting a node WITHOUT a vector property in a vector-indexed
 /// database succeeds and leaves the index untouched.
 ///
-/// The vector-removal path runs for every deletion; a node that was never
-/// indexed must not cause an error, and indexed nodes must stay searchable.
+/// The vector-removal path runs for every deletion, but the delete path
+/// deliberately swallows vector-removal errors (`let _ =
+/// try_remove_from_index(...)` in src/storage/current/mod.rs), so error
+/// propagation is not observable here. What this test pins: the deletion
+/// completes (no panic or refusal) and the other, indexed entry remains
+/// searchable.
 #[test]
 fn test_delete_node_never_indexed_leaves_index_intact() {
     let db = setup_indexed_db(128);
@@ -1468,9 +1486,11 @@ fn test_delete_node_never_indexed_leaves_index_intact() {
     .expect("Deleting a node without a vector property should succeed");
 
     // The indexed node must remain searchable.
-    let results = db.find_similar_by_embedding(&emb, 10).unwrap();
-    assert_eq!(results.len(), 1, "Index should be unaffected");
-    assert_eq!(results[0].0, indexed_node);
+    let results = db
+        .similarity_search(SimilarityQuery::from_embedding(emb.as_slice()).k(10))
+        .unwrap();
+    let ids: Vec<_> = results.iter().map(|(id, _)| *id).collect();
+    assert_eq!(ids, vec![indexed_node], "Index should be unaffected");
 }
 
 /// Test delete-then-recreate: after deleting a vector-indexed node and
@@ -1513,17 +1533,19 @@ fn test_recreate_after_delete_returns_only_new_node() {
         .unwrap();
     assert_ne!(old_node, new_node, "New node must get a fresh id");
 
-    let results = db.find_similar_by_embedding(&emb, 10).unwrap();
-    assert_eq!(results.len(), 1, "Exactly one node should be indexed");
-    assert_eq!(results[0].0, new_node, "Search must return the new node");
-    assert!(
-        !results.iter().any(|(id, _)| *id == old_node),
-        "Deleted node id must never reappear in search results"
+    let results = db
+        .similarity_search(SimilarityQuery::from_embedding(emb.as_slice()).k(10))
+        .unwrap();
+    let ids: Vec<_> = results.iter().map(|(id, _)| *id).collect();
+    assert_eq!(
+        ids,
+        vec![new_node],
+        "Search must return exactly the new node; the deleted id must never reappear"
     );
 }
 
-/// Test that find_similar() anchored on a deleted node returns an error
-/// (node not found) instead of panicking or returning stale results.
+/// Test that a similarity search anchored on a deleted node returns a
+/// NodeNotFound error instead of panicking or returning stale results.
 #[test]
 fn test_find_similar_from_deleted_node_errors() {
     let db = setup_indexed_db(128);
@@ -1544,11 +1566,17 @@ fn test_find_similar_from_deleted_node_errors() {
     })
     .unwrap();
 
-    // Using the deleted node as the query anchor must fail cleanly.
-    let result = db.find_similar(node_id, 10);
+    // Using the deleted node as the query anchor must fail cleanly with
+    // NodeNotFound -- not merely any error (an unrelated index-state error
+    // must not satisfy this test).
+    let result = db.similarity_search(SimilarityQuery::from_node(node_id).k(10));
+    let err = result.expect_err("similarity search anchored on a deleted node should fail");
     assert!(
-        result.is_err(),
-        "find_similar on a deleted node should return an error, got: {result:?}"
+        matches!(
+            &err,
+            Error::Storage(StorageError::NodeNotFound(id)) if *id == node_id
+        ),
+        "expected NodeNotFound for the deleted node, got: {err:?}"
     );
 }
 
@@ -1607,7 +1635,11 @@ fn test_temporal_vector_history_preserved_across_delete() {
 
     // History BEFORE the deletion must still contain the node.
     let results_before = db
-        .find_similar_as_of(&emb, 10, before_delete)
+        .similarity_search(
+            SimilarityQuery::from_embedding(emb.as_slice())
+                .k(10)
+                .at_time(before_delete),
+        )
         .expect("Temporal query before deletion should succeed");
     assert!(
         results_before.iter().any(|(id, _)| *id == node_id),
@@ -1617,7 +1649,11 @@ fn test_temporal_vector_history_preserved_across_delete() {
 
     // AFTER the deletion the node must be absent.
     let results_after = db
-        .find_similar_as_of(&emb, 10, after_delete)
+        .similarity_search(
+            SimilarityQuery::from_embedding(emb.as_slice())
+                .k(10)
+                .at_time(after_delete),
+        )
         .expect("Temporal query after deletion should succeed");
     assert!(
         !results_after.iter().any(|(id, _)| *id == node_id),
@@ -1626,7 +1662,9 @@ fn test_temporal_vector_history_preserved_across_delete() {
     );
 
     // Current-state search must also be clean.
-    let current = db.find_similar_by_embedding(&emb, 10).unwrap();
+    let current = db
+        .similarity_search(SimilarityQuery::from_embedding(emb.as_slice()).k(10))
+        .unwrap();
     assert!(
         !current.iter().any(|(id, _)| *id == node_id),
         "Current-state search must not return the deleted node"
