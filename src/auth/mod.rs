@@ -68,6 +68,38 @@ impl std::fmt::Display for AuthMode {
     }
 }
 
+/// Resolve an optionally-supplied auth-mode string (typically the value of
+/// `ALETHEIADB_AUTH_MODE`) into an [`AuthMode`], fail-closed.
+///
+/// - `None` (variable unset) → [`AuthMode::Required`] (the default).
+/// - A valid value (`"required"` / `"anonymous"`, case-insensitive,
+///   whitespace-tolerant) → that mode.
+/// - An invalid value → a warning on stderr and [`AuthMode::Required`] —
+///   **never** anonymous, so a typo cannot silently disable authentication.
+#[must_use]
+pub fn parse_auth_mode_value(raw: Option<&str>) -> AuthMode {
+    match raw {
+        None => AuthMode::Required,
+        Some(raw) => match raw.parse::<AuthMode>() {
+            Ok(mode) => mode,
+            Err(e) => {
+                eprintln!("WARNING: {e}. Falling back to auth mode 'required'.");
+                AuthMode::Required
+            }
+        },
+    }
+}
+
+/// Read `ALETHEIADB_AUTH_MODE` from the environment via
+/// [`parse_auth_mode_value`] (fail-closed: unset or invalid → `Required`).
+///
+/// Shared by the HTTP and MCP server binaries so both surfaces resolve the
+/// variable with identical semantics.
+#[must_use]
+pub fn auth_mode_from_env() -> AuthMode {
+    parse_auth_mode_value(std::env::var("ALETHEIADB_AUTH_MODE").ok().as_deref())
+}
+
 /// A secret string wrapper that never exposes its contents through `Debug`
 /// and zeroizes its buffer on drop.
 ///
@@ -118,6 +150,30 @@ mod tests {
     fn auth_mode_display() {
         assert_eq!(AuthMode::Required.to_string(), "required");
         assert_eq!(AuthMode::Anonymous.to_string(), "anonymous");
+    }
+
+    #[test]
+    fn parse_auth_mode_value_is_fail_closed() {
+        // Unset → Required.
+        assert_eq!(parse_auth_mode_value(None), AuthMode::Required);
+        // Valid values pass through (case-insensitive, trimmed).
+        assert_eq!(parse_auth_mode_value(Some("required")), AuthMode::Required);
+        assert_eq!(
+            parse_auth_mode_value(Some("anonymous")),
+            AuthMode::Anonymous
+        );
+        assert_eq!(
+            parse_auth_mode_value(Some(" ANONYMOUS ")),
+            AuthMode::Anonymous
+        );
+        // Invalid values MUST fall back to Required, never Anonymous.
+        assert_eq!(parse_auth_mode_value(Some("open")), AuthMode::Required);
+        assert_eq!(
+            parse_auth_mode_value(Some("anonymos")),
+            AuthMode::Required,
+            "a typo near 'anonymous' must still fail closed"
+        );
+        assert_eq!(parse_auth_mode_value(Some("")), AuthMode::Required);
     }
 
     #[test]

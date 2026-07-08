@@ -34,9 +34,17 @@ const KEY_PREFIX_RANDOM_CHARS: usize = 8;
 /// Random bytes per generated key (base64url-encoded into the key string).
 const KEY_RANDOM_BYTES: usize = 32;
 
+/// Maximum accepted length (in characters) of a key/principal display name.
+const MAX_KEY_NAME_CHARS: usize = 256;
+
 /// A named identity bound to a role. Never holds key material, so listing
 /// principals is masked by construction.
+///
+/// Marked `#[non_exhaustive]`: future work (e.g. multi-tenancy, Issue #3365)
+/// will add fields. Out-of-crate code obtains principals from
+/// [`AuthStore`] operations rather than constructing them.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct Principal {
     /// Short random identifier (stable across restarts for persisted keys).
     pub id: String,
@@ -191,9 +199,10 @@ impl AuthStore {
     ///
     /// # Errors
     ///
-    /// Returns [`AuthError::InvalidInput`] for an empty name, or a
-    /// persistence error if the store is file-backed and saving fails (in
-    /// which case the key is rolled back and does not take effect).
+    /// Returns [`AuthError::InvalidInput`] for an empty name or a name
+    /// longer than 256 characters, or a persistence error if the store is
+    /// file-backed and saving fails (in which case the key is rolled back
+    /// and does not take effect).
     pub fn create_key(
         &self,
         name: &str,
@@ -204,6 +213,11 @@ impl AuthStore {
             return Err(AuthError::InvalidInput(
                 "key name must not be empty".to_string(),
             ));
+        }
+        if name.chars().count() > MAX_KEY_NAME_CHARS {
+            return Err(AuthError::InvalidInput(format!(
+                "key name must be at most {MAX_KEY_NAME_CHARS} characters"
+            )));
         }
 
         let mut random_bytes = [0u8; KEY_RANDOM_BYTES];
@@ -325,7 +339,29 @@ impl AuthStore {
         // Idempotency: same plaintext already installed → return it.
         for entry in self.records.iter() {
             if bool::from(entry.value().digest.ct_eq(&digest)) {
-                return Ok(entry.value().principal.clone());
+                let existing = entry.value().principal.clone();
+                if existing.role != role {
+                    // Fail-closed: the requested role is IGNORED, the
+                    // existing principal (and its role) is kept — a
+                    // re-supplied bootstrap key can never escalate a key
+                    // that already exists. Warn loudly so the operator
+                    // notices the collision. NEVER log key material here.
+                    eprintln!(
+                        "WARNING: bootstrap key '{name}' matches an existing key belonging to \
+                         principal '{}' with role '{}'; the requested role '{role}' is ignored \
+                         and the existing principal is returned (no privilege change)",
+                        existing.name, existing.role
+                    );
+                    #[cfg(feature = "http-server")]
+                    tracing::warn!(
+                        existing_principal = %existing.name,
+                        existing_role = %existing.role,
+                        requested_role = %role,
+                        "bootstrap key matches an existing key with a different role; \
+                         keeping the existing principal"
+                    );
+                }
+                return Ok(existing);
             }
         }
 
@@ -416,6 +452,10 @@ impl AuthStore {
 
         // Atomic write: write to a sibling temp file, fsync, then rename.
         let tmp_path = path.with_extension("tmp");
+        // Remove any stale temp file first: `mode(0o600)` only applies when
+        // the file is *created*, so a pre-existing temp file (e.g. from a
+        // crashed save) could otherwise keep looser permissions.
+        let _ = std::fs::remove_file(&tmp_path);
         {
             use std::io::Write as _;
             let mut options = std::fs::OpenOptions::new();
@@ -430,6 +470,15 @@ impl AuthStore {
             file.sync_all()?;
         }
         std::fs::rename(&tmp_path, path)?;
+        // Make the rename itself durable: fsync the parent directory so the
+        // new directory entry survives a crash (unix only; directories are
+        // not opened for sync on other platforms).
+        #[cfg(unix)]
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::File::open(parent)?.sync_all()?;
+        }
         Ok(())
     }
 }

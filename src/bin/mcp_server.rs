@@ -84,30 +84,18 @@ use std::sync::Arc;
 use rmcp::{ServiceExt, transport::stdio};
 
 use aletheiadb::AletheiaDB;
-use aletheiadb::auth::{AuthMode, AuthStore, Role, SecretString};
+use aletheiadb::auth::{AuthMode, AuthStore, Role, SecretString, auth_mode_from_env};
 use aletheiadb::mcp::{AletheiaMcpServer, McpAuthConfig, validate_mcp_auth_startup};
-
-/// Parse `ALETHEIADB_AUTH_MODE`. Unset → `Required` (the conservative
-/// default). An invalid value also falls back to `Required` — never to
-/// anonymous — so a typo cannot silently disable authentication.
-fn parse_auth_mode() -> AuthMode {
-    match std::env::var("ALETHEIADB_AUTH_MODE") {
-        Ok(raw) => match raw.parse::<AuthMode>() {
-            Ok(mode) => mode,
-            Err(e) => {
-                eprintln!("WARNING: {e}. Falling back to auth mode 'required'.");
-                AuthMode::Required
-            }
-        },
-        Err(_) => AuthMode::Required,
-    }
-}
 
 /// Read a secret-bearing env var into a redacted [`SecretString`], if set
 /// and non-empty.
+///
+/// The value is trimmed: presented tokens are trimmed at the transport
+/// layer, so an env value with stray whitespace could otherwise never
+/// verify.
 fn parse_secret_env(name: &str) -> Option<SecretString> {
     match std::env::var(name) {
-        Ok(raw) if !raw.trim().is_empty() => Some(SecretString::new(raw)),
+        Ok(raw) if !raw.trim().is_empty() => Some(SecretString::new(raw.trim())),
         _ => None,
     }
 }
@@ -140,7 +128,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     // Resolve authentication (Issue #3350): required by default; the
     // session credential authenticates every tool call.
-    let auth_mode = parse_auth_mode();
+    let auth_mode = auth_mode_from_env();
     let store = build_auth_store()?;
     if let Err(msg) = validate_mcp_auth_startup(auth_mode, &store) {
         eprintln!("aletheia-mcp refusing to start: {msg}");

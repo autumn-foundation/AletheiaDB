@@ -15,8 +15,8 @@
 //! # Run with permissive CORS (development only!)
 //! ALETHEIADB_CORS_PERMISSIVE=true cargo run --bin aletheia-server --features http-server
 //!
-//! # Health check
-//! curl http://localhost:1963/status
+//! # Health check (auth is required by default: pass a valid API key)
+//! curl -H "x-api-key: $ALETHEIADB_BOOTSTRAP_ADMIN_KEY" http://localhost:1963/status
 //! ```
 //!
 //! # Environment Variables
@@ -46,7 +46,23 @@
 //!
 //! # Endpoints
 //!
-//! - `GET /status` - Health check endpoint, returns `{"status": "healthy"}`
+//! All AletheiaDB endpoints require a credential in `required` mode
+//! (`Authorization: Bearer <key>` or `x-api-key`); see
+//! `docs/guides/access-control-matrix.md` for role classes.
+//!
+//! - `GET /status` - Health check endpoint (metrics class), returns
+//!   `{"status": "healthy"}`
+//! - `POST /query` - JSON query API (`find_node`, `create_node`, bulk ops,
+//!   `execute_query`, ...); read or write class per operation
+//! - `POST /admin/keys` - Mint an API key (admin class)
+//! - `GET /admin/keys` - List principals, masked (admin class)
+//! - `POST /admin/keys/revoke` - Revoke a key by principal id (admin class)
+//!
+//! The autumn-web framework additionally serves unauthenticated
+//! health/metadata routes (`/health`, `/live`, `/ready`, `/startup`,
+//! `/actuator/health|info|metrics|a11y|ui`); its sensitive actuator group is
+//! force-disabled in every profile. See
+//! `docs/guides/security-quickstart.md`.
 //!
 //! # Security Notes
 //!
@@ -59,7 +75,7 @@
 //! The server handles SIGTERM and SIGINT signals for graceful shutdown,
 //! allowing in-flight requests to complete before terminating.
 
-use aletheiadb::auth::{AuthMode, SecretString};
+use aletheiadb::auth::{SecretString, auth_mode_from_env};
 use aletheiadb::http::{CorsConfig, ServerConfig, run_server};
 use std::env;
 use std::path::PathBuf;
@@ -124,26 +140,14 @@ fn parse_data_dir() -> Option<PathBuf> {
     aletheiadb::config::data_dir_from_env()
 }
 
-/// Parse `ALETHEIADB_AUTH_MODE`. Unset → `Required` (the conservative
-/// default). An invalid value also falls back to `Required` — never to
-/// anonymous — so a typo cannot silently disable authentication.
-fn parse_auth_mode() -> AuthMode {
-    match env::var("ALETHEIADB_AUTH_MODE") {
-        Ok(raw) => match raw.parse::<AuthMode>() {
-            Ok(mode) => mode,
-            Err(e) => {
-                eprintln!("WARNING: {e}. Falling back to auth mode 'required'.");
-                AuthMode::Required
-            }
-        },
-        Err(_) => AuthMode::Required,
-    }
-}
-
 /// Parse `ALETHEIADB_BOOTSTRAP_ADMIN_KEY` into a redacted secret, if set.
+///
+/// The value is trimmed: the HTTP extractor trims presented tokens, so an
+/// env value with stray whitespace (e.g. from `echo` without `-n` piped into
+/// the environment) could otherwise never verify.
 fn parse_bootstrap_admin_key() -> Option<SecretString> {
     match env::var("ALETHEIADB_BOOTSTRAP_ADMIN_KEY") {
-        Ok(raw) if !raw.trim().is_empty() => Some(SecretString::new(raw)),
+        Ok(raw) if !raw.trim().is_empty() => Some(SecretString::new(raw.trim())),
         _ => None,
     }
 }
@@ -159,7 +163,7 @@ async fn main() {
         .port(port)
         .host(host)
         .cors(cors)
-        .auth_mode(parse_auth_mode());
+        .auth_mode(auth_mode_from_env());
     if let Some(path) = data_dir {
         builder = builder.data_dir(path);
     }

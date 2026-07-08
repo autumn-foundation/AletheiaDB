@@ -9,7 +9,7 @@
 //! so the route shape stays uniform with the rest of the JSON API and avoids
 //! leaning on autumn's attribute-macro path-parameter support.
 
-use crate::auth::{AccessClass, Role};
+use crate::auth::{AccessClass, AuthError, Role};
 use crate::http::auth::AuthContext;
 use crate::http::error::AletheiaHttpError;
 use crate::http::handlers::ApiResponse;
@@ -47,7 +47,11 @@ pub async fn create_key(
     let (principal, key) = auth
         .store()
         .create_key(&req.name, req.role)
-        .map_err(|e| AletheiaHttpError::Internal(e.to_string()))?;
+        .map_err(|e| match e {
+            // Caller-fault input (empty/overlong name) is a 400, not a 500.
+            AuthError::InvalidInput(msg) => AletheiaHttpError::BadRequest(msg),
+            other => AletheiaHttpError::Internal(other.to_string()),
+        })?;
 
     Ok(Json(ApiResponse::success(json!({
         "id": principal.id,

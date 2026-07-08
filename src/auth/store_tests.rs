@@ -291,6 +291,51 @@ fn create_key_rejects_empty_name() {
 }
 
 #[test]
+fn create_key_rejects_overlong_name() {
+    let store = AuthStore::new();
+    let long_name = "x".repeat(300);
+    match store.create_key(&long_name, Role::Reader) {
+        Err(AuthError::InvalidInput(msg)) => {
+            assert!(msg.contains("256"), "message should name the cap: {msg}");
+        }
+        other => panic!("expected InvalidInput for a 300-char name, got {other:?}"),
+    }
+    // Exactly at the cap is accepted.
+    let max_name = "y".repeat(256);
+    assert!(store.create_key(&max_name, Role::Reader).is_ok());
+}
+
+/// Issue #3350 review: re-supplying a bootstrap key whose plaintext matches
+/// an existing record with a DIFFERENT role must return the existing
+/// principal unchanged (fail-closed — no privilege escalation), warning
+/// aside.
+#[test]
+fn bootstrap_key_role_collision_keeps_existing_principal_and_role() {
+    let store = AuthStore::new();
+    let original = store
+        .insert_bootstrap_key("metrics-probe", Role::Metrics, "shared-plaintext")
+        .expect("first insert");
+    assert_eq!(original.role, Role::Metrics);
+
+    // Same plaintext, escalated role requested: must NOT escalate.
+    let returned = store
+        .insert_bootstrap_key("bootstrap-admin", Role::Admin, "shared-plaintext")
+        .expect("collision insert still succeeds");
+    assert_eq!(returned.id, original.id, "existing principal returned");
+    assert_eq!(returned.name, "metrics-probe", "existing name kept");
+    assert_eq!(
+        returned.role,
+        Role::Metrics,
+        "requested admin role must be ignored (fail-closed)"
+    );
+    assert_eq!(store.len(), 1, "no duplicate record created");
+
+    // The store still verifies the key with the ORIGINAL role.
+    let verified = store.verify("shared-plaintext").expect("verifies");
+    assert_eq!(verified.role, Role::Metrics);
+}
+
+#[test]
 fn debug_output_contains_no_digests() {
     let store = AuthStore::new();
     let (_p, key) = store.create_key("dbg", Role::Reader).expect("create");
