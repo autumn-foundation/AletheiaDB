@@ -67,7 +67,7 @@ use crate::storage::CurrentStorage;
 
 use super::builder::Query;
 use super::ir::QueryOp;
-use super::plan::{LogicalOp, LogicalPlan, ScanOp, TemporalContext, UnaryOp};
+use super::plan::{LogicalOp, LogicalPlan, OptionalStep, ScanOp, TemporalContext, UnaryOp};
 
 pub use cost::{Cost, CostModel};
 pub use physical::{PhysicalOp, PhysicalPlan};
@@ -265,6 +265,15 @@ impl QueryPlanner {
 
     /// Apply a QueryOp to the current logical plan
     fn apply_query_op(&self, current: Option<LogicalOp>, op: &QueryOp) -> Result<LogicalOp> {
+        // Optional (OPTIONAL MATCH) can appear both in source position (as a
+        // leading clause with its own scan) and as a per-row apply operator.
+        if let QueryOp::Optional { ops } = op {
+            let source_position = current.is_none();
+            let steps = self.convert_optional_steps(ops, source_position)?;
+            let input = current.unwrap_or(LogicalOp::Empty);
+            return Ok(LogicalOp::unary(UnaryOp::OptionalApply { steps }, input));
+        }
+
         // Check if it is a source operation (starts a new pipeline)
         if let Some(source_op) = self.apply_source_op(op)? {
             return Ok(source_op);
@@ -274,6 +283,55 @@ impl QueryPlanner {
         let input = current.ok_or_else(|| self.missing_source_error(op))?;
 
         self.apply_unary_op(input, op)
+    }
+
+    /// Convert the sub-operations of a [`QueryOp::Optional`] into
+    /// [`OptionalStep`]s for the logical plan.
+    ///
+    /// In source position (a leading `OPTIONAL MATCH`) the first sub-op must
+    /// be a `ScanNodes` source; otherwise only traversals and filters are
+    /// allowed.
+    fn convert_optional_steps(
+        &self,
+        ops: &[QueryOp],
+        source_position: bool,
+    ) -> Result<Vec<OptionalStep>> {
+        let mut steps = Vec::with_capacity(ops.len());
+        for (i, op) in ops.iter().enumerate() {
+            let step = match op {
+                QueryOp::ScanNodes { label } if source_position && i == 0 => OptionalStep::Scan {
+                    label: label.clone(),
+                },
+                QueryOp::TraverseOut { label, depth } => OptionalStep::Traverse {
+                    direction: super::ir::Direction::Outgoing,
+                    label: label.clone(),
+                    depth: *depth,
+                },
+                QueryOp::TraverseIn { label, depth } => OptionalStep::Traverse {
+                    direction: super::ir::Direction::Incoming,
+                    label: label.clone(),
+                    depth: *depth,
+                },
+                QueryOp::TraverseBoth { label, depth } => OptionalStep::Traverse {
+                    direction: super::ir::Direction::Both,
+                    label: label.clone(),
+                    depth: *depth,
+                },
+                QueryOp::Filter(predicate) => OptionalStep::Filter(predicate.clone()),
+                other => {
+                    return Err(Error::Query(QueryError::SyntaxError {
+                        message: format!("unsupported operation inside OPTIONAL MATCH: {other:?}"),
+                    }));
+                }
+            };
+            steps.push(step);
+        }
+        if source_position && !matches!(steps.first(), Some(OptionalStep::Scan { .. })) {
+            return Err(Error::Query(QueryError::SyntaxError {
+                message: "a leading OPTIONAL MATCH must begin with a node scan".to_string(),
+            }));
+        }
+        Ok(steps)
     }
 
     /// Try to apply a source operation. Returns Ok(Some(op)) if successful,
@@ -749,6 +807,37 @@ impl QueryPlanner {
                 input: Box::new(input),
                 time_range: *time_range,
             }),
+
+            UnaryOp::OptionalApply { steps } => {
+                // Mirror UnaryOp::Traverse: extract the temporal context for
+                // edge filtering inside optional traversal steps.
+                let temporal_ctx = temporal.as_ref().and_then(|ctx| ctx.as_of_tuple());
+                let physical_steps = steps
+                    .iter()
+                    .map(|step| match step {
+                        OptionalStep::Scan { label } => physical::OptionalPhysicalStep::Scan {
+                            label: label.clone(),
+                        },
+                        OptionalStep::Traverse {
+                            direction,
+                            label,
+                            depth,
+                        } => physical::OptionalPhysicalStep::Traverse {
+                            direction: *direction,
+                            label: label.clone(),
+                            depth: depth.max_depth().unwrap_or(DEFAULT_MAX_TRAVERSAL_DEPTH),
+                            temporal_context: temporal_ctx,
+                        },
+                        OptionalStep::Filter(predicate) => {
+                            physical::OptionalPhysicalStep::Filter(predicate.clone())
+                        }
+                    })
+                    .collect();
+                Ok(PhysicalOp::OptionalApply {
+                    input: Box::new(input),
+                    steps: physical_steps,
+                })
+            }
         }
     }
 

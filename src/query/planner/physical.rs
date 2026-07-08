@@ -295,7 +295,8 @@ impl PhysicalPlan {
             | PhysicalOp::Count { input, .. }
             | PhysicalOp::Materialize { input, .. }
             | PhysicalOp::TemporalTrack { input, .. }
-            | PhysicalOp::IndexedTraversal { input, .. } => {
+            | PhysicalOp::IndexedTraversal { input, .. }
+            | PhysicalOp::OptionalApply { input, .. } => {
                 self.explain_op(input, output, indent + 1, "└─ ");
             }
 
@@ -574,8 +575,50 @@ pub enum PhysicalOp {
         input: Box<PhysicalOp>,
     },
 
+    /// Left-outer application of an optional sub-pattern (`OPTIONAL MATCH`).
+    ///
+    /// For each input row the `steps` sub-pipeline is executed seeded from
+    /// that row; if it yields nothing, one null-bound row is emitted so the
+    /// input row is preserved. When the first step is
+    /// [`OptionalPhysicalStep::Scan`] the operator is standalone (leading
+    /// `OPTIONAL MATCH`): the sub-pipeline runs once from its own scan and
+    /// `input` (typically [`PhysicalOp::Empty`]) is ignored.
+    OptionalApply {
+        /// Input operator providing seed rows.
+        input: Box<PhysicalOp>,
+        /// The optional sub-pipeline, applied per seed row.
+        steps: Vec<OptionalPhysicalStep>,
+    },
+
     /// Empty result set
     Empty,
+}
+
+/// A single step inside a [`PhysicalOp::OptionalApply`] sub-pipeline.
+#[derive(Debug, Clone)]
+pub enum OptionalPhysicalStep {
+    /// Scan source for a standalone (first-clause) `OPTIONAL MATCH`.
+    /// Only valid as the first step.
+    Scan {
+        /// Optional node label filter.
+        label: Option<String>,
+    },
+
+    /// A traversal hop inside the optional pattern.
+    Traverse {
+        /// Traversal direction.
+        direction: Direction,
+        /// Optional edge label filter.
+        label: Option<String>,
+        /// Maximum depth.
+        depth: usize,
+        /// Optional temporal context (valid_time, transaction_time) for edge
+        /// filtering, mirroring [`PhysicalOp::IndexedTraversal`].
+        temporal_context: Option<(Timestamp, Timestamp)>,
+    },
+
+    /// A predicate filter inside the optional pattern.
+    Filter(Predicate),
 }
 
 impl PhysicalOp {
@@ -605,6 +648,7 @@ impl PhysicalOp {
             PhysicalOp::Count { .. } => "Count",
             PhysicalOp::TemporalTrack { .. } => "TemporalTrack",
             PhysicalOp::Materialize { .. } => "Materialize",
+            PhysicalOp::OptionalApply { .. } => "OptionalApply",
             PhysicalOp::Empty => "Empty",
         }
     }
@@ -649,7 +693,8 @@ impl PhysicalOp {
             | PhysicalOp::Distinct { input, .. }
             | PhysicalOp::Count { input, .. }
             | PhysicalOp::TemporalTrack { input, .. }
-            | PhysicalOp::Materialize { input, .. } => 1 + input.depth(),
+            | PhysicalOp::Materialize { input, .. }
+            | PhysicalOp::OptionalApply { input, .. } => 1 + input.depth(),
 
             PhysicalOp::HashJoin { left, right, .. }
             | PhysicalOp::Union { left, right }
@@ -832,7 +877,8 @@ impl PhysicalOp {
             | PhysicalOp::Distinct { input, .. }
             | PhysicalOp::Count { input, .. }
             | PhysicalOp::TemporalTrack { input, .. }
-            | PhysicalOp::Materialize { input, .. } => Some(input),
+            | PhysicalOp::Materialize { input, .. }
+            | PhysicalOp::OptionalApply { input, .. } => Some(input),
             _ => None,
         }
     }

@@ -142,7 +142,9 @@ impl CypherParser {
     }
 
     /// ```text
-    /// match_stmt := [OPTIONAL] MATCH pattern_list [where_clause] [temporal_clause] return_clause
+    /// match_stmt := [OPTIONAL] MATCH pattern_list [where_clause] [temporal_clause]
+    ///               (with_clause | optional_match_clause)* return_clause
+    /// optional_match_clause := OPTIONAL MATCH pattern_list [where_clause]
     /// ```
     fn parse_match(
         &mut self,
@@ -167,8 +169,21 @@ impl CypherParser {
             self.try_parse_post_pattern_temporal()?
         };
 
-        // Parse zero or more WITH clauses between pattern/WHERE/temporal and RETURN.
-        let with_clauses = self.parse_with_clauses()?;
+        // Parse zero or more WITH and OPTIONAL MATCH clauses (in any order)
+        // between pattern/WHERE/temporal and RETURN. Source ordering between
+        // WITH clauses and OPTIONAL MATCH clauses is preserved via
+        // `preceding_withs` on each `CypherOptionalMatch`.
+        let mut with_clauses = Vec::new();
+        let mut optional_matches = Vec::new();
+        loop {
+            if self.at(TokenKind::With) {
+                with_clauses.push(self.parse_with()?);
+            } else if self.at(TokenKind::OptionalMatch) {
+                optional_matches.push(self.parse_optional_match(with_clauses.len())?);
+            } else {
+                break;
+            }
+        }
 
         let return_clause = self.parse_return()?;
 
@@ -179,6 +194,34 @@ impl CypherParser {
             return_clause,
             temporal,
             with_clauses,
+            optional_matches,
+        })
+    }
+
+    /// Parse a subsequent `OPTIONAL MATCH` clause.
+    ///
+    /// ```text
+    /// optional_match_clause := OPTIONAL MATCH pattern_list [where_clause]
+    /// ```
+    fn parse_optional_match(
+        &mut self,
+        preceding_withs: usize,
+    ) -> Result<CypherOptionalMatch, CypherError> {
+        self.expect(TokenKind::OptionalMatch)?;
+        self.expect(TokenKind::Match)?;
+
+        let pattern = self.parse_pattern_list()?;
+
+        let where_clause = if self.at(TokenKind::Where) {
+            Some(self.parse_where()?)
+        } else {
+            None
+        };
+
+        Ok(CypherOptionalMatch {
+            pattern,
+            where_clause,
+            preceding_withs,
         })
     }
 
@@ -637,19 +680,6 @@ impl CypherParser {
     }
 
     // -- WITH clause --------------------------------------------------------
-
-    /// Parse zero or more `WITH` clauses.
-    ///
-    /// ```text
-    /// with_clauses := (WITH return_items [WHERE expr])*
-    /// ```
-    fn parse_with_clauses(&mut self) -> Result<Vec<CypherWith>, CypherError> {
-        let mut clauses = Vec::new();
-        while self.at(TokenKind::With) {
-            clauses.push(self.parse_with()?);
-        }
-        Ok(clauses)
-    }
 
     /// Parse a single `WITH` clause.
     ///

@@ -127,6 +127,27 @@ pub enum QueryOp {
         time_range: TimeRange,
     },
 
+    /// Left-outer application of an optional sub-pattern (Cypher `OPTIONAL MATCH`).
+    ///
+    /// For each input row, the sub-pipeline in `ops` is executed seeded from
+    /// that row. If it produces at least one row, those rows are emitted;
+    /// otherwise a single null-bound row is emitted so the input row is
+    /// preserved (openCypher left-outer semantics).
+    ///
+    /// Allowed sub-operations are `TraverseOut`/`TraverseIn`/`TraverseBoth`
+    /// and `Filter`. When `Optional` is the *first* operation of a query
+    /// (a leading `OPTIONAL MATCH`), the sub-pipeline must instead begin with
+    /// a `ScanNodes` source; if the whole scan pipeline yields nothing, one
+    /// null row is emitted.
+    ///
+    /// Filters inside `ops` (inline pattern properties and the clause's
+    /// `WHERE`) participate in the matched/unmatched decision -- they run
+    /// *before* the null-row fallback, not after it.
+    Optional {
+        /// Sub-pipeline executed per input row (or once, for the leading form).
+        ops: Vec<QueryOp>,
+    },
+
     // === Filter Operations ===
     /// Filter by property predicate
     Filter(Predicate),

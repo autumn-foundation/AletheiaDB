@@ -552,6 +552,10 @@ let results = db.execute_cypher_with_params("MATCH (n:Person {name: $name}) RETU
 
 **Supported Syntax:**
 - Graph patterns: `MATCH (n:Label {prop: value})-[:REL]->(m)`
+- Left-outer patterns (Issue #557): `OPTIONAL MATCH (a)-[:KNOWS]->(x)` -- unmatched
+  patterns preserve the base row and bind null; the clause's `WHERE` and inline
+  properties are scoped inside the optional pattern (they decide matched vs
+  unmatched); multiple/leading `OPTIONAL MATCH` clauses supported
 - Variable-depth: `-[:KNOWS*1..3]->`
 - Directions: `->` (outgoing), `<-` (incoming), `-` (both)
 - Filtering: `WHERE n.age > 18 AND n.name = 'Alice'`

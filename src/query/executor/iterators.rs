@@ -1181,6 +1181,54 @@ impl FilterIterator {
     }
 }
 
+impl FilterIterator {
+    /// Evaluate a predicate against a null binding (an unmatched
+    /// `OPTIONAL MATCH` row).
+    ///
+    /// Approximates openCypher three-valued logic at the "not true" level:
+    /// any comparison, string predicate, or membership test involving the
+    /// null binding is not-true (row filtered), `IS NULL` (encoded as
+    /// `Eq { value: Null }`) is true, and `IS NOT NULL` (encoded as
+    /// `Ne { value: Null }`) is false.
+    ///
+    /// Known deviation: `NOT` uses two-valued negation (`NOT (null.p = 1)`
+    /// keeps the row where openCypher's `NOT null` would drop it). This
+    /// mirrors the engine's existing missing-property semantics.
+    fn evaluate_null(&self, predicate: &Predicate) -> bool {
+        match predicate {
+            Predicate::True => true,
+            Predicate::False => false,
+            // `x IS NULL` is converted to Eq { value: Null }: true for a null row.
+            Predicate::Eq {
+                value: PredicateValue::Null,
+                ..
+            } => true,
+            // `x IS NOT NULL` is converted to Ne { value: Null }: false for a null row.
+            Predicate::Ne {
+                value: PredicateValue::Null,
+                ..
+            } => false,
+            // A null binding has no properties.
+            Predicate::NotExists(_) => true,
+            Predicate::Exists(_) => false,
+            // Any comparison/membership/string predicate against null is not-true.
+            Predicate::Eq { .. }
+            | Predicate::Ne { .. }
+            | Predicate::Gt { .. }
+            | Predicate::Gte { .. }
+            | Predicate::Lt { .. }
+            | Predicate::Lte { .. }
+            | Predicate::In { .. }
+            | Predicate::Contains { .. }
+            | Predicate::StartsWith { .. }
+            | Predicate::EndsWith { .. } => false,
+            Predicate::And(preds) => preds.iter().all(|p| self.evaluate_null(p)),
+            Predicate::Or(preds) => preds.iter().any(|p| self.evaluate_null(p)),
+            Predicate::Not(pred) => !self.evaluate_null(pred),
+        }
+    }
+}
+
 impl ResultIterator for FilterIterator {
     fn next(&mut self) -> Option<Result<QueryRow>> {
         loop {
@@ -1188,6 +1236,14 @@ impl ResultIterator for FilterIterator {
                 Some(Ok(row)) => {
                     if let Some(node) = row.entity.as_node() {
                         if self.evaluate(node) {
+                            return Some(Ok(row));
+                        }
+                        // Filter didn't pass, continue to next
+                    } else if row.entity.is_null() {
+                        // Null bindings from unmatched OPTIONAL MATCH rows are
+                        // evaluated with null semantics (comparisons are
+                        // not-true, IS NULL is true).
+                        if self.evaluate_null(&self.predicate) {
                             return Some(Ok(row));
                         }
                         // Filter didn't pass, continue to next
@@ -1200,6 +1256,190 @@ impl ResultIterator for FilterIterator {
                 None => return None,
             }
         }
+    }
+}
+
+/// Iterator that yields a single, pre-built row.
+///
+/// Used by [`OptionalApplyIterator`] to seed the per-row optional
+/// sub-pipeline with the current input row.
+struct SeedRowIterator {
+    row: Option<QueryRow>,
+}
+
+impl SeedRowIterator {
+    fn new(row: QueryRow) -> Self {
+        SeedRowIterator { row: Some(row) }
+    }
+}
+
+impl ResultIterator for SeedRowIterator {
+    fn next(&mut self) -> Option<Result<QueryRow>> {
+        self.row.take().map(Ok)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let n = usize::from(self.row.is_some());
+        (n, Some(n))
+    }
+}
+
+/// Iterator implementing left-outer (`OPTIONAL MATCH`) semantics.
+///
+/// For each input row, the configured sub-pipeline (traversal hops and
+/// filters) is executed seeded from that row:
+///
+/// - If it produces at least one row, those rows are yielded (matched case).
+/// - If it produces nothing, a single row with [`EntityResult::Null`] is
+///   yielded instead, preserving the input row (unmatched case).
+///
+/// Because the sub-pipeline includes the optional pattern's inline property
+/// filters and its `WHERE` clause, filtering happens *before* the
+/// matched/unmatched decision, per openCypher semantics.
+///
+/// When the first step is a `Scan` the iterator is *standalone* (a leading
+/// `OPTIONAL MATCH` with no prior rows): the sub-pipeline runs exactly once
+/// from its own node scan, and an empty result yields one null row.
+///
+/// A null seed row (from a preceding unmatched optional) traverses to nothing,
+/// so a chained `OPTIONAL MATCH` over it yields another null row -- null
+/// propagates without dropping the row.
+pub struct OptionalApplyIterator {
+    input: Box<dyn ResultIterator>,
+    steps: Vec<crate::query::planner::physical::OptionalPhysicalStep>,
+    current: Arc<CurrentStorage>,
+    historical: Arc<RwLock<HistoricalStorage>>,
+    /// True when the first step is a Scan (leading OPTIONAL MATCH form).
+    standalone: bool,
+    /// The sub-pipeline currently being drained (one per seed row).
+    inner: Option<Box<dyn ResultIterator>>,
+    /// Whether the current sub-pipeline has produced at least one row.
+    inner_matched: bool,
+    /// Set when the input (or the single standalone run) is exhausted.
+    done: bool,
+}
+
+impl OptionalApplyIterator {
+    /// Create a new OptionalApplyIterator.
+    pub fn new(
+        input: Box<dyn ResultIterator>,
+        steps: Vec<crate::query::planner::physical::OptionalPhysicalStep>,
+        current: Arc<CurrentStorage>,
+        historical: Arc<RwLock<HistoricalStorage>>,
+    ) -> Self {
+        use crate::query::planner::physical::OptionalPhysicalStep;
+        let standalone = matches!(steps.first(), Some(OptionalPhysicalStep::Scan { .. }));
+        OptionalApplyIterator {
+            input,
+            steps,
+            current,
+            historical,
+            standalone,
+            inner: None,
+            inner_matched: false,
+            done: false,
+        }
+    }
+
+    /// Build the optional sub-pipeline for one seed row (or, for the
+    /// standalone form, from the leading scan step).
+    fn build_pipeline(&self, seed: Option<QueryRow>) -> Box<dyn ResultIterator> {
+        use crate::query::planner::physical::OptionalPhysicalStep;
+
+        let mut iter: Box<dyn ResultIterator> = match seed {
+            Some(row) => Box::new(SeedRowIterator::new(row)),
+            None => Box::new(EmptyIterator),
+        };
+
+        for step in &self.steps {
+            iter = match step {
+                OptionalPhysicalStep::Scan { label } => {
+                    // Source step (standalone form): replaces the seed input.
+                    Box::new(NodeScanIterator::new(
+                        label.clone(),
+                        Arc::clone(&self.current),
+                    ))
+                }
+                OptionalPhysicalStep::Traverse {
+                    direction,
+                    label,
+                    depth,
+                    temporal_context,
+                } => Box::new(TraversalIterator::new(
+                    iter,
+                    *direction,
+                    label.clone(),
+                    *depth,
+                    Arc::clone(&self.current),
+                    Arc::clone(&self.historical),
+                    *temporal_context,
+                )),
+                OptionalPhysicalStep::Filter(predicate) => {
+                    Box::new(FilterIterator::new(iter, predicate.clone()))
+                }
+            };
+        }
+
+        iter
+    }
+}
+
+impl ResultIterator for OptionalApplyIterator {
+    fn next(&mut self) -> Option<Result<QueryRow>> {
+        loop {
+            // Drain the current sub-pipeline, if any.
+            if let Some(inner) = self.inner.as_mut() {
+                match inner.next() {
+                    Some(Ok(row)) => {
+                        self.inner_matched = true;
+                        return Some(Ok(row));
+                    }
+                    Some(Err(e)) => return Some(Err(e)),
+                    None => {
+                        let unmatched = !self.inner_matched;
+                        self.inner = None;
+                        if unmatched {
+                            // Left-outer semantics: preserve the input row
+                            // with a null binding.
+                            return Some(Ok(QueryRow::from_entity(EntityResult::Null)));
+                        }
+                        continue;
+                    }
+                }
+            }
+
+            if self.done {
+                return None;
+            }
+
+            if self.standalone {
+                // Leading OPTIONAL MATCH: run the scan pipeline exactly once.
+                self.inner = Some(self.build_pipeline(None));
+                self.inner_matched = false;
+                self.done = true;
+                continue;
+            }
+
+            // Pull the next seed row from the input.
+            match self.input.next() {
+                Some(Ok(seed)) => {
+                    self.inner = Some(self.build_pipeline(Some(seed)));
+                    self.inner_matched = false;
+                }
+                Some(Err(e)) => return Some(Err(e)),
+                None => {
+                    self.done = true;
+                    return None;
+                }
+            }
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        // At least one row per remaining input row (matched rows may add
+        // more, so no useful upper bound).
+        let (lower, _) = self.input.size_hint();
+        (lower, None)
     }
 }
 

@@ -472,6 +472,15 @@ impl CostModel {
                 lookup_cost + search_cost
             }
 
+            PhysicalOp::OptionalApply { input, .. } => {
+                // Per input row, a small sub-pipeline (traversal + filters)
+                // runs; approximate with a single-hop traversal over the
+                // input cardinality on top of the input cost.
+                let input_cost = self.estimate(input, stats);
+                let input_card = self.estimate_cardinality(input, stats);
+                self.estimate_traversal(input_cost, input_card.max(1), 1, stats)
+            }
+
             PhysicalOp::Empty => Cost::zero(),
         }
     }
@@ -543,6 +552,10 @@ impl CostModel {
                 self.estimate_cardinality(input, stats)
             }
             PhysicalOp::SimilarToNode { k, .. } => *k,
+            PhysicalOp::OptionalApply { input, .. } => {
+                // Left-outer semantics: at least one output row per input row.
+                self.estimate_cardinality(input, stats).max(1)
+            }
             PhysicalOp::Empty => 0,
         }
     }

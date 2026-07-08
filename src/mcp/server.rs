@@ -3675,6 +3675,9 @@ impl AletheiaMcpServer {
             }
             EntityResult::NodeId(id) => json!({"type": "node", "id": id.as_u64()}),
             EntityResult::EdgeId(id) => json!({"type": "edge", "id": id.as_u64()}),
+            // Null binding from an unmatched OPTIONAL MATCH pattern: surface
+            // as JSON null so an LLM/caller sees the preserved row explicitly.
+            EntityResult::Null => serde_json::Value::Null,
         };
         json!({
             "entity": entity,

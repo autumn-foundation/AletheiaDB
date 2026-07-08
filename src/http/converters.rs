@@ -230,6 +230,11 @@ pub fn query_row_to_json(row: QueryRow) -> Result<serde_json::Value, String> {
         EntityResult::EdgeId(id) => {
             obj.insert("edge_id".to_string(), json!(id.as_u64()));
         }
+        EntityResult::Null => {
+            // Null binding from an unmatched OPTIONAL MATCH: the row is
+            // preserved but carries no entity payload.
+            obj.insert("null".to_string(), json!(true));
+        }
     }
 
     // Add metadata

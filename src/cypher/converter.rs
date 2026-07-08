@@ -140,39 +140,67 @@ impl CypherConverter {
     pub fn convert(&self, stmt: CypherStatement) -> Result<Query, CypherError> {
         match stmt {
             CypherStatement::Match {
+                optional,
                 pattern,
                 where_clause,
                 return_clause,
                 temporal,
                 with_clauses,
-                ..
+                optional_matches,
             } => {
                 let mut ops = Vec::new();
 
-                // 1. Convert graph patterns → ScanNodes + Traverse + Filter ops
+                // 1. Convert graph patterns → ScanNodes + Traverse + Filter ops,
+                //    followed by the base WHERE clause → Filter op.
+                //
+                //    For a leading OPTIONAL MATCH the whole base segment
+                //    (scan + filters + WHERE) is wrapped in a single
+                //    QueryOp::Optional so an empty result yields one null row.
+                let mut base_ops = Vec::new();
                 for pat in &pattern {
-                    self.convert_pattern(pat, &mut ops)?;
+                    self.convert_pattern(pat, &mut base_ops)?;
                 }
-
-                // 2. Convert WHERE clause → Filter ops
                 if let Some(expr) = where_clause {
                     let predicate = self.convert_expr_to_predicate(&expr)?;
-                    ops.push(QueryOp::Filter(predicate));
+                    base_ops.push(QueryOp::Filter(predicate));
+                }
+                if optional {
+                    ops.push(QueryOp::Optional { ops: base_ops });
+                } else {
+                    ops.append(&mut base_ops);
                 }
 
-                // 3. Convert temporal clause → TemporalContext + ops
+                // 2. Convert temporal clause → TemporalContext + ops
                 let temporal_context = if let Some(ref temporal_clause) = temporal {
                     Some(self.convert_temporal(temporal_clause, &mut ops)?)
                 } else {
                     None
                 };
 
-                // 3b. Convert WITH clauses → Filter ops for WITH WHERE
-                for with in &with_clauses {
-                    if let Some(ref where_expr) = with.where_clause {
-                        let predicate = self.convert_expr_to_predicate(where_expr)?;
-                        ops.push(QueryOp::Filter(predicate));
+                // 3. Interleave WITH clauses (→ Filter ops for WITH WHERE) and
+                //    OPTIONAL MATCH clauses (→ Optional ops) in source order.
+                let mut with_idx = 0;
+                for opt_match in &optional_matches {
+                    while with_idx < opt_match.preceding_withs && with_idx < with_clauses.len() {
+                        self.convert_with_clause(&with_clauses[with_idx], &mut ops)?;
+                        with_idx += 1;
                     }
+                    let mut sub_ops = Vec::new();
+                    for pat in &opt_match.pattern {
+                        self.convert_optional_pattern(pat, &mut sub_ops)?;
+                    }
+                    if let Some(ref where_expr) = opt_match.where_clause {
+                        // Per openCypher, the clause's WHERE is part of the
+                        // optional pattern: it must run before the
+                        // matched/unmatched decision, hence inside the op.
+                        let predicate = self.convert_expr_to_predicate(where_expr)?;
+                        sub_ops.push(QueryOp::Filter(predicate));
+                    }
+                    ops.push(QueryOp::Optional { ops: sub_ops });
+                }
+                while with_idx < with_clauses.len() {
+                    self.convert_with_clause(&with_clauses[with_idx], &mut ops)?;
+                    with_idx += 1;
                 }
 
                 // 4. Convert RETURN clause modifiers
@@ -261,6 +289,54 @@ impl CypherConverter {
             }
         }
 
+        Ok(())
+    }
+
+    /// Convert a graph pattern from a *subsequent* `OPTIONAL MATCH` clause
+    /// into query operations for the optional sub-pipeline.
+    ///
+    /// Unlike [`Self::convert_pattern`], the first node does **not** emit a
+    /// `ScanNodes` op: it is assumed to refer to the current row produced by
+    /// the preceding pipeline (e.g. `a` in
+    /// `MATCH (a) OPTIONAL MATCH (a)-[:KNOWS]->(x)`). Its inline property
+    /// constraints still become `Filter` ops, which run against the seed row
+    /// inside the optional segment and therefore participate in the
+    /// matched/unmatched decision.
+    ///
+    /// Limitation: like the rest of the converter, this performs no variable
+    /// binding analysis -- an OPTIONAL MATCH pattern starting from a variable
+    /// not bound by the preceding pipeline is treated positionally as if it
+    /// referred to the current row.
+    fn convert_optional_pattern(
+        &self,
+        pattern: &CypherPattern,
+        ops: &mut Vec<QueryOp>,
+    ) -> Result<(), CypherError> {
+        for element in &pattern.elements {
+            match element {
+                CypherPatternElement::Node(node) => {
+                    // No ScanNodes: the seed row is the pattern's entry point.
+                    self.convert_node_properties(node, ops)?;
+                }
+                CypherPatternElement::Relationship(rel) => {
+                    self.convert_relationship(rel, ops)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Convert a `WITH` clause into query operations (currently only its
+    /// `WHERE` sub-clause produces a `Filter`; projections are not lowered).
+    fn convert_with_clause(
+        &self,
+        with: &CypherWith,
+        ops: &mut Vec<QueryOp>,
+    ) -> Result<(), CypherError> {
+        if let Some(ref where_expr) = with.where_clause {
+            let predicate = self.convert_expr_to_predicate(where_expr)?;
+            ops.push(QueryOp::Filter(predicate));
+        }
         Ok(())
     }
 
