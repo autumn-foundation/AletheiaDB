@@ -524,10 +524,20 @@ before any transaction opens.
 
 If **any** operation fails — malformed op, unresolved ref, nonexistent
 target, constraint violation, detach refusal, commit conflict — **none** of
-the batch's writes become visible, ever, to any reader: operations are
-buffered in the transaction and a failure rolls the buffer back before
-anything is applied or WAL-logged. The error response reports the failing
-operation:
+the batch's writes take effect: for operation-time failures the
+transaction's buffer is rolled back before anything is applied or
+WAL-logged, and commit-phase failures (conflicts, constraint violations)
+abort the transaction as a whole. Atomicity is guaranteed for **every
+acknowledged outcome** (any success or error response the caller receives)
+and for **all non-crash failure modes**. One narrow caveat: the WAL
+currently has no transaction framing, so a process **crash during the
+commit flush window** can persist a prefix of a batch that was never
+acknowledged, and recovery may then replay that prefix — a pre-existing
+engine property of all multi-operation transactions, tracked in issue
+#3413. Separately, readers using non-snapshot read paths can briefly
+observe a commit in progress mid-apply — also pre-existing behavior for
+all multi-op transactions, not specific to `apply_batch`. The error
+response reports the failing operation:
 
 ```jsonc
 { "error": {
@@ -536,14 +546,18 @@ operation:
     "details": { "failed_op_index": 2 } } }
 ```
 
-`details.failed_op_index` is present on **every** `apply_batch` error:
-the offending array index for per-op failures, or JSON `null` for
-commit-phase failures that have no attributable op (e.g. a write-write
-`CONFLICT`, which is `retriable: true` — the whole batch is safe to resubmit
-because nothing committed). A unique-constraint violation is
+`details.failed_op_index` is present on every **per-operation**
+`apply_batch` error: the offending array index for per-op failures, or JSON
+`null` for whole-batch failures that have no attributable op (a commit-phase
+write-write `CONFLICT`, which is `retriable: true` — the whole batch is safe
+to resubmit because nothing committed — and the over-cap rejection). A
+top-level malformed-request error (arguments that don't parse as an
+`operations` array at all) has no op to attribute and carries no
+`failed_op_index`. A unique-constraint violation is
 `CONSTRAINT_VIOLATION` with the usual `label`/`property`/`value`/
 `existing_node_id` details. An over-cap batch is rejected up front with the
-limit echoed (#3226 convention): `details: {limit: 1000, submitted: 1042}`.
+limit echoed (#3226 convention):
+`details: {limit: 1000, submitted: 1042, failed_op_index: null}`.
 The cap defaults to 1000 operations and is tunable via
 `AletheiaMcpServer::with_max_batch_operations`.
 
@@ -557,7 +571,13 @@ plus `failed_op_index`) unless the op passes `detach: true`, in which case
 committed edges are cascade-deleted and batch-created edges touching the
 node are removed too. Edges the batch already deleted no longer count.
 `valid_time` is not supported together with `detach: true` (same rule as the
-single-op tool), rejected per-op.
+single-op tool), rejected per-op. Note one counting divergence: `apply_batch`
+counts **distinct** edges (a self-loop counts once), while the single-op
+`delete_node` tool's committed-state count tallies both adjacency directions
+(a self-loop counts as 2) — convergence is tracked in issue #3416. As with
+the single-op tools, a residual snapshot-isolation write-skew remains: a
+concurrent transaction committing an edge to a node this batch deletes can
+still orphan that edge despite the pre-delete count (also issue #3416).
 
 ### Success response
 
@@ -598,6 +618,13 @@ the last v1 limitation below.
   such an edge is elided from the transaction entirely (never allocated,
   never written to history) — the committed record equals the batch's atomic
   net effect. Its per-op result says so via `removed_by_delete_at_index`.
+  Because elision writes no history, a to-be-elided `create_edge` carrying an
+  **explicit `valid_time`** is rejected up front (`INVALID_ARGUMENT` with
+  `failed_op_index` = the create's index and `removed_by_delete_at_index` =
+  the delete's index): silently eliding a backdated fact would erase history
+  that single-op sequencing (create, commit, then delete) preserves — drop
+  the create from the batch, or commit it in a separate call before the
+  delete.
 - An **empty** `operations` array is a harmless, idempotent no-op success
   (`results: []`, `ref_map: {}`).
 - Updating an edge and then detach-deleting one of its endpoint nodes in the

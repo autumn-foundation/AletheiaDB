@@ -328,9 +328,12 @@ with N−1 possible partially-committed states. A `create_node` may carry a
 `"$alias"` or positional `"$<index>"` endpoints, freely mixed with committed
 integer ids; forward/unknown/duplicate refs, malformed ops, and over-cap
 batches (default 1000 ops, `with_max_batch_operations`, limit echoed per
-#3226) are rejected statically **before any transaction opens**. Every error
-carries `details.failed_op_index` (JSON `null` for commit-phase failures like
-a retriable `CONFLICT`); any failure means **zero** writes are visible.
+#3226) are rejected statically **before any transaction opens**. Every
+per-operation error carries `details.failed_op_index` (JSON `null` for
+commit-phase failures like a retriable `CONFLICT` and for the over-cap
+rejection; absent on top-level malformed-request errors); any acknowledged
+failure means **zero** writes take effect (narrow crash-during-commit-flush
+caveat until WAL transaction framing lands: #3413).
 In-batch `delete_node` honors the #3209 DETACH contract against committed
 AND batch-created edges (batch-local adjacency ledger; distinct edges, a
 self-loop counts once). Success returns per-op results in input order (ids +

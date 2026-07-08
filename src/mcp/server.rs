@@ -3918,6 +3918,17 @@ impl AletheiaMcpServer {
             .collect()
     }
 
+    /// Test-only accessor returning the advertised input schema for a tool,
+    /// so tests can pin schema contents (e.g. the apply_batch op variants)
+    /// against silent drift.
+    #[cfg(test)]
+    pub(crate) fn tool_input_schema_for_test(&self, name: &str) -> Option<serde_json::Value> {
+        tool_definitions()
+            .iter()
+            .find(|tool| tool.name == name)
+            .map(|tool| serde_json::Value::Object((*tool.input_schema).clone()))
+    }
+
     /// Dispatch a tool call by name to its handler.
     ///
     /// Shared between [`ServerHandler::call_tool`] and tests so that every
@@ -4236,7 +4247,10 @@ fn tool_definitions() -> Vec<Tool> {
                      '$alias' (or positionally as '$<index>') wherever a node id is accepted as \
                      an endpoint — forward references are rejected. If ANY operation fails \
                      (validation, unknown ref, constraint violation, detach refusal), NONE of \
-                     the batch's writes become visible and the error reports \
+                     the batch's writes take effect: atomicity holds for every acknowledged \
+                     outcome and all non-crash failures (narrow caveat: a process crash during \
+                     the commit flush can persist a prefix of a batch until WAL transaction \
+                     framing lands, issue #3413), and the error reports \
                      `details.failed_op_index`. `delete_node` honors the safe-by-default DETACH \
                      contract against committed AND batch-created edges. On success the response \
                      returns per-operation results in input order (ids and version ids for \

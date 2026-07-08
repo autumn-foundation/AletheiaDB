@@ -50,7 +50,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::api::transaction::{ReadOps, WriteOps, WriteRequestOptions};
-use crate::core::error::{Error, TransactionError};
+use crate::core::error::Error;
 use crate::core::provenance::Provenance;
 use crate::core::temporal::Timestamp;
 use crate::core::{EdgeId, NodeId, PropertyMap};
@@ -97,16 +97,6 @@ pub enum BatchNodeRef {
     /// A `"$alias"` or positional `"$<index>"` local reference to a node
     /// created earlier in the same batch.
     Ref(String),
-}
-
-impl BatchNodeRef {
-    /// Human-readable rendering for error messages.
-    fn describe(&self) -> String {
-        match self {
-            BatchNodeRef::Id(id) => id.to_string(),
-            BatchNodeRef::Ref(s) => s.clone(),
-        }
-    }
 }
 
 /// One write operation inside an `apply_batch` request, tagged by `op`.
@@ -365,6 +355,9 @@ enum BatchAbort {
     },
     /// A commit-phase failure (no attributable op index).
     Commit { source: Error },
+    /// An internal invariant breach in the batch handler itself (never the
+    /// caller's fault) — reported as `INTERNAL`, not as a caller-fault code.
+    Internal { index: usize, message: String },
 }
 
 impl From<Error> for BatchAbort {
@@ -487,7 +480,13 @@ impl AletheiaMcpServer {
                         limit
                     ),
                 )
-                .details(json!({ "limit": limit, "submitted": raw_ops.len() })),
+                .details(json!({
+                    "limit": limit,
+                    "submitted": raw_ops.len(),
+                    // No single op is at fault; null keeps the details shape
+                    // uniform with every other apply_batch error.
+                    "failed_op_index": serde_json::Value::Null
+                })),
             )));
         }
 
@@ -679,27 +678,52 @@ impl AletheiaMcpServer {
         // Annihilation pass: a batch-created edge whose committed endpoint is
         // later removed by `delete_node` + `detach: true` is elided from the
         // transaction — the cascade "removes" it (module docs). The earliest
-        // such delete wins.
-        let annihilators: Vec<Option<usize>> = planned
-            .iter()
-            .enumerate()
-            .map(|(index, op)| {
-                let mut annihilator: Option<usize> = None;
-                if let PlannedOp::CreateEdge { source, target, .. } = op {
-                    for endpoint in [source, target] {
-                        if let ResolvedNode::Committed(node_id) = endpoint
-                            && let Some(&(k, detach)) = deleted_nodes.get(&node_id.as_u64())
-                            && detach
-                            && k > index
-                            && annihilator.is_none_or(|prev| k < prev)
-                        {
-                            annihilator = Some(k);
-                        }
-                    }
+        // such delete wins. A to-be-elided edge carrying an explicit
+        // valid_time is REJECTED instead: eliding it would silently erase a
+        // backdated bi-temporal fact that single-op sequencing (create,
+        // commit, then delete) preserves in history.
+        let mut annihilators: Vec<Option<usize>> = vec![None; planned.len()];
+        for (index, op) in planned.iter().enumerate() {
+            let PlannedOp::CreateEdge {
+                source,
+                target,
+                valid_from,
+                ..
+            } = op
+            else {
+                continue;
+            };
+            let mut annihilator: Option<usize> = None;
+            for endpoint in [source, target] {
+                if let ResolvedNode::Committed(node_id) = endpoint
+                    && let Some(&(k, detach)) = deleted_nodes.get(&node_id.as_u64())
+                    && detach
+                    && k > index
+                    && annihilator.is_none_or(|prev| k < prev)
+                {
+                    annihilator = Some(k);
                 }
-                annihilator
-            })
-            .collect();
+            }
+            if let Some(k) = annihilator {
+                if valid_from.is_some() {
+                    let mut details = serde_json::Map::new();
+                    details.insert("removed_by_delete_at_index".to_string(), json!(k));
+                    return Err(self.batch_invalid(
+                        index,
+                        format!(
+                            "Operation {index}: this create_edge carries an explicit valid_time, \
+                             but operation {k} detach-deletes one of its endpoints later in the \
+                             batch, which would elide the edge and silently erase the backdated \
+                             fact. Drop the create_edge from this batch, or commit it in a \
+                             separate call before the delete (single-op sequencing preserves the \
+                             fact in history)."
+                        ),
+                        details,
+                    ));
+                }
+                annihilators[index] = Some(k);
+            }
+        }
         for (op, annihilator) in planned.iter_mut().zip(annihilators) {
             if let (Some(k), PlannedOp::CreateEdge { annihilated_by, .. }) = (annihilator, op) {
                 *annihilated_by = Some(k);
@@ -836,10 +860,16 @@ impl AletheiaMcpServer {
                 };
                 // Caller-supplied aliases first; purely numeric names are
                 // positional indices (aliases are validated non-numeric).
+                // The positional form is all-ASCII-digits only, so "$+5"
+                // never silently parses positionally (usize::from_str would
+                // accept a leading '+') — it falls through to the
+                // unknown-ref error. Leading zeros are fine: "$007" == "$7".
                 let defined_at = if let Some(&d) = aliases.get(name) {
                     Some(d)
-                } else if let Ok(p) = name.parse::<usize>() {
-                    (p < ops.len()).then_some(p)
+                } else if !name.is_empty() && name.bytes().all(|b| b.is_ascii_digit()) {
+                    name.parse::<usize>()
+                        .ok()
+                        .and_then(|p| (p < ops.len()).then_some(p))
                 } else {
                     None
                 };
@@ -899,18 +929,30 @@ impl AletheiaMcpServer {
     ) -> Result<NodeId, Box<CallToolResult>> {
         let id = match node_ref {
             BatchNodeRef::Id(id) => *id,
-            BatchNodeRef::Ref(_) => {
+            // Only '$'-prefixed strings are local refs and get the v1-scope
+            // message; any other string (e.g. a quoted number like "123") is
+            // a plain type error, reported as such.
+            BatchNodeRef::Ref(s) if s.starts_with('$') => {
                 let mut details = serde_json::Map::new();
-                details.insert("ref".to_string(), json!(node_ref.describe()));
+                details.insert("ref".to_string(), json!(s));
                 return Err(self.batch_invalid(
                     index,
                     format!(
-                        "Operation {index}: cannot {verb} \"{}\" — updating or deleting a node \
+                        "Operation {index}: cannot {verb} \"{s}\" — updating or deleting a node \
                          created in the same batch is not supported in v1. Commit the creation \
-                         first, then {verb} it in a follow-up call.",
-                        node_ref.describe()
+                         first, then {verb} it in a follow-up call."
                     ),
                     details,
+                ));
+            }
+            BatchNodeRef::Ref(s) => {
+                return Err(self.batch_invalid(
+                    index,
+                    format!(
+                        "Operation {index}: node_id must be an integer node id, got string \
+                         \"{s}\""
+                    ),
+                    serde_json::Map::new(),
                 ));
             }
         };
@@ -1204,6 +1246,11 @@ impl AletheiaMcpServer {
     ) -> Result<usize, BatchAbort> {
         // Existence check through the transaction (same snapshot the delete
         // will use), so a nonexistent node reports NOT_FOUND at this index.
+        // Note: transaction reads see COMMITTED state only, so a guessed
+        // numeric id that a create earlier in this batch happens to allocate
+        // is still NOT_FOUND here (and in the update/delete core ops) — the
+        // whole batch aborts and zero writes survive (pinned by
+        // apply_batch_guessed_id_of_batch_created_node_aborts_whole_batch).
         tx.get_node(node_id)
             .map_err(|source| BatchAbort::Op { index, source })?;
 
@@ -1241,17 +1288,25 @@ impl AletheiaMcpServer {
             // A cascade would silently discard an edge update made earlier
             // in this batch; refuse with the precise indices instead (commit
             // validation would abort the batch anyway, less precisely).
+            // Deterministic attribution: when several updated edges touch
+            // this node, report the EARLIEST update (minimum
+            // updated_at_index), never arbitrary HashMap iteration order.
+            let mut conflict: Option<(u64, usize)> = None;
             for (edge_id, (source, target, updated_at)) in updated_committed_edges {
                 if (*source == node_id || *target == node_id)
                     && !deleted_committed_edges.contains_key(edge_id)
+                    && conflict.is_none_or(|(_, prev)| *updated_at < prev)
                 {
-                    return Err(BatchAbort::UpdatedEdgeCascade {
-                        index,
-                        edge_id: *edge_id,
-                        node_id: node_id.as_u64(),
-                        updated_at_index: *updated_at,
-                    });
+                    conflict = Some((*edge_id, *updated_at));
                 }
+            }
+            if let Some((edge_id, updated_at_index)) = conflict {
+                return Err(BatchAbort::UpdatedEdgeCascade {
+                    index,
+                    edge_id,
+                    node_id: node_id.as_u64(),
+                    updated_at_index,
+                });
             }
 
             // Manual cascade over committed edges (delete_node_cascade would
@@ -1290,6 +1345,10 @@ impl AletheiaMcpServer {
         match abort {
             BatchAbort::Op { index, source } => self.batch_db_error(Some(index), &source),
             BatchAbort::Commit { source } => self.batch_db_error(None, &source),
+            BatchAbort::Internal { index, message } => self.error_result(
+                McpError::new(McpErrorCode::Internal, message)
+                    .details(json!({ "failed_op_index": index })),
+            ),
             BatchAbort::Refused {
                 index,
                 node_id,
@@ -1436,15 +1495,12 @@ fn resolve_local(
             .get(defined_at)
             .copied()
             .flatten()
-            .ok_or_else(|| BatchAbort::Op {
+            .ok_or_else(|| BatchAbort::Internal {
                 index,
-                source: TransactionError::ValidationFailed {
-                    reason: format!(
-                        "internal invariant breach: local ref target (op {defined_at}) has \
-                             no allocated node id"
-                    ),
-                }
-                .into(),
+                message: format!(
+                    "internal invariant breach: local ref target (op {defined_at}) has no \
+                     allocated node id"
+                ),
             }),
     }
 }
