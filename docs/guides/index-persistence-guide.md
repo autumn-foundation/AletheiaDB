@@ -85,14 +85,22 @@ let db = AletheiaDB::with_unified_config(config)?;
 **What this creates:**
 ```
 .my-app-data/
-├── wal/           # Write-ahead log (transaction durability)
-│   ├── 00000X.log # WAL segments
+├── wal/                # Write-ahead log (transaction durability)
+│   ├── 00000X.log      # WAL segments
 │   └── manifest.json
-└── indexes/       # Persisted indexes (fast restart)
-    ├── graph.bin.zst        # Graph structure (compressed)
-    ├── temporal.bin.zst     # Temporal indexes
-    └── vector/{prop}/       # Vector HNSW indexes (per property)
+└── indexes/            # PersistenceConfig.data_dir (fast restart)
+    └── indexes/        # …the manager nests everything under a second indexes/
+        ├── manifest.idx           # Index registry + LSN
+        ├── strings/               # String interner
+        ├── graph/adjacency.idx    # Graph structure
+        ├── temporal/versions.idx  # Temporal indexes
+        └── vector/<prop>/         # Vector HNSW indexes (per property)
 ```
+
+The doubled `indexes/indexes/` segment is real, not a typo: `data_dir` is the
+persistence *base* directory and the manager stores all index files under an
+`indexes/` subdirectory of it. `AletheiaDB::open(path)` sets
+`data_dir = path.join("indexes")`, producing exactly this layout.
 
 **Benefits:**
 - ✅ Data survives process restarts
@@ -172,11 +180,13 @@ data/my-database/
 │       ├── embedding/
 │       │   ├── meta.idx
 │       │   ├── mappings.idx
-│       │   └── current.usearch
+│       │   ├── current.usearch
+│       │   └── current.usearch.mappings
 │       └── title_embedding/
 │           ├── meta.idx
 │           ├── mappings.idx
-│           └── current.usearch
+│           ├── current.usearch
+│           └── current.usearch.mappings
 └── wal/                       # Write-ahead log (separate)
     └── ...
 ```
@@ -184,13 +194,14 @@ data/my-database/
 ### Vector Index Persistence
 
 Each vector-indexed property gets its own directory under `indexes/vector/`
-containing three files:
+containing four files:
 
 | File | Format | Contents |
 |------|--------|----------|
 | `meta.idx` | bitcode + CRC32 (`GVEC` magic, versioned) | Property name, dimensions, distance metric, HNSW hyper-parameters (`m`, `ef_construction`, `ef_search`), vector count |
 | `mappings.idx` | bitcode + CRC32 | `NodeId` <-> usearch key translation table |
 | `current.usearch` | usearch native binary | The HNSW graph itself (vectors + links) |
+| `current.usearch.mappings` | sidecar written alongside the usearch file | `NodeId` <-> usearch key mapping + integrity metadata used by `HnswIndex::load` |
 
 **Save:** vector indexes are persisted by `persist_indexes()`, the background
 persistence worker (per the vector persistence policy), and shutdown
@@ -205,11 +216,28 @@ After the restart, `find_similar` / `find_similar_in` work immediately and
 newly created nodes with vector properties are indexed as usual.
 
 **Per-index error isolation:** a corrupted or unreadable vector index
-(bad `meta.idx`, `mappings.idx`, or `current.usearch`, unknown metric) is
+(bad `meta.idx`, `mappings.idx`, `current.usearch`, or
+`current.usearch.mappings`; unknown metric; out-of-range mapping key) is
 skipped with a warning; it never aborts startup and never prevents the
 remaining vector indexes from loading. A skipped index is simply not
-registered — re-enable it and rebuild from node properties
-(`db.rebuild_vector_index("property")`) to recover.
+registered, and its directory is **left in place on disk** — nothing is
+deleted or quarantined, so the same warning repeats on every startup until
+the index is rebuilt and re-persisted (automatic quarantine-rename of
+skipped directories is a possible future enhancement).
+
+**Recovering a skipped index:** call
+`db.rebuild_vector_index("property", config)` — it re-enables the index
+(with the same `HnswConfig` you originally used) and **backfills it from the
+vector properties of current nodes**, restoring searchability for
+pre-existing data. The next persistence cycle then overwrites the corrupt
+files with the rebuilt index.
+
+> **Warning — do not just re-enable:** `enable_vector_index` creates an
+> **empty** index with no backfill. If you re-enable a skipped index without
+> rebuilding, the next persistence cycle (background worker, shutdown, or
+> `persist_indexes()`) overwrites the on-disk files with that empty index,
+> permanently losing the previously indexed vectors. Always use
+> `rebuild_vector_index` to recover a skipped index.
 
 ### Persistence Config Options
 
@@ -461,11 +489,11 @@ Error: Size limit exceeded: Vector dimension 150000 exceeds maximum allowed dime
 
 **Solution:**
 ```rust
-// Delete the malformed file
-fs::remove_file("data/my-db/indexes/vector/embedding/mappings.idx")?;
-
-// Rebuild vector index
-db.rebuild_vector_index("embedding")?;
+// Rebuild the vector index from node properties (re-enables it if it was
+// skipped at startup, then backfills; the next persist overwrites the
+// malformed files)
+use aletheiadb::index::vector::{DistanceMetric, HnswConfig};
+db.rebuild_vector_index("embedding", HnswConfig::new(384, DistanceMetric::Cosine))?;
 ```
 
 #### 3. Missing Index File

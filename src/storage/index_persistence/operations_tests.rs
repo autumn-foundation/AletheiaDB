@@ -154,6 +154,7 @@ fn test_load_vector_indexes_multi_property_round_trip() {
     ];
 
     let current = Arc::new(CurrentStorage::new());
+    let mut created_nodes = std::collections::HashMap::new();
     for (property, dims, metric) in specs {
         current
             .enable_vector_index(property, HnswConfig::new(dims, metric))
@@ -162,9 +163,10 @@ fn test_load_vector_indexes_multi_property_round_trip() {
         let mut embedding = vec![0.0f32; dims];
         embedding[0] = 1.0;
         builder = builder.insert_vector(property, &embedding);
-        current
+        let node_id = current
             .create_node("Doc", builder.build())
             .unwrap_or_else(|e| panic!("failed to create node for {property}: {e}"));
+        created_nodes.insert(property, node_id);
     }
     persist_vector_indexes(&current, &manager, None, 0).expect("failed to persist vector indexes");
 
@@ -186,8 +188,190 @@ fn test_load_vector_indexes_multi_property_round_trip() {
             .unwrap_or_else(|| panic!("index for {property} must be registered"));
         assert_eq!(count, 1, "vector count for {property}");
         assert_eq!(mappings.len(), 1, "id mappings for {property}");
+        let created_id = created_nodes[property];
+        assert!(
+            mappings
+                .iter()
+                .any(|(node_id, _)| *node_id == created_id.as_u64()),
+            "restored mappings for {property} must contain the created node id \
+             {created_id:?}, got: {mappings:?}"
+        );
         assert_eq!(index.len(), 1, "HNSW length for {property}");
     }
+}
+
+/// Issue #451: every per-index skip branch must skip ONLY the broken index
+/// and still load a valid sibling. Parameterized over the corruption modes
+/// so each error path in `load_single_vector_index` has direct coverage.
+#[test]
+fn test_load_vector_indexes_skip_branches_per_corruption_mode() {
+    use crate::index::vector::{DistanceMetric, HnswConfig};
+    use crate::storage::index_persistence::formats::PersistedHnswConfig;
+    use crate::storage::index_persistence::vector::{new_vector_meta, save_vector_meta};
+    use std::path::Path;
+
+    fn truncate_file(path: &Path) {
+        let data = std::fs::read(path).unwrap();
+        assert!(
+            data.len() > 8,
+            "file {path:?} too small ({} bytes) to truncate meaningfully",
+            data.len()
+        );
+        std::fs::write(path, &data[..data.len() / 2]).unwrap();
+    }
+
+    // Each corruption is applied to the persisted "bad_embedding" directory
+    // while its sibling "valid_embedding" stays untouched.
+    #[allow(clippy::type_complexity)]
+    let modes: Vec<(&str, Box<dyn Fn(&Path)>)> = vec![
+        (
+            "missing meta.idx",
+            Box::new(|dir: &Path| std::fs::remove_file(dir.join("meta.idx")).unwrap()),
+        ),
+        (
+            "truncated meta.idx",
+            Box::new(|dir: &Path| truncate_file(&dir.join("meta.idx"))),
+        ),
+        (
+            "valid meta with unknown metric byte",
+            Box::new(|dir: &Path| {
+                // Structurally valid (magic, version, CRC all pass) but the
+                // metric byte 99 maps to no DistanceMetric.
+                let meta = new_vector_meta(
+                    "bad_embedding",
+                    4,
+                    99,
+                    PersistedHnswConfig {
+                        m: 16,
+                        ef_construction: 200,
+                        ef_search: 50,
+                    },
+                );
+                save_vector_meta(&meta, &dir.join("meta.idx")).unwrap();
+            }),
+        ),
+        (
+            "garbage mappings.idx",
+            Box::new(|dir: &Path| {
+                std::fs::write(dir.join("mappings.idx"), b"garbage, not bitcode").unwrap()
+            }),
+        ),
+        (
+            "garbage current.usearch",
+            Box::new(|dir: &Path| {
+                std::fs::write(dir.join("current.usearch"), b"garbage, not usearch").unwrap()
+            }),
+        ),
+        (
+            "truncated current.usearch",
+            Box::new(|dir: &Path| truncate_file(&dir.join("current.usearch"))),
+        ),
+        (
+            "garbage current.usearch.mappings sidecar",
+            Box::new(|dir: &Path| {
+                std::fs::write(dir.join("current.usearch.mappings"), b"garbage sidecar").unwrap()
+            }),
+        ),
+    ];
+
+    for (mode, corrupt) in modes {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let manager = Arc::new(IndexPersistenceManager::new(temp_dir.path()));
+        manager.ensure_directories().unwrap();
+
+        // Persist two healthy indexes over one node.
+        let current = Arc::new(CurrentStorage::new());
+        for property in ["bad_embedding", "valid_embedding"] {
+            current
+                .enable_vector_index(property, HnswConfig::new(4, DistanceMetric::Cosine))
+                .unwrap_or_else(|e| panic!("[{mode}] failed to enable {property}: {e}"));
+        }
+        current
+            .create_node(
+                "Doc",
+                PropertyMapBuilder::new()
+                    .insert_vector("bad_embedding", &[1.0f32, 0.0, 0.0, 0.0])
+                    .insert_vector("valid_embedding", &[1.0f32, 0.0, 0.0, 0.0])
+                    .build(),
+            )
+            .unwrap_or_else(|e| panic!("[{mode}] failed to create node: {e}"));
+        persist_vector_indexes(&current, &manager, None, 0)
+            .unwrap_or_else(|e| panic!("[{mode}] failed to persist: {e}"));
+
+        // Apply this mode's corruption to the bad index's directory.
+        corrupt(&manager.vector_path("bad_embedding"));
+
+        // Load into a fresh storage: exactly the corrupted index is skipped.
+        let fresh = Arc::new(CurrentStorage::new());
+        let summary = load_vector_indexes(&fresh, &manager)
+            .unwrap_or_else(|e| panic!("[{mode}] per-index corruption must not abort load: {e}"));
+        assert_eq!(summary.skipped, 1, "[{mode}] skipped count");
+        assert_eq!(summary.loaded, 1, "[{mode}] loaded count");
+        assert!(
+            fresh.is_vector_index_enabled_for("valid_embedding"),
+            "[{mode}] the valid sibling must load"
+        );
+        assert!(
+            !fresh.is_vector_index_enabled_for("bad_embedding"),
+            "[{mode}] the corrupted index must not be registered"
+        );
+    }
+}
+
+/// Issue #451: a `mappings.idx` that decodes cleanly but contains a usearch
+/// key beyond `MAX_VALID_KEY` (only possible via corruption) must cause the
+/// index to be SKIPPED — not panic, and not poison the index's key
+/// allocator via `usearch_key + 1` — while the valid sibling still loads.
+#[test]
+fn test_load_vector_indexes_skips_index_with_out_of_range_usearch_key() {
+    use crate::index::vector::{DistanceMetric, HnswConfig};
+    use crate::storage::index_persistence::formats::VectorMapping;
+    use crate::storage::index_persistence::vector::{new_vector_mappings, save_vector_mappings};
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let manager = Arc::new(IndexPersistenceManager::new(temp_dir.path()));
+    manager.ensure_directories().unwrap();
+
+    let current = Arc::new(CurrentStorage::new());
+    for property in ["huge_key_embedding", "valid_embedding"] {
+        current
+            .enable_vector_index(property, HnswConfig::new(4, DistanceMetric::Cosine))
+            .expect("failed to enable vector index");
+    }
+    current
+        .create_node(
+            "Doc",
+            PropertyMapBuilder::new()
+                .insert_vector("huge_key_embedding", &[1.0f32, 0.0, 0.0, 0.0])
+                .insert_vector("valid_embedding", &[1.0f32, 0.0, 0.0, 0.0])
+                .build(),
+        )
+        .expect("failed to create node");
+    persist_vector_indexes(&current, &manager, None, 0).expect("failed to persist");
+
+    // Overwrite the mappings with a structurally valid file holding a key
+    // beyond MAX_VALID_KEY (u64::MAX - 1000).
+    let mut mappings = new_vector_mappings();
+    mappings.count = 1;
+    mappings.mappings = vec![VectorMapping {
+        node_id: 1,
+        usearch_key: u64::MAX,
+    }];
+    save_vector_mappings(
+        &mappings,
+        &manager
+            .vector_path("huge_key_embedding")
+            .join("mappings.idx"),
+    )
+    .expect("failed to write huge-key mappings");
+
+    let fresh = Arc::new(CurrentStorage::new());
+    let summary = load_vector_indexes(&fresh, &manager)
+        .expect("an out-of-range usearch key must be skipped, not abort or panic");
+    assert_eq!(summary.skipped, 1, "the huge-key index must be skipped");
+    assert_eq!(summary.loaded, 1, "the valid sibling must still load");
+    assert!(fresh.is_vector_index_enabled_for("valid_embedding"));
+    assert!(!fresh.is_vector_index_enabled_for("huge_key_embedding"));
 }
 
 #[test]
