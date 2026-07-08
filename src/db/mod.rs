@@ -25,6 +25,8 @@ pub mod backup;
 pub mod config;
 /// Uniqueness constraint builder.
 pub mod constraint_builder;
+/// Queryable bi-temporal extent of the dataset (Issue #3238).
+pub mod extent;
 /// GraphView implementation.
 pub mod graph_view;
 /// Basic graph operations (CRUD).
@@ -49,6 +51,7 @@ pub mod vector_builder;
 
 pub use crate::storage::backup::BackupSummary;
 pub use constraint_builder::UniqueConstraintBuilder;
+pub use extent::{LabelExtent, TemporalExtent, TimeBounds};
 pub use schema::{EdgeTypeSchema, GraphSchema, LabelSchema, SchemaInstant};
 pub use similarity_query::{SimilarityQuery, SimilaritySource};
 pub use vector_builder::VectorIndexBuilder;

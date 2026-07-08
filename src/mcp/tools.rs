@@ -889,6 +889,33 @@ pub struct GetSchemaRequest {
 }
 
 // ============================================================================
+// Temporal Extent (Issue #3238)
+// ============================================================================
+
+/// Request for the dataset's queryable bi-temporal extent: the earliest and
+/// latest valid-time and transaction-time coordinates across recorded
+/// history (including expired/superseded versions), covering everything
+/// recorded during the current process lifetime plus hot-tier history
+/// restored at startup (versions cold-migrated before the last restart are
+/// excluded).
+///
+/// No required arguments. Pass `by_label: true` to additionally receive the
+/// same bounds per node label and per edge type.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct TemporalExtentRequest {
+    /// When `true`, additionally break the bounds down per node label and
+    /// per edge/relationship type. Defaults to `false` (overall bounds only).
+    ///
+    /// Per-label bounds are computed from hot-tier history only: on
+    /// databases with cold-storage migration they may be narrower than the
+    /// overall bounds (or a label may be absent entirely).
+    #[schemars(
+        description = "When true, additionally return the same {valid_time, transaction_time} bounds per node label (node_labels) and per edge type (edge_types), so calibration can be scoped to the labels being queried. Defaults to false. Per-label bounds are computed from hot-tier history only and may be narrower than the overall bounds (or a label absent) after cold-storage migration."
+    )]
+    pub by_label: Option<bool>,
+}
+
+// ============================================================================
 // Response Types (for serialization)
 // ============================================================================
 

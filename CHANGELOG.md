@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Queryable bi-temporal extent (Issue #3238):
+  `AletheiaDB::temporal_extent()` / `temporal_extent_by_label()` and the MCP
+  `temporal_extent` tool report the dataset's earliest/latest valid-time and
+  transaction-time coordinates across recorded history — including
+  expired/superseded versions and delete tombstones — so a caller (notably
+  an LLM over MCP) can calibrate `AS OF` queries to land inside real data.
+  Overall bounds are O(1) reads of an aggregate the temporal indexes
+  maintain at write time and only ever widen while the process runs; an
+  empty database returns explicit `null`s/`None`s, never epoch 0. Optional
+  `by_label: true` adds per-node-label / per-edge-type bounds folded from
+  hot-tier history. Known limitation: on databases with cold-storage
+  migration, versions migrated to the cold tier before the last restart are
+  not reflected (the indexes rebuild from hot-tier versions at startup).
+
 - Valid-time writes on the convenience API and MCP tools (Issue #3221):
   `AletheiaDB::create_node_with_valid_time`, `create_edge_with_valid_time`,
   `update_node_with_valid_time`, `update_edge_with_valid_time`,
