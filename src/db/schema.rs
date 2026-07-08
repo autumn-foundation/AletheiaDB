@@ -221,12 +221,14 @@ impl AletheiaDB {
 /// though not necessarily in sorted order -- the order among the kept
 /// elements doesn't matter, since they're only used as a scan input, not
 /// exposed to callers). Returns `true` if truncation actually happened, so
-/// the caller can disclose it via [`GraphSchema::sampled`].
+/// the caller can disclose it via [`GraphSchema::sampled`] (or
+/// [`crate::db::NodesAtTime::sampled`] on the AS OF node-find path, which
+/// shares this cap).
 ///
 /// Uses a partial selection (`select_nth_unstable`, O(n) average) rather
 /// than a full sort (O(n log n)), since only membership in the smallest-`cap`
 /// set matters here, not a total order.
-fn cap_ids<T: Ord>(ids: &mut Vec<T>, cap: usize) -> bool {
+pub(crate) fn cap_ids<T: Ord>(ids: &mut Vec<T>, cap: usize) -> bool {
     if ids.len() > cap {
         ids.select_nth_unstable(cap);
         ids.truncate(cap);

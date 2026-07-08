@@ -7639,6 +7639,556 @@ mod completeness_tests {
 }
 
 // ============================================================================
+// Point-in-time (AS OF) node find by label and property (Issue #3236)
+// ============================================================================
+//
+// `find_nodes_at_time` resolves "the Person named Alice, as of T" without a
+// prior NodeId: it returns each matching node AS IT EXISTED at the queried
+// bi-temporal coordinate, excluding nodes that did not exist (or whose
+// property value did not hold) at that point.
+
+mod find_nodes_at_time_tests {
+    use super::*;
+    use chrono::{DateTime, Utc};
+
+    /// Capture an RFC 3339 anchor strictly after every previously committed
+    /// write: an HLC commit stamp in the same microsecond as the anchor
+    /// carries a logical component > 0 and would order *after* it, so sleep
+    /// past the microsecond boundary first.
+    fn anchor_after_commits() -> String {
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        Utc::now().to_rfc3339()
+    }
+
+    fn base_req(label: &str, valid_time: &str) -> FindNodesAtTimeRequest {
+        FindNodesAtTimeRequest {
+            label: label.to_string(),
+            property_key: None,
+            property_value: None,
+            valid_time: valid_time.to_string(),
+            transaction_time: None,
+            limit: None,
+            offset: None,
+            include_vectors: None,
+        }
+    }
+
+    fn name_req(label: &str, name: &str, valid_time: &str) -> FindNodesAtTimeRequest {
+        FindNodesAtTimeRequest {
+            property_key: Some("name".to_string()),
+            property_value: Some(serde_json::json!(name)),
+            ..base_req(label, valid_time)
+        }
+    }
+
+    fn find(server: &AletheiaMcpServer, req: FindNodesAtTimeRequest) -> serde_json::Value {
+        serde_json::from_str(&server.find_nodes_at_time(req))
+            .expect("find_nodes_at_time should return valid JSON")
+    }
+
+    fn node_ids(value: &serde_json::Value) -> Vec<u64> {
+        value["nodes"]
+            .as_array()
+            .unwrap_or_else(|| panic!("expected a nodes array, got: {value}"))
+            .iter()
+            .map(|n| n["id"].as_u64().expect("node id should be a u64"))
+            .collect()
+    }
+
+    fn create_named(server: &AletheiaMcpServer, label: &str, name: &str) -> u64 {
+        let node: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            label: label.to_string(),
+            properties: Some(HashMap::from([(
+                "name".to_string(),
+                serde_json::json!(name),
+            )])),
+            valid_time: None,
+            provenance: None,
+        }))
+        .expect("create should succeed");
+        node.id
+    }
+
+    fn rename(server: &AletheiaMcpServer, node_id: u64, name: &str) {
+        let _: NodeResponse = parse_response(&server.update_node(UpdateNodeRequest {
+            node_id,
+            properties: HashMap::from([("name".to_string(), serde_json::json!(name))]),
+            valid_time: None,
+            provenance: None,
+        }))
+        .expect("update should succeed");
+    }
+
+    fn delete(server: &AletheiaMcpServer, node_id: u64) {
+        let response = server.delete_node(DeleteNodeRequest {
+            node_id,
+            detach: None,
+            valid_time: None,
+        });
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(value["success"], serde_json::json!(true), "{value}");
+    }
+
+    fn assert_invalid_argument(response: &str, must_mention: &str) {
+        let value: serde_json::Value = serde_json::from_str(response).unwrap();
+        assert_eq!(
+            value["error"]["code"],
+            serde_json::json!("INVALID_ARGUMENT"),
+            "expected INVALID_ARGUMENT, got: {value}"
+        );
+        let message = value["error"]["message"].as_str().unwrap_or_default();
+        assert!(
+            message.contains(must_mention),
+            "error message should mention '{must_mention}': {message}"
+        );
+    }
+
+    /// Build a request anchored at the same instant on BOTH dimensions.
+    /// Recalling a superseded (or deleted) version requires this: the
+    /// superseding write closes the old version's *transaction* interval,
+    /// so with `transaction_time` defaulted to now only the latest recorded
+    /// version is visible (same convention as `traverse`'s `as_of_*`, see
+    /// the guide).
+    fn name_req_at(label: &str, name: &str, t: &str) -> FindNodesAtTimeRequest {
+        FindNodesAtTimeRequest {
+            transaction_time: Some(t.to_string()),
+            ..name_req(label, name, t)
+        }
+    }
+
+    #[test]
+    fn returns_node_as_it_existed_at_t_not_current_state() {
+        let server = create_test_server();
+        let id = create_named(&server, "Person", "Alice");
+        let t1 = anchor_after_commits();
+        rename(&server, id, "Bob");
+        let t2 = anchor_after_commits();
+
+        // At (t1, t1) the node matched "Alice" and its returned properties
+        // are the reconstructed at-time state, not the current one.
+        let value = find(&server, name_req_at("Person", "Alice", &t1));
+        assert_eq!(node_ids(&value), vec![id], "{value}");
+        assert_eq!(value["nodes"][0]["properties"]["name"], "Alice");
+        // "Bob" did not hold yet at t1...
+        let value = find(&server, name_req_at("Person", "Bob", &t1));
+        assert!(node_ids(&value).is_empty(), "{value}");
+        // ...and the situation reverses at t2.
+        let value = find(&server, name_req_at("Person", "Bob", &t2));
+        assert_eq!(node_ids(&value), vec![id]);
+        assert_eq!(value["nodes"][0]["properties"]["name"], "Bob");
+        let value = find(&server, name_req_at("Person", "Alice", &t2));
+        assert!(node_ids(&value).is_empty(), "{value}");
+    }
+
+    #[test]
+    fn node_created_after_t_is_excluded() {
+        let server = create_test_server();
+        let t0 = anchor_after_commits();
+        let id = create_named(&server, "Person", "Alice");
+        let t1 = anchor_after_commits();
+
+        let value = find(&server, name_req("Person", "Alice", &t0));
+        assert!(
+            node_ids(&value).is_empty(),
+            "node created after T must be excluded: {value}"
+        );
+        let value = find(&server, name_req("Person", "Alice", &t1));
+        assert_eq!(node_ids(&value), vec![id]);
+    }
+
+    /// T2 (review): the "both dimensions required" contract as a NEGATIVE
+    /// test. Anchoring only `valid_time` before a deletion while
+    /// `transaction_time` defaults to now must NOT recall the deleted node
+    /// -- the deletion already closed the version's transaction interval.
+    #[test]
+    fn deleted_node_not_recalled_when_transaction_time_omitted() {
+        let server = create_test_server();
+        let id = create_named(&server, "Person", "Alice");
+        let t_before = anchor_after_commits();
+        delete(&server, id);
+        std::thread::sleep(std::time::Duration::from_millis(2));
+
+        // valid_time anchored before the deletion, transaction_time omitted
+        // (defaults to now): empty, per the documented contract.
+        let value = find(&server, name_req("Person", "Alice", &t_before));
+        assert!(
+            node_ids(&value).is_empty(),
+            "past valid_time + defaulted transaction_time must not recall a deleted node: {value}"
+        );
+        assert_eq!(value["total_matching"], serde_json::json!(0));
+
+        // Label-only path obeys the same contract.
+        let value = find(&server, base_req("Person", &t_before));
+        assert!(node_ids(&value).is_empty(), "{value}");
+    }
+
+    #[test]
+    fn node_deleted_before_t_recalled_when_both_dimensions_anchored() {
+        let server = create_test_server();
+        let id = create_named(&server, "Person", "Alice");
+        let t_before = anchor_after_commits();
+        delete(&server, id);
+        let t_after = anchor_after_commits();
+
+        // Both dimensions anchored before the deletion recall the node even
+        // though it no longer exists in current state.
+        let value = find(
+            &server,
+            FindNodesAtTimeRequest {
+                transaction_time: Some(t_before.clone()),
+                ..name_req("Person", "Alice", &t_before)
+            },
+        );
+        assert_eq!(node_ids(&value), vec![id], "{value}");
+
+        // At a coordinate after the deletion the node is gone.
+        let value = find(
+            &server,
+            FindNodesAtTimeRequest {
+                transaction_time: Some(t_after.clone()),
+                ..name_req("Person", "Alice", &t_after)
+            },
+        );
+        assert!(node_ids(&value).is_empty(), "{value}");
+    }
+
+    #[test]
+    fn label_only_as_of_scan_without_property_filter() {
+        let server = create_test_server();
+        let a = create_named(&server, "Person", "Alice");
+        let b = create_named(&server, "Person", "Bob");
+        let _c = create_named(&server, "Company", "Acme");
+        let t1 = anchor_after_commits();
+        delete(&server, b);
+        let t2 = anchor_after_commits();
+
+        let value = find(
+            &server,
+            FindNodesAtTimeRequest {
+                transaction_time: Some(t1.clone()),
+                ..base_req("Person", &t1)
+            },
+        );
+        assert_eq!(node_ids(&value), vec![a, b], "{value}");
+
+        let value = find(
+            &server,
+            FindNodesAtTimeRequest {
+                transaction_time: Some(t2.clone()),
+                ..base_req("Person", &t2)
+            },
+        );
+        assert_eq!(node_ids(&value), vec![a], "{value}");
+    }
+
+    #[test]
+    fn current_state_equivalence_with_list_nodes_property_filter() {
+        let server = create_test_server();
+        let _a = create_named(&server, "Person", "Alice");
+        let _b = create_named(&server, "Person", "Bob");
+        let _c = create_named(&server, "Person", "Alice");
+        let now = anchor_after_commits();
+
+        let list_value: serde_json::Value =
+            serde_json::from_str(&server.list_nodes(ListNodesRequest {
+                label: Some("Person".to_string()),
+                property_key: Some("name".to_string()),
+                property_value: Some(serde_json::json!("Alice")),
+                limit: None,
+                offset: None,
+                include_vectors: None,
+            }))
+            .unwrap();
+        let mut current_ids = node_ids(&list_value);
+        current_ids.sort_unstable();
+
+        let at_now = find(&server, name_req("Person", "Alice", &now));
+        assert_eq!(
+            node_ids(&at_now),
+            current_ids,
+            "valid_time=now + transaction_time=now must equal the current-state result set"
+        );
+    }
+
+    #[test]
+    fn pagination_limit_offset_and_completeness_metadata() {
+        let server = create_test_server();
+        let mut created: Vec<u64> = (0..3)
+            .map(|_| create_named(&server, "Person", "Alice"))
+            .collect();
+        created.sort_unstable();
+        let now = anchor_after_commits();
+
+        // Page 1 (limit 1): stable ordering, exact total, continuation cursor.
+        let page1 = find(
+            &server,
+            FindNodesAtTimeRequest {
+                limit: Some(1),
+                ..name_req("Person", "Alice", &now)
+            },
+        );
+        assert_eq!(node_ids(&page1), vec![created[0]], "{page1}");
+        assert_eq!(page1["count"], serde_json::json!(1));
+        assert_eq!(page1["total_matching"], serde_json::json!(3));
+        assert_eq!(page1["has_more"], serde_json::json!(true));
+        assert_eq!(page1["next_offset"], serde_json::json!(1));
+
+        // Page 2 continues where page 1 left off, and its continuation
+        // metadata advances from the requested offset (T6: next_offset must
+        // be exercised at offset > 0, not just on page 1).
+        let page2 = find(
+            &server,
+            FindNodesAtTimeRequest {
+                limit: Some(1),
+                offset: Some(1),
+                ..name_req("Person", "Alice", &now)
+            },
+        );
+        assert_eq!(node_ids(&page2), vec![created[1]], "{page2}");
+        assert_eq!(page2["has_more"], serde_json::json!(true));
+        assert_eq!(page2["next_offset"], serde_json::json!(2));
+
+        // Final page reports has_more: false.
+        let page3 = find(
+            &server,
+            FindNodesAtTimeRequest {
+                limit: Some(1),
+                offset: Some(2),
+                ..name_req("Person", "Alice", &now)
+            },
+        );
+        assert_eq!(node_ids(&page3), vec![created[2]], "{page3}");
+        assert_eq!(page3["has_more"], serde_json::json!(false));
+    }
+
+    /// T4 (review, mutation killer): `limit: 0` is clamped UP to 1 (a page
+    /// must be able to carry a continuation cursor), exactly like
+    /// `list_nodes` -- one node comes back, not zero.
+    #[test]
+    fn limit_zero_is_clamped_up_to_one() {
+        let server = create_test_server();
+        let mut created: Vec<u64> = (0..2)
+            .map(|_| create_named(&server, "Person", "Alice"))
+            .collect();
+        created.sort_unstable();
+        let now = anchor_after_commits();
+
+        let value = find(
+            &server,
+            FindNodesAtTimeRequest {
+                limit: Some(0),
+                ..name_req("Person", "Alice", &now)
+            },
+        );
+        assert!(value.get("error").is_none(), "{value}");
+        assert_eq!(value["limit"], serde_json::json!(1));
+        assert_eq!(
+            node_ids(&value),
+            vec![created[0]],
+            "limit 0 must clamp to 1 and return one node, not zero: {value}"
+        );
+        assert_eq!(value["count"], serde_json::json!(1));
+        assert_eq!(value["has_more"], serde_json::json!(true));
+    }
+
+    #[test]
+    fn oversized_limit_and_offset_are_clamped_not_errors() {
+        let server = create_test_server();
+        let _ = create_named(&server, "Person", "Alice");
+        let now = anchor_after_commits();
+
+        // Far beyond MAX_RESULT_LIMIT / MAX_PAGINATION_OFFSET: clamped,
+        // exactly like list_nodes -- never an error.
+        let value = find(
+            &server,
+            FindNodesAtTimeRequest {
+                limit: Some(1_000_000),
+                offset: Some(1_000_000),
+                ..name_req("Person", "Alice", &now)
+            },
+        );
+        assert!(value.get("error").is_none(), "{value}");
+        assert_eq!(value["limit"], serde_json::json!(10_000));
+        assert_eq!(value["offset"], serde_json::json!(10_000));
+        assert!(node_ids(&value).is_empty(), "offset past the end: {value}");
+    }
+
+    #[test]
+    fn invalid_or_empty_timestamps_return_structured_errors() {
+        let server = create_test_server();
+
+        let response = server.find_nodes_at_time(base_req("Person", "not-a-timestamp"));
+        assert_invalid_argument(&response, "valid_time");
+
+        let response = server.find_nodes_at_time(base_req("Person", ""));
+        assert_invalid_argument(&response, "valid_time");
+
+        let response = server.find_nodes_at_time(FindNodesAtTimeRequest {
+            transaction_time: Some("not-a-timestamp".to_string()),
+            ..base_req("Person", &Utc::now().to_rfc3339())
+        });
+        assert_invalid_argument(&response, "transaction_time");
+    }
+
+    #[test]
+    fn property_key_without_value_and_reverse_return_structured_errors() {
+        let server = create_test_server();
+        let now = Utc::now().to_rfc3339();
+
+        let response = server.find_nodes_at_time(FindNodesAtTimeRequest {
+            property_key: Some("name".to_string()),
+            ..base_req("Person", &now)
+        });
+        assert_invalid_argument(&response, "property_key");
+
+        let response = server.find_nodes_at_time(FindNodesAtTimeRequest {
+            property_value: Some(serde_json::json!("Alice")),
+            ..base_req("Person", &now)
+        });
+        assert_invalid_argument(&response, "property_value");
+    }
+
+    #[test]
+    fn unsupported_property_value_type_returns_structured_error() {
+        let server = create_test_server();
+        let response = server.find_nodes_at_time(FindNodesAtTimeRequest {
+            property_key: Some("name".to_string()),
+            property_value: Some(serde_json::json!({"nested": "object"})),
+            ..base_req("Person", &Utc::now().to_rfc3339())
+        });
+        assert_invalid_argument(&response, "property_value");
+    }
+
+    #[test]
+    fn response_carries_resolved_bitemporal_coordinate_as_rfc3339() {
+        let server = create_test_server();
+        let _ = create_named(&server, "Person", "Alice");
+        let anchor = anchor_after_commits();
+        let anchor_micros = DateTime::parse_from_rfc3339(&anchor)
+            .unwrap()
+            .timestamp_micros();
+
+        let value = find(&server, name_req("Person", "Alice", &anchor));
+
+        // The resolved valid_time round-trips to the exact requested instant.
+        let valid_time = value["valid_time"].as_str().expect("valid_time present");
+        assert_eq!(
+            DateTime::parse_from_rfc3339(valid_time)
+                .expect("valid_time should be RFC 3339")
+                .timestamp_micros(),
+            anchor_micros
+        );
+
+        // The omitted transaction_time resolves to a concrete "now", not a
+        // placeholder -- it must parse and be at/after the anchor.
+        let tx_time = value["transaction_time"]
+            .as_str()
+            .expect("transaction_time present");
+        let tx_micros = DateTime::parse_from_rfc3339(tx_time)
+            .expect("transaction_time should be RFC 3339")
+            .timestamp_micros();
+        assert!(
+            tx_micros >= anchor_micros,
+            "resolved transaction_time {tx_time} should not precede the request anchor {anchor}"
+        );
+    }
+
+    #[test]
+    fn unknown_label_returns_empty_set_not_error() {
+        let server = create_test_server();
+        let value = find(
+            &server,
+            base_req("NeverSeenLabel3236", &Utc::now().to_rfc3339()),
+        );
+        assert!(value.get("error").is_none(), "{value}");
+        assert!(node_ids(&value).is_empty());
+        assert_eq!(value["total_matching"], serde_json::json!(0));
+        assert_eq!(value["has_more"], serde_json::json!(false));
+        assert_eq!(value["sampled"], serde_json::json!(false));
+    }
+
+    /// T3 (review): vector/embedding properties follow the #3220 elision
+    /// convention on this tool -- elided `{type, dim, elided: true}`
+    /// descriptor by default, full float array with `include_vectors: true`.
+    #[test]
+    fn vector_properties_elided_by_default_and_full_with_include_vectors() {
+        let server = create_test_server();
+        let embedding: Vec<f32> = (0..16).map(|i| (i as f32) * 0.001 + 0.1).collect();
+        let node: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            label: "Document".to_string(),
+            properties: Some(HashMap::from([
+                ("name".to_string(), serde_json::json!("Doc1")),
+                ("embedding".to_string(), serde_json::json!(embedding)),
+            ])),
+            valid_time: None,
+            provenance: None,
+        }))
+        .expect("create should succeed");
+        let now = anchor_after_commits();
+
+        // Default: elided descriptor, exactly like list_nodes.
+        let value = find(&server, base_req("Document", &now));
+        assert_eq!(node_ids(&value), vec![node.id], "{value}");
+        assert_eq!(
+            value["nodes"][0]["properties"]["embedding"],
+            serde_json::json!({"type": "vector", "dim": 16, "elided": true})
+        );
+        // Non-vector properties are untouched.
+        assert_eq!(value["nodes"][0]["properties"]["name"], "Doc1");
+
+        // include_vectors: true restores the full, lossless array.
+        let value = find(
+            &server,
+            FindNodesAtTimeRequest {
+                include_vectors: Some(true),
+                ..base_req("Document", &now)
+            },
+        );
+        let returned: Vec<f32> = value["nodes"][0]["properties"]["embedding"]
+            .as_array()
+            .expect("embedding should be a full array")
+            .iter()
+            .map(|v| v.as_f64().unwrap() as f32)
+            .collect();
+        assert_eq!(returned, embedding);
+    }
+
+    /// T7 (review): candidate-set truncation (the C1 cap) is disclosed via
+    /// `sampled: true`, with `total_matching` counting matches within the
+    /// sampled candidate set only. The cap is the same configurable
+    /// `max_schema_as_of_entities` bi-temporal `get_schema` uses, injected
+    /// small here (mirroring the schema_as_of cap test).
+    #[test]
+    fn truncated_candidate_scan_discloses_sampled_true() {
+        use crate::config::{AletheiaDBConfig, HistoricalConfigBuilder};
+        use crate::test_utils::create_test_db_with_config;
+
+        let config = AletheiaDBConfig::builder()
+            .historical(
+                HistoricalConfigBuilder::new()
+                    .max_schema_as_of_entities(2)
+                    .build(),
+            )
+            .build();
+        let (_tmp, db) = create_test_db_with_config(config).unwrap();
+        let server = AletheiaMcpServer::new(Arc::new(db));
+
+        let mut created: Vec<u64> = (0..4)
+            .map(|_| create_named(&server, "Person", "Alice"))
+            .collect();
+        created.sort_unstable();
+        let now = anchor_after_commits();
+
+        let value = find(&server, name_req("Person", "Alice", &now));
+        assert_eq!(value["sampled"], serde_json::json!(true), "{value}");
+        // total_matching is honest about the sampled candidate set: the cap
+        // keeps the lowest 2 node ids, both of which match.
+        assert_eq!(value["total_matching"], serde_json::json!(2));
+        assert_eq!(node_ids(&value), created[..2].to_vec(), "{value}");
+    }
+}
+
+// ============================================================================
 // Structured Error Codes with Retriable Flag (Issue #3234)
 // ============================================================================
 //

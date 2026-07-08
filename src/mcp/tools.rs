@@ -608,6 +608,63 @@ pub struct GetEdgeAtTimeRequest {
     pub transaction_time: Option<String>,
 }
 
+/// Request to find nodes by label (and optional exact property match) as of
+/// a bi-temporal point (Issue #3236). The entry-point resolver for
+/// "the Person named Alice, as of 2024-01-01" when no `NodeId` is known.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct FindNodesAtTimeRequest {
+    /// The node label to match (required).
+    #[schemars(description = "The node label to match (required)")]
+    pub label: String,
+
+    /// Filter by property key (requires property_value).
+    #[schemars(
+        description = "Filter by property key. Must be used together with 'property_value'."
+    )]
+    pub property_key: Option<String>,
+
+    /// Filter by exact property value (requires property_key).
+    /// Supports: strings, integers, floats, booleans, and null.
+    #[schemars(
+        description = "Filter by exact property value (JSON). Must be used together with 'property_key'."
+    )]
+    pub property_value: Option<serde_json::Value>,
+
+    /// Valid time as ISO 8601 timestamp (when the fact was true in reality).
+    #[schemars(
+        description = "Valid time (required) as ISO 8601 / RFC 3339 timestamp (e.g., \
+                       '2024-01-15T10:00:00Z') or microseconds since epoch: when the fact was \
+                       true in reality"
+    )]
+    pub valid_time: String,
+
+    /// Transaction time as ISO 8601 timestamp (when the fact was recorded).
+    /// If not provided, uses current time.
+    #[schemars(
+        description = "Transaction time as ISO 8601 / RFC 3339 timestamp or microseconds since \
+                       epoch (when recorded). If not provided, uses current time. Note: recalling \
+                       a since-deleted node requires anchoring BOTH dimensions before the \
+                       deletion, not just valid_time."
+    )]
+    pub transaction_time: Option<String>,
+
+    /// Maximum number of nodes to return (default: 100).
+    #[schemars(description = "Maximum number of nodes to return (default: 100)")]
+    pub limit: Option<usize>,
+
+    /// Number of matching nodes to skip (for pagination).
+    #[schemars(description = "Number of matching nodes to skip (for pagination)")]
+    pub offset: Option<usize>,
+
+    /// When true, return full vector/embedding properties instead of the
+    /// elided descriptor (default: false).
+    #[schemars(
+        description = "When true, return full vector/embedding float arrays instead of the elided \
+                       {type, dim, elided:true} descriptor (default: false)"
+    )]
+    pub include_vectors: Option<bool>,
+}
+
 /// Request to list graph-wide changes (node & edge versions) committed within a
 /// transaction-time window. Read-only; the discovery counterpart to `get_node_history`.
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
