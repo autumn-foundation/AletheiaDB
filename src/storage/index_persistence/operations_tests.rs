@@ -374,6 +374,249 @@ fn test_load_vector_indexes_skips_index_with_out_of_range_usearch_key() {
     assert!(!fresh.is_vector_index_enabled_for("huge_key_embedding"));
 }
 
+/// Helper: persist one healthy "valid_embedding" index over a single node so
+/// corruption tests have an intact sibling to assert isolation against.
+/// Returns the manager rooted at `base` (directories already created).
+fn persist_one_valid_vector_index(base: &std::path::Path) -> Arc<IndexPersistenceManager> {
+    use crate::index::vector::{DistanceMetric, HnswConfig};
+
+    let manager = Arc::new(IndexPersistenceManager::new(base));
+    manager.ensure_directories().unwrap();
+
+    let current = Arc::new(CurrentStorage::new());
+    current
+        .enable_vector_index(
+            "valid_embedding",
+            HnswConfig::new(4, DistanceMetric::Cosine),
+        )
+        .expect("failed to enable vector index");
+    current
+        .create_node(
+            "Doc",
+            PropertyMapBuilder::new()
+                .insert_vector("valid_embedding", &[1.0f32, 0.0, 0.0, 0.0])
+                .build(),
+        )
+        .expect("failed to create node with embedding");
+    persist_vector_indexes(&current, &manager, None, 0).expect("failed to persist vector indexes");
+    manager
+}
+
+/// Issue #451: a panic inside one per-index load task must be caught by the
+/// `catch_unwind` isolation in `load_vector_indexes` and converted into a
+/// skip — never abort startup or the sibling loads. Panics are injected via
+/// the test-only magic directory names consulted by
+/// `load_single_vector_index`; the three names exercise the three
+/// panic-payload downcast arms (&str, String, non-string).
+#[test]
+fn test_load_vector_indexes_panicking_load_is_isolated_to_a_skip() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let manager = persist_one_valid_vector_index(temp_dir.path());
+
+    let vector_base = manager.indexes_path().join("vector");
+    for magic in [
+        "__panic_injection_str__",
+        "__panic_injection_string__",
+        "__panic_injection_other__",
+    ] {
+        std::fs::create_dir_all(vector_base.join(magic)).unwrap();
+    }
+
+    let fresh = Arc::new(CurrentStorage::new());
+    let summary = load_vector_indexes(&fresh, &manager)
+        .expect("a panicking per-index load must be isolated, not abort all vector loading");
+    assert_eq!(
+        summary.skipped, 3,
+        "every panicking load must be counted as a skip"
+    );
+    assert_eq!(summary.loaded, 1, "the valid sibling must still load");
+    assert!(fresh.is_vector_index_enabled_for("valid_embedding"));
+    for magic in [
+        "__panic_injection_str__",
+        "__panic_injection_string__",
+        "__panic_injection_other__",
+    ] {
+        assert!(
+            !fresh.is_vector_index_enabled_for(magic),
+            "a panicked index '{magic}' must not be registered"
+        );
+    }
+}
+
+/// Issue #451: a vector index directory whose name is not valid UTF-8 cannot
+/// name a property, so it is skipped (with the lossy path as the reported
+/// name) while valid siblings still load.
+#[cfg(unix)]
+#[test]
+fn test_load_vector_indexes_skips_non_utf8_directory_name() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let manager = persist_one_valid_vector_index(temp_dir.path());
+
+    // 0xFF is never valid in UTF-8, so this directory name has no &str form.
+    let non_utf8_name = OsStr::from_bytes(b"bad_\xff\xfe_embedding");
+    let non_utf8_dir = manager.indexes_path().join("vector").join(non_utf8_name);
+    std::fs::create_dir_all(&non_utf8_dir).unwrap();
+
+    let fresh = Arc::new(CurrentStorage::new());
+    let summary = load_vector_indexes(&fresh, &manager)
+        .expect("a non-UTF-8 directory name must be skipped, not abort all vector loading");
+    assert_eq!(
+        summary.skipped, 1,
+        "the non-UTF-8 directory must be skipped"
+    );
+    assert_eq!(summary.loaded, 1, "the valid sibling must still load");
+    assert!(fresh.is_vector_index_enabled_for("valid_embedding"));
+}
+
+/// Issue #451: when `meta.idx` is intact but `current.usearch` is missing,
+/// the index is registered EMPTY (a fresh HNSW index) and the hollow-index
+/// warning branch fires (metadata records N > 0 vectors but 0 were
+/// restored). The load must still succeed so the caller can recover via
+/// `rebuild_vector_index`.
+#[test]
+fn test_load_vector_indexes_registers_empty_index_when_usearch_missing() {
+    use crate::index::vector::VectorIndex;
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let manager = persist_one_valid_vector_index(temp_dir.path());
+
+    // Remove the HNSW graph file (and its sidecar) but keep meta.idx, whose
+    // vector_count is 1 — the hollow-index condition.
+    let index_dir = manager.vector_path("valid_embedding");
+    std::fs::remove_file(index_dir.join("current.usearch")).unwrap();
+    let sidecar = index_dir.join("current.usearch.mappings");
+    if sidecar.exists() {
+        std::fs::remove_file(sidecar).unwrap();
+    }
+
+    let fresh = Arc::new(CurrentStorage::new());
+    let summary = load_vector_indexes(&fresh, &manager)
+        .expect("a missing current.usearch must register an empty index, not fail the load");
+    assert_eq!(summary.loaded, 1, "the hollow index must still be loaded");
+    assert_eq!(summary.skipped, 0);
+    assert!(
+        fresh.is_vector_index_enabled_for("valid_embedding"),
+        "the hollow index must be registered so rebuild_vector_index can recover it"
+    );
+    let (index, _, _, _) = fresh
+        .get_vector_index_for_persistence("valid_embedding")
+        .expect("hollow index must be registered");
+    assert_eq!(
+        index.len(),
+        0,
+        "no vectors can be restored without current.usearch"
+    );
+}
+
+/// Issue #451: a mapping whose node id exceeds `MAX_VALID_ID` is skipped
+/// with a warning while the rest of the index still loads — an invalid node
+/// id poisons only that one mapping, not the whole index (unlike an
+/// out-of-range usearch key, which would poison the key allocator).
+#[test]
+fn test_load_vector_indexes_warns_on_invalid_node_id_in_mappings_but_loads() {
+    use crate::storage::index_persistence::formats::VectorMapping;
+    use crate::storage::index_persistence::vector::{new_vector_mappings, save_vector_mappings};
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let manager = persist_one_valid_vector_index(temp_dir.path());
+
+    // Rewrite the mappings with one valid entry and one whose node id is
+    // beyond MAX_VALID_ID (u64::MAX - 1000), which NodeId::new rejects.
+    let mut mappings = new_vector_mappings();
+    mappings.count = 2;
+    mappings.mappings = vec![
+        VectorMapping {
+            node_id: 1,
+            usearch_key: 0,
+        },
+        VectorMapping {
+            node_id: u64::MAX - 100,
+            usearch_key: 1,
+        },
+    ];
+    save_vector_mappings(
+        &mappings,
+        &manager.vector_path("valid_embedding").join("mappings.idx"),
+    )
+    .expect("failed to write mappings with invalid node id");
+
+    let fresh = Arc::new(CurrentStorage::new());
+    let summary = load_vector_indexes(&fresh, &manager)
+        .expect("an invalid node id in mappings must be a per-mapping warning, not a failure");
+    assert_eq!(
+        summary.loaded, 1,
+        "the index must load despite the invalid mapping"
+    );
+    assert_eq!(summary.skipped, 0);
+    let (_, _, _, restored_mappings) = fresh
+        .get_vector_index_for_persistence("valid_embedding")
+        .expect("index must be registered");
+    assert!(
+        restored_mappings.iter().any(|(node_id, _)| *node_id == 1),
+        "the valid mapping must be restored, got: {restored_mappings:?}"
+    );
+    assert!(
+        !restored_mappings
+            .iter()
+            .any(|(node_id, _)| *node_id == u64::MAX - 100),
+        "the invalid mapping must be dropped, got: {restored_mappings:?}"
+    );
+}
+
+/// Issue #451: an unreadable vector directory (here: `vector` is a file, so
+/// `read_dir` fails) is an infrastructure error for `load_vector_indexes`,
+/// but `load_indexes_startup` must degrade it to a warning — vector indexes
+/// are auxiliary and their loss must never abort database startup.
+#[test]
+fn test_load_indexes_startup_survives_unreadable_vector_directory() {
+    use crate::core::id::IdGenerator;
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let manager = Arc::new(IndexPersistenceManager::new(temp_dir.path()));
+    manager.ensure_directories().unwrap();
+
+    // Replace the vector directory with a regular file: it "exists" but
+    // read_dir on it fails, which is the only Err path out of
+    // load_vector_indexes.
+    let vector_base = manager.indexes_path().join("vector");
+    if vector_base.exists() {
+        std::fs::remove_dir_all(&vector_base).unwrap();
+    }
+    std::fs::write(&vector_base, b"not a directory").unwrap();
+
+    let current = Arc::new(CurrentStorage::new());
+    assert!(
+        load_vector_indexes(&current, &manager).is_err(),
+        "read_dir on a file must surface as an infrastructure error"
+    );
+
+    // Startup loading must swallow that error with a warning, not panic or
+    // abort.
+    let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
+    let node_id_gen = Arc::new(IdGenerator::new());
+    let edge_id_gen = Arc::new(IdGenerator::new());
+    let version_id_gen = Arc::new(IdGenerator::new());
+    let manifest_lsn = load_indexes_startup(
+        &manager,
+        &current,
+        &historical,
+        &node_id_gen,
+        &edge_id_gen,
+        &version_id_gen,
+    );
+    assert!(
+        manifest_lsn.is_none(),
+        "no manifest was persisted, so no LSN should be reported"
+    );
+    assert!(
+        !current.is_vector_index_enabled(),
+        "no vector index can load from an unreadable vector directory"
+    );
+}
+
 #[test]
 fn test_graph_persist_keeps_interner_consistent_with_graph_string_ids() {
     let temp_dir = tempfile::tempdir().unwrap();

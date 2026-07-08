@@ -225,6 +225,23 @@ fn load_single_vector_index(
         }
     };
 
+    // Test-only panic injection. The catch_unwind panic-isolation arm in
+    // `load_vector_indexes` is unreachable with well-formed inputs (every
+    // parser below returns `Err` instead of panicking), so tests inject a
+    // panic via magic directory names to prove a panicking load is isolated
+    // to a skip and cannot abort startup or its sibling loads. The three
+    // names exercise the three panic-payload downcasts (&str, String, other).
+    // Compiled out of production builds entirely.
+    #[cfg(test)]
+    match property_name.as_str() {
+        "__panic_injection_str__" => panic!("injected &str panic (test-only)"),
+        "__panic_injection_string__" => {
+            panic!("injected String panic for '{property_name}' (test-only)")
+        }
+        "__panic_injection_other__" => std::panic::panic_any(42_u32),
+        _ => {}
+    }
+
     // Load metadata
     let meta_path = vec_path.join("meta.idx");
     if !meta_path.exists() {
