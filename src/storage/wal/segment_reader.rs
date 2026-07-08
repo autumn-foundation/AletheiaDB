@@ -89,14 +89,30 @@ pub(crate) const WAL_VERSION_PROVENANCE: u8 = 3;
 /// `WAL_VERSION_ENCRYPTED`'s counterpart once provenance was added.
 pub(crate) const WAL_VERSION_ENCRYPTED_PROVENANCE: u8 = 4;
 
-/// Maximum supported WAL version (inclusive).
-const WAL_VERSION_MAX: u8 = WAL_VERSION_ENCRYPTED_PROVENANCE;
+/// WAL format version for plaintext segments whose provenance bundle also
+/// carries the authenticated-principal field (Issue #3350).
+///
+/// Identical to [`WAL_VERSION_PROVENANCE`] except the serialized provenance
+/// bundle has a fifth optional string (`principal`) after `correlation_id`.
+/// Segments below this version simply lack the extra bytes; parsing falls
+/// back to `principal: None` for them (see `read_provenance`).
+pub(crate) const WAL_VERSION_PROVENANCE_PRINCIPAL: u8 = 5;
 
-/// Returns `true` if `version` denotes an encrypted segment (either the
-/// original encrypted format or its provenance-carrying successor).
+/// WAL format version for encrypted segments whose decrypted payload uses
+/// the principal-carrying provenance format (i.e.
+/// [`WAL_VERSION_PROVENANCE_PRINCIPAL`]).
+pub(crate) const WAL_VERSION_ENCRYPTED_PROVENANCE_PRINCIPAL: u8 = 6;
+
+/// Maximum supported WAL version (inclusive).
+const WAL_VERSION_MAX: u8 = WAL_VERSION_ENCRYPTED_PROVENANCE_PRINCIPAL;
+
+/// Returns `true` if `version` denotes an encrypted segment (the original
+/// encrypted format or one of its provenance-carrying successors).
 #[inline]
 fn is_encrypted_version(version: u8) -> bool {
-    version == WAL_VERSION_ENCRYPTED || version == WAL_VERSION_ENCRYPTED_PROVENANCE
+    version == WAL_VERSION_ENCRYPTED
+        || version == WAL_VERSION_ENCRYPTED_PROVENANCE
+        || version == WAL_VERSION_ENCRYPTED_PROVENANCE_PRINCIPAL
 }
 
 /// Map a segment/container format version to the logical *payload* version
@@ -110,6 +126,7 @@ fn payload_version(version: u8) -> u8 {
     match version {
         WAL_VERSION_ENCRYPTED => WAL_VERSION,
         WAL_VERSION_ENCRYPTED_PROVENANCE => WAL_VERSION_PROVENANCE,
+        WAL_VERSION_ENCRYPTED_PROVENANCE_PRINCIPAL => WAL_VERSION_PROVENANCE_PRINCIPAL,
         v => v,
     }
 }
@@ -646,6 +663,14 @@ fn read_provenance(buffer: &[u8], offset: &mut usize, version: u8) -> Result<Opt
     let confidence = read_opt_f64(buffer, offset, "provenance.confidence")?;
     let note = read_opt_string(buffer, offset, "provenance.note")?;
     let correlation_id = read_opt_string(buffer, offset, "provenance.correlation_id")?;
+    // The authenticated-principal field (Issue #3350) only exists on
+    // segments at or above WAL_VERSION_PROVENANCE_PRINCIPAL; older
+    // provenance-carrying segments end the bundle at correlation_id.
+    let principal = if version >= WAL_VERSION_PROVENANCE_PRINCIPAL {
+        read_opt_string(buffer, offset, "provenance.principal")?
+    } else {
+        None
+    };
 
     let mut builder = Provenance::builder();
     if let Some(source) = source {
@@ -659,6 +684,9 @@ fn read_provenance(buffer: &[u8], offset: &mut usize, version: u8) -> Result<Opt
     }
     if let Some(correlation_id) = correlation_id {
         builder = builder.correlation_id(correlation_id);
+    }
+    if let Some(principal) = principal {
+        builder = builder.principal(principal);
     }
     let provenance = builder.build().map_err(|e| {
         StorageError::CorruptedData(format!("Invalid provenance in WAL entry: {}", e))

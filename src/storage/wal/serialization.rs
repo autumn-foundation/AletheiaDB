@@ -97,13 +97,15 @@ fn opt_f64_size(v: Option<f64>) -> usize {
     1 + if v.is_some() { 8 } else { 0 }
 }
 
-/// Serialize an optional [`Provenance`] bundle: `[1-byte presence][source][confidence][note][correlation_id]`.
+/// Serialize an optional [`Provenance`] bundle:
+/// `[1-byte presence][source][confidence][note][correlation_id][principal]`.
 ///
-/// The four fields are only present when the outer presence byte is nonzero;
+/// The five fields are only present when the outer presence byte is nonzero;
 /// each is itself independently optional (see [`serialize_opt_str`] /
 /// [`serialize_opt_f64`]). Written unconditionally by writers on this format
 /// version -- readers on older WAL versions never look for these bytes at
-/// all (see `WAL_VERSION_PROVENANCE` in `segment_reader.rs`).
+/// all (see `WAL_VERSION_PROVENANCE` / `WAL_VERSION_PROVENANCE_PRINCIPAL`
+/// in `segment_reader.rs`; `principal` was added by Issue #3350).
 #[inline]
 fn serialize_provenance_into(provenance: Option<&Provenance>, buffer: &mut Vec<u8>) {
     match provenance {
@@ -114,6 +116,7 @@ fn serialize_provenance_into(provenance: Option<&Provenance>, buffer: &mut Vec<u
             serialize_opt_f64(p.confidence(), buffer);
             serialize_opt_str(p.note(), buffer);
             serialize_opt_str(p.correlation_id(), buffer);
+            serialize_opt_str(p.principal(), buffer);
         }
     }
 }
@@ -129,6 +132,7 @@ fn provenance_serialized_size(provenance: Option<&Provenance>) -> usize {
                 + opt_f64_size(p.confidence())
                 + opt_str_size(p.note())
                 + opt_str_size(p.correlation_id())
+                + opt_str_size(p.principal())
         }
     }
 }

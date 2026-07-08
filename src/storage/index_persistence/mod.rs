@@ -113,10 +113,13 @@ use rayon::prelude::*;
 ///
 /// Bumped to 2 for write-time provenance on temporal versions (Issue #3224):
 /// `NodeVersionEntry`/`EdgeVersionEntry` gained an optional `provenance`
-/// field. Since `bitcode` is positional, files written at version 1 can no
-/// longer decode directly as the current structs; see
-/// `temporal::load_temporal_index` for the legacy fallback.
-pub const MANIFEST_VERSION: u16 = 2;
+/// field. Bumped to 3 for the authenticated-principal provenance field
+/// (Issue #3350): `PersistedProvenance` gained an optional `principal`
+/// field. Since `bitcode` is positional, files written at older versions can
+/// no longer decode directly as the current structs; see
+/// `temporal::load_temporal_index` for the legacy fallbacks
+/// (`formats::legacy_v1` / `formats::legacy_v2`).
+pub const MANIFEST_VERSION: u16 = 3;
 
 /// Magic bytes for manifest files.
 pub const MANIFEST_MAGIC: [u8; 4] = *b"GIDX";

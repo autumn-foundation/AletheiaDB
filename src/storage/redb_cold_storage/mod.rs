@@ -1787,7 +1787,7 @@ impl RedbColdStorage {
 // Serialization helpers using bitcode
 // ============================================================================
 
-/// Serializable wrapper for write-time provenance (Issue #3224).
+/// Serializable wrapper for write-time provenance (Issues #3224 + #3350).
 ///
 /// Mirrors [`crate::core::provenance::Provenance`]'s fields exactly.
 #[derive(bitcode::Encode, bitcode::Decode)]
@@ -1796,6 +1796,7 @@ struct SerializableProvenance {
     confidence: Option<f64>,
     note: Option<String>,
     correlation_id: Option<String>,
+    principal: Option<String>,
 }
 
 /// Serializable wrapper for NodeVersion.
@@ -1832,12 +1833,61 @@ struct SerializableEdgeVersion {
     provenance: Option<SerializableProvenance>,
 }
 
+/// Pre-principal (Issue #3350) shape of the provenance bundle -- the
+/// Issue #3224 shape without the `principal` field. Only referenced by the
+/// frozen `..V2` record shapes below.
+#[derive(bitcode::Encode, bitcode::Decode)]
+struct SerializableProvenanceV2 {
+    source: Option<String>,
+    confidence: Option<f64>,
+    note: Option<String>,
+    correlation_id: Option<String>,
+}
+
+/// Pre-principal (Issue #3350) shape of [`SerializableNodeVersion`]: written
+/// with the [`COLD_RECORD_MAGIC_V2`] prefix by Issue-#3224-era binaries.
+/// Identical to the current shape except its provenance bundle lacks
+/// `principal`.
+#[derive(bitcode::Encode, bitcode::Decode)]
+struct SerializableNodeVersionV2 {
+    id: u64,
+    node_id: u64,
+    temporal_valid_start: i64,
+    temporal_valid_end: i64,
+    temporal_tx_start: i64,
+    temporal_tx_end: i64,
+    label: String,
+    data: SerializableVersionData,
+    next_version: Option<u64>,
+    prev_version: Option<u64>,
+    provenance: Option<SerializableProvenanceV2>,
+}
+
+/// Pre-principal (Issue #3350) shape of [`SerializableEdgeVersion`].
+#[derive(bitcode::Encode, bitcode::Decode)]
+struct SerializableEdgeVersionV2 {
+    id: u64,
+    edge_id: u64,
+    temporal_valid_start: i64,
+    temporal_valid_end: i64,
+    temporal_tx_start: i64,
+    temporal_tx_end: i64,
+    label: String,
+    source: u64,
+    target: u64,
+    data: SerializableVersionData,
+    next_version: Option<u64>,
+    prev_version: Option<u64>,
+    provenance: Option<SerializableProvenanceV2>,
+}
+
 /// Pre-provenance (Issue #3224) shape of [`SerializableNodeVersion`].
 ///
 /// Cold-storage records have no version tag at all, so a legacy record is
 /// indistinguishable from a current one except by trying to decode it. This
 /// frozen shape is the fallback `decode_node_version` tries when the
-/// tag-prefixed current decode fails (see [`COLD_RECORD_MAGIC_V2`]).
+/// tag-prefixed decodes don't apply (see [`COLD_RECORD_MAGIC_V2`] /
+/// [`COLD_RECORD_MAGIC_V3`]).
 #[derive(bitcode::Encode, bitcode::Decode)]
 struct SerializableNodeVersionV1 {
     id: u64,
@@ -1883,6 +1933,13 @@ struct SerializableEdgeVersionV1 {
 /// not. The value itself is arbitrary but deliberately not a small integer
 /// (to avoid any structural resemblance to a plausible bitcode-encoded id).
 const COLD_RECORD_MAGIC_V2: [u8; 4] = [0xA1, 0x37, 0xC0, 0xDE];
+
+/// Magic sequence prepended to cold-storage records written with the
+/// authenticated-principal provenance field (Issue #3350). Same collision
+/// rationale as [`COLD_RECORD_MAGIC_V2`]; a distinct value so decoders can
+/// tell the two tagged generations apart (the V2 provenance bundle lacks
+/// the `principal` field).
+const COLD_RECORD_MAGIC_V3: [u8; 4] = [0xB2, 0x48, 0xD1, 0xEF];
 
 /// Serializable wrapper for VersionData.
 #[derive(bitcode::Encode, bitcode::Decode)]
@@ -1943,8 +2000,8 @@ pub fn encode_node_version(version: &NodeVersion) -> Vec<u8> {
         provenance: encode_provenance(version.provenance.as_deref()),
     };
 
-    let mut out = Vec::with_capacity(COLD_RECORD_MAGIC_V2.len());
-    out.extend_from_slice(&COLD_RECORD_MAGIC_V2);
+    let mut out = Vec::with_capacity(COLD_RECORD_MAGIC_V3.len());
+    out.extend_from_slice(&COLD_RECORD_MAGIC_V3);
     out.extend_from_slice(&bitcode::encode(&serializable));
     out
 }
@@ -1959,6 +2016,7 @@ fn encode_provenance(
         confidence: p.confidence(),
         note: p.note().map(String::from),
         correlation_id: p.correlation_id().map(String::from),
+        principal: p.principal().map(String::from),
     })
 }
 
@@ -1971,9 +2029,29 @@ fn decode_provenance(
         return Ok(None);
     };
     use crate::core::provenance::Provenance;
-    let provenance = Provenance::from_parts(p.source, p.confidence, p.note, p.correlation_id)
-        .map_err(|e| StorageError::corruption(format!("Invalid persisted provenance: {}", e)))?;
+    let provenance = Provenance::from_parts(
+        p.source,
+        p.confidence,
+        p.note,
+        p.correlation_id,
+        p.principal,
+    )
+    .map_err(|e| StorageError::corruption(format!("Invalid persisted provenance: {}", e)))?;
     Ok(Some(std::sync::Arc::new(provenance)))
+}
+
+/// Restore a pre-principal (Issue #3350) cold-storage provenance bundle:
+/// same as [`decode_provenance`] with `principal: None`.
+fn decode_provenance_v2(
+    persisted: Option<SerializableProvenanceV2>,
+) -> Result<Option<std::sync::Arc<crate::core::provenance::Provenance>>> {
+    decode_provenance(persisted.map(|p| SerializableProvenance {
+        source: p.source,
+        confidence: p.confidence,
+        note: p.note,
+        correlation_id: p.correlation_id,
+        principal: None,
+    }))
 }
 
 /// Decode a `NodeVersion` from a previously serialized byte payload.
@@ -1988,16 +2066,19 @@ pub fn decode_node_version(data: &[u8]) -> Result<NodeVersion> {
     use crate::core::interning::GLOBAL_INTERNER;
     use crate::core::temporal::{BiTemporalInterval, TimeRange};
 
-    // Tagged (Issue #3224) records carry provenance; untagged records are
-    // pre-provenance and are decoded via the frozen `..V1` shape instead.
-    // There is no version marker on legacy records at all, so the magic
-    // sequence itself is the only signal -- see `COLD_RECORD_MAGIC_V2`.
+    // Tagged records carry provenance: V3 (Issue #3350) bundles include the
+    // authenticated principal, V2 (Issue #3224) bundles do not. Untagged
+    // records are pre-provenance and are decoded via the frozen `..V1`
+    // shape instead. There is no version marker on legacy records at all,
+    // so the magic sequences themselves are the only signal -- see
+    // `COLD_RECORD_MAGIC_V2` / `COLD_RECORD_MAGIC_V3`.
     //
-    // A magic-byte match means this is unambiguously a V2 record (legacy
-    // records never carry this prefix), so a decode failure past the magic
-    // indicates real corruption -- it must be surfaced directly rather than
-    // falling through to the V1 decoder, which would otherwise misinterpret
-    // the remaining bytes (magic-matched-but-corrupt is not "maybe legacy").
+    // A magic-byte match means this is unambiguously a record of that tagged
+    // generation (legacy records never carry either prefix), so a decode
+    // failure past the magic indicates real corruption -- it must be
+    // surfaced directly rather than falling through to an older decoder,
+    // which would otherwise misinterpret the remaining bytes
+    // (magic-matched-but-corrupt is not "maybe legacy").
     let (
         label,
         temporal_valid_start,
@@ -2010,8 +2091,26 @@ pub fn decode_node_version(data: &[u8]) -> Result<NodeVersion> {
         next_version,
         prev_version,
         provenance,
-    ) = if data.starts_with(&COLD_RECORD_MAGIC_V2) {
-        let s: SerializableNodeVersion = bitcode::decode(&data[COLD_RECORD_MAGIC_V2.len()..])
+    ) = if data.starts_with(&COLD_RECORD_MAGIC_V3) {
+        let s: SerializableNodeVersion = bitcode::decode(&data[COLD_RECORD_MAGIC_V3.len()..])
+            .map_err(|e| {
+                StorageError::corruption(format!("Failed to decode node version V3: {}", e))
+            })?;
+        (
+            s.label,
+            s.temporal_valid_start,
+            s.temporal_valid_end,
+            s.temporal_tx_start,
+            s.temporal_tx_end,
+            s.id,
+            s.node_id,
+            s.data,
+            s.next_version,
+            s.prev_version,
+            decode_provenance(s.provenance)?,
+        )
+    } else if data.starts_with(&COLD_RECORD_MAGIC_V2) {
+        let s: SerializableNodeVersionV2 = bitcode::decode(&data[COLD_RECORD_MAGIC_V2.len()..])
             .map_err(|e| {
                 StorageError::corruption(format!("Failed to decode node version V2: {}", e))
             })?;
@@ -2026,7 +2125,7 @@ pub fn decode_node_version(data: &[u8]) -> Result<NodeVersion> {
             s.data,
             s.next_version,
             s.prev_version,
-            decode_provenance(s.provenance)?,
+            decode_provenance_v2(s.provenance)?,
         )
     } else {
         let s: SerializableNodeVersionV1 = bitcode::decode(data).map_err(|e| {
@@ -2108,8 +2207,8 @@ pub fn encode_edge_version(version: &EdgeVersion) -> Vec<u8> {
         provenance: encode_provenance(version.provenance.as_deref()),
     };
 
-    let mut out = Vec::with_capacity(COLD_RECORD_MAGIC_V2.len());
-    out.extend_from_slice(&COLD_RECORD_MAGIC_V2);
+    let mut out = Vec::with_capacity(COLD_RECORD_MAGIC_V3.len());
+    out.extend_from_slice(&COLD_RECORD_MAGIC_V3);
     out.extend_from_slice(&bitcode::encode(&serializable));
     out
 }
@@ -2144,8 +2243,28 @@ pub fn decode_edge_version(data: &[u8]) -> Result<EdgeVersion> {
         next_version,
         prev_version,
         provenance,
-    ) = if data.starts_with(&COLD_RECORD_MAGIC_V2) {
-        let s: SerializableEdgeVersion = bitcode::decode(&data[COLD_RECORD_MAGIC_V2.len()..])
+    ) = if data.starts_with(&COLD_RECORD_MAGIC_V3) {
+        let s: SerializableEdgeVersion = bitcode::decode(&data[COLD_RECORD_MAGIC_V3.len()..])
+            .map_err(|e| {
+                StorageError::corruption(format!("Failed to decode edge version V3: {}", e))
+            })?;
+        (
+            s.label,
+            s.temporal_valid_start,
+            s.temporal_valid_end,
+            s.temporal_tx_start,
+            s.temporal_tx_end,
+            s.id,
+            s.edge_id,
+            s.source,
+            s.target,
+            s.data,
+            s.next_version,
+            s.prev_version,
+            decode_provenance(s.provenance)?,
+        )
+    } else if data.starts_with(&COLD_RECORD_MAGIC_V2) {
+        let s: SerializableEdgeVersionV2 = bitcode::decode(&data[COLD_RECORD_MAGIC_V2.len()..])
             .map_err(|e| {
                 StorageError::corruption(format!("Failed to decode edge version V2: {}", e))
             })?;
@@ -2162,7 +2281,7 @@ pub fn decode_edge_version(data: &[u8]) -> Result<EdgeVersion> {
             s.data,
             s.next_version,
             s.prev_version,
-            decode_provenance(s.provenance)?,
+            decode_provenance_v2(s.provenance)?,
         )
     } else {
         let s: SerializableEdgeVersionV1 = bitcode::decode(data).map_err(|e| {
