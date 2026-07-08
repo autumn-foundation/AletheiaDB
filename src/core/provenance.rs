@@ -8,7 +8,6 @@
 //! historical version of a node or edge may carry its own bundle, distinct
 //! from the versions before and after it.
 
-use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 /// Errors that can occur when constructing a [`Provenance`] bundle.
@@ -31,16 +30,37 @@ pub enum ProvenanceError {
 ///
 /// Constructed via [`Provenance::builder`], which validates `confidence`
 /// against `[0.0, 1.0]` (NaN is rejected).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(try_from = "ProvenanceRaw")]
+///
+/// Serde support is feature-gated because `serde` is an optional dependency
+/// (enabled by `config-toml` — a default feature — and `mcp-server`, whose
+/// response types embed [`Provenance`] directly); `--no-default-features`
+/// builds must still compile without it.
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(
+    any(feature = "config-toml", feature = "mcp-server"),
+    derive(serde::Serialize, serde::Deserialize),
+    serde(try_from = "ProvenanceRaw")
+)]
 pub struct Provenance {
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(
+        any(feature = "config-toml", feature = "mcp-server"),
+        serde(skip_serializing_if = "Option::is_none")
+    )]
     source: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(
+        any(feature = "config-toml", feature = "mcp-server"),
+        serde(skip_serializing_if = "Option::is_none")
+    )]
     confidence: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(
+        any(feature = "config-toml", feature = "mcp-server"),
+        serde(skip_serializing_if = "Option::is_none")
+    )]
     note: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(
+        any(feature = "config-toml", feature = "mcp-server"),
+        serde(skip_serializing_if = "Option::is_none")
+    )]
     correlation_id: Option<String>,
 }
 
@@ -178,7 +198,8 @@ impl ProvenanceBuilder {
 /// Unvalidated wire representation used only as the `serde` deserialization
 /// target; [`Provenance`] itself has private fields so it cannot be
 /// deserialized directly without going through validation.
-#[derive(Debug, Deserialize)]
+#[cfg(any(feature = "config-toml", feature = "mcp-server"))]
+#[derive(Debug, serde::Deserialize)]
 struct ProvenanceRaw {
     #[serde(default)]
     source: Option<String>,
@@ -190,6 +211,7 @@ struct ProvenanceRaw {
     correlation_id: Option<String>,
 }
 
+#[cfg(any(feature = "config-toml", feature = "mcp-server"))]
 impl TryFrom<ProvenanceRaw> for Provenance {
     type Error = ProvenanceError;
 
@@ -256,6 +278,7 @@ mod tests {
         assert_eq!(p.confidence(), None);
     }
 
+    #[cfg(any(feature = "config-toml", feature = "mcp-server"))]
     #[test]
     fn test_provenance_json_omits_absent_fields() {
         let p = Provenance::builder().source("csv-import").build().unwrap();
@@ -266,6 +289,7 @@ mod tests {
         assert!(!json.contains("correlation_id"));
     }
 
+    #[cfg(any(feature = "config-toml", feature = "mcp-server"))]
     #[test]
     fn test_provenance_deserialize_valid_round_trips() {
         let json = r#"{"source":"claude-mcp","confidence":0.8}"#;
@@ -274,6 +298,7 @@ mod tests {
         assert_eq!(p.confidence(), Some(0.8));
     }
 
+    #[cfg(any(feature = "config-toml", feature = "mcp-server"))]
     #[test]
     fn test_provenance_deserialize_rejects_invalid_confidence() {
         let json = r#"{"confidence":2.0}"#;
