@@ -39,7 +39,7 @@ pub use tools::{
     FindSimilarRequest, GetEdgeAtTimeRequest, GetEdgeRequest, GetIncomingEdgesRequest,
     GetNodeAtTimeRequest, GetNodeRequest, GetOutgoingEdgesRequest, HybridQueryRequest,
     ListChangesRequest, ListEdgesRequest, ListNodesRequest, ListVectorIndexesRequest, QueryRequest,
-    TraverseRequest, UpdateEdgeRequest, UpdateNodeRequest,
+    TemporalBounds, TraverseRequest, UpdateEdgeRequest, UpdateNodeRequest,
 };
 
 #[cfg(test)]

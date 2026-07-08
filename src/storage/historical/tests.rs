@@ -4993,3 +4993,191 @@ fn test_get_nodes_at_time_with_label_filters_on_version_label_before_reconstruct
         vec![company_id]
     );
 }
+
+// ============================================================================
+// Version read metadata: provenance + bi-temporal interval (Issue #3232)
+// ============================================================================
+
+#[test]
+fn test_get_node_version_read_metadata_hot_tier_hit() {
+    let mut storage = HistoricalStorage::new();
+    let node_id = NodeId::new(1).unwrap();
+    let version_id = VersionId::new(100).unwrap();
+    let label = GLOBAL_INTERNER.intern("Person").unwrap();
+    let props = PropertyMapBuilder::new().insert("name", "Alice").build();
+    let provenance = Arc::new(
+        Provenance::builder()
+            .source("test-suite")
+            .confidence(0.9)
+            .build()
+            .unwrap(),
+    );
+
+    storage
+        .add_node_version_with_provenance(
+            node_id,
+            version_id,
+            1_000.into(),
+            2_000.into(),
+            label,
+            props,
+            false,
+            Some(Arc::clone(&provenance)),
+        )
+        .unwrap();
+
+    let (prov, interval) = storage
+        .get_node_version_read_metadata(version_id)
+        .unwrap()
+        .expect("hot-tier version must be found");
+    let prov = prov.expect("provenance stored on the version must be returned");
+    assert_eq!(prov.source(), Some("test-suite"));
+    assert_eq!(prov.confidence(), Some(0.9));
+    assert_eq!(interval.valid_time().start(), 1_000.into());
+    assert_eq!(interval.transaction_time().start(), 2_000.into());
+    assert!(interval.transaction_time().is_current());
+}
+
+#[test]
+fn test_get_node_version_read_metadata_missing_version_returns_none() {
+    // A version id that exists in no tier (and with no tiered storage
+    // configured) must resolve to Ok(None) via the tiered fallback path,
+    // never an error: the MCP layer relies on this to distinguish
+    // "no metadata" from "metadata lookup failed".
+    let storage = HistoricalStorage::new();
+    let missing = VersionId::new(424_242).unwrap();
+    assert!(
+        storage
+            .get_node_version_read_metadata(missing)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn test_get_edge_version_read_metadata_hot_tier_hit() {
+    let mut storage = HistoricalStorage::new();
+    let edge_id = EdgeId::new(10).unwrap();
+    let version_id = VersionId::new(200).unwrap();
+    let label = GLOBAL_INTERNER.intern("KNOWS").unwrap();
+    let props = PropertyMapBuilder::new().insert("weight", 1.0f64).build();
+    let provenance = Arc::new(
+        Provenance::builder()
+            .source("edge-test-suite")
+            .note("hot tier")
+            .build()
+            .unwrap(),
+    );
+
+    storage
+        .add_edge_version_with_provenance(
+            edge_id,
+            version_id,
+            3_000.into(),
+            4_000.into(),
+            label,
+            NodeId::new(1).unwrap(),
+            NodeId::new(2).unwrap(),
+            props,
+            false,
+            Some(Arc::clone(&provenance)),
+        )
+        .unwrap();
+
+    let (prov, interval) = storage
+        .get_edge_version_read_metadata(version_id)
+        .unwrap()
+        .expect("hot-tier version must be found");
+    let prov = prov.expect("provenance stored on the version must be returned");
+    assert_eq!(prov.source(), Some("edge-test-suite"));
+    assert_eq!(prov.note(), Some("hot tier"));
+    assert_eq!(interval.valid_time().start(), 3_000.into());
+    assert_eq!(interval.transaction_time().start(), 4_000.into());
+    assert!(interval.transaction_time().is_current());
+}
+
+#[test]
+fn test_get_edge_version_read_metadata_missing_version_returns_none() {
+    // Edge mirror of the node missing-version case above.
+    let storage = HistoricalStorage::new();
+    let missing = VersionId::new(424_243).unwrap();
+    assert!(
+        storage
+            .get_edge_version_read_metadata(missing)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn test_get_node_version_read_metadata_cold_tier_fallback() {
+    use crate::storage::redb_cold_storage::RedbColdStorage;
+    use crate::storage::tiered_storage::TieredStorage;
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let db_path = temp_dir.path().join("cold.redb");
+    let cold = Arc::new(RedbColdStorage::with_default_config(&db_path).unwrap());
+    let tiered = Arc::new(TieredStorage::with_default_config(cold));
+
+    let version_id = VersionId::new(7_100).unwrap();
+    let temporal = BiTemporalInterval::with_valid_time(1_000.into(), 2_000.into());
+    let version = NodeVersion::new_anchor(
+        version_id,
+        NodeId::new(7).unwrap(),
+        temporal,
+        GLOBAL_INTERNER.intern("Person").unwrap(),
+        PropertyMapBuilder::new()
+            .insert("name", "Cold Alice")
+            .build(),
+    );
+    tiered.store_node_version(&version).unwrap();
+
+    let mut storage = HistoricalStorage::new();
+    storage.set_tiered_storage(tiered);
+
+    // The version was never added to the hot tier, so the lookup must fall
+    // back through the tiered path and hit cold storage.
+    let (prov, interval) = storage
+        .get_node_version_read_metadata(version_id)
+        .unwrap()
+        .expect("cold-tier version must be found");
+    assert!(prov.is_none(), "anchor was stored without provenance");
+    assert_eq!(interval.valid_time().start(), 1_000.into());
+    assert_eq!(interval.transaction_time().start(), 2_000.into());
+}
+
+#[test]
+fn test_get_edge_version_read_metadata_cold_tier_fallback() {
+    use crate::storage::redb_cold_storage::RedbColdStorage;
+    use crate::storage::tiered_storage::TieredStorage;
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let db_path = temp_dir.path().join("cold.redb");
+    let cold = Arc::new(RedbColdStorage::with_default_config(&db_path).unwrap());
+    let tiered = Arc::new(TieredStorage::with_default_config(cold));
+
+    let version_id = VersionId::new(7_200).unwrap();
+    let temporal = BiTemporalInterval::with_valid_time(3_000.into(), 4_000.into());
+    let version = EdgeVersion::new_anchor(
+        version_id,
+        EdgeId::new(70).unwrap(),
+        temporal,
+        GLOBAL_INTERNER.intern("KNOWS").unwrap(),
+        NodeId::new(7).unwrap(),
+        NodeId::new(8).unwrap(),
+        PropertyMapBuilder::new().insert("weight", 2.0f64).build(),
+    );
+    tiered.store_edge_version(&version).unwrap();
+
+    let mut storage = HistoricalStorage::new();
+    storage.set_tiered_storage(tiered);
+
+    // Edge mirror of the node cold-tier fallback case above.
+    let (prov, interval) = storage
+        .get_edge_version_read_metadata(version_id)
+        .unwrap()
+        .expect("cold-tier version must be found");
+    assert!(prov.is_none(), "anchor was stored without provenance");
+    assert_eq!(interval.valid_time().start(), 3_000.into());
+    assert_eq!(interval.transaction_time().start(), 4_000.into());
+}

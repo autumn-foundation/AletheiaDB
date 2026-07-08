@@ -755,65 +755,91 @@ impl AletheiaMcpServer {
         GLOBAL_INTERNER.resolve_or_else(interned, || format!("<unknown:{}>", interned.as_u32()))
     }
 
-    /// Look up the provenance bundle for the *exact* version already captured
-    /// in `version_id` (a `Node`/`Edge` snapshot's `current_version`), rather
-    /// than re-resolving "whichever version is current now". This keeps the
-    /// returned provenance consistent with the properties already read from
-    /// that same snapshot, even under a concurrent write.
+    /// Look up the provenance bundle and temporal bounds for the *exact*
+    /// version already captured in `version_id` (a `Node`/`Edge` snapshot's
+    /// `current_version`), rather than re-resolving "whichever version is
+    /// current now". This keeps the returned metadata consistent with the
+    /// properties already read from that same snapshot, even under a
+    /// concurrent write -- and makes the bounds correct for point-in-time
+    /// reads, which set `current_version` to the matched historical version.
     ///
     /// A lookup failure (e.g. a corrupted or unreachable cold-storage record)
-    /// is logged rather than silently treated as "no provenance": that
-    /// distinction matters because an MCP caller has no other way to learn
-    /// the two cases apart. Best-effort here (returning `None` rather than
+    /// is logged rather than silently treated as "no metadata": that
+    /// distinction matters because an MCP caller has no other way to tell
+    /// the two cases apart. Best-effort here (returning `None`s rather than
     /// failing the whole response) is deliberate: a single-node lookup or a
     /// bulk endpoint like `list_nodes`/`traverse` should not fail entirely
-    /// because one entry's provenance couldn't be read.
-    fn lookup_node_provenance(&self, version_id: VersionId) -> Option<Provenance> {
-        match self.db.get_node_version_provenance(version_id) {
-            Ok(p) => p,
+    /// because one entry's metadata couldn't be read.
+    fn lookup_node_read_metadata(
+        &self,
+        version_id: VersionId,
+    ) -> (Option<Provenance>, Option<TemporalBounds>) {
+        match self.db.get_node_version_read_metadata(version_id) {
+            Ok(Some((provenance, interval))) => (provenance, Some(TemporalBounds::from(&interval))),
+            Ok(None) => {
+                eprintln!(
+                    "Warning: node version {} not found in any tier; omitting provenance/temporal",
+                    version_id.as_u64()
+                );
+                (None, None)
+            }
             Err(e) => {
                 eprintln!(
-                    "Warning: failed to load provenance for node version {}: {}",
+                    "Warning: failed to load metadata for node version {}: {}",
                     version_id.as_u64(),
                     e
                 );
-                None
+                (None, None)
             }
         }
     }
 
-    /// Edge counterpart of [`lookup_node_provenance`](Self::lookup_node_provenance).
-    fn lookup_edge_provenance(&self, version_id: VersionId) -> Option<Provenance> {
-        match self.db.get_edge_version_provenance(version_id) {
-            Ok(p) => p,
+    /// Edge counterpart of [`lookup_node_read_metadata`](Self::lookup_node_read_metadata).
+    fn lookup_edge_read_metadata(
+        &self,
+        version_id: VersionId,
+    ) -> (Option<Provenance>, Option<TemporalBounds>) {
+        match self.db.get_edge_version_read_metadata(version_id) {
+            Ok(Some((provenance, interval))) => (provenance, Some(TemporalBounds::from(&interval))),
+            Ok(None) => {
+                eprintln!(
+                    "Warning: edge version {} not found in any tier; omitting provenance/temporal",
+                    version_id.as_u64()
+                );
+                (None, None)
+            }
             Err(e) => {
                 eprintln!(
-                    "Warning: failed to load provenance for edge version {}: {}",
+                    "Warning: failed to load metadata for edge version {}: {}",
                     version_id.as_u64(),
                     e
                 );
-                None
+                (None, None)
             }
         }
     }
 
     fn node_to_response(&self, node: &crate::core::Node, include_vectors: bool) -> NodeResponse {
+        let (provenance, temporal) = self.lookup_node_read_metadata(node.current_version);
         NodeResponse {
             id: node.id.as_u64(),
             label: self.interned_to_string(node.label),
             properties: self.property_map_to_json(&node.properties, include_vectors),
-            provenance: self.lookup_node_provenance(node.current_version),
+            provenance,
+            temporal,
         }
     }
 
     fn edge_to_response(&self, edge: &crate::core::Edge, include_vectors: bool) -> EdgeResponse {
+        let (provenance, temporal) = self.lookup_edge_read_metadata(edge.current_version);
         EdgeResponse {
             id: edge.id.as_u64(),
             source_id: edge.source.as_u64(),
             target_id: edge.target.as_u64(),
             label: self.interned_to_string(edge.label),
             properties: self.property_map_to_json(&edge.properties, include_vectors),
-            provenance: self.lookup_edge_provenance(edge.current_version),
+            provenance,
+            temporal,
         }
     }
 
