@@ -25,10 +25,12 @@
 //! server.serve_stdio().await?;
 //! ```
 
+mod batch;
 mod error;
 mod server;
 mod tools;
 
+pub use batch::{ApplyBatchRequest, BatchNodeRef, BatchOperation};
 pub use error::{McpError, McpErrorCode};
 pub use server::AletheiaMcpServer;
 

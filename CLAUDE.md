@@ -308,6 +308,7 @@ cargo run --bin aletheia-mcp --features mcp-server
 |----------|-------|
 | **Nodes** | `get_node`, `create_node`, `update_node`, `delete_node`, `delete_node_cascade`, `retract_node`, `list_nodes`, `count_nodes` |
 | **Edges** | `get_edge`, `create_edge`, `update_edge`, `delete_edge`, `retract_edge`, `get_outgoing_edges`, `get_incoming_edges` |
+| **Batch** | `apply_batch` (ordered multi-op write batch committing all-or-nothing in one transaction; edge ops may reference batch-created nodes via `$alias`/`$<index>` local refs; see below) |
 | **Traversal** | `traverse` (multi-hop graph traversal; optional bi-temporal `as_of_valid_time`/`as_of_transaction_time`) |
 | **Vector** | `find_similar`, `enable_vector_index`, `list_vector_indexes` |
 | **Temporal** | `get_node_at_time`, `get_edge_at_time`, `find_nodes_at_time` (point-in-time find by label/property, no NodeId needed), `temporal_extent` (dataset's queryable bi-temporal extent; optional by_label breakdown) |
@@ -315,6 +316,28 @@ cargo run --bin aletheia-mcp --features mcp-server
 | **Query** | `query` (execute a single read-only Cypher/AQL statement; see below) |
 | **Schema** | `get_schema` (node labels, edge types, and property keys, each with counts; optional bi-temporal `as_of_valid_time`/`as_of_transaction_time`) |
 | **Stats** | `database_stats` (holistic snapshot: current size, bi-temporal depth + anchor/delta compression, hot/warm/cold tier distribution, WAL state; no arguments) |
+
+**Atomic multi-write batches (Issue #3231)**: `apply_batch` accepts an
+**ordered** array of write operations (`create_node`, `create_edge`,
+`update_node`, `update_edge`, `delete_node`, `delete_edge`, each supporting
+the #3221 optional `valid_time`) committing **all-or-nothing** in one
+`WriteTransaction` (single WAL batch append / GroupCommit fsync) — an LLM
+builds an entity-with-relationships subgraph in ONE call instead of N calls
+with N−1 possible partially-committed states. A `create_node` may carry a
+`ref` alias; later edge operations reference batch-created nodes as
+`"$alias"` or positional `"$<index>"` endpoints, freely mixed with committed
+integer ids; forward/unknown/duplicate refs, malformed ops, and over-cap
+batches (default 1000 ops, `with_max_batch_operations`, limit echoed per
+#3226) are rejected statically **before any transaction opens**. Every error
+carries `details.failed_op_index` (JSON `null` for commit-phase failures like
+a retriable `CONFLICT`); any failure means **zero** writes are visible.
+In-batch `delete_node` honors the #3209 DETACH contract against committed
+AND batch-created edges (batch-local adjacency ledger; distinct edges, a
+self-loop counts once). Success returns per-op results in input order (ids +
+version ids for creates/updates) and a `ref_map` alias→committed-id. v1
+limits: no update/delete of batch-created refs, one write per committed
+entity per batch, no version_id on deletes. See
+[docs/guides/mcp-query-tool.md](docs/guides/mcp-query-tool.md#atomic-multi-write-batches-apply_batch).
 
 **`query` tool (read-only Cypher/AQL):** Lets an LLM answer a multi-hop,
 filtered, temporally-scoped question with **one declarative statement** instead
