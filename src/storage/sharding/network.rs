@@ -360,32 +360,64 @@ impl CircuitBreaker {
 
         match state {
             CircuitState::Closed => {
-                // Check if we should reset due to window expiry. Copy the value
-                // out and release the guard before doing anything else.
-                if let Some(last_time) = *self.last_failure.read() {
-                    if last_time.elapsed() > self.config.failure_window {
-                        self.failure_count.store(0, Ordering::SeqCst);
+                // Window-expiry check + last_failure update must be atomic:
+                // take the `last_failure` write guard ONCE and do the whole
+                // check-then-act under it, so concurrent resets can't lose
+                // increments (failures within the window accumulate; an
+                // expired window resets before this failure counts as 1).
+                {
+                    let mut last_failure = self.last_failure.write();
+                    if let Some(last_time) = *last_failure {
+                        if last_time.elapsed() > self.config.failure_window {
+                            self.failure_count.store(0, Ordering::SeqCst);
+                        }
                     }
+                    *last_failure = Some(Instant::now());
                 }
 
                 let failures = self.failure_count.fetch_add(1, Ordering::SeqCst) + 1;
 
-                *self.last_failure.write() = Some(Instant::now());
-
                 if failures >= self.config.failure_threshold {
-                    // Transition to open. `state` and `opened_at` are written in
-                    // sequence -- each guard is released before the next is
-                    // acquired, so the two locks are never held nested.
-                    *self.state.write() = CircuitState::Open;
-                    *self.opened_at.write() = Some(Instant::now());
+                    // Re-check the state under the write guard so only the
+                    // first tripping thread stamps opened_at (concurrent trips
+                    // don't keep pushing it forward). Decide the transition
+                    // while holding `state`, capture whether we opened, then
+                    // release `state` BEFORE touching `opened_at` -- the two
+                    // locks are never held nested (issue #3229 deadlock fix).
+                    let did_open = {
+                        let mut s = self.state.write();
+                        if *s == CircuitState::Closed {
+                            *s = CircuitState::Open;
+                            true
+                        } else {
+                            false
+                        }
+                    };
+                    if did_open {
+                        *self.opened_at.write() = Some(Instant::now());
+                    }
                 }
             }
             CircuitState::HalfOpen => {
-                // Any failure in half-open goes back to open. Again, the two
-                // locks are acquired sequentially, never nested.
-                *self.state.write() = CircuitState::Open;
-                *self.opened_at.write() = Some(Instant::now());
-                self.success_count.store(0, Ordering::SeqCst);
+                // Any failure in half-open goes back to open. Re-check the
+                // state under the write guard so a stale HalfOpen snapshot
+                // can't trip a breaker that concurrently closed. Decide the
+                // transition while holding `state`, capture whether we opened,
+                // then release `state` BEFORE touching `opened_at` -- never
+                // held nested (issue #3229 deadlock fix).
+                let did_open = {
+                    let mut s = self.state.write();
+                    if *s == CircuitState::HalfOpen {
+                        *s = CircuitState::Open;
+                        self.success_count.store(0, Ordering::SeqCst);
+                        true
+                    } else {
+                        false
+                    }
+                };
+                if did_open {
+                    *self.opened_at.write() = Some(Instant::now());
+                }
             }
             CircuitState::Open => {
                 // Already open, update opened_at
