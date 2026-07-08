@@ -46,7 +46,7 @@ pub const BACKUP_MAGIC: [u8; 4] = *b"ALBK";
 /// Bumped to 2 for write-time provenance on temporal versions (Issue #3224):
 /// the embedded `TemporalIndexData`'s `NodeVersionEntry`/`EdgeVersionEntry`
 /// gained an optional `provenance` field. Version 1 artifacts are still
-/// restorable -- see [`BackupPayloadV1`] and `read_artifact`.
+/// restorable -- see `BackupPayloadV1` and `read_artifact`.
 pub const BACKUP_FORMAT_VERSION: u16 = 2;
 
 /// Maximum allowed decompressed payload size (5 GiB).
