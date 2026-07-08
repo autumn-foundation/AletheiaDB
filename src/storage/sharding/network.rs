@@ -9,6 +9,7 @@
 use super::types::{ShardId, ShardState};
 use crate::core::hlc::HybridTimestamp;
 use crate::core::id::{EdgeId, NodeId, TxId};
+use parking_lot::RwLock as PlRwLock;
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -289,11 +290,16 @@ impl Default for CircuitBreakerConfig {
 #[derive(Debug)]
 pub struct CircuitBreaker {
     config: CircuitBreakerConfig,
-    state: RwLock<CircuitState>,
+    // These three locks are `parking_lot::RwLock` (task-fair queuing) rather
+    // than `std::sync::RwLock` (unspecified fairness). Combined with the
+    // structural rule below -- `state` and `opened_at` are never held nested
+    // in either order -- this guarantees the lock-inversion deadlock reported
+    // in issue #3229 cannot occur regardless of reader/writer scheduling.
+    state: PlRwLock<CircuitState>,
     failure_count: AtomicUsize,
     success_count: AtomicUsize,
-    last_failure: RwLock<Option<Instant>>,
-    opened_at: RwLock<Option<Instant>>,
+    last_failure: PlRwLock<Option<Instant>>,
+    opened_at: PlRwLock<Option<Instant>>,
 }
 
 impl CircuitBreaker {
@@ -301,46 +307,31 @@ impl CircuitBreaker {
     pub fn new(config: CircuitBreakerConfig) -> Self {
         Self {
             config,
-            state: RwLock::new(CircuitState::Closed),
+            state: PlRwLock::new(CircuitState::Closed),
             failure_count: AtomicUsize::new(0),
             success_count: AtomicUsize::new(0),
-            last_failure: RwLock::new(None),
-            opened_at: RwLock::new(None),
+            last_failure: PlRwLock::new(None),
+            opened_at: PlRwLock::new(None),
         }
     }
 
     /// Get the current state.
-    ///
-    /// If the lock is poisoned, returns Closed (fail-open) to prevent
-    /// cascading failures.
     pub fn state(&self) -> CircuitState {
         self.maybe_transition();
-        self.state
-            .read()
-            .map(|s| *s)
-            .unwrap_or(CircuitState::Closed)
+        *self.state.read()
     }
 
     /// Check if requests should be allowed.
-    ///
-    /// If the lock is poisoned, returns true (fail-open) to prevent
-    /// cascading failures.
     pub fn should_allow(&self) -> bool {
         self.maybe_transition();
-        let state = self
-            .state
-            .read()
-            .map(|s| *s)
-            .unwrap_or(CircuitState::Closed);
+        let state = *self.state.read();
         matches!(state, CircuitState::Closed | CircuitState::HalfOpen)
     }
 
     /// Record a successful request.
     pub fn record_success(&self) {
-        let state = match self.state.read() {
-            Ok(s) => *s,
-            Err(_) => return, // Lock poisoned, silently skip
-        };
+        // Snapshot the state and release the read guard immediately.
+        let state = *self.state.read();
 
         match state {
             CircuitState::Closed => {
@@ -351,9 +342,7 @@ impl CircuitBreaker {
                 let successes = self.success_count.fetch_add(1, Ordering::SeqCst) + 1;
                 if successes >= self.config.success_threshold {
                     // Transition to closed
-                    if let Ok(mut s) = self.state.write() {
-                        *s = CircuitState::Closed;
-                    }
+                    *self.state.write() = CircuitState::Closed;
                     self.failure_count.store(0, Ordering::SeqCst);
                     self.success_count.store(0, Ordering::SeqCst);
                 }
@@ -366,92 +355,99 @@ impl CircuitBreaker {
 
     /// Record a failed request.
     pub fn record_failure(&self) {
-        let state = match self.state.read() {
-            Ok(s) => *s,
-            Err(_) => return, // Lock poisoned, silently skip
-        };
+        // Snapshot the state and release the read guard immediately.
+        let state = *self.state.read();
 
         match state {
             CircuitState::Closed => {
-                // Check if we should reset due to window expiry
-                if let Ok(last) = self.last_failure.read() {
-                    if let Some(last_time) = *last {
-                        if last_time.elapsed() > self.config.failure_window {
-                            self.failure_count.store(0, Ordering::SeqCst);
-                        }
+                // Check if we should reset due to window expiry. Copy the value
+                // out and release the guard before doing anything else.
+                if let Some(last_time) = *self.last_failure.read() {
+                    if last_time.elapsed() > self.config.failure_window {
+                        self.failure_count.store(0, Ordering::SeqCst);
                     }
                 }
 
                 let failures = self.failure_count.fetch_add(1, Ordering::SeqCst) + 1;
 
-                if let Ok(mut last) = self.last_failure.write() {
-                    *last = Some(Instant::now());
-                }
+                *self.last_failure.write() = Some(Instant::now());
 
                 if failures >= self.config.failure_threshold {
-                    // Transition to open
-                    if let Ok(mut s) = self.state.write() {
-                        *s = CircuitState::Open;
-                    }
-                    if let Ok(mut opened) = self.opened_at.write() {
-                        *opened = Some(Instant::now());
-                    }
+                    // Transition to open. `state` and `opened_at` are written in
+                    // sequence -- each guard is released before the next is
+                    // acquired, so the two locks are never held nested.
+                    *self.state.write() = CircuitState::Open;
+                    *self.opened_at.write() = Some(Instant::now());
                 }
             }
             CircuitState::HalfOpen => {
-                // Any failure in half-open goes back to open
-                if let Ok(mut s) = self.state.write() {
-                    *s = CircuitState::Open;
-                }
-                if let Ok(mut opened) = self.opened_at.write() {
-                    *opened = Some(Instant::now());
-                }
+                // Any failure in half-open goes back to open. Again, the two
+                // locks are acquired sequentially, never nested.
+                *self.state.write() = CircuitState::Open;
+                *self.opened_at.write() = Some(Instant::now());
                 self.success_count.store(0, Ordering::SeqCst);
             }
             CircuitState::Open => {
                 // Already open, update opened_at
-                if let Ok(mut opened) = self.opened_at.write() {
-                    *opened = Some(Instant::now());
-                }
+                *self.opened_at.write() = Some(Instant::now());
             }
         }
     }
 
     /// Check and perform state transitions based on time.
+    ///
+    /// Deadlock-safety (issue #3229): this method must never hold `opened_at`
+    /// and `state` at the same time. It snapshots the current state, releases
+    /// that guard, then snapshots `opened_at` into a local and releases *that*
+    /// guard before acquiring `state.write()`. Holding `opened_at.read()`
+    /// across `state.write()` (the original ordering) closed a lock-inversion
+    /// cycle with `remaining_open_time` (state -> opened_at) and
+    /// `record_failure` (opened_at writer).
     fn maybe_transition(&self) {
-        let state = match self.state.read() {
-            Ok(s) => *s,
-            Err(_) => return, // Lock poisoned, skip transition
-        };
+        // Snapshot the state and release the read guard immediately.
+        let state = *self.state.read();
+        if state != CircuitState::Open {
+            return;
+        }
 
-        if state == CircuitState::Open {
-            if let Ok(opened) = self.opened_at.read() {
-                if let Some(opened_time) = *opened {
-                    if opened_time.elapsed() >= self.config.open_duration {
-                        // Transition to half-open
-                        if let Ok(mut s) = self.state.write() {
-                            *s = CircuitState::HalfOpen;
-                        }
-                        self.success_count.store(0, Ordering::SeqCst);
-                    }
-                }
-            }
+        // Snapshot `opened_at` into a local and release the guard BEFORE
+        // acquiring `state.write()` -- never hold `opened_at` and `state`
+        // nested in either order.
+        let opened_time = *self.opened_at.read();
+        let Some(opened_time) = opened_time else {
+            return;
+        };
+        if opened_time.elapsed() < self.config.open_duration {
+            return;
+        }
+
+        // Re-check the state under the write lock so we don't clobber a
+        // concurrent transition (e.g. a `record_failure` that moved us
+        // elsewhere between the snapshot above and acquiring this lock).
+        let mut s = self.state.write();
+        if *s == CircuitState::Open {
+            *s = CircuitState::HalfOpen;
+            self.success_count.store(0, Ordering::SeqCst);
         }
     }
 
     /// Get remaining time before circuit can close.
+    ///
+    /// Deadlock-safety (issue #3229): snapshots `state` and releases the read
+    /// guard before touching `opened_at`, so `state` and `opened_at` are never
+    /// held nested.
     pub fn remaining_open_time(&self) -> Option<Duration> {
-        let state = self.state.read().ok()?;
-        if *state != CircuitState::Open {
+        // Snapshot the state and release the read guard before touching
+        // `opened_at`.
+        let state = *self.state.read();
+        if state != CircuitState::Open {
             return None;
         }
 
-        if let Ok(opened) = self.opened_at.read() {
-            if let Some(opened_time) = *opened {
-                let elapsed = opened_time.elapsed();
-                if elapsed < self.config.open_duration {
-                    return Some(self.config.open_duration - elapsed);
-                }
+        if let Some(opened_time) = *self.opened_at.read() {
+            let elapsed = opened_time.elapsed();
+            if elapsed < self.config.open_duration {
+                return Some(self.config.open_duration - elapsed);
             }
         }
         None
@@ -459,9 +455,7 @@ impl CircuitBreaker {
 
     /// Reset the circuit breaker to closed state.
     pub fn reset(&self) {
-        if let Ok(mut s) = self.state.write() {
-            *s = CircuitState::Closed;
-        }
+        *self.state.write() = CircuitState::Closed;
         self.failure_count.store(0, Ordering::SeqCst);
         self.success_count.store(0, Ordering::SeqCst);
     }
@@ -1081,6 +1075,128 @@ mod tests {
         let remaining = cb.remaining_open_time();
         assert!(remaining.is_some());
         assert!(remaining.unwrap() <= Duration::from_secs(30));
+    }
+
+    /// Regression test for issue #3229: lock-inversion deadlock on an open
+    /// `CircuitBreaker`.
+    ///
+    /// The bug: three internal `RwLock`s (`state`, `opened_at`, `last_failure`)
+    /// were held nested in conflicting orders while the breaker was Open:
+    ///
+    /// * `maybe_transition` held `opened_at.read()` across `state.write()`
+    ///   (opened_at -> state)
+    /// * `remaining_open_time` held `state.read()` across `opened_at.read()`
+    ///   (state -> opened_at)
+    /// * `record_failure` (Open branch) wanted `opened_at.write()`
+    ///
+    /// Under a fair/writer-preferring lock a queued `opened_at` writer blocks
+    /// new `opened_at` readers, closing a 3-thread cycle that deadlocks the
+    /// connection pool.
+    ///
+    /// This test hammers those exact code paths concurrently on a shared,
+    /// perpetually-Open breaker and asserts that all workers make progress
+    /// within a watchdog deadline. It is NOT modelled with loom -- loom does
+    /// not model `RwLock` writer-preference starvation. With the structural
+    /// fix (no nested `state`+`opened_at` holds) there is no cycle, so it
+    /// completes near-instantly; against the buggy code the workers wedge and
+    /// the watchdog fires.
+    ///
+    /// Honesty note: the *guarantee* is structural (the fix removes the nested
+    /// holds outright). This test is a probabilistic backstop -- it reproduces
+    /// the deadlock reliably because the three `CircuitBreaker` locks use
+    /// `parking_lot::RwLock` (task-fair queuing), but a single scheduling run
+    /// is not a proof of absence.
+    #[test]
+    fn test_circuit_breaker_concurrent_no_deadlock_issue_3229() {
+        use std::sync::mpsc::{self, RecvTimeoutError};
+        use std::thread;
+
+        // open_duration = 0 forces `maybe_transition` to always reach the
+        // (previously nested) `state.write()` path while the breaker is Open,
+        // maximizing the chance of forming the lock-inversion cycle.
+        let config = CircuitBreakerConfig {
+            failure_threshold: 1,
+            open_duration: Duration::ZERO,
+            success_threshold: usize::MAX,
+            ..Default::default()
+        };
+        let cb = Arc::new(CircuitBreaker::new(config));
+        // Drive it Open to begin with.
+        cb.record_failure();
+
+        const THREADS_PER_ROLE: usize = 5;
+        const ITERATIONS: usize = 100_000;
+        const NUM_WORKERS: usize = THREADS_PER_ROLE * 3;
+        // Generous relative to the fixed version (which finishes in well under
+        // a second); long enough to be sure a real deadlock has wedged.
+        const WATCHDOG: Duration = Duration::from_secs(20);
+
+        let (tx, rx) = mpsc::channel::<()>();
+        let mut handles = Vec::with_capacity(NUM_WORKERS);
+
+        for _ in 0..THREADS_PER_ROLE {
+            // Role A: maybe_transition (opened_at.read -> state.write in the bug)
+            {
+                let cb = Arc::clone(&cb);
+                let tx = tx.clone();
+                handles.push(thread::spawn(move || {
+                    for _ in 0..ITERATIONS {
+                        let _ = cb.state();
+                    }
+                    let _ = tx.send(());
+                }));
+            }
+            // Role B: remaining_open_time (state.read -> opened_at.read in the bug)
+            {
+                let cb = Arc::clone(&cb);
+                let tx = tx.clone();
+                handles.push(thread::spawn(move || {
+                    for _ in 0..ITERATIONS {
+                        let _ = cb.remaining_open_time();
+                    }
+                    let _ = tx.send(());
+                }));
+            }
+            // Role C: record_failure (wants opened_at.write while Open)
+            {
+                let cb = Arc::clone(&cb);
+                let tx = tx.clone();
+                handles.push(thread::spawn(move || {
+                    for _ in 0..ITERATIONS {
+                        cb.record_failure();
+                    }
+                    let _ = tx.send(());
+                }));
+            }
+        }
+        // Drop the original sender so the channel disconnects once every worker
+        // (and its cloned sender) is gone.
+        drop(tx);
+
+        let deadline = Instant::now() + WATCHDOG;
+        let mut completed = 0usize;
+        while completed < NUM_WORKERS {
+            let remaining = deadline
+                .checked_duration_since(Instant::now())
+                .unwrap_or(Duration::ZERO);
+            match rx.recv_timeout(remaining) {
+                Ok(()) => completed += 1,
+                Err(RecvTimeoutError::Timeout) => panic!(
+                    "issue #3229 deadlock: only {completed}/{NUM_WORKERS} circuit-breaker \
+                     workers finished within {WATCHDOG:?}; the remaining threads are wedged \
+                     in a lock-inversion cycle"
+                ),
+                Err(RecvTimeoutError::Disconnected) => break,
+            }
+        }
+        assert_eq!(
+            completed, NUM_WORKERS,
+            "all circuit-breaker workers should complete without deadlock"
+        );
+
+        for h in handles {
+            h.join().expect("worker thread panicked");
+        }
     }
 
     // ============ ConnectionPool Tests ============
