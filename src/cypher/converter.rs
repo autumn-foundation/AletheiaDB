@@ -170,6 +170,14 @@ impl CypherConverter {
                     ops.append(&mut base_ops);
                 }
 
+                // Track the variable the pipeline is positionally "on" after
+                // each clause: the last node of the base pattern, then the
+                // last node of each OPTIONAL MATCH pattern (or a WITH
+                // projection). Subsequent OPTIONAL MATCH clauses must
+                // continue from this binding (see convert_optional_pattern).
+                let mut current_var: Option<&str> =
+                    pattern.last().and_then(Self::last_node_variable);
+
                 // 2. Convert temporal clause → TemporalContext + ops
                 let temporal_context = if let Some(ref temporal_clause) = temporal {
                     Some(self.convert_temporal(temporal_clause, &mut ops)?)
@@ -183,6 +191,15 @@ impl CypherConverter {
                 for opt_match in &optional_matches {
                     while with_idx < opt_match.preceding_withs && with_idx < with_clauses.len() {
                         self.convert_with_clause(&with_clauses[with_idx], &mut ops)?;
+                        // A `WITH v` projection makes `v` the current binding
+                        // for the clauses that follow. Other projection shapes
+                        // are not lowered and leave the positional row (and
+                        // therefore the current binding) unchanged.
+                        if let [CypherReturnItem::Variable(name)] =
+                            with_clauses[with_idx].items.as_slice()
+                        {
+                            current_var = Some(name.as_str());
+                        }
                         with_idx += 1;
                     }
                     // Without variable-binding analysis, comma-separated
@@ -200,8 +217,10 @@ impl CypherConverter {
                     }
                     let mut sub_ops = Vec::new();
                     for pat in &opt_match.pattern {
-                        self.convert_optional_pattern(pat, &mut sub_ops)?;
+                        self.convert_optional_pattern(pat, &mut sub_ops, current_var)?;
                     }
+                    // The next clause continues from this pattern's last node.
+                    current_var = opt_match.pattern.last().and_then(Self::last_node_variable);
                     if let Some(ref where_expr) = opt_match.where_clause {
                         // Per openCypher, the clause's WHERE is part of the
                         // optional pattern: it must run before the
@@ -318,30 +337,66 @@ impl CypherConverter {
     ///
     /// Limitation and design choice: the converter performs no variable
     /// binding analysis, so the first node is bound purely positionally to
-    /// the current row. A **label** on that node therefore cannot be honored
-    /// (there is no label predicate to lower it to), and silently dropping it
-    /// would turn `MATCH (a:Person) OPTIONAL MATCH (b:City) RETURN b` into a
-    /// query that returns `a`. Such clauses are **rejected** with
-    /// [`CypherError::UnsupportedFeature`] rather than answered wrongly;
-    /// inline properties on the first node remain supported because they
-    /// lower cheaply and correctly to seed-row filters.
+    /// the current row. Two constructs that would silently produce wrong
+    /// rows are therefore **rejected** with
+    /// [`CypherError::UnsupportedFeature`] rather than answered wrongly:
+    ///
+    /// - A **label** on the first node cannot be honored (there is no label
+    ///   predicate to lower it to), and silently dropping it would turn
+    ///   `MATCH (a:Person) OPTIONAL MATCH (b:City) RETURN b` into a query
+    ///   that returns `a`.
+    /// - A first-node **variable that does not name the positionally-current
+    ///   binding** (`current_var`, the last node of the previous
+    ///   MATCH/OPTIONAL MATCH or a `WITH` projection) would silently bind to
+    ///   whatever the pipeline is positioned on: in `MATCH (a:Person)
+    ///   OPTIONAL MATCH (a)-[:KNOWS]->(x) OPTIONAL MATCH (a)-[:OWNS]->(y)`
+    ///   the second `(a)` would bind to `x` (or null) and traverse `OWNS`
+    ///   from the wrong node. Re-anchoring on an earlier variable requires
+    ///   real binding analysis and is not yet supported.
+    ///
+    /// An unnamed first node `()` (explicit positional reference) and a
+    /// first node naming `current_var` are accepted; inline properties on
+    /// the first node remain supported because they lower cheaply and
+    /// correctly to seed-row filters.
     fn convert_optional_pattern(
         &self,
         pattern: &CypherPattern,
         ops: &mut Vec<QueryOp>,
+        current_var: Option<&str>,
     ) -> Result<(), CypherError> {
-        // Reject a labeled first node: it is bound positionally to the seed
-        // row and its label would be silently ignored (see rustdoc above).
-        if let Some(CypherPatternElement::Node(first)) = pattern.elements.first()
-            && !first.labels.is_empty()
-        {
-            return Err(CypherError::UnsupportedFeature(format!(
-                "label ':{}' on the first node of a subsequent OPTIONAL MATCH; \
-                 the first node refers to the current row and must be an \
-                 unlabeled bound variable (e.g. `(a)`) -- move the constraint \
-                 into the preceding MATCH or a WHERE clause",
-                first.labels.join(":"),
-            )));
+        if let Some(CypherPatternElement::Node(first)) = pattern.elements.first() {
+            // Reject a labeled first node: it is bound positionally to the
+            // seed row and its label would be silently ignored (see rustdoc
+            // above).
+            if !first.labels.is_empty() {
+                return Err(CypherError::UnsupportedFeature(format!(
+                    "label ':{}' on the first node of a subsequent OPTIONAL MATCH; \
+                     the first node refers to the current row and must be an \
+                     unlabeled bound variable (e.g. `(a)`) -- move the constraint \
+                     into the preceding MATCH or a WHERE clause",
+                    first.labels.join(":"),
+                )));
+            }
+            // Reject a first-node variable that re-anchors on something other
+            // than the positionally-current binding (see rustdoc above).
+            if let Some(ref first_var) = first.variable
+                && current_var != Some(first_var.as_str())
+            {
+                return Err(CypherError::UnsupportedFeature(match current_var {
+                    Some(cur) => format!(
+                        "OPTIONAL MATCH must continue from the previous clause's \
+                         binding '{cur}'; re-anchoring on '{first_var}' is not \
+                         yet supported -- start the pattern with `({cur})` or \
+                         restructure the query"
+                    ),
+                    None => format!(
+                        "OPTIONAL MATCH must continue from the previous clause's \
+                         binding, but its last node is unnamed; re-anchoring on \
+                         '{first_var}' is not yet supported -- name the previous \
+                         pattern's last node or restructure the query"
+                    ),
+                }));
+            }
         }
         for element in &pattern.elements {
             match element {
@@ -355,6 +410,24 @@ impl CypherConverter {
             }
         }
         Ok(())
+    }
+
+    /// The variable bound to a pattern's last node element, if named.
+    ///
+    /// This is the binding the pipeline is positionally "on" after the
+    /// pattern converts: each relationship traversal moves the current row
+    /// to its target node, so the last node of the pattern is where a
+    /// subsequent `OPTIONAL MATCH` continues from.
+    fn last_node_variable(pattern: &CypherPattern) -> Option<&str> {
+        pattern
+            .elements
+            .iter()
+            .rev()
+            .find_map(|element| match element {
+                CypherPatternElement::Node(node) => Some(node.variable.as_deref()),
+                CypherPatternElement::Relationship(_) => None,
+            })
+            .flatten()
     }
 
     /// Convert a `WITH` clause into query operations (currently only its

@@ -1193,6 +1193,11 @@ fn test_parse_match_then_optional_match() {
 
 #[test]
 fn test_parse_multiple_optional_matches() {
+    // Parse-only: the grammar accepts multiple OPTIONAL MATCH clauses in any
+    // shape. Note this particular query re-anchors the second clause on `a`
+    // and is rejected later, at CONVERSION (see
+    // test_convert_optional_match_reanchored_variable_rejected) -- parsing
+    // it is still correct.
     let ast = CypherParser::parse(
         "MATCH (a:Person) OPTIONAL MATCH (a)-[:KNOWS]->(x) OPTIONAL MATCH (a)-[:OWNS]->(y) RETURN y",
     )
@@ -1987,6 +1992,96 @@ fn test_convert_optional_match_labeled_first_node_rejected() {
     // An unlabeled first node (positional reference to the current row)
     // still works.
     assert!(parse_cypher("MATCH (a:Person) OPTIONAL MATCH (a)-[:KNOWS]->(x) RETURN x").is_ok());
+}
+
+#[test]
+fn test_convert_optional_match_reanchored_variable_rejected() {
+    // The first node of a subsequent OPTIONAL MATCH binds positionally to
+    // the current row (the previous clause's last binding). Here the second
+    // OPTIONAL MATCH names `(a)` but the pipeline is positioned on `x`, so
+    // without the check `(a)` would silently bind to `x` (or null) and
+    // traverse OWNS from the wrong node. Reject rather than answer wrongly.
+    let err = parse_cypher(
+        "MATCH (a:Person) OPTIONAL MATCH (a)-[:KNOWS]->(x) OPTIONAL MATCH (a)-[:OWNS]->(y) RETURN y",
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, CypherError::UnsupportedFeature(_)),
+        "expected UnsupportedFeature, got {err:?}"
+    );
+    assert!(
+        err.to_string().contains("re-anchor"),
+        "error should explain that re-anchoring is unsupported: {err}"
+    );
+    assert!(
+        err.to_string().contains('x') && err.to_string().contains('a'),
+        "error should name both the expected and the offending variable: {err}"
+    );
+
+    // Positive control: chaining each OPTIONAL MATCH from the previous
+    // clause's binding still converts.
+    assert!(parse_cypher(
+        "MATCH (a:Person) OPTIONAL MATCH (a)-[:KNOWS]->(x) OPTIONAL MATCH (x)-[:OWNS]->(y) RETURN y"
+    )
+    .is_ok());
+
+    // An unnamed first node `()` is an explicit positional reference and
+    // remains accepted.
+    assert!(
+        parse_cypher("MATCH (a:Person) OPTIONAL MATCH ()-[:KNOWS]->(x) RETURN x").is_ok(),
+        "unnamed first node must keep working"
+    );
+}
+
+#[test]
+fn test_convert_optional_match_reanchored_after_multi_hop_base_rejected() {
+    // Same hole for the FIRST OPTIONAL MATCH after a multi-hop base MATCH:
+    // the positionally-current variable is the base pattern's LAST node
+    // (`b`), so `(a)` would silently bind to `b` and traverse from the
+    // wrong end of the base pattern.
+    let err =
+        parse_cypher("MATCH (a:Person)-[:KNOWS]->(b) OPTIONAL MATCH (a)-[:OWNS]->(y) RETURN y")
+            .unwrap_err();
+    assert!(
+        matches!(err, CypherError::UnsupportedFeature(_)),
+        "expected UnsupportedFeature, got {err:?}"
+    );
+
+    // Continuing from the base pattern's last node converts fine.
+    assert!(
+        parse_cypher("MATCH (a:Person)-[:KNOWS]->(b) OPTIONAL MATCH (b)-[:OWNS]->(y) RETURN y")
+            .is_ok()
+    );
+
+    // When the previous clause's last node is unnamed, ANY named first node
+    // is a re-anchor and is rejected.
+    let err =
+        parse_cypher("MATCH (a:Person)-[:KNOWS]->() OPTIONAL MATCH (a)-[:OWNS]->(y) RETURN y")
+            .unwrap_err();
+    assert!(
+        matches!(err, CypherError::UnsupportedFeature(_)),
+        "expected UnsupportedFeature, got {err:?}"
+    );
+}
+
+#[test]
+fn test_convert_optional_match_after_with_projection_tracks_variable() {
+    // A `WITH v` projection makes `v` the positionally-current binding for
+    // a following OPTIONAL MATCH.
+    assert!(parse_cypher(
+        "MATCH (a:Person) OPTIONAL MATCH (a)-[:KNOWS]->(x) WITH x WHERE x IS NULL OPTIONAL MATCH (x)-[:OWNS]->(y) RETURN y"
+    )
+    .is_ok());
+
+    // Naming a stale variable after the projection is a re-anchor.
+    let err = parse_cypher(
+        "MATCH (a:Person) OPTIONAL MATCH (a)-[:KNOWS]->(x) WITH x OPTIONAL MATCH (a)-[:OWNS]->(y) RETURN y",
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, CypherError::UnsupportedFeature(_)),
+        "expected UnsupportedFeature, got {err:?}"
+    );
 }
 
 #[test]
