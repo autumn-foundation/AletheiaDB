@@ -92,8 +92,10 @@ pub mod http;
 #[cfg(any(test, feature = "simulation"))]
 pub mod test_utils;
 
-// Deterministic Simulation Testing framework (issue #154)
-#[cfg(feature = "simulation")]
+// Deterministic Simulation Testing framework (issue #154).
+// Also available in unit tests without the feature flag so in-crate tests can
+// inject a `SimulatedClock` into `time::now()` (Issue #3391).
+#[cfg(any(test, feature = "simulation"))]
 pub mod simulation;
 
 // Internal cargo-fuzz hooks and Arbitrary implementations (issue #155).

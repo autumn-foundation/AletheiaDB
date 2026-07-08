@@ -637,14 +637,15 @@ pub mod time {
     /// Returns HybridTimestamp with current wallclock and logical counter = 0.
     /// For monotonic HLC generation with causality, use HLC's send() method.
     ///
-    /// When the `simulation` feature is active and a `SimulatedClock` injection
-    /// guard is live on the current thread, returns the simulated time instead.
+    /// When the `simulation` feature is active (or in unit-test builds) and a
+    /// `SimulatedClock` injection guard is live on the current thread, returns
+    /// the simulated time instead.
     ///
     /// # Panics
     /// Panics if the system clock is set before Unix epoch. Use [`try_now`] for
     /// a fallible version that returns `Result` instead.
     pub fn now() -> Timestamp {
-        #[cfg(feature = "simulation")]
+        #[cfg(any(test, feature = "simulation"))]
         if let Some(micros) = crate::simulation::clock::thread_local_now() {
             return HybridTimestamp::new_unchecked(micros, 0);
         }

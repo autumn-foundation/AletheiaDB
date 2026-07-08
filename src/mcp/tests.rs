@@ -11006,6 +11006,34 @@ mod temporal_bounds_tests {
     }
 
     #[test]
+    fn test_from_interval_at_valid_from_equal_to_now_is_current() {
+        // Half-open interval semantics: a fact becomes true AT valid_from,
+        // so an explicit `now` exactly equal to valid_from is current
+        // (Issue #3391: `from_interval_at` evaluates at the caller's
+        // request-scoped instant, not a fresh wallclock read).
+        let t = HybridTimestamp::new(1_700_000_000_000_000, 0).expect("valid stamp");
+        let interval = BiTemporalInterval::now(t, t);
+        let bounds = TemporalBounds::from_interval_at(&interval, t);
+        assert!(
+            bounds.is_current,
+            "a fact is current from valid_from inclusive: {bounds:?}"
+        );
+    }
+
+    #[test]
+    fn test_from_interval_at_one_micro_before_valid_from_is_not_current() {
+        // One microsecond before valid_from the fact is not yet true.
+        let t = HybridTimestamp::new(1_700_000_000_000_000, 0).expect("valid stamp");
+        let interval = BiTemporalInterval::now(t, t);
+        let just_before = HybridTimestamp::new(t.wallclock() - 1, 0).expect("valid earlier stamp");
+        let bounds = TemporalBounds::from_interval_at(&interval, just_before);
+        assert!(
+            !bounds.is_current,
+            "a fact is not current one microsecond before valid_from: {bounds:?}"
+        );
+    }
+
+    #[test]
     fn test_node_with_unresolvable_version_omits_temporal_and_provenance() {
         // Best-effort degrade path (mirrors provenance, Issue #3224): when
         // the version metadata cannot be loaded from any tier, the read must
@@ -11094,6 +11122,142 @@ mod temporal_bounds_tests {
         assert!(
             value.get("provenance").is_none(),
             "provenance must be omitted, not fabricated: {value}"
+        );
+    }
+}
+
+// ============================================================================
+// Per-request `now` for is_current evaluation (Issue #3391)
+// ============================================================================
+
+mod per_request_now_tests {
+    use super::*;
+    use crate::simulation::SimulatedClock;
+    use crate::simulation::clock::{reset_simulated_read_count, simulated_read_count};
+
+    fn now_micros() -> i64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_micros() as i64
+    }
+
+    fn create_node_with_valid_time(
+        server: &AletheiaMcpServer,
+        label: &str,
+        name: &str,
+        valid_time_micros: Option<i64>,
+    ) {
+        let mut props = HashMap::new();
+        props.insert("name".to_string(), serde_json::json!(name));
+        let response = server.create_node(CreateNodeRequest {
+            label: label.to_string(),
+            properties: Some(props),
+            valid_time: valid_time_micros.map(|m| m.to_string()),
+            provenance: None,
+        });
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert!(value.get("error").is_none(), "create_node failed: {value}");
+    }
+
+    /// List nodes with the given label and return each node's
+    /// `temporal.is_current` flag, in response order.
+    fn list_is_current_flags(server: &AletheiaMcpServer, label: &str) -> Vec<bool> {
+        let response = server.list_nodes(ListNodesRequest {
+            label: Some(label.to_string()),
+            property_key: None,
+            property_value: None,
+            limit: None,
+            offset: None,
+            include_vectors: None,
+        });
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert!(value.get("error").is_none(), "list_nodes failed: {value}");
+        value["nodes"]
+            .as_array()
+            .expect("nodes must be an array")
+            .iter()
+            .map(|n| {
+                n["temporal"]["is_current"]
+                    .as_bool()
+                    .unwrap_or_else(|| panic!("temporal.is_current must be a bool: {n}"))
+            })
+            .collect()
+    }
+
+    /// Boundary fixture (Issue #3391): every entity in one bulk response must
+    /// be judged against the SAME evaluation timestamp.
+    ///
+    /// Two nodes share an identical future `valid_from`. A simulated clock
+    /// that advances by 1µs on every read is swept across that boundary, one
+    /// microsecond at a time, covering every read the request performs. If
+    /// `is_current` were evaluated per entity (a fresh `now()` per
+    /// conversion), the two entities would be judged at strictly different
+    /// timestamps, so some sweep offset must place one entity before the
+    /// boundary and the other at/after it — disagreeing flags. With the
+    /// wallclock captured once per request, the flags always agree.
+    #[test]
+    fn test_list_nodes_entities_share_one_evaluation_timestamp() {
+        let server = create_test_server();
+
+        // Both facts become true at exactly the same future instant.
+        let valid_from = now_micros() + 3_600_000_000; // +1 hour
+        create_node_with_valid_time(&server, "Person", "Alice", Some(valid_from));
+        create_node_with_valid_time(&server, "Person", "Bob", Some(valid_from));
+
+        let mut clock = SimulatedClock::new(valid_from - 1);
+        let _guard = clock.inject_advancing(1);
+
+        // Calibration: measure how many clock reads one request performs so
+        // the sweep below covers every read index.
+        reset_simulated_read_count();
+        let flags = list_is_current_flags(&server, "Person");
+        assert_eq!(flags.len(), 2, "both nodes must be listed");
+        let reads_per_request = simulated_read_count();
+
+        for offset in 0..=reads_per_request as i64 {
+            clock.jump_to(valid_from - offset);
+            let flags = list_is_current_flags(&server, "Person");
+            assert_eq!(flags.len(), 2, "both nodes must be listed");
+            assert_eq!(
+                flags[0], flags[1],
+                "entities in one list_nodes response were evaluated against \
+                 different 'now' values (clock started {offset} µs before the \
+                 shared valid_from, advancing 1 µs per read): {flags:?}"
+            );
+        }
+    }
+
+    /// The number of wallclock reads a bulk response performs must not scale
+    /// with the number of entities returned: the request captures `now` once
+    /// and evaluates every entity against it.
+    #[test]
+    fn test_list_nodes_clock_reads_do_not_scale_with_entity_count() {
+        let server = create_test_server();
+
+        create_node_with_valid_time(&server, "Solo", "only", None);
+        for i in 0..6 {
+            create_node_with_valid_time(&server, "Crowd", &format!("member-{i}"), None);
+        }
+
+        let clock = SimulatedClock::new(now_micros());
+        let _guard = clock.inject(); // frozen clock; we only count reads
+
+        reset_simulated_read_count();
+        let solo_flags = list_is_current_flags(&server, "Solo");
+        let solo_reads = simulated_read_count();
+        assert_eq!(solo_flags.len(), 1);
+
+        reset_simulated_read_count();
+        let crowd_flags = list_is_current_flags(&server, "Crowd");
+        let crowd_reads = simulated_read_count();
+        assert_eq!(crowd_flags.len(), 6);
+
+        assert_eq!(
+            crowd_reads, solo_reads,
+            "clock reads must not scale with the entity count of the \
+             response (1 entity: {solo_reads} reads, 6 entities: \
+             {crowd_reads} reads)"
         );
     }
 }
