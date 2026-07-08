@@ -253,6 +253,106 @@ returns a structured error instead of silently traversing current state:
 `MAX_TRAVERSAL_DEPTH` and `MAX_RESULT_LIMIT` apply identically whether or not
 a temporal coordinate is supplied.
 
+## Point-in-time (AS OF) node find by label and property
+
+`find_nodes_at_time` resolves a real-world identifier to an entity's state at
+a past bi-temporal point **without a prior `NodeId`** -- the entry-point
+resolver the AS OF traversal above assumes the caller already has. Where
+`list_nodes` answers "who is named Alice *now*?" and `get_node_at_time`
+answers "what did node 42 look like at T?", this tool answers *"the Person
+named Alice, as she was at T"* in one call (Issue #3236).
+
+Parameters:
+
+- `label` (**required**) -- the node label to match.
+- `property_key` + `property_value` (optional, **both-or-neither**, mirroring
+  `list_nodes`) -- exact-match property filter. Omit both for a label-only
+  AS OF scan.
+- `valid_time` (**required**) -- ISO 8601 / RFC 3339 or microseconds since
+  epoch, like every other MCP temporal field.
+- `transaction_time` (optional) -- defaults to **now**.
+- `limit` / `offset` -- same pagination and `MAX_RESULT_LIMIT` /
+  `MAX_PAGINATION_OFFSET` clamps as `list_nodes`; results are sorted by node
+  id, so pages are stable.
+- `include_vectors` -- vector properties are elided by default, as elsewhere.
+
+Each returned node is **reconstructed as it existed at
+`(valid_time, transaction_time)`** -- not its current state -- from the
+historical version visible at that coordinate. Nodes that did not exist at
+the queried point, or whose property value did not hold there, are excluded:
+a node whose `name` became "Alice" only after T is not returned for a query
+at T. With both dimensions at the current time, the result set equals the
+current-state `list_nodes` property lookup **for nodes whose valid interval
+has begun** -- the one divergence is future-dated facts: a node created with
+a `valid_from` in the future (Issue #3221) is already present in current
+state (so `list_nodes` returns it) but is not yet visible at `(now, now)` in
+the bi-temporal view, so this tool excludes it until its valid time arrives.
+
+```jsonc
+// tools/call -> "find_nodes_at_time"
+{
+  "label": "Person",
+  "property_key": "name",
+  "property_value": "Alice",
+  "valid_time": "2024-01-01T00:00:00Z",
+  "transaction_time": "2024-01-01T00:00:00Z"
+}
+// -> {
+//      "nodes": [ { "id": 7, "label": "Person",
+//                   "properties": {"name": "Alice", "title": "Engineer"} } ],
+//      "count": 1,
+//      "offset": 0,
+//      "limit": 100,
+//      "sampled": false,  // true if the candidate scan was capped (see below)
+//      "valid_time": "2024-01-01T00:00:00.000000Z",       // resolved coordinate,
+//      "transaction_time": "2024-01-01T00:00:00.000000Z", // echoed as RFC 3339
+//      "has_more": false,
+//      "total_matching": 1
+//    }
+```
+
+The response always echoes the **resolved** coordinate it was answered at --
+an omitted `transaction_time` comes back as the concrete "now" it resolved
+to, so the answer is reproducible later.
+
+**Recalling superseded or deleted states requires anchoring *both*
+dimensions**, exactly as with AS OF traversal above: a later update (or
+delete) closes the previous version's *transaction* interval, so with
+`transaction_time` defaulted to now only the latest recorded version is
+visible. If Alice was renamed to "Alicia" yesterday, finding her as "Alice"
+requires both `valid_time` *and* `transaction_time` anchored before the
+rename; supplying only a past `valid_time` asks "using everything recorded so
+far, who was named Alice at that instant?" -- and the current record says she
+was already on her way to being Alicia. The same holds for since-deleted
+nodes: this tool *does* find nodes that no longer exist in current state
+(they are enumerated from history, not the live index), but only at a
+`transaction_time` before the deletion was committed.
+
+Validation errors are structured, consistent with `list_nodes`:
+
+```jsonc
+// property_key without property_value (or vice versa)
+{ "error": { "code": "INVALID_ARGUMENT", "retriable": false,
+             "message": "Both 'property_key' and 'property_value' are required together" } }
+// unparseable/empty valid_time
+{ "error": { "code": "INVALID_ARGUMENT", "retriable": false,
+             "message": "Invalid valid_time: Invalid timestamp format: 'not-a-timestamp'. ..." } }
+```
+
+Performance note (v1): the tool scans every node that has ever had a version
+recorded (the same candidate enumeration bi-temporal `get_schema` uses,
+**capped at the same configurable limit** -- `max_schema_as_of_entities`,
+default 50,000), resolving each candidate's version at the queried coordinate
+and reconstructing properties only for candidates whose at-time label
+matches -- complete, including deleted nodes, but a scan. When the cap is
+hit, the lowest `cap` node ids are kept (a deterministic subset, so
+pagination stays stable) and the response sets `sampled: true`, exactly as
+`get_schema`'s AS OF form does; `total_matching` and `has_more` are then
+honest only about the **sampled candidate set**, so a `sampled: true`
+response may be missing matches with higher node ids. A dedicated temporal
+label index is a deliberate follow-up if this misses its latency target at
+scale. The edge equivalent (`find_edges_at_time`) is a planned fast-follow.
+
 ## Structured error codes and the retriable contract
 
 Every MCP tool error — across **all** tools, not just `query` — is a JSON
@@ -408,6 +508,105 @@ metadata to close the restart gap.
 guaranteed to be out of recorded range — its empty result means "before our
 records begin," not "nothing existed." Rerun the query at an instant inside
 the extent (or report the range mismatch) instead of concluding absence.
+
+## Database stats and storage-tier health (`database_stats`)
+
+*(Issue #3222)* The `database_stats` tool takes **no arguments** and returns a
+holistic snapshot of dataset size, bi-temporal depth, storage-tier
+distribution, and WAL state in a single call. Use it to orient yourself before
+querying ("how big is this dataset? is there history to time-travel through?
+is cold migration even on?") instead of stitching together `count_nodes` +
+`count_edges` — which cannot reveal version depth, tier distribution, or WAL
+state at all. It is backed by the public Rust API `AletheiaDB::stats()`, which
+returns the same data as a serializable `DatabaseStats`; the MCP handler only
+serializes that snapshot.
+
+### Response shape
+
+```jsonc
+{
+  "current": {                    // current-state (hot, in-RAM) graph size
+    "node_count": 10000,
+    "edge_count": 50000
+  },
+  "historical": {                 // bi-temporal depth of the in-RAM store
+    "total_node_versions": 12500, // node states retained in RAM (versions
+                                  // migrated to the cold tier are counted
+                                  // under cold_storage, not here)
+    "total_edge_versions": 50000,
+    "unique_nodes": 10000,        // distinct nodes with any history
+    "unique_edges": 50000,
+    "anchor_count": 11000,        // full property snapshots (node + edge)
+    "delta_count": 51500,         // change-only versions (node + edge)
+    "node_anchor_count": 10500,   // per-entity-type breakdowns of the above
+    "node_delta_count": 2000,
+    "edge_anchor_count": 500,
+    "edge_delta_count": 49500,
+    "compression_ratio": 0.176    // anchors / total versions; LOWER = better
+  },
+  "cold_storage": {               // disk tier; see "disabled tiers" below
+    "enabled": true,
+    "node_versions_stored": 800,  // versions on disk (persists across restarts)
+    "edge_versions_stored": 3200,
+    "compression_ratio": 3.8,     // raw/compressed bytes written since this
+                                  // process opened the DB; HIGHER = better
+    "tier_access": {              // where historical reads were served from,
+                                  // counted since this process opened the DB
+      "hot_hits": 90210,
+      "warm_hits": 4310,
+      "cold_hits": 122,
+      "misses": 0
+    }
+  },
+  "wal": {
+    "enabled": true,              // always true in current builds
+    "durability_mode": "group_commit", // synchronous | async | group_commit | async_batched
+    "current_lsn": 62501,         // NEXT LSN to be allocated
+    "total_appends": 62500,
+    "healthy": true               // false = outstanding WAL flush errors
+  }
+}
+```
+
+The cold-tier version counts are seeded from the persisted tables when the
+database is opened (an O(1) metadata read), so a restarted process reports its
+full on-disk cold history rather than zero. The byte-level
+`compression_ratio` and the `tier_access` counters are **not** persisted:
+they describe activity since the current process opened the database
+(`compression_ratio` is `1.0` until this process writes to the cold tier).
+
+### Disabled tiers are tagged, never zero-reported
+
+When no cold-storage tier is configured, the response contains exactly
+`"cold_storage": { "enabled": false }` — the count fields are **absent**, not
+zero. Never interpret a disabled tier as "0 cold versions"; it means the
+database retains history only in RAM (`historical`) and nothing has been (or
+can be) migrated to disk. The same contract applies to `wal.enabled`, which is
+always `true` in current builds (AletheiaDB has no no-WAL construction path)
+but is emitted explicitly so consumers never have to infer WAL presence.
+
+### Every field is O(1) — safe to call frequently
+
+All values are reads of counters the storage engines already maintain
+incrementally: current counts are index-length reads, historical counts come
+from `HistoricalStorage::stats()` (cached counters per Issue #212 — never a
+version scan), tier counters are atomic snapshots, and WAL fields are atomic
+loads. A `database_stats` call completes in microseconds regardless of
+database size.
+
+Note the two `compression_ratio` fields measure different things:
+`historical.compression_ratio` is the anchor share of versions (lower is
+better delta compression); `cold_storage.compression_ratio` is the byte-level
+Zstd/LZ4 ratio on disk (higher is better).
+
+### Scope
+
+`database_stats` reports magnitude/counts and tier health at a point in time.
+It does **not** report the calendar range of stored history (earliest/latest
+timestamps) — use
+[`temporal_extent`](#discovering-the-queryable-temporal-extent-temporal_extent)
+for that — and it does not break counts
+down per label; use `get_schema` for per-label/per-edge-type counts.
 
 ## Temporal bounds on read responses
 

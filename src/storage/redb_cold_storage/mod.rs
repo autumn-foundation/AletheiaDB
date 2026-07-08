@@ -56,7 +56,7 @@ use crate::core::id::VersionId;
 use crate::core::version::{EdgeVersion, EntityVersion, NodeVersion};
 use crate::storage::wal::LSN;
 use rayon::prelude::*;
-use redb::{ReadableDatabase, ReadableTable, TableHandle};
+use redb::{ReadableDatabase, ReadableTable, ReadableTableMetadata, TableHandle};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -214,9 +214,11 @@ impl Default for ColdStorageConfig {
 /// ```
 #[derive(Debug, Clone, Default)]
 pub struct ColdStorageStats {
-    /// Total number of node versions stored.
+    /// Total number of node versions stored. Seeded from the persisted table
+    /// length when an existing database is opened, then incremented per store.
     pub node_versions_stored: u64,
-    /// Total number of edge versions stored.
+    /// Total number of edge versions stored. Seeded from the persisted table
+    /// length when an existing database is opened, then incremented per store.
     pub edge_versions_stored: u64,
     /// Total number of node version reads.
     pub node_version_reads: u64,
@@ -241,6 +243,10 @@ impl ColdStorageStats {
     ///
     /// This helps monitor the effectiveness of the chosen compression algorithm
     /// in the cold storage tier. A higher ratio indicates better compression.
+    ///
+    /// The underlying byte counters are not persisted, so this ratio covers
+    /// writes made since the storage was opened (1.0 when nothing has been
+    /// written yet by this process).
     ///
     /// ## Examples
     ///
@@ -556,6 +562,13 @@ impl RedbColdStorage {
     ///
     /// If the parent directories do not exist, this method will attempt to create them.
     ///
+    /// When opening an existing database, the `node_versions_stored` and
+    /// `edge_versions_stored` statistics counters are seeded from the
+    /// persisted table lengths (an O(1) metadata read), so
+    /// [`stats`](Self::stats) reflects the full on-disk history rather than
+    /// only writes made by the current process. Byte and read counters are
+    /// not persisted and always start at zero.
+    ///
     /// # Examples
     ///
     /// ```rust
@@ -586,26 +599,51 @@ impl RedbColdStorage {
             .begin_write()
             .map_err(map_transaction_error("Failed to begin write transaction"))?;
 
-        // Open tables to create them
-        write_txn
-            .open_table(NODE_VERSIONS_TABLE)
-            .map_err(map_table_error("Failed to create node_versions table"))?;
-        write_txn
-            .open_table(EDGE_VERSIONS_TABLE)
-            .map_err(map_table_error("Failed to create edge_versions table"))?;
-        write_txn
-            .open_table(METADATA_TABLE)
-            .map_err(map_table_error("Failed to create metadata table"))?;
+        // Open tables to create them, and read their persisted entry counts so
+        // the version counters can be seeded below. `Table::len()` is an O(1)
+        // read of the B-tree root's cached length — no scan.
+        let (persisted_node_versions, persisted_edge_versions) = {
+            let node_table = write_txn
+                .open_table(NODE_VERSIONS_TABLE)
+                .map_err(map_table_error("Failed to create node_versions table"))?;
+            let edge_table = write_txn
+                .open_table(EDGE_VERSIONS_TABLE)
+                .map_err(map_table_error("Failed to create edge_versions table"))?;
+            write_txn
+                .open_table(METADATA_TABLE)
+                .map_err(map_table_error("Failed to create metadata table"))?;
+            (
+                node_table
+                    .len()
+                    .map_err(map_storage_error("Failed to read node_versions length"))?,
+                edge_table
+                    .len()
+                    .map_err(map_storage_error("Failed to read edge_versions length"))?,
+            )
+        };
 
         write_txn
             .commit()
             .map_err(map_commit_error("Failed to commit table creation"))?;
 
+        // Seed the version counters from the persisted tables so a reopened
+        // database reports its full cold history instead of misleading zeros
+        // (Issue #3222). Byte counters (raw/compressed) are not recoverable
+        // from table metadata, so `compression_ratio()` and the read counters
+        // remain since-process-start.
+        let stats = AtomicColdStorageStats::new();
+        stats
+            .node_versions_stored
+            .store(persisted_node_versions, Ordering::Relaxed);
+        stats
+            .edge_versions_stored
+            .store(persisted_edge_versions, Ordering::Relaxed);
+
         Ok(Self {
             path,
             db,
             config,
-            stats: AtomicColdStorageStats::new(),
+            stats,
             cipher: None,
             #[cfg(test)]
             fail_writes: AtomicBool::new(false),
