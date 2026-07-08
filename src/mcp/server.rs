@@ -1081,7 +1081,7 @@ impl AletheiaMcpServer {
     /// of `[0.0, 1.0]` (Issue #3224), rather than a generic deserialization
     /// error. An entirely empty bundle (all fields omitted) is normalized to
     /// `None` -- never persisted as a fabricated empty object.
-    fn parse_opt_provenance(
+    pub(crate) fn parse_opt_provenance(
         &self,
         value: Option<crate::mcp::tools::ProvenanceRequest>,
     ) -> std::result::Result<Option<Provenance>, CallToolResult> {

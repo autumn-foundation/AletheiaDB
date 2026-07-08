@@ -11649,6 +11649,30 @@ mod apply_batch_tests {
         assert_eq!(server.db().node_count(), 0);
     }
 
+    /// Per-op provenance is validated through the SAME shared helper the
+    /// single-op tools use (`parse_opt_provenance`, the #3350 stamping
+    /// seam), with the error re-shaped to carry the batch's op index.
+    #[test]
+    fn apply_batch_invalid_provenance_rejected_per_op() {
+        let server = create_test_server();
+        let value = apply_err(
+            &server,
+            json!([
+                {"op": "create_node", "label": "Person"},
+                {"op": "create_node", "label": "Person",
+                 "provenance": {"source": "sensor", "confidence": 3.5}},
+            ]),
+            "INVALID_ARGUMENT",
+        );
+        assert_eq!(value["error"]["details"]["failed_op_index"], json!(1));
+        let msg = value["error"]["message"].as_str().unwrap();
+        assert!(
+            msg.contains("confidence"),
+            "shared-helper message must be preserved: {msg}"
+        );
+        assert_eq!(server.db().node_count(), 0);
+    }
+
     /// #3413-adjacent bi-temporal guard: a batch-created edge that a later
     /// detach-delete would elide may NOT carry an explicit valid_time — the
     /// elision would silently erase the backdated fact.

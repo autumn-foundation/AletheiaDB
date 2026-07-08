@@ -788,27 +788,28 @@ impl AletheiaMcpServer {
 
     /// Validate an op's optional provenance bundle (Issue #3224 semantics:
     /// an all-absent bundle is normalized to `None`).
+    ///
+    /// Deliberately routes through [`Self::parse_opt_provenance`] — the SAME
+    /// helper every single-op tool uses — so a future principal stamp on the
+    /// provenance path (#3350 authn/RBAC) lands in exactly one place. Only
+    /// the error is re-shaped here, to carry the batch's `failed_op_index`.
     fn batch_provenance(
         &self,
         index: usize,
         provenance: Option<ProvenanceRequest>,
     ) -> Result<Option<Provenance>, Box<CallToolResult>> {
-        let Some(req) = provenance else {
-            return Ok(None);
-        };
-        let provenance =
-            Provenance::from_parts(req.source, req.confidence, req.note, req.correlation_id)
-                .map_err(|e| {
-                    self.batch_invalid(
-                        index,
-                        format!(
-                            "Operation {index}: invalid provenance: confidence must be between \
-                             0.0 and 1.0 ({e})"
-                        ),
-                        serde_json::Map::new(),
-                    )
-                })?;
-        Ok((!provenance.is_empty()).then_some(provenance))
+        self.parse_opt_provenance(provenance).map_err(|result| {
+            let text = Self::extract_text(result);
+            let detail = serde_json::from_str::<serde_json::Value>(&text)
+                .ok()
+                .and_then(|v| v["error"]["message"].as_str().map(str::to_owned))
+                .unwrap_or(text);
+            self.batch_invalid(
+                index,
+                format!("Operation {index}: {detail}"),
+                serde_json::Map::new(),
+            )
+        })
     }
 
     /// Resolve an edge-endpoint reference statically.
