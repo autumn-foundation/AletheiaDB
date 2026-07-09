@@ -13,14 +13,45 @@ thread_local! {
     /// Overrides `time::now()` for the current thread when set.
     /// `None` means "use the real wall clock".
     static SIMULATED_NOW_MICROS: Cell<Option<i64>> = const { Cell::new(None) };
+
+    /// Microseconds the simulated time advances *after each read* while an
+    /// injection is active. `0` (the default) freezes the clock between
+    /// explicit `advance_by`/`jump_*` calls.
+    static SIMULATED_ADVANCE_STEP_MICROS: Cell<i64> = const { Cell::new(0) };
+
+    /// Number of simulated-clock reads observed on this thread since the last
+    /// [`reset_simulated_read_count`]. Only reads that hit an active
+    /// injection are counted.
+    static SIMULATED_READ_COUNT: Cell<u64> = const { Cell::new(0) };
 }
 
 /// Read the current thread-local simulated time, if any.
 ///
-/// Called by `time::now()` when the `simulation` feature is active.
+/// Called by `time::now()` when the `simulation` feature is active. Each read
+/// that hits an active injection bumps the read counter and, when an
+/// auto-advance step is configured, moves the simulated time forward by that
+/// step (post-read), so consecutive reads observe strictly increasing values.
 #[inline]
 pub(crate) fn thread_local_now() -> Option<i64> {
-    SIMULATED_NOW_MICROS.with(|c| c.get())
+    let current = SIMULATED_NOW_MICROS.with(|c| c.get())?;
+    SIMULATED_READ_COUNT.with(|c| c.set(c.get().saturating_add(1)));
+    let step = SIMULATED_ADVANCE_STEP_MICROS.with(|c| c.get());
+    if step != 0 {
+        SIMULATED_NOW_MICROS.with(|c| c.set(Some(current.saturating_add(step))));
+    }
+    Some(current)
+}
+
+/// Number of simulated-clock reads on the current thread since the last
+/// [`reset_simulated_read_count`] (reads without an active injection are not
+/// counted).
+pub fn simulated_read_count() -> u64 {
+    SIMULATED_READ_COUNT.with(|c| c.get())
+}
+
+/// Reset the current thread's simulated-clock read counter to zero.
+pub fn reset_simulated_read_count() {
+    SIMULATED_READ_COUNT.with(|c| c.set(0));
 }
 
 /// Set the thread-local simulated time (raw microseconds since epoch).
@@ -70,6 +101,13 @@ impl SimulatedClock {
 
     /// Advance the clock by `delta_micros` (must be ≥ 0).
     ///
+    /// Note: under an auto-advancing injection
+    /// ([`inject_advancing`](Self::inject_advancing)), the struct's
+    /// `current_micros` does **not** track the per-read auto-advance, so this
+    /// advances relative to the last explicitly set value, not the value the
+    /// thread-local clock has drifted to — prefer
+    /// [`jump_to`](Self::jump_to) for absolute positioning in that case.
+    ///
     /// # Panics
     /// Panics if `delta_micros` is negative (use [`jump_to`] for backwards moves).
     pub fn advance_by(&mut self, delta_micros: i64) {
@@ -105,10 +143,47 @@ impl SimulatedClock {
     /// Returns a guard that restores the **previous** thread-local value when dropped,
     /// making nested injections safe. If no outer injection is active, dropping the
     /// guard reverts to the real wall clock.
+    ///
+    /// Injection resets the thread-local read counter
+    /// ([`reset_simulated_read_count`]) so counts never leak across
+    /// sequential injections.
     pub fn inject(&self) -> ClockInjectionGuard {
-        let previous = thread_local_now();
+        self.inject_advancing(0)
+    }
+
+    /// Intercept `time::now()` on the current thread with an auto-advancing
+    /// clock: every read returns the current simulated time and then moves it
+    /// forward by `step_micros`, so consecutive reads observe strictly
+    /// increasing values. A `step_micros` of `0` behaves exactly like
+    /// [`inject`](Self::inject) (frozen between explicit moves).
+    ///
+    /// Returns a guard that restores the previous thread-local value *and*
+    /// step when dropped, making nested injections safe.
+    ///
+    /// The auto-advance mutates only the thread-local time: the struct's
+    /// `current_micros` does **not** track it, so after any reads
+    /// [`now_micros`](Self::now_micros) and [`advance_by`](Self::advance_by)
+    /// operate on a stale value — prefer [`jump_to`](Self::jump_to) to
+    /// reposition the clock absolutely.
+    ///
+    /// Injection also resets the thread-local read counter
+    /// ([`reset_simulated_read_count`]) so counts never leak across
+    /// sequential injections; call [`reset_simulated_read_count`] yourself
+    /// to re-zero mid-injection.
+    ///
+    /// # Panics
+    /// Panics if `step_micros` is negative.
+    pub fn inject_advancing(&self, step_micros: i64) -> ClockInjectionGuard {
+        assert!(step_micros >= 0, "auto-advance step must be non-negative");
+        let previous = SIMULATED_NOW_MICROS.with(|c| c.get());
+        let previous_step = SIMULATED_ADVANCE_STEP_MICROS.with(|c| c.get());
         set_thread_local(Some(self.current_micros));
-        ClockInjectionGuard { previous }
+        SIMULATED_ADVANCE_STEP_MICROS.with(|c| c.set(step_micros));
+        reset_simulated_read_count();
+        ClockInjectionGuard {
+            previous,
+            previous_step,
+        }
     }
 }
 
@@ -122,11 +197,14 @@ impl SimulatedClock {
 pub struct ClockInjectionGuard {
     /// The thread-local value that was active before this guard was created.
     previous: Option<i64>,
+    /// The auto-advance step that was active before this guard was created.
+    previous_step: i64,
 }
 
 impl Drop for ClockInjectionGuard {
     fn drop(&mut self) {
         set_thread_local(self.previous);
+        SIMULATED_ADVANCE_STEP_MICROS.with(|c| c.set(self.previous_step));
     }
 }
 
@@ -171,6 +249,28 @@ mod tests {
         }
         // After drop, thread-local must be cleared (no outer injection was active).
         assert!(thread_local_now().is_none());
+    }
+
+    #[test]
+    fn inject_resets_read_count() {
+        let first = SimulatedClock::new(1_000);
+        {
+            let _g = first.inject();
+            let _ = time::now();
+            let _ = time::now();
+            assert_eq!(simulated_read_count(), 2);
+        }
+
+        // A fresh injection must not inherit the previous injection's count.
+        let second = SimulatedClock::new(2_000);
+        let _g = second.inject();
+        assert_eq!(
+            simulated_read_count(),
+            0,
+            "read counter must reset at injection time"
+        );
+        let _ = time::now();
+        assert_eq!(simulated_read_count(), 1);
     }
 
     #[test]

@@ -694,7 +694,7 @@ mod tests {
         db.write(|tx| tx.update_node(id, props_v2)).unwrap();
 
         // Force manual snapshot to ensure T2 is indexed (since anchors might not trigger on every update)
-        if let Some(idx) = db.current.get_temporal_vector_index() {
+        if let Some(idx) = db.current.get_temporal_vector_index_for("vec") {
             idx.create_manual_snapshot().unwrap();
         }
 

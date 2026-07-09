@@ -111,15 +111,21 @@ use rayon::prelude::*;
 
 /// Current manifest format version.
 ///
-/// Bumped to 2 for write-time provenance on temporal versions (Issue #3224):
-/// `NodeVersionEntry`/`EdgeVersionEntry` gained an optional `provenance`
-/// field. Bumped to 3 for the authenticated-principal provenance field
-/// (Issue #3350): `PersistedProvenance` gained an optional `principal`
-/// field. Since `bitcode` is positional, files written at older versions can
-/// no longer decode directly as the current structs; see
+/// Version history:
+/// - **1 -> 2** (Issue #3224): `NodeVersionEntry`/`EdgeVersionEntry` gained an
+///   optional `provenance` field.
+/// - **2 -> 3** (Issue #3350): `PersistedProvenance` gained an optional
+///   `principal` field (authenticated-principal provenance).
+/// - **3 -> 4** (Issue #3387): `NodeVersionEntry`/`EdgeVersionEntry` gained
+///   `tx_end`/`tx_end_logical` (transaction-time interval closure) and
+///   `prev_version`/`next_version` (version chain links), so checkpoint
+///   restore round-trips full bi-temporal state without WAL replay.
+///
+/// Since `bitcode` is positional, files written at older versions can no
+/// longer decode directly as the current structs; see
 /// `temporal::load_temporal_index` for the legacy fallbacks
-/// (`formats::legacy_v1` / `formats::legacy_v2`).
-pub const MANIFEST_VERSION: u16 = 3;
+/// (`formats::legacy_v1`, `formats::legacy_v2`, `formats::legacy_v3`).
+pub const MANIFEST_VERSION: u16 = 4;
 
 /// Magic bytes for manifest files.
 pub const MANIFEST_MAGIC: [u8; 4] = *b"GIDX";

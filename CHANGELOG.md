@@ -109,6 +109,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Bulk MCP read responses now evaluate `is_current` against a single
+  per-request timestamp (Issue #3391): the wallclock is captured once per
+  tool call and every entity's `temporal.is_current` in that response
+  (`list_nodes`, `traverse`, `get_outgoing_edges`/`get_incoming_edges`,
+  `find_similar`, `find_nodes_at_time`, `hybrid_query`, ...) is judged
+  against the same instant, instead of one clock read per serialized
+  entity. See
+  [docs/guides/mcp-query-tool.md](docs/guides/mcp-query-tool.md#temporal-bounds-on-read-responses).
+- Removed the legacy single-property temporal vector index state (Issue
+  #450): the internal `TemporalVectorIndexState` (which mirrored only the
+  most recently enabled temporal index) is gone, and the multi-property
+  `temporal_vector_indexes` DashMap introduced by Issue #389 is now the
+  single source of truth. No public types were removed, but one behavior
+  changed when **multiple** temporal vector indexes are enabled: the
+  property-less temporal APIs — `AletheiaDB::find_similar_as_of`
+  (deprecated), `similarity_search(...).at_time(...)`,
+  `GraphView::find_similar_as_of`, `query::hybrid::find_similar_as_of`, and
+  `CurrentStorage::find_similar_as_of` / `find_similar_in_range` — now
+  deterministically query the **alphabetically first** temporal-indexed
+  property (mirroring the non-temporal default-property rule) instead of
+  the most recently enabled one. Migration: name the property explicitly.
+
+  ```rust
+  // Before (ambiguous with several temporal indexes -- used the
+  // index that happened to be enabled last):
+  let results = db.find_similar_as_of(&query, 10, ts)?;
+
+  // After (explicit property -- recommended):
+  let results = db.find_similar_as_of_in("content_embedding", &query, 10, ts)?;
+  ```
+
+- Vector index loading at startup is now parallel with per-index error
+  isolation (Issue #451): with index persistence enabled, all per-property
+  HNSW vector indexes are loaded concurrently (one rayon task per property)
+  and a corrupted or unreadable vector index (bad `meta.idx`,
+  `mappings.idx`, `current.usearch`, or `current.usearch.mappings`; unknown
+  metric; out-of-range mapping key; even a panic inside one load task) is
+  skipped with a warning instead of aborting the loading of every remaining
+  vector index. Startup logs a loaded/skipped summary when any index is
+  skipped and reports the actually restored vector count per index. A
+  skipped index is recovered with the new
+  `AletheiaDB::rebuild_vector_index(property, config)`, which re-enables the
+  index and backfills it from the vector properties of current nodes —
+  merely re-enabling via `enable_vector_index` creates an empty index that
+  the next persistence cycle writes over the on-disk files, losing the
+  vectors. See
+  [docs/guides/index-persistence-guide.md](docs/guides/index-persistence-guide.md#vector-index-persistence).
+
 - `PersistenceConfig::default()` no longer enables index persistence
   (Issue #3388). The old default (`enabled: true` with the cwd-relative
   `data_dir: "data"`) made every database built from a default or builder
@@ -125,6 +173,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   set `enabled = true` under `[persistence]`; a `[persistence]` section that
   omits `enabled` (even one that sets `data_dir` or `load_on_startup`) is
   treated as disabled.
+
 - **BREAKING**: `ReadOps::get_outgoing_edges`, `ReadOps::get_incoming_edges`,
   and `ReadOps::get_outgoing_edges_with_label` now return
   `Result<Vec<EdgeId>>` instead of `Vec<EdgeId>` (Issue #359). A node that
@@ -166,6 +215,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Multi-property temporal vector indexes now all receive write-path updates
+  (Issue #450): with two or more temporal vector indexes enabled, node
+  creates/updates now index vectors into **every** matching property index,
+  deletes remove the node from every index, and post-commit snapshot
+  notifications reach every index. Previously only the most recently enabled
+  temporal index was maintained, silently leaving earlier-enabled temporal
+  indexes empty for point-in-time queries.
 - WAL: the flush coordinator no longer appends to an existing segment file
   whose header format version differs from the version the writer emits
   (Issue #3423). Replay derives the parse version solely from the segment

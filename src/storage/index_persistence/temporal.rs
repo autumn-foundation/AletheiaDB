@@ -37,7 +37,7 @@ use std::sync::Arc;
 
 use crate::core::id::{EdgeId, NodeId};
 use crate::core::interning::InternedString;
-use crate::core::property::PropertyValue;
+use crate::core::property::{PropertyMap, PropertyValue};
 use crate::core::provenance::Provenance;
 use crate::core::temporal::{BiTemporalInterval, TIMESTAMP_MAX, TimeRange};
 use crate::core::version::{EdgeVersion, NodeVersion, PropertyDelta, VersionData};
@@ -83,6 +83,48 @@ pub(crate) fn restore_provenance(
         IndexPersistenceError::Serialization(format!("Invalid persisted provenance: {}", e))
     })?;
     Ok(Some(Arc::new(provenance)))
+}
+
+/// True if this version data carries a `VectorDelta::Sparse`, which cannot be
+/// persisted without first materializing it against its base vector
+/// (Issue #3387 availability fix: callers materialize instead of failing the
+/// whole checkpoint/save).
+pub fn needs_sparse_vector_materialization(data: &VersionData) -> bool {
+    match data {
+        VersionData::Delta { delta } => delta
+            .vector_deltas
+            .values()
+            .any(|d| matches!(d, crate::core::version::VectorDelta::Sparse { .. })),
+        VersionData::Anchor { .. } => false,
+    }
+}
+
+/// Return a copy of `data` with all vector deltas materialized against
+/// `base` (the fully reconstructed property state of the *previous* version),
+/// ready for persistence. The live in-memory version is never mutated --
+/// only the persisted copy carries the materialized (Full) vectors.
+///
+/// # Errors
+///
+/// Returns an error if a sparse delta cannot be resolved against `base`
+/// (missing or non-vector base property) -- persisting it anyway would be
+/// silent data loss.
+pub fn materialize_version_data_for_persistence(
+    data: &VersionData,
+    base: &PropertyMap,
+) -> Result<VersionData> {
+    match data {
+        VersionData::Delta { delta } => {
+            let mut materialized = delta.clone();
+            materialized
+                .materialize_vector_deltas(base)
+                .map_err(IndexPersistenceError::Serialization)?;
+            Ok(VersionData::Delta {
+                delta: materialized,
+            })
+        }
+        anchor @ VersionData::Anchor { .. } => Ok(anchor.clone()),
+    }
 }
 
 /// Convert NodeVersion to NodeVersionEntry for persistence.
@@ -189,6 +231,20 @@ pub fn convert_node_version(version: &NodeVersion) -> Result<NodeVersionEntry> {
         properties,
         vector_snapshot_id,
         provenance: persist_provenance(version.provenance.as_deref()),
+        // Issue #3387: round-trip the tx-time closure and chain links so a
+        // restore-only recovery serves correct AS OF SYSTEM_TIME reads.
+        tx_end: if tx_time.is_current() {
+            None
+        } else {
+            Some(tx_time.end().wallclock())
+        },
+        tx_end_logical: if tx_time.is_current() {
+            None
+        } else {
+            Some(tx_time.end().logical())
+        },
+        prev_version: version.prev_version.map(|v| v.as_u64()),
+        next_version: version.next_version.map(|v| v.as_u64()),
     })
 }
 
@@ -277,6 +333,20 @@ pub fn convert_edge_version(version: &EdgeVersion) -> Result<EdgeVersionEntry> {
         version_type,
         properties,
         provenance: persist_provenance(version.provenance.as_deref()),
+        // Issue #3387: round-trip the tx-time closure and chain links so a
+        // restore-only recovery serves correct AS OF SYSTEM_TIME reads.
+        tx_end: if tx_time.is_current() {
+            None
+        } else {
+            Some(tx_time.end().wallclock())
+        },
+        tx_end_logical: if tx_time.is_current() {
+            None
+        } else {
+            Some(tx_time.end().logical())
+        },
+        prev_version: version.prev_version.map(|v| v.as_u64()),
+        next_version: version.next_version.map(|v| v.as_u64()),
     })
 }
 
@@ -320,10 +390,30 @@ pub fn restore_node_version(entry: &NodeVersionEntry) -> Result<NodeVersion> {
         ))
     })?;
 
-    let tx_time = TimeRange::from(HybridTimestamp::new_unchecked(
-        entry.tx_time,
-        entry.tx_time_logical,
-    ));
+    let tx_start = HybridTimestamp::new_unchecked(entry.tx_time, entry.tx_time_logical);
+    // Issue #3387: restore the persisted transaction-time closure
+    // (None = still current knowledge, open-ended interval).
+    let tx_time = match entry.tx_end {
+        Some(end) => {
+            // The writer always persists the pair together; a lone tx_end is
+            // on-disk corruption, not a value to default.
+            let end_logical = entry.tx_end_logical.ok_or_else(|| {
+                IndexPersistenceError::Serialization(format!(
+                    "Corrupt version entry {}: tx_end is set but tx_end_logical is missing",
+                    entry.version_id
+                ))
+            })?;
+            TimeRange::new(tx_start, HybridTimestamp::new_unchecked(end, end_logical)).map_err(
+                |e| {
+                    IndexPersistenceError::Serialization(format!(
+                        "Invalid transaction time range [{}, {}]: {}",
+                        entry.tx_time, end, e
+                    ))
+                },
+            )?
+        }
+        None => TimeRange::from(tx_start),
+    };
     let temporal = BiTemporalInterval::new(valid_time, tx_time);
 
     // Use the preserved version ID from the persisted entry
@@ -372,10 +462,24 @@ pub fn restore_node_version(entry: &NodeVersionEntry) -> Result<NodeVersion> {
         temporal,
         label,
         data,
-        next_version: None,
-        prev_version: None,
+        // Issue #3387: restore the persisted chain links (legacy formats
+        // carry None here; `rebuild_version_chains` re-derives them).
+        next_version: restore_version_link(entry.next_version, "next_version")?,
+        prev_version: restore_version_link(entry.prev_version, "prev_version")?,
         provenance: restore_provenance(entry.provenance.clone())?,
     })
+}
+
+/// Restore an optional persisted version-chain link, validating the raw ID.
+fn restore_version_link(
+    raw: Option<u64>,
+    field: &str,
+) -> Result<Option<crate::core::id::VersionId>> {
+    raw.map(crate::core::id::VersionId::new)
+        .transpose()
+        .map_err(|e| {
+            IndexPersistenceError::Serialization(format!("Invalid {} ID {:?}: {}", field, raw, e))
+        })
 }
 
 /// Restore EdgeVersionEntry back to EdgeVersion.
@@ -430,10 +534,30 @@ pub fn restore_edge_version(entry: &EdgeVersionEntry) -> Result<EdgeVersion> {
         ))
     })?;
 
-    let tx_time = TimeRange::from(HybridTimestamp::new_unchecked(
-        entry.tx_time,
-        entry.tx_time_logical,
-    ));
+    let tx_start = HybridTimestamp::new_unchecked(entry.tx_time, entry.tx_time_logical);
+    // Issue #3387: restore the persisted transaction-time closure
+    // (None = still current knowledge, open-ended interval).
+    let tx_time = match entry.tx_end {
+        Some(end) => {
+            // The writer always persists the pair together; a lone tx_end is
+            // on-disk corruption, not a value to default.
+            let end_logical = entry.tx_end_logical.ok_or_else(|| {
+                IndexPersistenceError::Serialization(format!(
+                    "Corrupt version entry {}: tx_end is set but tx_end_logical is missing",
+                    entry.version_id
+                ))
+            })?;
+            TimeRange::new(tx_start, HybridTimestamp::new_unchecked(end, end_logical)).map_err(
+                |e| {
+                    IndexPersistenceError::Serialization(format!(
+                        "Invalid transaction time range [{}, {}]: {}",
+                        entry.tx_time, end, e
+                    ))
+                },
+            )?
+        }
+        None => TimeRange::from(tx_start),
+    };
     let temporal = BiTemporalInterval::new(valid_time, tx_time);
 
     // Use the preserved version ID from the persisted entry
@@ -480,8 +604,10 @@ pub fn restore_edge_version(entry: &EdgeVersionEntry) -> Result<EdgeVersion> {
         source,
         target,
         data,
-        next_version: None,
-        prev_version: None,
+        // Issue #3387: restore the persisted chain links (legacy formats
+        // carry None here; `rebuild_version_chains` re-derives them).
+        next_version: restore_version_link(entry.next_version, "next_version")?,
+        prev_version: restore_version_link(entry.prev_version, "prev_version")?,
         provenance: restore_provenance(entry.provenance.clone())?,
     })
 }
@@ -581,20 +707,20 @@ pub fn load_temporal_index(path: &Path) -> Result<TemporalIndexData> {
     decode_temporal_blob(path)
 }
 
-/// Decode temporal index bytes, transparently upgrading pre-principal
-/// (Issue #3350, `version == 2`) and pre-provenance (Issue #3224,
-/// `version == 1`) files.
+/// Decode temporal index bytes, transparently upgrading pre-fidelity
+/// (Issue #3387, `version == 3`), pre-principal (Issue #3350,
+/// `version == 2`), and pre-provenance (Issue #3224, `version == 1`) files.
 ///
 /// `bitcode` is positional and non-self-describing, so an older-version file
 /// cannot decode directly as the current [`TemporalIndexData`]: version 1
 /// predates the `provenance` field on `NodeVersionEntry`/`EdgeVersionEntry`,
-/// and version 2 predates the `principal` field inside
-/// [`PersistedProvenance`]. We try decoding candidate shapes newest-first;
-/// a decode only "wins" when it also produces a plausible magic + the
-/// version that shape was written at (guarding against a decode
-/// "succeeding" on bytes it wasn't meant for) -- this is the same
-/// magic+version cross-check used throughout this module, just applied
-/// across three candidate shapes instead of one.
+/// version 2 predates the `principal` field inside [`PersistedProvenance`],
+/// and version 3 predates the Issue #3387 tx-end/chain-link fields. We try
+/// decoding candidate shapes newest-first; a decode only "wins" when it
+/// also produces a plausible magic + the version that shape was written at
+/// (guarding against a decode "succeeding" on bytes it wasn't meant for) --
+/// this is the same magic+version cross-check used throughout this module,
+/// just applied across four candidate shapes instead of one.
 ///
 /// The file is read from disk and CRC32-verified exactly once via
 /// [`super::common::read_and_verify_crc`]; all candidate decodes are
@@ -602,6 +728,7 @@ pub fn load_temporal_index(path: &Path) -> Result<TemporalIndexData> {
 /// reads and checksum passes on the (common, cheap) legacy-fallback paths.
 fn decode_temporal_blob(path: &Path) -> Result<TemporalIndexData> {
     use crate::storage::index_persistence::formats::legacy_v2::TemporalIndexDataV2;
+    use crate::storage::index_persistence::formats::legacy_v3::TemporalIndexDataV3;
 
     let bytes = super::common::read_and_verify_crc(
         path,
@@ -614,6 +741,15 @@ fn decode_temporal_blob(path: &Path) -> Result<TemporalIndexData> {
         && data.version == MANIFEST_VERSION
     {
         return Ok(data);
+    }
+
+    // Issue #3350 shape (principal-carrying provenance, no tx-end /
+    // chain-link fields), written at MANIFEST_VERSION == 3.
+    if let Ok(v3) = bitcode::decode::<TemporalIndexDataV3>(&bytes)
+        && v3.magic == TEMPORAL_MAGIC
+        && v3.version == 3
+    {
+        return Ok(v3.into());
     }
 
     // Issue #3224 shape (provenance without principal), written at
@@ -638,7 +774,11 @@ fn decode_temporal_blob(path: &Path) -> Result<TemporalIndexData> {
             got: legacy.magic,
         });
     }
-    if legacy.version > MANIFEST_VERSION {
+    // The V1 shape is the last candidate: only an exact version-1 stamp may
+    // decode through it. Anything else (0, or a 2/3/4 whose proper-shape
+    // decode failed above, or a future version) would be a misdecode, not a
+    // legacy file.
+    if legacy.version != 1 {
         return Err(IndexPersistenceError::UnsupportedVersion {
             found: legacy.version,
             supported: MANIFEST_VERSION,
@@ -696,6 +836,10 @@ mod tests {
             properties: PersistedPropertyMap { entries: vec![] },
             vector_snapshot_id: Some(42),
             provenance: None,
+            tx_end: None,
+            tx_end_logical: None,
+            prev_version: None,
+            next_version: None,
         });
         data.node_anchors.push(NodeAnchorEntry {
             node_id: 1,
@@ -740,6 +884,10 @@ mod tests {
                 correlation_id: Some("batch-42".to_string()),
                 principal: Some("ingest-writer".to_string()),
             }),
+            tx_end: None,
+            tx_end_logical: None,
+            prev_version: None,
+            next_version: None,
         });
 
         save_temporal_index(&data, &path).unwrap();
@@ -763,7 +911,7 @@ mod tests {
     fn test_load_v1_temporal_index_file_defaults_provenance_none() {
         use crate::core::GLOBAL_INTERNER;
         use crate::storage::index_persistence::formats::legacy_v1::{
-            NodeVersionEntryV1, TemporalIndexDataV1,
+            EdgeVersionEntryV1, NodeVersionEntryV1, TemporalIndexDataV1,
         };
 
         let dir = tempdir().unwrap();
@@ -788,7 +936,21 @@ mod tests {
                 vector_snapshot_id: Some(7),
             }],
             node_anchors: vec![],
-            edge_versions: vec![],
+            edge_versions: vec![EdgeVersionEntryV1 {
+                version_id: 101,
+                edge_id: 10,
+                source_id: 1,
+                target_id: 2,
+                label_idx: label.as_u32(),
+                valid_from: 1000,
+                valid_from_logical: 0,
+                valid_to: None,
+                valid_to_logical: None,
+                tx_time: 1000,
+                tx_time_logical: 0,
+                version_type: PersistedVersionType::Anchor,
+                properties: PersistedPropertyMap { entries: vec![] },
+            }],
             edge_anchors: vec![],
         };
 
@@ -806,6 +968,17 @@ mod tests {
 
         let version = restore_node_version(&loaded.node_versions[0]).unwrap();
         assert!(version.provenance.is_none());
+
+        // The v1 EDGE entry upgrades the same way: provenance and the
+        // Issue #3387 fidelity fields default to None.
+        assert_eq!(loaded.edge_versions.len(), 1);
+        let edge_entry = &loaded.edge_versions[0];
+        assert!(edge_entry.provenance.is_none());
+        assert_eq!(edge_entry.tx_end, None);
+        assert_eq!(edge_entry.prev_version, None);
+        let edge = restore_edge_version(edge_entry).unwrap();
+        assert!(edge.temporal.transaction_time().is_current());
+        assert!(edge.prev_version.is_none());
     }
 
     #[test]
@@ -1028,6 +1201,10 @@ mod tests {
             properties,
             vector_snapshot_id: Some(42),
             provenance: None,
+            tx_end: None,
+            tx_end_logical: None,
+            prev_version: None,
+            next_version: None,
         };
 
         let version = restore_node_version(&entry).unwrap();
@@ -1085,6 +1262,10 @@ mod tests {
             properties,
             vector_snapshot_id: None,
             provenance: None,
+            tx_end: None,
+            tx_end_logical: None,
+            prev_version: None,
+            next_version: None,
         };
 
         let version = restore_node_version(&entry).unwrap();
@@ -1129,6 +1310,10 @@ mod tests {
             version_type: PersistedVersionType::Anchor,
             properties,
             provenance: None,
+            tx_end: None,
+            tx_end_logical: None,
+            prev_version: None,
+            next_version: None,
         };
 
         let version = restore_edge_version(&entry).unwrap();
@@ -1186,6 +1371,10 @@ mod tests {
             properties,
             vector_snapshot_id: Some(42),
             provenance: None,
+            tx_end: None,
+            tx_end_logical: None,
+            prev_version: None,
+            next_version: None,
         };
 
         // Create temporal data (labels are now stored in entries)
@@ -1549,6 +1738,526 @@ mod tests {
             restored_start.logical(),
             logical,
             "Logical counter should be preserved"
+        );
+    }
+
+    /// Issue #3387: tx-time closures and version chain links must round-trip
+    /// through convert -> save -> load -> restore for node versions.
+    #[test]
+    fn test_node_tx_closure_and_chain_links_round_trip() {
+        use crate::core::GLOBAL_INTERNER;
+        use crate::core::hlc::HybridTimestamp;
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("fidelity_node.idx");
+
+        let label = GLOBAL_INTERNER.intern("Person").unwrap();
+        let tx_start = HybridTimestamp::new(1000, 3).unwrap();
+        let tx_end = HybridTimestamp::new(2000, 7).unwrap();
+        let temporal = BiTemporalInterval::new(
+            TimeRange::new(500.into(), TIMESTAMP_MAX).unwrap(),
+            TimeRange::new(tx_start, tx_end).unwrap(),
+        );
+        let version = NodeVersion {
+            id: VersionId::new(10).unwrap(),
+            node_id: NodeId::new(1).unwrap(),
+            commit_timestamp: tx_start,
+            temporal,
+            label,
+            data: VersionData::Anchor {
+                properties: PropertyMapBuilder::new().insert("name", "Alice").build(),
+                vector_snapshot_id: None,
+            },
+            next_version: Some(VersionId::new(11).unwrap()),
+            prev_version: Some(VersionId::new(9).unwrap()),
+            provenance: None,
+        };
+
+        let entry = convert_node_version(&version).unwrap();
+        assert_eq!(entry.tx_end, Some(2000));
+        assert_eq!(entry.tx_end_logical, Some(7));
+        assert_eq!(entry.prev_version, Some(9));
+        assert_eq!(entry.next_version, Some(11));
+
+        let mut data = new_temporal_index_data();
+        data.node_versions.push(entry);
+        save_temporal_index(&data, &path).unwrap();
+        let loaded = load_temporal_index(&path).unwrap();
+
+        let restored = restore_node_version(&loaded.node_versions[0]).unwrap();
+        let restored_tx = restored.temporal.transaction_time();
+        assert!(!restored_tx.is_current(), "tx-time closure must round-trip");
+        assert_eq!(restored_tx.start(), tx_start);
+        assert_eq!(restored_tx.end(), tx_end, "closed tx end (incl. logical)");
+        assert_eq!(restored.prev_version, Some(VersionId::new(9).unwrap()));
+        assert_eq!(restored.next_version, Some(VersionId::new(11).unwrap()));
+    }
+
+    /// Issue #3387: same round-trip contract for edge versions.
+    #[test]
+    fn test_edge_tx_closure_and_chain_links_round_trip() {
+        use crate::core::GLOBAL_INTERNER;
+        use crate::core::hlc::HybridTimestamp;
+
+        let label = GLOBAL_INTERNER.intern("KNOWS").unwrap();
+        let tx_start = HybridTimestamp::new(1000, 0).unwrap();
+        let tx_end = HybridTimestamp::new(1500, 2).unwrap();
+        let temporal = BiTemporalInterval::new(
+            TimeRange::new(500.into(), TIMESTAMP_MAX).unwrap(),
+            TimeRange::new(tx_start, tx_end).unwrap(),
+        );
+        let version = EdgeVersion {
+            id: VersionId::new(20).unwrap(),
+            edge_id: EdgeId::new(5).unwrap(),
+            source: NodeId::new(1).unwrap(),
+            target: NodeId::new(2).unwrap(),
+            commit_timestamp: tx_start,
+            temporal,
+            label,
+            data: VersionData::Anchor {
+                properties: PropertyMapBuilder::new().insert("weight", 1i64).build(),
+                vector_snapshot_id: None,
+            },
+            next_version: Some(VersionId::new(21).unwrap()),
+            prev_version: None,
+            provenance: None,
+        };
+
+        let entry = convert_edge_version(&version).unwrap();
+        assert_eq!(entry.tx_end, Some(1500));
+        assert_eq!(entry.tx_end_logical, Some(2));
+        assert_eq!(entry.prev_version, None);
+        assert_eq!(entry.next_version, Some(21));
+
+        let restored = restore_edge_version(&entry).unwrap();
+        let restored_tx = restored.temporal.transaction_time();
+        assert!(!restored_tx.is_current(), "tx-time closure must round-trip");
+        assert_eq!(restored_tx.end(), tx_end);
+        assert_eq!(restored.prev_version, None);
+        assert_eq!(restored.next_version, Some(VersionId::new(21).unwrap()));
+    }
+
+    /// Issue #3387: an open (current) tx interval persists as None and
+    /// restores open -- the closure fields never fabricate an end.
+    #[test]
+    fn test_open_tx_interval_round_trips_open() {
+        use crate::core::GLOBAL_INTERNER;
+
+        let label = GLOBAL_INTERNER.intern("Person").unwrap();
+        let temporal = BiTemporalInterval::new(
+            TimeRange::new(500.into(), TIMESTAMP_MAX).unwrap(),
+            TimeRange::new(1000.into(), TIMESTAMP_MAX).unwrap(),
+        );
+        let version = NodeVersion {
+            id: VersionId::new(10).unwrap(),
+            node_id: NodeId::new(1).unwrap(),
+            commit_timestamp: temporal.transaction_time().start(),
+            temporal,
+            label,
+            data: VersionData::Anchor {
+                properties: PropertyMapBuilder::new().build(),
+                vector_snapshot_id: None,
+            },
+            next_version: None,
+            prev_version: None,
+            provenance: None,
+        };
+
+        let entry = convert_node_version(&version).unwrap();
+        assert_eq!(entry.tx_end, None);
+        assert_eq!(entry.tx_end_logical, None);
+
+        let restored = restore_node_version(&entry).unwrap();
+        assert!(restored.temporal.transaction_time().is_current());
+        assert_eq!(restored.prev_version, None);
+        assert_eq!(restored.next_version, None);
+    }
+
+    /// Issue #3387: a `version == 2` file (pre-fidelity layout, written by a
+    /// pre-#3387 binary) still loads, upgrading in memory with the new
+    /// fields `None` and provenance preserved.
+    #[test]
+    fn test_load_v2_temporal_index_file_defaults_fidelity_fields_none() {
+        use crate::core::GLOBAL_INTERNER;
+        use crate::storage::index_persistence::formats::legacy_v2::{
+            EdgeVersionEntryV2, NodeVersionEntryV2, PersistedProvenanceV2, TemporalIndexDataV2,
+        };
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("legacy_v2_temporal.idx");
+
+        let label = GLOBAL_INTERNER.intern("Person").unwrap();
+        let legacy = TemporalIndexDataV2 {
+            magic: TEMPORAL_MAGIC,
+            version: 2,
+            node_versions: vec![NodeVersionEntryV2 {
+                version_id: 100,
+                node_id: 1,
+                label_idx: label.as_u32(),
+                valid_from: 1000,
+                valid_from_logical: 0,
+                valid_to: None,
+                valid_to_logical: None,
+                tx_time: 1000,
+                tx_time_logical: 0,
+                version_type: PersistedVersionType::Anchor,
+                properties: PersistedPropertyMap { entries: vec![] },
+                vector_snapshot_id: Some(7),
+                provenance: Some(PersistedProvenanceV2 {
+                    source: Some("hr-system".to_string()),
+                    confidence: Some(0.95),
+                    note: None,
+                    correlation_id: None,
+                }),
+            }],
+            node_anchors: vec![],
+            edge_versions: vec![EdgeVersionEntryV2 {
+                version_id: 101,
+                edge_id: 10,
+                source_id: 1,
+                target_id: 2,
+                label_idx: label.as_u32(),
+                valid_from: 1000,
+                valid_from_logical: 0,
+                valid_to: Some(2000),
+                valid_to_logical: Some(0),
+                tx_time: 1000,
+                tx_time_logical: 0,
+                version_type: PersistedVersionType::Anchor,
+                properties: PersistedPropertyMap { entries: vec![] },
+                provenance: Some(PersistedProvenanceV2 {
+                    source: Some("edge-system".to_string()),
+                    confidence: None,
+                    note: None,
+                    correlation_id: None,
+                }),
+            }],
+            edge_anchors: vec![],
+        };
+
+        // Write bytes exactly as a pre-#3387 binary would have: no tx-end /
+        // chain-link fields exist in this shape at all.
+        crate::storage::index_persistence::common::save_encoded_with_crc(&legacy, &path).unwrap();
+
+        let loaded = load_temporal_index(&path).unwrap();
+
+        assert_eq!(loaded.node_versions.len(), 1);
+        let entry = &loaded.node_versions[0];
+        assert_eq!(entry.vector_snapshot_id, Some(7));
+        assert!(
+            entry.provenance.is_some(),
+            "v2 provenance must be preserved"
+        );
+        assert_eq!(entry.tx_end, None);
+        assert_eq!(entry.tx_end_logical, None);
+        assert_eq!(entry.prev_version, None);
+        assert_eq!(entry.next_version, None);
+
+        // Restored version: open tx interval, no links (the historical
+        // storage rebuild heuristic then reconstructs chains as before).
+        let version = restore_node_version(entry).unwrap();
+        assert!(version.temporal.transaction_time().is_current());
+        assert!(version.prev_version.is_none());
+        assert!(version.next_version.is_none());
+
+        // The v2 EDGE entry upgrades identically: provenance preserved,
+        // fidelity fields None, closed valid interval kept.
+        assert_eq!(loaded.edge_versions.len(), 1);
+        let edge_entry = &loaded.edge_versions[0];
+        assert!(edge_entry.provenance.is_some());
+        assert_eq!(edge_entry.valid_to, Some(2000));
+        assert_eq!(edge_entry.tx_end, None);
+        assert_eq!(edge_entry.next_version, None);
+        let edge = restore_edge_version(edge_entry).unwrap();
+        assert!(edge.temporal.transaction_time().is_current());
+        assert_eq!(edge.temporal.valid_time().end().wallclock(), 2000);
+    }
+
+    /// Issue #3387 x #3350 reconciliation: a `version == 3` file (the #3350
+    /// principal-era layout, written by a pre-#3387 binary) still loads,
+    /// upgrading in memory with the principal preserved and the fidelity
+    /// fields `None`.
+    #[test]
+    fn test_load_v3_temporal_index_file_defaults_fidelity_fields_none() {
+        use crate::core::GLOBAL_INTERNER;
+        use crate::storage::index_persistence::formats::legacy_v3::{
+            EdgeVersionEntryV3, NodeVersionEntryV3, TemporalIndexDataV3,
+        };
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("legacy_v3_temporal.idx");
+
+        let label = GLOBAL_INTERNER.intern("Person").unwrap();
+        let legacy = TemporalIndexDataV3 {
+            magic: TEMPORAL_MAGIC,
+            version: 3,
+            node_versions: vec![NodeVersionEntryV3 {
+                version_id: 100,
+                node_id: 1,
+                label_idx: label.as_u32(),
+                valid_from: 1000,
+                valid_from_logical: 0,
+                valid_to: None,
+                valid_to_logical: None,
+                tx_time: 1000,
+                tx_time_logical: 0,
+                version_type: PersistedVersionType::Anchor,
+                properties: PersistedPropertyMap { entries: vec![] },
+                vector_snapshot_id: Some(7),
+                provenance: Some(PersistedProvenance {
+                    source: Some("hr-system".to_string()),
+                    confidence: Some(0.95),
+                    note: None,
+                    correlation_id: None,
+                    principal: Some("alice@example.com".to_string()),
+                }),
+            }],
+            node_anchors: vec![],
+            edge_versions: vec![EdgeVersionEntryV3 {
+                version_id: 101,
+                edge_id: 10,
+                source_id: 1,
+                target_id: 2,
+                label_idx: label.as_u32(),
+                valid_from: 1000,
+                valid_from_logical: 0,
+                valid_to: Some(2000),
+                valid_to_logical: Some(0),
+                tx_time: 1000,
+                tx_time_logical: 0,
+                version_type: PersistedVersionType::Anchor,
+                properties: PersistedPropertyMap { entries: vec![] },
+                provenance: Some(PersistedProvenance {
+                    source: Some("edge-system".to_string()),
+                    confidence: None,
+                    note: None,
+                    correlation_id: None,
+                    principal: None,
+                }),
+            }],
+            edge_anchors: vec![],
+        };
+
+        // Write bytes exactly as a #3350-era (pre-#3387) binary would have:
+        // principal-carrying provenance, no tx-end / chain-link fields.
+        crate::storage::index_persistence::common::save_encoded_with_crc(&legacy, &path).unwrap();
+
+        let loaded = load_temporal_index(&path).unwrap();
+
+        assert_eq!(loaded.node_versions.len(), 1);
+        let entry = &loaded.node_versions[0];
+        assert_eq!(entry.vector_snapshot_id, Some(7));
+        let provenance = entry.provenance.as_ref().unwrap();
+        assert_eq!(
+            provenance.principal.as_deref(),
+            Some("alice@example.com"),
+            "v3 principal must be preserved"
+        );
+        assert_eq!(entry.tx_end, None);
+        assert_eq!(entry.tx_end_logical, None);
+        assert_eq!(entry.prev_version, None);
+        assert_eq!(entry.next_version, None);
+
+        // Restored version: open tx interval, no links (the historical
+        // storage rebuild heuristic then reconstructs chains as before).
+        let version = restore_node_version(entry).unwrap();
+        assert!(version.temporal.transaction_time().is_current());
+        assert!(version.prev_version.is_none());
+        assert!(version.next_version.is_none());
+
+        // The v3 EDGE entry upgrades identically.
+        assert_eq!(loaded.edge_versions.len(), 1);
+        let edge_entry = &loaded.edge_versions[0];
+        assert!(edge_entry.provenance.is_some());
+        assert_eq!(edge_entry.valid_to, Some(2000));
+        assert_eq!(edge_entry.tx_end, None);
+        assert_eq!(edge_entry.next_version, None);
+        let edge = restore_edge_version(edge_entry).unwrap();
+        assert!(edge.temporal.transaction_time().is_current());
+        assert_eq!(edge.temporal.valid_time().end().wallclock(), 2000);
+    }
+
+    // ------------------------------------------------------------------
+    // Issue #3387 hardening: corrupt-entry and helper arms
+    // ------------------------------------------------------------------
+
+    fn minimal_node_entry() -> NodeVersionEntry {
+        use crate::core::GLOBAL_INTERNER;
+        NodeVersionEntry {
+            version_id: 100,
+            node_id: 1,
+            label_idx: GLOBAL_INTERNER.intern("CorruptNode").unwrap().as_u32(),
+            valid_from: 1000,
+            valid_from_logical: 0,
+            valid_to: None,
+            valid_to_logical: None,
+            tx_time: 1000,
+            tx_time_logical: 0,
+            version_type: PersistedVersionType::Anchor,
+            properties: PersistedPropertyMap { entries: vec![] },
+            vector_snapshot_id: None,
+            provenance: None,
+            tx_end: None,
+            tx_end_logical: None,
+            prev_version: None,
+            next_version: None,
+        }
+    }
+
+    fn minimal_edge_entry() -> EdgeVersionEntry {
+        use crate::core::GLOBAL_INTERNER;
+        EdgeVersionEntry {
+            version_id: 200,
+            edge_id: 1,
+            source_id: 1,
+            target_id: 2,
+            label_idx: GLOBAL_INTERNER.intern("CORRUPT_EDGE").unwrap().as_u32(),
+            valid_from: 1000,
+            valid_from_logical: 0,
+            valid_to: None,
+            valid_to_logical: None,
+            tx_time: 1000,
+            tx_time_logical: 0,
+            version_type: PersistedVersionType::Anchor,
+            properties: PersistedPropertyMap { entries: vec![] },
+            provenance: None,
+            tx_end: None,
+            tx_end_logical: None,
+            prev_version: None,
+            next_version: None,
+        }
+    }
+
+    /// A persisted tx_end without its logical component is corruption, not
+    /// a value to default (node variant).
+    #[test]
+    fn test_restore_node_version_rejects_tx_end_without_logical() {
+        let mut entry = minimal_node_entry();
+        entry.tx_end = Some(2000);
+        entry.tx_end_logical = None;
+
+        let err = restore_node_version(&entry).unwrap_err();
+        assert!(
+            err.to_string().contains("tx_end_logical is missing"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// Edge mirror of the lone-tx_end corruption check.
+    #[test]
+    fn test_restore_edge_version_rejects_tx_end_without_logical() {
+        let mut entry = minimal_edge_entry();
+        entry.tx_end = Some(2000);
+        entry.tx_end_logical = None;
+
+        let err = restore_edge_version(&entry).unwrap_err();
+        assert!(
+            err.to_string().contains("tx_end_logical is missing"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// A persisted tx interval that closes at/before its start is invalid.
+    #[test]
+    fn test_restore_node_version_rejects_inverted_tx_interval() {
+        let mut entry = minimal_node_entry();
+        entry.tx_end = Some(500); // < tx_time (1000)
+        entry.tx_end_logical = Some(0);
+
+        let err = restore_node_version(&entry).unwrap_err();
+        assert!(
+            err.to_string().contains("Invalid transaction time range"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// Edge mirror of the inverted-interval check.
+    #[test]
+    fn test_restore_edge_version_rejects_inverted_tx_interval() {
+        let mut entry = minimal_edge_entry();
+        entry.tx_end = Some(500);
+        entry.tx_end_logical = Some(0);
+
+        let err = restore_edge_version(&entry).unwrap_err();
+        assert!(
+            err.to_string().contains("Invalid transaction time range"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// A persisted chain link exceeding MAX_VALID_ID is rejected, per the
+    /// crate-wide ID validation contract (node prev + edge next variants).
+    #[test]
+    fn test_restore_version_rejects_invalid_chain_link_ids() {
+        let mut entry = minimal_node_entry();
+        entry.prev_version = Some(u64::MAX);
+        let err = restore_node_version(&entry).unwrap_err();
+        assert!(
+            err.to_string().contains("Invalid prev_version ID"),
+            "unexpected error: {err}"
+        );
+
+        let mut entry = minimal_edge_entry();
+        entry.next_version = Some(u64::MAX);
+        let err = restore_edge_version(&entry).unwrap_err();
+        assert!(
+            err.to_string().contains("Invalid next_version ID"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// The materialization helpers' non-delta arms: anchors need no
+    /// materialization and pass through unchanged.
+    #[test]
+    fn test_materialization_helpers_anchor_and_full_arms() {
+        use crate::core::GLOBAL_INTERNER;
+        use crate::core::version::VectorDelta;
+
+        let anchor = VersionData::anchor(PropertyMapBuilder::new().insert("k", "v").build());
+        assert!(!needs_sparse_vector_materialization(&anchor));
+
+        let base = PropertyMapBuilder::new().build();
+        let out = materialize_version_data_for_persistence(&anchor, &base).unwrap();
+        assert!(matches!(out, VersionData::Anchor { .. }));
+
+        // A delta carrying only FULL vector deltas needs no materialization.
+        let mut delta = PropertyDelta::new();
+        delta.vector_deltas.insert(
+            GLOBAL_INTERNER.intern("embedding").unwrap(),
+            VectorDelta::Full(Arc::from(vec![1.0f32, 2.0].as_slice())),
+        );
+        let full_only = VersionData::Delta { delta };
+        assert!(!needs_sparse_vector_materialization(&full_only));
+
+        // A delta with a SPARSE vector delta does.
+        let mut delta = PropertyDelta::new();
+        delta.vector_deltas.insert(
+            GLOBAL_INTERNER.intern("embedding").unwrap(),
+            VectorDelta::Sparse {
+                dimension: 4,
+                changes: Arc::new(vec![(1, 9.0)]),
+            },
+        );
+        let sparse = VersionData::Delta { delta };
+        assert!(needs_sparse_vector_materialization(&sparse));
+
+        // Materializing the sparse delta against a matching base succeeds
+        // and folds the full vector into `changed`.
+        let base = PropertyMapBuilder::new()
+            .insert_vector("embedding", &[0.0, 0.0, 0.0, 0.0])
+            .build();
+        let out = materialize_version_data_for_persistence(&sparse, &base).unwrap();
+        let VersionData::Delta { delta } = out else {
+            panic!("materialized delta must stay a delta");
+        };
+        assert!(delta.vector_deltas.is_empty());
+
+        // Materializing against a base MISSING the vector fails loudly.
+        let empty_base = PropertyMapBuilder::new().build();
+        let err = materialize_version_data_for_persistence(&sparse, &empty_base).unwrap_err();
+        assert!(
+            err.to_string().contains("base property not found"),
+            "unexpected error: {err}"
         );
     }
 }

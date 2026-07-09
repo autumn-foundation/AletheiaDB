@@ -472,6 +472,126 @@ fn test_enable_vector_index_twice_fails() {
     assert!(result.is_err());
 }
 
+/// Issue #451: rebuilding an ALREADY-ENABLED index must not error — the
+/// supplied config is ignored and the backfill runs against the existing
+/// index, updating entries in place, so the call is idempotent. Nodes
+/// without the property, or whose property is not a vector, are skipped.
+#[test]
+fn test_rebuild_vector_index_on_already_enabled_index_is_idempotent_backfill() {
+    use crate::index::vector::{DistanceMetric, VectorIndex};
+    let storage = CurrentStorage::new();
+
+    let config = HnswConfig::new(4, DistanceMetric::Cosine).with_capacity(100);
+    storage.enable_vector_index("embedding", config).unwrap();
+
+    // Two nodes with the vector (auto-indexed at create), one without the
+    // property at all, and one whose "embedding" property is not a vector.
+    for v in [[1.0f32, 0.0, 0.0, 0.0], [0.9f32, 0.1, 0.0, 0.0]] {
+        storage
+            .create_node(
+                "Doc",
+                PropertyMapBuilder::new()
+                    .insert_vector("embedding", &v)
+                    .build(),
+            )
+            .unwrap();
+    }
+    storage
+        .create_node(
+            "Doc",
+            PropertyMapBuilder::new()
+                .insert("name", "no-vector")
+                .build(),
+        )
+        .unwrap();
+    storage
+        .create_node(
+            "Doc",
+            PropertyMapBuilder::new()
+                .insert("embedding", "not a vector")
+                .build(),
+        )
+        .unwrap();
+
+    // The config passed here (different dimensions) must be ignored because
+    // the index is already registered.
+    let other_config = HnswConfig::new(8, DistanceMetric::Euclidean);
+    let indexed = storage
+        .rebuild_vector_index("embedding", other_config.clone())
+        .expect("rebuild on an already-enabled index must succeed");
+    assert_eq!(indexed, 2, "only nodes with the vector property count");
+
+    // Idempotent: a second rebuild re-indexes the same vectors in place.
+    let indexed_again = storage
+        .rebuild_vector_index("embedding", other_config)
+        .expect("rebuild must be idempotent");
+    assert_eq!(indexed_again, 2);
+
+    let (index, config, _, _) = storage
+        .get_vector_index_for_persistence("embedding")
+        .expect("index must still be registered");
+    assert_eq!(index.len(), 2, "no duplicate entries after double rebuild");
+    assert_eq!(config.dimensions, 4, "original config must be kept");
+}
+
+/// Issue #451: rebuilding an index for a NEW property when the maximum
+/// number of vector-indexed properties is already reached must propagate the
+/// enable error instead of registering anything.
+#[test]
+fn test_rebuild_vector_index_errors_when_property_limit_reached() {
+    use crate::index::vector::DistanceMetric;
+    let storage = CurrentStorage::new();
+
+    for i in 0..DEFAULT_MAX_VECTOR_PROPERTIES {
+        storage
+            .enable_vector_index(
+                &format!("embedding_{i}"),
+                HnswConfig::new(4, DistanceMetric::Cosine),
+            )
+            .unwrap();
+    }
+
+    let result = storage.rebuild_vector_index(
+        "one_property_too_many",
+        HnswConfig::new(4, DistanceMetric::Cosine),
+    );
+    assert!(
+        result.is_err(),
+        "rebuild must fail when no index slot is available"
+    );
+    assert!(
+        !storage.is_vector_index_enabled_for("one_property_too_many"),
+        "the failed rebuild must not register an index"
+    );
+}
+
+/// Issue #451: a stored vector whose dimensionality does not match the
+/// rebuild config must fail the rebuild (the `add` error propagates).
+#[test]
+fn test_rebuild_vector_index_errors_on_dimension_mismatch() {
+    use crate::index::vector::DistanceMetric;
+    let storage = CurrentStorage::new();
+
+    // Store a 2-dimensional vector with NO index enabled, so it is accepted.
+    storage
+        .create_node(
+            "Doc",
+            PropertyMapBuilder::new()
+                .insert_vector("embedding", &[1.0f32, 0.0])
+                .build(),
+        )
+        .unwrap();
+
+    // Rebuilding with a 4-dimensional config enables the index but fails to
+    // backfill the mismatched vector.
+    let result =
+        storage.rebuild_vector_index("embedding", HnswConfig::new(4, DistanceMetric::Cosine));
+    assert!(
+        result.is_err(),
+        "a dimension mismatch during backfill must surface as an error"
+    );
+}
+
 #[test]
 fn test_auto_index_on_create() {
     use crate::index::vector::DistanceMetric;
@@ -1979,4 +2099,77 @@ fn test_get_node_ids_by_label() {
 
     let nonexistent_ids = storage.get_node_ids_by_label("Nonexistent");
     assert_eq!(nonexistent_ids.len(), 0);
+}
+
+/// Issue #450: the property-less `find_similar_in_range` must error when no
+/// temporal vector index is enabled (there is no default property to resolve).
+#[test]
+fn test_find_similar_in_range_no_temporal_index_errors() {
+    let storage = CurrentStorage::new();
+
+    let now = crate::core::temporal::time::now();
+    let range = crate::core::temporal::TimeRange::new(now, now).unwrap();
+
+    let result = storage.find_similar_in_range(&[1.0f32, 0.0, 0.0, 0.0], 10, range);
+    assert!(
+        result.is_err(),
+        "find_similar_in_range without any temporal vector index must return Err, got: {result:?}"
+    );
+}
+
+/// Issue #450: with multiple temporal vector indexes enabled, the
+/// property-less `find_similar_in_range` must deterministically query the
+/// alphabetically-first indexed property. The node's vector exists ONLY in the
+/// alphabetically-first index, so results identify which index was consulted
+/// regardless of enable order.
+#[test]
+fn test_find_similar_in_range_uses_alphabetical_default() {
+    use crate::index::vector::DistanceMetric;
+    use crate::index::vector::temporal::{SnapshotStrategy, TemporalVectorConfig};
+
+    let storage = CurrentStorage::new();
+
+    // Enable in reverse-alphabetical order for good measure.
+    for property in ["z_embedding", "a_embedding"] {
+        let hnsw_config = HnswConfig::new(4, DistanceMetric::Cosine);
+        let config = TemporalVectorConfig {
+            snapshot_strategy: SnapshotStrategy::TransactionInterval(1),
+            ..TemporalVectorConfig::default_with_hnsw(hnsw_config)
+        };
+        storage
+            .enable_temporal_vector_index(property, config)
+            .unwrap();
+    }
+
+    let start = crate::core::temporal::time::now();
+
+    // Node carries a vector ONLY for the alphabetically-first property.
+    let emb = vec![1.0f32, 0.0, 0.0, 0.0];
+    let node_id = NodeId::new(1).unwrap();
+    let node = Node::new(
+        node_id,
+        GLOBAL_INTERNER.intern("Doc").unwrap(),
+        PropertyMapBuilder::new()
+            .insert_vector("a_embedding", &emb)
+            .build(),
+        VersionId::new(1).unwrap(),
+    );
+    storage
+        .insert_node_direct(node, crate::core::temporal::time::now())
+        .unwrap();
+
+    // Trigger snapshot creation in every enabled temporal index.
+    storage.on_temporal_vector_transaction().unwrap();
+
+    let end = crate::core::temporal::time::now();
+    let range = crate::core::temporal::TimeRange::new(start, end).unwrap();
+    let results = storage
+        .find_similar_in_range(&emb, 10, range)
+        .expect("property-less range query should use the alphabetically-first index");
+    assert!(
+        results
+            .iter()
+            .any(|(_, hits)| hits.iter().any(|(id, _)| *id == node_id)),
+        "find_similar_in_range must query 'a_embedding' (alphabetically first), got: {results:?}"
+    );
 }

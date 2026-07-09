@@ -941,7 +941,10 @@ Conventions:
   within its valid interval — i.e. the response reflects the live, current
   version. A superseded version returned by a point-in-time read, or a fact
   whose `valid_to` has passed (or whose `valid_from` has not yet arrived),
-  reports `is_current: false` with its closed bounds. The valid-time
+  reports `is_current: false` with its closed bounds. Within a single
+  response, every entity's `is_current` is evaluated against the same
+  request-scoped instant — the wallclock is captured once per tool call,
+  never once per entity (Issue #3391). The valid-time
   comparison is at wallclock (microsecond) granularity, so the logical
   component of a hybrid-logical-clock commit timestamp never affects the
   answer:

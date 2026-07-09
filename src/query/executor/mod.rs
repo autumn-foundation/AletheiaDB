@@ -254,8 +254,8 @@ impl QueryExecutor {
                 property_key,
             } => {
                 // Always use the multi-property-aware method with explicit property name.
-                // This ensures correctness in multi-property setups and avoids relying on
-                // legacy single-property state (which would use the last enabled index).
+                // This ensures correctness in multi-property setups instead of relying on
+                // the default-property resolution (alphabetically first temporal index).
                 let prop = property_key.as_deref().unwrap_or("embedding");
                 let results = self
                     .current
