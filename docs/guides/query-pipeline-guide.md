@@ -228,6 +228,16 @@ let plan = planner.plan(query)?;
 println!("{}", plan.explain());
 ```
 
+The planner's cost model reads cached `Statistics` (node/edge counts, label
+cardinalities, average out-degree, and the average delta chain length). The
+average delta chain length estimates how many delta versions a temporal
+(`AS OF`) lookup must apply on top of an anchor; since Issue #366 it is the
+actual average computed by `HistoricalStorage::calculate_avg_delta_chain()`
+(total deltas / total anchors, across node and edge version chains, in O(1)
+from cached counters) rather than a hardcoded estimate. It falls back to `5.0`
+only when historical storage is empty. `AletheiaDB::refresh_statistics()`
+refreshes all of these values.
+
 ### Executor (`aletheiadb::query::QueryExecutor`)
 
 Executes physical plans:

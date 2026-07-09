@@ -172,9 +172,8 @@ impl<'a> Alchemist<'a> {
                 // 2a. Move Outgoing Edges
                 // Collect edge data first to avoid borrow issues while mutating
                 // Actually ReadOps allows reading while WriteTx is active
-                let outgoing = tx.get_outgoing_edges(victim);
+                let outgoing = tx.get_outgoing_edges(victim)?;
                 for edge_id in outgoing {
-                    // Safe to unwrap here because get_outgoing_edges returns existing edges
                     if let Ok(edge) = tx.get_edge(edge_id) {
                         // Resolve label to string for creation
                         let label_str = GLOBAL_INTERNER
@@ -195,7 +194,7 @@ impl<'a> Alchemist<'a> {
                 }
 
                 // 2b. Move Incoming Edges
-                let incoming = tx.get_incoming_edges(victim);
+                let incoming = tx.get_incoming_edges(victim)?;
                 for edge_id in incoming {
                     if let Ok(edge) = tx.get_edge(edge_id) {
                         let label_str = GLOBAL_INTERNER
@@ -272,7 +271,7 @@ mod tests {
         // 3. Verify Edge Exists
         let found = db
             .read(|tx| {
-                let outgoing = tx.get_outgoing_edges(a);
+                let outgoing = tx.get_outgoing_edges(a)?;
                 let mut found_edge = false;
                 for eid in outgoing {
                     #[allow(clippy::collapsible_if)]
@@ -345,7 +344,7 @@ mod tests {
         // Check Outgoing: A -> D should exist (inherited from B -> D)
         let has_a_to_d = db
             .read(|tx| {
-                let edges = tx.get_outgoing_edges(a);
+                let edges = tx.get_outgoing_edges(a)?;
                 let mut found = false;
                 for eid in edges {
                     #[allow(clippy::collapsible_if)]
@@ -364,7 +363,7 @@ mod tests {
         // One with label LINKS, one with label LINKS_TO_B
         let has_c_to_a_inherited = db
             .read(|tx| {
-                let edges = tx.get_outgoing_edges(c);
+                let edges = tx.get_outgoing_edges(c)?;
                 let mut found = false;
                 for eid in edges {
                     #[allow(clippy::collapsible_if)]
