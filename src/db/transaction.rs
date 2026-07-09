@@ -41,16 +41,19 @@ impl AletheiaDB {
     ///
     /// Reservation is load-bearing for snapshot isolation, not a mere optimization.
     /// The snapshot `S` we hand out is always strictly greater than the prior
-    /// frontier in *both* branches, so we advance the frontier to `S` under the
-    /// same lock guard (compare-and-advance). This guarantees any *subsequent*
-    /// commit's HLC `send()` yields a stamp strictly greater than `S` — even when
-    /// it lands in the same wallclock tick. Without the reservation, a commit in
-    /// the same tick would recompute the identical stamp `S`, closing a superseded
-    /// version's transaction-time interval at exactly `[C1, S)`; the half-open
-    /// upper bound (`TimeRange::contains` uses `< end`) then excludes `S`, so the
-    /// historical fallback misses the version and returns `NodeNotFound` — a
-    /// snapshot-isolation violation. Reserving `S` sorts every later commit
-    /// strictly after this read, keeping it invisible to the snapshot as required.
+    /// frontier in *both* branches, so in *both* branches we advance the frontier
+    /// to `S` under the same lock guard (compare-and-advance) — the reservation is
+    /// unconditional, not limited to the same-tick case. In the wallclock-advanced
+    /// branch `now()` becomes the new frontier; in the same-tick branch the
+    /// logical-incremented stamp does. Either way this guarantees any *subsequent*
+    /// commit's HLC `send()` yields a stamp strictly greater than `S`. That matters
+    /// most when a commit lands in the same wallclock tick as the read: without the
+    /// reservation, its `send()` would recompute the identical stamp `S`, closing a
+    /// superseded version's transaction-time interval at exactly `[C1, S)`; the
+    /// half-open upper bound (`TimeRange::contains` uses `< end`) then excludes `S`,
+    /// so the historical fallback misses the version and returns `NodeNotFound` — a
+    /// snapshot-isolation violation. Reserving `S` sorts every later commit strictly
+    /// after this read, keeping it invisible to the snapshot as required.
     ///
     /// Lock discipline: `current_timestamp` is first in the project lock order, and
     /// this method holds only that guard and calls into no other subsystem while
