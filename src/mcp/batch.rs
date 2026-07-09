@@ -1258,8 +1258,13 @@ impl AletheiaMcpServer {
         // DISTINCT committed edges (a self-loop appears in both adjacency
         // directions but is one edge — mirrors the retract_node dedup),
         // minus committed edges this batch already deleted.
-        let mut committed_edges = tx.get_outgoing_edges(node_id);
-        committed_edges.extend(tx.get_incoming_edges(node_id));
+        let mut committed_edges = tx
+            .get_outgoing_edges(node_id)
+            .map_err(|source| BatchAbort::Op { index, source })?;
+        committed_edges.extend(
+            tx.get_incoming_edges(node_id)
+                .map_err(|source| BatchAbort::Op { index, source })?,
+        );
         committed_edges.sort_unstable();
         committed_edges.dedup();
         let live_committed: Vec<EdgeId> = committed_edges
