@@ -26,13 +26,18 @@
 //! 2. **Elide bulky property values** — inside each entity's `properties`, any
 //!    value whose serialized size exceeds a threshold (and is not a protected
 //!    `priority_properties` key) is replaced with an `{elided: true, ...}`
-//!    descriptor, mirroring the vector-elision convention of Issue #3220.
+//!    descriptor, mirroring the vector-elision convention of Issue #3220. A
+//!    value is only elided when the descriptor is *smaller* than the value it
+//!    replaces, so this rung can never enlarge the response (monotonic ladder).
 //! 3. **Per-entity summaries** — each entity's `properties` is reduced to the
 //!    protected keys only (ids, labels, temporal coordinates, provenance and
 //!    scores — the result *structure* — always survive because they are
 //!    siblings of `properties`, never inside it).
 //! 4. **Counts plus handles** — entity arrays are truncated to the prefix that
-//!    fits; the omitted tail is disclosed as a count plus a fetch handle.
+//!    fits; the omitted tail is disclosed as a count plus a fetch handle, and
+//!    the object's own pagination/count siblings (`count`/`row_count`/
+//!    `has_more`/`next_offset`/`truncated`) are rewritten to describe the
+//!    retained prefix so a paginating caller sees no gap and no duplicate.
 //!
 //! Result *structure* (ids, labels, relationships, temporal coordinates,
 //! provenance summaries, similarity scores) survives longest; bulky property
@@ -48,8 +53,11 @@ use super::error::{McpError, McpErrorCode};
 pub(crate) const BYTES_PER_TOKEN: u64 = 4;
 
 /// Property values whose pretty-serialized form exceeds this many bytes are
-/// "bulky" and are the first content sacrificed (rung 2).
-const BULKY_PROP_THRESHOLD_BYTES: usize = 48;
+/// "bulky" and are the first content sacrificed (rung 2). Set above the fixed
+/// cost of an elision descriptor so eliding a value can only ever shrink the
+/// response; an additional per-value `descriptor < value` guard makes the
+/// monotonicity guarantee exact regardless of this constant (Issue #3353 F3).
+const BULKY_PROP_THRESHOLD_BYTES: usize = 160;
 
 /// Parsed, validated budget parameters for one read request.
 #[derive(Debug, Clone)]
@@ -65,7 +73,7 @@ pub(crate) struct BudgetRequest {
 }
 
 impl BudgetRequest {
-    fn effective_bytes(&self) -> u64 {
+    pub(crate) fn effective_bytes(&self) -> u64 {
         self.effective_bytes
     }
 }
@@ -96,6 +104,11 @@ impl Rung {
 /// `max_response_bytes` is present (behavior is then unchanged — the caller
 /// skips shaping entirely). Returns a structured `INVALID_ARGUMENT` error when a
 /// budget field is present but malformed (wrong type, zero, or negative).
+///
+/// An unknown/misspelled budget key (e.g. `max_tokens` instead of
+/// `max_response_tokens`) is simply ignored — consistent with the surface's
+/// unknown-field tolerance — so the request is served in full rather than
+/// silently budgeted under a key the caller did not intend.
 pub(crate) fn parse_budget(args: &Value) -> Result<Option<BudgetRequest>, McpError> {
     let obj = match args.as_object() {
         Some(o) => o,
@@ -175,11 +188,74 @@ fn measured_bytes(value: &Value) -> usize {
         .len()
 }
 
+/// Byte cap enforcement for a payload that is not a shapeable read-tool object
+/// (non-JSON text, or a JSON scalar/array). Such payloads cannot degrade along
+/// the entity ladder, but the budget contract is unconditional: never emit text
+/// exceeding the cap under an active budget (Issue #3353 F6).
+///
+/// Returns the (possibly truncated) string to emit, or `Err` when even a
+/// minimal disclosed-truncation marker cannot fit — surfaced as the AC6
+/// too-small error by the caller.
+pub(crate) fn enforce_raw_cap(text: String, budget: &BudgetRequest) -> Result<String, McpError> {
+    let cap = budget.effective_bytes() as usize;
+    if text.len() <= cap {
+        return Ok(text);
+    }
+    // Reserve room for a disclosed truncation marker so the caller is never
+    // handed a silently clipped payload.
+    const MARKER: &str = "\n…[truncated: response exceeded token budget]";
+    if MARKER.len() >= cap {
+        return Err(too_small_error(text.len(), budget));
+    }
+    let keep = cap - MARKER.len();
+    // Truncate on a UTF-8 char boundary at or below `keep`.
+    let mut boundary = keep;
+    while boundary > 0 && !text.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    let mut out = text[..boundary].to_string();
+    out.push_str(MARKER);
+    Ok(out)
+}
+
+fn too_small_error(min_bytes: usize, budget: &BudgetRequest) -> McpError {
+    let min_tokens = min_bytes.div_ceil(BYTES_PER_TOKEN as usize);
+    McpError::new(
+        McpErrorCode::InvalidArgument,
+        format!(
+            "requested budget is too small to return even the minimal response for this request; \
+             minimum viable budget is approximately {min_tokens} tokens ({min_bytes} bytes)"
+        ),
+    )
+    .details(json!({
+        "min_viable_tokens": min_tokens,
+        "min_viable_bytes": min_bytes,
+        "requested_tokens": budget.max_tokens,
+        "requested_bytes": budget.max_bytes,
+    }))
+}
+
+/// Context threaded through the recursion so a fetch handle can be built for an
+/// entity that lives inside a history wrapper (whose parent id is not on the
+/// version object itself). Owns the parent id (cheaply cloned — an integer
+/// `Value`) so it never borrows the map being mutated during shaping.
+#[derive(Clone, Default)]
+struct ShapeCtx {
+    /// Parent entity id for a history-version object (`get_node_history` /
+    /// `get_edge_history`); `None` for ordinary entity responses.
+    history_parent_id: Option<Value>,
+    /// Whether the history wrapper is an edge history (selects the
+    /// `get_edge_at_time` fetch tool) rather than a node history.
+    history_is_edge: bool,
+}
+
 /// Shape a successful response value to fit `budget`, attaching a disclosed
 /// `budget` metadata block describing the rung applied.
 ///
 /// `tool` is the tool name; it selects the entity fetch-handle tool and whether
 /// the tool is *ranked* (ranked tools never reach the counts-and-handles rung).
+/// `args` is the original request arguments, threaded so the rung-4 truncation
+/// handle can emit a concrete `offset`-based resume call for paginated tools.
 ///
 /// Returns the shaped value on success, or a structured `INVALID_ARGUMENT`
 /// error naming the minimum viable budget when even the minimal rung cannot fit
@@ -188,9 +264,8 @@ pub(crate) fn shape_response(
     value: Value,
     budget: &BudgetRequest,
     tool: &str,
+    args: &Value,
 ) -> Result<Value, McpError> {
-    // Only objects carry the read-tool response shape; anything else is passed
-    // through with the metadata attached if it fits, else surfaced as too-small.
     let ranked = is_ranked_tool(tool);
     let cap = budget.effective_bytes();
 
@@ -205,33 +280,19 @@ pub(crate) fn shape_response(
         ]
     };
 
-    let mut last_candidate: Option<(Value, usize)> = None;
+    let mut last_bytes = 0usize;
     for &rung in ladder {
-        let candidate = build_candidate(value.clone(), rung, budget, tool, cap);
+        let candidate = build_candidate(value.clone(), rung, budget, tool, args, cap);
         let bytes = measured_bytes(&candidate);
         if bytes as u64 <= cap {
             return Ok(candidate);
         }
-        last_candidate = Some((candidate, bytes));
+        last_bytes = bytes;
     }
 
     // Even the minimal rung overflows: report the minimum viable budget so the
     // caller can re-issue with a sufficient budget (AC6).
-    let min_bytes = last_candidate.map(|(_, b)| b).unwrap_or(0);
-    let min_tokens = min_bytes.div_ceil(BYTES_PER_TOKEN as usize);
-    Err(McpError::new(
-        McpErrorCode::InvalidArgument,
-        format!(
-            "requested budget is too small to return even the minimal response for this request; \
-             minimum viable budget is approximately {min_tokens} tokens ({min_bytes} bytes)"
-        ),
-    )
-    .details(json!({
-        "min_viable_tokens": min_tokens,
-        "min_viable_bytes": min_bytes,
-        "requested_tokens": budget.max_tokens,
-        "requested_bytes": budget.max_bytes,
-    })))
+    Err(too_small_error(last_bytes, budget))
 }
 
 fn is_ranked_tool(tool: &str) -> bool {
@@ -245,13 +306,15 @@ fn build_candidate(
     rung: Rung,
     budget: &BudgetRequest,
     tool: &str,
+    args: &Value,
     cap: u64,
 ) -> Value {
+    let ctx = derive_ctx(&value, tool);
     let mut sections: Vec<Value> = Vec::new();
     match rung {
         Rung::Full => {}
         Rung::ElideProperties => {
-            let n = elide_bulky_properties(&mut value, &budget.priority_properties);
+            let n = elide_bulky_properties(&mut value, &budget.priority_properties, &ctx);
             if n > 0 {
                 sections.push(json!({
                     "section": "properties",
@@ -261,45 +324,81 @@ fn build_candidate(
             }
         }
         Rung::Summaries => {
-            let n = summarize_entities(&mut value, &budget.priority_properties);
+            let n = summarize_entities(&mut value, &budget.priority_properties, &ctx);
             if n > 0 {
                 sections.push(json!({
                     "section": "properties",
                     "rung": "entity_summaries",
-                    "entities_summarized": n,
                 }));
             }
         }
         Rung::CountsAndHandles => {
             // First reduce every entity to its summary, then truncate arrays.
-            summarize_entities(&mut value, &budget.priority_properties);
-            let truncations = truncate_arrays_to_fit(&mut value, tool, cap);
-            for t in truncations {
-                sections.push(t);
-            }
-            sections.push(json!({
+            summarize_entities(&mut value, &budget.priority_properties, &ctx);
+            let mut sections_so_far = vec![json!({
                 "section": "properties",
                 "rung": "entity_summaries",
-            }));
+            })];
+            // Truncation measures the fully-assembled candidate (object plus the
+            // budget/disclosure block) against `cap`, so the finalized response
+            // is guaranteed to fit even though the budget block is appended
+            // afterward (Issue #3353 F4).
+            let truncations =
+                truncate_arrays_to_fit(&mut value, tool, args, cap, budget, &sections_so_far);
+            sections_so_far.extend(truncations);
+            sections = sections_so_far;
         }
     }
 
-    if let Value::Object(map) = &mut value {
+    attach_budget_block(&mut value, rung, budget, cap, sections);
+    value
+}
+
+/// Attach the disclosed `budget` metadata block to a response object.
+fn attach_budget_block(
+    value: &mut Value,
+    rung: Rung,
+    budget: &BudgetRequest,
+    cap: u64,
+    sections: Vec<Value>,
+) {
+    if let Value::Object(map) = value {
         map.insert(
             "budget".to_string(),
-            json!({
-                "applied": true,
-                "rung": rung.as_str(),
-                "token_estimation_basis": "ceil(utf8_bytes / 4)",
-                "requested_max_tokens": budget.max_tokens,
-                "requested_max_bytes": budget.max_bytes,
-                "effective_max_bytes": cap,
-                "priority_properties": budget.priority_properties,
-                "sections": sections,
-            }),
+            budget_block(rung, budget, cap, sections),
         );
     }
-    value
+}
+
+fn budget_block(rung: Rung, budget: &BudgetRequest, cap: u64, sections: Vec<Value>) -> Value {
+    json!({
+        "applied": true,
+        "rung": rung.as_str(),
+        "token_estimation_basis": "ceil(utf8_bytes / 4)",
+        "requested_max_tokens": budget.max_tokens,
+        "requested_max_bytes": budget.max_bytes,
+        "effective_max_bytes": cap,
+        "priority_properties": budget.priority_properties,
+        "sections": sections,
+    })
+}
+
+/// Establish the shaping context for the top-level response of `tool`: for a
+/// history response, capture the parent entity id so version fetch handles can
+/// address the exact superseded version via `get_node_at_time` /
+/// `get_edge_at_time`.
+fn derive_ctx(value: &Value, tool: &str) -> ShapeCtx {
+    match tool {
+        "get_node_history" => ShapeCtx {
+            history_parent_id: value.get("node_id").cloned(),
+            history_is_edge: false,
+        },
+        "get_edge_history" => ShapeCtx {
+            history_parent_id: value.get("edge_id").cloned(),
+            history_is_edge: true,
+        },
+        _ => ShapeCtx::default(),
+    }
 }
 
 /// Does this object look like an entity carrying a `properties` object?
@@ -307,8 +406,48 @@ fn is_entity_object(map: &Map<String, Value>) -> bool {
     map.get("properties").map(Value::is_object).unwrap_or(false)
 }
 
+/// Does this object look like a bi-temporal history *version* (as emitted by
+/// `version_info_to_response`) rather than a live entity? A version carries
+/// `version_id` and its own valid/transaction coordinates, but no `id`.
+fn is_history_version(map: &Map<String, Value>) -> bool {
+    map.contains_key("version_id")
+        && map.contains_key("valid_from")
+        && map.contains_key("transaction_from")
+        && !map.contains_key("id")
+}
+
 /// Build the concrete fetch handle that retrieves this entity's full content.
-fn entity_fetch_handle(map: &Map<String, Value>) -> Value {
+///
+/// * A live node/edge → `get_node`/`get_edge` by id.
+/// * A history version → `get_node_at_time`/`get_edge_at_time` addressing the
+///   exact superseded version by the parent id (threaded via `ctx`) plus the
+///   version's own valid/transaction coordinates (Issue #3353 F2). A plain
+///   `get_node` would return the *current* state, not the historical version.
+fn entity_fetch_handle(map: &Map<String, Value>, ctx: &ShapeCtx) -> Value {
+    if is_history_version(map) {
+        let parent = ctx.history_parent_id.clone().unwrap_or(Value::Null);
+        let valid_time = map.get("valid_from").cloned().unwrap_or(Value::Null);
+        let transaction_time = map.get("transaction_from").cloned().unwrap_or(Value::Null);
+        if ctx.history_is_edge {
+            return json!({
+                "tool": "get_edge_at_time",
+                "arguments": {
+                    "edge_id": parent,
+                    "valid_time": valid_time,
+                    "transaction_time": transaction_time,
+                },
+            });
+        }
+        return json!({
+            "tool": "get_node_at_time",
+            "arguments": {
+                "node_id": parent,
+                "valid_time": valid_time,
+                "transaction_time": transaction_time,
+            },
+        });
+    }
+
     let is_edge = map.contains_key("source_id") || map.contains_key("target_id");
     let id = map.get("id").cloned().unwrap_or(Value::Null);
     if is_edge {
@@ -325,13 +464,15 @@ fn entity_fetch_handle(map: &Map<String, Value>) -> Value {
 }
 
 /// Rung 2: elide bulky, unprotected property *values* in place. Returns the
-/// number of values elided.
-fn elide_bulky_properties(value: &mut Value, priority: &[String]) -> usize {
+/// number of values elided. A value is elided only when its `{elided,...}`
+/// descriptor serializes *smaller* than the value it replaces, so this rung can
+/// never enlarge the response (Issue #3353 F3).
+fn elide_bulky_properties(value: &mut Value, priority: &[String], ctx: &ShapeCtx) -> usize {
     let mut count = 0;
     match value {
         Value::Object(map) => {
             if is_entity_object(map) {
-                let handle = entity_fetch_handle(map);
+                let handle = entity_fetch_handle(map, ctx);
                 if let Some(Value::Object(props)) = map.get_mut("properties") {
                     for (key, val) in props.iter_mut() {
                         if priority.iter().any(|p| p == key) {
@@ -341,28 +482,36 @@ fn elide_bulky_properties(value: &mut Value, priority: &[String]) -> usize {
                             continue;
                         }
                         let size = measured_bytes(val);
-                        if size > BULKY_PROP_THRESHOLD_BYTES {
-                            *val = json!({
-                                "elided": true,
-                                "reason": "budget",
-                                "type": json_type_name(val),
-                                "size_bytes": size,
-                                "fetch": handle.clone(),
-                            });
+                        if size <= BULKY_PROP_THRESHOLD_BYTES {
+                            continue;
+                        }
+                        let descriptor = json!({
+                            "elided": true,
+                            "reason": "budget",
+                            "type": json_type_name(val),
+                            "size_bytes": size,
+                            "fetch": handle.clone(),
+                        });
+                        // Monotonicity guard: never replace a value with a
+                        // descriptor that is not strictly smaller than it.
+                        if measured_bytes(&descriptor) < size {
+                            *val = descriptor;
                             count += 1;
                         }
                     }
                 }
             }
             // Recurse into all children to reach nested entity objects
-            // (traverse results, query rows, history versions, ...).
-            for (_k, child) in map.iter_mut() {
-                count += elide_bulky_properties(child, priority);
+            // (traverse results, query rows, history versions, ...). Thread the
+            // history context so version handles keep addressing their parent.
+            let child = child_ctx(map, ctx);
+            for (_k, c) in map.iter_mut() {
+                count += elide_bulky_properties(c, priority, &child);
             }
         }
         Value::Array(items) => {
             for item in items.iter_mut() {
-                count += elide_bulky_properties(item, priority);
+                count += elide_bulky_properties(item, priority, ctx);
             }
         }
         _ => {}
@@ -372,12 +521,12 @@ fn elide_bulky_properties(value: &mut Value, priority: &[String]) -> usize {
 
 /// Rung 3: reduce each entity's `properties` to protected keys only. Returns the
 /// number of entities summarized (i.e. that dropped at least one property).
-fn summarize_entities(value: &mut Value, priority: &[String]) -> usize {
+fn summarize_entities(value: &mut Value, priority: &[String], ctx: &ShapeCtx) -> usize {
     let mut count = 0;
     match value {
         Value::Object(map) => {
             if is_entity_object(map) {
-                let handle = entity_fetch_handle(map);
+                let handle = entity_fetch_handle(map, ctx);
                 if let Some(Value::Object(props)) = map.get_mut("properties") {
                     let original_len = props.len();
                     let mut kept = Map::new();
@@ -401,13 +550,14 @@ fn summarize_entities(value: &mut Value, priority: &[String]) -> usize {
                     *props = kept;
                 }
             }
-            for (_k, child) in map.iter_mut() {
-                count += summarize_entities(child, priority);
+            let child = child_ctx(map, ctx);
+            for (_k, c) in map.iter_mut() {
+                count += summarize_entities(c, priority, &child);
             }
         }
         Value::Array(items) => {
             for item in items.iter_mut() {
-                count += summarize_entities(item, priority);
+                count += summarize_entities(item, priority, ctx);
             }
         }
         _ => {}
@@ -415,15 +565,54 @@ fn summarize_entities(value: &mut Value, priority: &[String]) -> usize {
     count
 }
 
-/// Rung 4: truncate top-level entity arrays so the whole response fits `cap`.
-/// Returns one disclosure section per truncated array. Deterministic: elements
-/// are kept as a prefix (stable order) and only the tail is dropped.
-fn truncate_arrays_to_fit(value: &mut Value, tool: &str, cap: u64) -> Vec<Value> {
+/// Refine the shaping context when recursing into `map`'s children: a history
+/// wrapper (`node_id`/`edge_id` + a `versions` array) establishes the parent id
+/// used by its version fetch handles.
+fn child_ctx(map: &Map<String, Value>, inherited: &ShapeCtx) -> ShapeCtx {
+    if map.get("versions").map(Value::is_array).unwrap_or(false) {
+        if let Some(id) = map.get("node_id") {
+            return ShapeCtx {
+                history_parent_id: Some(id.clone()),
+                history_is_edge: false,
+            };
+        }
+        if let Some(id) = map.get("edge_id") {
+            return ShapeCtx {
+                history_parent_id: Some(id.clone()),
+                history_is_edge: true,
+            };
+        }
+    }
+    inherited.clone()
+}
+
+/// Rung 4: truncate top-level entity arrays so the whole *assembled* response
+/// (object plus its budget/disclosure block) fits `cap`. Returns one disclosure
+/// section per truncated array and rewrites the object's pagination/count
+/// siblings so a paginating caller sees no gap and no duplicate (Issue #3353
+/// F1). Deterministic: elements are kept as a prefix (stable order) and only the
+/// tail is dropped.
+fn truncate_arrays_to_fit(
+    value: &mut Value,
+    tool: &str,
+    args: &Value,
+    cap: u64,
+    budget: &BudgetRequest,
+    base_sections: &[Value],
+) -> Vec<Value> {
     let mut disclosures = Vec::new();
     let map = match value {
         Value::Object(m) => m,
         _ => return disclosures,
     };
+
+    // The original request offset (paginated tools only). Prefer the echoed
+    // response `offset`, falling back to the request argument, defaulting to 0.
+    let original_offset = map
+        .get("offset")
+        .and_then(Value::as_u64)
+        .or_else(|| args.get("offset").and_then(Value::as_u64))
+        .unwrap_or(0);
 
     // Identify top-level fields that are arrays of entity objects, largest first
     // for deterministic, greatest-impact-first truncation.
@@ -439,21 +628,28 @@ fn truncate_arrays_to_fit(value: &mut Value, tool: &str, cap: u64) -> Vec<Value>
     array_fields.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
 
     for (field, _) in array_fields {
-        if measured_bytes(&Value::Object(map.clone())) as u64 <= cap {
-            break;
-        }
         let original_len = match map.get(&field) {
             Some(Value::Array(items)) => items.len(),
             _ => continue,
         };
-        // Binary search the largest prefix length that keeps the whole object
-        // within budget.
+
+        // Fast-exit when the fully-assembled candidate already fits with this
+        // field untouched.
+        if assembled_len(map, budget, cap, base_sections, &disclosures, &field, original_len)
+            <= cap as usize
+        {
+            continue;
+        }
+
+        // Binary search the largest prefix length whose *assembled* candidate
+        // (including the finalized budget block) stays within budget (F4).
         let mut lo = 0usize;
         let mut hi = original_len;
         while lo < hi {
             let mid = lo + (hi - lo).div_ceil(2);
-            set_array_prefix(map, &field, mid);
-            if measured_bytes(&Value::Object(map.clone())) as u64 <= cap {
+            if assembled_len(map, budget, cap, base_sections, &disclosures, &field, mid)
+                <= cap as usize
+            {
                 lo = mid;
             } else {
                 hi = mid - 1;
@@ -462,22 +658,156 @@ fn truncate_arrays_to_fit(value: &mut Value, tool: &str, cap: u64) -> Vec<Value>
         set_array_prefix(map, &field, lo);
         let omitted = original_len - lo;
         if omitted > 0 {
+            let handle = truncation_fetch_handle(tool, args, original_offset, lo);
             disclosures.push(json!({
                 "section": field,
                 "rung": "counts_and_handles",
                 "returned": lo,
                 "omitted_count": omitted,
-                "fetch": {
-                    "tool": tool,
-                    "reason": "budget_truncated",
-                    "hint": "re-request without max_response_tokens/max_response_bytes, \
-                             or page the remainder using offset/next_offset, to retrieve \
-                             the omitted results",
-                },
+                "fetch": handle,
             }));
+            rewrite_pagination_siblings(map, &field, lo, original_offset, tool);
         }
     }
     disclosures
+}
+
+/// Measure the assembled candidate (object + budget block) with `field`
+/// tentatively truncated to `prefix_len`, without persisting the mutation to
+/// `map`. Used inside the rung-4 search so the *finalized* response size —
+/// including the budget and disclosure metadata appended afterward — is what is
+/// bounded by `cap` (Issue #3353 F4).
+fn assembled_len(
+    map: &Map<String, Value>,
+    budget: &BudgetRequest,
+    cap: u64,
+    base_sections: &[Value],
+    prior_disclosures: &[Value],
+    field: &str,
+    prefix_len: usize,
+) -> usize {
+    let original_len = map
+        .get(field)
+        .and_then(Value::as_array)
+        .map(|a| a.len())
+        .unwrap_or(prefix_len);
+    let omitted = original_len.saturating_sub(prefix_len);
+
+    let mut trial = map.clone();
+    set_array_prefix(&mut trial, field, prefix_len);
+
+    let mut sections: Vec<Value> = base_sections.to_vec();
+    sections.extend(prior_disclosures.iter().cloned());
+    if omitted > 0 {
+        rewrite_pagination_siblings(&mut trial, field, prefix_len, 0, "");
+        // A representative disclosure of maximal-ish size (concrete handle plus
+        // counts) so the reserved headroom matches the finalized block.
+        sections.push(json!({
+            "section": field,
+            "rung": "counts_and_handles",
+            "returned": prefix_len,
+            "omitted_count": omitted,
+            "fetch": {
+                "tool": "",
+                "arguments": { "offset": u64::MAX },
+                "reason": "budget_truncated",
+                "hint": "re-request with a larger max_response_tokens/max_response_bytes, \
+                         or page the remainder using offset, to retrieve the omitted results",
+            },
+        }));
+    }
+    trial.insert(
+        "budget".to_string(),
+        budget_block(Rung::CountsAndHandles, budget, cap, sections),
+    );
+    measured_bytes(&Value::Object(trial))
+}
+
+/// Build the rung-4 truncation fetch handle. Paginated tools (those that accept
+/// an `offset`) get a concrete resume call advancing the offset past the
+/// retained prefix; non-paginated tools get an honest disclosure that does not
+/// reference an offset they do not have (Issue #3353 F5).
+fn truncation_fetch_handle(
+    tool: &str,
+    args: &Value,
+    original_offset: u64,
+    retained: usize,
+) -> Value {
+    if is_offset_paginated_tool(tool) {
+        let mut resume_args = args.as_object().cloned().unwrap_or_default();
+        // Strip the budget knobs so the resume call returns the full remainder.
+        resume_args.remove("max_response_tokens");
+        resume_args.remove("max_response_bytes");
+        resume_args.remove("priority_properties");
+        resume_args.insert(
+            "offset".to_string(),
+            json!(original_offset.saturating_add(retained as u64)),
+        );
+        json!({
+            "tool": tool,
+            "arguments": Value::Object(resume_args),
+            "reason": "budget_truncated",
+            "hint": "call this to retrieve the omitted results, then continue paging with \
+                     `next_offset`",
+        })
+    } else {
+        json!({
+            "tool": tool,
+            "reason": "budget_truncated",
+            "hint": "re-request with a larger max_response_tokens/max_response_bytes to retrieve \
+                     the omitted results (this tool does not page by offset)",
+        })
+    }
+}
+
+/// Does this tool accept an `offset` argument for prefix pagination, so a
+/// concrete offset-advancing resume handle is meaningful?
+fn is_offset_paginated_tool(tool: &str) -> bool {
+    matches!(tool, "list_nodes" | "traverse" | "find_nodes_at_time")
+}
+
+/// After truncating `field` to `retained` elements, rewrite the object's own
+/// pagination/count siblings so they describe the retained prefix rather than
+/// the original (untruncated) page (Issue #3353 F1). This prevents the
+/// disclosed `next_offset` from skipping the dropped rows.
+fn rewrite_pagination_siblings(
+    map: &mut Map<String, Value>,
+    field: &str,
+    retained: usize,
+    original_offset: u64,
+    tool: &str,
+) {
+    // The count sibling co-located with each known array shape.
+    let count_key = match field {
+        "nodes" | "edges" | "results" => Some("count"),
+        "rows" => Some("row_count"),
+        _ => None,
+    };
+    if let Some(key) = count_key
+        && map.contains_key(key)
+    {
+        map.insert(key.to_string(), json!(retained));
+    }
+
+    // A `query`-style `truncated` flag becomes true.
+    if map.contains_key("truncated") {
+        map.insert("truncated".to_string(), json!(true));
+    }
+
+    // Pagination cursor: mark `has_more` and, for offset-paginated tools,
+    // advance `next_offset` past the retained prefix so a paginating caller
+    // resumes exactly where the page was cut.
+    if map.contains_key("has_more") {
+        map.insert("has_more".to_string(), json!(true));
+    }
+    if is_offset_paginated_tool(tool) {
+        map.insert(
+            "next_offset".to_string(),
+            json!(original_offset.saturating_add(retained as u64)),
+        );
+    }
+    // `total_matching`, when present, already counts the full matching set and
+    // remains correct; it is deliberately left unchanged.
 }
 
 /// Truncate `map[field]` (an array) to its first `len` elements in place.
@@ -490,7 +820,11 @@ fn set_array_prefix(map: &mut Map<String, Value>, field: &str, len: usize) {
 /// Is this array element an entity object (directly or via a nested wrapper)?
 fn is_entity_array_element(item: &Value) -> bool {
     match item {
-        Value::Object(map) => is_entity_object(map) || map.values().any(is_entity_array_element),
+        Value::Object(map) => {
+            is_entity_object(map)
+                || is_history_version(map)
+                || map.values().any(is_entity_array_element)
+        }
         _ => false,
     }
 }

@@ -4124,8 +4124,12 @@ impl AletheiaMcpServer {
         if is_budgetable_read_tool(name) {
             match budget::parse_budget(&args) {
                 Ok(Some(budget_req)) => {
+                    // Retain the original arguments so the rung-4 truncation
+                    // handle can emit a concrete offset-based resume call
+                    // (Issue #3353 F1/F5).
+                    let orig_args = args.clone();
                     let result = self.dispatch_read_tool(name, args);
-                    return self.apply_budget(name, result, &budget_req);
+                    return self.apply_budget(name, result, &budget_req, &orig_args);
                 }
                 Ok(None) => {}
                 Err(err) => return self.error_result(err),
@@ -4134,15 +4138,19 @@ impl AletheiaMcpServer {
         self.dispatch_read_tool(name, args)
     }
 
-    /// Apply the parsed token budget to a handler's result. Errors and
-    /// non-object payloads pass through untouched; a successful response is
-    /// shaped to fit and re-serialized, or replaced with the structured
-    /// `INVALID_ARGUMENT` too-small-budget error (Issue #3353 AC6).
+    /// Apply the parsed token budget to a handler's result. Errors pass through
+    /// untouched; a successful object response is shaped to fit and
+    /// re-serialized, or replaced with the structured `INVALID_ARGUMENT`
+    /// too-small-budget error (Issue #3353 AC6). Non-object / non-JSON success
+    /// payloads cannot degrade along the entity ladder but are still held to the
+    /// byte cap with a disclosed truncation marker — the "guaranteed to fit"
+    /// contract is unconditional (Issue #3353 F6).
     fn apply_budget(
         &self,
         name: &str,
         result: CallToolResult,
         budget_req: &budget::BudgetRequest,
+        args: &serde_json::Value,
     ) -> CallToolResult {
         if result.is_error.unwrap_or(false) {
             return result;
@@ -4150,13 +4158,29 @@ impl AletheiaMcpServer {
         let text = Self::extract_text(result);
         let value: serde_json::Value = match serde_json::from_str(&text) {
             Ok(v) => v,
-            // Non-JSON or non-object payloads are left untouched.
-            Err(_) => return self.success_json(serde_json::Value::String(text)),
+            // Non-JSON payload: still enforce the byte cap on the raw text.
+            Err(_) => {
+                return match budget::enforce_raw_cap(text, budget_req) {
+                    Ok(capped) => self.success_json(serde_json::Value::String(capped)),
+                    Err(err) => self.error_result(err),
+                };
+            }
         };
         if !value.is_object() {
-            return self.success_json(value);
+            // JSON scalar/array: not shapeable along the entity ladder, but the
+            // serialized form is still capped so an unbounded array cannot
+            // bypass the budget.
+            let serialized =
+                serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string());
+            if serialized.len() as u64 <= budget_req.effective_bytes() {
+                return self.success_json(value);
+            }
+            return match budget::enforce_raw_cap(serialized, budget_req) {
+                Ok(capped) => self.success_json(serde_json::Value::String(capped)),
+                Err(err) => self.error_result(err),
+            };
         }
-        match budget::shape_response(value, budget_req, name) {
+        match budget::shape_response(value, budget_req, name, args) {
             Ok(shaped) => self.success_json(shaped),
             Err(err) => self.error_result(err),
         }
@@ -4689,17 +4713,66 @@ fn tool_definitions() -> Vec<Tool> {
     ];
 
     // Advertise the Issue #3353 token budget on every budgetable read tool by
-    // appending a uniform hint to its description, keeping discoverability in
-    // lockstep with `BUDGETABLE_READ_TOOLS` (the dispatch-path source of truth)
-    // without editing each tool literal.
+    // (a) injecting the three budget parameters into its generated
+    // `inputSchema.properties` so they are machine-discoverable, and (b)
+    // appending a uniform prose hint to its description as a secondary,
+    // human-readable pointer. Both are kept in lockstep with
+    // `BUDGETABLE_READ_TOOLS` (the dispatch-path source of truth) without
+    // editing each tool literal.
     for tool in tools.iter_mut() {
         if is_budgetable_read_tool(&tool.name) {
+            inject_budget_schema_params(&mut tool.input_schema);
             let mut desc = tool.description.as_deref().unwrap_or("").to_string();
             desc.push_str(BUDGET_TOOL_HINT);
             tool.description = Some(std::borrow::Cow::Owned(desc));
         }
     }
     tools
+}
+
+/// Inject the three optional Issue #3353 token-budget parameters into a tool's
+/// generated JSON `inputSchema.properties`, so a client that introspects the
+/// schema (not just the prose description) discovers them with correct types.
+/// All three are optional, so `required` is deliberately left untouched. Idempotent.
+fn inject_budget_schema_params(schema: &mut Arc<serde_json::Map<String, serde_json::Value>>) {
+    let schema = Arc::make_mut(schema);
+    let props = schema
+        .entry("properties".to_string())
+        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+    let Some(props) = props.as_object_mut() else {
+        return;
+    };
+    props
+        .entry("max_response_tokens".to_string())
+        .or_insert_with(|| {
+            json!({
+                "type": "integer",
+                "minimum": 1,
+                "description": "Optional (Issue #3353): cap the response at approximately this \
+                    many tokens (estimated as ceil(utf8_bytes/4)). The serialized response, \
+                    including its truncation metadata, is guaranteed to fit.",
+            })
+        });
+    props
+        .entry("max_response_bytes".to_string())
+        .or_insert_with(|| {
+            json!({
+                "type": "integer",
+                "minimum": 1,
+                "description": "Optional (Issue #3353): byte-exact cap on the serialized response. \
+                    When both this and max_response_tokens are given, the tighter bound wins.",
+            })
+        });
+    props
+        .entry("priority_properties".to_string())
+        .or_insert_with(|| {
+            json!({
+                "type": "array",
+                "items": { "type": "string" },
+                "description": "Optional (Issue #3353): property keys to protect from elision at \
+                    every degradation rung when a response budget is active.",
+            })
+        });
 }
 
 /// Uniform description suffix documenting the token-budget parameters
