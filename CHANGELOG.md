@@ -56,6 +56,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `PersistenceConfig::default()` no longer enables index persistence
+  (Issue #3388). The old default (`enabled: true` with the cwd-relative
+  `data_dir: "data"`) made every database built from a default or builder
+  config silently write index snapshots into `./data` on shutdown and load
+  whatever `./data` happened to contain on startup, so unrelated instances
+  sharing a working directory could observe each other's data and a stale
+  `./data` could short-circuit WAL replay (this caused a real CI flake).
+  Index persistence is now opt-in: set `enabled: true` together with an
+  explicit `data_dir`, or use the canonical durable entry points
+  `AletheiaDB::open(path)` / `durable_config_for_data_dir(path)`, which are
+  unaffected. **Breaking for callers that relied on the implicit default:**
+  a config that never touches `PersistenceConfig` no longer persists indexes
+  (the WAL still provides durability when configured). TOML configs must now
+  set `enabled = true` under `[persistence]`; a `[persistence]` section that
+  omits `enabled` (even one that sets `data_dir` or `load_on_startup`) is
+  treated as disabled.
 - **BREAKING**: `ReadOps::get_outgoing_edges`, `ReadOps::get_incoming_edges`,
   and `ReadOps::get_outgoing_edges_with_label` now return
   `Result<Vec<EdgeId>>` instead of `Vec<EdgeId>` (Issue #359). A node that
