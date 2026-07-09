@@ -47,7 +47,26 @@ use super::lexer::{CypherLexer, Token, TokenKind};
 /// further. Without the cap, a pathological input such as thousands of nested
 /// parentheses or `NOT`s overflows the stack and aborts the whole process
 /// (issue #3404). Legitimate queries nest far below this limit.
+///
+/// Note: the bound is *cumulative* across all nesting constructs
+/// (parentheses, `NOT`, `IN [...]` element lists, and function arguments), not
+/// a separate budget per construct -- e.g. deeply nested parens inside an
+/// `IN`-list share the same counter.
 const MAX_EXPRESSION_DEPTH: usize = 128;
+
+/// Maximum number of operands in a single contiguous `AND` / `OR` chain.
+///
+/// The parser builds a left-nested `Box<CypherExpr>` spine for a flat
+/// `a AND b AND c ...` (or `OR`) chain, which is intentionally *not* bounded by
+/// [`MAX_EXPRESSION_DEPTH`] (the chain has no per-operand nesting). That spine
+/// is walked iteratively at conversion time, but the derived recursive `Drop`
+/// for `CypherExpr` still unwinds it one stack frame per node when the AST is
+/// dropped -- so an unbounded chain (tens of thousands of terms) would
+/// stack-overflow on teardown, relocating the very SIGABRT issue #3404 targets
+/// to destruction. Capping the operand count keeps that drop depth bounded
+/// while staying far beyond any realistic query; it doubles as an in-lane
+/// query-complexity guard.
+const MAX_EXPRESSION_TERMS: usize = 4096;
 
 /// Recursive descent parser for Cypher queries.
 ///
@@ -472,7 +491,13 @@ impl CypherParser {
     /// ```
     fn parse_or_expr(&mut self, depth: usize) -> Result<CypherExpr, CypherError> {
         let mut left = self.parse_and_expr(depth)?;
+        // Operand count for this contiguous OR chain (starts at 1 for `left`).
+        let mut terms: usize = 1;
         while self.eat(TokenKind::Or) {
+            terms += 1;
+            if terms > MAX_EXPRESSION_TERMS {
+                return Err(self.error("expression has too many AND/OR terms (max 4096)"));
+            }
             let right = self.parse_and_expr(depth)?;
             left = CypherExpr::Or(Box::new(left), Box::new(right));
         }
@@ -484,7 +509,13 @@ impl CypherParser {
     /// ```
     fn parse_and_expr(&mut self, depth: usize) -> Result<CypherExpr, CypherError> {
         let mut left = self.parse_not_expr(depth)?;
+        // Operand count for this contiguous AND chain (starts at 1 for `left`).
+        let mut terms: usize = 1;
         while self.eat(TokenKind::And) {
+            terms += 1;
+            if terms > MAX_EXPRESSION_TERMS {
+                return Err(self.error("expression has too many AND/OR terms (max 4096)"));
+            }
             let right = self.parse_not_expr(depth)?;
             left = CypherExpr::And(Box::new(left), Box::new(right));
         }

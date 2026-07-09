@@ -44,6 +44,16 @@ use crate::query::builder::Query;
 use crate::query::ir::{Predicate, PredicateValue, QueryOp, SortKey, TraversalDepth};
 use crate::query::plan::{QueryHints, TemporalContext};
 
+/// Defensive recursion bound for expression → predicate conversion.
+///
+/// The parser already caps expression nesting at 128, so for any AST it
+/// produces this never fires. It exists solely because `convert` is `pub`: a
+/// caller constructing a `CypherExpr` by hand (bypassing the parser) could nest
+/// `Not`/`Grouped` arbitrarily deep and overflow the stack during conversion.
+/// Kept clearly above the parser's cap so it only ever rejects such hand-built
+/// pathological input, never a legitimately parsed query.
+const MAX_CONVERT_DEPTH: usize = 256;
+
 // ---------------------------------------------------------------------------
 // Parameter values
 // ---------------------------------------------------------------------------
@@ -518,6 +528,26 @@ impl CypherConverter {
     ///
     /// This handles comparisons, logical operators, string predicates, etc.
     fn convert_expr_to_predicate(&self, expr: &CypherExpr) -> Result<Predicate, CypherError> {
+        self.convert_expr_to_predicate_at(expr, 0)
+    }
+
+    /// Depth-guarded worker for [`Self::convert_expr_to_predicate`].
+    ///
+    /// The `Not` / `Grouped` arms recurse structurally; `convert` is `pub`, so
+    /// this guards against a caller handing us an AST nested past the parser's
+    /// own [`MAX_EXPRESSION_DEPTH`]. The bound is set above the parser's cap so
+    /// it never fires for parser-produced ASTs, only for hand-built ones.
+    fn convert_expr_to_predicate_at(
+        &self,
+        expr: &CypherExpr,
+        depth: usize,
+    ) -> Result<Predicate, CypherError> {
+        if depth > MAX_CONVERT_DEPTH {
+            return Err(CypherError::ParseError {
+                position: 0,
+                message: "expression nesting too deep for conversion (max 256)".to_string(),
+            });
+        }
         match expr {
             CypherExpr::Comparison { left, op, right } => self.convert_comparison(left, *op, right),
             CypherExpr::And(_, _) => {
@@ -530,7 +560,7 @@ impl CypherConverter {
                 });
                 let preds = operands
                     .into_iter()
-                    .map(|operand| self.convert_expr_to_predicate(operand))
+                    .map(|operand| self.convert_expr_to_predicate_at(operand, depth + 1))
                     .collect::<Result<Vec<_>, _>>()?;
                 Ok(Predicate::And(preds))
             }
@@ -542,12 +572,12 @@ impl CypherConverter {
                 });
                 let preds = operands
                     .into_iter()
-                    .map(|operand| self.convert_expr_to_predicate(operand))
+                    .map(|operand| self.convert_expr_to_predicate_at(operand, depth + 1))
                     .collect::<Result<Vec<_>, _>>()?;
                 Ok(Predicate::Or(preds))
             }
             CypherExpr::Not(inner) => {
-                let inner_pred = self.convert_expr_to_predicate(inner)?;
+                let inner_pred = self.convert_expr_to_predicate_at(inner, depth + 1)?;
                 Ok(Predicate::Not(Box::new(inner_pred)))
             }
             CypherExpr::IsNull(inner) => {
@@ -596,7 +626,7 @@ impl CypherConverter {
                     suffix: suffix.clone(),
                 })
             }
-            CypherExpr::Grouped(inner) => self.convert_expr_to_predicate(inner),
+            CypherExpr::Grouped(inner) => self.convert_expr_to_predicate_at(inner, depth + 1),
             CypherExpr::Value(CypherValue::Bool(true)) => Ok(Predicate::True),
             CypherExpr::Value(CypherValue::Bool(false)) => Ok(Predicate::False),
             _ => Err(CypherError::UnsupportedFeature(format!(
