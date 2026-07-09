@@ -102,38 +102,60 @@ impl ResultIterator for NodeLookupIterator {
     }
 }
 
-/// Iterator for node scans with optional label filter.
+/// Label filter state for a [`NodeScanIterator`], resolved once at construction.
 ///
-/// # Memory Considerations
+/// Resolving the requested label to its interned id up front lets the scan use
+/// the fast 16-byte `node_headers` path (see [`CurrentStorage::node_has_label`])
+/// instead of loading and cloning a full `Node` just to inspect its label.
+enum ScanFilter {
+    /// No label filter: every existing node is yielded.
+    All,
+    /// Yield only nodes whose interned label equals this id.
+    Label(crate::core::interning::InternedString),
+    /// A label was requested but has never been interned, so no node can match.
+    /// The scan yields nothing (as opposed to [`ScanFilter::All`]).
+    None,
+}
+
+/// Sequential node scan iterator, optionally applying a label filter.
 ///
-/// **WARNING**: This iterator collects all node IDs into a `Vec` upfront during
-/// initialization. For very large graphs (millions of nodes), this can cause:
+/// # Memory Behavior
 ///
-/// - **High memory consumption**: O(n) where n = number of nodes
-/// - **Initial latency**: Delay before the first result is produced
+/// This iterator streams node ids lazily over the half-open range
+/// `[0, max_id)`, where `max_id` is current storage's insert-maintained node-id
+/// high-water-mark (see [`CurrentStorage::get_max_node_id`]), captured once at
+/// construction. It never materializes the full id set, so each `next()` call
+/// allocates O(1) regardless of graph size. This makes a full scan immune to
+/// the out-of-memory failure that eager `Vec<NodeId>` materialization caused on
+/// very large graphs.
 ///
-/// This design is a trade-off due to the `Send` bound on `ResultIterator` and
-/// the fact that DashMap's iterators hold internal locks that cannot be sent
-/// across threads. The current implementation prioritizes correctness and
-/// simplicity over optimal memory usage for full scans.
+/// Ids with no live node (gaps from deletion, or ids reserved but never used)
+/// are skipped cheaply: both label and unfiltered scans reject them via the
+/// compact 16-byte header fast path before loading any full node.
 ///
-/// ## Mitigation Strategies
+/// # Performance
 ///
-/// For production workloads with large graphs:
-/// 1. **Use label filters** - `scan(Some("Person"))` limits the scan scope
-/// 2. **Use LIMIT** - Add `.limit(n)` to queries to enable early termination
-/// 3. **Prefer targeted queries** - Use `start(node_id)` instead of full scans
+/// Resident memory is O(1), but the scan is **O(max_id) in time**: it visits
+/// every id in `[0, max_id)`, including ids with no live node. Node ids are
+/// monotonic and never reused (recovery `reset` sets the next id to
+/// `max_id + 1`), so `max_id` is the high-water mark of ids ever allocated,
+/// not the current live count. When `max_id` greatly exceeds the live node
+/// count -- e.g. after a bulk delete, or when post-compaction leaves a sparse
+/// id space -- the scan spends most of its time skipping dead ids and is
+/// pathologically slow relative to the number of nodes actually yielded. This
+/// is a deliberate trade: the old eager `Vec<NodeId>` path could hard-OOM on a
+/// large id range, whereas this streaming scan degrades only to a soft
+/// slowdown proportional to `max_id`.
 ///
-/// ## Future Improvements (Issue #307)
+/// # Concurrency
 ///
-/// Possible optimizations include:
-/// - Streaming iteration using channels (`std::sync::mpsc`)
-/// - Chunked iteration to limit memory per batch
-/// - Index-based iteration that doesn't require holding locks
-///
-/// Sequential node scan iterator.
-///
-/// Scans through nodes sequentially, optionally applying a label filter.
+/// Each `next()` acquires the relevant DashMap shard lock only for the duration
+/// of a single `node_has_label` / `get_node` call and releases it before
+/// yielding. No shard lock is held across a yield, so the iterator cannot
+/// deadlock against concurrent writers and does not violate the crate's lock
+/// acquisition order. `max_id` is a relaxed snapshot: nodes created after
+/// construction may or may not be observed, which is the expected semantics for
+/// an unsynchronized full scan.
 ///
 /// # Examples
 ///
@@ -146,67 +168,96 @@ impl ResultIterator for NodeLookupIterator {
 /// let iter = NodeScanIterator::new(Some("Person".to_string()), current);
 /// ```
 pub struct NodeScanIterator {
-    label: Option<String>,
+    filter: ScanFilter,
     current: Arc<CurrentStorage>,
-    initialized: bool,
-    node_ids: Option<std::vec::IntoIter<NodeId>>,
+    current_id: u64,
+    max_id: u64,
 }
 
 impl NodeScanIterator {
     /// Create a new NodeScanIterator.
     pub fn new(label: Option<String>, current: Arc<CurrentStorage>) -> Self {
-        NodeScanIterator {
-            label,
-            current,
-            initialized: false,
-            node_ids: None,
-        }
-    }
+        // Snapshot the id upper bound once. `get_max_node_id` returns the
+        // index's insert-maintained high-water-mark (`max id ever inserted + 1`)
+        // rather than any id generator, so scanning `[0, max_id)` covers every
+        // node present regardless of which generator allocated its id. Ids start
+        // at 0, so the range is `[0, max_id)`.
+        let max_id = current.get_max_node_id();
 
-    fn initialize(&mut self) {
-        if self.initialized {
-            return;
-        }
-        self.initialized = true;
-
-        // Collect all node IDs upfront.
-        //
-        // NOTE: This is a known memory concern for large graphs. See the struct
-        // documentation above for details and mitigation strategies.
-        //
-        // The current implementation trades memory efficiency for correctness:
-        // DashMap iterators cannot be sent across threads (not Send), and the
-        // ResultIterator trait requires Send for parallel query execution.
-        let ids: Vec<NodeId> = if let Some(ref label) = self.label {
-            self.current.get_node_ids_by_label(label)
-        } else {
-            self.current.get_all_node_ids()
+        // Resolve the label to an interned id exactly once. A requested-but-
+        // unknown label short-circuits to `None` so the scan yields nothing,
+        // rather than degrading to an unfiltered scan.
+        let filter = match label {
+            Option::None => ScanFilter::All,
+            Some(ref l) => match GLOBAL_INTERNER.get_id(l) {
+                Some(id) => ScanFilter::Label(id),
+                Option::None => ScanFilter::None,
+            },
         };
-        self.node_ids = Some(ids.into_iter());
+
+        NodeScanIterator {
+            filter,
+            current,
+            current_id: 0,
+            max_id,
+        }
     }
 }
 
 impl ResultIterator for NodeScanIterator {
     fn next(&mut self) -> Option<Result<QueryRow>> {
-        self.initialize();
+        // A label that was never interned can match no node.
+        if matches!(self.filter, ScanFilter::None) {
+            return None;
+        }
 
-        loop {
-            let id = self.node_ids.as_mut()?.next()?;
+        while self.current_id < self.max_id {
+            let id_val = self.current_id;
+            self.current_id += 1;
+
+            // Fast path: reject non-matching labels via the compact node header
+            // before ever loading the full node.
+            if let ScanFilter::Label(label_id) = self.filter
+                && !self.current.node_has_label(id_val, label_id)
+            {
+                continue;
+            }
+
+            // Fast path: for an unfiltered scan, skip gaps in the sparse id
+            // space with a cheap O(1) header existence check. This avoids
+            // allocating and immediately dropping a `NodeNotFound`
+            // `StorageError` for every dead id, which dominates when
+            // `max_id` greatly exceeds the live node count. The `get_node`
+            // `NodeNotFound` arm below still guards against a node deleted
+            // concurrently between this check and the load.
+            if matches!(self.filter, ScanFilter::All) && !self.current.contains_node(id_val) {
+                continue;
+            }
+
+            let id = match NodeId::new(id_val) {
+                Ok(id) => id,
+                Err(_) => continue,
+            };
+
             match self.current.get_node(id) {
-                Ok(node) => {
-                    // Check label filter by comparing InternedString IDs
-                    if let Some(ref label_str) = self.label {
-                        // Get the InternedString ID for the filter label
-                        let label_id = GLOBAL_INTERNER.get_id(label_str);
-                        if label_id != Some(node.label) {
-                            continue; // Skip this node
-                        }
-                    }
-                    return Some(Ok(QueryRow::from_entity(EntityResult::Node(node))));
-                }
+                Ok(node) => return Some(Ok(QueryRow::from_entity(EntityResult::Node(node)))),
+                // Sparse id space: skip ids with no live node.
+                Err(crate::core::error::Error::Storage(
+                    crate::core::error::StorageError::NodeNotFound(_),
+                )) => continue,
                 Err(e) => return Some(Err(e)),
             }
         }
+        None
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        if matches!(self.filter, ScanFilter::None) {
+            return (0, Some(0));
+        }
+        // Upper bound only: the range may contain gaps that are skipped.
+        let remaining = self.max_id.saturating_sub(self.current_id);
+        (0, Some(remaining as usize))
     }
 }
 
@@ -3018,6 +3069,129 @@ mod tests {
         let mut iter = NodeScanIterator::new(None, current);
 
         assert!(iter.next().is_none());
+    }
+
+    #[test]
+    fn test_node_scan_iterator_skips_deleted_ids() {
+        // The lazy id-range scan must tolerate gaps: deleting a node in the
+        // middle of the id space leaves a `NodeNotFound` hole that the scan
+        // skips rather than erroring on.
+        let current = Arc::new(CurrentStorage::new());
+        let a = current
+            .create_node("Person", PropertyMapBuilder::new().insert("n", "a").build())
+            .unwrap();
+        let b = current
+            .create_node("Person", PropertyMapBuilder::new().insert("n", "b").build())
+            .unwrap();
+        let c = current
+            .create_node("Person", PropertyMapBuilder::new().insert("n", "c").build())
+            .unwrap();
+
+        current.delete_node(b).unwrap();
+
+        let mut iter = NodeScanIterator::new(None, Arc::clone(&current));
+        let mut ids = Vec::new();
+        while let Some(Ok(row)) = iter.next() {
+            ids.push(row.entity.node_id().unwrap());
+        }
+
+        assert_eq!(ids, vec![a, c], "scan should skip the deleted id {b:?}");
+    }
+
+    #[test]
+    fn test_node_scan_iterator_bounds_by_index_not_storage_id_gen() {
+        // Regression (PR #3418): the scan bound must come from the index's
+        // insert-maintained high-water-mark, NOT CurrentStorage's own
+        // `node_id_gen`. The transactional write path allocates node ids from a
+        // database-level generator and applies them via `insert_node_direct`,
+        // leaving the storage-local generator at 0. If the scan bounded itself
+        // by that generator it would see `max_id == 0` and yield zero rows for
+        // every node in the database. Here we reproduce that path directly:
+        // insert nodes whose ids did NOT come from `current.node_id_gen`.
+        let current = Arc::new(CurrentStorage::new());
+        let ts = crate::core::temporal::time::now();
+        let label = GLOBAL_INTERNER.intern("Person").unwrap();
+
+        let expected: Vec<NodeId> = (0u64..3)
+            .map(|i| {
+                let id = NodeId::new(i).unwrap();
+                let node = Node::new(
+                    id,
+                    label,
+                    PropertyMapBuilder::new()
+                        .insert("n", format!("{i}"))
+                        .build(),
+                    VersionId::new(i + 1).unwrap(),
+                );
+                current.insert_node_direct(node, ts).unwrap();
+                id
+            })
+            .collect();
+
+        // The scan bound must reflect the ids inserted (index high-water-mark),
+        // not the storage's own id generator (which insert_node_direct never
+        // advances, so it is still 0). Under the pre-fix implementation this
+        // returned 0 and the scan below yielded nothing.
+        assert_eq!(
+            current.get_max_node_id(),
+            3,
+            "scan bound must come from the index high-water-mark, not the storage id generator"
+        );
+
+        let mut iter = NodeScanIterator::new(None, Arc::clone(&current));
+        let mut ids = Vec::new();
+        while let Some(Ok(row)) = iter.next() {
+            ids.push(row.entity.node_id().unwrap());
+        }
+
+        assert_eq!(
+            ids, expected,
+            "full scan must find nodes applied via insert_node_direct, \
+             proving the bound comes from the index not the storage id generator"
+        );
+    }
+
+    #[test]
+    fn test_node_scan_iterator_unknown_label_yields_nothing() {
+        // A label filter whose label was never interned must yield zero rows,
+        // NOT degrade into an unfiltered full scan.
+        let current = Arc::new(CurrentStorage::new());
+        current
+            .create_node("Person", PropertyMapBuilder::new().insert("n", "a").build())
+            .unwrap();
+
+        let mut iter =
+            NodeScanIterator::new(Some("NeverInternedLabel".to_string()), Arc::clone(&current));
+        assert!(
+            iter.next().is_none(),
+            "unknown label must match no nodes, not all of them"
+        );
+        assert_eq!(iter.size_hint(), (0, Some(0)));
+    }
+
+    #[test]
+    fn test_node_scan_iterator_size_hint_is_bounded_without_materializing() {
+        // size_hint reports a finite upper bound derived from the id range,
+        // proving the iterator knows its bound without collecting all ids.
+        let current = Arc::new(CurrentStorage::new());
+        for i in 0..4 {
+            current
+                .create_node(
+                    "Person",
+                    PropertyMapBuilder::new()
+                        .insert("n", format!("{i}"))
+                        .build(),
+                )
+                .unwrap();
+        }
+
+        let mut iter = NodeScanIterator::new(None, Arc::clone(&current));
+        // Upper bound equals the number of ids allocated so far.
+        assert_eq!(iter.size_hint(), (0, Some(4)));
+
+        iter.next();
+        // After consuming one id the remaining upper bound shrinks.
+        assert_eq!(iter.size_hint(), (0, Some(3)));
     }
 
     // ==================== VectorResultIterator Tests ====================

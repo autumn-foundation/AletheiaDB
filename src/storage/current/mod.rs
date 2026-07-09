@@ -1102,6 +1102,63 @@ impl CurrentStorage {
         self.indexes.node_count()
     }
 
+    /// Get an exclusive upper bound on node ids present in current storage.
+    ///
+    /// Used by the query executor's full-scan iterator to bound a lazy id sweep
+    /// over `[0, max_id)` without materializing the id set.
+    ///
+    /// This reads the index's insert-maintained high-water-mark
+    /// ([`CurrentIndexes::max_node_id_exclusive`]), **not** this storage's own
+    /// `node_id_gen`. In the transactional write path node ids are allocated by
+    /// a database-level generator and applied here via
+    /// [`Self::insert_node_direct`], so the storage-local `node_id_gen` is never
+    /// advanced and would report `0` -- collapsing every full scan to zero rows.
+    /// The index high-water-mark is advanced by every insert regardless of where
+    /// the id originated, so it is the correct scan bound. It is a relaxed,
+    /// monotonically non-decreasing read and must not be used for
+    /// snapshot-isolation decisions.
+    #[inline]
+    pub fn get_max_node_id(&self) -> u64 {
+        self.indexes.max_node_id_exclusive()
+    }
+
+    /// Fast-path label check using the compact node header.
+    ///
+    /// Returns `true` iff a live node with `node_id` exists and its interned
+    /// label equals `label_id`, reading only the 16-byte header instead of
+    /// loading and cloning the full node. Returns `false` for a missing/invalid
+    /// id, so callers can use it to skip gaps in a sparse id space.
+    #[inline]
+    pub fn node_has_label(
+        &self,
+        node_id: u64,
+        label_id: crate::core::interning::InternedString,
+    ) -> bool {
+        match NodeId::new(node_id) {
+            Ok(id) => self
+                .indexes
+                .get_node_header(id)
+                .is_some_and(|header| header.label == label_id),
+            Err(_) => false,
+        }
+    }
+
+    /// Fast-path existence check using the compact node header.
+    ///
+    /// Returns `true` iff a live node with `node_id` exists, reading only the
+    /// 16-byte header instead of loading and cloning the full node. Returns
+    /// `false` for a missing/invalid id, so callers can use it to cheaply skip
+    /// gaps in a sparse id space. This mirrors [`Self::node_has_label`] but
+    /// omits the label comparison. Acquires only a brief DashMap shard lock,
+    /// which is released before returning.
+    #[inline]
+    pub fn contains_node(&self, node_id: u64) -> bool {
+        match NodeId::new(node_id) {
+            Ok(id) => self.indexes.get_node_header(id).is_some(),
+            Err(_) => false,
+        }
+    }
+
     /// Get the number of edges.
     #[inline]
     pub fn edge_count(&self) -> usize {
