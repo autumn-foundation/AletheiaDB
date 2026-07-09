@@ -1579,8 +1579,8 @@ impl AletheiaMcpServer {
                 // sort/dedup list, so `connected_edges` always equals what
                 // `detach: true` would retract (a self-loop appears in both
                 // adjacency directions but is one edge).
-                let mut edge_ids = tx.get_outgoing_edges(node_id);
-                edge_ids.extend(tx.get_incoming_edges(node_id));
+                let mut edge_ids = tx.get_outgoing_edges(node_id)?;
+                edge_ids.extend(tx.get_incoming_edges(node_id)?);
                 edge_ids.sort_unstable();
                 edge_ids.dedup();
                 let connected_edges = edge_ids.len();

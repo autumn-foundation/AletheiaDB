@@ -79,6 +79,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **BREAKING**: `ReadOps::get_outgoing_edges`, `ReadOps::get_incoming_edges`,
+  and `ReadOps::get_outgoing_edges_with_label` now return
+  `Result<Vec<EdgeId>>` instead of `Vec<EdgeId>` (Issue #359). A node that
+  does not exist (or is not visible in the transaction's snapshot) returns
+  `Err(NodeNotFound)`, consistent with `get_node`/`get_edge`; an existing
+  node with no (matching) edges returns `Ok(vec![])`, so callers can finally
+  distinguish "node has no edges" from "node doesn't exist". Within a write
+  transaction the existence check is buffer-aware: a node created in the
+  transaction exists, a node deleted in it does not. The non-transactional
+  `AletheiaDB::get_outgoing_edges`/`get_incoming_edges`/
+  `get_outgoing_edges_with_label` convenience methods are unchanged.
+  Migration: append `?` (or `.unwrap_or_default()` to keep
+  the old silent-empty behavior) at call sites. The `ReadOps` trait methods
+  also gained comprehensive rustdoc with runnable examples covering the
+  empty-vs-missing contract (Issue #358).
+  Two edge-case behavior changes ride along: `retract_node_detach` on a node
+  previously removed via the plain (non-cascade) `delete_node` no longer
+  co-retracts that node's orphaned edges (`edges_retracted: 0`) — consistent
+  with the documented "retracting a deleted node is a no-op" contract; and
+  `delete_node_cascade` on a node already deleted in the same transaction
+  now fails fast with `NodeNotFound` at edge enumeration (same final outcome
+  as before, earlier failure point).
+
 - MCP tool error responses are now structured (Issue #3234): every error is
   `{"error": {"code", "message", "retriable", "details"?}}` instead of
   `{"error": "<string>"}`. `code` is drawn from a stable seven-value enum
