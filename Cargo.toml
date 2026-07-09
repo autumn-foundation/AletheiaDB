@@ -182,8 +182,16 @@ default = ["config-toml"]
 # Async runtime support
 tokio = ["dep:tokio"]
 
+# Unified serde support (Issue #3390).
+# Single flag that pulls in the optional `serde` dependency and gates every
+# `#[derive(Serialize, Deserialize)]` / serde attribute in the crate. Any
+# feature that needs serde derives depends on this rather than `dep:serde`
+# directly, so serde-enabled code compiles identically regardless of which
+# high-level feature turned it on.
+serde = ["dep:serde"]
+
 # Configuration file support (TOML)
-config-toml = ["dep:serde", "dep:toml"]
+config-toml = ["serde", "dep:toml"]
 
 # Embedding generation via embed_anything.
 embeddings = [
@@ -198,10 +206,10 @@ embeddings = [
 embeddings-onnx = ["embeddings", "embed_anything/ort"]
 
 # MCP server support
-mcp-server = ["dep:rmcp", "dep:tokio", "dep:serde", "dep:base64"]
+mcp-server = ["dep:rmcp", "dep:tokio", "serde", "dep:base64"]
 
 # Sharding RPC client support (uses blocking reqwest)
-sharding-rpc = ["dep:reqwest", "dep:serde", "dep:native-tls"]
+sharding-rpc = ["dep:reqwest", "serde", "dep:native-tls"]
 
 # SQL:2011 temporal syntax support
 sql = ["dep:sqlparser"]
@@ -221,7 +229,7 @@ http-server = [
     "dep:tower",
     "dep:tower-http",
     "dep:tokio",
-    "dep:serde",
+    "serde",
     "dep:base64",
     "dep:tracing",
 ]
@@ -230,7 +238,7 @@ http-server = [
 mvcc-snapshots-tdd = []
 
 # Encryption at rest (ADR-0028)
-encryption = ["dep:serde"]
+encryption = ["serde"]
 
 # AWS KMS key provider (optional)
 encryption-aws-kms = ["encryption", "dep:tokio"]

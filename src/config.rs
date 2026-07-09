@@ -36,7 +36,7 @@
 //! let db = AletheiaDB::with_unified_config(config);
 //! ```
 
-#[cfg(feature = "config-toml")]
+#[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "config-toml")]
 use std::fs;
@@ -57,8 +57,8 @@ use crate::storage::version::AnchorConfig;
 /// its behavior, such as concurrency (stripes), sync intervals, and directory paths,
 /// to balance between latency and throughput.
 #[derive(Debug, Clone, PartialEq)]
-#[cfg_attr(feature = "config-toml", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "config-toml", serde(default))]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "serde", serde(default))]
 #[non_exhaustive]
 pub struct WalConfig {
     /// Number of stripes for concurrent appends (must be power of 2).
@@ -327,8 +327,8 @@ impl Default for WalConfigBuilder {
 /// This configuration dictates how those versions are managed, including pruning
 /// thresholds and the directory where historical data is stored on disk.
 #[derive(Debug, Clone, PartialEq)]
-#[cfg_attr(feature = "config-toml", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "config-toml", serde(default))]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "serde", serde(default))]
 #[non_exhaustive]
 pub struct HistoricalConfig {
     /// Maximum versions to retain per entity before pruning.
@@ -667,8 +667,8 @@ impl Default for HistoricalConfigBuilder {
 /// configure parameters like the number of layers, connections per node, and memory
 /// limits to optimize the recall-vs-latency tradeoff.
 #[derive(Debug, Clone, PartialEq)]
-#[cfg_attr(feature = "config-toml", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "config-toml", serde(default))]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "serde", serde(default))]
 #[non_exhaustive]
 pub struct VectorIndexConfig {
     /// Maximum value of k for k-NN queries.
@@ -771,8 +771,8 @@ impl Default for VectorIndexConfigBuilder {
 /// (WAL, Historical, Vector, Persistence). It acts as the single source of truth
 /// when bootstrapping a new database instance.
 #[derive(Debug, Clone, PartialEq, Default)]
-#[cfg_attr(feature = "config-toml", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "config-toml", serde(default))]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "serde", serde(default))]
 #[non_exhaustive]
 pub struct AletheiaDBConfig {
     /// WAL configuration

@@ -59,6 +59,16 @@ check-features:
     @echo "=== semantic-characterization ===" && cargo check --features semantic-characterization
     @echo "=== nova umbrella ===" && cargo check --features nova
     @echo "=== nova + semantic-search ===" && cargo check --features nova,semantic-search
+    # Serde-enabling features (Issue #3390): each must compile standalone
+    # against the unified `serde` flag with no default features.
+    @echo "=== serde (standalone) ===" && cargo check --no-default-features --tests --features serde
+    @echo "=== config-toml (standalone) ===" && cargo check --no-default-features --tests --features config-toml
+    @echo "=== mcp-server (standalone) ===" && cargo check --no-default-features --tests --features mcp-server
+    @echo "=== sharding-rpc (standalone) ===" && cargo check --no-default-features --tests --features sharding-rpc
+    @echo "=== http-server (standalone) ===" && cargo check --no-default-features --tests --features http-server
+    @echo "=== encryption (standalone) ===" && cargo check --no-default-features --tests --features encryption
+    @echo "=== encryption-vault (standalone) ===" && cargo check --no-default-features --tests --features encryption-vault
+    @echo "=== encryption-aws-kms (standalone) ===" && cargo check --no-default-features --tests --features encryption-aws-kms
 
 # Format code
 fmt:

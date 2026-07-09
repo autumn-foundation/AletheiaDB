@@ -12,11 +12,8 @@ use crate::encryption::factory::Algorithm;
 ///
 /// Determines where the Master Encryption Key (MEK) is sourced from at startup.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(feature = "config-toml", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(
-    feature = "config-toml",
-    serde(tag = "type", rename_all = "snake_case")
-)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(tag = "type", rename_all = "snake_case"))]
 /// Configuration options for the Master Encryption Key (MEK) provider.
 ///
 /// # Why?
@@ -50,8 +47,8 @@ impl Default for KeyProviderConfig {
 /// storage, checkpoints) is encrypted using per-component DEKs derived from a
 /// master encryption key sourced by the configured [`KeyProviderConfig`].
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-#[cfg_attr(feature = "config-toml", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "config-toml", serde(default))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(default))]
 pub struct EncryptionConfig {
     /// Whether encryption at rest is enabled.
     pub enabled: bool,
