@@ -472,6 +472,126 @@ fn test_enable_vector_index_twice_fails() {
     assert!(result.is_err());
 }
 
+/// Issue #451: rebuilding an ALREADY-ENABLED index must not error — the
+/// supplied config is ignored and the backfill runs against the existing
+/// index, updating entries in place, so the call is idempotent. Nodes
+/// without the property, or whose property is not a vector, are skipped.
+#[test]
+fn test_rebuild_vector_index_on_already_enabled_index_is_idempotent_backfill() {
+    use crate::index::vector::{DistanceMetric, VectorIndex};
+    let storage = CurrentStorage::new();
+
+    let config = HnswConfig::new(4, DistanceMetric::Cosine).with_capacity(100);
+    storage.enable_vector_index("embedding", config).unwrap();
+
+    // Two nodes with the vector (auto-indexed at create), one without the
+    // property at all, and one whose "embedding" property is not a vector.
+    for v in [[1.0f32, 0.0, 0.0, 0.0], [0.9f32, 0.1, 0.0, 0.0]] {
+        storage
+            .create_node(
+                "Doc",
+                PropertyMapBuilder::new()
+                    .insert_vector("embedding", &v)
+                    .build(),
+            )
+            .unwrap();
+    }
+    storage
+        .create_node(
+            "Doc",
+            PropertyMapBuilder::new()
+                .insert("name", "no-vector")
+                .build(),
+        )
+        .unwrap();
+    storage
+        .create_node(
+            "Doc",
+            PropertyMapBuilder::new()
+                .insert("embedding", "not a vector")
+                .build(),
+        )
+        .unwrap();
+
+    // The config passed here (different dimensions) must be ignored because
+    // the index is already registered.
+    let other_config = HnswConfig::new(8, DistanceMetric::Euclidean);
+    let indexed = storage
+        .rebuild_vector_index("embedding", other_config.clone())
+        .expect("rebuild on an already-enabled index must succeed");
+    assert_eq!(indexed, 2, "only nodes with the vector property count");
+
+    // Idempotent: a second rebuild re-indexes the same vectors in place.
+    let indexed_again = storage
+        .rebuild_vector_index("embedding", other_config)
+        .expect("rebuild must be idempotent");
+    assert_eq!(indexed_again, 2);
+
+    let (index, config, _, _) = storage
+        .get_vector_index_for_persistence("embedding")
+        .expect("index must still be registered");
+    assert_eq!(index.len(), 2, "no duplicate entries after double rebuild");
+    assert_eq!(config.dimensions, 4, "original config must be kept");
+}
+
+/// Issue #451: rebuilding an index for a NEW property when the maximum
+/// number of vector-indexed properties is already reached must propagate the
+/// enable error instead of registering anything.
+#[test]
+fn test_rebuild_vector_index_errors_when_property_limit_reached() {
+    use crate::index::vector::DistanceMetric;
+    let storage = CurrentStorage::new();
+
+    for i in 0..DEFAULT_MAX_VECTOR_PROPERTIES {
+        storage
+            .enable_vector_index(
+                &format!("embedding_{i}"),
+                HnswConfig::new(4, DistanceMetric::Cosine),
+            )
+            .unwrap();
+    }
+
+    let result = storage.rebuild_vector_index(
+        "one_property_too_many",
+        HnswConfig::new(4, DistanceMetric::Cosine),
+    );
+    assert!(
+        result.is_err(),
+        "rebuild must fail when no index slot is available"
+    );
+    assert!(
+        !storage.is_vector_index_enabled_for("one_property_too_many"),
+        "the failed rebuild must not register an index"
+    );
+}
+
+/// Issue #451: a stored vector whose dimensionality does not match the
+/// rebuild config must fail the rebuild (the `add` error propagates).
+#[test]
+fn test_rebuild_vector_index_errors_on_dimension_mismatch() {
+    use crate::index::vector::DistanceMetric;
+    let storage = CurrentStorage::new();
+
+    // Store a 2-dimensional vector with NO index enabled, so it is accepted.
+    storage
+        .create_node(
+            "Doc",
+            PropertyMapBuilder::new()
+                .insert_vector("embedding", &[1.0f32, 0.0])
+                .build(),
+        )
+        .unwrap();
+
+    // Rebuilding with a 4-dimensional config enables the index but fails to
+    // backfill the mismatched vector.
+    let result =
+        storage.rebuild_vector_index("embedding", HnswConfig::new(4, DistanceMetric::Cosine));
+    assert!(
+        result.is_err(),
+        "a dimension mismatch during backfill must surface as an error"
+    );
+}
+
 #[test]
 fn test_auto_index_on_create() {
     use crate::index::vector::DistanceMetric;

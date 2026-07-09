@@ -310,6 +310,74 @@ impl CurrentStorage {
         );
     }
 
+    /// Rebuild a vector index from the vector properties of current nodes.
+    ///
+    /// This is the recovery path for a vector index that was skipped at
+    /// startup because its persisted files were corrupted or unreadable
+    /// (Issue #451): it enables the index with `config` if it is not
+    /// registered, then scans every current node and (re-)indexes the
+    /// node's `property_name` vector.
+    ///
+    /// If an index is already registered for `property_name`, `config` is
+    /// ignored and the backfill runs against the existing index (existing
+    /// entries for a node are updated in place, so the call is idempotent).
+    /// The rebuild covers **current state only** — temporal vector indexes
+    /// are not touched.
+    ///
+    /// Returns the number of node vectors indexed by the backfill.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the index cannot be created (e.g. the maximum
+    /// number of vector-indexed properties is reached) or if indexing a
+    /// node's vector fails (e.g. dimension mismatch with `config`).
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
+    pub fn rebuild_vector_index(&self, property_name: &str, config: HnswConfig) -> Result<usize> {
+        // Ensure an index is registered for the property, creating one from
+        // `config` if absent. A concurrent enable between the check and the
+        // call is benign: the index exists afterwards either way, and the
+        // backfill proceeds against whichever index won.
+        if !self.is_vector_index_enabled_for(property_name) {
+            match self.enable_vector_index(property_name, config) {
+                Ok(()) => {}
+                Err(_) if self.is_vector_index_enabled_for(property_name) => {}
+                Err(e) => return Err(e),
+            }
+        }
+
+        // Clone the Arc so no DashMap shard guard is held while scanning
+        // nodes (only the vector index map and node storage reads are
+        // involved; no other synchronization primitive is acquired).
+        let index = self
+            .vector_indexes
+            .get(property_name)
+            .map(|entry| Arc::clone(&entry.value().index))
+            .ok_or_else(|| {
+                crate::core::error::Error::Vector(crate::core::error::VectorError::IndexError(
+                    format!(
+                        "Vector index for property '{}' disappeared during rebuild",
+                        property_name
+                    ),
+                ))
+            })?;
+
+        // Backfill: registering the index BEFORE scanning means nodes created
+        // concurrently are indexed by the normal write path; `add` updates
+        // an existing entry in place, so double-indexing is harmless.
+        let mut indexed = 0usize;
+        for node in self.all_nodes() {
+            if let Some(vector) = node
+                .properties
+                .get(property_name)
+                .and_then(|v| v.as_vector())
+            {
+                index.add(node.id, vector)?;
+                indexed += 1;
+            }
+        }
+        Ok(indexed)
+    }
+
     /// Get a reference to the HNSW index and its config for a specific property.
     ///
     /// Used for persistence operations. Returns (index, config, vector_count, mappings).

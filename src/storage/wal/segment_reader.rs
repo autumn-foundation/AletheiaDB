@@ -89,14 +89,30 @@ pub(crate) const WAL_VERSION_PROVENANCE: u8 = 3;
 /// `WAL_VERSION_ENCRYPTED`'s counterpart once provenance was added.
 pub(crate) const WAL_VERSION_ENCRYPTED_PROVENANCE: u8 = 4;
 
-/// Maximum supported WAL version (inclusive).
-const WAL_VERSION_MAX: u8 = WAL_VERSION_ENCRYPTED_PROVENANCE;
+/// WAL format version for plaintext segments whose provenance bundle also
+/// carries the authenticated-principal field (Issue #3350).
+///
+/// Identical to [`WAL_VERSION_PROVENANCE`] except the serialized provenance
+/// bundle has a fifth optional string (`principal`) after `correlation_id`.
+/// Segments below this version simply lack the extra bytes; parsing falls
+/// back to `principal: None` for them (see `read_provenance`).
+pub(crate) const WAL_VERSION_PROVENANCE_PRINCIPAL: u8 = 5;
 
-/// Returns `true` if `version` denotes an encrypted segment (either the
-/// original encrypted format or its provenance-carrying successor).
+/// WAL format version for encrypted segments whose decrypted payload uses
+/// the principal-carrying provenance format (i.e.
+/// [`WAL_VERSION_PROVENANCE_PRINCIPAL`]).
+pub(crate) const WAL_VERSION_ENCRYPTED_PROVENANCE_PRINCIPAL: u8 = 6;
+
+/// Maximum supported WAL version (inclusive).
+const WAL_VERSION_MAX: u8 = WAL_VERSION_ENCRYPTED_PROVENANCE_PRINCIPAL;
+
+/// Returns `true` if `version` denotes an encrypted segment (the original
+/// encrypted format or one of its provenance-carrying successors).
 #[inline]
 fn is_encrypted_version(version: u8) -> bool {
-    version == WAL_VERSION_ENCRYPTED || version == WAL_VERSION_ENCRYPTED_PROVENANCE
+    version == WAL_VERSION_ENCRYPTED
+        || version == WAL_VERSION_ENCRYPTED_PROVENANCE
+        || version == WAL_VERSION_ENCRYPTED_PROVENANCE_PRINCIPAL
 }
 
 /// Map a segment/container format version to the logical *payload* version
@@ -110,6 +126,7 @@ fn payload_version(version: u8) -> u8 {
     match version {
         WAL_VERSION_ENCRYPTED => WAL_VERSION,
         WAL_VERSION_ENCRYPTED_PROVENANCE => WAL_VERSION_PROVENANCE,
+        WAL_VERSION_ENCRYPTED_PROVENANCE_PRINCIPAL => WAL_VERSION_PROVENANCE_PRINCIPAL,
         v => v,
     }
 }
@@ -187,8 +204,29 @@ pub fn read_entries_from_dir_with_cipher(
 ) -> Result<Vec<WalEntry>> {
     let mut entries = Vec::new();
 
-    // Find all WAL segments
-    let mut segments = Vec::with_capacity(16); // ⚡ Bolt Optimization: Pre-allocate space for WAL segment paths to prevent small heap reallocations when reading directories.
+    // Read entries from each segment
+    for (_, path) in sorted_segment_paths(wal_dir) {
+        let segment_entries = read_segment_with_cipher(&path, start_lsn, cipher)?;
+        entries.extend(segment_entries);
+    }
+
+    // Sort entries by LSN to ensure correct ordering across segments.
+    // In a striped WAL architecture, entries can be flushed to different segments
+    // in an order that differs from their LSN assignment order.
+    entries.sort_by_key(|entry| entry.lsn);
+
+    Ok(entries)
+}
+
+/// Enumerate `*.log` WAL segment files in `wal_dir`, sorted by segment ID.
+///
+/// Shared between the recovery read path ([`read_entries_from_dir_with_cipher`])
+/// and the LSN seeding scan ([`max_lsn_in_dir`]). An unreadable directory
+/// yields an empty list, matching the historical behavior of the read path.
+fn sorted_segment_paths(wal_dir: &Path) -> Vec<(u64, std::path::PathBuf)> {
+    // ⚡ Bolt Optimization: Pre-allocate space for WAL segment paths to prevent
+    // small heap reallocations when reading directories.
+    let mut segments = Vec::with_capacity(16);
     if let Ok(dir_entries) = std::fs::read_dir(wal_dir) {
         for entry in dir_entries.flatten() {
             if let Some(name) = entry.file_name().to_str()
@@ -201,22 +239,260 @@ pub fn read_entries_from_dir_with_cipher(
             }
         }
     }
-
-    // Sort segments by ID
     segments.sort_by_key(|(id, _)| *id);
+    segments
+}
 
-    // Read entries from each segment
-    for (_, path) in segments {
-        let segment_entries = read_segment_with_cipher(&path, start_lsn, cipher)?;
-        entries.extend(segment_entries);
+/// Log a warning from the LSN seeding scan under both logging configurations,
+/// matching this module's existing logging style.
+fn log_scan_warning(message: &str) {
+    #[cfg(feature = "observability")]
+    tracing::warn!("{}", message);
+    #[cfg(not(feature = "observability"))]
+    eprintln!("WARNING: {}", message);
+}
+
+/// Scan a WAL directory for the maximum LSN present in any segment file.
+///
+/// Standalone, additive helper for Issue #3420: on startup the LSN allocator
+/// must be seeded past every LSN already durable on disk, otherwise a
+/// restarted process re-allocates LSNs that already exist in older segments
+/// (breaking LSN total ordering) and new writes land *below* the manifest
+/// LSN, causing the next startup's differential replay to skip them.
+///
+/// # Torn-tail tolerance
+///
+/// This scan runs inside database **constructors**, so unlike the recovery
+/// read path it must tolerate the data shapes a crash (or another process
+/// sharing the WAL directory) can leave behind: a truncated final entry, a
+/// zeroed preallocated tail, or a torn entry whose header decoded but whose
+/// payload is garbage (e.g. an unknown operation type byte). On encountering
+/// an undecodable entry, the scan stops reading **that segment**, keeps the
+/// maximum LSN decoded from its prefix, logs a warning, and continues with
+/// the remaining segments. A segment that is unreadable from byte 0 (missing
+/// `GWAL` magic, unsupported version, oversized, or encrypted without a
+/// cipher) is skipped entirely with a warning. Only filesystem-level I/O
+/// errors (open/metadata/mmap failures) propagate, exactly as they do from
+/// [`read_segment_with_cipher`].
+///
+/// **Consistency with replay:** the recovery replay reader
+/// (`parse_plaintext_entries`) stops at a truncated or zeroed tail and
+/// hard-errors on any other undecodable entry — either way, replay never
+/// applies anything at or beyond the first undecodable entry of a segment.
+/// Seeding the allocator from each segment's decodable prefix (plus the
+/// index-manifest floor applied by the caller) therefore cannot under-seed
+/// relative to what replay actually applies; tolerating the tail here only
+/// removes constructor failures on data replay would never have applied.
+/// Replay's own error behavior is deliberately unchanged.
+///
+/// # Returns
+///
+/// `Ok(None)` when the directory contains no segments or no decodable
+/// entries; otherwise the maximum LSN across all decodable entries.
+pub fn max_lsn_in_dir(
+    wal_dir: &Path,
+    cipher: Option<&Arc<dyn crate::encryption::cipher::Cipher>>,
+) -> Result<Option<LSN>> {
+    let mut max: Option<LSN> = None;
+    for (_, path) in sorted_segment_paths(wal_dir) {
+        max = max.max(max_lsn_in_segment(&path, cipher)?);
+    }
+    Ok(max)
+}
+
+/// Best-effort maximum-LSN scan of a single segment (see [`max_lsn_in_dir`]).
+///
+/// Never fails on undecodable entry data — returns the maximum LSN of the
+/// segment's decodable prefix instead. Only filesystem-level I/O errors
+/// propagate.
+fn max_lsn_in_segment(
+    path: &Path,
+    cipher: Option<&Arc<dyn crate::encryption::cipher::Cipher>>,
+) -> Result<Option<LSN>> {
+    // Filesystem-level failures propagate exactly like read_segment_with_cipher.
+    let file = match File::open(path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => {
+            return Err(StorageError::IoError(format!(
+                "Failed to open WAL segment {:?}: {}",
+                path, e
+            ))
+            .into());
+        }
+    };
+
+    let metadata = file
+        .metadata()
+        .map_err(|e| StorageError::IoError(format!("Failed to get file metadata: {}", e)))?;
+
+    // A zero-byte file can occur if a crash happens immediately after segment
+    // creation; it trivially contributes no LSNs.
+    if metadata.len() == 0 {
+        return Ok(None);
     }
 
-    // Sort entries by LSN to ensure correct ordering across segments.
-    // In a striped WAL architecture, entries can be flushed to different segments
-    // in an order that differs from their LSN assignment order.
-    entries.sort_by_key(|entry| entry.lsn);
+    if metadata.len() > MAX_SEGMENT_SIZE {
+        log_scan_warning(&format!(
+            "Skipping oversized WAL segment {:?} ({} bytes, max {}) during LSN seeding scan",
+            path,
+            metadata.len(),
+            MAX_SEGMENT_SIZE
+        ));
+        return Ok(None);
+    }
 
-    Ok(entries)
+    // Memory-map the file for efficient reading without loading it into memory.
+    // SAFETY: We only read from the memory map, never write. The file is opened
+    // read-only. The mapping is valid for the lifetime of this function and is
+    // automatically unmapped when dropped. We have verified the file size above
+    // to prevent out-of-bounds reads.
+    let mmap = unsafe {
+        memmap2::Mmap::map(&file).map_err(|e| {
+            StorageError::IoError(format!("Failed to memory-map WAL segment: {}", e))
+        })?
+    };
+    let buffer = &mmap[..];
+
+    // Header validation: a segment that is undecodable from byte 0 (garbage
+    // or partially written header, unsupported version) contributes no
+    // decodable LSNs. Replay would apply nothing from it either, so skipping
+    // it with a warning cannot under-seed relative to what replay applies —
+    // and it keeps the constructor usable when e.g. another process is
+    // mid-way through creating a segment in a shared WAL directory.
+    let (version, offset) = if buffer.len() >= WAL_HEADER_SIZE && buffer[0..4] == WAL_MAGIC {
+        let ver = buffer[4];
+        if ver > WAL_VERSION_MAX {
+            log_scan_warning(&format!(
+                "Skipping WAL segment {:?} with unsupported version {} (max {}) during LSN seeding scan",
+                path, ver, WAL_VERSION_MAX
+            ));
+            return Ok(None);
+        }
+        (ver, WAL_HEADER_SIZE)
+    } else {
+        log_scan_warning(&format!(
+            "Skipping WAL segment {:?} without a valid GWAL header during LSN seeding scan",
+            path
+        ));
+        return Ok(None);
+    };
+
+    if is_encrypted_version(version) {
+        let Some(cipher) = cipher else {
+            log_scan_warning(&format!(
+                "Skipping encrypted WAL segment {:?} (version {}) during LSN seeding scan: no cipher configured",
+                path, version
+            ));
+            return Ok(None);
+        };
+        Ok(scan_encrypted_max_lsn(
+            buffer, offset, cipher, path, version,
+        ))
+    } else {
+        Ok(scan_plaintext_max_lsn(buffer, offset, version, path))
+    }
+}
+
+/// Walk plaintext entry frames, returning the maximum LSN of the decodable
+/// prefix. Mirrors `parse_plaintext_entries`' benign-stop cases (truncated
+/// tail, zeroed preallocated tail) and additionally *stops* — with a warning
+/// instead of an error — at any other undecodable entry (torn tail).
+fn scan_plaintext_max_lsn(
+    buffer: &[u8],
+    mut offset: usize,
+    version: u8,
+    path: &Path,
+) -> Option<LSN> {
+    let mut max: Option<LSN> = None;
+    while offset < buffer.len() {
+        match parse_entry_at(buffer, offset, version) {
+            Ok((entry, bytes_consumed)) => {
+                max = max.max(Some(entry.lsn));
+                offset += bytes_consumed;
+            }
+            Err(e) => {
+                // Same benign-stop cases as parse_plaintext_entries: a partial
+                // entry at EOF or a zeroed preallocated tail.
+                if offset + 24 > buffer.len() || buffer[offset..offset + 24].iter().all(|&b| b == 0)
+                {
+                    break;
+                }
+                // Torn entry (e.g. valid header, garbage payload): stop this
+                // segment, keeping the decodable prefix's max. See the
+                // consistency argument on max_lsn_in_dir.
+                log_scan_warning(&format!(
+                    "Undecodable WAL entry in segment {:?} at offset {} during LSN seeding scan ({}); \
+                     seeding from this segment's decodable prefix",
+                    path, offset, e
+                ));
+                break;
+            }
+        }
+    }
+    max
+}
+
+/// Walk encrypted (length-prefixed) entry frames, returning the maximum LSN
+/// of the decodable prefix. Mirrors `parse_encrypted_entries`' benign-stop
+/// cases (partial length prefix, zero length, truncated frame) and stops —
+/// with a warning instead of an error — at a frame that fails to decrypt or
+/// parse (torn tail).
+fn scan_encrypted_max_lsn(
+    buffer: &[u8],
+    mut offset: usize,
+    cipher: &Arc<dyn crate::encryption::cipher::Cipher>,
+    path: &Path,
+    container_version: u8,
+) -> Option<LSN> {
+    let entry_version = payload_version(container_version);
+    let mut max: Option<LSN> = None;
+    while offset < buffer.len() {
+        // Partial length prefix at EOF, zero-length end marker, or truncated
+        // frame: same benign stops as parse_encrypted_entries.
+        if offset + 4 > buffer.len() {
+            break;
+        }
+        let len_bytes: [u8; 4] = buffer[offset..offset + 4]
+            .try_into()
+            .expect("slice length verified above");
+        let entry_len = u32::from_le_bytes(len_bytes) as usize;
+        if entry_len == 0 {
+            break;
+        }
+        offset += 4;
+        if offset + entry_len > buffer.len() {
+            break;
+        }
+        let encrypted_entry = &buffer[offset..offset + entry_len];
+        offset += entry_len;
+
+        let decrypted =
+            match crate::encryption::wal_encryption::decrypt_wal_payload(encrypted_entry, cipher) {
+                Ok(d) => d,
+                Err(e) => {
+                    log_scan_warning(&format!(
+                        "Undecryptable WAL entry in segment {:?} during LSN seeding scan ({}); \
+                         seeding from this segment's decodable prefix",
+                        path, e
+                    ));
+                    break;
+                }
+            };
+
+        match parse_entry_at(&decrypted, 0, entry_version) {
+            Ok((entry, _bytes_consumed)) => max = max.max(Some(entry.lsn)),
+            Err(e) => {
+                log_scan_warning(&format!(
+                    "Undecodable decrypted WAL entry in segment {:?} during LSN seeding scan ({}); \
+                     seeding from this segment's decodable prefix",
+                    path, e
+                ));
+                break;
+            }
+        }
+    }
+    max
 }
 
 /// Read WAL entries from a single segment file.
@@ -646,6 +922,14 @@ fn read_provenance(buffer: &[u8], offset: &mut usize, version: u8) -> Result<Opt
     let confidence = read_opt_f64(buffer, offset, "provenance.confidence")?;
     let note = read_opt_string(buffer, offset, "provenance.note")?;
     let correlation_id = read_opt_string(buffer, offset, "provenance.correlation_id")?;
+    // The authenticated-principal field (Issue #3350) only exists on
+    // segments at or above WAL_VERSION_PROVENANCE_PRINCIPAL; older
+    // provenance-carrying segments end the bundle at correlation_id.
+    let principal = if version >= WAL_VERSION_PROVENANCE_PRINCIPAL {
+        read_opt_string(buffer, offset, "provenance.principal")?
+    } else {
+        None
+    };
 
     let mut builder = Provenance::builder();
     if let Some(source) = source {
@@ -659,6 +943,9 @@ fn read_provenance(buffer: &[u8], offset: &mut usize, version: u8) -> Result<Opt
     }
     if let Some(correlation_id) = correlation_id {
         builder = builder.correlation_id(correlation_id);
+    }
+    if let Some(principal) = principal {
+        builder = builder.principal(principal);
     }
     let provenance = builder.build().map_err(|e| {
         StorageError::CorruptedData(format!("Invalid provenance in WAL entry: {}", e))
@@ -1089,6 +1376,184 @@ mod tests {
         assert!(entries.is_empty());
     }
 
+    /// Issue #3420 / PR #3428 review: `max_lsn_in_dir` on an empty directory
+    /// (no segments at all) must report `None`, not a phantom LSN.
+    #[test]
+    fn test_max_lsn_in_dir_empty_directory() {
+        let dir = TempDir::new().unwrap();
+        assert_eq!(max_lsn_in_dir(dir.path(), None).unwrap(), None);
+    }
+
+    /// Issue #3420 / PR #3428 review: `max_lsn_in_dir` must return the max
+    /// LSN across ALL rotated segments — with the maximum deliberately placed
+    /// in a MIDDLE segment, so returning the first (or last) segment's max
+    /// would fail.
+    #[test]
+    fn test_max_lsn_in_dir_multi_segment_returns_global_max() {
+        use std::io::Write;
+
+        let dir = TempDir::new().unwrap();
+
+        // Segment 0: LSNs 1..=3; segment 1: LSNs 40..=42 (global max);
+        // segment 2: LSNs 10..=12.
+        let lsn_ranges: [&[u64]; 3] = [&[1, 2, 3], &[40, 41, 42], &[10, 11, 12]];
+        for (seg_id, lsns) in lsn_ranges.iter().enumerate() {
+            let segment_path = dir.path().join(format!("{}.log", seg_id));
+            let mut file = File::create(&segment_path).unwrap();
+            file.write_all(&WAL_MAGIC).unwrap();
+            file.write_all(&[WAL_VERSION_PROVENANCE]).unwrap();
+            for lsn in *lsns {
+                let operation = WalOperation::CreateNode {
+                    node_id: NodeId::new(*lsn).unwrap(),
+                    label: GLOBAL_INTERNER.intern("MaxLsnTest").unwrap(),
+                    properties: PropertyMap::new(),
+                    valid_from: time::now(),
+                    provenance: None,
+                };
+                let entry = WalEntry::new(LSN(*lsn), operation);
+                let mut buffer = Vec::new();
+                serialize_entry_into(&entry, &mut buffer).unwrap();
+                file.write_all(&buffer).unwrap();
+            }
+            file.sync_all().unwrap();
+        }
+
+        assert_eq!(
+            max_lsn_in_dir(dir.path(), None).unwrap(),
+            Some(LSN(42)),
+            "max must be taken across ALL segments, not the first or last"
+        );
+    }
+
+    /// Write a plaintext segment file containing valid CreateNode entries for
+    /// the given LSNs and return the raw serialized bytes of the LAST entry
+    /// written (useful for crafting torn tails from real entry headers).
+    fn write_segment_with_lsns(path: &Path, lsns: &[u64]) -> Vec<u8> {
+        use std::io::Write;
+        let mut file = File::create(path).unwrap();
+        file.write_all(&WAL_MAGIC).unwrap();
+        file.write_all(&[WAL_VERSION_PROVENANCE]).unwrap();
+        let mut last_entry_bytes = Vec::new();
+        for lsn in lsns {
+            let operation = WalOperation::CreateNode {
+                node_id: NodeId::new(*lsn).unwrap(),
+                label: GLOBAL_INTERNER.intern("TornTailTest").unwrap(),
+                properties: PropertyMap::new(),
+                valid_from: time::now(),
+                provenance: None,
+            };
+            let entry = WalEntry::new(LSN(*lsn), operation);
+            let mut buffer = Vec::new();
+            serialize_entry_into(&entry, &mut buffer).unwrap();
+            file.write_all(&buffer).unwrap();
+            last_entry_bytes = buffer;
+        }
+        file.sync_all().unwrap();
+        last_entry_bytes
+    }
+
+    /// PR #3428 CI regression: a torn entry (valid 24-byte entry header
+    /// followed by operation-type byte 0 — the exact corruption shape from
+    /// the CI failure, e.g. an in-flight write in a shared WAL dir or a
+    /// crash-torn tail) must NOT fail the seeding scan. `max_lsn_in_dir`
+    /// returns the max of the segment's decodable prefix; the recovery
+    /// replay reader keeps its hard-error behavior, unchanged.
+    #[test]
+    fn test_max_lsn_in_dir_tolerates_torn_tail_entry() {
+        use std::io::Write;
+
+        let dir = TempDir::new().unwrap();
+        let segment_path = dir.path().join("0.log");
+        let entry_bytes = write_segment_with_lsns(&segment_path, &[5, 7]);
+
+        // Torn tail: reuse a REAL serialized entry's first 24 bytes
+        // (LSN + timestamp + checksum, all decodable) but with operation
+        // type 0 — parse_entry_at fails with "Unknown WAL operation type: 0".
+        let mut torn = entry_bytes[..24].to_vec();
+        torn.push(0); // op-type 0 (OP_* codes start at 1)
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&segment_path)
+            .unwrap();
+        file.write_all(&torn).unwrap();
+        file.sync_all().unwrap();
+
+        // Seeding scan: max of the decodable prefix, no error.
+        assert_eq!(
+            max_lsn_in_dir(dir.path(), None).unwrap(),
+            Some(LSN(7)),
+            "torn tail must not fail the seeding scan; the decodable prefix's max must be kept"
+        );
+
+        // Replay reader behavior is deliberately UNCHANGED: it still
+        // hard-errors on the same torn entry.
+        assert!(
+            read_segment(&segment_path, LSN(1)).is_err(),
+            "replay reader must keep propagating undecodable-entry errors"
+        );
+    }
+
+    /// PR #3428 CI regression: a zeroed preallocated tail is a benign stop
+    /// for the seeding scan (mirroring the replay reader, which also stops
+    /// there without error).
+    #[test]
+    fn test_max_lsn_in_dir_tolerates_zeroed_tail() {
+        use std::io::Write;
+
+        let dir = TempDir::new().unwrap();
+        let segment_path = dir.path().join("0.log");
+        write_segment_with_lsns(&segment_path, &[3, 4]);
+
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&segment_path)
+            .unwrap();
+        file.write_all(&[0u8; 64]).unwrap();
+        file.sync_all().unwrap();
+
+        assert_eq!(
+            max_lsn_in_dir(dir.path(), None).unwrap(),
+            Some(LSN(4)),
+            "zeroed preallocated tail must not fail the seeding scan"
+        );
+    }
+
+    /// PR #3428 CI regression: a segment that is garbage from byte 0 (no
+    /// GWAL magic — e.g. a partially written header from another process
+    /// sharing the WAL dir) is SKIPPED with a warning; other segments still
+    /// contribute their LSNs. Decision rationale: replay applies nothing
+    /// from such a segment either, so skipping cannot under-seed relative to
+    /// what replay applies, and it keeps a real recovery dir usable. The
+    /// replay reader keeps its hard-error behavior for the same data.
+    #[test]
+    fn test_max_lsn_in_dir_skips_garbage_header_segment() {
+        use std::io::Write;
+
+        let dir = TempDir::new().unwrap();
+
+        // Segment 0: garbage from byte 0 (no GWAL magic).
+        let garbage_path = dir.path().join("0.log");
+        let mut file = File::create(&garbage_path).unwrap();
+        file.write_all(b"garbage-not-a-wal-segment").unwrap();
+        file.sync_all().unwrap();
+
+        // Segment 1: valid entries.
+        write_segment_with_lsns(&dir.path().join("1.log"), &[3, 4, 5]);
+
+        assert_eq!(
+            max_lsn_in_dir(dir.path(), None).unwrap(),
+            Some(LSN(5)),
+            "a garbage-header segment must be skipped, not fail the whole scan"
+        );
+
+        // Replay reader behavior is deliberately UNCHANGED: it still
+        // hard-errors on the garbage-header segment.
+        assert!(
+            read_entries_from_dir(dir.path(), LSN(1)).is_err(),
+            "replay reader must keep propagating missing-magic errors"
+        );
+    }
+
     // =============================================================================
     // TDD Tests for parse_entry_at() - Issue #218
     // =============================================================================
@@ -1129,6 +1594,99 @@ mod tests {
                 assert_eq!(label, GLOBAL_INTERNER.intern("Person").unwrap());
             }
             _ => panic!("Expected CreateNode operation"),
+        }
+    }
+
+    /// Issue #3350/#3423: a provenance bundle carrying an authenticated
+    /// principal must round-trip byte-exactly through WAL serialization
+    /// when parsed at the principal-carrying payload version.
+    #[test]
+    fn test_parse_entry_at_provenance_principal_roundtrip() {
+        let node_id = NodeId::new(77).unwrap();
+        let operation = WalOperation::CreateNode {
+            node_id,
+            label: GLOBAL_INTERNER.intern("Fact").unwrap(),
+            properties: PropertyMap::new(),
+            valid_from: time::now(),
+            provenance: Some(
+                Provenance::builder()
+                    .source("mcp")
+                    .confidence(0.75)
+                    .correlation_id("req-1")
+                    .principal("svc-writer")
+                    .build()
+                    .unwrap(),
+            ),
+        };
+        let entry = WalEntry::new(LSN(5), operation);
+
+        let mut buffer = Vec::new();
+        serialize_entry_into(&entry, &mut buffer).unwrap();
+
+        let (parsed_entry, bytes_consumed) =
+            parse_entry_at(&buffer, 0, WAL_VERSION_PROVENANCE_PRINCIPAL).unwrap();
+
+        assert_eq!(parsed_entry.lsn, LSN(5));
+        assert_eq!(bytes_consumed, buffer.len());
+        match parsed_entry.operation {
+            WalOperation::CreateNode { provenance, .. } => {
+                let p = provenance.expect("provenance bundle must round-trip");
+                assert_eq!(p.source(), Some("mcp"));
+                assert_eq!(p.confidence(), Some(0.75));
+                assert_eq!(p.correlation_id(), Some("req-1"));
+                assert_eq!(p.principal(), Some("svc-writer"));
+            }
+            other => panic!("Expected CreateNode operation, got {other:?}"),
+        }
+    }
+
+    /// Issue #3350/#3423: pre-v5 bytes (a provenance bundle that ends at
+    /// `correlation_id`, with no principal slot) must parse successfully at
+    /// their own payload version with `principal: None`.
+    #[test]
+    fn test_parse_pre_v5_provenance_bytes_yields_no_principal() {
+        // Build genuine v3-format bytes. Start from the current (v5)
+        // serializer with `principal: None` -- whose only difference from
+        // v3 is a single trailing absent-principal presence byte -- drop
+        // that byte, and re-stamp the CRC (bytes 20..24, computed over
+        // LSN+timestamp and the operation data).
+        let operation = WalOperation::CreateNode {
+            node_id: NodeId::new(9).unwrap(),
+            label: GLOBAL_INTERNER.intern("Doc").unwrap(),
+            properties: PropertyMap::new(),
+            valid_from: time::now(),
+            provenance: Some(Provenance::builder().source("importer").build().unwrap()),
+        };
+        let entry = WalEntry::new(LSN(9), operation);
+        let mut buffer = Vec::new();
+        serialize_entry_into(&entry, &mut buffer).unwrap();
+        assert_eq!(
+            *buffer.last().unwrap(),
+            0,
+            "v5 buffer must end with the absent-principal presence byte"
+        );
+        buffer.pop(); // v3 bundles end at correlation_id
+        let mut hasher = crc32fast::Hasher::new();
+        hasher.update(&buffer[0..20]);
+        hasher.update(&buffer[24..]);
+        let checksum = hasher.finalize();
+        buffer[20..24].copy_from_slice(&checksum.to_le_bytes());
+
+        let (parsed_entry, bytes_consumed) =
+            parse_entry_at(&buffer, 0, WAL_VERSION_PROVENANCE).unwrap();
+
+        assert_eq!(bytes_consumed, buffer.len());
+        match parsed_entry.operation {
+            WalOperation::CreateNode { provenance, .. } => {
+                let p = provenance.expect("v3 provenance bundle must parse");
+                assert_eq!(p.source(), Some("importer"));
+                assert_eq!(
+                    p.principal(),
+                    None,
+                    "pre-v5 bytes must parse with principal: None"
+                );
+            }
+            other => panic!("Expected CreateNode operation, got {other:?}"),
         }
     }
 
@@ -1323,11 +1881,14 @@ mod tests {
 
     #[test]
     fn test_parse_entry_at_delete_node() {
-        // Create a DeleteNode entry
+        // Create a DeleteNode entry with a distinct BACKDATED valid_from
+        // (Issue #3221/#3400: the logged delete valid_from must roundtrip
+        // through serialization exactly, it is honored by WAL replay).
         let node_id = NodeId::new(42).unwrap();
+        let valid_from = HybridTimestamp::new(time::now().wallclock() - 3_600_000_000, 0).unwrap(); // 1h ago
         let operation = WalOperation::DeleteNode {
             node_id,
-            valid_from: time::now(),
+            valid_from,
         };
         let entry = WalEntry::new(LSN(5), operation);
 
@@ -1343,9 +1904,14 @@ mod tests {
         assert_eq!(bytes_consumed, buffer.len());
         match parsed_entry.operation {
             WalOperation::DeleteNode {
-                node_id: parsed_id, ..
+                node_id: parsed_id,
+                valid_from: parsed_valid_from,
             } => {
                 assert_eq!(parsed_id, node_id);
+                assert_eq!(
+                    parsed_valid_from, valid_from,
+                    "backdated delete valid_from must roundtrip exactly"
+                );
             }
             _ => panic!("Expected DeleteNode operation"),
         }
@@ -1353,11 +1919,14 @@ mod tests {
 
     #[test]
     fn test_parse_entry_at_delete_edge() {
-        // Create a DeleteEdge entry
+        // Create a DeleteEdge entry with a distinct BACKDATED valid_from
+        // (Issue #3221/#3400: the logged delete valid_from must roundtrip
+        // through serialization exactly, it is honored by WAL replay).
         let edge_id = EdgeId::new(100).unwrap();
+        let valid_from = HybridTimestamp::new(time::now().wallclock() - 3_600_000_000, 0).unwrap(); // 1h ago
         let operation = WalOperation::DeleteEdge {
             edge_id,
-            valid_from: time::now(),
+            valid_from,
         };
         let entry = WalEntry::new(LSN(6), operation);
 
@@ -1373,9 +1942,14 @@ mod tests {
         assert_eq!(bytes_consumed, buffer.len());
         match parsed_entry.operation {
             WalOperation::DeleteEdge {
-                edge_id: parsed_id, ..
+                edge_id: parsed_id,
+                valid_from: parsed_valid_from,
             } => {
                 assert_eq!(parsed_id, edge_id);
+                assert_eq!(
+                    parsed_valid_from, valid_from,
+                    "backdated delete valid_from must roundtrip exactly"
+                );
             }
             _ => panic!("Expected DeleteEdge operation"),
         }

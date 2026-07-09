@@ -44,6 +44,67 @@ impl AletheiaDB {
             .record_error_metric()
     }
 
+    /// Rebuild a vector index from the vector properties of current nodes.
+    ///
+    /// This is the recovery path for a vector index that was **skipped at
+    /// startup** because its persisted files (`meta.idx`, `mappings.idx`,
+    /// `current.usearch`, or the `current.usearch.mappings` sidecar) were
+    /// corrupted or unreadable (Issue #451). It enables the index with
+    /// `config` if it is not registered, then backfills it by scanning every
+    /// current node and indexing the node's `property_name` vector.
+    ///
+    /// # Why not just `enable_vector_index`?
+    ///
+    /// [`enable_vector_index`](Self::enable_vector_index) creates an **empty**
+    /// index with no backfill. If you re-enable a skipped index without
+    /// rebuilding, the next persistence cycle (background worker, shutdown,
+    /// or `persist_indexes`) **overwrites the on-disk files with that empty
+    /// index**, permanently losing the previously indexed vectors. Use this
+    /// method instead to restore searchability for pre-existing nodes.
+    ///
+    /// If an index is already registered for `property_name`, `config` is
+    /// ignored and the backfill runs against the existing index (entries are
+    /// updated in place, so the call is idempotent). The rebuild covers
+    /// **current state only** — temporal vector indexes are not rebuilt.
+    ///
+    /// Returns the number of node vectors indexed by the backfill.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use aletheiadb::index::vector::{HnswConfig, DistanceMetric};
+    ///
+    /// // Startup skipped the "embedding" index (corrupted files on disk):
+    /// let indexed = db.rebuild_vector_index(
+    ///     "embedding",
+    ///     HnswConfig::new(384, DistanceMetric::Cosine),
+    /// )?;
+    /// println!("re-indexed {indexed} vectors");
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the index cannot be created (e.g. the maximum
+    /// number of vector-indexed properties is reached) or if indexing a
+    /// node's vector fails (e.g. dimension mismatch with `config`).
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
+    pub fn rebuild_vector_index(&self, property_name: &str, config: HnswConfig) -> Result<usize> {
+        #[cfg(feature = "observability")]
+        let _span = crate::observability::vector_index_span("rebuild_vector_index", property_name)
+            .entered();
+        let indexed = self
+            .current
+            .rebuild_vector_index(property_name, config)
+            .record_error_metric()?;
+        // Mark the vector indexes dirty so the background persistence worker
+        // saves the rebuilt index (otherwise it would only be persisted after
+        // the next vector write or on shutdown/persist_indexes).
+        if let Some(ref tracker) = self.persistence_tracker {
+            tracker.record_vector_mutation();
+        }
+        Ok(indexed)
+    }
+
     /// Check if vector indexing is enabled.
     pub fn is_vector_index_enabled(&self) -> bool {
         self.current.is_vector_index_enabled()

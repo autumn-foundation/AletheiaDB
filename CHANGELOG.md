@@ -9,6 +9,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Authentication and role-based access control on both server surfaces
+  (Issue #3350): the HTTP server (`aletheia-server`) and the MCP server
+  (`aletheia-mcp`) require an API key by default and refuse to start with
+  zero credentials; anonymous operation is an explicit, loudly-warned
+  opt-in (`ALETHEIADB_AUTH_MODE=anonymous`, fail-closed on invalid values).
+  Four roles (`admin`/`writer`/`reader`/`metrics`) gate every HTTP route
+  and MCP tool via classifications kept in lockstep with
+  `docs/guides/access-control-matrix.md` by CI conformance tests. Key
+  lifecycle is served by the HTTP `POST/GET /admin/keys` and
+  `POST /admin/keys/revoke` endpoints over a persisted, hashed key store
+  (`{data_dir}/auth/keys.json`, SHA-256 digests only, `0600`, atomic
+  writes with directory fsync); credentials are re-verified per call so
+  revocation is immediate. Auth failures are a uniform `UNAUTHENTICATED`
+  (never distinguishing missing/unknown/revoked); role denials are
+  `PERMISSION_DENIED` — both additive to the #3234 error-code enum.
+  Authenticated writes stamp the verified principal's name into version
+  provenance (`provenance.principal`) on the structured create/update
+  node/edge paths of both surfaces (deletes/retracts and HTTP AQL-statement
+  writes do not stamp a principal yet — known follow-up). Persistence
+  format versions bump **backward-compatibly** to carry the new provenance
+  field: WAL v5 (plaintext) / v6 (encrypted), index-persistence manifest
+  v3, backup artifact v3, cold-storage record tag v3 — all older artifacts
+  still load, with `principal: None`. The autumn-web framework's
+  sensitive actuator endpoints (`/actuator/env`, `/actuator/configprops`,
+  unauthenticated `PUT /actuator/loggers/{name}`, `/actuator/tasks`,
+  `/actuator/jobs`, `/actuator/prometheus`) are force-disabled in every
+  profile via a hardened config loader, since framework routes bypass the
+  API-key layer; the remaining health/metadata framework routes are
+  documented in `docs/guides/security-quickstart.md`.
+
 - Valid-time retraction (Issue #3230): `AletheiaDB::retract_node`,
   `retract_node_detach`, and `retract_edge` (plus
   `WriteTransaction::retract_node`/`retract_edge` and the MCP
@@ -79,6 +109,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   let results = db.find_similar_as_of_in("content_embedding", &query, 10, ts)?;
   ```
 
+- Vector index loading at startup is now parallel with per-index error
+  isolation (Issue #451): with index persistence enabled, all per-property
+  HNSW vector indexes are loaded concurrently (one rayon task per property)
+  and a corrupted or unreadable vector index (bad `meta.idx`,
+  `mappings.idx`, `current.usearch`, or `current.usearch.mappings`; unknown
+  metric; out-of-range mapping key; even a panic inside one load task) is
+  skipped with a warning instead of aborting the loading of every remaining
+  vector index. Startup logs a loaded/skipped summary when any index is
+  skipped and reports the actually restored vector count per index. A
+  skipped index is recovered with the new
+  `AletheiaDB::rebuild_vector_index(property, config)`, which re-enables the
+  index and backfills it from the vector properties of current nodes —
+  merely re-enabling via `enable_vector_index` creates an empty index that
+  the next persistence cycle writes over the on-disk files, losing the
+  vectors. See
+  [docs/guides/index-persistence-guide.md](docs/guides/index-persistence-guide.md#vector-index-persistence).
+
+- `PersistenceConfig::default()` no longer enables index persistence
+  (Issue #3388). The old default (`enabled: true` with the cwd-relative
+  `data_dir: "data"`) made every database built from a default or builder
+  config silently write index snapshots into `./data` on shutdown and load
+  whatever `./data` happened to contain on startup, so unrelated instances
+  sharing a working directory could observe each other's data and a stale
+  `./data` could short-circuit WAL replay (this caused a real CI flake).
+  Index persistence is now opt-in: set `enabled: true` together with an
+  explicit `data_dir`, or use the canonical durable entry points
+  `AletheiaDB::open(path)` / `durable_config_for_data_dir(path)`, which are
+  unaffected. **Breaking for callers that relied on the implicit default:**
+  a config that never touches `PersistenceConfig` no longer persists indexes
+  (the WAL still provides durability when configured). TOML configs must now
+  set `enabled = true` under `[persistence]`; a `[persistence]` section that
+  omits `enabled` (even one that sets `data_dir` or `load_on_startup`) is
+  treated as disabled.
 - **BREAKING**: `ReadOps::get_outgoing_edges`, `ReadOps::get_incoming_edges`,
   and `ReadOps::get_outgoing_edges_with_label` now return
   `Result<Vec<EdgeId>>` instead of `Vec<EdgeId>` (Issue #359). A node that
@@ -127,6 +190,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   notifications reach every index. Previously only the most recently enabled
   temporal index was maintained, silently leaving earlier-enabled temporal
   indexes empty for point-in-time queries.
+- WAL: the flush coordinator no longer appends to an existing segment file
+  whose header format version differs from the version the writer emits
+  (Issue #3423). Replay derives the parse version solely from the segment
+  header, so such an append produced a mixed-version segment whose newer
+  entries failed CRC/parsing on recovery. The writer now reads the header
+  of any existing non-empty segment it is about to reuse and rolls forward
+  to the next segment id on a mismatched (or unreadable) header; a failed
+  WAL-directory scan during startup id-recovery now warns instead of
+  silently under-reporting the next segment id.
 - `create_edge_with_valid_time` now enforces the same "not more than one
   year in the future" cap as every other `*_with_valid_time` operation; it
   previously accepted an arbitrarily-far-future `valid_time` on edges.
