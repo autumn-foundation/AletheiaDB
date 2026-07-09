@@ -53,8 +53,8 @@ pub const BACKUP_MAGIC: [u8; 4] = *b"ALBK";
 ///   (transaction-time closure) and `prev_version`/`next_version` (version
 ///   chain links).
 ///
-/// Older artifacts are still restorable -- see [`BackupPayloadV1`],
-/// [`BackupPayloadV2`], [`BackupPayloadV3`] and `read_artifact`.
+/// Older artifacts are still restorable -- see `` `BackupPayloadV1` ``,
+/// `` `BackupPayloadV2` ``, `` `BackupPayloadV3` `` and `read_artifact`.
 pub const BACKUP_FORMAT_VERSION: u16 = 4;
 
 /// Maximum allowed decompressed payload size (5 GiB).

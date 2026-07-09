@@ -473,7 +473,7 @@ impl AletheiaDB {
     }
 
     /// Create a node with an optional [`WriteRequestOptions`](crate::api::transaction::WriteRequestOptions)
-    /// bundle: a backdated `valid_from` and/or a write-time [`Provenance`] bundle (Issue #3224).
+    /// bundle: a backdated `valid_from` and/or a write-time [`Provenance`](crate::core::provenance::Provenance) bundle (Issue #3224).
     ///
     /// Passing `WriteRequestOptions::default()` is identical to [`create_node`](Self::create_node).
     ///
@@ -813,7 +813,7 @@ impl AletheiaDB {
     /// decide whether a detach/cascade delete is required to avoid orphaning
     /// edges.
     ///
-    /// Returns [`StorageError::NodeNotFound`](crate::storage::StorageError::NodeNotFound)
+    /// Returns [`StorageError::NodeNotFound`](crate::core::error::StorageError::NodeNotFound)
     /// if the node does not exist in the current state, so callers never receive
     /// a misleading zero count for a missing node.
     #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
