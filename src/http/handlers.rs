@@ -16,7 +16,9 @@
 //! ```
 
 use crate::api::transaction::WriteOps;
+use crate::auth::AccessClass;
 use crate::core::NodeId;
+use crate::http::auth::AuthContext;
 use crate::http::converters::{
     interned_to_string, json_to_parameter_map, json_to_property_map, property_map_to_json,
     query_row_to_json,
@@ -26,6 +28,7 @@ use crate::http::state::AppState;
 use crate::query::QueryBuilder;
 use crate::query::converter::{parse_query, parse_query_with_params};
 use crate::query::ir::{Predicate, PredicateValue};
+use crate::query::read_only::detect_mutating_clause;
 use autumn_web::Route;
 use autumn_web::prelude::{get, post, routes};
 use axum::Json;
@@ -48,11 +51,15 @@ pub struct HealthResponse {
 }
 
 /// Health check endpoint. Returns `{"status": "healthy"}` with HTTP 200.
+///
+/// Classified [`AccessClass::Metrics`]: every role may probe liveness, but
+/// (in required-auth mode) only with a valid credential.
 #[get("/status")]
-pub async fn health_check() -> Json<HealthResponse> {
-    Json(HealthResponse {
+pub async fn health_check(auth: AuthContext) -> Result<Json<HealthResponse>, AletheiaHttpError> {
+    auth.authorize(AccessClass::Metrics)?;
+    Ok(Json(HealthResponse {
         status: "healthy".to_string(),
-    })
+    }))
 }
 
 // ============================================================================
@@ -139,7 +146,7 @@ pub struct ApiResponse {
 }
 
 impl ApiResponse {
-    fn success(data: Value) -> Self {
+    pub(crate) fn success(data: Value) -> Self {
         Self {
             success: true,
             data: Some(data),
@@ -181,10 +188,32 @@ where
 // Sub-handlers — each returns a JSON data payload or an error with a status.
 // ============================================================================
 
+/// Build the [`WriteRequestOptions`](crate::api::transaction::WriteRequestOptions)
+/// for an authenticated `/query` write: when the request carried a verified
+/// principal, its name is stamped into a write-time provenance bundle
+/// (Issue #3350) so "who wrote this fact" is answerable from history.
+/// Anonymous-mode requests get default options (no provenance).
+fn write_options_for(principal: Option<&str>) -> crate::api::transaction::WriteRequestOptions {
+    let options = crate::api::transaction::WriteRequestOptions::new();
+    match principal.and_then(|name| {
+        // A principal-only bundle cannot fail validation (only `confidence`
+        // is validated, and it is unset here); `.ok()` keeps this
+        // non-panicking regardless.
+        crate::core::provenance::Provenance::builder()
+            .principal(name)
+            .build()
+            .ok()
+    }) {
+        Some(provenance) => options.with_provenance(provenance),
+        None => options,
+    }
+}
+
 async fn handle_create_node(
     db: Arc<crate::AletheiaDB>,
     label: String,
     properties: Option<HashMap<String, Value>>,
+    principal: Option<String>,
 ) -> Result<Value, AletheiaHttpError> {
     let props = match properties {
         Some(p) => json_to_property_map(&p).map_err(AletheiaHttpError::BadRequest)?,
@@ -193,7 +222,7 @@ async fn handle_create_node(
 
     blocking(move || {
         let node_id = db
-            .create_node(&label, props)
+            .create_node_with_options(&label, props, write_options_for(principal.as_deref()))
             .map_err(|e| AletheiaHttpError::BadRequest(e.to_string()))?;
         let node = db
             .get_node(node_id)
@@ -401,6 +430,7 @@ fn validate_bulk_size<T>(items: &[T], name: &str) -> Result<(), AletheiaHttpErro
 async fn handle_bulk_create_nodes(
     db: Arc<crate::AletheiaDB>,
     nodes: Vec<CreateNodeInput>,
+    principal: Option<String>,
 ) -> Result<Value, AletheiaHttpError> {
     validate_bulk_size(&nodes, "nodes")?;
     blocking(move || {
@@ -413,7 +443,11 @@ async fn handle_bulk_create_nodes(
                             .map_err(|e| crate::core::error::Error::other(e.to_string()))?,
                         None => crate::core::PropertyMap::new(),
                     };
-                    ids.push(tx.create_node(&node.label, props)?);
+                    ids.push(tx.create_node_with_options(
+                        &node.label,
+                        props,
+                        write_options_for(principal.as_deref()),
+                    )?);
                 }
                 Ok::<_, crate::core::error::Error>(ids)
             })
@@ -460,6 +494,7 @@ async fn handle_bulk_get_nodes(
 async fn handle_bulk_update_nodes(
     db: Arc<crate::AletheiaDB>,
     updates: Vec<UpdateNodeInput>,
+    principal: Option<String>,
 ) -> Result<Value, AletheiaHttpError> {
     validate_bulk_size(&updates, "updates")?;
     blocking(move || {
@@ -473,7 +508,11 @@ async fn handle_bulk_update_nodes(
                             .map_err(|e| crate::core::error::Error::other(e.to_string()))?,
                         None => crate::core::PropertyMap::new(),
                     };
-                    tx.update_node(node_id, props)?;
+                    tx.update_node_with_options(
+                        node_id,
+                        props,
+                        write_options_for(principal.as_deref()),
+                    )?;
                     ids.push(node_id);
                 }
                 Ok::<_, crate::core::error::Error>(ids)
@@ -579,22 +618,76 @@ fn classify_query_error(msg: String) -> AletheiaHttpError {
     }
 }
 
+/// Classify a `/query` operation into the [`AccessClass`] it requires.
+///
+/// Exhaustive match — no wildcard arm — so adding a new `QueryRequest`
+/// variant forces an explicit classification decision at compile time.
+/// This mapping is the seed of the authorization conformance matrix.
+fn query_access_class(req: &QueryRequest) -> AccessClass {
+    match req {
+        // Read-only lookups and traversals.
+        QueryRequest::FindNode { .. }
+        | QueryRequest::GetNode { .. }
+        | QueryRequest::BulkGetNodes { .. }
+        | QueryRequest::FindNeighbors { .. } => AccessClass::Read,
+        // Graph mutations.
+        QueryRequest::CreateNode { .. }
+        | QueryRequest::BulkCreateNodes { .. }
+        | QueryRequest::BulkUpdateNodes { .. }
+        | QueryRequest::BulkDeleteNodes { .. } => AccessClass::Write,
+        // Query-string execution: classify per statement using the shared
+        // read-only guard (the same one the MCP `query` tool uses). A
+        // statement with no mutating clause needs only Read.
+        QueryRequest::ExecuteQuery { query, .. } => {
+            if detect_mutating_clause(query).is_none() {
+                AccessClass::Read
+            } else {
+                AccessClass::Write
+            }
+        }
+        // A bulk batch is Read only if *every* statement is read-only.
+        QueryRequest::BulkExecuteQuery { queries } => {
+            if queries
+                .iter()
+                .all(|q| detect_mutating_clause(&q.query).is_none())
+            {
+                AccessClass::Read
+            } else {
+                AccessClass::Write
+            }
+        }
+    }
+}
+
 /// Polymorphic `/query` endpoint. Dispatches on the `operation` tag.
+///
+/// Authorization happens *before* any database work: the request's operation
+/// is classified via [`query_access_class`] and checked against the caller's
+/// role.
 #[post("/query")]
 pub async fn handle_query(
+    auth: AuthContext,
     state: AppState,
     Json(req): Json<QueryRequest>,
 ) -> Result<Json<ApiResponse>, AletheiaHttpError> {
+    auth.authorize(query_access_class(&req))?;
     let db = state.db_arc();
+    // Verified principal name (if any) for provenance stamping on write
+    // operations (Issue #3350). Anonymous mode yields None.
+    let principal = auth.principal().map(|p| p.name.clone());
 
     let data = match req {
         QueryRequest::CreateNode { label, properties } => {
-            handle_create_node(db, label, properties).await?
+            handle_create_node(db, label, properties, principal).await?
         }
         QueryRequest::GetNode { node_id } => handle_get_node(db, node_id).await?,
-        QueryRequest::BulkCreateNodes { nodes } => handle_bulk_create_nodes(db, nodes).await?,
+        QueryRequest::BulkCreateNodes { nodes } => {
+            handle_bulk_create_nodes(db, nodes, principal).await?
+        }
         QueryRequest::BulkGetNodes { node_ids } => handle_bulk_get_nodes(db, node_ids).await?,
-        QueryRequest::BulkUpdateNodes { updates } => handle_bulk_update_nodes(db, updates).await?,
+        QueryRequest::BulkUpdateNodes { updates } => {
+            handle_bulk_update_nodes(db, updates, principal).await?
+        }
         QueryRequest::BulkDeleteNodes { node_ids, cascade } => {
             handle_bulk_delete_nodes(db, node_ids, cascade).await?
         }
@@ -627,7 +720,9 @@ pub async fn handle_query(
 /// handlers are declared.
 #[must_use]
 pub fn all_routes() -> Vec<Route> {
-    routes![health_check, handle_query]
+    let mut r = routes![health_check, handle_query];
+    r.extend(crate::http::admin::admin_routes());
+    r
 }
 
 #[cfg(test)]
@@ -669,6 +764,84 @@ mod tests {
             json_to_predicate_value(&Value::Object(serde_json::Map::new())),
             None
         );
+    }
+
+    /// Conformance matrix: every `/query` operation maps to the expected
+    /// access class (Issue #3350). The match in `query_access_class` has no
+    /// wildcard arm, so new operations cannot silently skip classification.
+    #[test]
+    fn query_access_class_conformance_matrix() {
+        use AccessClass::{Read, Write};
+
+        let read_ops = [
+            json!({"operation": "find_node", "label": "Person"}),
+            json!({"operation": "get_node", "node_id": 1}),
+            json!({"operation": "bulk_get_nodes", "node_ids": [1, 2]}),
+            json!({"operation": "find_neighbors", "node_id": 1}),
+            json!({"operation": "execute_query", "query": "MATCH (n:Person) RETURN n"}),
+            json!({"operation": "bulk_execute_query", "queries": [
+                {"query": "MATCH (n) RETURN n"},
+                {"query": "MATCH (m:X) RETURN m"},
+            ]}),
+        ];
+        for op in &read_ops {
+            let req: QueryRequest = serde_json::from_value(op.clone()).expect("deserialize");
+            assert_eq!(query_access_class(&req), Read, "expected Read for {op}");
+        }
+
+        let write_ops = [
+            json!({"operation": "create_node", "label": "Person"}),
+            json!({"operation": "bulk_create_nodes", "nodes": [{"label": "P"}]}),
+            json!({"operation": "bulk_update_nodes", "updates": [{"node_id": 1}]}),
+            json!({"operation": "bulk_delete_nodes", "node_ids": [1]}),
+            json!({"operation": "execute_query", "query": "CREATE (n:Person {name: 'X'})"}),
+            json!({"operation": "bulk_execute_query", "queries": [
+                {"query": "MATCH (n) RETURN n"},
+                {"query": "MATCH (n) DETACH DELETE n"},
+            ]}),
+        ];
+        for op in &write_ops {
+            let req: QueryRequest = serde_json::from_value(op.clone()).expect("deserialize");
+            assert_eq!(query_access_class(&req), Write, "expected Write for {op}");
+        }
+    }
+
+    /// Runtime route-inventory conformance (Issue #3350 Phase 2): every
+    /// route the HTTP server actually registers must be a route the auth
+    /// matrix classifies. `query_access_class` covers `/query`'s operation
+    /// enum exhaustively at compile time; this test closes the remaining
+    /// gap — a brand-new *route* (a new handler in `all_routes`) cannot ship
+    /// without an explicit classification decision here and in
+    /// `docs/guides/access-control-matrix.md`.
+    #[test]
+    fn all_registered_routes_are_classified() {
+        // (method, path), mirroring docs/guides/access-control-matrix.md:
+        //   GET /status              -> metrics
+        //   POST /query              -> per-operation (query_access_class)
+        //   POST/GET /admin/keys and POST /admin/keys/revoke -> admin
+        let classified = [
+            ("GET", "/status"),
+            ("POST", "/query"),
+            ("POST", "/admin/keys"),
+            ("GET", "/admin/keys"),
+            ("POST", "/admin/keys/revoke"),
+        ];
+        let routes = all_routes();
+        assert_eq!(
+            routes.len(),
+            classified.len(),
+            "route inventory changed — update the classification set (and the \
+             documented matrix in docs/guides/access-control-matrix.md)"
+        );
+        for route in &routes {
+            assert!(
+                classified.contains(&(route.method.as_str(), route.path)),
+                "unclassified HTTP route: {} {} — classify it in \
+                 docs/guides/access-control-matrix.md and add it here",
+                route.method,
+                route.path
+            );
+        }
     }
 
     #[test]

@@ -96,6 +96,7 @@ pub mod lexer;
 pub mod parser;
 pub mod plan;
 pub mod planner;
+pub mod read_only;
 pub mod result;
 pub mod semantic_pathfinding;
 /// Query execution traits.

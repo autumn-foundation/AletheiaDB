@@ -62,6 +62,15 @@ pub struct Provenance {
         serde(skip_serializing_if = "Option::is_none")
     )]
     correlation_id: Option<String>,
+    /// The authenticated principal (API-key identity) that made this write,
+    /// if the write arrived through an authenticated server surface
+    /// (Issue #3350). Server-stamped -- never caller-supplied -- and
+    /// composes with `source` (which remains whatever the caller declared).
+    #[cfg_attr(
+        any(feature = "config-toml", feature = "mcp-server"),
+        serde(skip_serializing_if = "Option::is_none")
+    )]
+    principal: Option<String>,
 }
 
 impl Provenance {
@@ -90,6 +99,19 @@ impl Provenance {
         self.correlation_id.as_deref()
     }
 
+    /// The authenticated principal (API-key name) that made this write, if
+    /// the write arrived through an authenticated server surface
+    /// (Issue #3350).
+    ///
+    /// Unlike the other fields, this is stamped server-side from the
+    /// verified session/request credential -- it is never accepted from the
+    /// caller's provenance payload, so it cannot be forged through the MCP
+    /// or HTTP surfaces. `None` for anonymous-mode writes and for writes
+    /// made through the embedded Rust API.
+    pub fn principal(&self) -> Option<&str> {
+        self.principal.as_deref()
+    }
+
     /// Returns `true` if every field is absent.
     ///
     /// Used at API boundaries to normalize an all-`None` bundle to "no
@@ -100,9 +122,10 @@ impl Provenance {
             && self.confidence.is_none()
             && self.note.is_none()
             && self.correlation_id.is_none()
+            && self.principal.is_none()
     }
 
-    /// Construct and validate a [`Provenance`] bundle from four independently
+    /// Construct and validate a [`Provenance`] bundle from five independently
     /// optional fields.
     ///
     /// This is the single shared implementation of "feed whichever fields are
@@ -122,6 +145,7 @@ impl Provenance {
         confidence: Option<f64>,
         note: Option<String>,
         correlation_id: Option<String>,
+        principal: Option<String>,
     ) -> Result<Provenance, ProvenanceError> {
         let mut builder = ProvenanceBuilder::default();
         if let Some(source) = source {
@@ -136,7 +160,23 @@ impl Provenance {
         if let Some(correlation_id) = correlation_id {
             builder = builder.correlation_id(correlation_id);
         }
+        if let Some(principal) = principal {
+            builder = builder.principal(principal);
+        }
         builder.build()
+    }
+
+    /// Return a copy of this bundle with `principal` set to the given
+    /// authenticated identity (Issue #3350).
+    ///
+    /// Used by server surfaces to stamp the verified principal onto a
+    /// caller-supplied bundle without disturbing the caller's `source` /
+    /// `confidence` / `note` / `correlation_id`. No validation is required
+    /// (the principal name is server-verified, not caller data).
+    #[must_use]
+    pub fn with_principal<S: Into<String>>(mut self, principal: S) -> Self {
+        self.principal = Some(principal.into());
+        self
     }
 }
 
@@ -147,6 +187,7 @@ pub struct ProvenanceBuilder {
     confidence: Option<f64>,
     note: Option<String>,
     correlation_id: Option<String>,
+    principal: Option<String>,
 }
 
 impl ProvenanceBuilder {
@@ -174,6 +215,15 @@ impl ProvenanceBuilder {
         self
     }
 
+    /// Set the authenticated principal that made this write (Issue #3350).
+    ///
+    /// Server surfaces stamp this from the verified credential; it should
+    /// never be populated from caller-supplied provenance payloads.
+    pub fn principal<S: Into<String>>(mut self, principal: S) -> Self {
+        self.principal = Some(principal.into());
+        self
+    }
+
     /// Validate and construct the [`Provenance`] bundle.
     ///
     /// # Errors
@@ -191,6 +241,7 @@ impl ProvenanceBuilder {
             confidence: self.confidence,
             note: self.note,
             correlation_id: self.correlation_id,
+            principal: self.principal,
         })
     }
 }
@@ -209,6 +260,8 @@ struct ProvenanceRaw {
     note: Option<String>,
     #[serde(default)]
     correlation_id: Option<String>,
+    #[serde(default)]
+    principal: Option<String>,
 }
 
 #[cfg(any(feature = "config-toml", feature = "mcp-server"))]
@@ -216,7 +269,13 @@ impl TryFrom<ProvenanceRaw> for Provenance {
     type Error = ProvenanceError;
 
     fn try_from(raw: ProvenanceRaw) -> Result<Self, Self::Error> {
-        Provenance::from_parts(raw.source, raw.confidence, raw.note, raw.correlation_id)
+        Provenance::from_parts(
+            raw.source,
+            raw.confidence,
+            raw.note,
+            raw.correlation_id,
+            raw.principal,
+        )
     }
 }
 
@@ -296,6 +355,48 @@ mod tests {
         let p: Provenance = serde_json::from_str(json).unwrap();
         assert_eq!(p.source(), Some("claude-mcp"));
         assert_eq!(p.confidence(), Some(0.8));
+    }
+
+    #[test]
+    fn test_provenance_principal_field_composes_with_source() {
+        let p = Provenance::builder()
+            .source("hr-system")
+            .build()
+            .unwrap()
+            .with_principal("ingest-writer");
+        assert_eq!(p.source(), Some("hr-system"));
+        assert_eq!(p.principal(), Some("ingest-writer"));
+        assert!(!p.is_empty());
+    }
+
+    #[test]
+    fn test_provenance_principal_only_bundle_is_not_empty() {
+        let p = Provenance::builder()
+            .principal("ingest-writer")
+            .build()
+            .unwrap();
+        assert!(!p.is_empty());
+        assert_eq!(p.principal(), Some("ingest-writer"));
+        assert_eq!(p.source(), None);
+    }
+
+    #[cfg(any(feature = "config-toml", feature = "mcp-server"))]
+    #[test]
+    fn test_provenance_principal_json_round_trip_and_omission() {
+        // Absent principal is omitted from JSON entirely.
+        let p = Provenance::builder().source("csv-import").build().unwrap();
+        let json = serde_json::to_string(&p).unwrap();
+        assert!(!json.contains("principal"));
+
+        // Present principal round-trips; pre-#3350 JSON (no principal key)
+        // still deserializes.
+        let stamped = p.with_principal("alice-key");
+        let json = serde_json::to_string(&stamped).unwrap();
+        assert!(json.contains("\"principal\":\"alice-key\""));
+        let back: Provenance = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.principal(), Some("alice-key"));
+        let legacy: Provenance = serde_json::from_str(r#"{"source":"csv-import"}"#).unwrap();
+        assert_eq!(legacy.principal(), None);
     }
 
     #[cfg(any(feature = "config-toml", feature = "mcp-server"))]

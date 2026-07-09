@@ -19,6 +19,11 @@ use std::collections::HashMap;
 /// independently optional; an entirely empty bundle (all fields omitted) is
 /// treated as no provenance at all. `confidence`, if present, is validated
 /// to be in `[0.0, 1.0]` and rejected with a clear error otherwise.
+///
+/// Note: the stored provenance's `principal` field (Issue #3350) is
+/// **deliberately absent** here -- it is stamped server-side from the
+/// verified session credential and cannot be supplied (or forged) by the
+/// caller.
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct ProvenanceRequest {
     /// Source system/identifier that produced this write (e.g. "hr-system",
@@ -1101,30 +1106,35 @@ impl TemporalBounds {
             Some(Self::to_rfc3339_micros(ts))
         }
     }
-}
 
-impl From<&crate::core::temporal::BiTemporalInterval> for TemporalBounds {
-    fn from(interval: &crate::core::temporal::BiTemporalInterval) -> Self {
-        // `is_current` semantics (Issue #3232):
-        //
-        // Transaction dimension: current iff the transaction interval is
-        // open-ended. An open transaction interval IS by definition the
-        // currently-recorded version; comparing the HLC commit timestamp
-        // against SystemTime-now would be a clock artifact (HLC stamps carry
-        // a logical component that orders after SystemTime-now within the
-        // same microsecond, and the HLC frontier can legitimately run ahead
-        // of SystemTime for a while after a tolerated backward OS-clock
-        // step), transiently misreporting a live head version as not
-        // current.
-        //
-        // Valid dimension: still distinguishes not-yet-valid (future
-        // valid_from) and expired (past valid_to) facts, but compared at
-        // wallclock (microsecond) granularity so the HLC logical component
-        // cannot flip the answer within the current microsecond.
-        // Sub-microsecond edge rounding toward "current" is acceptable for a
-        // convenience boolean; the authoritative data is the bounds
-        // themselves.
-        let now = crate::core::temporal::time::now();
+    /// Build the bounds for a version, evaluating `is_current` at an explicit
+    /// `now` (Issue #3391): a request serializing many entities captures its
+    /// wallclock once and evaluates every entity against that same instant,
+    /// so entities in one response can never disagree about when "now" is.
+    ///
+    /// `is_current` semantics (Issue #3232):
+    ///
+    /// Transaction dimension: current iff the transaction interval is
+    /// open-ended. An open transaction interval IS by definition the
+    /// currently-recorded version; comparing the HLC commit timestamp
+    /// against SystemTime-now would be a clock artifact (HLC stamps carry
+    /// a logical component that orders after SystemTime-now within the
+    /// same microsecond, and the HLC frontier can legitimately run ahead
+    /// of SystemTime for a while after a tolerated backward OS-clock
+    /// step), transiently misreporting a live head version as not
+    /// current.
+    ///
+    /// Valid dimension: still distinguishes not-yet-valid (future
+    /// valid_from) and expired (past valid_to) facts, but compared at
+    /// wallclock (microsecond) granularity so the HLC logical component
+    /// cannot flip the answer within the current microsecond.
+    /// Sub-microsecond edge rounding toward "current" is acceptable for a
+    /// convenience boolean; the authoritative data is the bounds
+    /// themselves.
+    pub fn from_interval_at(
+        interval: &crate::core::temporal::BiTemporalInterval,
+        now: crate::core::temporal::Timestamp,
+    ) -> Self {
         let valid = interval.valid_time();
         let tx_open = interval.transaction_time().is_current();
         let valid_contains_now = valid.start().wallclock() <= now.wallclock()
@@ -1136,6 +1146,15 @@ impl From<&crate::core::temporal::BiTemporalInterval> for TemporalBounds {
             transaction_to: Self::end_bound(interval.transaction_time().end()),
             is_current: tx_open && valid_contains_now,
         }
+    }
+}
+
+impl From<&crate::core::temporal::BiTemporalInterval> for TemporalBounds {
+    /// Single-entity convenience: evaluates at a fresh wallclock read. Bulk
+    /// responses should call [`TemporalBounds::from_interval_at`] with one
+    /// request-scoped `now` instead (Issue #3391).
+    fn from(interval: &crate::core::temporal::BiTemporalInterval) -> Self {
+        Self::from_interval_at(interval, crate::core::temporal::time::now())
     }
 }
 

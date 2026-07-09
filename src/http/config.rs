@@ -16,6 +16,8 @@
 /// framework default that a middleware refactor could silently remove).
 pub const DEFAULT_MAX_REQUEST_BODY_BYTES: usize = 2 * 1024 * 1024;
 
+use crate::auth::{AuthMode, SecretString};
+
 /// CORS (Cross-Origin Resource Sharing) configuration.
 #[derive(Debug, Clone)]
 pub struct CorsConfig {
@@ -183,6 +185,17 @@ pub struct ServerConfig {
     /// are rejected with `413 Payload Too Large` before deserialization. See
     /// [`DEFAULT_MAX_REQUEST_BODY_BYTES`].
     max_request_body_bytes: usize,
+    /// Authentication mode. Defaults to [`AuthMode::Required`]: the server
+    /// refuses to start without at least one credential unless the operator
+    /// explicitly opts into anonymous mode.
+    auth_mode: AuthMode,
+    /// Bootstrap admin key installed at startup (from env/config), if any.
+    /// Wrapped in [`SecretString`] so it never appears in `Debug` output.
+    bootstrap_admin_key: Option<SecretString>,
+    /// Explicit path for the persisted auth key store. When unset and
+    /// [`data_dir`](Self::data_dir) is set, defaults to
+    /// `{data_dir}/auth/keys.json`.
+    auth_persist_path: Option<std::path::PathBuf>,
 }
 
 impl ServerConfig {
@@ -199,6 +212,9 @@ impl ServerConfig {
             rate_limit: RateLimitConfig::default(),
             data_dir: None,
             max_request_body_bytes: DEFAULT_MAX_REQUEST_BODY_BYTES,
+            auth_mode: AuthMode::default(),
+            bootstrap_admin_key: None,
+            auth_persist_path: None,
         }
     }
 
@@ -239,6 +255,39 @@ impl ServerConfig {
         self.data_dir.as_deref()
     }
 
+    /// Get the configured authentication mode (default: [`AuthMode::Required`]).
+    pub fn auth_mode(&self) -> AuthMode {
+        self.auth_mode
+    }
+
+    /// Get the bootstrap admin key, if configured.
+    pub fn bootstrap_admin_key(&self) -> Option<&SecretString> {
+        self.bootstrap_admin_key.as_ref()
+    }
+
+    /// Get the explicitly configured auth persist path, if any.
+    ///
+    /// Most callers want [`resolved_auth_persist_path`](Self::resolved_auth_persist_path),
+    /// which also applies the `data_dir` derivation.
+    pub fn auth_persist_path(&self) -> Option<&std::path::Path> {
+        self.auth_persist_path.as_deref()
+    }
+
+    /// Resolve where the auth key store should be persisted:
+    ///
+    /// 1. The explicit [`auth_persist_path`](Self::auth_persist_path) when set.
+    /// 2. Otherwise `{data_dir}/auth/keys.json` when a data dir is set.
+    /// 3. Otherwise `None` (memory-only auth store).
+    #[must_use]
+    pub fn resolved_auth_persist_path(&self) -> Option<std::path::PathBuf> {
+        if let Some(explicit) = &self.auth_persist_path {
+            return Some(explicit.clone());
+        }
+        self.data_dir
+            .as_deref()
+            .map(|d| d.join("auth").join("keys.json"))
+    }
+
     /// Materialize the [`AletheiaDBConfig`] this server config implies.
     ///
     /// Returns `None` when no [`data_dir`](Self::data_dir) is set — that
@@ -275,6 +324,9 @@ impl Default for ServerConfig {
             rate_limit: RateLimitConfig::default(),
             data_dir: None,
             max_request_body_bytes: DEFAULT_MAX_REQUEST_BODY_BYTES,
+            auth_mode: AuthMode::default(),
+            bootstrap_admin_key: None,
+            auth_persist_path: None,
         }
     }
 }
@@ -288,6 +340,9 @@ pub struct ServerConfigBuilder {
     rate_limit: Option<RateLimitConfig>,
     data_dir: Option<std::path::PathBuf>,
     max_request_body_bytes: Option<usize>,
+    auth_mode: Option<AuthMode>,
+    bootstrap_admin_key: Option<SecretString>,
+    auth_persist_path: Option<std::path::PathBuf>,
 }
 
 impl ServerConfigBuilder {
@@ -355,6 +410,31 @@ impl ServerConfigBuilder {
         self
     }
 
+    /// Set the authentication mode.
+    ///
+    /// Defaults to [`AuthMode::Required`]. [`AuthMode::Anonymous`] disables
+    /// authentication entirely and must be an explicit, deliberate opt-in.
+    pub fn auth_mode(mut self, mode: AuthMode) -> Self {
+        self.auth_mode = Some(mode);
+        self
+    }
+
+    /// Set a bootstrap admin key installed at startup (principal
+    /// `bootstrap-admin`, role `admin`). Memory-only; never persisted.
+    pub fn bootstrap_admin_key(mut self, key: SecretString) -> Self {
+        self.bootstrap_admin_key = Some(key);
+        self
+    }
+
+    /// Set an explicit path for the persisted auth key store.
+    ///
+    /// When unset, `{data_dir}/auth/keys.json` is used if a data dir is
+    /// configured; otherwise the store is memory-only.
+    pub fn auth_persist_path(mut self, path: impl Into<std::path::PathBuf>) -> Self {
+        self.auth_persist_path = Some(path.into());
+        self
+    }
+
     /// Build the server configuration.
     pub fn build(self) -> ServerConfig {
         ServerConfig {
@@ -366,6 +446,9 @@ impl ServerConfigBuilder {
             max_request_body_bytes: self
                 .max_request_body_bytes
                 .unwrap_or(DEFAULT_MAX_REQUEST_BODY_BYTES),
+            auth_mode: self.auth_mode.unwrap_or_default(),
+            bootstrap_admin_key: self.bootstrap_admin_key,
+            auth_persist_path: self.auth_persist_path,
         }
     }
 }
@@ -447,6 +530,70 @@ mod tests {
         let config = ServerConfig::builder().rate_limit(rate_limit).build();
         assert_eq!(config.rate_limit().requests_per_second(), 100);
         assert_eq!(config.rate_limit().burst_size(), 200);
+    }
+
+    /// Auth defaults are conservative: Required mode, no bootstrap key,
+    /// no persist path (Issue #3350).
+    #[test]
+    fn test_default_auth_is_required() {
+        let config = ServerConfig::default();
+        assert_eq!(config.auth_mode(), AuthMode::Required);
+        assert!(config.bootstrap_admin_key().is_none());
+        assert!(config.auth_persist_path().is_none());
+        assert!(config.resolved_auth_persist_path().is_none());
+
+        // `new(port)` and the builder default the same way.
+        assert_eq!(ServerConfig::new(3000).auth_mode(), AuthMode::Required);
+        assert_eq!(
+            ServerConfig::builder().build().auth_mode(),
+            AuthMode::Required
+        );
+    }
+
+    #[test]
+    fn test_auth_builder_settings() {
+        let config = ServerConfig::builder()
+            .auth_mode(AuthMode::Anonymous)
+            .bootstrap_admin_key(SecretString::new("boot-key"))
+            .auth_persist_path("/tmp/keys.json")
+            .build();
+        assert_eq!(config.auth_mode(), AuthMode::Anonymous);
+        assert_eq!(
+            config.bootstrap_admin_key().map(SecretString::expose),
+            Some("boot-key")
+        );
+        assert_eq!(
+            config.resolved_auth_persist_path(),
+            Some(std::path::PathBuf::from("/tmp/keys.json"))
+        );
+    }
+
+    #[test]
+    fn test_auth_persist_path_derives_from_data_dir() {
+        let config = ServerConfig::builder().data_dir("/data/aletheia").build();
+        assert_eq!(
+            config.resolved_auth_persist_path(),
+            Some(std::path::PathBuf::from("/data/aletheia/auth/keys.json"))
+        );
+
+        // Explicit path wins over the derivation.
+        let config = ServerConfig::builder()
+            .data_dir("/data/aletheia")
+            .auth_persist_path("/elsewhere/keys.json")
+            .build();
+        assert_eq!(
+            config.resolved_auth_persist_path(),
+            Some(std::path::PathBuf::from("/elsewhere/keys.json"))
+        );
+    }
+
+    #[test]
+    fn test_config_debug_does_not_leak_bootstrap_key() {
+        let config = ServerConfig::builder()
+            .bootstrap_admin_key(SecretString::new("super-secret-bootstrap"))
+            .build();
+        let debug = format!("{config:?}");
+        assert!(!debug.contains("super-secret-bootstrap"));
     }
 
     #[test]

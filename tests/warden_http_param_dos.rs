@@ -21,6 +21,7 @@
 use std::sync::Arc;
 
 use aletheiadb::AletheiaDB;
+use aletheiadb::auth::AuthMode;
 use aletheiadb::http::{AppState, ServerConfig, build_test_router};
 use autumn_web::test::{TestApp, TestClient};
 use axum::body::Body;
@@ -36,8 +37,13 @@ const TEST_BODY_LIMIT: usize = 4 * 1024;
 fn client_with_limit(max_body: usize) -> TestClient {
     let db = Arc::new(AletheiaDB::new().expect("create DB"));
     let state = AppState::new(db);
+    // Anonymous mode is an explicit opt-in (Issue #3350): this test exercises
+    // the body-size limit (Issue #3108) in isolation. Auth is extracted inside
+    // the handler and would otherwise 401 before the body is read, masking the
+    // 413 the body-limit layer produces.
     let config = ServerConfig::builder()
         .max_request_body_bytes(max_body)
+        .auth_mode(AuthMode::Anonymous)
         .build();
     let router = build_test_router(state, &config).expect("build router");
     TestApp::from_router(router)

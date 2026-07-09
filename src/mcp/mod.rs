@@ -25,10 +25,12 @@
 //! server.serve_stdio().await?;
 //! ```
 
+mod auth;
 mod error;
 mod server;
 mod tools;
 
+pub use auth::{McpAuthConfig, validate_mcp_auth_startup};
 pub use error::{McpError, McpErrorCode};
 pub use server::AletheiaMcpServer;
 
@@ -38,9 +40,12 @@ pub use tools::{
     DeleteNodeCascadeRequest, DeleteNodeRequest, EnableVectorIndexRequest, FindNodesAtTimeRequest,
     FindSimilarRequest, GetEdgeAtTimeRequest, GetEdgeRequest, GetIncomingEdgesRequest,
     GetNodeAtTimeRequest, GetNodeRequest, GetOutgoingEdgesRequest, HybridQueryRequest,
-    ListChangesRequest, ListEdgesRequest, ListNodesRequest, ListVectorIndexesRequest, QueryRequest,
-    TemporalBounds, TraverseRequest, UpdateEdgeRequest, UpdateNodeRequest,
+    ListChangesRequest, ListEdgesRequest, ListNodesRequest, ListVectorIndexesRequest,
+    ProvenanceRequest, QueryRequest, TemporalBounds, TraverseRequest, UpdateEdgeRequest,
+    UpdateNodeRequest,
 };
 
+#[cfg(test)]
+mod auth_tests;
 #[cfg(test)]
 mod tests;

@@ -307,7 +307,7 @@ impl AletheiaDB {
 pub fn enable_temporal_vector_index(&self, property_name: &str, config: TemporalVectorConfig) -> Result<()> {
     // 1. Create temporal vector index
     self.current.enable_temporal_vector_index(property_name, config)?;
-    let temporal_index = self.current.get_temporal_vector_index().ok_or(...)?;
+    let temporal_index = self.current.get_temporal_vector_index_for(property_name).ok_or(...)?;
 
     // 2. Register pre-anchor hooks (strong consistency)
     // Both node and edge hooks perform the same action, so we create one and clone it

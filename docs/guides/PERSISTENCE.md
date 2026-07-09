@@ -19,6 +19,10 @@ Persistence) in one line — see below. Reach for `with_unified_config()`
 directly only when you need to tune durability mode, stripe counts, or add
 cold storage (Pattern 3).
 
+> **Migration note (Issue #3388):** Index persistence is now opt-in —
+> `PersistenceConfig::default()` has `enabled: false`; set `enabled: true`
+> with an explicit `data_dir` (or use `AletheiaDB::open(path)`) to persist.
+
 ## Current Reality (Important)
 
 As of 2026-02, persistence and recovery behave as follows:

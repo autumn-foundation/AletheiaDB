@@ -66,7 +66,12 @@ pub enum EntityId {
 }
 
 /// Query result entity (full node or edge).
+///
+/// Marked `#[non_exhaustive]`: downstream crates must include a wildcard arm
+/// when matching, so future variants (like the [`EntityResult::Null`] binding
+/// added for `OPTIONAL MATCH`) are not semver-breaking.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum EntityResult {
     /// Full node data
     Node(Node),
@@ -76,18 +81,30 @@ pub enum EntityResult {
     NodeId(NodeId),
     /// Just an edge ID
     EdgeId(EdgeId),
+    /// A null binding produced by an unmatched `OPTIONAL MATCH` pattern.
+    ///
+    /// Preserves the row (openCypher left-outer semantics) while carrying no
+    /// entity. Predicates evaluated against a null row are not-true except
+    /// `IS NULL`-style checks.
+    Null,
 }
 
 impl EntityResult {
-    /// Get the entity ID
-    #[must_use]
-    pub fn id(&self) -> EntityId {
+    /// Get the entity ID, or `None` for a null binding.
+    pub fn id(&self) -> Option<EntityId> {
         match self {
-            EntityResult::Node(n) => EntityId::Node(n.id),
-            EntityResult::Edge(e) => EntityId::Edge(e.id),
-            EntityResult::NodeId(id) => EntityId::Node(*id),
-            EntityResult::EdgeId(id) => EntityId::Edge(*id),
+            EntityResult::Node(n) => Some(EntityId::Node(n.id)),
+            EntityResult::Edge(e) => Some(EntityId::Edge(e.id)),
+            EntityResult::NodeId(id) => Some(EntityId::Node(*id)),
+            EntityResult::EdgeId(id) => Some(EntityId::Edge(*id)),
+            EntityResult::Null => None,
         }
+    }
+
+    /// Returns `true` if this is a null binding from an unmatched optional pattern.
+    #[must_use]
+    pub fn is_null(&self) -> bool {
+        matches!(self, EntityResult::Null)
     }
 
     /// Try to get as a Node
@@ -852,8 +869,8 @@ mod tests {
         assert_eq!(result.node_id(), None);
 
         match result.id() {
-            EntityId::Edge(id) => assert_eq!(id, edge.id),
-            EntityId::Node(_) => panic!("Expected Edge"),
+            Some(EntityId::Edge(id)) => assert_eq!(id, edge.id),
+            other => panic!("Expected Edge, got {:?}", other),
         }
     }
 
@@ -867,9 +884,20 @@ mod tests {
         assert_eq!(result.node_id(), None);
 
         match result.id() {
-            EntityId::Edge(id) => assert_eq!(id, edge_id),
-            EntityId::Node(_) => panic!("Expected Edge"),
+            Some(EntityId::Edge(id)) => assert_eq!(id, edge_id),
+            other => panic!("Expected Edge, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn test_entity_result_null() {
+        let result = EntityResult::Null;
+
+        assert!(result.is_null());
+        assert!(result.as_node().is_none());
+        assert!(result.as_edge().is_none());
+        assert_eq!(result.node_id(), None);
+        assert_eq!(result.id(), None);
     }
 
     #[test]
@@ -918,8 +946,8 @@ mod tests {
         let entity = EntityResult::NodeId(node_id);
 
         match entity.id() {
-            EntityId::Node(id) => assert_eq!(id, node_id),
-            EntityId::Edge(_) => panic!("Expected Node"),
+            Some(EntityId::Node(id)) => assert_eq!(id, node_id),
+            other => panic!("Expected Node, got {:?}", other),
         }
     }
 

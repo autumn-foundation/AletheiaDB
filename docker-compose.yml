@@ -21,12 +21,35 @@ services:
       ALETHEIADB_PORT: "1963"
       ALETHEIADB_HOST: "0.0.0.0"
       ALETHEIADB_DATA_DIR: "/var/lib/aletheiadb"
+      # Authentication is REQUIRED by default (Issue #3350): the server
+      # refuses to start with zero credentials, so compose refuses to start
+      # without this variable. Generate one with e.g. `openssl rand -base64
+      # 32`, then mint role-scoped keys over POST /admin/keys — see
+      # docs/guides/security-quickstart.md. (Anonymous mode exists as an
+      # explicit opt-in via ALETHEIADB_AUTH_MODE=anonymous, but it grants
+      # every caller full unauthenticated access and is not suitable outside
+      # isolated local development.)
+      ALETHEIADB_BOOTSTRAP_ADMIN_KEY: "${ALETHEIADB_BOOTSTRAP_ADMIN_KEY:?set ALETHEIADB_BOOTSTRAP_ADMIN_KEY (see docs/guides/security-quickstart.md)}"
+      # The image is a release build, which runs under the web framework's
+      # `prod` profile — and that profile refuses to start without a signing
+      # secret (used by the framework's session/CSRF machinery; AletheiaDB's
+      # own API is token-based). Must be >=32 bytes and not a demo value:
+      # generate with `openssl rand -hex 32`.
+      AUTUMN_SECURITY__SIGNING_SECRET: "${AUTUMN_SECURITY__SIGNING_SECRET:?set AUTUMN_SECURITY__SIGNING_SECRET, e.g. from openssl rand -hex 32 (required by the release/prod profile)}"
       # Override for remote clients during development. Leave unset (or set
       # to false) for production — restrictive CORS is the default.
       ALETHEIADB_CORS_PERMISSIVE: "${ALETHEIADB_CORS_PERMISSIVE:-false}"
       ALETHEIADB_CORS_ORIGINS: "${ALETHEIADB_CORS_ORIGINS:-}"
     healthcheck:
-      test: ["CMD", "curl", "--fail", "--silent", "--show-error", "http://127.0.0.1:1963/status"]
+      # /status is metrics-class: in required-auth mode the probe needs a
+      # credential (any role). The x-api-key header is ignored in anonymous
+      # mode, so this works in both. ($$ = compose escape for a literal $
+      # expanded inside the container.)
+      test:
+        [
+          "CMD-SHELL",
+          'curl --fail --silent --show-error --header "x-api-key: $$ALETHEIADB_BOOTSTRAP_ADMIN_KEY" http://127.0.0.1:1963/status',
+        ]
       interval: 10s
       timeout: 3s
       retries: 3
