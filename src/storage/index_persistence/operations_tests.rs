@@ -458,7 +458,11 @@ fn test_load_vector_indexes_skips_non_utf8_directory_name() {
     // 0xFF is never valid in UTF-8, so this directory name has no &str form.
     let non_utf8_name = OsStr::from_bytes(b"bad_\xff\xfe_embedding");
     let non_utf8_dir = manager.indexes_path().join("vector").join(non_utf8_name);
-    std::fs::create_dir_all(&non_utf8_dir).unwrap();
+    if std::fs::create_dir_all(&non_utf8_dir).is_err() {
+        // Filesystem (e.g. APFS on macOS) rejects non-UTF-8 names with EILSEQ;
+        // the non-UTF-8-directory scenario cannot exist here.
+        return;
+    }
 
     let fresh = Arc::new(CurrentStorage::new());
     let summary = load_vector_indexes(&fresh, &manager)
