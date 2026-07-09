@@ -41,7 +41,9 @@ mod server;
 mod state;
 
 pub use auth::{AuthContext, AuthState, validate_auth_startup};
-pub use config::{CorsConfig, RateLimitConfig, ServerConfig, ServerConfigBuilder};
+pub use config::{
+    CorsConfig, DEFAULT_MAX_REQUEST_BODY_BYTES, RateLimitConfig, ServerConfig, ServerConfigBuilder,
+};
 pub use error::AletheiaHttpError;
 pub use handlers::{ApiResponse, QueryRequest, handle_query, health_check};
 pub use server::{build_test_router, build_test_router_with_auth, run_server};

@@ -1,5 +1,21 @@
 //! HTTP server configuration.
 
+/// Default maximum accepted request body size for the JSON API, in bytes (2 MiB).
+///
+/// The `/query` endpoint buffers and deserializes the entire request body into
+/// a `serde_json` tree before any handler logic runs, so an unbounded body is a
+/// memory-amplification / denial-of-service vector (a small compressed or
+/// terse payload can expand into a very large in-memory structure). Capping the
+/// body size bounds that allocation up front and returns `413 Payload Too Large`
+/// for anything larger.
+///
+/// This value matches axum's historical implicit `DefaultBodyLimit` default, so
+/// making it explicit changes no existing client behavior — it only makes the
+/// bound intentional, operator-configurable, and covered by a regression test
+/// (see Issue #3108 / this endpoint is otherwise protected only by an implicit
+/// framework default that a middleware refactor could silently remove).
+pub const DEFAULT_MAX_REQUEST_BODY_BYTES: usize = 2 * 1024 * 1024;
+
 use crate::auth::{AuthMode, SecretString};
 
 /// CORS (Cross-Origin Resource Sharing) configuration.
@@ -165,6 +181,10 @@ pub struct ServerConfig {
     /// so restarts preserve state. When `None`, the server runs on an in-memory
     /// `AletheiaDB::new()` (useful for tests and ephemeral demos).
     data_dir: Option<std::path::PathBuf>,
+    /// Maximum accepted request body size in bytes. Requests with a larger body
+    /// are rejected with `413 Payload Too Large` before deserialization. See
+    /// [`DEFAULT_MAX_REQUEST_BODY_BYTES`].
+    max_request_body_bytes: usize,
     /// Authentication mode. Defaults to [`AuthMode::Required`]: the server
     /// refuses to start without at least one credential unless the operator
     /// explicitly opts into anonymous mode.
@@ -191,6 +211,7 @@ impl ServerConfig {
             cors: CorsConfig::default(),
             rate_limit: RateLimitConfig::default(),
             data_dir: None,
+            max_request_body_bytes: DEFAULT_MAX_REQUEST_BODY_BYTES,
             auth_mode: AuthMode::default(),
             bootstrap_admin_key: None,
             auth_persist_path: None,
@@ -215,6 +236,14 @@ impl ServerConfig {
     /// Get the rate limit configuration.
     pub fn rate_limit(&self) -> &RateLimitConfig {
         &self.rate_limit
+    }
+
+    /// Get the maximum accepted request body size in bytes.
+    ///
+    /// Requests whose body exceeds this are rejected with `413 Payload Too
+    /// Large` before the JSON payload is buffered or deserialized.
+    pub fn max_request_body_bytes(&self) -> usize {
+        self.max_request_body_bytes
     }
 
     /// Get the configured data directory, if any.
@@ -294,6 +323,7 @@ impl Default for ServerConfig {
             cors: CorsConfig::default(),
             rate_limit: RateLimitConfig::default(),
             data_dir: None,
+            max_request_body_bytes: DEFAULT_MAX_REQUEST_BODY_BYTES,
             auth_mode: AuthMode::default(),
             bootstrap_admin_key: None,
             auth_persist_path: None,
@@ -309,6 +339,7 @@ pub struct ServerConfigBuilder {
     cors: Option<CorsConfig>,
     rate_limit: Option<RateLimitConfig>,
     data_dir: Option<std::path::PathBuf>,
+    max_request_body_bytes: Option<usize>,
     auth_mode: Option<AuthMode>,
     bootstrap_admin_key: Option<SecretString>,
     auth_persist_path: Option<std::path::PathBuf>,
@@ -368,6 +399,17 @@ impl ServerConfigBuilder {
         self
     }
 
+    /// Set the maximum accepted request body size in bytes.
+    ///
+    /// Requests with a larger body are rejected with `413 Payload Too Large`
+    /// before the JSON payload is buffered or deserialized, bounding the
+    /// memory a single request can force the server to allocate. Defaults to
+    /// [`DEFAULT_MAX_REQUEST_BODY_BYTES`] (2 MiB).
+    pub fn max_request_body_bytes(mut self, bytes: usize) -> Self {
+        self.max_request_body_bytes = Some(bytes);
+        self
+    }
+
     /// Set the authentication mode.
     ///
     /// Defaults to [`AuthMode::Required`]. [`AuthMode::Anonymous`] disables
@@ -401,6 +443,9 @@ impl ServerConfigBuilder {
             cors: self.cors.unwrap_or_default(),
             rate_limit: self.rate_limit.unwrap_or_default(),
             data_dir: self.data_dir,
+            max_request_body_bytes: self
+                .max_request_body_bytes
+                .unwrap_or(DEFAULT_MAX_REQUEST_BODY_BYTES),
             auth_mode: self.auth_mode.unwrap_or_default(),
             bootstrap_admin_key: self.bootstrap_admin_key,
             auth_persist_path: self.auth_persist_path,
