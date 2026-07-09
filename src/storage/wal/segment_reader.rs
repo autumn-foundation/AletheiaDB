@@ -1444,11 +1444,14 @@ mod tests {
 
     #[test]
     fn test_parse_entry_at_delete_node() {
-        // Create a DeleteNode entry
+        // Create a DeleteNode entry with a distinct BACKDATED valid_from
+        // (Issue #3221/#3400: the logged delete valid_from must roundtrip
+        // through serialization exactly, it is honored by WAL replay).
         let node_id = NodeId::new(42).unwrap();
+        let valid_from = HybridTimestamp::new(time::now().wallclock() - 3_600_000_000, 0).unwrap(); // 1h ago
         let operation = WalOperation::DeleteNode {
             node_id,
-            valid_from: time::now(),
+            valid_from,
         };
         let entry = WalEntry::new(LSN(5), operation);
 
@@ -1464,9 +1467,14 @@ mod tests {
         assert_eq!(bytes_consumed, buffer.len());
         match parsed_entry.operation {
             WalOperation::DeleteNode {
-                node_id: parsed_id, ..
+                node_id: parsed_id,
+                valid_from: parsed_valid_from,
             } => {
                 assert_eq!(parsed_id, node_id);
+                assert_eq!(
+                    parsed_valid_from, valid_from,
+                    "backdated delete valid_from must roundtrip exactly"
+                );
             }
             _ => panic!("Expected DeleteNode operation"),
         }
@@ -1474,11 +1482,14 @@ mod tests {
 
     #[test]
     fn test_parse_entry_at_delete_edge() {
-        // Create a DeleteEdge entry
+        // Create a DeleteEdge entry with a distinct BACKDATED valid_from
+        // (Issue #3221/#3400: the logged delete valid_from must roundtrip
+        // through serialization exactly, it is honored by WAL replay).
         let edge_id = EdgeId::new(100).unwrap();
+        let valid_from = HybridTimestamp::new(time::now().wallclock() - 3_600_000_000, 0).unwrap(); // 1h ago
         let operation = WalOperation::DeleteEdge {
             edge_id,
-            valid_from: time::now(),
+            valid_from,
         };
         let entry = WalEntry::new(LSN(6), operation);
 
@@ -1494,9 +1505,14 @@ mod tests {
         assert_eq!(bytes_consumed, buffer.len());
         match parsed_entry.operation {
             WalOperation::DeleteEdge {
-                edge_id: parsed_id, ..
+                edge_id: parsed_id,
+                valid_from: parsed_valid_from,
             } => {
                 assert_eq!(parsed_id, edge_id);
+                assert_eq!(
+                    parsed_valid_from, valid_from,
+                    "backdated delete valid_from must roundtrip exactly"
+                );
             }
             _ => panic!("Expected DeleteEdge operation"),
         }

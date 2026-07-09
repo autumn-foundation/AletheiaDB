@@ -337,7 +337,7 @@ pub(crate) fn replay_wal_into_storage_with_constraints(
             }
             WalOperation::DeleteNode {
                 node_id,
-                valid_from: _,
+                valid_from,
             } => {
                 // If the node doesn't exist in current storage, it might have been deleted already
                 // or never existed (if we're replaying a delete for something we missed creation of?).
@@ -356,12 +356,15 @@ pub(crate) fn replay_wal_into_storage_with_constraints(
                     let tombstone_version_id = VersionId::new(next_version_id)?;
                     next_version_id += 1;
 
-                    // Tombstones use commit_timestamp for both valid_from and tx_time
-                    // The is_tombstone=true flag closes the valid_time immediately
+                    // Honor the LOGGED valid_from (possibly backdated, Issues
+                    // #3221/#3400) — mirroring the live path's
+                    // `apply_node_delete` — while tx_time comes from the WAL
+                    // entry. The is_tombstone=true flag closes the valid_time
+                    // immediately at valid_from (empty interval).
                     historical.add_node_version(
                         node_id,
                         tombstone_version_id,
-                        commit_timestamp,
+                        valid_from,
                         commit_timestamp,
                         node.label,
                         node.properties.clone(),
@@ -373,7 +376,7 @@ pub(crate) fn replay_wal_into_storage_with_constraints(
             }
             WalOperation::DeleteEdge {
                 edge_id,
-                valid_from: _,
+                valid_from,
             } => {
                 if let Ok(edge) = current.get_edge(edge_id) {
                     let commit_timestamp = entry.timestamp;
@@ -388,12 +391,15 @@ pub(crate) fn replay_wal_into_storage_with_constraints(
                     let tombstone_version_id = VersionId::new(next_version_id)?;
                     next_version_id += 1;
 
-                    // Tombstones use commit_timestamp for both valid_from and tx_time
-                    // The is_tombstone=true flag closes the valid_time immediately
+                    // Honor the LOGGED valid_from (possibly backdated, Issues
+                    // #3221/#3400) — mirroring the live path's
+                    // `apply_edge_delete` — while tx_time comes from the WAL
+                    // entry. The is_tombstone=true flag closes the valid_time
+                    // immediately at valid_from (empty interval).
                     historical.add_edge_version(
                         edge_id,
                         tombstone_version_id,
-                        commit_timestamp,
+                        valid_from,
                         commit_timestamp,
                         edge.label,
                         edge.source,
