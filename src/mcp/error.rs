@@ -63,6 +63,18 @@ pub enum McpErrorCode {
     /// An unexpected internal failure (I/O, corruption, poisoned lock,
     /// serialization of a response, ...). Not retriable; report it.
     Internal,
+    /// The caller is not authenticated (Issue #3350): the surface requires a
+    /// credential and none was supplied, or the supplied credential is
+    /// unknown or revoked. Deliberately uniform across all of those cases —
+    /// the error never reveals whether a presented key exists and never
+    /// echoes credential material. Not retriable as-is: obtain a valid
+    /// credential, then retry.
+    Unauthenticated,
+    /// The caller is authenticated but their role does not permit the
+    /// operation's access class (Issue #3350). `details` carries
+    /// `{required_class, principal_role}`. Not retriable: the same call
+    /// under the same principal can never succeed.
+    PermissionDenied,
 }
 
 impl McpErrorCode {
@@ -76,6 +88,8 @@ impl McpErrorCode {
             McpErrorCode::Conflict => "CONFLICT",
             McpErrorCode::Unavailable => "UNAVAILABLE",
             McpErrorCode::Internal => "INTERNAL",
+            McpErrorCode::Unauthenticated => "UNAUTHENTICATED",
+            McpErrorCode::PermissionDenied => "PERMISSION_DENIED",
         }
     }
 
@@ -361,6 +375,14 @@ mod tests {
         assert_eq!(McpErrorCode::Conflict.as_str(), "CONFLICT");
         assert_eq!(McpErrorCode::Unavailable.as_str(), "UNAVAILABLE");
         assert_eq!(McpErrorCode::Internal.as_str(), "INTERNAL");
+        assert_eq!(McpErrorCode::Unauthenticated.as_str(), "UNAUTHENTICATED");
+        assert_eq!(McpErrorCode::PermissionDenied.as_str(), "PERMISSION_DENIED");
+    }
+
+    #[test]
+    fn auth_codes_are_never_retriable_by_default() {
+        assert!(!McpErrorCode::Unauthenticated.default_retriable());
+        assert!(!McpErrorCode::PermissionDenied.default_retriable());
     }
 
     #[test]

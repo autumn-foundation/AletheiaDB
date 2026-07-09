@@ -8724,7 +8724,8 @@ mod structured_error_tests {
     use super::*;
     use serde_json::json;
 
-    /// Every code documented for the MCP error contract (Issue #3234).
+    /// Every code documented for the MCP error contract (Issue #3234;
+    /// UNAUTHENTICATED / PERMISSION_DENIED added by Issue #3350).
     const DOCUMENTED_CODES: &[&str] = &[
         "NOT_FOUND",
         "INVALID_ARGUMENT",
@@ -8733,6 +8734,8 @@ mod structured_error_tests {
         "CONFLICT",
         "UNAVAILABLE",
         "INTERNAL",
+        "UNAUTHENTICATED",
+        "PERMISSION_DENIED",
     ];
 
     /// Dispatch a tool through the same table `call_tool` uses and parse the

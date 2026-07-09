@@ -299,8 +299,13 @@ Model Context Protocol server enabling LLMs to interact with AletheiaDB.
 
 **Quick Start:**
 ```bash
-# Run the MCP server (communicates over stdio)
-cargo run --bin aletheia-mcp --features mcp-server
+# Run the MCP server (communicates over stdio). Authentication is required
+# by default: without a credential the server exits 1 at startup.
+ALETHEIADB_BOOTSTRAP_ADMIN_KEY="$(openssl rand -base64 32)" \
+  cargo run --bin aletheia-mcp --features mcp-server
+
+# Or explicitly opt into anonymous mode (local development only):
+ALETHEIADB_AUTH_MODE=anonymous cargo run --bin aletheia-mcp --features mcp-server
 ```
 
 **Available Tools:**
@@ -512,6 +517,32 @@ bounds folded from hot-tier history. Coverage caveat: bounds span the
 current process lifetime plus hot-tier history restored at startup —
 versions cold-migrated before the last restart are not reflected. See
 [docs/guides/mcp-query-tool.md](docs/guides/mcp-query-tool.md#discovering-the-queryable-temporal-extent-temporal_extent).
+
+**Authentication & RBAC (Issue #3350)**: both server surfaces (MCP and
+HTTP) require an API key by default and refuse to start with zero
+credentials; anonymous access is an explicit opt-in
+(`ALETHEIADB_AUTH_MODE=anonymous`) with a prominent warning. Four roles
+(admin/writer/reader/metrics) gate every tool/route via a classification
+kept in lockstep with [docs/guides/access-control-matrix.md](docs/guides/access-control-matrix.md)
+by CI conformance tests. Keys are stored as SHA-256 hashes
+(`{data_dir}/auth/keys.json`, 0600), verified constant-time and re-verified
+per call (revocation is immediate); auth failures are a uniform
+`UNAUTHENTICATED` (never distinguishing missing/unknown/revoked), role
+denials are `PERMISSION_DENIED` with `details.required_class` /
+`details.principal_role` — both additive to the #3234 enum, both
+`retriable: false`. Authenticated writes stamp the principal's name into
+version provenance (`provenance.principal`, composing with the
+caller-supplied `source`) on the structured create/update node/edge
+paths of both surfaces — deletes/retracts and HTTP AQL-statement writes
+(`execute_query`/`bulk_execute_query`) do NOT stamp a principal yet
+(destructive-op attribution needs a WAL payload extension to survive
+crash recovery; tracked as Issue #3427); anonymous writes
+record no principal. MCP
+sessions authenticate via `ALETHEIADB_MCP_API_KEY`; key lifecycle is served
+by the HTTP `/admin/keys*` endpoints. Programmatic
+`AletheiaMcpServer::new()` stays anonymous (embedded API); use
+`with_auth(db, McpAuthConfig)` to serve. See
+[docs/guides/security-quickstart.md](docs/guides/security-quickstart.md).
 
 **Programmatic Usage:**
 ```rust
@@ -1003,6 +1034,8 @@ unless `detach: true` / `retract_node_detach` co-retracts the connected edges.
 - **[docs/guides/tiered-storage-guide.md](docs/guides/tiered-storage-guide.md)** - Tiered storage configuration and usage
 - **[docs/guides/sharding-guide.md](docs/guides/sharding-guide.md)** - Graph sharding and distributed deployment
 - **[docs/guides/query-pipeline-guide.md](docs/guides/query-pipeline-guide.md)** - Query execution pipeline
+- **[docs/guides/security-quickstart.md](docs/guides/security-quickstart.md)** - Authentication, RBAC roles, API-key lifecycle
+- **[docs/guides/access-control-matrix.md](docs/guides/access-control-matrix.md)** - Canonical role/operation authorization matrix
 
 ### Architecture Decision Records (ADRs)
 See `docs/adr/` for all architectural decisions.

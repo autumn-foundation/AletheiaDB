@@ -89,14 +89,30 @@ pub(crate) const WAL_VERSION_PROVENANCE: u8 = 3;
 /// `WAL_VERSION_ENCRYPTED`'s counterpart once provenance was added.
 pub(crate) const WAL_VERSION_ENCRYPTED_PROVENANCE: u8 = 4;
 
-/// Maximum supported WAL version (inclusive).
-const WAL_VERSION_MAX: u8 = WAL_VERSION_ENCRYPTED_PROVENANCE;
+/// WAL format version for plaintext segments whose provenance bundle also
+/// carries the authenticated-principal field (Issue #3350).
+///
+/// Identical to [`WAL_VERSION_PROVENANCE`] except the serialized provenance
+/// bundle has a fifth optional string (`principal`) after `correlation_id`.
+/// Segments below this version simply lack the extra bytes; parsing falls
+/// back to `principal: None` for them (see `read_provenance`).
+pub(crate) const WAL_VERSION_PROVENANCE_PRINCIPAL: u8 = 5;
 
-/// Returns `true` if `version` denotes an encrypted segment (either the
-/// original encrypted format or its provenance-carrying successor).
+/// WAL format version for encrypted segments whose decrypted payload uses
+/// the principal-carrying provenance format (i.e.
+/// [`WAL_VERSION_PROVENANCE_PRINCIPAL`]).
+pub(crate) const WAL_VERSION_ENCRYPTED_PROVENANCE_PRINCIPAL: u8 = 6;
+
+/// Maximum supported WAL version (inclusive).
+const WAL_VERSION_MAX: u8 = WAL_VERSION_ENCRYPTED_PROVENANCE_PRINCIPAL;
+
+/// Returns `true` if `version` denotes an encrypted segment (the original
+/// encrypted format or one of its provenance-carrying successors).
 #[inline]
 fn is_encrypted_version(version: u8) -> bool {
-    version == WAL_VERSION_ENCRYPTED || version == WAL_VERSION_ENCRYPTED_PROVENANCE
+    version == WAL_VERSION_ENCRYPTED
+        || version == WAL_VERSION_ENCRYPTED_PROVENANCE
+        || version == WAL_VERSION_ENCRYPTED_PROVENANCE_PRINCIPAL
 }
 
 /// Map a segment/container format version to the logical *payload* version
@@ -110,6 +126,7 @@ fn payload_version(version: u8) -> u8 {
     match version {
         WAL_VERSION_ENCRYPTED => WAL_VERSION,
         WAL_VERSION_ENCRYPTED_PROVENANCE => WAL_VERSION_PROVENANCE,
+        WAL_VERSION_ENCRYPTED_PROVENANCE_PRINCIPAL => WAL_VERSION_PROVENANCE_PRINCIPAL,
         v => v,
     }
 }
@@ -646,6 +663,14 @@ fn read_provenance(buffer: &[u8], offset: &mut usize, version: u8) -> Result<Opt
     let confidence = read_opt_f64(buffer, offset, "provenance.confidence")?;
     let note = read_opt_string(buffer, offset, "provenance.note")?;
     let correlation_id = read_opt_string(buffer, offset, "provenance.correlation_id")?;
+    // The authenticated-principal field (Issue #3350) only exists on
+    // segments at or above WAL_VERSION_PROVENANCE_PRINCIPAL; older
+    // provenance-carrying segments end the bundle at correlation_id.
+    let principal = if version >= WAL_VERSION_PROVENANCE_PRINCIPAL {
+        read_opt_string(buffer, offset, "provenance.principal")?
+    } else {
+        None
+    };
 
     let mut builder = Provenance::builder();
     if let Some(source) = source {
@@ -659,6 +684,9 @@ fn read_provenance(buffer: &[u8], offset: &mut usize, version: u8) -> Result<Opt
     }
     if let Some(correlation_id) = correlation_id {
         builder = builder.correlation_id(correlation_id);
+    }
+    if let Some(principal) = principal {
+        builder = builder.principal(principal);
     }
     let provenance = builder.build().map_err(|e| {
         StorageError::CorruptedData(format!("Invalid provenance in WAL entry: {}", e))
@@ -1129,6 +1157,99 @@ mod tests {
                 assert_eq!(label, GLOBAL_INTERNER.intern("Person").unwrap());
             }
             _ => panic!("Expected CreateNode operation"),
+        }
+    }
+
+    /// Issue #3350/#3423: a provenance bundle carrying an authenticated
+    /// principal must round-trip byte-exactly through WAL serialization
+    /// when parsed at the principal-carrying payload version.
+    #[test]
+    fn test_parse_entry_at_provenance_principal_roundtrip() {
+        let node_id = NodeId::new(77).unwrap();
+        let operation = WalOperation::CreateNode {
+            node_id,
+            label: GLOBAL_INTERNER.intern("Fact").unwrap(),
+            properties: PropertyMap::new(),
+            valid_from: time::now(),
+            provenance: Some(
+                Provenance::builder()
+                    .source("mcp")
+                    .confidence(0.75)
+                    .correlation_id("req-1")
+                    .principal("svc-writer")
+                    .build()
+                    .unwrap(),
+            ),
+        };
+        let entry = WalEntry::new(LSN(5), operation);
+
+        let mut buffer = Vec::new();
+        serialize_entry_into(&entry, &mut buffer).unwrap();
+
+        let (parsed_entry, bytes_consumed) =
+            parse_entry_at(&buffer, 0, WAL_VERSION_PROVENANCE_PRINCIPAL).unwrap();
+
+        assert_eq!(parsed_entry.lsn, LSN(5));
+        assert_eq!(bytes_consumed, buffer.len());
+        match parsed_entry.operation {
+            WalOperation::CreateNode { provenance, .. } => {
+                let p = provenance.expect("provenance bundle must round-trip");
+                assert_eq!(p.source(), Some("mcp"));
+                assert_eq!(p.confidence(), Some(0.75));
+                assert_eq!(p.correlation_id(), Some("req-1"));
+                assert_eq!(p.principal(), Some("svc-writer"));
+            }
+            other => panic!("Expected CreateNode operation, got {other:?}"),
+        }
+    }
+
+    /// Issue #3350/#3423: pre-v5 bytes (a provenance bundle that ends at
+    /// `correlation_id`, with no principal slot) must parse successfully at
+    /// their own payload version with `principal: None`.
+    #[test]
+    fn test_parse_pre_v5_provenance_bytes_yields_no_principal() {
+        // Build genuine v3-format bytes. Start from the current (v5)
+        // serializer with `principal: None` -- whose only difference from
+        // v3 is a single trailing absent-principal presence byte -- drop
+        // that byte, and re-stamp the CRC (bytes 20..24, computed over
+        // LSN+timestamp and the operation data).
+        let operation = WalOperation::CreateNode {
+            node_id: NodeId::new(9).unwrap(),
+            label: GLOBAL_INTERNER.intern("Doc").unwrap(),
+            properties: PropertyMap::new(),
+            valid_from: time::now(),
+            provenance: Some(Provenance::builder().source("importer").build().unwrap()),
+        };
+        let entry = WalEntry::new(LSN(9), operation);
+        let mut buffer = Vec::new();
+        serialize_entry_into(&entry, &mut buffer).unwrap();
+        assert_eq!(
+            *buffer.last().unwrap(),
+            0,
+            "v5 buffer must end with the absent-principal presence byte"
+        );
+        buffer.pop(); // v3 bundles end at correlation_id
+        let mut hasher = crc32fast::Hasher::new();
+        hasher.update(&buffer[0..20]);
+        hasher.update(&buffer[24..]);
+        let checksum = hasher.finalize();
+        buffer[20..24].copy_from_slice(&checksum.to_le_bytes());
+
+        let (parsed_entry, bytes_consumed) =
+            parse_entry_at(&buffer, 0, WAL_VERSION_PROVENANCE).unwrap();
+
+        assert_eq!(bytes_consumed, buffer.len());
+        match parsed_entry.operation {
+            WalOperation::CreateNode { provenance, .. } => {
+                let p = provenance.expect("v3 provenance bundle must parse");
+                assert_eq!(p.source(), Some("importer"));
+                assert_eq!(
+                    p.principal(),
+                    None,
+                    "pre-v5 bytes must parse with principal: None"
+                );
+            }
+            other => panic!("Expected CreateNode operation, got {other:?}"),
         }
     }
 
