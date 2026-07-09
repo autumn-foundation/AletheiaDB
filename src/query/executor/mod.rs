@@ -254,8 +254,8 @@ impl QueryExecutor {
                 property_key,
             } => {
                 // Always use the multi-property-aware method with explicit property name.
-                // This ensures correctness in multi-property setups and avoids relying on
-                // legacy single-property state (which would use the last enabled index).
+                // This ensures correctness in multi-property setups instead of relying on
+                // the default-property resolution (alphabetically first temporal index).
                 let prop = property_key.as_deref().unwrap_or("embedding");
                 let results = self
                     .current
@@ -335,6 +335,16 @@ impl QueryExecutor {
                 Ok(Box::new(iterators::ProjectIterator::new(
                     input_iter,
                     properties.clone(),
+                )))
+            }
+
+            PhysicalOp::OptionalApply { input, steps } => {
+                let input_iter = self.execute_op(input)?;
+                Ok(Box::new(iterators::OptionalApplyIterator::new(
+                    input_iter,
+                    steps.clone(),
+                    Arc::clone(&self.current),
+                    Arc::clone(&self.historical),
                 )))
             }
 
@@ -1481,6 +1491,140 @@ mod tests {
             }
             _ => panic!("Expected Node or NodeId result"),
         }
+    }
+
+    // ==================== OptionalApply Tests ====================
+
+    #[test]
+    fn test_execute_optional_apply_matched() {
+        use crate::query::planner::physical::OptionalPhysicalStep;
+
+        let (current, historical, alice, bob) = create_test_storage_with_data();
+        let executor = QueryExecutor::new(current, historical);
+
+        // Alice -KNOWS-> Bob exists: the optional traversal matches.
+        let plan = PhysicalPlan {
+            root: PhysicalOp::OptionalApply {
+                input: Box::new(PhysicalOp::NodeLookup {
+                    node_ids: vec![alice],
+                }),
+                steps: vec![OptionalPhysicalStep::Traverse {
+                    direction: crate::query::ir::Direction::Outgoing,
+                    label: Some("KNOWS".to_string()),
+                    depth: 1,
+                    temporal_context: None,
+                }],
+            },
+            estimated_cost: Default::default(),
+            temporal_context: None,
+            parallel: false,
+            include_provenance: false,
+        };
+
+        let results = executor.execute(plan).expect("Execution failed");
+        let rows: Vec<_> = results.collect_all().expect("Collection failed");
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].entity.node_id(), Some(bob));
+    }
+
+    #[test]
+    fn test_execute_optional_apply_unmatched_yields_null_row() {
+        use crate::query::planner::physical::OptionalPhysicalStep;
+
+        let (current, historical, alice, _bob) = create_test_storage_with_data();
+        let executor = QueryExecutor::new(current, historical);
+
+        // No FOLLOWS edges exist: left-outer semantics require one null row
+        // per input row, not zero rows.
+        let plan = PhysicalPlan {
+            root: PhysicalOp::OptionalApply {
+                input: Box::new(PhysicalOp::NodeLookup {
+                    node_ids: vec![alice],
+                }),
+                steps: vec![OptionalPhysicalStep::Traverse {
+                    direction: crate::query::ir::Direction::Outgoing,
+                    label: Some("FOLLOWS".to_string()),
+                    depth: 1,
+                    temporal_context: None,
+                }],
+            },
+            estimated_cost: Default::default(),
+            temporal_context: None,
+            parallel: false,
+            include_provenance: false,
+        };
+
+        let results = executor.execute(plan).expect("Execution failed");
+        let rows: Vec<_> = results.collect_all().expect("Collection failed");
+
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].entity.is_null());
+    }
+
+    #[test]
+    fn test_execute_optional_apply_filter_scoped_inside() {
+        use crate::query::planner::physical::OptionalPhysicalStep;
+
+        let (current, historical, alice, _bob) = create_test_storage_with_data();
+        let executor = QueryExecutor::new(current, historical);
+
+        // The traversal matches Bob, but the filter inside the optional
+        // segment eliminates him: the row survives as null.
+        let plan = PhysicalPlan {
+            root: PhysicalOp::OptionalApply {
+                input: Box::new(PhysicalOp::NodeLookup {
+                    node_ids: vec![alice],
+                }),
+                steps: vec![
+                    OptionalPhysicalStep::Traverse {
+                        direction: crate::query::ir::Direction::Outgoing,
+                        label: Some("KNOWS".to_string()),
+                        depth: 1,
+                        temporal_context: None,
+                    },
+                    OptionalPhysicalStep::Filter(crate::query::Predicate::eq("name", "Zed")),
+                ],
+            },
+            estimated_cost: Default::default(),
+            temporal_context: None,
+            parallel: false,
+            include_provenance: false,
+        };
+
+        let results = executor.execute(plan).expect("Execution failed");
+        let rows: Vec<_> = results.collect_all().expect("Collection failed");
+
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].entity.is_null());
+    }
+
+    #[test]
+    fn test_execute_optional_apply_standalone_scan() {
+        use crate::query::planner::physical::OptionalPhysicalStep;
+
+        let (current, historical) = create_test_storage();
+        let executor = QueryExecutor::new(current, historical);
+
+        // Standalone (leading OPTIONAL MATCH) over an empty store: one null row.
+        let plan = PhysicalPlan {
+            root: PhysicalOp::OptionalApply {
+                input: Box::new(PhysicalOp::Empty),
+                steps: vec![OptionalPhysicalStep::Scan {
+                    label: Some("Person".to_string()),
+                }],
+            },
+            estimated_cost: Default::default(),
+            temporal_context: None,
+            parallel: false,
+            include_provenance: false,
+        };
+
+        let results = executor.execute(plan).expect("Execution failed");
+        let rows: Vec<_> = results.collect_all().expect("Collection failed");
+
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].entity.is_null());
     }
 
     #[test]

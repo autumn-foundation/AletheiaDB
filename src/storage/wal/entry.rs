@@ -301,13 +301,14 @@ mod sentry_tests {
         let mut buffer = Vec::new();
         serialize_entry_into(&original_entry, &mut buffer).expect("Serialization failed");
 
-        // Deserialize. Serialization always writes the provenance-carrying
-        // payload shape now (Issue #3224), so parsing must use the matching
-        // version to consume the same bytes that were written.
+        // Deserialize. Serialization always writes the principal-carrying
+        // provenance payload shape now (Issues #3224 + #3350), so parsing
+        // must use the matching version to consume the same bytes that were
+        // written.
         let (parsed_entry, consumed) = parse_entry_at(
             &buffer,
             0,
-            crate::storage::wal::segment_reader::WAL_VERSION_PROVENANCE,
+            crate::storage::wal::segment_reader::WAL_VERSION_PROVENANCE_PRINCIPAL,
         )
         .expect("Deserialization failed");
 

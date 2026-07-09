@@ -40,6 +40,8 @@ use tower_http::trace::TraceLayer;
 // and is not subject to autumn's `IntoAppLayer` bound.
 
 use crate::AletheiaDB;
+use crate::auth::{AuthMode, AuthStore, Role};
+use crate::http::auth::{AuthState, validate_auth_startup};
 use crate::http::config::{CorsConfig, ServerConfig};
 use crate::http::handlers::all_routes;
 use crate::http::state::AppState;
@@ -81,9 +83,33 @@ pub async fn run_server(config: ServerConfig) -> std::io::Result<()> {
         .validate()
         .map_err(std::io::Error::other)?;
 
+    // Assemble the auth store: persisted keys (if a path is configured or
+    // derivable from data_dir), plus an optional env/config bootstrap admin
+    // key (memory-only, never persisted).
+    let auth_state = build_auth_state(&config).map_err(std::io::Error::other)?;
+    match auth_state.mode() {
+        AuthMode::Anonymous => {
+            // PROMINENT warning: the operator explicitly opted out of auth.
+            eprintln!(
+                "WARNING: AUTHENTICATION IS DISABLED (auth mode: anonymous). \
+                 Every request has full, unauthenticated access to the database. \
+                 Do not expose this server to untrusted networks."
+            );
+            tracing::warn!(
+                "authentication disabled (auth mode: anonymous); every request has full access"
+            );
+        }
+        AuthMode::Required => {
+            // Conservative default: refuse to start with zero credentials.
+            validate_auth_startup(AuthMode::Required, auth_state.store())
+                .map_err(std::io::Error::other)?;
+        }
+    }
+
     let db = Arc::new(build_database(&config)?);
     let our_state = AppState::new(db);
     let startup_state = our_state.clone();
+    let startup_auth = auth_state.clone();
     let shutdown_state = our_state.clone();
     let persist_on_shutdown = config.data_dir().is_some();
 
@@ -105,12 +131,11 @@ pub async fn run_server(config: ServerConfig) -> std::io::Result<()> {
     }
 
     // Bridge our ServerConfig into autumn's config via its AUTUMN_*__* env
-    // vars. Autumn 0.2.0 doesn't yet expose `with_config_loader` publicly
-    // (that lands in 0.3 on trunk), so this is the supported path for now.
+    // vars (host/port/CORS/CSRF; the actuator hardening below goes through
+    // a ConfigLoader because `[actuator]` has no AUTUMN_* env mapping).
     //
-    // TODO(autumn-0.3): replace this env-var bridge with a custom
-    // `ConfigLoader` impl — it's cleaner, retires the `unsafe` block, and
-    // is the idiomatic autumn extension point.
+    // TODO: fold this env-var bridge into `HardenedConfigLoader` — it's
+    // cleaner and retires the `unsafe` block.
     //
     // SAFETY: `set_var` is unsafe in edition 2024 because concurrent reads
     // from other threads are UB. These calls happen before any autumn code
@@ -119,6 +144,21 @@ pub async fn run_server(config: ServerConfig) -> std::io::Result<()> {
     unsafe {
         apply_autumn_env(&config);
     }
+
+    // Framework endpoints autumn mounts outside our AuthContext extractor
+    // (they never see AletheiaDB credentials). With the sensitive actuator
+    // group forced off by `HardenedConfigLoader`, what remains is
+    // health/metadata only — but operators should still block them at the
+    // reverse proxy if they must not be publicly reachable.
+    eprintln!(
+        "Note: framework endpoints served WITHOUT AletheiaDB authentication: \
+         /health, /live, /ready, /startup, /actuator/health, /actuator/info, \
+         /actuator/metrics, /actuator/a11y, /actuator/ui, /actuator/ui/metrics. \
+         Sensitive actuator endpoints (/actuator/env, /actuator/configprops, \
+         /actuator/loggers, /actuator/tasks, /actuator/jobs, /actuator/prometheus) \
+         are disabled in every profile. Block /actuator and the probe paths at \
+         your reverse proxy if they must not be publicly reachable."
+    );
 
     // TODO(autumn-0.3): wire per-IP rate limiting here when autumn ships it
     // natively. See the module-level doc.
@@ -129,10 +169,13 @@ pub async fn run_server(config: ServerConfig) -> std::io::Result<()> {
     // settings flow end-to-end into autumn's CorsLayer.
 
     autumn_web::app()
+        .with_config_loader(HardenedConfigLoader)
         .on_startup(move |autumn_state| {
             let installed = startup_state.clone();
+            let installed_auth = startup_auth.clone();
             async move {
                 autumn_state.insert_extension(installed);
+                autumn_state.insert_extension(installed_auth);
                 Ok(())
             }
         })
@@ -163,6 +206,66 @@ pub async fn run_server(config: ServerConfig) -> std::io::Result<()> {
         .await;
 
     Ok(())
+}
+
+/// Autumn [`ConfigLoader`](autumn_web::config::ConfigLoader) that runs the
+/// default five-layer load (framework defaults → profile smart defaults →
+/// `autumn.toml` → `autumn-{profile}.toml` → `AUTUMN_*` env vars) and then
+/// forces security-relevant framework settings to safe values.
+///
+/// Autumn mounts its own routes (probes, actuator) *outside* AletheiaDB's
+/// `AuthContext` extractor, so they are never authenticated by our API-key
+/// layer. Its `dev` profile smart default sets `actuator.sensitive = true`,
+/// which additionally exposes `/actuator/env`, `/actuator/configprops`, an
+/// unauthenticated `PUT /actuator/loggers/{name}`, `/actuator/tasks`,
+/// `/actuator/jobs`, and `/actuator/prometheus` — and `[actuator]` has **no**
+/// `AUTUMN_*` env-var mapping, so `AUTUMN_ACTUATOR__SENSITIVE=false` cannot
+/// turn it off. This loader pins `actuator.sensitive = false` in every
+/// profile: the config-dump and log-mutation endpoints are never served,
+/// debug build or not. The remaining always-mounted framework endpoints
+/// (health probes, `/actuator/health|info|metrics|a11y|ui`) are documented in
+/// `docs/guides/security-quickstart.md` with reverse-proxy guidance.
+struct HardenedConfigLoader;
+
+impl autumn_web::config::ConfigLoader for HardenedConfigLoader {
+    async fn load(
+        &self,
+    ) -> Result<autumn_web::config::AutumnConfig, autumn_web::config::ConfigError> {
+        let mut config = autumn_web::config::TomlEnvConfigLoader::new()
+            .load()
+            .await?;
+        // Never serve the sensitive actuator group, regardless of profile
+        // or operator TOML: these endpoints bypass AletheiaDB auth entirely.
+        config.actuator.sensitive = false;
+        Ok(config)
+    }
+}
+
+/// Assemble the [`AuthState`] a [`ServerConfig`] implies.
+///
+/// - Loads the persisted key store from
+///   [`ServerConfig::resolved_auth_persist_path`] when one is configured or
+///   derivable, otherwise starts a memory-only store.
+/// - Installs the bootstrap admin key (principal name `bootstrap-admin`,
+///   role `admin`) when configured. Bootstrap keys are memory-only: they are
+///   re-supplied via env/config on every start and never persisted.
+///
+/// Startup *refusal* (required mode with zero credentials) is enforced by
+/// [`run_server`], not here — `build_test_router` deliberately skips it so
+/// tests can exercise the uniform-401 behavior of a keyless required-mode
+/// server.
+fn build_auth_state(config: &ServerConfig) -> Result<AuthState, String> {
+    let store = match config.resolved_auth_persist_path() {
+        Some(path) => AuthStore::with_persistence(&path)
+            .map_err(|e| format!("failed to open auth key store: {e}"))?,
+        None => AuthStore::new(),
+    };
+    if let Some(key) = config.bootstrap_admin_key() {
+        store
+            .insert_bootstrap_key("bootstrap-admin", Role::Admin, key.expose())
+            .map_err(|e| format!("failed to install bootstrap admin key: {e}"))?;
+    }
+    Ok(AuthState::new(Arc::new(store), config.auth_mode()))
 }
 
 /// Construct the [`AletheiaDB`] instance the HTTP server will share.
@@ -243,14 +346,37 @@ unsafe fn apply_autumn_env(config: &ServerConfig) {
 /// `RateLimitConfig` validation still runs so tests catch misconfiguration,
 /// but no rate-limit layer is attached (see the module doc).
 ///
+/// Auth state is derived from `config` (mode, bootstrap key, persist path),
+/// exactly as `run_server` derives it — but *without* `run_server`'s
+/// "required mode needs at least one credential" startup refusal, so tests
+/// can exercise the uniform 401 of a keyless required-mode server. Use
+/// [`build_test_router_with_auth`] to inject a pre-populated
+/// [`AuthState`]/[`AuthStore`] instead.
+///
+/// # Errors
+///
+/// Returns an error string if the rate-limit or auth configuration is invalid.
+pub fn build_test_router(state: AppState, config: &ServerConfig) -> Result<Router, String> {
+    let auth_state = build_auth_state(config)?;
+    build_test_router_with_auth(state, auth_state, config)
+}
+
+/// [`build_test_router`] with an explicit [`AuthState`] — for tests that
+/// create/revoke keys against a shared [`AuthStore`] handle.
+///
 /// # Errors
 ///
 /// Returns an error string if the rate-limit configuration is invalid.
-pub fn build_test_router(state: AppState, config: &ServerConfig) -> Result<Router, String> {
+pub fn build_test_router_with_auth(
+    state: AppState,
+    auth_state: AuthState,
+    config: &ServerConfig,
+) -> Result<Router, String> {
     config.rate_limit().validate()?;
 
     let autumn_state = AutumnAppState::detached();
     autumn_state.insert_extension(state);
+    autumn_state.insert_extension(auth_state);
 
     let mut router: Router<AutumnAppState> = Router::new();
     for route in all_routes() {

@@ -472,6 +472,15 @@ impl CostModel {
                 lookup_cost + search_cost
             }
 
+            PhysicalOp::OptionalApply { input, .. } => {
+                // Per input row, a small sub-pipeline (traversal + filters)
+                // runs; approximate with a single-hop traversal over the
+                // input cardinality on top of the input cost.
+                let input_cost = self.estimate(input, stats);
+                let input_card = self.estimate_cardinality(input, stats);
+                self.estimate_traversal(input_cost, input_card.max(1), 1, stats)
+            }
+
             PhysicalOp::Empty => Cost::zero(),
         }
     }
@@ -543,6 +552,10 @@ impl CostModel {
                 self.estimate_cardinality(input, stats)
             }
             PhysicalOp::SimilarToNode { k, .. } => *k,
+            PhysicalOp::OptionalApply { input, .. } => {
+                // Left-outer semantics: at least one output row per input row.
+                self.estimate_cardinality(input, stats).max(1)
+            }
             PhysicalOp::Empty => 0,
         }
     }
@@ -897,5 +910,70 @@ mod tests {
         assert_eq!(node_cost.cpu, edge_cost.cpu);
         assert_eq!(node_cost.io, edge_cost.io);
         assert_eq!(node_cost.memory, edge_cost.memory);
+    }
+
+    // ==================== OptionalApply Cost Tests ====================
+
+    #[test]
+    fn test_optional_apply_cost_adds_to_input() {
+        let model = CostModel::default();
+        let stats = test_stats();
+
+        let input = PhysicalOp::NodeLookup {
+            node_ids: vec![NodeId::new(1).unwrap(), NodeId::new(2).unwrap()],
+        };
+        let input_cost = model.estimate(&input, &stats);
+
+        let op = PhysicalOp::OptionalApply {
+            input: Box::new(input),
+            steps: vec![],
+        };
+        let cost = model.estimate(&op, &stats);
+
+        // The per-row optional sub-pipeline (approximated as a single-hop
+        // traversal) adds CPU cost on top of the input.
+        assert!(
+            cost.cpu > input_cost.cpu,
+            "OptionalApply must cost more than its input: {} vs {}",
+            cost.cpu,
+            input_cost.cpu
+        );
+    }
+
+    #[test]
+    fn test_optional_apply_cost_empty_input_clamps_cardinality() {
+        let model = CostModel::default();
+        let stats = test_stats();
+
+        // Empty input has cardinality 0; the estimate clamps to 1 row so the
+        // standalone (leading OPTIONAL MATCH) sub-pipeline cost never vanishes.
+        let op = PhysicalOp::OptionalApply {
+            input: Box::new(PhysicalOp::Empty),
+            steps: vec![],
+        };
+        let cost = model.estimate(&op, &stats);
+        assert!(cost.cpu > 0.0, "standalone OptionalApply must have cost");
+    }
+
+    #[test]
+    fn test_optional_apply_cardinality_left_outer_floor() {
+        let model = CostModel::default();
+        let stats = test_stats();
+
+        // Left-outer semantics: at least one output row per input row.
+        let op = PhysicalOp::OptionalApply {
+            input: Box::new(PhysicalOp::NodeLookup {
+                node_ids: vec![NodeId::new(1).unwrap(), NodeId::new(2).unwrap()],
+            }),
+            steps: vec![],
+        };
+        assert_eq!(model.estimate_cardinality(&op, &stats), 2);
+
+        // Even an empty input yields one (null) row in the standalone form.
+        let standalone = PhysicalOp::OptionalApply {
+            input: Box::new(PhysicalOp::Empty),
+            steps: vec![],
+        };
+        assert_eq!(model.estimate_cardinality(&standalone, &stats), 1);
     }
 }

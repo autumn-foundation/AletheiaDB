@@ -162,17 +162,23 @@ impl LsnAllocator {
         LSN(self.next_lsn.load(Ordering::Relaxed))
     }
 
-    /// Set the next LSN to allocate.
+    /// Set the next LSN to allocate — monotonically.
     ///
     /// **Warning**: This should only be used during recovery to restore
     /// the allocator state. Using it during normal operation will cause
     /// duplicate LSNs.
     ///
+    /// Moving the allocator BACKWARDS would guarantee duplicate LSNs, so a
+    /// `lsn` at or below the current next-to-allocate value is a no-op
+    /// (`fetch_max` semantics; hardened after PR #3428 review). Recovery
+    /// callers seed from multiple durability floors (segment scan, index
+    /// manifest) — the highest one always wins regardless of call order.
+    ///
     /// # Arguments
     ///
-    /// * `lsn` - The next LSN to allocate
+    /// * `lsn` - The next LSN to allocate (applied only if it advances)
     pub fn set_next(&self, lsn: LSN) {
-        self.next_lsn.store(lsn.0, Ordering::Relaxed);
+        self.next_lsn.fetch_max(lsn.0, Ordering::Relaxed);
     }
 }
 
@@ -255,6 +261,26 @@ mod tests {
 
         assert_eq!(alloc.current(), LSN(1000));
         assert_eq!(alloc.allocate(), LSN(1000));
+        assert_eq!(alloc.allocate(), LSN(1001));
+    }
+
+    /// PR #3428 review: seeding must never move the allocator BACKWARDS —
+    /// a lower value would guarantee duplicate LSNs. `set_next` uses
+    /// `fetch_max` semantics, so the highest durability floor wins
+    /// regardless of the order recovery applies them in.
+    #[test]
+    fn test_set_next_lsn_never_moves_backwards() {
+        let alloc = LsnAllocator::new();
+
+        alloc.set_next(LSN(1000));
+        alloc.set_next(LSN(5)); // must be a no-op
+
+        assert_eq!(alloc.current(), LSN(1000));
+        assert_eq!(alloc.allocate(), LSN(1000));
+
+        // Equal to the current next value is also a no-op.
+        alloc.set_next(LSN(1001));
+        alloc.set_next(LSN(1001));
         assert_eq!(alloc.allocate(), LSN(1001));
     }
 

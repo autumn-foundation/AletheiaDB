@@ -521,9 +521,16 @@ object of this shape (Issue #3234):
 | `CONFLICT` | Concurrency conflict: serialization failure, write-write conflict, aborted transaction | usually `true` | Retry the operation (a duplicate-ID conflict is the exception: `retriable: false`) |
 | `UNAVAILABLE` | Transient condition: query timeout, clock skew, and other clock-related hiccups (non-monotonic transaction time, logical counter overflow) | `true` | Retry, ideally with backoff |
 | `INTERNAL` | Unexpected internal failure: I/O, corruption, poisoned lock | `false` | Report; do not blind-retry |
+| `UNAUTHENTICATED` | No valid session credential in `required` auth mode (Issue #3350) — missing, unknown, or revoked; deliberately indistinguishable, and returned for *every* tool including unknown tool names (no inventory leak). Never carries `details`, never echoes the credential | `false` | Supply a valid `ALETHEIADB_MCP_API_KEY` (or bootstrap key) and restart the session; retrying with the same credential cannot succeed |
+| `PERMISSION_DENIED` | Authenticated, but the principal's role does not allow the tool's access class (Issue #3350). `details` carries `required_class` and `principal_role` | `false` | Use a credential whose role allows the class (see [docs/guides/access-control-matrix.md](access-control-matrix.md)); do not retry with the same key |
 
 Codes may be **added** over time; existing codes never change. Treat an
-unrecognized code as non-retriable.
+unrecognized code as non-retriable. `UNAUTHENTICATED` and
+`PERMISSION_DENIED` (Issue #3350) extend the original #3234 enum
+**additively** — pre-#3350 consumers that treat unknown codes as
+non-retriable already handle them correctly. Setup for authenticated
+deployments is covered in the
+[security quickstart](security-quickstart.md).
 
 ### Recovery loop example (LLM-style)
 
@@ -780,7 +787,10 @@ Conventions:
   within its valid interval — i.e. the response reflects the live, current
   version. A superseded version returned by a point-in-time read, or a fact
   whose `valid_to` has passed (or whose `valid_from` has not yet arrived),
-  reports `is_current: false` with its closed bounds. The valid-time
+  reports `is_current: false` with its closed bounds. Within a single
+  response, every entity's `is_current` is evaluated against the same
+  request-scoped instant — the wallclock is captured once per tool call,
+  never once per entity (Issue #3391). The valid-time
   comparison is at wallclock (microsecond) granularity, so the logical
   component of a hybrid-logical-clock commit timestamp never affects the
   answer:

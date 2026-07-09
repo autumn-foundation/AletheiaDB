@@ -60,7 +60,7 @@ jobs:
           key: ${{ runner.os }}-v2-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Run tests
-        run: cargo test --verbose --features "config-toml,mcp-server,sharding-rpc"
+        run: cargo test --verbose --features "config-toml,mcp-server,sharding-rpc,simulation"
 
       - name: Run doc tests
         run: cargo test --doc --verbose
@@ -131,7 +131,7 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Run clippy
-        run: cargo clippy --all-targets --features "config-toml,mcp-server,sharding-rpc" -- -D warnings
+        run: cargo clippy --all-targets --features "config-toml,mcp-server,sharding-rpc,simulation" -- -D warnings
 
   security:
     name: Security Audit
