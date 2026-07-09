@@ -496,7 +496,8 @@ fn test_replay_update_preserves_temporal_intervals() -> Result<()> {
         old.properties.get("count"),
         Some(PropertyValue::Int(1))
     ));
-    let new = historical.get_node_at_time(node_id, time::now(), time::now())?;
+    let now_after_replay = time::now();
+    let new = historical.get_node_at_time(node_id, now_after_replay, now_after_replay)?;
     assert!(matches!(
         new.properties.get("count"),
         Some(PropertyValue::Int(2))
@@ -613,7 +614,8 @@ fn test_replay_update_edge_preserves_temporal_intervals() -> Result<()> {
         old.properties.get("weight"),
         Some(PropertyValue::Int(1))
     ));
-    let new = historical.get_edge_at_time(edge_id, time::now(), time::now())?;
+    let now_after_replay = time::now();
+    let new = historical.get_edge_at_time(edge_id, now_after_replay, now_after_replay)?;
     assert!(matches!(
         new.properties.get("weight"),
         Some(PropertyValue::Int(2))
