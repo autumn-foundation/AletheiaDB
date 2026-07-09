@@ -964,6 +964,145 @@ fn test_execute_cypher_parse_error() {
 }
 
 // ============================================================================
+// Expression-recursion safety tests (Issue #3404)
+//
+// Pathologically deep expression nesting must return a `ParseError` (bounded
+// by the parser depth cap) rather than overflowing the stack and aborting the
+// process, while arbitrarily long *flat* AND/OR chains must still convert (the
+// converter flattens them iteratively, so there is no term-count cap).
+// ============================================================================
+
+/// Nested parentheses at the boundary of the cap parse successfully.
+#[test]
+fn test_parse_nested_parens_under_cap() {
+    // 128 parens == MAX_EXPRESSION_DEPTH: still accepted.
+    let query = format!(
+        "MATCH (n) WHERE {}n.a = 1{} RETURN n",
+        "(".repeat(128),
+        ")".repeat(128)
+    );
+    let result = CypherParser::parse(&query);
+    assert!(result.is_ok(), "128 nested parens should parse: {result:?}");
+}
+
+/// Nested parentheses over the cap return a `ParseError` (not a crash).
+#[test]
+fn test_parse_nested_parens_over_cap() {
+    for parens in [129usize, 5000usize] {
+        let query = format!(
+            "MATCH (n) WHERE {}n.a = 1{} RETURN n",
+            "(".repeat(parens),
+            ")".repeat(parens)
+        );
+        let result = CypherParser::parse(&query);
+        assert!(
+            matches!(result, Err(CypherError::ParseError { .. })),
+            "{parens} nested parens should be a ParseError, got {result:?}"
+        );
+    }
+}
+
+/// A deep `NOT` chain at the boundary of the cap parses successfully.
+#[test]
+fn test_parse_deep_not_chain_under_cap() {
+    let query = format!("MATCH (n) WHERE {}n.a = 1 RETURN n", "NOT ".repeat(128));
+    let result = CypherParser::parse(&query);
+    assert!(result.is_ok(), "128 NOT chain should parse: {result:?}");
+}
+
+/// A deep `NOT` chain over the cap returns a `ParseError` (not a crash).
+#[test]
+fn test_parse_deep_not_chain_over_cap() {
+    for nots in [129usize, 5000usize] {
+        let query = format!("MATCH (n) WHERE {}n.a = 1 RETURN n", "NOT ".repeat(nots));
+        let result = CypherParser::parse(&query);
+        assert!(
+            matches!(result, Err(CypherError::ParseError { .. })),
+            "{nots} NOT chain should be a ParseError, got {result:?}"
+        );
+    }
+}
+
+/// A very long *flat* AND chain converts to a single n-ary `Predicate::And`
+/// without overflowing the stack in the converter.
+#[test]
+fn test_convert_large_and_chain() {
+    let terms = 5000usize;
+    let clause = vec!["n.a = 1"; terms].join(" AND ");
+    let query = parse_cypher(&format!("MATCH (n) WHERE {clause} RETURN n")).unwrap();
+    let and_len = query.ops.iter().find_map(|op| match op {
+        QueryOp::Filter(Predicate::And(preds)) => Some(preds.len()),
+        _ => None,
+    });
+    assert_eq!(
+        and_len,
+        Some(terms),
+        "expected a flattened n-ary AND with {terms} operands"
+    );
+}
+
+/// A very long *flat* OR chain converts to a single n-ary `Predicate::Or`
+/// without overflowing the stack in the converter.
+#[test]
+fn test_convert_large_or_chain() {
+    let terms = 5000usize;
+    let clause = vec!["n.a = 1"; terms].join(" OR ");
+    let query = parse_cypher(&format!("MATCH (n) WHERE {clause} RETURN n")).unwrap();
+    let or_len = query.ops.iter().find_map(|op| match op {
+        QueryOp::Filter(Predicate::Or(preds)) => Some(preds.len()),
+        _ => None,
+    });
+    assert_eq!(
+        or_len,
+        Some(terms),
+        "expected a flattened n-ary OR with {terms} operands"
+    );
+}
+
+/// Mixed `AND`/`OR` precedence still lowers correctly: `a AND b OR c` becomes
+/// an `OR` whose first operand is the `AND` (AND binds tighter than OR).
+#[test]
+fn test_convert_mixed_and_or_precedence() {
+    let query = parse_cypher("MATCH (n) WHERE n.a = 1 AND n.b = 2 OR n.c = 3 RETURN n").unwrap();
+    let filter = query
+        .ops
+        .iter()
+        .find_map(|op| match op {
+            QueryOp::Filter(pred) => Some(pred),
+            _ => None,
+        })
+        .expect("expected a filter predicate");
+    match filter {
+        Predicate::Or(operands) => {
+            assert_eq!(
+                operands.len(),
+                2,
+                "OR should have two operands: {operands:?}"
+            );
+            assert!(
+                matches!(operands[0], Predicate::And(_)),
+                "first OR operand should be the AND sub-expression, got {:?}",
+                operands[0]
+            );
+        }
+        other => panic!("expected top-level OR predicate, got {other:?}"),
+    }
+}
+
+/// End-to-end MCP-reachable path: a large flat AND `WHERE` clause executes
+/// cleanly instead of aborting the process.
+#[test]
+fn test_execute_cypher_large_and_chain() {
+    let db = AletheiaDB::new().unwrap();
+    let clause = vec!["n.a = 1"; 3000].join(" AND ");
+    let results = db
+        .execute_cypher(&format!("MATCH (n) WHERE {clause} RETURN n"))
+        .expect("large AND chain should execute without crashing");
+    // No nodes in an empty DB; the point is that it returns cleanly.
+    assert_eq!(results.count(), 0);
+}
+
+// ============================================================================
 // Temporal extension tests (Task 7)
 // ============================================================================
 

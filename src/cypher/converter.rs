@@ -520,15 +520,31 @@ impl CypherConverter {
     fn convert_expr_to_predicate(&self, expr: &CypherExpr) -> Result<Predicate, CypherError> {
         match expr {
             CypherExpr::Comparison { left, op, right } => self.convert_comparison(left, *op, right),
-            CypherExpr::And(left, right) => {
-                let left_pred = self.convert_expr_to_predicate(left)?;
-                let right_pred = self.convert_expr_to_predicate(right)?;
-                Ok(Predicate::And(vec![left_pred, right_pred]))
+            CypherExpr::And(_, _) => {
+                // Iteratively flatten the (possibly deeply left-nested) AND
+                // spine so that a long `a AND b AND c ...` chain lowers to a
+                // single n-ary predicate without recursing per operator.
+                let operands = flatten_logical_operands(expr, |e| match e {
+                    CypherExpr::And(left, right) => Some((left, right)),
+                    _ => None,
+                });
+                let preds = operands
+                    .into_iter()
+                    .map(|operand| self.convert_expr_to_predicate(operand))
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(Predicate::And(preds))
             }
-            CypherExpr::Or(left, right) => {
-                let left_pred = self.convert_expr_to_predicate(left)?;
-                let right_pred = self.convert_expr_to_predicate(right)?;
-                Ok(Predicate::Or(vec![left_pred, right_pred]))
+            CypherExpr::Or(_, _) => {
+                // Same iterative flattening for the OR spine.
+                let operands = flatten_logical_operands(expr, |e| match e {
+                    CypherExpr::Or(left, right) => Some((left, right)),
+                    _ => None,
+                });
+                let preds = operands
+                    .into_iter()
+                    .map(|operand| self.convert_expr_to_predicate(operand))
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(Predicate::Or(preds))
             }
             CypherExpr::Not(inner) => {
                 let inner_pred = self.convert_expr_to_predicate(inner)?;
@@ -842,6 +858,42 @@ impl CypherConverter {
 
         Ok((property_key, embedding))
     }
+}
+
+// ---------------------------------------------------------------------------
+// Logical-operator flattening
+// ---------------------------------------------------------------------------
+
+/// Flatten a left-nested chain of a single logical operator (`AND` or `OR`, as
+/// built by the parser's `parse_and_expr` / `parse_or_expr`) into its ordered
+/// operand list, iteratively — without recursing down the operator spine.
+///
+/// `split` returns `Some((left, right))` for a node of the operator being
+/// flattened and `None` for any other node. Nodes for which `split` returns
+/// `None` (including a sub-tree of the *other* logical operator) are returned
+/// as opaque operands, to be converted individually by the caller. Operand
+/// order is preserved left-to-right.
+///
+/// This keeps converting an arbitrarily long `a AND b AND c ...` (or `OR`)
+/// chain from overflowing the stack (issue #3404): the spine is walked with an
+/// explicit heap stack instead of one call frame per operator.
+fn flatten_logical_operands<'a>(
+    root: &'a CypherExpr,
+    split: impl Fn(&'a CypherExpr) -> Option<(&'a CypherExpr, &'a CypherExpr)>,
+) -> Vec<&'a CypherExpr> {
+    let mut operands = Vec::new();
+    let mut stack = vec![root];
+    // Pushing right-then-left means the left operand is popped first, so leaves
+    // are collected in source (left-to-right) order.
+    while let Some(node) = stack.pop() {
+        if let Some((left, right)) = split(node) {
+            stack.push(right);
+            stack.push(left);
+        } else {
+            operands.push(node);
+        }
+    }
+    operands
 }
 
 // ---------------------------------------------------------------------------

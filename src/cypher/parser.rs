@@ -37,6 +37,18 @@ use super::ast::*;
 use super::error::CypherError;
 use super::lexer::{CypherLexer, Token, TokenKind};
 
+/// Maximum nesting depth allowed while parsing an expression.
+///
+/// The expression grammar recurses at three points: a parenthesised
+/// sub-expression (`'(' expr ')'`), a `NOT` chain (`NOT not_expr`), and the
+/// element expressions of an `IN [ ... ]` / function-argument list. Each of
+/// these threads and increments a `depth` counter; when it exceeds this bound
+/// the parser returns a [`CypherError::ParseError`] instead of recursing
+/// further. Without the cap, a pathological input such as thousands of nested
+/// parentheses or `NOT`s overflows the stack and aborts the whole process
+/// (issue #3404). Legitimate queries nest far below this limit.
+const MAX_EXPRESSION_DEPTH: usize = 128;
+
 /// Recursive descent parser for Cypher queries.
 ///
 /// Created internally by [`CypherParser::parse`]; callers never need to
@@ -434,25 +446,34 @@ impl CypherParser {
     /// ```
     fn parse_where(&mut self) -> Result<CypherExpr, CypherError> {
         self.expect(TokenKind::Where)?;
-        self.parse_expression()
+        self.parse_expression(0)
     }
 
     /// Entry point for expression parsing.
     ///
+    /// `depth` is the current expression nesting level; it is incremented only
+    /// at genuine recursion re-entry points (parenthesised sub-expression,
+    /// `NOT`, and `IN`/argument element lists) and passed through unchanged by
+    /// the operator-precedence layers. Exceeding [`MAX_EXPRESSION_DEPTH`]
+    /// returns a [`CypherError::ParseError`] rather than overflowing the stack.
+    ///
     /// ```text
     /// expr := or_expr
     /// ```
-    fn parse_expression(&mut self) -> Result<CypherExpr, CypherError> {
-        self.parse_or_expr()
+    fn parse_expression(&mut self, depth: usize) -> Result<CypherExpr, CypherError> {
+        if depth > MAX_EXPRESSION_DEPTH {
+            return Err(self.error("expression nesting too deep (max 128)"));
+        }
+        self.parse_or_expr(depth)
     }
 
     /// ```text
     /// or_expr := and_expr (OR and_expr)*
     /// ```
-    fn parse_or_expr(&mut self) -> Result<CypherExpr, CypherError> {
-        let mut left = self.parse_and_expr()?;
+    fn parse_or_expr(&mut self, depth: usize) -> Result<CypherExpr, CypherError> {
+        let mut left = self.parse_and_expr(depth)?;
         while self.eat(TokenKind::Or) {
-            let right = self.parse_and_expr()?;
+            let right = self.parse_and_expr(depth)?;
             left = CypherExpr::Or(Box::new(left), Box::new(right));
         }
         Ok(left)
@@ -461,10 +482,10 @@ impl CypherParser {
     /// ```text
     /// and_expr := not_expr (AND not_expr)*
     /// ```
-    fn parse_and_expr(&mut self) -> Result<CypherExpr, CypherError> {
-        let mut left = self.parse_not_expr()?;
+    fn parse_and_expr(&mut self, depth: usize) -> Result<CypherExpr, CypherError> {
+        let mut left = self.parse_not_expr(depth)?;
         while self.eat(TokenKind::And) {
-            let right = self.parse_not_expr()?;
+            let right = self.parse_not_expr(depth)?;
             left = CypherExpr::And(Box::new(left), Box::new(right));
         }
         Ok(left)
@@ -473,12 +494,15 @@ impl CypherParser {
     /// ```text
     /// not_expr := NOT not_expr | comparison
     /// ```
-    fn parse_not_expr(&mut self) -> Result<CypherExpr, CypherError> {
+    fn parse_not_expr(&mut self, depth: usize) -> Result<CypherExpr, CypherError> {
+        if depth > MAX_EXPRESSION_DEPTH {
+            return Err(self.error("expression nesting too deep (max 128)"));
+        }
         if self.eat(TokenKind::Not) {
-            let inner = self.parse_not_expr()?;
+            let inner = self.parse_not_expr(depth + 1)?;
             Ok(CypherExpr::Not(Box::new(inner)))
         } else {
-            self.parse_comparison()
+            self.parse_comparison(depth)
         }
     }
 
@@ -486,8 +510,8 @@ impl CypherParser {
     /// comparison := primary (comp_op primary | IS [NOT] NULL | IN '[' expr_list ']'
     ///            | CONTAINS string | STARTS WITH string | ENDS WITH string)?
     /// ```
-    fn parse_comparison(&mut self) -> Result<CypherExpr, CypherError> {
-        let left = self.parse_primary_expr()?;
+    fn parse_comparison(&mut self, depth: usize) -> Result<CypherExpr, CypherError> {
+        let left = self.parse_primary_expr(depth)?;
 
         // Standard comparison operators
         let op = match self.peek().kind {
@@ -502,7 +526,7 @@ impl CypherParser {
 
         if let Some(op) = op {
             self.advance();
-            let right = self.parse_primary_expr()?;
+            let right = self.parse_primary_expr(depth)?;
             return Ok(CypherExpr::Comparison {
                 left: Box::new(left),
                 op,
@@ -527,9 +551,9 @@ impl CypherParser {
             self.expect(TokenKind::LBracket)?;
             let mut values = vec![];
             if !self.at(TokenKind::RBracket) {
-                values.push(self.parse_expression()?);
+                values.push(self.parse_expression(depth + 1)?);
                 while self.eat(TokenKind::Comma) {
-                    values.push(self.parse_expression()?);
+                    values.push(self.parse_expression(depth + 1)?);
                 }
             }
             self.expect(TokenKind::RBracket)?;
@@ -542,7 +566,7 @@ impl CypherParser {
         // CONTAINS string
         if self.at(TokenKind::Contains) {
             self.advance();
-            let right = self.parse_primary_expr()?;
+            let right = self.parse_primary_expr(depth)?;
             if let CypherExpr::Value(CypherValue::String(s)) = right {
                 return Ok(CypherExpr::Contains {
                     expr: Box::new(left),
@@ -556,7 +580,7 @@ impl CypherParser {
         if self.at(TokenKind::StartsWith) {
             self.advance(); // consume STARTS
             self.expect(TokenKind::With)?; // consume WITH
-            let right = self.parse_primary_expr()?;
+            let right = self.parse_primary_expr(depth)?;
             if let CypherExpr::Value(CypherValue::String(s)) = right {
                 return Ok(CypherExpr::StartsWith {
                     expr: Box::new(left),
@@ -570,7 +594,7 @@ impl CypherParser {
         if self.at(TokenKind::EndsWith) {
             self.advance(); // consume ENDS
             self.expect(TokenKind::With)?; // consume WITH
-            let right = self.parse_primary_expr()?;
+            let right = self.parse_primary_expr(depth)?;
             if let CypherExpr::Value(CypherValue::String(s)) = right {
                 return Ok(CypherExpr::EndsWith {
                     expr: Box::new(left),
@@ -586,12 +610,12 @@ impl CypherParser {
     /// ```text
     /// primary := value | var '.' prop | '(' expr ')' | func_call | var
     /// ```
-    fn parse_primary_expr(&mut self) -> Result<CypherExpr, CypherError> {
+    fn parse_primary_expr(&mut self, depth: usize) -> Result<CypherExpr, CypherError> {
         match self.peek().kind.clone() {
             // Parenthesized sub-expression
             TokenKind::LParen => {
                 self.advance();
-                let inner = self.parse_expression()?;
+                let inner = self.parse_expression(depth + 1)?;
                 self.expect(TokenKind::RParen)?;
                 Ok(CypherExpr::Grouped(Box::new(inner)))
             }
@@ -612,7 +636,7 @@ impl CypherParser {
                         // Dot-qualified function call: namespace.func(args...)
                         // e.g., vector.similarity(d.embedding, $query)
                         self.advance(); // consume '('
-                        let args = self.parse_function_args()?;
+                        let args = self.parse_function_args(depth)?;
                         self.expect(TokenKind::RParen)?;
                         let qualified_name = format!("{name}.{}", next_tok.text);
                         Ok(CypherExpr::FunctionCall {
@@ -629,7 +653,7 @@ impl CypherParser {
                 } else if self.at(TokenKind::LParen) {
                     // Function call: name(args...)
                     self.advance();
-                    let args = self.parse_function_args()?;
+                    let args = self.parse_function_args(depth)?;
                     self.expect(TokenKind::RParen)?;
                     Ok(CypherExpr::FunctionCall { name, args })
                 } else {
@@ -648,7 +672,7 @@ impl CypherParser {
                 let name_tok = self.advance().clone();
                 let name = name_tok.text.to_uppercase();
                 self.expect(TokenKind::LParen)?;
-                let args = self.parse_function_args()?;
+                let args = self.parse_function_args(depth)?;
                 self.expect(TokenKind::RParen)?;
                 Ok(CypherExpr::FunctionCall { name, args })
             }
@@ -673,12 +697,15 @@ impl CypherParser {
     }
 
     /// Parse comma-separated function arguments (may be empty).
-    fn parse_function_args(&mut self) -> Result<Vec<CypherExpr>, CypherError> {
+    ///
+    /// Each argument is a fresh expression nested one level below the call, so
+    /// `depth` is incremented to bound deeply nested `f(g(h(...)))` chains.
+    fn parse_function_args(&mut self, depth: usize) -> Result<Vec<CypherExpr>, CypherError> {
         let mut args = Vec::new();
         if !self.at(TokenKind::RParen) {
-            args.push(self.parse_expression()?);
+            args.push(self.parse_expression(depth + 1)?);
             while self.eat(TokenKind::Comma) {
-                args.push(self.parse_expression()?);
+                args.push(self.parse_expression(depth + 1)?);
             }
         }
         Ok(args)
@@ -766,7 +793,7 @@ impl CypherParser {
     /// return_item := expr [AS identifier]
     /// ```
     fn parse_return_item(&mut self) -> Result<CypherReturnItem, CypherError> {
-        let expr = self.parse_expression()?;
+        let expr = self.parse_expression(0)?;
 
         let alias = if self.eat(TokenKind::As) {
             let alias_tok = self.expect(TokenKind::Identifier)?;
@@ -796,7 +823,7 @@ impl CypherParser {
     /// order_item := expr [ASC | DESC]
     /// ```
     fn parse_order_item(&mut self) -> Result<CypherOrderItem, CypherError> {
-        let expr = self.parse_expression()?;
+        let expr = self.parse_expression(0)?;
 
         let descending = if self.eat(TokenKind::Desc) {
             true
