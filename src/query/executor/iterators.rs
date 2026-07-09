@@ -326,6 +326,58 @@ impl ResultIterator for VectorResultIterator {
     }
 }
 
+/// Reconstruct a node as it existed at `(valid_time, transaction_time)` from an
+/// already-locked historical storage (Issue #356).
+///
+/// This is the single, flat implementation of the temporal reconstruction path
+/// shared by [`TemporalNodeIterator`], [`BatchTemporalNodeIterator`], and
+/// [`TemporalNodeScanIterator`], replacing the previously duplicated (and
+/// originally deeply nested) per-iterator logic:
+///
+/// 1. Find the version valid at the requested bi-temporal point.
+/// 2. Retrieve the version metadata (validates that
+///    `find_node_version_at_time` only returns existing version IDs).
+/// 3. Reconstruct properties from the anchor+delta compression.
+/// 4. Build a `Node` with the historical label and properties.
+///
+/// The caller decides the locking strategy (per-node vs batch) and passes the
+/// already-locked storage, so this helper never affects lock semantics.
+///
+/// # Errors
+///
+/// - [`TemporalError::NodeNotFoundAtTime`](crate::core::error::TemporalError::NodeNotFoundAtTime)
+///   if no version exists at the requested time point
+/// - [`TemporalError::VersionNotFound`](crate::core::error::TemporalError::VersionNotFound)
+///   if version metadata is missing (data inconsistency)
+/// - Any error from property reconstruction
+fn reconstruct_node_at(
+    historical: &HistoricalStorage,
+    node_id: NodeId,
+    valid_time: Timestamp,
+    transaction_time: Timestamp,
+) -> Result<Node> {
+    // Step 1: Find the version valid at the requested time
+    let version_id = historical
+        .find_node_version_at_time(node_id, valid_time, transaction_time)
+        .ok_or(crate::core::error::TemporalError::NodeNotFoundAtTime {
+            node_id,
+            valid_time,
+            transaction_time,
+        })?;
+
+    // Step 2: Get the version metadata (also validates the invariant that
+    // find_node_version_at_time only returns existing version IDs)
+    let version = historical.get_node_version(version_id).ok_or(
+        crate::core::error::TemporalError::VersionNotFound(version_id),
+    )?;
+
+    // Step 3: Reconstruct the properties from the version
+    let properties = historical.reconstruct_node_properties(version_id)?;
+
+    // Step 4: Build and return the node with the historical data
+    Ok(Node::new(node_id, version.label, properties, version_id))
+}
+
 /// Iterator for temporal node lookups.
 ///
 /// # Context
@@ -408,26 +460,9 @@ impl ResultIterator for TemporalNodeIterator {
             // For bulk queries, use BatchTemporalNodeIterator instead
             let historical = self.historical.read();
 
-            // Find the version valid at the requested time
-            let version_id = historical
-                .find_node_version_at_time(id, self.valid_time, self.transaction_time)
-                .ok_or(crate::core::error::TemporalError::NodeNotFoundAtTime {
-                    node_id: id,
-                    valid_time: self.valid_time,
-                    transaction_time: self.transaction_time,
-                })?;
-
-            // Get the version metadata (also validates the invariant that
-            // find_node_version_at_time only returns existing version IDs)
-            let version = historical.get_node_version(version_id).ok_or(
-                crate::core::error::TemporalError::VersionNotFound(version_id),
-            )?;
-
-            // Reconstruct the properties from the version
-            let properties = historical.reconstruct_node_properties(version_id)?;
-
-            // Construct a node with the historical data
-            let node = Node::new(id, version.label, properties, version_id);
+            // Reconstruct the node at the requested bi-temporal point (Issue #356)
+            let node =
+                reconstruct_node_at(&historical, id, self.valid_time, self.transaction_time)?;
 
             Ok(QueryRow::from_entity(EntityResult::Node(node)).at_time(self.valid_time))
         })
@@ -517,26 +552,8 @@ impl BatchTemporalNodeIterator {
         let results: Vec<Result<QueryRow>> = node_ids
             .into_iter()
             .map(|id| {
-                // Find the version valid at the requested time
-                let version_id = guard
-                    .find_node_version_at_time(id, valid_time, transaction_time)
-                    .ok_or(crate::core::error::TemporalError::NodeNotFoundAtTime {
-                        node_id: id,
-                        valid_time,
-                        transaction_time,
-                    })?;
-
-                // Get the version metadata (also validates the invariant that
-                // find_node_version_at_time only returns existing version IDs)
-                let version = guard.get_node_version(version_id).ok_or(
-                    crate::core::error::TemporalError::VersionNotFound(version_id),
-                )?;
-
-                // Reconstruct the properties from the version
-                let properties = guard.reconstruct_node_properties(version_id)?;
-
-                // Construct a node with the historical data
-                let node = Node::new(id, version.label, properties, version_id);
+                // Reconstruct the node at the requested bi-temporal point (Issue #356)
+                let node = reconstruct_node_at(&guard, id, valid_time, transaction_time)?;
 
                 Ok(QueryRow::from_entity(EntityResult::Node(node)).at_time(valid_time))
             })
@@ -654,11 +671,8 @@ impl TemporalNodeScanIterator {
 
     /// Retrieve the temporal version of a node at the configured time point.
     ///
-    /// This helper method encapsulates the temporal reconstruction logic:
-    /// 1. Find the version valid at (valid_time, transaction_time)
-    /// 2. Retrieve the version metadata
-    /// 3. Reconstruct properties from anchor+delta compression
-    /// 4. Return a fully reconstructed Node
+    /// Thin wrapper over the shared [`reconstruct_node_at`] helper (Issue #356),
+    /// binding this iterator's configured `(valid_time, transaction_time)`.
     ///
     /// # Errors
     ///
@@ -671,26 +685,7 @@ impl TemporalNodeScanIterator {
         node_id: NodeId,
         guard: &parking_lot::RwLockReadGuard<'_, HistoricalStorage>,
     ) -> Result<Node> {
-        // Step 1: Find the version valid at the requested time
-        let version_id = guard
-            .find_node_version_at_time(node_id, self.valid_time, self.transaction_time)
-            .ok_or(crate::core::error::TemporalError::NodeNotFoundAtTime {
-                node_id,
-                valid_time: self.valid_time,
-                transaction_time: self.transaction_time,
-            })?;
-
-        // Step 2: Get the version metadata (also validates the invariant that
-        // find_node_version_at_time only returns existing version IDs)
-        let version = guard.get_node_version(version_id).ok_or(
-            crate::core::error::TemporalError::VersionNotFound(version_id),
-        )?;
-
-        // Step 3: Reconstruct properties
-        let properties = guard.reconstruct_node_properties(version_id)?;
-
-        // Step 4: Build and return the node
-        Ok(Node::new(node_id, version.label, properties, version_id))
+        reconstruct_node_at(guard, node_id, self.valid_time, self.transaction_time)
     }
 
     /// Check if a node passes the label filter.
@@ -3050,6 +3045,187 @@ mod tests {
         let mut iter = TemporalNodeIterator::new(node_ids, now, now, historical);
 
         assert!(iter.next().is_none());
+    }
+
+    // Characterization tests (Issue #356): capture the exact behavior of the
+    // temporal reconstruction path before/after flattening it into a shared
+    // helper. Behavior must not change.
+
+    /// Helper: extract the "name" string property from a QueryRow's node.
+    fn row_name(row: &QueryRow) -> String {
+        let node = row.entity.as_node().expect("row should contain a node");
+        match node.properties.get("name") {
+            Some(PropertyValue::String(s)) => s.to_string(),
+            other => panic!("unexpected name property: {:?}", other),
+        }
+    }
+
+    /// Helper: historical storage with two versions of node 1:
+    /// name=Alice at t=1000, name=Alicia at t=2000 (valid == tx time).
+    fn historical_with_two_versions() -> Arc<RwLock<HistoricalStorage>> {
+        use crate::storage::historical::HistoricalStorage;
+
+        let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
+        let label = GLOBAL_INTERNER.intern("Person").unwrap();
+        {
+            let mut hist = historical.write();
+            hist.add_node_version(
+                NodeId::new(1).unwrap(),
+                VersionId::new(100).unwrap(),
+                1000.into(),
+                1000.into(),
+                label,
+                PropertyMapBuilder::new().insert("name", "Alice").build(),
+                false, // not a tombstone
+            )
+            .unwrap();
+            hist.add_node_version(
+                NodeId::new(1).unwrap(),
+                VersionId::new(101).unwrap(),
+                2000.into(),
+                2000.into(),
+                label,
+                PropertyMapBuilder::new().insert("name", "Alicia").build(),
+                false, // not a tombstone
+            )
+            .unwrap();
+        }
+        historical
+    }
+
+    #[test]
+    fn test_temporal_node_iterator_not_found_before_first_version() {
+        let historical = historical_with_two_versions();
+        let node_ids = vec![NodeId::new(1).unwrap()];
+
+        // Query before the node's first version: not found at that time
+        let mut iter = TemporalNodeIterator::new(node_ids, 500.into(), 500.into(), historical);
+
+        let result = iter.next().unwrap();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_temporal_node_iterator_multiple_versions_selects_point_in_time() {
+        let historical = historical_with_two_versions();
+
+        // Between the two versions: the older version's properties are returned
+        let mut iter = TemporalNodeIterator::new(
+            vec![NodeId::new(1).unwrap()],
+            1500.into(),
+            1500.into(),
+            historical.clone(),
+        );
+        let row = iter.next().unwrap().unwrap();
+        assert_eq!(row_name(&row), "Alice");
+        assert_eq!(row.timestamp, Some(1500.into()));
+
+        // At/after the second version: the newer version's properties are returned
+        let mut iter = TemporalNodeIterator::new(
+            vec![NodeId::new(1).unwrap()],
+            2500.into(),
+            2500.into(),
+            historical,
+        );
+        let row = iter.next().unwrap().unwrap();
+        assert_eq!(row_name(&row), "Alicia");
+    }
+
+    #[test]
+    fn test_temporal_node_iterator_boundary_timestamps() {
+        let historical = historical_with_two_versions();
+
+        // Exactly at the first version's start: that version is visible
+        let mut iter = TemporalNodeIterator::new(
+            vec![NodeId::new(1).unwrap()],
+            1000.into(),
+            1000.into(),
+            historical.clone(),
+        );
+        let row = iter.next().unwrap().unwrap();
+        assert_eq!(row_name(&row), "Alice");
+
+        // Exactly at the second version's start: the new version wins
+        // (intervals are half-open: the old version ends at 2000, the new begins)
+        let mut iter = TemporalNodeIterator::new(
+            vec![NodeId::new(1).unwrap()],
+            2000.into(),
+            2000.into(),
+            historical,
+        );
+        let row = iter.next().unwrap().unwrap();
+        assert_eq!(row_name(&row), "Alicia");
+    }
+
+    #[test]
+    fn test_temporal_node_iterator_tombstone_semantics() {
+        use crate::storage::historical::HistoricalStorage;
+
+        let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
+        let label = GLOBAL_INTERNER.intern("Person").unwrap();
+        {
+            let mut hist = historical.write();
+            hist.add_node_version(
+                NodeId::new(1).unwrap(),
+                VersionId::new(100).unwrap(),
+                1000.into(),
+                1000.into(),
+                label,
+                PropertyMapBuilder::new().insert("name", "Alice").build(),
+                false, // not a tombstone
+            )
+            .unwrap();
+            // Tombstone (deletion) at t=2000
+            hist.add_node_version(
+                NodeId::new(1).unwrap(),
+                VersionId::new(101).unwrap(),
+                2000.into(),
+                2000.into(),
+                label,
+                PropertyMapBuilder::new().build(),
+                true, // tombstone
+            )
+            .unwrap();
+        }
+
+        // Before the deletion: node is visible with its original properties
+        let mut iter = TemporalNodeIterator::new(
+            vec![NodeId::new(1).unwrap()],
+            1500.into(),
+            1500.into(),
+            historical.clone(),
+        );
+        let row = iter.next().unwrap().unwrap();
+        assert_eq!(row_name(&row), "Alice");
+
+        // After the deletion: node is not found at that time
+        let mut iter = TemporalNodeIterator::new(
+            vec![NodeId::new(1).unwrap()],
+            2500.into(),
+            2500.into(),
+            historical,
+        );
+        let result = iter.next().unwrap();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_batch_temporal_node_iterator_multiple_versions_selects_point_in_time() {
+        // The batch iterator must reconstruct the same point-in-time state as
+        // the per-node iterator (shared logic, Issue #356).
+        let historical = historical_with_two_versions();
+
+        let mut iter = BatchTemporalNodeIterator::new(
+            vec![NodeId::new(1).unwrap()],
+            1500.into(),
+            1500.into(),
+            historical,
+        )
+        .unwrap();
+
+        let row = iter.next().unwrap().unwrap();
+        assert_eq!(row_name(&row), "Alice");
+        assert_eq!(row.timestamp, Some(1500.into()));
     }
 
     // ==================== BatchTemporalNodeIterator Tests ====================

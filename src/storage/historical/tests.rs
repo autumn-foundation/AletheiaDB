@@ -352,6 +352,127 @@ fn test_stats() {
 }
 
 // ============================================================
+// Average Delta Chain Length (Issue #366)
+// ============================================================
+
+#[test]
+fn test_calculate_avg_delta_chain_hand_computed() {
+    // Issue #366: hand-computed expected average over known constructed chains.
+    // With anchor_interval=10, the first version of each entity is an anchor and
+    // the following versions (up to the interval) are deltas.
+    let mut storage = HistoricalStorage::with_config(AnchorConfig {
+        anchor_interval: 10,
+        max_delta_chain: 20,
+    });
+    let label = GLOBAL_INTERNER.intern("Test").unwrap();
+
+    // Node 1: 4 versions -> 1 anchor + 3 deltas
+    for i in 0..4u64 {
+        storage
+            .add_node_version(
+                NodeId::new(1).unwrap(),
+                VersionId::new(100 + i).unwrap(),
+                (1000 + (i as i64) * 100).into(),
+                (1000 + (i as i64) * 100).into(),
+                label,
+                PropertyMapBuilder::new().insert("v", i as i64).build(),
+                false, // not a tombstone
+            )
+            .unwrap();
+    }
+
+    // Node 2: 1 version -> 1 anchor + 0 deltas
+    storage
+        .add_node_version(
+            NodeId::new(2).unwrap(),
+            VersionId::new(200).unwrap(),
+            1000.into(),
+            1000.into(),
+            label,
+            PropertyMapBuilder::new().build(),
+            false, // not a tombstone
+        )
+        .unwrap();
+
+    // Expected: (3 deltas + 0 deltas) / 2 anchors = 1.5
+    assert!((storage.calculate_avg_delta_chain() - 1.5).abs() < f64::EPSILON);
+}
+
+#[test]
+fn test_calculate_avg_delta_chain_empty_storage_fallback() {
+    // Issue #366: empty historical storage falls back to the default estimate 5.0.
+    let storage = HistoricalStorage::new();
+    assert!((storage.calculate_avg_delta_chain() - 5.0).abs() < f64::EPSILON);
+}
+
+#[test]
+fn test_calculate_avg_delta_chain_includes_edge_versions() {
+    // Issue #366: the average considers both node and edge version chains.
+    let mut storage = HistoricalStorage::with_config(AnchorConfig {
+        anchor_interval: 10,
+        max_delta_chain: 20,
+    });
+    let label = GLOBAL_INTERNER.intern("Test").unwrap();
+
+    // Node chain: 3 versions -> 1 anchor + 2 deltas
+    for i in 0..3u64 {
+        storage
+            .add_node_version(
+                NodeId::new(1).unwrap(),
+                VersionId::new(100 + i).unwrap(),
+                (1000 + (i as i64) * 100).into(),
+                (1000 + (i as i64) * 100).into(),
+                label,
+                PropertyMapBuilder::new().insert("v", i as i64).build(),
+                false, // not a tombstone
+            )
+            .unwrap();
+    }
+
+    // Edge chain: 3 versions -> 1 anchor + 2 deltas
+    for i in 0..3u64 {
+        storage
+            .add_edge_version(
+                EdgeId::new(1).unwrap(),
+                VersionId::new(300 + i).unwrap(),
+                (1000 + (i as i64) * 100).into(),
+                (1000 + (i as i64) * 100).into(),
+                label,
+                NodeId::new(1).unwrap(),
+                NodeId::new(2).unwrap(),
+                PropertyMapBuilder::new().insert("w", i as i64).build(),
+                false, // not a tombstone
+            )
+            .unwrap();
+    }
+
+    // Expected: (2 node deltas + 2 edge deltas) / (1 + 1 anchors) = 2.0
+    assert!((storage.calculate_avg_delta_chain() - 2.0).abs() < f64::EPSILON);
+}
+
+#[test]
+fn test_calculate_avg_delta_chain_anchors_only_is_zero() {
+    // Anchors with no deltas: the actual average chain length is 0.0
+    // (every lookup hits an anchor directly), not the 5.0 fallback.
+    let mut storage = HistoricalStorage::new();
+    let label = GLOBAL_INTERNER.intern("Test").unwrap();
+
+    storage
+        .add_node_version(
+            NodeId::new(1).unwrap(),
+            VersionId::new(100).unwrap(),
+            1000.into(),
+            1000.into(),
+            label,
+            PropertyMapBuilder::new().build(),
+            false, // not a tombstone
+        )
+        .unwrap();
+
+    assert!(storage.calculate_avg_delta_chain().abs() < f64::EPSILON);
+}
+
+// ============================================================
 // Vector Property Tests (VS-012)
 // ============================================================
 //
