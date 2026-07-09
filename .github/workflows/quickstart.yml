@@ -11,6 +11,12 @@ on:
   pull_request:
     branches: [ main, trunk, develop ]
 
+# Least-privilege GITHUB_TOKEN: the jobs only check out the repo and run the
+# demo — no writes to PRs, issues, pages, or the repo — so read-only contents
+# access is sufficient.
+permissions:
+  contents: read
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
