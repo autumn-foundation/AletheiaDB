@@ -26,11 +26,13 @@
 //! ```
 
 mod auth;
+mod batch;
 mod error;
 mod server;
 mod tools;
 
 pub use auth::{McpAuthConfig, validate_mcp_auth_startup};
+pub use batch::{ApplyBatchRequest, BatchNodeRef, BatchOperation};
 pub use error::{McpError, McpErrorCode};
 pub use server::AletheiaMcpServer;
 

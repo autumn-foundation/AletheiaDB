@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Atomic multi-write batches with local refs via MCP (Issue #3231): the new
+  `apply_batch` tool accepts an **ordered** array of write operations
+  (`create_node`, `create_edge`, `update_node`, `update_edge`, `delete_node`,
+  `delete_edge`, each supporting the #3221 optional `valid_time`) that commit
+  **all-or-nothing** in a single `WriteTransaction` (one WAL batch append,
+  one GroupCommit fsync). A `create_node` may carry a `ref` alias; later edge
+  operations may reference batch-created nodes as `"$alias"` or positionally
+  as `"$<index>"` — forward/unknown/duplicate refs are rejected statically
+  with a precise `details.failed_op_index` before any transaction opens. Any
+  failure (validation, constraint violation, #3209 detach refusal — enforced
+  against committed **and** batch-created edges via a batch-local adjacency
+  ledger) rolls the whole batch back: zero writes become visible. On success
+  the response returns per-operation results in input order (entity ids,
+  version ids for creates/updates) plus a `ref_map` of every alias to its
+  committed real id. Batch size is capped (default 1000, tunable via
+  `AletheiaMcpServer::with_max_batch_operations`; the limit is echoed on
+  rejection per #3226). New `WriteTransaction::buffered_node_version` /
+  `buffered_edge_version` accessors surface the eagerly-allocated per-op
+  version ids. v1 scope: ops may not update/delete a batch-created entity,
+  each committed entity accepts at most one write per batch, and delete
+  results carry no version id. See
+  [docs/guides/mcp-query-tool.md](docs/guides/mcp-query-tool.md#atomic-multi-write-batches-apply_batch).
+
 - Authentication and role-based access control on both server surfaces
   (Issue #3350): the HTTP server (`aletheia-server`) and the MCP server
   (`aletheia-mcp`) require an API key by default and refuse to start with

@@ -152,6 +152,7 @@ use crate::index::vector::{DistanceMetric, HnswConfig};
 use crate::query::executor::{EntityId as ResultEntityId, EntityResult};
 
 use super::auth::{McpAuthConfig, SessionAuth};
+use super::batch::ApplyBatchRequest;
 use super::error::{McpError, McpErrorCode, query_kind_classification};
 use super::tools::*;
 use crate::auth::{AuthMode, Principal};
@@ -188,6 +189,13 @@ const DEFAULT_VECTOR_K: usize = 10;
 /// Default transaction time placeholder string.
 const TRANSACTION_TIME_NOW: &str = "now";
 
+/// Default maximum number of operations accepted by a single `apply_batch`
+/// call (Issue #3231). Deliberately far below the core transaction buffer's
+/// own DoS cap (`WriteBuffer::DEFAULT_MAX_OPERATIONS` = 50,000), so the MCP
+/// surface bound is always the one that fires, with the limit echoed in the
+/// rejection per the #3226 completeness convention.
+pub(crate) const DEFAULT_MAX_BATCH_OPERATIONS: usize = 1000;
+
 /// AletheiaDB MCP Server.
 ///
 /// Exposes AletheiaDB's graph, vector, and temporal capabilities through the Model Context Protocol.
@@ -207,6 +215,8 @@ const TRANSACTION_TIME_NOW: &str = "now";
 #[derive(Clone)]
 pub struct AletheiaMcpServer {
     db: Arc<AletheiaDB>,
+    /// Maximum operations accepted by one `apply_batch` call (Issue #3231).
+    pub(crate) max_batch_operations: usize,
     auth: SessionAuth,
 }
 
@@ -242,8 +252,22 @@ impl AletheiaMcpServer {
     pub fn new(db: Arc<AletheiaDB>) -> Self {
         Self {
             db,
+            max_batch_operations: DEFAULT_MAX_BATCH_OPERATIONS,
             auth: SessionAuth::Anonymous,
         }
+    }
+
+    /// Override the maximum number of operations accepted by a single
+    /// `apply_batch` call (default: 1000, Issue #3231). An over-limit batch
+    /// is rejected before any operation runs, with the limit echoed in the
+    /// structured error's `details` (per the #3226 completeness convention).
+    ///
+    /// The cap is an MCP-surface payload bound; the core transaction buffer
+    /// keeps its own independent DoS ceiling (50,000 ops).
+    #[must_use]
+    pub fn with_max_batch_operations(mut self, max_batch_operations: usize) -> Self {
+        self.max_batch_operations = max_batch_operations;
+        self
     }
 
     /// Create an MCP server with authentication and role-based
@@ -279,6 +303,7 @@ impl AletheiaMcpServer {
         }
         Self {
             db,
+            max_batch_operations: DEFAULT_MAX_BATCH_OPERATIONS,
             auth: SessionAuth::from(auth),
         }
     }
@@ -307,7 +332,7 @@ impl AletheiaMcpServer {
     /// Extract text content from a CallToolResult.
     ///
     /// Returns an error JSON string if the result contains no text content.
-    fn extract_text(result: CallToolResult) -> String {
+    pub(crate) fn extract_text(result: CallToolResult) -> String {
         result
             .content
             .first()
@@ -1018,7 +1043,7 @@ impl AletheiaMcpServer {
         }
     }
 
-    fn json_to_property_map(
+    pub(crate) fn json_to_property_map(
         &self,
         json: &HashMap<String, serde_json::Value>,
     ) -> Result<PropertyMap, String> {
@@ -1065,7 +1090,7 @@ impl AletheiaMcpServer {
         }
     }
 
-    fn parse_timestamp(&self, s: &str) -> Result<Timestamp, String> {
+    pub(crate) fn parse_timestamp(&self, s: &str) -> Result<Timestamp, String> {
         // Try parsing as ISO 8601 timestamp first
         if let Ok(dt) = s.parse::<DateTime<Utc>>() {
             let micros = dt.timestamp_micros();
@@ -1151,7 +1176,7 @@ impl AletheiaMcpServer {
     /// deliberately has no `principal` field, so callers cannot forge it.
     /// Anonymous-mode sessions (and the embedded `new()` constructor)
     /// record no principal -- the field is absent, not an empty string.
-    fn parse_opt_provenance(
+    pub(crate) fn parse_opt_provenance(
         &self,
         value: Option<crate::mcp::tools::ProvenanceRequest>,
     ) -> std::result::Result<Option<Provenance>, CallToolResult> {
@@ -1264,7 +1289,7 @@ impl AletheiaMcpServer {
         Ok(())
     }
 
-    fn success_json(&self, value: serde_json::Value) -> CallToolResult {
+    pub(crate) fn success_json(&self, value: serde_json::Value) -> CallToolResult {
         CallToolResult::success(vec![Content::text(
             serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string()),
         )])
@@ -1273,7 +1298,7 @@ impl AletheiaMcpServer {
     /// Serialize a structured [`McpError`] into an error `CallToolResult`
     /// with the Issue #3234 shape:
     /// `{"error": {"code", "message", "retriable", "details"?}}`.
-    fn error_result(&self, err: McpError) -> CallToolResult {
+    pub(crate) fn error_result(&self, err: McpError) -> CallToolResult {
         Self::error_result_with_top_level(err, serde_json::Map::new())
     }
 
@@ -1281,7 +1306,7 @@ impl AletheiaMcpServer {
     /// legacy top-level fields alongside the structured `error` object (e.g.
     /// the #3209 DETACH refusal's `connected_edges`), so pre-#3234 consumers
     /// lose nothing.
-    fn error_result_with_top_level(
+    pub(crate) fn error_result_with_top_level(
         err: McpError,
         mut top_level: serde_json::Map<String, serde_json::Value>,
     ) -> CallToolResult {
@@ -1296,7 +1321,7 @@ impl AletheiaMcpServer {
 
     /// Caller-fault error: malformed arguments, bad IDs, unparseable
     /// timestamps, inconsistent parameter combinations. Never retriable.
-    fn invalid_argument(&self, msg: &str) -> CallToolResult {
+    pub(crate) fn invalid_argument(&self, msg: &str) -> CallToolResult {
         self.error_result(McpError::new(McpErrorCode::InvalidArgument, msg))
     }
 
@@ -4057,6 +4082,17 @@ impl AletheiaMcpServer {
             .collect()
     }
 
+    /// Test-only accessor returning the advertised input schema for a tool,
+    /// so tests can pin schema contents (e.g. the apply_batch op variants)
+    /// against silent drift.
+    #[cfg(test)]
+    pub(crate) fn tool_input_schema_for_test(&self, name: &str) -> Option<serde_json::Value> {
+        tool_definitions()
+            .iter()
+            .find(|tool| tool.name == name)
+            .map(|tool| serde_json::Value::Object((*tool.input_schema).clone()))
+    }
+
     /// Dispatch a tool call by name to its handler.
     ///
     /// Shared between [`ServerHandler::call_tool`] and tests so that every
@@ -4093,6 +4129,7 @@ impl AletheiaMcpServer {
             "create_edge" => self.handle_create_edge(args),
             "update_edge" => self.handle_update_edge(args),
             "delete_edge" => self.handle_delete_edge(args),
+            "apply_batch" => self.handle_apply_batch(args),
             "list_edges" => self.handle_list_edges(args),
             "count_edges" => self.handle_count_edges(args),
             "get_outgoing_edges" => self.handle_get_outgoing_edges(args),
@@ -4301,6 +4338,29 @@ fn tool_definitions() -> Vec<Tool> {
                      relationship stopped being true in the real world; omit it to default to the \
                      transaction time.",
             make_input_schema::<DeleteEdgeRequest>(),
+        ),
+        Tool::new(
+            "apply_batch",
+            "Apply an ordered list of write operations ATOMICALLY (all-or-nothing) in one \
+                     call. Each operation is a tagged object (`op`: create_node, create_edge, \
+                     update_node, update_edge, delete_node, delete_edge) mirroring the single-op \
+                     tools, including optional per-op `valid_time`. A `create_node` may carry a \
+                     `ref` alias; later edge operations may reference batch-created nodes as \
+                     '$alias' (or positionally as '$<index>') wherever a node id is accepted as \
+                     an endpoint — forward references are rejected. If ANY operation fails \
+                     (validation, unknown ref, constraint violation, detach refusal), NONE of \
+                     the batch's writes take effect: atomicity holds for every acknowledged \
+                     outcome and all non-crash failures (narrow caveat: a process crash during \
+                     the commit flush can persist a prefix of a batch until WAL transaction \
+                     framing lands, issue #3413), and the error reports \
+                     `details.failed_op_index`. `delete_node` honors the safe-by-default DETACH \
+                     contract against committed AND batch-created edges. On success the response \
+                     returns per-operation results in input order (ids and version ids for \
+                     creates/updates) plus `ref_map` mapping every alias to its committed real \
+                     id. Batch size is capped (default 1000; the limit is echoed on rejection). \
+                     v1 limits: an op may not update/delete a node created in the same batch, \
+                     and each committed entity accepts at most one write per batch.",
+            make_input_schema::<ApplyBatchRequest>(),
         ),
         Tool::new(
             "list_edges",

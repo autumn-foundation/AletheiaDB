@@ -108,6 +108,7 @@ pub(crate) const TOOL_ACCESS_CLASSES: &[(&str, AccessClass)] = &[
     ("update_edge", AccessClass::Write),
     ("delete_edge", AccessClass::Write),
     ("retract_edge", AccessClass::Write),
+    ("apply_batch", AccessClass::Write),
     ("enable_vector_index", AccessClass::Write),
     ("enable_unique_constraint", AccessClass::Write),
     // ---- Admin: none yet. Key lifecycle is served by the HTTP admin

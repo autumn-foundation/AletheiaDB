@@ -477,6 +477,160 @@ response may be missing matches with higher node ids. A dedicated temporal
 label index is a deliberate follow-up if this misses its latency target at
 scale. The edge equivalent (`find_edges_at_time`) is a planned fast-follow.
 
+## Atomic multi-write batches (`apply_batch`)
+
+Building an entity-with-relationships subgraph through the single-op tools
+takes one call — one transaction — per write: if the third call fails, the
+first two are already committed, leaving a half-built graph with no rollback.
+`apply_batch` (Issue #3231) submits an **ordered** array of write operations
+that commit **all-or-nothing** in one call, where later operations reference
+nodes created earlier in the same batch via symbolic local refs (the
+Datomic-tempid / XTDB-`submit-tx` pattern). The whole batch rides one
+`WriteTransaction`: one WAL batch append, one GroupCommit fsync — commit
+latency stays within the single-transaction envelope no matter how many
+operations the batch carries.
+
+### Request shape
+
+```jsonc
+{
+  "operations": [
+    {"op": "create_node", "label": "Person", "ref": "alice",
+     "properties": {"name": "Alice"}},
+    {"op": "create_node", "label": "Person", "ref": "bob",
+     "properties": {"name": "Bob"}, "valid_time": "2024-01-15T10:00:00Z"},
+    {"op": "create_edge", "source_id": "$alice", "target_id": "$bob",
+     "label": "KNOWS", "properties": {"since": 2024}}
+  ]
+}
+```
+
+Supported `op` values: `create_node`, `create_edge`, `update_node`,
+`update_edge`, `delete_node`, `delete_edge`. Each mirrors its single-op
+tool's fields, including the optional #3221 `valid_time` (ISO 8601 or
+microseconds since epoch) and the optional #3224 `provenance` bundle on
+creates/updates.
+
+**Local refs.** A `create_node` may carry a `ref` alias (unique within the
+batch, must not start with `$`, must not be purely numeric). Later
+`create_edge` operations may then use `"$alias"` — or the positional form
+`"$<index>"` naming the create_node op at that array index — anywhere a node
+id is accepted **as an edge endpoint**, freely mixed with committed integer
+ids. A **forward reference** (naming a node only created later in the array)
+is rejected, as are unknown refs and duplicate aliases — all statically,
+before any transaction opens.
+
+### Atomicity contract
+
+If **any** operation fails — malformed op, unresolved ref, nonexistent
+target, constraint violation, detach refusal, commit conflict — **none** of
+the batch's writes take effect: for operation-time failures the
+transaction's buffer is rolled back before anything is applied or
+WAL-logged, and commit-phase failures (conflicts, constraint violations)
+abort the transaction as a whole. Atomicity is guaranteed for **every
+acknowledged outcome** (any success or error response the caller receives)
+and for **all non-crash failure modes**. One narrow caveat: the WAL
+currently has no transaction framing, so a process **crash during the
+commit flush window** can persist a prefix of a batch that was never
+acknowledged, and recovery may then replay that prefix — a pre-existing
+engine property of all multi-operation transactions, tracked in issue
+#3413. Separately, readers using non-snapshot read paths can briefly
+observe a commit in progress mid-apply — also pre-existing behavior for
+all multi-op transactions, not specific to `apply_batch`. The error
+response reports the failing operation:
+
+```jsonc
+{ "error": {
+    "code": "NOT_FOUND", "retriable": false,
+    "message": "Node not found: NodeId(999999)",
+    "details": { "failed_op_index": 2 } } }
+```
+
+`details.failed_op_index` is present on every **per-operation**
+`apply_batch` error: the offending array index for per-op failures, or JSON
+`null` for whole-batch failures that have no attributable op (a commit-phase
+write-write `CONFLICT`, which is `retriable: true` — the whole batch is safe
+to resubmit because nothing committed — and the over-cap rejection). A
+top-level malformed-request error (arguments that don't parse as an
+`operations` array at all) has no op to attribute and carries no
+`failed_op_index`. A unique-constraint violation is
+`CONSTRAINT_VIOLATION` with the usual `label`/`property`/`value`/
+`existing_node_id` details. An over-cap batch is rejected up front with the
+limit echoed (#3226 convention):
+`details: {limit: 1000, submitted: 1042, failed_op_index: null}`.
+The cap defaults to 1000 operations and is tunable via
+`AletheiaMcpServer::with_max_batch_operations`.
+
+`delete_node` inside a batch honors the #3209 safe-by-default DETACH
+contract — against committed **and** batch-created edges (the handler keeps
+a batch-local adjacency ledger, since committed-state adjacency cannot see
+uncommitted edges). Deleting a node that still has connected edges at that
+point in the batch is refused (`FAILED_PRECONDITION`,
+`details.connected_edges` counting distinct edges — a self-loop counts once —
+plus `failed_op_index`) unless the op passes `detach: true`, in which case
+committed edges are cascade-deleted and batch-created edges touching the
+node are removed too. Edges the batch already deleted no longer count.
+`valid_time` is not supported together with `detach: true` (same rule as the
+single-op tool), rejected per-op. Note one counting divergence: `apply_batch`
+counts **distinct** edges (a self-loop counts once), while the single-op
+`delete_node` tool's committed-state count tallies both adjacency directions
+(a self-loop counts as 2) — convergence is tracked in issue #3416. As with
+the single-op tools, a residual snapshot-isolation write-skew remains: a
+concurrent transaction committing an edge to a node this batch deletes can
+still orphan that edge despite the pre-delete count (also issue #3416).
+
+### Success response
+
+```jsonc
+{
+  "success": true,
+  "operation_count": 3,
+  "results": [                      // per-op results, in input order
+    {"op": "create_node", "index": 0, "ref": "alice", "node_id": 7, "version_id": 12},
+    {"op": "create_node", "index": 1, "ref": "bob",   "node_id": 8, "version_id": 13},
+    {"op": "create_edge", "index": 2, "edge_id": 3, "version_id": 14,
+     "source_id": 7, "target_id": 8}
+  ],
+  "ref_map": { "alice": 7, "bob": 8 }  // every alias -> committed real id
+}
+```
+
+`update_node`/`update_edge` results carry the entity id and the new
+`version_id`; `delete_node` results carry `detached` and `edges_removed`
+(committed edges cascaded plus batch-created edges removed). A batch-created
+edge that a later `delete_node` + `detach: true` removes is reported with
+`edge_id: null`, `version_id: null`, and `removed_by_delete_at_index` — see
+the last v1 limitation below.
+
+### v1 limitations
+
+- **No update/delete of batch-created entities**: refs are accepted only as
+  edge endpoints. `update_node`/`delete_node` targeting `"$alias"` is
+  rejected with a clear error (`INVALID_ARGUMENT` + `failed_op_index`) —
+  read-your-writes inside an uncommitted batch is out of scope for #3231;
+  commit the create first, then modify it in a follow-up call.
+- **One write per committed entity per batch**: a second `update`/`delete`
+  aimed at the same node/edge id is rejected (the second op would act on a
+  stale read of the pre-batch state); `details` names both op indices.
+- **Deletes carry no `version_id`**: tombstone versions are allocated inside
+  the commit path and are not surfaced by the transaction API.
+- **Batch-created edges removed by a later detach delete leave no trace**:
+  such an edge is elided from the transaction entirely (never allocated,
+  never written to history) — the committed record equals the batch's atomic
+  net effect. Its per-op result says so via `removed_by_delete_at_index`.
+  Because elision writes no history, a to-be-elided `create_edge` carrying an
+  **explicit `valid_time`** is rejected up front (`INVALID_ARGUMENT` with
+  `failed_op_index` = the create's index and `removed_by_delete_at_index` =
+  the delete's index): silently eliding a backdated fact would erase history
+  that single-op sequencing (create, commit, then delete) preserves — drop
+  the create from the batch, or commit it in a separate call before the
+  delete.
+- An **empty** `operations` array is a harmless, idempotent no-op success
+  (`results: []`, `ref_map: {}`).
+- Updating an edge and then detach-deleting one of its endpoint nodes in the
+  same batch is refused with both op indices (the cascade would silently
+  discard the update).
+
 ## Structured error codes and the retriable contract
 
 Every MCP tool error — across **all** tools, not just `query` — is a JSON

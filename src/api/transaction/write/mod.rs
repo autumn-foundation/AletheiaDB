@@ -957,6 +957,45 @@ impl ReadOps for WriteTransaction {
     }
 }
 
+/// Buffered-version introspection (Issue #3231).
+///
+/// The `apply_batch` MCP surface reports a per-operation `version_id` for
+/// creates and updates. Those version ids are allocated eagerly at op call
+/// time and stored in the corresponding [`BufferedWrite`](super::BufferedWrite)
+/// variant; these accessors surface them without touching storage or any
+/// synchronization primitive — they are plain reads of the transaction's own
+/// write buffer (no lock-order implications).
+impl WriteTransaction {
+    /// Version ID of the latest buffered create/update for `node_id`, if any.
+    ///
+    /// Returns `None` when the node has no buffered write in this transaction,
+    /// or when its latest buffered write is a delete/retract (tombstone
+    /// versions are allocated at apply time and are not surfaced here).
+    pub fn buffered_node_version(&self, node_id: NodeId) -> Option<VersionId> {
+        match self.buffer.get_node_write(node_id) {
+            Some(
+                super::BufferedWrite::CreateNode { version_id, .. }
+                | super::BufferedWrite::UpdateNode { version_id, .. },
+            ) => Some(*version_id),
+            _ => None,
+        }
+    }
+
+    /// Version ID of the latest buffered create/update for `edge_id`, if any.
+    ///
+    /// Returns `None` when the edge has no buffered write in this transaction,
+    /// or when its latest buffered write is a delete/retract.
+    pub fn buffered_edge_version(&self, edge_id: EdgeId) -> Option<VersionId> {
+        match self.buffer.get_edge_write(edge_id) {
+            Some(
+                super::BufferedWrite::CreateEdge { version_id, .. }
+                | super::BufferedWrite::UpdateEdge { version_id, .. },
+            ) => Some(*version_id),
+            _ => None,
+        }
+    }
+}
+
 impl WriteOps for WriteTransaction {
     fn create_node_with_options(
         &mut self,

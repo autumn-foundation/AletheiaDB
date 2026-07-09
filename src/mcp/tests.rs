@@ -11154,6 +11154,1301 @@ mod temporal_bounds_tests {
 }
 
 // ============================================================================
+// Atomic multi-write batches with local refs (`apply_batch`, Issue #3231)
+// ============================================================================
+
+mod apply_batch_tests {
+    use super::*;
+    use crate::core::id::{EdgeId, NodeId};
+    use crate::core::temporal::{Timestamp, time};
+    use serde_json::json;
+
+    /// 2020-01-01T00:00:00Z in microseconds since epoch — a safely-backdated
+    /// valid time for #3221-style per-op valid_time assertions.
+    const T_PAST_MICROS: i64 = 1_577_836_800_000_000;
+
+    /// Dispatch `apply_batch` through the same table `call_tool` uses.
+    /// Returns `(parsed_json, is_error)`.
+    fn dispatch_batch(
+        server: &AletheiaMcpServer,
+        args: serde_json::Value,
+    ) -> (serde_json::Value, bool) {
+        let result = server.dispatch_tool("apply_batch", args);
+        let is_error = result.is_error.unwrap_or(false);
+        let text = result
+            .content
+            .first()
+            .and_then(|c| c.as_text().map(|t| t.text.clone()))
+            .expect("tool result should carry text content");
+        let value = serde_json::from_str(&text).expect("tool response should be valid JSON");
+        (value, is_error)
+    }
+
+    /// Apply a batch given just the operations array.
+    fn apply(server: &AletheiaMcpServer, ops: serde_json::Value) -> (serde_json::Value, bool) {
+        dispatch_batch(server, json!({ "operations": ops }))
+    }
+
+    /// Apply a batch and require success, returning the parsed response.
+    fn apply_ok(server: &AletheiaMcpServer, ops: serde_json::Value) -> serde_json::Value {
+        let (value, is_error) = apply(server, ops);
+        assert!(!is_error, "expected batch success, got: {value}");
+        assert_eq!(value["success"], json!(true), "got: {value}");
+        value
+    }
+
+    /// Apply a batch and require a structured error with the given code,
+    /// returning the full response payload.
+    fn apply_err(
+        server: &AletheiaMcpServer,
+        ops: serde_json::Value,
+        expected_code: &str,
+    ) -> serde_json::Value {
+        let (value, is_error) = apply(server, ops);
+        assert!(is_error, "expected batch error, got: {value}");
+        let error = value
+            .get("error")
+            .unwrap_or_else(|| panic!("expected structured error payload: {value}"));
+        assert_eq!(
+            error["code"].as_str(),
+            Some(expected_code),
+            "wrong code: {value}"
+        );
+        assert!(
+            error["message"].as_str().is_some_and(|m| !m.is_empty()),
+            "error must carry a message: {value}"
+        );
+        assert!(
+            error["retriable"].as_bool().is_some(),
+            "error must carry retriable: {value}"
+        );
+        // Caller-fault classes are never retriable (#3234 contract).
+        if matches!(expected_code, "INVALID_ARGUMENT" | "FAILED_PRECONDITION") {
+            assert_eq!(
+                error["retriable"],
+                json!(false),
+                "{expected_code} must be non-retriable: {value}"
+            );
+        }
+        value
+    }
+
+    /// Seed a committed `Person` node with a `name` property via the
+    /// single-op tool and return its id.
+    fn seed_person(server: &AletheiaMcpServer, name: &str) -> u64 {
+        let node: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            label: "Person".to_string(),
+            properties: Some(HashMap::from([(
+                "name".to_string(),
+                serde_json::Value::String(name.to_string()),
+            )])),
+            valid_time: None,
+            provenance: None,
+        }))
+        .expect("seed node should succeed");
+        node.id
+    }
+
+    /// Seed a committed edge between two committed nodes and return its id.
+    fn seed_edge(server: &AletheiaMcpServer, source: u64, target: u64) -> u64 {
+        let edge: EdgeResponse = parse_response(&server.create_edge(CreateEdgeRequest {
+            source_id: source,
+            target_id: target,
+            label: "KNOWS".to_string(),
+            properties: None,
+            valid_time: None,
+            provenance: None,
+        }))
+        .expect("seed edge should succeed");
+        edge.id
+    }
+
+    // ------------------------------------------------------------------
+    // Registration and argument-shape basics
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn apply_batch_registered_in_tool_list() {
+        let server = create_test_server();
+        let tools = server.list_tools_for_test();
+        assert!(
+            tools.iter().any(|t| t == "apply_batch"),
+            "apply_batch must be advertised: {tools:?}"
+        );
+    }
+
+    /// Schema drift guard: the advertised input schema must mention all six
+    /// op variant names, so an added/renamed variant that misses the schema
+    /// (or a schemars regression collapsing the tagged enum) fails loudly.
+    #[test]
+    fn apply_batch_schema_advertises_all_six_op_variants() {
+        let server = create_test_server();
+        let schema = server
+            .tool_input_schema_for_test("apply_batch")
+            .expect("apply_batch must advertise an input schema");
+        let schema_text = schema.to_string();
+        for variant in [
+            "create_node",
+            "create_edge",
+            "update_node",
+            "update_edge",
+            "delete_node",
+            "delete_edge",
+        ] {
+            assert!(
+                schema_text.contains(variant),
+                "apply_batch input schema must mention op variant {variant}: {schema_text}"
+            );
+        }
+    }
+
+    #[test]
+    fn apply_batch_null_args_returns_invalid_argument() {
+        let server = create_test_server();
+        let (value, is_error) = dispatch_batch(&server, serde_json::Value::Null);
+        assert!(is_error, "null args must error: {value}");
+        assert_eq!(value["error"]["code"], json!("INVALID_ARGUMENT"));
+    }
+
+    #[test]
+    fn apply_batch_empty_operations_is_noop_success() {
+        let server = create_test_server();
+        let value = apply_ok(&server, json!([]));
+        assert_eq!(value["results"], json!([]));
+        assert_eq!(value["ref_map"], json!({}));
+        assert_eq!(value["operation_count"], json!(0));
+        assert_eq!(server.db().node_count(), 0);
+    }
+
+    // ------------------------------------------------------------------
+    // Happy paths: subgraph in one call, local refs, version ids
+    // ------------------------------------------------------------------
+
+    /// The issue's success metric: an entity-with-relationships subgraph of
+    /// three-plus operations lands in ONE call, with every alias resolved to
+    /// a committed real ID and per-op version ids for creates/updates.
+    #[test]
+    fn apply_batch_creates_subgraph_with_refs_and_version_ids() {
+        let server = create_test_server();
+        let value = apply_ok(
+            &server,
+            json!([
+                {"op": "create_node", "label": "Person", "ref": "alice",
+                 "properties": {"name": "Alice"}},
+                {"op": "create_node", "label": "Person", "ref": "bob",
+                 "properties": {"name": "Bob"}},
+                {"op": "create_edge", "source_id": "$alice", "target_id": "$bob",
+                 "label": "KNOWS", "properties": {"since": 2024}},
+            ]),
+        );
+
+        assert_eq!(value["operation_count"], json!(3));
+        let results = value["results"].as_array().expect("results array");
+        assert_eq!(results.len(), 3);
+
+        // Per-op results in input order, each echoing its index and op.
+        assert_eq!(results[0]["op"], json!("create_node"));
+        assert_eq!(results[0]["index"], json!(0));
+        assert_eq!(results[0]["ref"], json!("alice"));
+        let alice_id = results[0]["node_id"].as_u64().expect("alice node_id");
+        assert!(
+            results[0]["version_id"].as_u64().is_some(),
+            "create_node result must carry a version_id: {value}"
+        );
+
+        assert_eq!(results[1]["op"], json!("create_node"));
+        let bob_id = results[1]["node_id"].as_u64().expect("bob node_id");
+
+        assert_eq!(results[2]["op"], json!("create_edge"));
+        let edge_id = results[2]["edge_id"].as_u64().expect("edge_id");
+        assert_eq!(results[2]["source_id"], json!(alice_id));
+        assert_eq!(results[2]["target_id"], json!(bob_id));
+        assert!(results[2]["version_id"].as_u64().is_some());
+
+        // ref_map maps every caller-supplied alias to its committed real ID.
+        assert_eq!(value["ref_map"]["alice"], json!(alice_id));
+        assert_eq!(value["ref_map"]["bob"], json!(bob_id));
+
+        // All three writes are committed and visible.
+        assert_eq!(server.db().node_count(), 2);
+        assert_eq!(server.db().edge_count(), 1);
+        let edge = server.db().get_edge(EdgeId::new(edge_id).unwrap()).unwrap();
+        assert_eq!(edge.source.as_u64(), alice_id);
+        assert_eq!(edge.target.as_u64(), bob_id);
+    }
+
+    /// Edge endpoints may mix pre-existing committed IDs and local refs
+    /// (including positional `$0`-style refs) interchangeably.
+    #[test]
+    fn apply_batch_edge_mixes_committed_id_and_local_ref() {
+        let server = create_test_server();
+        let existing = seed_person(&server, "Carol");
+
+        let value = apply_ok(
+            &server,
+            json!([
+                {"op": "create_node", "label": "Person", "properties": {"name": "Dave"}},
+                {"op": "create_edge", "source_id": "$0", "target_id": existing,
+                 "label": "KNOWS"},
+            ]),
+        );
+
+        let results = value["results"].as_array().unwrap();
+        let dave_id = results[0]["node_id"].as_u64().unwrap();
+        assert_eq!(results[1]["source_id"], json!(dave_id));
+        assert_eq!(results[1]["target_id"], json!(existing));
+        assert_eq!(server.db().edge_count(), 1);
+    }
+
+    #[test]
+    fn apply_batch_returns_version_ids_in_input_order_for_creates_and_updates() {
+        let server = create_test_server();
+        let existing = seed_person(&server, "Eve");
+        let other = seed_person(&server, "Grace");
+        let seeded_edge = seed_edge(&server, existing, other);
+
+        let value = apply_ok(
+            &server,
+            json!([
+                {"op": "create_node", "label": "Person", "ref": "f",
+                 "properties": {"name": "Frank"}},
+                {"op": "update_node", "node_id": existing,
+                 "properties": {"name": "Eve II"}},
+                {"op": "create_edge", "source_id": "$f", "target_id": existing,
+                 "label": "KNOWS"},
+                {"op": "update_edge", "edge_id": seeded_edge,
+                 "properties": {"weight": 5}},
+            ]),
+        );
+
+        let results = value["results"].as_array().unwrap();
+        assert_eq!(results.len(), 4);
+        for (i, expected_op) in ["create_node", "update_node", "create_edge", "update_edge"]
+            .iter()
+            .enumerate()
+        {
+            assert_eq!(results[i]["index"], json!(i));
+            assert_eq!(results[i]["op"], json!(*expected_op));
+            assert!(
+                results[i]["version_id"].as_u64().is_some(),
+                "op {i} must carry version_id: {value}"
+            );
+        }
+        // The updates targeted the committed entities and reported them back.
+        assert_eq!(results[1]["node_id"], json!(existing));
+        assert_eq!(results[3]["edge_id"], json!(seeded_edge));
+
+        // PATCH semantics as in the single-op tools: node property updated...
+        let node = server
+            .db()
+            .get_node(NodeId::new(existing).unwrap())
+            .unwrap();
+        let name = node
+            .properties
+            .iter()
+            .find_map(|(k, v)| {
+                crate::core::interning::GLOBAL_INTERNER
+                    .resolve_with(*k, |s| s == "name")
+                    .unwrap_or(false)
+                    .then(|| format!("{v:?}"))
+            })
+            .unwrap_or_default();
+        assert!(name.contains("Eve II"), "update must apply: {name}");
+
+        // ...and the edge property merge took effect too.
+        let edge = server
+            .db()
+            .get_edge(EdgeId::new(seeded_edge).unwrap())
+            .unwrap();
+        let weight = edge
+            .properties
+            .iter()
+            .find_map(|(k, v)| {
+                crate::core::interning::GLOBAL_INTERNER
+                    .resolve_with(*k, |s| s == "weight")
+                    .unwrap_or(false)
+                    .then(|| format!("{v:?}"))
+            })
+            .unwrap_or_default();
+        assert!(weight.contains('5'), "edge update must apply: {weight}");
+    }
+
+    #[test]
+    fn apply_batch_delete_edge_and_delete_node_report_no_version_id() {
+        let server = create_test_server();
+        let a = seed_person(&server, "A");
+        let b = seed_person(&server, "B");
+        let e = seed_edge(&server, a, b);
+
+        let value = apply_ok(
+            &server,
+            json!([
+                {"op": "delete_edge", "edge_id": e},
+                {"op": "delete_node", "node_id": a},
+            ]),
+        );
+        let results = value["results"].as_array().unwrap();
+        assert_eq!(results[0]["op"], json!("delete_edge"));
+        assert_eq!(results[0]["edge_id"], json!(e));
+        assert!(
+            results[0].get("version_id").is_none_or(|v| v.is_null()),
+            "deletes carry no version_id in v1: {value}"
+        );
+        assert_eq!(results[1]["op"], json!("delete_node"));
+        assert_eq!(results[1]["node_id"], json!(a));
+        assert_eq!(results[1]["edges_removed"], json!(0));
+        assert_eq!(server.db().node_count(), 1);
+        assert_eq!(server.db().edge_count(), 0);
+    }
+
+    // ------------------------------------------------------------------
+    // Static pre-validation: refs
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn apply_batch_forward_ref_rejected_with_op_index_and_nothing_committed() {
+        let server = create_test_server();
+        let value = apply_err(
+            &server,
+            json!([
+                {"op": "create_edge", "source_id": "$late", "target_id": "$late",
+                 "label": "KNOWS"},
+                {"op": "create_node", "label": "Person", "ref": "late"},
+            ]),
+            "INVALID_ARGUMENT",
+        );
+        let details = &value["error"]["details"];
+        assert_eq!(details["failed_op_index"], json!(0), "got: {value}");
+        assert_eq!(details["ref"], json!("$late"));
+        assert_eq!(details["defined_at_index"], json!(1));
+        assert_eq!(server.db().node_count(), 0, "nothing may commit");
+        assert_eq!(server.db().edge_count(), 0);
+    }
+
+    #[test]
+    fn apply_batch_unknown_ref_rejected_invalid_argument() {
+        let server = create_test_server();
+        let value = apply_err(
+            &server,
+            json!([
+                {"op": "create_node", "label": "Person", "ref": "a"},
+                {"op": "create_edge", "source_id": "$a", "target_id": "$ghost",
+                 "label": "KNOWS"},
+            ]),
+            "INVALID_ARGUMENT",
+        );
+        let details = &value["error"]["details"];
+        assert_eq!(details["failed_op_index"], json!(1));
+        assert_eq!(details["ref"], json!("$ghost"));
+        assert_eq!(server.db().node_count(), 0);
+    }
+
+    #[test]
+    fn apply_batch_duplicate_alias_rejected_with_first_definition_index() {
+        let server = create_test_server();
+        let value = apply_err(
+            &server,
+            json!([
+                {"op": "create_node", "label": "Person", "ref": "dup"},
+                {"op": "create_node", "label": "Person", "ref": "dup"},
+            ]),
+            "INVALID_ARGUMENT",
+        );
+        let details = &value["error"]["details"];
+        assert_eq!(details["failed_op_index"], json!(1));
+        assert_eq!(details["first_defined_at_index"], json!(0));
+        assert_eq!(server.db().node_count(), 0);
+    }
+
+    #[test]
+    fn apply_batch_unknown_op_type_rejected_with_index() {
+        let server = create_test_server();
+        let value = apply_err(
+            &server,
+            json!([
+                {"op": "create_node", "label": "Person"},
+                {"op": "upsert_node", "label": "Person"},
+            ]),
+            "INVALID_ARGUMENT",
+        );
+        assert_eq!(value["error"]["details"]["failed_op_index"], json!(1));
+        assert_eq!(server.db().node_count(), 0);
+    }
+
+    #[test]
+    fn apply_batch_empty_ref_alias_rejected() {
+        let server = create_test_server();
+        let value = apply_err(
+            &server,
+            json!([
+                {"op": "create_node", "label": "Person", "ref": ""},
+            ]),
+            "INVALID_ARGUMENT",
+        );
+        assert_eq!(value["error"]["details"]["failed_op_index"], json!(0));
+        assert_eq!(server.db().node_count(), 0);
+    }
+
+    #[test]
+    fn apply_batch_dollar_prefixed_ref_alias_rejected() {
+        let server = create_test_server();
+        let value = apply_err(
+            &server,
+            json!([
+                {"op": "create_node", "label": "Person"},
+                {"op": "create_node", "label": "Person", "ref": "$a"},
+            ]),
+            "INVALID_ARGUMENT",
+        );
+        assert_eq!(value["error"]["details"]["failed_op_index"], json!(1));
+        let msg = value["error"]["message"].as_str().unwrap();
+        assert!(
+            msg.contains('$'),
+            "message must explain the '$' rule: {msg}"
+        );
+        assert_eq!(server.db().node_count(), 0);
+    }
+
+    #[test]
+    fn apply_batch_purely_numeric_ref_alias_rejected() {
+        let server = create_test_server();
+        let value = apply_err(
+            &server,
+            json!([
+                {"op": "create_node", "label": "Person", "ref": "7"},
+            ]),
+            "INVALID_ARGUMENT",
+        );
+        assert_eq!(value["error"]["details"]["failed_op_index"], json!(0));
+        let msg = value["error"]["message"].as_str().unwrap();
+        assert!(
+            msg.contains("numeric"),
+            "message must explain the positional reservation: {msg}"
+        );
+        assert_eq!(server.db().node_count(), 0);
+    }
+
+    /// A '$'-ref whose name is not all-ASCII-digits must never parse
+    /// positionally ("+5" would satisfy usize::from_str): it falls through
+    /// to alias lookup and errors as an unknown ref.
+    #[test]
+    fn apply_batch_plus_prefixed_positional_ref_rejected_as_unknown() {
+        let server = create_test_server();
+        let value = apply_err(
+            &server,
+            json!([
+                {"op": "create_node", "label": "Person"},
+                {"op": "create_edge", "source_id": "$+0", "target_id": "$0",
+                 "label": "KNOWS"},
+            ]),
+            "INVALID_ARGUMENT",
+        );
+        let details = &value["error"]["details"];
+        assert_eq!(details["failed_op_index"], json!(1));
+        assert_eq!(details["ref"], json!("$+0"));
+        assert_eq!(server.db().node_count(), 0);
+    }
+
+    /// Pins the chosen leading-zeros behavior: an all-digits name parses
+    /// positionally, so "$00" is the same reference as "$0".
+    #[test]
+    fn apply_batch_numeric_ref_with_leading_zeros_resolves_positionally() {
+        let server = create_test_server();
+        let value = apply_ok(
+            &server,
+            json!([
+                {"op": "create_node", "label": "Person", "properties": {"name": "Zero"}},
+                {"op": "create_edge", "source_id": "$00", "target_id": "$0",
+                 "label": "SELF"},
+            ]),
+        );
+        let results = value["results"].as_array().unwrap();
+        let node_id = results[0]["node_id"].as_u64().unwrap();
+        assert_eq!(results[1]["source_id"], json!(node_id));
+        assert_eq!(results[1]["target_id"], json!(node_id));
+        assert_eq!(server.db().edge_count(), 1);
+    }
+
+    /// A plain numeric string as a write target is a type error, not a
+    /// v1-scope rejection; a '$'-ref gets the v1-scope message.
+    #[test]
+    fn apply_batch_numeric_string_node_id_rejected_with_integer_message() {
+        let server = create_test_server();
+
+        let value = apply_err(
+            &server,
+            json!([
+                {"op": "update_node", "node_id": "123", "properties": {"x": 1}},
+            ]),
+            "INVALID_ARGUMENT",
+        );
+        assert_eq!(value["error"]["details"]["failed_op_index"], json!(0));
+        let msg = value["error"]["message"].as_str().unwrap();
+        assert!(
+            msg.contains("must be an integer node id") && msg.contains("\"123\""),
+            "numeric string must get the type-error message: {msg}"
+        );
+
+        let value = apply_err(
+            &server,
+            json!([
+                {"op": "update_node", "node_id": "$ghost", "properties": {"x": 1}},
+            ]),
+            "INVALID_ARGUMENT",
+        );
+        let msg = value["error"]["message"].as_str().unwrap();
+        assert!(
+            msg.contains("not supported in v1"),
+            "'$'-refs must get the v1-scope message: {msg}"
+        );
+        assert_eq!(server.db().node_count(), 0);
+    }
+
+    /// Per-op provenance is validated through the SAME shared helper the
+    /// single-op tools use (`parse_opt_provenance`, the #3350 stamping
+    /// seam), with the error re-shaped to carry the batch's op index.
+    #[test]
+    fn apply_batch_invalid_provenance_rejected_per_op() {
+        let server = create_test_server();
+        let value = apply_err(
+            &server,
+            json!([
+                {"op": "create_node", "label": "Person"},
+                {"op": "create_node", "label": "Person",
+                 "provenance": {"source": "sensor", "confidence": 3.5}},
+            ]),
+            "INVALID_ARGUMENT",
+        );
+        assert_eq!(value["error"]["details"]["failed_op_index"], json!(1));
+        let msg = value["error"]["message"].as_str().unwrap();
+        assert!(
+            msg.contains("confidence"),
+            "shared-helper message must be preserved: {msg}"
+        );
+        assert_eq!(server.db().node_count(), 0);
+    }
+
+    /// #3413-adjacent bi-temporal guard: a batch-created edge that a later
+    /// detach-delete would elide may NOT carry an explicit valid_time — the
+    /// elision would silently erase the backdated fact.
+    #[test]
+    fn apply_batch_backdated_edge_annihilation_rejected() {
+        let server = create_test_server();
+        let x = seed_person(&server, "X");
+        let nodes_before = server.db().node_count();
+
+        let value = apply_err(
+            &server,
+            json!([
+                {"op": "create_node", "label": "Person", "ref": "a"},
+                {"op": "create_edge", "source_id": "$a", "target_id": x,
+                 "label": "KNOWS", "valid_time": T_PAST_MICROS.to_string()},
+                {"op": "delete_node", "node_id": x, "detach": true},
+            ]),
+            "INVALID_ARGUMENT",
+        );
+        let details = &value["error"]["details"];
+        assert_eq!(details["failed_op_index"], json!(1), "got: {value}");
+        assert_eq!(details["removed_by_delete_at_index"], json!(2));
+        let msg = value["error"]["message"].as_str().unwrap();
+        assert!(
+            msg.contains("valid_time"),
+            "message must explain the carve-out: {msg}"
+        );
+
+        // Rejected statically: nothing committed.
+        assert_eq!(server.db().node_count(), nodes_before);
+        assert_eq!(server.db().edge_count(), 0);
+    }
+
+    /// The same batch WITHOUT the explicit valid_time is fine (the edge is
+    /// elided with no history loss — it never carried a backdated fact).
+    #[test]
+    fn apply_batch_non_backdated_edge_annihilation_still_allowed() {
+        let server = create_test_server();
+        let x = seed_person(&server, "X");
+        let value = apply_ok(
+            &server,
+            json!([
+                {"op": "create_node", "label": "Person", "ref": "a"},
+                {"op": "create_edge", "source_id": "$a", "target_id": x,
+                 "label": "KNOWS"},
+                {"op": "delete_node", "node_id": x, "detach": true},
+            ]),
+        );
+        assert_eq!(
+            value["results"][1]["removed_by_delete_at_index"],
+            json!(2),
+            "elision path unchanged for non-backdated edges: {value}"
+        );
+        assert_eq!(server.db().edge_count(), 0);
+    }
+
+    // ------------------------------------------------------------------
+    // v1 scope: writes against batch-created refs, double writes
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn apply_batch_update_of_batch_created_ref_rejected_v1() {
+        let server = create_test_server();
+        let value = apply_err(
+            &server,
+            json!([
+                {"op": "create_node", "label": "Person", "ref": "a"},
+                {"op": "update_node", "node_id": "$a", "properties": {"x": 1}},
+            ]),
+            "INVALID_ARGUMENT",
+        );
+        assert_eq!(value["error"]["details"]["failed_op_index"], json!(1));
+        let msg = value["error"]["message"].as_str().unwrap();
+        assert!(
+            msg.contains("not supported"),
+            "message must state the v1 limitation: {msg}"
+        );
+        assert_eq!(server.db().node_count(), 0);
+    }
+
+    #[test]
+    fn apply_batch_delete_of_batch_created_ref_rejected_v1() {
+        let server = create_test_server();
+        let value = apply_err(
+            &server,
+            json!([
+                {"op": "create_node", "label": "Person", "ref": "a"},
+                {"op": "delete_node", "node_id": "$a"},
+            ]),
+            "INVALID_ARGUMENT",
+        );
+        assert_eq!(value["error"]["details"]["failed_op_index"], json!(1));
+        assert_eq!(server.db().node_count(), 0);
+    }
+
+    #[test]
+    fn apply_batch_second_write_to_same_committed_entity_rejected() {
+        let server = create_test_server();
+        let existing = seed_person(&server, "G");
+        let value = apply_err(
+            &server,
+            json!([
+                {"op": "update_node", "node_id": existing, "properties": {"x": 1}},
+                {"op": "update_node", "node_id": existing, "properties": {"x": 2}},
+            ]),
+            "INVALID_ARGUMENT",
+        );
+        let details = &value["error"]["details"];
+        assert_eq!(details["failed_op_index"], json!(1));
+        assert_eq!(details["first_write_op_index"], json!(0));
+        // The seeded node is untouched.
+        assert_eq!(server.db().node_count(), 1);
+    }
+
+    #[test]
+    fn apply_batch_create_edge_referencing_earlier_deleted_node_rejected() {
+        let server = create_test_server();
+        let a = seed_person(&server, "H");
+        let b = seed_person(&server, "I");
+        let value = apply_err(
+            &server,
+            json!([
+                {"op": "delete_node", "node_id": a},
+                {"op": "create_edge", "source_id": a, "target_id": b, "label": "KNOWS"},
+            ]),
+            "INVALID_ARGUMENT",
+        );
+        assert_eq!(value["error"]["details"]["failed_op_index"], json!(1));
+        assert_eq!(server.db().node_count(), 2, "nothing may commit");
+    }
+
+    // ------------------------------------------------------------------
+    // Cap enforcement
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn apply_batch_at_cap_succeeds_and_over_cap_rejected_with_limit_echoed() {
+        let server = AletheiaMcpServer::new(create_test_db()).with_max_batch_operations(2);
+
+        // Exactly at the cap: fine.
+        let value = apply_ok(
+            &server,
+            json!([
+                {"op": "create_node", "label": "Person"},
+                {"op": "create_node", "label": "Person"},
+            ]),
+        );
+        assert_eq!(value["operation_count"], json!(2));
+
+        // One over: rejected before anything runs, limit echoed (#3226).
+        let value = apply_err(
+            &server,
+            json!([
+                {"op": "create_node", "label": "Person"},
+                {"op": "create_node", "label": "Person"},
+                {"op": "create_node", "label": "Person"},
+            ]),
+            "INVALID_ARGUMENT",
+        );
+        let details = &value["error"]["details"];
+        assert_eq!(details["limit"], json!(2));
+        assert_eq!(details["submitted"], json!(3));
+        assert_eq!(server.db().node_count(), 2, "over-cap batch must not run");
+    }
+
+    #[test]
+    fn apply_batch_default_cap_is_1000() {
+        let server = create_test_server();
+        let ops: Vec<serde_json::Value> = (0..1001)
+            .map(|_| json!({"op": "create_node", "label": "Person"}))
+            .collect();
+        let value = apply_err(&server, json!(ops), "INVALID_ARGUMENT");
+        assert_eq!(value["error"]["details"]["limit"], json!(1000));
+        assert_eq!(value["error"]["details"]["submitted"], json!(1001));
+        assert_eq!(server.db().node_count(), 0);
+    }
+
+    // ------------------------------------------------------------------
+    // Atomicity (AC8: the flagship test)
+    // ------------------------------------------------------------------
+
+    /// Inject a failure mid-batch (update of a nonexistent node at op index
+    /// 2) and assert via count_nodes/count_edges that ZERO of the batch's
+    /// writes survived — including ops that already executed (indices 0, 1)
+    /// and ops after the failing one (index 3).
+    #[test]
+    fn apply_batch_mid_batch_failure_leaves_counts_unchanged() {
+        let server = create_test_server();
+        let baseline = seed_person(&server, "Baseline");
+        let nodes_before = server.db().node_count();
+        let edges_before = server.db().edge_count();
+
+        let value = apply_err(
+            &server,
+            json!([
+                {"op": "create_node", "label": "Person", "ref": "a",
+                 "properties": {"name": "Ghost A"}},
+                {"op": "create_node", "label": "Person", "ref": "b",
+                 "properties": {"name": "Ghost B"}},
+                {"op": "update_node", "node_id": 999_999, "properties": {"x": 1}},
+                {"op": "create_edge", "source_id": "$a", "target_id": "$b",
+                 "label": "KNOWS"},
+            ]),
+            "NOT_FOUND",
+        );
+        assert_eq!(
+            value["error"]["details"]["failed_op_index"],
+            json!(2),
+            "the failing op index must be reported: {value}"
+        );
+
+        // AC8: zero writes survived.
+        assert_eq!(server.db().node_count(), nodes_before);
+        assert_eq!(server.db().edge_count(), edges_before);
+        // And the batch-created ghosts are truly absent from lookups.
+        let ghosts = server.db().find_nodes_by_property(
+            "Person",
+            "name",
+            &crate::core::PropertyValue::String("Ghost A".into()),
+        );
+        assert!(ghosts.is_empty(), "no partial write may be visible");
+        // The pre-existing node is untouched.
+        assert!(server.db().get_node(NodeId::new(baseline).unwrap()).is_ok());
+    }
+
+    /// Pins the behavior when a caller *guesses* the numeric id a batch
+    /// create will allocate and submits it as a write target: prevalidation
+    /// accepts it (it is a plain integer), but transaction reads see
+    /// committed state only, so the op fails NOT_FOUND at core op time and
+    /// the whole batch aborts — zero writes survive.
+    #[test]
+    fn apply_batch_guessed_id_of_batch_created_node_aborts_whole_batch() {
+        let server = create_test_server();
+        let seeded = seed_person(&server, "Seed");
+        // Node ids are allocated sequentially: the batch's create will get
+        // seeded + 1. Submitting that id "works" structurally but must not
+        // let the caller write to an uncommitted entity.
+        let guessed = seeded + 1;
+
+        let value = apply_err(
+            &server,
+            json!([
+                {"op": "create_node", "label": "Person",
+                 "properties": {"name": "Ghost"}},
+                {"op": "update_node", "node_id": guessed, "properties": {"x": 1}},
+            ]),
+            "NOT_FOUND",
+        );
+        assert_eq!(value["error"]["details"]["failed_op_index"], json!(1));
+
+        // Zero writes survived: only the seeded node exists, and the
+        // guessed id resolves to nothing.
+        assert_eq!(server.db().node_count(), 1);
+        assert!(server.db().get_node(NodeId::new(guessed).unwrap()).is_err());
+    }
+
+    #[test]
+    fn apply_batch_unique_constraint_violation_aborts_whole_batch() {
+        let server = create_test_server();
+        let response = server.enable_unique_constraint(EnableUniqueConstraintRequest {
+            label: "Person".to_string(),
+            property: "email".to_string(),
+        });
+        assert!(
+            !response.contains("\"error\""),
+            "constraint enable should succeed: {response}"
+        );
+        let _existing: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            label: "Person".to_string(),
+            properties: Some(HashMap::from([(
+                "email".to_string(),
+                serde_json::Value::String("a@x.com".to_string()),
+            )])),
+            valid_time: None,
+            provenance: None,
+        }))
+        .unwrap();
+
+        let value = apply_err(
+            &server,
+            json!([
+                {"op": "create_node", "label": "Person",
+                 "properties": {"name": "Fresh"}},
+                {"op": "create_node", "label": "Person",
+                 "properties": {"email": "a@x.com"}},
+            ]),
+            "CONSTRAINT_VIOLATION",
+        );
+        assert!(
+            value["error"]["details"].get("failed_op_index").is_some(),
+            "details must carry failed_op_index (possibly null for commit-time \
+             constraint failures): {value}"
+        );
+        // The whole batch aborted: only the seeded node exists.
+        assert_eq!(server.db().node_count(), 1);
+    }
+
+    // ------------------------------------------------------------------
+    // #3209 safe-by-default delete inside a batch
+    // ------------------------------------------------------------------
+
+    /// A batch-created edge counts toward the #3209 refusal even though it
+    /// is invisible to committed-state adjacency (the in-batch case).
+    #[test]
+    fn apply_batch_delete_node_with_batch_created_edge_refused_without_detach() {
+        let server = create_test_server();
+        let x = seed_person(&server, "X");
+        let nodes_before = server.db().node_count();
+
+        let value = apply_err(
+            &server,
+            json!([
+                {"op": "create_node", "label": "Person", "ref": "a"},
+                {"op": "create_edge", "source_id": "$a", "target_id": x,
+                 "label": "KNOWS"},
+                {"op": "delete_node", "node_id": x},
+            ]),
+            "FAILED_PRECONDITION",
+        );
+        let details = &value["error"]["details"];
+        assert_eq!(details["failed_op_index"], json!(2));
+        assert_eq!(details["connected_edges"], json!(1));
+        assert_eq!(details["detach_required"], json!(true));
+        // Legacy top-level fields preserved, mirroring the single-op tool.
+        assert_eq!(value["connected_edges"], json!(1));
+
+        // Atomic refusal: nothing committed.
+        assert_eq!(server.db().node_count(), nodes_before);
+        assert_eq!(server.db().edge_count(), 0);
+    }
+
+    /// With `detach: true`, the cascade also removes batch-created edges
+    /// touching the node (which `delete_node_cascade` alone cannot see).
+    #[test]
+    fn apply_batch_delete_node_detach_true_removes_batch_created_edges() {
+        let server = create_test_server();
+        let x = seed_person(&server, "X");
+
+        let value = apply_ok(
+            &server,
+            json!([
+                {"op": "create_node", "label": "Person", "ref": "a",
+                 "properties": {"name": "Survivor"}},
+                {"op": "create_edge", "source_id": "$a", "target_id": x,
+                 "label": "KNOWS"},
+                {"op": "delete_node", "node_id": x, "detach": true},
+            ]),
+        );
+
+        let results = value["results"].as_array().unwrap();
+        // The batch-created edge was removed by the later detach delete.
+        assert_eq!(
+            results[1]["removed_by_delete_at_index"],
+            json!(2),
+            "create_edge result must report the removing op: {value}"
+        );
+        assert_eq!(results[2]["op"], json!("delete_node"));
+        assert_eq!(results[2]["detached"], json!(true));
+        assert_eq!(
+            results[2]["edges_removed"],
+            json!(1),
+            "the batch-created edge counts as removed: {value}"
+        );
+
+        // Final state: X gone, the batch node exists, no edges at all.
+        assert_eq!(server.db().node_count(), 1);
+        assert_eq!(server.db().edge_count(), 0);
+        assert!(server.db().get_node(NodeId::new(x).unwrap()).is_err());
+        let survivor = server.db().find_nodes_by_property(
+            "Person",
+            "name",
+            &crate::core::PropertyValue::String("Survivor".into()),
+        );
+        assert_eq!(survivor.len(), 1);
+    }
+
+    #[test]
+    fn apply_batch_delete_node_detach_true_cascades_committed_edges() {
+        let server = create_test_server();
+        let a = seed_person(&server, "A");
+        let b = seed_person(&server, "B");
+        let _e = seed_edge(&server, a, b);
+
+        let value = apply_ok(
+            &server,
+            json!([
+                {"op": "delete_node", "node_id": a, "detach": true},
+            ]),
+        );
+        assert_eq!(value["results"][0]["edges_removed"], json!(1));
+        assert_eq!(server.db().node_count(), 1);
+        assert_eq!(server.db().edge_count(), 0);
+    }
+
+    /// A batch-created self-loop appears in both adjacency directions but is
+    /// one edge: the refusal must count it once (mirrors retract_node dedup).
+    #[test]
+    fn apply_batch_self_loop_edge_then_delete_counts_edge_once() {
+        let server = create_test_server();
+        let x = seed_person(&server, "X");
+
+        let value = apply_err(
+            &server,
+            json!([
+                {"op": "create_edge", "source_id": x, "target_id": x,
+                 "label": "SELF"},
+                {"op": "delete_node", "node_id": x},
+            ]),
+            "FAILED_PRECONDITION",
+        );
+        assert_eq!(
+            value["error"]["details"]["connected_edges"],
+            json!(1),
+            "self-loop must count once: {value}"
+        );
+        assert_eq!(server.db().edge_count(), 0);
+    }
+
+    /// Updating a committed edge and then detach-deleting one of its
+    /// endpoints in the same batch is refused with BOTH op indices — the
+    /// cascade would silently discard the update.
+    #[test]
+    fn apply_batch_update_edge_then_detach_delete_endpoint_refused_with_both_indices() {
+        let server = create_test_server();
+        let a = seed_person(&server, "A");
+        let b = seed_person(&server, "B");
+        let e = seed_edge(&server, a, b);
+
+        let value = apply_err(
+            &server,
+            json!([
+                {"op": "update_edge", "edge_id": e, "properties": {"weight": 9}},
+                {"op": "delete_node", "node_id": a, "detach": true},
+            ]),
+            "FAILED_PRECONDITION",
+        );
+        let details = &value["error"]["details"];
+        assert_eq!(details["failed_op_index"], json!(1), "got: {value}");
+        assert_eq!(details["updated_at_index"], json!(0));
+        assert_eq!(details["edge_id"], json!(e));
+        assert_eq!(details["node_id"], json!(a));
+
+        // Atomic refusal: nothing changed.
+        assert_eq!(server.db().node_count(), 2);
+        assert_eq!(server.db().edge_count(), 1);
+    }
+
+    /// Explicitly writing to a committed edge that an earlier detach-delete
+    /// in the same batch already cascaded away is refused with the removing
+    /// op's index.
+    #[test]
+    fn apply_batch_delete_edge_removed_by_cascade_refused() {
+        let server = create_test_server();
+        let a = seed_person(&server, "A");
+        let b = seed_person(&server, "B");
+        let e = seed_edge(&server, a, b);
+
+        let value = apply_err(
+            &server,
+            json!([
+                {"op": "delete_node", "node_id": a, "detach": true},
+                {"op": "delete_edge", "edge_id": e},
+            ]),
+            "FAILED_PRECONDITION",
+        );
+        let details = &value["error"]["details"];
+        assert_eq!(details["failed_op_index"], json!(1), "got: {value}");
+        assert_eq!(details["removed_at_index"], json!(0));
+        assert_eq!(details["edge_id"], json!(e));
+
+        // Atomic refusal: the cascade itself was rolled back too.
+        assert_eq!(server.db().node_count(), 2);
+        assert_eq!(server.db().edge_count(), 1);
+    }
+
+    /// Committed edges already deleted earlier in the same batch no longer
+    /// count toward the #3209 refusal.
+    #[test]
+    fn apply_batch_delete_node_after_batch_deleted_edges_succeeds_without_detach() {
+        let server = create_test_server();
+        let a = seed_person(&server, "A");
+        let b = seed_person(&server, "B");
+        let e = seed_edge(&server, a, b);
+
+        let value = apply_ok(
+            &server,
+            json!([
+                {"op": "delete_edge", "edge_id": e},
+                {"op": "delete_node", "node_id": a},
+            ]),
+        );
+        assert_eq!(value["results"][1]["edges_removed"], json!(0));
+        assert_eq!(server.db().node_count(), 1);
+        assert_eq!(server.db().edge_count(), 0);
+    }
+
+    // ------------------------------------------------------------------
+    // Per-op valid_time (#3221 inside a batch)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn apply_batch_valid_time_honored_per_op() {
+        let server = create_test_server();
+        let value = apply_ok(
+            &server,
+            json!([
+                {"op": "create_node", "label": "Person", "ref": "old",
+                 "properties": {"name": "Old"},
+                 "valid_time": T_PAST_MICROS.to_string()},
+                {"op": "create_node", "label": "Person", "ref": "new",
+                 "properties": {"name": "New"}},
+            ]),
+        );
+        let old_id = value["results"][0]["node_id"].as_u64().unwrap();
+        let new_id = value["results"][1]["node_id"].as_u64().unwrap();
+        let now = time::now();
+
+        // The backdated node existed (valid-time) back in 2020...
+        assert!(
+            server
+                .db()
+                .get_node_at_time(
+                    NodeId::new(old_id).unwrap(),
+                    Timestamp::from(T_PAST_MICROS),
+                    now
+                )
+                .is_ok(),
+            "backdated valid_time must be honored"
+        );
+        // ...but not one second before its valid_from.
+        assert!(
+            server
+                .db()
+                .get_node_at_time(
+                    NodeId::new(old_id).unwrap(),
+                    Timestamp::from(T_PAST_MICROS - 1_000_000),
+                    now
+                )
+                .is_err()
+        );
+        // The non-backdated node did not exist in 2020.
+        assert!(
+            server
+                .db()
+                .get_node_at_time(
+                    NodeId::new(new_id).unwrap(),
+                    Timestamp::from(T_PAST_MICROS),
+                    now
+                )
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn apply_batch_valid_time_and_detach_rejected_per_op() {
+        let server = create_test_server();
+        let x = seed_person(&server, "X");
+        let nodes_before = server.db().node_count();
+
+        let value = apply_err(
+            &server,
+            json!([
+                {"op": "create_node", "label": "Person",
+                 "valid_time": T_PAST_MICROS.to_string()},
+                {"op": "delete_node", "node_id": x, "detach": true,
+                 "valid_time": T_PAST_MICROS.to_string()},
+            ]),
+            "INVALID_ARGUMENT",
+        );
+        assert_eq!(value["error"]["details"]["failed_op_index"], json!(1));
+        assert_eq!(server.db().node_count(), nodes_before);
+    }
+
+    // ------------------------------------------------------------------
+    // WAL durability and recovery
+    // ------------------------------------------------------------------
+
+    /// A committed batch survives a clean shutdown + reopen. NOTE: with a
+    /// clean shutdown, `open()` loads the index SNAPSHOT written at close
+    /// and replays no WAL entries — this test therefore verifies
+    /// snapshot-based restart, not WAL replay. Genuine WAL replay of a
+    /// batch is exercised by
+    /// `apply_batch_committed_batch_survives_wal_replay_without_index_snapshot`.
+    #[test]
+    fn apply_batch_committed_batch_survives_wal_recovery() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let path = temp_dir.path().join("batch-db");
+
+        {
+            let db = Arc::new(AletheiaDB::open(&path).expect("open durable db"));
+            let server = AletheiaMcpServer::new(db);
+            apply_ok(
+                &server,
+                json!([
+                    {"op": "create_node", "label": "Person", "ref": "a",
+                     "properties": {"name": "Durable A"}},
+                    {"op": "create_node", "label": "Person", "ref": "b",
+                     "properties": {"name": "Durable B"}},
+                    {"op": "create_edge", "source_id": "$a", "target_id": "$b",
+                     "label": "KNOWS"},
+                ]),
+            );
+            assert_eq!(server.db().node_count(), 2);
+            assert_eq!(server.db().edge_count(), 1);
+        }
+
+        // Reopen: the shutdown index snapshot must restore the whole batch.
+        let db = AletheiaDB::open(&path).expect("reopen durable db");
+        assert_eq!(db.node_count(), 2, "batch nodes must survive recovery");
+        assert_eq!(db.edge_count(), 1, "batch edge must survive recovery");
+        let found = db.find_nodes_by_property(
+            "Person",
+            "name",
+            &crate::core::PropertyValue::String("Durable A".into()),
+        );
+        assert_eq!(found.len(), 1);
+    }
+
+    /// Forces GENUINE WAL replay: after a clean shutdown, the index
+    /// snapshot directory is deleted, so the reopen can only rebuild state
+    /// from the WAL. The full subgraph — nodes, edge, endpoints, and
+    /// properties — must be restored from the batch's WAL entries alone.
+    #[test]
+    fn apply_batch_committed_batch_survives_wal_replay_without_index_snapshot() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let path = temp_dir.path().join("batch-db-replay");
+
+        let (alice_id, bob_id, edge_id) = {
+            let db = Arc::new(AletheiaDB::open(&path).expect("open durable db"));
+            let server = AletheiaMcpServer::new(db);
+            let value = apply_ok(
+                &server,
+                json!([
+                    {"op": "create_node", "label": "Person", "ref": "a",
+                     "properties": {"name": "Replay A"}},
+                    {"op": "create_node", "label": "Person", "ref": "b",
+                     "properties": {"name": "Replay B"}},
+                    {"op": "create_edge", "source_id": "$a", "target_id": "$b",
+                     "label": "KNOWS", "properties": {"since": 2024}},
+                ]),
+            );
+            let results = value["results"].as_array().unwrap();
+            (
+                results[0]["node_id"].as_u64().unwrap(),
+                results[1]["node_id"].as_u64().unwrap(),
+                results[2]["edge_id"].as_u64().unwrap(),
+            )
+        };
+
+        // Delete the index snapshot so `open()` cannot short-circuit the
+        // WAL: the reopen below must genuinely replay the batch's entries.
+        std::fs::remove_dir_all(path.join("indexes")).expect("remove index snapshot dir");
+
+        let db = AletheiaDB::open(&path).expect("reopen durable db");
+        assert_eq!(db.node_count(), 2, "batch nodes must survive WAL replay");
+        assert_eq!(db.edge_count(), 1, "batch edge must survive WAL replay");
+
+        // Nodes restored with their properties.
+        for (name, id) in [("Replay A", alice_id), ("Replay B", bob_id)] {
+            let found = db.find_nodes_by_property(
+                "Person",
+                "name",
+                &crate::core::PropertyValue::String(name.into()),
+            );
+            assert_eq!(found.len(), 1, "{name} must be restored via WAL replay");
+            assert_eq!(found[0].as_u64(), id, "{name} must keep its node id");
+        }
+
+        // Edge restored with its endpoints and property.
+        let edge = db
+            .get_edge(EdgeId::new(edge_id).unwrap())
+            .expect("batch edge must be restored via WAL replay");
+        assert_eq!(edge.source.as_u64(), alice_id);
+        assert_eq!(edge.target.as_u64(), bob_id);
+        let since = edge
+            .properties
+            .iter()
+            .find_map(|(k, v)| {
+                crate::core::interning::GLOBAL_INTERNER
+                    .resolve_with(*k, |s| s == "since")
+                    .unwrap_or(false)
+                    .then(|| format!("{v:?}"))
+            })
+            .unwrap_or_default();
+        assert!(
+            since.contains("2024"),
+            "edge property must survive WAL replay: {since}"
+        );
+    }
+
+    /// A batch that fails at op time aborts BEFORE the WAL is ever touched
+    /// (WAL append happens only at commit), so nothing is appended and
+    /// recovery trivially restores nothing — this pins that a failed batch
+    /// leaves no WAL residue to resurrect.
+    #[test]
+    fn apply_batch_failed_batch_leaves_nothing_after_recovery() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let path = temp_dir.path().join("batch-db-failed");
+
+        {
+            let db = Arc::new(AletheiaDB::open(&path).expect("open durable db"));
+            let server = AletheiaMcpServer::new(db);
+            apply_err(
+                &server,
+                json!([
+                    {"op": "create_node", "label": "Person",
+                     "properties": {"name": "Ghost"}},
+                    {"op": "update_node", "node_id": 424_242, "properties": {"x": 1}},
+                ]),
+                "NOT_FOUND",
+            );
+            assert_eq!(server.db().node_count(), 0);
+        }
+
+        let db = AletheiaDB::open(&path).expect("reopen durable db");
+        assert_eq!(db.node_count(), 0, "failed batch must leave no trace");
+        assert_eq!(db.edge_count(), 0);
+    }
+}
+
+// ============================================================================
 // Per-request `now` for is_current evaluation (Issue #3391)
 // ============================================================================
 

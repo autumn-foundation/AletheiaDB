@@ -697,6 +697,80 @@ fn authenticated_edge_write_stamps_principal() {
     );
 }
 
+/// `apply_batch` (Issue #3231) create/update ops route through the same
+/// `parse_opt_provenance` helper as the single-op tools, so an authenticated
+/// batch stamps the session principal on every created/updated version --
+/// composing with (never replacing) a caller-supplied `source`, and
+/// recording a principal-only bundle when the op carries no provenance.
+#[test]
+fn authenticated_apply_batch_stamps_principal_on_creates_and_updates() {
+    let (server, _store, _id) = server_with_role(Role::Writer);
+
+    let (batch, is_error) = dispatch(
+        &server,
+        "apply_batch",
+        json!({"operations": [
+            {"op": "create_node", "label": "Person", "ref": "a",
+             "properties": {"name": "Alice"},
+             "provenance": {"source": "batch-import"}},
+            {"op": "create_node", "label": "Person", "ref": "b",
+             "properties": {"name": "Bob"}},
+            {"op": "create_edge", "source_id": "$a", "target_id": "$b",
+             "label": "KNOWS", "provenance": {"source": "batch-import"}},
+        ]}),
+    );
+    assert!(!is_error, "{batch}");
+    let a_id = batch["ref_map"]["a"].as_u64().expect("a id");
+    let b_id = batch["ref_map"]["b"].as_u64().expect("b id");
+    let edge_id = batch["results"][2]["edge_id"].as_u64().expect("edge id");
+
+    // Caller source composes with the stamped principal.
+    let (a, _) = dispatch(&server, "get_node", json!({"node_id": a_id}));
+    assert_eq!(a["provenance"]["source"], json!("batch-import"), "{a}");
+    assert_eq!(a["provenance"]["principal"], json!("test-writer"), "{a}");
+
+    // No caller provenance still records a principal-only bundle.
+    let (b, _) = dispatch(&server, "get_node", json!({"node_id": b_id}));
+    assert_eq!(b["provenance"]["principal"], json!("test-writer"), "{b}");
+    assert!(b["provenance"].get("source").is_none(), "{b}");
+
+    // Batch edge creates are stamped like node creates.
+    let (edge, _) = dispatch(&server, "get_edge", json!({"edge_id": edge_id}));
+    assert_eq!(
+        edge["provenance"]["source"],
+        json!("batch-import"),
+        "{edge}"
+    );
+    assert_eq!(
+        edge["provenance"]["principal"],
+        json!("test-writer"),
+        "{edge}"
+    );
+
+    // Batch update ops stamp the new version too.
+    let (batch, is_error) = dispatch(
+        &server,
+        "apply_batch",
+        json!({"operations": [
+            {"op": "update_node", "node_id": a_id,
+             "properties": {"name": "Alice II"},
+             "provenance": {"source": "batch-correction"}},
+            {"op": "update_edge", "edge_id": edge_id,
+             "properties": {"since": 2024}},
+        ]}),
+    );
+    assert!(!is_error, "{batch}");
+    let (a, _) = dispatch(&server, "get_node", json!({"node_id": a_id}));
+    assert_eq!(a["provenance"]["source"], json!("batch-correction"), "{a}");
+    assert_eq!(a["provenance"]["principal"], json!("test-writer"), "{a}");
+    let (edge, _) = dispatch(&server, "get_edge", json!({"edge_id": edge_id}));
+    assert_eq!(
+        edge["provenance"]["principal"],
+        json!("test-writer"),
+        "{edge}"
+    );
+}
+
 // ============================================================================
 // AccessClass sanity: the classification only uses classes the role matrix
 // covers (guards against a future class being added without matrix review).
@@ -710,7 +784,7 @@ fn authenticated_edge_write_stamps_principal() {
 /// adding a Write/Metrics tool) must touch this literal list too.
 #[test]
 fn write_and_metrics_sets_match_hardcoded_snapshot() {
-    const EXPECTED_WRITE: [&str; 11] = [
+    const EXPECTED_WRITE: [&str; 12] = [
         "create_node",
         "update_node",
         "delete_node",
@@ -720,6 +794,7 @@ fn write_and_metrics_sets_match_hardcoded_snapshot() {
         "update_edge",
         "delete_edge",
         "retract_edge",
+        "apply_batch",
         "enable_vector_index",
         "enable_unique_constraint",
     ];

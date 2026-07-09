@@ -92,6 +92,7 @@ is served by the HTTP admin endpoints over the shared persisted store
 | `update_edge` | write |
 | `delete_edge` | write |
 | `retract_edge` | write |
+| `apply_batch` | write |
 | `enable_vector_index` | write |
 | `enable_unique_constraint` | write |
 
