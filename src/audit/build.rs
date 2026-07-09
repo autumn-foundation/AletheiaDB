@@ -541,9 +541,5 @@ fn describe_scope(scope: &AuditScope) -> String {
 /// Format a timestamp as RFC 3339 (UTC), falling back to raw micros if it is
 /// outside chrono's representable range.
 fn format_timestamp(ts: Timestamp) -> String {
-    use chrono::{DateTime, Utc};
-    match DateTime::<Utc>::from_timestamp_micros(ts.wallclock()) {
-        Some(dt) => dt.to_rfc3339_opts(chrono::SecondsFormat::Micros, true),
-        None => format!("{}us", ts.wallclock()),
-    }
+    crate::audit::model::rfc3339_micros(ts.wallclock())
 }

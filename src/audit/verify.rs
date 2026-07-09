@@ -410,12 +410,4 @@ fn render_value(v: &ExportedValue) -> String {
     }
 }
 
-/// Format microseconds-since-epoch as RFC 3339 (UTC), or raw micros if out of
-/// chrono's representable range.
-fn format_micros(micros: i64) -> String {
-    use chrono::{DateTime, Utc};
-    match DateTime::<Utc>::from_timestamp_micros(micros) {
-        Some(dt) => dt.to_rfc3339_opts(chrono::SecondsFormat::Micros, true),
-        None => format!("{micros}us"),
-    }
-}
+use crate::audit::model::rfc3339_micros as format_micros;

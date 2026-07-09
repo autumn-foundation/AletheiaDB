@@ -304,6 +304,17 @@ pub struct SignatureBlock {
     pub signed: String,
 }
 
+/// Format microseconds-since-epoch as RFC 3339 (UTC), or `<micros>us` if the
+/// value is outside chrono's representable range. Shared by the export builder
+/// and the offline verifier so their timestamp rendering cannot drift.
+pub(crate) fn rfc3339_micros(micros: i64) -> String {
+    use chrono::{DateTime, Utc};
+    match DateTime::<Utc>::from_timestamp_micros(micros) {
+        Some(dt) => dt.to_rfc3339_opts(chrono::SecondsFormat::Micros, true),
+        None => format!("{micros}us"),
+    }
+}
+
 /// Render a finite/NaN/Inf `f64` to a lossless, parseable token.
 pub(crate) fn f64_to_token(v: f64) -> String {
     if v.is_nan() {
