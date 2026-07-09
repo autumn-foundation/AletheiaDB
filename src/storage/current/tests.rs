@@ -2100,3 +2100,76 @@ fn test_get_node_ids_by_label() {
     let nonexistent_ids = storage.get_node_ids_by_label("Nonexistent");
     assert_eq!(nonexistent_ids.len(), 0);
 }
+
+/// Issue #450: the property-less `find_similar_in_range` must error when no
+/// temporal vector index is enabled (there is no default property to resolve).
+#[test]
+fn test_find_similar_in_range_no_temporal_index_errors() {
+    let storage = CurrentStorage::new();
+
+    let now = crate::core::temporal::time::now();
+    let range = crate::core::temporal::TimeRange::new(now, now).unwrap();
+
+    let result = storage.find_similar_in_range(&[1.0f32, 0.0, 0.0, 0.0], 10, range);
+    assert!(
+        result.is_err(),
+        "find_similar_in_range without any temporal vector index must return Err, got: {result:?}"
+    );
+}
+
+/// Issue #450: with multiple temporal vector indexes enabled, the
+/// property-less `find_similar_in_range` must deterministically query the
+/// alphabetically-first indexed property. The node's vector exists ONLY in the
+/// alphabetically-first index, so results identify which index was consulted
+/// regardless of enable order.
+#[test]
+fn test_find_similar_in_range_uses_alphabetical_default() {
+    use crate::index::vector::DistanceMetric;
+    use crate::index::vector::temporal::{SnapshotStrategy, TemporalVectorConfig};
+
+    let storage = CurrentStorage::new();
+
+    // Enable in reverse-alphabetical order for good measure.
+    for property in ["z_embedding", "a_embedding"] {
+        let hnsw_config = HnswConfig::new(4, DistanceMetric::Cosine);
+        let config = TemporalVectorConfig {
+            snapshot_strategy: SnapshotStrategy::TransactionInterval(1),
+            ..TemporalVectorConfig::default_with_hnsw(hnsw_config)
+        };
+        storage
+            .enable_temporal_vector_index(property, config)
+            .unwrap();
+    }
+
+    let start = crate::core::temporal::time::now();
+
+    // Node carries a vector ONLY for the alphabetically-first property.
+    let emb = vec![1.0f32, 0.0, 0.0, 0.0];
+    let node_id = NodeId::new(1).unwrap();
+    let node = Node::new(
+        node_id,
+        GLOBAL_INTERNER.intern("Doc").unwrap(),
+        PropertyMapBuilder::new()
+            .insert_vector("a_embedding", &emb)
+            .build(),
+        VersionId::new(1).unwrap(),
+    );
+    storage
+        .insert_node_direct(node, crate::core::temporal::time::now())
+        .unwrap();
+
+    // Trigger snapshot creation in every enabled temporal index.
+    storage.on_temporal_vector_transaction().unwrap();
+
+    let end = crate::core::temporal::time::now();
+    let range = crate::core::temporal::TimeRange::new(start, end).unwrap();
+    let results = storage
+        .find_similar_in_range(&emb, 10, range)
+        .expect("property-less range query should use the alphabetically-first index");
+    assert!(
+        results
+            .iter()
+            .any(|(_, hits)| hits.iter().any(|(id, _)| *id == node_id)),
+        "find_similar_in_range must query 'a_embedding' (alphabetically first), got: {results:?}"
+    );
+}

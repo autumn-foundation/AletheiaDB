@@ -39,26 +39,3 @@ pub(crate) struct TemporalVectorIndexEntry {
     #[allow(dead_code)]
     pub(crate) config: TemporalVectorConfig,
 }
-
-/// Legacy internal state for temporal vector indexing.
-/// Kept for backward compatibility with existing code paths.
-pub(crate) struct TemporalVectorIndexState {
-    pub(crate) index: Option<Arc<TemporalVectorIndex>>,
-    pub(crate) property_name: Option<String>,
-    pub(crate) config: Option<TemporalVectorConfig>,
-}
-
-impl TemporalVectorIndexState {
-    pub(crate) fn new() -> Self {
-        TemporalVectorIndexState {
-            index: None,
-            property_name: None,
-            config: None,
-        }
-    }
-
-    #[allow(dead_code)] // Kept for backward compatibility with legacy single-property API
-    pub(crate) fn is_enabled(&self) -> bool {
-        self.index.is_some()
-    }
-}

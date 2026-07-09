@@ -199,12 +199,15 @@ impl AletheiaDB {
             self.current
                 .enable_temporal_vector_index(property_name, resolved_config)?;
 
-            // Get the temporal vector index from current storage
-            let temporal_index = self.current.get_temporal_vector_index().ok_or_else(|| {
-                crate::core::error::Error::Vector(crate::core::error::VectorError::IndexError(
-                    "Temporal vector index not found after enabling".to_string(),
-                ))
-            })?;
+            // Get the temporal vector index for this property from current storage
+            let temporal_index = self
+                .current
+                .get_temporal_vector_index_for(property_name)
+                .ok_or_else(|| {
+                    crate::core::error::Error::Vector(crate::core::error::VectorError::IndexError(
+                        "Temporal vector index not found after enabling".to_string(),
+                    ))
+                })?;
 
             // Register pre-anchor hooks with historical storage (for strong consistency)
             // Both node and edge hooks perform the same action, so we create one and clone it
@@ -435,6 +438,12 @@ impl AletheiaDB {
     /// node/embedding is invalid, or the requested combination of filters is not
     /// supported (currently: a node-based temporal search, or a label-filtered
     /// temporal search).
+    ///
+    /// Note: a temporal search built with `.at_time(..)` has no property
+    /// selector; with multiple temporal vector indexes enabled it queries the
+    /// alphabetically first indexed property. Use
+    /// [`find_similar_as_of_in`](Self::find_similar_as_of_in) to target a
+    /// specific property.
     ///
     /// # Example
     ///
@@ -703,6 +712,11 @@ impl AletheiaDB {
     ///
     /// This method performs a temporal vector search, finding nodes with embeddings
     /// most similar to the query embedding as they existed at the specified timestamp.
+    ///
+    /// With multiple temporal vector indexes enabled and no property specified,
+    /// the alphabetically first indexed property is queried. Prefer
+    /// [`find_similar_as_of_in`](Self::find_similar_as_of_in) with an explicit
+    /// property to make the target index unambiguous.
     ///
     /// # Arguments
     ///
