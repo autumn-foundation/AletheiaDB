@@ -4,6 +4,7 @@ mod interner_leak_prevention;
 mod interner_property_delta;
 mod interner_wal_labels;
 mod mvcc_snapshot_visibility;
+mod persistence_default_isolation;
 mod persistence_version_ids;
 mod property_deserialization_dos;
 mod temporal_query_visibility;

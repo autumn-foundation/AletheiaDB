@@ -1355,7 +1355,7 @@ fn test_encode_decode_node_version_with_provenance() {
 
     let encoded = encode_node_version(&version);
     assert!(
-        encoded.starts_with(&COLD_RECORD_MAGIC_V2),
+        encoded.starts_with(&COLD_RECORD_MAGIC_V3),
         "new records must be magic-prefixed"
     );
 
@@ -1364,6 +1364,106 @@ fn test_encode_decode_node_version_with_provenance() {
     assert_eq!(decoded_provenance.source(), Some("hr-system"));
     assert_eq!(decoded_provenance.confidence(), Some(0.95));
     assert_eq!(decoded_provenance.correlation_id(), Some("batch-42"));
+}
+
+#[test]
+fn test_encode_decode_node_version_with_principal_provenance() {
+    use crate::core::provenance::Provenance;
+    use std::sync::Arc;
+
+    let provenance = Arc::new(
+        Provenance::builder()
+            .source("hr-system")
+            .principal("ingest-writer")
+            .build()
+            .unwrap(),
+    );
+
+    let version = NodeVersion::new_anchor(
+        VersionId::new(1).unwrap(),
+        NodeId::new(1).unwrap(),
+        BiTemporalInterval::current(1000.into()),
+        GLOBAL_INTERNER.intern("Person").unwrap(),
+        PropertyMapBuilder::new().build(),
+    )
+    .with_provenance(Some(provenance));
+
+    let encoded = encode_node_version(&version);
+    let decoded = decode_node_version(&encoded).unwrap();
+    let decoded_provenance = decoded.provenance.unwrap();
+    assert_eq!(decoded_provenance.source(), Some("hr-system"));
+    assert_eq!(decoded_provenance.principal(), Some("ingest-writer"));
+}
+
+#[test]
+fn test_decode_v2_tagged_node_record_principal_none() {
+    // Simulate a record written by an Issue-#3224-era (pre-#3350) binary:
+    // V2 magic prefix, provenance bundle without the `principal` field.
+    let legacy = SerializableNodeVersionV2 {
+        id: 1,
+        node_id: 7,
+        temporal_valid_start: 1000,
+        temporal_valid_end: crate::core::temporal::TIMESTAMP_MAX.wallclock(),
+        temporal_tx_start: 1000,
+        temporal_tx_end: crate::core::temporal::TIMESTAMP_MAX.wallclock(),
+        label: "Person".to_string(),
+        data: SerializableVersionData::Anchor {
+            properties: vec![],
+            vector_snapshot_id: None,
+        },
+        next_version: None,
+        prev_version: None,
+        provenance: Some(SerializableProvenanceV2 {
+            source: Some("hr-system".to_string()),
+            confidence: Some(0.9),
+            note: None,
+            correlation_id: None,
+        }),
+    };
+    let mut bytes = COLD_RECORD_MAGIC_V2.to_vec();
+    bytes.extend_from_slice(&bitcode::encode(&legacy));
+
+    let decoded = decode_node_version(&bytes).unwrap();
+    assert_eq!(decoded.node_id.as_u64(), 7);
+    let provenance = decoded.provenance.unwrap();
+    assert_eq!(provenance.source(), Some("hr-system"));
+    assert_eq!(provenance.confidence(), Some(0.9));
+    assert_eq!(provenance.principal(), None);
+}
+
+#[test]
+fn test_decode_v2_tagged_edge_record_principal_none() {
+    let legacy = SerializableEdgeVersionV2 {
+        id: 1,
+        edge_id: 3,
+        temporal_valid_start: 1000,
+        temporal_valid_end: crate::core::temporal::TIMESTAMP_MAX.wallclock(),
+        temporal_tx_start: 1000,
+        temporal_tx_end: crate::core::temporal::TIMESTAMP_MAX.wallclock(),
+        label: "KNOWS".to_string(),
+        source: 1,
+        target: 2,
+        data: SerializableVersionData::Anchor {
+            properties: vec![],
+            vector_snapshot_id: None,
+        },
+        next_version: None,
+        prev_version: None,
+        provenance: Some(SerializableProvenanceV2 {
+            source: Some("csv-import".to_string()),
+            confidence: None,
+            note: None,
+            correlation_id: None,
+        }),
+    };
+    let mut bytes = COLD_RECORD_MAGIC_V2.to_vec();
+    bytes.extend_from_slice(&bitcode::encode(&legacy));
+
+    let decoded = decode_edge_version(&bytes).unwrap();
+    assert_eq!(decoded.edge_id.as_u64(), 3);
+    let provenance = decoded.provenance.unwrap();
+    assert_eq!(provenance.source(), Some("csv-import"));
+    assert_eq!(provenance.principal(), None);
 }
 
 #[test]
@@ -1406,7 +1506,7 @@ fn test_encode_decode_edge_version_with_provenance() {
     .with_provenance(Some(provenance));
 
     let encoded = encode_edge_version(&version);
-    assert!(encoded.starts_with(&COLD_RECORD_MAGIC_V2));
+    assert!(encoded.starts_with(&COLD_RECORD_MAGIC_V3));
 
     let decoded = decode_edge_version(&encoded).unwrap();
     let decoded_provenance = decoded.provenance.unwrap();

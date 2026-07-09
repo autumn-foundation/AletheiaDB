@@ -289,22 +289,12 @@ impl AletheiaDB {
         // Collect label counts from current storage
         let label_counts = self.current.label_counts();
 
-        // Calculate average delta chain length from historical storage
-        // This is used for cost estimation of temporal lookups.
-        let historical_stats = self.historical.read().stats();
-        let total_versions =
-            historical_stats.total_node_versions + historical_stats.total_edge_versions;
-        let total_anchors = historical_stats.node_anchor_count + historical_stats.edge_anchor_count;
-
-        let avg_delta_chain = if total_anchors > 0 {
-            let interval = total_versions as f64 / total_anchors as f64;
-            // Average reconstruction depth is roughly (interval - 1) / 2
-            (interval - 1.0) / 2.0
-        } else {
-            // Default estimate if historical storage is empty or has no anchors
-            // (Assumes anchor_interval=10, so avg depth ~5)
-            5.0
-        };
+        // Calculate the average delta chain length from historical storage
+        // (Issue #366). This feeds the query planner's temporal-lookup cost
+        // model. O(1): reads incrementally-maintained anchor/delta counters
+        // (Issue #212) and falls back to the default estimate of 5.0 when the
+        // historical storage is empty.
+        let avg_delta_chain = self.historical.read().calculate_avg_delta_chain();
 
         self.stats.refresh(
             node_count,

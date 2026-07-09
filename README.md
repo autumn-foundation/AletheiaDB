@@ -148,6 +148,7 @@ aletheiadb = { version = "0.1", features = ["nova", "semantic-search"] }
 | [Hybrid Query Guide](docs/guides/hybrid-query-guide.md) | Graph + vector + temporal query API |
 | [Vector Search](docs/guides/vector-search-integration.md) | HNSW indexing, k-NN, semantic drift |
 | [Sharding Guide](docs/guides/sharding-guide.md) | Horizontal scaling with 2PC transactions |
+| [Security Quickstart](docs/guides/security-quickstart.md) | Authentication, RBAC roles, API-key lifecycle |
 | [Configuration](docs/CONFIGURATION.md) | All configuration options and presets |
 | [Architecture](docs/ARCHITECTURE.md) | System design and internals |
 
@@ -162,6 +163,12 @@ cargo run --bin aletheia-mcp --features mcp-server
 Exposes AletheiaDB as a set of MCP tools over stdio: node/edge CRUD,
 multi-hop traversal, vector search, temporal queries, and hybrid queries.
 Compatible with Claude, Claude Code, and any MCP-capable host.
+
+**Authentication is on by default**: the server refuses to start without a
+credential (`ALETHEIADB_BOOTSTRAP_ADMIN_KEY`; session key via
+`ALETHEIADB_MCP_API_KEY`) — see the
+[Security Quickstart](docs/guides/security-quickstart.md) for key setup,
+roles, and the explicit anonymous opt-in.
 
 **Vector elision by default**: read tools (`get_node`, `list_nodes`,
 `get_edge`, `list_edges`, `get_outgoing_edges`, `get_incoming_edges`,

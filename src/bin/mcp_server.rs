@@ -52,13 +52,71 @@
 //!   `$param` bindings) and get structured rows back. Mutating statements are
 //!   rejected before execution. Cypher requires the `cypher` feature; AQL is
 //!   always available.
+//!
+//! # Authentication (Issue #3350)
+//!
+//! The MCP transport is stdio, so the credential is **session-scoped**:
+//! supplied once at process start and re-verified on every tool call (a
+//! revocation in the shared key store takes effect on the next call).
+//!
+//! Environment variables:
+//!
+//! - `ALETHEIADB_AUTH_MODE`: `required` (default) or `anonymous`. In
+//!   `required` mode every tool call is authorized against the session
+//!   principal's role, and the server refuses to start with zero
+//!   credentials. `anonymous` disables authentication entirely (explicit
+//!   opt-in; a prominent warning is printed to stderr). Invalid values fall
+//!   back to `required` (fail-closed) with a warning.
+//! - `ALETHEIADB_MCP_API_KEY`: The session credential. In `required` mode a
+//!   missing/unknown/revoked key does not stop the server — every tool call
+//!   then returns the uniform `UNAUTHENTICATED` error.
+//! - `ALETHEIADB_BOOTSTRAP_ADMIN_KEY`: Plaintext admin key installed at
+//!   startup as principal `bootstrap-admin` (role `admin`). Memory-only —
+//!   re-supply it on every start, or use it once against the HTTP server's
+//!   `POST /admin/keys` to mint persisted keys.
+//! - Key persistence: when `ALETHEIADB_DATA_DIR` is set, keys are loaded
+//!   from `{data_dir}/auth/keys.json` — the same path the HTTP server uses,
+//!   so keys minted via the HTTP admin endpoints work here when both point
+//!   at the same data directory.
 
 use std::sync::Arc;
 
 use rmcp::{ServiceExt, transport::stdio};
 
 use aletheiadb::AletheiaDB;
-use aletheiadb::mcp::AletheiaMcpServer;
+use aletheiadb::auth::{AuthMode, AuthStore, Role, SecretString, auth_mode_from_env};
+use aletheiadb::mcp::{AletheiaMcpServer, McpAuthConfig, validate_mcp_auth_startup};
+
+/// Read a secret-bearing env var into a redacted [`SecretString`], if set
+/// and non-empty.
+///
+/// The value is trimmed: presented tokens are trimmed at the transport
+/// layer, so an env value with stray whitespace could otherwise never
+/// verify.
+fn parse_secret_env(name: &str) -> Option<SecretString> {
+    match std::env::var(name) {
+        Ok(raw) if !raw.trim().is_empty() => Some(SecretString::new(raw.trim())),
+        _ => None,
+    }
+}
+
+/// Build the auth key store: persisted under `{data_dir}/auth/keys.json`
+/// when `ALETHEIADB_DATA_DIR` is set (the same derivation the HTTP server
+/// uses), memory-only otherwise. Installs the bootstrap admin key
+/// (memory-only, never persisted) when configured.
+fn build_auth_store() -> Result<AuthStore, String> {
+    let store = match aletheiadb::config::data_dir_from_env() {
+        Some(dir) => AuthStore::with_persistence(dir.join("auth").join("keys.json"))
+            .map_err(|e| format!("failed to open auth key store: {e}"))?,
+        None => AuthStore::new(),
+    };
+    if let Some(key) = parse_secret_env("ALETHEIADB_BOOTSTRAP_ADMIN_KEY") {
+        store
+            .insert_bootstrap_key("bootstrap-admin", Role::Admin, key.expose())
+            .map_err(|e| format!("failed to install bootstrap admin key: {e}"))?;
+    }
+    Ok(store)
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -68,8 +126,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     //   (neither set)                            -> ephemeral tempdir-backed DB
     let db = AletheiaDB::open_from_env()?;
 
-    // Create the MCP server
-    let server = AletheiaMcpServer::new(Arc::new(db));
+    // Resolve authentication (Issue #3350): required by default; the
+    // session credential authenticates every tool call.
+    let auth_mode = auth_mode_from_env();
+    let store = build_auth_store()?;
+    if let Err(msg) = validate_mcp_auth_startup(auth_mode, &store) {
+        eprintln!("aletheia-mcp refusing to start: {msg}");
+        std::process::exit(1);
+    }
+    let store = Arc::new(store);
+
+    let session_key = parse_secret_env("ALETHEIADB_MCP_API_KEY");
+    if auth_mode == AuthMode::Required
+        && session_key
+            .as_ref()
+            .is_none_or(|key| store.verify(key.expose()).is_none())
+    {
+        eprintln!(
+            "WARNING: no valid session credential was supplied \
+             (ALETHEIADB_MCP_API_KEY is unset or not recognized by the key \
+             store); every tool call will return UNAUTHENTICATED until the \
+             server is restarted with a valid key."
+        );
+    }
+
+    let mut auth = McpAuthConfig::new(auth_mode, store);
+    if let Some(key) = session_key {
+        auth = auth.with_credential(key);
+    }
+
+    // Create the MCP server (with_auth prints the prominent anonymous-mode
+    // warning to stderr when applicable — stdout is the protocol channel).
+    let server = AletheiaMcpServer::with_auth(Arc::new(db), auth);
 
     // Serve over stdio using the MCP protocol
     let service = server.serve(stdio()).await?;

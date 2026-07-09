@@ -87,6 +87,10 @@ pub mod cypher;
 // Optional HTTP server module
 #[cfg(feature = "http-server")]
 pub mod http;
+// Authentication + RBAC core (Issue #3350, Phase 1). Shared by the HTTP
+// server today and the MCP server in Phase 2, hence gated on either feature.
+#[cfg(any(feature = "http-server", feature = "mcp-server"))]
+pub mod auth;
 // Test utilities: available in unit tests and when the simulation feature is enabled
 // (integration tests under `--features simulation` need create_test_db).
 #[cfg(any(test, feature = "simulation"))]

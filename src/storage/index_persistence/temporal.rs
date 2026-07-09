@@ -45,7 +45,7 @@ use crate::core::version::{EdgeVersion, NodeVersion, PropertyDelta, VersionData}
 use super::error::{IndexPersistenceError, Result};
 use super::formats::{
     EdgeVersionEntry, NodeVersionEntry, PersistedProvenance, PersistedVersionType,
-    TemporalIndexData, legacy_v1::TemporalIndexDataV1, legacy_v2::TemporalIndexDataV2,
+    TemporalIndexData, legacy_v1::TemporalIndexDataV1,
 };
 use super::graph::{persist_property_map, restore_property_map};
 use super::{MANIFEST_VERSION, TEMPORAL_MAGIC};
@@ -57,6 +57,7 @@ pub(crate) fn persist_provenance(provenance: Option<&Provenance>) -> Option<Pers
         confidence: p.confidence(),
         note: p.note().map(String::from),
         correlation_id: p.correlation_id().map(String::from),
+        principal: p.principal().map(String::from),
     })
 }
 
@@ -71,10 +72,16 @@ pub(crate) fn restore_provenance(
     let Some(p) = persisted else {
         return Ok(None);
     };
-    let provenance = Provenance::from_parts(p.source, p.confidence, p.note, p.correlation_id)
-        .map_err(|e| {
-            IndexPersistenceError::Serialization(format!("Invalid persisted provenance: {}", e))
-        })?;
+    let provenance = Provenance::from_parts(
+        p.source,
+        p.confidence,
+        p.note,
+        p.correlation_id,
+        p.principal,
+    )
+    .map_err(|e| {
+        IndexPersistenceError::Serialization(format!("Invalid persisted provenance: {}", e))
+    })?;
     Ok(Some(Arc::new(provenance)))
 }
 
@@ -701,24 +708,28 @@ pub fn load_temporal_index(path: &Path) -> Result<TemporalIndexData> {
 }
 
 /// Decode temporal index bytes, transparently upgrading pre-fidelity
-/// (Issue #3387, `version == 2`) and pre-provenance (Issue #3224,
-/// `version == 1`) files.
+/// (Issue #3387, `version == 3`), pre-principal (Issue #3350,
+/// `version == 2`), and pre-provenance (Issue #3224, `version == 1`) files.
 ///
-/// `bitcode` is positional and non-self-describing, so an older file cannot
-/// decode directly as the current [`TemporalIndexData`] (whose
-/// `NodeVersionEntry`/`EdgeVersionEntry` gained a `provenance` field at v2
-/// and tx-end/chain-link fields at v3). We first try decoding as the current
-/// shape; if that fails, or produces an implausible magic/version (a decode
-/// "succeeding" on bytes it wasn't meant for), we fall back to the frozen
-/// `legacy_v2` shape (new fields `None`), then `legacy_v1` (additionally
-/// `provenance: None`) -- the same magic+version cross-check used throughout
-/// this module, just applied across the candidate shapes newest-first.
+/// `bitcode` is positional and non-self-describing, so an older-version file
+/// cannot decode directly as the current [`TemporalIndexData`]: version 1
+/// predates the `provenance` field on `NodeVersionEntry`/`EdgeVersionEntry`,
+/// version 2 predates the `principal` field inside [`PersistedProvenance`],
+/// and version 3 predates the Issue #3387 tx-end/chain-link fields. We try
+/// decoding candidate shapes newest-first; a decode only "wins" when it
+/// also produces a plausible magic + the version that shape was written at
+/// (guarding against a decode "succeeding" on bytes it wasn't meant for) --
+/// this is the same magic+version cross-check used throughout this module,
+/// just applied across four candidate shapes instead of one.
 ///
 /// The file is read from disk and CRC32-verified exactly once via
 /// [`super::common::read_and_verify_crc`]; all candidate decodes are
-/// attempted against that single in-memory buffer, avoiding a second disk
-/// read and checksum pass on the (common, cheap) legacy-fallback path.
+/// attempted against that single in-memory buffer, avoiding extra disk
+/// reads and checksum passes on the (common, cheap) legacy-fallback paths.
 fn decode_temporal_blob(path: &Path) -> Result<TemporalIndexData> {
+    use crate::storage::index_persistence::formats::legacy_v2::TemporalIndexDataV2;
+    use crate::storage::index_persistence::formats::legacy_v3::TemporalIndexDataV3;
+
     let bytes = super::common::read_and_verify_crc(
         path,
         super::MAX_TEMPORAL_INDEX_FILE_SIZE,
@@ -732,7 +743,17 @@ fn decode_temporal_blob(path: &Path) -> Result<TemporalIndexData> {
         return Ok(data);
     }
 
-    // Pre-fidelity (Issue #3387) layout: no tx-end / chain-link fields.
+    // Issue #3350 shape (principal-carrying provenance, no tx-end /
+    // chain-link fields), written at MANIFEST_VERSION == 3.
+    if let Ok(v3) = bitcode::decode::<TemporalIndexDataV3>(&bytes)
+        && v3.magic == TEMPORAL_MAGIC
+        && v3.version == 3
+    {
+        return Ok(v3.into());
+    }
+
+    // Issue #3224 shape (provenance without principal), written at
+    // MANIFEST_VERSION == 2.
     if let Ok(v2) = bitcode::decode::<TemporalIndexDataV2>(&bytes)
         && v2.magic == TEMPORAL_MAGIC
         && v2.version == 2
@@ -754,9 +775,9 @@ fn decode_temporal_blob(path: &Path) -> Result<TemporalIndexData> {
         });
     }
     // The V1 shape is the last candidate: only an exact version-1 stamp may
-    // decode through it. Anything else (0, or a 2/3 whose proper-shape decode
-    // failed above, or a future version) would be a misdecode, not a legacy
-    // file.
+    // decode through it. Anything else (0, or a 2/3/4 whose proper-shape
+    // decode failed above, or a future version) would be a misdecode, not a
+    // legacy file.
     if legacy.version != 1 {
         return Err(IndexPersistenceError::UnsupportedVersion {
             found: legacy.version,
@@ -861,6 +882,7 @@ mod tests {
                 confidence: Some(0.95),
                 note: None,
                 correlation_id: Some("batch-42".to_string()),
+                principal: Some("ingest-writer".to_string()),
             }),
             tx_end: None,
             tx_end_logical: None,
@@ -876,6 +898,7 @@ mod tests {
         assert_eq!(provenance.confidence, Some(0.95));
         assert_eq!(provenance.note, None);
         assert_eq!(provenance.correlation_id.as_deref(), Some("batch-42"));
+        assert_eq!(provenance.principal.as_deref(), Some("ingest-writer"));
 
         // And the version without provenance round-trips as None, not a
         // fabricated default.
@@ -956,6 +979,63 @@ mod tests {
         let edge = restore_edge_version(edge_entry).unwrap();
         assert!(edge.temporal.transaction_time().is_current());
         assert!(edge.prev_version.is_none());
+    }
+
+    #[test]
+    fn test_load_v2_temporal_index_file_defaults_principal_none() {
+        use crate::core::GLOBAL_INTERNER;
+        use crate::storage::index_persistence::formats::legacy_v2::{
+            NodeVersionEntryV2, PersistedProvenanceV2, TemporalIndexDataV2,
+        };
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("legacy_v2_temporal.idx");
+
+        let label = GLOBAL_INTERNER.intern("Person").unwrap();
+        let legacy = TemporalIndexDataV2 {
+            magic: TEMPORAL_MAGIC,
+            version: 2,
+            node_versions: vec![NodeVersionEntryV2 {
+                version_id: 100,
+                node_id: 1,
+                label_idx: label.as_u32(),
+                valid_from: 1000,
+                valid_from_logical: 0,
+                valid_to: None,
+                valid_to_logical: None,
+                tx_time: 1000,
+                tx_time_logical: 0,
+                version_type: PersistedVersionType::Anchor,
+                properties: PersistedPropertyMap { entries: vec![] },
+                vector_snapshot_id: Some(7),
+                provenance: Some(PersistedProvenanceV2 {
+                    source: Some("hr-system".to_string()),
+                    confidence: Some(0.5),
+                    note: None,
+                    correlation_id: None,
+                }),
+            }],
+            node_anchors: vec![],
+            edge_versions: vec![],
+            edge_anchors: vec![],
+        };
+
+        // Write bytes exactly as an Issue-#3224-era binary (pre-#3350) would
+        // have: provenance exists but has no `principal` field.
+        crate::storage::index_persistence::common::save_encoded_with_crc(&legacy, &path).unwrap();
+
+        let loaded = load_temporal_index(&path).unwrap();
+
+        assert_eq!(loaded.node_versions.len(), 1);
+        let provenance = loaded.node_versions[0].provenance.as_ref().unwrap();
+        assert_eq!(provenance.source.as_deref(), Some("hr-system"));
+        assert_eq!(provenance.confidence, Some(0.5));
+        assert!(provenance.principal.is_none());
+
+        let version = restore_node_version(&loaded.node_versions[0]).unwrap();
+        let restored = version.provenance.unwrap();
+        assert_eq!(restored.source(), Some("hr-system"));
+        assert_eq!(restored.principal(), None);
     }
 
     #[test]
@@ -1800,7 +1880,7 @@ mod tests {
     fn test_load_v2_temporal_index_file_defaults_fidelity_fields_none() {
         use crate::core::GLOBAL_INTERNER;
         use crate::storage::index_persistence::formats::legacy_v2::{
-            EdgeVersionEntryV2, NodeVersionEntryV2, TemporalIndexDataV2,
+            EdgeVersionEntryV2, NodeVersionEntryV2, PersistedProvenanceV2, TemporalIndexDataV2,
         };
 
         let dir = tempdir().unwrap();
@@ -1823,7 +1903,7 @@ mod tests {
                 version_type: PersistedVersionType::Anchor,
                 properties: PersistedPropertyMap { entries: vec![] },
                 vector_snapshot_id: Some(7),
-                provenance: Some(PersistedProvenance {
+                provenance: Some(PersistedProvenanceV2 {
                     source: Some("hr-system".to_string()),
                     confidence: Some(0.95),
                     note: None,
@@ -1845,7 +1925,7 @@ mod tests {
                 tx_time_logical: 0,
                 version_type: PersistedVersionType::Anchor,
                 properties: PersistedPropertyMap { entries: vec![] },
-                provenance: Some(PersistedProvenance {
+                provenance: Some(PersistedProvenanceV2 {
                     source: Some("edge-system".to_string()),
                     confidence: None,
                     note: None,
@@ -1882,6 +1962,110 @@ mod tests {
 
         // The v2 EDGE entry upgrades identically: provenance preserved,
         // fidelity fields None, closed valid interval kept.
+        assert_eq!(loaded.edge_versions.len(), 1);
+        let edge_entry = &loaded.edge_versions[0];
+        assert!(edge_entry.provenance.is_some());
+        assert_eq!(edge_entry.valid_to, Some(2000));
+        assert_eq!(edge_entry.tx_end, None);
+        assert_eq!(edge_entry.next_version, None);
+        let edge = restore_edge_version(edge_entry).unwrap();
+        assert!(edge.temporal.transaction_time().is_current());
+        assert_eq!(edge.temporal.valid_time().end().wallclock(), 2000);
+    }
+
+    /// Issue #3387 x #3350 reconciliation: a `version == 3` file (the #3350
+    /// principal-era layout, written by a pre-#3387 binary) still loads,
+    /// upgrading in memory with the principal preserved and the fidelity
+    /// fields `None`.
+    #[test]
+    fn test_load_v3_temporal_index_file_defaults_fidelity_fields_none() {
+        use crate::core::GLOBAL_INTERNER;
+        use crate::storage::index_persistence::formats::legacy_v3::{
+            EdgeVersionEntryV3, NodeVersionEntryV3, TemporalIndexDataV3,
+        };
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("legacy_v3_temporal.idx");
+
+        let label = GLOBAL_INTERNER.intern("Person").unwrap();
+        let legacy = TemporalIndexDataV3 {
+            magic: TEMPORAL_MAGIC,
+            version: 3,
+            node_versions: vec![NodeVersionEntryV3 {
+                version_id: 100,
+                node_id: 1,
+                label_idx: label.as_u32(),
+                valid_from: 1000,
+                valid_from_logical: 0,
+                valid_to: None,
+                valid_to_logical: None,
+                tx_time: 1000,
+                tx_time_logical: 0,
+                version_type: PersistedVersionType::Anchor,
+                properties: PersistedPropertyMap { entries: vec![] },
+                vector_snapshot_id: Some(7),
+                provenance: Some(PersistedProvenance {
+                    source: Some("hr-system".to_string()),
+                    confidence: Some(0.95),
+                    note: None,
+                    correlation_id: None,
+                    principal: Some("alice@example.com".to_string()),
+                }),
+            }],
+            node_anchors: vec![],
+            edge_versions: vec![EdgeVersionEntryV3 {
+                version_id: 101,
+                edge_id: 10,
+                source_id: 1,
+                target_id: 2,
+                label_idx: label.as_u32(),
+                valid_from: 1000,
+                valid_from_logical: 0,
+                valid_to: Some(2000),
+                valid_to_logical: Some(0),
+                tx_time: 1000,
+                tx_time_logical: 0,
+                version_type: PersistedVersionType::Anchor,
+                properties: PersistedPropertyMap { entries: vec![] },
+                provenance: Some(PersistedProvenance {
+                    source: Some("edge-system".to_string()),
+                    confidence: None,
+                    note: None,
+                    correlation_id: None,
+                    principal: None,
+                }),
+            }],
+            edge_anchors: vec![],
+        };
+
+        // Write bytes exactly as a #3350-era (pre-#3387) binary would have:
+        // principal-carrying provenance, no tx-end / chain-link fields.
+        crate::storage::index_persistence::common::save_encoded_with_crc(&legacy, &path).unwrap();
+
+        let loaded = load_temporal_index(&path).unwrap();
+
+        assert_eq!(loaded.node_versions.len(), 1);
+        let entry = &loaded.node_versions[0];
+        assert_eq!(entry.vector_snapshot_id, Some(7));
+        let provenance = entry.provenance.as_ref().unwrap();
+        assert_eq!(
+            provenance.principal.as_deref(),
+            Some("alice@example.com"),
+            "v3 principal must be preserved"
+        );
+        assert_eq!(entry.tx_end, None);
+        assert_eq!(entry.tx_end_logical, None);
+        assert_eq!(entry.prev_version, None);
+        assert_eq!(entry.next_version, None);
+
+        // Restored version: open tx interval, no links (the historical
+        // storage rebuild heuristic then reconstructs chains as before).
+        let version = restore_node_version(entry).unwrap();
+        assert!(version.temporal.transaction_time().is_current());
+        assert!(version.prev_version.is_none());
+        assert!(version.next_version.is_none());
+
+        // The v3 EDGE entry upgrades identically.
         assert_eq!(loaded.edge_versions.len(), 1);
         let edge_entry = &loaded.edge_versions[0];
         assert!(edge_entry.provenance.is_some());
