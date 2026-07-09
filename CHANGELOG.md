@@ -86,6 +86,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Bulk MCP read responses now evaluate `is_current` against a single
+  per-request timestamp (Issue #3391): the wallclock is captured once per
+  tool call and every entity's `temporal.is_current` in that response
+  (`list_nodes`, `traverse`, `get_outgoing_edges`/`get_incoming_edges`,
+  `find_similar`, `find_nodes_at_time`, `hybrid_query`, ...) is judged
+  against the same instant, instead of one clock read per serialized
+  entity. See
+  [docs/guides/mcp-query-tool.md](docs/guides/mcp-query-tool.md#temporal-bounds-on-read-responses).
 - Removed the legacy single-property temporal vector index state (Issue
   #450): the internal `TemporalVectorIndexState` (which mirrored only the
   most recently enabled temporal index) is gone, and the multi-property
@@ -142,6 +150,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   set `enabled = true` under `[persistence]`; a `[persistence]` section that
   omits `enabled` (even one that sets `data_dir` or `load_on_startup`) is
   treated as disabled.
+
 - **BREAKING**: `ReadOps::get_outgoing_edges`, `ReadOps::get_incoming_edges`,
   and `ReadOps::get_outgoing_edges_with_label` now return
   `Result<Vec<EdgeId>>` instead of `Vec<EdgeId>` (Issue #359). A node that

@@ -862,12 +862,20 @@ impl AletheiaMcpServer {
     /// failing the whole response) is deliberate: a single-node lookup or a
     /// bulk endpoint like `list_nodes`/`traverse` should not fail entirely
     /// because one entry's metadata couldn't be read.
+    ///
+    /// `now` is the request-scoped wallclock captured once per tool call
+    /// (Issue #3391), so every entity in one response evaluates `is_current`
+    /// against the same instant.
     fn lookup_node_read_metadata(
         &self,
         version_id: VersionId,
+        now: Timestamp,
     ) -> (Option<Provenance>, Option<TemporalBounds>) {
         match self.db.get_node_version_read_metadata(version_id) {
-            Ok(Some((provenance, interval))) => (provenance, Some(TemporalBounds::from(&interval))),
+            Ok(Some((provenance, interval))) => (
+                provenance,
+                Some(TemporalBounds::from_interval_at(&interval, now)),
+            ),
             Ok(None) => {
                 eprintln!(
                     "Warning: node version {} not found in any tier; omitting provenance/temporal",
@@ -890,9 +898,13 @@ impl AletheiaMcpServer {
     fn lookup_edge_read_metadata(
         &self,
         version_id: VersionId,
+        now: Timestamp,
     ) -> (Option<Provenance>, Option<TemporalBounds>) {
         match self.db.get_edge_version_read_metadata(version_id) {
-            Ok(Some((provenance, interval))) => (provenance, Some(TemporalBounds::from(&interval))),
+            Ok(Some((provenance, interval))) => (
+                provenance,
+                Some(TemporalBounds::from_interval_at(&interval, now)),
+            ),
             Ok(None) => {
                 eprintln!(
                     "Warning: edge version {} not found in any tier; omitting provenance/temporal",
@@ -911,8 +923,13 @@ impl AletheiaMcpServer {
         }
     }
 
-    fn node_to_response(&self, node: &crate::core::Node, include_vectors: bool) -> NodeResponse {
-        let (provenance, temporal) = self.lookup_node_read_metadata(node.current_version);
+    fn node_to_response(
+        &self,
+        node: &crate::core::Node,
+        include_vectors: bool,
+        now: Timestamp,
+    ) -> NodeResponse {
+        let (provenance, temporal) = self.lookup_node_read_metadata(node.current_version, now);
         NodeResponse {
             id: node.id.as_u64(),
             label: self.interned_to_string(node.label),
@@ -922,8 +939,13 @@ impl AletheiaMcpServer {
         }
     }
 
-    fn edge_to_response(&self, edge: &crate::core::Edge, include_vectors: bool) -> EdgeResponse {
-        let (provenance, temporal) = self.lookup_edge_read_metadata(edge.current_version);
+    fn edge_to_response(
+        &self,
+        edge: &crate::core::Edge,
+        include_vectors: bool,
+        now: Timestamp,
+    ) -> EdgeResponse {
+        let (provenance, temporal) = self.lookup_edge_read_metadata(edge.current_version, now);
         EdgeResponse {
             id: edge.id.as_u64(),
             source_id: edge.source.as_u64(),
@@ -1384,7 +1406,9 @@ impl AletheiaMcpServer {
 
         match self.db.get_node(node_id) {
             Ok(node) => {
-                let response = self.node_to_response(&node, req.include_vectors.unwrap_or(false));
+                let now = time::now();
+                let response =
+                    self.node_to_response(&node, req.include_vectors.unwrap_or(false), now);
                 self.success_json(
                     serde_json::to_value(&response)
                         .expect("response serialization should not fail"),
@@ -1431,7 +1455,8 @@ impl AletheiaMcpServer {
         {
             Ok(node_id) => match self.db.get_node(node_id) {
                 Ok(node) => {
-                    let response = self.node_to_response(&node, true);
+                    let now = time::now();
+                    let response = self.node_to_response(&node, true, now);
                     self.success_json(
                         serde_json::to_value(&response)
                             .expect("response serialization should not fail"),
@@ -1486,7 +1511,8 @@ impl AletheiaMcpServer {
         {
             Ok(()) => match self.db.get_node(node_id) {
                 Ok(node) => {
-                    let response = self.node_to_response(&node, true);
+                    let now = time::now();
+                    let response = self.node_to_response(&node, true, now);
                     self.success_json(
                         serde_json::to_value(&response)
                             .expect("response serialization should not fail"),
@@ -1806,6 +1832,10 @@ impl AletheiaMcpServer {
             return self.invalid_argument("Property filtering requires 'label' to be specified");
         }
 
+        // One request-scoped wallclock for every entity in the response
+        // (Issue #3391).
+        let now = time::now();
+
         // Property-based lookup: label + property_key + property_value
         if let (Some(label), Some(prop_key), Some(prop_val)) =
             (&req.label, &req.property_key, &req.property_value)
@@ -1829,7 +1859,7 @@ impl AletheiaMcpServer {
             let mut nodes = Vec::with_capacity(limit);
             for node_id in node_ids.into_iter().skip(offset).take(limit) {
                 if let Ok(node) = self.db.get_node(node_id) {
-                    nodes.push(self.node_to_response(&node, include_vectors));
+                    nodes.push(self.node_to_response(&node, include_vectors, now));
                 }
             }
 
@@ -1881,7 +1911,7 @@ impl AletheiaMcpServer {
                                         has_more = true;
                                         break;
                                     }
-                                    nodes.push(self.node_to_response(&node, include_vectors));
+                                    nodes.push(self.node_to_response(&node, include_vectors, now));
                                 }
                             }
                             Err(e) => return self.db_error(e),
@@ -1964,7 +1994,9 @@ impl AletheiaMcpServer {
 
         match self.db.get_edge(edge_id) {
             Ok(edge) => {
-                let response = self.edge_to_response(&edge, req.include_vectors.unwrap_or(false));
+                let now = time::now();
+                let response =
+                    self.edge_to_response(&edge, req.include_vectors.unwrap_or(false), now);
                 self.success_json(
                     serde_json::to_value(&response)
                         .expect("response serialization should not fail"),
@@ -2021,7 +2053,8 @@ impl AletheiaMcpServer {
         {
             Ok(edge_id) => match self.db.get_edge(edge_id) {
                 Ok(edge) => {
-                    let response = self.edge_to_response(&edge, true);
+                    let now = time::now();
+                    let response = self.edge_to_response(&edge, true, now);
                     self.success_json(
                         serde_json::to_value(&response)
                             .expect("response serialization should not fail"),
@@ -2076,7 +2109,8 @@ impl AletheiaMcpServer {
         {
             Ok(()) => match self.db.get_edge(edge_id) {
                 Ok(edge) => {
-                    let response = self.edge_to_response(&edge, true);
+                    let now = time::now();
+                    let response = self.edge_to_response(&edge, true, now);
                     self.success_json(
                         serde_json::to_value(&response)
                             .expect("response serialization should not fail"),
@@ -2189,10 +2223,13 @@ impl AletheiaMcpServer {
         };
 
         let include_vectors = req.include_vectors.unwrap_or(false);
+        // One request-scoped wallclock for every entity in the response
+        // (Issue #3391).
+        let now = time::now();
         let edges: Vec<EdgeResponse> = edge_ids
             .into_iter()
             .filter_map(|eid| self.db.get_edge(eid).ok())
-            .map(|e| self.edge_to_response(&e, include_vectors))
+            .map(|e| self.edge_to_response(&e, include_vectors, now))
             .collect();
 
         // This handler returns the complete adjacency (no limit/offset), so the
@@ -2226,6 +2263,9 @@ impl AletheiaMcpServer {
 
         // Filter by label if provided
         let include_vectors = req.include_vectors.unwrap_or(false);
+        // One request-scoped wallclock for every entity in the response
+        // (Issue #3391).
+        let now = time::now();
         let edges: Vec<EdgeResponse> = edge_ids
             .into_iter()
             .filter_map(|eid| self.db.get_edge(eid).ok())
@@ -2235,7 +2275,7 @@ impl AletheiaMcpServer {
                     .map(|l| self.matches_label(e.label, l))
                     .unwrap_or(true)
             })
-            .map(|e| self.edge_to_response(&e, include_vectors))
+            .map(|e| self.edge_to_response(&e, include_vectors, now))
             .collect();
 
         // Complete adjacency (no limit/offset): never truncated, so
@@ -2423,6 +2463,9 @@ impl AletheiaMcpServer {
         // under-reports.
         let mut produced: usize = 0;
         let mut has_more = false;
+        // One request-scoped wallclock for every entity in the response
+        // (Issue #3391).
+        let now = time::now();
 
         while let Some((current_id, path, current_depth)) = frontier.pop() {
             let mut current_exists = true;
@@ -2433,8 +2476,11 @@ impl AletheiaMcpServer {
                         produced += 1;
                         if produced > offset && results.len() < limit {
                             results.push(TraversalResult {
-                                node: self
-                                    .node_to_response(&node, req.include_vectors.unwrap_or(false)),
+                                node: self.node_to_response(
+                                    &node,
+                                    req.include_vectors.unwrap_or(false),
+                                    now,
+                                ),
                                 path: path.clone(),
                                 depth: current_depth,
                             });
@@ -2543,13 +2589,16 @@ impl AletheiaMcpServer {
             Ok(results) => {
                 let has_more = results.len() > offset.saturating_add(k);
                 let include_vectors = req.include_vectors.unwrap_or(false);
+                // One request-scoped wallclock for every entity in the
+                // response (Issue #3391).
+                let now = time::now();
                 let similarity_results: Vec<SimilarityResult> = results
                     .into_iter()
                     .skip(offset)
                     .take(k)
                     .filter_map(|(node_id, score)| {
                         self.db.get_node(node_id).ok().map(|node| SimilarityResult {
-                            node: self.node_to_response(&node, include_vectors),
+                            node: self.node_to_response(&node, include_vectors, now),
                             score,
                         })
                     })
@@ -2675,7 +2724,8 @@ impl AletheiaMcpServer {
 
         match self.db.get_node_at_time(node_id, valid_time, tx_time) {
             Ok(node) => {
-                let response = self.node_to_response(&node, true);
+                let now = time::now();
+                let response = self.node_to_response(&node, true, now);
                 self.success_json(json!({
                     "node": response,
                     "valid_time": req.valid_time,
@@ -2713,7 +2763,8 @@ impl AletheiaMcpServer {
 
         match self.db.get_edge_at_time(edge_id, valid_time, tx_time) {
             Ok(edge) => {
-                let response = self.edge_to_response(&edge, true);
+                let now = time::now();
+                let response = self.edge_to_response(&edge, true, now);
                 self.success_json(json!({
                     "edge": response,
                     "valid_time": req.valid_time,
@@ -2800,11 +2851,14 @@ impl AletheiaMcpServer {
                 let matches = matches.nodes;
                 let total_matching = matches.len();
                 let include_vectors = req.include_vectors.unwrap_or(false);
+                // One request-scoped wallclock for every entity in the
+                // response (Issue #3391).
+                let now = time::now();
                 let nodes: Vec<NodeResponse> = matches
                     .iter()
                     .skip(offset)
                     .take(limit)
-                    .map(|node| self.node_to_response(node, include_vectors))
+                    .map(|node| self.node_to_response(node, include_vectors, now))
                     .collect();
 
                 let has_more = offset.saturating_add(limit) < total_matching;
@@ -2935,7 +2989,8 @@ impl AletheiaMcpServer {
 
         match self.db.get_node_at_valid_time(node_id, valid_time) {
             Ok(node) => {
-                let response = self.node_to_response(&node, true);
+                let now = time::now();
+                let response = self.node_to_response(&node, true, now);
                 self.success_json(json!({
                     "node": response,
                     "valid_time": req.valid_time
@@ -2967,7 +3022,8 @@ impl AletheiaMcpServer {
 
         match self.db.get_node_at_transaction_time(node_id, tx_time) {
             Ok(node) => {
-                let response = self.node_to_response(&node, true);
+                let now = time::now();
+                let response = self.node_to_response(&node, true, now);
                 self.success_json(json!({
                     "node": response,
                     "transaction_time": req.transaction_time
@@ -3077,7 +3133,8 @@ impl AletheiaMcpServer {
 
         match self.db.get_edge_at_valid_time(edge_id, valid_time) {
             Ok(edge) => {
-                let response = self.edge_to_response(&edge, true);
+                let now = time::now();
+                let response = self.edge_to_response(&edge, true, now);
                 self.success_json(json!({
                     "edge": response,
                     "valid_time": req.valid_time
@@ -3109,7 +3166,8 @@ impl AletheiaMcpServer {
 
         match self.db.get_edge_at_transaction_time(edge_id, tx_time) {
             Ok(edge) => {
-                let response = self.edge_to_response(&edge, true);
+                let now = time::now();
+                let response = self.edge_to_response(&edge, true, now);
                 self.success_json(json!({
                     "edge": response,
                     "transaction_time": req.transaction_time
@@ -3499,6 +3557,10 @@ impl AletheiaMcpServer {
 
         let include_vectors = req.include_vectors.unwrap_or(false);
 
+        // One request-scoped wallclock for every entity in the response
+        // (Issue #3391).
+        let now = time::now();
+
         // Helper to convert rows to hybrid results with temporal info
         let rows_to_results =
             |rows: Vec<crate::query::executor::QueryRow>| -> Vec<HybridQueryResult> {
@@ -3506,7 +3568,7 @@ impl AletheiaMcpServer {
                     .filter_map(|row| {
                         if let EntityResult::Node(node) = row.entity {
                             Some(HybridQueryResult {
-                                node: self.node_to_response(&node, include_vectors),
+                                node: self.node_to_response(&node, include_vectors, now),
                                 similarity_score: row.score,
                                 traversal_path: row.path.map(|p| {
                                     p.iter()
@@ -3539,7 +3601,7 @@ impl AletheiaMcpServer {
                 // Temporal query for a single node
                 return match self.db.get_node_at_time(node_id, vt, tt) {
                     Ok(node) => {
-                        let response = self.node_to_response(&node, include_vectors);
+                        let response = self.node_to_response(&node, include_vectors, now);
                         self.success_json(json!({
                             "results": [HybridQueryResult {
                                 node: response,
@@ -3571,7 +3633,7 @@ impl AletheiaMcpServer {
                 // Just return the start node
                 return match self.db.get_node(node_id) {
                     Ok(node) => {
-                        let response = self.node_to_response(&node, include_vectors);
+                        let response = self.node_to_response(&node, include_vectors, now);
                         self.success_json(json!({
                             "results": [HybridQueryResult {
                                 node: response,
@@ -3751,23 +3813,28 @@ impl AletheiaMcpServer {
     }
 
     /// Serialize a single query row (entity + score/path/timestamp) to JSON.
+    ///
+    /// Query rows carry only id/label/properties -- no provenance or
+    /// temporal block -- so entities are serialized directly instead of
+    /// through `node_to_response`/`edge_to_response`, which would pay a
+    /// per-entity version-metadata lookup just to discard the result
+    /// (Issue #3391).
     fn query_row_to_json(&self, row: crate::query::executor::QueryRow) -> serde_json::Value {
         let entity = match row.entity {
-            EntityResult::Node(node) => {
-                let r = self.node_to_response(&node, true);
-                json!({"type": "node", "id": r.id, "label": r.label, "properties": r.properties})
-            }
-            EntityResult::Edge(edge) => {
-                let r = self.edge_to_response(&edge, true);
-                json!({
-                    "type": "edge",
-                    "id": r.id,
-                    "source_id": r.source_id,
-                    "target_id": r.target_id,
-                    "label": r.label,
-                    "properties": r.properties,
-                })
-            }
+            EntityResult::Node(node) => json!({
+                "type": "node",
+                "id": node.id.as_u64(),
+                "label": self.interned_to_string(node.label),
+                "properties": self.property_map_to_json(&node.properties, true),
+            }),
+            EntityResult::Edge(edge) => json!({
+                "type": "edge",
+                "id": edge.id.as_u64(),
+                "source_id": edge.source.as_u64(),
+                "target_id": edge.target.as_u64(),
+                "label": self.interned_to_string(edge.label),
+                "properties": self.property_map_to_json(&edge.properties, true),
+            }),
             EntityResult::NodeId(id) => json!({"type": "node", "id": id.as_u64()}),
             EntityResult::EdgeId(id) => json!({"type": "edge", "id": id.as_u64()}),
         };
