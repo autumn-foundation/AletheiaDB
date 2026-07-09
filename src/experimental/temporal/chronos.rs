@@ -54,7 +54,7 @@
 //!
 //! db.write(|tx| {
 //!     // Delete the link between Bob and Charlie
-//!     let edges = tx.get_outgoing_edges(bob);
+//!     let edges = tx.get_outgoing_edges(bob)?;
 //!     for e in edges { tx.delete_edge(e)?; }
 //!     Ok::<_, Error>(())
 //! })?;
