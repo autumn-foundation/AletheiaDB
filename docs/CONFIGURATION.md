@@ -214,10 +214,22 @@ max_batch_size = 1000
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `enabled` | bool | false | Enable index persistence |
-| `data_dir` | PathBuf | "data/indexes" | Directory for index files |
-| `load_on_startup` | bool | false | Load indexes on startup |
-| `use_mmap` | bool | false | Use memory-mapped loading |
+| `data_dir` | PathBuf | "data" | Directory for index files (cwd-relative placeholder; always set explicitly when enabling) |
+| `load_on_startup` | bool | true | Load indexes on startup (only applies when enabled) |
+| `use_mmap` | bool | true | Use memory-mapped loading |
 | `policies` | PersistencePolicies | Default | Automatic persistence policies |
+
+> **Note (Issue #3388):** Index persistence is opt-in. Before this change,
+> `PersistenceConfig::default()` had `enabled: true` with the cwd-relative
+> `data_dir: "data"`, so any database built from a default/builder config
+> silently persisted into (and loaded from) `./data`, letting unrelated
+> instances that share a working directory observe each other's data. If you
+> relied on that implicit default, opt in explicitly with `enabled: true`
+> and an explicit `data_dir`, or use `AletheiaDB::open(path)` /
+> `durable_config_for_data_dir(path)`. TOML configs must now set
+> `enabled = true` under `[persistence]`; a `[persistence]` section that
+> omits `enabled` (even one that sets `data_dir` or `load_on_startup`) is
+> treated as disabled.
 
 #### Persistence Policies
 
@@ -430,6 +442,7 @@ HistoricalConfigBuilder::new()
 // Enable index persistence for fast cold starts
 PersistenceConfig {
     enabled: true,
+    data_dir: "/var/lib/my-app/indexes".into(),  // Always set explicitly when enabling
     load_on_startup: true,
     use_mmap: true,  // Memory-map large indexes
     ..Default::default()
