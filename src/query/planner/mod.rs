@@ -1967,4 +1967,282 @@ mod tests {
             explain
         );
     }
+
+    // ==================== OPTIONAL MATCH (OptionalApply) Tests ====================
+
+    /// A non-leading `QueryOp::Optional` plans to a `PhysicalOp::OptionalApply`
+    /// whose steps mirror the traverse + filter sub-ops (per-row apply form).
+    #[test]
+    fn test_optional_apply_planning_after_scan() {
+        let planner = test_planner();
+        let query = Query {
+            ops: vec![
+                QueryOp::ScanNodes {
+                    label: Some("Person".to_string()),
+                },
+                QueryOp::Optional {
+                    ops: vec![
+                        QueryOp::TraverseOut {
+                            label: Some("KNOWS".to_string()),
+                            depth: TraversalDepth::Exact(1),
+                        },
+                        QueryOp::Filter(Predicate::eq("name", "Alice")),
+                    ],
+                },
+            ],
+            temporal_context: None,
+            hints: QueryHints::default(),
+        };
+
+        let plan = planner.plan(query).unwrap();
+        match &plan.root {
+            PhysicalOp::OptionalApply { input, steps } => {
+                assert!(matches!(**input, PhysicalOp::NodeScan { .. }));
+                assert_eq!(steps.len(), 2);
+                match &steps[0] {
+                    physical::OptionalPhysicalStep::Traverse {
+                        direction,
+                        label,
+                        depth,
+                        temporal_context,
+                    } => {
+                        assert_eq!(*direction, Direction::Outgoing);
+                        assert_eq!(label.as_deref(), Some("KNOWS"));
+                        assert_eq!(*depth, 1);
+                        assert!(temporal_context.is_none());
+                    }
+                    other => panic!("expected Traverse step, got {other:?}"),
+                }
+                assert!(matches!(
+                    steps[1],
+                    physical::OptionalPhysicalStep::Filter(_)
+                ));
+            }
+            other => panic!("expected OptionalApply root, got {other:?}"),
+        }
+    }
+
+    /// TraverseIn / TraverseBoth inside an optional map to Incoming / Both,
+    /// and unbounded `Variable` depth falls back to the planner default.
+    #[test]
+    fn test_optional_apply_traverse_directions_and_default_depth() {
+        let planner = test_planner();
+        let query = Query {
+            ops: vec![
+                QueryOp::ScanNodes { label: None },
+                QueryOp::Optional {
+                    ops: vec![
+                        QueryOp::TraverseIn {
+                            label: None,
+                            depth: TraversalDepth::Exact(2),
+                        },
+                        QueryOp::TraverseBoth {
+                            label: None,
+                            depth: TraversalDepth::Variable,
+                        },
+                    ],
+                },
+            ],
+            temporal_context: None,
+            hints: QueryHints::default(),
+        };
+
+        let plan = planner.plan(query).unwrap();
+        match &plan.root {
+            PhysicalOp::OptionalApply { steps, .. } => {
+                match &steps[0] {
+                    physical::OptionalPhysicalStep::Traverse {
+                        direction, depth, ..
+                    } => {
+                        assert_eq!(*direction, Direction::Incoming);
+                        assert_eq!(*depth, 2);
+                    }
+                    other => panic!("expected Traverse step, got {other:?}"),
+                }
+                match &steps[1] {
+                    physical::OptionalPhysicalStep::Traverse {
+                        direction, depth, ..
+                    } => {
+                        assert_eq!(*direction, Direction::Both);
+                        assert_eq!(*depth, DEFAULT_MAX_TRAVERSAL_DEPTH);
+                    }
+                    other => panic!("expected Traverse step, got {other:?}"),
+                }
+            }
+            other => panic!("expected OptionalApply root, got {other:?}"),
+        }
+    }
+
+    /// A leading `Optional` (source position) plans to OptionalApply over an
+    /// Empty input with a Scan first step (standalone form).
+    #[test]
+    fn test_leading_optional_match_planning() {
+        let planner = test_planner();
+        let query = Query {
+            ops: vec![QueryOp::Optional {
+                ops: vec![
+                    QueryOp::ScanNodes {
+                        label: Some("Person".to_string()),
+                    },
+                    QueryOp::TraverseOut {
+                        label: Some("KNOWS".to_string()),
+                        depth: TraversalDepth::Exact(1),
+                    },
+                ],
+            }],
+            temporal_context: None,
+            hints: QueryHints::default(),
+        };
+
+        let plan = planner.plan(query).unwrap();
+        match &plan.root {
+            PhysicalOp::OptionalApply { input, steps } => {
+                assert!(matches!(**input, PhysicalOp::Empty));
+                assert_eq!(steps.len(), 2);
+                match &steps[0] {
+                    physical::OptionalPhysicalStep::Scan { label } => {
+                        assert_eq!(label.as_deref(), Some("Person"));
+                    }
+                    other => panic!("expected Scan step, got {other:?}"),
+                }
+            }
+            other => panic!("expected OptionalApply root, got {other:?}"),
+        }
+    }
+
+    /// Sub-ops other than scan/traverse/filter are rejected inside an
+    /// optional pattern.
+    #[test]
+    fn test_optional_unsupported_op_rejected() {
+        let planner = test_planner();
+        let query = Query {
+            ops: vec![
+                QueryOp::ScanNodes { label: None },
+                QueryOp::Optional {
+                    ops: vec![QueryOp::Limit(10)],
+                },
+            ],
+            temporal_context: None,
+            hints: QueryHints::default(),
+        };
+
+        let err = planner.plan(query).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("unsupported operation inside OPTIONAL MATCH"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// A leading OPTIONAL MATCH whose first sub-op is not a node scan is
+    /// rejected.
+    #[test]
+    fn test_leading_optional_without_scan_rejected() {
+        let planner = test_planner();
+        let query = Query {
+            ops: vec![QueryOp::Optional {
+                ops: vec![QueryOp::TraverseOut {
+                    label: None,
+                    depth: TraversalDepth::Exact(1),
+                }],
+            }],
+            temporal_context: None,
+            hints: QueryHints::default(),
+        };
+
+        let err = planner.plan(query).unwrap_err();
+        assert!(
+            err.to_string().contains("must begin with a node scan"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// A scan is only allowed as the *first* step of a *leading* optional:
+    /// in apply position (after a source), it is rejected.
+    #[test]
+    fn test_optional_scan_rejected_in_apply_position() {
+        let planner = test_planner();
+        let query = Query {
+            ops: vec![
+                QueryOp::ScanNodes { label: None },
+                QueryOp::Optional {
+                    ops: vec![QueryOp::ScanNodes {
+                        label: Some("Person".to_string()),
+                    }],
+                },
+            ],
+            temporal_context: None,
+            hints: QueryHints::default(),
+        };
+
+        let err = planner.plan(query).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("unsupported operation inside OPTIONAL MATCH"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// Even in a leading optional, a scan after the first step is rejected
+    /// (the `i == 0` guard).
+    #[test]
+    fn test_leading_optional_second_scan_rejected() {
+        let planner = test_planner();
+        let query = Query {
+            ops: vec![QueryOp::Optional {
+                ops: vec![
+                    QueryOp::ScanNodes {
+                        label: Some("Person".to_string()),
+                    },
+                    QueryOp::ScanNodes {
+                        label: Some("Place".to_string()),
+                    },
+                ],
+            }],
+            temporal_context: None,
+            hints: QueryHints::default(),
+        };
+
+        let err = planner.plan(query).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("unsupported operation inside OPTIONAL MATCH"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// The query's AS OF temporal context propagates into optional traverse
+    /// steps, mirroring `UnaryOp::Traverse`.
+    #[test]
+    fn test_optional_traverse_inherits_temporal_context() {
+        let planner = test_planner();
+        let query = Query {
+            ops: vec![
+                QueryOp::ScanNodes { label: None },
+                QueryOp::Optional {
+                    ops: vec![QueryOp::TraverseOut {
+                        label: None,
+                        depth: TraversalDepth::Exact(1),
+                    }],
+                },
+            ],
+            temporal_context: Some(TemporalContext::as_of(1000.into(), 2000.into())),
+            hints: QueryHints::default(),
+        };
+
+        let plan = planner.plan(query).unwrap();
+        match &plan.root {
+            PhysicalOp::OptionalApply { steps, .. } => match &steps[0] {
+                physical::OptionalPhysicalStep::Traverse {
+                    temporal_context, ..
+                } => {
+                    let (valid, tx) = temporal_context.expect("temporal context must propagate");
+                    assert_eq!(valid, 1000.into());
+                    assert_eq!(tx, 2000.into());
+                }
+                other => panic!("expected Traverse step, got {other:?}"),
+            },
+            other => panic!("expected OptionalApply root, got {other:?}"),
+        }
+    }
 }

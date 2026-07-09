@@ -2088,4 +2088,53 @@ mod tests {
         };
         assert!(op.get_input().is_none());
     }
+
+    // ==================== OptionalApply Coverage Tests ====================
+
+    fn optional_apply_op() -> PhysicalOp {
+        PhysicalOp::OptionalApply {
+            input: Box::new(PhysicalOp::NodeScan {
+                label: Some("Person".to_string()),
+                estimated_rows: 100,
+            }),
+            steps: vec![OptionalPhysicalStep::Traverse {
+                direction: Direction::Outgoing,
+                label: Some("KNOWS".to_string()),
+                depth: 1,
+                temporal_context: None,
+            }],
+        }
+    }
+
+    #[test]
+    fn test_optional_apply_op_metadata() {
+        let op = optional_apply_op();
+        assert_eq!(op.name(), "OptionalApply");
+        assert!(!op.is_leaf());
+        // Unary operator: one level above its NodeScan input.
+        assert_eq!(op.depth(), 2);
+        assert!(matches!(op.get_input(), Some(PhysicalOp::NodeScan { .. })));
+    }
+
+    #[test]
+    fn test_optional_apply_op_explain_recurses_into_input() {
+        let explain = optional_apply_op().explain();
+        assert!(explain.contains("OptionalApply"), "{explain}");
+        assert!(explain.contains("NodeScan"), "{explain}");
+    }
+
+    #[test]
+    fn test_physical_plan_explain_optional_apply() {
+        let plan = PhysicalPlan {
+            root: optional_apply_op(),
+            estimated_cost: Cost::default(),
+            temporal_context: None,
+            parallel: false,
+            include_provenance: false,
+        };
+        let explain = plan.explain();
+        assert!(explain.contains("OptionalApply"), "{explain}");
+        // The plan-level explain must recurse into OptionalApply's input.
+        assert!(explain.contains("NodeScan"), "{explain}");
+    }
 }

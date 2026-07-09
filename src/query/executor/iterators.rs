@@ -4074,4 +4074,177 @@ mod tests {
         assert!(row.timestamp.is_none());
         assert!(iter.next().is_none());
     }
+
+    /// The matched case: a seed row whose optional traversal produces rows
+    /// yields those rows (not a null fallback), then moves to the next seed.
+    #[test]
+    fn test_optional_apply_matched_rows_pass_through() {
+        use crate::query::planner::physical::OptionalPhysicalStep;
+
+        let (current, historical) = optional_test_storages();
+        let alice = current
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "Alice").build(),
+            )
+            .unwrap();
+        let bob = current
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "Bob").build(),
+            )
+            .unwrap();
+        current
+            .create_edge(alice, bob, "KNOWS", PropertyMapBuilder::new().build())
+            .unwrap();
+
+        let seed = QueryRow::from_entity(EntityResult::Node(current.get_node(alice).unwrap()));
+        let input = Box::new(MockIterator::from_results(vec![Ok(seed)]));
+
+        let mut iter = OptionalApplyIterator::new(
+            input,
+            vec![OptionalPhysicalStep::Traverse {
+                direction: Direction::Outgoing,
+                label: Some("KNOWS".to_string()),
+                depth: 1,
+                temporal_context: None,
+            }],
+            current,
+            historical,
+        );
+
+        let row = iter.next().expect("one row expected").expect("no error");
+        assert_eq!(
+            row.entity.node_id(),
+            Some(bob),
+            "matched optional must yield the traversal target, not null"
+        );
+        // The matched seed must NOT be followed by a fabricated null row.
+        assert!(iter.next().is_none());
+    }
+
+    /// An error from the input (seed) iterator is propagated as-is.
+    #[test]
+    fn test_optional_apply_input_error_propagates() {
+        use crate::query::planner::physical::OptionalPhysicalStep;
+
+        let (current, historical) = optional_test_storages();
+        let input = Box::new(MockIterator::from_results(vec![Err(
+            crate::core::error::Error::other("test error"),
+        )]));
+
+        let mut iter = OptionalApplyIterator::new(
+            input,
+            vec![OptionalPhysicalStep::Filter(Predicate::True)],
+            current,
+            historical,
+        );
+
+        assert!(iter.next().expect("error row expected").is_err());
+        assert!(iter.next().is_none());
+    }
+
+    /// An error inside the optional sub-pipeline abandons the seed: the
+    /// error is surfaced and NO fabricated null row follows for that seed.
+    #[test]
+    fn test_optional_apply_inner_error_abandons_seed() {
+        use crate::query::planner::physical::OptionalPhysicalStep;
+
+        let (current, historical) = optional_test_storages();
+        let alice = current
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "Alice").build(),
+            )
+            .unwrap();
+        let bob = current
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "Bob").build(),
+            )
+            .unwrap();
+        current
+            .create_edge(alice, bob, "KNOWS", PropertyMapBuilder::new().build())
+            .unwrap();
+        let seed = QueryRow::from_entity(EntityResult::Node(current.get_node(alice).unwrap()));
+        // Delete Bob but keep the edge (low-level delete_node preserves
+        // edges): the traversal reaches a missing endpoint and errors.
+        current.delete_node(bob).unwrap();
+
+        let input = Box::new(MockIterator::from_results(vec![Ok(seed)]));
+        let mut iter = OptionalApplyIterator::new(
+            input,
+            vec![OptionalPhysicalStep::Traverse {
+                direction: Direction::Outgoing,
+                label: Some("KNOWS".to_string()),
+                depth: 1,
+                temporal_context: None,
+            }],
+            current,
+            historical,
+        );
+
+        assert!(iter.next().expect("error row expected").is_err());
+        // The errored seed must not fall back to a null row.
+        assert!(iter.next().is_none());
+    }
+
+    /// size_hint: at least one row per remaining input row, no upper bound.
+    #[test]
+    fn test_optional_apply_size_hint() {
+        use crate::query::planner::physical::OptionalPhysicalStep;
+
+        let (current, historical) = optional_test_storages();
+        let input = Box::new(MockIterator::from_nodes(vec![
+            test_node(1, "Alice"),
+            test_node(2, "Bob"),
+        ]));
+
+        let iter = OptionalApplyIterator::new(
+            input,
+            vec![OptionalPhysicalStep::Filter(Predicate::True)],
+            current,
+            historical,
+        );
+        assert_eq!(iter.size_hint(), (2, None));
+    }
+
+    /// SeedRowIterator yields its single row exactly once, with exact hints.
+    #[test]
+    fn test_seed_row_iterator() {
+        let row = QueryRow::from_entity(EntityResult::Node(test_node(1, "Alice")));
+        let mut iter = SeedRowIterator::new(row);
+
+        assert_eq!(iter.size_hint(), (1, Some(1)));
+        assert!(iter.next().expect("one row").is_ok());
+        assert_eq!(iter.size_hint(), (0, Some(0)));
+        assert!(iter.next().is_none());
+    }
+
+    /// FilterIterator applies null semantics to null-binding rows from an
+    /// unmatched OPTIONAL MATCH: IS NULL keeps them, comparisons drop them.
+    #[test]
+    fn test_filter_iterator_null_row_semantics() {
+        // `x IS NULL` (encoded Eq { value: Null }) keeps the null row.
+        let input = Box::new(MockIterator::from_results(vec![Ok(QueryRow::from_entity(
+            EntityResult::Null,
+        ))]));
+        let mut keep = FilterIterator::new(
+            input,
+            Predicate::Eq {
+                key: "x".into(),
+                value: PredicateValue::Null,
+            },
+        );
+        let row = keep.next().expect("one row expected").expect("no error");
+        assert!(row.entity.is_null());
+        assert!(keep.next().is_none());
+
+        // A comparison against the null binding is not-true: row dropped.
+        let input = Box::new(MockIterator::from_results(vec![Ok(QueryRow::from_entity(
+            EntityResult::Null,
+        ))]));
+        let mut dropped = FilterIterator::new(input, Predicate::eq("x", 1i64));
+        assert!(dropped.next().is_none());
+    }
 }

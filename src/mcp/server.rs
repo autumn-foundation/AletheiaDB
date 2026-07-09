@@ -4668,4 +4668,18 @@ mod server_unit_tests {
         assert!(val["valid_time"]["earliest"].is_null());
         assert!(val["transaction_time"]["latest"].is_null());
     }
+
+    #[test]
+    fn query_row_to_json_null_binding_serializes_entity_as_json_null() {
+        // A null binding from an unmatched OPTIONAL MATCH pattern must
+        // surface as an explicit JSON null entity (row preserved).
+        let server = make_server();
+        let value = server.query_row_to_json(QueryRow::from_entity(EntityResult::Null));
+        assert!(
+            value["entity"].is_null(),
+            "null binding must serialize as JSON null: {value}"
+        );
+        assert!(value["score"].is_null());
+        assert!(value["path"].is_null());
+    }
 }
