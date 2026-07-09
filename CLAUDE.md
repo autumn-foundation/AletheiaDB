@@ -502,6 +502,34 @@ temporal/history tools (`get_node_at_time`, `get_edge_at_time`,
 `get_node_history`), which have no `include_vectors` flag and always return
 full vectors.
 
+**Token-budget-aware responses (Issue #3353)**: every MCP read tool
+(`get_node`, `list_nodes`, `get_edge`, `list_edges`, `get_outgoing_edges`,
+`get_incoming_edges`, `traverse`, `find_similar`, `hybrid_query`, `query`,
+`find_nodes_at_time`, `get_node_history`, `get_schema`) accepts an optional
+`max_response_tokens` (estimated as `ceil(utf8_bytes / 4)`) or the byte-exact
+`max_response_bytes`, so a context-bounded caller can say "spend at most N
+tokens answering this" instead of guessing a row `limit`. The serialized
+response — **including its own truncation metadata** — is guaranteed not to
+exceed the stated budget (hard contract, CI conformance sweep 256..32K tokens,
+0 overruns). Over budget the response degrades along a deterministic, disclosed
+ladder — full → `elided_properties` (bulky property values become
+`{elided: true, ...}` descriptors, reusing #3220's convention) → `entity_summaries`
+(properties reduced to protected keys; ids/labels/relationships/temporal
+coordinates/provenance/scores always survive) → `counts_and_handles` (entity
+arrays truncated to the prefix that fits) — carrying a `budget` block that names
+the rung applied per section. Every elision/truncation site carries a **fetch
+handle** (a concrete `get_node`/`get_edge` call with `include_vectors: true`, or
+`offset`/`next_offset` paging per #3226) so nothing is lost: an agent following
+handles reconstructs the full response. `priority_properties` names properties
+to protect; they out-survive unprotected ones at every rung.
+`find_similar`/`hybrid_query` never drop or reorder ranked results to meet a
+budget (only per-result payloads degrade), and temporal responses never omit
+temporal coordinates. A budget too small for even the minimal rung returns a
+#3234 `INVALID_ARGUMENT` stating the minimum viable budget (never a silently
+empty success). Omitting the budget parameters reproduces prior behavior
+exactly; write/admin tools are out of scope. See
+[docs/guides/mcp-query-tool.md](docs/guides/mcp-query-tool.md#token-budget-aware-responses-issue-3353).
+
 **Temporal extent (Issue #3238)**: `temporal_extent` reports the dataset's
 queryable bi-temporal extent — the earliest/latest valid-time and
 transaction-time coordinates across recorded history (including

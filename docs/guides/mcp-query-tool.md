@@ -975,6 +975,121 @@ keeps its existing microseconds-as-string format — that contract is
 unchanged). The block is purely additive: no existing field moved or changed
 shape.
 
+## Token-budget-aware responses (Issue #3353)
+
+An LLM's context window is its scarcest resource, yet the read tools size their
+responses by *row count* (`limit`), not by *cost*: a `limit: 50` traversal can
+return 500 tokens or 50,000 depending on the property payloads, and the caller
+cannot know in advance. The token budget lets a caller say "spend at most N
+tokens answering this" and receive a response *guaranteed* to fit, with an
+explicit, machine-readable account of what was reduced and how to fetch it.
+
+### The parameters
+
+Every budgetable read tool — `get_node`, `list_nodes`, `get_edge`, `list_edges`,
+`get_outgoing_edges`, `get_incoming_edges`, `traverse`, `find_similar`,
+`hybrid_query`, `query`, `find_nodes_at_time`, `get_node_history`, and
+`get_schema` — accepts these optional parameters. Omitting all of them leaves
+the tool's behavior **completely unchanged**.
+
+| Parameter | Meaning |
+|-----------|---------|
+| `max_response_tokens` | Maximum response size in **estimated tokens**. The serialized response, *including the truncation metadata itself*, is guaranteed not to exceed this. |
+| `max_response_bytes` | Byte-exact alternative. When both are set, the **tighter** bound wins. |
+| `priority_properties` | Array of property keys to protect from elision; they out-survive unprotected properties at every degradation rung. |
+
+**Token-estimation basis:** tokens are estimated as `ceil(utf8_byte_len / 4)`.
+Four bytes per token is the standard approximation of GPT/Claude-family BPE
+tokenizers for English-plus-JSON text and holds within ~10% at the 1K-token
+scale. Callers needing an exact wire bound use `max_response_bytes`, which is
+enforced byte-for-byte.
+
+### The degradation ladder (deterministic, disclosed)
+
+Over budget, the response degrades along a fixed, ordered ladder. The same
+request at the same budget on the same data always degrades **identically**:
+
+1. **`full`** — nothing reduced.
+2. **`elided_properties`** — inside each entity's `properties`, any value whose
+   serialized size exceeds a threshold (and is not a protected
+   `priority_properties` key) is replaced with an `{ "elided": true, ... }`
+   descriptor, mirroring the vector-elision convention of #3220.
+3. **`entity_summaries`** — each entity's `properties` is reduced to the
+   protected keys only. Result *structure* — ids, labels, relationships,
+   temporal coordinates, provenance and similarity scores — survives because it
+   lives *beside* `properties`, never inside it.
+4. **`counts_and_handles`** — entity arrays are truncated to the prefix that
+   fits; the omitted tail is disclosed as a count plus a fetch handle.
+
+`find_similar` and `hybrid_query` **never reach rung 4**: their ranked results
+are never dropped or reordered to meet a budget — only the per-result payloads
+degrade. Temporal responses never omit the temporal coordinates that make a
+result interpretable.
+
+Every response carries a `budget` block naming the rung applied per section:
+
+```jsonc
+// tools/call -> "get_node"
+{ "node_id": 7, "max_response_tokens": 400 }
+// -> {
+//      "id": 7,
+//      "label": "Person",
+//      "properties": {
+//        "name": "Alice",
+//        "bio": {
+//          "elided": true, "reason": "budget", "type": "string", "size_bytes": 4002,
+//          "fetch": { "tool": "get_node",
+//                     "arguments": { "node_id": 7, "include_vectors": true } }
+//        }
+//      },
+//      "temporal": { /* ... always preserved ... */ },
+//      "budget": {
+//        "applied": true,
+//        "rung": "elided_properties",
+//        "token_estimation_basis": "ceil(utf8_bytes / 4)",
+//        "requested_max_tokens": 400,
+//        "effective_max_bytes": 1600,
+//        "priority_properties": [],
+//        "sections": [ { "section": "properties", "rung": "elided_properties",
+//                        "elided_values": 1 } ]
+//      }
+//    }
+```
+
+### Fetch handles — nothing is lost
+
+Every elision/truncation site carries a **fetch handle**: a concrete follow-up
+call (`tool` + `arguments`) that retrieves exactly the omitted content. A
+per-entity elision points at `get_node`/`get_edge` with `include_vectors: true`;
+a truncated array composes with the completeness signals (`has_more` /
+`next_offset`, #3226). An agent that follows the handles can reconstruct the
+full, unbudgeted response.
+
+### Budgets too small to satisfy
+
+If the budget is too small to return even the minimal rung, the tool returns a
+structured #3234 `INVALID_ARGUMENT` error stating the **minimum viable budget** —
+never a silently empty success:
+
+```jsonc
+{ "error": {
+    "code": "INVALID_ARGUMENT",
+    "message": "requested budget is too small to return even the minimal response for this request; minimum viable budget is approximately 1222 tokens (4886 bytes)",
+    "retriable": false,
+    "details": { "min_viable_tokens": 1222, "min_viable_bytes": 4886,
+                 "requested_tokens": 1200, "requested_bytes": null }
+} }
+```
+
+### Composition and scope
+
+- **Composes with #3220 vector elision** (already-elided vectors are left as-is),
+  **#3226 completeness signals** (truncation handles reference `next_offset`),
+  and the **#3234 error contract** (the too-small-budget error is `INVALID_ARGUMENT`).
+- **Read tools only.** Write and admin tools are out of scope (their responses
+  are already small and fixed-shape). Cursor/streaming continuation of large
+  results is a complementary, separate spec (#3360).
+
 ## Notes
 
 - **AQL has no parameter binding.** Sending `params` with `language: "aql"`

@@ -27,6 +27,7 @@
 
 mod auth;
 mod batch;
+mod budget;
 mod error;
 mod server;
 mod tools;
