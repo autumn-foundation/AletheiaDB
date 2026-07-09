@@ -286,6 +286,48 @@ pub enum UnaryOp {
 
     /// Count results (aggregate)
     Count,
+
+    /// Left-outer application of an optional sub-pattern (`OPTIONAL MATCH`).
+    ///
+    /// For each input row, the `steps` sub-pipeline runs seeded from that row;
+    /// if it produces nothing, a single null-bound row is emitted instead, so
+    /// the input row is never lost. When the first step is
+    /// [`OptionalStep::Scan`] the operator is *standalone* (a leading
+    /// `OPTIONAL MATCH`): the sub-pipeline runs once from its own scan and
+    /// the input (typically [`LogicalOp::Empty`]) is ignored.
+    ///
+    /// The steps are deliberately opaque to optimization rules: filters
+    /// inside the optional segment participate in the matched/unmatched
+    /// decision and must not be reordered across this boundary.
+    OptionalApply {
+        /// The optional sub-pipeline, applied per input row.
+        steps: Vec<OptionalStep>,
+    },
+}
+
+/// A single step inside an [`UnaryOp::OptionalApply`] sub-pipeline.
+#[derive(Debug, Clone, PartialEq)]
+pub enum OptionalStep {
+    /// Scan source for a standalone (first-clause) `OPTIONAL MATCH`.
+    /// Only valid as the first step.
+    Scan {
+        /// Optional node label filter.
+        label: Option<String>,
+    },
+
+    /// A traversal hop inside the optional pattern.
+    Traverse {
+        /// Traversal direction.
+        direction: Direction,
+        /// Optional edge label filter.
+        label: Option<String>,
+        /// Depth specification.
+        depth: TraversalDepth,
+    },
+
+    /// A predicate filter inside the optional pattern (inline pattern
+    /// properties or the clause's `WHERE`).
+    Filter(Predicate),
 }
 
 /// Binary operations that combine two inputs.

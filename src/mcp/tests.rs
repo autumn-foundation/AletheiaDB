@@ -3675,6 +3675,30 @@ mod query_tool_tests {
 
     #[cfg(feature = "cypher")]
     #[test]
+    fn test_query_cypher_optional_match_null_row_serializes_as_json_null() {
+        let server = create_test_server();
+        seed_named(&server, "Person", "Alice");
+        // Alice has no outgoing KNOWS edges: OPTIONAL MATCH preserves the
+        // base row and the null binding must surface as JSON null, not crash.
+        let value = run_query(
+            &server,
+            QueryRequest {
+                language: "cypher".to_string(),
+                query: "MATCH (a:Person {name: 'Alice'}) OPTIONAL MATCH (a)-[:KNOWS]->(x) RETURN x"
+                    .to_string(),
+                params: None,
+                limit: None,
+            },
+        );
+        assert_eq!(value["row_count"].as_u64(), Some(1), "{value}");
+        assert!(
+            value["rows"][0]["entity"].is_null(),
+            "unmatched OPTIONAL MATCH row must serialize entity as JSON null: {value}"
+        );
+    }
+
+    #[cfg(feature = "cypher")]
+    #[test]
     fn test_query_cypher_with_params() {
         let server = create_test_server();
         seed_named(&server, "Person", "Alice");

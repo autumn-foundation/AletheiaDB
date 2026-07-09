@@ -3837,6 +3837,9 @@ impl AletheiaMcpServer {
             }),
             EntityResult::NodeId(id) => json!({"type": "node", "id": id.as_u64()}),
             EntityResult::EdgeId(id) => json!({"type": "edge", "id": id.as_u64()}),
+            // Null binding from an unmatched OPTIONAL MATCH pattern: surface
+            // as JSON null so an LLM/caller sees the preserved row explicitly.
+            EntityResult::Null => serde_json::Value::Null,
         };
         json!({
             "entity": entity,
@@ -4764,5 +4767,19 @@ mod server_unit_tests {
         let val: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert!(val["valid_time"]["earliest"].is_null());
         assert!(val["transaction_time"]["latest"].is_null());
+    }
+
+    #[test]
+    fn query_row_to_json_null_binding_serializes_entity_as_json_null() {
+        // A null binding from an unmatched OPTIONAL MATCH pattern must
+        // surface as an explicit JSON null entity (row preserved).
+        let server = make_server();
+        let value = server.query_row_to_json(QueryRow::from_entity(EntityResult::Null));
+        assert!(
+            value["entity"].is_null(),
+            "null binding must serialize as JSON null: {value}"
+        );
+        assert!(value["score"].is_null());
+        assert!(value["path"].is_null());
     }
 }

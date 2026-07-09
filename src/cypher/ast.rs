@@ -44,7 +44,30 @@ pub enum CypherStatement {
         temporal: Option<CypherTemporal>,
         /// Zero or more intermediate `WITH` projections.
         with_clauses: Vec<CypherWith>,
+        /// Zero or more subsequent `OPTIONAL MATCH` clauses.
+        ///
+        /// Source ordering relative to `with_clauses` is preserved via
+        /// [`CypherOptionalMatch::preceding_withs`].
+        optional_matches: Vec<CypherOptionalMatch>,
     },
+}
+
+/// A subsequent `OPTIONAL MATCH` clause within a `MATCH` statement.
+///
+/// Per openCypher semantics the clause's `WHERE` is part of the optional
+/// pattern itself: it participates in the matched/unmatched decision rather
+/// than filtering rows afterwards.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CypherOptionalMatch {
+    /// One or more comma-separated graph patterns to match optionally.
+    pub pattern: Vec<CypherPattern>,
+    /// An optional `WHERE` clause scoped to this optional pattern.
+    pub where_clause: Option<CypherExpr>,
+    /// Number of `WITH` clauses (in the statement's `with_clauses`) that
+    /// appear before this clause in the query text. This preserves clause
+    /// ordering so conversion can interleave `WITH ... WHERE` filters and
+    /// optional patterns exactly as written.
+    pub preceding_withs: usize,
 }
 
 // ---------------------------------------------------------------------------

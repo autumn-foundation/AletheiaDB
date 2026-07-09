@@ -140,39 +140,99 @@ impl CypherConverter {
     pub fn convert(&self, stmt: CypherStatement) -> Result<Query, CypherError> {
         match stmt {
             CypherStatement::Match {
+                optional,
                 pattern,
                 where_clause,
                 return_clause,
                 temporal,
                 with_clauses,
-                ..
+                optional_matches,
             } => {
                 let mut ops = Vec::new();
 
-                // 1. Convert graph patterns → ScanNodes + Traverse + Filter ops
+                // 1. Convert graph patterns → ScanNodes + Traverse + Filter ops,
+                //    followed by the base WHERE clause → Filter op.
+                //
+                //    For a leading OPTIONAL MATCH the whole base segment
+                //    (scan + filters + WHERE) is wrapped in a single
+                //    QueryOp::Optional so an empty result yields one null row.
+                let mut base_ops = Vec::new();
                 for pat in &pattern {
-                    self.convert_pattern(pat, &mut ops)?;
+                    self.convert_pattern(pat, &mut base_ops)?;
                 }
-
-                // 2. Convert WHERE clause → Filter ops
                 if let Some(expr) = where_clause {
                     let predicate = self.convert_expr_to_predicate(&expr)?;
-                    ops.push(QueryOp::Filter(predicate));
+                    base_ops.push(QueryOp::Filter(predicate));
+                }
+                if optional {
+                    ops.push(QueryOp::Optional { ops: base_ops });
+                } else {
+                    ops.append(&mut base_ops);
                 }
 
-                // 3. Convert temporal clause → TemporalContext + ops
+                // Track the variable the pipeline is positionally "on" after
+                // each clause: the last node of the base pattern, then the
+                // last node of each OPTIONAL MATCH pattern (or a WITH
+                // projection). Subsequent OPTIONAL MATCH clauses must
+                // continue from this binding (see convert_optional_pattern).
+                let mut current_var: Option<&str> =
+                    pattern.last().and_then(Self::last_node_variable);
+
+                // 2. Convert temporal clause → TemporalContext + ops
                 let temporal_context = if let Some(ref temporal_clause) = temporal {
                     Some(self.convert_temporal(temporal_clause, &mut ops)?)
                 } else {
                     None
                 };
 
-                // 3b. Convert WITH clauses → Filter ops for WITH WHERE
-                for with in &with_clauses {
-                    if let Some(ref where_expr) = with.where_clause {
-                        let predicate = self.convert_expr_to_predicate(where_expr)?;
-                        ops.push(QueryOp::Filter(predicate));
+                // 3. Interleave WITH clauses (→ Filter ops for WITH WHERE) and
+                //    OPTIONAL MATCH clauses (→ Optional ops) in source order.
+                let mut with_idx = 0;
+                for opt_match in &optional_matches {
+                    while with_idx < opt_match.preceding_withs && with_idx < with_clauses.len() {
+                        self.convert_with_clause(&with_clauses[with_idx], &mut ops)?;
+                        // A `WITH v` projection makes `v` the current binding
+                        // for the clauses that follow. Other projection shapes
+                        // are not lowered and leave the positional row (and
+                        // therefore the current binding) unchanged.
+                        if let [CypherReturnItem::Variable(name)] =
+                            with_clauses[with_idx].items.as_slice()
+                        {
+                            current_var = Some(name.as_str());
+                        }
+                        with_idx += 1;
                     }
+                    // Without variable-binding analysis, comma-separated
+                    // patterns in one OPTIONAL MATCH clause would silently
+                    // chain positionally (the second pattern would traverse
+                    // the first pattern's result instead of re-seeding from
+                    // the bound variable), returning wrong entities. Reject
+                    // until binding analysis exists.
+                    if opt_match.pattern.len() > 1 {
+                        return Err(CypherError::UnsupportedFeature(
+                            "comma-separated patterns in an OPTIONAL MATCH clause; \
+                             use one pattern per OPTIONAL MATCH clause instead"
+                                .to_string(),
+                        ));
+                    }
+                    let mut sub_ops = Vec::new();
+                    for pat in &opt_match.pattern {
+                        self.convert_optional_pattern(pat, &mut sub_ops, current_var)?;
+                    }
+                    // The next clause continues from this pattern's last node.
+                    current_var = opt_match.pattern.last().and_then(Self::last_node_variable);
+                    if let Some(ref where_expr) = opt_match.where_clause {
+                        // Per openCypher, the clause's WHERE is part of the
+                        // optional pattern: it must run before the
+                        // matched/unmatched decision, hence inside the op.
+                        let predicate = self.convert_expr_to_predicate(where_expr)?;
+                        sub_ops.push(QueryOp::Filter(predicate));
+                    }
+                    ops.push(QueryOp::Optional { ops: sub_ops });
+                }
+                while with_idx < with_clauses.len() {
+                    self.convert_with_clause(&with_clauses[with_idx], &mut ops)?;
+                    with_idx += 1;
                 }
 
                 // 4. Convert RETURN clause modifiers
@@ -261,6 +321,126 @@ impl CypherConverter {
             }
         }
 
+        Ok(())
+    }
+
+    /// Convert a graph pattern from a *subsequent* `OPTIONAL MATCH` clause
+    /// into query operations for the optional sub-pipeline.
+    ///
+    /// Unlike [`Self::convert_pattern`], the first node does **not** emit a
+    /// `ScanNodes` op: it is assumed to refer to the current row produced by
+    /// the preceding pipeline (e.g. `a` in
+    /// `MATCH (a) OPTIONAL MATCH (a)-[:KNOWS]->(x)`). Its inline property
+    /// constraints still become `Filter` ops, which run against the seed row
+    /// inside the optional segment and therefore participate in the
+    /// matched/unmatched decision.
+    ///
+    /// Limitation and design choice: the converter performs no variable
+    /// binding analysis, so the first node is bound purely positionally to
+    /// the current row. Two constructs that would silently produce wrong
+    /// rows are therefore **rejected** with
+    /// [`CypherError::UnsupportedFeature`] rather than answered wrongly:
+    ///
+    /// - A **label** on the first node cannot be honored (there is no label
+    ///   predicate to lower it to), and silently dropping it would turn
+    ///   `MATCH (a:Person) OPTIONAL MATCH (b:City) RETURN b` into a query
+    ///   that returns `a`.
+    /// - A first-node **variable that does not name the positionally-current
+    ///   binding** (`current_var`, the last node of the previous
+    ///   MATCH/OPTIONAL MATCH or a `WITH` projection) would silently bind to
+    ///   whatever the pipeline is positioned on: in `MATCH (a:Person)
+    ///   OPTIONAL MATCH (a)-[:KNOWS]->(x) OPTIONAL MATCH (a)-[:OWNS]->(y)`
+    ///   the second `(a)` would bind to `x` (or null) and traverse `OWNS`
+    ///   from the wrong node. Re-anchoring on an earlier variable requires
+    ///   real binding analysis and is not yet supported.
+    ///
+    /// An unnamed first node `()` (explicit positional reference) and a
+    /// first node naming `current_var` are accepted; inline properties on
+    /// the first node remain supported because they lower cheaply and
+    /// correctly to seed-row filters.
+    fn convert_optional_pattern(
+        &self,
+        pattern: &CypherPattern,
+        ops: &mut Vec<QueryOp>,
+        current_var: Option<&str>,
+    ) -> Result<(), CypherError> {
+        if let Some(CypherPatternElement::Node(first)) = pattern.elements.first() {
+            // Reject a labeled first node: it is bound positionally to the
+            // seed row and its label would be silently ignored (see rustdoc
+            // above).
+            if !first.labels.is_empty() {
+                return Err(CypherError::UnsupportedFeature(format!(
+                    "label ':{}' on the first node of a subsequent OPTIONAL MATCH; \
+                     the first node refers to the current row and must be an \
+                     unlabeled bound variable (e.g. `(a)`) -- move the constraint \
+                     into the preceding MATCH or a WHERE clause",
+                    first.labels.join(":"),
+                )));
+            }
+            // Reject a first-node variable that re-anchors on something other
+            // than the positionally-current binding (see rustdoc above).
+            if let Some(ref first_var) = first.variable
+                && current_var != Some(first_var.as_str())
+            {
+                return Err(CypherError::UnsupportedFeature(match current_var {
+                    Some(cur) => format!(
+                        "OPTIONAL MATCH must continue from the previous clause's \
+                         binding '{cur}'; re-anchoring on '{first_var}' is not \
+                         yet supported -- start the pattern with `({cur})` or \
+                         restructure the query"
+                    ),
+                    None => format!(
+                        "OPTIONAL MATCH must continue from the previous clause's \
+                         binding, but its last node is unnamed; re-anchoring on \
+                         '{first_var}' is not yet supported -- name the previous \
+                         pattern's last node or restructure the query"
+                    ),
+                }));
+            }
+        }
+        for element in &pattern.elements {
+            match element {
+                CypherPatternElement::Node(node) => {
+                    // No ScanNodes: the seed row is the pattern's entry point.
+                    self.convert_node_properties(node, ops)?;
+                }
+                CypherPatternElement::Relationship(rel) => {
+                    self.convert_relationship(rel, ops)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The variable bound to a pattern's last node element, if named.
+    ///
+    /// This is the binding the pipeline is positionally "on" after the
+    /// pattern converts: each relationship traversal moves the current row
+    /// to its target node, so the last node of the pattern is where a
+    /// subsequent `OPTIONAL MATCH` continues from.
+    fn last_node_variable(pattern: &CypherPattern) -> Option<&str> {
+        pattern
+            .elements
+            .iter()
+            .rev()
+            .find_map(|element| match element {
+                CypherPatternElement::Node(node) => Some(node.variable.as_deref()),
+                CypherPatternElement::Relationship(_) => None,
+            })
+            .flatten()
+    }
+
+    /// Convert a `WITH` clause into query operations (currently only its
+    /// `WHERE` sub-clause produces a `Filter`; projections are not lowered).
+    fn convert_with_clause(
+        &self,
+        with: &CypherWith,
+        ops: &mut Vec<QueryOp>,
+    ) -> Result<(), CypherError> {
+        if let Some(ref where_expr) = with.where_clause {
+            let predicate = self.convert_expr_to_predicate(where_expr)?;
+            ops.push(QueryOp::Filter(predicate));
+        }
         Ok(())
     }
 
