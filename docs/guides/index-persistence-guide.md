@@ -20,6 +20,10 @@ AletheiaDB's index persistence layer enables **fast cold starts** by saving all 
 - ✅ Temporal indexes (bi-temporal version chains)
 - ✅ String interner (label/property key deduplication)
 
+> **Migration note (Issue #3388):** Index persistence is now opt-in —
+> `PersistenceConfig::default()` has `enabled: false`; set `enabled: true`
+> with an explicit `data_dir` (or use `AletheiaDB::open(path)`) to persist.
+
 ## Current Reality (Important)
 
 As of 2026-02, the active restart/recovery path is:
@@ -555,6 +559,7 @@ println!("LSN: {}", metrics.current_lsn);
 ```rust
 PersistenceConfig {
     enabled: true,
+    data_dir: ".dev-data/indexes".into(),  // Always set explicitly when enabling
     save_interval_secs: 60,      // Save every minute
     save_on_shutdown: true,       // Always save on exit
     ..Default::default()
@@ -565,6 +570,7 @@ PersistenceConfig {
 ```rust
 PersistenceConfig {
     enabled: true,
+    data_dir: "/var/lib/my-app/indexes".into(),  // Always set explicitly when enabling
     save_interval_secs: 300,     // Save every 5 minutes
     save_on_shutdown: true,       // Always save on exit
     save_after_transactions: Some(10000),  // Also save after 10K txns
