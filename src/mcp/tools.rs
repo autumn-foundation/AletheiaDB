@@ -19,6 +19,11 @@ use std::collections::HashMap;
 /// independently optional; an entirely empty bundle (all fields omitted) is
 /// treated as no provenance at all. `confidence`, if present, is validated
 /// to be in `[0.0, 1.0]` and rejected with a clear error otherwise.
+///
+/// Note: the stored provenance's `principal` field (Issue #3350) is
+/// **deliberately absent** here -- it is stamped server-side from the
+/// verified session credential and cannot be supplied (or forged) by the
+/// caller.
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct ProvenanceRequest {
     /// Source system/identifier that produced this write (e.g. "hr-system",

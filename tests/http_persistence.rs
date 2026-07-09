@@ -11,6 +11,7 @@
 
 use std::sync::Arc;
 
+use aletheiadb::auth::AuthMode;
 use aletheiadb::core::PropertyMapBuilder;
 use aletheiadb::http::{AppState, ServerConfig, build_test_router};
 use aletheiadb::{AletheiaDB, AletheiaDBConfig, NodeId};
@@ -42,7 +43,10 @@ async fn node_survives_database_restart_with_same_data_dir() {
         let db =
             Arc::new(AletheiaDB::with_unified_config(unified_config(&data_path)).expect("open db"));
         let state = AppState::new(db.clone());
-        let config = ServerConfig::default();
+        // Explicit anonymous opt-in (Issue #3350).
+        let config = ServerConfig::builder()
+            .auth_mode(AuthMode::Anonymous)
+            .build();
         let router = build_test_router(state, &config).expect("build router");
         let client = TestApp::from_router(router);
 
@@ -88,7 +92,10 @@ async fn node_survives_database_restart_with_same_data_dir() {
     assert_eq!(node.id.as_u64(), alice_id);
 
     let state = AppState::new(db);
-    let config = ServerConfig::default();
+    // Explicit anonymous opt-in (Issue #3350).
+    let config = ServerConfig::builder()
+        .auth_mode(AuthMode::Anonymous)
+        .build();
     let router = build_test_router(state, &config).expect("build router");
     let client = TestApp::from_router(router);
 
