@@ -191,7 +191,7 @@ impl<'a> ParadoxDetector<'a> {
         // If temporal query returned nothing, fall back to current transaction state
         if edges.is_empty() {
              let _ = self.db.read(|tx| {
-                 edges = tx.get_outgoing_edges(node_id).into_iter().filter_map(|eid| {
+                 edges = tx.get_outgoing_edges(node_id)?.into_iter().filter_map(|eid| {
                      if let Ok(edge) = tx.get_edge(eid) {
                          Some(edge.target)
                      } else {

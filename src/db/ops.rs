@@ -380,8 +380,8 @@ impl AletheiaDB {
                 // always equals what retract_node_detach would retract (a
                 // self-loop appears in both adjacency directions but is one
                 // edge — count_connected_edges would report 2).
-                let mut edge_ids = tx.get_outgoing_edges(node_id);
-                edge_ids.extend(tx.get_incoming_edges(node_id));
+                let mut edge_ids = tx.get_outgoing_edges(node_id)?;
+                edge_ids.extend(tx.get_incoming_edges(node_id)?);
                 edge_ids.sort_unstable();
                 edge_ids.dedup();
                 let connected_edges = edge_ids.len();
@@ -430,8 +430,12 @@ impl AletheiaDB {
             // no-check-then-act rationale as retract_node). Deduplicate so a
             // self-loop (present in both adjacency directions) is retracted
             // once.
-            let mut edge_ids = tx.get_outgoing_edges(node_id);
-            edge_ids.extend(tx.get_incoming_edges(node_id));
+            // A node that is not visible (e.g. already retracted or never
+            // created) has no enumerable edges; `retract_node` below still
+            // owns the idempotency / not-found semantics for that case, so a
+            // NodeNotFound here must not fail the detach early (Issue #359).
+            let mut edge_ids = tx.get_outgoing_edges(node_id).unwrap_or_default();
+            edge_ids.extend(tx.get_incoming_edges(node_id).unwrap_or_default());
             edge_ids.sort_unstable();
             edge_ids.dedup();
 
@@ -2459,6 +2463,83 @@ mod tests {
             assert!(!result.already_retracted);
             assert_eq!(result.edges_retracted, 0);
             assert!(db.get_node(id).is_err());
+        }
+
+        /// Review follow-up (#358/#359 fix round): retract_node_detach is
+        /// idempotent — a second detach on an already-retracted node is a
+        /// no-op returning already_retracted with edges_retracted: 0 (a
+        /// retracted node has no enumerable edges left to co-retract).
+        #[test]
+        fn double_retract_node_detach_is_idempotent() {
+            let (_tmp, db) = create_test_db().unwrap();
+            let now = time::now().wallclock();
+            let t_create = hours_ago(now, 3);
+            let t_retract = hours_ago(now, 1);
+
+            let a = db
+                .create_node_with_valid_time(
+                    "Person",
+                    PropertyMapBuilder::new().build(),
+                    Some(t_create),
+                )
+                .unwrap();
+            let b = db
+                .create_node_with_valid_time(
+                    "Person",
+                    PropertyMapBuilder::new().build(),
+                    Some(t_create),
+                )
+                .unwrap();
+            db.create_edge_with_valid_time(
+                a,
+                b,
+                "KNOWS",
+                PropertyMapBuilder::new().build(),
+                Some(t_create),
+            )
+            .unwrap();
+
+            let first = db.retract_node_detach(a, t_retract).unwrap();
+            assert!(!first.already_retracted);
+            assert_eq!(first.edges_retracted, 1);
+            let versions = db.get_node_history(a).unwrap().version_count();
+
+            let second = db.retract_node_detach(a, t_retract).unwrap();
+            assert!(second.already_retracted);
+            assert_eq!(
+                second.edges_retracted, 0,
+                "an idempotent re-detach must not re-count edges"
+            );
+            assert_eq!(
+                second.valid_to, t_retract,
+                "must return the existing valid_to"
+            );
+            assert_eq!(
+                db.get_node_history(a).unwrap().version_count(),
+                versions,
+                "idempotent re-detach must not append a version"
+            );
+        }
+
+        /// Review follow-up (#358/#359 fix round): retract_node_detach on a
+        /// NodeId that never existed is a typed NodeNotFound (the edge
+        /// enumeration tolerates the missing node; retract_node owns the
+        /// not-found semantics).
+        #[test]
+        fn retract_node_detach_nonexistent_node_is_node_not_found() {
+            let (_tmp, db) = create_test_db().unwrap();
+            let now = time::now().wallclock();
+            let missing = NodeId::new(999_999).unwrap();
+
+            let err = db
+                .retract_node_detach(missing, hours_ago(now, 1))
+                .unwrap_err();
+            match err {
+                Error::Storage(crate::core::error::StorageError::NodeNotFound(nid)) => {
+                    assert_eq!(nid, missing);
+                }
+                other => panic!("Expected StorageError::NodeNotFound, got: {other:?}"),
+            }
         }
 
         /// Fix-round #11 pin: a buffered retraction in a transaction that

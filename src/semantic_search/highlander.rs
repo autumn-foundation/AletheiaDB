@@ -104,7 +104,7 @@ impl<'a> EntityMerger<'a> {
             let mut edges_processed = std::collections::HashSet::new();
 
             // Outgoing: Victim -> Target
-            let outgoing = tx.get_outgoing_edges(victim);
+            let outgoing = tx.get_outgoing_edges(victim)?;
             for edge_id in outgoing {
                 if edges_processed.insert(edge_id) {
                     let edge = tx.get_edge(edge_id)?;
@@ -133,7 +133,7 @@ impl<'a> EntityMerger<'a> {
             }
 
             // Incoming: Source -> Victim
-            let incoming = tx.get_incoming_edges(victim);
+            let incoming = tx.get_incoming_edges(victim)?;
             for edge_id in incoming {
                 if edges_processed.insert(edge_id) {
                     let edge = tx.get_edge(edge_id)?;
