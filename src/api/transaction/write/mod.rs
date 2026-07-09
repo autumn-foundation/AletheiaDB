@@ -862,16 +862,25 @@ impl ReadOps for WriteTransaction {
         result.record_error_metric()
     }
 
-    fn get_outgoing_edges(&self, node_id: NodeId) -> Vec<EdgeId> {
-        self.current.get_outgoing_edges(node_id)
+    fn get_outgoing_edges(&self, node_id: NodeId) -> Result<Vec<EdgeId>> {
+        // Existence check (Issue #359): consults the write buffer first (a node
+        // created in this tx exists; a node deleted in this tx does not), then
+        // falls back to a snapshot-isolated storage read.
+        self.get_node(node_id)?;
+        Ok(self.current.get_outgoing_edges(node_id))
     }
 
-    fn get_incoming_edges(&self, node_id: NodeId) -> Vec<EdgeId> {
-        self.current.get_incoming_edges(node_id)
+    fn get_incoming_edges(&self, node_id: NodeId) -> Result<Vec<EdgeId>> {
+        // Existence check (Issue #359): see get_outgoing_edges.
+        self.get_node(node_id)?;
+        Ok(self.current.get_incoming_edges(node_id))
     }
 
-    fn get_outgoing_edges_with_label(&self, node_id: NodeId, label: &str) -> Vec<EdgeId> {
-        self.current.get_outgoing_edges_with_label(node_id, label)
+    fn get_outgoing_edges_with_label(&self, node_id: NodeId, label: &str) -> Result<Vec<EdgeId>> {
+        // Existence check (Issue #359): see get_outgoing_edges. An existing node
+        // with no edges matching `label` is Ok(empty).
+        self.get_node(node_id)?;
+        Ok(self.current.get_outgoing_edges_with_label(node_id, label))
     }
 
     fn node_count(&self) -> usize {
@@ -1286,8 +1295,8 @@ impl WriteOps for WriteTransaction {
         // in the same transaction (but not yet committed) won't be found and deleted.
         // This is consistent with the existing ReadOps behavior but may leave orphaned
         // edges in same-transaction scenarios. See issue for future improvement.
-        let outgoing_edges = self.get_outgoing_edges(node_id);
-        let incoming_edges = self.get_incoming_edges(node_id);
+        let outgoing_edges = self.get_outgoing_edges(node_id)?;
+        let incoming_edges = self.get_incoming_edges(node_id)?;
 
         // Delete all connected edges first to maintain referential integrity
         // This prevents orphaned edges that reference a deleted node
