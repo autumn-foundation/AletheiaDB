@@ -745,3 +745,85 @@ fn t10_deleted_node_id_is_never_reissued_across_restart() {
         "B's history must be exactly create + tombstone"
     );
 }
+
+/// T11 — CI-proven regression on this branch: a torn tail in a WAL segment
+/// must not fail database construction.
+///
+/// The #3420 seeding scan (`seed_lsn_allocator_from_segments` →
+/// `max_lsn_in_dir`) runs inside every constructor. Pre-fix it fully parsed
+/// every segment and propagated parse errors, so a torn entry — valid
+/// 24-byte entry header followed by operation-type byte 0, the exact shape
+/// from the CI failure in `tests/temporal_vector_integration.rs` (which
+/// shares the cwd-relative default WAL dir with concurrently running tests)
+/// — bricked `with_config`/`with_full_config` with
+/// `Storage(CorruptedData("Unknown WAL operation type: 0"))`. The same shape
+/// arises in production from a genuine crash-torn tail, permanently bricking
+/// startup. Post-fix the scan stops at the undecodable entry, seeds from the
+/// decodable prefix, and construction succeeds.
+///
+/// Uses `with_wal_config` (→ `with_full_config`), the exact constructor path
+/// the CI failure went through: it seeds the allocator from segments but
+/// performs no WAL replay.
+#[test]
+fn t11_constructor_tolerates_torn_wal_tail() {
+    let _g = lock();
+    let tmp = tempdir().unwrap();
+    let db_path = tmp.path();
+
+    let wal_config = || {
+        WalConfigBuilder::new()
+            .wal_dir(db_path.join("wal"))
+            .durability_mode(DurabilityMode::Synchronous)
+            .build()
+    };
+
+    // Session 1: real fsynced writes so the segment has a decodable prefix.
+    let session1_end_lsn = {
+        let db = AletheiaDB::with_wal_config(wal_config()).expect("open session 1");
+        create(&db, "A");
+        create(&db, "B");
+        let lsn = db.__test_current_wal_lsn();
+        std::mem::forget(db); // crash: leave segments exactly as fsynced
+        lsn
+    };
+    assert!(session1_end_lsn > 1, "session 1 must have allocated LSNs");
+
+    // Append a torn entry to the HIGHEST segment: 24 bytes of plausible
+    // entry header (nonzero LSN + timestamp + checksum) followed by
+    // operation-type byte 0 — undecodable, non-truncated, non-zeroed.
+    let wal_dir = db_path.join("wal");
+    let last_segment = std::fs::read_dir(&wal_dir)
+        .expect("read wal dir")
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().is_some_and(|ext| ext == "log"))
+        .max()
+        .expect("at least one WAL segment");
+    let mut torn = Vec::new();
+    torn.extend_from_slice(&999u64.to_le_bytes()); // LSN (nonzero)
+    torn.extend_from_slice(&[1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]); // timestamp
+    torn.extend_from_slice(&[0xAB; 4]); // checksum (garbage)
+    torn.push(0); // op-type 0 — "Unknown WAL operation type: 0"
+    {
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&last_segment)
+            .expect("open segment for append");
+        file.write_all(&torn).expect("append torn entry");
+        file.sync_all().expect("sync torn entry");
+    }
+
+    // Pre-fix: this constructor returned
+    // Err(Storage(CorruptedData("Unknown WAL operation type: 0"))).
+    let db = AletheiaDB::with_wal_config(wal_config())
+        .expect("constructor must tolerate a torn WAL tail");
+
+    // The allocator must still be seeded from the decodable prefix: new LSNs
+    // continue above everything session 1 durably wrote.
+    let seeded_lsn = db.__test_current_wal_lsn();
+    assert!(
+        seeded_lsn >= session1_end_lsn,
+        "allocator under-seeded after torn-tail scan: next LSN {seeded_lsn} \
+         < session 1 end {session1_end_lsn}"
+    );
+}
