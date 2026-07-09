@@ -86,6 +86,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Vector index loading at startup is now parallel with per-index error
+  isolation (Issue #451): with index persistence enabled, all per-property
+  HNSW vector indexes are loaded concurrently (one rayon task per property)
+  and a corrupted or unreadable vector index (bad `meta.idx`,
+  `mappings.idx`, `current.usearch`, or `current.usearch.mappings`; unknown
+  metric; out-of-range mapping key; even a panic inside one load task) is
+  skipped with a warning instead of aborting the loading of every remaining
+  vector index. Startup logs a loaded/skipped summary when any index is
+  skipped and reports the actually restored vector count per index. A
+  skipped index is recovered with the new
+  `AletheiaDB::rebuild_vector_index(property, config)`, which re-enables the
+  index and backfills it from the vector properties of current nodes —
+  merely re-enabling via `enable_vector_index` creates an empty index that
+  the next persistence cycle writes over the on-disk files, losing the
+  vectors. See
+  [docs/guides/index-persistence-guide.md](docs/guides/index-persistence-guide.md#vector-index-persistence).
+
 - `PersistenceConfig::default()` no longer enables index persistence
   (Issue #3388). The old default (`enabled: true` with the cwd-relative
   `data_dir: "data"`) made every database built from a default or builder

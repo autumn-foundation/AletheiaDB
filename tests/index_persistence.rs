@@ -2878,3 +2878,451 @@ fn test_parallel_loading_graph_error() {
 
     println!("✓ Parallel loading graph error test passed");
 }
+
+/// Issue #451: multi-property vector indexes survive a full restart cycle.
+///
+/// Verifies that after `persist_indexes()` + reopen with `load_on_startup`:
+/// - every per-property vector index is re-enabled with its persisted
+///   configuration (dimensions, distance metric),
+/// - similarity search works on every property,
+/// - vectors added AFTER the restart are indexed correctly (no usearch key
+///   collisions with restored mappings),
+/// - a second persist/reopen cycle works (save → load → save → load).
+#[test]
+fn test_vector_index_persistence_multi_property_restart() {
+    let _guard = INTERNER_TEST_MUTEX.lock().unwrap();
+
+    use aletheiadb::AletheiaDB;
+    use aletheiadb::index::vector::{DistanceMetric, HnswConfig};
+
+    let dir = tempdir().unwrap();
+    let data_dir = dir.path().to_path_buf();
+    let wal_dir = dir.path().join("wal");
+
+    let make_config = |load_on_startup: bool| {
+        AletheiaDBConfig::builder()
+            .wal(WalConfigBuilder::new().wal_dir(wal_dir.clone()).build())
+            .persistence(PersistenceConfig {
+                enabled: true,
+                data_dir: data_dir.clone(),
+                load_on_startup,
+                ..Default::default()
+            })
+            .build()
+    };
+
+    let title_emb_a = {
+        let mut v = vec![0.0f32; 4];
+        v[0] = 1.0;
+        v
+    };
+    let title_emb_b = {
+        let mut v = vec![0.0f32; 4];
+        v[1] = 1.0;
+        v
+    };
+    let body_emb_a = {
+        let mut v = vec![0.0f32; 8];
+        v[0] = 1.0;
+        v
+    };
+    let body_emb_b = {
+        let mut v = vec![0.0f32; 8];
+        v[1] = 1.0;
+        v
+    };
+
+    // ---- Phase 1: create, index, persist ----
+    let (node_a, node_b) = {
+        let db = AletheiaDB::with_unified_config(make_config(false)).unwrap();
+
+        db.vector_index("title_embedding")
+            .hnsw(HnswConfig::new(4, DistanceMetric::Cosine))
+            .enable()
+            .unwrap();
+        db.vector_index("body_embedding")
+            .hnsw(HnswConfig::new(8, DistanceMetric::Euclidean))
+            .enable()
+            .unwrap();
+
+        let node_a = db
+            .create_node(
+                "Doc",
+                PropertyMapBuilder::new()
+                    .insert_vector("title_embedding", &title_emb_a)
+                    .insert_vector("body_embedding", &body_emb_a)
+                    .build(),
+            )
+            .unwrap();
+        let node_b = db
+            .create_node(
+                "Doc",
+                PropertyMapBuilder::new()
+                    .insert_vector("title_embedding", &title_emb_b)
+                    .insert_vector("body_embedding", &body_emb_b)
+                    .build(),
+            )
+            .unwrap();
+
+        db.persist_indexes().unwrap();
+        (node_a, node_b)
+    };
+
+    // ---- Phase 2: reopen and verify both properties ----
+    let node_c = {
+        let db = AletheiaDB::with_unified_config(make_config(true)).unwrap();
+
+        for property in ["title_embedding", "body_embedding"] {
+            assert!(
+                db.is_vector_index_enabled_for(property),
+                "vector index '{property}' must be re-enabled after restart"
+            );
+        }
+
+        // Config must survive: dimensions + metric per property.
+        let indexes = db.list_vector_indexes();
+        let title_info = indexes
+            .iter()
+            .find(|info| info.property_name == "title_embedding")
+            .expect("title_embedding config must survive restart");
+        assert_eq!(title_info.dimensions, 4);
+        assert_eq!(title_info.distance_metric, DistanceMetric::Cosine);
+        let body_info = indexes
+            .iter()
+            .find(|info| info.property_name == "body_embedding")
+            .expect("body_embedding config must survive restart");
+        assert_eq!(body_info.dimensions, 8);
+        assert_eq!(body_info.distance_metric, DistanceMetric::Euclidean);
+
+        // Similarity search must work per property after restart.
+        let title_similar = db.find_similar_in("title_embedding", node_a, 2).unwrap();
+        assert!(
+            title_similar.iter().any(|(id, _)| *id == node_b),
+            "title_embedding search must find node_b after restart, got: {title_similar:?}"
+        );
+        let body_similar = db.find_similar_in("body_embedding", node_a, 2).unwrap();
+        assert!(
+            body_similar.iter().any(|(id, _)| *id == node_b),
+            "body_embedding search must find node_b after restart, got: {body_similar:?}"
+        );
+
+        // Vectors added AFTER the restart must be indexed (fresh usearch keys
+        // must not collide with restored mappings).
+        let title_emb_c = {
+            let mut v = vec![0.0f32; 4];
+            v[0] = 0.9;
+            v[1] = 0.1;
+            v
+        };
+        let node_c = db
+            .create_node(
+                "Doc",
+                PropertyMapBuilder::new()
+                    .insert_vector("title_embedding", &title_emb_c)
+                    .build(),
+            )
+            .unwrap();
+        let similar_to_c = db.find_similar_in("title_embedding", node_c, 3).unwrap();
+        assert!(
+            similar_to_c.iter().any(|(id, _)| *id == node_a),
+            "post-restart node must be searchable and close to node_a, got: {similar_to_c:?}"
+        );
+        assert!(
+            similar_to_c.iter().any(|(id, _)| *id == node_b),
+            "restored node_b must still be reachable (k=3 covers all nodes) after \
+             the post-restart insert, got: {similar_to_c:?}"
+        );
+
+        // Second save (save → load → save).
+        db.persist_indexes().unwrap();
+        node_c
+    };
+
+    // ---- Phase 3: second reopen (…→ load) ----
+    {
+        let db = AletheiaDB::with_unified_config(make_config(true)).unwrap();
+        let similar = db.find_similar_in("title_embedding", node_c, 3).unwrap();
+        assert!(
+            similar.iter().any(|(id, _)| *id == node_a),
+            "vector index must survive a second persist/reopen cycle, got: {similar:?}"
+        );
+    }
+}
+
+/// Issue #451: corrupted vector index files must not prevent the database
+/// from starting, and every OTHER vector index must still be loaded and
+/// searchable (per-index error isolation on the startup path).
+///
+/// TWO corrupt sibling indexes are used, named so their directories bracket
+/// the good one in sorted order (`aaa_bad_embedding` < `good_embedding` <
+/// `zzz_bad_embedding`). With a single corrupt sibling the test is
+/// order-dependent: a trunk-style abort-on-first-error loader would still
+/// pass whenever directory iteration happens to visit the good index first
+/// (verified empirically during review). Bracketing guarantees that in any
+/// sorted iteration direction a corrupt index is encountered BEFORE the good
+/// one, so an abort-on-first-error regression always fails this test.
+#[test]
+fn test_vector_index_persistence_corrupt_index_degrades_gracefully() {
+    let _guard = INTERNER_TEST_MUTEX.lock().unwrap();
+
+    use aletheiadb::AletheiaDB;
+    use aletheiadb::index::vector::{DistanceMetric, HnswConfig};
+
+    let dir = tempdir().unwrap();
+    let data_dir = dir.path().to_path_buf();
+    let wal_dir = dir.path().join("wal");
+
+    let make_config = |load_on_startup: bool| {
+        AletheiaDBConfig::builder()
+            .wal(WalConfigBuilder::new().wal_dir(wal_dir.clone()).build())
+            .persistence(PersistenceConfig {
+                enabled: true,
+                data_dir: data_dir.clone(),
+                load_on_startup,
+                ..Default::default()
+            })
+            .build()
+    };
+
+    // ---- Phase 1: persist three vector indexes ----
+    let (node_a, node_b) = {
+        let db = AletheiaDB::with_unified_config(make_config(false)).unwrap();
+        for property in ["aaa_bad_embedding", "good_embedding", "zzz_bad_embedding"] {
+            db.vector_index(property)
+                .hnsw(HnswConfig::new(4, DistanceMetric::Cosine))
+                .enable()
+                .unwrap();
+        }
+        let node_a = db
+            .create_node(
+                "Doc",
+                PropertyMapBuilder::new()
+                    .insert_vector("aaa_bad_embedding", &[1.0f32, 0.0, 0.0, 0.0])
+                    .insert_vector("good_embedding", &[1.0f32, 0.0, 0.0, 0.0])
+                    .insert_vector("zzz_bad_embedding", &[1.0f32, 0.0, 0.0, 0.0])
+                    .build(),
+            )
+            .unwrap();
+        let node_b = db
+            .create_node(
+                "Doc",
+                PropertyMapBuilder::new()
+                    .insert_vector("aaa_bad_embedding", &[0.9f32, 0.1, 0.0, 0.0])
+                    .insert_vector("good_embedding", &[0.9f32, 0.1, 0.0, 0.0])
+                    .insert_vector("zzz_bad_embedding", &[0.9f32, 0.1, 0.0, 0.0])
+                    .build(),
+            )
+            .unwrap();
+        db.persist_indexes().unwrap();
+        (node_a, node_b)
+    };
+
+    // ---- Corrupt the bracketing indexes' metadata on disk ----
+    let manager = IndexPersistenceManager::new(&data_dir);
+    for property in ["aaa_bad_embedding", "zzz_bad_embedding"] {
+        let corrupt_meta = manager.vector_path(property).join("meta.idx");
+        assert!(corrupt_meta.exists(), "persisted meta.idx must exist");
+        std::fs::write(&corrupt_meta, b"garbage bytes, definitely not bitcode").unwrap();
+    }
+
+    // ---- Phase 2: reopen; startup must succeed and the good index must work ----
+    {
+        let db = AletheiaDB::with_unified_config(make_config(true))
+            .expect("database startup must not fail because sibling vector indexes are corrupt");
+
+        assert!(
+            db.is_vector_index_enabled_for("good_embedding"),
+            "the intact vector index must load despite corrupt siblings on both sides"
+        );
+        for property in ["aaa_bad_embedding", "zzz_bad_embedding"] {
+            assert!(
+                !db.is_vector_index_enabled_for(property),
+                "the corrupt vector index '{property}' must be skipped, not half-loaded"
+            );
+        }
+
+        let similar = db.find_similar_in("good_embedding", node_a, 2).unwrap();
+        assert!(
+            similar.iter().any(|(id, _)| *id == node_b),
+            "search on the intact index must work after restart, got: {similar:?}"
+        );
+    }
+}
+
+/// Issue #451: a vector index skipped at startup (corrupted on disk) must be
+/// recoverable via `AletheiaDB::rebuild_vector_index`, which re-enables the
+/// index and backfills it from the vector properties of current nodes.
+///
+/// This is the documented recovery path for per-index error isolation:
+/// merely re-enabling the index (`enable_vector_index`) creates an EMPTY
+/// index that the persistence worker then writes over the on-disk files,
+/// permanently losing the vectors. `rebuild_vector_index` must restore
+/// searchability for pre-existing nodes AND survive a subsequent
+/// persist + reopen cycle.
+#[test]
+fn test_rebuild_vector_index_recovers_skipped_index() {
+    let _guard = INTERNER_TEST_MUTEX.lock().unwrap();
+
+    use aletheiadb::AletheiaDB;
+    use aletheiadb::index::vector::{DistanceMetric, HnswConfig};
+
+    let dir = tempdir().unwrap();
+    let data_dir = dir.path().to_path_buf();
+    let wal_dir = dir.path().join("wal");
+
+    let make_config = |load_on_startup: bool| {
+        AletheiaDBConfig::builder()
+            .wal(WalConfigBuilder::new().wal_dir(wal_dir.clone()).build())
+            .persistence(PersistenceConfig {
+                enabled: true,
+                data_dir: data_dir.clone(),
+                load_on_startup,
+                ..Default::default()
+            })
+            .build()
+    };
+
+    // ---- Phase 1: persist two vector indexes over two nodes ----
+    let (node_a, node_b) = {
+        let db = AletheiaDB::with_unified_config(make_config(false)).unwrap();
+        for property in ["good_embedding", "broken_embedding"] {
+            db.vector_index(property)
+                .hnsw(HnswConfig::new(4, DistanceMetric::Cosine))
+                .enable()
+                .unwrap();
+        }
+        let node_a = db
+            .create_node(
+                "Doc",
+                PropertyMapBuilder::new()
+                    .insert_vector("good_embedding", &[1.0f32, 0.0, 0.0, 0.0])
+                    .insert_vector("broken_embedding", &[1.0f32, 0.0, 0.0, 0.0])
+                    .build(),
+            )
+            .unwrap();
+        let node_b = db
+            .create_node(
+                "Doc",
+                PropertyMapBuilder::new()
+                    .insert_vector("good_embedding", &[0.9f32, 0.1, 0.0, 0.0])
+                    .insert_vector("broken_embedding", &[0.9f32, 0.1, 0.0, 0.0])
+                    .build(),
+            )
+            .unwrap();
+        db.persist_indexes().unwrap();
+        (node_a, node_b)
+    };
+
+    // ---- Corrupt one index's metadata on disk ----
+    let manager = IndexPersistenceManager::new(&data_dir);
+    let corrupt_meta = manager.vector_path("broken_embedding").join("meta.idx");
+    assert!(corrupt_meta.exists(), "persisted meta.idx must exist");
+    std::fs::write(&corrupt_meta, b"garbage bytes, definitely not bitcode").unwrap();
+
+    // ---- Phase 2: reopen (sibling loads, corrupt one skipped), then rebuild ----
+    {
+        let db = AletheiaDB::with_unified_config(make_config(true)).unwrap();
+        assert!(
+            db.is_vector_index_enabled_for("good_embedding"),
+            "the intact vector index must load despite a corrupt sibling"
+        );
+        assert!(
+            !db.is_vector_index_enabled_for("broken_embedding"),
+            "the corrupt vector index must be skipped at startup"
+        );
+
+        let rebuilt = db
+            .rebuild_vector_index(
+                "broken_embedding",
+                HnswConfig::new(4, DistanceMetric::Cosine),
+            )
+            .expect("rebuild_vector_index must recover a skipped index");
+        assert_eq!(
+            rebuilt, 2,
+            "both pre-existing nodes' vectors must be re-indexed"
+        );
+
+        assert!(
+            db.is_vector_index_enabled_for("broken_embedding"),
+            "the rebuilt vector index must be enabled again"
+        );
+        let similar = db.find_similar_in("broken_embedding", node_a, 2).unwrap();
+        assert!(
+            similar.iter().any(|(id, _)| *id == node_b),
+            "pre-existing nodes' vectors must be searchable after rebuild, got: {similar:?}"
+        );
+
+        db.persist_indexes().unwrap();
+    }
+
+    // ---- Phase 3: a subsequent persist + reopen keeps the rebuilt index ----
+    {
+        let db = AletheiaDB::with_unified_config(make_config(true)).unwrap();
+        assert!(
+            db.is_vector_index_enabled_for("broken_embedding"),
+            "the rebuilt vector index must survive persist + reopen"
+        );
+        let similar = db.find_similar_in("broken_embedding", node_a, 2).unwrap();
+        assert!(
+            similar.iter().any(|(id, _)| *id == node_b),
+            "the rebuilt index must stay searchable after persist + reopen, got: {similar:?}"
+        );
+    }
+}
+
+/// Issue #451: vector index persistence must work through the documented
+/// one-line entry point `AletheiaDB::open(path)` plus `Drop` shutdown
+/// persistence — no explicit `persist_indexes()` call. This exercises the
+/// exact lifecycle the persistence guide promises users: open, enable an
+/// index, insert, drop the handle, reopen, search.
+#[test]
+fn test_vector_index_persistence_via_open_and_drop() {
+    let _guard = INTERNER_TEST_MUTEX.lock().unwrap();
+
+    use aletheiadb::AletheiaDB;
+    use aletheiadb::index::vector::{DistanceMetric, HnswConfig};
+
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("open-drop-db");
+
+    // ---- Phase 1: open, enable index, insert, and drop (shutdown persist) ----
+    let (node_a, node_b) = {
+        let db = AletheiaDB::open(&db_path).expect("open must create a durable database");
+        db.vector_index("embedding")
+            .hnsw(HnswConfig::new(4, DistanceMetric::Cosine))
+            .enable()
+            .unwrap();
+        let node_a = db
+            .create_node(
+                "Doc",
+                PropertyMapBuilder::new()
+                    .insert_vector("embedding", &[1.0f32, 0.0, 0.0, 0.0])
+                    .build(),
+            )
+            .unwrap();
+        let node_b = db
+            .create_node(
+                "Doc",
+                PropertyMapBuilder::new()
+                    .insert_vector("embedding", &[0.9f32, 0.1, 0.0, 0.0])
+                    .build(),
+            )
+            .unwrap();
+        drop(db); // Drop joins the persistence worker, which persists on shutdown
+        (node_a, node_b)
+    };
+
+    // ---- Phase 2: reopen through open() and search ----
+    {
+        let db = AletheiaDB::open(&db_path).expect("reopen must load persisted state");
+        assert!(
+            db.is_vector_index_enabled_for("embedding"),
+            "vector index must be re-enabled after open() + Drop shutdown persistence"
+        );
+        let similar = db.find_similar_in("embedding", node_a, 2).unwrap();
+        assert!(
+            similar.iter().any(|(id, _)| *id == node_b),
+            "similarity search must work after open() + Drop + open(), got: {similar:?}"
+        );
+    }
+}
