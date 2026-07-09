@@ -380,8 +380,8 @@ impl AletheiaDB {
                 // always equals what retract_node_detach would retract (a
                 // self-loop appears in both adjacency directions but is one
                 // edge — count_connected_edges would report 2).
-                let mut edge_ids = tx.get_outgoing_edges(node_id);
-                edge_ids.extend(tx.get_incoming_edges(node_id));
+                let mut edge_ids = tx.get_outgoing_edges(node_id)?;
+                edge_ids.extend(tx.get_incoming_edges(node_id)?);
                 edge_ids.sort_unstable();
                 edge_ids.dedup();
                 let connected_edges = edge_ids.len();
@@ -430,8 +430,12 @@ impl AletheiaDB {
             // no-check-then-act rationale as retract_node). Deduplicate so a
             // self-loop (present in both adjacency directions) is retracted
             // once.
-            let mut edge_ids = tx.get_outgoing_edges(node_id);
-            edge_ids.extend(tx.get_incoming_edges(node_id));
+            // A node that is not visible (e.g. already retracted or never
+            // created) has no enumerable edges; `retract_node` below still
+            // owns the idempotency / not-found semantics for that case, so a
+            // NodeNotFound here must not fail the detach early (Issue #359).
+            let mut edge_ids = tx.get_outgoing_edges(node_id).unwrap_or_default();
+            edge_ids.extend(tx.get_incoming_edges(node_id).unwrap_or_default());
             edge_ids.sort_unstable();
             edge_ids.dedup();
 
@@ -2461,6 +2465,83 @@ mod tests {
             assert!(db.get_node(id).is_err());
         }
 
+        /// Review follow-up (#358/#359 fix round): retract_node_detach is
+        /// idempotent — a second detach on an already-retracted node is a
+        /// no-op returning already_retracted with edges_retracted: 0 (a
+        /// retracted node has no enumerable edges left to co-retract).
+        #[test]
+        fn double_retract_node_detach_is_idempotent() {
+            let (_tmp, db) = create_test_db().unwrap();
+            let now = time::now().wallclock();
+            let t_create = hours_ago(now, 3);
+            let t_retract = hours_ago(now, 1);
+
+            let a = db
+                .create_node_with_valid_time(
+                    "Person",
+                    PropertyMapBuilder::new().build(),
+                    Some(t_create),
+                )
+                .unwrap();
+            let b = db
+                .create_node_with_valid_time(
+                    "Person",
+                    PropertyMapBuilder::new().build(),
+                    Some(t_create),
+                )
+                .unwrap();
+            db.create_edge_with_valid_time(
+                a,
+                b,
+                "KNOWS",
+                PropertyMapBuilder::new().build(),
+                Some(t_create),
+            )
+            .unwrap();
+
+            let first = db.retract_node_detach(a, t_retract).unwrap();
+            assert!(!first.already_retracted);
+            assert_eq!(first.edges_retracted, 1);
+            let versions = db.get_node_history(a).unwrap().version_count();
+
+            let second = db.retract_node_detach(a, t_retract).unwrap();
+            assert!(second.already_retracted);
+            assert_eq!(
+                second.edges_retracted, 0,
+                "an idempotent re-detach must not re-count edges"
+            );
+            assert_eq!(
+                second.valid_to, t_retract,
+                "must return the existing valid_to"
+            );
+            assert_eq!(
+                db.get_node_history(a).unwrap().version_count(),
+                versions,
+                "idempotent re-detach must not append a version"
+            );
+        }
+
+        /// Review follow-up (#358/#359 fix round): retract_node_detach on a
+        /// NodeId that never existed is a typed NodeNotFound (the edge
+        /// enumeration tolerates the missing node; retract_node owns the
+        /// not-found semantics).
+        #[test]
+        fn retract_node_detach_nonexistent_node_is_node_not_found() {
+            let (_tmp, db) = create_test_db().unwrap();
+            let now = time::now().wallclock();
+            let missing = NodeId::new(999_999).unwrap();
+
+            let err = db
+                .retract_node_detach(missing, hours_ago(now, 1))
+                .unwrap_err();
+            match err {
+                Error::Storage(crate::core::error::StorageError::NodeNotFound(nid)) => {
+                    assert_eq!(nid, missing);
+                }
+                other => panic!("Expected StorageError::NodeNotFound, got: {other:?}"),
+            }
+        }
+
         /// Fix-round #11 pin: a buffered retraction in a transaction that
         /// ABORTS (closure error, never committed) leaves the node fully
         /// present with no version appended.
@@ -2625,6 +2706,7 @@ mod tests {
     /// transaction_time)`.
     mod find_nodes_at_time_tests {
         use super::*;
+        use crate::AletheiaDB;
         use crate::core::id::NodeId;
         use crate::core::property::PropertyValue;
         use crate::core::temporal::time;
@@ -2638,14 +2720,47 @@ mod tests {
         }
 
         /// Capture a bi-temporal anchor strictly after every previously
-        /// committed write. A bare `time::now()` carries logical component 0,
-        /// while an HLC commit stamp in the *same microsecond* carries a
-        /// logical component > 0 and therefore orders *after* the anchor;
-        /// sleeping past the microsecond boundary first makes the anchor's
-        /// wallclock strictly greater than all prior commit wallclocks.
-        fn anchor_after_commits() -> crate::core::temporal::Timestamp {
-            std::thread::sleep(std::time::Duration::from_millis(2));
-            time::now()
+        /// committed write and strictly before every subsequent one.
+        ///
+        /// A fixed wallclock sleep is NOT sufficient (issue #3405): the HLC
+        /// commit frontier can run ahead of wallclock (logical-counter
+        /// increments within a stalled microsecond, coarse Windows clock
+        /// granularity, `cargo llvm-cov` instrumentation overhead), so a
+        /// bare `time::now()` taken "2ms later" may still order at or before
+        /// an already-committed stamp. Instead, derive the anchor from the
+        /// committed state itself:
+        ///
+        /// 1. Read the database's HLC commit frontier (the maximum
+        ///    transaction stamp issued so far) and loop-sleep until a bare
+        ///    `time::now()` reading orders strictly AFTER it. That reading
+        ///    is the anchor: it is deterministically after every prior
+        ///    commit, regardless of how far the frontier ran ahead.
+        /// 2. Loop-sleep until `time::now()` orders strictly after the
+        ///    anchor before returning, so any write committed after this
+        ///    call reads a wallclock strictly greater than the anchor's and
+        ///    therefore receives a strictly later commit stamp (a bare
+        ///    anchor has logical component 0, so an equal-microsecond commit
+        ///    stamp would otherwise compare equal, not greater).
+        ///
+        /// These tests are single-threaded, so no commit can slip between
+        /// the two phases.
+        fn anchor_after_commits(db: &AletheiaDB) -> crate::core::temporal::Timestamp {
+            let committed = *db
+                .current_timestamp
+                .lock()
+                .expect("current_timestamp mutex poisoned");
+            // Phase 1: anchor strictly after every committed stamp.
+            let mut anchor = time::now();
+            while anchor <= committed {
+                std::thread::sleep(std::time::Duration::from_micros(100));
+                anchor = time::now();
+            }
+            // Phase 2: return only once wallclock has moved strictly past
+            // the anchor, so later commits stamp strictly after it.
+            while time::now() <= anchor {
+                std::thread::sleep(std::time::Duration::from_micros(100));
+            }
+            anchor
         }
 
         #[test]
@@ -2655,10 +2770,10 @@ mod tests {
             let bob = PropertyValue::from("Bob");
 
             let id = db.create_node("Person", name_props("Alice")).unwrap();
-            let t1 = anchor_after_commits();
+            let t1 = anchor_after_commits(&db);
             db.update_node_with_valid_time(id, name_props("Bob"), None)
                 .unwrap();
-            let t2 = anchor_after_commits();
+            let t2 = anchor_after_commits(&db);
 
             // At (t1, t1) the name was still "Alice"...
             let found = db
@@ -2695,9 +2810,9 @@ mod tests {
             let (_tmp, db) = create_test_db().unwrap();
             let alice = PropertyValue::from("Alice");
 
-            let t0 = anchor_after_commits();
+            let t0 = anchor_after_commits(&db);
             let id = db.create_node("Person", name_props("Alice")).unwrap();
-            let t1 = anchor_after_commits();
+            let t1 = anchor_after_commits(&db);
 
             assert!(
                 db.find_nodes_by_property_at("Person", "name", &alice, t0, t0)
@@ -2720,9 +2835,9 @@ mod tests {
             let alice = PropertyValue::from("Alice");
 
             let id = db.create_node("Person", name_props("Alice")).unwrap();
-            let t_before = anchor_after_commits();
+            let t_before = anchor_after_commits(&db);
             db.delete_node_with_valid_time(id, None).unwrap();
-            let t_after = anchor_after_commits();
+            let t_after = anchor_after_commits(&db);
 
             // Anchoring both dimensions before the deletion recalls the node
             // -- this is the case a current-state label index alone would
@@ -2754,9 +2869,9 @@ mod tests {
             let alice = PropertyValue::from("Alice");
 
             let _id = db.create_node("Person", name_props("Alice")).unwrap();
-            let v_before = anchor_after_commits();
+            let v_before = anchor_after_commits(&db);
             db.delete_node_with_valid_time(_id, None).unwrap();
-            let tx_now = anchor_after_commits();
+            let tx_now = anchor_after_commits(&db);
 
             assert!(
                 db.find_nodes_by_property_at("Person", "name", &alice, v_before, tx_now)
@@ -2774,9 +2889,9 @@ mod tests {
             let a = db.create_node("Person", name_props("Alice")).unwrap();
             let b = db.create_node("Person", name_props("Bob")).unwrap();
             let c = db.create_node("Company", name_props("Acme")).unwrap();
-            let t1 = anchor_after_commits();
+            let t1 = anchor_after_commits(&db);
             db.delete_node_with_valid_time(b, None).unwrap();
-            let t2 = anchor_after_commits();
+            let t2 = anchor_after_commits(&db);
 
             // Before the deletion both Person nodes are visible (sorted by id).
             assert_eq!(
@@ -2806,7 +2921,7 @@ mod tests {
             let d = db.create_node("Person", name_props("Alice")).unwrap();
             db.delete_node_with_valid_time(d, None).unwrap();
 
-            let now = anchor_after_commits();
+            let now = anchor_after_commits(&db);
             let mut current = db.find_nodes_by_property("Person", "name", &alice);
             current.sort_unstable();
             let at_now = ids(&db
@@ -2836,7 +2951,7 @@ mod tests {
             let id = db
                 .create_node_with_valid_time("Person", name_props("FutureAlice"), Some(future))
                 .unwrap();
-            let now = anchor_after_commits();
+            let now = anchor_after_commits(&db);
 
             // Current-state lookup sees the future-dated node...
             assert_eq!(
@@ -2881,11 +2996,11 @@ mod tests {
             );
             // A wall-clock instant after v0 but strictly before the write is
             // recorded: inside the valid interval, outside the tx interval.
-            let t_mid = anchor_after_commits();
+            let t_mid = anchor_after_commits(&db);
             let id = db
                 .create_node_with_valid_time("Person", name_props("BackdatedAlice"), Some(v0))
                 .unwrap();
-            let t_now = anchor_after_commits();
+            let t_now = anchor_after_commits(&db);
 
             // (valid = t_mid, tx = t_now): valid interval [v0, inf) contains
             // t_mid and the write is recorded by t_now -> FOUND. With the
@@ -2927,7 +3042,7 @@ mod tests {
         fn unknown_label_or_property_key_returns_empty_not_error() {
             let (_tmp, db) = create_test_db().unwrap();
             let _ = db.create_node("Person", name_props("Alice")).unwrap();
-            let now = anchor_after_commits();
+            let now = anchor_after_commits(&db);
 
             assert!(
                 db.find_nodes_at_time("NeverInternedLabel3236", now, now)
@@ -2977,7 +3092,7 @@ mod tests {
             }
             expected.sort_unstable();
 
-            let now = anchor_after_commits();
+            let now = anchor_after_commits(&db);
             let found = ids(&db.find_nodes_at_time("Person", now, now).unwrap());
             assert_eq!(found, expected, "results must be sorted by node id");
         }
@@ -3012,7 +3127,7 @@ mod tests {
                 created.push(db.create_node("Person", name_props("Alice")).unwrap());
             }
             created.sort_unstable();
-            let now = anchor_after_commits();
+            let now = anchor_after_commits(&db);
 
             let found = db.find_nodes_at_time("Person", now, now).unwrap();
             assert!(
@@ -3038,8 +3153,7 @@ mod tests {
             // A db whose history fits under the cap never reports sampling.
             let (_tmp2, small_db) = create_test_db().unwrap();
             let id = small_db.create_node("Person", name_props("Alice")).unwrap();
-            std::thread::sleep(std::time::Duration::from_millis(2));
-            let now2 = time::now();
+            let now2 = anchor_after_commits(&small_db);
             let small = small_db.find_nodes_at_time("Person", now2, now2).unwrap();
             assert!(!small.sampled);
             assert_eq!(ids(&small), vec![id]);

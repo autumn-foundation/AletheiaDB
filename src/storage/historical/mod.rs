@@ -166,6 +166,14 @@ const ANCHOR_CACHE_SIZE_RATIO: usize = 5; // 20% of main cache
 /// at least a few anchors to avoid immediate evictions.
 const MIN_ANCHOR_CACHE_SIZE: usize = 100;
 
+/// Default average delta chain length estimate used when historical storage
+/// is empty (Issue #366).
+///
+/// Assumes the default `anchor_interval` of 10 (one anchor followed by up to
+/// nine deltas), matching the query planner's fallback in
+/// [`Statistics::average_delta_chain_length`](crate::query::planner::Statistics::average_delta_chain_length).
+pub const DEFAULT_AVG_DELTA_CHAIN: f64 = 5.0;
+
 /// Historical storage for versioned nodes and edges.
 ///
 /// This storage engine maintains version chains for all temporal data,
@@ -3034,6 +3042,54 @@ impl HistoricalStorage {
             node_anchor_cache_entries: self.node_anchor_cache.len(),
             edge_anchor_cache_entries: self.edge_anchor_cache.len(),
         }
+    }
+
+    /// Calculate the average delta chain length across all version chains (Issue #366).
+    ///
+    /// A delta chain is the run of delta versions that follows an anchor in the
+    /// anchor+delta compression scheme. Every chain starts at exactly one anchor,
+    /// so the chains partition the delta versions among the anchors and the exact
+    /// average chain length is `total deltas / total anchors`, computed over both
+    /// node and edge versions.
+    ///
+    /// The result feeds the query planner's temporal-lookup cost model (via
+    /// [`AletheiaDB::refresh_statistics`](crate::db::AletheiaDB::refresh_statistics)):
+    /// it estimates how many delta versions a point-in-time reconstruction must
+    /// walk back through before reaching an anchor.
+    ///
+    /// # Returns
+    ///
+    /// - The actual average delta chain length when historical data exists.
+    ///   A storage containing only anchors returns `0.0` (every lookup hits an
+    ///   anchor directly).
+    /// - [`DEFAULT_AVG_DELTA_CHAIN`] (5.0) when the storage is empty (no anchors),
+    ///   matching the query planner's default assumption of `anchor_interval = 10`.
+    ///
+    /// # Performance
+    ///
+    /// O(1): reads the incrementally-maintained anchor/delta counters (Issue #212);
+    /// no version scan is performed, so this is safe to call on every statistics
+    /// refresh.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use aletheiadb::storage::historical::HistoricalStorage;
+    /// let storage = HistoricalStorage::new();
+    /// // Empty storage falls back to the default estimate
+    /// assert_eq!(storage.calculate_avg_delta_chain(), 5.0);
+    /// ```
+    #[must_use]
+    pub fn calculate_avg_delta_chain(&self) -> f64 {
+        let total_anchors = self.cached_node_anchor_count + self.cached_edge_anchor_count;
+        if total_anchors == 0 {
+            // No historical data: fall back to the default estimate
+            // (assumes anchor_interval=10, so avg chain length ~5)
+            return DEFAULT_AVG_DELTA_CHAIN;
+        }
+
+        let total_deltas = self.cached_node_delta_count + self.cached_edge_delta_count;
+        total_deltas as f64 / total_anchors as f64
     }
 
     /// Get cache performance metrics (Improvement #3: Adaptive Cache Sizing).
