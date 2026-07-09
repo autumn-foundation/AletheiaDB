@@ -40,7 +40,7 @@ fn test_temporal_adjacency_index_enabled_by_default() {
     thread::sleep(Duration::from_millis(10));
     let (_edge_id, _t1) = db
         .write_with_timestamp(|tx| {
-            let edges = tx.get_outgoing_edges(alice);
+            let edges = tx.get_outgoing_edges(alice)?;
             tx.delete_edge(edges[0])
         })
         .unwrap();
