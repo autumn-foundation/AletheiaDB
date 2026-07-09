@@ -29,20 +29,14 @@ fn incoming_edges_multiple_sources_same_target() {
         .unwrap();
 
     // Verify outgoing edges work
-    let child1_out = db
-        .read(|tx| Ok::<_, aletheiadb::Error>(tx.get_outgoing_edges(child1)))
-        .unwrap();
+    let child1_out = db.read(|tx| tx.get_outgoing_edges(child1)).unwrap();
     assert_eq!(child1_out.len(), 1, "child1 should have 1 outgoing edge");
 
-    let child2_out = db
-        .read(|tx| Ok::<_, aletheiadb::Error>(tx.get_outgoing_edges(child2)))
-        .unwrap();
+    let child2_out = db.read(|tx| tx.get_outgoing_edges(child2)).unwrap();
     assert_eq!(child2_out.len(), 1, "child2 should have 1 outgoing edge");
 
     // This should return 2 edges
-    let parent_in = db
-        .read(|tx| Ok::<_, aletheiadb::Error>(tx.get_incoming_edges(parent)))
-        .unwrap();
+    let parent_in = db.read(|tx| tx.get_incoming_edges(parent)).unwrap();
 
     assert!(
         parent_in.contains(&edge1),
@@ -78,9 +72,7 @@ fn incoming_edges_multiple_sources_single_transaction() {
         })
         .unwrap();
 
-    let parent_in = db
-        .read(|tx| Ok::<_, aletheiadb::Error>(tx.get_incoming_edges(parent)))
-        .unwrap();
+    let parent_in = db.read(|tx| tx.get_incoming_edges(parent)).unwrap();
     assert_eq!(
         parent_in.len(),
         2,
@@ -111,9 +103,7 @@ fn incoming_edges_fan_in_pattern() {
         edge_ids.push(eid);
     }
 
-    let incoming = db
-        .read(|tx| Ok::<_, aletheiadb::Error>(tx.get_incoming_edges(target)))
-        .unwrap();
+    let incoming = db.read(|tx| tx.get_incoming_edges(target)).unwrap();
     assert_eq!(
         incoming.len(),
         5,
