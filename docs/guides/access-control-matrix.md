@@ -39,6 +39,20 @@ Defined by `Role::allows(AccessClass)` in `src/auth/role.rs`.
 Both codes are additive to the #3234 enum and are never retriable: obtain a
 valid credential / a sufficient role, then re-issue.
 
+- **Resource limit exceeded** (per-query limits, HTTP `/query`, Issue #3368):
+  authentication and authorization run **first**, so these are only reachable
+  by an already-authorized caller.
+  - HTTP `429`, `code:"RESOURCE_EXHAUSTED"`, `retriable:true`,
+    `details:{dimension:"wall_clock_timeout", limit_ms}` — wall-clock timeout.
+  - HTTP `413`, `code:"RESOURCE_EXHAUSTED"`, `retriable:false`,
+    `details:{dimension:"result_rows"|"result_bytes", limit, consumed}` — result
+    too large (row `Reject` policy / byte cap).
+  - HTTP `422`, `code:"INVALID_ARGUMENT"`, `retriable:false`,
+    `details:{dimension, requested, ceiling}` — a per-call `limits` override
+    exceeded the operator ceiling.
+  - See [HTTP Per-Query Resource Limits](http-query-limits.md) for the full
+    contract. (MCP parity is deferred to the MCP lane.)
+
 ## MCP tools
 
 The MCP transport is stdio, so the credential is session-scoped (supplied at

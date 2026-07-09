@@ -42,7 +42,9 @@ mod state;
 
 pub use auth::{AuthContext, AuthState, validate_auth_startup};
 pub use config::{
-    CorsConfig, DEFAULT_MAX_REQUEST_BODY_BYTES, RateLimitConfig, ServerConfig, ServerConfigBuilder,
+    CorsConfig, DEFAULT_MAX_REQUEST_BODY_BYTES, EffectiveQueryLimits, LimitDimension,
+    LimitOverrideError, QueryLimitsConfig, QueryLimitsOverride, RateLimitConfig, RowOverflowPolicy,
+    ServerConfig, ServerConfigBuilder,
 };
 pub use error::AletheiaHttpError;
 pub use handlers::{ApiResponse, QueryRequest, handle_query, health_check};

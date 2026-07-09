@@ -46,17 +46,26 @@ This pattern is proven in production use.
 ```rust
 pub struct AppState {
     db: Arc<AletheiaDB>,
+    query_limits: Arc<QueryLimitsConfig>, // Issue #3368
 }
 
 impl AppState {
-    pub fn new(db: Arc<AletheiaDB>) -> Self { Self { db } }
+    pub fn new(db: Arc<AletheiaDB>) -> Self { /* default query limits */ }
+    pub fn with_query_limits(self, limits: QueryLimitsConfig) -> Self { /* ... */ }
     pub fn db(&self) -> &AletheiaDB { &self.db }
     pub fn db_arc(&self) -> Arc<AletheiaDB> { self.db.clone() }
+    pub fn query_limits(&self) -> &QueryLimitsConfig { &self.query_limits }
 }
 ```
 
 `AppState: Clone` — a cheap `Arc` bump. It is installed once per process and
-read on every request.
+read on every request. Alongside the database it carries the per-query
+resource-limit configuration (wall-clock timeout, result-row cap, result-byte
+cap), delivered from `ServerConfig::query_limits()` when the router is wired —
+exactly as the request-body-size limit is delivered into the layer stack. The
+`/query` handler reads it via `state.query_limits()`. See
+[HTTP Per-Query Resource Limits](http-query-limits.md) for the full contract,
+the per-call override shape, and the `429`/`413`/`422` error responses.
 
 ## Wiring
 
