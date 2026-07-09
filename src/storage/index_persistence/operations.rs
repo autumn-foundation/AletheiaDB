@@ -649,7 +649,9 @@ pub(crate) fn persist_all_indexes(
 ///
 /// 1. **String Interner**: Loaded first so that `InternedString` IDs in subsequent indexes can be resolved.
 /// 2. **Graph Index**: Restores the current state (nodes, edges, properties).
-/// 3. **ID Generators**: Initialized based on the maximum IDs found in the graph index to prevent collisions.
+/// 3. **ID Generators**: Initialized from the maximum IDs found in the graph index AND the
+///    temporal index (step 4) to prevent collisions — deleted entities survive only in the
+///    temporal index, and their ids must never be reissued (PR #3428 review).
 /// 4. **Temporal Index**: Restores historical versions into `HistoricalStorage`.
 /// 5. **Vector Indexes**: Rebuilds HNSW indexes and attaches them to the graph.
 /// 6. **Adjacency Index**: Restores optimized graph traversal structures (CSR).
@@ -936,17 +938,44 @@ pub(crate) fn load_indexes_startup(
                 // graph-index seeding already set and what the temporal data requires.
                 // Note: version IDs start at 0, so a single entry with version 0 yields
                 // max == 0; we must seed whenever entries exist, not only when max > 0.
+                //
+                // Review round 2 (PR #3428): the node/edge id generators must
+                // ALSO be seeded from historical versions, not only from the
+                // live graph snapshot above. Deleted entities are invisible in
+                // the live snapshot, and their create/delete WAL entries lie
+                // below the manifest LSN (outside the differential replay
+                // window), so seeding from the live snapshot alone lets a
+                // restarted process REISSUE a deleted entity's id — the next
+                // restart's replay then splices the new entity onto the dead
+                // entity's version chain (silent bi-temporal corruption).
+                // Historical versions (tombstones and superseded versions
+                // included) carry the ids of every entity that ever existed in
+                // hot-tier history. Cost: one pass over version entries that
+                // were already deserialized for the restore above — O(history
+                // size) at startup, no extra I/O.
                 if !temporal_data.node_versions.is_empty()
                     || !temporal_data.edge_versions.is_empty()
                 {
-                    let max_temporal_version = temporal_data
-                        .node_versions
-                        .iter()
-                        .map(|v| v.version_id)
-                        .chain(temporal_data.edge_versions.iter().map(|v| v.version_id))
-                        .max()
-                        .unwrap_or(0);
+                    let mut max_temporal_version = 0u64;
+                    let mut max_historical_node_id: Option<u64> = None;
+                    let mut max_historical_edge_id: Option<u64> = None;
+                    for v in &temporal_data.node_versions {
+                        max_temporal_version = max_temporal_version.max(v.version_id);
+                        max_historical_node_id =
+                            Some(max_historical_node_id.map_or(v.node_id, |m| m.max(v.node_id)));
+                    }
+                    for v in &temporal_data.edge_versions {
+                        max_temporal_version = max_temporal_version.max(v.version_id);
+                        max_historical_edge_id =
+                            Some(max_historical_edge_id.map_or(v.edge_id, |m| m.max(v.edge_id)));
+                    }
                     version_id_gen.ensure_at_least(max_temporal_version + 1);
+                    if let Some(max_nid) = max_historical_node_id {
+                        node_id_gen.ensure_at_least(max_nid + 1);
+                    }
+                    if let Some(max_eid) = max_historical_edge_id {
+                        edge_id_gen.ensure_at_least(max_eid + 1);
+                    }
                 }
             }
             Err(e) => {

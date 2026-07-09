@@ -33,7 +33,29 @@ pub struct IndexManifest {
     pub created_at: i64,
     /// Unix timestamp of last modification
     pub last_modified: i64,
-    /// LSN this manifest is consistent with
+    /// WAL position this manifest is consistent with.
+    ///
+    /// # Semantics (Issue #3419)
+    ///
+    /// This is the **next-to-allocate** LSN (`wal.current_lsn()`) captured
+    /// *before* the snapshot was taken — NOT the last-allocated LSN. The
+    /// resulting contract is:
+    ///
+    /// - Every WAL entry with LSN **< lsn** is guaranteed to be reflected in
+    ///   the persisted snapshot.
+    /// - Entries with LSN **>= lsn** may or may not be reflected (a write can
+    ///   race a background persist between the LSN capture and the snapshot
+    ///   read).
+    ///
+    /// Startup replay must therefore begin **AT `lsn` (inclusive)** — never
+    /// at `lsn + 1`, which silently drops the first post-persist write — and
+    /// WAL replay must be idempotent for entries whose effects are already in
+    /// the snapshot (see the re-application guards in
+    /// `storage::recovery::replay_wal_into_storage_with_constraints`).
+    ///
+    /// The allocator must also never allocate below this value after a
+    /// restart (Issue #3420); startup seeds it from
+    /// `max(max LSN in WAL segments + 1, manifest lsn)`.
     pub lsn: u64,
 
     /// Vector index entries (one per property)

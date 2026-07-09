@@ -2613,10 +2613,17 @@ fn test_version_chain_reconstruction() {
 /// This test verifies the fix for issue #410: The public persist_indexes() method
 /// must use the actual LSN from the WAL, not a hardcoded value of 0.
 ///
+/// Manifest LSN semantics (Issue #3419): the manifest stores the
+/// **next-to-allocate** LSN (`wal.current_lsn()`) captured at persist time —
+/// see the doc comment on `IndexManifest::lsn`. Entries with LSN < manifest.lsn
+/// are guaranteed in the snapshot; startup replay begins AT manifest.lsn
+/// (inclusive) so the first post-persist write is never skipped. This test
+/// pins that stored value exactly.
+///
 /// Test strategy:
 /// 1. Create database with persistence enabled
 /// 2. Create several nodes/edges to advance WAL LSN beyond 0
-/// 3. Get the current WAL LSN before persisting
+/// 3. Get the current (next-to-allocate) WAL LSN before persisting
 /// 4. Call persist_indexes()
 /// 5. Load manifest and verify LSN matches WAL LSN (not 0)
 #[test]
@@ -2690,6 +2697,10 @@ fn test_persist_indexes_uses_actual_wal_lsn() {
 
     // Enhanced assertion: LSN should exactly match WAL LSN at persist time
     // This is the strongest verification - catches ANY hardcoded value (0, 1, 100, etc.)
+    //
+    // Note (Issue #3419): this is deliberately the NEXT-to-allocate LSN.
+    // Recovery compensates by replaying from manifest.lsn INCLUSIVE, so this
+    // stored value and the replay start together form the durability contract.
     assert_eq!(
         manifest.lsn, expected_lsn,
         "Manifest LSN should exactly match WAL LSN at persist time. Expected: {}, Got: {}",
