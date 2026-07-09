@@ -2625,6 +2625,7 @@ mod tests {
     /// transaction_time)`.
     mod find_nodes_at_time_tests {
         use super::*;
+        use crate::AletheiaDB;
         use crate::core::id::NodeId;
         use crate::core::property::PropertyValue;
         use crate::core::temporal::time;
@@ -2637,55 +2638,61 @@ mod tests {
             found.nodes.iter().map(|n| n.id).collect()
         }
 
-        use crate::simulation::{ClockInjectionGuard, SimulatedClock};
-
-        /// Drive every `time::now()` read on this thread from a deterministic
-        /// [`SimulatedClock`] seeded strictly after the db's commit frontier.
+        /// Capture a bi-temporal anchor strictly after every previously
+        /// committed write and strictly before every subsequent one.
         ///
-        /// The previous real-clock scheme (`sleep(2ms); time::now()`) flaked
-        /// on CI in two ways, both stamping the commit *after* an anchor
-        /// at-or-before the anchor itself:
-        /// - the next commit could read the wallclock in the same
-        ///   microsecond as the anchor (the sleep only separated the anchor
-        ///   from *prior* commits), so the version interval closed exactly
-        ///   at the anchor and the half-open visibility check excluded it;
-        /// - any small backward wallclock regression between the anchor
-        ///   read and the next commit is absorbed by the HLC (backward
-        ///   drift up to `MAX_BACKWARD_DRIFT_US` keeps the frontier
-        ///   wallclock and bumps the logical counter), timestamping that
-        ///   commit before the anchor.
+        /// A fixed wallclock sleep is NOT sufficient (issue #3405): the HLC
+        /// commit frontier can run ahead of wallclock (logical-counter
+        /// increments within a stalled microsecond, coarse Windows clock
+        /// granularity, `cargo llvm-cov` instrumentation overhead), so a
+        /// bare `time::now()` taken "2ms later" may still order at or before
+        /// an already-committed stamp. Instead, derive the anchor from the
+        /// committed state itself:
         ///
-        /// With an injected clock every read is explicit and ordering is
-        /// exact and platform-independent.
-        fn inject_clock(db: &crate::AletheiaDB) -> (SimulatedClock, ClockInjectionGuard) {
-            let clock = SimulatedClock::new(db.__test_current_timestamp().wallclock() + 1_000);
-            let guard = clock.inject();
-            (clock, guard)
-        }
-
-        /// Capture a bi-temporal anchor strictly between the writes
-        /// committed before it and any committed after it: 1 simulated ms
-        /// after every prior clock read, 1 simulated ms before any
-        /// following one.
-        fn anchor_between_commits(clock: &mut SimulatedClock) -> crate::core::temporal::Timestamp {
-            clock.advance_by(1_000);
-            let t = time::now();
-            clock.advance_by(1_000);
-            t
+        /// 1. Read the database's HLC commit frontier (the maximum
+        ///    transaction stamp issued so far) and loop-sleep until a bare
+        ///    `time::now()` reading orders strictly AFTER it. That reading
+        ///    is the anchor: it is deterministically after every prior
+        ///    commit, regardless of how far the frontier ran ahead.
+        /// 2. Loop-sleep until `time::now()` orders strictly after the
+        ///    anchor before returning, so any write committed after this
+        ///    call reads a wallclock strictly greater than the anchor's and
+        ///    therefore receives a strictly later commit stamp (a bare
+        ///    anchor has logical component 0, so an equal-microsecond commit
+        ///    stamp would otherwise compare equal, not greater).
+        ///
+        /// These tests are single-threaded, so no commit can slip between
+        /// the two phases.
+        fn anchor_after_commits(db: &AletheiaDB) -> crate::core::temporal::Timestamp {
+            let committed = *db
+                .current_timestamp
+                .lock()
+                .expect("current_timestamp mutex poisoned");
+            // Phase 1: anchor strictly after every committed stamp.
+            let mut anchor = time::now();
+            while anchor <= committed {
+                std::thread::sleep(std::time::Duration::from_micros(100));
+                anchor = time::now();
+            }
+            // Phase 2: return only once wallclock has moved strictly past
+            // the anchor, so later commits stamp strictly after it.
+            while time::now() <= anchor {
+                std::thread::sleep(std::time::Duration::from_micros(100));
+            }
+            anchor
         }
 
         #[test]
         fn property_changed_across_versions_matches_value_at_t_only() {
             let (_tmp, db) = create_test_db().unwrap();
-            let (mut clock, _guard) = inject_clock(&db);
             let alice = PropertyValue::from("Alice");
             let bob = PropertyValue::from("Bob");
 
             let id = db.create_node("Person", name_props("Alice")).unwrap();
-            let t1 = anchor_between_commits(&mut clock);
+            let t1 = anchor_after_commits(&db);
             db.update_node_with_valid_time(id, name_props("Bob"), None)
                 .unwrap();
-            let t2 = anchor_between_commits(&mut clock);
+            let t2 = anchor_after_commits(&db);
 
             // At (t1, t1) the name was still "Alice"...
             let found = db
@@ -2720,12 +2727,11 @@ mod tests {
         #[test]
         fn node_created_after_t_is_excluded() {
             let (_tmp, db) = create_test_db().unwrap();
-            let (mut clock, _guard) = inject_clock(&db);
             let alice = PropertyValue::from("Alice");
 
-            let t0 = anchor_between_commits(&mut clock);
+            let t0 = anchor_after_commits(&db);
             let id = db.create_node("Person", name_props("Alice")).unwrap();
-            let t1 = anchor_between_commits(&mut clock);
+            let t1 = anchor_after_commits(&db);
 
             assert!(
                 db.find_nodes_by_property_at("Person", "name", &alice, t0, t0)
@@ -2745,13 +2751,12 @@ mod tests {
         #[test]
         fn node_deleted_before_t_found_when_both_dimensions_anchor_before_deletion() {
             let (_tmp, db) = create_test_db().unwrap();
-            let (mut clock, _guard) = inject_clock(&db);
             let alice = PropertyValue::from("Alice");
 
             let id = db.create_node("Person", name_props("Alice")).unwrap();
-            let t_before = anchor_between_commits(&mut clock);
+            let t_before = anchor_after_commits(&db);
             db.delete_node_with_valid_time(id, None).unwrap();
-            let t_after = anchor_between_commits(&mut clock);
+            let t_after = anchor_after_commits(&db);
 
             // Anchoring both dimensions before the deletion recalls the node
             // -- this is the case a current-state label index alone would
@@ -2780,13 +2785,12 @@ mod tests {
         #[test]
         fn deleted_node_not_recalled_with_only_valid_time_anchored() {
             let (_tmp, db) = create_test_db().unwrap();
-            let (mut clock, _guard) = inject_clock(&db);
             let alice = PropertyValue::from("Alice");
 
             let _id = db.create_node("Person", name_props("Alice")).unwrap();
-            let v_before = anchor_between_commits(&mut clock);
+            let v_before = anchor_after_commits(&db);
             db.delete_node_with_valid_time(_id, None).unwrap();
-            let tx_now = anchor_between_commits(&mut clock);
+            let tx_now = anchor_after_commits(&db);
 
             assert!(
                 db.find_nodes_by_property_at("Person", "name", &alice, v_before, tx_now)
@@ -2800,14 +2804,13 @@ mod tests {
         #[test]
         fn label_only_as_of_scan_without_property_filter() {
             let (_tmp, db) = create_test_db().unwrap();
-            let (mut clock, _guard) = inject_clock(&db);
 
             let a = db.create_node("Person", name_props("Alice")).unwrap();
             let b = db.create_node("Person", name_props("Bob")).unwrap();
             let c = db.create_node("Company", name_props("Acme")).unwrap();
-            let t1 = anchor_between_commits(&mut clock);
+            let t1 = anchor_after_commits(&db);
             db.delete_node_with_valid_time(b, None).unwrap();
-            let t2 = anchor_between_commits(&mut clock);
+            let t2 = anchor_after_commits(&db);
 
             // Before the deletion both Person nodes are visible (sorted by id).
             assert_eq!(
@@ -2829,7 +2832,6 @@ mod tests {
         #[test]
         fn current_state_equivalence_with_find_nodes_by_property() {
             let (_tmp, db) = create_test_db().unwrap();
-            let (mut clock, _guard) = inject_clock(&db);
             let alice = PropertyValue::from("Alice");
 
             let _a = db.create_node("Person", name_props("Alice")).unwrap();
@@ -2838,7 +2840,7 @@ mod tests {
             let d = db.create_node("Person", name_props("Alice")).unwrap();
             db.delete_node_with_valid_time(d, None).unwrap();
 
-            let now = anchor_between_commits(&mut clock);
+            let now = anchor_after_commits(&db);
             let mut current = db.find_nodes_by_property("Person", "name", &alice);
             current.sort_unstable();
             let at_now = ids(&db
@@ -2860,7 +2862,6 @@ mod tests {
         #[test]
         fn future_valid_from_node_visible_currently_but_not_at_now_now() {
             let (_tmp, db) = create_test_db().unwrap();
-            let (mut clock, _guard) = inject_clock(&db);
             let alice = PropertyValue::from("FutureAlice");
 
             let future = crate::core::temporal::Timestamp::from(
@@ -2869,7 +2870,7 @@ mod tests {
             let id = db
                 .create_node_with_valid_time("Person", name_props("FutureAlice"), Some(future))
                 .unwrap();
-            let now = anchor_between_commits(&mut clock);
+            let now = anchor_after_commits(&db);
 
             // Current-state lookup sees the future-dated node...
             assert_eq!(
@@ -2906,7 +2907,6 @@ mod tests {
         #[test]
         fn backdated_valid_time_distinguishes_the_two_dimensions() {
             let (_tmp, db) = create_test_db().unwrap();
-            let (mut clock, _guard) = inject_clock(&db);
             let alice = PropertyValue::from("BackdatedAlice");
 
             // valid_from one hour in the past; the write itself is recorded now.
@@ -2915,11 +2915,11 @@ mod tests {
             );
             // A wall-clock instant after v0 but strictly before the write is
             // recorded: inside the valid interval, outside the tx interval.
-            let t_mid = anchor_between_commits(&mut clock);
+            let t_mid = anchor_after_commits(&db);
             let id = db
                 .create_node_with_valid_time("Person", name_props("BackdatedAlice"), Some(v0))
                 .unwrap();
-            let t_now = anchor_between_commits(&mut clock);
+            let t_now = anchor_after_commits(&db);
 
             // (valid = t_mid, tx = t_now): valid interval [v0, inf) contains
             // t_mid and the write is recorded by t_now -> FOUND. With the
@@ -2960,9 +2960,8 @@ mod tests {
         #[test]
         fn unknown_label_or_property_key_returns_empty_not_error() {
             let (_tmp, db) = create_test_db().unwrap();
-            let (mut clock, _guard) = inject_clock(&db);
             let _ = db.create_node("Person", name_props("Alice")).unwrap();
-            let now = anchor_between_commits(&mut clock);
+            let now = anchor_after_commits(&db);
 
             assert!(
                 db.find_nodes_at_time("NeverInternedLabel3236", now, now)
@@ -2987,7 +2986,6 @@ mod tests {
         #[test]
         fn results_are_sorted_by_node_id_for_stable_pagination() {
             let (_tmp, db) = create_test_db().unwrap();
-            let (mut clock, _guard) = inject_clock(&db);
 
             // Many nodes with delete + recreate interleaving, so the
             // sorted-order contract is pinned across a realistic churn
@@ -3013,7 +3011,7 @@ mod tests {
             }
             expected.sort_unstable();
 
-            let now = anchor_between_commits(&mut clock);
+            let now = anchor_after_commits(&db);
             let found = ids(&db.find_nodes_at_time("Person", now, now).unwrap());
             assert_eq!(found, expected, "results must be sorted by node id");
         }
@@ -3042,14 +3040,13 @@ mod tests {
                 )
                 .build();
             let (_tmp, db) = create_test_db_with_config(config).unwrap();
-            let (mut clock, _guard) = inject_clock(&db);
 
             let mut created = Vec::new();
             for _ in 0..64 {
                 created.push(db.create_node("Person", name_props("Alice")).unwrap());
             }
             created.sort_unstable();
-            let now = anchor_between_commits(&mut clock);
+            let now = anchor_after_commits(&db);
 
             let found = db.find_nodes_at_time("Person", now, now).unwrap();
             assert!(
@@ -3073,11 +3070,9 @@ mod tests {
             assert!(filtered.sampled, "property path shares the same cap");
 
             // A db whose history fits under the cap never reports sampling.
-            // (Created under the same injected clock, so its commits and the
-            // anchor below share one deterministic timeline.)
             let (_tmp2, small_db) = create_test_db().unwrap();
             let id = small_db.create_node("Person", name_props("Alice")).unwrap();
-            let now2 = anchor_between_commits(&mut clock);
+            let now2 = anchor_after_commits(&small_db);
             let small = small_db.find_nodes_at_time("Person", now2, now2).unwrap();
             assert!(!small.sampled);
             assert_eq!(ids(&small), vec![id]);
