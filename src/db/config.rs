@@ -46,16 +46,26 @@ fn bootstrap_timestamp(
 
     let historical = historical.read();
     for node_version in historical.get_node_versions().values() {
-        let commit_ts = node_version.temporal.transaction_time().start();
-        if commit_ts > max_timestamp {
-            max_timestamp = commit_ts;
+        let tx_time = node_version.temporal.transaction_time();
+        if tx_time.start() > max_timestamp {
+            max_timestamp = tx_time.start();
+        }
+        // Issue #3387: restored versions carry CLOSED tx ends too. A closure
+        // stamped by a superseding version that was since cold-migrated may
+        // exceed every restored tx start; fold it in so the HLC seed stays
+        // monotonic under clock skew.
+        if !tx_time.is_current() && tx_time.end() > max_timestamp {
+            max_timestamp = tx_time.end();
         }
     }
 
     for edge_version in historical.get_edge_versions().values() {
-        let commit_ts = edge_version.temporal.transaction_time().start();
-        if commit_ts > max_timestamp {
-            max_timestamp = commit_ts;
+        let tx_time = edge_version.temporal.transaction_time();
+        if tx_time.start() > max_timestamp {
+            max_timestamp = tx_time.start();
+        }
+        if !tx_time.is_current() && tx_time.end() > max_timestamp {
+            max_timestamp = tx_time.end();
         }
     }
 
@@ -70,6 +80,32 @@ fn seed_startup_current_timestamp(db: &AletheiaDB) -> Result<()> {
         })
     })?;
     *current_timestamp = startup_timestamp;
+    Ok(())
+}
+
+/// Seed the WAL LSN allocator from durable state at startup (Issue #3420).
+///
+/// Scans the WAL directory for the maximum LSN present in existing segments
+/// and moves the allocator to `max + 1` (never backwards). Must run after WAL
+/// construction and **before any write is accepted**; otherwise a restarted
+/// process starts allocating at LSN 1 again, producing duplicate LSNs across
+/// segments and writes that land below the index manifest LSN — which the
+/// next startup's differential replay then silently skips.
+///
+/// Seeding policy lives here (in the database startup path), not inside the
+/// WAL constructor, so WAL-crate users keep full control over allocator state.
+fn seed_lsn_allocator_from_segments(
+    wal: &ConcurrentWalSystem,
+    cipher: Option<&Arc<dyn crate::encryption::cipher::Cipher>>,
+) -> Result<()> {
+    if let Some(max_lsn) =
+        crate::storage::wal::segment_reader::max_lsn_in_dir(wal.wal_dir(), cipher)?
+    {
+        let next = crate::storage::wal::LSN(max_lsn.0.saturating_add(1));
+        if next > wal.current_lsn() {
+            wal.set_next_lsn(next);
+        }
+    }
     Ok(())
 }
 
@@ -334,10 +370,18 @@ impl AletheiaDB {
                 ),
                 durability_mode,
                 write_buffer_size: config.wal.write_buffer_size,
-                wal_cipher,
+                wal_cipher: wal_cipher.clone(),
             };
 
             let wal = Arc::new(ConcurrentWalSystem::new(wal_system_config)?);
+
+            // Issue #3420: seed the LSN allocator past every LSN already durable
+            // in existing WAL segments, BEFORE any write is accepted. Without
+            // this, a restarted process re-allocates LSNs starting at 1,
+            // breaking LSN total ordering across segments and placing new
+            // writes below the index manifest LSN (so the next startup's
+            // differential replay silently skips them).
+            seed_lsn_allocator_from_segments(&wal, wal_cipher.as_ref())?;
 
             // Create persistence manager if enabled
             let persistence_manager = if config.persistence.enabled {
@@ -401,6 +445,20 @@ impl AletheiaDB {
                         &db.version_id_gen,
                     );
 
+                // Issue #3420: the manifest LSN is a second durability floor for
+                // the allocator. Normally the segment scan above already seeded
+                // the allocator higher, but if the WAL was truncated below the
+                // manifest LSN (e.g. LSN-based truncation after cold-storage
+                // migration), the segments alone under-seed it. The manifest
+                // stores the next-to-allocate LSN captured at snapshot time
+                // (see `IndexManifest::lsn`), so it is itself a valid "next".
+                if let Some(lsn) = loaded_lsn {
+                    let manifest_floor = crate::storage::wal::LSN(lsn);
+                    if manifest_floor > db.wal.current_lsn() {
+                        db.wal.set_next_lsn(manifest_floor);
+                    }
+                }
+
                 // Initialize tracker LSNs from the loaded manifest
                 if let Some(ref tracker) = persistence_tracker
                     && let Some(lsn) = loaded_lsn
@@ -426,8 +484,19 @@ impl AletheiaDB {
 
                 // Replay WAL entries that occurred after the persisted snapshot
                 // This ensures no data loss if the WAL is ahead of the indexes (e.g. crash before persist)
+                //
+                // Issue #3419: the manifest LSN is the NEXT-to-allocate LSN
+                // captured *before* the snapshot was taken (see
+                // `IndexManifest::lsn`). Entries with LSN < manifest.lsn are
+                // guaranteed to be in the snapshot; entries with LSN >=
+                // manifest.lsn may or may not be. Replay therefore starts AT
+                // the manifest LSN (inclusive) — the previous `.next()` here
+                // skipped the first post-persist write entirely — and the
+                // replay itself is idempotent for already-applied entries
+                // (see the re-application guards in
+                // `replay_wal_into_storage_with_constraints`).
                 let start_lsn = match loaded_lsn {
-                    Some(lsn) => crate::storage::wal::LSN(lsn).next(),
+                    Some(lsn) => crate::storage::wal::LSN(lsn),
                     None => {
                         // Safety check: if we have data but no LSN, replaying from initial is dangerous
                         // as it might overwrite existing data with old WAL entries or duplicate IDs.
@@ -609,6 +678,12 @@ impl AletheiaDB {
             };
 
             let wal = Arc::new(ConcurrentWalSystem::new(wal_system_config)?);
+
+            // Issue #3420: seed the LSN allocator from existing WAL segments
+            // before any write is accepted (see with_unified_config for details).
+            // This construction path never configures a WAL cipher, matching
+            // its (pre-existing) cipher-less read path.
+            seed_lsn_allocator_from_segments(&wal, None)?;
 
             let db = AletheiaDB {
                 current: Arc::new(CurrentStorage::new()),
@@ -845,26 +920,21 @@ mod ephemeral_tests {
                 .expect("background thread running");
             let _ = handle.join();
 
-            // persist_all_indexes records safe_lsn = wal.current_lsn() which is the
-            // NEXT-to-allocate LSN (call it L).  On the second session startup,
-            // start_lsn = L+1.  Any WAL entry at LSN < L+1 is below the replay window
-            // and will NOT be recovered from the incremental replay.
-            //
-            // To place the edge inside the replay window we first allocate LSN=L with a
-            // throwaway node (key "x" is unique and does not conflict with "a"/"b").
-            // The edge then receives LSN=L+1 and will be seen by the incremental replay.
-            db.create_node("P", PropertyMapBuilder::new().insert("k", "x").build())
-                .expect("dummy node must succeed (key 'x' not yet reserved)");
-
-            // Edge at LSN=L+1 — will be in the incremental replay window on restart.
+            // persist_all_indexes records safe_lsn = wal.current_lsn(), the
+            // NEXT-to-allocate LSN (call it L).  The edge below receives LSN=L
+            // — the exact Issue #3419 boundary.  Startup replays from the
+            // manifest LSN INCLUSIVE, so the very first post-persist write is
+            // recovered without burning a throwaway LSN (the old workaround
+            // that this test now guards against regressing).
             db.write(|tx| tx.create_edge(n1, n2, "R", PropertyMapBuilder::new().build()))
                 .unwrap();
             (n1, n2)
         };
         let _ = (n1, n2);
 
-        // Session 2: startup loads snapshot (n1+n2 only, no edge, no dummy) then replays
-        // incremental WAL from LSN L+1 (edge) → max_edge_id = Some(_) → line 435 fires.
+        // Session 2: startup loads snapshot (n1+n2 only, no edge) then replays
+        // incremental WAL from LSN L INCLUSIVE (the edge, Issue #3419) →
+        // max_edge_id = Some(_) → the edge_id_gen bump fires.
         {
             let db = AletheiaDB::with_unified_config(make_config()).unwrap();
             assert_eq!(
@@ -951,5 +1021,72 @@ mod ephemeral_tests {
                 recorded_edge_id,
             );
         }
+    }
+
+    /// Issue #3387: the startup HLC seed must fold restored CLOSED
+    /// transaction-time ends into the max, not just tx starts -- a closure
+    /// stamped by a since-cold-migrated superseding version can exceed
+    /// every restored tx start.
+    #[test]
+    fn bootstrap_timestamp_folds_closed_tx_ends() {
+        use crate::core::GLOBAL_INTERNER;
+        use crate::core::hlc::HybridTimestamp;
+        use crate::core::id::{EdgeId, NodeId, VersionId};
+        use crate::core::property::PropertyMapBuilder;
+        use crate::storage::historical::HistoricalStorage;
+        use parking_lot::RwLock;
+
+        let current = CurrentStorage::new();
+        let historical = RwLock::new(HistoricalStorage::new());
+
+        let now = crate::core::temporal::time::now().wallclock();
+        let node_start = HybridTimestamp::new(now + 3_600_000_000, 0).unwrap(); // now + 1h
+        let node_end = HybridTimestamp::new(now + 7_200_000_000, 3).unwrap(); // now + 2h
+        let edge_start = HybridTimestamp::new(now + 1_800_000_000, 0).unwrap();
+        let edge_end = HybridTimestamp::new(now + 10_800_000_000, 5).unwrap(); // now + 3h (max)
+
+        {
+            let mut hist = historical.write();
+            let label = GLOBAL_INTERNER.intern("BootstrapFold").unwrap();
+            let node_id = NodeId::new(1).unwrap();
+            let node_vid = VersionId::new(1).unwrap();
+            hist.add_node_version(
+                node_id,
+                node_vid,
+                node_start,
+                node_start,
+                label,
+                PropertyMapBuilder::new().build(),
+                false,
+            )
+            .unwrap();
+            hist.close_node_version_transaction_time(node_vid, node_end)
+                .unwrap();
+
+            let edge_label = GLOBAL_INTERNER.intern("BOOTSTRAP_FOLD").unwrap();
+            let edge_id = EdgeId::new(1).unwrap();
+            let edge_vid = VersionId::new(2).unwrap();
+            hist.add_edge_version(
+                edge_id,
+                edge_vid,
+                edge_start,
+                edge_start,
+                edge_label,
+                NodeId::new(1).unwrap(),
+                NodeId::new(2).unwrap(),
+                PropertyMapBuilder::new().build(),
+                false,
+            )
+            .unwrap();
+            hist.close_edge_version_transaction_time(edge_vid, edge_end)
+                .unwrap();
+        }
+
+        let seed = bootstrap_timestamp(&current, &historical);
+        assert_eq!(
+            seed, edge_end,
+            "seed must be the max over restored tx starts AND closed tx ends \
+             (here the edge's closed end, incl. its logical component)"
+        );
     }
 }

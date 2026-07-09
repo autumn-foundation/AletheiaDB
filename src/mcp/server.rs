@@ -151,8 +151,10 @@ use crate::db::AletheiaDB;
 use crate::index::vector::{DistanceMetric, HnswConfig};
 use crate::query::executor::{EntityId as ResultEntityId, EntityResult};
 
+use super::auth::{McpAuthConfig, SessionAuth};
 use super::error::{McpError, McpErrorCode, query_kind_classification};
 use super::tools::*;
+use crate::auth::{AuthMode, Principal};
 
 // ============================================================================
 // Resource Limits (to prevent DoS attacks)
@@ -205,10 +207,20 @@ const TRANSACTION_TIME_NOW: &str = "now";
 #[derive(Clone)]
 pub struct AletheiaMcpServer {
     db: Arc<AletheiaDB>,
+    auth: SessionAuth,
 }
 
 impl AletheiaMcpServer {
     /// Create a new MCP server wrapping a AletheiaDB instance.
+    ///
+    /// # Authentication
+    ///
+    /// This constructor is the **embedded/programmatic** entry point and is
+    /// deliberately source-compatible with pre-#3350 behavior: it runs in
+    /// anonymous mode (no authentication — a Rust caller holding the
+    /// `Arc<AletheiaDB>` can already do anything the tools can). Serving
+    /// deployments should use [`with_auth`](Self::with_auth); the
+    /// `aletheia-mcp` binary requires authentication by default.
     ///
     /// # Arguments
     ///
@@ -228,7 +240,57 @@ impl AletheiaMcpServer {
     /// # }
     /// ```
     pub fn new(db: Arc<AletheiaDB>) -> Self {
-        Self { db }
+        Self {
+            db,
+            auth: SessionAuth::Anonymous,
+        }
+    }
+
+    /// Create an MCP server with authentication and role-based
+    /// authorization (Issue #3350, Phase 2).
+    ///
+    /// The MCP transport is stdio, so the credential is **session-scoped**:
+    /// supplied once at construction (see
+    /// [`McpAuthConfig::with_credential`]) and re-verified against the
+    /// [`AuthStore`](crate::auth::AuthStore) on every tool call, so a
+    /// revocation in the (possibly HTTP-shared) store takes effect on the
+    /// next call.
+    ///
+    /// Behavior per [`AuthMode`]:
+    ///
+    /// - `Required` + valid credential → every tool call is authorized
+    ///   against the principal's role (see the matrix in
+    ///   `docs/guides/access-control-matrix.md`).
+    /// - `Required` + missing/invalid/revoked credential → the server still
+    ///   serves, but **every** tool call (including unknown tool names)
+    ///   returns the uniform `UNAUTHENTICATED` error.
+    /// - `Anonymous` → full access, exactly like [`new`](Self::new); a
+    ///   prominent warning is emitted on stderr (never stdout — that is the
+    ///   MCP protocol channel).
+    pub fn with_auth(db: Arc<AletheiaDB>, auth: McpAuthConfig) -> Self {
+        if auth.mode() == AuthMode::Anonymous {
+            // PROMINENT warning: the operator explicitly opted out of auth.
+            // stderr only — stdout carries the MCP protocol.
+            eprintln!(
+                "WARNING: AUTHENTICATION IS DISABLED (auth mode: anonymous). \
+                 Every MCP tool call has full, unauthenticated access to the \
+                 database. Do not expose this server to untrusted callers."
+            );
+        }
+        Self {
+            db,
+            auth: SessionAuth::from(auth),
+        }
+    }
+
+    /// The verified session principal, if any.
+    ///
+    /// Re-verifies the session credential against the store, so a revoked
+    /// key yields `None`. Always `None` in anonymous mode. Principal `id`
+    /// and `name` are safe to log or stamp into provenance; key material
+    /// never reaches this type.
+    pub fn session_principal(&self) -> Option<Principal> {
+        self.auth.principal()
     }
 
     /// Get a reference to the underlying database.
@@ -1070,31 +1132,64 @@ impl AletheiaMcpServer {
     }
 
     /// Validate and convert an optional MCP [`ProvenanceRequest`] into a
-    /// core [`Provenance`](crate::core::provenance::Provenance).
+    /// core [`Provenance`](crate::core::provenance::Provenance), stamping
+    /// the authenticated session principal (Issue #3350).
     ///
     /// Mirrors [`parse_opt_timestamp`](Self::parse_opt_timestamp): returns
     /// `Err(invalid_argument(...))` with a clear message when `confidence` is out
     /// of `[0.0, 1.0]` (Issue #3224), rather than a generic deserialization
     /// error. An entirely empty bundle (all fields omitted) is normalized to
     /// `None` -- never persisted as a fabricated empty object.
+    ///
+    /// **Principal stamping**: when the session has a verified principal
+    /// (see [`session_principal`](Self::session_principal)), its *name* is
+    /// recorded as the bundle's `principal` field -- composing with (never
+    /// replacing) whatever `source`/`confidence`/`note`/`correlation_id`
+    /// the caller supplied. A write with no caller-supplied provenance
+    /// still records a principal-only bundle. The principal is
+    /// server-stamped from the verified credential; [`ProvenanceRequest`]
+    /// deliberately has no `principal` field, so callers cannot forge it.
+    /// Anonymous-mode sessions (and the embedded `new()` constructor)
+    /// record no principal -- the field is absent, not an empty string.
     fn parse_opt_provenance(
         &self,
         value: Option<crate::mcp::tools::ProvenanceRequest>,
     ) -> std::result::Result<Option<Provenance>, CallToolResult> {
-        let Some(req) = value else {
-            return Ok(None);
-        };
-        let provenance =
-            Provenance::from_parts(req.source, req.confidence, req.note, req.correlation_id)
+        let principal = self.session_principal().map(|p| p.name);
+        let supplied = match value {
+            Some(req) => {
+                let provenance = Provenance::from_parts(
+                    req.source,
+                    req.confidence,
+                    req.note,
+                    req.correlation_id,
+                    None,
+                )
                 .map_err(|e| {
                     self.invalid_argument(&format!(
                         "Invalid provenance: confidence must be between 0.0 and 1.0 ({e})"
                     ))
                 })?;
-        if provenance.is_empty() {
-            return Ok(None);
-        }
-        Ok(Some(provenance))
+                // Normalize an all-empty caller bundle away *before*
+                // stamping, so "caller sent {}" and "caller sent nothing"
+                // behave identically.
+                if provenance.is_empty() {
+                    None
+                } else {
+                    Some(provenance)
+                }
+            }
+            None => None,
+        };
+        Ok(match (supplied, principal) {
+            (Some(p), Some(name)) => Some(p.with_principal(name)),
+            (Some(p), None) => Some(p),
+            // A principal-only bundle cannot fail validation (only
+            // `confidence` is validated, and it is unset here); `.ok()`
+            // keeps this non-panicking regardless.
+            (None, Some(name)) => Provenance::builder().principal(name).build().ok(),
+            (None, None) => None,
+        })
     }
 
     /// Parse an optional transaction time, returning the current time if not specified.
@@ -3967,7 +4062,20 @@ impl AletheiaMcpServer {
     /// registry-driven error-shape test iterates [`tool_definitions`] and
     /// calls this for each tool, guaranteeing new tools are automatically
     /// covered by the structured-error contract (Issue #3234).
+    ///
+    /// # Authentication & authorization (Issue #3350)
+    ///
+    /// This is the single enforcement point for the MCP surface: the session
+    /// credential is (re-)verified and the tool's access class checked
+    /// against the principal's role **before** any handler runs — including
+    /// before tool-name resolution, so an unknown tool name cannot bypass
+    /// authentication or probe the tool inventory. The per-tool public Rust
+    /// methods (e.g. [`get_node`](Self::get_node)) are the embedded API and
+    /// are not gated — a Rust caller already holds the `Arc<AletheiaDB>`.
     pub(crate) fn dispatch_tool(&self, name: &str, args: serde_json::Value) -> CallToolResult {
+        if let Err(err) = self.auth.authorize_tool(name) {
+            return self.error_result(err);
+        }
         match name {
             "get_node" => self.handle_get_node(args),
             "create_node" => self.handle_create_node(args),
@@ -4027,85 +4135,10 @@ fn make_input_schema<T: rmcp::schemars::JsonSchema>()
     }
 }
 
-/// Clauses that would mutate state. The read-only `query` tool rejects any
-/// statement containing one of these (as a whole token) before execution.
-const MUTATING_KEYWORDS: &[&str] = &[
-    "CREATE", "MERGE", "SET", "DELETE", "REMOVE", "DETACH", "DROP", "CALL", "FOREACH", "LOAD",
-];
-
-/// Scan a query string for a mutating clause, ignoring string-literal contents
-/// (so `{name: 'DELETE'}` does not trip the guard), single-line `//` comments,
-/// node labels (`:CALL`), and property keys (`n.set`). Returns the offending
-/// keyword so the error can name it.
-fn detect_mutating_clause(query: &str) -> Option<&'static str> {
-    // First pass: strip string literals (single and double quoted, with backslash
-    // escapes) and single-line comments (//) into a sanitized string.
-    let mut sanitized = String::with_capacity(query.len());
-    let mut quote: Option<char> = None;
-    let mut escaped = false;
-    let mut chars = query.chars().peekable();
-    while let Some(c) = chars.next() {
-        if escaped {
-            escaped = false;
-            continue;
-        }
-        match quote {
-            Some(q) => {
-                if c == '\\' {
-                    escaped = true;
-                } else if c == q {
-                    quote = None;
-                }
-                // Inside a string literal — don't emit characters.
-            }
-            None => {
-                if c == '\'' || c == '"' {
-                    quote = Some(c);
-                } else if c == '/' && chars.peek() == Some(&'/') {
-                    // Single-line comment: skip to end of line.
-                    for next in chars.by_ref() {
-                        if next == '\n' {
-                            break;
-                        }
-                    }
-                } else {
-                    sanitized.push(c);
-                }
-            }
-        }
-    }
-
-    // Second pass: tokenise and match, but skip tokens immediately preceded by
-    // ':' or '.' so that node labels (`:CALL`) and property keys (`n.set`) do
-    // not trigger a false positive.
-    let mut last_non_ws: Option<char> = None;
-    let mut current_token = String::new();
-
-    for c in sanitized.chars().chain(std::iter::once(' ')) {
-        if c.is_alphanumeric() || c == '_' {
-            current_token.push(c);
-        } else {
-            if !current_token.is_empty() {
-                let preceded_by_label_or_prop =
-                    last_non_ws == Some(':') || last_non_ws == Some('.');
-                if !preceded_by_label_or_prop
-                    && let Some(kw) = MUTATING_KEYWORDS
-                        .iter()
-                        .copied()
-                        .find(|kw| kw.eq_ignore_ascii_case(&current_token))
-                {
-                    return Some(kw);
-                }
-                current_token.clear();
-            }
-            if !c.is_whitespace() {
-                last_non_ws = Some(c);
-            }
-        }
-    }
-
-    None
-}
+// The read-only statement guard (`detect_mutating_clause`) moved to
+// `crate::query::read_only` so the HTTP surface can reuse it for RBAC
+// classification (Issue #3350). Re-imported here to keep call sites stable.
+use crate::query::read_only::detect_mutating_clause;
 
 /// Column metadata describing the structured shape of each `query` result row.
 ///
