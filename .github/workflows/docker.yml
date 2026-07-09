@@ -1,14 +1,18 @@
 name: Docker Image
 
-# Build and publish the `aletheiadb` container image to GitHub Container
-# Registry. Triggers:
-#   - push to trunk      -> `:trunk` and `:sha-<commit>`
-#   - semver tag vX.Y.Z  -> `:vX.Y.Z`, `:X.Y`, `:latest`, and `:sha-<commit>`
-#   - manual workflow_dispatch (for rebuilding without a new commit/tag)
+# Build, test, and publish the `aletheiadb` container image (HTTP + MCP
+# server) to GitHub Container Registry.
 #
-# Images are linux/amd64 for the first pass. linux/arm64 is easy to add to
-# the platforms list once someone actually asks for it; it doubles build
-# time without any current consumer, so we keep it off by default.
+# Triggers:
+#   - pull_request touching container files -> smoke + durability + scan ONLY
+#     (path-filtered, so it never runs on the normal PR required path)
+#   - push to trunk        -> smoke, then publish `:trunk` + `:sha-<commit>`
+#   - semver tag vX.Y.Z    -> smoke, then publish `:vX.Y.Z`, `:X.Y`, `:latest`,
+#                             `:sha-<commit>` (multi-arch amd64 + arm64)
+#   - manual workflow_dispatch
+#
+# The publish job is gated on the smoke job (AC #8: test the built artifact
+# before publishing) and is skipped entirely for pull_request events.
 
 on:
   push:
@@ -16,6 +20,15 @@ on:
       - trunk
     tags:
       - 'v*.*.*'
+  pull_request:
+    # Path filter keeps this OFF the required PR path: it only runs when the
+    # container packaging itself changes.
+    paths:
+      - 'Dockerfile'
+      - 'docker-compose.yml'
+      - '.dockerignore'
+      - '.github/workflows/docker.yml'
+      - 'scripts/docker-smoke.sh'
   workflow_dispatch:
 
 env:
@@ -23,16 +36,64 @@ env:
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
+  # ── Build the image once, smoke + durability test it, scan it ──────────
+  smoke-test:
+    name: Build, smoke-test and scan image
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/share/powershell /usr/share/swift /usr/local/.ghcup \
+            /usr/lib/jvm "$AGENT_TOOLSDIRECTORY" || true
+          df -h
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build image (amd64, load into local daemon)
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ./Dockerfile
+          load: true
+          tags: aletheiadb:ci
+          build-args: |
+            ALETHEIADB_VERSION=${{ github.ref_name }}
+            VCS_REF=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke + durability test
+        run: ./scripts/docker-smoke.sh aletheiadb:ci
+
+      - name: Scan image for CRITICAL CVEs
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: aletheiadb:ci
+          format: table
+          severity: CRITICAL
+          ignore-unfixed: true
+          exit-code: '1'
+
+  # ── Publish (never on pull_request; gated on smoke-test) ───────────────
   build-and-push:
     name: Build and push Docker image
+    needs: smoke-test
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
-
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+
+      - name: Set up QEMU (arm64 emulation)
+        uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -56,15 +117,18 @@ jobs:
             type=sha,prefix=sha-,format=short
             type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
 
-      - name: Build and push
+      - name: Build and push (multi-arch)
         uses: docker/build-push-action@v7
         with:
           context: .
           file: ./Dockerfile
           push: true
-          platforms: linux/amd64
+          platforms: linux/amd64,linux/arm64
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            ALETHEIADB_VERSION=${{ steps.meta.outputs.version }}
+            VCS_REF=${{ github.sha }}
           # BuildKit cache keyed on the GitHub Actions cache backend. Keeps
           # Cargo's dependency compile cost (usearch, tokio, autumn, etc.)
           # off the critical path for incremental builds.

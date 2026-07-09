@@ -58,6 +58,31 @@ See the [Getting Started guide](docs/guides/getting-started.md) for a full walkt
 
 ---
 
+## Run with Docker
+
+No Rust toolchain required. The official image ships both the HTTP server
+(default) and the stdio MCP server.
+
+```bash
+# One command brings up a durable server on localhost:1963 with a persistent
+# named volume. Both secrets are required — the server refuses to start
+# without them (auth is on by default; see the Security Quickstart).
+export ALETHEIADB_BOOTSTRAP_ADMIN_KEY="$(openssl rand -base64 32)"
+export AUTUMN_SECURITY__SIGNING_SECRET="$(openssl rand -hex 32)"
+docker compose up -d
+
+# First query
+curl -H "x-api-key: $ALETHEIADB_BOOTSTRAP_ADMIN_KEY" http://localhost:1963/status
+```
+
+Data lives under a declared volume at `/var/lib/aletheiadb` (`wal/` +
+`indexes/`); kill-and-restart with the volume attached recovers via WAL
+replay with zero data loss. See the
+[Docker guide](docs/guides/docker.md) for image details, MCP mode, env vars,
+graceful shutdown, and measured footprint/startup.
+
+---
+
 ## Hybrid Queries
 
 Graph traversal, vector ranking, and temporal snapshots compose into a single
@@ -143,6 +168,7 @@ aletheiadb = { version = "0.1", features = ["nova", "semantic-search"] }
 | [Core Concepts](docs/guides/core-concepts.md) | Bi-temporal model, nodes, edges, WAL, vector search |
 | [Installation](docs/guides/installation.md) | Prerequisites, feature flags, building from source |
 | [Getting Started](docs/guides/getting-started.md) | First database, CRUD, time-travel, hybrid queries |
+| [Docker](docs/guides/docker.md) | Container image, compose quickstart, MCP mode, volumes |
 | [Persistence Guide](docs/guides/PERSISTENCE.md) | WAL, index persistence, cold storage |
 | [Tiered Storage](docs/guides/tiered-storage-guide.md) | Unlimited history with hot/warm/cold tiers |
 | [Hybrid Query Guide](docs/guides/hybrid-query-guide.md) | Graph + vector + temporal query API |
