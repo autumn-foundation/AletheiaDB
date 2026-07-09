@@ -46,16 +46,26 @@ fn bootstrap_timestamp(
 
     let historical = historical.read();
     for node_version in historical.get_node_versions().values() {
-        let commit_ts = node_version.temporal.transaction_time().start();
-        if commit_ts > max_timestamp {
-            max_timestamp = commit_ts;
+        let tx_time = node_version.temporal.transaction_time();
+        if tx_time.start() > max_timestamp {
+            max_timestamp = tx_time.start();
+        }
+        // Issue #3387: restored versions carry CLOSED tx ends too. A closure
+        // stamped by a superseding version that was since cold-migrated may
+        // exceed every restored tx start; fold it in so the HLC seed stays
+        // monotonic under clock skew.
+        if !tx_time.is_current() && tx_time.end() > max_timestamp {
+            max_timestamp = tx_time.end();
         }
     }
 
     for edge_version in historical.get_edge_versions().values() {
-        let commit_ts = edge_version.temporal.transaction_time().start();
-        if commit_ts > max_timestamp {
-            max_timestamp = commit_ts;
+        let tx_time = edge_version.temporal.transaction_time();
+        if tx_time.start() > max_timestamp {
+            max_timestamp = tx_time.start();
+        }
+        if !tx_time.is_current() && tx_time.end() > max_timestamp {
+            max_timestamp = tx_time.end();
         }
     }
 
@@ -1011,5 +1021,72 @@ mod ephemeral_tests {
                 recorded_edge_id,
             );
         }
+    }
+
+    /// Issue #3387: the startup HLC seed must fold restored CLOSED
+    /// transaction-time ends into the max, not just tx starts -- a closure
+    /// stamped by a since-cold-migrated superseding version can exceed
+    /// every restored tx start.
+    #[test]
+    fn bootstrap_timestamp_folds_closed_tx_ends() {
+        use crate::core::GLOBAL_INTERNER;
+        use crate::core::hlc::HybridTimestamp;
+        use crate::core::id::{EdgeId, NodeId, VersionId};
+        use crate::core::property::PropertyMapBuilder;
+        use crate::storage::historical::HistoricalStorage;
+        use parking_lot::RwLock;
+
+        let current = CurrentStorage::new();
+        let historical = RwLock::new(HistoricalStorage::new());
+
+        let now = crate::core::temporal::time::now().wallclock();
+        let node_start = HybridTimestamp::new(now + 3_600_000_000, 0).unwrap(); // now + 1h
+        let node_end = HybridTimestamp::new(now + 7_200_000_000, 3).unwrap(); // now + 2h
+        let edge_start = HybridTimestamp::new(now + 1_800_000_000, 0).unwrap();
+        let edge_end = HybridTimestamp::new(now + 10_800_000_000, 5).unwrap(); // now + 3h (max)
+
+        {
+            let mut hist = historical.write();
+            let label = GLOBAL_INTERNER.intern("BootstrapFold").unwrap();
+            let node_id = NodeId::new(1).unwrap();
+            let node_vid = VersionId::new(1).unwrap();
+            hist.add_node_version(
+                node_id,
+                node_vid,
+                node_start,
+                node_start,
+                label,
+                PropertyMapBuilder::new().build(),
+                false,
+            )
+            .unwrap();
+            hist.close_node_version_transaction_time(node_vid, node_end)
+                .unwrap();
+
+            let edge_label = GLOBAL_INTERNER.intern("BOOTSTRAP_FOLD").unwrap();
+            let edge_id = EdgeId::new(1).unwrap();
+            let edge_vid = VersionId::new(2).unwrap();
+            hist.add_edge_version(
+                edge_id,
+                edge_vid,
+                edge_start,
+                edge_start,
+                edge_label,
+                NodeId::new(1).unwrap(),
+                NodeId::new(2).unwrap(),
+                PropertyMapBuilder::new().build(),
+                false,
+            )
+            .unwrap();
+            hist.close_edge_version_transaction_time(edge_vid, edge_end)
+                .unwrap();
+        }
+
+        let seed = bootstrap_timestamp(&current, &historical);
+        assert_eq!(
+            seed, edge_end,
+            "seed must be the max over restored tx starts AND closed tx ends \
+             (here the edge's closed end, incl. its logical component)"
+        );
     }
 }

@@ -58,7 +58,7 @@ use crate::storage::index_persistence::{
         GraphIndexData, GraphIndexManifestEntry, IndexManifest, StringInternerManifestEntry,
         TemporalIndexData, TemporalIndexManifestEntry,
     },
-    graph::{persist_property_map, restore_property_map},
+    graph::restore_property_map,
 };
 use crate::storage::redb_cold_storage::RedbColdStorage;
 use crate::storage::wal::LSN;
@@ -77,6 +77,120 @@ fn persistence_err(e: IndexPersistenceError) -> crate::core::error::Error {
         reason: e.to_string(),
     }
     .into()
+}
+
+/// Reconstruct the full property state of the version PRECEDING `version`,
+/// using only versions captured in the checkpoint snapshot (Issue #3387).
+///
+/// Used to materialize sparse vector deltas at checkpoint-extract time:
+/// walks `prev_version` links back to the nearest anchor, then re-applies
+/// the intervening deltas oldest-first. Fails (rather than persisting a
+/// silently-lossy entry) if the chain leaves the snapshot (e.g. the base
+/// was cold-migrated) or carries no anchor.
+fn reconstruct_node_base_properties(
+    by_id: &std::collections::HashMap<VersionId, Arc<crate::core::version::NodeVersion>>,
+    version: &crate::core::version::NodeVersion,
+) -> Result<crate::core::property::PropertyMap> {
+    let chain_err = |reason: String| StorageError::CheckpointError { reason };
+
+    let mut chain: Vec<&Arc<crate::core::version::NodeVersion>> = Vec::new();
+    let mut cur = version.prev_version;
+    while let Some(vid) = cur {
+        if chain.len() >= crate::storage::historical::MAX_RECONSTRUCTION_DEPTH {
+            return Err(chain_err(format!(
+                "Version chain for node {} exceeds max reconstruction depth \
+                 while materializing sparse vector deltas",
+                version.node_id
+            ))
+            .into());
+        }
+        let v = by_id.get(&vid).ok_or_else(|| {
+            chain_err(format!(
+                "Cannot materialize sparse vector delta for node version {}: \
+                 base version {} is not in the checkpoint snapshot (cold-migrated?)",
+                version.id, vid
+            ))
+        })?;
+        chain.push(v);
+        if v.is_anchor() {
+            break;
+        }
+        cur = v.prev_version;
+    }
+
+    let anchor_props = match chain.last().map(|v| &v.data) {
+        Some(VersionData::Anchor { properties, .. }) => properties.clone(),
+        _ => {
+            return Err(chain_err(format!(
+                "Cannot materialize sparse vector delta for node version {}: \
+                 no anchor found in its version chain",
+                version.id
+            ))
+            .into());
+        }
+    };
+
+    // Re-apply the deltas between the anchor and `version` oldest-first.
+    let mut props = anchor_props;
+    for v in chain.iter().rev().skip(1) {
+        if let VersionData::Delta { delta } = &v.data {
+            props = delta.apply(&props);
+        }
+    }
+    Ok(props)
+}
+
+/// Edge mirror of [`reconstruct_node_base_properties`].
+fn reconstruct_edge_base_properties(
+    by_id: &std::collections::HashMap<VersionId, Arc<crate::core::version::EdgeVersion>>,
+    version: &crate::core::version::EdgeVersion,
+) -> Result<crate::core::property::PropertyMap> {
+    let chain_err = |reason: String| StorageError::CheckpointError { reason };
+
+    let mut chain: Vec<&Arc<crate::core::version::EdgeVersion>> = Vec::new();
+    let mut cur = version.prev_version;
+    while let Some(vid) = cur {
+        if chain.len() >= crate::storage::historical::MAX_RECONSTRUCTION_DEPTH {
+            return Err(chain_err(format!(
+                "Version chain for edge {} exceeds max reconstruction depth \
+                 while materializing sparse vector deltas",
+                version.edge_id
+            ))
+            .into());
+        }
+        let v = by_id.get(&vid).ok_or_else(|| {
+            chain_err(format!(
+                "Cannot materialize sparse vector delta for edge version {}: \
+                 base version {} is not in the checkpoint snapshot (cold-migrated?)",
+                version.id, vid
+            ))
+        })?;
+        chain.push(v);
+        if v.is_anchor() {
+            break;
+        }
+        cur = v.prev_version;
+    }
+
+    let anchor_props = match chain.last().map(|v| &v.data) {
+        Some(VersionData::Anchor { properties, .. }) => properties.clone(),
+        _ => {
+            return Err(chain_err(format!(
+                "Cannot materialize sparse vector delta for edge version {}: \
+                 no anchor found in its version chain",
+                version.id
+            ))
+            .into());
+        }
+    };
+
+    let mut props = anchor_props;
+    for v in chain.iter().rev().skip(1) {
+        if let VersionData::Delta { delta } = &v.data {
+            props = delta.apply(&props);
+        }
+    }
+    Ok(props)
 }
 
 /// Configuration for checkpoint behavior.
@@ -710,166 +824,92 @@ impl CheckpointManager {
         &self,
         snapshot: &crate::storage::snapshot::HistoricalStorageSnapshot,
     ) -> Result<TemporalIndexData> {
-        use crate::core::property::PropertyMapBuilder;
         use crate::storage::index_persistence::formats::{
-            EdgeAnchorEntry, EdgeVersionEntry, NodeAnchorEntry, NodeVersionEntry,
-            PersistedVersionType,
+            EdgeAnchorEntry, NodeAnchorEntry, PersistedVersionType,
         };
-        use crate::storage::index_persistence::temporal::persist_provenance;
+        use crate::storage::index_persistence::temporal::{
+            convert_edge_version, convert_node_version, materialize_version_data_for_persistence,
+            needs_sparse_vector_materialization,
+        };
 
         let mut node_versions = Vec::with_capacity(snapshot.node_version_count());
         let mut node_anchors = Vec::with_capacity(snapshot.node_version_count());
         let mut edge_versions = Vec::with_capacity(snapshot.edge_version_count());
         let mut edge_anchors = Vec::with_capacity(snapshot.edge_version_count());
 
-        // Extract node versions from snapshot (isolated from concurrent writes)
+        // Sparse vector deltas cannot be persisted as-is (Issue #3387
+        // availability fix): materialize them against the base state
+        // reconstructed WITHIN the snapshot, in the persisted copy only.
+        // The common case (no sparse deltas) pays only this detection scan.
+        let node_by_id: std::collections::HashMap<
+            VersionId,
+            Arc<crate::core::version::NodeVersion>,
+        > = if snapshot
+            .iter_node_versions()
+            .any(|v| needs_sparse_vector_materialization(&v.data))
+        {
+            snapshot.iter_node_versions().map(|v| (v.id, v)).collect()
+        } else {
+            std::collections::HashMap::new()
+        };
+        let edge_by_id: std::collections::HashMap<
+            VersionId,
+            Arc<crate::core::version::EdgeVersion>,
+        > = if snapshot
+            .iter_edge_versions()
+            .any(|v| needs_sparse_vector_materialization(&v.data))
+        {
+            snapshot.iter_edge_versions().map(|v| (v.id, v)).collect()
+        } else {
+            std::collections::HashMap::new()
+        };
+
+        // Extract node versions from snapshot (isolated from concurrent
+        // writes). Entry conversion is delegated to the canonical
+        // `convert_node_version` so the checkpoint path persists exactly the
+        // same shape as the index-persistence save path, including the
+        // Issue #3387 tx-time closures and version chain links.
         for version_arc in snapshot.iter_node_versions() {
             let version = &*version_arc;
-            let version_id = version.id;
-            let (version_type, properties, vector_snapshot_id) = match &version.data {
-                VersionData::Anchor {
-                    properties,
-                    vector_snapshot_id,
-                } => {
-                    // Also add to anchors list
-                    node_anchors.push(NodeAnchorEntry {
-                        node_id: version.node_id.as_u64(),
-                        anchor_tx_time: version.temporal.transaction_time().start().wallclock(),
-                        full_state: persist_property_map(properties).map_err(persistence_err)?,
-                        vector_snapshot_id: vector_snapshot_id.map(|id| id as u64),
-                    });
-                    (
-                        PersistedVersionType::Anchor,
-                        persist_property_map(properties).map_err(persistence_err)?,
-                        vector_snapshot_id.map(|id| id as u64),
-                    )
-                }
-                VersionData::Delta { delta } => {
-                    // Convert delta to PropertyMap for persistence
-                    let mut builder = PropertyMapBuilder::new();
-                    for (key, value) in &delta.changed {
-                        builder = builder.insert_by_key(*key, value.clone());
-                    }
-                    let changed_props = builder.build();
-                    let removed_keys: Vec<u32> = delta
-                        .removed
-                        .iter()
-                        .map(|k: &crate::core::interning::InternedString| k.as_u32())
-                        .collect();
-
-                    (
-                        PersistedVersionType::Delta {
-                            base_anchor_tx: version.temporal.transaction_time().start().wallclock(),
-                            base_anchor_tx_logical: version
-                                .temporal
-                                .transaction_time()
-                                .start()
-                                .logical(),
-                            removed_keys,
-                        },
-                        persist_property_map(&changed_props).map_err(persistence_err)?,
-                        None,
-                    )
-                }
+            let entry = if needs_sparse_vector_materialization(&version.data) {
+                let base = reconstruct_node_base_properties(&node_by_id, version)?;
+                let mut persisted = version.clone();
+                persisted.data = materialize_version_data_for_persistence(&version.data, &base)
+                    .map_err(persistence_err)?;
+                convert_node_version(&persisted).map_err(persistence_err)?
+            } else {
+                convert_node_version(version).map_err(persistence_err)?
             };
-
-            let valid_time = version.temporal.valid_time();
-            let entry = NodeVersionEntry {
-                version_id: version_id.as_u64(),
-                node_id: version.node_id.as_u64(),
-                label_idx: version.label.as_u32(),
-                valid_from: valid_time.start().wallclock(),
-                valid_from_logical: valid_time.start().logical(),
-                valid_to: if valid_time.is_current() {
-                    None
-                } else {
-                    Some(valid_time.end().wallclock())
-                },
-                valid_to_logical: if valid_time.is_current() {
-                    None
-                } else {
-                    Some(valid_time.end().logical())
-                },
-                tx_time: version.temporal.transaction_time().start().wallclock(),
-                tx_time_logical: version.temporal.transaction_time().start().logical(),
-                version_type,
-                properties,
-                vector_snapshot_id,
-                provenance: persist_provenance(version.provenance.as_deref()),
-            };
+            if matches!(entry.version_type, PersistedVersionType::Anchor) {
+                node_anchors.push(NodeAnchorEntry {
+                    node_id: entry.node_id,
+                    anchor_tx_time: entry.tx_time,
+                    full_state: entry.properties.clone(),
+                    vector_snapshot_id: entry.vector_snapshot_id,
+                });
+            }
             node_versions.push(entry);
         }
 
         // Extract edge versions from snapshot (isolated from concurrent writes)
         for version_arc in snapshot.iter_edge_versions() {
             let version = &*version_arc;
-            let version_id = version.id;
-            let (version_type, properties) = match &version.data {
-                VersionData::Anchor { properties, .. } => {
-                    // Also add to anchors list
-                    edge_anchors.push(EdgeAnchorEntry {
-                        edge_id: version.edge_id.as_u64(),
-                        anchor_tx_time: version.temporal.transaction_time().start().wallclock(),
-                        full_state: persist_property_map(properties).map_err(persistence_err)?,
-                    });
-                    (
-                        PersistedVersionType::Anchor,
-                        persist_property_map(properties).map_err(persistence_err)?,
-                    )
-                }
-                VersionData::Delta { delta } => {
-                    // Convert delta to PropertyMap for persistence
-                    let mut builder = PropertyMapBuilder::new();
-                    for (key, value) in &delta.changed {
-                        builder = builder.insert_by_key(*key, value.clone());
-                    }
-                    let changed_props = builder.build();
-                    let removed_keys: Vec<u32> = delta
-                        .removed
-                        .iter()
-                        .map(|k: &crate::core::interning::InternedString| k.as_u32())
-                        .collect();
-
-                    (
-                        PersistedVersionType::Delta {
-                            base_anchor_tx: version.temporal.transaction_time().start().wallclock(),
-                            base_anchor_tx_logical: version
-                                .temporal
-                                .transaction_time()
-                                .start()
-                                .logical(),
-                            removed_keys,
-                        },
-                        persist_property_map(&changed_props).map_err(persistence_err)?,
-                    )
-                }
+            let entry = if needs_sparse_vector_materialization(&version.data) {
+                let base = reconstruct_edge_base_properties(&edge_by_id, version)?;
+                let mut persisted = version.clone();
+                persisted.data = materialize_version_data_for_persistence(&version.data, &base)
+                    .map_err(persistence_err)?;
+                convert_edge_version(&persisted).map_err(persistence_err)?
+            } else {
+                convert_edge_version(version).map_err(persistence_err)?
             };
-
-            let valid_time = version.temporal.valid_time();
-            let entry = EdgeVersionEntry {
-                version_id: version_id.as_u64(),
-                edge_id: version.edge_id.as_u64(),
-                source_id: version.source.as_u64(),
-                target_id: version.target.as_u64(),
-                label_idx: version.label.as_u32(),
-                valid_from: valid_time.start().wallclock(),
-                valid_from_logical: valid_time.start().logical(),
-                valid_to: if valid_time.is_current() {
-                    None
-                } else {
-                    Some(valid_time.end().wallclock())
-                },
-                valid_to_logical: if valid_time.is_current() {
-                    None
-                } else {
-                    Some(valid_time.end().logical())
-                },
-                tx_time: version.temporal.transaction_time().start().wallclock(),
-                tx_time_logical: version.temporal.transaction_time().start().logical(),
-                version_type,
-                properties,
-                provenance: persist_provenance(version.provenance.as_deref()),
-            };
+            if matches!(entry.version_type, PersistedVersionType::Anchor) {
+                edge_anchors.push(EdgeAnchorEntry {
+                    edge_id: entry.edge_id,
+                    anchor_tx_time: entry.tx_time,
+                    full_state: entry.properties.clone(),
+                });
+            }
             edge_versions.push(entry);
         }
 
@@ -960,8 +1000,6 @@ impl CheckpointManager {
         &self,
         manifest: &IndexManifest,
     ) -> Result<(HistoricalStorage, u64)> {
-        use crate::core::version::PropertyDelta;
-
         let mut historical = HistoricalStorage::new();
         let mut max_version_id: u64 = 0;
 
@@ -974,160 +1012,24 @@ impl CheckpointManager {
                 crate::storage::index_persistence::temporal::load_temporal_index(&temporal_path)
                     .map_err(persistence_err)?;
 
-            // Reserve capacity for efficient bulk insertion
-            historical.reserve_restoration_capacity(
-                temporal_data.node_versions.len(),
-                temporal_data.edge_versions.len(),
-            );
+            max_version_id = temporal_data
+                .node_versions
+                .iter()
+                .map(|e| e.version_id)
+                .chain(temporal_data.edge_versions.iter().map(|e| e.version_id))
+                .max()
+                .unwrap_or(0);
 
-            // Restore node versions
-            for entry in &temporal_data.node_versions {
-                max_version_id = max_version_id.max(entry.version_id);
-
-                let version_id = VersionId::new(entry.version_id)?;
-                let node_id = NodeId::new(entry.node_id)?;
-
-                use crate::core::hlc::HybridTimestamp;
-                use crate::core::temporal::{TIMESTAMP_MAX, TimeRange};
-
-                let valid_start =
-                    HybridTimestamp::new_unchecked(entry.valid_from, entry.valid_from_logical);
-                let valid_end = entry
-                    .valid_to
-                    .map(|t| HybridTimestamp::new_unchecked(t, entry.valid_to_logical.unwrap_or(0)))
-                    .unwrap_or(TIMESTAMP_MAX);
-                let valid_time = TimeRange::new(valid_start, valid_end).map_err(|e| {
-                    StorageError::CheckpointError {
-                        reason: format!("Invalid valid time range: {}", e),
-                    }
-                })?;
-
-                let tx_start = HybridTimestamp::new_unchecked(entry.tx_time, entry.tx_time_logical);
-                let tx_time = TimeRange::from(tx_start);
-
-                let temporal = crate::core::temporal::BiTemporalInterval::new(valid_time, tx_time);
-
-                let properties =
-                    restore_property_map(&entry.properties).map_err(persistence_err)?;
-                let label = InternedString::from_raw(entry.label_idx);
-
-                let data = match &entry.version_type {
-                    crate::storage::index_persistence::formats::PersistedVersionType::Anchor => {
-                        let vector_snapshot_id = entry.vector_snapshot_id.map(|id| id as usize);
-                        VersionData::Anchor {
-                            properties,
-                            vector_snapshot_id,
-                        }
-                    }
-                    crate::storage::index_persistence::formats::PersistedVersionType::Delta {
-                        removed_keys,
-                        ..
-                    } => {
-                        // Convert properties to PropertyDelta
-                        let mut delta = PropertyDelta::new();
-                        for (key, value) in properties.iter() {
-                            delta.changed.insert(*key, value.clone());
-                        }
-                        for key_idx in removed_keys {
-                            delta.removed.insert(InternedString::from_raw(*key_idx));
-                        }
-                        VersionData::Delta { delta }
-                    }
-                };
-
-                let version = crate::core::version::NodeVersion {
-                    id: version_id,
-                    node_id,
-                    commit_timestamp: temporal.transaction_time().start(),
-                    temporal,
-                    label,
-                    data,
-                    next_version: None,
-                    prev_version: None,
-                    provenance: crate::storage::index_persistence::temporal::restore_provenance(
-                        entry.provenance.clone(),
-                    )
-                    .map_err(persistence_err)?,
-                };
-
-                historical.insert_restored_node_version(version)?;
-            }
-
-            // Restore edge versions
-            for entry in &temporal_data.edge_versions {
-                max_version_id = max_version_id.max(entry.version_id);
-
-                let version_id = VersionId::new(entry.version_id)?;
-                let edge_id = EdgeId::new(entry.edge_id)?;
-                let source = NodeId::new(entry.source_id)?;
-                let target = NodeId::new(entry.target_id)?;
-
-                use crate::core::hlc::HybridTimestamp;
-                use crate::core::temporal::{TIMESTAMP_MAX, TimeRange};
-
-                let valid_start =
-                    HybridTimestamp::new_unchecked(entry.valid_from, entry.valid_from_logical);
-                let valid_end = entry
-                    .valid_to
-                    .map(|t| HybridTimestamp::new_unchecked(t, entry.valid_to_logical.unwrap_or(0)))
-                    .unwrap_or(TIMESTAMP_MAX);
-                let valid_time = TimeRange::new(valid_start, valid_end).map_err(|e| {
-                    StorageError::CheckpointError {
-                        reason: format!("Invalid valid time range: {}", e),
-                    }
-                })?;
-
-                let tx_start = HybridTimestamp::new_unchecked(entry.tx_time, entry.tx_time_logical);
-                let tx_time = TimeRange::from(tx_start);
-
-                let temporal = crate::core::temporal::BiTemporalInterval::new(valid_time, tx_time);
-
-                let properties =
-                    restore_property_map(&entry.properties).map_err(persistence_err)?;
-                let label = InternedString::from_raw(entry.label_idx);
-
-                let data = match &entry.version_type {
-                    crate::storage::index_persistence::formats::PersistedVersionType::Anchor => {
-                        VersionData::Anchor {
-                            properties,
-                            vector_snapshot_id: None,
-                        }
-                    }
-                    crate::storage::index_persistence::formats::PersistedVersionType::Delta {
-                        removed_keys,
-                        ..
-                    } => {
-                        // Convert properties to PropertyDelta
-                        let mut delta = PropertyDelta::new();
-                        for (key, value) in properties.iter() {
-                            delta.changed.insert(*key, value.clone());
-                        }
-                        for key_idx in removed_keys {
-                            delta.removed.insert(InternedString::from_raw(*key_idx));
-                        }
-                        VersionData::Delta { delta }
-                    }
-                };
-
-                let version = crate::core::version::EdgeVersion {
-                    id: version_id,
-                    edge_id,
-                    source,
-                    target,
-                    commit_timestamp: temporal.transaction_time().start(),
-                    temporal,
-                    label,
-                    data,
-                    next_version: None,
-                    prev_version: None,
-                    provenance: crate::storage::index_persistence::temporal::restore_provenance(
-                        entry.provenance.clone(),
-                    )
-                    .map_err(persistence_err)?,
-                };
-
-                historical.insert_restored_edge_version(version)?;
-            }
+            // Restore via the canonical index-persistence path (Issue #3387):
+            // it restores the persisted tx-time closures and version chain
+            // links and finalizes version heads via `rebuild_version_chains`,
+            // so a restore-only recovery (no WAL replay) serves the same full
+            // bi-temporal reads as before the checkpoint.
+            crate::storage::index_persistence::temporal::restore_into_historical_storage(
+                &temporal_data,
+                &mut historical,
+            )
+            .map_err(persistence_err)?;
         }
 
         Ok((historical, max_version_id))
@@ -3131,5 +3033,341 @@ mod tests {
         assert!(result.used_cold_storage());
         assert!(!result.used_checkpoint());
         assert_eq!(result.wal_entries_skipped_from_cold(), 75);
+    }
+
+    /// Issue #3387 mixed-matrix cell: a LEGACY (pre-#3387, `version == 2`)
+    /// temporal blob restored by the current binary, followed by a WAL
+    /// replay tail that updates a checkpointed node. The legacy restore
+    /// leaves tx intervals open (heuristic rebuild), and the replayed update
+    /// must close the restored head's tx time and chain onto it correctly.
+    #[test]
+    fn test_recover_legacy_v2_checkpoint_with_wal_replay_tail() -> Result<()> {
+        use crate::core::id::VersionId;
+        use crate::storage::index_persistence::formats::PersistedVersionType;
+        use crate::storage::index_persistence::formats::legacy_v2::{
+            NodeVersionEntryV2, TemporalIndexDataV2,
+        };
+        use crate::storage::index_persistence::graph::persist_property_map;
+
+        let temp_dir = TempDir::new().unwrap();
+        let wal_dir = temp_dir.path().join("wal");
+        let data_dir = temp_dir.path().join("data");
+
+        let wal = ConcurrentWalSystem::new(ConcurrentWalSystemConfig::new(&wal_dir))?;
+        let node_id = NodeId::new(1)?;
+        let label = GLOBAL_INTERNER.intern("LegacyTail").unwrap();
+
+        wal.append(WalOperation::CreateNode {
+            node_id,
+            label,
+            properties: PropertyMapBuilder::new().insert("name", "Alice").build(),
+            valid_from: time::now(),
+            provenance: None,
+        })?;
+        wal.flush()?;
+
+        // Checkpoint the replayed state, then REWRITE the temporal blob in
+        // the byte-exact pre-#3387 (version == 2) layout, built from the
+        // actual checkpointed version.
+        let checkpoint_lsn = LSN(wal.current_lsn().0.saturating_sub(1));
+        let (v1_id, v1_props, v1_valid, v1_tx);
+        {
+            let config = CheckpointConfig::with_data_dir(&data_dir);
+            let mut manager = CheckpointManager::new(config)?;
+            let (current, historical, _final) = manager.recover(&wal)?;
+            manager.create_checkpoint(checkpoint_lsn, &current, &historical)?;
+
+            let head_id = historical
+                .get_current_node_version(node_id)
+                .expect("head version");
+            let head = historical.get_node_version(head_id).unwrap();
+            v1_id = head.id;
+            v1_valid = head.temporal.valid_time().start();
+            v1_tx = head.temporal.transaction_time().start();
+            let VersionData::Anchor { properties, .. } = &head.data else {
+                panic!("create version must be an anchor");
+            };
+            v1_props = properties.clone();
+
+            let legacy = TemporalIndexDataV2 {
+                magic: TEMPORAL_MAGIC,
+                version: 2,
+                node_versions: vec![NodeVersionEntryV2 {
+                    version_id: v1_id.as_u64(),
+                    node_id: node_id.as_u64(),
+                    label_idx: label.as_u32(),
+                    valid_from: v1_valid.wallclock(),
+                    valid_from_logical: v1_valid.logical(),
+                    valid_to: None,
+                    valid_to_logical: None,
+                    tx_time: v1_tx.wallclock(),
+                    tx_time_logical: v1_tx.logical(),
+                    version_type: PersistedVersionType::Anchor,
+                    properties: persist_property_map(&v1_props).map_err(persistence_err)?,
+                    vector_snapshot_id: None,
+                    provenance: None,
+                }],
+                node_anchors: vec![],
+                edge_versions: vec![],
+                edge_anchors: vec![],
+            };
+            let temporal_path = manager
+                .persistence_manager
+                .temporal_path()
+                .join("versions.idx");
+            crate::storage::index_persistence::common::save_encoded_with_crc(
+                &legacy,
+                &temporal_path,
+            )
+            .map_err(persistence_err)?;
+        }
+
+        // The update lands in the WAL AFTER the (now legacy-format) checkpoint.
+        wal.append(WalOperation::UpdateNode {
+            node_id,
+            version_id: VersionId::new(50)?,
+            label,
+            properties: PropertyMapBuilder::new().insert("name", "Alice2").build(),
+            valid_from: time::now(),
+            provenance: None,
+        })?;
+        wal.flush()?;
+
+        // Recovery: legacy-blob restore (heuristic chain rebuild, open tx)
+        // + replay of the update tail on top of it.
+        let config = CheckpointConfig::with_data_dir(&data_dir);
+        let mut manager = CheckpointManager::new(config)?;
+        let (current, historical, _final) = manager.recover(&wal)?;
+
+        let node = current.get_node(node_id)?;
+        assert_eq!(
+            node.get_property("name").and_then(|v| v.as_str()),
+            Some("Alice2"),
+            "replay tail must apply on top of the legacy-restored state"
+        );
+
+        let history = historical.get_node_history(node_id)?;
+        assert_eq!(
+            history.version_count(),
+            2,
+            "legacy-restored create + replayed update"
+        );
+        let v1 = &history.versions[0];
+        let v2 = &history.versions[1];
+        assert_eq!(v1.version_id, v1_id);
+        assert!(
+            !v1.temporal.transaction_time().is_current(),
+            "replayed update must close the legacy-restored head's tx time"
+        );
+        assert_eq!(
+            v1.temporal.transaction_time().end(),
+            v2.temporal.transaction_time().start(),
+            "closure must land exactly at the superseding tx start"
+        );
+
+        // AS OF SYSTEM_TIME at the original commit still sees Alice.
+        let at_create = historical.get_node_at_time(node_id, v1_valid, v1_tx)?;
+        assert_eq!(
+            at_create.get_property("name").and_then(|v| v.as_str()),
+            Some("Alice")
+        );
+
+        Ok(())
+    }
+
+    // ------------------------------------------------------------------
+    // Issue #3387: snapshot base-reconstruction walker error branches
+    // ------------------------------------------------------------------
+
+    fn walker_node(
+        vid: u64,
+        prev: Option<u64>,
+        anchor: bool,
+    ) -> Arc<crate::core::version::NodeVersion> {
+        use crate::core::version::{NodeVersion, PropertyDelta};
+        let label = GLOBAL_INTERNER.intern("WalkerNode").unwrap();
+        let mut v = if anchor {
+            NodeVersion::new_anchor(
+                VersionId::new(vid).unwrap(),
+                NodeId::new(1).unwrap(),
+                BiTemporalInterval::current((1000 + vid as i64).into()),
+                label,
+                PropertyMapBuilder::new().insert("k", "v").build(),
+            )
+        } else {
+            let mut delta_version = NodeVersion::new_anchor(
+                VersionId::new(vid).unwrap(),
+                NodeId::new(1).unwrap(),
+                BiTemporalInterval::current((1000 + vid as i64).into()),
+                label,
+                PropertyMapBuilder::new().build(),
+            );
+            delta_version.data = VersionData::Delta {
+                delta: PropertyDelta::new(),
+            };
+            delta_version
+        };
+        v.prev_version = prev.map(|p| VersionId::new(p).unwrap());
+        Arc::new(v)
+    }
+
+    fn walker_edge(
+        vid: u64,
+        prev: Option<u64>,
+        anchor: bool,
+    ) -> Arc<crate::core::version::EdgeVersion> {
+        use crate::core::version::{EdgeVersion, PropertyDelta};
+        let label = GLOBAL_INTERNER.intern("WALKER_EDGE").unwrap();
+        let mut v = EdgeVersion::new_anchor(
+            VersionId::new(vid).unwrap(),
+            EdgeId::new(1).unwrap(),
+            BiTemporalInterval::current((1000 + vid as i64).into()),
+            label,
+            NodeId::new(1).unwrap(),
+            NodeId::new(2).unwrap(),
+            PropertyMapBuilder::new().insert("k", "v").build(),
+        );
+        if !anchor {
+            v.data = VersionData::Delta {
+                delta: PropertyDelta::new(),
+            };
+        }
+        v.prev_version = prev.map(|p| VersionId::new(p).unwrap());
+        Arc::new(v)
+    }
+
+    /// A base version missing from the snapshot map (cold-migrated) must
+    /// fail loudly, not persist a silently-lossy entry.
+    #[test]
+    fn test_reconstruct_node_base_fails_when_base_left_snapshot() {
+        let mut by_id = std::collections::HashMap::new();
+        // delta version 3 with prev = 2, but 2 is absent from the map
+        let v3 = walker_node(3, Some(2), false);
+        by_id.insert(v3.id, Arc::clone(&v3));
+
+        let err = reconstruct_node_base_properties(&by_id, &v3).unwrap_err();
+        assert!(
+            err.to_string().contains("not in the checkpoint snapshot"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// Edge mirror of the missing-base error branch.
+    #[test]
+    fn test_reconstruct_edge_base_fails_when_base_left_snapshot() {
+        let mut by_id = std::collections::HashMap::new();
+        let v3 = walker_edge(3, Some(2), false);
+        by_id.insert(v3.id, Arc::clone(&v3));
+
+        let err = reconstruct_edge_base_properties(&by_id, &v3).unwrap_err();
+        assert!(
+            err.to_string().contains("not in the checkpoint snapshot"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// A chain that terminates without an anchor (corrupt links) must fail.
+    #[test]
+    fn test_reconstruct_node_base_fails_without_anchor() {
+        let mut by_id = std::collections::HashMap::new();
+        // v2 is a delta whose prev is None: chain ends anchor-less.
+        let v2 = walker_node(2, None, false);
+        let v3 = walker_node(3, Some(2), false);
+        by_id.insert(v2.id, Arc::clone(&v2));
+        by_id.insert(v3.id, Arc::clone(&v3));
+
+        let err = reconstruct_node_base_properties(&by_id, &v3).unwrap_err();
+        assert!(
+            err.to_string().contains("no anchor found"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// Edge mirror of the anchor-less chain error branch.
+    #[test]
+    fn test_reconstruct_edge_base_fails_without_anchor() {
+        let mut by_id = std::collections::HashMap::new();
+        let v2 = walker_edge(2, None, false);
+        let v3 = walker_edge(3, Some(2), false);
+        by_id.insert(v2.id, Arc::clone(&v2));
+        by_id.insert(v3.id, Arc::clone(&v3));
+
+        let err = reconstruct_edge_base_properties(&by_id, &v3).unwrap_err();
+        assert!(
+            err.to_string().contains("no anchor found"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// A chain longer than MAX_RECONSTRUCTION_DEPTH must be cut off (cycle /
+    /// corruption guard), not walked forever.
+    #[test]
+    fn test_reconstruct_node_base_fails_beyond_max_depth() {
+        use crate::storage::historical::MAX_RECONSTRUCTION_DEPTH;
+        let mut by_id = std::collections::HashMap::new();
+        let n = MAX_RECONSTRUCTION_DEPTH as u64 + 2;
+        // delta chain v2 <- v3 <- ... <- v(n+1), no anchor within depth
+        for vid in 2..=(n + 1) {
+            let prev = if vid == 2 { None } else { Some(vid - 1) };
+            let v = walker_node(vid, prev, false);
+            by_id.insert(v.id, v);
+        }
+        let head = by_id.get(&VersionId::new(n + 1).unwrap()).cloned().unwrap();
+
+        let err = reconstruct_node_base_properties(&by_id, &head).unwrap_err();
+        assert!(
+            err.to_string().contains("max reconstruction depth"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// Edge mirror of the depth-cap error branch.
+    #[test]
+    fn test_reconstruct_edge_base_fails_beyond_max_depth() {
+        use crate::storage::historical::MAX_RECONSTRUCTION_DEPTH;
+        let mut by_id = std::collections::HashMap::new();
+        let n = MAX_RECONSTRUCTION_DEPTH as u64 + 2;
+        for vid in 2..=(n + 1) {
+            let prev = if vid == 2 { None } else { Some(vid - 1) };
+            let v = walker_edge(vid, prev, false);
+            by_id.insert(v.id, v);
+        }
+        let head = by_id.get(&VersionId::new(n + 1).unwrap()).cloned().unwrap();
+
+        let err = reconstruct_edge_base_properties(&by_id, &head).unwrap_err();
+        assert!(
+            err.to_string().contains("max reconstruction depth"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// Happy path through the multi-hop walker: anchor -> delta -> delta,
+    /// base state for the head is anchor + intermediate delta applied.
+    #[test]
+    fn test_reconstruct_node_base_applies_intermediate_deltas() {
+        use crate::core::version::PropertyDelta;
+
+        let mut by_id = std::collections::HashMap::new();
+        let v1 = walker_node(1, None, true); // anchor: k=v
+        // v2: delta changing k -> v2
+        let mut delta = PropertyDelta::new();
+        delta.changed.insert(
+            GLOBAL_INTERNER.intern("k").unwrap(),
+            crate::core::property::PropertyValue::String(std::sync::Arc::from("v2")),
+        );
+        let mut v2_inner = (*walker_node(2, Some(1), false)).clone();
+        v2_inner.data = VersionData::Delta { delta };
+        let v2 = Arc::new(v2_inner);
+        let v3 = walker_node(3, Some(2), false);
+        by_id.insert(v1.id, v1);
+        by_id.insert(v2.id, v2);
+        by_id.insert(v3.id, Arc::clone(&v3));
+
+        let base = reconstruct_node_base_properties(&by_id, &v3).unwrap();
+        assert_eq!(
+            base.get("k").and_then(|v| v.as_str()),
+            Some("v2"),
+            "base for v3 must include v2's delta applied on the anchor"
+        );
     }
 }

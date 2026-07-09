@@ -799,3 +799,158 @@ fn test_temporal_persist_keeps_interner_consistent_with_temporal_string_ids() {
         .expect("persisted string id should index into persisted interner");
     assert_eq!(resolved, &unique_value);
 }
+
+/// Issue #3387 availability fix, save-path variant: `persist_temporal_index`
+/// must materialize sparse vector deltas (node AND edge) against their
+/// reconstructed base state in the persisted copy -- succeeding instead of
+/// hard-failing -- while leaving the live in-memory delta sparse. The
+/// persisted file must reconstruct the updated vectors on restore.
+#[test]
+fn test_persist_temporal_index_materializes_sparse_vector_deltas() {
+    use crate::core::id::EdgeId;
+    use crate::core::version::{VectorDelta, VersionData};
+    use crate::storage::index_persistence::temporal::restore_into_historical_storage;
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let manager = Arc::new(IndexPersistenceManager::new(temp_dir.path()));
+    let tracker = Arc::new(PersistenceTracker::new());
+    let temporal_indexes = Arc::new(TemporalIndexes::new());
+    let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
+
+    let node_label = GLOBAL_INTERNER.intern("SparseSaveNode").unwrap();
+    let edge_label = GLOBAL_INTERNER.intern("SPARSE_SAVE_EDGE").unwrap();
+    let node_id = NodeId::new(1).unwrap();
+    let source = NodeId::new(1).unwrap();
+    let target = NodeId::new(2).unwrap();
+    let edge_id = EdgeId::new(1).unwrap();
+
+    let dim = 128usize;
+    let base_vec: Vec<f32> = (0..dim).map(|i| i as f32 * 0.01).collect();
+    let mut updated_vec = base_vec.clone();
+    updated_vec[7] = 42.0; // 1 change * 2 < 128 -> sparse delta
+
+    // Explicitly distinct tx timestamps: two same-microsecond `now()` calls
+    // would make head selection and tx-closure ordering ambiguous.
+    let now = time::now();
+    let t1 = now;
+    let t2 = crate::core::hlc::HybridTimestamp::new(now.wallclock() + 1_000_000, 0).unwrap();
+    {
+        let mut hist = historical.write();
+        hist.add_node_version(
+            node_id,
+            VersionId::new(1).unwrap(),
+            t1,
+            t1,
+            node_label,
+            PropertyMapBuilder::new()
+                .insert("name", "doc")
+                .insert_vector("embedding", &base_vec)
+                .build(),
+            false,
+        )
+        .unwrap();
+        hist.add_node_version(
+            node_id,
+            VersionId::new(2).unwrap(),
+            t2,
+            t2,
+            node_label,
+            PropertyMapBuilder::new()
+                .insert("name", "doc")
+                .insert_vector("embedding", &updated_vec)
+                .build(),
+            false,
+        )
+        .unwrap();
+
+        hist.add_edge_version(
+            edge_id,
+            VersionId::new(3).unwrap(),
+            t1,
+            t1,
+            edge_label,
+            source,
+            target,
+            PropertyMapBuilder::new()
+                .insert_vector("embedding", &base_vec)
+                .build(),
+            false,
+        )
+        .unwrap();
+        hist.add_edge_version(
+            edge_id,
+            VersionId::new(4).unwrap(),
+            t2,
+            t2,
+            edge_label,
+            source,
+            target,
+            PropertyMapBuilder::new()
+                .insert_vector("embedding", &updated_vec)
+                .build(),
+            false,
+        )
+        .unwrap();
+
+        // Preconditions: both updates really produced SPARSE deltas.
+        let is_sparse = |data: &VersionData| match data {
+            VersionData::Delta { delta } => delta
+                .vector_deltas
+                .values()
+                .any(|d| matches!(d, VectorDelta::Sparse { .. })),
+            VersionData::Anchor { .. } => false,
+        };
+        let node_head = hist.get_current_node_version(node_id).unwrap();
+        assert!(
+            is_sparse(&hist.get_node_version(node_head).unwrap().data),
+            "precondition: node update must produce VectorDelta::Sparse"
+        );
+        let edge_head = hist.get_current_edge_version(edge_id).unwrap();
+        assert!(
+            is_sparse(&hist.get_edge_version(edge_head).unwrap().data),
+            "precondition: edge update must produce VectorDelta::Sparse"
+        );
+    }
+
+    // The save must succeed (pre-fix: hard error demanding materialization).
+    persist_temporal_index(&historical, &temporal_indexes, &manager, &tracker, 0)
+        .expect("persist_temporal_index must materialize sparse deltas, not fail");
+
+    // Live in-memory state keeps its sparse deltas untouched.
+    {
+        let hist = historical.read();
+        let node_head = hist.get_current_node_version(node_id).unwrap();
+        let VersionData::Delta { delta } = &hist.get_node_version(node_head).unwrap().data else {
+            panic!("live node head must remain a delta");
+        };
+        assert!(
+            delta
+                .vector_deltas
+                .values()
+                .any(|d| matches!(d, VectorDelta::Sparse { .. })),
+            "persist must not mutate live node state"
+        );
+    }
+
+    // The persisted file reconstructs the updated vectors on restore.
+    let temporal_data = load_temporal_index(&manager.temporal_path().join("versions.idx"))
+        .expect("failed to load persisted temporal index");
+    let mut restored = HistoricalStorage::new();
+    restore_into_historical_storage(&temporal_data, &mut restored).unwrap();
+
+    let node_head = restored.get_current_node_version(node_id).unwrap();
+    let node_props = restored.reconstruct_node_properties(node_head).unwrap();
+    assert_eq!(
+        node_props.get("embedding").and_then(|v| v.as_vector()),
+        Some(updated_vec.as_slice()),
+        "restored node head must reconstruct the updated embedding"
+    );
+
+    let edge_head = restored.get_current_edge_version(edge_id).unwrap();
+    let edge_props = restored.reconstruct_edge_properties(edge_head).unwrap();
+    assert_eq!(
+        edge_props.get("embedding").and_then(|v| v.as_vector()),
+        Some(updated_vec.as_slice()),
+        "restored edge head must reconstruct the updated embedding"
+    );
+}

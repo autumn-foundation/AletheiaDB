@@ -597,16 +597,51 @@ pub(crate) fn persist_temporal_index(
     current_lsn: u64,
 ) -> Result<()> {
     use crate::storage::index_persistence::temporal::{
-        convert_edge_version, convert_node_version, new_temporal_index_data, save_temporal_index,
+        convert_edge_version, convert_node_version, materialize_version_data_for_persistence,
+        needs_sparse_vector_materialization, new_temporal_index_data, save_temporal_index,
     };
 
     // Get read lock on historical storage
     let historical_guard = historical.read();
 
-    // Convert all node versions
+    // Convert all node versions. Sparse vector deltas are materialized
+    // against their reconstructed base state in the PERSISTED copy only
+    // (Issue #3387 availability fix: a routine small embedding edit must not
+    // make persistence fail persistently).
     let mut node_versions = Vec::with_capacity(historical_guard.get_node_versions().len());
     for version in historical_guard.get_node_versions().values() {
-        let entry = convert_node_version(version).map_err(|e| {
+        let entry = if needs_sparse_vector_materialization(&version.data) {
+            let prev_id = version.prev_version.ok_or_else(|| {
+                StorageError::PersistenceError(format!(
+                    "Cannot materialize sparse vector delta for node version {}: \
+                     delta has no previous version",
+                    version.id.as_u64()
+                ))
+            })?;
+            let base = historical_guard
+                .reconstruct_node_properties(prev_id)
+                .map_err(|e| {
+                    StorageError::PersistenceError(format!(
+                        "Cannot materialize sparse vector delta for node version {}: \
+                         failed to reconstruct base state: {}",
+                        version.id.as_u64(),
+                        e
+                    ))
+                })?;
+            let mut persisted = version.clone();
+            persisted.data = materialize_version_data_for_persistence(&version.data, &base)
+                .map_err(|e| {
+                    StorageError::PersistenceError(format!(
+                        "Failed to materialize node version {}: {}",
+                        version.id.as_u64(),
+                        e
+                    ))
+                })?;
+            convert_node_version(&persisted)
+        } else {
+            convert_node_version(version)
+        }
+        .map_err(|e| {
             StorageError::PersistenceError(format!(
                 "Failed to convert node version {}: {}",
                 version.id.as_u64(),
@@ -616,10 +651,41 @@ pub(crate) fn persist_temporal_index(
         node_versions.push(entry);
     }
 
-    // Convert all edge versions
+    // Convert all edge versions (same sparse-delta materialization contract).
     let mut edge_versions = Vec::with_capacity(historical_guard.get_edge_versions().len());
     for version in historical_guard.get_edge_versions().values() {
-        let entry = convert_edge_version(version).map_err(|e| {
+        let entry = if needs_sparse_vector_materialization(&version.data) {
+            let prev_id = version.prev_version.ok_or_else(|| {
+                StorageError::PersistenceError(format!(
+                    "Cannot materialize sparse vector delta for edge version {}: \
+                     delta has no previous version",
+                    version.id.as_u64()
+                ))
+            })?;
+            let base = historical_guard
+                .reconstruct_edge_properties(prev_id)
+                .map_err(|e| {
+                    StorageError::PersistenceError(format!(
+                        "Cannot materialize sparse vector delta for edge version {}: \
+                         failed to reconstruct base state: {}",
+                        version.id.as_u64(),
+                        e
+                    ))
+                })?;
+            let mut persisted = version.clone();
+            persisted.data = materialize_version_data_for_persistence(&version.data, &base)
+                .map_err(|e| {
+                    StorageError::PersistenceError(format!(
+                        "Failed to materialize edge version {}: {}",
+                        version.id.as_u64(),
+                        e
+                    ))
+                })?;
+            convert_edge_version(&persisted)
+        } else {
+            convert_edge_version(version)
+        }
+        .map_err(|e| {
             StorageError::PersistenceError(format!(
                 "Failed to convert edge version {}: {}",
                 version.id.as_u64(),

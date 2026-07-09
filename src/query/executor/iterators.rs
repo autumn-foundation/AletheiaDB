@@ -191,24 +191,20 @@ impl ResultIterator for NodeScanIterator {
         self.initialize();
 
         loop {
-            match self.node_ids.as_mut()?.next() {
-                Some(id) => {
-                    match self.current.get_node(id) {
-                        Ok(node) => {
-                            // Check label filter by comparing InternedString IDs
-                            if let Some(ref label_str) = self.label {
-                                // Get the InternedString ID for the filter label
-                                let label_id = GLOBAL_INTERNER.get_id(label_str);
-                                if label_id != Some(node.label) {
-                                    continue; // Skip this node
-                                }
-                            }
-                            return Some(Ok(QueryRow::from_entity(EntityResult::Node(node))));
+            let id = self.node_ids.as_mut()?.next()?;
+            match self.current.get_node(id) {
+                Ok(node) => {
+                    // Check label filter by comparing InternedString IDs
+                    if let Some(ref label_str) = self.label {
+                        // Get the InternedString ID for the filter label
+                        let label_id = GLOBAL_INTERNER.get_id(label_str);
+                        if label_id != Some(node.label) {
+                            continue; // Skip this node
                         }
-                        Err(e) => return Some(Err(e)),
                     }
+                    return Some(Ok(QueryRow::from_entity(EntityResult::Node(node))));
                 }
-                None => return None,
+                Err(e) => return Some(Err(e)),
             }
         }
     }
