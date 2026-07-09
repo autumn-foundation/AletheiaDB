@@ -1605,6 +1605,51 @@ fn test_refresh_statistics() {
 }
 
 #[test]
+fn test_refresh_statistics_avg_delta_chain_from_historical() {
+    // Issue #366: refresh_statistics must feed the planner the actual average
+    // delta chain length computed from historical storage, not a hardcoded
+    // estimate.
+    let db = AletheiaDB::new().unwrap();
+
+    let node = db
+        .create_node(
+            "Person",
+            PropertyMapBuilder::new().insert("v", 0i64).build(),
+        )
+        .unwrap();
+    // Three updates create delta versions behind the initial anchor.
+    for i in 1..=3i64 {
+        db.update_node_with_valid_time(
+            node,
+            PropertyMapBuilder::new().insert("v", i).build(),
+            None,
+        )
+        .unwrap();
+    }
+
+    db.refresh_statistics();
+
+    // Hand-compute the expected value from the historical storage counters.
+    let hist = db.historical_stats().unwrap();
+    let total_deltas = (hist.node_delta_count + hist.edge_delta_count) as f64;
+    let total_anchors = (hist.node_anchor_count + hist.edge_anchor_count) as f64;
+    assert!(total_anchors > 0.0, "expected at least one anchor version");
+    assert!(
+        total_deltas > 0.0,
+        "expected delta versions from the updates"
+    );
+    let expected = total_deltas / total_anchors;
+
+    let stats = db.statistics();
+    assert!(
+        (stats.average_delta_chain_length() - expected).abs() < f64::EPSILON,
+        "avg delta chain {} should equal deltas/anchors {}",
+        stats.average_delta_chain_length(),
+        expected
+    );
+}
+
+#[test]
 fn test_invalidate_statistics() {
     let db = AletheiaDB::new().unwrap();
 

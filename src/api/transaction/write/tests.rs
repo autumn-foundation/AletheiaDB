@@ -793,9 +793,122 @@ mod general_tests {
         assert_eq!(tx.node_count(), 2);
         assert_eq!(tx.edge_count(), 1);
         assert!(tx.get_node(node1).is_ok());
-        assert_eq!(tx.get_outgoing_edges(node1).len(), 1);
-        assert_eq!(tx.get_incoming_edges(node2).len(), 1);
-        assert_eq!(tx.get_outgoing_edges_with_label(node1, "KNOWS").len(), 1);
+        assert_eq!(tx.get_outgoing_edges(node1).unwrap().len(), 1);
+        assert_eq!(tx.get_incoming_edges(node2).unwrap().len(), 1);
+        assert_eq!(
+            tx.get_outgoing_edges_with_label(node1, "KNOWS")
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    // Issue #359: edge-listing methods return Result so callers can
+    // distinguish "node doesn't exist" (Err) from "node has no edges" (Ok(empty)).
+
+    #[test]
+    fn test_write_tx_get_outgoing_edges_nonexistent_node_errors() {
+        let (tx, _temp_dir) = create_test_write_tx();
+
+        let missing = NodeId::new(999).unwrap();
+        let result = tx.get_outgoing_edges(missing);
+        assert!(
+            matches!(
+                result,
+                Err(crate::core::error::Error::Storage(
+                    crate::core::error::StorageError::NodeNotFound(id)
+                )) if id == missing
+            ),
+            "get_outgoing_edges on a nonexistent node must return Err(NodeNotFound), got {result:?}"
+        );
+        assert!(
+            tx.get_incoming_edges(missing).is_err(),
+            "get_incoming_edges on a nonexistent node must return Err"
+        );
+        assert!(
+            tx.get_outgoing_edges_with_label(missing, "KNOWS").is_err(),
+            "get_outgoing_edges_with_label on a nonexistent node must return Err"
+        );
+    }
+
+    #[test]
+    fn test_write_tx_get_outgoing_edges_node_created_in_tx_ok() {
+        let (mut tx, _temp_dir) = create_test_write_tx();
+
+        // Node exists only in this transaction's write buffer.
+        let props = PropertyMapBuilder::new().build();
+        let node = tx.create_node("Person", props).unwrap();
+
+        let edges = tx
+            .get_outgoing_edges(node)
+            .expect("node created in this tx must be visible to the existence check");
+        assert!(edges.is_empty(), "expected Ok(empty), got {edges:?}");
+
+        let edges = tx
+            .get_incoming_edges(node)
+            .expect("node created in this tx must be visible to the existence check");
+        assert!(edges.is_empty(), "expected Ok(empty), got {edges:?}");
+
+        let edges = tx
+            .get_outgoing_edges_with_label(node, "KNOWS")
+            .expect("node created in this tx must be visible to the existence check");
+        assert!(edges.is_empty(), "expected Ok(empty), got {edges:?}");
+    }
+
+    /// Pins the documented write-transaction caveat: an edge created in this
+    /// transaction (still buffered, not yet committed) is NOT listed by the
+    /// edge-listing methods — only the node existence check is buffer-aware.
+    #[test]
+    fn test_write_tx_buffered_edge_not_listed_before_commit() {
+        let (mut tx, _temp_dir) = create_test_write_tx();
+        let current = Arc::clone(&tx.current);
+
+        // Source and target are committed nodes; the edge exists only in the
+        // transaction's write buffer.
+        let props = PropertyMapBuilder::new().build();
+        let source = current.create_node("Person", props.clone()).unwrap();
+        let target = current.create_node("Person", props.clone()).unwrap();
+        tx.create_edge(source, target, "KNOWS", props).unwrap();
+
+        assert_eq!(
+            tx.get_outgoing_edges(source).unwrap(),
+            Vec::new(),
+            "an edge buffered in this tx must not be listed before commit"
+        );
+        assert_eq!(
+            tx.get_incoming_edges(target).unwrap(),
+            Vec::new(),
+            "an edge buffered in this tx must not be listed before commit"
+        );
+        assert_eq!(
+            tx.get_outgoing_edges_with_label(source, "KNOWS").unwrap(),
+            Vec::new(),
+            "an edge buffered in this tx must not be listed before commit"
+        );
+    }
+
+    #[test]
+    fn test_write_tx_get_outgoing_edges_node_deleted_in_tx_errors() {
+        let (mut tx, _temp_dir) = create_test_write_tx();
+        let current = Arc::clone(&tx.current);
+
+        // Node exists in current storage, but is deleted in this transaction.
+        let props = PropertyMapBuilder::new().build();
+        let node = current.create_node("Person", props).unwrap();
+        tx.delete_node(node).unwrap();
+
+        assert!(
+            tx.get_outgoing_edges(node).is_err(),
+            "node deleted in this tx must not be treated as existing"
+        );
+        assert!(
+            tx.get_incoming_edges(node).is_err(),
+            "node deleted in this tx must not be treated as existing"
+        );
+        assert!(
+            tx.get_outgoing_edges_with_label(node, "KNOWS").is_err(),
+            "node deleted in this tx must not be treated as existing"
+        );
     }
 
     #[test]

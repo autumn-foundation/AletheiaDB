@@ -167,7 +167,7 @@ impl<'a> ChimeraEngine<'a> {
             // Outgoing: A -> X becomes New -> X
             // We do this for both A and B
             for &source in &[node_a, node_b] {
-                let edges = tx.get_outgoing_edges(source);
+                let edges = tx.get_outgoing_edges(source)?;
                 for edge_id in edges {
                     let edge = tx.get_edge(edge_id)?;
                     let label_str = GLOBAL_INTERNER
@@ -184,7 +184,7 @@ impl<'a> ChimeraEngine<'a> {
 
             // Incoming: X -> A becomes X -> New
             for &target in &[node_a, node_b] {
-                let edges = tx.get_incoming_edges(target);
+                let edges = tx.get_incoming_edges(target)?;
                 for edge_id in edges {
                     let edge = tx.get_edge(edge_id)?;
                     let label_str = GLOBAL_INTERNER
