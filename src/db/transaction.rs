@@ -30,51 +30,73 @@ fn record_tx_mutations(tracker: Option<&Arc<PersistenceTracker>>, tx: &WriteTran
 
 impl AletheiaDB {
     /// Compute a snapshot timestamp that is strictly greater than the last commit
-    /// timestamp, ensuring all previously committed transactions are visible.
+    /// timestamp, ensuring all previously committed transactions are visible, and
+    /// **reserve** it by advancing the HLC frontier to that value.
     ///
     /// The MVCC visibility check uses strict less-than (`commit_ts < snapshot_ts`),
     /// so the snapshot must be strictly greater than the most recent commit to see it.
     /// When the system clock advances past the last commit, `now()` is sufficient.
     /// When it hasn't (e.g., multiple operations within the same clock tick), we
     /// advance one logical tick past the last commit.
+    ///
+    /// Reservation is load-bearing for snapshot isolation, not a mere optimization.
+    /// The snapshot `S` we hand out is always strictly greater than the prior
+    /// frontier in *both* branches, so we advance the frontier to `S` under the
+    /// same lock guard (compare-and-advance). This guarantees any *subsequent*
+    /// commit's HLC `send()` yields a stamp strictly greater than `S` — even when
+    /// it lands in the same wallclock tick. Without the reservation, a commit in
+    /// the same tick would recompute the identical stamp `S`, closing a superseded
+    /// version's transaction-time interval at exactly `[C1, S)`; the half-open
+    /// upper bound (`TimeRange::contains` uses `< end`) then excludes `S`, so the
+    /// historical fallback misses the version and returns `NodeNotFound` — a
+    /// snapshot-isolation violation. Reserving `S` sorts every later commit
+    /// strictly after this read, keeping it invisible to the snapshot as required.
+    ///
+    /// Lock discipline: `current_timestamp` is first in the project lock order, and
+    /// this method holds only that guard and calls into no other subsystem while
+    /// held, so the read-compute-write sequence is atomic and lock-order-safe.
     fn snapshot_timestamp_for_read(&self) -> Result<Timestamp> {
-        // Capture current time before acquiring lock to minimize lock contention
+        // Capture current time before acquiring lock to minimize lock contention.
         let now = crate::core::temporal::time::now();
 
-        let last_commit =
-            *self
-                .current_timestamp
+        // Hold the frontier guard across read + compute + write so the
+        // reservation is atomic against concurrent snapshots and commits.
+        let mut frontier =
+            self.current_timestamp
                 .lock()
                 .map_err(|_| TransactionError::LockPoisoned {
                     resource: "current_timestamp".to_string(),
                 })?;
+        let last_commit = *frontier;
 
-        if now > last_commit {
-            // Wallclock advanced past the last commit — now is sufficient
-            Ok(now)
-        } else {
-            // Wallclock hasn't advanced — advance one logical tick past the last
-            // commit so that `commit_ts < snapshot_ts` holds for all committed txns.
-            // Use checked_add to handle potential overflow (theoretically requires
-            // 4B+ events per microsecond, but we handle it for correctness).
-            let next_logical =
-                last_commit
-                    .logical()
-                    .checked_add(1)
-                    .ok_or(crate::core::error::Error::Temporal(
+        let snapshot =
+            if now > last_commit {
+                // Wallclock advanced past the last commit — now is sufficient.
+                now
+            } else {
+                // Wallclock hasn't advanced — advance one logical tick past the last
+                // commit so that `commit_ts < snapshot_ts` holds for all committed txns.
+                // Use checked_add to handle potential overflow (theoretically requires
+                // 4B+ events per microsecond, but we handle it for correctness).
+                let next_logical = last_commit.logical().checked_add(1).ok_or(
+                    crate::core::error::Error::Temporal(
                         crate::core::error::TemporalError::LogicalCounterOverflow {
                             wallclock: last_commit.wallclock(),
                             current_logical: last_commit.logical(),
                         },
-                    ))?;
+                    ),
+                )?;
 
-            // SAFETY: wallclock is copied from an existing valid HybridTimestamp,
-            // and next_logical is bounded by u32::MAX via checked_add above.
-            Ok(HybridTimestamp::new_unchecked(
-                last_commit.wallclock(),
-                next_logical,
-            ))
-        }
+                // SAFETY: wallclock is copied from an existing valid HybridTimestamp,
+                // and next_logical is bounded by u32::MAX via checked_add above.
+                HybridTimestamp::new_unchecked(last_commit.wallclock(), next_logical)
+            };
+
+        // Reserve the snapshot tick: `snapshot` is strictly greater than
+        // `last_commit` in both branches, so this only ever advances the frontier.
+        // No future commit can now reuse or land on this exact stamp.
+        *frontier = snapshot;
+        Ok(snapshot)
     }
 
     /// Create a new read-only transaction.
