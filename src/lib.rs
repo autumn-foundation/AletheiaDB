@@ -91,6 +91,10 @@ pub mod http;
 // server today and the MCP server in Phase 2, hence gated on either feature.
 #[cfg(any(feature = "http-server", feature = "mcp-server"))]
 pub mod auth;
+// Signed audit export of entity history for compliance (Issue #3358).
+// Offline-verifiable Ed25519-signed evidence artifacts built on history reads.
+#[cfg(feature = "audit-export")]
+pub mod audit;
 // Test utilities: available in unit tests and when the simulation feature is enabled
 // (integration tests under `--features simulation` need create_test_db).
 #[cfg(any(test, feature = "simulation"))]
