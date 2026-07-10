@@ -497,12 +497,17 @@ impl From<&BufferedWrite> for crate::storage::wal::WalOperation {
                 valid_from: *valid_from,
                 provenance: provenance.as_deref().cloned(),
             },
+            // The tombstone/retraction `version_id` (Issue #3406) is not known
+            // at the buffer level — it is pre-generated at commit time and
+            // stamped onto the WAL op by `log_operations_to_wal`. This blanket
+            // conversion therefore emits `None`; see that function.
             BufferedWrite::DeleteNode {
                 node_id,
                 valid_from,
             } => crate::storage::wal::WalOperation::DeleteNode {
                 node_id: *node_id,
                 valid_from: *valid_from,
+                version_id: None,
             },
             BufferedWrite::DeleteEdge {
                 edge_id,
@@ -510,17 +515,20 @@ impl From<&BufferedWrite> for crate::storage::wal::WalOperation {
             } => crate::storage::wal::WalOperation::DeleteEdge {
                 edge_id: *edge_id,
                 valid_from: *valid_from,
+                version_id: None,
             },
             BufferedWrite::RetractNode { node_id, valid_to } => {
                 crate::storage::wal::WalOperation::RetractNode {
                     node_id: *node_id,
                     valid_to: *valid_to,
+                    version_id: None,
                 }
             }
             BufferedWrite::RetractEdge { edge_id, valid_to } => {
                 crate::storage::wal::WalOperation::RetractEdge {
                     edge_id: *edge_id,
                     valid_to: *valid_to,
+                    version_id: None,
                 }
             }
         }

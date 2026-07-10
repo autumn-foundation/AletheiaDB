@@ -19,11 +19,14 @@ use crate::api::transaction::WriteOps;
 use crate::auth::AccessClass;
 use crate::core::NodeId;
 use crate::http::auth::AuthContext;
+use crate::http::config::{
+    EffectiveQueryLimits, LimitDimension, QueryLimitsOverride, RowOverflowPolicy,
+};
 use crate::http::converters::{
     interned_to_string, json_to_parameter_map, json_to_property_map, property_map_to_json,
     query_row_to_json,
 };
-use crate::http::error::AletheiaHttpError;
+use crate::http::error::{AletheiaHttpError, ResourceLimitExceeded};
 use crate::http::state::AppState;
 use crate::http::trace::HttpTrace;
 use crate::query::QueryBuilder;
@@ -33,11 +36,14 @@ use crate::query::read_only::detect_mutating_clause;
 use autumn_web::Route;
 use autumn_web::prelude::{get, post, routes};
 use axum::Json;
+use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
+use std::future::Future;
 use std::sync::Arc;
+use std::time::Duration;
 
 // Resource caps to prevent DoS via deep pagination / large result sets.
 const MAX_DEEP_PAGINATION: usize = 10_000;
@@ -153,6 +159,11 @@ pub struct ApiResponse {
     data: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
+    /// `truncated` is additive (Issue #3368): present and `true` only when a
+    /// result row cap under [`RowOverflowPolicy::Truncate`] dropped rows;
+    /// omitted otherwise, so existing responses are unchanged.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    truncated: Option<bool>,
 }
 
 impl ApiResponse {
@@ -161,6 +172,18 @@ impl ApiResponse {
             success: true,
             data: Some(data),
             error: None,
+            truncated: None,
+        }
+    }
+
+    /// Success response that flags `truncated: true` when the row cap dropped
+    /// rows (Issue #3368). When `truncated` is `false`, the field is omitted.
+    pub(crate) fn success_with_truncation(data: Value, truncated: bool) -> Self {
+        Self {
+            success: true,
+            data: Some(data),
+            error: None,
+            truncated: truncated.then_some(true),
         }
     }
 }
@@ -680,11 +703,129 @@ fn query_access_class(req: &QueryRequest) -> AccessClass {
     }
 }
 
+/// The `/query` request envelope (Issue #3368).
+///
+/// Wraps the polymorphic [`QueryRequest`] (flattened, so the `operation` tag
+/// and its fields stay at the top level) and an optional per-call `limits`
+/// override. Both `limits` and its inner fields are `#[serde(default)]`, so a
+/// request body with no `"limits"` key parses and behaves exactly as before.
+#[derive(Debug, Deserialize)]
+pub struct QueryEnvelope {
+    #[serde(flatten)]
+    request: QueryRequest,
+    #[serde(default)]
+    limits: Option<QueryLimitsOverride>,
+}
+
+/// Apply the effective row cap to a result `Value` (Issue #3368).
+///
+/// Caps the **top-level array length only**: row limits apply to
+/// array-shaped results (list-like reads); a single-entity object result is
+/// returned unchanged, and nested arrays inside an object are never counted or
+/// truncated. Under [`RowOverflowPolicy::Truncate`] the array is capped and
+/// `truncated` is `true`; under [`RowOverflowPolicy::Reject`] an over-cap
+/// result is a structured `413` error (never retriable — the result is simply
+/// too large).
+///
+/// Only ever invoked for read-class operations (Issue #3368 review MUST-FIX 1):
+/// a committed write's acknowledgement is never truncated or rejected here.
+fn apply_row_cap(
+    data: Value,
+    limits: &EffectiveQueryLimits,
+) -> Result<(Value, bool), AletheiaHttpError> {
+    if limits.max_result_rows == 0 {
+        return Ok((data, false));
+    }
+    match data {
+        Value::Array(mut rows) if rows.len() > limits.max_result_rows => {
+            let consumed = rows.len();
+            match limits.row_overflow {
+                RowOverflowPolicy::Truncate => {
+                    rows.truncate(limits.max_result_rows);
+                    Ok((Value::Array(rows), true))
+                }
+                RowOverflowPolicy::Reject => Err(AletheiaHttpError::ResourceLimitExceeded(
+                    ResourceLimitExceeded {
+                        dimension: LimitDimension::ResultRows,
+                        limit: limits.max_result_rows as u64,
+                        consumed: Some(consumed as u64),
+                        retriable: false,
+                    },
+                )),
+            }
+        }
+        other => Ok((other, false)),
+    }
+}
+
+/// Enforce the time and result-shaping limit dimensions around an operation
+/// future (Issue #3368):
+///
+/// 1. **Wall-clock timeout** — the operation is raced against `timeout_ms`; on
+///    elapse the client gets a prompt `429`. Applies to **all** operations
+///    (it bounds the client's wait). (The underlying blocking computation is
+///    not cancelled — it runs to completion on the blocking pool — but the HTTP
+///    response deadline is bounded. True engine-level cancellation is the
+///    query-executor lane's concern.) The timeout's `retriable` flag is `true`
+///    only for read-class ops: a **write** may have committed on the blocking
+///    pool, so its timeout is `retriable: false` to avoid a duplicate retry
+///    (review MUST-FIX 1).
+/// 2. **Result-row cap** — truncate-or-reject per policy, **read-class only**.
+///    A committed write's small acknowledgement (ids / version ids) is never
+///    truncated or `413`'d after the fact.
+///
+/// The **result-byte cap** is enforced by the caller ([`handle_query`]) on the
+/// fully-serialized response envelope, so it too is read-class only and is not
+/// applied here.
+///
+/// A dimension whose effective value is `0` is unlimited and skipped. Returns
+/// the (possibly truncated) result plus a `truncated` flag.
+async fn enforce_query_limits<F>(
+    limits: &EffectiveQueryLimits,
+    is_write: bool,
+    op: F,
+) -> Result<(Value, bool), AletheiaHttpError>
+where
+    F: Future<Output = Result<Value, AletheiaHttpError>>,
+{
+    // 1. Wall-clock timeout (all ops — it bounds the client's wait).
+    let data = if limits.timeout_ms > 0 {
+        match tokio::time::timeout(Duration::from_millis(limits.timeout_ms), op).await {
+            Ok(result) => result?,
+            Err(_elapsed) => {
+                return Err(AletheiaHttpError::ResourceLimitExceeded(
+                    ResourceLimitExceeded {
+                        dimension: LimitDimension::WallClockTimeout,
+                        limit: limits.timeout_ms,
+                        consumed: None,
+                        // A write may already have committed — do not invite a
+                        // duplicate retry.
+                        retriable: !is_write,
+                    },
+                ));
+            }
+        }
+    } else {
+        op.await?
+    };
+
+    // 2. Result-row cap — READ-class ops only. A write acknowledgement is never
+    // truncated or rejected after the write has committed.
+    if is_write {
+        return Ok((data, false));
+    }
+    let (data, truncated) = apply_row_cap(data, limits)?;
+    Ok((data, truncated))
+}
+
 /// Polymorphic `/query` endpoint. Dispatches on the `operation` tag.
 ///
 /// Authorization happens *before* any database work: the request's operation
 /// is classified via [`query_access_class`] and checked against the caller's
-/// role.
+/// role. Per-query resource limits (Issue #3368) are then resolved from the
+/// server defaults + the optional per-call `limits` override (a request that
+/// asks for more than the operator ceiling is rejected `422` here, before any
+/// DB work), and enforced around execution by [`enforce_query_limits`].
 ///
 /// The whole handler body runs inside the [`HttpTrace`] root span (Issue
 /// #3376), so the database's query/write child spans nest underneath it, the
@@ -695,8 +836,13 @@ pub async fn handle_query(
     trace: HttpTrace,
     auth: AuthContext,
     state: AppState,
-    Json(req): Json<QueryRequest>,
+    Json(envelope): Json<QueryEnvelope>,
 ) -> Response {
+    let QueryEnvelope {
+        request: req,
+        limits,
+    } = envelope;
+
     // Compute and stamp per-request attributes only when the span will actually
     // be recorded (Issue #3376, MED2 / Perf). A feature-absent build compiles
     // this block out entirely; a runtime-disabled or head-sampled-out span
@@ -721,48 +867,76 @@ pub async fn handle_query(
     #[cfg(feature = "observability")]
     let span = trace.span();
 
-    // Authorization + dispatch, returning the JSON data payload or an error.
+    // Classify the operation once. The access class drives BOTH authorization
+    // and limit semantics: a write is exempt from the result row/byte caps and
+    // its wall-clock timeout is non-retriable (the write may already have
+    // committed — Issue #3368 review MUST-FIX 1).
+    let access_class = query_access_class(&req);
+    let is_write = matches!(access_class, AccessClass::Write);
+
+    // Authorization + limit resolution + dispatch, wrapped in the trace root
+    // span so DB child spans nest underneath it and the trace id is available
+    // for correlation on any failure (Issue #3376). Resource limits (Issue
+    // #3368) are resolved and enforced inside, so a limit rejection (422/413/
+    // 429) is stamped and trace-correlated exactly like any other error.
     let work = async move {
-        auth.authorize(query_access_class(&req))?;
+        // Authorization first: auth rejects (401/403) before limit logic runs.
+        auth.authorize(access_class)?;
+
+        // Resolve effective limits; an over-ceiling per-call override is a 422
+        // rejected up front, before any database work.
+        let effective = state
+            .query_limits()
+            .effective(limits.as_ref())
+            .map_err(AletheiaHttpError::InvalidLimitOverride)?;
+
         let db = state.db_arc();
         // Verified principal name (if any) for provenance stamping on write
         // operations (Issue #3350). Anonymous mode yields None.
         let principal = auth.principal().map(|p| p.name.clone());
 
-        let data = match req {
-            QueryRequest::CreateNode { label, properties } => {
-                handle_create_node(db, label, properties, principal).await?
-            }
-            QueryRequest::GetNode { node_id } => handle_get_node(db, node_id).await?,
-            QueryRequest::BulkCreateNodes { nodes } => {
-                handle_bulk_create_nodes(db, nodes, principal).await?
-            }
-            QueryRequest::BulkGetNodes { node_ids } => handle_bulk_get_nodes(db, node_ids).await?,
-            QueryRequest::BulkUpdateNodes { updates } => {
-                handle_bulk_update_nodes(db, updates, principal).await?
-            }
-            QueryRequest::BulkDeleteNodes { node_ids, cascade } => {
-                handle_bulk_delete_nodes(db, node_ids, cascade).await?
-            }
-            QueryRequest::FindNode {
-                label,
-                properties,
-                limit,
-                offset,
-            } => handle_find_node(db, label, properties, limit, offset).await?,
-            QueryRequest::FindNeighbors {
-                node_id,
-                limit,
-                offset,
-            } => handle_find_neighbors(db, node_id, limit, offset).await?,
-            QueryRequest::ExecuteQuery { query, parameters } => {
-                handle_execute_query(db, query, parameters).await?
-            }
-            QueryRequest::BulkExecuteQuery { queries } => {
-                handle_bulk_execute_query(db, queries).await?
+        // Build (but do not yet await) the operation future so the wall-clock
+        // timeout in `enforce_query_limits` wraps the actual execution.
+        let op = async move {
+            match req {
+                QueryRequest::CreateNode { label, properties } => {
+                    handle_create_node(db, label, properties, principal).await
+                }
+                QueryRequest::GetNode { node_id } => handle_get_node(db, node_id).await,
+                QueryRequest::BulkCreateNodes { nodes } => {
+                    handle_bulk_create_nodes(db, nodes, principal).await
+                }
+                QueryRequest::BulkGetNodes { node_ids } => {
+                    handle_bulk_get_nodes(db, node_ids).await
+                }
+                QueryRequest::BulkUpdateNodes { updates } => {
+                    handle_bulk_update_nodes(db, updates, principal).await
+                }
+                QueryRequest::BulkDeleteNodes { node_ids, cascade } => {
+                    handle_bulk_delete_nodes(db, node_ids, cascade).await
+                }
+                QueryRequest::FindNode {
+                    label,
+                    properties,
+                    limit,
+                    offset,
+                } => handle_find_node(db, label, properties, limit, offset).await,
+                QueryRequest::FindNeighbors {
+                    node_id,
+                    limit,
+                    offset,
+                } => handle_find_neighbors(db, node_id, limit, offset).await,
+                QueryRequest::ExecuteQuery { query, parameters } => {
+                    handle_execute_query(db, query, parameters).await
+                }
+                QueryRequest::BulkExecuteQuery { queries } => {
+                    handle_bulk_execute_query(db, queries).await
+                }
             }
         };
-        Ok::<Value, AletheiaHttpError>(data)
+
+        let (data, truncated) = enforce_query_limits(&effective, is_write, op).await?;
+        Ok::<(Value, bool, EffectiveQueryLimits), AletheiaHttpError>((data, truncated, effective))
     };
 
     #[cfg(feature = "observability")]
@@ -773,14 +947,59 @@ pub async fn handle_query(
     #[cfg(not(feature = "observability"))]
     let result = work.await;
 
-    match result {
-        Ok(data) => {
+    // Build the final response. On success the result count is stamped on the
+    // span (Issue #3376) and the wire envelope is serialized exactly ONCE
+    // (Issue #3368 perf-High) so the result-byte cap is measured against the
+    // real wire bytes. Any error — including a limit rejection surfaced here —
+    // is funneled through the single trace-aware error path below so it carries
+    // the `error.code` span attribute and the `trace_id`/`x-trace-id`.
+    let outcome: Result<Response, AletheiaHttpError> = match result {
+        Ok((data, truncated, effective)) => {
             #[cfg(feature = "observability")]
             if recording {
                 trace.record_result_count(result_count(&data));
             }
-            Json(ApiResponse::success(data)).into_response()
+            let body = ApiResponse::success_with_truncation(data, truncated);
+            match serde_json::to_vec(&body) {
+                Ok(bytes) => {
+                    // Result-byte cap — READ-class only, and only when a finite
+                    // cap is set. A committed write's acknowledgement has already
+                    // taken effect; a post-commit 413 would lie about durability,
+                    // so writes are exempt. Measured against the real wire bytes
+                    // (never back through `Json(..)`, which would serialize a
+                    // second time — these bytes are byte-identical to it).
+                    if !is_write
+                        && effective.max_response_bytes > 0
+                        && bytes.len() > effective.max_response_bytes
+                    {
+                        Err(AletheiaHttpError::ResourceLimitExceeded(
+                            ResourceLimitExceeded {
+                                dimension: LimitDimension::ResultBytes,
+                                limit: effective.max_response_bytes as u64,
+                                consumed: Some(bytes.len() as u64),
+                                retriable: false,
+                            },
+                        ))
+                    } else {
+                        Ok((
+                            StatusCode::OK,
+                            [(
+                                header::CONTENT_TYPE,
+                                HeaderValue::from_static("application/json"),
+                            )],
+                            bytes,
+                        )
+                            .into_response())
+                    }
+                }
+                Err(e) => Err(AletheiaHttpError::Internal(e.to_string())),
+            }
         }
+        Err(e) => Err(e),
+    };
+
+    match outcome {
+        Ok(response) => response,
         Err(e) => {
             #[cfg(feature = "observability")]
             if recording {
@@ -995,6 +1214,186 @@ mod tests {
                 route.path
             );
         }
+    }
+
+    // ------------------------------------------------------------------
+    // Per-query resource limits (Issue #3368)
+    // ------------------------------------------------------------------
+
+    /// The `#[serde(flatten)]` envelope keeps `operation` at the top level and
+    /// carries the optional `limits` override — and a body with no `limits`
+    /// key still parses (backward compatible).
+    #[test]
+    fn query_envelope_flattens_operation_and_optional_limits() {
+        // With a limits override.
+        let env: QueryEnvelope = serde_json::from_value(json!({
+            "operation": "get_node",
+            "node_id": 7,
+            "limits": { "timeout_ms": 500, "max_result_rows": 3 }
+        }))
+        .expect("deserialize envelope with limits");
+        assert!(matches!(env.request, QueryRequest::GetNode { node_id: 7 }));
+        let ov = env.limits.expect("limits present");
+        assert_eq!(ov.timeout_ms, Some(500));
+        assert_eq!(ov.max_result_rows, Some(3));
+
+        // Without a limits key — unchanged legacy body.
+        let env: QueryEnvelope = serde_json::from_value(json!({
+            "operation": "get_node",
+            "node_id": 9
+        }))
+        .expect("deserialize envelope without limits");
+        assert!(matches!(env.request, QueryRequest::GetNode { node_id: 9 }));
+        assert!(env.limits.is_none());
+    }
+
+    fn effective(
+        timeout_ms: u64,
+        max_result_rows: usize,
+        max_response_bytes: usize,
+        row_overflow: RowOverflowPolicy,
+    ) -> EffectiveQueryLimits {
+        EffectiveQueryLimits {
+            timeout_ms,
+            max_result_rows,
+            max_response_bytes,
+            row_overflow,
+        }
+    }
+
+    /// A future that outlives the timeout produces a 429 timeout error, with
+    /// the underlying computation left running (documented caveat). Read-class
+    /// op → `retriable: true`. Uses paused time for determinism.
+    #[tokio::test(start_paused = true)]
+    async fn enforce_wall_clock_timeout_trips_429() {
+        let limits = effective(10, 0, 0, RowOverflowPolicy::Truncate);
+        let slow = async {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            Ok(json!([]))
+        };
+        let err = enforce_query_limits(&limits, false, slow)
+            .await
+            .unwrap_err();
+        match err {
+            AletheiaHttpError::ResourceLimitExceeded(e) => {
+                assert_eq!(e.dimension, LimitDimension::WallClockTimeout);
+                assert_eq!(e.limit, 10);
+                assert!(e.retriable, "a read-class timeout is retriable");
+            }
+            other => panic!("expected timeout, got {other:?}"),
+        }
+    }
+
+    /// A write-class op that outlives the timeout is `retriable: false` — the
+    /// write may already have committed on the blocking pool (review MUST-FIX 1).
+    #[tokio::test(start_paused = true)]
+    async fn enforce_write_timeout_is_not_retriable() {
+        let limits = effective(10, 0, 0, RowOverflowPolicy::Truncate);
+        let slow = async {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            Ok(json!({ "id": 1 }))
+        };
+        let err = enforce_query_limits(&limits, true, slow).await.unwrap_err();
+        match err {
+            AletheiaHttpError::ResourceLimitExceeded(e) => {
+                assert_eq!(e.dimension, LimitDimension::WallClockTimeout);
+                assert!(
+                    !e.retriable,
+                    "a write-class timeout must not invite a duplicate retry"
+                );
+            }
+            other => panic!("expected timeout, got {other:?}"),
+        }
+    }
+
+    /// A fast future under the timeout passes through untouched.
+    #[tokio::test]
+    async fn enforce_fast_op_under_timeout_succeeds() {
+        let limits = effective(1_000, 0, 0, RowOverflowPolicy::Truncate);
+        let fast = async { Ok(json!({ "ok": true })) };
+        let (data, truncated) = enforce_query_limits(&limits, false, fast).await.unwrap();
+        assert_eq!(data, json!({ "ok": true }));
+        assert!(!truncated);
+    }
+
+    /// Zero timeout means unlimited — a slow op is not interrupted.
+    #[tokio::test(start_paused = true)]
+    async fn enforce_zero_timeout_is_unlimited() {
+        let limits = effective(0, 0, 0, RowOverflowPolicy::Truncate);
+        let op = async {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            Ok(json!([1, 2, 3]))
+        };
+        let (data, truncated) = enforce_query_limits(&limits, false, op).await.unwrap();
+        assert_eq!(data, json!([1, 2, 3]));
+        assert!(!truncated);
+    }
+
+    #[tokio::test]
+    async fn enforce_row_cap_truncate_flags_truncated() {
+        let limits = effective(0, 2, 0, RowOverflowPolicy::Truncate);
+        let op = async { Ok(json!([1, 2, 3, 4, 5])) };
+        let (data, truncated) = enforce_query_limits(&limits, false, op).await.unwrap();
+        assert_eq!(data, json!([1, 2]));
+        assert!(truncated);
+    }
+
+    #[tokio::test]
+    async fn enforce_row_cap_reject_errors() {
+        let limits = effective(0, 2, 0, RowOverflowPolicy::Reject);
+        let op = async { Ok(json!([1, 2, 3])) };
+        let err = enforce_query_limits(&limits, false, op).await.unwrap_err();
+        match err {
+            AletheiaHttpError::ResourceLimitExceeded(e) => {
+                assert_eq!(e.dimension, LimitDimension::ResultRows);
+                assert_eq!(e.limit, 2);
+                assert_eq!(e.consumed, Some(3));
+            }
+            other => panic!("expected row-reject, got {other:?}"),
+        }
+    }
+
+    /// A WRITE op is exempt from the row cap: an over-cap array acknowledgement
+    /// is neither truncated nor rejected (review MUST-FIX 1).
+    #[tokio::test]
+    async fn enforce_write_op_is_exempt_from_row_cap() {
+        // Reject policy with a cap of 1; a 3-element write ack must still pass.
+        let limits = effective(0, 1, 0, RowOverflowPolicy::Reject);
+        let op = async { Ok(json!([1, 2, 3])) };
+        let (data, truncated) = enforce_query_limits(&limits, true, op).await.unwrap();
+        assert_eq!(data, json!([1, 2, 3]), "write ack must not be truncated");
+        assert!(!truncated);
+    }
+
+    /// Row cap only applies to arrays; a single-object result is untouched.
+    #[tokio::test]
+    async fn enforce_row_cap_ignores_non_arrays() {
+        let limits = effective(0, 1, 0, RowOverflowPolicy::Reject);
+        let op = async { Ok(json!({ "id": 1, "big": [1, 2, 3, 4] })) };
+        let (data, truncated) = enforce_query_limits(&limits, false, op).await.unwrap();
+        assert_eq!(data, json!({ "id": 1, "big": [1, 2, 3, 4] }));
+        assert!(!truncated);
+    }
+
+    /// The byte cap now lives in `handle_query`, applied to the fully-serialized
+    /// response envelope. This unit test drives that same envelope serialization
+    /// and measurement step directly (the end-to-end path is covered in the
+    /// `tests/http_query_limits.rs` integration suite).
+    #[test]
+    fn envelope_byte_cap_measures_the_wire_body() {
+        let max_response_bytes = 8usize;
+        let data = json!(["a very long string that exceeds eight bytes"]);
+        let body = ApiResponse::success_with_truncation(data, false);
+        let bytes = serde_json::to_vec(&body).unwrap();
+        // The serialized envelope wraps `data` in `{"success":true,"data":...}`,
+        // so it is strictly larger than the raw data and far exceeds 8 bytes.
+        assert!(bytes.len() > max_response_bytes);
+
+        let over_cap = bytes.len() > max_response_bytes;
+        assert!(over_cap, "envelope must trip the byte cap");
+
+        // A generous cap does not trip.
+        assert!(bytes.len() < 4096);
     }
 
     #[test]

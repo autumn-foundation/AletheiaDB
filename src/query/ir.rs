@@ -241,6 +241,32 @@ impl TraversalDepth {
             TraversalDepth::Variable => None,
         }
     }
+
+    /// Get the minimum depth for this specification.
+    ///
+    /// Variable-length traversal in this engine binds the far node to each
+    /// **distinct** reachable target once, at its **shortest** hop-distance,
+    /// returning it iff `min <= shortestDepth <= max`. This returns the lower
+    /// bound `min`:
+    /// - `Exact(n)` => `n` (a single fixed depth),
+    /// - `Max(_)` => `1` (`*..n` starts at one hop),
+    /// - `Range { min, .. }` => `min`,
+    /// - `Variable` => `1` (`*` starts at one hop).
+    ///
+    /// Note this is **node-distinct / shortest-path reachability**, a deliberate
+    /// v1 simplification of openCypher's trail (path-enumeration) semantics: a
+    /// node whose *shortest* path is shorter than `min` is not re-emitted at a
+    /// longer, in-range depth, and an anchor reachable only via an in-range
+    /// cycle is not re-bound. See the `TraversalIterator` docs for details;
+    /// full trail semantics is a tracked follow-up.
+    #[must_use]
+    pub fn min_depth(&self) -> usize {
+        match self {
+            TraversalDepth::Exact(n) => *n,
+            TraversalDepth::Max(_) | TraversalDepth::Variable => 1,
+            TraversalDepth::Range { min, .. } => *min,
+        }
+    }
 }
 
 /// Edge traversal direction.

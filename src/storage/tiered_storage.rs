@@ -55,7 +55,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-#[cfg(feature = "config-toml")]
+#[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
 /// Number of latency samples to keep for percentile calculation.
@@ -63,8 +63,8 @@ const LATENCY_SAMPLE_SIZE: usize = 1000;
 
 /// Configuration for tiered storage.
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "config-toml", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "config-toml", serde(default))]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "serde", serde(default))]
 pub struct TieredStorageConfig {
     /// Size of the warm cache (number of entries per type).
     /// This cache holds recently accessed cold data to reduce disk reads.

@@ -68,6 +68,7 @@ fn test_replay_delete_node_basic() -> Result<()> {
     wal.append(WalOperation::DeleteNode {
         node_id,
         valid_from: timestamp2,
+        version_id: None,
     })?;
     wal.flush()?;
 
@@ -124,6 +125,7 @@ fn test_replay_delete_node_after_update() -> Result<()> {
     wal.append(WalOperation::DeleteNode {
         node_id,
         valid_from: time::now(),
+        version_id: None,
     })?;
     wal.flush()?;
 
@@ -187,6 +189,7 @@ fn test_replay_delete_edge_basic() -> Result<()> {
     wal.append(WalOperation::DeleteEdge {
         edge_id,
         valid_from: time::now(),
+        version_id: None,
     })?;
     wal.flush()?;
 
@@ -243,6 +246,7 @@ fn test_replay_delete_node_preserves_temporal_intervals() -> Result<()> {
     wal.append(WalOperation::DeleteNode {
         node_id,
         valid_from: delete_vf,
+        version_id: None,
     })?;
     wal.flush()?;
 
@@ -363,6 +367,7 @@ fn test_replay_delete_edge_preserves_temporal_intervals() -> Result<()> {
     wal.append(WalOperation::DeleteEdge {
         edge_id,
         valid_from: delete_vf,
+        version_id: None,
     })?;
     wal.flush()?;
 
@@ -477,6 +482,7 @@ fn test_replay_delete_node_honors_logged_valid_from() -> Result<()> {
     wal.append(WalOperation::DeleteNode {
         node_id,
         valid_from: delete_vf,
+        version_id: None,
     })?;
     wal.flush()?;
 
@@ -563,6 +569,7 @@ fn test_replay_delete_edge_honors_logged_valid_from() -> Result<()> {
     wal.append(WalOperation::DeleteEdge {
         edge_id,
         valid_from: delete_vf,
+        version_id: None,
     })?;
     wal.flush()?;
 
@@ -637,6 +644,7 @@ fn test_replay_multiple_deletes() -> Result<()> {
         wal.append(WalOperation::DeleteNode {
             node_id: NodeId::new(id).unwrap(),
             valid_from: time::now(),
+            version_id: None,
         })?;
     }
 
@@ -689,6 +697,7 @@ fn test_replay_delete_with_vector() -> Result<()> {
     wal.append(WalOperation::DeleteNode {
         node_id,
         valid_from: time::now(),
+        version_id: None,
     })?;
     wal.flush()?;
 
@@ -748,6 +757,7 @@ fn test_replay_mixed_creates_updates_deletes() -> Result<()> {
     wal.append(WalOperation::DeleteNode {
         node_id: NodeId::new(2).unwrap(),
         valid_from: time::now(),
+        version_id: None,
     })?;
 
     // Create node 3

@@ -1999,6 +1999,7 @@ mod tests {
         wal.append(WalOperation::DeleteNode {
             node_id,
             valid_from: time::now(),
+            version_id: None,
         })?;
         wal.flush()?;
 
@@ -2057,6 +2058,7 @@ mod tests {
         wal.append(WalOperation::DeleteEdge {
             edge_id,
             valid_from: time::now(),
+            version_id: None,
         })?;
         wal.flush()?;
 

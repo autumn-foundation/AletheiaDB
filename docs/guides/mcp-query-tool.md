@@ -776,17 +776,21 @@ maintain at write time; bounds only ever widen while the server runs, so a
 caller can cache the result for the duration of a session. The per-label
 breakdown is folded from the hot-tier historical version store.
 
-**Coverage caveat (cold storage + restarts).** Bounds cover all history
+**Coverage (cold storage + restarts).** Overall bounds cover all history
 recorded during the **current process lifetime**, plus the hot-tier history
-restored at startup. On databases with cold-storage migration enabled,
-versions migrated to the cold tier *before the last restart* are **not**
-reflected — the temporal indexes (and their extent aggregate) are rebuilt at
-startup from hot-tier versions only. Within a single process lifetime,
-cold-tier migration never shrinks the bounds. The per-label breakdown is
-additionally hot-tier-only even within a process lifetime: after cold
-migration a label's bounds may be narrower than the overall bounds, or a
-label may be absent entirely. A follow-up could persist cold-tier bounds
-metadata to close the restart gap.
+restored at startup, plus history migrated to the cold tier — including
+across restarts (Issue #3389). The cold store persists its min/max extent
+bounds per dimension in metadata (maintained incrementally as versions
+migrate), and those bounds are merged back into the extent aggregate at
+startup, so a fact migrated to cold before a restart still bounds the extent.
+The **per-label breakdown** is still folded from the hot-tier historical
+version store only: after cold migration a label's per-label bounds may be
+narrower than the overall bounds, or a label may be absent entirely (the
+persisted cold bounds are aggregate-only, not per-label). Bounds never
+shrink. One narrow gap: bounds are **not** backfilled for a cold file created
+by a pre-#3389 binary that already held versions — such pre-existing cold
+history is captured only from the first new write onward, so the extent can
+under-report (never over-report) until those versions are re-touched.
 
 **Calibration pattern:** if `temporal_extent` reports
 `valid_time.earliest = 2021-03-01`, an `AS OF '2019-01-01'` query is
@@ -975,6 +979,169 @@ keeps its existing microseconds-as-string format — that contract is
 unchanged). The block is purely additive: no existing field moved or changed
 shape.
 
+## Token-budget-aware responses (Issue #3353)
+
+An LLM's context window is its scarcest resource, yet the read tools size their
+responses by *row count* (`limit`), not by *cost*: a `limit: 50` traversal can
+return 500 tokens or 50,000 depending on the property payloads, and the caller
+cannot know in advance. The token budget lets a caller say "spend at most N
+tokens answering this" and receive a response *guaranteed* to fit, with an
+explicit, machine-readable account of what was reduced and how to fetch it.
+
+### The parameters
+
+The **thirteen** budgetable read tools — `get_node`, `list_nodes`, `get_edge`,
+`list_edges`, `get_outgoing_edges`, `get_incoming_edges`, `traverse`,
+`find_similar`, `hybrid_query`, `query`, `find_nodes_at_time`,
+`get_node_history`, and `get_schema` — accept these optional parameters. This is
+the exact set (the code's single source of truth is `BUDGETABLE_READ_TOOLS`);
+it is **not** *every* read tool — single-entity/aggregate reads such as
+`get_node_at_time`, `get_edge_history`, `diff_node_versions`, `temporal_extent`,
+`database_stats`, and `count_nodes` are out of scope. The three parameters are
+injected into each budgetable tool's advertised `inputSchema.properties`, so a
+client that introspects the schema discovers them (with correct types) rather
+than relying on the prose description alone. Omitting all of them leaves the
+tool's behavior **completely unchanged**.
+
+| Parameter | Meaning |
+|-----------|---------|
+| `max_response_tokens` | Maximum response size in **estimated tokens**. The serialized **success** response, *including the truncation metadata itself*, is guaranteed not to exceed this. |
+| `max_response_bytes` | Byte-exact alternative. When both are set, the **tighter** bound wins. |
+| `priority_properties` | Array of property keys to protect from elision; they out-survive unprotected properties at every degradation rung. |
+
+The budget bounds **success** responses. A structured *error* response (for
+example the too-small-budget `INVALID_ARGUMENT` below) is itself small and is
+returned intact. In the rare case a budgetable tool returns a non-object success
+payload (a JSON scalar/array, or plain text) it cannot degrade along the entity
+ladder, but the byte cap is still enforced: the payload is truncated with a
+disclosed marker rather than emitted unbounded.
+
+A **misspelled or unknown budget key** (e.g. `max_tokens` instead of
+`max_response_tokens`) is **ignored** — consistent with the surface's
+unknown-field tolerance — and the full, unbudgeted response is returned. Use the
+exact key names above so a budget you intend to apply is actually applied.
+
+**Token-estimation basis:** tokens are estimated as `ceil(utf8_byte_len / 4)`.
+Four bytes per token is the standard approximation of GPT/Claude-family BPE
+tokenizers for English-plus-JSON text and holds within ~10% at the 1K-token
+scale. Callers needing an exact wire bound use `max_response_bytes`, which is
+enforced byte-for-byte.
+
+### The degradation ladder (deterministic, disclosed)
+
+Over budget, the response degrades along a fixed, ordered ladder. The same
+request at the same budget on the same data always degrades **identically**:
+
+1. **`full`** — nothing reduced.
+2. **`elided_properties`** — inside each entity's `properties`, any value whose
+   serialized size exceeds a threshold (and is not a protected
+   `priority_properties` key) is replaced with an `{ "elided": true, ... }`
+   descriptor, mirroring the vector-elision convention of #3220. A value is
+   elided **only when the descriptor is actually smaller** than the value it
+   replaces, so this rung can never enlarge the response.
+3. **`entity_summaries`** — each entity's `properties` is reduced to the
+   protected keys only. Result *structure* — ids, labels, relationships,
+   temporal coordinates, provenance and similarity scores — survives because it
+   lives *beside* `properties`, never inside it.
+4. **`counts_and_handles`** — entity arrays are truncated to the prefix that
+   fits; the omitted tail is disclosed as a count plus a fetch handle, **and the
+   object's own pagination/count siblings are rewritten** to describe the
+   retained prefix — `count`/`row_count` become the retained length,
+   `has_more`/`truncated` become `true`, and `next_offset` (on offset-paginated
+   tools) advances to exactly the cut point. This keeps a paginating caller
+   gap-free and duplicate-free: following the disclosed resume call yields the
+   dropped rows and nothing else. (`total_matching`, when present, still counts
+   the full matching set and is left unchanged.)
+
+`find_similar` and `hybrid_query` **never reach rung 4**: their ranked results
+are never dropped or reordered to meet a budget — only the per-result payloads
+degrade. Temporal responses never omit the temporal coordinates that make a
+result interpretable.
+
+Every response carries a `budget` block naming the rung applied per section:
+
+```jsonc
+// tools/call -> "get_node"
+{ "node_id": 7, "max_response_tokens": 400 }
+// -> {
+//      "id": 7,
+//      "label": "Person",
+//      "properties": {
+//        "name": "Alice",
+//        "bio": {
+//          "elided": true, "reason": "budget", "type": "string", "size_bytes": 4002,
+//          "fetch": { "tool": "get_node",
+//                     "arguments": { "node_id": 7, "include_vectors": true } }
+//        }
+//      },
+//      "temporal": { /* ... always preserved ... */ },
+//      "budget": {
+//        "applied": true,
+//        "rung": "elided_properties",
+//        "token_estimation_basis": "ceil(utf8_bytes / 4)",
+//        "requested_max_tokens": 400,
+//        "effective_max_bytes": 1600,
+//        "priority_properties": [],
+//        "sections": [ { "section": "properties", "rung": "elided_properties",
+//                        "elided_values": 1 } ]
+//      }
+//    }
+```
+
+### Fetch handles — nothing is lost
+
+Every elision/truncation site carries a **fetch handle**: a concrete follow-up
+call (`tool` + `arguments`) that retrieves exactly the omitted content.
+
+- A **per-entity elision** on a live node/edge points at `get_node`/`get_edge`
+  with `include_vectors: true`.
+- A **history version** elision (`get_node_history`/`get_edge_history`) points at
+  `get_node_at_time`/`get_edge_at_time` addressing the *exact superseded
+  version* — the parent entity id (taken from the history wrapper) plus that
+  version's own `valid_from`/`transaction_from` coordinates. A plain `get_node`
+  would return the current state, not the historical version, so the handle uses
+  the point-in-time tool instead.
+- A **truncated array** on an offset-paginated tool
+  (`list_nodes`/`traverse`/`find_nodes_at_time`) carries a concrete resume call:
+  the original arguments with the budget knobs stripped and `offset` advanced to
+  the cut point (composing with the #3226 `next_offset` completeness signal). On
+  a tool that does **not** page by offset (e.g. `get_outgoing_edges`,
+  `get_schema`, `query`) the handle honestly discloses the truncation and tells
+  the caller to re-request with a larger budget — it never fabricates an `offset`
+  argument the tool does not accept.
+
+An agent that follows the handles can reconstruct the full, unbudgeted response.
+
+### Budgets too small to satisfy
+
+If the budget is too small to return even the minimal rung, the tool returns a
+structured #3234 `INVALID_ARGUMENT` error stating the **minimum viable budget** —
+never a silently empty success. The reported minimum is **self-consistent**:
+re-issuing the same request at `min_viable_tokens` (or `min_viable_bytes`)
+succeeds — the figure already accounts for the disclosed `budget` block's own
+numbers growing at the larger budget.
+
+```jsonc
+{ "error": {
+    "code": "INVALID_ARGUMENT",
+    "message": "requested budget is too small to return even the minimal response for this request; minimum viable budget is approximately 1222 tokens (4886 bytes)",
+    "retriable": false,
+    "details": { "min_viable_tokens": 1222, "min_viable_bytes": 4886,
+                 "requested_tokens": 1200, "requested_bytes": null }
+} }
+```
+
+### Composition and scope
+
+- **Composes with #3220 vector elision** (already-elided vectors are left as-is),
+  **#3226 completeness signals** (truncation handles reference `next_offset`),
+  and the **#3234 error contract** (the too-small-budget error is `INVALID_ARGUMENT`).
+- **Read tools only.** Write and admin tools are out of scope (their responses
+  are already small and fixed-shape). Cursor continuation of large results
+  (#3360) is a complementary, now-landed feature — see
+  [Paging large results](#paging-large-results-cursor-continuation) below for how
+  the two compose.
+
 ## Paging large results (cursor continuation)
 
 Offset pagination (`offset`/`next_offset`, Issue #3226) works, but over a
@@ -1116,21 +1283,25 @@ traversal each page in v1.
   **expired** cursor or one **exceeding the cap** returns `FAILED_PRECONDITION`
   with remediation guidance (re-issue the query). Both are `retriable: false`.
 
-### Composing with token budgets (Issue #3353) — forward-looking
+### Composing with token budgets (Issue #3353)
 
-> **Not yet implemented on this branch.** Token-budget truncation (#3353) is a
-> separate sibling change that has not landed here yet; the behavior below
-> describes the intended composition *once #3353 lands*, not current behavior.
-> Today a cursor page is bounded only by `limit`.
+Cursors and token-budget truncation (#3353) are both available and complementary.
+They compose along a fixed order: within one `call_tool` the cursor page is
+produced **first** (the handler pages the snapshot-anchored scan), then the token
+budget shapes **that page** — a budget-constrained page simply ends up smaller
+(fewer rows retained, or degraded payloads), while the cursor still resumes the
+same consistent scan on the next call. Budgeting shapes *one* call; cursors move
+data *across* calls; the snapshot is unchanged between pages.
 
-Once #3353 lands, cursors and token-budget truncation will be complementary and
-compose cleanly: a budget-constrained page simply ends earlier (fewer rows or
-degraded payloads), and the cursor resumes exactly where the retained prefix
-stopped — the snapshot is unchanged, so the next page continues the same
-consistent scan. Budgeting shapes *one* call; cursors move data *across* calls.
-(Implementation note: when budgets land, the continuation key must be derived
-from the last row *actually emitted* after any budget trim, not the limit-th
-candidate, or a truncated page would skip rows.)
+Caveat for v1: the cursor continuation key is derived from the underlying keyset
+scan (or, for `traverse`, the internal DFS offset), not from the last row that
+*survived* a budget trim. So if a token budget truncates a cursor page's entity
+array below the rows the scan actually advanced past, following the returned
+`cursor` can skip the trimmed-off rows. To page a large scan losslessly, either
+resume via the budget ladder's own offset-advancing fetch handle, or re-request
+the page with a larger budget so the whole page is retained before advancing the
+cursor. Deriving the continuation key from the last *emitted* row after budget
+trim is a tracked follow-up.
 
 ### When to prefer cursors over offsets
 

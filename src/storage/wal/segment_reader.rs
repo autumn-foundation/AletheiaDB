@@ -57,7 +57,7 @@ use crate::core::provenance::Provenance;
 use super::serialization::{
     OP_BEGIN_TX, OP_CHECKPOINT, OP_COMMIT_TX, OP_CREATE_EDGE, OP_CREATE_NODE,
     OP_DECLARE_UNIQUE_CONSTRAINT, OP_DELETE_EDGE, OP_DELETE_NODE, OP_DROP_UNIQUE_CONSTRAINT,
-    OP_RETRACT_EDGE, OP_RETRACT_NODE, OP_UPDATE_EDGE, OP_UPDATE_NODE,
+    OP_RETRACT_EDGE, OP_RETRACT_NODE, OP_UPDATE_EDGE, OP_UPDATE_NODE, TOMBSTONE_VERSION_ID_ABSENT,
 };
 use super::{LSN, WalEntry, WalOperation};
 
@@ -125,8 +125,28 @@ pub(crate) const WAL_VERSION_TX_FRAMING: u8 = 7;
 /// transaction-framing entry format (i.e. [`WAL_VERSION_TX_FRAMING`]).
 pub(crate) const WAL_VERSION_ENCRYPTED_TX_FRAMING: u8 = 8;
 
+/// WAL format version for plaintext segments whose delete/retract payloads
+/// carry the tombstone/retraction `version_id` (Issue #3406).
+///
+/// A strict superset of [`WAL_VERSION_TX_FRAMING`]: it keeps the tx-framing
+/// markers and additionally appends an 8-byte `version_id` to the
+/// `DeleteNode`/`DeleteEdge`/`RetractNode`/`RetractEdge` payloads, so crash
+/// recovery reproduces the live tombstone version chain bit-for-bit instead of
+/// synthesizing a (possibly colliding) id. The `framed` predicate
+/// ([`is_framed_version`]) and this delete-version-id gate
+/// ([`carries_delete_version_id`]) are independent booleans on the same version
+/// byte and compose without conflict (per the #3413 reservation note above).
+/// Bumping the header version makes an older reader reject the file cleanly
+/// rather than mis-length the extended payload, following the #3224/#3413
+/// precedent.
+pub(crate) const WAL_VERSION_DELETE_VERSION_ID: u8 = 9;
+
+/// WAL format version for encrypted segments whose decrypted payload uses the
+/// delete-version-id entry format (i.e. [`WAL_VERSION_DELETE_VERSION_ID`]).
+pub(crate) const WAL_VERSION_ENCRYPTED_DELETE_VERSION_ID: u8 = 10;
+
 /// Maximum supported WAL version (inclusive).
-const WAL_VERSION_MAX: u8 = WAL_VERSION_ENCRYPTED_TX_FRAMING;
+const WAL_VERSION_MAX: u8 = WAL_VERSION_ENCRYPTED_DELETE_VERSION_ID;
 
 /// Returns `true` if `version` denotes an encrypted segment (the original
 /// encrypted format or one of its provenance/framing-carrying successors).
@@ -136,6 +156,7 @@ fn is_encrypted_version(version: u8) -> bool {
         || version == WAL_VERSION_ENCRYPTED_PROVENANCE
         || version == WAL_VERSION_ENCRYPTED_PROVENANCE_PRINCIPAL
         || version == WAL_VERSION_ENCRYPTED_TX_FRAMING
+        || version == WAL_VERSION_ENCRYPTED_DELETE_VERSION_ID
 }
 
 /// Returns `true` if `version` (a plaintext/payload version) supports the
@@ -144,6 +165,17 @@ fn is_encrypted_version(version: u8) -> bool {
 #[inline]
 fn is_framed_version(version: u8) -> bool {
     version >= WAL_VERSION_TX_FRAMING
+}
+
+/// Returns `true` if `version` (a plaintext/payload version) carries the
+/// tombstone/retraction `version_id` in delete/retract payloads (Issue #3406).
+///
+/// Independent of [`is_framed_version`]: both are monotonic `>=` predicates on
+/// the same version byte, so v9/v10 segments are simultaneously framed AND
+/// delete-version-id-carrying.
+#[inline]
+fn carries_delete_version_id(version: u8) -> bool {
+    version >= WAL_VERSION_DELETE_VERSION_ID
 }
 
 /// Map a segment/container format version to the logical *payload* version
@@ -159,6 +191,7 @@ fn payload_version(version: u8) -> u8 {
         WAL_VERSION_ENCRYPTED_PROVENANCE => WAL_VERSION_PROVENANCE,
         WAL_VERSION_ENCRYPTED_PROVENANCE_PRINCIPAL => WAL_VERSION_PROVENANCE_PRINCIPAL,
         WAL_VERSION_ENCRYPTED_TX_FRAMING => WAL_VERSION_TX_FRAMING,
+        WAL_VERSION_ENCRYPTED_DELETE_VERSION_ID => WAL_VERSION_DELETE_VERSION_ID,
         v => v,
     }
 }
@@ -1249,6 +1282,37 @@ fn parse_update_edge_op(
     })
 }
 
+/// Parse an optional tombstone/retraction `version_id` trailing a delete/retract
+/// payload (Issue #3406).
+///
+/// For segments below [`WAL_VERSION_DELETE_VERSION_ID`] the field is absent, so
+/// this returns `None` and replay falls back to synthesizing the id. For v9+
+/// segments it reads a fixed 8-byte LE u64; the
+/// [`TOMBSTONE_VERSION_ID_ABSENT`] sentinel maps back to `None`.
+fn parse_opt_tombstone_version_id(
+    buffer: &[u8],
+    offset: &mut usize,
+    version: u8,
+    context: &str,
+) -> Result<Option<VersionId>> {
+    if !carries_delete_version_id(version) {
+        return Ok(None);
+    }
+    require_bytes(buffer, *offset, 8, context)?;
+    let raw = u64::from_le_bytes(buffer[*offset..*offset + 8].try_into().unwrap());
+    advance(offset, 8)?;
+    if raw == TOMBSTONE_VERSION_ID_ABSENT {
+        return Ok(None);
+    }
+    let vid = VersionId::new(raw).map_err(|e| {
+        Error::Storage(StorageError::CorruptedData(format!(
+            "Invalid tombstone version ID in WAL {}: {}",
+            context, e
+        )))
+    })?;
+    Ok(Some(vid))
+}
+
 fn parse_delete_node_op(
     buffer: &[u8],
     offset: &mut usize,
@@ -1264,9 +1328,11 @@ fn parse_delete_node_op(
     } else {
         tx_timestamp
     };
+    let version_id = parse_opt_tombstone_version_id(buffer, offset, version, "DeleteNode")?;
     Ok(WalOperation::DeleteNode {
         node_id,
         valid_from,
+        version_id,
     })
 }
 
@@ -1285,33 +1351,49 @@ fn parse_delete_edge_op(
     } else {
         tx_timestamp
     };
+    let version_id = parse_opt_tombstone_version_id(buffer, offset, version, "DeleteEdge")?;
     Ok(WalOperation::DeleteEdge {
         edge_id,
         valid_from,
+        version_id,
     })
 }
 
-/// Parse a `RetractNode` payload: `[node_id: 8][valid_to: 12]`.
+/// Parse a `RetractNode` payload: `[node_id: 8][valid_to: 12]` plus, for v9+
+/// segments, an 8-byte tombstone `version_id` (Issue #3406).
 ///
-/// No version gating is needed: the `OP_RETRACT_NODE` tag (Issue #3230) only
-/// ever appears in segments written by versions that serialize `valid_to`.
-fn parse_retract_node_op(buffer: &[u8], offset: &mut usize) -> Result<WalOperation> {
+/// The `valid_to` needs no version gating: the `OP_RETRACT_NODE` tag (Issue
+/// #3230) only ever appears in segments written by versions that serialize
+/// `valid_to`. The trailing `version_id` is gated on
+/// [`WAL_VERSION_DELETE_VERSION_ID`].
+fn parse_retract_node_op(buffer: &[u8], offset: &mut usize, version: u8) -> Result<WalOperation> {
     let node_id = deserialize_node_id(buffer, *offset, "RetractNode")?;
     advance(offset, 8)?;
     let (valid_to, ts_len) = HybridTimestamp::deserialize(&buffer[*offset..])?;
     advance(offset, ts_len)?;
-    Ok(WalOperation::RetractNode { node_id, valid_to })
+    let version_id = parse_opt_tombstone_version_id(buffer, offset, version, "RetractNode")?;
+    Ok(WalOperation::RetractNode {
+        node_id,
+        valid_to,
+        version_id,
+    })
 }
 
-/// Parse a `RetractEdge` payload: `[edge_id: 8][valid_to: 12]`.
+/// Parse a `RetractEdge` payload: `[edge_id: 8][valid_to: 12]` plus, for v9+
+/// segments, an 8-byte tombstone `version_id` (Issue #3406).
 ///
-/// See [`parse_retract_node_op`] for why no version gating is needed.
-fn parse_retract_edge_op(buffer: &[u8], offset: &mut usize) -> Result<WalOperation> {
+/// See [`parse_retract_node_op`] for version-gating details.
+fn parse_retract_edge_op(buffer: &[u8], offset: &mut usize, version: u8) -> Result<WalOperation> {
     let edge_id = deserialize_edge_id(buffer, *offset, "RetractEdge")?;
     advance(offset, 8)?;
     let (valid_to, ts_len) = HybridTimestamp::deserialize(&buffer[*offset..])?;
     advance(offset, ts_len)?;
-    Ok(WalOperation::RetractEdge { edge_id, valid_to })
+    let version_id = parse_opt_tombstone_version_id(buffer, offset, version, "RetractEdge")?;
+    Ok(WalOperation::RetractEdge {
+        edge_id,
+        valid_to,
+        version_id,
+    })
 }
 
 fn parse_checkpoint_op(buffer: &[u8], offset: &mut usize) -> Result<WalOperation> {
@@ -1424,8 +1506,8 @@ pub(crate) fn parse_entry_at(
         OP_UPDATE_EDGE => parse_update_edge_op(buffer, &mut cur, version, timestamp)?,
         OP_DELETE_NODE => parse_delete_node_op(buffer, &mut cur, version, timestamp)?,
         OP_DELETE_EDGE => parse_delete_edge_op(buffer, &mut cur, version, timestamp)?,
-        OP_RETRACT_NODE => parse_retract_node_op(buffer, &mut cur)?,
-        OP_RETRACT_EDGE => parse_retract_edge_op(buffer, &mut cur)?,
+        OP_RETRACT_NODE => parse_retract_node_op(buffer, &mut cur, version)?,
+        OP_RETRACT_EDGE => parse_retract_edge_op(buffer, &mut cur, version)?,
         OP_CHECKPOINT => parse_checkpoint_op(buffer, &mut cur)?,
         OP_DECLARE_UNIQUE_CONSTRAINT => {
             let label = read_label(buffer, &mut cur, "DeclareUniqueConstraint.label")?;
@@ -1980,14 +2062,22 @@ mod tests {
         // Issue #3230: RetractNode must round-trip its valid_to exactly.
         let node_id = NodeId::new(7).unwrap();
         let valid_to = crate::core::hlc::HybridTimestamp::new(1_234_567, 42).unwrap();
-        let operation = WalOperation::RetractNode { node_id, valid_to };
+        // Issue #3406: the retraction version_id round-trips too. Serialization
+        // always writes the highest (v9+) payload shape, so parse at that
+        // version to consume the same bytes.
+        let version_id = Some(VersionId::new(321).unwrap());
+        let operation = WalOperation::RetractNode {
+            node_id,
+            valid_to,
+            version_id,
+        };
         let entry = WalEntry::new(LSN(10), operation);
 
         let mut buffer = Vec::new();
         serialize_entry_into(&entry, &mut buffer).unwrap();
 
         let (parsed_entry, bytes_consumed) =
-            parse_entry_at(&buffer, 0, WAL_VERSION_PROVENANCE).unwrap();
+            parse_entry_at(&buffer, 0, WAL_VERSION_DELETE_VERSION_ID).unwrap();
 
         assert_eq!(parsed_entry.lsn, LSN(10));
         assert_eq!(bytes_consumed, buffer.len());
@@ -1995,9 +2085,11 @@ mod tests {
             WalOperation::RetractNode {
                 node_id: parsed_id,
                 valid_to: parsed_valid_to,
+                version_id: parsed_version_id,
             } => {
                 assert_eq!(parsed_id, node_id);
                 assert_eq!(parsed_valid_to, valid_to, "valid_to must survive verbatim");
+                assert_eq!(parsed_version_id, version_id, "version_id must round-trip");
             }
             other => panic!("Expected RetractNode operation, got {other:?}"),
         }
@@ -2008,14 +2100,20 @@ mod tests {
         // Issue #3230: RetractEdge must round-trip its valid_to exactly.
         let edge_id = EdgeId::new(11).unwrap();
         let valid_to = crate::core::hlc::HybridTimestamp::new(9_876_543, 3).unwrap();
-        let operation = WalOperation::RetractEdge { edge_id, valid_to };
+        // Issue #3406: the retraction version_id round-trips too.
+        let version_id = Some(VersionId::new(654).unwrap());
+        let operation = WalOperation::RetractEdge {
+            edge_id,
+            valid_to,
+            version_id,
+        };
         let entry = WalEntry::new(LSN(11), operation);
 
         let mut buffer = Vec::new();
         serialize_entry_into(&entry, &mut buffer).unwrap();
 
         let (parsed_entry, bytes_consumed) =
-            parse_entry_at(&buffer, 0, WAL_VERSION_PROVENANCE).unwrap();
+            parse_entry_at(&buffer, 0, WAL_VERSION_DELETE_VERSION_ID).unwrap();
 
         assert_eq!(parsed_entry.lsn, LSN(11));
         assert_eq!(bytes_consumed, buffer.len());
@@ -2023,9 +2121,11 @@ mod tests {
             WalOperation::RetractEdge {
                 edge_id: parsed_id,
                 valid_to: parsed_valid_to,
+                version_id: parsed_version_id,
             } => {
                 assert_eq!(parsed_id, edge_id);
                 assert_eq!(parsed_valid_to, valid_to, "valid_to must survive verbatim");
+                assert_eq!(parsed_version_id, version_id, "version_id must round-trip");
             }
             other => panic!("Expected RetractEdge operation, got {other:?}"),
         }
@@ -2124,9 +2224,14 @@ mod tests {
         // through serialization exactly, it is honored by WAL replay).
         let node_id = NodeId::new(42).unwrap();
         let valid_from = HybridTimestamp::new(time::now().wallclock() - 3_600_000_000, 0).unwrap(); // 1h ago
+        // Issue #3406: the tombstone version_id round-trips too. Serialization
+        // always writes the highest (v9+) payload shape, so parse at that
+        // version to consume the same bytes.
+        let version_id = Some(VersionId::new(555).unwrap());
         let operation = WalOperation::DeleteNode {
             node_id,
             valid_from,
+            version_id,
         };
         let entry = WalEntry::new(LSN(5), operation);
 
@@ -2135,7 +2240,8 @@ mod tests {
         serialize_entry_into(&entry, &mut buffer).unwrap();
 
         // Parse it back
-        let (parsed_entry, bytes_consumed) = parse_entry_at(&buffer, 0, WAL_VERSION).unwrap();
+        let (parsed_entry, bytes_consumed) =
+            parse_entry_at(&buffer, 0, WAL_VERSION_DELETE_VERSION_ID).unwrap();
 
         // Verify
         assert_eq!(parsed_entry.lsn, LSN(5));
@@ -2144,12 +2250,14 @@ mod tests {
             WalOperation::DeleteNode {
                 node_id: parsed_id,
                 valid_from: parsed_valid_from,
+                version_id: parsed_version_id,
             } => {
                 assert_eq!(parsed_id, node_id);
                 assert_eq!(
                     parsed_valid_from, valid_from,
                     "backdated delete valid_from must roundtrip exactly"
                 );
+                assert_eq!(parsed_version_id, version_id, "version_id must round-trip");
             }
             _ => panic!("Expected DeleteNode operation"),
         }
@@ -2162,9 +2270,12 @@ mod tests {
         // through serialization exactly, it is honored by WAL replay).
         let edge_id = EdgeId::new(100).unwrap();
         let valid_from = HybridTimestamp::new(time::now().wallclock() - 3_600_000_000, 0).unwrap(); // 1h ago
+        // Issue #3406: the tombstone version_id round-trips too.
+        let version_id = Some(VersionId::new(556).unwrap());
         let operation = WalOperation::DeleteEdge {
             edge_id,
             valid_from,
+            version_id,
         };
         let entry = WalEntry::new(LSN(6), operation);
 
@@ -2173,7 +2284,8 @@ mod tests {
         serialize_entry_into(&entry, &mut buffer).unwrap();
 
         // Parse it back
-        let (parsed_entry, bytes_consumed) = parse_entry_at(&buffer, 0, WAL_VERSION).unwrap();
+        let (parsed_entry, bytes_consumed) =
+            parse_entry_at(&buffer, 0, WAL_VERSION_DELETE_VERSION_ID).unwrap();
 
         // Verify
         assert_eq!(parsed_entry.lsn, LSN(6));
@@ -2182,12 +2294,14 @@ mod tests {
             WalOperation::DeleteEdge {
                 edge_id: parsed_id,
                 valid_from: parsed_valid_from,
+                version_id: parsed_version_id,
             } => {
                 assert_eq!(parsed_id, edge_id);
                 assert_eq!(
                     parsed_valid_from, valid_from,
                     "backdated delete valid_from must roundtrip exactly"
                 );
+                assert_eq!(parsed_version_id, version_id, "version_id must round-trip");
             }
             _ => panic!("Expected DeleteEdge operation"),
         }
@@ -3062,9 +3176,13 @@ mod tests {
             WalOperation::DeleteNode {
                 node_id: parsed_id,
                 valid_from,
+                version_id,
             } => {
                 assert_eq!(parsed_id, node_id);
                 assert_eq!(valid_from, timestamp);
+                // v0 segments carry no tombstone version_id (Issue #3406);
+                // replay synthesizes it.
+                assert_eq!(version_id, None);
             }
             _ => panic!("Expected DeleteNode"),
         }
@@ -3081,9 +3199,12 @@ mod tests {
             WalOperation::DeleteEdge {
                 edge_id: parsed_id,
                 valid_from,
+                version_id,
             } => {
                 assert_eq!(parsed_id, edge_id);
                 assert_eq!(valid_from, timestamp);
+                // v0 segments carry no tombstone version_id (Issue #3406).
+                assert_eq!(version_id, None);
             }
             _ => panic!("Expected DeleteEdge"),
         }

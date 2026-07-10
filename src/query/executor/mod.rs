@@ -22,7 +22,8 @@ pub use iterators::ResultIterator;
 pub use iterators::TemporalNodeScanIterator;
 pub use iterators::{
     BatchTemporalNodeIterator, FilterIterator, LimitIterator, ProjectIterator,
-    ProvenanceFilterIterator, TemporalNodeIterator, VectorRerankIterator, VectorResultIterator,
+    ProvenanceFilterIterator, TemporalNodeIterator, TemporalNodeRangeScanIterator,
+    VectorRerankIterator, VectorResultIterator,
 };
 pub use results::{EntityId, EntityResult, QueryResults, QueryRow};
 
@@ -198,6 +199,49 @@ impl QueryExecutor {
         Ok(QueryResults::new(filtered))
     }
 
+    /// Candidate node ids for a temporal label scan (`AS OF` / `BETWEEN`).
+    ///
+    /// Enumerates every node that has ever had a version recorded -- the same
+    /// candidate set the AS OF node-find oracle
+    /// (`AletheiaDB::find_nodes_at_time`) uses, which stays complete for nodes
+    /// deleted from current state. The set is capped at the configured
+    /// `max_schema_as_of_entities` limit (lowest ids kept) so a pathological
+    /// history can't make a single scan unbounded, then sorted for
+    /// deterministic, stable output.
+    ///
+    /// # Truncation caveat
+    ///
+    /// When recorded history exceeds `max_schema_as_of_entities` (default
+    /// 50,000) the candidate set is **truncated** (lowest ids kept, newest
+    /// dropped) and the temporal scan returns an *incomplete* result. This
+    /// mirrors the oracle's [`NodesAtTime::sampled`] cap. The query-results
+    /// envelope does not yet carry a `truncated`/`sampled` flag, so today
+    /// truncation is only surfaced via an `observability` `warn!`; wiring the
+    /// flag through the executor result is tracked as a follow-up. Callers with
+    /// larger histories should raise `max_schema_as_of_entities`.
+    fn temporal_scan_candidates(&self) -> Vec<crate::core::NodeId> {
+        let historical = self.historical.read();
+        let mut ids = historical.versioned_node_ids();
+        let cap = historical.max_schema_as_of_entities();
+        drop(historical);
+        // History exceeds the cap => incomplete result (lowest ids kept).
+        // Surface it rather than silently dropping the signal.
+        let truncated = crate::db::schema::cap_ids(&mut ids, cap);
+        #[cfg(feature = "observability")]
+        if truncated {
+            tracing::warn!(
+                cap,
+                kept = ids.len(),
+                "temporal label scan candidate set truncated at max_schema_as_of_entities; \
+                 result is incomplete (newest node ids dropped)"
+            );
+        }
+        #[cfg(not(feature = "observability"))]
+        let _ = truncated;
+        ids.sort_unstable();
+        ids
+    }
+
     /// Execute a physical operator, returning an iterator
     fn execute_op(&self, op: &PhysicalOp) -> Result<Box<dyn ResultIterator>> {
         match op {
@@ -247,6 +291,51 @@ impl QueryExecutor {
                 }
             }
 
+            PhysicalOp::TemporalNodeScan {
+                label,
+                valid_time,
+                transaction_time,
+            } => {
+                // Point-in-time label scan (`AS OF`, Issues #550/#551). Enumerate
+                // every ever-versioned node (mirroring the AS OF node-find oracle
+                // `AletheiaDB::find_nodes_at_time`) and reconstruct each at the
+                // requested bi-temporal point, filtering by label; candidates that
+                // did not exist at that instant are skipped, not errors.
+                let node_ids = self.temporal_scan_candidates();
+                Ok(Box::new(
+                    iterators::TemporalNodeScanIterator::new(
+                        node_ids,
+                        *valid_time,
+                        *transaction_time,
+                        Arc::clone(&self.historical),
+                        label.clone(),
+                    )
+                    .skipping_missing(),
+                ))
+            }
+
+            PhysicalOp::TemporalNodeRangeScan {
+                label,
+                valid_from,
+                valid_to,
+                transaction_time,
+            } => {
+                // Valid-time range label scan (`BETWEEN`, Issue #552). Same
+                // candidate enumeration; the iterator emits each node's
+                // believed-at-`transaction_time` version whose valid interval
+                // overlaps the range (at most one row per node -- multiple rows
+                // only across distinct nodes).
+                let node_ids = self.temporal_scan_candidates();
+                Ok(Box::new(iterators::TemporalNodeRangeScanIterator::new(
+                    node_ids,
+                    *valid_from,
+                    *valid_to,
+                    *transaction_time,
+                    Arc::clone(&self.historical),
+                    label.clone(),
+                )))
+            }
+
             PhysicalOp::TemporalVectorSearch {
                 embedding,
                 k,
@@ -271,6 +360,7 @@ impl QueryExecutor {
                 input,
                 direction,
                 label,
+                min_depth,
                 depth,
                 temporal_context,
             } => {
@@ -279,6 +369,7 @@ impl QueryExecutor {
                     input_iter,
                     *direction,
                     label.clone(),
+                    *min_depth,
                     *depth,
                     Arc::clone(&self.current),
                     Arc::clone(&self.historical),
@@ -710,6 +801,7 @@ mod tests {
                 }),
                 direction: crate::query::ir::Direction::Outgoing,
                 label: Some("KNOWS".to_string()),
+                min_depth: 1,
                 depth: 1,
                 temporal_context: None,
             },
@@ -894,6 +986,7 @@ mod tests {
                         }),
                         direction: crate::query::ir::Direction::Outgoing,
                         label: Some("KNOWS".to_string()),
+                        min_depth: 1,
                         depth: 1,
                         temporal_context: None,
                     }),
@@ -1511,6 +1604,7 @@ mod tests {
                 steps: vec![OptionalPhysicalStep::Traverse {
                     direction: crate::query::ir::Direction::Outgoing,
                     label: Some("KNOWS".to_string()),
+                    min_depth: 1,
                     depth: 1,
                     temporal_context: None,
                 }],
@@ -1545,6 +1639,7 @@ mod tests {
                 steps: vec![OptionalPhysicalStep::Traverse {
                     direction: crate::query::ir::Direction::Outgoing,
                     label: Some("FOLLOWS".to_string()),
+                    min_depth: 1,
                     depth: 1,
                     temporal_context: None,
                 }],
@@ -1580,6 +1675,7 @@ mod tests {
                     OptionalPhysicalStep::Traverse {
                         direction: crate::query::ir::Direction::Outgoing,
                         label: Some("KNOWS".to_string()),
+                        min_depth: 1,
                         depth: 1,
                         temporal_context: None,
                     },
