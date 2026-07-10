@@ -97,7 +97,7 @@ const SPARSE_INDEX_VERSION: u16 = 1;
 /// - **Cosine**: Angle-based similarity, ignores magnitude
 /// - **BM25**: Best for text retrieval with term frequencies
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
-#[cfg_attr(feature = "config-toml", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum ScoringMethod {
     /// Dot product (inner product) similarity.
     /// Scores can be any real number. Higher is more similar.
@@ -125,7 +125,7 @@ impl ScoringMethod {
 
 /// Configuration for sparse vector index.
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "config-toml", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct SparseIndexConfig {
     /// Vector dimensionality (total dimensions including zeros).
     pub dimensions: usize,
@@ -929,7 +929,7 @@ impl SparseVectorIndex {
 
 /// Statistics about a sparse vector index.
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "config-toml", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct SparseIndexStats {
     /// Number of vectors in the index
     pub num_vectors: usize,

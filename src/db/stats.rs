@@ -53,10 +53,7 @@ use crate::storage::wal::DurabilityMode;
 /// not a transactionally frozen view — concurrent writers may advance
 /// individual counters between reads.
 #[derive(Debug, Clone, PartialEq)]
-#[cfg_attr(
-    any(feature = "config-toml", feature = "mcp-server"),
-    derive(serde::Serialize)
-)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[non_exhaustive]
 pub struct DatabaseStats {
     /// Current-state graph size (the hot, in-RAM tier queried by
@@ -75,10 +72,7 @@ pub struct DatabaseStats {
 
 /// Current-state (hot tier) graph size.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(
-    any(feature = "config-toml", feature = "mcp-server"),
-    derive(serde::Serialize)
-)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[non_exhaustive]
 pub struct CurrentStateStats {
     /// Number of nodes in the current state. O(1) index-length read.
@@ -94,10 +88,7 @@ pub struct CurrentStateStats {
 /// maintained incrementally (Issue #212) — reading them is O(1) and never
 /// iterates versions.
 #[derive(Debug, Clone, Copy, PartialEq)]
-#[cfg_attr(
-    any(feature = "config-toml", feature = "mcp-server"),
-    derive(serde::Serialize)
-)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[non_exhaustive]
 pub struct HistoricalDepthStats {
     /// Total node versions retained in the hot historical store.
@@ -135,27 +126,21 @@ pub struct HistoricalDepthStats {
 /// — count fields are structurally absent so they can never be misread as
 /// "zero cold versions".
 #[derive(Debug, Clone, Copy, PartialEq)]
-#[cfg_attr(
-    any(feature = "config-toml", feature = "mcp-server"),
-    derive(serde::Serialize)
-)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[non_exhaustive]
 pub struct ColdStorageTierStats {
     /// Whether a cold-storage tier (tiered storage + Redb backend) is
     /// configured for this database.
     pub enabled: bool,
     /// Counters for the enabled tier; absent when `enabled` is false.
-    #[cfg_attr(any(feature = "config-toml", feature = "mcp-server"), serde(flatten))]
+    #[cfg_attr(feature = "serde", serde(flatten))]
     pub details: Option<ColdStorageDetails>,
 }
 
 /// Counters for an enabled cold-storage tier. All values are atomic counter
 /// snapshots — O(1) reads, no disk access.
 #[derive(Debug, Clone, Copy, PartialEq)]
-#[cfg_attr(
-    any(feature = "config-toml", feature = "mcp-server"),
-    derive(serde::Serialize)
-)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[non_exhaustive]
 pub struct ColdStorageDetails {
     /// Node versions in the cold (disk) tier. Seeded from the persisted
@@ -180,10 +165,7 @@ pub struct ColdStorageDetails {
 /// Where historical-version reads were served from. Together these reveal
 /// the hot / warm-cache / cold distribution of temporal query traffic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(
-    any(feature = "config-toml", feature = "mcp-server"),
-    derive(serde::Serialize)
-)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[non_exhaustive]
 pub struct TierAccessStats {
     /// Reads served from the hot (in-RAM) tier.
@@ -203,10 +185,7 @@ pub struct TierAccessStats {
 /// still emitted explicitly so the schema contract covers any future no-WAL
 /// build and a consumer never has to infer WAL presence from other fields.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(
-    any(feature = "config-toml", feature = "mcp-server"),
-    derive(serde::Serialize)
-)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[non_exhaustive]
 pub struct WalStateStats {
     /// Whether a WAL is active. Always `true` in current builds (see type
@@ -381,7 +360,7 @@ mod tests {
 
     /// WAL counters are `u64`; extreme values must survive JSON
     /// serialization without precision loss or sign flips.
-    #[cfg(any(feature = "config-toml", feature = "mcp-server"))]
+    #[cfg(feature = "serde")]
     #[test]
     fn wal_stats_u64_max_survives_json_round_trip() {
         let stats = WalStateStats {
@@ -405,7 +384,7 @@ mod tests {
 
     /// Disabled cold storage serializes as exactly `{"enabled": false}` —
     /// no count keys an LLM could misread as "0 cold versions".
-    #[cfg(any(feature = "config-toml", feature = "mcp-server"))]
+    #[cfg(feature = "serde")]
     #[test]
     fn disabled_cold_storage_serializes_without_count_fields() {
         let value = serde_json::to_value(ColdStorageTierStats {

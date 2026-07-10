@@ -31,45 +31,31 @@ pub enum ProvenanceError {
 /// Constructed via [`Provenance::builder`], which validates `confidence`
 /// against `[0.0, 1.0]` (NaN is rejected).
 ///
-/// Serde support is feature-gated because `serde` is an optional dependency
-/// (enabled by `config-toml` — a default feature — and `mcp-server`, whose
-/// response types embed [`Provenance`] directly); `--no-default-features`
-/// builds must still compile without it.
+/// Serde support is feature-gated behind the unified `serde` flag (Issue
+/// #3390), which is pulled in by any serde-enabling feature — e.g.
+/// `config-toml` (a default feature) and `mcp-server`, whose response types
+/// embed [`Provenance`] directly; `--no-default-features` builds must still
+/// compile without it.
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(
-    any(feature = "config-toml", feature = "mcp-server"),
+    feature = "serde",
     derive(serde::Serialize, serde::Deserialize),
     serde(try_from = "ProvenanceRaw")
 )]
 pub struct Provenance {
-    #[cfg_attr(
-        any(feature = "config-toml", feature = "mcp-server"),
-        serde(skip_serializing_if = "Option::is_none")
-    )]
+    #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
     source: Option<String>,
-    #[cfg_attr(
-        any(feature = "config-toml", feature = "mcp-server"),
-        serde(skip_serializing_if = "Option::is_none")
-    )]
+    #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
     confidence: Option<f64>,
-    #[cfg_attr(
-        any(feature = "config-toml", feature = "mcp-server"),
-        serde(skip_serializing_if = "Option::is_none")
-    )]
+    #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
     note: Option<String>,
-    #[cfg_attr(
-        any(feature = "config-toml", feature = "mcp-server"),
-        serde(skip_serializing_if = "Option::is_none")
-    )]
+    #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
     correlation_id: Option<String>,
     /// The authenticated principal (API-key identity) that made this write,
     /// if the write arrived through an authenticated server surface
     /// (Issue #3350). Server-stamped -- never caller-supplied -- and
     /// composes with `source` (which remains whatever the caller declared).
-    #[cfg_attr(
-        any(feature = "config-toml", feature = "mcp-server"),
-        serde(skip_serializing_if = "Option::is_none")
-    )]
+    #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
     principal: Option<String>,
 }
 
@@ -249,7 +235,7 @@ impl ProvenanceBuilder {
 /// Unvalidated wire representation used only as the `serde` deserialization
 /// target; [`Provenance`] itself has private fields so it cannot be
 /// deserialized directly without going through validation.
-#[cfg(any(feature = "config-toml", feature = "mcp-server"))]
+#[cfg(feature = "serde")]
 #[derive(Debug, serde::Deserialize)]
 struct ProvenanceRaw {
     #[serde(default)]
@@ -264,7 +250,7 @@ struct ProvenanceRaw {
     principal: Option<String>,
 }
 
-#[cfg(any(feature = "config-toml", feature = "mcp-server"))]
+#[cfg(feature = "serde")]
 impl TryFrom<ProvenanceRaw> for Provenance {
     type Error = ProvenanceError;
 
@@ -337,7 +323,7 @@ mod tests {
         assert_eq!(p.confidence(), None);
     }
 
-    #[cfg(any(feature = "config-toml", feature = "mcp-server"))]
+    #[cfg(feature = "serde")]
     #[test]
     fn test_provenance_json_omits_absent_fields() {
         let p = Provenance::builder().source("csv-import").build().unwrap();
@@ -348,7 +334,7 @@ mod tests {
         assert!(!json.contains("correlation_id"));
     }
 
-    #[cfg(any(feature = "config-toml", feature = "mcp-server"))]
+    #[cfg(feature = "serde")]
     #[test]
     fn test_provenance_deserialize_valid_round_trips() {
         let json = r#"{"source":"claude-mcp","confidence":0.8}"#;
@@ -380,7 +366,7 @@ mod tests {
         assert_eq!(p.source(), None);
     }
 
-    #[cfg(any(feature = "config-toml", feature = "mcp-server"))]
+    #[cfg(feature = "serde")]
     #[test]
     fn test_provenance_principal_json_round_trip_and_omission() {
         // Absent principal is omitted from JSON entirely.
@@ -399,7 +385,7 @@ mod tests {
         assert_eq!(legacy.principal(), None);
     }
 
-    #[cfg(any(feature = "config-toml", feature = "mcp-server"))]
+    #[cfg(feature = "serde")]
     #[test]
     fn test_provenance_deserialize_rejects_invalid_confidence() {
         let json = r#"{"confidence":2.0}"#;

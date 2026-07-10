@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-#[cfg(feature = "config-toml")]
+#[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
 use super::formats::PersistencePolicies;
@@ -27,8 +27,8 @@ use super::formats::PersistencePolicies;
 /// [`crate::config::durable_config_for_data_dir`], which wire this up for you
 /// under a single data-directory root.
 #[derive(Debug, Clone, PartialEq)]
-#[cfg_attr(feature = "config-toml", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "config-toml", serde(default))]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "serde", serde(default))]
 pub struct PersistenceConfig {
     /// Whether persistence is enabled. Defaults to `false`; always pair
     /// `enabled: true` with an explicit `data_dir`.

@@ -61,7 +61,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-#[cfg(feature = "config-toml")]
+#[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
 #[cfg(test)]
@@ -119,7 +119,7 @@ impl PreparedVersionBatch {
 
 /// Compression algorithm for cold storage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-#[cfg_attr(feature = "config-toml", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub enum CompressionAlgorithm {
     /// No compression (fastest, but uses more disk space)
     None,
@@ -169,8 +169,8 @@ impl CompressionAlgorithm {
 /// assert!(matches!(config.compression, CompressionAlgorithm::Zstd));
 /// ```
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "config-toml", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "config-toml", serde(default))]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "serde", serde(default))]
 pub struct ColdStorageConfig {
     /// Compression algorithm to use.
     pub compression: CompressionAlgorithm,
@@ -404,8 +404,8 @@ fn map_compaction_error(
 ///     .cache_size_bytes(1024 * 1024 * 64); // 64MB cache
 /// ```
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "config-toml", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "config-toml", serde(default))]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "serde", serde(default))]
 pub struct RedbConfig {
     /// Compression algorithm for stored values.
     pub compression: CompressionAlgorithm,
