@@ -590,19 +590,14 @@ impl WriteTransaction {
         // instead of dropping it internally. We hold it across finalization below
         // so the current-side writes and their `commit_timestamp` finalization are
         // atomic w.r.t. any snapshot (checkpoint / backup) holding `historical.read()`
-        // — closing the window in which a committed node/edge could be captured with
-        // `commit_timestamp: None`. This respects the documented lock order
-        // (`historical` precedes `snapshot_lock`, adjacency, and the temporal-vector
-        // index lock), so no lock-order inversion is introduced.
+        // — closing the *in-memory* window in which a committed node/edge could be
+        // captured with `commit_timestamp: None`. (The persisted index format does
+        // not serialize `commit_timestamp` and reconstructs it as committed on
+        // restore, so this fix hardens the in-memory snapshot invariant rather than
+        // fixing any on-disk corruption.) This respects the documented lock order
+        // (`historical` precedes `snapshot_lock` and adjacency), so no lock-order
+        // inversion is introduced.
         let historical_guard = apply::apply_changes(self, commit_timestamp)?;
-
-        // Notify temporal vector index of transaction completion (for snapshot creation)
-        // Only call this if the transaction modified vector properties to avoid unnecessary overhead.
-        // Safe to run under `historical_guard`: it only touches the temporal-vector
-        // index's own locks (never `historical`), so the lock order still holds.
-        if self.buffer.has_vector_operations() {
-            self.current.on_temporal_vector_transaction()?;
-        }
 
         // Test-only interleaving hook (Issue #3425): fires at the exact point
         // between the historical writes and the commit-timestamp finalization,
@@ -617,7 +612,23 @@ impl WriteTransaction {
 
         // Finalization complete: release the historical write guard. Snapshots
         // blocked on `historical.read()` now proceed and observe resolved timestamps.
+        //
+        // Issue #3425: only `finalize_current_commit_timestamps` must run under the
+        // guard to close the snapshot finalize window. The temporal-vector notify
+        // below is deliberately kept OUTSIDE the guard: it touches only the vector
+        // index's own locks and is independent of current-side commit_timestamp
+        // finalization, so serializing its (potentially O(N log N)) HNSW snapshot
+        // build under the global historical write lock would only add latency
+        // without any correctness benefit.
         drop(historical_guard);
+
+        // Notify temporal vector index of transaction completion (for snapshot creation).
+        // Only call this if the transaction modified vector properties to avoid unnecessary overhead.
+        // No ordering dependency on finalize: the vectors were already added to the
+        // index during `apply_changes`; this only triggers snapshot creation.
+        if self.buffer.has_vector_operations() {
+            self.current.on_temporal_vector_transaction()?;
+        }
 
         // Commit the constraint guard before registering with the visibility manager.
         // Committing first ensures that freed old-value slots are released before
