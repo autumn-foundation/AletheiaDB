@@ -280,19 +280,51 @@ pub(crate) fn shape_response(
         ]
     };
 
-    let mut last_bytes = 0usize;
     for &rung in ladder {
         let candidate = build_candidate(value.clone(), rung, budget, tool, args, cap);
         let bytes = measured_bytes(&candidate);
         if bytes as u64 <= cap {
             return Ok(candidate);
         }
-        last_bytes = bytes;
     }
 
-    // Even the minimal rung overflows: report the minimum viable budget so the
-    // caller can re-issue with a sufficient budget (AC6).
-    Err(too_small_error(last_bytes, budget))
+    // Even the minimal rung overflows. Report a minimum viable budget the caller
+    // can actually re-issue at. The reported number must self-consistently fit:
+    // a larger budget makes the disclosed `budget` block's own numbers
+    // (`effective_max_bytes`, `requested_max_tokens`) wider, so a naive "size at
+    // the current tiny cap" underestimates. Iterate to a fixpoint, simulating
+    // the caller re-issuing `max_response_tokens = min_tokens`, until the
+    // minimal-rung candidate actually fits that budget (Issue #3353 AC6/T6).
+    let minimal_rung = *ladder.last().expect("ladder is non-empty");
+    let mut min_bytes = measured_bytes(&build_candidate(
+        value.clone(),
+        minimal_rung,
+        budget,
+        tool,
+        args,
+        cap,
+    ));
+    let mut min_tokens = (min_bytes as u64).div_ceil(BYTES_PER_TOKEN);
+    for _ in 0..8 {
+        let probe_cap = min_tokens.saturating_mul(BYTES_PER_TOKEN);
+        let probe = BudgetRequest {
+            effective_bytes: probe_cap,
+            max_tokens: Some(min_tokens),
+            max_bytes: None,
+            priority_properties: budget.priority_properties.clone(),
+        };
+        let cand = build_candidate(value.clone(), minimal_rung, &probe, tool, args, probe_cap);
+        let b = measured_bytes(&cand);
+        min_bytes = b;
+        if b as u64 <= probe_cap {
+            break;
+        }
+        min_tokens = (b as u64).div_ceil(BYTES_PER_TOKEN);
+    }
+    // Report the fitting token budget (and its byte equivalent) so re-issuing at
+    // `min_viable_tokens` — or `min_viable_bytes` — succeeds.
+    let report_bytes = (min_tokens.saturating_mul(BYTES_PER_TOKEN)).max(min_bytes as u64) as usize;
+    Err(too_small_error(report_bytes, budget))
 }
 
 fn is_ranked_tool(tool: &str) -> bool {
