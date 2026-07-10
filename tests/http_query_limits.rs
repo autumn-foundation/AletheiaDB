@@ -425,3 +425,291 @@ async fn request_without_limits_key_uses_server_defaults() {
     assert!(body.get("truncated").is_none());
     assert_eq!(body["data"].as_array().map(Vec::len), Some(3));
 }
+
+/// A `"limits": null` field is deserialized as absent (`Option::None`) and
+/// therefore behaves exactly as no `"limits"` key at all — server defaults.
+#[tokio::test]
+async fn null_limits_behaves_as_absent() {
+    let (client, db) = client_with_limits(QueryLimitsConfig::default());
+    seed_people(&db, 3);
+
+    let (status, body) = post_query(
+        &client,
+        &json!({ "operation": "find_node", "label": "Person", "limits": null }),
+    )
+    .await;
+    assert_eq!(status, 200, "null limits must parse as absent: {body}");
+    assert_eq!(body["success"], true);
+    assert!(body.get("truncated").is_none());
+    assert_eq!(body["data"].as_array().map(Vec::len), Some(3));
+}
+
+/// A malformed `limits` field (out-of-range or wrong-typed) is a clean client
+/// error (4xx) from the JSON extractor — never a 500 (server fault).
+#[tokio::test]
+async fn malformed_limits_is_a_clean_4xx_not_500() {
+    let (client, _db) = client_with_limits(QueryLimitsConfig::default());
+
+    // `timeout_ms` is a u64; a negative value cannot deserialize.
+    let (status, _body) = post_query(
+        &client,
+        &json!({
+            "operation": "find_node",
+            "label": "Person",
+            "limits": { "timeout_ms": -1 }
+        }),
+    )
+    .await;
+    assert!(
+        (400..500).contains(&status),
+        "negative timeout_ms must be a 4xx, got {status}"
+    );
+
+    // Wrong type (string where a number is expected) is likewise a clean 4xx.
+    let (status, _body) = post_query(
+        &client,
+        &json!({
+            "operation": "find_node",
+            "label": "Person",
+            "limits": { "max_result_rows": "not-a-number" }
+        }),
+    )
+    .await;
+    assert!(
+        (400..500).contains(&status),
+        "wrong-typed override must be a 4xx, got {status}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Write operations are exempt from the result row/byte caps (Issue #3368
+// review MUST-FIX 1) — a committed write is never truncated or 413'd.
+// ---------------------------------------------------------------------------
+
+/// Under a Reject row policy with a tight per-call `max_result_rows`, a bulk
+/// WRITE that produces more acknowledgement rows than the cap must NOT 413:
+/// the write is exempt, and every node must actually persist.
+#[tokio::test]
+async fn write_op_is_exempt_from_row_reject_and_persists() {
+    // Reject policy, cap 1, no ceiling (so the per-call override is honored).
+    let limits = QueryLimitsConfig {
+        enabled: true,
+        default_timeout_ms: 0,
+        max_timeout_ms: 0,
+        default_max_result_rows: 100,
+        max_result_rows: 0,
+        default_max_response_bytes: 0,
+        max_response_bytes: 0,
+        row_overflow: RowOverflowPolicy::Reject,
+    };
+    let (client, db) = client_with_limits(limits);
+
+    let (status, body) = post_query(
+        &client,
+        &json!({
+            "operation": "bulk_create_nodes",
+            "nodes": [
+                { "label": "Person" },
+                { "label": "Person" },
+                { "label": "Person" },
+            ],
+            "limits": { "max_result_rows": 1 } // would 413 a read of 3 rows
+        }),
+    )
+    .await;
+    assert_eq!(
+        status, 200,
+        "a write must be exempt from the row Reject cap: {body}"
+    );
+    assert_eq!(body["success"], true);
+    assert!(
+        body.get("truncated").is_none(),
+        "a write ack is never flagged truncated: {body}"
+    );
+    assert_eq!(
+        body["data"].as_array().map(Vec::len),
+        Some(3),
+        "the full write acknowledgement is returned"
+    );
+    assert_eq!(db.node_count(), 3, "all three nodes must persist");
+}
+
+/// Under a Truncate policy with a tight per-call row cap, a bulk WRITE is not
+/// truncated and is not flagged `truncated` — writes bypass the row cap.
+#[tokio::test]
+async fn write_op_is_not_truncated_under_truncate_policy() {
+    let limits = QueryLimitsConfig {
+        enabled: true,
+        default_timeout_ms: 0,
+        max_timeout_ms: 0,
+        default_max_result_rows: 1, // tiny default cap
+        max_result_rows: 0,
+        default_max_response_bytes: 0,
+        max_response_bytes: 0,
+        row_overflow: RowOverflowPolicy::Truncate,
+    };
+    let (client, db) = client_with_limits(limits);
+
+    let (status, body) = post_query(
+        &client,
+        &json!({
+            "operation": "bulk_create_nodes",
+            "nodes": [
+                { "label": "Person" },
+                { "label": "Person" },
+                { "label": "Person" },
+            ]
+        }),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert!(
+        body.get("truncated").is_none(),
+        "write ack must not be flagged truncated: {body}"
+    );
+    assert_eq!(body["data"].as_array().map(Vec::len), Some(3));
+    assert_eq!(db.node_count(), 3);
+}
+
+// ---------------------------------------------------------------------------
+// Concurrency isolation — distinct per-call overrides yield distinct outcomes
+// on the SAME server, proving no shared-state bleed between requests.
+// ---------------------------------------------------------------------------
+
+/// Four concurrent `/query` requests against one server, each with a different
+/// per-call override, must each get its own outcome: a default truncation, a
+/// byte-cap 413, an over-ceiling 422, and an unlimited-within-ceiling 200.
+/// (The row overflow *policy* is server-wide, so the 413 case uses the byte
+/// dimension — still a genuine per-request 413.)
+#[tokio::test]
+async fn concurrent_requests_with_distinct_overrides_are_isolated() {
+    let limits = QueryLimitsConfig {
+        enabled: true,
+        default_timeout_ms: 0,
+        max_timeout_ms: 0,
+        default_max_result_rows: 2, // default cap → truncates the 5-row read
+        max_result_rows: 10,        // ceiling for row overrides
+        default_max_response_bytes: 0, // unlimited by default
+        max_response_bytes: 0,      // no byte ceiling → any byte override ok
+        row_overflow: RowOverflowPolicy::Truncate,
+    };
+    let (client, db) = client_with_limits(limits);
+    seed_people(&db, 5);
+    let client = Arc::new(client);
+
+    // A: no override → default cap 2 → truncated.
+    let a = {
+        let client = client.clone();
+        tokio::spawn(async move { post_query(&client, &find_people()).await })
+    };
+    // B: tiny byte override → the 5-row response blows past 8 bytes → 413.
+    let b = {
+        let client = client.clone();
+        tokio::spawn(async move {
+            post_query(
+                &client,
+                &json!({
+                    "operation": "find_node",
+                    "label": "Person",
+                    "limits": { "max_response_bytes": 8 }
+                }),
+            )
+            .await
+        })
+    };
+    // C: row override above the ceiling → 422.
+    let c = {
+        let client = client.clone();
+        tokio::spawn(async move {
+            post_query(
+                &client,
+                &json!({
+                    "operation": "find_node",
+                    "label": "Person",
+                    "limits": { "max_result_rows": 1000 }
+                }),
+            )
+            .await
+        })
+    };
+    // D: row override at the ceiling (10 > 5 seeded) → full result, untruncated.
+    let d = {
+        let client = client.clone();
+        tokio::spawn(async move {
+            post_query(
+                &client,
+                &json!({
+                    "operation": "find_node",
+                    "label": "Person",
+                    "limits": { "max_result_rows": 10 }
+                }),
+            )
+            .await
+        })
+    };
+
+    let (a, b, c, d) = (
+        a.await.unwrap(),
+        b.await.unwrap(),
+        c.await.unwrap(),
+        d.await.unwrap(),
+    );
+
+    // A: truncated to 2.
+    assert_eq!(a.0, 200, "A: {}", a.1);
+    assert_eq!(a.1["truncated"], true);
+    assert_eq!(a.1["data"].as_array().map(Vec::len), Some(2));
+
+    // B: byte-cap 413.
+    assert_eq!(b.0, 413, "B: {}", b.1);
+    assert_eq!(b.1["details"]["dimension"], "result_bytes");
+
+    // C: over-ceiling 422.
+    assert_eq!(c.0, 422, "C: {}", c.1);
+    assert_eq!(c.1["details"]["dimension"], "result_rows");
+
+    // D: full, untruncated.
+    assert_eq!(d.0, 200, "D: {}", d.1);
+    assert!(d.1.get("truncated").is_none());
+    assert_eq!(d.1["data"].as_array().map(Vec::len), Some(5));
+}
+
+// ---------------------------------------------------------------------------
+// Auth parity — an authenticated-but-unauthorized caller is rejected 403
+// BEFORE limit validation, even carrying an over-ceiling override.
+// ---------------------------------------------------------------------------
+
+/// A Reader (no write permission) attempting a WRITE operation while ALSO
+/// carrying an over-ceiling limit override is rejected 403 PERMISSION_DENIED —
+/// authorization runs before limit validation, so the caller never sees a 422.
+#[tokio::test]
+async fn authorized_check_precedes_limit_validation() {
+    let limits = QueryLimitsConfig {
+        enabled: true,
+        default_timeout_ms: 0,
+        max_timeout_ms: 0,
+        default_max_result_rows: 10,
+        max_result_rows: 100, // finite ceiling the override breaches
+        default_max_response_bytes: 0,
+        max_response_bytes: 0,
+        row_overflow: RowOverflowPolicy::Truncate,
+    };
+    let (client, store, _db) = auth_client_with_limits(limits);
+    let (_p, key) = store.create_key("reader", Role::Reader).expect("mint key");
+
+    let (status, body) = post_query_with_key(
+        &client,
+        &key,
+        &json!({
+            "operation": "create_node",
+            "label": "Person",
+            "limits": { "max_result_rows": 1000 } // over ceiling 100
+        }),
+    )
+    .await;
+    assert_eq!(
+        status, 403,
+        "role denial must precede limit validation: {body}"
+    );
+    assert_eq!(body["code"], "PERMISSION_DENIED");
+}
