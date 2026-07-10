@@ -2247,3 +2247,348 @@ fn test_e2e_optional_match_where_with_param() {
     assert_eq!(rows.len(), 1);
     assert!(rows[0].entity.is_null());
 }
+
+// ============================================================================
+// Runtime aggregation (Issue #558): count / sum / avg / min / max / collect,
+// implicit grouping, DISTINCT, count(*), plus ORDER BY and RETURN DISTINCT.
+// ============================================================================
+
+use crate::core::property::PropertyValue;
+
+/// Fixture: five Persons across two departments; Dave has no `age`.
+/// Alice{Eng,30}, Bob{Eng,40}, Carol{Sales,50}, Dave{Sales,null}, Eve{Eng,20}.
+fn aggregation_test_db() -> AletheiaDB {
+    let db = AletheiaDB::new().unwrap();
+    db.create_node(
+        "Person",
+        PropertyMapBuilder::new()
+            .insert("name", "Alice")
+            .insert("dept", "Eng")
+            .insert("age", 30i64)
+            .build(),
+    )
+    .unwrap();
+    db.create_node(
+        "Person",
+        PropertyMapBuilder::new()
+            .insert("name", "Bob")
+            .insert("dept", "Eng")
+            .insert("age", 40i64)
+            .build(),
+    )
+    .unwrap();
+    db.create_node(
+        "Person",
+        PropertyMapBuilder::new()
+            .insert("name", "Carol")
+            .insert("dept", "Sales")
+            .insert("age", 50i64)
+            .build(),
+    )
+    .unwrap();
+    // Dave: no age property (null age).
+    db.create_node(
+        "Person",
+        PropertyMapBuilder::new()
+            .insert("name", "Dave")
+            .insert("dept", "Sales")
+            .build(),
+    )
+    .unwrap();
+    db.create_node(
+        "Person",
+        PropertyMapBuilder::new()
+            .insert("name", "Eve")
+            .insert("dept", "Eng")
+            .insert("age", 20i64)
+            .build(),
+    )
+    .unwrap();
+    db
+}
+
+/// Look up a computed column value by name in an aggregate row.
+fn col<'a>(row: &'a crate::query::executor::QueryRow, name: &str) -> Option<&'a PropertyValue> {
+    row.columns
+        .as_ref()?
+        .iter()
+        .find(|(k, _)| k == name)
+        .map(|(_, v)| v)
+}
+
+#[test]
+fn test_agg_count_star() {
+    let db = aggregation_test_db();
+    let rows = collect_rows(
+        db.execute_cypher("MATCH (n:Person) RETURN count(*)")
+            .unwrap(),
+    );
+    assert_eq!(rows.len(), 1, "global aggregation yields exactly one row");
+    assert_eq!(col(&rows[0], "count(*)"), Some(&PropertyValue::Int(5)));
+}
+
+#[test]
+fn test_agg_count_property_skips_nulls() {
+    let db = aggregation_test_db();
+    // Dave has no age -> counted only where non-null: 4.
+    let rows = collect_rows(
+        db.execute_cypher("MATCH (n:Person) RETURN count(n.age)")
+            .unwrap(),
+    );
+    assert_eq!(rows.len(), 1);
+    assert_eq!(col(&rows[0], "count(n.age)"), Some(&PropertyValue::Int(4)));
+}
+
+#[test]
+fn test_agg_sum() {
+    let db = aggregation_test_db();
+    let rows = collect_rows(
+        db.execute_cypher("MATCH (n:Person) RETURN sum(n.age)")
+            .unwrap(),
+    );
+    // 30 + 40 + 50 + 20 = 140 (Dave null skipped); integer input -> integer sum.
+    assert_eq!(col(&rows[0], "sum(n.age)"), Some(&PropertyValue::Int(140)));
+}
+
+#[test]
+fn test_agg_avg() {
+    let db = aggregation_test_db();
+    let rows = collect_rows(
+        db.execute_cypher("MATCH (n:Person) RETURN avg(n.age)")
+            .unwrap(),
+    );
+    // 140 / 4 = 35.0 (avg is always a float).
+    assert_eq!(
+        col(&rows[0], "avg(n.age)"),
+        Some(&PropertyValue::Float(35.0))
+    );
+}
+
+#[test]
+fn test_agg_min_max() {
+    let db = aggregation_test_db();
+    let rows = collect_rows(
+        db.execute_cypher("MATCH (n:Person) RETURN min(n.age), max(n.age)")
+            .unwrap(),
+    );
+    assert_eq!(rows.len(), 1);
+    assert_eq!(col(&rows[0], "min(n.age)"), Some(&PropertyValue::Int(20)));
+    assert_eq!(col(&rows[0], "max(n.age)"), Some(&PropertyValue::Int(50)));
+}
+
+#[test]
+fn test_agg_collect() {
+    let db = aggregation_test_db();
+    let rows = collect_rows(
+        db.execute_cypher("MATCH (n:Person) RETURN collect(n.dept)")
+            .unwrap(),
+    );
+    assert_eq!(rows.len(), 1);
+    match col(&rows[0], "collect(n.dept)") {
+        Some(PropertyValue::Array(items)) => assert_eq!(items.len(), 5),
+        other => panic!("expected a 5-element array, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_agg_count_distinct() {
+    let db = aggregation_test_db();
+    // Two distinct departments: Eng, Sales.
+    let rows = collect_rows(
+        db.execute_cypher("MATCH (n:Person) RETURN count(DISTINCT n.dept)")
+            .unwrap(),
+    );
+    assert_eq!(
+        col(&rows[0], "count(DISTINCT n.dept)"),
+        Some(&PropertyValue::Int(2))
+    );
+}
+
+#[test]
+fn test_agg_grouped_count() {
+    let db = aggregation_test_db();
+    let rows = collect_rows(
+        db.execute_cypher("MATCH (n:Person) RETURN n.dept, count(*)")
+            .unwrap(),
+    );
+    assert_eq!(rows.len(), 2, "one row per department");
+    let mut counts = std::collections::HashMap::new();
+    for row in &rows {
+        let dept = col(row, "n.dept").and_then(|v| v.as_str()).unwrap();
+        let count = col(row, "count(*)").and_then(|v| v.as_int()).unwrap();
+        counts.insert(dept.to_string(), count);
+    }
+    assert_eq!(counts.get("Eng"), Some(&3));
+    assert_eq!(counts.get("Sales"), Some(&2));
+}
+
+#[test]
+fn test_agg_grouped_avg() {
+    let db = aggregation_test_db();
+    let rows = collect_rows(
+        db.execute_cypher("MATCH (n:Person) RETURN n.dept, avg(n.age)")
+            .unwrap(),
+    );
+    assert_eq!(rows.len(), 2);
+    let mut avgs = std::collections::HashMap::new();
+    for row in &rows {
+        let dept = col(row, "n.dept").and_then(|v| v.as_str()).unwrap();
+        let avg = col(row, "avg(n.age)").and_then(|v| v.as_float()).unwrap();
+        avgs.insert(dept.to_string(), avg);
+    }
+    // Eng: (30 + 40 + 20) / 3 = 30.0; Sales: 50 / 1 = 50.0 (Dave's null skipped).
+    assert_eq!(avgs.get("Eng"), Some(&30.0));
+    assert_eq!(avgs.get("Sales"), Some(&50.0));
+}
+
+#[test]
+fn test_agg_grouped_multi_aggregate() {
+    let db = aggregation_test_db();
+    let rows = collect_rows(
+        db.execute_cypher("MATCH (n:Person) RETURN n.dept, count(*), max(n.age)")
+            .unwrap(),
+    );
+    assert_eq!(rows.len(), 2);
+    for row in &rows {
+        let dept = col(row, "n.dept").and_then(|v| v.as_str()).unwrap();
+        let count = col(row, "count(*)").and_then(|v| v.as_int()).unwrap();
+        let max = col(row, "max(n.age)").and_then(|v| v.as_int()).unwrap();
+        match dept {
+            "Eng" => {
+                assert_eq!(count, 3);
+                assert_eq!(max, 40);
+            }
+            "Sales" => {
+                assert_eq!(count, 2);
+                assert_eq!(max, 50);
+            }
+            other => panic!("unexpected dept {other}"),
+        }
+    }
+}
+
+#[test]
+fn test_agg_empty_global_count_is_one_row_zero() {
+    let db = aggregation_test_db();
+    // No Ghost nodes: global count(*) still yields ONE row with 0.
+    let rows = collect_rows(
+        db.execute_cypher("MATCH (n:Ghost) RETURN count(*)")
+            .unwrap(),
+    );
+    assert_eq!(rows.len(), 1);
+    assert_eq!(col(&rows[0], "count(*)"), Some(&PropertyValue::Int(0)));
+}
+
+#[test]
+fn test_agg_empty_grouped_is_zero_rows() {
+    let db = aggregation_test_db();
+    // No Ghost nodes: grouped aggregation yields ZERO rows.
+    let rows = collect_rows(
+        db.execute_cypher("MATCH (n:Ghost) RETURN n.dept, count(*)")
+            .unwrap(),
+    );
+    assert!(rows.is_empty());
+}
+
+#[test]
+fn test_agg_empty_global_sum_avg_min_max_collect() {
+    let db = aggregation_test_db();
+    let rows = collect_rows(
+        db.execute_cypher(
+            "MATCH (n:Ghost) RETURN sum(n.age), avg(n.age), min(n.age), max(n.age), collect(n.age)",
+        )
+        .unwrap(),
+    );
+    assert_eq!(rows.len(), 1);
+    // sum over empty = 0; avg/min/max = null; collect = [].
+    assert_eq!(col(&rows[0], "sum(n.age)"), Some(&PropertyValue::Int(0)));
+    assert_eq!(col(&rows[0], "avg(n.age)"), Some(&PropertyValue::Null));
+    assert_eq!(col(&rows[0], "min(n.age)"), Some(&PropertyValue::Null));
+    assert_eq!(col(&rows[0], "max(n.age)"), Some(&PropertyValue::Null));
+    match col(&rows[0], "collect(n.age)") {
+        Some(PropertyValue::Array(items)) => assert!(items.is_empty()),
+        other => panic!("expected empty array, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_agg_alias() {
+    let db = aggregation_test_db();
+    let rows = collect_rows(
+        db.execute_cypher("MATCH (n:Person) RETURN count(*) AS c")
+            .unwrap(),
+    );
+    assert_eq!(rows.len(), 1);
+    assert_eq!(col(&rows[0], "c"), Some(&PropertyValue::Int(5)));
+}
+
+#[test]
+fn test_agg_collect_structured_exposes_columns() {
+    let db = aggregation_test_db();
+    let structured = db
+        .execute_cypher("MATCH (n:Person) RETURN count(*)")
+        .unwrap()
+        .collect_structured()
+        .unwrap();
+    let columns = structured
+        .columns
+        .expect("aggregate result must expose computed columns");
+    assert_eq!(columns.len(), 1);
+    assert_eq!(columns[0][0].0, "count(*)");
+    assert_eq!(columns[0][0].1, PropertyValue::Int(5));
+}
+
+#[test]
+fn test_e2e_return_distinct() {
+    let db = AletheiaDB::new().unwrap();
+    let alice = db
+        .create_node(
+            "Person",
+            PropertyMapBuilder::new().insert("name", "Alice").build(),
+        )
+        .unwrap();
+    let bob = db
+        .create_node(
+            "Person",
+            PropertyMapBuilder::new().insert("name", "Bob").build(),
+        )
+        .unwrap();
+    let carol = db
+        .create_node(
+            "Person",
+            PropertyMapBuilder::new().insert("name", "Carol").build(),
+        )
+        .unwrap();
+    // Both Alice and Bob KNOW Carol: traversal reaches Carol twice.
+    db.create_edge(alice, carol, "KNOWS", CorePropertyMap::new())
+        .unwrap();
+    db.create_edge(bob, carol, "KNOWS", CorePropertyMap::new())
+        .unwrap();
+
+    // Without DISTINCT: Carol appears twice.
+    let all = collect_rows(
+        db.execute_cypher("MATCH (a:Person)-[:KNOWS]->(b) RETURN b")
+            .unwrap(),
+    );
+    assert_eq!(all.len(), 2);
+
+    // With DISTINCT: Carol appears once.
+    let distinct = collect_rows(
+        db.execute_cypher("MATCH (a:Person)-[:KNOWS]->(b) RETURN DISTINCT b")
+            .unwrap(),
+    );
+    assert_eq!(distinct.len(), 1);
+    assert_eq!(row_name(&distinct[0]).as_deref(), Some("Carol"));
+}
+
+#[test]
+fn test_e2e_order_by() {
+    let db = aggregation_test_db();
+    let rows = collect_rows(
+        db.execute_cypher("MATCH (n:Person) RETURN n.name ORDER BY n.age DESC")
+            .unwrap(),
+    );
+    let names: Vec<String> = rows.iter().filter_map(row_name).collect();
+    // DESC by age; Dave (null age) sorts last.
+    assert_eq!(names, vec!["Carol", "Bob", "Alice", "Eve", "Dave"]);
+}

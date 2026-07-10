@@ -173,11 +173,72 @@ pub enum QueryOp {
     /// Count results
     Count,
 
+    /// Grouped aggregation over the input rows (openCypher implicit grouping).
+    ///
+    /// Partitions input rows by the values of `group_keys` (empty = a single
+    /// global group) and, for each group, evaluates every entry in
+    /// `aggregates`. Emits one output row per group carrying the group-key
+    /// values followed by the aggregate values as named columns. A global
+    /// aggregation over empty input still emits exactly one row (e.g.
+    /// `count(*) = 0`); a grouped aggregation over empty input emits no rows.
+    Aggregate {
+        /// Grouping keys (non-aggregate `RETURN`/`WITH` items). Empty means a
+        /// single global group.
+        group_keys: Vec<AggregateGroupKey>,
+        /// The aggregate expressions to compute per group.
+        aggregates: Vec<AggregateSpec>,
+    },
+
     /// Collect unique values
     Distinct,
 
     /// Project specific properties
     Project(Vec<String>),
+}
+
+/// A grouping key in a [`QueryOp::Aggregate`] (a non-aggregate projection
+/// item such as `n.dept`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AggregateGroupKey {
+    /// The node property to read for the grouping value (e.g. `"dept"` for
+    /// `n.dept`).
+    pub property_key: String,
+    /// The output column name for this key (alias if given, else the source
+    /// text such as `"n.dept"`).
+    pub alias: String,
+}
+
+/// A single aggregate expression in a [`QueryOp::Aggregate`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AggregateSpec {
+    /// Which aggregate function to apply.
+    pub func: AggregateFunc,
+    /// The node property the aggregate reads (e.g. `"age"` for `sum(n.age)`).
+    /// `None` for `count(*)`, which counts rows regardless of any value.
+    pub arg: Option<String>,
+    /// Whether the `DISTINCT` quantifier was supplied (deduplicates values
+    /// before aggregating).
+    pub distinct: bool,
+    /// The output column name (alias if given, else generated source text such
+    /// as `"count(*)"`).
+    pub alias: String,
+}
+
+/// The aggregate functions supported by [`QueryOp::Aggregate`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AggregateFunc {
+    /// `count(...)` / `count(*)` -- number of (non-null) rows/values.
+    Count,
+    /// `sum(...)` -- numeric sum, skipping nulls (0 over no values).
+    Sum,
+    /// `avg(...)` -- numeric mean, skipping nulls (null over no values).
+    Avg,
+    /// `min(...)` -- minimum value in natural order, skipping nulls.
+    Min,
+    /// `max(...)` -- maximum value in natural order, skipping nulls.
+    Max,
+    /// `collect(...)` -- gather non-null values into a list, preserving order.
+    Collect,
 }
 
 /// Specifies how deep to traverse in graph operations.

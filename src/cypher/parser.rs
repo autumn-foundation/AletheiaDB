@@ -618,6 +618,7 @@ impl CypherParser {
                         Ok(CypherExpr::FunctionCall {
                             name: qualified_name,
                             args,
+                            distinct: false,
                         })
                     } else {
                         // Property access: var.prop
@@ -631,7 +632,11 @@ impl CypherParser {
                     self.advance();
                     let args = self.parse_function_args()?;
                     self.expect(TokenKind::RParen)?;
-                    Ok(CypherExpr::FunctionCall { name, args })
+                    Ok(CypherExpr::FunctionCall {
+                        name,
+                        args,
+                        distinct: false,
+                    })
                 } else {
                     // Bare variable
                     Ok(CypherExpr::Variable(name))
@@ -648,9 +653,22 @@ impl CypherParser {
                 let name_tok = self.advance().clone();
                 let name = name_tok.text.to_uppercase();
                 self.expect(TokenKind::LParen)?;
-                let args = self.parse_function_args()?;
+                // Optional DISTINCT quantifier: count(DISTINCT n.dept).
+                let distinct = self.eat(TokenKind::Distinct);
+                // `count(*)` -- the star wildcard is only valid as the sole
+                // argument (typically for count).
+                let args = if self.at(TokenKind::Star) {
+                    self.advance();
+                    vec![CypherExpr::Star]
+                } else {
+                    self.parse_function_args()?
+                };
                 self.expect(TokenKind::RParen)?;
-                Ok(CypherExpr::FunctionCall { name, args })
+                Ok(CypherExpr::FunctionCall {
+                    name,
+                    args,
+                    distinct,
+                })
             }
 
             // Literal values

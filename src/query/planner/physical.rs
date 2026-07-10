@@ -293,6 +293,7 @@ impl PhysicalPlan {
             | PhysicalOp::Project { input, .. }
             | PhysicalOp::Distinct { input, .. }
             | PhysicalOp::Count { input, .. }
+            | PhysicalOp::Aggregate { input, .. }
             | PhysicalOp::Materialize { input, .. }
             | PhysicalOp::TemporalTrack { input, .. }
             | PhysicalOp::IndexedTraversal { input, .. }
@@ -561,6 +562,20 @@ pub enum PhysicalOp {
         input: Box<PhysicalOp>,
     },
 
+    /// Grouped aggregation (openCypher implicit grouping).
+    ///
+    /// Partitions input rows by `group_keys` (empty = one global group) and
+    /// computes each entry of `aggregates` per group, emitting one computed
+    /// column row per group. Maps 1:1 to the executor's `AggregateIterator`.
+    Aggregate {
+        /// Input operator providing the rows to aggregate.
+        input: Box<PhysicalOp>,
+        /// Grouping keys (empty = single global group).
+        group_keys: Vec<crate::query::ir::AggregateGroupKey>,
+        /// Aggregate expressions computed per group.
+        aggregates: Vec<crate::query::ir::AggregateSpec>,
+    },
+
     /// Track temporal changes
     TemporalTrack {
         /// Input operator
@@ -646,6 +661,7 @@ impl PhysicalOp {
             PhysicalOp::Project { .. } => "Project",
             PhysicalOp::Distinct { .. } => "Distinct",
             PhysicalOp::Count { .. } => "Count",
+            PhysicalOp::Aggregate { .. } => "Aggregate",
             PhysicalOp::TemporalTrack { .. } => "TemporalTrack",
             PhysicalOp::Materialize { .. } => "Materialize",
             PhysicalOp::OptionalApply { .. } => "OptionalApply",
@@ -692,6 +708,7 @@ impl PhysicalOp {
             | PhysicalOp::Project { input, .. }
             | PhysicalOp::Distinct { input, .. }
             | PhysicalOp::Count { input, .. }
+            | PhysicalOp::Aggregate { input, .. }
             | PhysicalOp::TemporalTrack { input, .. }
             | PhysicalOp::Materialize { input, .. }
             | PhysicalOp::OptionalApply { input, .. } => 1 + input.depth(),
@@ -876,6 +893,7 @@ impl PhysicalOp {
             | PhysicalOp::Project { input, .. }
             | PhysicalOp::Distinct { input, .. }
             | PhysicalOp::Count { input, .. }
+            | PhysicalOp::Aggregate { input, .. }
             | PhysicalOp::TemporalTrack { input, .. }
             | PhysicalOp::Materialize { input, .. }
             | PhysicalOp::OptionalApply { input, .. } => Some(input),

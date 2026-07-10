@@ -453,6 +453,17 @@ impl QueryPlanner {
             // Aggregation operations
             QueryOp::Count => Ok(LogicalOp::unary(UnaryOp::Count, input)),
 
+            QueryOp::Aggregate {
+                group_keys,
+                aggregates,
+            } => Ok(LogicalOp::unary(
+                UnaryOp::Aggregate {
+                    group_keys: group_keys.clone(),
+                    aggregates: aggregates.clone(),
+                },
+                input,
+            )),
+
             QueryOp::Distinct => Ok(LogicalOp::unary(UnaryOp::Distinct, input)),
 
             QueryOp::Project(props) => Ok(LogicalOp::unary(UnaryOp::Project(props.clone()), input)),
@@ -494,6 +505,7 @@ impl QueryPlanner {
             QueryOp::Limit(_) => "Limit",
             QueryOp::Skip(_) => "Skip",
             QueryOp::Count => "Count",
+            QueryOp::Aggregate { .. } => "Aggregate",
             QueryOp::Distinct => "Distinct",
             QueryOp::Project(_) => "Project",
             QueryOp::Sort { .. } => "Sort",
@@ -801,6 +813,15 @@ impl QueryPlanner {
 
             UnaryOp::Count => Ok(PhysicalOp::Count {
                 input: Box::new(input),
+            }),
+
+            UnaryOp::Aggregate {
+                group_keys,
+                aggregates,
+            } => Ok(PhysicalOp::Aggregate {
+                input: Box::new(input),
+                group_keys: group_keys.clone(),
+                aggregates: aggregates.clone(),
             }),
 
             UnaryOp::TemporalTrack { time_range } => Ok(PhysicalOp::TemporalTrack {

@@ -21,8 +21,9 @@ pub use iterators::NodeScanIterator;
 pub use iterators::ResultIterator;
 pub use iterators::TemporalNodeScanIterator;
 pub use iterators::{
-    BatchTemporalNodeIterator, FilterIterator, LimitIterator, ProjectIterator,
-    ProvenanceFilterIterator, TemporalNodeIterator, VectorRerankIterator, VectorResultIterator,
+    AggregateIterator, BatchTemporalNodeIterator, CountIterator, DistinctIterator, FilterIterator,
+    LimitIterator, ProjectIterator, ProvenanceFilterIterator, SortIterator, TemporalNodeIterator,
+    VectorRerankIterator, VectorResultIterator,
 };
 pub use results::{EntityId, EntityResult, QueryResults, QueryRow};
 
@@ -346,6 +347,42 @@ impl QueryExecutor {
                     Arc::clone(&self.current),
                     Arc::clone(&self.historical),
                 )))
+            }
+
+            PhysicalOp::Aggregate {
+                input,
+                group_keys,
+                aggregates,
+            } => {
+                let input_iter = self.execute_op(input)?;
+                Ok(Box::new(iterators::AggregateIterator::new(
+                    input_iter,
+                    group_keys.clone(),
+                    aggregates.clone(),
+                )))
+            }
+
+            PhysicalOp::Distinct { input } => {
+                let input_iter = self.execute_op(input)?;
+                Ok(Box::new(iterators::DistinctIterator::new(input_iter)))
+            }
+
+            PhysicalOp::Sort {
+                input,
+                key,
+                descending,
+            } => {
+                let input_iter = self.execute_op(input)?;
+                Ok(Box::new(iterators::SortIterator::new(
+                    input_iter,
+                    key.clone(),
+                    *descending,
+                )))
+            }
+
+            PhysicalOp::Count { input } => {
+                let input_iter = self.execute_op(input)?;
+                Ok(Box::new(iterators::CountIterator::new(input_iter)))
             }
 
             PhysicalOp::Empty => Ok(Box::new(iterators::EmptyIterator)),
