@@ -12,6 +12,33 @@ one query. [Why that matters →](docs/guides/why-aletheiadb.md)
 
 ---
 
+## 60-Second Quickstart
+
+One command seeds a small, story-driven **bi-temporal** dataset and walks you
+through a guided sequence of queries — including a **time-travel (`AS OF`)**
+query whose answer visibly differs from the current state. It is ephemeral
+(nothing written to disk) and needs no server and no API key:
+
+```bash
+cargo run --example demo
+```
+
+Time-to-first-query is a few seconds (the one-time `cargo build` is separate).
+The three entry channels, each with its exact commands:
+
+| Channel | Command | Server? | API key? |
+|---------|---------|---------|----------|
+| **Embedded (Rust)** | `cargo run --example demo` | No | No |
+| **MCP (agent-issued)** | `export ALETHEIADB_BOOTSTRAP_ADMIN_KEY="$(openssl rand -base64 32)"`<br>`cargo run --bin aletheia-mcp --features mcp-server` | Yes (stdio) | Yes |
+| **HTTP server** | `export ALETHEIADB_BOOTSTRAP_ADMIN_KEY="$(openssl rand -base64 32)"`<br>`cargo run --bin aletheia-server --features http-server` | Yes | Yes |
+
+Authentication is **on by default** for both servers — see the
+[Security Quickstart](docs/guides/security-quickstart.md) for key setup and the
+explicit anonymous opt-in. Full walkthrough, sample output, and measured
+timings: **[60-Second Quickstart guide →](docs/guides/quickstart.md)**
+
+---
+
 ## Install
 
 ```toml
@@ -139,6 +166,7 @@ aletheiadb = { version = "0.1", features = ["nova", "semantic-search"] }
 
 | Guide | Description |
 |-------|-------------|
+| [60-Second Quickstart](docs/guides/quickstart.md) | Fastest path to your first (time-travel) query, across all channels |
 | [Why AletheiaDB](docs/guides/why-aletheiadb.md) | The problem it solves; when to use it |
 | [Core Concepts](docs/guides/core-concepts.md) | Bi-temporal model, nodes, edges, WAL, vector search |
 | [Installation](docs/guides/installation.md) | Prerequisites, feature flags, building from source |
