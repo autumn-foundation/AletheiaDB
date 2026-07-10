@@ -146,9 +146,15 @@ impl SamplerConfig {
     /// default (parent-based always-on).
     #[must_use]
     pub fn parse(token: &str, arg: Option<&str>) -> Self {
+        // A probability sampler ratio must lie in `[0.0, 1.0]`. Clamp
+        // out-of-range values (e.g. `2.0 → 1.0`, `-1.0 → 0.0`) and treat a NaN
+        // or unparseable/missing arg as the default full-sampling ratio, so a
+        // hostile or fat-fingered `OTEL_TRACES_SAMPLER_ARG` can never construct
+        // a nonsensical sampler (Issue #3376, LOW3).
         let ratio = || {
             arg.and_then(|a| a.trim().parse::<f64>().ok())
-                .unwrap_or(1.0)
+                .filter(|r| !r.is_nan())
+                .map_or(1.0, |r| r.clamp(0.0, 1.0))
         };
         match token.trim().to_ascii_lowercase().as_str() {
             "always_on" | "alwayson" => Self::AlwaysOn,
@@ -355,11 +361,15 @@ pub fn current_context_headers() -> Vec<(String, String)> {
 // Trace-id correlation
 // ===========================================================================
 
-/// The active trace id (32 lowercase hex chars) if a valid, sampled span is
+/// The active trace id (32 lowercase hex chars) if a valid, **sampled** span is
 /// current; otherwise `None`.
 ///
 /// Used to stamp the trace id into error responses and debug logs so a failing
-/// call can be looked up directly in the trace backend.
+/// call can be looked up directly in the trace backend. The `is_sampled` gate
+/// is load-bearing: a head-sampler-dropped trace still carries a valid, non-zero
+/// id, but that trace is never exported — returning it would hand the caller a
+/// dead-end lookup. We therefore surface a trace id only when the current span
+/// is actually sampled and will reach the backend (Issue #3376, MED1).
 #[must_use]
 pub fn current_trace_id() -> Option<String> {
     if !is_active() {
@@ -368,11 +378,28 @@ pub fn current_trace_id() -> Option<String> {
     let cx = tracing::Span::current().context();
     let span = cx.span();
     let sc = span.span_context();
-    if sc.is_valid() {
+    if sc.is_valid() && sc.is_sampled() {
         Some(sc.trace_id().to_string())
     } else {
         None
     }
+}
+
+/// Whether `span`'s trace is sampled (i.e. it will be recorded and exported).
+///
+/// Hot paths gate per-request attribute recording on this: a head-sampled-out
+/// span is never exported, so recording attributes onto it is wasted work. The
+/// standard samplers this crate installs (`always_on`/`always_off`/
+/// `traceidratio` and their parent-based variants) only ever decide *drop* or
+/// *record-and-sample* — never OTel's record-only state — so `is_sampled` is an
+/// exact proxy for "will be recorded" here (Issue #3376, MED2 / Perf).
+#[must_use]
+pub fn span_is_sampled(span: &tracing::Span) -> bool {
+    if !is_active() {
+        return false;
+    }
+    let cx = span.context();
+    cx.span().span_context().is_sampled()
 }
 
 /// The active `(trace_id, span_id)` pair if a valid span is current.
@@ -537,14 +564,22 @@ pub fn init_in_memory_global(
 }
 
 fn install_global(provider: SdkTracerProvider) -> Result<(), OtelError> {
-    opentelemetry::global::set_text_map_propagator(TraceContextPropagator::new());
+    // Attempt the subscriber install FIRST. A second `init()` loses the race
+    // here and returns `SubscriberAlreadySet`; by trying it before mutating any
+    // other global we never swap out a healthy first provider/propagator on a
+    // failed re-init (Issue #3376, LOW4). The tracer clones an `Arc` to the
+    // provider, so the layer stays fully functional independent of the global
+    // tracer-provider slot.
     let tracer = provider.tracer(TRACER_NAME);
-    opentelemetry::global::set_tracer_provider(provider);
     let otel_layer = tracing_opentelemetry::layer().with_tracer(tracer);
     tracing_subscriber::registry()
         .with(otel_layer)
         .try_init()
         .map_err(|e| OtelError::SubscriberAlreadySet(e.to_string()))?;
+    // Only now, having won the subscriber slot, publish the global propagator
+    // and tracer provider.
+    opentelemetry::global::set_text_map_propagator(TraceContextPropagator::new());
+    opentelemetry::global::set_tracer_provider(provider);
     set_active(true);
     Ok(())
 }
@@ -715,5 +750,126 @@ mod tests {
             root.span_context.span_id(),
             "child span not nested under http root"
         );
+    }
+
+    /// The sampler ratio arg is clamped into `[0.0, 1.0]`; NaN / unparseable /
+    /// missing falls back to the default full-sampling ratio (Issue #3376,
+    /// LOW3).
+    #[test]
+    fn sampler_arg_ratio_is_clamped() {
+        let ratio = |cfg: &SamplerConfig| match cfg {
+            SamplerConfig::TraceIdRatio(r) => *r,
+            other => panic!("expected TraceIdRatio, got {other:?}"),
+        };
+        assert!(
+            (ratio(&SamplerConfig::parse("traceidratio", Some("0.0"))) - 0.0).abs() < f64::EPSILON
+        );
+        assert!(
+            (ratio(&SamplerConfig::parse("traceidratio", Some("1.0"))) - 1.0).abs() < f64::EPSILON
+        );
+        // Above range → clamped down to 1.0.
+        assert!(
+            (ratio(&SamplerConfig::parse("traceidratio", Some("2.0"))) - 1.0).abs() < f64::EPSILON
+        );
+        // Below range → clamped up to 0.0.
+        assert!(
+            (ratio(&SamplerConfig::parse("traceidratio", Some("-1.0"))) - 0.0).abs() < f64::EPSILON
+        );
+        // NaN → default full sampling.
+        assert!(
+            (ratio(&SamplerConfig::parse("traceidratio", Some("NaN"))) - 1.0).abs() < f64::EPSILON
+        );
+        // Unparseable → default.
+        assert!(
+            (ratio(&SamplerConfig::parse("traceidratio", Some("abc"))) - 1.0).abs() < f64::EPSILON
+        );
+        // Missing arg → default.
+        assert!((ratio(&SamplerConfig::parse("traceidratio", None)) - 1.0).abs() < f64::EPSILON);
+        // Same clamping for the parent-based ratio variant.
+        match SamplerConfig::parse("parentbased_traceidratio", Some("5.0")) {
+            SamplerConfig::ParentBasedTraceIdRatio(r) => {
+                assert!((r - 1.0).abs() < f64::EPSILON);
+            }
+            other => panic!("expected ParentBasedTraceIdRatio, got {other:?}"),
+        }
+    }
+
+    /// A valid-but-**sampled-out** span must not surface a trace id (it will
+    /// never be exported — the id would be a dead-end lookup), while a sampled
+    /// span does. Regression guard for MED1 (Issue #3376).
+    #[test]
+    #[serial]
+    fn current_trace_id_gated_on_sampling() {
+        // `always_off`: root span is valid but dropped by the head sampler.
+        let off = OtelConfig {
+            enabled: true,
+            sampler: SamplerConfig::AlwaysOff,
+            ..OtelConfig::default()
+        };
+        let ((tid_off, sampled_off), _) = with_scoped_in_memory(&off, || {
+            let span = super::super::http_request_span("POST", "/query");
+            let _g = span.enter();
+            (current_trace_id(), span_is_sampled(&span))
+        });
+        set_active_test(false);
+        assert!(
+            tid_off.is_none(),
+            "sampled-out span must not surface a trace id, got {tid_off:?}"
+        );
+        assert!(!sampled_off, "sampled-out span must report not sampled");
+
+        // `always_on`: root span is sampled and will be exported.
+        let on = OtelConfig {
+            enabled: true,
+            sampler: SamplerConfig::AlwaysOn,
+            ..OtelConfig::default()
+        };
+        let ((tid_on, sampled_on), _) = with_scoped_in_memory(&on, || {
+            let span = super::super::http_request_span("POST", "/query");
+            let _g = span.enter();
+            (current_trace_id(), span_is_sampled(&span))
+        });
+        set_active_test(false);
+        assert_eq!(
+            tid_on.as_deref().map(str::len),
+            Some(32),
+            "sampled span must surface a 32-hex trace id, got {tid_on:?}"
+        );
+        assert!(sampled_on, "sampled span must report sampled");
+    }
+
+    /// The guard's `force_flush` delivers spans still buffered in the batch
+    /// processor. Uses the production (batch) processor so the flush is
+    /// load-bearing — unlike `SimpleSpanProcessor`, which exports on span end.
+    /// (Test gap: prior tests `mem::forget` the guard, leaving this unexercised.)
+    #[test]
+    #[serial]
+    fn guard_force_flush_delivers_pending_spans() {
+        let cfg = OtelConfig {
+            enabled: true,
+            sampler: SamplerConfig::AlwaysOn,
+            ..OtelConfig::default()
+        };
+        let exporter = InMemorySpanExporter::new();
+        let provider = provider_with_exporter(&cfg, exporter.clone(), false);
+        let tracer = provider.tracer(TRACER_NAME);
+        let subscriber =
+            tracing_subscriber::registry().with(tracing_opentelemetry::layer().with_tracer(tracer));
+        set_active(true);
+        tracing::subscriber::with_default(subscriber, || {
+            let span = tracing::info_span!("aletheiadb.http.request");
+            let _g = span.enter();
+        });
+        // The span has closed but may still be buffered by the batch processor.
+        let guard = OtelGuard { provider };
+        guard.force_flush();
+        let spans = exporter.spans();
+        set_active(false);
+        assert!(
+            spans.iter().any(|s| s.name == "aletheiadb.http.request"),
+            "force_flush should have delivered the pending span, got {} spans",
+            spans.len()
+        );
+        drop(guard);
     }
 }

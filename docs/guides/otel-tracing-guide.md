@@ -75,9 +75,20 @@ Head sampling is configured with `OTEL_TRACES_SAMPLER`:
 **Guidance.** In production use `parentbased_traceidratio` with a low ratio
 (1% is a good start): traces that arrive already-sampled from an upstream
 service are always continued (so you never get half a waterfall), while
-locally-rooted traces are sampled at your budget. A **sampled-out** request
-skips span construction on the hot path, so raising the ratio is the only knob
-that trades cost for coverage.
+locally-rooted traces are sampled at your budget.
+
+For a **sampled-out** request the root span is still *constructed* (the
+`tracing` layer runs the sampler at span creation, and the incoming W3C context
+is still attached first so parent-based sampling can honor the caller's
+decision), but it is **not recorded or exported**, and the per-request attribute
+recording (operation, result count, temporal scope, error code) is **skipped** —
+the hot path detects the not-recording span and does no attribute work. The
+residual cost of a sampled-out request is therefore the span construction plus
+the sampler decision, not the full attribute set; raising the ratio trades that
+remaining headroom for coverage. See [Overhead](#overhead).
+
+The ratio arg (`OTEL_TRACES_SAMPLER_ARG`) is clamped to `[0.0, 1.0]`; an
+out-of-range or non-numeric value falls back to full sampling (`1.0`).
 
 ## Attributes and the privacy model
 
@@ -104,6 +115,15 @@ What is **never** emitted:
   attached as `db.query.text` (following OTel database semantic conventions);
   parameters use `$`-bindings, so values are not interpolated.
 
+  > **Warning — enabling statement capture can leak literal values.** The
+  > captured `db.query.text` is the statement string *exactly as submitted*. If
+  > a caller inlines literal values into the statement (e.g.
+  > `MATCH (n {ssn: '123-45-6789'})` instead of `{ssn: $ssn}`), those literals
+  > land in the exported span and travel to your trace backend. Statement
+  > capture is off by default for this reason. When you enable it, keep values
+  > out of traces by using `$param` bindings for every value — the binding
+  > names are captured, the bound values are not.
+
 ## Context propagation and correlation
 
 Incoming W3C `traceparent`/`tracestate` headers are honored, so AletheiaDB's
@@ -120,12 +140,28 @@ responses carry a `trace_id` body field **and** an `x-trace-id` response header.
 
 ## Overhead
 
-Overhead is bounded and enforced as a bench gate (`benches/otel_overhead.rs`):
+Overhead is bounded and measured across three regimes:
 
-- **Compiled in but disabled**: within noise of the `performance_targets`
-  suite — spans are `tracing` no-ops.
-- **Enabled at low sampling**: small, bounded — sampled-out requests skip span
-  construction entirely.
+- **Compiled in but disabled** (no subscriber installed): spans are `tracing`
+  no-ops and the per-request attribute sites are skipped entirely — within noise
+  of the `performance_targets` suite.
+- **Enabled, sampled out**: the span is constructed and the sampler runs, but
+  the span is neither recorded nor exported and the per-request attribute
+  recording is skipped (the hot path checks the not-recording span first). This
+  is *not* zero — it is span construction plus the sampler decision — but it is
+  small and bounded.
+- **Enabled, recorded**: the full cost — span construction, W3C context attach,
+  and attribute recording — paid only for sampled requests.
+
+**How the gate is enforced.** The authoritative, non-flaky gate is a structural
+**inertness assertion** that runs in the normal `cargo test` suite (and thus in
+CI): with the `otel` feature compiled but tracing **not** initialized, it asserts
+`otel::is_active() == false` and that exercising the request-span hot path
+exports **zero** spans and does not panic — proving the disabled path is inert.
+The criterion micro-bench (`benches/otel_overhead.rs`) measures the three
+regimes above for local/manual profiling; wiring the criterion bench into the
+CI benchmark workflow is a follow-up (see the PR notes). Build the bench with
+`cargo bench --no-run --bench otel_overhead --features otel`.
 
 ## Find-the-slow-query walkthrough (collector + Jaeger)
 

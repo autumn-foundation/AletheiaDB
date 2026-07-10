@@ -41,6 +41,34 @@ impl HttpTrace {
         self.span.clone()
     }
 
+    /// Whether recording per-request attributes onto the root span is
+    /// worthwhile. Callers gate the *computation* of attribute values on this so
+    /// that no work is done when nothing will consume it (Issue #3376, MED2 /
+    /// Perf):
+    ///
+    /// - `false` when no subscriber is interested in the span at all
+    ///   (`span.is_disabled()`), i.e. a compiled-in-but-runtime-disabled build;
+    /// - with the OTel exporter active, this reflects the head-sampling
+    ///   decision — a **sampled-out** span returns `false`, so per-request
+    ///   attribute recording is skipped for traces that will never be exported;
+    /// - otherwise `true` (some non-OTel subscriber may record the span).
+    ///
+    /// Compiled out entirely when `observability` is absent, so a feature-absent
+    /// build has no call site to evaluate.
+    #[cfg(feature = "observability")]
+    #[must_use]
+    #[inline]
+    pub fn is_recording(&self) -> bool {
+        if self.span.is_disabled() {
+            return false;
+        }
+        #[cfg(feature = "otel")]
+        if crate::observability::otel::is_active() {
+            return crate::observability::otel::span_is_sampled(&self.span);
+        }
+        true
+    }
+
     /// Record the high-level operation name (e.g. the `/query` operation tag).
     #[inline]
     pub fn record_operation(&self, operation: &str) {
@@ -101,13 +129,33 @@ impl HttpTrace {
     }
 }
 
-#[cfg(feature = "observability")]
+#[cfg(feature = "otel")]
 fn header_value(parts: &Parts, name: &str) -> Option<String> {
     parts
         .headers
         .get(name)
         .and_then(|v| v.to_str().ok())
         .map(str::to_owned)
+}
+
+/// Read the incoming W3C `traceparent`, treating a duplicated header as absent.
+///
+/// Per the [W3C Trace Context] spec, if more than one `traceparent` header is
+/// present the trace context is ambiguous and MUST be handled as if no parent
+/// were supplied — the request then starts a fresh root trace rather than
+/// nesting under an arbitrarily-chosen (and possibly forged) parent
+/// (Issue #3376, LOW5).
+///
+/// [W3C Trace Context]: https://www.w3.org/TR/trace-context/#traceparent-header
+#[cfg(feature = "otel")]
+fn traceparent_value(parts: &Parts) -> Option<String> {
+    let mut values = parts.headers.get_all("traceparent").iter();
+    let first = values.next()?;
+    if values.next().is_some() {
+        // Multiple `traceparent` values → no valid parent.
+        return None;
+    }
+    first.to_str().ok().map(str::to_owned)
 }
 
 impl FromRequestParts<autumn_web::prelude::AppState> for HttpTrace {
@@ -128,7 +176,7 @@ impl FromRequestParts<autumn_web::prelude::AppState> for HttpTrace {
             // exporter is actually active.
             #[cfg(feature = "otel")]
             if crate::observability::otel::is_active() {
-                let traceparent = header_value(_parts, "traceparent");
+                let traceparent = traceparent_value(_parts);
                 let tracestate = header_value(_parts, "tracestate");
                 crate::observability::otel::attach_parent(
                     &span,

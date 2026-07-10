@@ -216,6 +216,121 @@ async fn absent_traceparent_starts_new_root_trace() {
     );
 }
 
+/// A malformed `traceparent` (`"garbage"`) must not error the request and must
+/// start a fresh, valid (non-all-zeros) root trace rather than nesting under a
+/// bogus parent (Issue #3376 test gap).
+#[tokio::test]
+#[serial]
+async fn malformed_traceparent_starts_fresh_root() {
+    let exp = exporter();
+    exp.clear();
+    let client = client();
+
+    // Each is rejected by the W3C parser: no structure; the forbidden `ff`
+    // version; and a truncated 4-field header missing the flags. (A merely
+    // *unknown* forward-compatible version like `99` is deliberately NOT here —
+    // the spec requires it still be parsed, so it would continue the trace.)
+    for bad in [
+        "garbage",
+        "ff-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01",
+        "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331",
+    ] {
+        exp.clear();
+        let resp = client
+            .post("/query")
+            .header("traceparent", bad)
+            .json(&json!({"operation": "find_node", "label": "Nothing"}))
+            .send()
+            .await;
+        assert_eq!(
+            resp.status.as_u16(),
+            200,
+            "malformed traceparent {bad:?} must not error"
+        );
+
+        let spans = exp.spans();
+        let root = find_root(&spans);
+        assert_eq!(
+            root.parent_span_id.to_string(),
+            INVALID_SPAN_ID,
+            "malformed traceparent {bad:?} should yield a fresh root"
+        );
+        assert_ne!(
+            root.span_context.trace_id().to_string(),
+            "00000000000000000000000000000000",
+            "root should have a valid, freshly-generated trace id (not all zeros)"
+        );
+    }
+}
+
+/// Per W3C Trace Context, more than one `traceparent` header is ambiguous and
+/// must be treated as no parent — a fresh root trace (Issue #3376, LOW5).
+#[tokio::test]
+#[serial]
+async fn multiple_traceparent_headers_start_fresh_root() {
+    let exp = exporter();
+    exp.clear();
+    let client = client();
+
+    let incoming_trace = "0af7651916cd43dd8448eb211c80319c";
+
+    let resp = client
+        .post("/query")
+        .header(
+            "traceparent",
+            &format!("00-{incoming_trace}-b7ad6b7169203331-01"),
+        )
+        .header(
+            "traceparent",
+            "00-11111111111111111111111111111111-2222222222222222-01",
+        )
+        .json(&json!({"operation": "find_node", "label": "Nothing"}))
+        .send()
+        .await;
+    assert_eq!(resp.status.as_u16(), 200);
+
+    let spans = exp.spans();
+    let root = find_root(&spans);
+    // Fresh root: neither incoming trace id is adopted, and there is no parent.
+    assert_eq!(root.parent_span_id.to_string(), INVALID_SPAN_ID);
+    assert_ne!(
+        root.span_context.trace_id().to_string(),
+        incoming_trace,
+        "duplicate traceparent must NOT continue the caller's trace"
+    );
+    assert_ne!(
+        root.span_context.trace_id().to_string(),
+        "00000000000000000000000000000000"
+    );
+}
+
+/// A `tracestate` with no accompanying `traceparent` carries no parent span —
+/// the request must start a fresh root trace (Issue #3376 test gap).
+#[tokio::test]
+#[serial]
+async fn tracestate_without_traceparent_starts_fresh_root() {
+    let exp = exporter();
+    exp.clear();
+    let client = client();
+
+    let resp = client
+        .post("/query")
+        .header("tracestate", "vendor=value")
+        .json(&json!({"operation": "find_node", "label": "Nothing"}))
+        .send()
+        .await;
+    assert_eq!(resp.status.as_u16(), 200);
+
+    let spans = exp.spans();
+    let root = find_root(&spans);
+    assert_eq!(root.parent_span_id.to_string(), INVALID_SPAN_ID);
+    assert_ne!(
+        root.span_context.trace_id().to_string(),
+        "00000000000000000000000000000000",
+        "root should have a valid, freshly-generated trace id"
+    );
+}
+
 #[tokio::test]
 #[serial]
 async fn credentials_never_appear_in_span_attributes() {

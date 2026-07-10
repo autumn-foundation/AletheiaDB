@@ -697,10 +697,26 @@ pub async fn handle_query(
     state: AppState,
     Json(req): Json<QueryRequest>,
 ) -> Response {
-    trace.record_operation(operation_name(&req));
-    trace.record_temporal_scope(request_is_temporal(&req));
+    // Compute and stamp per-request attributes only when the span will actually
+    // be recorded (Issue #3376, MED2 / Perf). A feature-absent build compiles
+    // this block out entirely; a runtime-disabled or head-sampled-out span
+    // short-circuits `is_recording()` so the (otherwise-wasted) attribute
+    // computation — including `request_is_temporal`'s statement scan — never
+    // runs.
+    #[cfg(feature = "observability")]
+    let recording = trace.is_recording();
+    #[cfg(feature = "observability")]
+    if recording {
+        trace.record_operation(operation_name(&req));
+        trace.record_temporal_scope(request_is_temporal(&req));
+    }
     #[cfg(feature = "otel")]
     maybe_capture_statement(&trace, &req);
+    // In an observability-off build the extractor still runs (zero-sized no-op),
+    // but nothing consumes `trace`; keep it "used" without renaming the field
+    // (which is genuinely used under `observability`).
+    #[cfg(not(feature = "observability"))]
+    let _ = &trace;
 
     #[cfg(feature = "observability")]
     let span = trace.span();
@@ -759,11 +775,17 @@ pub async fn handle_query(
 
     match result {
         Ok(data) => {
-            trace.record_result_count(result_count(&data));
+            #[cfg(feature = "observability")]
+            if recording {
+                trace.record_result_count(result_count(&data));
+            }
             Json(ApiResponse::success(data)).into_response()
         }
         Err(e) => {
-            trace.record_error(e.code_str());
+            #[cfg(feature = "observability")]
+            if recording {
+                trace.record_error(e.code_str());
+            }
             #[cfg(feature = "observability")]
             let trace_id = span.in_scope(crate::http::trace::active_trace_id);
             #[cfg(not(feature = "observability"))]
@@ -775,6 +797,7 @@ pub async fn handle_query(
 
 /// The stable operation-name attribute for a `/query` request (bounded set,
 /// never user data).
+#[cfg(feature = "observability")]
 fn operation_name(req: &QueryRequest) -> &'static str {
     match req {
         QueryRequest::FindNode { .. } => "find_node",
@@ -792,6 +815,7 @@ fn operation_name(req: &QueryRequest) -> &'static str {
 
 /// Result-count attribute for a response payload: array length, `nodes` array
 /// length for the bulk-get shape, otherwise `1` for a single entity.
+#[cfg(feature = "observability")]
 fn result_count(data: &Value) -> usize {
     match data {
         Value::Array(items) => items.len(),
@@ -806,9 +830,19 @@ fn result_count(data: &Value) -> usize {
 /// Whether a request carries a temporal (`AS OF`) scope. Only statement-based
 /// operations can; detection is a cheap case-insensitive substring check that
 /// never inspects property values.
+#[cfg(feature = "observability")]
 fn request_is_temporal(req: &QueryRequest) -> bool {
+    /// Allocation-free, case-insensitive scan for the `as of` temporal marker.
+    /// The previous `to_ascii_lowercase().contains(..)` allocated a full
+    /// lowercased copy of the statement on every request; scanning byte windows
+    /// with `eq_ignore_ascii_case` matches identically for the ASCII needle
+    /// while allocating nothing (Issue #3376, MED2 / Perf).
     fn is_as_of(query: &str) -> bool {
-        query.to_ascii_lowercase().contains("as of")
+        const NEEDLE: &[u8] = b"as of";
+        query
+            .as_bytes()
+            .windows(NEEDLE.len())
+            .any(|w| w.eq_ignore_ascii_case(NEEDLE))
     }
     match req {
         QueryRequest::ExecuteQuery { query, .. } => is_as_of(query),

@@ -74,6 +74,9 @@ impl AletheiaHttpError {
     /// (Issue #3376); the response body still only carries [`code`](Self::code)
     /// for auth errors so the existing wire shape is unchanged.
     #[must_use]
+    // Only consumed by the tracing span-stamping path, which is compiled out
+    // when `observability` is disabled; keep it available without warning.
+    #[cfg_attr(not(feature = "observability"), allow(dead_code))]
     pub(crate) fn code_str(&self) -> &'static str {
         match self {
             Self::BadRequest(_) | Self::QueryParse(_) => "INVALID_ARGUMENT",
