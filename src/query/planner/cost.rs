@@ -822,6 +822,7 @@ mod tests {
             }),
             direction: crate::query::ir::Direction::Outgoing,
             label: None,
+            min_depth: 2,
             depth: 2,
             temporal_context: None,
         };

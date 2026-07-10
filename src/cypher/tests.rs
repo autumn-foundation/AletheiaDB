@@ -1399,19 +1399,132 @@ fn test_e2e_multi_hop_traversal() {
     let rows: Vec<_> = results.collect();
     assert_eq!(rows.len(), 1); // Bob
 
-    // 2-hop: Alice -> Bob -> Charlie (yields nodes at depth 2)
+    // 2-hop: Alice -> Bob -> Charlie.
+    // openCypher range `*1..2` binds `b` to EVERY node reachable at depth 1
+    // (Bob) or depth 2 (Charlie), not only the terminal-depth node.
     let results = db
         .execute_cypher("MATCH (a:Person {name: 'Alice'})-[:KNOWS*1..2]->(b) RETURN b")
         .unwrap();
-    let rows: Vec<_> = results.collect();
-    // Range *1..2 should yield nodes at depth 1 (Bob) and depth 2 (Charlie),
-    // but the executor may only return terminal-depth nodes depending on the
-    // TraversalDepth::Range semantics.  Assert at least 1 result.
-    assert!(
-        !rows.is_empty(),
-        "expected at least 1 result from *1..2 traversal, got {}",
-        rows.len()
+    let rows: Vec<_> = collect_rows(results);
+    let mut names: Vec<String> = rows.iter().filter_map(row_name).collect();
+    names.sort();
+    assert_eq!(names, vec!["Bob".to_string(), "Charlie".to_string()]);
+}
+
+// ============================================================================
+// Variable-length path depth-range matrix (Issue #548)
+//
+// openCypher `-[:R*min..max]->` binds the far node to EVERY distinct node
+// reachable at any depth d with min <= d <= max, not only the terminal depth.
+// ============================================================================
+
+/// Build a linear chain N0-[:R]->N1->N2->N3->N4 (5 nodes, 4 edges) and run
+/// `MATCH (a:N {name:'N0'})-[:R<spec>]->(b) RETURN b`, returning the SORTED
+/// list of resulting `b.name` values so tests can assert an exact set.
+fn varlen_chain_names(spec: &str) -> Vec<String> {
+    let db = AletheiaDB::new().unwrap();
+    let mut ids = Vec::new();
+    for i in 0..5 {
+        let id = db
+            .create_node(
+                "N",
+                PropertyMapBuilder::new()
+                    .insert("name", format!("N{i}"))
+                    .build(),
+            )
+            .unwrap();
+        ids.push(id);
+    }
+    for i in 0..4 {
+        db.create_edge(ids[i], ids[i + 1], "R", CorePropertyMap::new())
+            .unwrap();
+    }
+    let q = format!("MATCH (a:N {{name: 'N0'}})-[:R{spec}]->(b) RETURN b");
+    let rows = collect_rows(db.execute_cypher(&q).unwrap());
+    let mut names: Vec<String> = rows.iter().filter_map(row_name).collect();
+    names.sort();
+    names
+}
+
+#[test]
+fn test_varlen_depth_exact_1() {
+    assert_eq!(varlen_chain_names("*1..1"), vec!["N1"]);
+    assert_eq!(varlen_chain_names("*1"), vec!["N1"]);
+}
+
+#[test]
+fn test_varlen_depth_1_to_2() {
+    assert_eq!(varlen_chain_names("*1..2"), vec!["N1", "N2"]);
+}
+
+#[test]
+fn test_varlen_depth_1_to_3() {
+    assert_eq!(varlen_chain_names("*1..3"), vec!["N1", "N2", "N3"]);
+}
+
+#[test]
+fn test_varlen_depth_2_to_3() {
+    assert_eq!(varlen_chain_names("*2..3"), vec!["N2", "N3"]);
+}
+
+#[test]
+fn test_varlen_depth_exact_2() {
+    assert_eq!(varlen_chain_names("*2..2"), vec!["N2"]);
+    assert_eq!(varlen_chain_names("*2"), vec!["N2"]);
+}
+
+#[test]
+fn test_varlen_depth_max_only_2() {
+    assert_eq!(varlen_chain_names("*..2"), vec!["N1", "N2"]);
+}
+
+#[test]
+fn test_varlen_depth_min_only_3() {
+    // `*3..` is unbounded above; capped at DEFAULT_MAX_TRAVERSAL_DEPTH (10),
+    // well beyond the chain length, so it reaches N4.
+    assert_eq!(varlen_chain_names("*3.."), vec!["N3", "N4"]);
+}
+
+#[test]
+fn test_varlen_depth_unbounded() {
+    // `*` is Variable depth; capped at DEFAULT_MAX_TRAVERSAL_DEPTH (10).
+    assert_eq!(varlen_chain_names("*"), vec!["N1", "N2", "N3", "N4"]);
+}
+
+#[test]
+fn test_varlen_cycle_distinct_nodes_no_infinite_loop() {
+    // Triangle N0->N1->N2->N0. Per-input-node isomorphism dedup means each
+    // distinct reachable node is emitted at most once and the cycle back to
+    // the start node terminates instead of looping forever.
+    let db = AletheiaDB::new().unwrap();
+    let mut ids = Vec::new();
+    for i in 0..3 {
+        let id = db
+            .create_node(
+                "N",
+                PropertyMapBuilder::new()
+                    .insert("name", format!("N{i}"))
+                    .build(),
+            )
+            .unwrap();
+        ids.push(id);
+    }
+    db.create_edge(ids[0], ids[1], "R", CorePropertyMap::new())
+        .unwrap();
+    db.create_edge(ids[1], ids[2], "R", CorePropertyMap::new())
+        .unwrap();
+    db.create_edge(ids[2], ids[0], "R", CorePropertyMap::new())
+        .unwrap();
+
+    let rows = collect_rows(
+        db.execute_cypher("MATCH (a:N {name: 'N0'})-[:R*1..5]->(b) RETURN b")
+            .unwrap(),
     );
+    let mut names: Vec<String> = rows.iter().filter_map(row_name).collect();
+    names.sort();
+    // N1 (depth 1) and N2 (depth 2) each once; N0 reached again at depth 3 is
+    // suppressed by the visited set (and the depth-0 start is never emitted).
+    assert_eq!(names, vec!["N1", "N2"]);
 }
 
 #[test]

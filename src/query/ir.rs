@@ -241,6 +241,24 @@ impl TraversalDepth {
             TraversalDepth::Variable => None,
         }
     }
+
+    /// Get the minimum depth for this specification.
+    ///
+    /// openCypher variable-length paths bind the far node to every distinct
+    /// node reachable at any depth `d` with `min <= d <= max`. This returns the
+    /// lower bound `min`:
+    /// - `Exact(n)` => `n` (a single fixed depth),
+    /// - `Max(_)` => `1` (`*..n` starts at one hop),
+    /// - `Range { min, .. }` => `min`,
+    /// - `Variable` => `1` (`*` starts at one hop).
+    #[must_use]
+    pub fn min_depth(&self) -> usize {
+        match self {
+            TraversalDepth::Exact(n) => *n,
+            TraversalDepth::Max(_) | TraversalDepth::Variable => 1,
+            TraversalDepth::Range { min, .. } => *min,
+        }
+    }
 }
 
 /// Edge traversal direction.

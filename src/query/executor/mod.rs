@@ -271,6 +271,7 @@ impl QueryExecutor {
                 input,
                 direction,
                 label,
+                min_depth,
                 depth,
                 temporal_context,
             } => {
@@ -279,6 +280,7 @@ impl QueryExecutor {
                     input_iter,
                     *direction,
                     label.clone(),
+                    *min_depth,
                     *depth,
                     Arc::clone(&self.current),
                     Arc::clone(&self.historical),
@@ -710,6 +712,7 @@ mod tests {
                 }),
                 direction: crate::query::ir::Direction::Outgoing,
                 label: Some("KNOWS".to_string()),
+                min_depth: 1,
                 depth: 1,
                 temporal_context: None,
             },
@@ -894,6 +897,7 @@ mod tests {
                         }),
                         direction: crate::query::ir::Direction::Outgoing,
                         label: Some("KNOWS".to_string()),
+                        min_depth: 1,
                         depth: 1,
                         temporal_context: None,
                     }),
@@ -1511,6 +1515,7 @@ mod tests {
                 steps: vec![OptionalPhysicalStep::Traverse {
                     direction: crate::query::ir::Direction::Outgoing,
                     label: Some("KNOWS".to_string()),
+                    min_depth: 1,
                     depth: 1,
                     temporal_context: None,
                 }],
@@ -1545,6 +1550,7 @@ mod tests {
                 steps: vec![OptionalPhysicalStep::Traverse {
                     direction: crate::query::ir::Direction::Outgoing,
                     label: Some("FOLLOWS".to_string()),
+                    min_depth: 1,
                     depth: 1,
                     temporal_context: None,
                 }],
@@ -1580,6 +1586,7 @@ mod tests {
                     OptionalPhysicalStep::Traverse {
                         direction: crate::query::ir::Direction::Outgoing,
                         label: Some("KNOWS".to_string()),
+                        min_depth: 1,
                         depth: 1,
                         temporal_context: None,
                     },

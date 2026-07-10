@@ -455,7 +455,10 @@ pub enum PhysicalOp {
         direction: Direction,
         /// Optional edge label filter
         label: Option<String>,
-        /// Maximum depth
+        /// Minimum depth (inclusive). A node bound at depth `d` is emitted only
+        /// when `min_depth <= d <= depth` (openCypher `*min..max` semantics).
+        min_depth: usize,
+        /// Maximum depth (inclusive).
         depth: usize,
         /// Optional temporal context (valid_time, transaction_time) for edge filtering.
         /// When present, only edges that existed at the specified point in time are traversed.
@@ -610,7 +613,9 @@ pub enum OptionalPhysicalStep {
         direction: Direction,
         /// Optional edge label filter.
         label: Option<String>,
-        /// Maximum depth.
+        /// Minimum depth (inclusive), mirroring [`PhysicalOp::IndexedTraversal`].
+        min_depth: usize,
+        /// Maximum depth (inclusive).
         depth: usize,
         /// Optional temporal context (valid_time, transaction_time) for edge
         /// filtering, mirroring [`PhysicalOp::IndexedTraversal`].
@@ -788,6 +793,7 @@ impl PhysicalOp {
                 input,
                 direction,
                 label,
+                min_depth,
                 depth,
                 temporal_context,
             } => {
@@ -797,9 +803,10 @@ impl PhysicalOp {
                     String::new()
                 };
                 format!(
-                    "{prefix}{name} (dir: {:?}, label: {:?}, depth: {}{})\n{}",
+                    "{prefix}{name} (dir: {:?}, label: {:?}, depth: {}..{}{})\n{}",
                     direction,
                     label,
+                    min_depth,
                     depth,
                     temporal_str,
                     input.explain_indent(indent + 1)
@@ -1014,6 +1021,7 @@ mod tests {
                 input: Box::new(PhysicalOp::Empty),
                 direction: Direction::Outgoing,
                 label: None,
+                min_depth: 1,
                 depth: 1,
                 temporal_context: None,
             }
@@ -1202,6 +1210,7 @@ mod tests {
                 input: Box::new(PhysicalOp::Empty),
                 direction: Direction::Outgoing,
                 label: None,
+                min_depth: 1,
                 depth: 1,
                 temporal_context: None,
             }
@@ -1486,6 +1495,7 @@ mod tests {
             input: Box::new(PhysicalOp::Empty),
             direction: Direction::Outgoing,
             label: Some("KNOWS".to_string()),
+            min_depth: 2,
             depth: 2,
             temporal_context: None,
         };
@@ -1826,6 +1836,7 @@ mod tests {
                     }),
                     direction: Direction::Outgoing,
                     label: Some("KNOWS".to_string()),
+                    min_depth: 2,
                     depth: 2,
                     temporal_context: None,
                 }),
@@ -2100,6 +2111,7 @@ mod tests {
             steps: vec![OptionalPhysicalStep::Traverse {
                 direction: Direction::Outgoing,
                 label: Some("KNOWS".to_string()),
+                min_depth: 1,
                 depth: 1,
                 temporal_context: None,
             }],

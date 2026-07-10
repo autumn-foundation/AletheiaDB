@@ -85,6 +85,21 @@ const DEFAULT_PROPERTY_SCAN_ROWS: usize = 100;
 /// Fallback maximum traversal depth when the query specifies unbounded (`Variable`) depth.
 const DEFAULT_MAX_TRAVERSAL_DEPTH: usize = 10;
 
+/// Resolve the effective maximum traversal depth for a [`TraversalDepth`],
+/// clamping the unbounded upper cases to [`DEFAULT_MAX_TRAVERSAL_DEPTH`].
+///
+/// Both `Variable` (`*`) and the `*N..` / `Min` form (which the converter
+/// models as `Range { min, max: usize::MAX }`) are unbounded above and must be
+/// capped so BFS terminates; finite bounds (`Exact`, `Max`, closed `Range`)
+/// pass through unchanged. Configurable caps are a noted follow-up.
+fn cap_traversal_depth(depth: &super::ir::TraversalDepth) -> usize {
+    match depth.max_depth() {
+        Some(max) if max == usize::MAX => DEFAULT_MAX_TRAVERSAL_DEPTH,
+        Some(max) => max,
+        None => DEFAULT_MAX_TRAVERSAL_DEPTH,
+    }
+}
+
 /// Default `top_k` for vector re-rank when the caller does not provide one.
 const DEFAULT_VECTOR_TOP_K: usize = 10;
 
@@ -764,7 +779,8 @@ impl QueryPlanner {
                     input: Box::new(input),
                     direction: *direction,
                     label: label.clone(),
-                    depth: depth.max_depth().unwrap_or(DEFAULT_MAX_TRAVERSAL_DEPTH),
+                    min_depth: depth.min_depth(),
+                    depth: cap_traversal_depth(depth),
                     temporal_context: temporal_ctx,
                 })
             }
@@ -825,7 +841,8 @@ impl QueryPlanner {
                         } => physical::OptionalPhysicalStep::Traverse {
                             direction: *direction,
                             label: label.clone(),
-                            depth: depth.max_depth().unwrap_or(DEFAULT_MAX_TRAVERSAL_DEPTH),
+                            min_depth: depth.min_depth(),
+                            depth: cap_traversal_depth(depth),
                             temporal_context: temporal_ctx,
                         },
                         OptionalStep::Filter(predicate) => {
@@ -2003,11 +2020,13 @@ mod tests {
                     physical::OptionalPhysicalStep::Traverse {
                         direction,
                         label,
+                        min_depth,
                         depth,
                         temporal_context,
                     } => {
                         assert_eq!(*direction, Direction::Outgoing);
                         assert_eq!(label.as_deref(), Some("KNOWS"));
+                        assert_eq!(*min_depth, 1);
                         assert_eq!(*depth, 1);
                         assert!(temporal_context.is_none());
                     }
