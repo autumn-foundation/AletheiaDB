@@ -12,6 +12,33 @@ one query. [Why that matters →](docs/guides/why-aletheiadb.md)
 
 ---
 
+## 60-Second Quickstart
+
+One command seeds a small, story-driven **bi-temporal** dataset and walks you
+through a guided sequence of queries — including a **time-travel (`AS OF`)**
+query whose answer visibly differs from the current state. It is ephemeral
+(nothing written to disk) and needs no server and no API key:
+
+```bash
+cargo run --example demo
+```
+
+Time-to-first-query is a few seconds (the one-time `cargo build` is separate).
+The three entry channels, each with its exact commands:
+
+| Channel | Command | Server? | API key? |
+|---------|---------|---------|----------|
+| **Embedded (Rust)** | `cargo run --example demo` | No | No |
+| **MCP (agent-issued)** | `export ALETHEIADB_BOOTSTRAP_ADMIN_KEY="$(openssl rand -base64 32)"`<br>`cargo run --bin aletheia-mcp --features mcp-server` | Yes (stdio) | Yes |
+| **HTTP server** | `export ALETHEIADB_BOOTSTRAP_ADMIN_KEY="$(openssl rand -base64 32)"`<br>`cargo run --bin aletheia-server --features http-server` | Yes | Yes |
+
+Authentication is **on by default** for both servers — see the
+[Security Quickstart](docs/guides/security-quickstart.md) for key setup and the
+explicit anonymous opt-in. Full walkthrough, sample output, and measured
+timings: **[60-Second Quickstart guide →](docs/guides/quickstart.md)**
+
+---
+
 ## Install
 
 ```toml
@@ -55,6 +82,31 @@ fn main() -> Result<()> {
 ```
 
 See the [Getting Started guide](docs/guides/getting-started.md) for a full walkthrough.
+
+---
+
+## Run with Docker
+
+No Rust toolchain required. The official image ships both the HTTP server
+(default) and the stdio MCP server.
+
+```bash
+# One command brings up a durable server on localhost:1963 with a persistent
+# named volume. Both secrets are required — the server refuses to start
+# without them (auth is on by default; see the Security Quickstart).
+export ALETHEIADB_BOOTSTRAP_ADMIN_KEY="$(openssl rand -base64 32)"
+export AUTUMN_SECURITY__SIGNING_SECRET="$(openssl rand -hex 32)"
+docker compose up -d
+
+# First query
+curl -H "x-api-key: $ALETHEIADB_BOOTSTRAP_ADMIN_KEY" http://localhost:1963/status
+```
+
+Data lives under a declared volume at `/var/lib/aletheiadb` (`wal/` +
+`indexes/`); kill-and-restart with the volume attached recovers via WAL
+replay with zero data loss. See the
+[Docker guide](docs/guides/docker.md) for image details, MCP mode, env vars,
+graceful shutdown, and measured footprint/startup.
 
 ---
 
@@ -139,10 +191,12 @@ aletheiadb = { version = "0.1", features = ["nova", "semantic-search"] }
 
 | Guide | Description |
 |-------|-------------|
+| [60-Second Quickstart](docs/guides/quickstart.md) | Fastest path to your first (time-travel) query, across all channels |
 | [Why AletheiaDB](docs/guides/why-aletheiadb.md) | The problem it solves; when to use it |
 | [Core Concepts](docs/guides/core-concepts.md) | Bi-temporal model, nodes, edges, WAL, vector search |
 | [Installation](docs/guides/installation.md) | Prerequisites, feature flags, building from source |
 | [Getting Started](docs/guides/getting-started.md) | First database, CRUD, time-travel, hybrid queries |
+| [Docker](docs/guides/docker.md) | Container image, compose quickstart, MCP mode, volumes |
 | [Persistence Guide](docs/guides/PERSISTENCE.md) | WAL, index persistence, cold storage |
 | [Tiered Storage](docs/guides/tiered-storage-guide.md) | Unlimited history with hot/warm/cold tiers |
 | [Hybrid Query Guide](docs/guides/hybrid-query-guide.md) | Graph + vector + temporal query API |

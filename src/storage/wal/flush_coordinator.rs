@@ -45,8 +45,7 @@ use super::ring_buffer::PendingEntry;
 use crate::core::error::{Error, Result, StorageError};
 
 use super::segment_reader::{
-    WAL_HEADER_SIZE, WAL_MAGIC, WAL_VERSION_ENCRYPTED_PROVENANCE_PRINCIPAL,
-    WAL_VERSION_PROVENANCE_PRINCIPAL,
+    WAL_HEADER_SIZE, WAL_MAGIC, WAL_VERSION_ENCRYPTED_TX_FRAMING, WAL_VERSION_TX_FRAMING,
 };
 
 /// Metadata about a WAL segment's LSN range.
@@ -387,13 +386,17 @@ impl FlushCoordinator {
             return Ok(());
         }
 
-        // New segments always use the principal-carrying provenance
-        // format (Issues #3224 + #3350): version 6 for encrypted
-        // segments, version 5 for plaintext.
+        // New segments use the transaction-framing format (Issue #3413),
+        // which is a superset of the principal-carrying provenance format
+        // (Issues #3224 + #3350): version 8 for encrypted segments, version 7
+        // for plaintext. Non-transactional producers (raw appends, control
+        // ops) simply omit the BeginTx/CommitTx markers; the version bump only
+        // signals that such markers MAY be present so old readers reject the
+        // segment cleanly rather than misparsing an unknown op tag.
         let write_version = if self.config.wal_cipher.is_some() {
-            WAL_VERSION_ENCRYPTED_PROVENANCE_PRINCIPAL
+            WAL_VERSION_ENCRYPTED_TX_FRAMING
         } else {
-            WAL_VERSION_PROVENANCE_PRINCIPAL
+            WAL_VERSION_TX_FRAMING
         };
 
         // Allocate the next segment id, rolling past any existing non-empty
@@ -1144,12 +1147,12 @@ mod tests {
             "existing v3 segment must not be appended to"
         );
 
-        // ...the write must have rolled forward to a fresh segment with a
-        // matching (v5) header...
+        // ...the write must have rolled forward to a fresh segment with the
+        // current writer (v7 transaction-framing) header...
         assert_eq!(coordinator.current_segment_id(), 2);
         let new_segment = std::fs::read(dir.path().join("000002.log")).unwrap();
         assert_eq!(&new_segment[0..4], &WAL_MAGIC);
-        assert_eq!(new_segment[4], WAL_VERSION_PROVENANCE_PRINCIPAL);
+        assert_eq!(new_segment[4], WAL_VERSION_TX_FRAMING);
 
         // ...and a full-directory replay succeeds, with the new entry's
         // principal intact.
@@ -1379,7 +1382,7 @@ mod tests {
 
         assert!(data.len() >= WAL_HEADER_SIZE);
         assert_eq!(&data[0..4], &WAL_MAGIC);
-        assert_eq!(data[4], WAL_VERSION_PROVENANCE_PRINCIPAL);
+        assert_eq!(data[4], WAL_VERSION_TX_FRAMING);
     }
 
     #[test]
