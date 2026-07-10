@@ -12,6 +12,9 @@ pub mod metrics;
 #[cfg(feature = "metrics-rs")]
 pub mod metrics_rs_adapter;
 
+#[cfg(feature = "otel")]
+pub mod otel;
+
 use arc_swap::ArcSwap;
 use std::sync::{Arc, LazyLock};
 
