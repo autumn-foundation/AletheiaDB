@@ -5861,6 +5861,7 @@ mod server_unit_tests {
     use std::sync::Arc;
 
     use super::AletheiaMcpServer;
+    use crate::core::PropertyValue;
     use crate::core::error::{Error, QueryError};
     use crate::core::id::{EdgeId, NodeId};
     use crate::db::AletheiaDB;
@@ -5954,6 +5955,58 @@ mod server_unit_tests {
         let json = server.query_row_to_json(row);
         assert_eq!(json["entity"]["type"].as_str(), Some("edge"));
         assert_eq!(json["entity"]["id"].as_u64(), Some(99));
+    }
+
+    // --- #558 MCP surface: computed/aggregate rows render their named columns.
+    // These are deliberately feature-independent (no `#[cfg(feature = "cypher")]`)
+    // so the coverage job -- which compiles without `cypher` -- still exercises
+    // the aggregate branches of `query_row_to_json`, `handle_query`'s column
+    // selection, and `computed_query_columns`. `QueryRow::from_columns` builds
+    // exactly the `entity: Null, columns: Some(..)` shape those branches key on.
+
+    #[test]
+    fn query_row_to_json_renders_computed_columns() {
+        let server = make_server();
+        let row = QueryRow::from_columns(vec![("count(*)".to_string(), PropertyValue::Int(5))]);
+        let json = server.query_row_to_json(row);
+        // The aggregate value is surfaced under its column name, not lost.
+        assert_eq!(json["count(*)"].as_i64(), Some(5), "got: {json}");
+        // Computed rows use the bare column-map shape: no entity/score/path/timestamp keys.
+        let obj = json
+            .as_object()
+            .expect("computed row must be a JSON object");
+        assert!(!obj.contains_key("entity"), "no entity key: {json}");
+        assert!(!obj.contains_key("score"), "no score key: {json}");
+        assert!(!obj.contains_key("path"), "no path key: {json}");
+        assert!(!obj.contains_key("timestamp"), "no timestamp key: {json}");
+    }
+
+    #[test]
+    fn query_row_to_json_renders_multi_column_computed_row() {
+        let server = make_server();
+        let row = QueryRow::from_columns(vec![
+            ("n.dept".to_string(), PropertyValue::String("Eng".into())),
+            ("c".to_string(), PropertyValue::Int(3)),
+        ]);
+        let json = server.query_row_to_json(row);
+        assert_eq!(json["n.dept"].as_str(), Some("Eng"), "got: {json}");
+        assert_eq!(json["c"].as_i64(), Some(3), "got: {json}");
+    }
+
+    #[test]
+    fn computed_query_columns_names_the_columns() {
+        let names = vec!["count(*)".to_string(), "c".to_string()];
+        let cols = super::computed_query_columns(&names);
+        let arr = cols.as_array().expect("columns must be a JSON array");
+        assert_eq!(arr.len(), 2, "one entry per column, in order: {cols}");
+        assert_eq!(arr[0]["name"].as_str(), Some("count(*)"), "got: {cols}");
+        assert_eq!(arr[1]["name"].as_str(), Some("c"), "got: {cols}");
+        // Each entry carries the response schema shape (name/type/description).
+        assert!(arr[0].get("type").is_some(), "type present: {cols}");
+        assert!(
+            arr[0].get("description").is_some(),
+            "description present: {cols}"
+        );
     }
 
     #[test]
