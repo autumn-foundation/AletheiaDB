@@ -4710,6 +4710,20 @@ impl AletheiaMcpServer {
     /// per-entity version-metadata lookup just to discard the result
     /// (Issue #3391).
     fn query_row_to_json(&self, row: crate::query::executor::QueryRow) -> serde_json::Value {
+        // Computed/aggregate row (e.g. `RETURN count(*)`, `RETURN n.dept,
+        // count(*)`): the meaningful payload lives in `row.columns`, not
+        // `row.entity` (which is `EntityResult::Null`). Render each named column
+        // via `property_value_to_json` so an LLM sees the aggregate/group value
+        // instead of a lossy `entity: null`. Closes the #558 MCP-surface
+        // follow-up. `include_vectors: true` -- computed aggregate values are
+        // not stored embeddings, so nothing should be elided.
+        if let Some(columns) = row.columns {
+            let mut obj = serde_json::Map::with_capacity(columns.len());
+            for (name, value) in columns {
+                obj.insert(name, self.property_value_to_json(&value, true));
+            }
+            return serde_json::Value::Object(obj);
+        }
         let entity = match row.entity {
             EntityResult::Node(node) => json!({
                 "type": "node",
@@ -4944,16 +4958,34 @@ impl AletheiaMcpServer {
             Err(e) => return self.map_query_error(e, &language),
         };
         let truncated = collected.len() > limit;
+        // Detect computed/aggregate rows (#558): a row carrying named `columns`
+        // (e.g. `RETURN count(*)`, `RETURN n.dept, count(*)`) reports its own
+        // column schema in projection order. Ordinary entity rows leave this
+        // `None`, so the static entity/score/path/timestamp schema is retained
+        // byte-for-byte.
+        let mut computed_columns: Option<Vec<String>> = None;
         let rows: Vec<serde_json::Value> = collected
             .into_iter()
             .take(limit)
-            .map(|row| self.query_row_to_json(row))
+            .map(|row| {
+                if computed_columns.is_none()
+                    && let Some(cols) = &row.columns
+                {
+                    computed_columns = Some(cols.iter().map(|(name, _)| name.clone()).collect());
+                }
+                self.query_row_to_json(row)
+            })
             .collect();
         let row_count = rows.len();
 
+        let columns = match &computed_columns {
+            Some(names) => computed_query_columns(names),
+            None => query_columns(),
+        };
+
         self.success_json(json!({
             "language": language,
-            "columns": query_columns(),
+            "columns": columns,
             "rows": rows,
             "row_count": row_count,
             "truncated": truncated,
@@ -5251,6 +5283,27 @@ fn query_columns() -> serde_json::Value {
             ])
         })
         .clone()
+}
+
+/// Build the column schema for a computed/aggregate `query` result (#558).
+///
+/// When a result carries named `QueryRow::columns` (e.g. `RETURN count(*)` or
+/// `RETURN n.dept, count(*)`), the response advertises those column names in
+/// projection order instead of the static entity/score/path/timestamp schema,
+/// so a caller can map each row's values to their columns.
+fn computed_query_columns(names: &[String]) -> serde_json::Value {
+    serde_json::Value::Array(
+        names
+            .iter()
+            .map(|name| {
+                json!({
+                    "name": name,
+                    "type": "value",
+                    "description": "Computed column from a RETURN projection or aggregation."
+                })
+            })
+            .collect(),
+    )
 }
 
 /// Build the list of tool definitions advertised by this MCP server.
