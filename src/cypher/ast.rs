@@ -261,8 +261,17 @@ pub enum CypherExpr {
         /// The function name (case-insensitive at parse time).
         name: String,
         /// The arguments passed to the function.
+        ///
+        /// For the `count(*)` aggregate the single argument is
+        /// [`CypherExpr::Star`].
         args: Vec<CypherExpr>,
+        /// Whether the call used the `DISTINCT` quantifier, e.g.
+        /// `count(DISTINCT n.dept)`. Only meaningful for aggregate functions;
+        /// always `false` for ordinary/vector functions.
+        distinct: bool,
     },
+    /// The `*` wildcard argument, used only inside `count(*)`.
+    Star,
     /// A parenthesized sub-expression used for grouping.
     Grouped(Box<CypherExpr>),
 }

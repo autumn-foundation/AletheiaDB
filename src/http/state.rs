@@ -13,6 +13,7 @@
 //! in this module, which reads the extension out of autumn's own state.
 
 use crate::AletheiaDB;
+use crate::http::config::QueryLimitsConfig;
 use crate::http::error::AletheiaHttpError;
 use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
@@ -20,18 +21,35 @@ use std::sync::Arc;
 
 /// Application state shared across HTTP handlers.
 ///
-/// Holds an `Arc<AletheiaDB>` and exposes it via [`db`](Self::db) and
-/// [`db_arc`](Self::db_arc). Cheap to clone (a single `Arc` bump).
+/// Holds an `Arc<AletheiaDB>` plus the per-query resource-limit configuration
+/// (Issue #3368) and exposes them via [`db`](Self::db) / [`db_arc`](Self::db_arc)
+/// and [`query_limits`](Self::query_limits). Cheap to clone (a single `Arc`
+/// bump plus a small `Copy`-ish config).
 #[derive(Clone)]
 pub struct AppState {
     db: Arc<AletheiaDB>,
+    query_limits: Arc<QueryLimitsConfig>,
 }
 
 impl AppState {
-    /// Create new application state wrapping the given database.
+    /// Create new application state wrapping the given database, with the
+    /// default per-query limits ([`QueryLimitsConfig::default`]).
     #[must_use]
     pub fn new(db: Arc<AletheiaDB>) -> Self {
-        Self { db }
+        Self {
+            db,
+            query_limits: Arc::new(QueryLimitsConfig::default()),
+        }
+    }
+
+    /// Install the per-query resource limits this state should enforce
+    /// (Issue #3368). Builder-style; typically fed from
+    /// [`ServerConfig::query_limits`](crate::http::ServerConfig::query_limits)
+    /// when wiring the router.
+    #[must_use]
+    pub fn with_query_limits(mut self, limits: QueryLimitsConfig) -> Self {
+        self.query_limits = Arc::new(limits);
+        self
     }
 
     /// Borrow the database for direct method calls.
@@ -44,6 +62,12 @@ impl AppState {
     #[must_use]
     pub fn db_arc(&self) -> Arc<AletheiaDB> {
         self.db.clone()
+    }
+
+    /// The per-query resource limits in force (Issue #3368).
+    #[must_use]
+    pub fn query_limits(&self) -> &QueryLimitsConfig {
+        &self.query_limits
     }
 }
 

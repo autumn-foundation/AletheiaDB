@@ -41,8 +41,21 @@ use super::error::CypherError;
 use super::parser::CypherParser;
 use crate::core::temporal::{TimeRange, Timestamp};
 use crate::query::builder::Query;
-use crate::query::ir::{Predicate, PredicateValue, QueryOp, SortKey, TraversalDepth};
+use crate::query::ir::{
+    AggregateArg, AggregateFunc, AggregateGroupKey, AggregateSpec, Predicate, PredicateValue,
+    QueryOp, SortKey, TraversalDepth,
+};
 use crate::query::plan::{QueryHints, TemporalContext};
+
+/// Defensive recursion bound for expression → predicate conversion.
+///
+/// The parser already caps expression nesting at 128, so for any AST it
+/// produces this never fires. It exists solely because `convert` is `pub`: a
+/// caller constructing a `CypherExpr` by hand (bypassing the parser) could nest
+/// `Not`/`Grouped` arbitrarily deep and overflow the stack during conversion.
+/// Kept clearly above the parser's cap so it only ever rejects such hand-built
+/// pathological input, never a legitimately parsed query.
+const MAX_CONVERT_DEPTH: usize = 256;
 
 // ---------------------------------------------------------------------------
 // Parameter values
@@ -235,37 +248,49 @@ impl CypherConverter {
                     with_idx += 1;
                 }
 
-                // 4. Convert RETURN clause modifiers
-                if return_clause.distinct {
-                    ops.push(QueryOp::Distinct);
-                }
-
-                // 4b. Check for aggregation functions in RETURN items
-                for item in &return_clause.items {
-                    if let CypherReturnItem::Expression {
-                        expr: CypherExpr::FunctionCall { name, .. },
-                        ..
-                    } = item
-                        && name.eq_ignore_ascii_case("count")
-                    {
-                        ops.push(QueryOp::Count);
-                    }
-                }
-
-                // Check if ORDER BY contains a vector function call that should
-                // be converted to RankBySimilarity instead of Sort.
-                let vector_rank_emitted = self.try_emit_vector_rank(&return_clause, &mut ops)?;
-
-                if !vector_rank_emitted {
+                // 4. Aggregation (openCypher implicit grouping). If any RETURN
+                //    item is an aggregate function call, the RETURN lowers to a
+                //    single Aggregate op grouping on the non-aggregate items.
+                //    Aggregation subsumes DISTINCT and changes what the pipeline
+                //    yields (computed column rows), so RETURN DISTINCT and the
+                //    ORDER BY / vector-rank projection are only applied on the
+                //    non-aggregate path.
+                if let Some(aggregate_op) = self.build_aggregate(&return_clause)? {
+                    ops.push(aggregate_op);
+                    // ORDER BY over aggregate output: sort by the output column
+                    // name / aggregate alias (RETURN DISTINCT is subsumed by
+                    // grouping; vector rank does not apply to computed rows).
                     for order_item in &return_clause.order_by {
-                        let sort_key = self.convert_order_item_to_sort_key(order_item)?;
+                        let key = self.aggregate_order_key(&return_clause, order_item)?;
                         ops.push(QueryOp::Sort {
-                            key: sort_key,
+                            key: SortKey::Property(key),
                             descending: order_item.descending,
                         });
                     }
+                } else {
+                    // 4a. RETURN DISTINCT
+                    if return_clause.distinct {
+                        ops.push(QueryOp::Distinct);
+                    }
+
+                    // 4b. Check if ORDER BY contains a vector function call that
+                    // should be converted to RankBySimilarity instead of Sort.
+                    let vector_rank_emitted =
+                        self.try_emit_vector_rank(&return_clause, &mut ops)?;
+
+                    if !vector_rank_emitted {
+                        for order_item in &return_clause.order_by {
+                            let sort_key = self.convert_order_item_to_sort_key(order_item)?;
+                            ops.push(QueryOp::Sort {
+                                key: sort_key,
+                                descending: order_item.descending,
+                            });
+                        }
+                    }
                 }
 
+                // SKIP / LIMIT page the final rows in both the aggregate and the
+                // ordinary case.
                 if let Some(skip) = return_clause.skip {
                     ops.push(QueryOp::Skip(skip));
                 }
@@ -518,20 +543,56 @@ impl CypherConverter {
     ///
     /// This handles comparisons, logical operators, string predicates, etc.
     fn convert_expr_to_predicate(&self, expr: &CypherExpr) -> Result<Predicate, CypherError> {
+        self.convert_expr_to_predicate_at(expr, 0)
+    }
+
+    /// Depth-guarded worker for [`Self::convert_expr_to_predicate`].
+    ///
+    /// The `Not` / `Grouped` arms recurse structurally; `convert` is `pub`, so
+    /// this guards against a caller handing us an AST nested past the parser's
+    /// own [`MAX_EXPRESSION_DEPTH`]. The bound is set above the parser's cap so
+    /// it never fires for parser-produced ASTs, only for hand-built ones.
+    fn convert_expr_to_predicate_at(
+        &self,
+        expr: &CypherExpr,
+        depth: usize,
+    ) -> Result<Predicate, CypherError> {
+        if depth > MAX_CONVERT_DEPTH {
+            return Err(CypherError::ParseError {
+                position: 0,
+                message: "expression nesting too deep for conversion (max 256)".to_string(),
+            });
+        }
         match expr {
             CypherExpr::Comparison { left, op, right } => self.convert_comparison(left, *op, right),
-            CypherExpr::And(left, right) => {
-                let left_pred = self.convert_expr_to_predicate(left)?;
-                let right_pred = self.convert_expr_to_predicate(right)?;
-                Ok(Predicate::And(vec![left_pred, right_pred]))
+            CypherExpr::And(_, _) => {
+                // Iteratively flatten the (possibly deeply left-nested) AND
+                // spine so that a long `a AND b AND c ...` chain lowers to a
+                // single n-ary predicate without recursing per operator.
+                let operands = flatten_logical_operands(expr, |e| match e {
+                    CypherExpr::And(left, right) => Some((left, right)),
+                    _ => None,
+                });
+                let preds = operands
+                    .into_iter()
+                    .map(|operand| self.convert_expr_to_predicate_at(operand, depth + 1))
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(Predicate::And(preds))
             }
-            CypherExpr::Or(left, right) => {
-                let left_pred = self.convert_expr_to_predicate(left)?;
-                let right_pred = self.convert_expr_to_predicate(right)?;
-                Ok(Predicate::Or(vec![left_pred, right_pred]))
+            CypherExpr::Or(_, _) => {
+                // Same iterative flattening for the OR spine.
+                let operands = flatten_logical_operands(expr, |e| match e {
+                    CypherExpr::Or(left, right) => Some((left, right)),
+                    _ => None,
+                });
+                let preds = operands
+                    .into_iter()
+                    .map(|operand| self.convert_expr_to_predicate_at(operand, depth + 1))
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(Predicate::Or(preds))
             }
             CypherExpr::Not(inner) => {
-                let inner_pred = self.convert_expr_to_predicate(inner)?;
+                let inner_pred = self.convert_expr_to_predicate_at(inner, depth + 1)?;
                 Ok(Predicate::Not(Box::new(inner_pred)))
             }
             CypherExpr::IsNull(inner) => {
@@ -580,7 +641,7 @@ impl CypherConverter {
                     suffix: suffix.clone(),
                 })
             }
-            CypherExpr::Grouped(inner) => self.convert_expr_to_predicate(inner),
+            CypherExpr::Grouped(inner) => self.convert_expr_to_predicate_at(inner, depth + 1),
             CypherExpr::Value(CypherValue::Bool(true)) => Ok(Predicate::True),
             CypherExpr::Value(CypherValue::Bool(false)) => Ok(Predicate::False),
             _ => Err(CypherError::UnsupportedFeature(format!(
@@ -660,6 +721,216 @@ impl CypherConverter {
                 "vector literals in predicate position".to_string(),
             )),
         }
+    }
+
+    // =======================================================================
+    // Aggregation (implicit grouping)
+    // =======================================================================
+
+    /// Build a [`QueryOp::Aggregate`] from the `RETURN` clause if it contains
+    /// any aggregate function call, applying openCypher implicit grouping:
+    /// every non-aggregate item becomes a grouping key and every aggregate
+    /// item becomes an [`AggregateSpec`]. Returns `Ok(None)` when the clause
+    /// has no aggregates (the ordinary projection path).
+    fn build_aggregate(&self, ret: &CypherReturn) -> Result<Option<QueryOp>, CypherError> {
+        let has_aggregate = ret.items.iter().any(|item| {
+            matches!(
+                item,
+                CypherReturnItem::Expression { expr, .. }
+                    if Self::aggregate_call(expr).is_some()
+            )
+        });
+        if !has_aggregate {
+            return Ok(None);
+        }
+
+        let mut group_keys = Vec::new();
+        let mut aggregates = Vec::new();
+
+        for item in &ret.items {
+            match item {
+                CypherReturnItem::Star => {
+                    return Err(CypherError::UnsupportedFeature(
+                        "RETURN * combined with aggregation; project explicit \
+                         grouping keys instead"
+                            .to_string(),
+                    ));
+                }
+                CypherReturnItem::Variable(name) => {
+                    // Grouping by a whole node/edge cannot be expressed by the
+                    // single-entity row model (it would collapse into one
+                    // Null-keyed group). Reject rather than silently mis-group.
+                    return Err(CypherError::UnsupportedFeature(format!(
+                        "grouping by a whole node/edge is not supported \
+                         (RETURN {name}, <aggregate>); group by a property such \
+                         as {name}.<key> instead"
+                    )));
+                }
+                CypherReturnItem::Expression { expr, alias } => {
+                    if let Some((func, args, distinct)) = Self::aggregate_call(expr) {
+                        let arg = Self::aggregate_arg(func, args)?;
+                        let default_alias = Self::aggregate_default_alias(func, args, distinct);
+                        aggregates.push(AggregateSpec {
+                            func,
+                            arg,
+                            distinct,
+                            alias: alias.clone().unwrap_or(default_alias),
+                        });
+                    } else {
+                        let (property_key, default_alias) = Self::group_key_of(expr)?;
+                        group_keys.push(AggregateGroupKey {
+                            property_key,
+                            alias: alias.clone().unwrap_or(default_alias),
+                        });
+                    }
+                }
+            }
+        }
+
+        Ok(Some(QueryOp::Aggregate {
+            group_keys,
+            aggregates,
+        }))
+    }
+
+    /// If `expr` is an aggregate function call, return its function, argument
+    /// list, and `DISTINCT` flag. Non-aggregate calls (e.g. `vector.cosine`)
+    /// and non-calls return `None`.
+    fn aggregate_call(expr: &CypherExpr) -> Option<(AggregateFunc, &[CypherExpr], bool)> {
+        if let CypherExpr::FunctionCall {
+            name,
+            args,
+            distinct,
+        } = expr
+            && let Some(func) = Self::aggregate_func_name(name)
+        {
+            return Some((func, args.as_slice(), *distinct));
+        }
+        None
+    }
+
+    /// Map a function name (case-insensitive) to an [`AggregateFunc`].
+    fn aggregate_func_name(name: &str) -> Option<AggregateFunc> {
+        match name.to_ascii_uppercase().as_str() {
+            "COUNT" => Some(AggregateFunc::Count),
+            "SUM" => Some(AggregateFunc::Sum),
+            "AVG" => Some(AggregateFunc::Avg),
+            "MIN" => Some(AggregateFunc::Min),
+            "MAX" => Some(AggregateFunc::Max),
+            "COLLECT" => Some(AggregateFunc::Collect),
+            _ => None,
+        }
+    }
+
+    /// Resolve what an aggregate reads from each row into an [`AggregateArg`].
+    ///
+    /// `count(*)` -> [`AggregateArg::Star`] (count every row); a bare-variable
+    /// `count(n)` -> [`AggregateArg::Entity`] (count rows with a non-null bound
+    /// entity, openCypher semantics); `func(v.prop)` ->
+    /// [`AggregateArg::Property`]. Non-property arguments to value aggregates
+    /// are rejected in v1.
+    fn aggregate_arg(
+        func: AggregateFunc,
+        args: &[CypherExpr],
+    ) -> Result<AggregateArg, CypherError> {
+        match args {
+            // `*` (or the degenerate empty arg list) is only valid for count.
+            [CypherExpr::Star] | [] if func == AggregateFunc::Count => Ok(AggregateArg::Star),
+            [CypherExpr::Property { property, .. }] => Ok(AggregateArg::Property(property.clone())),
+            // A bare variable argument (`count(n)`) references the bound entity,
+            // not a property: count non-null bindings (distinct from count(*)).
+            [CypherExpr::Variable(_)] if func == AggregateFunc::Count => Ok(AggregateArg::Entity),
+            _ => Err(CypherError::UnsupportedFeature(format!(
+                "aggregate argument must be `*` (count only) or a property access \
+                 (e.g. n.age); got {args:?}"
+            ))),
+        }
+    }
+
+    /// Generate the default output column name for an aggregate (used when no
+    /// `AS` alias is supplied), e.g. `count(*)`, `sum(n.age)`,
+    /// `count(DISTINCT n.dept)`.
+    fn aggregate_default_alias(func: AggregateFunc, args: &[CypherExpr], distinct: bool) -> String {
+        let func_name = match func {
+            AggregateFunc::Count => "count",
+            AggregateFunc::Sum => "sum",
+            AggregateFunc::Avg => "avg",
+            AggregateFunc::Min => "min",
+            AggregateFunc::Max => "max",
+            AggregateFunc::Collect => "collect",
+        };
+        let arg_text = match args.first() {
+            None => String::new(),
+            Some(CypherExpr::Star) => "*".to_string(),
+            Some(CypherExpr::Property { variable, property }) => format!("{variable}.{property}"),
+            Some(CypherExpr::Variable(v)) => v.clone(),
+            Some(_) => "expr".to_string(),
+        };
+        let distinct_prefix = if distinct { "DISTINCT " } else { "" };
+        format!("{func_name}({distinct_prefix}{arg_text})")
+    }
+
+    /// Resolve a non-aggregate `RETURN` item into a grouping key:
+    /// `(property_to_read, default_column_name)`.
+    ///
+    /// Only property access (`n.dept`) is supported. A bare variable
+    /// (whole node/edge) is rejected -- see the `Variable` arm in
+    /// [`Self::build_aggregate`].
+    fn group_key_of(expr: &CypherExpr) -> Result<(String, String), CypherError> {
+        match expr {
+            CypherExpr::Property { variable, property } => {
+                Ok((property.clone(), format!("{variable}.{property}")))
+            }
+            CypherExpr::Variable(name) => Err(CypherError::UnsupportedFeature(format!(
+                "grouping by a whole node/edge is not supported \
+                 (RETURN {name}, <aggregate>); group by a property such as \
+                 {name}.<key> instead"
+            ))),
+            _ => Err(CypherError::UnsupportedFeature(format!(
+                "grouping key must be a property access (e.g. n.dept); got {expr:?}"
+            ))),
+        }
+    }
+
+    /// Resolve an `ORDER BY` item, in an aggregating query, to the output
+    /// column name it should sort by (the aggregate/group alias or generated
+    /// column name).
+    fn aggregate_order_key(
+        &self,
+        ret: &CypherReturn,
+        order_item: &CypherOrderItem,
+    ) -> Result<String, CypherError> {
+        let expr = &order_item.expr;
+
+        // A bare variable directly names an output column / AS alias.
+        if let CypherExpr::Variable(name) = expr {
+            return Ok(name.clone());
+        }
+
+        // Otherwise compute the column name the same way build_aggregate does.
+        let default_name = if let Some((func, args, distinct)) = Self::aggregate_call(expr) {
+            Self::aggregate_default_alias(func, args, distinct)
+        } else if let CypherExpr::Property { variable, property } = expr {
+            format!("{variable}.{property}")
+        } else {
+            return Err(CypherError::UnsupportedFeature(format!(
+                "unsupported ORDER BY expression over an aggregating query: {expr:?}"
+            )));
+        };
+
+        // If a RETURN item projects this exact expression under an alias, order
+        // by that alias (its actual output column name).
+        for item in &ret.items {
+            if let CypherReturnItem::Expression {
+                expr: item_expr,
+                alias: Some(alias),
+            } = item
+                && item_expr == expr
+            {
+                return Ok(alias.clone());
+            }
+        }
+        Ok(default_name)
     }
 
     // =======================================================================
@@ -754,7 +1025,7 @@ impl CypherConverter {
         }
 
         let order_item = &return_clause.order_by[0];
-        if let CypherExpr::FunctionCall { name, args } = &order_item.expr
+        if let CypherExpr::FunctionCall { name, args, .. } = &order_item.expr
             && is_vector_function(name)
         {
             let (property_key, embedding) = self.extract_vector_args(args)?;
@@ -773,7 +1044,7 @@ impl CypherConverter {
         if let CypherExpr::Variable(ref alias_name) = order_item.expr {
             for item in &return_clause.items {
                 if let CypherReturnItem::Expression {
-                    expr: CypherExpr::FunctionCall { name, args },
+                    expr: CypherExpr::FunctionCall { name, args, .. },
                     alias: Some(alias),
                 } = item
                     && alias == alias_name
@@ -842,6 +1113,42 @@ impl CypherConverter {
 
         Ok((property_key, embedding))
     }
+}
+
+// ---------------------------------------------------------------------------
+// Logical-operator flattening
+// ---------------------------------------------------------------------------
+
+/// Flatten a left-nested chain of a single logical operator (`AND` or `OR`, as
+/// built by the parser's `parse_and_expr` / `parse_or_expr`) into its ordered
+/// operand list, iteratively — without recursing down the operator spine.
+///
+/// `split` returns `Some((left, right))` for a node of the operator being
+/// flattened and `None` for any other node. Nodes for which `split` returns
+/// `None` (including a sub-tree of the *other* logical operator) are returned
+/// as opaque operands, to be converted individually by the caller. Operand
+/// order is preserved left-to-right.
+///
+/// This keeps converting an arbitrarily long `a AND b AND c ...` (or `OR`)
+/// chain from overflowing the stack (issue #3404): the spine is walked with an
+/// explicit heap stack instead of one call frame per operator.
+fn flatten_logical_operands<'a>(
+    root: &'a CypherExpr,
+    split: impl Fn(&'a CypherExpr) -> Option<(&'a CypherExpr, &'a CypherExpr)>,
+) -> Vec<&'a CypherExpr> {
+    let mut operands = Vec::new();
+    let mut stack = vec![root];
+    // Pushing right-then-left means the left operand is popped first, so leaves
+    // are collected in source (left-to-right) order.
+    while let Some(node) = stack.pop() {
+        if let Some((left, right)) = split(node) {
+            stack.push(right);
+            stack.push(left);
+        } else {
+            operands.push(node);
+        }
+    }
+    operands
 }
 
 // ---------------------------------------------------------------------------

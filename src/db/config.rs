@@ -632,6 +632,21 @@ impl AletheiaDB {
                 let tiered_config = TieredStorageConfig::default();
                 let tiered_storage = TieredStorage::new(tiered_config, cold_storage);
 
+                // Merge the cold tier's persisted extent bounds into the
+                // temporal index so `temporal_extent` spans history migrated to
+                // cold before this restart (Issue #3389). `wire_temporal_indexes`
+                // above rebuilt the extent aggregate from the hot tier only;
+                // absent/empty cold metadata leaves it untouched, and merging
+                // only ever widens (never narrows) the reported extent.
+                if let Some(bounds) = tiered_storage.cold_storage().get_temporal_extent_bounds()? {
+                    db.temporal_indexes.merge_extent_bounds(
+                        bounds.valid_earliest,
+                        bounds.valid_latest,
+                        bounds.tx_earliest,
+                        bounds.tx_latest,
+                    );
+                }
+
                 // Wire tiered storage to historical storage
                 // Note: migration_age_threshold and max_hot_versions from config.historical
                 // are used by HistoricalStorage's migration logic, not by TieredStorage

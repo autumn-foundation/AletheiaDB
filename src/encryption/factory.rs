@@ -13,8 +13,8 @@ use crate::encryption::cipher::{
 ///
 /// `Auto` selects the best algorithm based on hardware capabilities at runtime.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(feature = "config-toml", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "config-toml", serde(rename_all = "kebab-case"))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
 pub enum Algorithm {
     /// AES-256-GCM -- preferred when AES-NI hardware acceleration is available.
     Aes256Gcm,

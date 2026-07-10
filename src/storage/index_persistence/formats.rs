@@ -629,8 +629,8 @@ pub enum PersistedSnapshotType {
 
 /// Persistence policies for all index types.
 #[derive(Debug, Clone, PartialEq, Default, Encode, Decode)]
-#[cfg_attr(feature = "config-toml", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "config-toml", serde(default))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(default))]
 pub struct PersistencePolicies {
     /// Vector index persistence policy
     pub vector: VectorPersistencePolicy,
@@ -644,8 +644,8 @@ pub struct PersistencePolicies {
 
 /// Vector index persistence policy.
 #[derive(Debug, Clone, PartialEq, Encode, Decode)]
-#[cfg_attr(feature = "config-toml", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "config-toml", serde(default))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(default))]
 pub struct VectorPersistencePolicy {
     /// Persist after N mutations
     pub mutation_threshold: u32,
@@ -664,8 +664,8 @@ impl Default for VectorPersistencePolicy {
 
 /// Graph index persistence policy.
 #[derive(Debug, Clone, PartialEq, Encode, Decode)]
-#[cfg_attr(feature = "config-toml", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "config-toml", serde(default))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(default))]
 pub struct GraphPersistencePolicy {
     /// Persist after adjacency rebuild
     pub on_adjacency_rebuild: bool,
@@ -687,8 +687,8 @@ impl Default for GraphPersistencePolicy {
 
 /// Temporal index persistence policy.
 #[derive(Debug, Clone, PartialEq, Encode, Decode)]
-#[cfg_attr(feature = "config-toml", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "config-toml", serde(default))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(default))]
 pub struct TemporalPersistencePolicy {
     /// Persist after N new versions
     pub version_threshold: u32,
@@ -710,8 +710,8 @@ impl Default for TemporalPersistencePolicy {
 
 /// String interner persistence policy.
 #[derive(Debug, Clone, PartialEq, Encode, Decode)]
-#[cfg_attr(feature = "config-toml", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "config-toml", serde(default))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(default))]
 pub struct StringPersistencePolicy {
     /// Persist after N new strings
     pub new_strings_threshold: u32,
