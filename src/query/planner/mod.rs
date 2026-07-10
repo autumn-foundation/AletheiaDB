@@ -643,10 +643,59 @@ impl QueryPlanner {
             ScanOp::NodeScan {
                 label,
                 estimated_rows,
-            } => Ok(PhysicalOp::NodeScan {
-                label: label.clone(),
-                estimated_rows: estimated_rows.unwrap_or(DEFAULT_SCAN_ESTIMATED_ROWS),
-            }),
+            } => {
+                // Bi-temporal label scans (Issues #550/#551/#552). When the query
+                // carries a temporal context the label scan must reconstruct
+                // history instead of reading current storage -- otherwise
+                // `MATCH (n:Label) AS OF T RETURN n` silently returns present-day
+                // data. When no temporal context is present the fast current-state
+                // path below is 100% unchanged.
+                if let Some(ctx) = temporal.as_ref() {
+                    // Point-in-time (`AS OF`). Any single dimension is enough; the
+                    // missing dimension resolves to "now" via `resolve_now()`, so
+                    // `AS OF VALID_TIME` and `AS OF SYSTEM_TIME` alone both work.
+                    if ctx.valid_time_as_of.is_some() || ctx.transaction_time_as_of.is_some() {
+                        let (valid_time, transaction_time) = ctx.resolve_now();
+                        return Ok(PhysicalOp::TemporalNodeScan {
+                            label: label.clone(),
+                            valid_time,
+                            transaction_time,
+                        });
+                    }
+                    // Valid-time range (`BETWEEN ... AND ...`): every version whose
+                    // valid interval overlaps the range, observed at the current
+                    // transaction time (or an explicit system-time anchor).
+                    if let Some(range) = ctx.valid_time_between {
+                        let transaction_time = ctx
+                            .transaction_time_as_of
+                            .unwrap_or_else(crate::core::temporal::time::now);
+                        return Ok(PhysicalOp::TemporalNodeRangeScan {
+                            label: label.clone(),
+                            valid_from: range.start(),
+                            valid_to: range.end(),
+                            transaction_time,
+                        });
+                    }
+                    // A transaction-time RANGE (`FOR SYSTEM_TIME BETWEEN ...`,
+                    // reachable via the SQL:2011 parser / `QueryBuilder`) has no
+                    // label-scan lowering yet. Reject it with a structured error
+                    // rather than silently falling through to the current-state
+                    // `NodeScan` below (which would return present-day data -- the
+                    // exact bug class this PR fixes, for the tx-range dimension).
+                    if ctx.transaction_time_between.is_some() {
+                        return Err(Error::Query(QueryError::UnsupportedFeature {
+                            feature: "transaction-time range scan (FOR SYSTEM_TIME BETWEEN) on a \
+                                      label scan is not supported; use AS OF SYSTEM_TIME for a \
+                                      point-in-time transaction-time query"
+                                .to_string(),
+                        }));
+                    }
+                }
+                Ok(PhysicalOp::NodeScan {
+                    label: label.clone(),
+                    estimated_rows: estimated_rows.unwrap_or(DEFAULT_SCAN_ESTIMATED_ROWS),
+                })
+            }
 
             ScanOp::EdgeScan {
                 edge_type,
@@ -1582,6 +1631,110 @@ mod tests {
         let plan = planner.plan(query).unwrap();
         // Should be TemporalNodeLookup instead of NodeLookup
         assert!(matches!(plan.root, PhysicalOp::TemporalNodeLookup { .. }));
+    }
+
+    #[test]
+    fn test_temporal_node_scan_with_context() {
+        // Companion to `test_temporal_node_lookup_with_context`: a *label scan*
+        // carrying a point-in-time context must lower to `TemporalNodeScan`, not
+        // the current-state `NodeScan` (Issues #550/#551) -- otherwise
+        // `MATCH (n:Label) AS OF T RETURN n` silently returns present-day data.
+        let planner = test_planner();
+        let now = crate::core::temporal::time::now();
+        let query = Query {
+            ops: vec![QueryOp::ScanNodes {
+                label: Some("Person".to_string()),
+            }],
+            temporal_context: Some(TemporalContext::as_of(now, now)),
+            hints: QueryHints::default(),
+        };
+
+        let plan = planner.plan(query).unwrap();
+        assert!(
+            matches!(plan.root, PhysicalOp::TemporalNodeScan { .. }),
+            "AS OF label scan must lower to TemporalNodeScan, got {:?}",
+            plan.root.name()
+        );
+    }
+
+    #[test]
+    fn test_temporal_node_scan_single_dimension_context() {
+        // A single-dimension `AS OF SYSTEM_TIME` (only transaction time set)
+        // must still lower to the temporal scan; the missing dimension resolves
+        // to "now" (Issue #551).
+        let planner = test_planner();
+        let now = crate::core::temporal::time::now();
+        let query = Query {
+            ops: vec![QueryOp::ScanNodes {
+                label: Some("Person".to_string()),
+            }],
+            temporal_context: Some(TemporalContext::as_of_transaction_time(now)),
+            hints: QueryHints::default(),
+        };
+
+        let plan = planner.plan(query).unwrap();
+        assert!(matches!(plan.root, PhysicalOp::TemporalNodeScan { .. }));
+    }
+
+    #[test]
+    fn test_temporal_node_range_scan_with_between_context() {
+        // A `BETWEEN` valid-time range on a label scan must lower to
+        // `TemporalNodeRangeScan` (Issue #552).
+        let planner = test_planner();
+        let range = crate::core::temporal::TimeRange::new(1_000.into(), 2_000.into()).unwrap();
+        let query = Query {
+            ops: vec![QueryOp::ScanNodes {
+                label: Some("Person".to_string()),
+            }],
+            temporal_context: Some(TemporalContext::valid_time_between(range)),
+            hints: QueryHints::default(),
+        };
+
+        let plan = planner.plan(query).unwrap();
+        assert!(
+            matches!(plan.root, PhysicalOp::TemporalNodeRangeScan { .. }),
+            "BETWEEN label scan must lower to TemporalNodeRangeScan, got {:?}",
+            plan.root.name()
+        );
+    }
+
+    #[test]
+    fn test_node_scan_without_temporal_context_unchanged() {
+        // Regression: with no temporal context the fast current-state path is
+        // untouched -- still a plain `NodeScan`.
+        let planner = test_planner();
+        let query = Query {
+            ops: vec![QueryOp::ScanNodes {
+                label: Some("Person".to_string()),
+            }],
+            temporal_context: None,
+            hints: QueryHints::default(),
+        };
+
+        let plan = planner.plan(query).unwrap();
+        assert!(matches!(plan.root, PhysicalOp::NodeScan { .. }));
+    }
+
+    #[test]
+    fn test_transaction_time_between_label_scan_rejected() {
+        // A transaction-time RANGE context on a label scan has no lowering yet;
+        // it must be REJECTED with a structured error, never fall through to a
+        // current-state NodeScan (which would silently return present-day data).
+        let planner = test_planner();
+        let range = crate::core::temporal::TimeRange::new(1_000.into(), 2_000.into()).unwrap();
+        let query = Query {
+            ops: vec![QueryOp::ScanNodes {
+                label: Some("Person".to_string()),
+            }],
+            temporal_context: Some(TemporalContext::transaction_time_between(range)),
+            hints: QueryHints::default(),
+        };
+
+        let err = planner.plan(query).unwrap_err();
+        assert!(
+            matches!(err, Error::Query(QueryError::UnsupportedFeature { .. })),
+            "transaction_time_between must be an UnsupportedFeature error, got {err:?}"
+        );
     }
 
     #[test]
