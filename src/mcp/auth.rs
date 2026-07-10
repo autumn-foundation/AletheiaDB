@@ -96,6 +96,8 @@ pub(crate) const TOOL_ACCESS_CLASSES: &[(&str, AccessClass)] = &[
     ("query", AccessClass::Read),
     ("get_schema", AccessClass::Read),
     ("temporal_extent", AccessClass::Read),
+    // Signed audit export reads history and signs it — no mutation (Issue #3358).
+    ("audit_export", AccessClass::Read),
     // ---- Metrics: operational health/stats.
     ("database_stats", AccessClass::Metrics),
     // ---- Write: graph mutations plus index/constraint state changes.

@@ -154,6 +154,7 @@ use crate::query::executor::{EntityId as ResultEntityId, EntityResult};
 use super::auth::{McpAuthConfig, SessionAuth};
 use super::batch::ApplyBatchRequest;
 use super::budget;
+use super::cursor::{CursorManager, CursorPayload};
 use super::error::{McpError, McpErrorCode, query_kind_classification};
 use super::tools::*;
 use crate::auth::{AuthMode, Principal};
@@ -219,6 +220,10 @@ pub struct AletheiaMcpServer {
     /// Maximum operations accepted by one `apply_batch` call (Issue #3231).
     pub(crate) max_batch_operations: usize,
     auth: SessionAuth,
+    /// Snapshot-anchored keyset continuation cursors (Issue #3360). Shared
+    /// (one manager == one MCP connection) so its live-cursor cap is a
+    /// per-connection cap.
+    cursors: Arc<CursorManager>,
 }
 
 impl AletheiaMcpServer {
@@ -255,7 +260,17 @@ impl AletheiaMcpServer {
             db,
             max_batch_operations: DEFAULT_MAX_BATCH_OPERATIONS,
             auth: SessionAuth::Anonymous,
+            cursors: Arc::new(CursorManager::new()),
         }
+    }
+
+    /// Override the cursor lifecycle bounds (Issue #3360): the continuation
+    /// cursor TTL and the per-connection cap on concurrently live cursors.
+    /// Defaults are a 5-minute TTL and 128 live cursors.
+    #[must_use]
+    pub fn with_cursor_config(mut self, ttl: std::time::Duration, max_live_cursors: usize) -> Self {
+        self.cursors = Arc::new(CursorManager::with_config(ttl, max_live_cursors));
+        self
     }
 
     /// Override the maximum number of operations accepted by a single
@@ -306,6 +321,7 @@ impl AletheiaMcpServer {
             db,
             max_batch_operations: DEFAULT_MAX_BATCH_OPERATIONS,
             auth: SessionAuth::from(auth),
+            cursors: Arc::new(CursorManager::new()),
         }
     }
 
@@ -1412,6 +1428,370 @@ impl AletheiaMcpServer {
     }
 
     // ========================================================================
+    // Snapshot-anchored cursor continuation (Issue #3360)
+    // ========================================================================
+
+    /// Whether the raw arguments opt into cursor paging -- either a `cursor`
+    /// continuation token or `use_cursor: true` on the first page. The cursor
+    /// parameters are additive and read directly off the arguments so the
+    /// per-tool request structs (and their many struct-literal call sites)
+    /// stay unchanged.
+    fn cursor_requested(args: &serde_json::Value) -> bool {
+        args.get("cursor").and_then(|v| v.as_str()).is_some()
+            || args.get("use_cursor").and_then(|v| v.as_bool()) == Some(true)
+    }
+
+    /// Read an optional non-empty string argument.
+    fn arg_str(args: &serde_json::Value, key: &str) -> Option<String> {
+        args.get(key).and_then(|v| v.as_str()).map(str::to_string)
+    }
+
+    /// Read an optional non-null JSON argument (e.g. a `property_value` that
+    /// may be a string, number, or bool).
+    fn arg_value(args: &serde_json::Value, key: &str) -> Option<serde_json::Value> {
+        match args.get(key) {
+            None | Some(serde_json::Value::Null) => None,
+            Some(v) => Some(v.clone()),
+        }
+    }
+
+    /// Read and clamp the per-page `limit`, matching the bounded read tools'
+    /// convention (default 100, at least 1, capped at `MAX_RESULT_LIMIT`).
+    fn arg_limit(args: &serde_json::Value) -> usize {
+        args.get("limit")
+            .and_then(|v| v.as_u64())
+            .map(|n| n as usize)
+            .unwrap_or(DEFAULT_RESULT_LIMIT)
+            .clamp(1, MAX_RESULT_LIMIT)
+    }
+
+    /// Emit one snapshot-anchored keyset page over a set of node candidates
+    /// (shared by `list_nodes` and `find_nodes_at_time` in cursor mode).
+    ///
+    /// `candidates` MUST be sorted ascending by node id (both underlying `db`
+    /// finders guarantee this) and reconstructed at `snapshot`. The page
+    /// returns the first `limit` candidates whose id is strictly greater than
+    /// `after` -- a keyset filter that avoids re-emitting prior result pages (no
+    /// dup/gap). Candidate enumeration is still O(total) per page in v1 (the
+    /// full candidate scan re-runs each page); a true depth-independent keyset
+    /// seek is a follow-up. When more candidates remain, a continuation `cursor` is
+    /// issued carrying the same pinned `snapshot`, so the union of all pages
+    /// equals exactly the unbounded result at that one bi-temporal moment.
+    ///
+    /// `parent_cid` is the cursor id of the page being resumed (empty for the
+    /// first page): passing it through keeps the whole scan on one registry
+    /// slot instead of consuming the live-cursor cap once per page.
+    #[allow(clippy::too_many_arguments)]
+    fn emit_node_cursor_page(
+        &self,
+        tool: &str,
+        snapshot: (Timestamp, Timestamp),
+        after: Option<u64>,
+        limit: usize,
+        include_vectors: bool,
+        filters: serde_json::Value,
+        candidates: crate::db::ops::NodesAtTime,
+        parent_cid: String,
+        now: Timestamp,
+    ) -> CallToolResult {
+        let sampled = candidates.sampled;
+        let nodes = candidates.nodes;
+        let total_matching = nodes.len();
+
+        // Keyset seek: everything strictly past the last id returned so far
+        // (`after == None` on the first page returns from the beginning).
+        let past = |id: u64| after.is_none_or(|a| id > a);
+        let remaining = nodes.iter().filter(|n| past(n.id.as_u64())).count();
+        let page: Vec<&crate::core::Node> = nodes
+            .iter()
+            .filter(|n| past(n.id.as_u64()))
+            .take(limit)
+            .collect();
+        let has_more = remaining > page.len();
+        let last_id = page.last().map(|n| n.id.as_u64());
+
+        let responses: Vec<NodeResponse> = page
+            .iter()
+            .map(|n| self.node_to_response(n, include_vectors, now))
+            .collect();
+
+        let mut obj = serde_json::Map::new();
+        obj.insert(
+            "nodes".to_string(),
+            serde_json::to_value(&responses).unwrap_or_else(|_| json!([])),
+        );
+        obj.insert("count".to_string(), json!(responses.len()));
+        obj.insert("total_matching".to_string(), json!(total_matching));
+        obj.insert("sampled".to_string(), json!(sampled));
+        obj.insert("has_more".to_string(), json!(has_more));
+        // Disclose the pinned snapshot so the caller can see exactly which
+        // bi-temporal moment the whole scan is answering at.
+        obj.insert(
+            "snapshot_valid_time".to_string(),
+            json!(Self::format_timestamp_rfc3339(snapshot.0)),
+        );
+        obj.insert(
+            "snapshot_transaction_time".to_string(),
+            json!(Self::format_timestamp_rfc3339(snapshot.1)),
+        );
+        obj.insert("paging".to_string(), json!("cursor"));
+
+        if has_more {
+            // `last_id` is Some whenever the page is non-empty; a full page
+            // with more remaining always has a last id.
+            if let Some(last_id) = last_id {
+                let mut payload = CursorPayload::seed(
+                    tool,
+                    (snapshot.0.wallclock(), snapshot.1.wallclock()),
+                    limit,
+                    filters,
+                );
+                // Continuation key = last id ACTUALLY EMITTED on this page.
+                // When #3353 token budgets land and can trim a page short of
+                // `limit`, `after` MUST still be derived from the last row that
+                // survived the trim (not the limit-th candidate), or the next
+                // page would skip the trimmed-off rows.
+                payload.after = Some(last_id);
+                payload.cid = parent_cid;
+                match self.cursors.issue(payload) {
+                    Ok(token) => {
+                        obj.insert("cursor".to_string(), json!(token));
+                        obj.insert(
+                            "cursor_ttl_seconds".to_string(),
+                            json!(self.cursors.ttl().as_secs()),
+                        );
+                    }
+                    Err(e) => return self.error_result(e),
+                }
+            }
+        }
+
+        self.success_json(serde_json::Value::Object(obj))
+    }
+
+    /// Fetch the node candidate set for a cursored scan at `snapshot`,
+    /// applying the same optional exact-property filter `list_nodes` /
+    /// `find_nodes_at_time` support. Returns a structured error result on a
+    /// bad property value.
+    fn fetch_node_candidates(
+        &self,
+        label: &str,
+        property_key: &Option<String>,
+        property_value: &Option<serde_json::Value>,
+        snapshot: (Timestamp, Timestamp),
+    ) -> Result<crate::db::ops::NodesAtTime, CallToolResult> {
+        let (vt, tt) = snapshot;
+        match (property_key, property_value) {
+            (Some(key), Some(val)) => {
+                let pv = match self.json_to_property_value(val) {
+                    Some(v) => v,
+                    None => {
+                        return Err(self.invalid_argument(
+                            "Unsupported property_value type. Use strings, numbers, booleans, or null.",
+                        ));
+                    }
+                };
+                self.db
+                    .find_nodes_by_property_at(label, key, &pv, vt, tt)
+                    .map_err(|e| self.db_error(e))
+            }
+            _ => self
+                .db
+                .find_nodes_at_time(label, vt, tt)
+                .map_err(|e| self.db_error(e)),
+        }
+    }
+
+    /// Build the opaque `filters` blob embedded in a node-scan cursor so a
+    /// continuation reconstructs the exact same query with no extra params.
+    fn node_scan_filters(
+        label: &str,
+        property_key: &Option<String>,
+        property_value: &Option<serde_json::Value>,
+        include_vectors: bool,
+    ) -> serde_json::Value {
+        json!({
+            "label": label,
+            "property_key": property_key,
+            "property_value": property_value,
+            "include_vectors": include_vectors,
+        })
+    }
+
+    /// Emit one snapshot-anchored keyset page over a node's adjacency (shared
+    /// by `get_outgoing_edges` / `get_incoming_edges` in cursor mode), ordered
+    /// by edge id. The adjacency is read as of the pinned snapshot via the
+    /// bi-temporal `get_*_edges_at_time` path, so paging is consistent under
+    /// concurrent writes exactly like the node scans.
+    #[allow(clippy::too_many_arguments)]
+    fn emit_adjacency_cursor_page(
+        &self,
+        tool: &str,
+        node_id: NodeId,
+        incoming: bool,
+        label: &Option<String>,
+        snapshot: (Timestamp, Timestamp),
+        after: Option<u64>,
+        limit: usize,
+        include_vectors: bool,
+        parent_cid: String,
+        now: Timestamp,
+    ) -> CallToolResult {
+        let (vt, tt) = snapshot;
+        let edge_ids = if incoming {
+            self.db.get_incoming_edges_at_time(node_id, vt, tt)
+        } else {
+            self.db.get_outgoing_edges_at_time(node_id, vt, tt)
+        };
+
+        // Resolve each candidate edge once as of the snapshot, applying the
+        // optional label filter, then order by edge id for a stable keyset.
+        let mut resolved: Vec<crate::core::Edge> = edge_ids
+            .into_iter()
+            .filter_map(|eid| self.get_edge_maybe_at(eid, Some((vt, tt))).ok())
+            .filter(|e| {
+                label
+                    .as_ref()
+                    .map(|l| self.matches_label(e.label, l))
+                    .unwrap_or(true)
+            })
+            .collect();
+        resolved.sort_by_key(|e| e.id.as_u64());
+
+        let past = |id: u64| after.is_none_or(|a| id > a);
+        let total_matching = resolved.len();
+        let remaining = resolved.iter().filter(|e| past(e.id.as_u64())).count();
+        let page: Vec<&crate::core::Edge> = resolved
+            .iter()
+            .filter(|e| past(e.id.as_u64()))
+            .take(limit)
+            .collect();
+        let has_more = remaining > page.len();
+        let last_id = page.last().map(|e| e.id.as_u64());
+
+        let responses: Vec<EdgeResponse> = page
+            .iter()
+            .map(|e| self.edge_to_response(e, include_vectors, now))
+            .collect();
+
+        let mut obj = serde_json::Map::new();
+        obj.insert(
+            "edges".to_string(),
+            serde_json::to_value(&responses).unwrap_or_else(|_| json!([])),
+        );
+        obj.insert("count".to_string(), json!(responses.len()));
+        obj.insert("total_matching".to_string(), json!(total_matching));
+        obj.insert("has_more".to_string(), json!(has_more));
+        obj.insert(
+            "snapshot_valid_time".to_string(),
+            json!(Self::format_timestamp_rfc3339(snapshot.0)),
+        );
+        obj.insert(
+            "snapshot_transaction_time".to_string(),
+            json!(Self::format_timestamp_rfc3339(snapshot.1)),
+        );
+        obj.insert("paging".to_string(), json!("cursor"));
+
+        if has_more && let Some(last_id) = last_id {
+            let filters = json!({
+                "node_id": node_id.as_u64(),
+                "label": label,
+                "incoming": incoming,
+                "include_vectors": include_vectors,
+            });
+            let mut payload = CursorPayload::seed(
+                tool,
+                (snapshot.0.wallclock(), snapshot.1.wallclock()),
+                limit,
+                filters,
+            );
+            // Continuation key = last edge id ACTUALLY EMITTED on this page.
+            // When #3353 token budgets land and can trim a page short of
+            // `limit`, `after` MUST still be derived from the last row that
+            // survived the trim (not the limit-th candidate), or the next page
+            // would skip the trimmed-off edges.
+            payload.after = Some(last_id);
+            payload.cid = parent_cid;
+            match self.cursors.issue(payload) {
+                Ok(token) => {
+                    obj.insert("cursor".to_string(), json!(token));
+                    obj.insert(
+                        "cursor_ttl_seconds".to_string(),
+                        json!(self.cursors.ttl().as_secs()),
+                    );
+                }
+                Err(e) => return self.error_result(e),
+            }
+        }
+
+        self.success_json(serde_json::Value::Object(obj))
+    }
+
+    /// Cursor-mode dispatch shared by `get_outgoing_edges` /
+    /// `get_incoming_edges` (Issue #3360). `incoming` selects the direction and
+    /// the tool name the cursor is bound to.
+    fn handle_adjacency_cursor(
+        &self,
+        tool: &str,
+        incoming: bool,
+        args: &serde_json::Value,
+    ) -> CallToolResult {
+        let now = time::now();
+
+        if let Some(token) = args.get("cursor").and_then(|v| v.as_str()) {
+            let payload = match self.cursors.decode(token, tool) {
+                Ok(p) => p,
+                Err(e) => return self.error_result(e),
+            };
+            let node_id = match NodeId::new(payload.filters["node_id"].as_u64().unwrap_or(0)) {
+                Ok(id) => id,
+                Err(e) => return self.invalid_argument(&e.to_string()),
+            };
+            let label = payload.filters["label"].as_str().map(str::to_string);
+            let include_vectors = payload.filters["include_vectors"]
+                .as_bool()
+                .unwrap_or(false);
+            let snapshot = (Timestamp::from(payload.svt), Timestamp::from(payload.stt));
+            return self.emit_adjacency_cursor_page(
+                tool,
+                node_id,
+                incoming,
+                &label,
+                snapshot,
+                payload.after,
+                payload.limit,
+                include_vectors,
+                payload.cid,
+                now,
+            );
+        }
+
+        let node_id = match NodeId::new(args.get("node_id").and_then(|v| v.as_u64()).unwrap_or(0)) {
+            Ok(id) => id,
+            Err(e) => return self.invalid_argument(&e.to_string()),
+        };
+        let label = Self::arg_str(args, "label");
+        let include_vectors = args
+            .get("include_vectors")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let limit = Self::arg_limit(args);
+        let snapshot = (now, now);
+        self.emit_adjacency_cursor_page(
+            tool,
+            node_id,
+            incoming,
+            &label,
+            snapshot,
+            None,
+            limit,
+            include_vectors,
+            String::new(),
+            now,
+        )
+    }
+
+    // ========================================================================
     // Tool Implementations
     // ========================================================================
 
@@ -1832,7 +2212,107 @@ impl AletheiaMcpServer {
         }
     }
 
+    /// Cursor-mode `list_nodes` (Issue #3360): snapshot-anchored keyset paging.
+    ///
+    /// The scan is pinned to the transaction time captured on the first page
+    /// and every page is reconstructed as of that coordinate via the same
+    /// point-in-time machinery `find_nodes_at_time` uses, so concurrent writes
+    /// after the anchor are invisible: the union of all pages equals exactly a
+    /// single unbounded `list_nodes` at the anchor moment. Requires `label`
+    /// (an unlabeled list has no enumerable, ordered candidate set).
+    fn handle_list_nodes_cursor(&self, args: &serde_json::Value) -> CallToolResult {
+        let now = time::now();
+
+        // Resume path: everything discriminating is baked into the token.
+        if let Some(token) = args.get("cursor").and_then(|v| v.as_str()) {
+            let payload = match self.cursors.decode(token, "list_nodes") {
+                Ok(p) => p,
+                Err(e) => return self.error_result(e),
+            };
+            let label = payload.filters["label"].as_str().unwrap_or("").to_string();
+            let property_key = payload.filters["property_key"].as_str().map(str::to_string);
+            let property_value = match &payload.filters["property_value"] {
+                serde_json::Value::Null => None,
+                v => Some(v.clone()),
+            };
+            let include_vectors = payload.filters["include_vectors"]
+                .as_bool()
+                .unwrap_or(false);
+            let snapshot = (Timestamp::from(payload.svt), Timestamp::from(payload.stt));
+            let candidates = match self.fetch_node_candidates(
+                &label,
+                &property_key,
+                &property_value,
+                snapshot,
+            ) {
+                Ok(c) => c,
+                Err(result) => return result,
+            };
+            return self.emit_node_cursor_page(
+                "list_nodes",
+                snapshot,
+                payload.after,
+                payload.limit,
+                include_vectors,
+                payload.filters.clone(),
+                candidates,
+                payload.cid,
+                now,
+            );
+        }
+
+        // First page: validate and pin the snapshot at "now".
+        let property_key = Self::arg_str(args, "property_key");
+        let property_value = Self::arg_value(args, "property_value");
+        if property_key.is_some() != property_value.is_some() {
+            return self.invalid_argument(
+                "Both 'property_key' and 'property_value' are required together",
+            );
+        }
+        let label = match Self::arg_str(args, "label") {
+            Some(l) => l,
+            None => {
+                return self.invalid_argument(
+                    "Cursor paging requires 'label' (an unlabeled node list has no ordered, \
+                     enumerable candidate set to page over).",
+                );
+            }
+        };
+        let limit = Self::arg_limit(args);
+        let include_vectors = args
+            .get("include_vectors")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let snapshot = (now, now);
+        let candidates =
+            match self.fetch_node_candidates(&label, &property_key, &property_value, snapshot) {
+                Ok(c) => c,
+                Err(result) => return result,
+            };
+        let filters =
+            Self::node_scan_filters(&label, &property_key, &property_value, include_vectors);
+        self.emit_node_cursor_page(
+            "list_nodes",
+            snapshot,
+            None,
+            limit,
+            include_vectors,
+            filters,
+            candidates,
+            String::new(),
+            now,
+        )
+    }
+
     fn handle_list_nodes(&self, args: serde_json::Value) -> CallToolResult {
+        // Snapshot-anchored cursor paging (Issue #3360) is a distinct path
+        // from the legacy offset paging below, which stays unchanged for
+        // backward compatibility. The cursor parameters are additive and read
+        // straight off the raw arguments (the request structs stay unchanged).
+        if Self::cursor_requested(&args) {
+            return self.handle_list_nodes_cursor(&args);
+        }
+
         let req: ListNodesRequest = match serde_json::from_value(args) {
             Ok(r) => r,
             Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
@@ -2181,6 +2661,22 @@ impl AletheiaMcpServer {
     }
 
     fn handle_list_edges(&self, args: serde_json::Value) -> CallToolResult {
+        // Cursor paging (Issue #3360) is not supported here: `list_edges` does
+        // not enumerate edges (there is no global edge scan). Rather than
+        // silently ignore the flag, direct the caller to the cursor-paged
+        // adjacency tools. (No-silent-fallback culture.)
+        if Self::cursor_requested(&args) {
+            return self.error_result(
+                McpError::new(
+                    McpErrorCode::InvalidArgument,
+                    "list_edges does not enumerate edges and is not cursorable. Use \
+                     get_outgoing_edges or get_incoming_edges from a known node -- both support \
+                     snapshot-anchored cursor paging (use_cursor / cursor).",
+                )
+                .details(json!({ "cursorable_alternatives": ["get_outgoing_edges", "get_incoming_edges"] })),
+            );
+        }
+
         let req: ListEdgesRequest = match serde_json::from_value(args) {
             Ok(r) => r,
             Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
@@ -2228,6 +2724,12 @@ impl AletheiaMcpServer {
     }
 
     fn handle_get_outgoing_edges(&self, args: serde_json::Value) -> CallToolResult {
+        // Snapshot-anchored cursor paging (Issue #3360); the full-adjacency
+        // path below is unchanged for backward compatibility.
+        if Self::cursor_requested(&args) {
+            return self.handle_adjacency_cursor("get_outgoing_edges", false, &args);
+        }
+
         let req: GetOutgoingEdgesRequest = match serde_json::from_value(args) {
             Ok(r) => r,
             Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
@@ -2271,6 +2773,12 @@ impl AletheiaMcpServer {
     }
 
     fn handle_get_incoming_edges(&self, args: serde_json::Value) -> CallToolResult {
+        // Snapshot-anchored cursor paging (Issue #3360); the full-adjacency
+        // path below is unchanged for backward compatibility.
+        if Self::cursor_requested(&args) {
+            return self.handle_adjacency_cursor("get_incoming_edges", true, &args);
+        }
+
         let req: GetIncomingEdgesRequest = match serde_json::from_value(args) {
             Ok(r) => r,
             Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
@@ -2422,6 +2930,17 @@ impl AletheiaMcpServer {
     }
 
     fn handle_traverse(&self, args: serde_json::Value) -> CallToolResult {
+        // Snapshot-anchored cursor paging (Issue #3360). Unlike the id-keyset
+        // node/adjacency scans, a DFS result order is not a simple id keyset,
+        // so traverse's cursor pins the bi-temporal snapshot (making every
+        // continuation page consistent -- AC2) and continues by an internal
+        // offset over the deterministic DFS order (v1; a depth-independent
+        // keyset traversal is a documented follow-up). The offset path below
+        // is unchanged for backward compatibility.
+        if Self::cursor_requested(&args) {
+            return self.handle_traverse_cursor(&args);
+        }
+
         let req: TraverseRequest = match serde_json::from_value(args) {
             Ok(r) => r,
             Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
@@ -2454,7 +2973,59 @@ impl AletheiaMcpServer {
             .clamp(1, MAX_RESULT_LIMIT);
         let offset = req.offset.unwrap_or(0).min(MAX_PAGINATION_OFFSET);
         let direction = req.direction.as_deref().unwrap_or("outgoing");
+        // One request-scoped wallclock for every entity in the response
+        // (Issue #3391).
+        let now = time::now();
 
+        let (results, has_more) = self.run_traversal(
+            start_id,
+            &req.edge_label,
+            direction,
+            depth,
+            limit,
+            offset,
+            temporal,
+            req.include_vectors.unwrap_or(false),
+            now,
+        );
+
+        let count = results.len();
+        let mut response = match temporal {
+            Some((vt, tt)) => json!({
+                "results": results,
+                "count": count,
+                "as_of_valid_time": time::to_iso8601(vt),
+                "as_of_transaction_time": time::to_iso8601(tt),
+            }),
+            None => json!({
+                "results": results,
+                "count": count
+            }),
+        };
+        // The matching total would require exhausting the traversal, so
+        // `total_matching` is omitted; `has_more`/`next_offset` carry the
+        // completeness signal.
+        Self::attach_completeness(&mut response, offset, count, has_more, None);
+        self.success_json(response)
+    }
+
+    /// The DFS core of `traverse`, shared by the offset path and the
+    /// snapshot-anchored cursor path (Issue #3360). Returns the page of
+    /// results (after skipping `offset`, taking `limit`) and whether more
+    /// remain. Behavior is identical to the pre-refactor inline loop.
+    #[allow(clippy::too_many_arguments)]
+    fn run_traversal(
+        &self,
+        start_id: NodeId,
+        edge_label: &str,
+        direction: &str,
+        depth: usize,
+        limit: usize,
+        offset: usize,
+        temporal: Option<(Timestamp, Timestamp)>,
+        include_vectors: bool,
+        now: Timestamp,
+    ) -> (Vec<TraversalResult>, bool) {
         // Use depth-first search (DFS) traversal.
         // DFS is chosen for memory efficiency: it processes nodes immediately rather than
         // queuing all nodes at each level. For large graphs with high branching factors,
@@ -2489,9 +3060,6 @@ impl AletheiaMcpServer {
         // under-reports.
         let mut produced: usize = 0;
         let mut has_more = false;
-        // One request-scoped wallclock for every entity in the response
-        // (Issue #3391).
-        let now = time::now();
 
         while let Some((current_id, path, current_depth)) = frontier.pop() {
             let mut current_exists = true;
@@ -2502,11 +3070,7 @@ impl AletheiaMcpServer {
                         produced += 1;
                         if produced > offset && results.len() < limit {
                             results.push(TraversalResult {
-                                node: self.node_to_response(
-                                    &node,
-                                    req.include_vectors.unwrap_or(false),
-                                    now,
-                                ),
+                                node: self.node_to_response(&node, include_vectors, now),
                                 path: path.clone(),
                                 depth: current_depth,
                             });
@@ -2530,7 +3094,7 @@ impl AletheiaMcpServer {
 
             if current_depth < depth && current_exists {
                 let next_ids =
-                    self.traversal_next_hops(current_id, &req.edge_label, direction, temporal);
+                    self.traversal_next_hops(current_id, edge_label, direction, temporal);
 
                 for next_id in next_ids {
                     if !visited.contains(&next_id.as_u64()) {
@@ -2547,24 +3111,153 @@ impl AletheiaMcpServer {
             }
         }
 
-        let count = results.len();
-        let mut response = match temporal {
-            Some((vt, tt)) => json!({
-                "results": results,
-                "count": count,
-                "as_of_valid_time": time::to_iso8601(vt),
-                "as_of_transaction_time": time::to_iso8601(tt),
-            }),
-            None => json!({
-                "results": results,
-                "count": count
-            }),
+        (results, has_more)
+    }
+
+    /// Cursor-mode `traverse` (Issue #3360): snapshot-pinned offset
+    /// continuation. On the first page the bi-temporal snapshot is pinned
+    /// (to the request's `as_of_*` coordinate, or to "now" if none was given,
+    /// so a current-state traversal still becomes a consistent point-in-time
+    /// scan for the duration of the cursor). Every continuation re-walks the
+    /// deterministic DFS as of that pinned snapshot and skips the already-seen
+    /// prefix, so all pages reflect one consistent moment.
+    fn handle_traverse_cursor(&self, args: &serde_json::Value) -> CallToolResult {
+        let now = time::now();
+
+        // Resolve page parameters, start node, and pinned snapshot, from the
+        // token when resuming or from the request on the first page.
+        let (
+            start_id,
+            edge_label,
+            direction,
+            depth,
+            limit,
+            offset,
+            include_vectors,
+            snapshot,
+            parent_cid,
+        ) = if let Some(token) = args.get("cursor").and_then(|v| v.as_str()) {
+            let payload = match self.cursors.decode(token, "traverse") {
+                Ok(p) => p,
+                Err(e) => return self.error_result(e),
+            };
+            let f = &payload.filters;
+            let start_id = match NodeId::new(f["start_node_id"].as_u64().unwrap_or(0)) {
+                Ok(id) => id,
+                Err(e) => return self.invalid_argument(&e.to_string()),
+            };
+            (
+                start_id,
+                f["edge_label"].as_str().unwrap_or("").to_string(),
+                f["direction"].as_str().unwrap_or("outgoing").to_string(),
+                f["depth"].as_u64().unwrap_or(1) as usize,
+                payload.limit,
+                payload.off as usize,
+                f["include_vectors"].as_bool().unwrap_or(false),
+                (Timestamp::from(payload.svt), Timestamp::from(payload.stt)),
+                payload.cid,
+            )
+        } else {
+            // First page: parse the request and pin the snapshot. If no as_of
+            // was supplied, anchor at "now" so the whole scan is consistent.
+            let start_id = match NodeId::new(
+                args.get("start_node_id")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0),
+            ) {
+                Ok(id) => id,
+                Err(e) => return self.invalid_argument(&e.to_string()),
+            };
+            let temporal = match self.resolve_bitemporal_as_of(
+                &Self::arg_str(args, "as_of_valid_time"),
+                &Self::arg_str(args, "as_of_transaction_time"),
+            ) {
+                Ok(t) => t,
+                Err(result) => return result,
+            };
+            let snapshot = temporal.unwrap_or((now, now));
+            (
+                start_id,
+                Self::arg_str(args, "edge_label").unwrap_or_default(),
+                Self::arg_str(args, "direction").unwrap_or_else(|| "outgoing".into()),
+                args.get("depth")
+                    .and_then(|v| v.as_u64())
+                    .map(|d| d as usize)
+                    .unwrap_or(1)
+                    .min(MAX_TRAVERSAL_DEPTH),
+                Self::arg_limit(args),
+                0usize,
+                args.get("include_vectors")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
+                snapshot,
+                String::new(),
+            )
         };
-        // The matching total would require exhausting the traversal, so
-        // `total_matching` is omitted; `has_more`/`next_offset` carry the
-        // completeness signal.
-        Self::attach_completeness(&mut response, offset, count, has_more, None);
-        self.success_json(response)
+
+        let (results, has_more) = self.run_traversal(
+            start_id,
+            &edge_label,
+            &direction,
+            depth,
+            limit,
+            offset,
+            Some(snapshot),
+            include_vectors,
+            now,
+        );
+        let count = results.len();
+
+        let mut obj = serde_json::Map::new();
+        obj.insert(
+            "results".to_string(),
+            serde_json::to_value(&results).unwrap_or_else(|_| json!([])),
+        );
+        obj.insert("count".to_string(), json!(count));
+        obj.insert(
+            "snapshot_valid_time".to_string(),
+            json!(Self::format_timestamp_rfc3339(snapshot.0)),
+        );
+        obj.insert(
+            "snapshot_transaction_time".to_string(),
+            json!(Self::format_timestamp_rfc3339(snapshot.1)),
+        );
+        obj.insert("has_more".to_string(), json!(has_more));
+        obj.insert("paging".to_string(), json!("cursor"));
+
+        if has_more {
+            let filters = json!({
+                "start_node_id": start_id.as_u64(),
+                "edge_label": edge_label,
+                "direction": direction,
+                "depth": depth,
+                "include_vectors": include_vectors,
+            });
+            let mut payload = CursorPayload::seed(
+                "traverse",
+                (snapshot.0.wallclock(), snapshot.1.wallclock()),
+                limit,
+                filters,
+            );
+            // Continuation offset advances by the number of rows ACTUALLY
+            // EMITTED (`count`). When #3353 token budgets land and can trim a
+            // page short of `limit`, `off` MUST advance by the post-trim row
+            // count (not `limit`), or the next page would skip trimmed rows.
+            payload.off = (offset + count) as u64;
+            payload.cid = parent_cid;
+            match self.cursors.issue(payload) {
+                Ok(token) => {
+                    obj.insert("cursor".to_string(), json!(token));
+                    obj.insert(
+                        "cursor_ttl_seconds".to_string(),
+                        json!(self.cursors.ttl().as_secs()),
+                    );
+                }
+                Err(e) => return self.error_result(e),
+            }
+        }
+
+        self.success_json(serde_json::Value::Object(obj))
     }
 
     fn handle_find_similar(&self, args: serde_json::Value) -> CallToolResult {
@@ -2801,6 +3494,96 @@ impl AletheiaMcpServer {
         }
     }
 
+    /// Cursor-mode `find_nodes_at_time` (Issue #3360): snapshot-anchored keyset
+    /// paging. The snapshot is the caller's requested `(valid_time,
+    /// transaction_time)` -- already a point-in-time read, so consistency is
+    /// native; continuation just seeks by node id past the last returned.
+    fn handle_find_nodes_at_time_cursor(&self, args: &serde_json::Value) -> CallToolResult {
+        let now = time::now();
+
+        if let Some(token) = args.get("cursor").and_then(|v| v.as_str()) {
+            let payload = match self.cursors.decode(token, "find_nodes_at_time") {
+                Ok(p) => p,
+                Err(e) => return self.error_result(e),
+            };
+            let label = payload.filters["label"].as_str().unwrap_or("").to_string();
+            let property_key = payload.filters["property_key"].as_str().map(str::to_string);
+            let property_value = match &payload.filters["property_value"] {
+                serde_json::Value::Null => None,
+                v => Some(v.clone()),
+            };
+            let include_vectors = payload.filters["include_vectors"]
+                .as_bool()
+                .unwrap_or(false);
+            let snapshot = (Timestamp::from(payload.svt), Timestamp::from(payload.stt));
+            let candidates = match self.fetch_node_candidates(
+                &label,
+                &property_key,
+                &property_value,
+                snapshot,
+            ) {
+                Ok(c) => c,
+                Err(result) => return result,
+            };
+            return self.emit_node_cursor_page(
+                "find_nodes_at_time",
+                snapshot,
+                payload.after,
+                payload.limit,
+                include_vectors,
+                payload.filters.clone(),
+                candidates,
+                payload.cid,
+                now,
+            );
+        }
+
+        // First page: validate filter combo and pin the requested coordinate.
+        let label = Self::arg_str(args, "label").unwrap_or_default();
+        let property_key = Self::arg_str(args, "property_key");
+        let property_value = Self::arg_value(args, "property_value");
+        if property_key.is_some() != property_value.is_some() {
+            return self.invalid_argument(
+                "Both 'property_key' and 'property_value' are required together",
+            );
+        }
+        let valid_time_str = Self::arg_str(args, "valid_time").unwrap_or_default();
+        let valid_time = match self.parse_timestamp(&valid_time_str) {
+            Ok(t) => t,
+            Err(e) => return self.invalid_argument(&format!("Invalid valid_time: {}", e)),
+        };
+        let tx_time = match self
+            .parse_optional_tx_time(Self::arg_str(args, "transaction_time").as_deref())
+        {
+            Ok(t) => t,
+            Err(e) => return self.invalid_argument(&format!("Invalid transaction_time: {}", e)),
+        };
+        let limit = Self::arg_limit(args);
+        let include_vectors = args
+            .get("include_vectors")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let snapshot = (valid_time, tx_time);
+        let candidates =
+            match self.fetch_node_candidates(&label, &property_key, &property_value, snapshot) {
+                Ok(c) => c,
+                Err(result) => return result,
+            };
+        let filters =
+            Self::node_scan_filters(&label, &property_key, &property_value, include_vectors);
+        self.emit_node_cursor_page(
+            "find_nodes_at_time",
+            snapshot,
+            None,
+            limit,
+            include_vectors,
+            filters,
+            candidates,
+            String::new(),
+            now,
+        )
+    }
+
     /// Find nodes by label (and optional exact property match) as of a
     /// bi-temporal point (Issue #3236).
     ///
@@ -2816,6 +3599,12 @@ impl AletheiaMcpServer {
     /// `total_matching`/`has_more` count matches within the sampled
     /// candidate set only.
     fn handle_find_nodes_at_time(&self, args: serde_json::Value) -> CallToolResult {
+        // Snapshot-anchored cursor paging (Issue #3360); offset paging below
+        // is unchanged for backward compatibility.
+        if Self::cursor_requested(&args) {
+            return self.handle_find_nodes_at_time_cursor(&args);
+        }
+
         let req: FindNodesAtTimeRequest = match serde_json::from_value(args) {
             Ok(r) => r,
             Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
@@ -3517,6 +4306,81 @@ impl AletheiaMcpServer {
         }
     }
 
+    /// Handle the `audit_export` tool (Issue #3358).
+    ///
+    /// Produces a signed, offline-verifiable evidence artifact of an entity's
+    /// complete bi-temporal history. The Ed25519 signing key is operator-
+    /// provided out of band via the `ALETHEIADB_AUDIT_SIGNING_KEY` environment
+    /// variable (a 32-byte hex seed); the secret is never returned or logged —
+    /// only the public key travels in the artifact.
+    fn handle_audit_export(&self, args: serde_json::Value) -> CallToolResult {
+        use crate::audit::{AuditScope, AuditSigningKey, ExportOptions, SIGNING_KEY_ENV};
+
+        let req: AuditExportRequest = match serde_json::from_value(args) {
+            Ok(r) => r,
+            Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
+        };
+
+        let scope = match req.entity_type.as_str() {
+            "node" => match NodeId::new(req.entity_id) {
+                Ok(id) => AuditScope::node(id),
+                Err(e) => return self.invalid_argument(&e.to_string()),
+            },
+            "edge" => match crate::core::id::EdgeId::new(req.entity_id) {
+                Ok(id) => AuditScope::edge(id),
+                Err(e) => return self.invalid_argument(&e.to_string()),
+            },
+            other => {
+                return self.invalid_argument(&format!(
+                    "entity_type must be 'node' or 'edge', got '{other}'"
+                ));
+            }
+        };
+
+        // The signing key is a precondition supplied by the operator, not a
+        // caller argument — a missing key is a FAILED_PRECONDITION, never a
+        // silent unsigned export.
+        let signing_key = match AuditSigningKey::from_env(SIGNING_KEY_ENV) {
+            Ok(k) => k,
+            Err(_) => {
+                return self.failed_precondition(&format!(
+                    "audit export requires an operator-provided Ed25519 signing key in the \
+                     {SIGNING_KEY_ENV} environment variable (32-byte hex seed)"
+                ));
+            }
+        };
+
+        let mut options =
+            ExportOptions::new(req.database_id.unwrap_or_else(|| "aletheiadb".to_string()));
+        if !req.redact_keys.is_empty() {
+            options = options.redact(req.redact_keys);
+        }
+
+        match self.db.audit_export(scope, &signing_key, &options) {
+            Ok(export) => match serde_json::to_value(&export) {
+                Ok(artifact) => self.success_json(json!({
+                    "artifact": artifact,
+                    "public_key": signing_key.public_key().to_hex(),
+                    "entity_count": export.entity_count(),
+                    "version_count": export.version_count(),
+                    "chain_root": export.chain.root,
+                })),
+                Err(e) => self.error_result(McpError::new(
+                    McpErrorCode::Internal,
+                    format!("failed to serialize artifact: {e}"),
+                )),
+            },
+            Err(crate::audit::AuditError::NoHistory(msg)) => self.error_result(McpError::new(
+                McpErrorCode::NotFound,
+                format!("no exportable history: {msg}"),
+            )),
+            Err(e) => self.error_result(McpError::new(
+                McpErrorCode::Internal,
+                format!("audit export failed: {e}"),
+            )),
+        }
+    }
+
     /// Handle the `database_stats` tool (Issue #3222).
     ///
     /// Thin aggregator: delegates entirely to the public
@@ -3958,6 +4822,10 @@ impl AletheiaMcpServer {
             .and_then(|v| v.as_str())
             .map(|s| s.to_ascii_lowercase());
 
+        // Cursor paging is not supported for the declarative query tool in v1
+        // (Issue #3360); captured before `args` is consumed by deserialization.
+        let cursor_requested = Self::cursor_requested(&args);
+
         let req: QueryRequest = match serde_json::from_value(args) {
             Ok(r) => r,
             Err(e) => {
@@ -3978,6 +4846,24 @@ impl AletheiaMcpServer {
                     "Unsupported query language '{}'. Use \"cypher\" or \"aql\".",
                     req.language
                 ),
+                None,
+                Some(&language),
+            );
+        }
+
+        // Cursor paging (Issue #3360) is not supported for the declarative
+        // query tool in v1: arbitrary result shapes (projections, aggregates,
+        // ordering) have no snapshot-anchored keyset to page over. Return a
+        // structured `unsupported_construct` error rather than silently
+        // serving a single truncated page (AC7: no silent fallback). Callers
+        // needing consistent, resumable scans use `list_nodes` /
+        // `find_nodes_at_time`, which are cursor-paged.
+        if cursor_requested {
+            return self.query_error(
+                "unsupported_construct",
+                "Cursor paging is not supported for the `query` tool in v1. Use `list_nodes` or \
+                 `find_nodes_at_time` for snapshot-anchored, resumable cursor scans; the `query` \
+                 tool returns a single (optionally `limit`-bounded) result set.",
                 None,
                 Some(&language),
             );
@@ -4230,6 +5116,7 @@ impl AletheiaMcpServer {
             "query" => self.handle_query(args),
             "get_schema" => self.handle_get_schema(args),
             "temporal_extent" => self.handle_temporal_extent(args),
+            "audit_export" => self.handle_audit_export(args),
             "database_stats" => self.handle_database_stats(args),
             _ => self.error_result(
                 McpError::new(McpErrorCode::NotFound, format!("Unknown tool: {}", name))
@@ -4272,6 +5159,57 @@ fn make_input_schema<T: rmcp::schemars::JsonSchema>()
         serde_json::Value::Object(map) => Arc::new(map),
         _ => Arc::new(serde_json::Map::new()),
     }
+}
+
+/// Inject the snapshot-anchored cursor parameters (`use_cursor`, `cursor`) into
+/// a generated tool `inputSchema` (Issue #3360).
+///
+/// The five cursorable read tools (`list_nodes`, `find_nodes_at_time`,
+/// `get_outgoing_edges`, `get_incoming_edges`, `traverse`) read `use_cursor` /
+/// `cursor` directly off the raw JSON arguments rather than through their typed
+/// request structs, so those two parameters are absent from the derived schema
+/// and would otherwise be undiscoverable to a client/LLM. This programmatically
+/// adds them (both optional) to `inputSchema.properties` with clear
+/// descriptions -- mirroring the sibling budget-param injection (#3353) rather
+/// than threading the fields through every request-struct construction site.
+fn inject_cursor_schema_params(
+    schema: Arc<serde_json::Map<String, serde_json::Value>>,
+) -> Arc<serde_json::Map<String, serde_json::Value>> {
+    let mut map = (*schema).clone();
+    let props = map
+        .entry("properties")
+        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+    if let Some(props) = props.as_object_mut() {
+        props.insert(
+            "use_cursor".to_string(),
+            json!({
+                "type": "boolean",
+                "description": "Optional. Set true on the FIRST call to open a \
+                    snapshot-anchored cursor scan; the response then carries an opaque \
+                    `cursor` token to resume paging. Consistent, duplicate-free and \
+                    gap-free under concurrent writes. Omit (or false) for the default \
+                    offset pagination."
+            }),
+        );
+        props.insert(
+            "cursor".to_string(),
+            json!({
+                "type": "string",
+                "description": "Optional. The opaque continuation token returned by a \
+                    prior cursor page. Echo it back VERBATIM with no other arguments to \
+                    fetch the next page. When the response omits `cursor` (has_more is \
+                    false) the scan is complete."
+            }),
+        );
+    }
+    Arc::new(map)
+}
+
+/// [`make_input_schema`] for a cursorable read tool, with the `use_cursor` /
+/// `cursor` parameters injected (see [`inject_cursor_schema_params`]).
+fn make_cursor_input_schema<T: rmcp::schemars::JsonSchema>()
+-> Arc<serde_json::Map<String, serde_json::Value>> {
+    inject_cursor_schema_params(make_input_schema::<T>())
 }
 
 // The read-only statement guard (`detect_mutating_clause`) moved to
@@ -4400,8 +5338,11 @@ fn tool_definitions() -> Vec<Tool> {
                      (property-filtered queries) and omitted for plain label scans. \
                      Vector/embedding properties are elided by default (replaced with a \
                      `{type, dim, elided:true}` descriptor) to protect LLM context; pass \
-                     `include_vectors: true` to receive the full float arrays.",
-            make_input_schema::<ListNodesRequest>(),
+                     `include_vectors: true` to receive the full float arrays. \
+                     Pass `use_cursor: true` for snapshot-anchored cursor paging; echo the \
+                     returned `cursor` back verbatim (no other args) for the next page; when \
+                     the response omits `cursor` / `has_more` is false, the scan is complete.",
+            make_cursor_input_schema::<ListNodesRequest>(),
         ),
         Tool::new(
             "count_nodes",
@@ -4479,21 +5420,30 @@ fn tool_definitions() -> Vec<Tool> {
         Tool::new(
             "get_outgoing_edges",
             "Get all outgoing edges from a node. Returns the complete set (never \
-                     truncated), so the response carries `has_more: false` and \
-                     `total_matching` equal to `count`. Vector/embedding properties are elided \
+                     truncated) in the default full-adjacency mode, so the response carries \
+                     `has_more: false` and `total_matching` equal to `count`; with \
+                     `use_cursor: true` the adjacency is paged and `has_more` may be true with a \
+                     continuation `cursor`. Vector/embedding properties are elided \
                      by default (replaced with a `{type, dim, elided:true}` descriptor) to \
                      protect LLM context; pass `include_vectors: true` to receive the full float \
-                     arrays.",
-            make_input_schema::<GetOutgoingEdgesRequest>(),
+                     arrays. Pass `use_cursor: true` for snapshot-anchored cursor paging; echo \
+                     the returned `cursor` back verbatim (no other args) for the next page; when \
+                     the response omits `cursor` / `has_more` is false, the scan is complete.",
+            make_cursor_input_schema::<GetOutgoingEdgesRequest>(),
         ),
         Tool::new(
             "get_incoming_edges",
-            "Get all incoming edges to a node. Returns the complete set (never truncated), \
-                     so the response carries `has_more: false` and `total_matching` equal to \
-                     `count`. Vector/embedding properties are elided by \
+            "Get all incoming edges to a node. Returns the complete set (never truncated) \
+                     in the default full-adjacency mode, so the response carries \
+                     `has_more: false` and `total_matching` equal to `count`; with \
+                     `use_cursor: true` the adjacency is paged and `has_more` may be true with a \
+                     continuation `cursor`. Vector/embedding properties are elided by \
                      default (replaced with a `{type, dim, elided:true}` descriptor) to protect \
-                     LLM context; pass `include_vectors: true` to receive the full float arrays.",
-            make_input_schema::<GetIncomingEdgesRequest>(),
+                     LLM context; pass `include_vectors: true` to receive the full float arrays. \
+                     Pass `use_cursor: true` for snapshot-anchored cursor paging; echo the \
+                     returned `cursor` back verbatim (no other args) for the next page; when the \
+                     response omits `cursor` / `has_more` is false, the scan is complete.",
+            make_cursor_input_schema::<GetIncomingEdgesRequest>(),
         ),
         Tool::new(
             "traverse",
@@ -4508,8 +5458,10 @@ fn tool_definitions() -> Vec<Tool> {
                      bi-temporal instant instead of the current state -- e.g. \"Alice's KNOWS \
                      network as of last year\". Edges/nodes not valid at that instant are \
                      excluded; omitting both parameters reproduces today's current-state behavior \
-                     exactly.",
-            make_input_schema::<TraverseRequest>(),
+                     exactly. Pass `use_cursor: true` for snapshot-anchored cursor paging; echo \
+                     the returned `cursor` back verbatim (no other args) for the next page; when \
+                     the response omits `cursor` / `has_more` is false, the scan is complete.",
+            make_cursor_input_schema::<TraverseRequest>(),
         ),
         Tool::new(
             "find_similar",
@@ -4571,8 +5523,11 @@ fn tool_definitions() -> Vec<Tool> {
                      bi-temporal history the candidate scan is capped; the response then sets \
                      `sampled: true` and `total_matching` counts matches within the sampled \
                      candidate set only. Vector/embedding properties are \
-                     elided by default; pass `include_vectors: true` for full arrays.",
-            make_input_schema::<FindNodesAtTimeRequest>(),
+                     elided by default; pass `include_vectors: true` for full arrays. \
+                     Pass `use_cursor: true` for snapshot-anchored cursor paging; echo the \
+                     returned `cursor` back verbatim (no other args) for the next page; when the \
+                     response omits `cursor` / `has_more` is false, the scan is complete.",
+            make_cursor_input_schema::<FindNodesAtTimeRequest>(),
         ),
         Tool::new(
             "list_changes",
@@ -4683,6 +5638,28 @@ fn tool_definitions() -> Vec<Tool> {
              (edge_types); per-label bounds are computed from hot-tier history only and may \
              be narrower than the overall bounds (or a label absent) after cold migration.",
             make_input_schema::<TemporalExtentRequest>(),
+        ),
+        Tool::new(
+            "audit_export",
+            "Produce a SIGNED, self-contained audit export of a single entity's (node or edge) \
+             complete bi-temporal history plus provenance — a portable evidence artifact a \
+             third party can verify OFFLINE with only the signer's public key (no database, no \
+             network). Use this to answer 'prove what the system knew about entity X, and \
+             when' for compliance, audits, GDPR/CCPA subject-access requests, or legal \
+             discovery. Arguments: entity_type ('node'|'edge'), entity_id, optional \
+             database_id (recorded in the artifact), optional redact_keys (property keys whose \
+             VALUES are omitted while the redaction stays recorded and verifiable). The \
+             artifact contains every version across both time dimensions (including superseded \
+             versions and delete tombstones), per-version provenance/principal where recorded, \
+             a per-version SHA-256 hash chain, and an Ed25519 signature over the chain root. \
+             The Ed25519 signing key is operator-provided out of band via the \
+             ALETHEIADB_AUDIT_SIGNING_KEY environment variable (32-byte hex seed); the secret \
+             is never returned — only the public key travels in the artifact. Returns the \
+             artifact JSON plus public_key, chain_root, and entity/version counts. Note: \
+             delete/retract operations do not yet stamp an authenticated principal (#3427); \
+             the export surfaces provenance faithfully, including its absence, and never \
+             fabricates attribution.",
+            make_input_schema::<AuditExportRequest>(),
         ),
         Tool::new(
             "database_stats",

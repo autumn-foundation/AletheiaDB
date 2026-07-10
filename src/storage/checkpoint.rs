@@ -599,7 +599,20 @@ impl CheckpointManager {
             current.ensure_version_id_generator_at_least(next_version_id);
         }
 
-        // Replay WAL entries after checkpoint LSN
+        // Replay WAL entries after checkpoint LSN.
+        //
+        // ⚠️ Transaction-framing invariant (Issue #3413): this EXCLUSIVE
+        // `.next()` convention starts replay one LSN PAST `checkpoint_lsn`. If
+        // `checkpoint_lsn` ever pointed at the last op of a committed
+        // `[BeginTx .. CommitTx]` band, `.next()` would begin replay mid-band
+        // (at the `CommitTx`, with its `BeginTx` skipped) — which
+        // `resolve_transaction_frames` only tolerates as a benign no-op because
+        // its buffered ops are also below the boundary. This whole `recover*`
+        // path is currently test-only and unwired (production replays from an
+        // INCLUSIVE `manifest.lsn`, always a band start; see `db::config` and
+        // the resolver's load-bearing-invariant doc). Before wiring any of these
+        // to production, ensure the start LSN lands on a transaction-frame
+        // boundary, not mid-band.
         let start_lsn = checkpoint_lsn.next();
         let (current, historical, final_lsn) =
             self.replay_wal(wal, current, historical, start_lsn)?;

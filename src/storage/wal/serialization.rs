@@ -52,6 +52,12 @@ pub(crate) const OP_DECLARE_UNIQUE_CONSTRAINT: u8 = 8;
 pub(crate) const OP_DROP_UNIQUE_CONSTRAINT: u8 = 9;
 pub(crate) const OP_RETRACT_NODE: u8 = 10;
 pub(crate) const OP_RETRACT_EDGE: u8 = 11;
+/// Terminal transaction-commit marker (Issue #3413). Only appears in segments
+/// at or above `WAL_VERSION_TX_FRAMING`.
+pub(crate) const OP_COMMIT_TX: u8 = 12;
+/// Leading transaction-begin marker (Issue #3413). Only appears in segments at
+/// or above `WAL_VERSION_TX_FRAMING`.
+pub(crate) const OP_BEGIN_TX: u8 = 13;
 
 /// Helper to serialize an InternedString into the buffer (4-byte ID)
 #[inline(always)]
@@ -271,6 +277,14 @@ pub(crate) fn estimate_entry_capacity(operation: &WalOperation) -> usize {
             // op type (1) + label (4) + property (4)
             1 + 4 + 4
         }
+        WalOperation::BeginTx { .. } => {
+            // op type (1) + tx_id (8)
+            1 + 8
+        }
+        WalOperation::CommitTx { .. } => {
+            // op type (1) + tx_id (8) + entry_count (4) + commit_timestamp (12)
+            1 + 8 + 4 + TIMESTAMP_SIZE
+        }
     };
 
     FIXED_OVERHEAD + variable_size
@@ -446,6 +460,20 @@ pub(crate) fn serialize_operation_into(
             buffer.push(OP_DROP_UNIQUE_CONSTRAINT);
             serialize_interned_string(*label, buffer);
             serialize_interned_string(*property, buffer);
+        }
+        WalOperation::BeginTx { tx_id } => {
+            buffer.push(OP_BEGIN_TX);
+            buffer.extend_from_slice(&tx_id.to_le_bytes());
+        }
+        WalOperation::CommitTx {
+            tx_id,
+            entry_count,
+            commit_timestamp,
+        } => {
+            buffer.push(OP_COMMIT_TX);
+            buffer.extend_from_slice(&tx_id.to_le_bytes());
+            buffer.extend_from_slice(&entry_count.to_le_bytes());
+            commit_timestamp.serialize_into(buffer);
         }
     }
 
