@@ -318,6 +318,7 @@ ALETHEIADB_AUTH_MODE=anonymous cargo run --bin aletheia-mcp --features mcp-serve
 | **Vector** | `find_similar`, `enable_vector_index`, `list_vector_indexes` |
 | **Temporal** | `get_node_at_time`, `get_edge_at_time`, `find_nodes_at_time` (point-in-time find by label/property, no NodeId needed), `temporal_extent` (dataset's queryable bi-temporal extent; optional by_label breakdown) |
 | **Hybrid** | `hybrid_query` (combined graph + vector + temporal) |
+| **Lineage** | `lineage_upstream` / `lineage_downstream` (fact-to-fact derivation closure in both directions; the write tools take an optional `derived_from`) |
 | **Query** | `query` (execute a single read-only Cypher/AQL statement; see below) |
 | **Schema** | `get_schema` (node labels, edge types, and property keys, each with counts; optional bi-temporal `as_of_valid_time`/`as_of_transaction_time`) |
 | **Stats** | `database_stats` (holistic snapshot: current size, bi-temporal depth + anchor/delta compression, hot/warm/cold tier distribution, WAL state; no arguments) |
@@ -704,7 +705,20 @@ time. Lineage records are **immutable** and survive supersession/retraction of
 the facts they reference (a retracted input still resolves in the closure,
 marked `Absent`). v1 lineage index is **in-memory** (does not survive restart —
 keeps the WAL format untouched during #3413; durable rehydration is a
-follow-up). See [docs/guides/derivation-lineage.md](docs/guides/derivation-lineage.md).
+follow-up).
+
+**MCP surface:** the `create_node`/`create_edge`/`update_node`/`update_edge`
+tools accept an optional `derived_from` array of version-pinned refs
+(`[{entity_kind:"node"|"edge", id, version}]`); `lineage_upstream` /
+`lineage_downstream` query the closure (args: `entity_kind`/`id`/`version`
+root, `max_depth`, `limit`, `offset`, `as_of_transaction_time`) returning
+entries with the version-pinned ref, `depth`, `status`, plus `has_more` /
+`next_offset` (#3226). Write params stay `writer`-class; the query tools are
+`reader`-class. Errors use the #3234 structured codes (`NOT_FOUND` for a
+dangling ref, `INVALID_ARGUMENT` for self/cycle, `FAILED_PRECONDITION` for
+already-recorded), all non-retriable. Durable persistence of lineage is a
+#3413 follow-up; the #3427 attribution caveat applies. See
+[docs/guides/derivation-lineage.md](docs/guides/derivation-lineage.md).
 
 ### Feature Flags: Stable vs Experimental
 

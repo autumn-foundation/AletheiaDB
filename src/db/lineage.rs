@@ -25,7 +25,8 @@
 //! those downstream events (Issue #3371 immutability), so the closure over a
 //! retracted input still resolves and marks that input `Absent`.
 
-use crate::core::error::{Result, ResultExt};
+use crate::api::transaction::{WriteOps, WriteRequestOptions};
+use crate::core::error::{Error, Result, ResultExt};
 use crate::core::id::{EdgeId, EntityId, NodeId, VersionId};
 use crate::core::lineage::{
     LineageClosure, LineageError, LineageQueryOptions, LineageRecord, LineageRef,
@@ -122,11 +123,13 @@ impl AletheiaDB {
         properties: PropertyMap,
         derived_from: &[LineageRef],
     ) -> Result<NodeId> {
-        self.validate_sources(derived_from)?;
-        let node_id = self.create_node(label, properties)?;
-        let version = self.current_node_version(node_id)?;
-        self.record_lineage(EntityId::Node(node_id), version, derived_from)?;
-        Ok(node_id)
+        self.create_node_with_options_and_lineage(
+            label,
+            properties,
+            WriteRequestOptions::new(),
+            derived_from,
+        )
+        .map(|(node_id, _version)| node_id)
     }
 
     /// Create an edge declared as derived from `derived_from` (Issue #3371).
@@ -141,11 +144,15 @@ impl AletheiaDB {
         properties: PropertyMap,
         derived_from: &[LineageRef],
     ) -> Result<EdgeId> {
-        self.validate_sources(derived_from)?;
-        let edge_id = self.create_edge(source, target, label, properties)?;
-        let version = self.current_edge_version(edge_id)?;
-        self.record_lineage(EntityId::Edge(edge_id), version, derived_from)?;
-        Ok(edge_id)
+        self.create_edge_with_options_and_lineage(
+            source,
+            target,
+            label,
+            properties,
+            WriteRequestOptions::new(),
+            derived_from,
+        )
+        .map(|(edge_id, _version)| edge_id)
     }
 
     /// Update a node, declaring the new version as derived from `derived_from`
@@ -165,11 +172,12 @@ impl AletheiaDB {
         properties: PropertyMap,
         derived_from: &[LineageRef],
     ) -> Result<VersionId> {
-        self.validate_sources(derived_from)?;
-        self.update_node_with_valid_time(node_id, properties, None)?;
-        let version = self.current_node_version(node_id)?;
-        self.record_lineage(EntityId::Node(node_id), version, derived_from)?;
-        Ok(version)
+        self.update_node_with_options_and_lineage(
+            node_id,
+            properties,
+            WriteRequestOptions::new(),
+            derived_from,
+        )
     }
 
     /// Update an edge, declaring the new version as derived from
@@ -183,9 +191,112 @@ impl AletheiaDB {
         properties: PropertyMap,
         derived_from: &[LineageRef],
     ) -> Result<VersionId> {
+        self.update_edge_with_options_and_lineage(
+            edge_id,
+            properties,
+            WriteRequestOptions::new(),
+            derived_from,
+        )
+    }
+
+    /// Create a node with a full [`WriteRequestOptions`] bundle (backdated
+    /// `valid_from` and/or write-time provenance) *and* a derivation lineage
+    /// declaration, returning both the new id and the exact version produced
+    /// (Issue #3371).
+    ///
+    /// This is the combined write+lineage entry point the MCP surface uses so
+    /// `derived_from` composes with `valid_time`/`provenance`. The lineage
+    /// record binds to the **exact** [`VersionId`] this write produced — read
+    /// out of the transaction buffer before commit, never re-derived from a
+    /// later "current version" read, so two concurrent same-entity writes each
+    /// attribute lineage to their own version with no post-commit races.
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
+    pub(crate) fn create_node_with_options_and_lineage(
+        &self,
+        label: &str,
+        properties: PropertyMap,
+        options: WriteRequestOptions,
+        derived_from: &[LineageRef],
+    ) -> Result<(NodeId, VersionId)> {
         self.validate_sources(derived_from)?;
-        self.update_edge_with_valid_time(edge_id, properties, None)?;
-        let version = self.current_edge_version(edge_id)?;
+        let (node_id, version) = self.write(|tx| {
+            let node_id = tx.create_node_with_options(label, properties, options)?;
+            let version = tx.buffered_node_version(node_id).ok_or_else(|| {
+                Error::from(crate::core::error::StorageError::NodeNotFound(node_id))
+            })?;
+            Ok::<_, Error>((node_id, version))
+        })?;
+        self.record_lineage(EntityId::Node(node_id), version, derived_from)?;
+        Ok((node_id, version))
+    }
+
+    /// Edge counterpart of
+    /// [`create_node_with_options_and_lineage`](Self::create_node_with_options_and_lineage).
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
+    pub(crate) fn create_edge_with_options_and_lineage(
+        &self,
+        source: NodeId,
+        target: NodeId,
+        label: &str,
+        properties: PropertyMap,
+        options: WriteRequestOptions,
+        derived_from: &[LineageRef],
+    ) -> Result<(EdgeId, VersionId)> {
+        self.validate_sources(derived_from)?;
+        let (edge_id, version) = self.write(|tx| {
+            let edge_id =
+                tx.create_edge_with_options(source, target, label, properties, options)?;
+            let version = tx.buffered_edge_version(edge_id).ok_or_else(|| {
+                Error::from(crate::core::error::StorageError::EdgeNotFound(edge_id))
+            })?;
+            Ok::<_, Error>((edge_id, version))
+        })?;
+        self.record_lineage(EntityId::Edge(edge_id), version, derived_from)?;
+        Ok((edge_id, version))
+    }
+
+    /// Update a node with a full [`WriteRequestOptions`] bundle and a
+    /// derivation lineage declaration, returning the exact new version
+    /// (Issue #3371).
+    ///
+    /// See
+    /// [`create_node_with_options_and_lineage`](Self::create_node_with_options_and_lineage)
+    /// for why the version is captured from the transaction rather than
+    /// re-read.
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
+    pub(crate) fn update_node_with_options_and_lineage(
+        &self,
+        node_id: NodeId,
+        properties: PropertyMap,
+        options: WriteRequestOptions,
+        derived_from: &[LineageRef],
+    ) -> Result<VersionId> {
+        self.validate_sources(derived_from)?;
+        let version = self.write(|tx| {
+            tx.update_node_with_options(node_id, properties, options)?;
+            tx.buffered_node_version(node_id)
+                .ok_or_else(|| Error::from(crate::core::error::StorageError::NodeNotFound(node_id)))
+        })?;
+        self.record_lineage(EntityId::Node(node_id), version, derived_from)?;
+        Ok(version)
+    }
+
+    /// Edge counterpart of
+    /// [`update_node_with_options_and_lineage`](Self::update_node_with_options_and_lineage).
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
+    pub(crate) fn update_edge_with_options_and_lineage(
+        &self,
+        edge_id: EdgeId,
+        properties: PropertyMap,
+        options: WriteRequestOptions,
+        derived_from: &[LineageRef],
+    ) -> Result<VersionId> {
+        self.validate_sources(derived_from)?;
+        let version = self.write(|tx| {
+            tx.update_edge_with_options(edge_id, properties, options)?;
+            tx.buffered_edge_version(edge_id)
+                .ok_or_else(|| Error::from(crate::core::error::StorageError::EdgeNotFound(edge_id)))
+        })?;
         self.record_lineage(EntityId::Edge(edge_id), version, derived_from)?;
         Ok(version)
     }
@@ -305,22 +416,6 @@ impl AletheiaDB {
                 .map(|v| v.commit_timestamp),
         };
         ts.unwrap_or_else(crate::core::temporal::time::now)
-    }
-
-    /// The current version id of a node, as a typed error if missing.
-    fn current_node_version(&self, node_id: NodeId) -> Result<VersionId> {
-        self.historical
-            .read()
-            .get_current_node_version(node_id)
-            .ok_or_else(|| crate::core::error::StorageError::NodeNotFound(node_id).into())
-    }
-
-    /// The current version id of an edge, as a typed error if missing.
-    fn current_edge_version(&self, edge_id: EdgeId) -> Result<VersionId> {
-        self.historical
-            .read()
-            .get_current_edge_version(edge_id)
-            .ok_or_else(|| crate::core::error::StorageError::EdgeNotFound(edge_id).into())
     }
 
     /// Resolve each closure entry's current-state status.

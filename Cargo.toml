@@ -394,6 +394,12 @@ path = "benches/temporal_extent.rs"
 required-features = []
 
 [[bench]]
+name = "derivation_lineage"
+harness = false
+path = "benches/derivation_lineage.rs"
+required-features = []
+
+[[bench]]
 name = "changefeed"
 harness = false
 path = "benches/changefeed.rs"

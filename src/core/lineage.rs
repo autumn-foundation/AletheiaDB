@@ -244,6 +244,15 @@ pub struct LineageStore {
     upstream: DashMap<VersionId, LineageRecord>,
     /// source version -> derived versions that declared it as a source.
     downstream: DashMap<VersionId, Vec<VersionId>>,
+    /// Serializes the check-then-act critical section of [`Self::record`] so
+    /// the `contains_key` write-once check, the cycle scan, and the paired
+    /// `upstream`/`downstream` inserts are one atomic step. Without it, two
+    /// concurrent records of the *same* derived version could both pass the
+    /// `contains_key` check and the second would silently overwrite the first
+    /// (a lost update violating write-once). Reads (closure queries) never
+    /// take this lock, so they stay fully concurrent — only the low-frequency
+    /// write path is serialized.
+    write_lock: parking_lot::Mutex<()>,
 }
 
 impl LineageStore {
@@ -285,12 +294,9 @@ impl LineageStore {
         sources: Vec<LineageRef>,
         recorded_at: Timestamp,
     ) -> Result<(), LineageError> {
-        if self.upstream.contains_key(&derived.version) {
-            return Err(LineageError::AlreadyRecorded(derived.version));
-        }
-
         // Deduplicate sources, preserving declaration order, and reject
-        // self-derivation.
+        // self-derivation. This is pure (touches no shared state) so it runs
+        // outside the write lock.
         let mut seen = HashSet::new();
         let mut deduped: Vec<LineageRef> = Vec::with_capacity(sources.len());
         for source in sources {
@@ -304,6 +310,17 @@ impl LineageStore {
 
         if deduped.is_empty() {
             return Ok(());
+        }
+
+        // Everything below mutates or reads-for-mutation the shared adjacency
+        // maps and must be a single atomic step: two concurrent records of the
+        // same derived version must not both pass the write-once check, and the
+        // cycle scan must see a consistent graph. Hold the write lock across the
+        // whole check-then-act region. (Reads never take this lock.)
+        let _guard = self.write_lock.lock();
+
+        if self.upstream.contains_key(&derived.version) {
+            return Err(LineageError::AlreadyRecorded(derived.version));
         }
 
         // Cycle guard: for each source, ensure the derived version is not
@@ -440,9 +457,16 @@ impl LineageStore {
                     next.push(neighbour);
                 }
             }
-            // If we stopped expanding because of the depth cap but there is
-            // still an unexplored frontier, flag has_more.
-            if depth == options.max_depth && !next.is_empty() {
+            // If we stopped expanding because of the depth cap, flag has_more
+            // only when the unexplored frontier actually has an unvisited
+            // neighbour beyond the cap — a node whose one more hop would reveal
+            // a new entry. A frontier of pure leaves (nothing further upstream/
+            // downstream) means the closure is complete, so has_more stays
+            // false (returning exactly the chain at its own length is not
+            // "truncated").
+            if depth == options.max_depth
+                && self.frontier_has_unvisited_neighbour(&next, direction, options.as_of, &visited)
+            {
                 has_more = true;
             }
             frontier = next;
@@ -453,6 +477,27 @@ impl LineageStore {
             entries,
             has_more,
         }
+    }
+
+    /// Whether any node in the (depth-capped) frontier has at least one
+    /// neighbour, in `direction`, that has not already been visited — i.e.
+    /// expanding one more hop would yield a genuinely new closure entry. Used
+    /// to decide `has_more` precisely at the depth cap so a fully-returned
+    /// chain is not falsely marked truncated.
+    fn frontier_has_unvisited_neighbour(
+        &self,
+        frontier: &[LineageRef],
+        direction: Direction,
+        as_of: Option<Timestamp>,
+        visited: &HashSet<VersionId>,
+    ) -> bool {
+        frontier.iter().any(|node| {
+            let neighbours = match direction {
+                Direction::Upstream => self.neighbours_upstream(node.version, as_of),
+                Direction::Downstream => self.neighbours_downstream(node.version, as_of),
+            };
+            neighbours.iter().any(|nb| !visited.contains(&nb.version))
+        })
     }
 
     /// Upstream neighbours of `version` (its declared sources), filtered by the
@@ -716,6 +761,111 @@ mod tests {
         let closure = store.downstream_closure(n1, LineageQueryOptions::new());
         assert_eq!(closure.count(), 1);
         assert_eq!(closure.entries[0].reference, edge);
+    }
+
+    #[test]
+    fn explicit_two_cycle_rejected() {
+        // record(a <- b) then record(b <- a): walking upstream from a reaches b
+        // whose only source is a's derived version -> the second record closes
+        // a 2-cycle and must be rejected.
+        let store = LineageStore::new();
+        let a = node_ref(1, 20);
+        let b = node_ref(2, 10);
+        store.record(a, vec![b], ts(1)).expect("a<-b");
+        let err = store.record(b, vec![a], ts(2)).expect_err("2-cycle");
+        match err {
+            LineageError::CycleDetected { path } => {
+                assert_eq!(path.first(), Some(&a.version));
+                assert_eq!(path.last(), Some(&b.version));
+            }
+            other => panic!("expected cycle, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn depth_boundary_exact_vs_one_past() {
+        // Chain D(v40) <- C(v30) <- B(v20) <- A(v10): 3 hops total.
+        let store = LineageStore::new();
+        let d = node_ref(4, 40);
+        let c = node_ref(3, 30);
+        let b = node_ref(2, 20);
+        let a = node_ref(1, 10);
+        store.record(d, vec![c], ts(1)).unwrap();
+        store.record(c, vec![b], ts(1)).unwrap();
+        store.record(b, vec![a], ts(1)).unwrap();
+
+        // Exactly at the chain length: full closure, nothing beyond -> no has_more.
+        let exact = store.upstream_closure(d, LineageQueryOptions::new().with_max_depth(3));
+        assert_eq!(exact.count(), 3);
+        assert!(!exact.has_more);
+
+        // One hop short: A unreached, has_more set.
+        let one_short = store.upstream_closure(d, LineageQueryOptions::new().with_max_depth(2));
+        assert_eq!(one_short.count(), 2);
+        assert!(one_short.has_more);
+
+        // One past the chain length: identical to exact, still no has_more.
+        let one_past = store.upstream_closure(d, LineageQueryOptions::new().with_max_depth(4));
+        assert_eq!(one_past.count(), 3);
+        assert!(!one_past.has_more);
+    }
+
+    #[test]
+    fn has_more_false_when_limit_equals_count_exactly() {
+        // A has exactly 3 direct downstream facts.
+        let store = LineageStore::new();
+        let a = node_ref(1, 10);
+        store.record(node_ref(2, 20), vec![a], ts(1)).unwrap();
+        store.record(node_ref(3, 30), vec![a], ts(1)).unwrap();
+        store.record(node_ref(4, 40), vec![a], ts(1)).unwrap();
+
+        // limit == count: all returned, no has_more (traversal exhausted the
+        // graph without hitting the cap mid-expansion).
+        let exact = store.downstream_closure(a, LineageQueryOptions::new().with_limit(3));
+        assert_eq!(exact.count(), 3);
+        assert!(!exact.has_more);
+
+        // limit one below count: has_more set.
+        let under = store.downstream_closure(a, LineageQueryOptions::new().with_limit(2));
+        assert_eq!(under.count(), 2);
+        assert!(under.has_more);
+    }
+
+    #[test]
+    fn concurrent_records_from_shared_source_no_lost_updates() {
+        // N threads each record a DISTINCT derived version from one shared
+        // source. The check-then-act critical section must be atomic, so every
+        // record survives (write-once is not violated by a lost update) and the
+        // downstream closure of the shared source counts exactly N.
+        use std::sync::Arc;
+        use std::thread;
+
+        const N: u64 = 64;
+        let store = Arc::new(LineageStore::new());
+        let source = node_ref(1, 1);
+
+        let mut handles = Vec::new();
+        for i in 0..N {
+            let store = Arc::clone(&store);
+            handles.push(thread::spawn(move || {
+                // Distinct derived version ids (>= 100) per thread.
+                let derived = node_ref(100 + i, 100 + i);
+                store
+                    .record(derived, vec![source], ts(1))
+                    .expect("distinct derived version records cleanly");
+            }));
+        }
+        for h in handles {
+            h.join().expect("thread panicked");
+        }
+
+        assert_eq!(store.len(), N as usize);
+        let closure = store.downstream_closure(
+            source,
+            LineageQueryOptions::new().with_limit(N as usize + 10),
+        );
+        assert_eq!(closure.count(), N as usize);
+        assert!(!closure.has_more);
     }
 
     #[test]

@@ -138,6 +138,73 @@ for entry in &contaminated.entries {
 }
 ```
 
+## MCP surface
+
+The same capability is exposed to LLM callers over MCP (Issue #3371).
+
+**Declaring lineage on a write.** `create_node`, `create_edge`, `update_node`,
+and `update_edge` accept an optional `derived_from` array of version-pinned
+references. It composes with `valid_time` and `provenance`; a nonexistent
+reference fails the write with a structured error **before any commit**.
+
+```json
+// create_node
+{
+  "label": "Summary",
+  "properties": { "text": "A+B merged" },
+  "derived_from": [
+    { "entity_kind": "node", "id": 12, "version": 34 },
+    { "entity_kind": "node", "id": 13, "version": 35 }
+  ]
+}
+```
+
+The write response is the usual node/edge body (with the #3232 `temporal`
+block); obtain the `version` of a source from any prior write/read response's
+`version_id`.
+
+**Querying the closure.** `lineage_upstream` ("what was this derived from?")
+and `lineage_downstream` ("what has been derived from this?" — the blast
+radius) share one request shape:
+
+```json
+{
+  "entity_kind": "node",
+  "id": 99,
+  "version": 100,
+  "max_depth": 5,
+  "limit": 100,
+  "offset": 0,
+  "as_of_transaction_time": "2024-06-01T00:00:00Z"
+}
+```
+
+`max_depth`, `limit`, `offset`, and `as_of_transaction_time` are all optional
+(`limit` defaults to 100). The response is:
+
+```json
+{
+  "direction": "downstream",
+  "root": { "entity_kind": "node", "id": 99, "version": 100 },
+  "entries": [
+    { "entity_kind": "node", "id": 101, "version": 140, "depth": 1, "status": "current" },
+    { "entity_kind": "edge", "id": 7,   "version": 141, "depth": 2, "status": "superseded" }
+  ],
+  "count": 2,
+  "has_more": false
+}
+```
+
+Each entry carries the version-pinned ref, its minimum `depth` from the root,
+and the referenced fact's current-state `status`
+(`current`/`superseded`/`absent`). When the closure is truncated at the
+`limit` or `max_depth` bound, `has_more` is `true` and `next_offset` is set
+(the #3226 pagination convention).
+
+**RBAC.** The `derived_from` write parameter rides the host write tool's class
+(`writer`); `lineage_upstream` / `lineage_downstream` are `reader`-class. See
+[access-control-matrix.md](access-control-matrix.md).
+
 ## Immutability and retraction
 
 Lineage records are **immutable once written** — they are part of recorded
