@@ -29,6 +29,8 @@ pub mod constraint_builder;
 pub mod extent;
 /// GraphView implementation.
 pub mod graph_view;
+/// Fact-to-fact derivation lineage API (Issue #3371).
+pub mod lineage;
 /// Basic graph operations (CRUD).
 pub mod ops;
 /// Query builder and executor hooks.
@@ -180,6 +182,15 @@ pub struct AletheiaDB {
     pub(crate) encryption_manager: Option<Arc<crate::encryption::EncryptionManager>>,
     /// Uniqueness constraint registry (declarations + reservation index).
     pub(crate) constraint_registry: Arc<crate::core::constraint::ConstraintRegistry>,
+    /// Fact-to-fact derivation lineage index (Issue #3371).
+    ///
+    /// Records that a fact version was derived from a set of source fact
+    /// versions and answers upstream/downstream closure queries. Immutable,
+    /// append-only, and independent of the graph/version stores so retracting
+    /// or superseding a fact never disturbs lineage pointing at it. v1 is
+    /// in-memory (does not survive restart) to keep the WAL format untouched
+    /// (Issue #3413); see [`crate::core::lineage`].
+    pub(crate) lineage: Arc<crate::core::lineage::LineageStore>,
     /// Backing tempdir for ephemeral databases created via [`AletheiaDB::new`].
     /// Declared last so it is dropped last (Rust drops struct fields in
     /// declaration order); this guarantees the WAL/persistence file handles

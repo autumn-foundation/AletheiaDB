@@ -210,10 +210,27 @@ fn classify_db_error(e: &Error) -> (McpErrorCode, bool) {
         Error::Constraint(ce) => classify_constraint_error(ce),
         // A provenance bundle failing validation is a caller fault.
         Error::Provenance(_) => (McpErrorCode::InvalidArgument, false),
+        Error::Lineage(le) => classify_lineage_error(le),
         Error::Io(_) | Error::Backup(_) => (McpErrorCode::Internal, false),
         // The feature exists but this build/deployment doesn't provide it.
         Error::NotImplemented { .. } => (McpErrorCode::FailedPrecondition, false),
         Error::Other(_) => (McpErrorCode::Internal, false),
+    }
+}
+
+/// Map a derivation-lineage error (Issue #3371). All lineage errors are
+/// caller faults and never retriable: a dangling source reference is
+/// `NOT_FOUND`, a self/cyclic declaration is `INVALID_ARGUMENT`, and
+/// re-declaring lineage for an already-recorded version is a
+/// `FAILED_PRECONDITION`.
+fn classify_lineage_error(e: &crate::core::lineage::LineageError) -> (McpErrorCode, bool) {
+    use crate::core::lineage::LineageError;
+    match e {
+        LineageError::SourceNotFound { .. } => (McpErrorCode::NotFound, false),
+        LineageError::SelfDerivation(_) | LineageError::CycleDetected { .. } => {
+            (McpErrorCode::InvalidArgument, false)
+        }
+        LineageError::AlreadyRecorded(_) => (McpErrorCode::FailedPrecondition, false),
     }
 }
 

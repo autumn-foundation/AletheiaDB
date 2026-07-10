@@ -683,6 +683,29 @@ Optional embedding providers via feature flags (OpenAI, HuggingFace, Ollama, ONN
 
 **See [docs/EMBEDDINGS.md](docs/EMBEDDINGS.md) for comprehensive user guide.**
 
+### Derivation Lineage (Issue #3371)
+
+Records **fact-to-fact derivation** at write time — "fact B was computed from
+facts A1..An" — the complement to write-time provenance (#3224), which only
+records external-source origin. Each reference is **version-pinned**
+(`LineageRef { entity, version }`), so lineage refers to exactly the fact
+version that was read, immune to later updates of the input.
+
+**Rust API:** `create_node_with_lineage` / `create_edge_with_lineage` /
+`update_node_with_lineage` / `update_edge_with_lineage` accept a
+`derived_from: &[LineageRef]` (omit/empty == today's behavior); a nonexistent
+reference fails the write with a structured error **before any commit**.
+`upstream_lineage` ("what was this derived from?") and `downstream_lineage`
+("what has been derived from this?" — the retraction **blast radius**) return a
+depth-bounded, entry-limited `LineageView` with `has_more` (#3226) and each
+entry's current-state `FactStatus` (`Current`/`Superseded`/`Absent`);
+`with_as_of(ts)` scopes the closure to lineage recorded by that transaction
+time. Lineage records are **immutable** and survive supersession/retraction of
+the facts they reference (a retracted input still resolves in the closure,
+marked `Absent`). v1 lineage index is **in-memory** (does not survive restart —
+keeps the WAL format untouched during #3413; durable rehydration is a
+follow-up). See [docs/guides/derivation-lineage.md](docs/guides/derivation-lineage.md).
+
 ### Feature Flags: Stable vs Experimental
 
 Semantic features are split between a stable cohort and four experimental
@@ -1035,6 +1058,7 @@ unless `detach: true` / `retract_node_detach` co-retracts the connected edges.
 - **[docs/VECTOR_SEARCH_DESIGN.md](docs/VECTOR_SEARCH_DESIGN.md)** - Vector search architecture and roadmap
 - **[docs/EMBEDDINGS.md](docs/EMBEDDINGS.md)** - Embedding generation guide
 - **[docs/query-language-design.md](docs/query-language-design.md)** - Query language grammar and semantics
+- **[docs/guides/derivation-lineage.md](docs/guides/derivation-lineage.md)** - Derivation lineage between facts (Issue #3371)
 
 ### User Guides
 - **[docs/guides/vector-search-integration.md](docs/guides/vector-search-integration.md)** - Complete vector search API
@@ -1046,6 +1070,7 @@ unless `detach: true` / `retract_node_detach` co-retracts the connected edges.
 - **[docs/guides/query-pipeline-guide.md](docs/guides/query-pipeline-guide.md)** - Query execution pipeline
 - **[docs/guides/security-quickstart.md](docs/guides/security-quickstart.md)** - Authentication, RBAC roles, API-key lifecycle
 - **[docs/guides/access-control-matrix.md](docs/guides/access-control-matrix.md)** - Canonical role/operation authorization matrix
+- **[docs/guides/derivation-lineage.md](docs/guides/derivation-lineage.md)** - Fact-to-fact derivation lineage: version-pinned upstream/downstream closures (Issue #3371)
 
 ### Architecture Decision Records (ADRs)
 See `docs/adr/` for all architectural decisions.
