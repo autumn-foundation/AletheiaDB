@@ -213,15 +213,26 @@ pub struct AggregateGroupKey {
 pub struct AggregateSpec {
     /// Which aggregate function to apply.
     pub func: AggregateFunc,
-    /// The node property the aggregate reads (e.g. `"age"` for `sum(n.age)`).
-    /// `None` for `count(*)`, which counts rows regardless of any value.
-    pub arg: Option<String>,
+    /// What the aggregate reads from each row.
+    pub arg: AggregateArg,
     /// Whether the `DISTINCT` quantifier was supplied (deduplicates values
     /// before aggregating).
     pub distinct: bool,
     /// The output column name (alias if given, else generated source text such
     /// as `"count(*)"`).
     pub alias: String,
+}
+
+/// The argument an aggregate reads from each input row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AggregateArg {
+    /// `count(*)` -- count every row unconditionally (ignores nulls/DISTINCT).
+    Star,
+    /// `count(n)` -- count rows whose bound entity is non-null (openCypher
+    /// `count(<variable>)`). Distinct from [`AggregateArg::Star`].
+    Entity,
+    /// `func(n.prop)` -- read the named node property from each row.
+    Property(String),
 }
 
 /// The aggregate functions supported by [`QueryOp::Aggregate`].

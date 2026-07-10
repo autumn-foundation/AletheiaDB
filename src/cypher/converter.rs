@@ -42,8 +42,8 @@ use super::parser::CypherParser;
 use crate::core::temporal::{TimeRange, Timestamp};
 use crate::query::builder::Query;
 use crate::query::ir::{
-    AggregateFunc, AggregateGroupKey, AggregateSpec, Predicate, PredicateValue, QueryOp, SortKey,
-    TraversalDepth,
+    AggregateArg, AggregateFunc, AggregateGroupKey, AggregateSpec, Predicate, PredicateValue,
+    QueryOp, SortKey, TraversalDepth,
 };
 use crate::query::plan::{QueryHints, TemporalContext};
 
@@ -257,6 +257,16 @@ impl CypherConverter {
                 //    non-aggregate path.
                 if let Some(aggregate_op) = self.build_aggregate(&return_clause)? {
                     ops.push(aggregate_op);
+                    // ORDER BY over aggregate output: sort by the output column
+                    // name / aggregate alias (RETURN DISTINCT is subsumed by
+                    // grouping; vector rank does not apply to computed rows).
+                    for order_item in &return_clause.order_by {
+                        let key = self.aggregate_order_key(&return_clause, order_item)?;
+                        ops.push(QueryOp::Sort {
+                            key: SortKey::Property(key),
+                            descending: order_item.descending,
+                        });
+                    }
                 } else {
                     // 4a. RETURN DISTINCT
                     if return_clause.distinct {
@@ -747,14 +757,18 @@ impl CypherConverter {
                     ));
                 }
                 CypherReturnItem::Variable(name) => {
-                    group_keys.push(AggregateGroupKey {
-                        property_key: name.clone(),
-                        alias: name.clone(),
-                    });
+                    // Grouping by a whole node/edge cannot be expressed by the
+                    // single-entity row model (it would collapse into one
+                    // Null-keyed group). Reject rather than silently mis-group.
+                    return Err(CypherError::UnsupportedFeature(format!(
+                        "grouping by a whole node/edge is not supported \
+                         (RETURN {name}, <aggregate>); group by a property such \
+                         as {name}.<key> instead"
+                    )));
                 }
                 CypherReturnItem::Expression { expr, alias } => {
                     if let Some((func, args, distinct)) = Self::aggregate_call(expr) {
-                        let arg = Self::aggregate_arg_property(func, args)?;
+                        let arg = Self::aggregate_arg(func, args)?;
                         let default_alias = Self::aggregate_default_alias(func, args, distinct);
                         aggregates.push(AggregateSpec {
                             func,
@@ -808,23 +822,27 @@ impl CypherConverter {
         }
     }
 
-    /// Resolve the node property an aggregate reads from its argument list.
+    /// Resolve what an aggregate reads from each row into an [`AggregateArg`].
     ///
-    /// `count(*)` and a bare-variable `count(n)` yield `None` (count rows);
-    /// `func(v.prop)` yields `Some("prop")`. Non-property arguments to
-    /// value aggregates are rejected in v1.
-    fn aggregate_arg_property(
+    /// `count(*)` -> [`AggregateArg::Star`] (count every row); a bare-variable
+    /// `count(n)` -> [`AggregateArg::Entity`] (count rows with a non-null bound
+    /// entity, openCypher semantics); `func(v.prop)` ->
+    /// [`AggregateArg::Property`]. Non-property arguments to value aggregates
+    /// are rejected in v1.
+    fn aggregate_arg(
         func: AggregateFunc,
         args: &[CypherExpr],
-    ) -> Result<Option<String>, CypherError> {
+    ) -> Result<AggregateArg, CypherError> {
         match args {
-            [] | [CypherExpr::Star] => Ok(None),
-            [CypherExpr::Property { property, .. }] => Ok(Some(property.clone())),
+            // `*` (or the degenerate empty arg list) is only valid for count.
+            [CypherExpr::Star] | [] if func == AggregateFunc::Count => Ok(AggregateArg::Star),
+            [CypherExpr::Property { property, .. }] => Ok(AggregateArg::Property(property.clone())),
             // A bare variable argument (`count(n)`) references the bound entity,
-            // not a property: treat it as a row/entity count for `count`.
-            [CypherExpr::Variable(_)] if func == AggregateFunc::Count => Ok(None),
+            // not a property: count non-null bindings (distinct from count(*)).
+            [CypherExpr::Variable(_)] if func == AggregateFunc::Count => Ok(AggregateArg::Entity),
             _ => Err(CypherError::UnsupportedFeature(format!(
-                "aggregate argument must be `*` or a property access (e.g. n.age); got {args:?}"
+                "aggregate argument must be `*` (count only) or a property access \
+                 (e.g. n.age); got {args:?}"
             ))),
         }
     }
@@ -852,18 +870,67 @@ impl CypherConverter {
         format!("{func_name}({distinct_prefix}{arg_text})")
     }
 
-    /// Resolve a non-aggregate `RETURN`/`WITH` item into a grouping key:
+    /// Resolve a non-aggregate `RETURN` item into a grouping key:
     /// `(property_to_read, default_column_name)`.
+    ///
+    /// Only property access (`n.dept`) is supported. A bare variable
+    /// (whole node/edge) is rejected -- see the `Variable` arm in
+    /// [`Self::build_aggregate`].
     fn group_key_of(expr: &CypherExpr) -> Result<(String, String), CypherError> {
         match expr {
             CypherExpr::Property { variable, property } => {
                 Ok((property.clone(), format!("{variable}.{property}")))
             }
-            CypherExpr::Variable(name) => Ok((name.clone(), name.clone())),
+            CypherExpr::Variable(name) => Err(CypherError::UnsupportedFeature(format!(
+                "grouping by a whole node/edge is not supported \
+                 (RETURN {name}, <aggregate>); group by a property such as \
+                 {name}.<key> instead"
+            ))),
             _ => Err(CypherError::UnsupportedFeature(format!(
-                "grouping key must be a variable or property access; got {expr:?}"
+                "grouping key must be a property access (e.g. n.dept); got {expr:?}"
             ))),
         }
+    }
+
+    /// Resolve an `ORDER BY` item, in an aggregating query, to the output
+    /// column name it should sort by (the aggregate/group alias or generated
+    /// column name).
+    fn aggregate_order_key(
+        &self,
+        ret: &CypherReturn,
+        order_item: &CypherOrderItem,
+    ) -> Result<String, CypherError> {
+        let expr = &order_item.expr;
+
+        // A bare variable directly names an output column / AS alias.
+        if let CypherExpr::Variable(name) = expr {
+            return Ok(name.clone());
+        }
+
+        // Otherwise compute the column name the same way build_aggregate does.
+        let default_name = if let Some((func, args, distinct)) = Self::aggregate_call(expr) {
+            Self::aggregate_default_alias(func, args, distinct)
+        } else if let CypherExpr::Property { variable, property } = expr {
+            format!("{variable}.{property}")
+        } else {
+            return Err(CypherError::UnsupportedFeature(format!(
+                "unsupported ORDER BY expression over an aggregating query: {expr:?}"
+            )));
+        };
+
+        // If a RETURN item projects this exact expression under an alias, order
+        // by that alias (its actual output column name).
+        for item in &ret.items {
+            if let CypherReturnItem::Expression {
+                expr: item_expr,
+                alias: Some(alias),
+            } = item
+                && item_expr == expr
+            {
+                return Ok(alias.clone());
+            }
+        }
+        Ok(default_name)
     }
 
     // =======================================================================

@@ -457,16 +457,11 @@ impl QueryExecutor {
                 Ok(Box::new(iterators::DistinctIterator::new(input_iter)))
             }
 
-            PhysicalOp::Sort {
-                input,
-                key,
-                descending,
-            } => {
+            PhysicalOp::Sort { input, keys } => {
                 let input_iter = self.execute_op(input)?;
                 Ok(Box::new(iterators::SortIterator::new(
                     input_iter,
-                    key.clone(),
-                    *descending,
+                    keys.clone(),
                 )))
             }
 

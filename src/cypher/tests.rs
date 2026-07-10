@@ -3190,8 +3190,213 @@ fn test_e2e_order_by() {
             .unwrap(),
     );
     let names: Vec<String> = rows.iter().filter_map(row_name).collect();
-    // DESC by age; Dave (null age) sorts last.
-    assert_eq!(names, vec!["Carol", "Bob", "Alice", "Eve", "Dave"]);
+    // DESC by age; openCypher orders nulls FIRST for DESC, so Dave (null age)
+    // leads, then 50, 40, 30, 20.
+    assert_eq!(names, vec!["Dave", "Carol", "Bob", "Alice", "Eve"]);
+}
+
+#[test]
+fn test_e2e_order_by_asc_nulls_last() {
+    let db = aggregation_test_db();
+    let rows = collect_rows(
+        db.execute_cypher("MATCH (n:Person) RETURN n.name ORDER BY n.age ASC")
+            .unwrap(),
+    );
+    let names: Vec<String> = rows.iter().filter_map(row_name).collect();
+    // ASC by age; openCypher orders nulls LAST for ASC.
+    assert_eq!(names, vec!["Eve", "Alice", "Bob", "Carol", "Dave"]);
+}
+
+#[test]
+fn test_e2e_order_by_multi_key_precedence() {
+    // Fix B: `ORDER BY n.dept ASC, n.age DESC` must sort by dept (primary) then
+    // age descending (secondary), NOT the inverted (age, dept).
+    let db = aggregation_test_db();
+    let rows = collect_rows(
+        db.execute_cypher("MATCH (n:Person) RETURN n.name ORDER BY n.dept ASC, n.age DESC")
+            .unwrap(),
+    );
+    let names: Vec<String> = rows.iter().filter_map(row_name).collect();
+    // Eng (Bob 40, Alice 30, Eve 20) then Sales (Dave null-first for DESC, Carol 50).
+    assert_eq!(names, vec!["Bob", "Alice", "Eve", "Dave", "Carol"]);
+}
+
+#[test]
+fn test_agg_order_by_aggregate_alias() {
+    // Fix A: ORDER BY over aggregation must not be dropped, and SortIterator
+    // must order computed rows by an aggregate alias.
+    let db = aggregation_test_db();
+    let rows = collect_rows(
+        db.execute_cypher("MATCH (n:Person) RETURN n.dept, count(*) AS c ORDER BY c DESC")
+            .unwrap(),
+    );
+    assert_eq!(rows.len(), 2);
+    // Eng (3) before Sales (2).
+    assert_eq!(
+        col(&rows[0], "n.dept").and_then(|v| v.as_str()),
+        Some("Eng")
+    );
+    assert_eq!(col(&rows[0], "c"), Some(&PropertyValue::Int(3)));
+    assert_eq!(
+        col(&rows[1], "n.dept").and_then(|v| v.as_str()),
+        Some("Sales")
+    );
+    assert_eq!(col(&rows[1], "c"), Some(&PropertyValue::Int(2)));
+}
+
+#[test]
+fn test_agg_reject_group_by_whole_node() {
+    // Fix C: grouping by a bare variable / whole node is rejected, not
+    // silently collapsed into one wrong group.
+    let db = aggregation_test_db();
+    let err = db
+        .execute_cypher("MATCH (n:Person) RETURN n, count(*)")
+        .map(|_| ())
+        .unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("whole node") || msg.contains("group by a property"),
+        "expected a structured node-grouping rejection, got: {msg}"
+    );
+}
+
+#[test]
+fn test_agg_count_variable_skips_null_bindings() {
+    // Fix D: count(x) counts NON-NULL bindings, unlike count(*).
+    let db = AletheiaDB::new().unwrap();
+    let alice = db
+        .create_node(
+            "Person",
+            PropertyMapBuilder::new().insert("name", "Alice").build(),
+        )
+        .unwrap();
+    let bob = db
+        .create_node(
+            "Person",
+            PropertyMapBuilder::new().insert("name", "Bob").build(),
+        )
+        .unwrap();
+    // Only Alice KNOWS someone; Bob has no outgoing KNOWS -> null x binding.
+    db.create_edge(alice, bob, "KNOWS", CorePropertyMap::new())
+        .unwrap();
+
+    // Two base rows (Alice, Bob); one has a matched x, one has null x.
+    let star = collect_rows(
+        db.execute_cypher("MATCH (a:Person) OPTIONAL MATCH (a)-[:KNOWS]->(x) RETURN count(*)")
+            .unwrap(),
+    );
+    assert_eq!(col(&star[0], "count(*)"), Some(&PropertyValue::Int(2)));
+
+    let non_null = collect_rows(
+        db.execute_cypher("MATCH (a:Person) OPTIONAL MATCH (a)-[:KNOWS]->(x) RETURN count(x)")
+            .unwrap(),
+    );
+    // count(x) skips the null binding -> 1, not 2.
+    assert_eq!(col(&non_null[0], "count(x)"), Some(&PropertyValue::Int(1)));
+}
+
+#[test]
+fn test_agg_count_distinct_star_is_error() {
+    // Fix H: count(DISTINCT *) is rejected (openCypher disallows it).
+    let db = aggregation_test_db();
+    let err = db
+        .execute_cypher("MATCH (n:Person) RETURN count(DISTINCT *)")
+        .map(|_| ())
+        .unwrap_err();
+    assert!(
+        err.to_string().to_lowercase().contains("distinct *"),
+        "expected a DISTINCT * rejection, got: {err}"
+    );
+}
+
+#[test]
+fn test_agg_group_key_int_vs_float_and_signed_zero() {
+    // Fix F: integral floats group with equal ints, and -0.0 groups with 0.0/0.
+    let db = AletheiaDB::new().unwrap();
+    db.create_node("M", PropertyMapBuilder::new().insert("k", 1i64).build())
+        .unwrap();
+    db.create_node("M", PropertyMapBuilder::new().insert("k", 1.0f64).build())
+        .unwrap();
+    db.create_node("M", PropertyMapBuilder::new().insert("k", 0.0f64).build())
+        .unwrap();
+    db.create_node("M", PropertyMapBuilder::new().insert("k", -0.0f64).build())
+        .unwrap();
+    db.create_node("M", PropertyMapBuilder::new().insert("k", 0i64).build())
+        .unwrap();
+
+    let rows = collect_rows(
+        db.execute_cypher("MATCH (n:M) RETURN n.k, count(*)")
+            .unwrap(),
+    );
+    // Expect exactly two groups: {1 / 1.0} and {0 / 0.0 / -0.0}.
+    assert_eq!(
+        rows.len(),
+        2,
+        "1 and 1.0 must share a group; 0/0.0/-0.0 too"
+    );
+    let mut counts = std::collections::HashMap::new();
+    for row in &rows {
+        let k = col(row, "n.k")
+            .and_then(|v| v.as_int().or_else(|| v.as_float().map(|f| f as i64)))
+            .unwrap();
+        let c = col(row, "count(*)").and_then(|v| v.as_int()).unwrap();
+        counts.insert(k, c);
+    }
+    assert_eq!(counts.get(&1), Some(&2));
+    assert_eq!(counts.get(&0), Some(&3));
+}
+
+#[test]
+fn test_agg_collect_distinct_dedup_and_order() {
+    let db = AletheiaDB::new().unwrap();
+    for dept in ["Eng", "Sales", "Eng", "Ops", "Sales"] {
+        db.create_node(
+            "Person",
+            PropertyMapBuilder::new().insert("dept", dept).build(),
+        )
+        .unwrap();
+    }
+    let rows = collect_rows(
+        db.execute_cypher("MATCH (n:Person) RETURN collect(DISTINCT n.dept)")
+            .unwrap(),
+    );
+    match col(&rows[0], "collect(DISTINCT n.dept)") {
+        Some(PropertyValue::Array(items)) => {
+            // Deduped, first-occurrence order preserved: Eng, Sales, Ops.
+            let got: Vec<&str> = items.iter().filter_map(|v| v.as_str()).collect();
+            assert_eq!(got, vec!["Eng", "Sales", "Ops"]);
+        }
+        other => panic!("expected array, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_agg_two_independent_distinct_aggregates() {
+    let db = AletheiaDB::new().unwrap();
+    // dept in {Eng, Sales, Eng}; team in {A, A, B} -> distinct depts=2, teams=2.
+    for (dept, team) in [("Eng", "A"), ("Sales", "A"), ("Eng", "B")] {
+        db.create_node(
+            "Person",
+            PropertyMapBuilder::new()
+                .insert("dept", dept)
+                .insert("team", team)
+                .build(),
+        )
+        .unwrap();
+    }
+    let rows = collect_rows(
+        db.execute_cypher("MATCH (n:Person) RETURN count(DISTINCT n.dept), count(DISTINCT n.team)")
+            .unwrap(),
+    );
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        col(&rows[0], "count(DISTINCT n.dept)"),
+        Some(&PropertyValue::Int(2))
+    );
+    assert_eq!(
+        col(&rows[0], "count(DISTINCT n.team)"),
+        Some(&PropertyValue::Int(2))
+    );
 }
 // Bi-temporal AS OF / BETWEEN runtime tests (Issues #550, #551, #552)
 //

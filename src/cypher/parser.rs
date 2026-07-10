@@ -711,8 +711,14 @@ impl CypherParser {
                 // Optional DISTINCT quantifier: count(DISTINCT n.dept).
                 let distinct = self.eat(TokenKind::Distinct);
                 // `count(*)` -- the star wildcard is only valid as the sole
-                // argument (typically for count).
+                // argument (typically for count). `DISTINCT *` is rejected
+                // (openCypher does not allow `count(DISTINCT *)`).
                 let args = if self.at(TokenKind::Star) {
+                    if distinct {
+                        return Err(self.error(
+                            "DISTINCT * is not allowed (use count(*) or count(DISTINCT expr))",
+                        ));
+                    }
                     self.advance();
                     vec![CypherExpr::Star]
                 } else {

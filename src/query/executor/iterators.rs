@@ -18,7 +18,8 @@ use crate::core::property::PropertyValue;
 use crate::core::vector::cosine_similarity;
 use crate::core::{NodeId, Timestamp};
 use crate::query::ir::{
-    AggregateFunc, AggregateGroupKey, AggregateSpec, Direction, Predicate, PredicateValue, SortKey,
+    AggregateArg, AggregateFunc, AggregateGroupKey, AggregateSpec, Direction, Predicate,
+    PredicateValue, SortKey,
 };
 use crate::storage::current::CurrentStorage;
 use crate::storage::historical::HistoricalStorage;
@@ -2222,11 +2223,35 @@ impl GroupKeyValue {
             None | Some(PropertyValue::Null) => GroupKeyValue::Null,
             Some(PropertyValue::Bool(b)) => GroupKeyValue::Bool(*b),
             Some(PropertyValue::Int(i)) => GroupKeyValue::Int(*i),
-            Some(PropertyValue::Float(f)) => GroupKeyValue::Float(f.to_bits()),
+            Some(PropertyValue::Float(f)) => Self::float_key(*f),
             Some(PropertyValue::String(s)) => GroupKeyValue::Str(s.to_string()),
             Some(other) => GroupKeyValue::Other(format!("{other:?}")),
         }
     }
+
+    /// Map a float to a grouping/DISTINCT key, canonicalizing `-0.0 -> 0.0`
+    /// (signed zeros group together) and unifying an integral float with the
+    /// equal integer (so `1` and `1.0` land in the same group / distinct set).
+    fn float_key(f: f64) -> Self {
+        let f = if f == 0.0 { 0.0 } else { f };
+        if f.is_finite() && f.fract() == 0.0 && f >= i64::MIN as f64 && f <= i64::MAX as f64 {
+            GroupKeyValue::Int(f as i64)
+        } else {
+            GroupKeyValue::Float(f.to_bits())
+        }
+    }
+}
+
+/// The resolved per-row input to one aggregate, computed once per row in
+/// [`AggregateIterator::drain`].
+enum AggInput<'a> {
+    /// `count(*)` -- count the row unconditionally.
+    Star,
+    /// `count(n)` -- count the row iff its bound entity is non-null.
+    Entity { present: bool },
+    /// `func(n.prop)` -- the row's value for the property (`None`/`Null` =
+    /// absent, skipped by every value aggregate).
+    Value(Option<&'a PropertyValue>),
 }
 
 /// Per-group, per-aggregate accumulator.
@@ -2264,24 +2289,29 @@ impl AggAccumulator {
         }
     }
 
-    /// Fold one input row's value into the accumulator.
+    /// Fold one input row into the accumulator.
     ///
-    /// `is_star` marks `count(*)`, which counts the row unconditionally
-    /// (ignoring nulls and `DISTINCT`). Otherwise `value` is the row's value
-    /// for the aggregate argument; `None`/`Null` values are skipped by every
-    /// function (openCypher semantics).
-    fn update(&mut self, value: Option<&PropertyValue>, is_star: bool) {
-        if self.func == AggregateFunc::Count && is_star {
-            self.count += 1;
-            return;
-        }
-
-        let Some(v) = value else {
-            return;
+    /// `count(*)` ([`AggInput::Star`]) counts the row unconditionally and
+    /// `count(n)` ([`AggInput::Entity`]) counts non-null bindings, both
+    /// ignoring `DISTINCT`. Otherwise the value ([`AggInput::Value`]) feeds the
+    /// function; `None`/`Null` values are skipped (openCypher semantics).
+    fn update(&mut self, input: AggInput<'_>) {
+        let v = match input {
+            AggInput::Star => {
+                // Only Count uses Star (enforced by the converter).
+                self.count += 1;
+                return;
+            }
+            AggInput::Entity { present } => {
+                // Only Count uses Entity; count non-null bindings.
+                if present {
+                    self.count += 1;
+                }
+                return;
+            }
+            AggInput::Value(Some(v)) if !matches!(v, PropertyValue::Null) => v,
+            AggInput::Value(_) => return,
         };
-        if matches!(v, PropertyValue::Null) {
-            return;
-        }
 
         if self.distinct {
             let key = GroupKeyValue::from_property(Some(v));
@@ -2336,7 +2366,12 @@ impl AggAccumulator {
                 } else if self.saw_float {
                     PropertyValue::Float(self.sum_f)
                 } else {
-                    PropertyValue::Int(self.sum_i as i64)
+                    // Checked cast: an all-integer sum that overflows i64 falls
+                    // back to Float rather than silently wrapping.
+                    match i64::try_from(self.sum_i) {
+                        Ok(v) => PropertyValue::Int(v),
+                        Err(_) => PropertyValue::Float(self.sum_i as f64),
+                    }
                 }
             }
             AggregateFunc::Avg => {
@@ -2450,9 +2485,14 @@ impl AggregateIterator {
                 .get_mut(&key)
                 .expect("group inserted above must be present");
             for (spec, acc) in self.aggregates.iter().zip(group.accumulators.iter_mut()) {
-                let is_star = spec.arg.is_none();
-                let value = spec.arg.as_deref().and_then(|k| row_property(&row, k));
-                acc.update(value, is_star);
+                let input = match &spec.arg {
+                    AggregateArg::Star => AggInput::Star,
+                    AggregateArg::Entity => AggInput::Entity {
+                        present: !row.entity.is_null(),
+                    },
+                    AggregateArg::Property(k) => AggInput::Value(row_property(&row, k)),
+                };
+                acc.update(input);
             }
         }
 
@@ -2536,27 +2576,39 @@ impl ResultIterator for DistinctIterator {
     }
 }
 
-/// `ORDER BY` iterator: buffers the entire input, sorts it by the sort key, and
-/// then streams the sorted rows.
+/// Look up a value for ordering by column/property name: first a node property
+/// (entity rows), then a computed aggregate column (`row.columns`) so ORDER BY
+/// can sort grouped/aggregate rows by a group key or aggregate alias.
+fn row_value<'a>(row: &'a QueryRow, key: &str) -> Option<&'a PropertyValue> {
+    if let Some(v) = row_property(row, key) {
+        return Some(v);
+    }
+    row.columns
+        .as_ref()
+        .and_then(|cols| cols.iter().find(|(k, _)| k == key).map(|(_, v)| v))
+}
+
+/// `ORDER BY` iterator: buffers the entire input and stably sorts it by one or
+/// more keys in precedence order (first key primary), then streams the result.
 ///
-/// Sorting is stable. Rows missing the sort property sort **last** regardless of
-/// direction (a v1 simplification of openCypher's nulls-first-on-DESC rule),
-/// which keeps ordering deterministic without a tri-valued comparator.
+/// Each key carries its own ascending/descending flag. Null placement follows
+/// openCypher: a missing/null sort value orders **last** for an ascending key
+/// and **first** for a descending key. Property keys fall back to computed
+/// aggregate columns via [`row_value`], so grouped results can be ordered by a
+/// group key or aggregate alias.
 pub struct SortIterator {
     input: Option<Box<dyn ResultIterator>>,
-    key: SortKey,
-    descending: bool,
+    keys: Vec<(SortKey, bool)>,
     output: std::vec::IntoIter<QueryRow>,
     drained: bool,
 }
 
 impl SortIterator {
-    /// Create a new ORDER BY iterator.
-    pub fn new(input: Box<dyn ResultIterator>, key: SortKey, descending: bool) -> Self {
+    /// Create a new ORDER BY iterator sorting by `keys` (first = primary).
+    pub fn new(input: Box<dyn ResultIterator>, keys: Vec<(SortKey, bool)>) -> Self {
         SortIterator {
             input: Some(input),
-            key,
-            descending,
+            keys,
             output: Vec::new().into_iter(),
             drained: false,
         }
@@ -2578,28 +2630,56 @@ impl SortIterator {
 
     fn cmp_rows(&self, a: &QueryRow, b: &QueryRow) -> std::cmp::Ordering {
         use std::cmp::Ordering;
-        match &self.key {
-            SortKey::Property(prop) => {
-                match (row_property(a, prop), row_property(b, prop)) {
-                    (Some(x), Some(y)) => {
-                        let ord = compare_property(x, y);
-                        if self.descending { ord.reverse() } else { ord }
-                    }
-                    // Missing sort key always orders last, in both directions.
-                    (Some(_), None) => Ordering::Less,
-                    (None, Some(_)) => Ordering::Greater,
-                    (None, None) => Ordering::Equal,
-                }
+        for (key, descending) in &self.keys {
+            let ord = Self::cmp_by_key(a, b, key, *descending);
+            if ord != Ordering::Equal {
+                return ord;
             }
+        }
+        Ordering::Equal
+    }
+
+    /// Compare two rows by a single key, applying openCypher null placement
+    /// (nulls last for ASC, first for DESC).
+    fn cmp_by_key(
+        a: &QueryRow,
+        b: &QueryRow,
+        key: &SortKey,
+        descending: bool,
+    ) -> std::cmp::Ordering {
+        use std::cmp::Ordering;
+        match key {
+            SortKey::Property(prop) => match (row_value(a, prop), row_value(b, prop)) {
+                (Some(x), Some(y)) => {
+                    let ord = compare_property(x, y);
+                    if descending { ord.reverse() } else { ord }
+                }
+                // openCypher: nulls last for ASC, first for DESC.
+                (Some(_), None) => {
+                    if descending {
+                        Ordering::Greater
+                    } else {
+                        Ordering::Less
+                    }
+                }
+                (None, Some(_)) => {
+                    if descending {
+                        Ordering::Less
+                    } else {
+                        Ordering::Greater
+                    }
+                }
+                (None, None) => Ordering::Equal,
+            },
             SortKey::Score => {
                 let ord = a.score.partial_cmp(&b.score).unwrap_or(Ordering::Equal);
-                if self.descending { ord.reverse() } else { ord }
+                if descending { ord.reverse() } else { ord }
             }
             SortKey::Timestamp => {
                 let av = a.timestamp.map(|t| t.wallclock());
                 let bv = b.timestamp.map(|t| t.wallclock());
                 let ord = av.cmp(&bv);
-                if self.descending { ord.reverse() } else { ord }
+                if descending { ord.reverse() } else { ord }
             }
         }
     }

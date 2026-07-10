@@ -286,10 +286,8 @@ impl PhysicalPlan {
             PhysicalOp::VectorRerank { k, .. } => {
                 line.push_str(&format!(" (k={})", k));
             }
-            PhysicalOp::Sort {
-                key, descending, ..
-            } => {
-                line.push_str(&format!(" (key={:?}, desc={})", key, descending));
+            PhysicalOp::Sort { keys, .. } => {
+                line.push_str(&format!(" (keys={:?})", keys));
             }
             PhysicalOp::HashJoin {
                 left_key,
@@ -596,14 +594,19 @@ pub enum PhysicalOp {
         property_key: Option<String>,
     },
 
-    /// Sort by key
+    /// Sort by one or more keys (stable, multi-key).
+    ///
+    /// `keys` lists `(key, descending)` pairs in **precedence order**: the
+    /// first entry is the primary sort key, the second breaks ties, and so on.
+    /// A folded chain of `ORDER BY a, b, c` produces a single `Sort` with
+    /// `keys = [(a, ..), (b, ..), (c, ..)]` (Issue #558 fold), so the primary
+    /// key is never inverted by stable-sort composition.
     Sort {
         /// Input operator
         input: Box<PhysicalOp>,
-        /// Sort key
-        key: SortKey,
-        /// Descending order
-        descending: bool,
+        /// Sort keys in precedence order (first = primary), each with its own
+        /// descending flag.
+        keys: Vec<(SortKey, bool)>,
     },
 
     /// Limit with optional offset
@@ -1203,8 +1206,7 @@ mod tests {
         assert_eq!(
             PhysicalOp::Sort {
                 input: Box::new(PhysicalOp::Empty),
-                key: SortKey::Property("name".to_string()),
-                descending: false
+                keys: vec![(SortKey::Property("name".to_string()), false)],
             }
             .name(),
             "Sort"
@@ -1495,8 +1497,7 @@ mod tests {
         assert_eq!(
             PhysicalOp::Sort {
                 input: Box::new(base.clone()),
-                key: SortKey::Property("name".to_string()),
-                descending: false
+                keys: vec![(SortKey::Property("name".to_string()), false)],
             }
             .depth(),
             2
@@ -1669,8 +1670,7 @@ mod tests {
         // Sort
         let sort = PhysicalOp::Sort {
             input: Box::new(PhysicalOp::Empty),
-            key: SortKey::Property("name".to_string()),
-            descending: false,
+            keys: vec![(SortKey::Property("name".to_string()), false)],
         };
         let explain = sort.explain();
         assert!(explain.contains("Sort"));
