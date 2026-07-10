@@ -27,6 +27,7 @@
 
 mod auth;
 mod batch;
+mod cursor;
 mod error;
 mod server;
 mod tools;

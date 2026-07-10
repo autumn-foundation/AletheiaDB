@@ -12883,6 +12883,838 @@ mod per_request_now_tests {
     }
 }
 
+// ============================================================================
+// Snapshot-anchored cursor continuation (Issue #3360)
+// ============================================================================
+
+mod cursor_tests {
+    use super::*;
+    use std::collections::BTreeSet;
+    use std::time::Duration;
+
+    /// Drive a tool through the real MCP dispatch table and parse its JSON.
+    fn call(server: &AletheiaMcpServer, name: &str, args: serde_json::Value) -> serde_json::Value {
+        let result = server.dispatch_tool(name, args);
+        let text = AletheiaMcpServer::extract_text(result);
+        serde_json::from_str(&text).expect("tool returned valid json")
+    }
+
+    /// Create `n` `Person` nodes, returning their ids in creation order.
+    fn make_people(server: &AletheiaMcpServer, n: usize) -> Vec<u64> {
+        (0..n)
+            .map(|i| {
+                server
+                    .db()
+                    .create_node(
+                        "Person",
+                        PropertyMapBuilder::new()
+                            .insert("name", format!("p{i}"))
+                            .build(),
+                    )
+                    .expect("create_node")
+                    .as_u64()
+            })
+            .collect()
+    }
+
+    // AC1 + AC7: cursor pages the full labelled set, in deterministic ascending
+    // id order, with no duplicates and no gaps; the last page carries no cursor.
+    #[test]
+    fn list_nodes_cursor_pages_full_set_deterministically() {
+        let server = create_test_server();
+        let expected: BTreeSet<u64> = make_people(&server, 25).into_iter().collect();
+
+        let mut seen: BTreeSet<u64> = BTreeSet::new();
+        let mut prev_page_max: Option<u64> = None;
+        let mut args = serde_json::json!({"label": "Person", "use_cursor": true, "limit": 10});
+        let mut pages = 0;
+        loop {
+            let v = call(&server, "list_nodes", args.clone());
+            assert_eq!(v["paging"], "cursor");
+            assert_eq!(v["total_matching"], 25);
+            let ids: Vec<u64> = v["nodes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|n| n["id"].as_u64().unwrap())
+                .collect();
+            // Ascending within the page, and every id strictly past the prior
+            // page's max (keyset, deterministic boundaries).
+            assert!(
+                ids.windows(2).all(|w| w[0] < w[1]),
+                "ids ascend within page"
+            );
+            if let Some(m) = prev_page_max {
+                assert!(ids.iter().all(|&id| id > m), "keyset seek past prior page");
+            }
+            prev_page_max = ids.iter().max().copied();
+            for id in ids {
+                assert!(seen.insert(id), "duplicate id {id} across pages");
+            }
+            pages += 1;
+            match v.get("cursor").and_then(|c| c.as_str()) {
+                Some(tok) => {
+                    assert_eq!(v["has_more"], true);
+                    assert!(v["cursor_ttl_seconds"].as_u64().unwrap() > 0);
+                    args = serde_json::json!({"cursor": tok});
+                }
+                None => {
+                    assert_eq!(v["has_more"], false);
+                    break;
+                }
+            }
+            assert!(pages < 10, "runaway paging");
+        }
+        assert_eq!(seen, expected, "union of pages equals the full set");
+        assert_eq!(pages, 3, "25 rows / 10 per page = 3 pages");
+    }
+
+    // AC2 (headline): all pages of one scan are evaluated at the first page's
+    // bi-temporal coordinate. Interleaving writes between pages leaks nothing:
+    // zero duplicates, zero omissions, and no post-snapshot writes appear.
+    #[test]
+    fn find_nodes_at_time_cursor_is_snapshot_consistent_under_concurrent_writes() {
+        let server = create_test_server();
+        let expected: BTreeSet<u64> = make_people(&server, 25).into_iter().collect();
+
+        // Pin an explicit snapshot coordinate now that the 25 exist.
+        let snap = crate::core::temporal::time::now().wallclock().to_string();
+
+        let v1 = call(
+            &server,
+            "find_nodes_at_time",
+            serde_json::json!({
+                "label": "Person",
+                "valid_time": snap,
+                "transaction_time": snap,
+                "use_cursor": true,
+                "limit": 10
+            }),
+        );
+        assert_eq!(v1["has_more"], true);
+        let mut seen: BTreeSet<u64> = v1["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|n| n["id"].as_u64().unwrap())
+            .collect();
+        let cursor = v1["cursor"].as_str().unwrap().to_string();
+
+        // --- Concurrent writes between page 1 and the rest ---
+        // Five brand-new Persons (recorded AFTER the snapshot).
+        make_people(&server, 5);
+        // Delete an original that page 1 has not yet returned (highest id; page 1
+        // returned the lowest 10). Recorded AFTER the snapshot.
+        let victim = *expected.iter().next_back().unwrap();
+        let del = call(
+            &server,
+            "delete_node",
+            serde_json::json!({"node_id": victim}),
+        );
+        assert!(del.get("error").is_none(), "delete should succeed: {del}");
+
+        // Drain the remaining pages via the cursor.
+        let mut args = serde_json::json!({"cursor": cursor});
+        loop {
+            let v = call(&server, "find_nodes_at_time", args.clone());
+            for n in v["nodes"].as_array().unwrap() {
+                assert!(
+                    seen.insert(n["id"].as_u64().unwrap()),
+                    "duplicate row across pages"
+                );
+            }
+            match v.get("cursor").and_then(|c| c.as_str()) {
+                Some(tok) => args = serde_json::json!({"cursor": tok}),
+                None => break,
+            }
+        }
+
+        // Exactly the original 25: the 5 later inserts are invisible (created
+        // after the snapshot), the deleted node is still present (deleted after
+        // the snapshot), no duplicates, no omissions.
+        assert_eq!(seen, expected);
+        assert!(
+            seen.contains(&victim),
+            "a node deleted after the snapshot still appears in the scan"
+        );
+    }
+
+    // AC3: a tampered token is rejected with a structured INVALID_ARGUMENT
+    // error (never wrong data), through the tool surface.
+    #[test]
+    fn tampered_cursor_returns_invalid_argument() {
+        let server = create_test_server();
+        make_people(&server, 15);
+        let v1 = call(
+            &server,
+            "list_nodes",
+            serde_json::json!({"label": "Person", "use_cursor": true, "limit": 5}),
+        );
+        let tok = v1["cursor"].as_str().unwrap();
+        // Corrupt the final character of the signed token.
+        let mut bad = tok.to_string();
+        bad.pop();
+        bad.push(if tok.ends_with('A') { 'B' } else { 'A' });
+
+        let v = call(&server, "list_nodes", serde_json::json!({"cursor": bad}));
+        assert_eq!(v["error"]["code"], "INVALID_ARGUMENT");
+        assert_eq!(v["error"]["retriable"], false);
+    }
+
+    // AC5: resuming after expiry returns a structured FAILED_PRECONDITION with
+    // remediation guidance (re-issue the query).
+    #[test]
+    fn expired_cursor_returns_failed_precondition() {
+        let server = AletheiaMcpServer::new(create_test_db())
+            .with_cursor_config(Duration::from_secs(0), 128);
+        make_people(&server, 15);
+        let v1 = call(
+            &server,
+            "list_nodes",
+            serde_json::json!({"label": "Person", "use_cursor": true, "limit": 5}),
+        );
+        let tok = v1["cursor"].as_str().unwrap().to_string();
+        let v = call(&server, "list_nodes", serde_json::json!({"cursor": tok}));
+        assert_eq!(v["error"]["code"], "FAILED_PRECONDITION");
+        assert_eq!(v["error"]["retriable"], false);
+    }
+
+    // AC5: exceeding the per-connection live-cursor cap is a structured
+    // FAILED_PRECONDITION echoing the cap.
+    #[test]
+    fn exceeding_live_cursor_cap_returns_failed_precondition() {
+        let server = AletheiaMcpServer::new(create_test_db())
+            .with_cursor_config(Duration::from_secs(300), 1);
+        make_people(&server, 30);
+        // First scan opens the one permitted live cursor.
+        let v1 = call(
+            &server,
+            "list_nodes",
+            serde_json::json!({"label": "Person", "use_cursor": true, "limit": 5}),
+        );
+        assert!(v1["cursor"].is_string());
+        // A second independent first-page scan exceeds the cap.
+        let v2 = call(
+            &server,
+            "list_nodes",
+            serde_json::json!({"label": "Person", "use_cursor": true, "limit": 5}),
+        );
+        assert_eq!(v2["error"]["code"], "FAILED_PRECONDITION");
+        assert_eq!(v2["error"]["details"]["max_live_cursors"], 1);
+    }
+
+    // AC3: a cursor minted by one tool cannot be replayed against another.
+    #[test]
+    fn cross_tool_cursor_replay_is_rejected() {
+        let server = create_test_server();
+        make_people(&server, 15);
+        let v1 = call(
+            &server,
+            "list_nodes",
+            serde_json::json!({"label": "Person", "use_cursor": true, "limit": 5}),
+        );
+        let tok = v1["cursor"].as_str().unwrap().to_string();
+        let v = call(
+            &server,
+            "find_nodes_at_time",
+            serde_json::json!({"cursor": tok}),
+        );
+        assert_eq!(v["error"]["code"], "INVALID_ARGUMENT");
+    }
+
+    // AC1: adjacency tools page a node's edges by edge id, no dup, no gap.
+    #[test]
+    fn get_outgoing_edges_cursor_pages_full_adjacency() {
+        let server = create_test_server();
+        let src = server
+            .db()
+            .create_node("Person", PropertyMapBuilder::new().build())
+            .unwrap();
+        let mut expected: BTreeSet<u64> = BTreeSet::new();
+        for _ in 0..12 {
+            let dst = server
+                .db()
+                .create_node("Person", PropertyMapBuilder::new().build())
+                .unwrap();
+            let eid = server
+                .db()
+                .create_edge(src, dst, "KNOWS", crate::core::PropertyMap::default())
+                .unwrap();
+            expected.insert(eid.as_u64());
+        }
+
+        let mut seen: BTreeSet<u64> = BTreeSet::new();
+        let mut args = serde_json::json!({"node_id": src.as_u64(), "use_cursor": true, "limit": 5});
+        loop {
+            let v = call(&server, "get_outgoing_edges", args.clone());
+            assert_eq!(v["total_matching"], 12);
+            for e in v["edges"].as_array().unwrap() {
+                assert!(seen.insert(e["id"].as_u64().unwrap()), "duplicate edge");
+            }
+            match v.get("cursor").and_then(|c| c.as_str()) {
+                Some(tok) => args = serde_json::json!({"cursor": tok}),
+                None => break,
+            }
+        }
+        assert_eq!(seen, expected);
+    }
+
+    // AC1: traverse cursor pages every reachable node exactly once (snapshot
+    // pinned across pages).
+    #[test]
+    fn traverse_cursor_pages_all_reachable_nodes() {
+        let server = create_test_server();
+        let src = server
+            .db()
+            .create_node("Person", PropertyMapBuilder::new().build())
+            .unwrap();
+        let mut expected: BTreeSet<u64> = BTreeSet::new();
+        for _ in 0..12 {
+            let dst = server
+                .db()
+                .create_node("Person", PropertyMapBuilder::new().build())
+                .unwrap();
+            server
+                .db()
+                .create_edge(src, dst, "KNOWS", crate::core::PropertyMap::default())
+                .unwrap();
+            expected.insert(dst.as_u64());
+        }
+
+        let mut seen: BTreeSet<u64> = BTreeSet::new();
+        let mut args = serde_json::json!({
+            "start_node_id": src.as_u64(),
+            "edge_label": "KNOWS",
+            "use_cursor": true,
+            "limit": 5
+        });
+        loop {
+            let v = call(&server, "traverse", args.clone());
+            assert_eq!(v["paging"], "cursor");
+            for r in v["results"].as_array().unwrap() {
+                assert!(
+                    seen.insert(r["node"]["id"].as_u64().unwrap()),
+                    "duplicate node across traverse pages"
+                );
+            }
+            match v.get("cursor").and_then(|c| c.as_str()) {
+                Some(tok) => args = serde_json::json!({"cursor": tok}),
+                None => break,
+            }
+        }
+        assert_eq!(seen, expected);
+    }
+
+    // AC7: the query tool refuses cursor paging with a structured
+    // unsupported_construct-class error rather than silently falling back.
+    #[test]
+    fn query_tool_cursor_is_unsupported_not_silent() {
+        let server = create_test_server();
+        let v = call(
+            &server,
+            "query",
+            serde_json::json!({
+                "language": "aql",
+                "query": "MATCH (n:Person) RETURN n",
+                "use_cursor": true
+            }),
+        );
+        assert_eq!(v["error"]["kind"], "unsupported_construct");
+        assert_eq!(v["error"]["code"], "INVALID_ARGUMENT");
+    }
+
+    // AC1/disclosure: list_edges is not cursorable and says so, pointing at the
+    // cursor-paged adjacency tools (no silent no-op).
+    #[test]
+    fn list_edges_cursor_is_refused_with_alternatives() {
+        let server = create_test_server();
+        let v = call(
+            &server,
+            "list_edges",
+            serde_json::json!({"use_cursor": true}),
+        );
+        assert_eq!(v["error"]["code"], "INVALID_ARGUMENT");
+        let alts = v["error"]["details"]["cursorable_alternatives"]
+            .as_array()
+            .expect("alternatives listed");
+        assert!(alts.iter().any(|a| a == "get_outgoing_edges"));
+    }
+
+    // AC6: cursor mode is opt-in; without use_cursor/cursor the legacy offset
+    // response shape (offset/limit, no `paging` marker) is unchanged.
+    #[test]
+    fn offset_paging_remains_the_default_and_unchanged() {
+        let server = create_test_server();
+        make_people(&server, 3);
+        let v = call(
+            &server,
+            "list_nodes",
+            serde_json::json!({"label": "Person", "limit": 2}),
+        );
+        assert!(v.get("paging").is_none(), "no cursor marker in offset mode");
+        assert_eq!(v["offset"], 0);
+        assert_eq!(v["has_more"], true);
+        assert_eq!(v["next_offset"], 2);
+    }
+
+    // FIX-A (discoverability): every cursorable tool advertises `use_cursor`
+    // and `cursor` in its inputSchema.properties with descriptions, so a client
+    // / LLM can discover snapshot cursor paging without reading source.
+    #[test]
+    fn all_cursorable_tools_advertise_cursor_params_in_schema() {
+        let server = create_test_server();
+        for tool in [
+            "list_nodes",
+            "find_nodes_at_time",
+            "get_outgoing_edges",
+            "get_incoming_edges",
+            "traverse",
+        ] {
+            let schema = server
+                .tool_input_schema_for_test(tool)
+                .unwrap_or_else(|| panic!("{tool} has an input schema"));
+            let props = schema["properties"]
+                .as_object()
+                .unwrap_or_else(|| panic!("{tool} schema has properties"));
+            assert!(
+                props.contains_key("use_cursor"),
+                "{tool} must expose `use_cursor` in inputSchema"
+            );
+            assert!(
+                props.contains_key("cursor"),
+                "{tool} must expose `cursor` in inputSchema"
+            );
+            assert!(
+                props["use_cursor"]["description"].is_string(),
+                "{tool} `use_cursor` carries a description"
+            );
+            assert!(
+                props["cursor"]["description"].is_string(),
+                "{tool} `cursor` carries a description"
+            );
+            assert_eq!(
+                props["use_cursor"]["type"], "boolean",
+                "{tool} `use_cursor` is boolean"
+            );
+            assert_eq!(
+                props["cursor"]["type"], "string",
+                "{tool} `cursor` is string"
+            );
+        }
+    }
+
+    // FIX-F (list_nodes snapshot consistency): list_nodes cursor pins (now, now)
+    // on page 1. Creating AND deleting nodes mid-stream must leave the union of
+    // pages equal to the page-1 snapshot set: created-after excluded,
+    // deleted-after still present, no dup/gap, across >2 pages.
+    #[test]
+    fn list_nodes_cursor_snapshot_consistent_under_concurrent_create_and_delete() {
+        let server = create_test_server();
+        let expected: BTreeSet<u64> = make_people(&server, 25).into_iter().collect();
+
+        // Page 1 (limit 8 -> at least 4 pages) pins the snapshot at "now".
+        let v1 = call(
+            &server,
+            "list_nodes",
+            serde_json::json!({"label": "Person", "use_cursor": true, "limit": 8}),
+        );
+        assert_eq!(v1["has_more"], true);
+        let mut seen: BTreeSet<u64> = v1["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|n| n["id"].as_u64().unwrap())
+            .collect();
+        let mut cursor = v1["cursor"].as_str().unwrap().to_string();
+
+        // Concurrent writes recorded AFTER the page-1 snapshot:
+        //  - 5 brand-new Persons (must be invisible to the scan), and
+        //  - delete an original not yet returned (highest id) -- still visible.
+        make_people(&server, 5);
+        let victim = *expected.iter().next_back().unwrap();
+        let del = call(
+            &server,
+            "delete_node",
+            serde_json::json!({"node_id": victim}),
+        );
+        assert!(del.get("error").is_none(), "delete should succeed: {del}");
+
+        let mut pages = 1;
+        loop {
+            let v = call(&server, "list_nodes", serde_json::json!({"cursor": cursor}));
+            for n in v["nodes"].as_array().unwrap() {
+                assert!(
+                    seen.insert(n["id"].as_u64().unwrap()),
+                    "duplicate row across pages"
+                );
+            }
+            pages += 1;
+            match v.get("cursor").and_then(|c| c.as_str()) {
+                Some(tok) => cursor = tok.to_string(),
+                None => break,
+            }
+            assert!(pages < 10, "runaway paging");
+        }
+
+        assert!(pages > 2, "scan spanned more than two pages, got {pages}");
+        assert_eq!(seen, expected, "union of pages == page-1 snapshot set");
+        assert!(
+            seen.contains(&victim),
+            "a node deleted after the snapshot is still present"
+        );
+    }
+
+    // FIX-G (deletion of an already-returned row): deleting a node that page 1
+    // already emitted, between pages, must not remove it from the scan (it was
+    // present at the pinned snapshot) and must not duplicate/skip anything.
+    #[test]
+    fn list_nodes_cursor_deletion_of_already_returned_row_stays_in_scan() {
+        let server = create_test_server();
+        let expected: BTreeSet<u64> = make_people(&server, 12).into_iter().collect();
+
+        let v1 = call(
+            &server,
+            "list_nodes",
+            serde_json::json!({"label": "Person", "use_cursor": true, "limit": 5}),
+        );
+        let page1: Vec<u64> = v1["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|n| n["id"].as_u64().unwrap())
+            .collect();
+        assert_eq!(v1["has_more"], true);
+        let mut seen: BTreeSet<u64> = page1.iter().copied().collect();
+        let mut cursor = v1["cursor"].as_str().unwrap().to_string();
+
+        // Delete a row page 1 ALREADY returned (the lowest id) after the
+        // snapshot -- it must stay in the union.
+        let already_returned = *page1.first().unwrap();
+        let del = call(
+            &server,
+            "delete_node",
+            serde_json::json!({"node_id": already_returned}),
+        );
+        assert!(del.get("error").is_none(), "delete should succeed: {del}");
+
+        loop {
+            let v = call(&server, "list_nodes", serde_json::json!({"cursor": cursor}));
+            for n in v["nodes"].as_array().unwrap() {
+                assert!(
+                    seen.insert(n["id"].as_u64().unwrap()),
+                    "duplicate row across pages"
+                );
+            }
+            match v.get("cursor").and_then(|c| c.as_str()) {
+                Some(tok) => cursor = tok.to_string(),
+                None => break,
+            }
+        }
+
+        assert_eq!(seen, expected, "union still equals the full snapshot set");
+        assert!(
+            seen.contains(&already_returned),
+            "an already-returned row deleted mid-stream stays in the scan"
+        );
+    }
+
+    // FIX-G (update mid-stream): a node updated AFTER the page-1 snapshot must
+    // be returned AS IT WAS at the snapshot -- verify the reconstructed PROPERTY
+    // value, not just the id.
+    #[test]
+    fn list_nodes_cursor_returns_updated_node_as_of_snapshot() {
+        let server = create_test_server();
+        let ids = make_people(&server, 6); // names p0..p5, ascending ids
+        let sorted: Vec<u64> = {
+            let mut s = ids.clone();
+            s.sort_unstable();
+            s
+        };
+
+        // Page 1 (limit 3) pins the snapshot and returns the lowest 3 ids.
+        let v1 = call(
+            &server,
+            "list_nodes",
+            serde_json::json!({"label": "Person", "use_cursor": true, "limit": 3}),
+        );
+        assert_eq!(v1["has_more"], true);
+        let cursor = v1["cursor"].as_str().unwrap().to_string();
+
+        // Update a node NOT yet returned (the 4th lowest id) to a new name,
+        // recorded AFTER the snapshot.
+        let target = sorted[3];
+        let upd = call(
+            &server,
+            "update_node",
+            serde_json::json!({"node_id": target, "properties": {"name": "UPDATED_AFTER_SNAPSHOT"}}),
+        );
+        assert!(upd.get("error").is_none(), "update should succeed: {upd}");
+
+        // Drain remaining pages; find the target and assert its reconstructed
+        // name is the pre-update value (snapshot state), not "UPDATED...".
+        let mut args = serde_json::json!({"cursor": cursor});
+        let mut found_name: Option<String> = None;
+        loop {
+            let v = call(&server, "list_nodes", args.clone());
+            for n in v["nodes"].as_array().unwrap() {
+                if n["id"].as_u64().unwrap() == target {
+                    found_name = Some(n["properties"]["name"].as_str().unwrap().to_string());
+                }
+            }
+            match v.get("cursor").and_then(|c| c.as_str()) {
+                Some(tok) => args = serde_json::json!({"cursor": tok}),
+                None => break,
+            }
+        }
+        assert_eq!(
+            found_name.as_deref(),
+            Some("p3"),
+            "updated-after node is returned as-it-was at the pinned snapshot"
+        );
+    }
+
+    // FIX-G (incoming adjacency coverage): get_incoming_edges cursor pages a
+    // node's incoming edges by edge id, no dup / no gap (mirrors the outgoing
+    // test).
+    #[test]
+    fn get_incoming_edges_cursor_pages_full_adjacency() {
+        let server = create_test_server();
+        let dst = server
+            .db()
+            .create_node("Person", PropertyMapBuilder::new().build())
+            .unwrap();
+        let mut expected: BTreeSet<u64> = BTreeSet::new();
+        for _ in 0..12 {
+            let src = server
+                .db()
+                .create_node("Person", PropertyMapBuilder::new().build())
+                .unwrap();
+            let eid = server
+                .db()
+                .create_edge(src, dst, "KNOWS", crate::core::PropertyMap::default())
+                .unwrap();
+            expected.insert(eid.as_u64());
+        }
+
+        let mut seen: BTreeSet<u64> = BTreeSet::new();
+        let mut args = serde_json::json!({"node_id": dst.as_u64(), "use_cursor": true, "limit": 5});
+        loop {
+            let v = call(&server, "get_incoming_edges", args.clone());
+            assert_eq!(v["paging"], "cursor");
+            assert_eq!(v["total_matching"], 12);
+            for e in v["edges"].as_array().unwrap() {
+                assert!(seen.insert(e["id"].as_u64().unwrap()), "duplicate edge");
+            }
+            match v.get("cursor").and_then(|c| c.as_str()) {
+                Some(tok) => args = serde_json::json!({"cursor": tok}),
+                None => break,
+            }
+        }
+        assert_eq!(seen, expected);
+    }
+
+    // FIX-F (adjacency snapshot consistency): get_outgoing_edges cursor pins the
+    // snapshot on page 1; a mid-stream edge create+delete must leave the union
+    // equal to the page-1 adjacency (created-after excluded, deleted-after
+    // present), no dup/gap.
+    #[test]
+    fn get_outgoing_edges_cursor_snapshot_consistent_under_concurrent_edge_writes() {
+        let server = create_test_server();
+        let src = server
+            .db()
+            .create_node("Person", PropertyMapBuilder::new().build())
+            .unwrap();
+        let mut expected: BTreeSet<u64> = BTreeSet::new();
+        let mut edge_ids: Vec<u64> = Vec::new();
+        for _ in 0..12 {
+            let dst = server
+                .db()
+                .create_node("Person", PropertyMapBuilder::new().build())
+                .unwrap();
+            let eid = server
+                .db()
+                .create_edge(src, dst, "KNOWS", crate::core::PropertyMap::default())
+                .unwrap();
+            expected.insert(eid.as_u64());
+            edge_ids.push(eid.as_u64());
+        }
+
+        let v1 = call(
+            &server,
+            "get_outgoing_edges",
+            serde_json::json!({"node_id": src.as_u64(), "use_cursor": true, "limit": 5}),
+        );
+        assert_eq!(v1["has_more"], true);
+        let mut seen: BTreeSet<u64> = v1["edges"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["id"].as_u64().unwrap())
+            .collect();
+        let mut cursor = v1["cursor"].as_str().unwrap().to_string();
+
+        // Concurrent writes recorded AFTER the snapshot: add a new edge
+        // (invisible) and delete an existing one not yet returned (still
+        // present at the pinned snapshot).
+        let new_dst = server
+            .db()
+            .create_node("Person", PropertyMapBuilder::new().build())
+            .unwrap();
+        server
+            .db()
+            .create_edge(src, new_dst, "KNOWS", crate::core::PropertyMap::default())
+            .unwrap();
+        let victim_edge = *edge_ids.iter().max().unwrap();
+        let del = call(
+            &server,
+            "delete_edge",
+            serde_json::json!({"edge_id": victim_edge}),
+        );
+        assert!(
+            del.get("error").is_none(),
+            "delete_edge should succeed: {del}"
+        );
+
+        loop {
+            let v = call(
+                &server,
+                "get_outgoing_edges",
+                serde_json::json!({"cursor": cursor}),
+            );
+            for e in v["edges"].as_array().unwrap() {
+                assert!(seen.insert(e["id"].as_u64().unwrap()), "duplicate edge");
+            }
+            match v.get("cursor").and_then(|c| c.as_str()) {
+                Some(tok) => cursor = tok.to_string(),
+                None => break,
+            }
+        }
+
+        assert_eq!(seen, expected, "union == page-1 adjacency snapshot");
+        assert!(
+            seen.contains(&victim_edge),
+            "an edge deleted after the snapshot is still present in the scan"
+        );
+    }
+
+    // FIX-F (traverse snapshot consistency): traverse cursor pins the snapshot
+    // on page 1; adding + deleting graph elements mid-stream must leave the
+    // reachable set equal to the page-1 snapshot reachable set, no dup/skip.
+    #[test]
+    fn traverse_cursor_snapshot_consistent_under_concurrent_graph_mutation() {
+        let server = create_test_server();
+        let src = server
+            .db()
+            .create_node("Person", PropertyMapBuilder::new().build())
+            .unwrap();
+        let mut expected: BTreeSet<u64> = BTreeSet::new();
+        let mut edge_ids: Vec<u64> = Vec::new();
+        for _ in 0..12 {
+            let dst = server
+                .db()
+                .create_node("Person", PropertyMapBuilder::new().build())
+                .unwrap();
+            let eid = server
+                .db()
+                .create_edge(src, dst, "KNOWS", crate::core::PropertyMap::default())
+                .unwrap();
+            expected.insert(dst.as_u64());
+            edge_ids.push(eid.as_u64());
+        }
+
+        let v1 = call(
+            &server,
+            "traverse",
+            serde_json::json!({
+                "start_node_id": src.as_u64(),
+                "edge_label": "KNOWS",
+                "use_cursor": true,
+                "limit": 5
+            }),
+        );
+        assert_eq!(v1["has_more"], true);
+        let mut seen: BTreeSet<u64> = v1["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["node"]["id"].as_u64().unwrap())
+            .collect();
+        let mut cursor = v1["cursor"].as_str().unwrap().to_string();
+
+        // Mutate the graph AFTER the snapshot: add a new reachable node+edge
+        // (must be invisible) and delete an existing edge to a not-yet-returned
+        // dst (its dst stays reachable at the pinned snapshot).
+        let new_dst = server
+            .db()
+            .create_node("Person", PropertyMapBuilder::new().build())
+            .unwrap();
+        server
+            .db()
+            .create_edge(src, new_dst, "KNOWS", crate::core::PropertyMap::default())
+            .unwrap();
+        let victim_edge = *edge_ids.iter().max().unwrap();
+        let del = call(
+            &server,
+            "delete_edge",
+            serde_json::json!({"edge_id": victim_edge}),
+        );
+        assert!(
+            del.get("error").is_none(),
+            "delete_edge should succeed: {del}"
+        );
+
+        loop {
+            let v = call(&server, "traverse", serde_json::json!({"cursor": cursor}));
+            for r in v["results"].as_array().unwrap() {
+                assert!(
+                    seen.insert(r["node"]["id"].as_u64().unwrap()),
+                    "duplicate node across traverse pages"
+                );
+            }
+            match v.get("cursor").and_then(|c| c.as_str()) {
+                Some(tok) => cursor = tok.to_string(),
+                None => break,
+            }
+        }
+
+        assert!(
+            !seen.contains(&new_dst.as_u64()),
+            "a node reachable only via an edge created after the snapshot is invisible"
+        );
+        assert_eq!(
+            seen, expected,
+            "reachable set == page-1 snapshot reachable set"
+        );
+    }
+
+    // FIX-G (TTL boundary companion to the pre-expired TTL=0 test): a cursor
+    // issued under a positive TTL verifies successfully immediately (it is well
+    // within the validity window). Combined with
+    // `expired_cursor_returns_failed_precondition` (TTL=0, already expired) this
+    // brackets the TTL boundary. Limitation: no injectable clock exists, so the
+    // exact expiry instant is not asserted -- only valid-within-window and
+    // already-expired.
+    #[test]
+    fn cursor_valid_within_positive_ttl_window() {
+        let server = AletheiaMcpServer::new(create_test_db())
+            .with_cursor_config(Duration::from_secs(300), 128);
+        make_people(&server, 15);
+        let v1 = call(
+            &server,
+            "list_nodes",
+            serde_json::json!({"label": "Person", "use_cursor": true, "limit": 5}),
+        );
+        let tok = v1["cursor"].as_str().unwrap().to_string();
+        // Resuming immediately is comfortably inside the 300s window.
+        let v2 = call(&server, "list_nodes", serde_json::json!({"cursor": tok}));
+        assert!(
+            v2.get("error").is_none(),
+            "a cursor within its TTL window must verify: {v2}"
+        );
+        assert_eq!(v2["paging"], "cursor");
+    }
+}
+
 #[cfg(feature = "audit-export")]
 mod audit_export_tool_tests {
     use super::create_test_server;
