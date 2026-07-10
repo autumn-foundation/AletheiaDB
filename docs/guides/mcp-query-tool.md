@@ -986,17 +986,36 @@ explicit, machine-readable account of what was reduced and how to fetch it.
 
 ### The parameters
 
-Every budgetable read tool — `get_node`, `list_nodes`, `get_edge`, `list_edges`,
-`get_outgoing_edges`, `get_incoming_edges`, `traverse`, `find_similar`,
-`hybrid_query`, `query`, `find_nodes_at_time`, `get_node_history`, and
-`get_schema` — accepts these optional parameters. Omitting all of them leaves
-the tool's behavior **completely unchanged**.
+The **thirteen** budgetable read tools — `get_node`, `list_nodes`, `get_edge`,
+`list_edges`, `get_outgoing_edges`, `get_incoming_edges`, `traverse`,
+`find_similar`, `hybrid_query`, `query`, `find_nodes_at_time`,
+`get_node_history`, and `get_schema` — accept these optional parameters. This is
+the exact set (the code's single source of truth is `BUDGETABLE_READ_TOOLS`);
+it is **not** *every* read tool — single-entity/aggregate reads such as
+`get_node_at_time`, `get_edge_history`, `diff_node_versions`, `temporal_extent`,
+`database_stats`, and `count_nodes` are out of scope. The three parameters are
+injected into each budgetable tool's advertised `inputSchema.properties`, so a
+client that introspects the schema discovers them (with correct types) rather
+than relying on the prose description alone. Omitting all of them leaves the
+tool's behavior **completely unchanged**.
 
 | Parameter | Meaning |
 |-----------|---------|
-| `max_response_tokens` | Maximum response size in **estimated tokens**. The serialized response, *including the truncation metadata itself*, is guaranteed not to exceed this. |
+| `max_response_tokens` | Maximum response size in **estimated tokens**. The serialized **success** response, *including the truncation metadata itself*, is guaranteed not to exceed this. |
 | `max_response_bytes` | Byte-exact alternative. When both are set, the **tighter** bound wins. |
 | `priority_properties` | Array of property keys to protect from elision; they out-survive unprotected properties at every degradation rung. |
+
+The budget bounds **success** responses. A structured *error* response (for
+example the too-small-budget `INVALID_ARGUMENT` below) is itself small and is
+returned intact. In the rare case a budgetable tool returns a non-object success
+payload (a JSON scalar/array, or plain text) it cannot degrade along the entity
+ladder, but the byte cap is still enforced: the payload is truncated with a
+disclosed marker rather than emitted unbounded.
+
+A **misspelled or unknown budget key** (e.g. `max_tokens` instead of
+`max_response_tokens`) is **ignored** — consistent with the surface's
+unknown-field tolerance — and the full, unbudgeted response is returned. Use the
+exact key names above so a budget you intend to apply is actually applied.
 
 **Token-estimation basis:** tokens are estimated as `ceil(utf8_byte_len / 4)`.
 Four bytes per token is the standard approximation of GPT/Claude-family BPE
@@ -1013,13 +1032,22 @@ request at the same budget on the same data always degrades **identically**:
 2. **`elided_properties`** — inside each entity's `properties`, any value whose
    serialized size exceeds a threshold (and is not a protected
    `priority_properties` key) is replaced with an `{ "elided": true, ... }`
-   descriptor, mirroring the vector-elision convention of #3220.
+   descriptor, mirroring the vector-elision convention of #3220. A value is
+   elided **only when the descriptor is actually smaller** than the value it
+   replaces, so this rung can never enlarge the response.
 3. **`entity_summaries`** — each entity's `properties` is reduced to the
    protected keys only. Result *structure* — ids, labels, relationships,
    temporal coordinates, provenance and similarity scores — survives because it
    lives *beside* `properties`, never inside it.
 4. **`counts_and_handles`** — entity arrays are truncated to the prefix that
-   fits; the omitted tail is disclosed as a count plus a fetch handle.
+   fits; the omitted tail is disclosed as a count plus a fetch handle, **and the
+   object's own pagination/count siblings are rewritten** to describe the
+   retained prefix — `count`/`row_count` become the retained length,
+   `has_more`/`truncated` become `true`, and `next_offset` (on offset-paginated
+   tools) advances to exactly the cut point. This keeps a paginating caller
+   gap-free and duplicate-free: following the disclosed resume call yields the
+   dropped rows and nothing else. (`total_matching`, when present, still counts
+   the full matching set and is left unchanged.)
 
 `find_similar` and `hybrid_query` **never reach rung 4**: their ranked results
 are never dropped or reordered to meet a budget — only the per-result payloads
@@ -1059,17 +1087,35 @@ Every response carries a `budget` block naming the rung applied per section:
 ### Fetch handles — nothing is lost
 
 Every elision/truncation site carries a **fetch handle**: a concrete follow-up
-call (`tool` + `arguments`) that retrieves exactly the omitted content. A
-per-entity elision points at `get_node`/`get_edge` with `include_vectors: true`;
-a truncated array composes with the completeness signals (`has_more` /
-`next_offset`, #3226). An agent that follows the handles can reconstruct the
-full, unbudgeted response.
+call (`tool` + `arguments`) that retrieves exactly the omitted content.
+
+- A **per-entity elision** on a live node/edge points at `get_node`/`get_edge`
+  with `include_vectors: true`.
+- A **history version** elision (`get_node_history`/`get_edge_history`) points at
+  `get_node_at_time`/`get_edge_at_time` addressing the *exact superseded
+  version* — the parent entity id (taken from the history wrapper) plus that
+  version's own `valid_from`/`transaction_from` coordinates. A plain `get_node`
+  would return the current state, not the historical version, so the handle uses
+  the point-in-time tool instead.
+- A **truncated array** on an offset-paginated tool
+  (`list_nodes`/`traverse`/`find_nodes_at_time`) carries a concrete resume call:
+  the original arguments with the budget knobs stripped and `offset` advanced to
+  the cut point (composing with the #3226 `next_offset` completeness signal). On
+  a tool that does **not** page by offset (e.g. `get_outgoing_edges`,
+  `get_schema`, `query`) the handle honestly discloses the truncation and tells
+  the caller to re-request with a larger budget — it never fabricates an `offset`
+  argument the tool does not accept.
+
+An agent that follows the handles can reconstruct the full, unbudgeted response.
 
 ### Budgets too small to satisfy
 
 If the budget is too small to return even the minimal rung, the tool returns a
 structured #3234 `INVALID_ARGUMENT` error stating the **minimum viable budget** —
-never a silently empty success:
+never a silently empty success. The reported minimum is **self-consistent**:
+re-issuing the same request at `min_viable_tokens` (or `min_viable_bytes`)
+succeeds — the figure already accounts for the disclosed `budget` block's own
+numbers growing at the larger budget.
 
 ```jsonc
 { "error": {

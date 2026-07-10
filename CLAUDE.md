@@ -502,32 +502,54 @@ temporal/history tools (`get_node_at_time`, `get_edge_at_time`,
 `get_node_history`), which have no `include_vectors` flag and always return
 full vectors.
 
-**Token-budget-aware responses (Issue #3353)**: every MCP read tool
-(`get_node`, `list_nodes`, `get_edge`, `list_edges`, `get_outgoing_edges`,
-`get_incoming_edges`, `traverse`, `find_similar`, `hybrid_query`, `query`,
-`find_nodes_at_time`, `get_node_history`, `get_schema`) accepts an optional
-`max_response_tokens` (estimated as `ceil(utf8_bytes / 4)`) or the byte-exact
-`max_response_bytes`, so a context-bounded caller can say "spend at most N
-tokens answering this" instead of guessing a row `limit`. The serialized
+**Token-budget-aware responses (Issue #3353)**: the thirteen budgetable read
+tools — `get_node`, `list_nodes`, `get_edge`, `list_edges`,
+`get_outgoing_edges`, `get_incoming_edges`, `traverse`, `find_similar`,
+`hybrid_query`, `query`, `find_nodes_at_time`, `get_node_history`, `get_schema`
+(the single source of truth is `BUDGETABLE_READ_TOOLS`; not *every* read tool —
+e.g. `get_node_at_time`, `get_edge_history`, `diff_node_versions`,
+`temporal_extent`, `database_stats`, `count_nodes` are out of scope) — accept an
+optional `max_response_tokens` (estimated as `ceil(utf8_bytes / 4)`) or the
+byte-exact `max_response_bytes`, so a context-bounded caller can say "spend at
+most N tokens answering this" instead of guessing a row `limit`. These three
+parameters (`max_response_tokens`, `max_response_bytes`, `priority_properties`)
+are injected into each budgetable tool's advertised `inputSchema.properties`, so
+they are machine-discoverable, not just described in prose. The serialized
 response — **including its own truncation metadata** — is guaranteed not to
 exceed the stated budget (hard contract, CI conformance sweep 256..32K tokens,
-0 overruns). Over budget the response degrades along a deterministic, disclosed
-ladder — full → `elided_properties` (bulky property values become
-`{elided: true, ...}` descriptors, reusing #3220's convention) → `entity_summaries`
-(properties reduced to protected keys; ids/labels/relationships/temporal
-coordinates/provenance/scores always survive) → `counts_and_handles` (entity
-arrays truncated to the prefix that fits) — carrying a `budget` block that names
-the rung applied per section. Every elision/truncation site carries a **fetch
-handle** (a concrete `get_node`/`get_edge` call with `include_vectors: true`, or
-`offset`/`next_offset` paging per #3226) so nothing is lost: an agent following
-handles reconstructs the full response. `priority_properties` names properties
-to protect; they out-survive unprotected ones at every rung.
+0 overruns). This bound governs **success** responses; a structured *error*
+response (e.g. the too-small-budget `INVALID_ARGUMENT` below) is itself small
+and returned intact. The rare non-object success payload (JSON scalar/array or
+plain text) cannot degrade along the entity ladder but is still held to the byte
+cap via a disclosed truncation marker (never emitted unbounded). Over budget the
+response degrades along a deterministic, disclosed ladder — full →
+`elided_properties` (bulky property values become `{elided: true, ...}`
+descriptors, reusing #3220's convention, and only when the descriptor is
+actually smaller than the value, so the ladder never enlarges the response) →
+`entity_summaries` (properties reduced to protected keys;
+ids/labels/relationships/temporal coordinates/provenance/scores always survive)
+→ `counts_and_handles` (entity arrays truncated to the prefix that fits, with the
+object's own `count`/`row_count`/`has_more`/`next_offset`/`truncated` siblings
+rewritten to describe the retained prefix so a paginating caller sees no gap and
+no duplicate) — carrying a `budget` block that names the rung applied per
+section. Every elision/truncation site carries a **fetch handle**: a concrete
+`get_node`/`get_edge` call with `include_vectors: true` for an elided entity, a
+`get_node_at_time`/`get_edge_at_time` call for an elided history version (parent
+id + that version's own coordinates, not the current state), and for a truncated
+array a concrete `offset`-advancing resume call on paginated tools
+(`list_nodes`/`traverse`/`find_nodes_at_time`) or an honest "re-request with a
+larger budget" disclosure on non-paginated ones — so nothing is lost: an agent
+following handles reconstructs the full response. `priority_properties` names
+properties to protect; they out-survive unprotected ones at every rung.
 `find_similar`/`hybrid_query` never drop or reorder ranked results to meet a
 budget (only per-result payloads degrade), and temporal responses never omit
 temporal coordinates. A budget too small for even the minimal rung returns a
-#3234 `INVALID_ARGUMENT` stating the minimum viable budget (never a silently
-empty success). Omitting the budget parameters reproduces prior behavior
-exactly; write/admin tools are out of scope. See
+#3234 `INVALID_ARGUMENT` stating a minimum viable budget that is self-consistent
+(re-issuing at the reported `min_viable_tokens` succeeds) — never a silently
+empty success. Omitting the budget parameters reproduces prior behavior exactly,
+and a **misspelled/unknown budget key** (e.g. `max_tokens`) is ignored — the
+full response is returned — so use the exact key names. Write/admin tools are out
+of scope. See
 [docs/guides/mcp-query-tool.md](docs/guides/mcp-query-tool.md#token-budget-aware-responses-issue-3353).
 
 **Temporal extent (Issue #3238)**: `temporal_extent` reports the dataset's
