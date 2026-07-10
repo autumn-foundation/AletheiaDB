@@ -2818,6 +2818,89 @@ mod tests {
         }
     }
 
+    fn test_node_with_dept_age(id: u64, dept: &str, age: i64) -> Node {
+        let props = PropertyMapBuilder::new()
+            .insert("dept", dept)
+            .insert("age", age)
+            .build();
+        let label = GLOBAL_INTERNER.intern("Person").unwrap();
+        Node::new(
+            NodeId::new(id).unwrap(),
+            label,
+            props,
+            VersionId::new(1).unwrap(),
+        )
+    }
+
+    // ==================== AggregateIterator Tests ====================
+
+    /// Drives `AggregateIterator`'s group-finalize path directly (no cypher
+    /// parser), so it runs under any feature set including the coverage job's
+    /// `--features "config-toml,mcp-server,sharding-rpc"` (no `cypher`). Groups
+    /// by `dept` and computes both `count(*)` and `sum(age)`, so the
+    /// finalize loop executes with BOTH a group key and aggregate accumulators.
+    #[test]
+    fn test_aggregate_iterator_group_key_and_aggregates() {
+        // Two "eng" rows and one "sales" row; first-seen group order is
+        // eng, then sales.
+        let nodes = vec![
+            test_node_with_dept_age(1, "eng", 30),
+            test_node_with_dept_age(2, "eng", 20),
+            test_node_with_dept_age(3, "sales", 40),
+        ];
+        let input = Box::new(MockIterator::from_nodes(nodes));
+
+        let group_keys = vec![AggregateGroupKey {
+            property_key: "dept".to_string(),
+            alias: "dept".to_string(),
+        }];
+        let aggregates = vec![
+            AggregateSpec {
+                func: AggregateFunc::Count,
+                arg: AggregateArg::Star,
+                distinct: false,
+                alias: "cnt".to_string(),
+            },
+            AggregateSpec {
+                func: AggregateFunc::Sum,
+                arg: AggregateArg::Property("age".to_string()),
+                distinct: false,
+                alias: "sum_age".to_string(),
+            },
+        ];
+
+        let mut iter = AggregateIterator::new(input, group_keys, aggregates);
+
+        // Drain all output rows.
+        let mut rows = Vec::new();
+        while let Some(row) = iter.next() {
+            rows.push(row.expect("aggregate row"));
+        }
+
+        assert_eq!(rows.len(), 2, "expected one row per group");
+
+        // Each row's `columns` carries (alias, value): the group key first,
+        // then each aggregate in spec order.
+        let cols: Vec<Vec<(String, PropertyValue)>> = rows
+            .into_iter()
+            .map(|r| r.columns.expect("aggregate row has columns"))
+            .collect();
+
+        // Group 1: eng -> count 2, sum(age) 50.
+        assert_eq!(cols[0][0].0, "dept");
+        assert_eq!(cols[0][0].1, PropertyValue::from("eng"));
+        assert_eq!(cols[0][1].0, "cnt");
+        assert_eq!(cols[0][1].1, PropertyValue::Int(2));
+        assert_eq!(cols[0][2].0, "sum_age");
+        assert_eq!(cols[0][2].1, PropertyValue::Int(50));
+
+        // Group 2: sales -> count 1, sum(age) 40.
+        assert_eq!(cols[1][0].0, "dept");
+        assert_eq!(cols[1][0].1, PropertyValue::from("sales"));
+        assert_eq!(cols[1][1].1, PropertyValue::Int(1));
+        assert_eq!(cols[1][2].1, PropertyValue::Int(40));
+    }
+
     // ==================== EmptyIterator Tests ====================
 
     #[test]
