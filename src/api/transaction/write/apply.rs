@@ -609,6 +609,7 @@ pub(crate) fn apply_single_write(
 pub(crate) fn apply_changes<'a>(
     tx: &'a WriteTransaction,
     commit_timestamp: Timestamp,
+    closing_version_ids: &[VersionId],
 ) -> Result<parking_lot::RwLockWriteGuard<'a, HistoricalStorage>> {
     // Create temporal interval for all operations in this transaction.
     let _temporal = BiTemporalInterval::current(commit_timestamp);
@@ -616,31 +617,16 @@ pub(crate) fn apply_changes<'a>(
     // Acquire lock on historical storage once before processing all operations.
     let mut historical = tx.historical.write();
 
-    // Pre-generate all closing-version IDs (delete tombstones + retraction
-    // versions) at once to reduce lock contention
-    let num_deletes = tx
-        .buffer
-        .operations()
+    // Issue #3406: the closing-version IDs (delete tombstones + retraction
+    // versions) are pre-generated once per commit — BEFORE the WAL log phase —
+    // so the identical ids are recorded in the WAL and applied here. We simply
+    // replay them in the same buffer order they were generated and logged.
+    let num_deletes = closing_version_ids.len();
+    let mut tombstone_ids = closing_version_ids
         .iter()
-        .filter(|op| {
-            matches!(
-                op,
-                crate::api::transaction::BufferedWrite::DeleteNode { .. }
-                    | crate::api::transaction::BufferedWrite::DeleteEdge { .. }
-                    | crate::api::transaction::BufferedWrite::RetractNode { .. }
-                    | crate::api::transaction::BufferedWrite::RetractEdge { .. }
-            )
-        })
-        .count();
-
-    let mut tombstone_ids = if num_deletes > 0 {
-        let ids: Result<Vec<u64>> = (0..num_deletes)
-            .map(|_| tx.version_id_gen.next().map_err(Into::into))
-            .collect();
-        ids?.into_iter()
-    } else {
-        Vec::new().into_iter()
-    };
+        .map(|v| v.as_u64())
+        .collect::<Vec<u64>>()
+        .into_iter();
 
     for write in tx.buffer.operations() {
         apply_single_write(

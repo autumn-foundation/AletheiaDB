@@ -2650,7 +2650,7 @@ fn test_schema_as_of_entity_cap_is_configurable_and_discloses_sampling() {
 /// `config-toml` or `mcp-server` is enabled, so this test is gated the same
 /// way; `test_stats_populated_matches_underlying_counters` keeps the
 /// non-serde behavior covered in minimal builds.
-#[cfg(any(feature = "config-toml", feature = "mcp-server"))]
+#[cfg(feature = "serde")]
 #[test]
 fn test_stats_serialization_shape_empty_db() {
     let db = AletheiaDB::new().unwrap();
@@ -2734,7 +2734,7 @@ fn test_stats_populated_matches_underlying_counters() {
 ///
 /// Gated like `test_stats_serialization_shape_empty_db`: the serde derive
 /// this test exercises only exists under `config-toml`/`mcp-server`.
-#[cfg(any(feature = "config-toml", feature = "mcp-server"))]
+#[cfg(feature = "serde")]
 #[test]
 fn test_stats_cold_storage_enabled() {
     use crate::config::{AletheiaDBConfig, HistoricalConfigBuilder, WalConfigBuilder};

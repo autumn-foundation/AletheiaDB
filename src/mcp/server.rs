@@ -153,6 +153,7 @@ use crate::query::executor::{EntityId as ResultEntityId, EntityResult};
 
 use super::auth::{McpAuthConfig, SessionAuth};
 use super::batch::ApplyBatchRequest;
+use super::budget;
 use super::cursor::{CursorManager, CursorPayload};
 use super::error::{McpError, McpErrorCode, query_kind_classification};
 use super::tools::*;
@@ -5001,6 +5002,79 @@ impl AletheiaMcpServer {
         if let Err(err) = self.auth.authorize_tool(name) {
             return self.error_result(err);
         }
+        // Token-budget-aware response shaping (Issue #3353). For the read tools
+        // listed in `BUDGETABLE_READ_TOOLS`, an optional `max_response_tokens` /
+        // `max_response_bytes` shapes the successful response to fit the stated
+        // budget with a disclosed truncation contract. Omitting the budget
+        // parameters leaves behavior completely unchanged.
+        if is_budgetable_read_tool(name) {
+            match budget::parse_budget(&args) {
+                Ok(Some(budget_req)) => {
+                    // Retain the original arguments so the rung-4 truncation
+                    // handle can emit a concrete offset-based resume call
+                    // (Issue #3353 F1/F5).
+                    let orig_args = args.clone();
+                    let result = self.dispatch_read_tool(name, args);
+                    return self.apply_budget(name, result, &budget_req, &orig_args);
+                }
+                Ok(None) => {}
+                Err(err) => return self.error_result(err),
+            }
+        }
+        self.dispatch_read_tool(name, args)
+    }
+
+    /// Apply the parsed token budget to a handler's result. Errors pass through
+    /// untouched; a successful object response is shaped to fit and
+    /// re-serialized, or replaced with the structured `INVALID_ARGUMENT`
+    /// too-small-budget error (Issue #3353 AC6). Non-object / non-JSON success
+    /// payloads cannot degrade along the entity ladder but are still held to the
+    /// byte cap with a disclosed truncation marker — the "guaranteed to fit"
+    /// contract is unconditional (Issue #3353 F6).
+    fn apply_budget(
+        &self,
+        name: &str,
+        result: CallToolResult,
+        budget_req: &budget::BudgetRequest,
+        args: &serde_json::Value,
+    ) -> CallToolResult {
+        if result.is_error.unwrap_or(false) {
+            return result;
+        }
+        let text = Self::extract_text(result);
+        let value: serde_json::Value = match serde_json::from_str(&text) {
+            Ok(v) => v,
+            // Non-JSON payload: still enforce the byte cap on the raw text.
+            Err(_) => {
+                return match budget::enforce_raw_cap(text, budget_req) {
+                    Ok(capped) => self.success_json(serde_json::Value::String(capped)),
+                    Err(err) => self.error_result(err),
+                };
+            }
+        };
+        if !value.is_object() {
+            // JSON scalar/array: not shapeable along the entity ladder, but the
+            // serialized form is still capped so an unbounded array cannot
+            // bypass the budget.
+            let serialized =
+                serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string());
+            if serialized.len() as u64 <= budget_req.effective_bytes() {
+                return self.success_json(value);
+            }
+            return match budget::enforce_raw_cap(serialized, budget_req) {
+                Ok(capped) => self.success_json(serde_json::Value::String(capped)),
+                Err(err) => self.error_result(err),
+            };
+        }
+        match budget::shape_response(value, budget_req, name, args) {
+            Ok(shaped) => self.success_json(shaped),
+            Err(err) => self.error_result(err),
+        }
+    }
+
+    /// The tool-name dispatch table shared between the budgeted and unbudgeted
+    /// paths.
+    fn dispatch_read_tool(&self, name: &str, args: serde_json::Value) -> CallToolResult {
         match name {
             "get_node" => self.handle_get_node(args),
             "create_node" => self.handle_create_node(args),
@@ -5050,6 +5124,31 @@ impl AletheiaMcpServer {
             ),
         }
     }
+}
+
+/// The read tools that honor the Issue #3353 token budget (`max_response_tokens`
+/// / `max_response_bytes`). Kept as a single source of truth so the dispatch
+/// path, the schema-documentation path, and the CI conformance sweep cannot
+/// drift apart.
+pub(crate) const BUDGETABLE_READ_TOOLS: &[&str] = &[
+    "get_node",
+    "list_nodes",
+    "get_edge",
+    "list_edges",
+    "get_outgoing_edges",
+    "get_incoming_edges",
+    "traverse",
+    "find_similar",
+    "hybrid_query",
+    "query",
+    "find_nodes_at_time",
+    "get_node_history",
+    "get_schema",
+];
+
+/// Does this tool honor the token budget parameters (Issue #3353)?
+pub(crate) fn is_budgetable_read_tool(name: &str) -> bool {
+    BUDGETABLE_READ_TOOLS.contains(&name)
 }
 
 fn make_input_schema<T: rmcp::schemars::JsonSchema>()
@@ -5159,7 +5258,7 @@ fn query_columns() -> serde_json::Value {
 /// Shared between [`ServerHandler::list_tools`] and test helpers so the advertised tool
 /// set and the `call_tool` dispatch table cannot silently drift apart.
 fn tool_definitions() -> Vec<Tool> {
-    vec![
+    let mut tools = vec![
         Tool::new(
             "get_node",
             "Get a node by its ID. Returns the node's label and properties. \
@@ -5588,8 +5687,83 @@ fn tool_definitions() -> Vec<Tool> {
              for per-label breakdowns use get_schema.",
             make_input_schema::<DatabaseStatsRequest>(),
         ),
-    ]
+    ];
+
+    // Advertise the Issue #3353 token budget on every budgetable read tool by
+    // (a) injecting the three budget parameters into its generated
+    // `inputSchema.properties` so they are machine-discoverable, and (b)
+    // appending a uniform prose hint to its description as a secondary,
+    // human-readable pointer. Both are kept in lockstep with
+    // `BUDGETABLE_READ_TOOLS` (the dispatch-path source of truth) without
+    // editing each tool literal.
+    for tool in tools.iter_mut() {
+        if is_budgetable_read_tool(&tool.name) {
+            inject_budget_schema_params(&mut tool.input_schema);
+            let mut desc = tool.description.as_deref().unwrap_or("").to_string();
+            desc.push_str(BUDGET_TOOL_HINT);
+            tool.description = Some(std::borrow::Cow::Owned(desc));
+        }
+    }
+    tools
 }
+
+/// Inject the three optional Issue #3353 token-budget parameters into a tool's
+/// generated JSON `inputSchema.properties`, so a client that introspects the
+/// schema (not just the prose description) discovers them with correct types.
+/// All three are optional, so `required` is deliberately left untouched. Idempotent.
+fn inject_budget_schema_params(schema: &mut Arc<serde_json::Map<String, serde_json::Value>>) {
+    let schema = Arc::make_mut(schema);
+    let props = schema
+        .entry("properties".to_string())
+        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+    let Some(props) = props.as_object_mut() else {
+        return;
+    };
+    props
+        .entry("max_response_tokens".to_string())
+        .or_insert_with(|| {
+            json!({
+                "type": "integer",
+                "minimum": 1,
+                "description": "Optional (Issue #3353): cap the response at approximately this \
+                    many tokens (estimated as ceil(utf8_bytes/4)). The serialized response, \
+                    including its truncation metadata, is guaranteed to fit.",
+            })
+        });
+    props
+        .entry("max_response_bytes".to_string())
+        .or_insert_with(|| {
+            json!({
+                "type": "integer",
+                "minimum": 1,
+                "description": "Optional (Issue #3353): byte-exact cap on the serialized response. \
+                    When both this and max_response_tokens are given, the tighter bound wins.",
+            })
+        });
+    props
+        .entry("priority_properties".to_string())
+        .or_insert_with(|| {
+            json!({
+                "type": "array",
+                "items": { "type": "string" },
+                "description": "Optional (Issue #3353): property keys to protect from elision at \
+                    every degradation rung when a response budget is active.",
+            })
+        });
+}
+
+/// Uniform description suffix documenting the token-budget parameters
+/// (Issue #3353), appended to every budgetable read tool.
+const BUDGET_TOOL_HINT: &str = " Optional token budget (Issue #3353): pass \
+    `max_response_tokens` (estimated as ceil(utf8_bytes/4)) or the byte-exact \
+    `max_response_bytes` to cap the response size; the serialized response \
+    (including its truncation metadata) is guaranteed to fit. Over budget, the \
+    response degrades deterministically (elide bulky property values → per-entity \
+    summaries → counts-plus-handles), carrying a `budget` block naming the rung \
+    applied and a fetch handle at every elision site. Protect specific properties \
+    with `priority_properties`. A budget too small for the minimal response \
+    returns INVALID_ARGUMENT stating the minimum viable budget. Omit for \
+    unchanged (row-limit) behavior.";
 
 impl ServerHandler for AletheiaMcpServer {
     fn get_info(&self) -> ServerInfo {

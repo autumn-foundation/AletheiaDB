@@ -401,6 +401,16 @@ impl WriteTransaction {
             None
         };
 
+        // Issue #3406: pre-generate the closing (delete tombstone / retraction)
+        // version ids BEFORE WAL logging, so the SAME ids are both (a) recorded
+        // in the WAL delete/retract payloads and (b) applied to historical
+        // storage. This makes crash recovery reproduce the live version chain
+        // bit-for-bit instead of synthesizing ids that can diverge from — or
+        // collide with — later-logged version ids. Generated here (id
+        // generators are lock-free atomics, order class 5) before the
+        // `current_timestamp` lock is taken, preserving the lock-order contract.
+        let closing_version_ids = self.pregenerate_closing_version_ids()?;
+
         // Acquire commit timestamp and perform mode-aware WAL flush.
         //
         // CRITICAL: We must hold the timestamp lock until WAL logging is complete
@@ -531,7 +541,7 @@ impl WriteTransaction {
 
             // Log operations to WAL (lock-free striped append!)
             // This must happen BEFORE applying changes for durability.
-            wal::log_operations_to_wal(self, commit)?;
+            wal::log_operations_to_wal(self, commit, &closing_version_ids)?;
 
             #[cfg(feature = "observability")]
             let wal_logged = std::time::Instant::now();
@@ -597,7 +607,10 @@ impl WriteTransaction {
         // fixing any on-disk corruption.) This respects the documented lock order
         // (`historical` precedes `snapshot_lock` and adjacency), so no lock-order
         // inversion is introduced.
-        let historical_guard = apply::apply_changes(self, commit_timestamp)?;
+        //
+        // The pre-generated closing version ids (Issue #3406) are consumed here
+        // in the same buffer order they were logged to the WAL.
+        let historical_guard = apply::apply_changes(self, commit_timestamp, &closing_version_ids)?;
 
         // Test-only interleaving hook (Issue #3425): fires at the exact point
         // between the historical writes and the commit-timestamp finalization,
@@ -662,6 +675,42 @@ impl WriteTransaction {
         }
 
         Ok(commit_timestamp)
+    }
+
+    /// Pre-generate the closing version ids for every buffered delete/retract
+    /// operation, in buffer order (Issue #3406).
+    ///
+    /// Delete tombstones and valid-time retractions each append exactly one
+    /// closing version; both draw from the shared `version_id_gen`. Generating
+    /// them here — before the WAL log phase — lets the exact same id be written
+    /// into the WAL payload AND applied to historical storage, so crash
+    /// recovery reproduces the live version chain instead of synthesizing a
+    /// (potentially colliding) id.
+    ///
+    /// The returned vector has one id per delete/retract op in the buffer,
+    /// ordered to match the iteration order used by both
+    /// [`wal::log_operations_to_wal`] and [`apply::apply_changes`].
+    fn pregenerate_closing_version_ids(&self) -> Result<Vec<VersionId>> {
+        let num_closing = self
+            .buffer
+            .operations()
+            .iter()
+            .filter(|op| {
+                matches!(
+                    op,
+                    super::BufferedWrite::DeleteNode { .. }
+                        | super::BufferedWrite::DeleteEdge { .. }
+                        | super::BufferedWrite::RetractNode { .. }
+                        | super::BufferedWrite::RetractEdge { .. }
+                )
+            })
+            .count();
+
+        let mut ids = Vec::with_capacity(num_closing);
+        for _ in 0..num_closing {
+            ids.push(VersionId::new_unchecked(self.version_id_gen.next()?));
+        }
+        Ok(ids)
     }
 
     /// Rollback the transaction.

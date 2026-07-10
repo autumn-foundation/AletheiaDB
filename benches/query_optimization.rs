@@ -149,6 +149,7 @@ fn bench_cost_estimation(c: &mut Criterion) {
             }),
             direction: aletheiadb::query::ir::Direction::Outgoing,
             label: Some("KNOWS".to_string()),
+            min_depth: 2,
             depth: 2,
             temporal_context: None,
         }),
