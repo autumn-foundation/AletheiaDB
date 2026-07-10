@@ -111,3 +111,6 @@ mod checkpoint_recovery_tests;
 
 #[path = "recovery/property_based_tests.rs"]
 mod property_based_tests;
+
+#[path = "recovery/tombstone_version_id_tests.rs"]
+mod tombstone_version_id_tests;

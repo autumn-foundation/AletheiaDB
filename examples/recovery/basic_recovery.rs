@@ -151,6 +151,7 @@ fn main() -> Result<()> {
     wal.append(WalOperation::DeleteNode {
         node_id: node_id_25,
         valid_from: time::now(),
+        version_id: None,
     })?;
     println!("✓ Deleted node 25");
 

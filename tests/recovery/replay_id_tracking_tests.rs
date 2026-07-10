@@ -235,6 +235,7 @@ fn test_recover_with_deletes_tracks_max_ids() -> Result<()> {
     wal.append(WalOperation::DeleteNode {
         node_id: NodeId::new(2).unwrap(),
         valid_from: time::now(),
+        version_id: None,
     })?;
     wal.flush()?;
 
