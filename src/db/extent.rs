@@ -16,11 +16,12 @@
 //!   startup — not just the current state. A fact written for 2019 and
 //!   later corrected still counts toward `earliest`. This is a calendar
 //!   *range*, not a current-state count.
-//! - **Cold-storage caveat**: on databases with cold-storage migration
-//!   enabled, versions migrated to the cold tier **before the last restart**
-//!   are not reflected — the temporal indexes (and their extent aggregate)
-//!   are rebuilt at startup from hot-tier versions only. A follow-up could
-//!   persist cold-tier bounds metadata to close this gap.
+//! - **Cold storage (Issue #3389)**: on databases with cold-storage migration
+//!   enabled, versions migrated to the cold tier are also reflected across
+//!   restarts. The cold store persists min/max extent bounds per dimension in
+//!   its metadata (maintained incrementally as versions migrate), and those
+//!   bounds are merged back into the extent aggregate at startup — so a fact
+//!   migrated to cold before a restart still counts toward `earliest`.
 //! - **`earliest`**: the minimum interval start observed in that dimension.
 //! - **`latest`**: the maximum *finite* coordinate observed in that
 //!   dimension — the max over every interval start and every **closed**
@@ -166,13 +167,14 @@ impl AletheiaDB {
     /// ever widen while the process runs, so callers may cache the result
     /// for the duration of a session.
     ///
-    /// # Coverage across restarts (cold-storage caveat)
+    /// # Coverage across restarts
     ///
-    /// Bounds cover all history recorded during the current process
-    /// lifetime plus the hot-tier history restored at startup. On databases
-    /// with cold-storage migration enabled, versions migrated to the cold
-    /// tier **before the last restart** are not reflected (the temporal
-    /// indexes rebuild from hot-tier versions only). See the
+    /// Bounds cover all history recorded during the current process lifetime
+    /// plus the hot-tier history restored at startup. On databases with
+    /// cold-storage migration enabled, history migrated to the cold tier is
+    /// covered across restarts too (Issue #3389): the cold store persists its
+    /// extent bounds and they are merged into the aggregate at startup, so a
+    /// fact migrated to cold before a restart still bounds the extent. See the
     /// [module docs](self) for details.
     ///
     /// # Example
@@ -204,15 +206,16 @@ impl AletheiaDB {
     /// so a caller can scope `AS OF` calibration to exactly the labels it
     /// queries.
     ///
-    /// The overall bounds are identical to [`temporal_extent`](Self::temporal_extent).
-    /// The per-label breakdown is computed from the historical version
-    /// store, which retains all recorded versions **still resident in the
-    /// hot tier**; on databases with cold-storage migration enabled,
-    /// versions whose payload has been migrated to the cold tier are not
-    /// attributed to a label, and after a restart neither the per-label
-    /// bounds nor the overall bounds reflect versions cold-migrated before
-    /// that restart (see [module docs](self)). On a hot-only database every
-    /// per-label bound lies within the overall bounds.
+    /// The overall bounds are identical to [`temporal_extent`](Self::temporal_extent)
+    /// and, as of Issue #3389, reflect cold-migrated history across restarts.
+    /// The **per-label breakdown**, however, is computed from the historical
+    /// version store, which retains only versions **still resident in the hot
+    /// tier**: on databases with cold-storage migration enabled, versions
+    /// whose payload has been migrated to the cold tier are not attributed to
+    /// a label (the persisted cold bounds are aggregate-only, not per-label).
+    /// So after a restart a label's per-label bound can be narrower than the
+    /// overall bound if that label's older history lives only in cold. On a
+    /// hot-only database every per-label bound lies within the overall bounds.
     #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn temporal_extent_by_label(&self) -> Result<TemporalExtent> {
         // Take the historical read lock FIRST, then read the overall bounds
@@ -684,5 +687,83 @@ mod tests {
         let schema_inside = db.schema_as_of(earliest, tx_at).expect("schema inside");
         assert_eq!(schema_inside.node_labels.len(), 1);
         assert_eq!(schema_inside.node_labels[0].label, "Person");
+    }
+
+    /// Regression for Issue #3389: on a cold-storage-enabled database, history
+    /// migrated to the cold tier before a restart must still be reflected in
+    /// `temporal_extent` after the restart. Previously the temporal-index
+    /// extent aggregate rebuilt from the hot tier only, so a backdated fact
+    /// migrated to cold silently vanished from the reported extent — making an
+    /// in-range `AS OF` misread as "never existed".
+    #[test]
+    fn cold_migrated_extent_survives_restart() {
+        use crate::config::{AletheiaDBConfig, HistoricalConfigBuilder, WalConfigBuilder};
+        use crate::core::id::{NodeId, VersionId};
+        use crate::core::interning::GLOBAL_INTERNER;
+        use crate::core::property::PropertyMap;
+        use crate::core::version::NodeVersion;
+        use crate::storage::redb_cold_storage::RedbColdStorage;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let cold_path = temp.path().join("cold.redb");
+
+        // A fact valid since ~2001, recorded ~2004, that lives ONLY in the
+        // cold tier (as if migrated out of the hot maps before a restart).
+        let old_valid = ts(1_000_000_000_000_000);
+        let tx_at = ts(1_100_000_000_000_000);
+
+        {
+            let cold = RedbColdStorage::with_default_config(&cold_path).expect("cold open");
+            let version = NodeVersion::new_anchor(
+                VersionId::new(1).expect("vid"),
+                NodeId::new(1).expect("nid"),
+                BiTemporalInterval::new(TimeRange::from(old_valid), TimeRange::from(tx_at)),
+                GLOBAL_INTERNER.intern("Person").expect("intern"),
+                PropertyMap::new(),
+            );
+            cold.store_node_version(&version)
+                .expect("store cold version");
+            // `cold` is dropped here, releasing the redb file — simulating a
+            // process exit with this history durable only in the cold tier.
+        }
+
+        // Reopen the database against the same cold file (simulated restart).
+        let config = AletheiaDBConfig::builder()
+            .wal(
+                WalConfigBuilder::new()
+                    .wal_dir(temp.path().join("wal"))
+                    .build(),
+            )
+            .persistence(crate::storage::index_persistence::PersistenceConfig {
+                enabled: false,
+                ..Default::default()
+            })
+            .historical(
+                HistoricalConfigBuilder::new()
+                    .enable_cold_storage(true)
+                    .cold_storage_path(&cold_path)
+                    .build(),
+            )
+            .build();
+        let db = AletheiaDB::with_unified_config(config).expect("db reopen");
+
+        let extent = db.temporal_extent().expect("extent");
+        assert_eq!(
+            extent.valid_time.earliest,
+            Some(old_valid),
+            "cold-migrated backdated valid start must survive restart"
+        );
+        assert_eq!(
+            extent.transaction_time.earliest,
+            Some(tx_at),
+            "cold-migrated transaction start must survive restart"
+        );
+        // The single migrated fact has an open valid_to; `latest` must be its
+        // start, never the open-interval sentinel.
+        assert_eq!(extent.valid_time.latest, Some(old_valid));
+        assert!(
+            extent.valid_time.latest.expect("latest") < TIMESTAMP_MAX,
+            "open-interval sentinel must never leak into latest"
+        );
     }
 }

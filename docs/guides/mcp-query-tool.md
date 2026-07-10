@@ -776,17 +776,18 @@ maintain at write time; bounds only ever widen while the server runs, so a
 caller can cache the result for the duration of a session. The per-label
 breakdown is folded from the hot-tier historical version store.
 
-**Coverage caveat (cold storage + restarts).** Bounds cover all history
+**Coverage (cold storage + restarts).** Overall bounds cover all history
 recorded during the **current process lifetime**, plus the hot-tier history
-restored at startup. On databases with cold-storage migration enabled,
-versions migrated to the cold tier *before the last restart* are **not**
-reflected — the temporal indexes (and their extent aggregate) are rebuilt at
-startup from hot-tier versions only. Within a single process lifetime,
-cold-tier migration never shrinks the bounds. The per-label breakdown is
-additionally hot-tier-only even within a process lifetime: after cold
-migration a label's bounds may be narrower than the overall bounds, or a
-label may be absent entirely. A follow-up could persist cold-tier bounds
-metadata to close the restart gap.
+restored at startup, plus history migrated to the cold tier — including
+across restarts (Issue #3389). The cold store persists its min/max extent
+bounds per dimension in metadata (maintained incrementally as versions
+migrate), and those bounds are merged back into the extent aggregate at
+startup, so a fact migrated to cold before a restart still bounds the extent.
+The **per-label breakdown** is still folded from the hot-tier historical
+version store only: after cold migration a label's per-label bounds may be
+narrower than the overall bounds, or a label may be absent entirely (the
+persisted cold bounds are aggregate-only, not per-label). Bounds never
+shrink.
 
 **Calibration pattern:** if `temporal_extent` reports
 `valid_time.earliest = 2021-03-01`, an `AS OF '2019-01-01'` query is

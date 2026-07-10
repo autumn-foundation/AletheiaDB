@@ -39,9 +39,9 @@ pub use migration::{
     MigrationStats,
 };
 pub use redb_cold_storage::{
-    AtomicColdStorageStats, ColdStorageConfig, ColdStorageStats, CompressionAlgorithm,
-    RedbColdStorage, RedbConfig, decode_edge_version, decode_node_version, encode_edge_version,
-    encode_node_version,
+    AtomicColdStorageStats, ColdStorageConfig, ColdStorageStats, ColdTemporalExtentBounds,
+    CompressionAlgorithm, RedbColdStorage, RedbConfig, decode_edge_version, decode_node_version,
+    encode_edge_version, encode_node_version,
 };
 pub use snapshot::{CurrentStorageSnapshot, HistoricalStorageSnapshot};
 pub use tiered_storage::{

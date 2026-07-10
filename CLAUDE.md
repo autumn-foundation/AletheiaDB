@@ -513,9 +513,10 @@ max of interval starts and *closed* ends, so the open-interval sentinel
 never leaks. Overall bounds are O(1) reads of a write-time-maintained
 aggregate and only ever widen while the server runs (cacheable per
 session). Optional `by_label: true` adds per-node-label / per-edge-type
-bounds folded from hot-tier history. Coverage caveat: bounds span the
-current process lifetime plus hot-tier history restored at startup —
-versions cold-migrated before the last restart are not reflected. See
+bounds folded from hot-tier history. Overall bounds also span history
+migrated to the cold tier across restarts (Issue #3389): the cold store
+persists its per-dimension extent bounds and they are merged into the
+aggregate at startup (the per-label breakdown remains hot-tier-only). See
 [docs/guides/mcp-query-tool.md](docs/guides/mcp-query-tool.md#discovering-the-queryable-temporal-extent-temporal_extent).
 
 **Authentication & RBAC (Issue #3350)**: both server surfaces (MCP and
