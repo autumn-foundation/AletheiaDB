@@ -518,6 +518,38 @@ current process lifetime plus hot-tier history restored at startup —
 versions cold-migrated before the last restart are not reflected. See
 [docs/guides/mcp-query-tool.md](docs/guides/mcp-query-tool.md#discovering-the-queryable-temporal-extent-temporal_extent).
 
+**Cursor continuation for large scans (Issue #3360)**: the bounded read tools
+(`list_nodes`, `find_nodes_at_time`, `get_outgoing_edges`,
+`get_incoming_edges`, `traverse`) accept an additive `use_cursor: true` on the
+first call (returning an opaque `cursor` token) and a `cursor` continuation
+token thereafter — passed back **with no other parameters** — for
+**snapshot-anchored** paging that is consistent, duplicate-free, and gap-free
+under concurrent writes. Every page of one scan is evaluated at the
+bi-temporal coordinate captured on the first page (disclosed as
+`snapshot_valid_time`/`snapshot_transaction_time`), leveraging the existing
+point-in-time read semantics: a row **created** after the first page is never
+seen, a row **deleted** after it is still seen, and the union of all pages
+equals exactly the unbounded result at that one moment. The node/adjacency
+tools use a **keyset** (ascending id, depth-independent — page N does not
+recompute the preceding N−1 pages); `traverse` pins the snapshot but continues
+by an internal offset over its deterministic DFS in v1. Tokens are opaque,
+printable, bounded base64url strings signed with a per-process secret (so
+tampered/wrong-tool tokens are rejected `INVALID_ARGUMENT`, never wrong data;
+they do not survive a server restart). Cursors have a documented, configurable
+**TTL** (default 5 min, `cursor_ttl_seconds`) and a per-connection **cap** on
+concurrently live cursors (default 128; both via
+`AletheiaMcpServer::with_cursor_config`); resuming after expiry or exceeding
+the cap returns `FAILED_PRECONDITION` with remediation guidance, and expired
+cursors pin no storage. The design is **stateless** (all resume state is in
+the token) with only a tiny in-process registry for cap enforcement. Cursors
+compose with #3353 token budgets (a budget-limited page ends earlier; the
+cursor resumes where it stopped); offset paging (#3226) remains unchanged for
+backward compatibility. The `query` tool returns a structured
+`unsupported_construct` error for cursor requests in v1 (no silent fallback);
+`list_edges` is not cursorable (it does not enumerate edges — use the
+adjacency tools). See
+[docs/guides/mcp-query-tool.md](docs/guides/mcp-query-tool.md#paging-large-results-cursor-continuation).
+
 **Authentication & RBAC (Issue #3350)**: both server surfaces (MCP and
 HTTP) require an API key by default and refuse to start with zero
 credentials; anonymous access is an explicit opt-in

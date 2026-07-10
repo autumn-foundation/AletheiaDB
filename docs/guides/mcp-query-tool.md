@@ -975,6 +975,132 @@ keeps its existing microseconds-as-string format — that contract is
 unchanged). The block is purely additive: no existing field moved or changed
 shape.
 
+## Paging large results (cursor continuation)
+
+Offset pagination (`offset`/`next_offset`, Issue #3226) works, but over a
+*concurrently written* database it is quietly unsafe: between fetching page 1
+and page 2 other agents write, offsets shift, and the reader sees duplicates
+or misses rows — and each page is computed against a *different* database
+state, so an agent assembling "all Persons matching X" across five pages can
+return a set that never existed at any single moment. It also degrades
+linearly (page 50 recomputes and discards 4,900 rows).
+
+**Cursor continuation (Issue #3360)** fixes this. Set `use_cursor: true` on
+the first call to a bounded read tool; the response includes an opaque
+`cursor` token. Pass that token back — *with no other parameters* — to fetch
+the next page. When no `cursor` is present in a response, the scan is
+complete.
+
+### The consistency guarantee
+
+Every page of one cursor scan is evaluated at the **bi-temporal coordinate
+captured on the first page** (disclosed in each response as
+`snapshot_valid_time` / `snapshot_transaction_time`), leveraging AletheiaDB's
+existing point-in-time read semantics. Concretely, for the whole scan:
+
+- a node/edge **created** after the first page is **never** seen (it did not
+  exist in the snapshot) — no post-cursor leakage;
+- a node/edge **deleted** after the first page is **still** seen (the snapshot
+  predates the deletion) — no omission;
+- a node/edge **updated** after the first page is returned **as it was** at
+  the snapshot.
+
+So the union of all pages equals *exactly* the unbounded result at one
+consistent moment — zero duplicates, zero gaps — even under concurrent
+mutation. This is uniquely cheap for AletheiaDB: the bi-temporal engine
+already answers "the database as of coordinate T" natively, so consistent
+paging falls out of existing semantics rather than requiring a held-open
+transaction (contrast Qdrant/Weaviate/Milvus scroll APIs, which drift under
+concurrent writes because they have no coordinate to anchor to).
+
+### The cursor loop
+
+```jsonc
+// Page 1 — opt in. `label` is required (an unlabeled list has no ordered set).
+// tools/call -> "list_nodes"
+{ "label": "Person", "use_cursor": true, "limit": 100 }
+// -> {
+//      "nodes": [ ...up to 100, ascending by id... ],
+//      "count": 100,
+//      "total_matching": 2500,
+//      "has_more": true,
+//      "paging": "cursor",
+//      "snapshot_valid_time": "2026-07-09T12:00:00.000000Z",
+//      "snapshot_transaction_time": "2026-07-09T12:00:00.000000Z",
+//      "cursor": "aletheiadb.cursor.v1.eyJ2Ijox...==.Qk9x...",   // opaque
+//      "cursor_ttl_seconds": 300
+//    }
+
+// Page 2..N — pass the cursor back verbatim, nothing else.
+// tools/call -> "list_nodes"
+{ "cursor": "aletheiadb.cursor.v1.eyJ2Ijox...==.Qk9x..." }
+// -> { ...next 100..., "cursor": "aletheiadb.cursor.v1.…", ... }
+
+// Last page: no `cursor` field and `has_more: false`. Stop.
+```
+
+An agent completing a 10K-row scan therefore sends the query text **once**
+(one full request + N cursor-only continuations), not N filtered re-queries.
+
+### Which tools are cursorable
+
+| Tool | Cursor support | Ordering / continuation |
+|------|----------------|-------------------------|
+| `list_nodes` | Yes (requires `label`) | Ascending node id — **keyset** (depth-independent) |
+| `find_nodes_at_time` | Yes | Ascending node id — **keyset**; snapshot is the request's `(valid_time, transaction_time)` |
+| `get_outgoing_edges` | Yes | Ascending edge id — **keyset** |
+| `get_incoming_edges` | Yes | Ascending edge id — **keyset** |
+| `traverse` | Yes | Deterministic DFS order — snapshot-pinned **offset** in v1 (a depth-independent keyset traversal is a documented follow-up) |
+| `query` | No (v1) | Returns a structured `unsupported_construct` error — no silent fallback; use `list_nodes`/`find_nodes_at_time` |
+| `list_edges` | No | Does not enumerate edges; returns `INVALID_ARGUMENT` pointing at `get_outgoing_edges`/`get_incoming_edges` |
+
+The **keyset** tools are depth-independent: fetching page N seeks straight to
+its start instead of recomputing and discarding the preceding N−1 pages, so
+page latency is flat across depth. `traverse` pins the snapshot (so every page
+is consistent) but continues by an internal offset in v1.
+
+### Token, lifecycle, and error contract
+
+- **Opaque and LLM-safe.** The token is a printable, bounded-length,
+  base64url string (`aletheiadb.cursor.v1.<payload>.<signature>`) with no
+  escaping hazards — safe to echo back verbatim. It is *self-describing to the
+  server*: the originating tool, the pinned snapshot, the keyset position, the
+  page size, and the query filters are all encoded inside it and signed with a
+  per-process secret. Continuation needs no other parameters.
+- **Stateless design.** No server-side scan state is held, so there is no
+  unbounded memory growth. A tiny in-process registry tracks only live cursor
+  *ids* (not pages) to enforce the cap and make reclamation observable.
+- **TTL.** Cursors expire after a documented, configurable TTL (default 5
+  minutes, surfaced as `cursor_ttl_seconds`), refreshed on each page (an idle
+  timeout between successive fetches). Expired cursors pin no storage.
+- **Live-cursor cap.** A configurable per-connection cap (default 128) bounds
+  concurrently open scans; continuation pages of one scan reuse its slot, so a
+  thousand-page scan holds exactly one.
+- **Cross-restart.** Cursors do **not** survive a server restart (the signing
+  secret is per-process); a stale token simply fails verification and the
+  caller re-issues the query.
+- **Structured errors** (Issue #3234): a **tampered**, malformed, or
+  wrong-tool token returns `INVALID_ARGUMENT` (never wrong data); an
+  **expired** cursor or one **exceeding the cap** returns `FAILED_PRECONDITION`
+  with remediation guidance (re-issue the query). Both are `retriable: false`.
+
+### Composing with token budgets (Issue #3353)
+
+Cursors and token-budget truncation are complementary and compose cleanly: a
+budget-constrained page simply ends earlier (fewer rows or degraded payloads),
+and the cursor resumes exactly where the retained prefix stopped — the
+snapshot is unchanged, so the next page continues the same consistent scan.
+Budgeting shapes *one* call; cursors move data *across* calls.
+
+### When to prefer cursors over offsets
+
+Use a **cursor** whenever you scan a result set that may span multiple pages
+while the graph is being written — you need snapshot consistency, no
+duplicates/gaps, and flat latency at depth. Offset paging remains available
+unchanged for backward compatibility and is fine for small, stable, one-shot
+lists where re-planning per page is cheap and concurrent drift is not a
+concern.
+
 ## Notes
 
 - **AQL has no parameter binding.** Sending `params` with `language: "aql"`
@@ -982,6 +1108,8 @@ shape.
 - **Feature gating.** When AletheiaDB is built without the `cypher` feature,
   `language: "cypher"` returns `language_unavailable` rather than failing; AQL
   remains available.
-- **Result cap.** Large result sets are capped (default 100, max 10000); use the
-  `truncated` flag to detect a cap hit. A streaming/cursor protocol is future
-  work.
+- **Result cap.** Large result sets from the `query` tool are capped (default
+  100, max 10000); use the `truncated` flag to detect a cap hit. The `query`
+  tool is not cursorable in v1 — for consistent, resumable scans use the
+  cursor-paged bounded read tools (see
+  [Paging large results](#paging-large-results-cursor-continuation)).
