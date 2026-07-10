@@ -236,9 +236,17 @@ pub fn read_entries_from_dir_with_cipher(
 ) -> Result<Vec<WalEntry>> {
     let mut entries = Vec::new();
 
-    // Read entries from each segment
-    for (_, path) in sorted_segment_paths(wal_dir) {
-        let segment_entries = read_segment_with_cipher(&path, start_lsn, cipher)?;
+    // Read entries from each segment. Only the FINAL segment is allowed to
+    // tolerate a torn trailing entry (a crash during the commit-marker flush,
+    // Issue #3413): a truncated entry at the true end of the last segment is a
+    // benign torn append, whereas the same shape in a NON-final segment (a
+    // later segment exists past it) is real corruption and must still hard-error.
+    let segment_paths = sorted_segment_paths(wal_dir);
+    let last_idx = segment_paths.len().saturating_sub(1);
+    for (i, (_, path)) in segment_paths.iter().enumerate() {
+        let tolerate_torn_tail = i == last_idx;
+        let segment_entries =
+            read_segment_with_cipher_tolerant(path, start_lsn, cipher, tolerate_torn_tail)?;
         entries.extend(segment_entries);
     }
 
@@ -603,6 +611,29 @@ pub fn read_segment_with_cipher(
     start_lsn: LSN,
     cipher: Option<&Arc<dyn crate::encryption::cipher::Cipher>>,
 ) -> Result<Vec<WalEntry>> {
+    // Standalone single-segment reads keep the strict contract: a torn trailing
+    // entry hard-errors, exactly as before. Only the recovery dir-reader
+    // (`read_entries_from_dir_with_cipher`) opts the FINAL segment into
+    // torn-tail tolerance (Issue #3413).
+    read_segment_with_cipher_tolerant(path, start_lsn, cipher, false)
+}
+
+/// Read WAL entries from a single segment, optionally tolerating a torn
+/// trailing entry (a crash during the final flush, Issue #3413).
+///
+/// When `tolerate_torn_tail` is `true` and the segment's LAST entry fails to
+/// parse **because its declared payload runs past end-of-buffer** (a truncated
+/// trailing entry — e.g. a half-written `CommitTx` marker), the decodable
+/// prefix is kept and the read stops without error. Any other parse failure
+/// (checksum mismatch, unknown op type, invalid UTF-8 — all of which mean the
+/// entry's bytes were fully present but wrong) still hard-errors, and so does
+/// every parse failure when `tolerate_torn_tail` is `false`.
+fn read_segment_with_cipher_tolerant(
+    path: &Path,
+    start_lsn: LSN,
+    cipher: Option<&Arc<dyn crate::encryption::cipher::Cipher>>,
+    tolerate_torn_tail: bool,
+) -> Result<Vec<WalEntry>> {
     // Open file, only treating NotFound as "empty" - all other errors are propagated
     let file = match File::open(path) {
         Ok(f) => f,
@@ -677,7 +708,7 @@ pub fn read_segment_with_cipher(
         return Ok(Vec::new()); // Empty segment
     };
 
-    // Encrypted segments (version 2 or 4) require a cipher for decryption.
+    // Encrypted segments (versions 2/4/6/8) require a cipher for decryption.
     if is_encrypted_version(version) && cipher.is_none() {
         return Err(StorageError::Encryption(format!(
             "Cannot read encrypted WAL segment (version {}) without a cipher",
@@ -688,7 +719,7 @@ pub fn read_segment_with_cipher(
 
     // Dispatch to the appropriate parsing loop based on version.
     if is_encrypted_version(version) {
-        // Version 2/4: length-prefixed encrypted entries.
+        // Encrypted (2/4/6/8): length-prefixed encrypted entries.
         let cipher = cipher.expect("cipher presence checked above");
         parse_encrypted_entries(
             buffer,
@@ -698,16 +729,53 @@ pub fn read_segment_with_cipher(
             path,
             &mut entries,
             version,
+            tolerate_torn_tail,
         )?;
     } else {
-        // Version 1/3: plaintext entries.
-        parse_plaintext_entries(buffer, &mut offset, version, start_lsn, path, &mut entries)?;
+        // Plaintext (1/3/5/7): plaintext entries.
+        parse_plaintext_entries(
+            buffer,
+            &mut offset,
+            version,
+            start_lsn,
+            path,
+            &mut entries,
+            tolerate_torn_tail,
+        )?;
     }
 
     Ok(entries)
 }
 
-/// Parse plaintext (version 1) entries from a WAL segment buffer.
+/// Does `err` denote a WAL parse failure caused by the entry's declared
+/// payload running **past the end of the buffer** (a truncated / torn entry),
+/// as opposed to corruption whose bytes were fully present but wrong?
+///
+/// This is the signal that separates a benign torn append (Issue #3413: a
+/// crash during the commit-marker flush leaves a full 24-byte header but a
+/// truncated payload) from real damage (a checksum mismatch, an unknown op
+/// type, invalid UTF-8 — all of which mean the entry was fully written but is
+/// bad). Every truncation-origin error carries one of these stable,
+/// test-locked substrings emitted whenever a reader needs more bytes than the
+/// buffer holds (`require_bytes`, `HybridTimestamp::deserialize`,
+/// `PropertyMap::deserialize`). Because such an error only fires once the
+/// parser has consumed to the very end of the buffer, a truncation error at a
+/// tail entry provably has no valid entries after it — which is exactly why it
+/// is safe to stop and keep the decodable prefix.
+///
+/// NOTE: sibling Issue #3433 generalizes torn-tail tolerance to all entry
+/// types across replay via a structured signal; here we implement only the
+/// narrow marker-specific slice #3413's own crash-during-marker-flush case
+/// needs.
+fn is_truncation_error(err: &Error) -> bool {
+    let msg = err.to_string();
+    msg.contains("Insufficient buffer size") || msg.contains("too short")
+}
+
+/// Parse plaintext (versions 1/3/5/7) entries from a WAL segment buffer.
+///
+/// See [`read_segment_with_cipher_tolerant`] for the meaning of
+/// `tolerate_torn_tail`.
 fn parse_plaintext_entries(
     buffer: &[u8],
     offset: &mut usize,
@@ -715,6 +783,7 @@ fn parse_plaintext_entries(
     start_lsn: LSN,
     path: &Path,
     entries: &mut Vec<WalEntry>,
+    tolerate_torn_tail: bool,
 ) -> Result<()> {
     while *offset < buffer.len() {
         match parse_entry_at(buffer, *offset, version) {
@@ -748,6 +817,27 @@ fn parse_plaintext_entries(
                         break;
                     }
 
+                    // Torn trailing entry (Issue #3413): a full 24-byte header
+                    // but a payload truncated past end-of-buffer, at the true
+                    // end of the FINAL segment (a crash during the commit-marker
+                    // flush). This is a benign torn append — keep the decodable
+                    // prefix and stop. Restricted to a genuine truncation error
+                    // (payload ran past EOF); any other corruption still
+                    // hard-errors, and a non-final segment never sets
+                    // `tolerate_torn_tail`.
+                    if tolerate_torn_tail && is_truncation_error(&e) {
+                        #[cfg(feature = "observability")]
+                        tracing::debug!(
+                            "Torn trailing entry at end of final WAL segment {:?} (offset {}/{}): {}; \
+                             keeping decodable prefix",
+                            path,
+                            offset,
+                            buffer.len(),
+                            e
+                        );
+                        break;
+                    }
+
                     #[cfg(feature = "observability")]
                     tracing::error!(
                         "Failed to parse WAL entry in segment {:?} at offset {}: {}",
@@ -771,12 +861,16 @@ fn parse_plaintext_entries(
     Ok(())
 }
 
-/// Parse encrypted (version 2 or 4) entries from a WAL segment buffer.
+/// Parse encrypted (versions 2/4/6/8) entries from a WAL segment buffer.
 ///
 /// Each entry is stored as `[4-byte LE length][encrypted entry bytes]`.
 /// The encrypted entry bytes are decrypted using the provided cipher,
 /// then parsed as a normal WAL entry using the payload version implied by
 /// `container_version` (see [`payload_version`]).
+///
+/// See [`read_segment_with_cipher_tolerant`] for the meaning of
+/// `tolerate_torn_tail`.
+#[allow(clippy::too_many_arguments)]
 fn parse_encrypted_entries(
     buffer: &[u8],
     offset: &mut usize,
@@ -785,6 +879,7 @@ fn parse_encrypted_entries(
     path: &Path,
     entries: &mut Vec<WalEntry>,
     container_version: u8,
+    tolerate_torn_tail: bool,
 ) -> Result<()> {
     let entry_version = payload_version(container_version);
     while *offset < buffer.len() {
@@ -850,6 +945,24 @@ fn parse_encrypted_entries(
                 }
             }
             Err(e) => {
+                // Torn trailing entry (Issue #3413): a length-complete final
+                // frame that decrypts but whose decrypted payload is truncated
+                // past its own end (a crash during the commit-marker flush at
+                // the true end of the final segment). Mirrors the plaintext
+                // path — keep the decodable prefix on a genuine truncation
+                // error; any other corruption still hard-errors. (The more
+                // common encrypted torn tail — an incomplete length prefix or
+                // frame — is already caught by the benign breaks above.)
+                if tolerate_torn_tail && is_truncation_error(&e) {
+                    #[cfg(feature = "observability")]
+                    tracing::debug!(
+                        "Torn trailing decrypted entry at end of final WAL segment {:?}: {}; \
+                         keeping decodable prefix",
+                        path,
+                        e
+                    );
+                    break;
+                }
                 #[cfg(feature = "observability")]
                 tracing::error!(
                     "Failed to parse decrypted WAL entry in segment {:?}: {}",

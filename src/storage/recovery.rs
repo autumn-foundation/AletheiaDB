@@ -803,6 +803,22 @@ fn lsns_contiguous(pending: &[(LSN, WalOperation)]) -> bool {
 /// entry stream into the ordered list of `(operation, transaction_timestamp)`
 /// pairs that replay must apply — with uncommitted transaction tails removed.
 ///
+/// # Load-bearing invariant: replay begins at a transaction-frame boundary
+///
+/// This resolver assumes the entry stream it is handed **never begins in the
+/// middle of a `[BeginTx .. CommitTx]` band** — i.e. `start_lsn` is always a
+/// band start (or a legacy/unframed boundary), never a data op or `CommitTx`
+/// whose `BeginTx` was already skipped. Production guarantees this: startup
+/// replays from an inclusive `start_lsn = manifest.lsn` (see `db::config`), and
+/// the manifest LSN is the observable next-to-allocate LSN, which
+/// `allocate_batch` only ever advances by a WHOLE `[BeginTx .. CommitTx]` band
+/// in one atomic step — so it can never fall mid-band. If that invariant were
+/// ever violated (see the note on `checkpoint.rs`'s exclusive `.next()`
+/// convention, currently test-only and unwired), a `CommitTx` could arrive with
+/// no open frame; this resolver treats that as a **benign skip** (its `BeginTx`
+/// lies below `start_lsn`, so there are no buffered ops to apply) rather than a
+/// "failed validation" corruption warning.
+///
 /// # Framed-replay invariant
 ///
 /// A committing `WriteTransaction` writes `[BeginTx, ..data ops.., CommitTx]`
@@ -829,8 +845,11 @@ fn resolve_transaction_frames(entries: Vec<WalEntry>) -> Vec<(WalOperation, Time
     let mut resolved: Vec<(WalOperation, Timestamp)> = Vec::with_capacity(entries.len());
     // Buffered data ops of the currently-open frame, with their LSNs.
     let mut pending: Vec<(LSN, WalOperation)> = Vec::new();
-    // `tx_id` of the currently-open frame, if any.
-    let mut open_tx: Option<u64> = None;
+    // `(tx_id, begin_lsn)` of the currently-open frame, if any. The `BeginTx`
+    // LSN is retained so the terminal `CommitTx` can bracket-check the band
+    // (Issue #3413 integrity check R5): the whole `[BeginTx .. CommitTx]` band
+    // must be gap-free at BOTH ends, not just internally contiguous.
+    let mut open_tx: Option<(u64, LSN)> = None;
 
     for entry in entries {
         // Legacy / non-transactional entries apply immediately with their own
@@ -853,28 +872,54 @@ fn resolve_transaction_frames(entries: Vec<WalEntry>) -> Vec<(WalOperation, Time
                     );
                     pending.clear();
                 }
-                open_tx = Some(tx_id);
+                open_tx = Some((tx_id, entry_lsn));
             }
             WalOperation::CommitTx {
                 tx_id,
                 entry_count,
                 commit_timestamp,
             } => {
-                let valid = open_tx == Some(tx_id)
-                    && pending.len() == entry_count as usize
-                    && lsns_contiguous(&pending);
-                if valid {
-                    // Commit the frame atomically: every op takes the marker's
-                    // authoritative commit timestamp.
-                    for (_lsn, op) in pending.drain(..) {
-                        resolved.push((op, commit_timestamp));
+                match open_tx {
+                    // Benign skip (see the load-bearing invariant on this fn): a
+                    // `CommitTx` with no open frame is a band whose `BeginTx`
+                    // lies below `start_lsn`. Under the production invariant this
+                    // never happens; if it ever did, `pending` is empty and there
+                    // is nothing to apply — quietly skip rather than emit a
+                    // spurious corruption warning.
+                    None => {
+                        debug_assert!(
+                            pending.is_empty(),
+                            "a CommitTx with no open frame must have no buffered ops"
+                        );
                     }
-                } else {
-                    warn_discarded_frame(
-                        "CommitTx failed validation (tx_id / entry_count / LSN contiguity)",
-                        pending.len(),
-                    );
-                    pending.clear();
+                    Some((open_id, begin_lsn)) => {
+                        // Bracket check (R5): the band must be gap-free at both
+                        // ends — the first data op immediately follows BeginTx
+                        // and CommitTx immediately follows the last data op — in
+                        // addition to being internally contiguous (R4) and
+                        // matching the marker's tx_id / entry_count.
+                        let brackets_ok = pending.first().map(|(l, _)| l.0)
+                            == Some(begin_lsn.0.wrapping_add(1))
+                            && pending.last().map(|(l, _)| l.0.wrapping_add(1))
+                                == Some(entry_lsn.0);
+                        let valid = open_id == tx_id
+                            && pending.len() == entry_count as usize
+                            && lsns_contiguous(&pending)
+                            && brackets_ok;
+                        if valid {
+                            // Commit the frame atomically: every op takes the
+                            // marker's authoritative commit timestamp.
+                            for (_lsn, op) in pending.drain(..) {
+                                resolved.push((op, commit_timestamp));
+                            }
+                        } else {
+                            warn_discarded_frame(
+                                "CommitTx failed validation (tx_id / entry_count / LSN contiguity / band brackets)",
+                                pending.len(),
+                            );
+                            pending.clear();
+                        }
+                    }
                 }
                 open_tx = None;
             }
@@ -899,9 +944,21 @@ fn resolve_transaction_frames(entries: Vec<WalEntry>) -> Vec<(WalOperation, Time
                 if open_tx.is_some() {
                     pending.push((entry_lsn, op));
                 } else {
-                    // Framed segment but no open frame: a raw append landed in
-                    // a v7+ segment (only test/tooling paths do this). Apply
-                    // immediately with the entry's own timestamp.
+                    // ⚠️ LANDMINE (Issue #3413): a framed data op with NO open
+                    // frame falls through to immediate-apply with its OWN
+                    // per-entry timestamp — exactly the per-op timestamp
+                    // bisection transaction framing exists to prevent. This is
+                    // deliberately reachable ONLY for raw `append`/`append_async`
+                    // into a v7+ segment (test/tooling paths), which carry the
+                    // `framed` flag from the segment version yet legitimately
+                    // have no `BeginTx`; for them immediate-apply is correct.
+                    // The real committing producer (`log_operations_to_wal`)
+                    // ALWAYS brackets its data ops in a `[BeginTx .. CommitTx]`
+                    // band, so a *transactional* op never lands here. If any
+                    // future producer raw-appends framed data ops that were
+                    // meant to share a commit timestamp, this branch would
+                    // silently re-bisect them — audit this path before adding
+                    // one.
                     resolved.push((op, entry_ts));
                 }
             }
@@ -1170,6 +1227,81 @@ mod framing_tests {
             resolved[0].0,
             WalOperation::DeclareUniqueConstraint { .. }
         ));
+    }
+
+    /// Fix #3413 (defensive benign skip): a `CommitTx` that arrives with no
+    /// open frame (its `BeginTx` lay below `start_lsn`) applies nothing and is
+    /// NOT a validation failure. Unreachable in production (replay always
+    /// starts at a band boundary) but must degrade gracefully if it ever isn't.
+    #[test]
+    fn stray_commit_tx_with_no_open_frame_is_benign_skip() {
+        let entries = vec![framed(
+            5,
+            WalOperation::CommitTx {
+                tx_id: 9,
+                entry_count: 0,
+                commit_timestamp: ts(100),
+            },
+            ts(13),
+        )];
+        let resolved = resolve_transaction_frames(entries);
+        assert!(
+            resolved.is_empty(),
+            "a stray CommitTx with no open frame must apply nothing"
+        );
+    }
+
+    /// Fix #3413 (band bracket check, R5): a frame that is internally contiguous
+    /// AND matches tx_id/entry_count but has a GAP between `BeginTx` and the
+    /// first data op (head gap) must be discarded — the band is not fully
+    /// bracketed, so an op may be missing at the head.
+    #[test]
+    fn discards_frame_on_head_gap_between_begin_and_first_op() {
+        let entries = vec![
+            framed(1, WalOperation::BeginTx { tx_id: 1 }, ts(10)),
+            // Head gap: first data op at LSN 3, not 2 (BeginTx.lsn + 1).
+            framed(3, create_node_op(1), ts(11)),
+            framed(4, create_node_op(2), ts(12)),
+            framed(
+                5,
+                WalOperation::CommitTx {
+                    tx_id: 1,
+                    entry_count: 2,
+                    commit_timestamp: ts(100),
+                },
+                ts(13),
+            ),
+        ];
+        assert!(
+            resolve_transaction_frames(entries).is_empty(),
+            "a head-gapped band (BeginTx not immediately followed by first data op) must discard"
+        );
+    }
+
+    /// Fix #3413 (band bracket check, R5): a GAP between the last data op and
+    /// the terminal `CommitTx` (tail gap) must also discard the frame, even
+    /// though the data ops are internally contiguous.
+    #[test]
+    fn discards_frame_on_tail_gap_between_last_op_and_commit() {
+        let entries = vec![
+            framed(1, WalOperation::BeginTx { tx_id: 1 }, ts(10)),
+            framed(2, create_node_op(1), ts(11)),
+            framed(3, create_node_op(2), ts(12)),
+            // Tail gap: CommitTx at LSN 5, not 4 (last data op.lsn + 1).
+            framed(
+                5,
+                WalOperation::CommitTx {
+                    tx_id: 1,
+                    entry_count: 2,
+                    commit_timestamp: ts(100),
+                },
+                ts(13),
+            ),
+        ];
+        assert!(
+            resolve_transaction_frames(entries).is_empty(),
+            "a tail-gapped band (last data op not immediately followed by CommitTx) must discard"
+        );
     }
 }
 

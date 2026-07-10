@@ -146,6 +146,162 @@ fn atomic_batch_shares_single_transaction_time() {
     }
 }
 
+/// AC#3 (authoritative commit timestamp): the `CommitTx` marker must carry the
+/// **real MVCC commit timestamp** — the exact value the live version was stamped
+/// with — not a fresh `time::now()` sampled at commit or replay. Capture a
+/// committed node's LIVE `transaction_from` BEFORE the simulated crash, then
+/// after forced replay assert the recovered version's transaction time is
+/// **exactly equal**. A marker stamped with `time::now()` would differ from the
+/// HLC commit timestamp (different logical/wallclock), so this pins that the
+/// marker is authoritative rather than merely "internally consistent across the
+/// batch" (which `atomic_batch_shares_single_transaction_time` alone allows).
+#[test]
+fn test_commit_timestamp_matches_live_commit() {
+    let dir = tempdir().unwrap();
+    let data_dir = dir.path().join("db");
+
+    let (id, live_tx_time) = {
+        let db = AletheiaDB::open(&data_dir).unwrap();
+        let id = commit_batch(&db, &["Live"])[0];
+        let live = db
+            .get_node_history(id)
+            .expect("live history")
+            .versions
+            .last()
+            .expect("at least one live version")
+            .temporal
+            .transaction_time()
+            .start();
+        (id, live)
+    };
+
+    force_full_replay(&data_dir);
+
+    let db2 = AletheiaDB::open(&data_dir).unwrap();
+    let recovered_tx_time = db2
+        .get_node_history(id)
+        .expect("history after replay")
+        .versions
+        .last()
+        .expect("at least one recovered version")
+        .temporal
+        .transaction_time()
+        .start();
+
+    assert_eq!(
+        recovered_tx_time, live_tx_time,
+        "recovered transaction time {:?} must EXACTLY equal the authoritative live commit \
+         timestamp {:?}; a marker stamped with time::now() instead of the MVCC commit \
+         timestamp would differ",
+        recovered_tx_time, live_tx_time
+    );
+}
+
+/// AC#3 companion (cross-batch distinctness): two SEPARATE transactions must
+/// recover with DIFFERENT unified transaction times. Within each batch every
+/// version shares one time (pinned elsewhere); across batches they must differ.
+/// This guards against an "everything collapses to one global timestamp"
+/// regression that a single-batch equality test cannot catch.
+#[test]
+fn distinct_batches_have_distinct_transaction_times() {
+    let dir = tempdir().unwrap();
+    let data_dir = dir.path().join("db");
+
+    let (a, b) = {
+        let db = AletheiaDB::open(&data_dir).unwrap();
+        let a = commit_batch(&db, &["A1", "A2"]);
+        let b = commit_batch(&db, &["B1", "B2"]);
+        (a, b)
+    };
+
+    force_full_replay(&data_dir);
+    let db2 = AletheiaDB::open(&data_dir).unwrap();
+
+    let ts_of = |id: &NodeId| {
+        db2.get_node_history(*id)
+            .expect("history after replay")
+            .versions
+            .last()
+            .expect("version present")
+            .temporal
+            .transaction_time()
+            .start()
+    };
+
+    // Within each batch: one shared transaction time.
+    let a_ts = ts_of(&a[0]);
+    assert_eq!(
+        a_ts,
+        ts_of(&a[1]),
+        "batch A must share one transaction time"
+    );
+    let b_ts = ts_of(&b[0]);
+    assert_eq!(
+        b_ts,
+        ts_of(&b[1]),
+        "batch B must share one transaction time"
+    );
+
+    // Across batches: distinct times (no global-timestamp collapse).
+    assert_ne!(
+        a_ts, b_ts,
+        "two separate transactions must have DISTINCT unified transaction times \
+         (got {:?} for both)",
+        a_ts
+    );
+}
+
+/// Fix #3413 (torn/partial CommitTx marker): a crash can leave the FINAL
+/// `CommitTx` with a full 24-byte entry header but a **truncated payload**
+/// (24–48 of its 49 bytes). Recovery must treat that as a benign torn tail —
+/// discard the un-terminated transaction and KEEP every prior committed
+/// transaction — not hard-error the whole segment read (which would discard
+/// PRIOR committed data too).
+#[test]
+fn torn_partial_commit_marker_keeps_prior_tx() {
+    // Truncating this many bytes off the tail leaves 30 bytes of the 49-byte
+    // marker: the full 24-byte header + op tag + 5 payload bytes, so the entry
+    // dispatches to the CommitTx parser which then fails needing more bytes —
+    // exactly the "full header, truncated payload" shape.
+    const TORN_MARKER_TRUNC: u64 = 19;
+
+    let dir = tempdir().unwrap();
+    let data_dir = dir.path().join("db");
+
+    let (tx1, tx2) = {
+        let db = AletheiaDB::open(&data_dir).unwrap();
+        let tx1 = commit_batch(&db, &["K1", "K2"]);
+        let tx2 = commit_batch(&db, &["D1", "D2"]);
+        (tx1, tx2)
+    };
+
+    // Leave tx2's CommitTx as a full-header/truncated-payload torn entry.
+    truncate_last_segment_tail(&data_dir, TORN_MARKER_TRUNC);
+    force_full_replay(&data_dir);
+
+    // Reopen MUST succeed despite the torn trailing marker.
+    let db2 = AletheiaDB::open(&data_dir).expect(
+        "reopen must succeed: a torn trailing CommitTx is a benign tail, not a segment-read error",
+    );
+
+    // tx1 (marker intact) fully present.
+    for id in &tx1 {
+        assert!(
+            db2.get_node(*id).is_ok(),
+            "prior committed tx node {:?} must survive a torn following marker",
+            id
+        );
+    }
+    // tx2 (torn marker) fully discarded.
+    for id in &tx2 {
+        assert!(
+            db2.get_node(*id).is_err(),
+            "node {:?} from the tx whose CommitTx was torn must be discarded",
+            id
+        );
+    }
+}
+
 /// AC#2 (prefix discard): a batch whose commit marker never reached disk must
 /// replay as **all-or-nothing** — zero of its writes may survive. On trunk the
 /// unframed prefix leaks (some nodes survive).
@@ -268,6 +424,86 @@ fn single_op_tx_is_framed() {
     assert!(
         db3.get_node(id2).is_err(),
         "single-op tx whose marker was lost must be discarded"
+    );
+}
+
+/// An EMPTY transaction (no buffered writes) must write **zero** WAL entries —
+/// no `BeginTx`/`CommitTx` frame, no data ops (Issue #3413: framing is elided
+/// for empty commits, reproducing the pre-framing early return exactly).
+#[test]
+fn test_empty_tx_writes_no_marker() {
+    use aletheiadb::storage::LSN;
+    use aletheiadb::storage::wal::segment_reader::read_entries_from_dir;
+
+    let dir = tempdir().unwrap();
+    let data_dir = dir.path().join("db");
+
+    {
+        let db = AletheiaDB::open(&data_dir).unwrap();
+        // Commit a transaction that buffers no writes.
+        db.write(|_tx| Ok::<_, aletheiadb::Error>(()))
+            .expect("empty commit");
+    }
+
+    let entries = read_entries_from_dir(&data_dir.join("wal"), LSN::initial()).unwrap();
+    assert!(
+        entries.is_empty(),
+        "an empty transaction must write zero WAL entries, found {}: {:?}",
+        entries.len(),
+        entries.iter().map(|e| &e.operation).collect::<Vec<_>>()
+    );
+}
+
+/// Raw-segment shape check: a committed transaction of N data ops leaves exactly
+/// one trailing `CommitTx {{ entry_count: N }}` on disk, positioned one LSN past
+/// the last data op (i.e. at `BeginTx.lsn + N + 1`).
+#[test]
+fn committed_tx_has_trailing_commit_marker_with_entry_count() {
+    use aletheiadb::storage::LSN;
+    use aletheiadb::storage::WalOperation;
+    use aletheiadb::storage::wal::segment_reader::read_entries_from_dir;
+
+    let dir = tempdir().unwrap();
+    let data_dir = dir.path().join("db");
+
+    const N: u32 = 3;
+    {
+        let db = AletheiaDB::open(&data_dir).unwrap();
+        commit_batch(&db, &["N1", "N2", "N3"]);
+    }
+
+    let entries = read_entries_from_dir(&data_dir.join("wal"), LSN::initial()).unwrap();
+
+    let begin_lsn = entries
+        .iter()
+        .find_map(|e| match e.operation {
+            WalOperation::BeginTx { .. } => Some(e.lsn),
+            _ => None,
+        })
+        .expect("a committed tx must have a BeginTx marker");
+
+    let commit_markers: Vec<_> = entries
+        .iter()
+        .filter_map(|e| match &e.operation {
+            WalOperation::CommitTx { entry_count, .. } => Some((e.lsn, *entry_count)),
+            _ => None,
+        })
+        .collect();
+
+    assert_eq!(
+        commit_markers.len(),
+        1,
+        "exactly one CommitTx marker for one committed batch"
+    );
+    let (commit_lsn, entry_count) = commit_markers[0];
+    assert_eq!(
+        entry_count, N,
+        "CommitTx entry_count must equal the number of data ops"
+    );
+    assert_eq!(
+        commit_lsn.0,
+        begin_lsn.0 + u64::from(N) + 1,
+        "the trailing CommitTx must sit at BeginTx.lsn + N + 1"
     );
 }
 
