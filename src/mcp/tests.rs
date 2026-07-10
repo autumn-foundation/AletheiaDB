@@ -12884,6 +12884,914 @@ mod per_request_now_tests {
 }
 
 // ============================================================================
+// Token-budget-aware response shaping (Issue #3353)
+// ============================================================================
+
+#[cfg(test)]
+mod budget_tests {
+    use super::*;
+    use serde_json::{Value, json};
+
+    /// Dispatch a tool and return the *raw* serialized response text plus its
+    /// error flag. The raw text length is exactly what is emitted on the wire,
+    /// so it is the quantity the budget contract bounds.
+    fn dispatch_raw(server: &AletheiaMcpServer, tool: &str, args: Value) -> (String, bool) {
+        let result = server.dispatch_tool(tool, args);
+        let is_error = result.is_error.unwrap_or(false);
+        let text = result
+            .content
+            .first()
+            .and_then(|c| c.as_text().map(|t| t.text.clone()))
+            .expect("tool result should carry text content");
+        (text, is_error)
+    }
+
+    fn dispatch_json(server: &AletheiaMcpServer, tool: &str, args: Value) -> (Value, bool) {
+        let (text, is_error) = dispatch_raw(server, tool, args);
+        let value = serde_json::from_str(&text).expect("response should be valid JSON");
+        (value, is_error)
+    }
+
+    /// Create a node whose properties are large enough to blow a small budget.
+    fn seed_big_node(server: &AletheiaMcpServer, label: &str, name: &str) -> u64 {
+        let bio = "x".repeat(4000);
+        let args = json!({
+            "label": label,
+            "properties": {
+                "name": name,
+                "bio": bio,
+                "notes": "y".repeat(2000),
+            }
+        });
+        let (value, is_error) = dispatch_json(server, "create_node", args);
+        assert!(!is_error, "seed create_node failed: {value}");
+        value.get("id").and_then(Value::as_u64).expect("node id")
+    }
+
+    fn seed_many(server: &AletheiaMcpServer, label: &str, n: usize) -> Vec<u64> {
+        (0..n)
+            .map(|i| seed_big_node(server, label, &format!("n{i}")))
+            .collect()
+    }
+
+    // ---- AC1: omitting the budget leaves behavior unchanged ----------------
+
+    #[test]
+    fn ac1_omitting_budget_is_unchanged() {
+        let server = create_test_server();
+        let id = seed_big_node(&server, "Person", "Alice");
+        let (with_none, _) = dispatch_json(&server, "get_node", json!({ "node_id": id }));
+        // Full bio present, no budget block.
+        assert!(
+            with_none.get("budget").is_none(),
+            "no budget block expected"
+        );
+        let bio = with_none["properties"]["bio"].as_str().unwrap();
+        assert_eq!(bio.len(), 4000, "full bio returned when no budget set");
+    }
+
+    // ---- AC2: hard contract, conformance sweep -----------------------------
+
+    #[test]
+    fn ac2_conformance_sweep_never_overruns() {
+        let server = create_test_server();
+        // Enable a vector index so find_similar/hybrid_query have data.
+        let _ = server.dispatch_tool(
+            "enable_vector_index",
+            json!({ "property_name": "embedding", "dimensions": 4, "metric": "cosine" }),
+        );
+        let ids = seed_many(&server, "Person", 40);
+        // A couple of edges for edge tools / traversal.
+        for w in ids.windows(2).take(20) {
+            let _ = server.dispatch_tool(
+                "create_edge",
+                json!({ "source_id": w[0], "target_id": w[1], "label": "KNOWS",
+                        "properties": { "detail": "z".repeat(1500) } }),
+            );
+        }
+
+        let budgets = [256u64, 512, 1024, 2048, 4096, 8192, 16384, 32768];
+        let cases: Vec<(&str, Value)> = vec![
+            ("get_node", json!({ "node_id": ids[0] })),
+            ("list_nodes", json!({ "label": "Person", "limit": 40 })),
+            ("get_edge", json!({ "edge_id": 1 })),
+            ("list_edges", json!({ "limit": 40 })),
+            ("get_outgoing_edges", json!({ "node_id": ids[0] })),
+            ("get_incoming_edges", json!({ "node_id": ids[1] })),
+            (
+                "traverse",
+                json!({ "start_node_id": ids[0], "max_depth": 3 }),
+            ),
+            ("get_node_history", json!({ "node_id": ids[0] })),
+            ("get_schema", json!({})),
+            (
+                "find_nodes_at_time",
+                json!({ "label": "Person", "valid_time": "2999-01-01T00:00:00Z" }),
+            ),
+        ];
+
+        for &budget in &budgets {
+            for (tool, base) in &cases {
+                let mut args = base.clone();
+                args.as_object_mut()
+                    .unwrap()
+                    .insert("max_response_tokens".into(), json!(budget));
+                let (text, is_error) = dispatch_raw(&server, tool, args);
+                if is_error {
+                    // Too-small budgets legitimately error (AC6); that is not an overrun.
+                    continue;
+                }
+                let cap = (budget * super::super::budget::BYTES_PER_TOKEN) as usize;
+                assert!(
+                    text.len() <= cap,
+                    "[{tool} @ {budget} tok] overran budget: {} bytes > cap {} bytes",
+                    text.len(),
+                    cap
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn ac2_byte_budget_is_exact() {
+        let server = create_test_server();
+        let ids = seed_many(&server, "Doc", 20);
+        let _ = ids;
+        for cap in [400usize, 900, 1500, 3000] {
+            let (text, is_error) = dispatch_raw(
+                &server,
+                "list_nodes",
+                json!({ "label": "Doc", "limit": 20, "max_response_bytes": cap }),
+            );
+            if is_error {
+                continue;
+            }
+            assert!(
+                text.len() <= cap,
+                "byte budget {cap} overran: {} bytes",
+                text.len()
+            );
+        }
+    }
+
+    // ---- AC3: deterministic, disclosed rung --------------------------------
+
+    #[test]
+    fn ac3_rung_is_disclosed_and_deterministic() {
+        let server = create_test_server();
+        let id = seed_big_node(&server, "Person", "Alice");
+        let (a, _) = dispatch_json(
+            &server,
+            "get_node",
+            json!({ "node_id": id, "max_response_tokens": 300 }),
+        );
+        let (b, _) = dispatch_json(
+            &server,
+            "get_node",
+            json!({ "node_id": id, "max_response_tokens": 300 }),
+        );
+        assert_eq!(a, b, "same request+budget+data must degrade identically");
+        let budget = a.get("budget").expect("budget block present");
+        assert_eq!(budget["applied"], json!(true));
+        assert!(budget.get("rung").and_then(Value::as_str).is_some());
+        assert_eq!(
+            budget["token_estimation_basis"],
+            json!("ceil(utf8_bytes / 4)")
+        );
+        // Structure survives: id and label kept.
+        assert_eq!(a["id"], json!(id));
+        assert!(a.get("label").is_some());
+    }
+
+    #[test]
+    fn ac3_ladder_progression() {
+        let server = create_test_server();
+        let id = seed_big_node(&server, "Person", "Alice");
+        // Generous budget -> full.
+        let (full, _) = dispatch_json(
+            &server,
+            "get_node",
+            json!({ "node_id": id, "max_response_tokens": 20000 }),
+        );
+        assert_eq!(full["budget"]["rung"], json!("full"));
+        // Mid budget -> some form of elision/summary (bio gone as full string).
+        let (mid, _) = dispatch_json(
+            &server,
+            "get_node",
+            json!({ "node_id": id, "max_response_tokens": 400 }),
+        );
+        let rung = mid["budget"]["rung"].as_str().unwrap();
+        assert!(
+            rung == "elided_properties" || rung == "entity_summaries",
+            "expected a degraded rung, got {rung}"
+        );
+        // bio must no longer be a full 4000-char string.
+        let bio = &mid["properties"]["bio"];
+        assert!(
+            bio.as_str().map(|s| s.len()).unwrap_or(0) < 4000,
+            "bio should have degraded"
+        );
+    }
+
+    // ---- AC4: fetch handles reconstruct omitted content --------------------
+
+    #[test]
+    fn ac4_fetch_handle_recovers_full_content() {
+        let server = create_test_server();
+        let id = seed_big_node(&server, "Person", "Alice");
+        let (shaped, _) = dispatch_json(
+            &server,
+            "get_node",
+            json!({ "node_id": id, "max_response_tokens": 400 }),
+        );
+        // Find a fetch handle somewhere in the shaped properties.
+        let handle = find_fetch_handle(&shaped).expect("a fetch handle must be present");
+        let tool = handle["tool"].as_str().unwrap().to_string();
+        let mut args = handle["arguments"].clone();
+        assert_eq!(tool, "get_node");
+        // Following the handle (no budget) returns the full bio.
+        let (recovered, is_error) = dispatch_json(&server, &tool, {
+            args.as_object_mut().unwrap();
+            args
+        });
+        assert!(!is_error, "handle call failed: {recovered}");
+        assert_eq!(
+            recovered["properties"]["bio"].as_str().unwrap().len(),
+            4000,
+            "handle reconstructs the omitted content exactly"
+        );
+    }
+
+    fn find_fetch_handle(value: &Value) -> Option<Value> {
+        match value {
+            Value::Object(map) => {
+                if let Some(fetch) = map.get("fetch")
+                    && fetch.get("tool").is_some()
+                {
+                    return Some(fetch.clone());
+                }
+                for v in map.values() {
+                    if let Some(h) = find_fetch_handle(v) {
+                        return Some(h);
+                    }
+                }
+                None
+            }
+            Value::Array(items) => items.iter().find_map(find_fetch_handle),
+            _ => None,
+        }
+    }
+
+    // ---- AC5: priority_properties out-survive ------------------------------
+
+    #[test]
+    fn ac5_priority_properties_protected() {
+        let server = create_test_server();
+        let id = seed_big_node(&server, "Person", "Alice");
+        // Protect "bio" even though it is the bulkiest property. The budget is
+        // tight enough to force degradation (bio ~4000B + notes ~2000B exceeds
+        // it) but roomy enough to keep the protected bio in full.
+        let (shaped, is_error) = dispatch_json(
+            &server,
+            "get_node",
+            json!({ "node_id": id, "max_response_tokens": 1500,
+                    "priority_properties": ["bio"] }),
+        );
+        assert!(!is_error, "should fit with bio protected: {shaped}");
+        assert_ne!(
+            shaped["budget"]["rung"],
+            json!("full"),
+            "budget must be tight enough to force degradation"
+        );
+        // bio kept in full; an unprotected bulky prop (notes) elided/dropped.
+        assert_eq!(
+            shaped["properties"]["bio"].as_str().map(|s| s.len()),
+            Some(4000),
+            "protected property survives"
+        );
+        let notes = &shaped["properties"]["notes"];
+        let notes_full = notes.as_str().map(|s| s.len() == 2000).unwrap_or(false);
+        assert!(
+            !notes_full,
+            "unprotected bulky property should degrade first"
+        );
+    }
+
+    // ---- AC6: too-small budget -> structured error -------------------------
+
+    #[test]
+    fn ac6_too_small_budget_errors_with_min_viable() {
+        let server = create_test_server();
+        let ids = seed_many(&server, "Person", 30);
+        let _ = ids;
+        let (value, is_error) = dispatch_json(
+            &server,
+            "list_nodes",
+            json!({ "label": "Person", "limit": 30, "max_response_tokens": 1 }),
+        );
+        assert!(
+            is_error,
+            "tiny budget must error, not silently empty: {value}"
+        );
+        let err = value.get("error").expect("structured error");
+        assert_eq!(err["code"], json!("INVALID_ARGUMENT"));
+        assert_eq!(err["retriable"], json!(false));
+        assert!(
+            err["details"].get("min_viable_tokens").is_some(),
+            "error must state the minimum viable budget: {err}"
+        );
+    }
+
+    #[test]
+    fn ac6_malformed_budget_rejected() {
+        let server = create_test_server();
+        let id = seed_big_node(&server, "Person", "Alice");
+        let (value, is_error) = dispatch_json(
+            &server,
+            "get_node",
+            json!({ "node_id": id, "max_response_tokens": 0 }),
+        );
+        assert!(is_error);
+        assert_eq!(value["error"]["code"], json!("INVALID_ARGUMENT"));
+    }
+
+    // ---- AC7: ranked tools never drop/reorder results ----------------------
+
+    #[test]
+    fn ac7_find_similar_never_drops_results() {
+        let server = create_test_server();
+        let _ = server.dispatch_tool(
+            "enable_vector_index",
+            json!({ "property_name": "embedding", "dimensions": 4, "metric": "cosine" }),
+        );
+        // Seed nodes with embeddings and bulky payloads.
+        let mut ids = Vec::new();
+        for i in 0..6 {
+            let (v, e) = dispatch_json(
+                &server,
+                "create_node",
+                json!({ "label": "Doc", "properties": {
+                    "name": format!("d{i}"),
+                    "bio": "b".repeat(3000),
+                    "embedding": [i as f32, 0.0, 0.0, 1.0],
+                }}),
+            );
+            assert!(!e, "seed failed: {v}");
+            ids.push(v["id"].as_u64().unwrap());
+        }
+        let (unbudgeted, _) = dispatch_json(
+            &server,
+            "find_similar",
+            json!({ "node_id": ids[0], "limit": 5 }),
+        );
+        let full_count = count_results(&unbudgeted);
+        let (budgeted, is_error) = dispatch_json(
+            &server,
+            "find_similar",
+            json!({ "node_id": ids[0], "limit": 5, "max_response_tokens": 900 }),
+        );
+        if is_error {
+            // Acceptable only via AC6 (budget too small even for summaries).
+            assert_eq!(budgeted["error"]["code"], json!("INVALID_ARGUMENT"));
+            return;
+        }
+        let budgeted_count = count_results(&budgeted);
+        assert_eq!(
+            budgeted_count, full_count,
+            "ranked results must not be dropped to meet a budget"
+        );
+        // Scores preserved for every result.
+        assert!(scores_present(&budgeted), "scores must survive budgeting");
+    }
+
+    fn count_results(value: &Value) -> usize {
+        for key in ["results", "similar", "nodes"] {
+            if let Some(arr) = value.get(key).and_then(Value::as_array) {
+                return arr.len();
+            }
+        }
+        0
+    }
+
+    fn scores_present(value: &Value) -> bool {
+        for key in ["results", "similar", "nodes"] {
+            if let Some(arr) = value.get(key).and_then(Value::as_array) {
+                return arr
+                    .iter()
+                    .all(|r| r.get("score").is_some() || r.get("similarity_score").is_some());
+            }
+        }
+        false
+    }
+
+    // ---- T4: real classification test (not tautological) -------------------
+
+    #[test]
+    fn budgetable_set_is_nonempty_and_classified_read() {
+        use crate::auth::AccessClass;
+        // The set must be non-empty...
+        assert!(
+            !super::super::server::BUDGETABLE_READ_TOOLS.is_empty(),
+            "budgetable set must not be empty"
+        );
+        // ...and every entry must be classified as a Read tool in the RBAC
+        // access matrix (lockstep with the auth surface, not a self-referential
+        // `is_budgetable_read_tool` check).
+        for tool in super::super::server::BUDGETABLE_READ_TOOLS {
+            let class = super::super::auth::tool_access_class(tool);
+            assert_eq!(
+                class,
+                Some(AccessClass::Read),
+                "{tool} must be classified AccessClass::Read (got {class:?})"
+            );
+        }
+    }
+
+    // ---- F7: budget params are discoverable in every tool's inputSchema ----
+
+    #[test]
+    fn f7_budget_params_present_in_every_budgetable_input_schema() {
+        let server = create_test_server();
+        for tool in super::super::server::BUDGETABLE_READ_TOOLS {
+            let schema = server
+                .tool_input_schema_for_test(tool)
+                .unwrap_or_else(|| panic!("{tool} must be advertised"));
+            let props = schema
+                .get("properties")
+                .and_then(Value::as_object)
+                .unwrap_or_else(|| panic!("{tool} inputSchema must have properties"));
+            for key in [
+                "max_response_tokens",
+                "max_response_bytes",
+                "priority_properties",
+            ] {
+                assert!(
+                    props.contains_key(key),
+                    "{tool} inputSchema must expose `{key}` (found: {:?})",
+                    props.keys().collect::<Vec<_>>()
+                );
+            }
+            // Types are correct: two positive integers, one array of strings.
+            assert_eq!(props["max_response_tokens"]["type"], json!("integer"));
+            assert_eq!(props["max_response_bytes"]["type"], json!("integer"));
+            assert_eq!(props["priority_properties"]["type"], json!("array"));
+        }
+    }
+
+    // ---- F1 + F5: rung-4 truncation resume covers all rows, no gap/dupe ----
+
+    #[test]
+    fn f1_truncated_list_nodes_resume_has_no_gaps_or_dupes() {
+        let server = create_test_server();
+        let all_ids = seed_many(&server, "Person", 30);
+
+        // Full, unbudgeted page (limit high enough to hold all).
+        let (full, _) = dispatch_json(
+            &server,
+            "list_nodes",
+            json!({ "label": "Person", "limit": 100 }),
+        );
+        let full_ids = collect_node_ids(&full);
+        assert_eq!(full_ids.len(), all_ids.len(), "seeded set fully listed");
+
+        // Budgeted request tight enough to force rung-4 truncation.
+        let (page1, is_error) = dispatch_json(
+            &server,
+            "list_nodes",
+            json!({ "label": "Person", "limit": 100, "max_response_tokens": 400 }),
+        );
+        assert!(!is_error, "budgeted list_nodes should succeed: {page1}");
+        assert_eq!(
+            page1["budget"]["rung"],
+            json!("counts_and_handles"),
+            "budget must be tight enough to truncate the array"
+        );
+        let page1_ids = collect_node_ids(&page1);
+
+        // F1: `count` sibling reflects the retained prefix, and `next_offset`
+        // advances by exactly that (not the original limit).
+        assert_eq!(
+            page1["count"].as_u64().unwrap() as usize,
+            page1_ids.len(),
+            "count sibling must match retained rows"
+        );
+        assert_eq!(page1["has_more"], json!(true), "has_more must flip to true");
+        assert_eq!(
+            page1["next_offset"].as_u64().unwrap() as usize,
+            page1_ids.len(),
+            "next_offset must resume at the cut point"
+        );
+
+        // F5: the truncation fetch handle is a concrete resume call.
+        let handle = truncation_handle(&page1).expect("a truncation fetch handle must exist");
+        assert_eq!(handle["tool"], json!("list_nodes"));
+        let resume_args = handle["arguments"].clone();
+        assert_eq!(
+            resume_args["offset"].as_u64().unwrap() as usize,
+            page1_ids.len(),
+            "resume offset must equal the retained count"
+        );
+
+        // Follow the disclosed resume call (unbudgeted): the union must equal
+        // the full set with NO gaps and NO dupes.
+        let (page2, e2) = dispatch_json(&server, "list_nodes", resume_args);
+        assert!(!e2, "resume call must succeed: {page2}");
+        let page2_ids = collect_node_ids(&page2);
+
+        let mut union = page1_ids.clone();
+        union.extend(page2_ids.iter().copied());
+        let mut sorted_union = union.clone();
+        sorted_union.sort_unstable();
+        let before_dedup = sorted_union.len();
+        sorted_union.dedup();
+        assert_eq!(
+            before_dedup,
+            sorted_union.len(),
+            "no duplicate rows across pages"
+        );
+
+        let mut expected = full_ids.clone();
+        expected.sort_unstable();
+        assert_eq!(
+            sorted_union, expected,
+            "union of pages == full set (no gaps)"
+        );
+    }
+
+    fn collect_node_ids(value: &Value) -> Vec<u64> {
+        value
+            .get("nodes")
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(|n| n.get("id").and_then(Value::as_u64))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Find the rung-4 truncation disclosure's fetch handle in `budget.sections`.
+    fn truncation_handle(value: &Value) -> Option<Value> {
+        let sections = value.get("budget")?.get("sections")?.as_array()?;
+        for s in sections {
+            if s.get("rung").and_then(Value::as_str) == Some("counts_and_handles")
+                && let Some(fetch) = s.get("fetch")
+                && fetch.get("tool").is_some()
+            {
+                return Some(fetch.clone());
+            }
+        }
+        None
+    }
+
+    // ---- F4: counts_and_handles succeeds at a tight budget (no false AC6) --
+
+    #[test]
+    fn f4_counts_and_handles_succeeds_at_tight_budget() {
+        let server = create_test_server();
+        let _ = seed_many(&server, "Person", 30);
+        // A budget large enough for the minimal rung-4 response but tight enough
+        // that the metadata block matters — must SUCCEED, not falsely AC6-error.
+        let cap = 2000usize;
+        let (value, is_error) = dispatch_raw(
+            &server,
+            "list_nodes",
+            json!({ "label": "Person", "limit": 100, "max_response_bytes": cap }),
+        );
+        assert!(
+            !is_error,
+            "tight-but-viable budget must succeed, not error: {value}"
+        );
+        assert!(
+            value.len() <= cap,
+            "assembled response must fit: {}",
+            value.len()
+        );
+        let parsed: Value = serde_json::from_str(&value).unwrap();
+        assert_eq!(parsed["budget"]["rung"], json!("counts_and_handles"));
+    }
+
+    // ---- T6: re-issuing at the reported min_viable_tokens succeeds ---------
+
+    #[test]
+    fn t6_reissue_at_min_viable_budget_succeeds() {
+        let server = create_test_server();
+        let id = seed_big_node(&server, "Person", "Alice");
+        let (value, is_error) = dispatch_json(
+            &server,
+            "get_node",
+            json!({ "node_id": id, "max_response_tokens": 1 }),
+        );
+        assert!(is_error, "tiny budget must error first");
+        let min_viable = value["error"]["details"]["min_viable_tokens"]
+            .as_u64()
+            .expect("min_viable_tokens present");
+        // Re-issue at the reported minimum — must now succeed.
+        let (retry, retry_err) = dispatch_json(
+            &server,
+            "get_node",
+            json!({ "node_id": id, "max_response_tokens": min_viable }),
+        );
+        assert!(
+            !retry_err,
+            "re-issuing at min_viable_tokens={min_viable} must succeed: {retry}"
+        );
+        assert_eq!(retry["id"], json!(id));
+    }
+
+    // ---- T5: byte budget holds for multibyte/unicode property payloads -----
+
+    #[test]
+    fn t5_byte_budget_holds_for_unicode_property() {
+        let server = create_test_server();
+        let big = "🌍héllo".repeat(500); // multibyte, ~ several KB
+        let (created, e) = dispatch_json(
+            &server,
+            "create_node",
+            json!({ "label": "Doc", "properties": { "name": "u", "bio": big } }),
+        );
+        assert!(!e, "seed failed: {created}");
+        let id = created["id"].as_u64().unwrap();
+        for cap in [300usize, 700, 1200] {
+            let (text, is_error) = dispatch_raw(
+                &server,
+                "get_node",
+                json!({ "node_id": id, "max_response_bytes": cap }),
+            );
+            if is_error {
+                continue;
+            }
+            assert!(
+                text.len() <= cap,
+                "unicode byte budget {cap} overran: {} bytes",
+                text.len()
+            );
+            assert!(
+                std::str::from_utf8(text.as_bytes()).is_ok(),
+                "response must remain valid UTF-8"
+            );
+        }
+    }
+
+    // ---- F5 (non-paginated): truncation handle has no bogus offset ---------
+
+    #[test]
+    fn f5_non_paginated_truncation_handle_omits_offset() {
+        let server = create_test_server();
+        let hub = seed_big_node(&server, "Hub", "center");
+        // Many bulky outgoing edges so get_outgoing_edges (no offset paging)
+        // reaches rung-4 truncation.
+        for _ in 0..25 {
+            let tgt = seed_big_node(&server, "Person", "t");
+            let _ = server.dispatch_tool(
+                "create_edge",
+                json!({ "source_id": hub, "target_id": tgt, "label": "KNOWS",
+                        "properties": { "detail": "z".repeat(400) } }),
+            );
+        }
+        let (value, is_error) = dispatch_json(
+            &server,
+            "get_outgoing_edges",
+            json!({ "node_id": hub, "max_response_tokens": 500 }),
+        );
+        if is_error {
+            return; // AC6 acceptable at extreme tightness
+        }
+        if value["budget"]["rung"] == json!("counts_and_handles")
+            && let Some(handle) = truncation_edge_handle(&value)
+        {
+            assert_eq!(handle["tool"], json!("get_outgoing_edges"));
+            assert!(
+                handle.get("arguments").is_none(),
+                "non-paginated tool must not fabricate an offset resume call: {handle}"
+            );
+        }
+    }
+
+    fn truncation_edge_handle(value: &Value) -> Option<Value> {
+        let sections = value.get("budget")?.get("sections")?.as_array()?;
+        for s in sections {
+            if s.get("rung").and_then(Value::as_str) == Some("counts_and_handles")
+                && let Some(fetch) = s.get("fetch")
+                && fetch.get("tool").is_some()
+            {
+                return Some(fetch.clone());
+            }
+        }
+        None
+    }
+
+    // ---- T1: AC2 sweep extended to ranked + query tools --------------------
+
+    /// Seed Doc nodes carrying both a 4-d embedding and a bulky bio, so the
+    /// ranked/query tools have data large enough to force degradation.
+    fn seed_vector_docs(server: &AletheiaMcpServer, n: usize) -> Vec<u64> {
+        let _ = server.dispatch_tool(
+            "enable_vector_index",
+            json!({ "property_name": "embedding", "dimensions": 4, "metric": "cosine" }),
+        );
+        let mut ids = Vec::new();
+        for i in 0..n {
+            let (v, e) = dispatch_json(
+                server,
+                "create_node",
+                json!({ "label": "Doc", "properties": {
+                    "name": format!("d{i}"),
+                    "bio": "b".repeat(2500),
+                    "embedding": [i as f32, 1.0, 0.0, 1.0],
+                }}),
+            );
+            assert!(!e, "seed failed: {v}");
+            ids.push(v["id"].as_u64().unwrap());
+        }
+        ids
+    }
+
+    #[test]
+    fn t1_ranked_and_query_byte_cap_sweep_is_nonvacuous() {
+        let server = create_test_server();
+        let ids = seed_vector_docs(&server, 12);
+        // A few edges so hybrid traversal has neighbors.
+        for w in ids.windows(2).take(8) {
+            let _ = server.dispatch_tool(
+                "create_edge",
+                json!({ "source_id": w[0], "target_id": w[1], "label": "REL",
+                        "properties": { "note": "n".repeat(600) } }),
+            );
+        }
+        let cases: Vec<(&str, Value)> = vec![
+            (
+                "find_similar",
+                json!({ "property_name": "embedding", "embedding": [0.0, 1.0, 0.0, 1.0], "k": 10 }),
+            ),
+            (
+                "hybrid_query",
+                json!({ "start_node_id": ids[0], "traverse_edge": "REL", "traverse_depth": 2,
+                        "limit": 10 }),
+            ),
+            (
+                "query",
+                json!({ "language": "aql", "query": "MATCH (n:Doc) RETURN n", "limit": 20 }),
+            ),
+        ];
+        let budgets = [512u64, 1024, 2048, 4096, 8192];
+        let mut successful_cases = 0usize;
+        for &budget in &budgets {
+            for (tool, base) in &cases {
+                let mut args = base.clone();
+                args.as_object_mut()
+                    .unwrap()
+                    .insert("max_response_bytes".into(), json!(budget));
+                let (text, is_error) = dispatch_raw(&server, tool, args);
+                if is_error {
+                    continue;
+                }
+                successful_cases += 1;
+                assert!(
+                    text.len() as u64 <= budget,
+                    "[{tool} @ {budget}B] overran: {} bytes",
+                    text.len()
+                );
+            }
+        }
+        // The sweep must not pass vacuously (every case erroring).
+        assert!(
+            successful_cases > 0,
+            "conformance sweep produced zero successful budgeted responses"
+        );
+    }
+
+    // ---- T2: dedicated query-tool budget + hybrid_query AC7 ----------------
+
+    #[test]
+    fn t2_query_tool_budget_shapes_bulky_rows() {
+        let server = create_test_server();
+        let _ = seed_vector_docs(&server, 10);
+        let (full, ferr) = dispatch_json(
+            &server,
+            "query",
+            json!({ "language": "aql", "query": "MATCH (n:Doc) RETURN n", "limit": 20 }),
+        );
+        assert!(!ferr, "unbudgeted query failed: {full}");
+        let full_rows = full["rows"].as_array().map(|a| a.len()).unwrap_or(0);
+        assert!(full_rows > 0, "query returned rows");
+
+        let (shaped, is_error) = dispatch_json(
+            &server,
+            "query",
+            json!({ "language": "aql", "query": "MATCH (n:Doc) RETURN n", "limit": 20,
+                    "max_response_tokens": 500 }),
+        );
+        if is_error {
+            assert_eq!(shaped["error"]["code"], json!("INVALID_ARGUMENT"));
+            return;
+        }
+        // Budget block present; rows degraded (bulky bio elided/summarized or
+        // rows truncated) but row_count stays consistent with the array length.
+        assert_eq!(shaped["budget"]["applied"], json!(true));
+        let rc = shaped["row_count"].as_u64().unwrap() as usize;
+        let arr = shaped["rows"].as_array().map(|a| a.len()).unwrap_or(0);
+        assert_eq!(rc, arr, "row_count must match retained rows (F1)");
+    }
+
+    #[test]
+    fn t2_hybrid_query_preserves_count_and_scores_under_budget() {
+        let server = create_test_server();
+        let ids = seed_vector_docs(&server, 6);
+        for w in ids.windows(2) {
+            let _ = server.dispatch_tool(
+                "create_edge",
+                json!({ "source_id": ids[0], "target_id": w[1], "label": "REL",
+                        "properties": { "note": "n".repeat(500) } }),
+            );
+        }
+        let base = json!({ "start_node_id": ids[0], "traverse_edge": "REL",
+                           "traverse_depth": 1, "limit": 10 });
+        let (full, _) = dispatch_json(&server, "hybrid_query", base.clone());
+        let full_count = full["results"].as_array().map(|a| a.len()).unwrap_or(0);
+
+        let mut args = base;
+        args.as_object_mut()
+            .unwrap()
+            .insert("max_response_tokens".into(), json!(700));
+        let (budgeted, is_error) = dispatch_json(&server, "hybrid_query", args);
+        if is_error {
+            assert_eq!(budgeted["error"]["code"], json!("INVALID_ARGUMENT"));
+            return;
+        }
+        let budgeted_count = budgeted["results"].as_array().map(|a| a.len()).unwrap_or(0);
+        assert_eq!(
+            budgeted_count, full_count,
+            "ranked hybrid results must not be dropped to meet a budget (AC7)"
+        );
+        for r in budgeted["results"].as_array().unwrap() {
+            assert!(
+                r.get("similarity_score").is_some(),
+                "similarity_score must be present on every ranked result: {r}"
+            );
+        }
+    }
+
+    // ---- T3: AC7 ordering preserved for ranked tools -----------------------
+
+    #[test]
+    fn t3_find_similar_preserves_result_ordering_under_budget() {
+        let server = create_test_server();
+        let _ = seed_vector_docs(&server, 8);
+        let q = json!({ "property_name": "embedding", "embedding": [0.0, 1.0, 0.0, 1.0], "k": 6 });
+
+        let (full, _) = dispatch_json(&server, "find_similar", q.clone());
+        let full_seq = ordered_id_score(&full);
+        assert!(
+            !full_seq.is_empty(),
+            "unbudgeted find_similar returned results"
+        );
+
+        let mut args = q;
+        args.as_object_mut()
+            .unwrap()
+            .insert("max_response_tokens".into(), json!(700));
+        let (budgeted, is_error) = dispatch_json(&server, "find_similar", args);
+        if is_error {
+            assert_eq!(budgeted["error"]["code"], json!("INVALID_ARGUMENT"));
+            return;
+        }
+        let budgeted_seq = ordered_id_score(&budgeted);
+        assert_eq!(
+            budgeted_seq, full_seq,
+            "ranked ordering (id + score sequence) must be identical under budget"
+        );
+    }
+
+    /// The ordered (id, score-bits) sequence of a ranked response's results, so
+    /// ordering — not just membership — can be compared exactly.
+    fn ordered_id_score(value: &Value) -> Vec<(u64, u64)> {
+        value
+            .get("results")
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .map(|r| {
+                        let id = r
+                            .get("node")
+                            .and_then(|n| n.get("id"))
+                            .and_then(Value::as_u64)
+                            .unwrap_or(0);
+                        let score = r
+                            .get("score")
+                            .or_else(|| r.get("similarity_score"))
+                            .and_then(Value::as_f64)
+                            .map(f64::to_bits)
+                            .unwrap_or(0);
+                        (id, score)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+}
+
+// ============================================================================
 // Snapshot-anchored cursor continuation (Issue #3360)
 // ============================================================================
 
