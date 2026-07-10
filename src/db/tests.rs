@@ -2825,3 +2825,104 @@ fn test_stats_cold_storage_reports_migrated_versions() {
         "migrated versions must leave the hot historical counters"
     );
 }
+
+/// Regression test for Issue #3425: a checkpoint/backup snapshot must never
+/// capture a *committed* node whose `commit_timestamp` is still `None`.
+///
+/// The latent bug: the commit path finalized `commit_timestamp`
+/// (`None -> Some(T)`) *after* dropping the `historical.write()` guard and took
+/// no snapshot lock, leaving a narrow window in which a snapshot holding
+/// `historical.read()` could clone a committed node while its timestamp was
+/// still `None` (which downstream visibility logic treats as uncommitted).
+///
+/// The hardening (Option A in the issue) holds the `historical.write()` guard
+/// across finalization, making the current-write + finalize atomic w.r.t. any
+/// `historical.read()`-holding snapshot.
+///
+/// This test uses the `#[cfg(test)]` pre-finalize hook to deterministically park
+/// a committing writer in that exact window while a checker thread mimics
+/// `create_checkpoint`'s snapshot block -- holding `historical.read()` (outer)
+/// then `snapshot_lock.write()` (inner), exactly as the issue describes -- and
+/// inspects every captured node. Before the fix the checker observes
+/// `commit_timestamp: None` (RED). After the fix the checker's `historical.read()`
+/// blocks until finalize completes under the writer's held guard, so it only ever
+/// sees resolved timestamps (GREEN).
+#[test]
+fn test_checkpoint_never_captures_uncommitted_finalize_window_3425() {
+    use crate::api::transaction::write::commit_test_hooks;
+    use crate::storage::wal::LSN;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Barrier};
+    use std::time::{Duration, Instant};
+
+    let db = Arc::new(AletheiaDB::new().unwrap());
+
+    // Writer sets this when it enters the finalize window (pre-finalize hook).
+    let in_window = Arc::new(AtomicBool::new(false));
+    // Both threads rendezvous before the writer begins its commit.
+    let barrier = Arc::new(Barrier::new(2));
+
+    // Install a pre-finalize hook that (1) announces the window and (2) parks the
+    // writer long enough for the checker to attempt its snapshot. In the buggy
+    // code the `historical.write()` guard is already dropped here; in the fixed
+    // code it is still held across this sleep.
+    {
+        let in_window = Arc::clone(&in_window);
+        commit_test_hooks::set_pre_finalize_hook(Arc::new(move || {
+            in_window.store(true, Ordering::SeqCst);
+            std::thread::sleep(Duration::from_millis(200));
+        }));
+    }
+
+    // Writer thread: commit a single node. Its commit fires the hook.
+    let writer = {
+        let db = Arc::clone(&db);
+        let barrier = Arc::clone(&barrier);
+        std::thread::spawn(move || {
+            barrier.wait();
+            let props = PropertyMapBuilder::new().insert("name", "Alice").build();
+            db.create_node("Person", props).expect("create_node failed");
+        })
+    };
+
+    // Checker thread: once the writer is in the window, replicate the checkpoint
+    // snapshot block and assert no captured node is finalize-pending.
+    let checker = {
+        let db = Arc::clone(&db);
+        let in_window = Arc::clone(&in_window);
+        let barrier = Arc::clone(&barrier);
+        std::thread::spawn(move || {
+            barrier.wait();
+            // Spin until the writer signals it has entered the finalize window.
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !in_window.load(Ordering::SeqCst) {
+                assert!(Instant::now() < deadline, "writer never entered window");
+                std::thread::yield_now();
+            }
+
+            // Mimic `create_checkpoint`'s consistent-snapshot block: hold the
+            // historical read guard (outer) then the snapshot lock (inner).
+            let hist_guard = db.historical.read();
+            let snap_lock = db.current.snapshot_lock.write();
+            let snapshot = db.current.create_snapshot(LSN(0));
+            let captured_none = snapshot
+                .nodes()
+                .iter()
+                .any(|n| n.metadata.commit_timestamp.is_none());
+            drop(snap_lock);
+            drop(hist_guard);
+            captured_none
+        })
+    };
+
+    writer.join().expect("writer thread panicked");
+    let captured_none = checker.join().expect("checker thread panicked");
+
+    commit_test_hooks::clear_pre_finalize_hook();
+
+    assert!(
+        !captured_none,
+        "Issue #3425: checkpoint snapshot captured a committed node with \
+         commit_timestamp: None inside the finalize window"
+    );
+}

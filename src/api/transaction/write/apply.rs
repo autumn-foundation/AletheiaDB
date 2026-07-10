@@ -591,12 +591,25 @@ pub(crate) fn apply_single_write(
 /// for the duration of all operations. This avoids lock thrashing (acquiring/releasing
 /// for every single write) and ensures atomicity of the historical updates.
 ///
+/// The acquired `historical.write()` guard is **returned to the caller** rather than
+/// dropped internally (Issue #3425). The caller must keep it alive across
+/// [`finalize_current_commit_timestamps`] so that the current-side writes and their
+/// `commit_timestamp` finalization are atomic with respect to any snapshot
+/// (checkpoint / backup) that holds `historical.read()`. Otherwise a snapshot landing
+/// between the guard drop and finalize could capture a committed node/edge whose
+/// `commit_timestamp` is still `None`. Respecting the documented lock order
+/// (`historical` precedes `snapshot_lock`, adjacency, and the temporal-vector index
+/// lock), holding this guard across finalize introduces no lock-order inversion.
+///
 /// # Performance
 ///
-/// - **Locking**: Single lock acquisition for historical storage.
+/// - **Locking**: Single lock acquisition for historical storage, held across finalize.
 /// - **ID Generation**: Tombstone IDs are pre-generated in a batch to minimize lock contention.
 /// - **Adjacency**: Adjacency indexes are compacted *once* after all edge operations are complete.
-pub(crate) fn apply_changes(tx: &WriteTransaction, commit_timestamp: Timestamp) -> Result<()> {
+pub(crate) fn apply_changes<'a>(
+    tx: &'a WriteTransaction,
+    commit_timestamp: Timestamp,
+) -> Result<parking_lot::RwLockWriteGuard<'a, HistoricalStorage>> {
     // Create temporal interval for all operations in this transaction.
     let _temporal = BiTemporalInterval::current(commit_timestamp);
 
@@ -647,12 +660,13 @@ pub(crate) fn apply_changes(tx: &WriteTransaction, commit_timestamp: Timestamp) 
         num_deletes
     );
 
-    drop(historical);
-
     // With incremental adjacency indexes, edge updates are immediately visible
     // via merged reads. Background compaction handles delta->frozen promotion.
 
-    Ok(())
+    // Return the guard (Issue #3425): the caller holds it across
+    // `finalize_current_commit_timestamps` so a concurrent `historical.read()`
+    // snapshot cannot observe a committed node/edge with `commit_timestamp: None`.
+    Ok(historical)
 }
 
 /// Finalize commit timestamps in current storage after a successful `apply_changes`.

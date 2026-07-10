@@ -411,11 +411,25 @@ impl CheckpointManager {
     /// - Temporal index (all version chains)
     /// - Manifest (LSN and metadata)
     ///
+    /// # Locking contract (Issue #3425)
+    ///
+    /// `historical` is taken as a bare `&HistoricalStorage`, but a consistent
+    /// (and data-race-free) snapshot requires the **caller to hold the
+    /// `historical` `RwLock` read guard** for the whole duration of this call —
+    /// exactly as [`crate::db::AletheiaDB::backup`] does. Holding that read guard
+    /// is what makes the snapshot mutually exclusive with the commit path's
+    /// `historical.write()` guard, which (as of #3425) is now held across
+    /// `commit_timestamp` finalization. Without it, a snapshot can race the
+    /// finalize step and capture a committed node/edge whose `commit_timestamp`
+    /// is still `None`. Callers that already hold the guard by construction (e.g.
+    /// via `historical.read()`) satisfy this contract; do not call this method
+    /// with an unlocked `historical`.
+    ///
     /// # Arguments
     ///
     /// * `lsn` - Current LSN for consistency tracking
     /// * `current` - Current storage to persist
-    /// * `historical` - Historical storage to persist
+    /// * `historical` - Historical storage to persist (caller must hold its read guard)
     ///
     /// # Errors
     ///
