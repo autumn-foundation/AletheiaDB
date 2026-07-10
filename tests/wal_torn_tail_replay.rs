@@ -173,4 +173,20 @@ fn open_default_policy_tolerates_torn_tail_via_unified_config() {
     for id in &ids {
         assert!(db2.get_node(*id).is_ok(), "node {:?} recovered", id);
     }
+    assert_eq!(
+        db2.node_count(),
+        ids.len(),
+        "exactly the committed nodes recovered; the torn tail added none"
+    );
+}
+
+/// #3433: the default recovery policy tolerates a crash-torn tail out of the
+/// box — `WalConfig::default().tolerate_torn_tail` must be `true`, so an
+/// operator who never touches the flag keeps automatic tail truncation.
+#[test]
+fn wal_config_default_tolerates_torn_tail() {
+    assert!(
+        aletheiadb::config::WalConfig::default().tolerate_torn_tail,
+        "tolerate_torn_tail must default to true"
+    );
 }
