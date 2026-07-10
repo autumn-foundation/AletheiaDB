@@ -1558,6 +1558,38 @@ impl TemporalIndexes {
         }
     }
 
+    /// Merge externally-sourced extent bounds into the write-time aggregate
+    /// (Issue #3389).
+    ///
+    /// Each dimension is folded in with the aggregate's normal
+    /// `earliest = min`, `latest = max` union, so this can only **widen** the
+    /// reported extent, never narrow it — matching every in-process mutation.
+    /// A `None` bound leaves that field untouched.
+    ///
+    /// The intended caller is startup restore: versions migrated to the cold
+    /// tier before the current process began are absent from the hot-tier
+    /// rebuild, so their persisted bounds (see
+    /// [`RedbColdStorage::get_temporal_extent_bounds`](crate::storage::redb_cold_storage::RedbColdStorage::get_temporal_extent_bounds))
+    /// are merged here to keep [`extent`](Self::extent) — and thus
+    /// `temporal_extent` — spanning cold history. Because only real observed
+    /// coordinates are merged (the open-interval sentinel is never persisted),
+    /// this preserves the `latest` convention and cannot leak `TIMESTAMP_MAX`.
+    pub fn merge_extent_bounds(
+        &self,
+        valid_earliest: Option<Timestamp>,
+        valid_latest: Option<Timestamp>,
+        tx_earliest: Option<Timestamp>,
+        tx_latest: Option<Timestamp>,
+    ) {
+        let delta = ExtentAggregate {
+            valid_earliest,
+            valid_latest,
+            tx_earliest,
+            tx_latest,
+        };
+        self.extent_aggregate.lock().merge(delta);
+    }
+
     /// Get the total number of indexed version entries.
     ///
     /// Returns the count of unique versions across all entities.
