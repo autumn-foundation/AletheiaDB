@@ -72,6 +72,11 @@ fn huge_operation(id: u64) -> WalOperation {
 // successfully. A serialization failure therefore leaves ZERO WAL residue.
 // This test is flipped ON PURPOSE to pin that new zero-residue contract: no
 // entry of the failed batch may appear in the ring buffer.
+//
+// NOTE: the tests in this file pin the SERIALIZE-failure case specifically
+// (an oversized entry rejected in phase 1). A phase-2 append failure --
+// reachable only if a stripe is closed mid-batch during teardown -- is a
+// distinct, narrower case deferred to WAL transaction framing (#3413).
 // ---------------------------------------------------------------------------
 #[test]
 fn test_havoc_wal_batch_gaps() {
@@ -137,6 +142,76 @@ fn test_havoc_wal_batch_gaps() {
     );
 
     println!("✅ ZERO-RESIDUE: failed batch left no entries in the ring buffer.");
+}
+
+// ---------------------------------------------------------------------------
+// Max-residue variant (Issue #3414): the OVERSIZED entry is LAST.
+//
+// `test_havoc_wal_batch_gaps` fails the MIDDLE entry, so buggy pre-#3414 code
+// would have leaked a single-entry prefix (LSN 1). This test fails the LAST
+// entry of a three-entry batch -- the worst case for the old serialize-in-loop
+// bug, which would have appended the entire N-1 prefix (LSNs 1 AND 2) before
+// hitting the oversized entry. Pinning the last-entry position proves the
+// serialize-first fix abandons the WHOLE batch, not just a trailing suffix:
+// zero residue regardless of how far into the batch serialization fails.
+// ---------------------------------------------------------------------------
+#[test]
+fn test_havoc_wal_batch_last_entry_failure_no_residue() {
+    let dir = tempdir().unwrap();
+    let config = ConcurrentWalConfig::new(dir.path());
+    let wal = ConcurrentWal::new(config).unwrap();
+
+    // Batch: [Valid(1), Valid(2), Huge(3) - invalid LAST entry].
+    // On buggy serialize-in-loop code this would append LSN 1 and LSN 2 (the
+    // full N-1 prefix) before the oversized entry aborts the loop.
+    let ops = vec![test_operation(1), test_operation(2), huge_operation(3)];
+
+    let result = wal.append_batch(ops);
+    assert!(
+        result.is_err(),
+        "batch with an oversized LAST entry must fail"
+    );
+
+    let err = result.unwrap_err();
+    println!("Append batch error (expected): {}", err);
+    assert!(
+        err.to_string().contains("CapacityExceeded") || err.to_string().contains("WAL entry size")
+    );
+
+    // A later valid op must still succeed and be the ONLY visible entry.
+    let lsn_after = wal.append_async(test_operation(4)).unwrap();
+    println!("Appended valid op after failure, LSN: {:?}", lsn_after);
+
+    let entries = wal.drain_all();
+    let lsns: Vec<u64> = entries.iter().map(|e| e.lsn.0).collect();
+    println!("Drained LSNs: {:?}", lsns);
+
+    // The max-residue assertion: NEITHER LSN 1 NOR LSN 2 (the full N-1 prefix
+    // the buggy code would have leaked) may be present.
+    assert!(
+        !lsns.contains(&1),
+        "LSN 1 must be ABSENT: no prefix of the failed batch may be appended (buggy code leaked LSNs 1,2)"
+    );
+    assert!(
+        !lsns.contains(&2),
+        "LSN 2 must be ABSENT: the full N-1 prefix must be abandoned, not just the failed suffix"
+    );
+    assert!(
+        !lsns.contains(&3),
+        "LSN 3 must be absent (failed serialization)"
+    );
+    assert!(
+        lsns.contains(&lsn_after.0),
+        "the post-failure valid append must be present"
+    );
+    assert_eq!(
+        lsns.len(),
+        1,
+        "exactly one entry (the post-failure op) should be present; the failed batch left zero residue, got {:?}",
+        lsns
+    );
+
+    println!("✅ ZERO-RESIDUE (last-entry failure): full N-1 prefix abandoned.");
 }
 
 // ---------------------------------------------------------------------------

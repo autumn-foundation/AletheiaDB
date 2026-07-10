@@ -385,6 +385,15 @@ impl ConcurrentWal {
     /// Vector of allocated LSNs in the same order as the operations.
     /// Returns an empty vector if `operations` is empty.
     ///
+    /// # Failure atomicity
+    ///
+    /// Serializing all entries before appending any guarantees zero WAL residue
+    /// on a **serialization** failure (e.g. an oversized entry rejected by the
+    /// `MAX_WAL_ENTRY_SIZE` guard): no prefix is written, flushed, or replayed.
+    /// A phase-2 append failure (reachable only if the stripe is closed
+    /// mid-batch during teardown) is out of scope and covered by transaction
+    /// framing (#3413).
+    ///
     /// # Example
     ///
     /// ```ignore
@@ -418,8 +427,10 @@ impl ConcurrentWal {
         // entries have serialized successfully do we begin appending. If any
         // entry fails to serialize (e.g. an oversized entry rejected by the
         // MAX_WAL_ENTRY_SIZE guard), we return the error WITHOUT having
-        // appended anything, so the failed batch leaves ZERO WAL residue -- no
-        // prefix is written, flushed, or replayed on recovery (Issue #3414).
+        // appended anything, so a SERIALIZATION failure leaves ZERO WAL residue
+        // -- no prefix is written, flushed, or replayed on recovery
+        // (Issue #3414). (A phase-2 append failure is a distinct, narrower case
+        // scoped out below.)
         //
         // The reserved LSN range is consumed but unwritten on failure, which
         // is benign: recovery seeds the allocator from the max *written* LSN,
@@ -435,9 +446,11 @@ impl ConcurrentWal {
         }
 
         // Phase 2 (append): every entry serialized successfully, so append
-        // them all. An append failure here (buffer closed) is covered by the
-        // WAL transaction-framing work (Issue #3413) and is out of scope for
-        // this contained serialize-first fix.
+        // them all. An append failure here is reachable ONLY if the stripe is
+        // closed mid-batch during teardown (abnormal shutdown), and could leave
+        // a partial prefix; that residue is out of scope for this contained
+        // serialize-first fix and is covered by the WAL transaction-framing
+        // work (Issue #3413).
         let mut lsns = Vec::with_capacity(serialized.len());
         for (lsn, data) in serialized {
             lsns.push(lsn);
@@ -468,6 +481,13 @@ impl ConcurrentWal {
     /// A tuple containing:
     /// - Vector of allocated LSNs
     /// - Vector of completion handles corresponding to each operation
+    ///
+    /// # Failure atomicity
+    ///
+    /// Serializing all entries before appending any guarantees zero WAL residue
+    /// on a **serialization** failure. A phase-2 append failure (reachable only
+    /// if the stripe is closed mid-batch during teardown) is out of scope and
+    /// covered by transaction framing (#3413).
     pub fn append_batch_with_handles(
         &self,
         operations: Vec<WalOperation>,
@@ -489,11 +509,11 @@ impl ConcurrentWal {
         let (first_lsn, _last_lsn) = self.lsn_allocator.allocate_batch(count);
 
         // Phase 1 (fallible): serialize EVERY entry up front, exactly as in
-        // `append_batch`. A serialization failure (e.g. an oversized entry)
-        // returns the error WITHOUT appending anything, so the failed batch
-        // leaves ZERO WAL residue -- nothing is written, flushed, or replayed
-        // (Issue #3414). The reserved-but-unwritten LSN range is benign (see
-        // `append_batch` for the rationale).
+        // `append_batch`. A SERIALIZATION failure (e.g. an oversized entry)
+        // returns the error WITHOUT appending anything, so it leaves ZERO WAL
+        // residue -- nothing is written, flushed, or replayed (Issue #3414).
+        // The reserved-but-unwritten LSN range is benign (see `append_batch`
+        // for the rationale).
         let mut serialized: Vec<(LSN, Vec<u8>)> = Vec::with_capacity(count as usize);
         for (idx, operation) in operations.into_iter().enumerate() {
             let lsn = LSN(first_lsn.0 + idx as u64);
@@ -502,8 +522,10 @@ impl ConcurrentWal {
         }
 
         // Phase 2 (append): every entry serialized successfully, so append
-        // them all. An append failure here (buffer closed) is covered by the
-        // WAL transaction-framing work (Issue #3413) and is out of scope here.
+        // them all. An append failure here is reachable ONLY if the stripe is
+        // closed mid-batch during teardown (abnormal shutdown), and could leave
+        // a partial prefix; that residue is out of scope here and is covered by
+        // the WAL transaction-framing work (Issue #3413).
         let mut lsns = Vec::with_capacity(serialized.len());
         let mut handles = Vec::with_capacity(serialized.len());
         for (lsn, data) in serialized {
