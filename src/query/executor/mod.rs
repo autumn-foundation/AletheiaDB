@@ -321,9 +321,10 @@ impl QueryExecutor {
                 transaction_time,
             } => {
                 // Valid-time range label scan (`BETWEEN`, Issue #552). Same
-                // candidate enumeration; the iterator emits every version whose
-                // valid interval overlaps the range (potentially several rows
-                // per node).
+                // candidate enumeration; the iterator emits each node's
+                // believed-at-`transaction_time` version whose valid interval
+                // overlaps the range (at most one row per node -- multiple rows
+                // only across distinct nodes).
                 let node_ids = self.temporal_scan_candidates();
                 Ok(Box::new(iterators::TemporalNodeRangeScanIterator::new(
                     node_ids,

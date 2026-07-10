@@ -847,9 +847,13 @@ fn is_missing_at_time(err: &crate::core::error::Error) -> bool {
 ///
 /// # Ordering
 ///
-/// Within each node, overlapping versions are emitted oldest-`valid_from`-first
-/// (ties broken by version id) for deterministic output; nodes are emitted in
-/// the order of the supplied candidate list.
+/// At a fixed `transaction_time` at most one version per node is believed (see
+/// the type-level note above), so a node contributes at most one row; multiple
+/// rows arise only across DISTINCT nodes. Nodes are emitted in the order of the
+/// supplied candidate list. The per-node selection is still sorted
+/// oldest-`valid_from`-first (ties broken by version id) so that, were the store
+/// ever to retain multiple co-current versions, the output would remain
+/// deterministic.
 pub struct TemporalNodeRangeScanIterator {
     results: std::vec::IntoIter<Result<QueryRow>>,
 }
