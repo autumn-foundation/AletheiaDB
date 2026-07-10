@@ -13346,8 +13346,11 @@ mod budget_tests {
         let all_ids = seed_many(&server, "Person", 30);
 
         // Full, unbudgeted page (limit high enough to hold all).
-        let (full, _) =
-            dispatch_json(&server, "list_nodes", json!({ "label": "Person", "limit": 100 }));
+        let (full, _) = dispatch_json(
+            &server,
+            "list_nodes",
+            json!({ "label": "Person", "limit": 100 }),
+        );
         let full_ids = collect_node_ids(&full);
         assert_eq!(full_ids.len(), all_ids.len(), "seeded set fully listed");
 
@@ -13401,18 +13404,29 @@ mod budget_tests {
         sorted_union.sort_unstable();
         let before_dedup = sorted_union.len();
         sorted_union.dedup();
-        assert_eq!(before_dedup, sorted_union.len(), "no duplicate rows across pages");
+        assert_eq!(
+            before_dedup,
+            sorted_union.len(),
+            "no duplicate rows across pages"
+        );
 
         let mut expected = full_ids.clone();
         expected.sort_unstable();
-        assert_eq!(sorted_union, expected, "union of pages == full set (no gaps)");
+        assert_eq!(
+            sorted_union, expected,
+            "union of pages == full set (no gaps)"
+        );
     }
 
     fn collect_node_ids(value: &Value) -> Vec<u64> {
         value
             .get("nodes")
             .and_then(Value::as_array)
-            .map(|a| a.iter().filter_map(|n| n.get("id").and_then(Value::as_u64)).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|n| n.get("id").and_then(Value::as_u64))
+                    .collect()
+            })
             .unwrap_or_default()
     }
 
@@ -13448,7 +13462,11 @@ mod budget_tests {
             !is_error,
             "tight-but-viable budget must succeed, not error: {value}"
         );
-        assert!(value.len() <= cap, "assembled response must fit: {}", value.len());
+        assert!(
+            value.len() <= cap,
+            "assembled response must fit: {}",
+            value.len()
+        );
         let parsed: Value = serde_json::from_str(&value).unwrap();
         assert_eq!(parsed["budget"]["rung"], json!("counts_and_handles"));
     }
@@ -13724,7 +13742,10 @@ mod budget_tests {
 
         let (full, _) = dispatch_json(&server, "find_similar", q.clone());
         let full_seq = ordered_id_score(&full);
-        assert!(!full_seq.is_empty(), "unbudgeted find_similar returned results");
+        assert!(
+            !full_seq.is_empty(),
+            "unbudgeted find_similar returned results"
+        );
 
         let mut args = q;
         args.as_object_mut()

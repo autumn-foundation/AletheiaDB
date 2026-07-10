@@ -667,8 +667,15 @@ fn truncate_arrays_to_fit(
 
         // Fast-exit when the fully-assembled candidate already fits with this
         // field untouched.
-        if assembled_len(map, budget, cap, base_sections, &disclosures, &field, original_len)
-            <= cap as usize
+        if assembled_len(
+            map,
+            budget,
+            cap,
+            base_sections,
+            &disclosures,
+            &field,
+            original_len,
+        ) <= cap as usize
         {
             continue;
         }
