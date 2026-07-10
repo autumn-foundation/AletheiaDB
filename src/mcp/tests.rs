@@ -12882,3 +12882,115 @@ mod per_request_now_tests {
         );
     }
 }
+
+#[cfg(feature = "audit-export")]
+mod audit_export_tool_tests {
+    use super::create_test_server;
+    use crate::audit::{AuditSigningKey, verify_json_bytes};
+    use crate::core::hex;
+    use serde_json::json;
+
+    const SEED: [u8; 32] = [23u8; 32];
+
+    fn dispatch_json(
+        server: &super::AletheiaMcpServer,
+        tool: &str,
+        args: serde_json::Value,
+    ) -> (serde_json::Value, bool) {
+        let result = server.dispatch_tool(tool, args);
+        let is_error = result.is_error.unwrap_or(false);
+        let text = result
+            .content
+            .first()
+            .and_then(|c| c.as_text().map(|t| t.text.clone()))
+            .expect("tool result should carry text content");
+        (serde_json::from_str(&text).expect("valid JSON"), is_error)
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn audit_export_tool_signs_and_verifies_offline() {
+        // SAFETY: env mutation serialized via #[serial]; restored below.
+        unsafe {
+            std::env::set_var("ALETHEIADB_AUDIT_SIGNING_KEY", hex::encode(&SEED));
+        }
+
+        let server = create_test_server();
+        let (created, is_err) = dispatch_json(
+            &server,
+            "create_node",
+            json!({"label": "Person", "properties": {"name": "Alice", "ssn": "secret"}}),
+        );
+        assert!(!is_err, "create_node failed: {created}");
+        let node_id = created["id"].as_u64().expect("node_id");
+
+        let (resp, is_err) = dispatch_json(
+            &server,
+            "audit_export",
+            json!({
+                "entity_type": "node",
+                "entity_id": node_id,
+                "database_id": "prod-db",
+                "redact_keys": ["ssn"],
+            }),
+        );
+        assert!(!is_err, "audit_export failed: {resp}");
+        assert_eq!(resp["version_count"].as_u64(), Some(1));
+
+        let pubkey_hex = resp["public_key"].as_str().unwrap();
+        let expected_pub = AuditSigningKey::from_seed_bytes(SEED).public_key();
+        assert_eq!(pubkey_hex, expected_pub.to_hex());
+
+        // The artifact verifies offline against the operator's public key.
+        let artifact_bytes = serde_json::to_vec(&resp["artifact"]).unwrap();
+        let report = verify_json_bytes(&artifact_bytes, Some(&expected_pub))
+            .expect("MCP-produced artifact must verify offline");
+        assert!(report.passed);
+        assert!(report.redacted_keys.iter().any(|k| k == "ssn"));
+        // Redacted value must not have leaked into the artifact.
+        assert!(
+            !String::from_utf8(artifact_bytes)
+                .unwrap()
+                .contains("secret")
+        );
+
+        unsafe {
+            std::env::remove_var("ALETHEIADB_AUDIT_SIGNING_KEY");
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn audit_export_tool_without_signing_key_is_failed_precondition() {
+        // SAFETY: env mutation serialized via #[serial].
+        unsafe {
+            std::env::remove_var("ALETHEIADB_AUDIT_SIGNING_KEY");
+        }
+        let server = create_test_server();
+        let (created, _) = dispatch_json(
+            &server,
+            "create_node",
+            json!({"label": "Person", "properties": {"name": "Bob"}}),
+        );
+        let node_id = created["id"].as_u64().unwrap();
+        let (resp, is_err) = dispatch_json(
+            &server,
+            "audit_export",
+            json!({"entity_type": "node", "entity_id": node_id}),
+        );
+        assert!(is_err, "expected an error without a signing key");
+        assert_eq!(resp["error"]["code"].as_str(), Some("FAILED_PRECONDITION"));
+    }
+
+    #[test]
+    fn audit_export_tool_rejects_bad_entity_type() {
+        let server = create_test_server();
+        let (resp, is_err) = dispatch_json(
+            &server,
+            "audit_export",
+            json!({"entity_type": "widget", "entity_id": 1}),
+        );
+        assert!(is_err);
+        assert_eq!(resp["error"]["code"].as_str(), Some("INVALID_ARGUMENT"));
+    }
+}

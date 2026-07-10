@@ -52,6 +52,14 @@ fn run() -> Result<(), String> {
         Some("daemon") => handle_daemon(args.collect()),
         Some("backup") => handle_backup(args.collect()),
         Some("restore") => handle_restore(args.collect()),
+        #[cfg(feature = "audit-export")]
+        Some("audit-keygen") => audit::handle_keygen(args.collect()),
+        #[cfg(feature = "audit-export")]
+        Some("audit-export") => audit::handle_export(args.collect()),
+        #[cfg(feature = "audit-export")]
+        Some("audit-verify") => audit::handle_verify(args.collect()),
+        #[cfg(feature = "audit-export")]
+        Some("audit-render") => audit::handle_render(args.collect()),
         Some("help") | Some("--help") | Some("-h") | None => {
             print_usage();
             Ok(())
@@ -75,11 +83,20 @@ Usage:\n\
   aletheia daemon status [--pid-file PATH]\n\
   aletheia backup <output_path>\n\
   aletheia restore <input_path>\n\
+  aletheia audit-keygen <key_file>\n\
+  aletheia audit-export <node|edge> <id> --key <key_file> --out <path> [--db-id ID] [--redact k1,k2]\n\
+  aletheia audit-verify <artifact_path> [--public-key HEX]\n\
+  aletheia audit-render <artifact_path>\n\
 \nCommands map to core MCP-style graph operations while using local storage.\n\
 \nBackup / Restore:\n\
   backup  — Write a portable .albk artifact capturing full bi-temporal state.\n\
             Opens the database via ALETHEIADB_CONFIG or ALETHEIADB_DATA_DIR.\n\
-  restore — Restore a .albk artifact into ALETHEIADB_DATA_DIR (must be empty).\n"
+  restore — Restore a .albk artifact into ALETHEIADB_DATA_DIR (must be empty).\n\
+\nSigned audit export (Issue #3358):\n\
+  audit-keygen — Generate an Ed25519 signing key (0600) and print its public key.\n\
+  audit-export — Sign an entity's full bi-temporal history into a portable artifact.\n\
+  audit-verify — Verify an artifact OFFLINE (no database) with the signer's public key.\n\
+  audit-render — Render an artifact as a human-readable chronology.\n"
     );
 }
 
@@ -675,6 +692,142 @@ fn print_json_pretty(value: &serde_json::Value) -> Result<(), String> {
         Ok(_) => Ok(()),
         Err(e) if e.kind() == ErrorKind::BrokenPipe => Ok(()),
         Err(e) => Err(format!("error writing JSON output: {e}")),
+    }
+}
+
+/// Signed audit export subcommands (Issue #3358).
+#[cfg(feature = "audit-export")]
+mod audit {
+    use super::{arg_value, open_db, parse_edge_id, parse_node_id};
+    use aletheiadb::audit::{
+        AuditPublicKey, AuditScope, AuditSigningKey, ExportOptions, verify_json_bytes,
+    };
+    use std::path::Path;
+
+    /// `aletheia audit-keygen <key_file>` — generate a signing key (0600) and
+    /// print its public key. The private seed is written to `<key_file>`.
+    pub(super) fn handle_keygen(args: Vec<String>) -> Result<(), String> {
+        let path = args
+            .first()
+            .ok_or_else(|| "usage: aletheia audit-keygen <key_file>".to_string())?;
+        if Path::new(path).exists() {
+            return Err(format!("refusing to overwrite existing key file '{path}'"));
+        }
+        let key = AuditSigningKey::generate();
+        key.write_to_file(path)
+            .map_err(|e| format!("failed to write key file: {e}"))?;
+        println!(
+            "{{\"ok\":true,\"key_file\":\"{}\",\"public_key\":\"{}\"}}",
+            path,
+            key.public_key().to_hex()
+        );
+        Ok(())
+    }
+
+    /// `aletheia audit-export <node|edge> <id> --key <file> --out <path>` —
+    /// sign an entity's full bi-temporal history into a portable artifact.
+    pub(super) fn handle_export(args: Vec<String>) -> Result<(), String> {
+        let kind = args.first().map(String::as_str).ok_or_else(usage_export)?;
+        let id_str = args.get(1).ok_or_else(usage_export)?;
+        let key_file = arg_value(&args, "--key").ok_or_else(usage_export)?;
+        let out = arg_value(&args, "--out").ok_or_else(usage_export)?;
+        let db_id = arg_value(&args, "--db-id").unwrap_or_else(|| "aletheiadb".to_string());
+
+        let scope = match kind {
+            "node" => AuditScope::node(parse_node_id(id_str)?),
+            "edge" => AuditScope::edge(parse_edge_id(id_str)?),
+            other => {
+                return Err(format!(
+                    "unknown entity kind '{other}' (expected node|edge)"
+                ));
+            }
+        };
+
+        let mut options = ExportOptions::new(db_id);
+        if let Some(redact) = arg_value(&args, "--redact") {
+            let keys: Vec<String> = redact
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+                .collect();
+            options = options.redact(keys);
+        }
+
+        let key = AuditSigningKey::from_file(&key_file)
+            .map_err(|e| format!("failed to load signing key: {e}"))?;
+        let db = open_db()?;
+        let export = db
+            .audit_export(scope, &key, &options)
+            .map_err(|e| format!("audit export failed: {e}"))?;
+        let bytes = export
+            .to_json_bytes()
+            .map_err(|e| format!("failed to serialize artifact: {e}"))?;
+        std::fs::write(&out, &bytes).map_err(|e| format!("failed to write artifact: {e}"))?;
+
+        println!(
+            "{{\"ok\":true,\"artifact\":\"{}\",\"entity_count\":{},\"version_count\":{},\
+             \"public_key\":\"{}\",\"chain_root\":\"{}\",\"anchor_lsn\":{}}}",
+            out,
+            export.entity_count(),
+            export.version_count(),
+            key.public_key().to_hex(),
+            export.chain.root,
+            export.metadata().chain_anchor.source_lsn,
+        );
+        Ok(())
+    }
+
+    /// `aletheia audit-verify <artifact> [--public-key HEX]` — verify OFFLINE.
+    /// Exits non-zero (via `Err`) when verification fails.
+    pub(super) fn handle_verify(args: Vec<String>) -> Result<(), String> {
+        let path = args.first().ok_or_else(|| {
+            "usage: aletheia audit-verify <artifact> [--public-key HEX]".to_string()
+        })?;
+        let bytes = std::fs::read(path).map_err(|e| format!("failed to read artifact: {e}"))?;
+
+        let expected = match arg_value(&args, "--public-key") {
+            Some(hex) => Some(
+                AuditPublicKey::from_hex(&hex).map_err(|e| format!("invalid --public-key: {e}"))?,
+            ),
+            None => None,
+        };
+
+        match verify_json_bytes(&bytes, expected.as_ref()) {
+            Ok(report) => {
+                println!("{}", report.summary());
+                println!("  entity summary: {}", report.entity_summary);
+                if !report.redacted_keys.is_empty() {
+                    println!("  redacted keys: {}", report.redacted_keys.join(", "));
+                }
+                if !report.trusted_key {
+                    println!(
+                        "  NOTE: no --public-key supplied; trust in the embedded key is \
+                         self-asserted. Supply the signer's known public key to establish trust."
+                    );
+                }
+                Ok(())
+            }
+            Err(e) => Err(format!("VERIFICATION FAILED: {e}")),
+        }
+    }
+
+    /// `aletheia audit-render <artifact>` — render a human-readable chronology.
+    pub(super) fn handle_render(args: Vec<String>) -> Result<(), String> {
+        let path = args
+            .first()
+            .ok_or_else(|| "usage: aletheia audit-render <artifact>".to_string())?;
+        let bytes = std::fs::read(path).map_err(|e| format!("failed to read artifact: {e}"))?;
+        let export = aletheiadb::audit::AuditExport::from_json_bytes(&bytes)
+            .map_err(|e| format!("failed to parse artifact: {e}"))?;
+        print!("{}", export.render_chronology());
+        Ok(())
+    }
+
+    fn usage_export() -> String {
+        "usage: aletheia audit-export <node|edge> <id> --key <key_file> --out <path> \
+         [--db-id ID] [--redact k1,k2]"
+            .to_string()
     }
 }
 

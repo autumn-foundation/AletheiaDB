@@ -82,6 +82,7 @@ is served by the HTTP admin endpoints over the shared persisted store
 | `query` | read |
 | `get_schema` | read |
 | `temporal_extent` | read |
+| `audit_export` | read |
 | `database_stats` | metrics |
 | `create_node` | write |
 | `update_node` | write |

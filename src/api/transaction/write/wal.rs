@@ -44,17 +44,34 @@ use crate::storage::wal::WalOperation;
 /// full string labels and keys, it copies their 4-byte `InternedString` IDs.
 /// This minimizes memory allocation and bus traffic during the critical commit path.
 ///
+/// # Transaction framing (Issue #3413)
+///
+/// The buffered data ops are bracketed by a leading [`WalOperation::BeginTx`]
+/// and a terminal [`WalOperation::CommitTx`] carrying the real
+/// `commit_timestamp` and the data-op count, and the whole
+/// `[BeginTx, ..data.., CommitTx]` sequence is appended in the SAME atomic
+/// `append_batch_async` allocation (one LSN band, one flush epoch). This lets
+/// crash recovery (a) discard a batch whose commit marker never became durable
+/// — instead of replaying a torn prefix as a half-committed transaction — and
+/// (b) re-stamp every recovered version of the transaction with the single
+/// `commit_timestamp` instead of each entry's own wallclock (which previously
+/// let `AS OF SYSTEM_TIME` bisect an atomic batch).
+///
+/// The markers ride entirely inside the existing `wal` critical section, so the
+/// CLAUDE.md lock order (current_timestamp → wal → …) is unchanged.
+///
 /// # Arguments
 ///
 /// * `tx` - The active write transaction containing the write buffer.
-/// * `_commit_timestamp` - The timestamp assigned to this commit (currently unused in WAL op, but required by API).
+/// * `commit_timestamp` - The authoritative bi-temporal commit timestamp, carried
+///   in the terminal `CommitTx` marker and re-stamped onto every replayed version.
 ///
 /// # Errors
 ///
 /// Returns an error if the WAL append fails (e.g., disk full, IO error).
 pub(crate) fn log_operations_to_wal(
     tx: &WriteTransaction,
-    _commit_timestamp: Timestamp,
+    commit_timestamp: Timestamp,
 ) -> Result<()> {
     // Collect all buffered writes into a single batch and append them under one atomic
     // LSN allocation via the WAL `append_batch` path (Issue #219). This is strictly more
@@ -62,16 +79,28 @@ pub(crate) fn log_operations_to_wal(
     // transactions — e.g. each chunk committed by the bulk importer (Issue #3211) — and is
     // behavior-preserving: `append_batch_async` only buffers, leaving the subsequent
     // `wal.commit()` to perform the `DurabilityMode`-appropriate flush.
-    let operations: Vec<WalOperation> = tx
-        .buffer
-        .operations()
-        .iter()
-        .map(WalOperation::from)
-        .collect();
+    let buffered = tx.buffer.operations();
 
-    if operations.is_empty() {
+    if buffered.is_empty() {
+        // Empty transaction: no data ops, therefore no frame and no marker.
+        // Reproduces the prior early-return exactly.
         return Ok(());
     }
+
+    let tx_id = tx.tx_id.as_u64();
+
+    // [BeginTx, ..data ops.., CommitTx]. Begin+Commit bracket the data ops so
+    // replay buffers exactly this transaction's ops until the commit marker is
+    // seen; raw (non-transactional) appends and legacy segments carry no such
+    // markers and stay on the immediate-apply recovery path.
+    let mut operations: Vec<WalOperation> = Vec::with_capacity(buffered.len() + 2);
+    operations.push(WalOperation::BeginTx { tx_id });
+    operations.extend(buffered.iter().map(WalOperation::from));
+    operations.push(WalOperation::CommitTx {
+        tx_id,
+        entry_count: buffered.len() as u32,
+        commit_timestamp,
+    });
 
     tx.wal.append_batch_async(operations)?;
 
