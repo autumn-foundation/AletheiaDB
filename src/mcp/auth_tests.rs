@@ -829,8 +829,8 @@ fn write_and_metrics_sets_match_hardcoded_snapshot() {
     // Everything else must be Read (no fourth class sneaking in).
     assert_eq!(
         TOOL_ACCESS_CLASSES.len(),
-        actual_write.len() + actual_metrics.len() + 28,
-        "Read tool count changed (expected 28); if a tool was added or \
+        actual_write.len() + actual_metrics.len() + 29,
+        "Read tool count changed (expected 29); if a tool was added or \
          removed, re-verify its classification and update this count"
     );
 }
