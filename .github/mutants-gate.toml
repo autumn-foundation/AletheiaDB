@@ -1,0 +1,12 @@
+# Mutation-score gate configuration. See TESTING.md § Mutation Testing.
+# Read by .github/scripts/mutants_gate.py in the "Mutation Testing" workflow.
+
+# threshold: minimum mutation score (%) for the mutants touched by a PR diff.
+# Score = (caught + timeout) / (caught + timeout + missed) * 100.
+# PROVISIONAL value — project-wide baseline measurement in progress; will be
+# updated from the measured baseline before this PR merges.
+threshold = 60.0
+
+# Gate only applies when the diff produces at least this many viable mutants;
+# below this, results are reported but never fail the check (small-sample noise).
+min_mutants = 10
