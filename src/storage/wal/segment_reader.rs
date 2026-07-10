@@ -3210,6 +3210,96 @@ mod tests {
         }
     }
 
+    /// Issue #3406 back-compat: a GENUINE pre-v9 but *framed* (v7) `DeleteNode`
+    /// payload — `node_id` + `valid_from` and NO trailing tombstone
+    /// `version_id` — parses under the current (v9-max) reader without error and
+    /// yields `version_id == None`, so replay synthesizes the tombstone. This
+    /// closes the gap left by the v0-only `..._version_0_delete_node` test: v0
+    /// skips `valid_from` entirely, whereas v7 reads it and THEN hits the
+    /// `carries_delete_version_id` gate, exercising the realistic
+    /// old-reader-parsing-a-recent-but-pre-#3406-segment path.
+    ///
+    /// Limitation: this covers the PARSE half of the mixed-format recovery path
+    /// (the `carries_delete_version_id(version) == false` gate) at a genuine
+    /// older header version. The SYNTHESIS half is covered by the recovery
+    /// integration test `back_compat_synthesizes_when_version_id_absent`. A
+    /// single test driving a real old-header segment through
+    /// `CheckpointManager::recover` is impractical here: the WAL serializer is
+    /// test-only (`pub(crate)`) and always emits the highest (v9) payload shape,
+    /// so a genuine short old payload must be hand-assembled at the parse layer.
+    #[test]
+    fn test_parse_entry_at_pre_v9_framed_delete_node_has_no_version_id() {
+        let timestamp = time::now();
+        let valid_from = HybridTimestamp::new(time::now().wallclock() - 3_600_000_000, 0).unwrap();
+        let node_id = NodeId::new(77).unwrap();
+
+        // v7 DeleteNode op_data: node_id (8) + valid_from (12), NO version_id.
+        let mut op_data = Vec::new();
+        op_data.extend_from_slice(&node_id.as_u64().to_le_bytes());
+        valid_from.serialize_into(&mut op_data);
+        let buf = make_v0_buffer(6, &op_data, timestamp); // OP_DELETE_NODE = 6
+
+        let (entry, consumed) = parse_entry_at(&buf, 0, WAL_VERSION_TX_FRAMING).unwrap();
+        assert_eq!(
+            consumed,
+            buf.len(),
+            "parser must consume exactly the v7 payload — no phantom trailing version_id"
+        );
+        match entry.operation {
+            WalOperation::DeleteNode {
+                node_id: parsed_id,
+                valid_from: parsed_vf,
+                version_id,
+            } => {
+                assert_eq!(parsed_id, node_id);
+                assert_eq!(parsed_vf, valid_from, "v7 delete carries valid_from");
+                assert_eq!(
+                    version_id, None,
+                    "a genuine pre-v9 delete carries no tombstone version_id"
+                );
+            }
+            _ => panic!("Expected DeleteNode"),
+        }
+    }
+
+    /// Issue #3406 back-compat: same as above for a genuine pre-v9 (v7)
+    /// `RetractNode` payload — `node_id` + `valid_to` and NO trailing
+    /// `version_id` — must parse to `version_id == None`.
+    #[test]
+    fn test_parse_entry_at_pre_v9_framed_retract_node_has_no_version_id() {
+        let timestamp = time::now();
+        let valid_to = HybridTimestamp::new(1_700_000_000_000_000, 0).unwrap();
+        let node_id = NodeId::new(88).unwrap();
+
+        // v7 RetractNode op_data: node_id (8) + valid_to (12), NO version_id.
+        let mut op_data = Vec::new();
+        op_data.extend_from_slice(&node_id.as_u64().to_le_bytes());
+        valid_to.serialize_into(&mut op_data);
+        let buf = make_v0_buffer(10, &op_data, timestamp); // OP_RETRACT_NODE = 10
+
+        let (entry, consumed) = parse_entry_at(&buf, 0, WAL_VERSION_TX_FRAMING).unwrap();
+        assert_eq!(
+            consumed,
+            buf.len(),
+            "parser must consume exactly the v7 retract payload — no phantom version_id"
+        );
+        match entry.operation {
+            WalOperation::RetractNode {
+                node_id: parsed_id,
+                valid_to: parsed_vt,
+                version_id,
+            } => {
+                assert_eq!(parsed_id, node_id);
+                assert_eq!(parsed_vt, valid_to, "v7 retract carries valid_to");
+                assert_eq!(
+                    version_id, None,
+                    "a genuine pre-v9 retract carries no version_id"
+                );
+            }
+            _ => panic!("Expected RetractNode"),
+        }
+    }
+
     #[test]
     fn test_parse_entry_at_version_0_update_node() {
         let timestamp = time::now();

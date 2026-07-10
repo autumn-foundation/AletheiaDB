@@ -25,6 +25,7 @@
 
 use aletheiadb::{
     AletheiaDB, GLOBAL_INTERNER,
+    api::transaction::WriteOps,
     config::{AletheiaDBConfig, WalConfigBuilder},
     core::error::Result,
     core::{
@@ -167,16 +168,23 @@ fn honor_logged_retract_node_version_id() -> Result<()> {
     let node_id = NodeId::new(1).unwrap();
     let live_retraction = VersionId::new(9999).unwrap();
 
+    // Distinct valid_from / valid_to so the assertion below catches a recovery
+    // arm that honored the id but MANGLED valid_to (e.g. substituting the
+    // head's valid_from or the replay/commit time) — both would leave the
+    // recovered interval closed at the wrong instant.
+    let created_at = time::from_secs(1_600_000_000); // 2020
+    let retract_valid_to = time::from_secs(1_700_000_000); // 2023 (> created_at)
+
     wal.append(WalOperation::CreateNode {
         node_id,
         label: GLOBAL_INTERNER.intern("Person").unwrap(),
         properties: person("Alice"),
-        valid_from: time::now(),
+        valid_from: created_at,
         provenance: None,
     })?;
     wal.append(WalOperation::RetractNode {
         node_id,
-        valid_to: time::now(),
+        valid_to: retract_valid_to,
         version_id: Some(live_retraction),
     })?;
     wal.flush()?;
@@ -187,6 +195,26 @@ fn honor_logged_retract_node_version_id() -> Result<()> {
         historical.get_current_node_version(node_id),
         Some(live_retraction),
         "recovered retraction head must equal the logged live version_id"
+    );
+
+    // The retraction closed the valid-time interval at the LOGGED valid_to —
+    // not left open, not closed at valid_from or the commit time.
+    let head = historical
+        .get_node_version(live_retraction)
+        .expect("retraction version must exist under the logged id");
+    assert!(
+        head.temporal.valid_time().is_closed(),
+        "retraction must close the valid-time interval"
+    );
+    assert_eq!(
+        head.temporal.valid_time().end(),
+        retract_valid_to,
+        "recovered retraction must close valid time at the LOGGED valid_to"
+    );
+    assert_eq!(
+        head.temporal.valid_time().start(),
+        created_at,
+        "retraction must preserve the original valid_from"
     );
     Ok(())
 }
@@ -199,6 +227,11 @@ fn honor_logged_retract_edge_version_id() -> Result<()> {
     let tgt = NodeId::new(2).unwrap();
     let edge_id = EdgeId::new(1).unwrap();
     let live_retraction = VersionId::new(4242).unwrap();
+
+    // Distinct valid_from / valid_to (see honor_logged_retract_node_version_id)
+    // so a mangled valid_to on the edge retraction arm is caught.
+    let created_at = time::from_secs(1_600_000_000); // 2020
+    let retract_valid_to = time::from_secs(1_700_000_000); // 2023 (> created_at)
 
     for (id, name) in [(src, "Alice"), (tgt, "Bob")] {
         wal.append(WalOperation::CreateNode {
@@ -215,12 +248,12 @@ fn honor_logged_retract_edge_version_id() -> Result<()> {
         target: tgt,
         label: GLOBAL_INTERNER.intern("KNOWS").unwrap(),
         properties: PropertyMapBuilder::new().build(),
-        valid_from: time::now(),
+        valid_from: created_at,
         provenance: None,
     })?;
     wal.append(WalOperation::RetractEdge {
         edge_id,
-        valid_to: time::now(),
+        valid_to: retract_valid_to,
         version_id: Some(live_retraction),
     })?;
     wal.flush()?;
@@ -231,6 +264,25 @@ fn honor_logged_retract_edge_version_id() -> Result<()> {
         historical.get_current_edge_version(edge_id),
         Some(live_retraction),
         "recovered edge retraction head must equal the logged live version_id"
+    );
+
+    // The edge retraction closed the valid-time interval at the LOGGED valid_to.
+    let head = historical
+        .get_edge_version(live_retraction)
+        .expect("edge retraction version must exist under the logged id");
+    assert!(
+        head.temporal.valid_time().is_closed(),
+        "edge retraction must close the valid-time interval"
+    );
+    assert_eq!(
+        head.temporal.valid_time().end(),
+        retract_valid_to,
+        "recovered edge retraction must close valid time at the LOGGED valid_to"
+    );
+    assert_eq!(
+        head.temporal.valid_time().start(),
+        created_at,
+        "edge retraction must preserve the original valid_from"
     );
     Ok(())
 }
@@ -328,6 +380,134 @@ fn collision_does_not_clobber_history() -> Result<()> {
         "no version may be clobbered: expected 4 node versions"
     );
 
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// AC #2 (advancement guard): after HONORING a high logged tombstone id, replay
+// must bump `next_version_id` PAST it (`.max(id + 1)`), so a *subsequent*
+// synthesized tombstone lands ABOVE the honored id instead of colliding with —
+// or regressing below — it. Guards the four delete/retract arms'
+// `next_version_id = next_version_id.max(id + 1)`: reverting any to a plain
+// `next_version_id += 1` leaves the synthesized id small (it ignores the
+// honored high id), which these tests catch.
+// ---------------------------------------------------------------------------
+
+/// A delete whose honored id is HIGH, followed in the SAME recovery by a delete
+/// forcing synthesis: the synthesized id must skip past the honored high id.
+#[test]
+fn synthesized_delete_after_honored_high_id_skips_past_it() -> Result<()> {
+    let temp_dir = TempDir::new().unwrap();
+    let wal = new_wal(&temp_dir)?;
+
+    let a = NodeId::new(1).unwrap();
+    let c = NodeId::new(2).unwrap();
+    // Deliberately high: a synthesizing replay (max-seen + 1) would pick a small
+    // value, so honoring this id forces `next_version_id` far forward.
+    const HIGH: u64 = 7777;
+    let honored_high = VersionId::new(HIGH).unwrap();
+
+    for (id, name) in [(a, "Alice"), (c, "Carol")] {
+        wal.append(WalOperation::CreateNode {
+            node_id: id,
+            label: GLOBAL_INTERNER.intern("Person").unwrap(),
+            properties: person(name),
+            valid_from: time::now(),
+            provenance: None,
+        })?;
+    }
+    // Delete A with the HIGH honored id.
+    wal.append(WalOperation::DeleteNode {
+        node_id: a,
+        valid_from: time::now(),
+        version_id: Some(honored_high),
+    })?;
+    // Delete C with NO logged id -> replay must SYNTHESIZE its tombstone.
+    wal.append(WalOperation::DeleteNode {
+        node_id: c,
+        valid_from: time::now(),
+        version_id: None,
+    })?;
+    wal.flush()?;
+
+    let (_current, historical) = recover(&temp_dir, &wal)?;
+
+    // A's tombstone is the honored high id.
+    assert_eq!(
+        historical.get_current_node_version(a),
+        Some(honored_high),
+        "A's tombstone must be the honored high id"
+    );
+    // C's synthesized tombstone must skip PAST the honored high id — proof that
+    // honoring advanced `next_version_id` via `.max(id + 1)` (a plain `+= 1`
+    // would leave it small, at/below HIGH, and could even collide with A's id).
+    let c_tombstone = historical
+        .get_current_node_version(c)
+        .expect("C must have a synthesized tombstone head");
+    assert!(
+        c_tombstone.as_u64() > HIGH,
+        "synthesized tombstone {} must skip past the honored high id {}",
+        c_tombstone.as_u64(),
+        HIGH
+    );
+    assert_ne!(
+        c_tombstone, honored_high,
+        "synthesized tombstone must not collide with the honored high id"
+    );
+    Ok(())
+}
+
+/// Same shape, but the HIGH honored id comes from a RETRACT (exercising the
+/// retract arm's `.max(id + 1)` advancement rather than the delete arm's).
+#[test]
+fn synthesized_delete_after_honored_retract_high_id_skips_past_it() -> Result<()> {
+    let temp_dir = TempDir::new().unwrap();
+    let wal = new_wal(&temp_dir)?;
+
+    let a = NodeId::new(1).unwrap();
+    let c = NodeId::new(2).unwrap();
+    const HIGH: u64 = 7777;
+    let honored_high = VersionId::new(HIGH).unwrap();
+
+    for (id, name) in [(a, "Alice"), (c, "Carol")] {
+        wal.append(WalOperation::CreateNode {
+            node_id: id,
+            label: GLOBAL_INTERNER.intern("Person").unwrap(),
+            properties: person(name),
+            valid_from: time::now(),
+            provenance: None,
+        })?;
+    }
+    // Retract A with the HIGH honored id (retract arm advancement).
+    wal.append(WalOperation::RetractNode {
+        node_id: a,
+        valid_to: time::now(),
+        version_id: Some(honored_high),
+    })?;
+    // Delete C with NO logged id -> synthesis; must skip past the retract's id.
+    wal.append(WalOperation::DeleteNode {
+        node_id: c,
+        valid_from: time::now(),
+        version_id: None,
+    })?;
+    wal.flush()?;
+
+    let (_current, historical) = recover(&temp_dir, &wal)?;
+
+    assert_eq!(
+        historical.get_current_node_version(a),
+        Some(honored_high),
+        "A's retraction must be the honored high id"
+    );
+    let c_tombstone = historical
+        .get_current_node_version(c)
+        .expect("C must have a synthesized tombstone head");
+    assert!(
+        c_tombstone.as_u64() > HIGH,
+        "synthesized tombstone {} must skip past the honored retract id {}",
+        c_tombstone.as_u64(),
+        HIGH
+    );
     Ok(())
 }
 
@@ -441,8 +621,25 @@ fn live_delete_tombstone_id_survives_crash() -> Result<()> {
         let id = db
             .create_node("Person", person("Alice"))
             .expect("create_node");
-        db.delete_node_with_valid_time(id, None)
-            .expect("delete_node");
+
+        // Introduce a GAP so the live tombstone id is NON-CONTIGUOUS with what a
+        // pure-synthesis replay would assign at the delete's log position. In a
+        // single transaction, the delete/retract closing ids are pre-generated
+        // at commit (Issue #3406) — AFTER every buffered create has already
+        // drawn its version id — yet the DeleteNode entry is logged BEFORE the
+        // trailing create. So replaying in log order, a synthesizing reader
+        // would give the tombstone the id at THAT position (lower), whereas the
+        // live commit stamped it with the max (post-create) id. Honoring the
+        // logged id is the only way the recovered head equals the live one; a
+        // regression to pure synthesis would recover a smaller id and this
+        // test's `recovered == live` assertion would fail.
+        let mut tx = db.write_transaction().expect("begin tx");
+        tx.create_node("Filler", person("f1")).expect("create f1");
+        tx.delete_node(id).expect("delete_node"); // logged before f2/f3
+        tx.create_node("Filler", person("f2")).expect("create f2");
+        tx.create_node("Filler", person("f3")).expect("create f3");
+        tx.commit().expect("commit");
+
         // Hard crash: leak the handle so Drop never persists anything.
         std::mem::forget(db);
         id
