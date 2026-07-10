@@ -453,6 +453,7 @@ pub(crate) fn replay_wal_into_storage_with_constraints(
             WalOperation::DeleteNode {
                 node_id,
                 valid_from,
+                version_id: logged_tombstone_id,
             } => {
                 // Idempotent re-application guard, per store (review round 2,
                 // #3428). Background persistence may snapshot current and
@@ -502,8 +503,17 @@ pub(crate) fn replay_wal_into_storage_with_constraints(
                         )?;
                     }
 
-                    let tombstone_version_id = VersionId::new(next_version_id)?;
-                    next_version_id += 1;
+                    // Honor the LOGGED tombstone version_id (Issue #3406) so the
+                    // recovered version chain is bit-identical to the live one
+                    // and replay is idempotent; segments predating
+                    // WAL_VERSION_DELETE_VERSION_ID carry no id, so synthesize as
+                    // before. Either way, advance next_version_id past it to keep
+                    // future synthesized ids collision-free.
+                    let tombstone_version_id = match logged_tombstone_id {
+                        Some(vid) => vid,
+                        None => VersionId::new(next_version_id)?,
+                    };
+                    next_version_id = next_version_id.max(tombstone_version_id.as_u64() + 1);
 
                     // Honor the LOGGED valid_from (possibly backdated, Issues
                     // #3221/#3400) — mirroring the live path's
@@ -528,6 +538,7 @@ pub(crate) fn replay_wal_into_storage_with_constraints(
             WalOperation::DeleteEdge {
                 edge_id,
                 valid_from,
+                version_id: logged_tombstone_id,
             } => {
                 // Per-store re-application guard — see the DeleteNode arm
                 // above (review round 2, #3428).
@@ -575,8 +586,14 @@ pub(crate) fn replay_wal_into_storage_with_constraints(
                         )?;
                     }
 
-                    let tombstone_version_id = VersionId::new(next_version_id)?;
-                    next_version_id += 1;
+                    // Honor the LOGGED tombstone version_id (Issue #3406); see
+                    // the DeleteNode arm above for rationale and the synthesis
+                    // fallback for pre-v9 segments.
+                    let tombstone_version_id = match logged_tombstone_id {
+                        Some(vid) => vid,
+                        None => VersionId::new(next_version_id)?,
+                    };
+                    next_version_id = next_version_id.max(tombstone_version_id.as_u64() + 1);
 
                     // Honor the LOGGED valid_from (possibly backdated, Issues
                     // #3221/#3400) — mirroring the live path's
@@ -600,7 +617,11 @@ pub(crate) fn replay_wal_into_storage_with_constraints(
                     current.delete_edge_direct(edge_id)?;
                 }
             }
-            WalOperation::RetractNode { node_id, valid_to } => {
+            WalOperation::RetractNode {
+                node_id,
+                valid_to,
+                version_id: logged_retraction_id,
+            } => {
                 // Valid-time retraction (Issue #3230). Reconstruct exactly what
                 // the original commit did:
                 //   (a) close the head version's TRANSACTION time (its valid
@@ -656,8 +677,14 @@ pub(crate) fn replay_wal_into_storage_with_constraints(
                         )?;
                     }
 
-                    let retraction_version_id = VersionId::new(next_version_id)?;
-                    next_version_id += 1;
+                    // Honor the LOGGED retraction version_id (Issue #3406); see
+                    // the DeleteNode arm for rationale and the pre-v9 synthesis
+                    // fallback.
+                    let retraction_version_id = match logged_retraction_id {
+                        Some(vid) => vid,
+                        None => VersionId::new(next_version_id)?,
+                    };
+                    next_version_id = next_version_id.max(retraction_version_id.as_u64() + 1);
 
                     historical.add_retracted_node_version(
                         node_id,
@@ -674,7 +701,11 @@ pub(crate) fn replay_wal_into_storage_with_constraints(
                     current.delete_node_direct(node_id, commit_timestamp)?;
                 }
             }
-            WalOperation::RetractEdge { edge_id, valid_to } => {
+            WalOperation::RetractEdge {
+                edge_id,
+                valid_to,
+                version_id: logged_retraction_id,
+            } => {
                 // Valid-time retraction of an edge (Issue #3230); mirrors the
                 // RetractNode arm above, honoring the logged `valid_to`, with
                 // the same per-store re-application guards (#3428).
@@ -727,8 +758,14 @@ pub(crate) fn replay_wal_into_storage_with_constraints(
                         )?;
                     }
 
-                    let retraction_version_id = VersionId::new(next_version_id)?;
-                    next_version_id += 1;
+                    // Honor the LOGGED retraction version_id (Issue #3406); see
+                    // the DeleteNode arm for rationale and the pre-v9 synthesis
+                    // fallback.
+                    let retraction_version_id = match logged_retraction_id {
+                        Some(vid) => vid,
+                        None => VersionId::new(next_version_id)?,
+                    };
+                    next_version_id = next_version_id.max(retraction_version_id.as_u64() + 1);
 
                     historical.add_retracted_edge_version(
                         edge_id,
@@ -1372,8 +1409,12 @@ mod tests {
             provenance: None,
         })
         .unwrap();
-        wal.append(WalOperation::RetractNode { node_id, valid_to })
-            .unwrap();
+        wal.append(WalOperation::RetractNode {
+            node_id,
+            valid_to,
+            version_id: None,
+        })
+        .unwrap();
         wal.flush().unwrap();
 
         let current = CurrentStorage::new();
@@ -1502,8 +1543,12 @@ mod tests {
             provenance: None,
         })
         .unwrap();
-        wal.append(WalOperation::RetractEdge { edge_id, valid_to })
-            .unwrap();
+        wal.append(WalOperation::RetractEdge {
+            edge_id,
+            valid_to,
+            version_id: None,
+        })
+        .unwrap();
         wal.flush().unwrap();
 
         let current = CurrentStorage::new();
@@ -1706,6 +1751,7 @@ mod tests {
         wal.append(WalOperation::DeleteNode {
             node_id,
             valid_from: time::now(),
+            version_id: None,
         })
         .unwrap();
         wal.append(WalOperation::CreateNode {
@@ -1813,6 +1859,7 @@ mod tests {
         wal.append(WalOperation::DeleteEdge {
             edge_id,
             valid_from: time::now(),
+            version_id: None,
         })
         .unwrap();
         wal.append(WalOperation::CreateEdge {
@@ -1952,11 +1999,13 @@ mod tests {
         wal.append(WalOperation::DeleteEdge {
             edge_id,
             valid_from: time::now(),
+            version_id: None,
         })
         .unwrap();
         wal.append(WalOperation::DeleteNode {
             node_id,
             valid_from: time::now(),
+            version_id: None,
         })
         .unwrap();
         wal.flush().unwrap();
@@ -2037,11 +2086,13 @@ mod tests {
         wal.append(WalOperation::DeleteEdge {
             edge_id,
             valid_from: time::now(),
+            version_id: None,
         })
         .unwrap();
         wal.append(WalOperation::DeleteNode {
             node_id,
             valid_from: time::now(),
+            version_id: None,
         })
         .unwrap();
         wal.flush().unwrap();

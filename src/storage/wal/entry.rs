@@ -104,6 +104,12 @@ pub enum WalOperation {
         node_id: NodeId,
         /// When the deletion became valid (typically commit time)
         valid_from: Timestamp,
+        /// The tombstone version ID assigned by the live write path (Issue
+        /// #3406). Logged so replay reproduces the exact same version chain
+        /// instead of synthesizing a (potentially colliding) id. `None` for
+        /// segments written before `WAL_VERSION_DELETE_VERSION_ID` (v9/v10),
+        /// which fall back to synthesis during replay.
+        version_id: Option<VersionId>,
     },
     /// Delete an edge
     DeleteEdge {
@@ -111,6 +117,9 @@ pub enum WalOperation {
         edge_id: EdgeId,
         /// When the deletion became valid (typically commit time)
         valid_from: Timestamp,
+        /// The tombstone version ID assigned by the live write path (Issue
+        /// #3406). See [`WalOperation::DeleteNode`]'s `version_id`.
+        version_id: Option<VersionId>,
     },
     /// Retract a node: close its valid-time interval at `valid_to` without
     /// deleting its history (Issue #3230).
@@ -119,6 +128,9 @@ pub enum WalOperation {
         node_id: NodeId,
         /// When the fact stopped being true in the real world (user-controlled)
         valid_to: Timestamp,
+        /// The retraction (closing) version ID assigned by the live write path
+        /// (Issue #3406). See [`WalOperation::DeleteNode`]'s `version_id`.
+        version_id: Option<VersionId>,
     },
     /// Retract an edge: close its valid-time interval at `valid_to` without
     /// deleting its history (Issue #3230).
@@ -127,6 +139,9 @@ pub enum WalOperation {
         edge_id: EdgeId,
         /// When the relationship stopped being true in the real world (user-controlled)
         valid_to: Timestamp,
+        /// The retraction (closing) version ID assigned by the live write path
+        /// (Issue #3406). See [`WalOperation::DeleteNode`]'s `version_id`.
+        version_id: Option<VersionId>,
     },
     /// Checkpoint marker - indicates a snapshot was taken
     Checkpoint {

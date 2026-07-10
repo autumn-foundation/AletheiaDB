@@ -24,6 +24,7 @@
 
 use super::WriteTransaction;
 use crate::core::error::Result;
+use crate::core::id::VersionId;
 use crate::core::temporal::Timestamp;
 use crate::storage::wal::WalOperation;
 
@@ -72,6 +73,7 @@ use crate::storage::wal::WalOperation;
 pub(crate) fn log_operations_to_wal(
     tx: &WriteTransaction,
     commit_timestamp: Timestamp,
+    closing_version_ids: &[VersionId],
 ) -> Result<()> {
     // Collect all buffered writes into a single batch and append them under one atomic
     // LSN allocation via the WAL `append_batch` path (Issue #219). This is strictly more
@@ -95,7 +97,26 @@ pub(crate) fn log_operations_to_wal(
     // markers and stay on the immediate-apply recovery path.
     let mut operations: Vec<WalOperation> = Vec::with_capacity(buffered.len() + 2);
     operations.push(WalOperation::BeginTx { tx_id });
-    operations.extend(buffered.iter().map(WalOperation::from));
+
+    // Issue #3406: stamp the pre-generated closing (tombstone / retraction)
+    // version id onto each delete/retract op, in buffer order, so the WAL
+    // records the exact id historical storage will use. `closing_version_ids`
+    // was generated with one id per delete/retract op in this same order.
+    let mut closing_ids = closing_version_ids.iter().copied();
+    for bw in buffered.iter() {
+        let mut op = WalOperation::from(bw);
+        match &mut op {
+            WalOperation::DeleteNode { version_id, .. }
+            | WalOperation::DeleteEdge { version_id, .. }
+            | WalOperation::RetractNode { version_id, .. }
+            | WalOperation::RetractEdge { version_id, .. } => {
+                *version_id = closing_ids.next();
+            }
+            _ => {}
+        }
+        operations.push(op);
+    }
+
     operations.push(WalOperation::CommitTx {
         tx_id,
         entry_count: buffered.len() as u32,
