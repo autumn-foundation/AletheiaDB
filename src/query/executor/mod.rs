@@ -208,12 +208,36 @@ impl QueryExecutor {
     /// `max_schema_as_of_entities` limit (lowest ids kept) so a pathological
     /// history can't make a single scan unbounded, then sorted for
     /// deterministic, stable output.
+    ///
+    /// # Truncation caveat
+    ///
+    /// When recorded history exceeds `max_schema_as_of_entities` (default
+    /// 50,000) the candidate set is **truncated** (lowest ids kept, newest
+    /// dropped) and the temporal scan returns an *incomplete* result. This
+    /// mirrors the oracle's [`NodesAtTime::sampled`] cap. The query-results
+    /// envelope does not yet carry a `truncated`/`sampled` flag, so today
+    /// truncation is only surfaced via an `observability` `warn!`; wiring the
+    /// flag through the executor result is tracked as a follow-up. Callers with
+    /// larger histories should raise `max_schema_as_of_entities`.
     fn temporal_scan_candidates(&self) -> Vec<crate::core::NodeId> {
         let historical = self.historical.read();
         let mut ids = historical.versioned_node_ids();
         let cap = historical.max_schema_as_of_entities();
         drop(historical);
-        crate::db::schema::cap_ids(&mut ids, cap);
+        // History exceeds the cap => incomplete result (lowest ids kept).
+        // Surface it rather than silently dropping the signal.
+        let truncated = crate::db::schema::cap_ids(&mut ids, cap);
+        #[cfg(feature = "observability")]
+        if truncated {
+            tracing::warn!(
+                cap,
+                kept = ids.len(),
+                "temporal label scan candidate set truncated at max_schema_as_of_entities; \
+                 result is incomplete (newest node ids dropped)"
+            );
+        }
+        #[cfg(not(feature = "observability"))]
+        let _ = truncated;
         ids.sort_unstable();
         ids
     }

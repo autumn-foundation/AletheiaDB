@@ -816,11 +816,24 @@ fn is_missing_at_time(err: &crate::core::error::Error) -> bool {
 /// # Semantics
 ///
 /// Given a candidate set of node ids and a valid-time range `[valid_from,
-/// valid_to)`, this yields **every recorded version** of each candidate whose
-/// valid-time interval *overlaps* the range and that was recorded no later than
-/// the observed `transaction_time`, optionally filtered by `label`. Segments
-/// later superseded in transaction time are included (a valid-time range query
-/// surfaces the full recorded history over the window, not a single snapshot).
+/// valid_to)`, this yields every version of each candidate that is **believed
+/// at** the observed `transaction_time` (its transaction interval contains TT
+/// -- the same predicate a point-in-time `AS OF` uses) **and** whose valid-time
+/// interval *overlaps* the range, optionally filtered by `label`.
+///
+/// Semantically this is an **as-of-TT snapshot across a valid-time range**: it
+/// equals the union, over every valid instant `v` in `[valid_from, valid_to)`,
+/// of `AS OF (v, TT)`, deduplicated by version. Earlier valid segments that are
+/// no longer believed at TT (superseded by a later transaction-time write, or
+/// closed by a retraction) are **excluded**, consistent with `AS OF`, so no
+/// stale beliefs and no duplicate rows appear.
+///
+/// In the current storage model each forward write closes the prior version's
+/// transaction interval (transaction-time supersession), so at a fixed TT at
+/// most one version per node is believed; a node therefore contributes at most
+/// one row -- its believed-at-TT state -- and only when that state's valid
+/// interval overlaps the range. (Were the store to retain multiple co-current
+/// valid segments, this would naturally emit one row per in-range version.)
 /// Because a single node can have several versions overlapping the range, this
 /// iterator may emit **multiple rows per node** -- one per overlapping version
 /// -- which is the openCypher-ish reading of a `BETWEEN` range query.
@@ -902,14 +915,20 @@ impl TemporalNodeRangeScanIterator {
                 {
                     continue;
                 }
-                // Include every version recorded no later than the observation
-                // transaction time. Unlike a point-in-time `AS OF` (which pins a
-                // single visible version), a valid-time *range* query surfaces the
-                // full recorded valid-time history over the window -- including
-                // segments later superseded in transaction time (an update closes
-                // the prior version's transaction interval). Versions recorded
-                // *after* the observation time are excluded.
-                if version.temporal.transaction_time().start() > transaction_time {
+                // Keep only versions BELIEVED at the observation transaction time
+                // -- the exact same tx-visibility predicate the point-in-time
+                // `AS OF` selector (`find_node_version_at_time`) uses. This makes
+                // the range scan an as-of-TT snapshot ACROSS the valid range:
+                // versions whose transaction interval was closed by a later
+                // correction or retraction (beliefs no longer held at TT) are
+                // excluded, exactly as a point `AS OF` would exclude them. Because
+                // at a fixed TT there is at most one version per valid instant,
+                // this also yields no duplicate rows.
+                if !version
+                    .temporal
+                    .transaction_time()
+                    .contains(transaction_time)
+                {
                     continue;
                 }
                 // Keep versions whose valid interval overlaps the range.

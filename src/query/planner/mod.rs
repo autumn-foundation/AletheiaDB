@@ -661,6 +661,20 @@ impl QueryPlanner {
                             transaction_time,
                         });
                     }
+                    // A transaction-time RANGE (`FOR SYSTEM_TIME BETWEEN ...`,
+                    // reachable via the SQL:2011 parser / `QueryBuilder`) has no
+                    // label-scan lowering yet. Reject it with a structured error
+                    // rather than silently falling through to the current-state
+                    // `NodeScan` below (which would return present-day data -- the
+                    // exact bug class this PR fixes, for the tx-range dimension).
+                    if ctx.transaction_time_between.is_some() {
+                        return Err(Error::Query(QueryError::UnsupportedFeature {
+                            feature: "transaction-time range scan (FOR SYSTEM_TIME BETWEEN) on a \
+                                      label scan is not supported; use AS OF SYSTEM_TIME for a \
+                                      point-in-time transaction-time query"
+                                .to_string(),
+                        }));
+                    }
                 }
                 Ok(PhysicalOp::NodeScan {
                     label: label.clone(),
@@ -1682,6 +1696,28 @@ mod tests {
 
         let plan = planner.plan(query).unwrap();
         assert!(matches!(plan.root, PhysicalOp::NodeScan { .. }));
+    }
+
+    #[test]
+    fn test_transaction_time_between_label_scan_rejected() {
+        // A transaction-time RANGE context on a label scan has no lowering yet;
+        // it must be REJECTED with a structured error, never fall through to a
+        // current-state NodeScan (which would silently return present-day data).
+        let planner = test_planner();
+        let range = crate::core::temporal::TimeRange::new(1_000.into(), 2_000.into()).unwrap();
+        let query = Query {
+            ops: vec![QueryOp::ScanNodes {
+                label: Some("Person".to_string()),
+            }],
+            temporal_context: Some(TemporalContext::transaction_time_between(range)),
+            hints: QueryHints::default(),
+        };
+
+        let err = planner.plan(query).unwrap_err();
+        assert!(
+            matches!(err, Error::Query(QueryError::UnsupportedFeature { .. })),
+            "transaction_time_between must be an UnsupportedFeature error, got {err:?}"
+        );
     }
 
     #[test]

@@ -461,12 +461,19 @@ pub enum PhysicalOp {
 
     /// Valid-time range label scan (`BETWEEN ... AND ...`).
     ///
-    /// Emits every recorded node version whose valid-time interval **overlaps**
-    /// `[valid_from, valid_to)` (as recorded at `transaction_time`), keeping
-    /// only those matching the optional `label`. Because a single node can have
-    /// multiple versions overlapping the range, this operator may emit multiple
-    /// rows per node. Produced by the planner when a label scan carries a
-    /// `valid_time_between` range (Issue #552).
+    /// An **as-of-`transaction_time` snapshot across a valid-time range**: emits
+    /// every node version believed at `transaction_time` (its transaction
+    /// interval contains it -- the same predicate a point `AS OF` uses) whose
+    /// valid-time interval **overlaps** `[valid_from, valid_to)`, keeping only
+    /// those matching the optional `label`. Equals the union, over every valid
+    /// instant in the range, of `AS OF (v, transaction_time)`, deduplicated by
+    /// version -- so versions superseded in transaction time (later writes /
+    /// retractions) are excluded, consistent with `AS OF`, with no stale or
+    /// duplicate rows. Because each forward write supersedes the prior version
+    /// in transaction time, at most one version per node is believed at a fixed
+    /// `transaction_time`, so a node contributes at most one row. Produced by
+    /// the planner when a label scan carries a `valid_time_between` range
+    /// (Issue #552).
     TemporalNodeRangeScan {
         /// Optional label filter
         label: Option<String>,
@@ -839,6 +846,27 @@ impl PhysicalOp {
                     .map(|p| format!(", prop: {}", p))
                     .unwrap_or_default();
                 format!("{prefix}{name} (k: {}, ts: {}{})", k, timestamp, prop_str)
+            }
+            PhysicalOp::TemporalNodeScan {
+                label,
+                valid_time,
+                transaction_time,
+            } => {
+                format!(
+                    "{prefix}{name} (label: {:?}, vt: {}, tt: {})",
+                    label, valid_time, transaction_time
+                )
+            }
+            PhysicalOp::TemporalNodeRangeScan {
+                label,
+                valid_from,
+                valid_to,
+                transaction_time,
+            } => {
+                format!(
+                    "{prefix}{name} (label: {:?}, valid: [{}, {}), tt: {})",
+                    label, valid_from, valid_to, transaction_time
+                )
             }
             PhysicalOp::SimilarToNode {
                 source_node,
