@@ -1470,8 +1470,10 @@ impl AletheiaMcpServer {
     /// `candidates` MUST be sorted ascending by node id (both underlying `db`
     /// finders guarantee this) and reconstructed at `snapshot`. The page
     /// returns the first `limit` candidates whose id is strictly greater than
-    /// `after` -- a keyset seek, so page N costs the same as page 1 regardless
-    /// of depth. When more candidates remain, a continuation `cursor` is
+    /// `after` -- a keyset filter that avoids re-emitting prior result pages (no
+    /// dup/gap). Candidate enumeration is still O(total) per page in v1 (the
+    /// full candidate scan re-runs each page); a true depth-independent keyset
+    /// seek is a follow-up. When more candidates remain, a continuation `cursor` is
     /// issued carrying the same pinned `snapshot`, so the union of all pages
     /// equals exactly the unbounded result at that one bi-temporal moment.
     ///
@@ -1543,6 +1545,11 @@ impl AletheiaMcpServer {
                     limit,
                     filters,
                 );
+                // Continuation key = last id ACTUALLY EMITTED on this page.
+                // When #3353 token budgets land and can trim a page short of
+                // `limit`, `after` MUST still be derived from the last row that
+                // survived the trim (not the limit-th candidate), or the next
+                // page would skip the trimmed-off rows.
                 payload.after = Some(last_id);
                 payload.cid = parent_cid;
                 match self.cursors.issue(payload) {
@@ -1697,6 +1704,11 @@ impl AletheiaMcpServer {
                 limit,
                 filters,
             );
+            // Continuation key = last edge id ACTUALLY EMITTED on this page.
+            // When #3353 token budgets land and can trim a page short of
+            // `limit`, `after` MUST still be derived from the last row that
+            // survived the trim (not the limit-th candidate), or the next page
+            // would skip the trimmed-off edges.
             payload.after = Some(last_id);
             payload.cid = parent_cid;
             match self.cursors.issue(payload) {
@@ -3226,6 +3238,10 @@ impl AletheiaMcpServer {
                 limit,
                 filters,
             );
+            // Continuation offset advances by the number of rows ACTUALLY
+            // EMITTED (`count`). When #3353 token budgets land and can trim a
+            // page short of `limit`, `off` MUST advance by the post-trim row
+            // count (not `limit`), or the next page would skip trimmed rows.
             payload.off = (offset + count) as u64;
             payload.cid = parent_cid;
             match self.cursors.issue(payload) {
@@ -3477,20 +3493,6 @@ impl AletheiaMcpServer {
         }
     }
 
-    /// Find nodes by label (and optional exact property match) as of a
-    /// bi-temporal point (Issue #3236).
-    ///
-    /// Validation mirrors `handle_list_nodes` (both-or-neither property
-    /// filter, same limit/offset clamps); the temporal reconstruction is
-    /// delegated to `AletheiaDB::find_nodes_at_time` /
-    /// `find_nodes_by_property_at`, which reconstruct each candidate from
-    /// the historical version visible at the queried coordinate -- so nodes
-    /// deleted from current state are still found when both dimensions
-    /// anchor before the deletion. The candidate set is capped at the same
-    /// `max_schema_as_of_entities` limit bi-temporal `get_schema` uses; when
-    /// truncated, the response discloses it via `sampled: true` and
-    /// `total_matching`/`has_more` count matches within the sampled
-    /// candidate set only.
     /// Cursor-mode `find_nodes_at_time` (Issue #3360): snapshot-anchored keyset
     /// paging. The snapshot is the caller's requested `(valid_time,
     /// transaction_time)` -- already a point-in-time read, so consistency is
@@ -3581,6 +3583,20 @@ impl AletheiaMcpServer {
         )
     }
 
+    /// Find nodes by label (and optional exact property match) as of a
+    /// bi-temporal point (Issue #3236).
+    ///
+    /// Validation mirrors `handle_list_nodes` (both-or-neither property
+    /// filter, same limit/offset clamps); the temporal reconstruction is
+    /// delegated to `AletheiaDB::find_nodes_at_time` /
+    /// `find_nodes_by_property_at`, which reconstruct each candidate from
+    /// the historical version visible at the queried coordinate -- so nodes
+    /// deleted from current state are still found when both dimensions
+    /// anchor before the deletion. The candidate set is capped at the same
+    /// `max_schema_as_of_entities` limit bi-temporal `get_schema` uses; when
+    /// truncated, the response discloses it via `sampled: true` and
+    /// `total_matching`/`has_more` count matches within the sampled
+    /// candidate set only.
     fn handle_find_nodes_at_time(&self, args: serde_json::Value) -> CallToolResult {
         // Snapshot-anchored cursor paging (Issue #3360); offset paging below
         // is unchanged for backward compatibility.
@@ -5046,6 +5062,57 @@ fn make_input_schema<T: rmcp::schemars::JsonSchema>()
     }
 }
 
+/// Inject the snapshot-anchored cursor parameters (`use_cursor`, `cursor`) into
+/// a generated tool `inputSchema` (Issue #3360).
+///
+/// The five cursorable read tools (`list_nodes`, `find_nodes_at_time`,
+/// `get_outgoing_edges`, `get_incoming_edges`, `traverse`) read `use_cursor` /
+/// `cursor` directly off the raw JSON arguments rather than through their typed
+/// request structs, so those two parameters are absent from the derived schema
+/// and would otherwise be undiscoverable to a client/LLM. This programmatically
+/// adds them (both optional) to `inputSchema.properties` with clear
+/// descriptions -- mirroring the sibling budget-param injection (#3353) rather
+/// than threading the fields through every request-struct construction site.
+fn inject_cursor_schema_params(
+    schema: Arc<serde_json::Map<String, serde_json::Value>>,
+) -> Arc<serde_json::Map<String, serde_json::Value>> {
+    let mut map = (*schema).clone();
+    let props = map
+        .entry("properties")
+        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+    if let Some(props) = props.as_object_mut() {
+        props.insert(
+            "use_cursor".to_string(),
+            json!({
+                "type": "boolean",
+                "description": "Optional. Set true on the FIRST call to open a \
+                    snapshot-anchored cursor scan; the response then carries an opaque \
+                    `cursor` token to resume paging. Consistent, duplicate-free and \
+                    gap-free under concurrent writes. Omit (or false) for the default \
+                    offset pagination."
+            }),
+        );
+        props.insert(
+            "cursor".to_string(),
+            json!({
+                "type": "string",
+                "description": "Optional. The opaque continuation token returned by a \
+                    prior cursor page. Echo it back VERBATIM with no other arguments to \
+                    fetch the next page. When the response omits `cursor` (has_more is \
+                    false) the scan is complete."
+            }),
+        );
+    }
+    Arc::new(map)
+}
+
+/// [`make_input_schema`] for a cursorable read tool, with the `use_cursor` /
+/// `cursor` parameters injected (see [`inject_cursor_schema_params`]).
+fn make_cursor_input_schema<T: rmcp::schemars::JsonSchema>()
+-> Arc<serde_json::Map<String, serde_json::Value>> {
+    inject_cursor_schema_params(make_input_schema::<T>())
+}
+
 // The read-only statement guard (`detect_mutating_clause`) moved to
 // `crate::query::read_only` so the HTTP surface can reuse it for RBAC
 // classification (Issue #3350). Re-imported here to keep call sites stable.
@@ -5172,8 +5239,11 @@ fn tool_definitions() -> Vec<Tool> {
                      (property-filtered queries) and omitted for plain label scans. \
                      Vector/embedding properties are elided by default (replaced with a \
                      `{type, dim, elided:true}` descriptor) to protect LLM context; pass \
-                     `include_vectors: true` to receive the full float arrays.",
-            make_input_schema::<ListNodesRequest>(),
+                     `include_vectors: true` to receive the full float arrays. \
+                     Pass `use_cursor: true` for snapshot-anchored cursor paging; echo the \
+                     returned `cursor` back verbatim (no other args) for the next page; when \
+                     the response omits `cursor` / `has_more` is false, the scan is complete.",
+            make_cursor_input_schema::<ListNodesRequest>(),
         ),
         Tool::new(
             "count_nodes",
@@ -5251,21 +5321,30 @@ fn tool_definitions() -> Vec<Tool> {
         Tool::new(
             "get_outgoing_edges",
             "Get all outgoing edges from a node. Returns the complete set (never \
-                     truncated), so the response carries `has_more: false` and \
-                     `total_matching` equal to `count`. Vector/embedding properties are elided \
+                     truncated) in the default full-adjacency mode, so the response carries \
+                     `has_more: false` and `total_matching` equal to `count`; with \
+                     `use_cursor: true` the adjacency is paged and `has_more` may be true with a \
+                     continuation `cursor`. Vector/embedding properties are elided \
                      by default (replaced with a `{type, dim, elided:true}` descriptor) to \
                      protect LLM context; pass `include_vectors: true` to receive the full float \
-                     arrays.",
-            make_input_schema::<GetOutgoingEdgesRequest>(),
+                     arrays. Pass `use_cursor: true` for snapshot-anchored cursor paging; echo \
+                     the returned `cursor` back verbatim (no other args) for the next page; when \
+                     the response omits `cursor` / `has_more` is false, the scan is complete.",
+            make_cursor_input_schema::<GetOutgoingEdgesRequest>(),
         ),
         Tool::new(
             "get_incoming_edges",
-            "Get all incoming edges to a node. Returns the complete set (never truncated), \
-                     so the response carries `has_more: false` and `total_matching` equal to \
-                     `count`. Vector/embedding properties are elided by \
+            "Get all incoming edges to a node. Returns the complete set (never truncated) \
+                     in the default full-adjacency mode, so the response carries \
+                     `has_more: false` and `total_matching` equal to `count`; with \
+                     `use_cursor: true` the adjacency is paged and `has_more` may be true with a \
+                     continuation `cursor`. Vector/embedding properties are elided by \
                      default (replaced with a `{type, dim, elided:true}` descriptor) to protect \
-                     LLM context; pass `include_vectors: true` to receive the full float arrays.",
-            make_input_schema::<GetIncomingEdgesRequest>(),
+                     LLM context; pass `include_vectors: true` to receive the full float arrays. \
+                     Pass `use_cursor: true` for snapshot-anchored cursor paging; echo the \
+                     returned `cursor` back verbatim (no other args) for the next page; when the \
+                     response omits `cursor` / `has_more` is false, the scan is complete.",
+            make_cursor_input_schema::<GetIncomingEdgesRequest>(),
         ),
         Tool::new(
             "traverse",
@@ -5280,8 +5359,10 @@ fn tool_definitions() -> Vec<Tool> {
                      bi-temporal instant instead of the current state -- e.g. \"Alice's KNOWS \
                      network as of last year\". Edges/nodes not valid at that instant are \
                      excluded; omitting both parameters reproduces today's current-state behavior \
-                     exactly.",
-            make_input_schema::<TraverseRequest>(),
+                     exactly. Pass `use_cursor: true` for snapshot-anchored cursor paging; echo \
+                     the returned `cursor` back verbatim (no other args) for the next page; when \
+                     the response omits `cursor` / `has_more` is false, the scan is complete.",
+            make_cursor_input_schema::<TraverseRequest>(),
         ),
         Tool::new(
             "find_similar",
@@ -5343,8 +5424,11 @@ fn tool_definitions() -> Vec<Tool> {
                      bi-temporal history the candidate scan is capped; the response then sets \
                      `sampled: true` and `total_matching` counts matches within the sampled \
                      candidate set only. Vector/embedding properties are \
-                     elided by default; pass `include_vectors: true` for full arrays.",
-            make_input_schema::<FindNodesAtTimeRequest>(),
+                     elided by default; pass `include_vectors: true` for full arrays. \
+                     Pass `use_cursor: true` for snapshot-anchored cursor paging; echo the \
+                     returned `cursor` back verbatim (no other args) for the next page; when the \
+                     response omits `cursor` / `has_more` is false, the scan is complete.",
+            make_cursor_input_schema::<FindNodesAtTimeRequest>(),
         ),
         Tool::new(
             "list_changes",

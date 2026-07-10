@@ -1007,11 +1007,37 @@ existing point-in-time read semantics. Concretely, for the whole scan:
 
 So the union of all pages equals *exactly* the unbounded result at one
 consistent moment — zero duplicates, zero gaps — even under concurrent
-mutation. This is uniquely cheap for AletheiaDB: the bi-temporal engine
-already answers "the database as of coordinate T" natively, so consistent
-paging falls out of existing semantics rather than requiring a held-open
-transaction (contrast Qdrant/Weaviate/Milvus scroll APIs, which drift under
-concurrent writes because they have no coordinate to anchor to).
+mutation, **up to the candidate cap** (see below). This is uniquely cheap for
+AletheiaDB: the bi-temporal engine already answers "the database as of
+coordinate T" natively, so consistent paging falls out of existing semantics
+rather than requiring a held-open transaction (contrast Qdrant/Weaviate/Milvus
+scroll APIs, which drift under concurrent writes because they have no
+coordinate to anchor to).
+
+**Candidate cap (`sampled`).** The node scans (`list_nodes`,
+`find_nodes_at_time`) route through the #3236 point-in-time finders, whose
+candidate enumeration is capped at `max_schema_as_of_entities` (default 50,000,
+lowest node ids kept). When the labelled candidate set exceeds that cap, every
+page of the scan carries `sampled: true`, and the "union equals exactly the
+unbounded result" guarantee holds only **up to the cap** — the scan is bounded
+by the cap, not exhausted. `total_matching` then counts matches within the
+sampled candidate set only. When `sampled` is `false` (the common case) the
+union is the complete result. To scan a set larger than the cap with full
+coverage, narrow it with a `property_key`/`property_value` filter (or a more
+specific `label`) so the candidate set fits under the cap.
+
+**Current-state vs. bi-temporal-at-now divergence.** `get_outgoing_edges`,
+`get_incoming_edges`, and `traverse` in cursor mode (with no `as_of_*`
+coordinate supplied) pin the snapshot at "now" on the first page and answer via
+the bi-temporal **as-of-now** read path — *not* the plain current-state path
+their default (non-cursor) mode uses. The practical consequence: a cursor scan
+**excludes future-valid** rows (an edge or node whose `valid_from` is in the
+future, e.g. a #3221 forward-dated fact), whereas a plain current-state
+`get_outgoing_edges` / `traverse` call returns them. This is the same tradeoff
+`find_nodes_at_time` (and #3236) already documents for point-in-time reads: a
+future-dated `valid_from` row is in current state but not yet visible at
+`(now, now)`. If you specifically need future-valid rows, use the tool's
+non-cursor mode.
 
 ### The cursor loop
 
@@ -1046,18 +1072,24 @@ An agent completing a 10K-row scan therefore sends the query text **once**
 
 | Tool | Cursor support | Ordering / continuation |
 |------|----------------|-------------------------|
-| `list_nodes` | Yes (requires `label`) | Ascending node id — **keyset** (depth-independent) |
+| `list_nodes` | Yes (requires `label`) | Ascending node id — **keyset** |
 | `find_nodes_at_time` | Yes | Ascending node id — **keyset**; snapshot is the request's `(valid_time, transaction_time)` |
 | `get_outgoing_edges` | Yes | Ascending edge id — **keyset** |
 | `get_incoming_edges` | Yes | Ascending edge id — **keyset** |
-| `traverse` | Yes | Deterministic DFS order — snapshot-pinned **offset** in v1 (a depth-independent keyset traversal is a documented follow-up) |
+| `traverse` | Yes | Deterministic DFS order — snapshot-pinned **offset** in v1 |
 | `query` | No (v1) | Returns a structured `unsupported_construct` error — no silent fallback; use `list_nodes`/`find_nodes_at_time` |
 | `list_edges` | No | Does not enumerate edges; returns `INVALID_ARGUMENT` pointing at `get_outgoing_edges`/`get_incoming_edges` |
 
-The **keyset** tools are depth-independent: fetching page N seeks straight to
-its start instead of recomputing and discarding the preceding N−1 pages, so
-page latency is flat across depth. `traverse` pins the snapshot (so every page
-is consistent) but continues by an internal offset in v1.
+The **keyset** continuation avoids **re-emitting prior result pages** (no
+duplicates, no gaps): page N does not re-send the rows already returned on pages
+1..N−1, unlike offset paging which re-materializes and discards them. Note this
+is *result-page* deduplication, **not** a depth-independent seek — in v1 the
+candidate enumeration is still O(total) per page (the node scans re-run the full
+`find_nodes_at_time` candidate scan, and the adjacency scans re-resolve the
+whole edge set, on every page). A true depth-independent keyset seek that skips
+prior candidates is a follow-up. `traverse` likewise pins the snapshot (so every
+page is consistent) but continues by an internal offset that re-runs the
+traversal each page in v1.
 
 ### Token, lifecycle, and error contract
 
@@ -1084,13 +1116,21 @@ is consistent) but continues by an internal offset in v1.
   **expired** cursor or one **exceeding the cap** returns `FAILED_PRECONDITION`
   with remediation guidance (re-issue the query). Both are `retriable: false`.
 
-### Composing with token budgets (Issue #3353)
+### Composing with token budgets (Issue #3353) — forward-looking
 
-Cursors and token-budget truncation are complementary and compose cleanly: a
-budget-constrained page simply ends earlier (fewer rows or degraded payloads),
-and the cursor resumes exactly where the retained prefix stopped — the
-snapshot is unchanged, so the next page continues the same consistent scan.
-Budgeting shapes *one* call; cursors move data *across* calls.
+> **Not yet implemented on this branch.** Token-budget truncation (#3353) is a
+> separate sibling change that has not landed here yet; the behavior below
+> describes the intended composition *once #3353 lands*, not current behavior.
+> Today a cursor page is bounded only by `limit`.
+
+Once #3353 lands, cursors and token-budget truncation will be complementary and
+compose cleanly: a budget-constrained page simply ends earlier (fewer rows or
+degraded payloads), and the cursor resumes exactly where the retained prefix
+stopped — the snapshot is unchanged, so the next page continues the same
+consistent scan. Budgeting shapes *one* call; cursors move data *across* calls.
+(Implementation note: when budgets land, the continuation key must be derived
+from the last row *actually emitted* after any budget trim, not the limit-th
+candidate, or a truncated page would skip rows.)
 
 ### When to prefer cursors over offsets
 

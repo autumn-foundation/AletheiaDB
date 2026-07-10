@@ -12,9 +12,14 @@
 //!   the result of an unbounded query *at that one moment*; concurrent writes
 //!   committed after the anchor are invisible to the scan (no duplicates, no
 //!   gaps, no post-cursor leakage);
-//! - **keyset (depth-independent)** -- continuation carries the last-returned
-//!   id, so fetching page N seeks straight to it instead of recomputing and
-//!   discarding the preceding N-1 pages (offset pagination's linear tax);
+//! - **keyset continuation** -- continuation carries the last-returned id, so a
+//!   page never re-emits rows from the preceding pages (no duplicates, no gaps),
+//!   unlike offset pagination which re-materializes and discards them. Note this
+//!   is *result-page* deduplication, not a depth-independent seek: in v1 the
+//!   candidate enumeration is still O(total) per page (the node path re-runs the
+//!   full `find_nodes_at_time` candidate scan, and adjacency re-resolves the
+//!   whole edge set, on every page); a true depth-independent keyset seek that
+//!   skips prior candidates is a follow-up;
 //! - **stateless-safe for the client** -- the token is a printable,
 //!   bounded-length, self-describing string an LLM can echo back verbatim with
 //!   no escaping hazards, and continuing needs no other parameters;
@@ -206,7 +211,7 @@ impl CursorManager {
     /// resource-reclamation tests.
     #[cfg(test)]
     pub(crate) fn live_count(&self) -> usize {
-        let mut live = self.live.lock().expect("cursor registry lock poisoned");
+        let mut live = self.live.lock().unwrap_or_else(|e| e.into_inner());
         let now = time::now().wallclock();
         live.retain(|_, &mut expiry| expiry > now);
         live.len()
@@ -228,7 +233,7 @@ impl CursorManager {
         let expiry = now.saturating_add(self.ttl.as_micros() as i64);
 
         {
-            let mut live = self.live.lock().expect("cursor registry lock poisoned");
+            let mut live = self.live.lock().unwrap_or_else(|e| e.into_inner());
             // Reclaim expired cursors first: expired cursors never pin a slot.
             live.retain(|_, &mut e| e > now);
             if payload.cid.is_empty() {
