@@ -630,6 +630,14 @@ pub struct TemporalNodeScanIterator {
     /// Pre-computed interned ID of the label filter for efficient comparison.
     /// Avoids repeated hashmap lookups in apply_label_filter().
     interned_label_filter: Option<crate::core::interning::InternedString>,
+    /// When `true`, a candidate that has no version at the requested
+    /// bi-temporal point (or whose version metadata is missing) is silently
+    /// skipped instead of surfacing an error. This is the correct semantics
+    /// for a point-in-time label *scan* (Issues #550/#551): the candidate set
+    /// is "every node ever versioned", most of which need not exist at the
+    /// queried instant. The per-node lookup path (default `false`) keeps
+    /// propagating the error, since there the caller explicitly named the id.
+    skip_missing: bool,
 }
 
 impl TemporalNodeScanIterator {
@@ -666,7 +674,21 @@ impl TemporalNodeScanIterator {
             historical,
             label_filter,
             interned_label_filter,
+            skip_missing: false,
         }
+    }
+
+    /// Enable point-in-time *scan* semantics: candidates absent at the queried
+    /// bi-temporal point are skipped rather than raising
+    /// [`TemporalError::NodeNotFoundAtTime`](crate::core::error::TemporalError::NodeNotFoundAtTime).
+    ///
+    /// Used by the Cypher/AQL label-scan `AS OF` path (Issues #550/#551), where
+    /// the candidate set is every ever-versioned node and most of them simply
+    /// did not exist at the instant being asked about.
+    #[must_use]
+    pub fn skipping_missing(mut self) -> Self {
+        self.skip_missing = true;
+        self
     }
 
     /// Retrieve the temporal version of a node at the configured time point.
@@ -750,6 +772,10 @@ impl ResultIterator for TemporalNodeScanIterator {
             let node_id = self.node_ids.next()?;
 
             match self.filter_node(node_id, &guard) {
+                // In scan mode, a candidate absent at the queried instant is not
+                // an error -- it simply isn't in the result set. Skip it and
+                // keep scanning instead of aborting the whole query.
+                Some(Err(e)) if self.skip_missing && is_missing_at_time(&e) => continue,
                 Some(result) => return Some(result), // Found valid node or error
                 None => continue,                    // Label filter didn't match, try next
             }
@@ -768,6 +794,168 @@ impl ResultIterator for TemporalNodeScanIterator {
             // (assuming they exist in storage at the requested time point).
             self.node_ids.size_hint()
         }
+    }
+}
+
+/// Returns `true` for the "this entity has no version at the queried
+/// bi-temporal point" family of errors, which a point-in-time *scan*
+/// (Issues #550/#551) treats as "not in the result set" rather than a hard
+/// failure. A per-node lookup, where the caller explicitly named the id, keeps
+/// propagating these as errors.
+fn is_missing_at_time(err: &crate::core::error::Error) -> bool {
+    use crate::core::error::{Error, TemporalError};
+    matches!(
+        err,
+        Error::Temporal(TemporalError::NodeNotFoundAtTime { .. })
+            | Error::Temporal(TemporalError::VersionNotFound(_))
+    )
+}
+
+/// Iterator for valid-time range label scans (`BETWEEN ... AND ...`, Issue #552).
+///
+/// # Semantics
+///
+/// Given a candidate set of node ids and a valid-time range `[valid_from,
+/// valid_to)`, this yields **every recorded version** of each candidate whose
+/// valid-time interval *overlaps* the range and that was recorded no later than
+/// the observed `transaction_time`, optionally filtered by `label`. Segments
+/// later superseded in transaction time are included (a valid-time range query
+/// surfaces the full recorded history over the window, not a single snapshot).
+/// Because a single node can have several versions overlapping the range, this
+/// iterator may emit **multiple rows per node** -- one per overlapping version
+/// -- which is the openCypher-ish reading of a `BETWEEN` range query.
+///
+/// # Eager reconstruction
+///
+/// Like [`BatchTemporalNodeIterator`], all rows are reconstructed eagerly under
+/// a single historical read lock during construction. A range scan is inherently
+/// heavier than a point lookup, and eager collection keeps the lock held for a
+/// bounded, predictable window instead of across the entire (lazy) drain.
+///
+/// # Ordering
+///
+/// Within each node, overlapping versions are emitted oldest-`valid_from`-first
+/// (ties broken by version id) for deterministic output; nodes are emitted in
+/// the order of the supplied candidate list.
+pub struct TemporalNodeRangeScanIterator {
+    results: std::vec::IntoIter<Result<QueryRow>>,
+}
+
+impl TemporalNodeRangeScanIterator {
+    /// Build a range-scan iterator, reconstructing all overlapping versions up
+    /// front under a single read lock.
+    ///
+    /// # Arguments
+    ///
+    /// * `node_ids` - Candidate node ids (typically every ever-versioned node)
+    /// * `valid_from` - Inclusive start of the valid-time range
+    /// * `valid_to` - Exclusive end of the valid-time range
+    /// * `transaction_time` - Transaction time the range is observed at
+    /// * `historical` - Historical storage
+    /// * `label_filter` - Optional label the versions must match
+    pub fn new(
+        node_ids: Vec<NodeId>,
+        valid_from: Timestamp,
+        valid_to: Timestamp,
+        transaction_time: Timestamp,
+        historical: Arc<RwLock<HistoricalStorage>>,
+        label_filter: Option<String>,
+    ) -> Self {
+        // An invalid range (end < start) yields nothing rather than erroring:
+        // the converter already validated it, but defend anyway.
+        let Ok(range) = crate::core::temporal::TimeRange::new(valid_from, valid_to) else {
+            return TemporalNodeRangeScanIterator {
+                results: Vec::new().into_iter(),
+            };
+        };
+
+        // Resolve the label filter to its interned id once. If the label was
+        // never interned, nothing can match -- yield an empty result.
+        let interned_label = label_filter
+            .as_ref()
+            .and_then(|label| GLOBAL_INTERNER.get_id(label));
+        if label_filter.is_some() && interned_label.is_none() {
+            return TemporalNodeRangeScanIterator {
+                results: Vec::new().into_iter(),
+            };
+        }
+
+        let guard = historical.read();
+        let mut results: Vec<Result<QueryRow>> = Vec::new();
+
+        for node_id in node_ids {
+            // Walk the version chain from the head backwards.
+            let Some(head) = guard.get_current_node_version(node_id) else {
+                continue;
+            };
+            let mut selected = Vec::new();
+            let mut cursor = Some(head);
+            while let Some(vid) = cursor {
+                let Some(version) = guard.get_node_version(vid) else {
+                    break;
+                };
+                cursor = version.prev_version;
+
+                // Label filter (label can change across versions).
+                if let Some(lbl) = interned_label
+                    && version.label != lbl
+                {
+                    continue;
+                }
+                // Include every version recorded no later than the observation
+                // transaction time. Unlike a point-in-time `AS OF` (which pins a
+                // single visible version), a valid-time *range* query surfaces the
+                // full recorded valid-time history over the window -- including
+                // segments later superseded in transaction time (an update closes
+                // the prior version's transaction interval). Versions recorded
+                // *after* the observation time are excluded.
+                if version.temporal.transaction_time().start() > transaction_time {
+                    continue;
+                }
+                // Keep versions whose valid interval overlaps the range.
+                // (`overlaps` already excludes empty tombstone intervals.)
+                if !version.temporal.valid_time().overlaps(&range) {
+                    continue;
+                }
+                selected.push((
+                    version.temporal.valid_time().start(),
+                    version.node_id,
+                    version.label,
+                    vid,
+                ));
+            }
+
+            // Deterministic per-node ordering: oldest valid_from first.
+            selected.sort_by(|a, b| a.0.cmp(&b.0).then(a.3.cmp(&b.3)));
+
+            for (valid_from_ts, matched_node_id, matched_label, vid) in selected {
+                match guard.reconstruct_node_properties(vid) {
+                    Ok(properties) => {
+                        let node = Node::new(matched_node_id, matched_label, properties, vid);
+                        results
+                            .push(Ok(QueryRow::from_entity(EntityResult::Node(node))
+                                .at_time(valid_from_ts)));
+                    }
+                    Err(e) => results.push(Err(e)),
+                }
+            }
+        }
+
+        drop(guard);
+
+        TemporalNodeRangeScanIterator {
+            results: results.into_iter(),
+        }
+    }
+}
+
+impl ResultIterator for TemporalNodeRangeScanIterator {
+    fn next(&mut self) -> Option<Result<QueryRow>> {
+        self.results.next()
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.results.size_hint()
     }
 }
 

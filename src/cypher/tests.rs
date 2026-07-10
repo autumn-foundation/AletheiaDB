@@ -2247,3 +2247,289 @@ fn test_e2e_optional_match_where_with_param() {
     assert_eq!(rows.len(), 1);
     assert!(rows[0].entity.is_null());
 }
+
+// ============================================================================
+// Bi-temporal AS OF / BETWEEN runtime tests (Issues #550, #551, #552)
+//
+// These are RUNTIME (end-to-end) tests, not parse-only: each creates and
+// mutates data, captures commit-separated timestamps, runs the Cypher query,
+// and asserts the HISTORICAL state -- cross-checking against the oracle
+// temporal API (`get_node_at_time` / `find_nodes_at_time`). The original bug
+// (the planner's label-scan arm ignoring the temporal context, so
+// `MATCH (n:Label) AS OF T RETURN n` silently returned present-day data)
+// slipped through precisely because only parse-level tests existed.
+// ============================================================================
+
+/// Capture a wall-clock instant strictly after every already-committed
+/// transaction and strictly before any subsequent commit, so it is an
+/// unambiguous bi-temporal anchor *between* two writes. Mirrors the helper the
+/// oracle tests in `db::ops` use.
+fn temporal_anchor(db: &AletheiaDB) -> crate::core::Timestamp {
+    use crate::core::temporal::time;
+    let committed = *db
+        .current_timestamp
+        .lock()
+        .expect("current_timestamp mutex poisoned");
+    // Phase 1: anchor strictly after every committed stamp.
+    let mut anchor = time::now();
+    while anchor <= committed {
+        std::thread::sleep(std::time::Duration::from_micros(100));
+        anchor = time::now();
+    }
+    // Phase 2: return only once wallclock has moved strictly past the anchor,
+    // so later commits stamp strictly after it.
+    while time::now() <= anchor {
+        std::thread::sleep(std::time::Duration::from_micros(100));
+    }
+    anchor
+}
+
+/// The raw microsecond form of a timestamp, which `parse_timestamp_string`
+/// round-trips exactly (unlike an RFC3339 string, which loses sub-second
+/// precision), so the query anchors on the identical instant we captured.
+fn anchor_micros(ts: crate::core::Timestamp) -> i64 {
+    ts.wallclock()
+}
+
+/// Sorted `name` property values of a row set, for order-independent asserts.
+fn sorted_names(rows: &[crate::query::executor::QueryRow]) -> Vec<String> {
+    let mut names: Vec<String> = rows.iter().filter_map(row_name).collect();
+    names.sort();
+    names
+}
+
+fn person(name: &str) -> CorePropertyMap {
+    PropertyMapBuilder::new().insert("name", name).build()
+}
+
+/// #550: `AS OF TIMESTAMP` on a label scan returns the OLD value after an
+/// update -- not the current one -- and matches the oracle exactly.
+#[test]
+fn test_e2e_as_of_timestamp_returns_historical_state() {
+    use crate::core::property::PropertyValue;
+
+    let db = AletheiaDB::new().unwrap();
+    let id = db.create_node("Person", person("Alice")).unwrap();
+    let t1 = temporal_anchor(&db);
+    db.update_node_with_valid_time(id, person("Bob"), None)
+        .unwrap();
+
+    // The label scan must reconstruct history at t1, not read present state.
+    let q = format!(
+        "MATCH (n:Person) AS OF TIMESTAMP '{}' RETURN n",
+        anchor_micros(t1)
+    );
+    let rows = collect_rows(db.execute_cypher(&q).unwrap());
+    assert_eq!(rows.len(), 1, "AS OF must return the one historical Person");
+    assert_eq!(
+        row_name(&rows[0]).as_deref(),
+        Some("Alice"),
+        "AS OF must return the pre-update value, not present-day 'Bob'"
+    );
+
+    // Cross-check the exact node state against the oracle.
+    let oracle = db.get_node_at_time(id, t1, t1).unwrap();
+    assert_eq!(
+        oracle.properties.get("name"),
+        Some(&PropertyValue::from("Alice"))
+    );
+
+    // Discriminator: present-day state is 'Bob'.
+    let now_rows = collect_rows(db.execute_cypher("MATCH (n:Person) RETURN n").unwrap());
+    assert_eq!(sorted_names(&now_rows), vec!["Bob".to_string()]);
+}
+
+/// #550 (coordinator's required case): a point-in-time query for a moment
+/// *before any data existed* returns EMPTY (not present-day rows).
+#[test]
+fn test_e2e_as_of_before_any_data_is_empty() {
+    let db = AletheiaDB::new().unwrap();
+    // Anchor strictly before creating anything.
+    let t0 = temporal_anchor(&db);
+    db.create_node("Person", person("Alice")).unwrap();
+
+    let q = format!(
+        "MATCH (n:Person) AS OF TIMESTAMP '{}' RETURN n",
+        anchor_micros(t0)
+    );
+    let rows = collect_rows(db.execute_cypher(&q).unwrap());
+    assert!(
+        rows.is_empty(),
+        "AS OF before any data existed must be empty, got {} row(s)",
+        rows.len()
+    );
+
+    // Oracle agrees the node did not exist at t0.
+    assert!(
+        db.find_nodes_at_time("Person", t0, t0)
+            .unwrap()
+            .nodes
+            .is_empty()
+    );
+}
+
+/// #551: bi-temporal `AS OF VALID_TIME ... AS OF SYSTEM_TIME ...` reconstructs
+/// the state at the given (valid, system) point and matches the oracle.
+#[test]
+fn test_e2e_as_of_bitemporal_valid_and_system() {
+    use crate::core::property::PropertyValue;
+
+    let db = AletheiaDB::new().unwrap();
+    let id = db.create_node("Person", person("Alice")).unwrap();
+    let t1 = temporal_anchor(&db);
+    db.update_node_with_valid_time(id, person("Bob"), None)
+        .unwrap();
+
+    let q = format!(
+        "MATCH (n:Person) AS OF VALID_TIME '{}' AS OF SYSTEM_TIME '{}' RETURN n",
+        anchor_micros(t1),
+        anchor_micros(t1)
+    );
+    let rows = collect_rows(db.execute_cypher(&q).unwrap());
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        row_name(&rows[0]).as_deref(),
+        Some("Alice"),
+        "bi-temporal AS OF must reconstruct the historical value"
+    );
+
+    let oracle = db.get_node_at_time(id, t1, t1).unwrap();
+    assert_eq!(
+        oracle.properties.get("name"),
+        Some(&PropertyValue::from("Alice"))
+    );
+}
+
+/// #551: single-dimension `FOR SYSTEM_TIME AS OF` is honored by the label scan
+/// (valid time defaults to now). The result equals the oracle-recorded state
+/// at that transaction time and is NOT the present-day state.
+#[test]
+fn test_e2e_for_system_time_as_of_honored_by_label_scan() {
+    use crate::core::temporal::time;
+
+    let db = AletheiaDB::new().unwrap();
+    let id = db.create_node("Person", person("Alice")).unwrap();
+    let t1 = temporal_anchor(&db);
+    db.update_node_with_valid_time(id, person("Bob"), None)
+        .unwrap();
+
+    let q = format!(
+        "MATCH (n:Person) FOR SYSTEM_TIME AS OF '{}' RETURN n",
+        anchor_micros(t1)
+    );
+    let cypher_names = sorted_names(&collect_rows(db.execute_cypher(&q).unwrap()));
+
+    // Oracle ground truth: reconstruct at (now, t1) -- the state as recorded at
+    // transaction time t1. This is what the label scan must equal, NOT the
+    // present-day rows.
+    let now = time::now();
+    let mut oracle_names: Vec<String> = db
+        .find_nodes_at_time("Person", now, t1)
+        .unwrap()
+        .nodes
+        .iter()
+        .filter_map(|n| {
+            n.properties
+                .get("name")
+                .and_then(|p| p.as_str().map(|s| s.to_string()))
+        })
+        .collect();
+    oracle_names.sort();
+    assert_eq!(
+        cypher_names, oracle_names,
+        "FOR SYSTEM_TIME AS OF must equal the oracle state recorded at t1"
+    );
+
+    // Discriminator: the present-day label scan sees 'Bob'; before the fix the
+    // AS OF scan wrongly returned that same present-day row.
+    let current = sorted_names(&collect_rows(
+        db.execute_cypher("MATCH (n:Person) RETURN n").unwrap(),
+    ));
+    assert_eq!(current, vec!["Bob".to_string()]);
+    assert_ne!(
+        cypher_names, current,
+        "FOR SYSTEM_TIME AS OF must not silently return present-day data"
+    );
+}
+
+/// #552: `BETWEEN` returns every version whose valid-time interval overlaps the
+/// range -- multiple rows for a node that changed within the window.
+#[test]
+fn test_e2e_between_returns_all_overlapping_versions() {
+    let db = AletheiaDB::new().unwrap();
+    let v1 = temporal_anchor(&db);
+    let id = db
+        .create_node_with_valid_time("Person", person("A"), Some(v1))
+        .unwrap();
+    let v2 = temporal_anchor(&db);
+    db.update_node_with_valid_time(id, person("B"), Some(v2))
+        .unwrap();
+    let vend = temporal_anchor(&db);
+
+    // [v1, v2) -> "A" and [v2, MAX) -> "B" both overlap [v1, vend).
+    let q = format!(
+        "MATCH (n:Person) BETWEEN '{}' AND '{}' RETURN n",
+        anchor_micros(v1),
+        anchor_micros(vend)
+    );
+    let names = sorted_names(&collect_rows(db.execute_cypher(&q).unwrap()));
+    assert_eq!(
+        names,
+        vec!["A".to_string(), "B".to_string()],
+        "BETWEEN must return every version overlapping the valid-time range"
+    );
+
+    // Discriminator: the present-day scan sees only the current version.
+    let current = sorted_names(&collect_rows(
+        db.execute_cypher("MATCH (n:Person) RETURN n").unwrap(),
+    ));
+    assert_eq!(current, vec!["B".to_string()]);
+}
+
+/// Regression: a label scan with NO temporal clause is unchanged (current
+/// state, fast path).
+#[test]
+fn test_e2e_current_state_label_scan_unchanged() {
+    let db = AletheiaDB::new().unwrap();
+    db.create_node("Person", person("Alice")).unwrap();
+    db.create_node("Person", person("Bob")).unwrap();
+
+    let rows = collect_rows(db.execute_cypher("MATCH (n:Person) RETURN n").unwrap());
+    assert_eq!(
+        sorted_names(&rows),
+        vec!["Alice".to_string(), "Bob".to_string()]
+    );
+}
+
+/// Regression: traversals already honor `AS OF` (no new code) -- an edge
+/// created after the anchor is not followed at that anchor.
+#[test]
+fn test_e2e_as_of_traversal_excludes_future_edge() {
+    let db = AletheiaDB::new().unwrap();
+    let alice = db.create_node("Person", person("Alice")).unwrap();
+    let bob = db.create_node("Person", person("Bob")).unwrap();
+    let t0 = temporal_anchor(&db);
+    // Edge created strictly AFTER t0.
+    db.create_edge(alice, bob, "KNOWS", CorePropertyMap::new())
+        .unwrap();
+
+    // Current state: Alice KNOWS Bob.
+    let now_rows = collect_rows(
+        db.execute_cypher("MATCH (a:Person {name: 'Alice'})-[:KNOWS]->(b) RETURN b")
+            .unwrap(),
+    );
+    assert_eq!(now_rows.len(), 1);
+    assert_eq!(row_name(&now_rows[0]).as_deref(), Some("Bob"));
+
+    // AS OF t0 (before the edge existed): the traversal follows nothing.
+    let q = format!(
+        "MATCH (a:Person {{name: 'Alice'}})-[:KNOWS]->(b) AS OF TIMESTAMP '{}' RETURN b",
+        anchor_micros(t0)
+    );
+    let rows = collect_rows(db.execute_cypher(&q).unwrap());
+    assert!(
+        rows.is_empty(),
+        "AS OF before the edge existed must traverse nothing, got {} row(s)",
+        rows.len()
+    );
+}
