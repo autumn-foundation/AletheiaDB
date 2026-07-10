@@ -78,6 +78,22 @@ use crate::http::state::AppState;
 /// (e.g. failing to bind the port) terminate the process via
 /// [`std::process::exit`]; they are not surfaced as `Err` here.
 pub async fn run_server(config: ServerConfig) -> std::io::Result<()> {
+    // Install OpenTelemetry tracing from the standard OTEL_* environment
+    // (Issue #3376). Disabled unless ALETHEIADB_OTEL is truthy or an OTLP
+    // endpoint is configured; the guard flushes + shuts the exporter down when
+    // `run_server` returns. A subscriber-already-installed error is non-fatal
+    // (the host process may own the subscriber).
+    #[cfg(feature = "otel")]
+    let _otel_guard =
+        match crate::observability::otel::init(&crate::observability::otel::OtelConfig::from_env())
+        {
+            Ok(guard) => guard,
+            Err(e) => {
+                eprintln!("WARNING: OpenTelemetry tracing not installed: {e}");
+                None
+            }
+        };
+
     // Validate config before wiring anything else.
     config
         .rate_limit()

@@ -39,6 +39,7 @@ mod error;
 pub mod handlers;
 mod server;
 mod state;
+pub mod trace;
 
 pub use auth::{AuthContext, AuthState, validate_auth_startup};
 pub use config::{
@@ -48,3 +49,4 @@ pub use error::AletheiaHttpError;
 pub use handlers::{ApiResponse, QueryRequest, handle_query, health_check};
 pub use server::{build_test_router, build_test_router_with_auth, run_server};
 pub use state::AppState;
+pub use trace::HttpTrace;

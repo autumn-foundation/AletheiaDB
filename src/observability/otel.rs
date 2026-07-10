@@ -42,12 +42,15 @@ use opentelemetry::trace::{TraceContextExt, TracerProvider as _};
 use opentelemetry_sdk::Resource;
 use opentelemetry_sdk::error::OTelSdkResult;
 use opentelemetry_sdk::propagation::TraceContextPropagator;
-use opentelemetry_sdk::trace::{
-    Sampler, SdkTracerProvider, SimpleSpanProcessor, SpanData, SpanExporter,
-};
+use opentelemetry_sdk::trace::{Sampler, SdkTracerProvider, SimpleSpanProcessor, SpanExporter};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
+
+/// Re-export of the SDK's exported-span type so downstream tests / embedders
+/// can inspect captured spans (via [`InMemorySpanExporter::spans`]) without
+/// taking a direct dependency on `opentelemetry_sdk`.
+pub use opentelemetry_sdk::trace::SpanData;
 
 /// Standard OTLP endpoint environment variable.
 pub const ENV_OTLP_ENDPOINT: &str = "OTEL_EXPORTER_OTLP_ENDPOINT";
@@ -71,6 +74,7 @@ pub const TRACER_NAME: &str = super::DB_SYSTEM_NAME;
 /// span-context work, so a compiled-in-but-uninitialized build pays only the
 /// load, never the OTel machinery.
 static OTEL_ACTIVE: AtomicBool = AtomicBool::new(false);
+static CAPTURE_STATEMENTS: AtomicBool = AtomicBool::new(false);
 
 /// Whether OTel tracing has been initialized and is exporting.
 #[must_use]
@@ -79,8 +83,19 @@ pub fn is_active() -> bool {
     OTEL_ACTIVE.load(Ordering::Relaxed)
 }
 
+/// Whether sanitized statement capture is enabled (opt-in, off by default).
+#[must_use]
+#[inline]
+pub fn capture_statements() -> bool {
+    CAPTURE_STATEMENTS.load(Ordering::Relaxed)
+}
+
 fn set_active(active: bool) {
     OTEL_ACTIVE.store(active, Ordering::Relaxed);
+}
+
+fn set_capture_statements(capture: bool) {
+    CAPTURE_STATEMENTS.store(capture, Ordering::Relaxed);
 }
 
 // ===========================================================================
@@ -478,6 +493,7 @@ impl Drop for OtelGuard {
         let _ = self.provider.force_flush();
         let _ = self.provider.shutdown();
         set_active(false);
+        set_capture_statements(false);
     }
 }
 
@@ -498,6 +514,7 @@ pub fn init(config: &OtelConfig) -> Result<Option<OtelGuard>, OtelError> {
     let exporter = build_otlp_exporter(config)?;
     let provider = provider_with_exporter(config, exporter, false);
     install_global(provider.clone())?;
+    set_capture_statements(config.capture_statements);
     Ok(Some(OtelGuard { provider }))
 }
 
@@ -515,6 +532,7 @@ pub fn init_in_memory_global(
     let exporter = InMemorySpanExporter::new();
     let provider = provider_with_exporter(config, exporter.clone(), true);
     install_global(provider.clone())?;
+    set_capture_statements(config.capture_statements);
     Ok((OtelGuard { provider }, exporter))
 }
 
@@ -543,6 +561,7 @@ fn with_scoped_in_memory<T>(config: &OtelConfig, f: impl FnOnce() -> T) -> (T, V
     let exporter = InMemorySpanExporter::new();
     let provider = provider_with_exporter(config, exporter.clone(), true);
     set_active(true);
+    set_capture_statements(config.capture_statements);
     opentelemetry::global::set_text_map_propagator(TraceContextPropagator::new());
     let tracer = provider.tracer(TRACER_NAME);
     let subscriber =

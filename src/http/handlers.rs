@@ -25,6 +25,7 @@ use crate::http::converters::{
 };
 use crate::http::error::AletheiaHttpError;
 use crate::http::state::AppState;
+use crate::http::trace::HttpTrace;
 use crate::query::QueryBuilder;
 use crate::query::converter::{parse_query, parse_query_with_params};
 use crate::query::ir::{Predicate, PredicateValue};
@@ -32,6 +33,7 @@ use crate::query::read_only::detect_mutating_clause;
 use autumn_web::Route;
 use autumn_web::prelude::{get, post, routes};
 use axum::Json;
+use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
@@ -55,7 +57,15 @@ pub struct HealthResponse {
 /// Classified [`AccessClass::Metrics`]: every role may probe liveness, but
 /// (in required-auth mode) only with a valid credential.
 #[get("/status")]
-pub async fn health_check(auth: AuthContext) -> Result<Json<HealthResponse>, AletheiaHttpError> {
+pub async fn health_check(
+    trace: HttpTrace,
+    auth: AuthContext,
+) -> Result<Json<HealthResponse>, AletheiaHttpError> {
+    trace.record_operation("health");
+    // Enter the root span so the probe is a first-class (non-orphaned) span.
+    // There is no `.await` inside this block, so holding the guard is sound.
+    #[cfg(feature = "observability")]
+    let _entered = trace.span().entered();
     auth.authorize(AccessClass::Metrics)?;
     Ok(Json(HealthResponse {
         status: "healthy".to_string(),
@@ -174,14 +184,25 @@ fn json_to_predicate_value(v: &Value) -> Option<PredicateValue> {
 }
 
 /// Run a CPU/IO-bound closure on the blocking pool and unwrap the join error.
+///
+/// The caller's current `tracing` span is propagated into the blocking thread
+/// and entered for the duration of `f`, so the database's own child spans
+/// (`aletheiadb.query.execute`, `aletheiadb.transaction.commit`, …) nest under
+/// the HTTP root span even though they run on a different thread (Issue #3376).
 async fn blocking<F, T>(f: F) -> Result<T, AletheiaHttpError>
 where
     F: FnOnce() -> Result<T, AletheiaHttpError> + Send + 'static,
     T: Send + 'static,
 {
-    tokio::task::spawn_blocking(f)
-        .await
-        .map_err(|e| AletheiaHttpError::Internal(e.to_string()))?
+    #[cfg(feature = "observability")]
+    let span = tracing::Span::current();
+    tokio::task::spawn_blocking(move || {
+        #[cfg(feature = "observability")]
+        let _entered = span.enter();
+        f()
+    })
+    .await
+    .map_err(|e| AletheiaHttpError::Internal(e.to_string()))?
 }
 
 // ============================================================================
@@ -664,53 +685,151 @@ fn query_access_class(req: &QueryRequest) -> AccessClass {
 /// Authorization happens *before* any database work: the request's operation
 /// is classified via [`query_access_class`] and checked against the caller's
 /// role.
+///
+/// The whole handler body runs inside the [`HttpTrace`] root span (Issue
+/// #3376), so the database's query/write child spans nest underneath it, the
+/// operation name / result count / error code are stamped onto the span, and a
+/// failure carries the active trace id back to the caller for correlation.
 #[post("/query")]
 pub async fn handle_query(
+    trace: HttpTrace,
     auth: AuthContext,
     state: AppState,
     Json(req): Json<QueryRequest>,
-) -> Result<Json<ApiResponse>, AletheiaHttpError> {
-    auth.authorize(query_access_class(&req))?;
-    let db = state.db_arc();
-    // Verified principal name (if any) for provenance stamping on write
-    // operations (Issue #3350). Anonymous mode yields None.
-    let principal = auth.principal().map(|p| p.name.clone());
+) -> Response {
+    trace.record_operation(operation_name(&req));
+    trace.record_temporal_scope(request_is_temporal(&req));
+    #[cfg(feature = "otel")]
+    maybe_capture_statement(&trace, &req);
 
-    let data = match req {
-        QueryRequest::CreateNode { label, properties } => {
-            handle_create_node(db, label, properties, principal).await?
-        }
-        QueryRequest::GetNode { node_id } => handle_get_node(db, node_id).await?,
-        QueryRequest::BulkCreateNodes { nodes } => {
-            handle_bulk_create_nodes(db, nodes, principal).await?
-        }
-        QueryRequest::BulkGetNodes { node_ids } => handle_bulk_get_nodes(db, node_ids).await?,
-        QueryRequest::BulkUpdateNodes { updates } => {
-            handle_bulk_update_nodes(db, updates, principal).await?
-        }
-        QueryRequest::BulkDeleteNodes { node_ids, cascade } => {
-            handle_bulk_delete_nodes(db, node_ids, cascade).await?
-        }
-        QueryRequest::FindNode {
-            label,
-            properties,
-            limit,
-            offset,
-        } => handle_find_node(db, label, properties, limit, offset).await?,
-        QueryRequest::FindNeighbors {
-            node_id,
-            limit,
-            offset,
-        } => handle_find_neighbors(db, node_id, limit, offset).await?,
-        QueryRequest::ExecuteQuery { query, parameters } => {
-            handle_execute_query(db, query, parameters).await?
-        }
-        QueryRequest::BulkExecuteQuery { queries } => {
-            handle_bulk_execute_query(db, queries).await?
-        }
+    #[cfg(feature = "observability")]
+    let span = trace.span();
+
+    // Authorization + dispatch, returning the JSON data payload or an error.
+    let work = async move {
+        auth.authorize(query_access_class(&req))?;
+        let db = state.db_arc();
+        // Verified principal name (if any) for provenance stamping on write
+        // operations (Issue #3350). Anonymous mode yields None.
+        let principal = auth.principal().map(|p| p.name.clone());
+
+        let data = match req {
+            QueryRequest::CreateNode { label, properties } => {
+                handle_create_node(db, label, properties, principal).await?
+            }
+            QueryRequest::GetNode { node_id } => handle_get_node(db, node_id).await?,
+            QueryRequest::BulkCreateNodes { nodes } => {
+                handle_bulk_create_nodes(db, nodes, principal).await?
+            }
+            QueryRequest::BulkGetNodes { node_ids } => handle_bulk_get_nodes(db, node_ids).await?,
+            QueryRequest::BulkUpdateNodes { updates } => {
+                handle_bulk_update_nodes(db, updates, principal).await?
+            }
+            QueryRequest::BulkDeleteNodes { node_ids, cascade } => {
+                handle_bulk_delete_nodes(db, node_ids, cascade).await?
+            }
+            QueryRequest::FindNode {
+                label,
+                properties,
+                limit,
+                offset,
+            } => handle_find_node(db, label, properties, limit, offset).await?,
+            QueryRequest::FindNeighbors {
+                node_id,
+                limit,
+                offset,
+            } => handle_find_neighbors(db, node_id, limit, offset).await?,
+            QueryRequest::ExecuteQuery { query, parameters } => {
+                handle_execute_query(db, query, parameters).await?
+            }
+            QueryRequest::BulkExecuteQuery { queries } => {
+                handle_bulk_execute_query(db, queries).await?
+            }
+        };
+        Ok::<Value, AletheiaHttpError>(data)
     };
 
-    Ok(Json(ApiResponse::success(data)))
+    #[cfg(feature = "observability")]
+    let result = {
+        use tracing::Instrument;
+        work.instrument(span.clone()).await
+    };
+    #[cfg(not(feature = "observability"))]
+    let result = work.await;
+
+    match result {
+        Ok(data) => {
+            trace.record_result_count(result_count(&data));
+            Json(ApiResponse::success(data)).into_response()
+        }
+        Err(e) => {
+            trace.record_error(e.code_str());
+            #[cfg(feature = "observability")]
+            let trace_id = span.in_scope(crate::http::trace::active_trace_id);
+            #[cfg(not(feature = "observability"))]
+            let trace_id = crate::http::trace::active_trace_id();
+            e.into_response_with_trace(trace_id)
+        }
+    }
+}
+
+/// The stable operation-name attribute for a `/query` request (bounded set,
+/// never user data).
+fn operation_name(req: &QueryRequest) -> &'static str {
+    match req {
+        QueryRequest::FindNode { .. } => "find_node",
+        QueryRequest::GetNode { .. } => "get_node",
+        QueryRequest::CreateNode { .. } => "create_node",
+        QueryRequest::BulkCreateNodes { .. } => "bulk_create_nodes",
+        QueryRequest::BulkGetNodes { .. } => "bulk_get_nodes",
+        QueryRequest::BulkUpdateNodes { .. } => "bulk_update_nodes",
+        QueryRequest::BulkDeleteNodes { .. } => "bulk_delete_nodes",
+        QueryRequest::FindNeighbors { .. } => "find_neighbors",
+        QueryRequest::ExecuteQuery { .. } => "execute_query",
+        QueryRequest::BulkExecuteQuery { .. } => "bulk_execute_query",
+    }
+}
+
+/// Result-count attribute for a response payload: array length, `nodes` array
+/// length for the bulk-get shape, otherwise `1` for a single entity.
+fn result_count(data: &Value) -> usize {
+    match data {
+        Value::Array(items) => items.len(),
+        Value::Object(map) => map
+            .get("nodes")
+            .and_then(Value::as_array)
+            .map_or(1, Vec::len),
+        _ => 1,
+    }
+}
+
+/// Whether a request carries a temporal (`AS OF`) scope. Only statement-based
+/// operations can; detection is a cheap case-insensitive substring check that
+/// never inspects property values.
+fn request_is_temporal(req: &QueryRequest) -> bool {
+    fn is_as_of(query: &str) -> bool {
+        query.to_ascii_lowercase().contains("as of")
+    }
+    match req {
+        QueryRequest::ExecuteQuery { query, .. } => is_as_of(query),
+        QueryRequest::BulkExecuteQuery { queries } => queries.iter().any(|q| is_as_of(&q.query)),
+        _ => false,
+    }
+}
+
+/// Attach sanitized statement text to the span when statement capture is
+/// explicitly enabled. Only single-statement `execute_query` is captured; the
+/// statement is the query template (parameters are `$`-bound, so no property
+/// values are interpolated). Off by default (Issue #3376 privacy model).
+#[cfg(feature = "otel")]
+fn maybe_capture_statement(trace: &HttpTrace, req: &QueryRequest) {
+    if !crate::observability::otel::is_active() || !crate::observability::otel::capture_statements()
+    {
+        return;
+    }
+    if let QueryRequest::ExecuteQuery { query, .. } = req {
+        trace.record_statement(query);
+    }
 }
 
 /// Collect the crate's HTTP routes as a `Vec<Route>`.
