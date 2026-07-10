@@ -1206,6 +1206,14 @@ impl RedbColdStorage {
         }
         let mut current = match table.get(TEMPORAL_EXTENT_KEY) {
             Ok(Some(value)) => {
+                // An existing record with an UNRECOGNIZED version tag decodes to
+                // `None` and is clobbered here: `unwrap_or_default()` starts from
+                // empty bounds and rebuilds them widen-only from post-write
+                // deltas. That makes a downgrade across a future
+                // `EXTENT_RECORD_VERSION` bump lossy (bounds a newer binary
+                // persisted are dropped, then re-accumulated only from writes the
+                // older binary performs) — acceptable because the extent is
+                // advisory (under-reporting is safe) and only ever widens.
                 ColdTemporalExtentBounds::from_bytes(value.value()).unwrap_or_default()
             }
             Ok(None) => ColdTemporalExtentBounds::default(),

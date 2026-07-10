@@ -2559,7 +2559,7 @@ fn extent_bounds_updated_by_batch_paths() {
 
 #[test]
 fn extent_bounds_round_trip_serialization() {
-    // Every-field-present round trip, including an absent (None) latest arm.
+    // Every-field-present round trip (all four dimensions Some).
     let bounds = ColdTemporalExtentBounds {
         valid_earliest: Some(Timestamp::from(1_000)),
         valid_latest: Some(Timestamp::from(9_000)),
@@ -2568,6 +2568,33 @@ fn extent_bounds_round_trip_serialization() {
     };
     let decoded = ColdTemporalExtentBounds::from_bytes(&bounds.to_bytes()).unwrap();
     assert_eq!(decoded, bounds);
+
+    // Mixed presence: some dimensions Some, others None. Exercises the
+    // per-field presence flag independently in both `to_bytes`/`from_bytes`
+    // arms (a Some field must decode back Some, a None field back None) rather
+    // than the all-present fixture above, which cannot distinguish the arms.
+    let mixed = ColdTemporalExtentBounds {
+        valid_earliest: Some(Timestamp::from(1_000)),
+        valid_latest: None,
+        tx_earliest: None,
+        tx_latest: Some(Timestamp::from(8_000)),
+    };
+    assert_eq!(
+        ColdTemporalExtentBounds::from_bytes(&mixed.to_bytes()).unwrap(),
+        mixed
+    );
+
+    // Extreme wallclock values round-trip losslessly through the i64 encoding.
+    let extremes = ColdTemporalExtentBounds {
+        valid_earliest: Some(Timestamp::new_unchecked(i64::MIN, 0)),
+        valid_latest: Some(Timestamp::new_unchecked(i64::MAX, u32::MAX)),
+        tx_earliest: Some(Timestamp::new_unchecked(i64::MIN, u32::MAX)),
+        tx_latest: Some(Timestamp::new_unchecked(i64::MAX, 0)),
+    };
+    assert_eq!(
+        ColdTemporalExtentBounds::from_bytes(&extremes.to_bytes()).unwrap(),
+        extremes
+    );
 
     // A default (all-None) record round-trips to all-None.
     let empty = ColdTemporalExtentBounds::default();
@@ -2582,4 +2609,7 @@ fn extent_bounds_round_trip_serialization() {
     assert_eq!(ColdTemporalExtentBounds::from_bytes(&bad), None);
     // Wrong length is also treated as absent, never a panic.
     assert_eq!(ColdTemporalExtentBounds::from_bytes(&[1, 2, 3]), None);
+    // An empty buffer likewise decodes to None (guards the length check
+    // against an index-out-of-bounds panic on `bytes[0]`).
+    assert_eq!(ColdTemporalExtentBounds::from_bytes(&[]), None);
 }

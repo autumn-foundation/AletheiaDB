@@ -787,7 +787,10 @@ The **per-label breakdown** is still folded from the hot-tier historical
 version store only: after cold migration a label's per-label bounds may be
 narrower than the overall bounds, or a label may be absent entirely (the
 persisted cold bounds are aggregate-only, not per-label). Bounds never
-shrink.
+shrink. One narrow gap: bounds are **not** backfilled for a cold file created
+by a pre-#3389 binary that already held versions — such pre-existing cold
+history is captured only from the first new write onward, so the extent can
+under-report (never over-report) until those versions are re-touched.
 
 **Calibration pattern:** if `temporal_extent` reports
 `valid_time.earliest = 2021-03-01`, an `AS OF '2019-01-01'` query is
