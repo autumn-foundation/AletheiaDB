@@ -221,6 +221,7 @@ fn provenance_serialized_size(provenance: Option<&Provenance>) -> usize {
 /// let delete_op = WalOperation::DeleteNode {
 ///     node_id: NodeId::try_from(1).unwrap(),
 ///     valid_from: Timestamp::from(12345),
+///     version_id: None, // tombstone version id (Issue #3406); None here
 /// };
 ///
 /// // Fixed overhead (24 bytes) + DeleteNode payload (21 bytes)
@@ -339,6 +340,7 @@ pub(crate) fn estimate_entry_capacity(operation: &WalOperation) -> usize {
 /// let op = WalOperation::DeleteNode {
 ///     node_id: NodeId::try_from(42).unwrap(),
 ///     valid_from: Timestamp::from(100),
+///     version_id: None, // tombstone version id (Issue #3406); None here
 /// };
 ///
 /// // 1. Pre-allocate the buffer using our estimate
