@@ -97,6 +97,20 @@ pub struct WalConfig {
     /// This determines the tradeoff between durability guarantees and performance.
     /// Default: GroupCommit (10ms delay, 200 batch size)
     pub durability_mode: crate::storage::wal::DurabilityMode,
+
+    /// Recovery policy for a crash-torn trailing entry (Issue #3433).
+    ///
+    /// When `true` (the default), WAL replay stops at the first undecodable
+    /// entry in the FINAL segment — the shape a crash during append leaves —
+    /// applying everything before it and logging a warning, instead of
+    /// hard-failing startup. A torn tail was never acknowledged, so discarding
+    /// it is correct, not data loss. Corruption in a non-final segment (or, for
+    /// encrypted segments, an undecodable frame followed by a valid one) still
+    /// hard-errors. Set to `false` for fail-stop recovery (any parse failure
+    /// aborts startup) if you prefer manual inspection over automatic tail
+    /// truncation.
+    /// Default: true
+    pub tolerate_torn_tail: bool,
 }
 
 impl Default for WalConfig {
@@ -110,6 +124,7 @@ impl Default for WalConfig {
             wal_dir: std::path::PathBuf::from("aletheiadb/wal"),
             segments_to_retain: 10,
             durability_mode: crate::storage::wal::DurabilityMode::group_commit_default(),
+            tolerate_torn_tail: true,
         }
     }
 }
@@ -302,6 +317,16 @@ impl WalConfigBuilder {
     /// Set the durability mode.
     pub fn durability_mode(mut self, mode: crate::storage::wal::DurabilityMode) -> Self {
         self.config.durability_mode = mode;
+        self
+    }
+
+    /// Set the crash-torn-tail recovery policy (Issue #3433).
+    ///
+    /// `true` (default) tolerates a torn trailing entry in the final WAL
+    /// segment on replay; `false` selects fail-stop recovery (any parse
+    /// failure aborts startup). See [`WalConfig::tolerate_torn_tail`].
+    pub fn tolerate_torn_tail(mut self, tolerate: bool) -> Self {
+        self.config.tolerate_torn_tail = tolerate;
         self
     }
 
