@@ -13,13 +13,20 @@ use serde_json::{Value, json};
 /// A per-query resource limit was exceeded at the HTTP layer (Issue #3368).
 ///
 /// Carries enough structure to render the `{code, retriable, details}` body:
-/// the [`LimitDimension`], the effective `limit`, and (for the byte/row caps)
-/// how much was `consumed`. The HTTP status and `retriable` flag are derived
-/// from the dimension:
+/// the [`LimitDimension`], the effective `limit`, (for the byte/row caps) how
+/// much was `consumed`, and whether a retry could usefully succeed. The HTTP
+/// status is derived from the dimension:
 ///
-/// - [`LimitDimension::WallClockTimeout`] → `429`, `retriable: true`
-/// - [`LimitDimension::ResultBytes`] / [`LimitDimension::ResultRows`] → `413`,
-///   `retriable: false`
+/// - [`LimitDimension::WallClockTimeout`] → `429`
+/// - [`LimitDimension::ResultBytes`] / [`LimitDimension::ResultRows`] → `413`
+///
+/// The [`retriable`](Self::retriable) flag is carried explicitly rather than
+/// derived from the dimension: a wall-clock timeout is transient and normally
+/// `retriable: true`, **but** a timeout on a *write*-class operation is
+/// `retriable: false` — the write may already have committed on the blocking
+/// pool, so a naive retry would duplicate it (Issue #3368 review). Result-row
+/// and result-byte caps are always `retriable: false`, and (post-review) only
+/// ever apply to read-class operations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResourceLimitExceeded {
     /// Which dimension's cap was hit.
@@ -28,6 +35,10 @@ pub struct ResourceLimitExceeded {
     pub limit: u64,
     /// How much was consumed, when known (row count / byte size).
     pub consumed: Option<u64>,
+    /// Whether a retry could usefully succeed. `true` only for a read-class
+    /// wall-clock timeout; `false` for a write-class timeout and for every
+    /// row/byte cap.
+    pub retriable: bool,
 }
 
 impl std::fmt::Display for ResourceLimitExceeded {
@@ -148,12 +159,15 @@ impl AletheiaHttpError {
         }
     }
 
-    /// Whether a caller may usefully retry (additive; Issue #3368). Only the
-    /// wall-clock timeout is transient. `None` where the flag does not apply
-    /// (existing variants keep their pre-#3368 body shape).
+    /// Whether a caller may usefully retry (additive; Issue #3368). The flag is
+    /// carried on the [`ResourceLimitExceeded`] itself: a read-class wall-clock
+    /// timeout is transient (`true`), a write-class timeout is not (a committed
+    /// write must not be duplicated), and row/byte caps are never retriable.
+    /// `None` where the flag does not apply (existing variants keep their
+    /// pre-#3368 body shape).
     fn retriable(&self) -> Option<bool> {
         match self {
-            Self::ResourceLimitExceeded(e) => Some(e.dimension == LimitDimension::WallClockTimeout),
+            Self::ResourceLimitExceeded(e) => Some(e.retriable),
             Self::InvalidLimitOverride(_) => Some(false),
             _ => None,
         }
@@ -215,6 +229,17 @@ impl IntoResponse for AletheiaHttpError {
                 axum::http::HeaderValue::from_static("Bearer"),
             );
         }
+        // A wall-clock timeout is a transient 429; hint clients to back off
+        // briefly before retrying (Issue #3368 review). Fixed conservative 1 s.
+        if matches!(
+            &self,
+            Self::ResourceLimitExceeded(e) if e.dimension == LimitDimension::WallClockTimeout
+        ) {
+            response.headers_mut().insert(
+                axum::http::header::RETRY_AFTER,
+                axum::http::HeaderValue::from_static("1"),
+            );
+        }
         response
     }
 }
@@ -238,6 +263,7 @@ mod tests {
                 dimension: LimitDimension::WallClockTimeout,
                 limit: 100,
                 consumed: None,
+                retriable: true,
             },
         ))
         .await;
@@ -257,6 +283,7 @@ mod tests {
                 dimension: LimitDimension::ResultBytes,
                 limit: 1024,
                 consumed: Some(4096),
+                retriable: false,
             },
         ))
         .await;
@@ -275,12 +302,36 @@ mod tests {
                 dimension: LimitDimension::ResultRows,
                 limit: 10,
                 consumed: Some(25),
+                retriable: false,
             },
         ))
         .await;
         assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
         assert_eq!(body["details"]["dimension"], "result_rows");
         assert_eq!(body["details"]["consumed"], 25);
+    }
+
+    /// A write-class wall-clock timeout renders `429` but `retriable: false`
+    /// (the write may already have committed; a retry could duplicate it —
+    /// Issue #3368 review MUST-FIX 1).
+    #[tokio::test]
+    async fn write_timeout_maps_to_429_not_retriable() {
+        let (status, body) = body_json(AletheiaHttpError::ResourceLimitExceeded(
+            ResourceLimitExceeded {
+                dimension: LimitDimension::WallClockTimeout,
+                limit: 100,
+                consumed: None,
+                retriable: false,
+            },
+        ))
+        .await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(body["code"], "RESOURCE_EXHAUSTED");
+        assert_eq!(
+            body["retriable"], false,
+            "a write timeout must not invite a duplicate retry"
+        );
+        assert_eq!(body["details"]["dimension"], "wall_clock_timeout");
     }
 
     #[tokio::test]
