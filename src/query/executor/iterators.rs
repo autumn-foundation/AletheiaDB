@@ -17,7 +17,10 @@ use crate::core::interning::GLOBAL_INTERNER;
 use crate::core::property::PropertyValue;
 use crate::core::vector::cosine_similarity;
 use crate::core::{NodeId, Timestamp};
-use crate::query::ir::{Direction, Predicate, PredicateValue};
+use crate::query::ir::{
+    AggregateArg, AggregateFunc, AggregateGroupKey, AggregateSpec, Direction, Predicate,
+    PredicateValue, SortKey,
+};
 use crate::storage::current::CurrentStorage;
 use crate::storage::historical::HistoricalStorage;
 
@@ -2155,6 +2158,584 @@ impl ResultIterator for PropertyScanIterator {
             },
             None => None,
         }
+    }
+}
+
+// ============================================================================
+// Aggregation, DISTINCT, and ORDER BY iterators
+// ============================================================================
+
+/// Read a node property value from a row, for grouping / aggregation / sorting.
+///
+/// Returns `None` when the row has no backing node (e.g. a null binding or a
+/// computed aggregate row) or the property is absent.
+fn row_property<'a>(row: &'a QueryRow, key: &str) -> Option<&'a PropertyValue> {
+    row.entity.as_node().and_then(|n| n.properties.get(key))
+}
+
+/// Numeric view of a scalar property (`Int`/`Float`), used for sum/avg and
+/// numeric ordering. `None` for non-numeric values.
+fn property_as_f64(value: &PropertyValue) -> Option<f64> {
+    match value {
+        PropertyValue::Int(i) => Some(*i as f64),
+        PropertyValue::Float(f) => Some(*f),
+        _ => None,
+    }
+}
+
+/// Total order over comparable scalar property values (numbers compared
+/// numerically, strings lexicographically, bools by value). Non-comparable or
+/// mixed pairs compare `Equal` so they retain input order.
+fn compare_property(a: &PropertyValue, b: &PropertyValue) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    match (a, b) {
+        (PropertyValue::Int(x), PropertyValue::Int(y)) => x.cmp(y),
+        (
+            PropertyValue::Int(_) | PropertyValue::Float(_),
+            PropertyValue::Int(_) | PropertyValue::Float(_),
+        ) => match (property_as_f64(a), property_as_f64(b)) {
+            (Some(x), Some(y)) => x.partial_cmp(&y).unwrap_or(Ordering::Equal),
+            _ => Ordering::Equal,
+        },
+        (PropertyValue::String(x), PropertyValue::String(y)) => x.as_ref().cmp(y.as_ref()),
+        (PropertyValue::Bool(x), PropertyValue::Bool(y)) => x.cmp(y),
+        _ => Ordering::Equal,
+    }
+}
+
+/// A hashable, `Eq` projection of a scalar property value used both for
+/// grouping keys and for `DISTINCT` deduplication of aggregate arguments.
+/// Floats are keyed by their bit pattern (total order); non-scalar values fall
+/// back to their debug representation.
+#[derive(Clone, PartialEq, Eq, Hash)]
+enum GroupKeyValue {
+    Null,
+    Bool(bool),
+    Int(i64),
+    Float(u64),
+    Str(String),
+    Other(String),
+}
+
+impl GroupKeyValue {
+    fn from_property(value: Option<&PropertyValue>) -> Self {
+        match value {
+            None | Some(PropertyValue::Null) => GroupKeyValue::Null,
+            Some(PropertyValue::Bool(b)) => GroupKeyValue::Bool(*b),
+            Some(PropertyValue::Int(i)) => GroupKeyValue::Int(*i),
+            Some(PropertyValue::Float(f)) => Self::float_key(*f),
+            Some(PropertyValue::String(s)) => GroupKeyValue::Str(s.to_string()),
+            Some(other) => GroupKeyValue::Other(format!("{other:?}")),
+        }
+    }
+
+    /// Map a float to a grouping/DISTINCT key, canonicalizing `-0.0 -> 0.0`
+    /// (signed zeros group together) and unifying an integral float with the
+    /// equal integer (so `1` and `1.0` land in the same group / distinct set).
+    fn float_key(f: f64) -> Self {
+        let f = if f == 0.0 { 0.0 } else { f };
+        if f.is_finite() && f.fract() == 0.0 && f >= i64::MIN as f64 && f <= i64::MAX as f64 {
+            GroupKeyValue::Int(f as i64)
+        } else {
+            GroupKeyValue::Float(f.to_bits())
+        }
+    }
+}
+
+/// The resolved per-row input to one aggregate, computed once per row in
+/// [`AggregateIterator::drain`].
+enum AggInput<'a> {
+    /// `count(*)` -- count the row unconditionally.
+    Star,
+    /// `count(n)` -- count the row iff its bound entity is non-null.
+    Entity { present: bool },
+    /// `func(n.prop)` -- the row's value for the property (`None`/`Null` =
+    /// absent, skipped by every value aggregate).
+    Value(Option<&'a PropertyValue>),
+}
+
+/// Per-group, per-aggregate accumulator.
+struct AggAccumulator {
+    func: AggregateFunc,
+    distinct: bool,
+    /// Values already counted, for the `DISTINCT` quantifier.
+    seen: HashSet<GroupKeyValue>,
+    count: i64,
+    /// Integer running sum (i128 headroom against overflow) for all-integer sums.
+    sum_i: i128,
+    /// Floating running sum, always maintained (used for avg and float sums).
+    sum_f: f64,
+    saw_float: bool,
+    numeric_count: i64,
+    min: Option<PropertyValue>,
+    max: Option<PropertyValue>,
+    collected: Vec<PropertyValue>,
+}
+
+impl AggAccumulator {
+    fn new(spec: &AggregateSpec) -> Self {
+        AggAccumulator {
+            func: spec.func,
+            distinct: spec.distinct,
+            seen: HashSet::new(),
+            count: 0,
+            sum_i: 0,
+            sum_f: 0.0,
+            saw_float: false,
+            numeric_count: 0,
+            min: None,
+            max: None,
+            collected: Vec::new(),
+        }
+    }
+
+    /// Fold one input row into the accumulator.
+    ///
+    /// `count(*)` ([`AggInput::Star`]) counts the row unconditionally and
+    /// `count(n)` ([`AggInput::Entity`]) counts non-null bindings, both
+    /// ignoring `DISTINCT`. Otherwise the value ([`AggInput::Value`]) feeds the
+    /// function; `None`/`Null` values are skipped (openCypher semantics).
+    fn update(&mut self, input: AggInput<'_>) {
+        let v = match input {
+            AggInput::Star => {
+                // Only Count uses Star (enforced by the converter).
+                self.count += 1;
+                return;
+            }
+            AggInput::Entity { present } => {
+                // Only Count uses Entity; count non-null bindings.
+                if present {
+                    self.count += 1;
+                }
+                return;
+            }
+            AggInput::Value(Some(v)) if !matches!(v, PropertyValue::Null) => v,
+            AggInput::Value(_) => return,
+        };
+
+        if self.distinct {
+            let key = GroupKeyValue::from_property(Some(v));
+            if !self.seen.insert(key) {
+                return;
+            }
+        }
+
+        match self.func {
+            AggregateFunc::Count => self.count += 1,
+            AggregateFunc::Sum | AggregateFunc::Avg => {
+                if let Some(f) = property_as_f64(v) {
+                    self.sum_f += f;
+                    self.numeric_count += 1;
+                    match v {
+                        PropertyValue::Int(i) => self.sum_i += i128::from(*i),
+                        PropertyValue::Float(_) => self.saw_float = true,
+                        _ => {}
+                    }
+                }
+            }
+            AggregateFunc::Min => {
+                let replace = match &self.min {
+                    None => true,
+                    Some(m) => compare_property(v, m) == std::cmp::Ordering::Less,
+                };
+                if replace {
+                    self.min = Some(v.clone());
+                }
+            }
+            AggregateFunc::Max => {
+                let replace = match &self.max {
+                    None => true,
+                    Some(m) => compare_property(v, m) == std::cmp::Ordering::Greater,
+                };
+                if replace {
+                    self.max = Some(v.clone());
+                }
+            }
+            AggregateFunc::Collect => self.collected.push(v.clone()),
+        }
+    }
+
+    /// Produce the final aggregate value for this group.
+    fn finalize(self) -> PropertyValue {
+        match self.func {
+            AggregateFunc::Count => PropertyValue::Int(self.count),
+            AggregateFunc::Sum => {
+                if self.numeric_count == 0 {
+                    // openCypher: sum over no values is 0 (integer).
+                    PropertyValue::Int(0)
+                } else if self.saw_float {
+                    PropertyValue::Float(self.sum_f)
+                } else {
+                    // Checked cast: an all-integer sum that overflows i64 falls
+                    // back to Float rather than silently wrapping.
+                    match i64::try_from(self.sum_i) {
+                        Ok(v) => PropertyValue::Int(v),
+                        Err(_) => PropertyValue::Float(self.sum_i as f64),
+                    }
+                }
+            }
+            AggregateFunc::Avg => {
+                if self.numeric_count == 0 {
+                    PropertyValue::Null
+                } else {
+                    PropertyValue::Float(self.sum_f / self.numeric_count as f64)
+                }
+            }
+            AggregateFunc::Min => self.min.unwrap_or(PropertyValue::Null),
+            AggregateFunc::Max => self.max.unwrap_or(PropertyValue::Null),
+            AggregateFunc::Collect => PropertyValue::Array(Arc::new(self.collected)),
+        }
+    }
+}
+
+/// A single group's state during aggregation.
+struct AggGroup {
+    /// The group-key values (in `group_keys` order), captured from the first
+    /// row of the group for output.
+    key_values: Vec<PropertyValue>,
+    accumulators: Vec<AggAccumulator>,
+}
+
+/// Grouped aggregation iterator (openCypher implicit grouping).
+///
+/// Eagerly drains its input on the first `next()`, hash-groups rows by the
+/// group-key tuple, folds each aggregate per group, and then emits exactly one
+/// computed-column [`QueryRow`] per group (via [`QueryRow::from_columns`]) in
+/// group-discovery order. A global aggregation (no group keys) always emits one
+/// row even over empty input; a grouped aggregation over empty input emits no
+/// rows.
+pub struct AggregateIterator {
+    input: Option<Box<dyn ResultIterator>>,
+    group_keys: Vec<AggregateGroupKey>,
+    aggregates: Vec<AggregateSpec>,
+    output: std::vec::IntoIter<QueryRow>,
+    drained: bool,
+}
+
+impl AggregateIterator {
+    /// Create a new aggregation iterator.
+    pub fn new(
+        input: Box<dyn ResultIterator>,
+        group_keys: Vec<AggregateGroupKey>,
+        aggregates: Vec<AggregateSpec>,
+    ) -> Self {
+        AggregateIterator {
+            input: Some(input),
+            group_keys,
+            aggregates,
+            output: Vec::new().into_iter(),
+            drained: false,
+        }
+    }
+
+    fn drain(&mut self) -> Result<()> {
+        let mut input = match self.input.take() {
+            Some(i) => i,
+            None => return Ok(()),
+        };
+
+        let mut order: Vec<Vec<GroupKeyValue>> = Vec::new();
+        let mut groups: std::collections::HashMap<Vec<GroupKeyValue>, AggGroup> =
+            std::collections::HashMap::new();
+
+        // A global aggregation always yields exactly one row, even over empty
+        // input: seed the single (empty-key) group up front.
+        if self.group_keys.is_empty() {
+            let key: Vec<GroupKeyValue> = Vec::new();
+            order.push(key.clone());
+            groups.insert(
+                key,
+                AggGroup {
+                    key_values: Vec::new(),
+                    accumulators: self.aggregates.iter().map(AggAccumulator::new).collect(),
+                },
+            );
+        }
+
+        while let Some(row) = input.next() {
+            let row = row?;
+            let key: Vec<GroupKeyValue> = self
+                .group_keys
+                .iter()
+                .map(|gk| GroupKeyValue::from_property(row_property(&row, &gk.property_key)))
+                .collect();
+
+            if !groups.contains_key(&key) {
+                order.push(key.clone());
+                let key_values = self
+                    .group_keys
+                    .iter()
+                    .map(|gk| {
+                        row_property(&row, &gk.property_key)
+                            .cloned()
+                            .unwrap_or(PropertyValue::Null)
+                    })
+                    .collect();
+                let accumulators = self.aggregates.iter().map(AggAccumulator::new).collect();
+                groups.insert(
+                    key.clone(),
+                    AggGroup {
+                        key_values,
+                        accumulators,
+                    },
+                );
+            }
+
+            let group = groups
+                .get_mut(&key)
+                .expect("group inserted above must be present");
+            for (spec, acc) in self.aggregates.iter().zip(group.accumulators.iter_mut()) {
+                let input = match &spec.arg {
+                    AggregateArg::Star => AggInput::Star,
+                    AggregateArg::Entity => AggInput::Entity {
+                        present: !row.entity.is_null(),
+                    },
+                    AggregateArg::Property(k) => AggInput::Value(row_property(&row, k)),
+                };
+                acc.update(input);
+            }
+        }
+
+        let mut rows = Vec::with_capacity(order.len());
+        for key in order {
+            let group = groups.remove(&key).expect("group present in order");
+            let mut columns: Vec<(String, PropertyValue)> =
+                Vec::with_capacity(self.group_keys.len() + self.aggregates.len());
+            for (gk, val) in self.group_keys.iter().zip(group.key_values.into_iter()) {
+                columns.push((gk.alias.clone(), val));
+            }
+            for (spec, acc) in self.aggregates.iter().zip(group.accumulators.into_iter()) {
+                columns.push((spec.alias.clone(), acc.finalize()));
+            }
+            rows.push(QueryRow::from_columns(columns));
+        }
+        self.output = rows.into_iter();
+        Ok(())
+    }
+}
+
+impl ResultIterator for AggregateIterator {
+    fn next(&mut self) -> Option<Result<QueryRow>> {
+        if !self.drained {
+            self.drained = true;
+            if let Err(e) = self.drain() {
+                return Some(Err(e));
+            }
+        }
+        self.output.next().map(Ok)
+    }
+}
+
+/// A whole-row deduplication key for `DISTINCT`.
+#[derive(PartialEq, Eq, Hash)]
+enum DistinctRowKey {
+    /// Keyed by the row's entity identity (node/edge id, or `None` for a null
+    /// binding).
+    Entity(Option<EntityId>),
+    /// A computed aggregate row, keyed by its rendered columns.
+    Columns(String),
+}
+
+/// `RETURN DISTINCT` iterator: yields each distinct row once, preserving first
+/// occurrence order.
+pub struct DistinctIterator {
+    input: Box<dyn ResultIterator>,
+    seen: HashSet<DistinctRowKey>,
+}
+
+impl DistinctIterator {
+    /// Create a new DISTINCT iterator over `input`.
+    pub fn new(input: Box<dyn ResultIterator>) -> Self {
+        DistinctIterator {
+            input,
+            seen: HashSet::new(),
+        }
+    }
+
+    fn key(row: &QueryRow) -> DistinctRowKey {
+        if let Some(cols) = &row.columns {
+            DistinctRowKey::Columns(format!("{cols:?}"))
+        } else {
+            DistinctRowKey::Entity(row.entity.id())
+        }
+    }
+}
+
+impl ResultIterator for DistinctIterator {
+    fn next(&mut self) -> Option<Result<QueryRow>> {
+        loop {
+            match self.input.next()? {
+                Ok(row) => {
+                    if self.seen.insert(Self::key(&row)) {
+                        return Some(Ok(row));
+                    }
+                }
+                Err(e) => return Some(Err(e)),
+            }
+        }
+    }
+}
+
+/// Look up a value for ordering by column/property name: first a node property
+/// (entity rows), then a computed aggregate column (`row.columns`) so ORDER BY
+/// can sort grouped/aggregate rows by a group key or aggregate alias.
+fn row_value<'a>(row: &'a QueryRow, key: &str) -> Option<&'a PropertyValue> {
+    if let Some(v) = row_property(row, key) {
+        return Some(v);
+    }
+    row.columns
+        .as_ref()
+        .and_then(|cols| cols.iter().find(|(k, _)| k == key).map(|(_, v)| v))
+}
+
+/// `ORDER BY` iterator: buffers the entire input and stably sorts it by one or
+/// more keys in precedence order (first key primary), then streams the result.
+///
+/// Each key carries its own ascending/descending flag. Null placement follows
+/// openCypher: a missing/null sort value orders **last** for an ascending key
+/// and **first** for a descending key. Property keys fall back to computed
+/// aggregate columns via [`row_value`], so grouped results can be ordered by a
+/// group key or aggregate alias.
+pub struct SortIterator {
+    input: Option<Box<dyn ResultIterator>>,
+    keys: Vec<(SortKey, bool)>,
+    output: std::vec::IntoIter<QueryRow>,
+    drained: bool,
+}
+
+impl SortIterator {
+    /// Create a new ORDER BY iterator sorting by `keys` (first = primary).
+    pub fn new(input: Box<dyn ResultIterator>, keys: Vec<(SortKey, bool)>) -> Self {
+        SortIterator {
+            input: Some(input),
+            keys,
+            output: Vec::new().into_iter(),
+            drained: false,
+        }
+    }
+
+    fn drain(&mut self) -> Result<()> {
+        let mut input = match self.input.take() {
+            Some(i) => i,
+            None => return Ok(()),
+        };
+        let mut rows: Vec<QueryRow> = Vec::new();
+        while let Some(row) = input.next() {
+            rows.push(row?);
+        }
+        rows.sort_by(|a, b| self.cmp_rows(a, b));
+        self.output = rows.into_iter();
+        Ok(())
+    }
+
+    fn cmp_rows(&self, a: &QueryRow, b: &QueryRow) -> std::cmp::Ordering {
+        use std::cmp::Ordering;
+        for (key, descending) in &self.keys {
+            let ord = Self::cmp_by_key(a, b, key, *descending);
+            if ord != Ordering::Equal {
+                return ord;
+            }
+        }
+        Ordering::Equal
+    }
+
+    /// Compare two rows by a single key, applying openCypher null placement
+    /// (nulls last for ASC, first for DESC).
+    fn cmp_by_key(
+        a: &QueryRow,
+        b: &QueryRow,
+        key: &SortKey,
+        descending: bool,
+    ) -> std::cmp::Ordering {
+        use std::cmp::Ordering;
+        match key {
+            SortKey::Property(prop) => match (row_value(a, prop), row_value(b, prop)) {
+                (Some(x), Some(y)) => {
+                    let ord = compare_property(x, y);
+                    if descending { ord.reverse() } else { ord }
+                }
+                // openCypher: nulls last for ASC, first for DESC.
+                (Some(_), None) => {
+                    if descending {
+                        Ordering::Greater
+                    } else {
+                        Ordering::Less
+                    }
+                }
+                (None, Some(_)) => {
+                    if descending {
+                        Ordering::Less
+                    } else {
+                        Ordering::Greater
+                    }
+                }
+                (None, None) => Ordering::Equal,
+            },
+            SortKey::Score => {
+                let ord = a.score.partial_cmp(&b.score).unwrap_or(Ordering::Equal);
+                if descending { ord.reverse() } else { ord }
+            }
+            SortKey::Timestamp => {
+                let av = a.timestamp.map(|t| t.wallclock());
+                let bv = b.timestamp.map(|t| t.wallclock());
+                let ord = av.cmp(&bv);
+                if descending { ord.reverse() } else { ord }
+            }
+        }
+    }
+}
+
+impl ResultIterator for SortIterator {
+    fn next(&mut self) -> Option<Result<QueryRow>> {
+        if !self.drained {
+            self.drained = true;
+            if let Err(e) = self.drain() {
+                return Some(Err(e));
+            }
+        }
+        self.output.next().map(Ok)
+    }
+}
+
+/// `Count` aggregate iterator: drains the input and yields a single computed
+/// row with the total row count under the column name `count`.
+pub struct CountIterator {
+    input: Option<Box<dyn ResultIterator>>,
+    done: bool,
+}
+
+impl CountIterator {
+    /// Create a new count iterator over `input`.
+    pub fn new(input: Box<dyn ResultIterator>) -> Self {
+        CountIterator {
+            input: Some(input),
+            done: false,
+        }
+    }
+}
+
+impl ResultIterator for CountIterator {
+    fn next(&mut self) -> Option<Result<QueryRow>> {
+        if self.done {
+            return None;
+        }
+        self.done = true;
+        let mut input = self.input.take()?;
+        let mut count: i64 = 0;
+        while let Some(row) = input.next() {
+            if let Err(e) = row {
+                return Some(Err(e));
+            }
+            count += 1;
+        }
+        Some(Ok(QueryRow::from_columns(vec![(
+            "count".to_string(),
+            PropertyValue::Int(count),
+        )])))
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (usize::from(!self.done), Some(usize::from(!self.done)))
     }
 }
 

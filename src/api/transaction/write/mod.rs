@@ -595,20 +595,53 @@ impl WriteTransaction {
 
         // Apply all changes atomically.
         // Nodes/edges are written with commit_timestamp: None during this phase.
+        //
+        // Issue #3425: `apply_changes` returns the `historical.write()` guard
+        // instead of dropping it internally. We hold it across finalization below
+        // so the current-side writes and their `commit_timestamp` finalization are
+        // atomic w.r.t. any snapshot (checkpoint / backup) holding `historical.read()`
+        // — closing the *in-memory* window in which a committed node/edge could be
+        // captured with `commit_timestamp: None`. (The persisted index format does
+        // not serialize `commit_timestamp` and reconstructs it as committed on
+        // restore, so this fix hardens the in-memory snapshot invariant rather than
+        // fixing any on-disk corruption.) This respects the documented lock order
+        // (`historical` precedes `snapshot_lock` and adjacency), so no lock-order
+        // inversion is introduced.
+        //
         // The pre-generated closing version ids (Issue #3406) are consumed here
         // in the same buffer order they were logged to the WAL.
-        apply::apply_changes(self, commit_timestamp, &closing_version_ids)?;
+        let historical_guard = apply::apply_changes(self, commit_timestamp, &closing_version_ids)?;
 
-        // Notify temporal vector index of transaction completion (for snapshot creation)
-        // Only call this if the transaction modified vector properties to avoid unnecessary overhead
-        if self.buffer.has_vector_operations() {
-            self.current.on_temporal_vector_transaction()?;
-        }
+        // Test-only interleaving hook (Issue #3425): fires at the exact point
+        // between the historical writes and the commit-timestamp finalization,
+        // while `historical_guard` is held. Production builds compile this away.
+        #[cfg(test)]
+        commit_test_hooks::run_pre_finalize_hook();
 
         // Finalize commit timestamps in current storage.
         // Only reached on the success path — sets commit_timestamp: Some(T) on all
         // written nodes/edges, making them visible to future snapshot readers.
         apply::finalize_current_commit_timestamps(self, commit_timestamp);
+
+        // Finalization complete: release the historical write guard. Snapshots
+        // blocked on `historical.read()` now proceed and observe resolved timestamps.
+        //
+        // Issue #3425: only `finalize_current_commit_timestamps` must run under the
+        // guard to close the snapshot finalize window. The temporal-vector notify
+        // below is deliberately kept OUTSIDE the guard: it touches only the vector
+        // index's own locks and is independent of current-side commit_timestamp
+        // finalization, so serializing its (potentially O(N log N)) HNSW snapshot
+        // build under the global historical write lock would only add latency
+        // without any correctness benefit.
+        drop(historical_guard);
+
+        // Notify temporal vector index of transaction completion (for snapshot creation).
+        // Only call this if the transaction modified vector properties to avoid unnecessary overhead.
+        // No ordering dependency on finalize: the vectors were already added to the
+        // index during `apply_changes`; this only triggers snapshot creation.
+        if self.buffer.has_vector_operations() {
+            self.current.on_temporal_vector_transaction()?;
+        }
 
         // Commit the constraint guard before registering with the visibility manager.
         // Committing first ensures that freed old-value slots are released before
@@ -1752,6 +1785,50 @@ impl Drop for WriteTransaction {
             // Register abort with visibility manager
             self.visibility_manager.register_abort(self.tx_id);
             self.state = TxState::Aborted;
+        }
+    }
+}
+
+/// Test-only interleaving hooks for the commit path (Issue #3425).
+///
+/// These let a test park a committing writer at a precise point — between the
+/// historical writes and the commit-timestamp finalization — so a concurrent
+/// snapshot (checkpoint / backup) can be driven into the exact window the
+/// hardening closes. The entire module is `#[cfg(test)]`, so it is compiled
+/// out of production builds and adds zero cost to the commit hot path.
+#[cfg(test)]
+pub(crate) mod commit_test_hooks {
+    use std::sync::{Arc, Mutex};
+
+    type Hook = Arc<dyn Fn() + Send + Sync>;
+
+    static PRE_FINALIZE_HOOK: Mutex<Option<Hook>> = Mutex::new(None);
+
+    /// Install a hook fired just before `finalize_current_commit_timestamps`.
+    pub(crate) fn set_pre_finalize_hook(hook: Hook) {
+        *PRE_FINALIZE_HOOK
+            .lock()
+            .expect("pre-finalize hook mutex poisoned") = Some(hook);
+    }
+
+    /// Remove any installed pre-finalize hook.
+    pub(crate) fn clear_pre_finalize_hook() {
+        *PRE_FINALIZE_HOOK
+            .lock()
+            .expect("pre-finalize hook mutex poisoned") = None;
+    }
+
+    /// Invoke the installed pre-finalize hook, if any.
+    ///
+    /// The `Arc` is cloned out from under the mutex so the hook body never runs
+    /// while holding the registry lock (the hook may block for a long time).
+    pub(crate) fn run_pre_finalize_hook() {
+        let hook = PRE_FINALIZE_HOOK
+            .lock()
+            .expect("pre-finalize hook mutex poisoned")
+            .clone();
+        if let Some(hook) = hook {
+            hook();
         }
     }
 }

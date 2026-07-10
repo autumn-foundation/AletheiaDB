@@ -35,15 +35,36 @@ impl AletheiaDB {
         let source_lsn = self.wal.current_lsn().0;
 
         // Take consistent point-in-time snapshots.
-        let current_snapshot = self
-            .current
-            .create_snapshot(crate::storage::wal::LSN(source_lsn));
-        let (historical_snapshot, tiered_arc) = {
+        //
+        // Issue #3425: the current-storage snapshot is taken INSIDE the
+        // `historical.read()` guard (and under `snapshot_lock`, mirroring
+        // `create_checkpoint`'s locking contract) rather than before/outside it.
+        // A committing writer holds `historical.write()` across its
+        // `commit_timestamp` finalization, so acquiring `historical.read()` here
+        // excludes that window: without this, the backup could clone a committed
+        // node/edge whose `commit_timestamp` is still `None` (an in-memory
+        // finalize-window artifact). Lock order is preserved
+        // (`historical` -> `snapshot_lock` -> DashMap shards); `create_snapshot`
+        // takes no `historical`/`wal`/`current_timestamp` lock, so no inversion.
+        let (current_snapshot, historical_snapshot, tiered_arc) = {
             let hist = self.historical.read();
-            let snap = hist.create_snapshot(crate::storage::wal::LSN(source_lsn));
+            let current_snapshot = {
+                let _snap_lock = self.current.snapshot_lock.write();
+                self.current
+                    .create_snapshot(crate::storage::wal::LSN(source_lsn))
+            };
+            let historical_snapshot = hist.create_snapshot(crate::storage::wal::LSN(source_lsn));
             let tiered = hist.tiered_storage_arc();
-            (snap, tiered)
+            (current_snapshot, historical_snapshot, tiered)
         };
+
+        // Test-only seam (Issue #3425): lets the backup-path regression test inspect
+        // the exact current-storage snapshot this backup captured, so it can prove
+        // the snapshot never contains a committed node with `commit_timestamp: None`
+        // even when a concurrent writer is parked in the finalize window. Production
+        // builds compile this away.
+        #[cfg(test)]
+        backup_test_hooks::run_post_current_snapshot_hook(&current_snapshot);
 
         // Scan cold-tier versions outside the historical lock (disk I/O).
         let (cold_node_versions, cold_edge_versions) = if let Some(tiered) = tiered_arc {
@@ -168,4 +189,50 @@ fn build_restore_config(persistence_dir: &Path, wal_dir: std::path::PathBuf) -> 
             ..Default::default()
         })
         .build()
+}
+
+/// Test-only interleaving seam for the Issue #3425 backup-path regression test.
+///
+/// Lets a test observe the exact current-storage snapshot that a real `backup()`
+/// call captured. The hook fires immediately after the snapshot is taken (inside
+/// the `historical.read()` guard block), so a test can drive the real backup path
+/// concurrently with a writer parked in the finalize window and assert the
+/// captured snapshot never contains a committed node with `commit_timestamp: None`.
+/// Compiled away in non-test builds.
+#[cfg(test)]
+pub(crate) mod backup_test_hooks {
+    use crate::storage::snapshot::CurrentStorageSnapshot;
+    use std::sync::{Arc, Mutex};
+
+    type Hook = Arc<dyn Fn(&CurrentStorageSnapshot) + Send + Sync>;
+
+    static POST_CURRENT_SNAPSHOT_HOOK: Mutex<Option<Hook>> = Mutex::new(None);
+
+    /// Install a hook fired just after `backup()` captures its current snapshot.
+    pub(crate) fn set_post_current_snapshot_hook(hook: Hook) {
+        *POST_CURRENT_SNAPSHOT_HOOK
+            .lock()
+            .expect("backup post-snapshot hook mutex poisoned") = Some(hook);
+    }
+
+    /// Remove any installed post-snapshot hook.
+    pub(crate) fn clear_post_current_snapshot_hook() {
+        *POST_CURRENT_SNAPSHOT_HOOK
+            .lock()
+            .expect("backup post-snapshot hook mutex poisoned") = None;
+    }
+
+    /// Invoke the installed post-snapshot hook, if any.
+    ///
+    /// The `Arc` is cloned out from under the mutex so the hook body never runs
+    /// while holding the registry lock.
+    pub(crate) fn run_post_current_snapshot_hook(snapshot: &CurrentStorageSnapshot) {
+        let hook = POST_CURRENT_SNAPSHOT_HOOK
+            .lock()
+            .expect("backup post-snapshot hook mutex poisoned")
+            .clone();
+        if let Some(hook) = hook {
+            hook(snapshot);
+        }
+    }
 }

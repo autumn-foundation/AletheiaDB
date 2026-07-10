@@ -287,6 +287,16 @@ pub enum UnaryOp {
     /// Count results (aggregate)
     Count,
 
+    /// Grouped aggregation (openCypher implicit grouping): partition by
+    /// `group_keys` and compute `aggregates` per group. Mirrors
+    /// [`super::ir::QueryOp::Aggregate`].
+    Aggregate {
+        /// Grouping keys (empty = single global group).
+        group_keys: Vec<super::ir::AggregateGroupKey>,
+        /// Aggregate expressions computed per group.
+        aggregates: Vec<super::ir::AggregateSpec>,
+    },
+
     /// Left-outer application of an optional sub-pattern (`OPTIONAL MATCH`).
     ///
     /// For each input row, the `steps` sub-pipeline runs seeded from that row;
