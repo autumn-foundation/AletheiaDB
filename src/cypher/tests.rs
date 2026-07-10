@@ -1679,19 +1679,340 @@ fn test_e2e_multi_hop_traversal() {
     let rows: Vec<_> = results.collect();
     assert_eq!(rows.len(), 1); // Bob
 
-    // 2-hop: Alice -> Bob -> Charlie (yields nodes at depth 2)
+    // 2-hop: Alice -> Bob -> Charlie.
+    // openCypher range `*1..2` binds `b` to EVERY node reachable at depth 1
+    // (Bob) or depth 2 (Charlie), not only the terminal-depth node.
     let results = db
         .execute_cypher("MATCH (a:Person {name: 'Alice'})-[:KNOWS*1..2]->(b) RETURN b")
         .unwrap();
-    let rows: Vec<_> = results.collect();
-    // Range *1..2 should yield nodes at depth 1 (Bob) and depth 2 (Charlie),
-    // but the executor may only return terminal-depth nodes depending on the
-    // TraversalDepth::Range semantics.  Assert at least 1 result.
-    assert!(
-        !rows.is_empty(),
-        "expected at least 1 result from *1..2 traversal, got {}",
-        rows.len()
+    let rows: Vec<_> = collect_rows(results);
+    let mut names: Vec<String> = rows.iter().filter_map(row_name).collect();
+    names.sort();
+    assert_eq!(names, vec!["Bob".to_string(), "Charlie".to_string()]);
+}
+
+// ============================================================================
+// Variable-length path depth-range matrix (Issue #548)
+//
+// `-[:R*min..max]->` binds the far node to every DISTINCT node reachable at a
+// SHORTEST hop-distance d with min <= d <= max, not only the terminal depth.
+// This is node-distinct / shortest-path reachability: a deliberate v1
+// simplification of openCypher trail semantics (a node whose shortest path is
+// below `min`, or the anchor reached only via an in-range cycle, is not
+// re-emitted at a longer in-range depth). See
+// `test_varlen_min_ge_2_shortest_path_underreport` and
+// `test_varlen_cycle_distinct_nodes_no_infinite_loop` for the pinned
+// simplifications. On a linear chain (no shortcuts) shortest-depth == the only
+// depth, so the matrix below matches full openCypher semantics exactly.
+// ============================================================================
+
+/// Build a linear chain N0-[:R]->N1->N2->N3->N4 (5 nodes, 4 edges) and run
+/// `MATCH (a:N {name:'N0'})-[:R<spec>]->(b) RETURN b`, returning the SORTED
+/// list of resulting `b.name` values so tests can assert an exact set.
+fn varlen_chain_names(spec: &str) -> Vec<String> {
+    let db = AletheiaDB::new().unwrap();
+    let mut ids = Vec::new();
+    for i in 0..5 {
+        let id = db
+            .create_node(
+                "N",
+                PropertyMapBuilder::new()
+                    .insert("name", format!("N{i}"))
+                    .build(),
+            )
+            .unwrap();
+        ids.push(id);
+    }
+    for i in 0..4 {
+        db.create_edge(ids[i], ids[i + 1], "R", CorePropertyMap::new())
+            .unwrap();
+    }
+    let q = format!("MATCH (a:N {{name: 'N0'}})-[:R{spec}]->(b) RETURN b");
+    let rows = collect_rows(db.execute_cypher(&q).unwrap());
+    let mut names: Vec<String> = rows.iter().filter_map(row_name).collect();
+    names.sort();
+    names
+}
+
+#[test]
+fn test_varlen_depth_exact_1() {
+    assert_eq!(varlen_chain_names("*1..1"), vec!["N1"]);
+    assert_eq!(varlen_chain_names("*1"), vec!["N1"]);
+}
+
+#[test]
+fn test_varlen_depth_1_to_2() {
+    assert_eq!(varlen_chain_names("*1..2"), vec!["N1", "N2"]);
+}
+
+#[test]
+fn test_varlen_depth_1_to_3() {
+    assert_eq!(varlen_chain_names("*1..3"), vec!["N1", "N2", "N3"]);
+}
+
+#[test]
+fn test_varlen_depth_2_to_3() {
+    assert_eq!(varlen_chain_names("*2..3"), vec!["N2", "N3"]);
+}
+
+#[test]
+fn test_varlen_depth_exact_2() {
+    assert_eq!(varlen_chain_names("*2..2"), vec!["N2"]);
+    assert_eq!(varlen_chain_names("*2"), vec!["N2"]);
+}
+
+#[test]
+fn test_varlen_depth_max_only_2() {
+    assert_eq!(varlen_chain_names("*..2"), vec!["N1", "N2"]);
+}
+
+#[test]
+fn test_varlen_depth_min_only_3() {
+    // `*3..` is unbounded above; capped at DEFAULT_MAX_TRAVERSAL_DEPTH (10),
+    // well beyond the chain length, so it reaches N4.
+    assert_eq!(varlen_chain_names("*3.."), vec!["N3", "N4"]);
+}
+
+#[test]
+fn test_varlen_depth_unbounded() {
+    // `*` is Variable depth; capped at DEFAULT_MAX_TRAVERSAL_DEPTH (10).
+    assert_eq!(varlen_chain_names("*"), vec!["N1", "N2", "N3", "N4"]);
+}
+
+#[test]
+fn test_varlen_cycle_distinct_nodes_no_infinite_loop() {
+    // Triangle N0->N1->N2->N0. Node-distinct / shortest-path dedup means each
+    // distinct reachable node is emitted at most once and the cycle back to
+    // the start node terminates instead of looping forever.
+    let db = AletheiaDB::new().unwrap();
+    let mut ids = Vec::new();
+    for i in 0..3 {
+        let id = db
+            .create_node(
+                "N",
+                PropertyMapBuilder::new()
+                    .insert("name", format!("N{i}"))
+                    .build(),
+            )
+            .unwrap();
+        ids.push(id);
+    }
+    db.create_edge(ids[0], ids[1], "R", CorePropertyMap::new())
+        .unwrap();
+    db.create_edge(ids[1], ids[2], "R", CorePropertyMap::new())
+        .unwrap();
+    db.create_edge(ids[2], ids[0], "R", CorePropertyMap::new())
+        .unwrap();
+
+    let rows = collect_rows(
+        db.execute_cypher("MATCH (a:N {name: 'N0'})-[:R*1..5]->(b) RETURN b")
+            .unwrap(),
     );
+    let mut names: Vec<String> = rows.iter().filter_map(row_name).collect();
+    names.sort();
+    // Documented v1 (shortest-path) result: N1 (depth 1) and N2 (depth 2) each
+    // once; N0 reached again at depth 3 via the cycle is suppressed by the
+    // visited set (and the depth-0 start is never emitted).
+    //
+    // KNOWN LIMITATION: full openCypher trail semantics would ADDITIONALLY bind
+    // the anchor N0 here (via the length-3 trail N0->N1->N2->N0, which lands in
+    // the [1,5] range). This engine does not — node-distinct/shortest-path
+    // reachability is a deliberate simplification (tracked follow-up). This test
+    // records that documented behavior, not a claim of trail conformance.
+    assert_eq!(names, vec!["N1", "N2"]);
+}
+
+#[test]
+fn test_varlen_min_ge_2_shortest_path_underreport() {
+    // Branching graph with a shortcut: N0->N1, N0->N2, N1->N2. Query `*2..2`.
+    //
+    // Full openCypher trail semantics would bind N2 via the length-2 trail
+    // N0->N1->N2. This engine binds each node at its SHORTEST depth only: N2's
+    // shortest path is N0->N2 (depth 1), which is below min=2, so N2 is marked
+    // visited at depth 1 and never re-emitted at depth 2 -> the result is EMPTY.
+    //
+    // This pins the documented v1 shortest-path/node-distinct simplification so
+    // the under-report is stated-and-tested, not a silent surprise. Full trail
+    // semantics is a tracked follow-up.
+    let db = AletheiaDB::new().unwrap();
+    let mut ids = Vec::new();
+    for i in 0..3 {
+        let id = db
+            .create_node(
+                "N",
+                PropertyMapBuilder::new()
+                    .insert("name", format!("N{i}"))
+                    .build(),
+            )
+            .unwrap();
+        ids.push(id);
+    }
+    db.create_edge(ids[0], ids[1], "R", CorePropertyMap::new())
+        .unwrap();
+    db.create_edge(ids[0], ids[2], "R", CorePropertyMap::new())
+        .unwrap();
+    db.create_edge(ids[1], ids[2], "R", CorePropertyMap::new())
+        .unwrap();
+
+    let rows = collect_rows(
+        db.execute_cypher("MATCH (a:N {name: 'N0'})-[:R*2..2]->(b) RETURN b")
+            .unwrap(),
+    );
+    let names: Vec<String> = rows.iter().filter_map(row_name).collect();
+    // Documented shortest-path result (openCypher trail semantics would return
+    // ["N2"]).
+    assert_eq!(names, Vec::<String>::new());
+}
+
+/// Build a linear chain of `n` nodes N0->..->N{n-1} joined by `:R` edges, run
+/// `MATCH (a:N {name:'N0'})-[:R<spec>]->(b) RETURN b` with the given arrow
+/// syntax around the relationship, and return the SORTED result `b.name` set.
+/// `left`/`right` let a test pick edge direction (`-`/`->`, `<-`/`-`, `-`/`-`).
+fn varlen_chain_names_dir(n: usize, left: &str, spec: &str, right: &str) -> Vec<String> {
+    let db = AletheiaDB::new().unwrap();
+    let mut ids = Vec::new();
+    for i in 0..n {
+        let id = db
+            .create_node(
+                "N",
+                PropertyMapBuilder::new()
+                    .insert("name", format!("N{i}"))
+                    .build(),
+            )
+            .unwrap();
+        ids.push(id);
+    }
+    for i in 0..n.saturating_sub(1) {
+        db.create_edge(ids[i], ids[i + 1], "R", CorePropertyMap::new())
+            .unwrap();
+    }
+    let q = format!("MATCH (a:N {{name: 'N0'}}){left}[:R{spec}]{right}(b) RETURN b");
+    let rows = collect_rows(db.execute_cypher(&q).unwrap());
+    let mut names: Vec<String> = rows.iter().filter_map(row_name).collect();
+    names.sort();
+    names
+}
+
+#[test]
+fn test_varlen_incoming_direction_range() {
+    // Chain N0->N1->N2->N3 (outgoing edges). From N0, an INCOMING var-length
+    // pattern `<-[:R*1..3]-` follows edges backwards and reaches nothing (N0 has
+    // no in-edges). From N3 it would reach N2,N1,N0. Assert the reverse anchor:
+    // build the chain and query incoming from N3 via a direct db build.
+    let db = AletheiaDB::new().unwrap();
+    let mut ids = Vec::new();
+    for i in 0..4 {
+        let id = db
+            .create_node(
+                "N",
+                PropertyMapBuilder::new()
+                    .insert("name", format!("N{i}"))
+                    .build(),
+            )
+            .unwrap();
+        ids.push(id);
+    }
+    for i in 0..3 {
+        db.create_edge(ids[i], ids[i + 1], "R", CorePropertyMap::new())
+            .unwrap();
+    }
+    // Incoming traversal from N3 reaches N2 (d1), N1 (d2), N0 (d3).
+    let rows = collect_rows(
+        db.execute_cypher("MATCH (a:N {name: 'N3'})<-[:R*1..3]-(b) RETURN b")
+            .unwrap(),
+    );
+    let mut names: Vec<String> = rows.iter().filter_map(row_name).collect();
+    names.sort();
+    assert_eq!(names, vec!["N0", "N1", "N2"]);
+}
+
+#[test]
+fn test_varlen_both_direction_range() {
+    // Undirected traversal `-[:R*1..3]-` over the chain N0->N1->N2->N3 from N0
+    // follows edges regardless of stored direction, reaching N1 (d1), N2 (d2),
+    // N3 (d3).
+    assert_eq!(
+        varlen_chain_names_dir(4, "-", "*1..3", "-"),
+        vec!["N1", "N2", "N3"]
+    );
+}
+
+#[test]
+fn test_varlen_cap_at_default_max_depth() {
+    // Chain longer than DEFAULT_MAX_TRAVERSAL_DEPTH (10): 14 nodes N0..N13.
+    // Unbounded `*` (and `*3..`) are capped at depth 10, so nodes beyond depth
+    // 10 (N11, N12, N13) are excluded; N1..N10 are reached.
+    // Sort expected the same (lexical) way the helper sorts its output.
+    let mut expected_all: Vec<String> = (1..=10).map(|i| format!("N{i}")).collect();
+    expected_all.sort();
+    assert_eq!(varlen_chain_names_dir(14, "-", "*", "->"), expected_all);
+
+    // `*3..` caps the same way: depths 3..=10 -> N3..N10.
+    let mut expected_min3: Vec<String> = (3..=10).map(|i| format!("N{i}")).collect();
+    expected_min3.sort();
+    assert_eq!(varlen_chain_names_dir(14, "-", "*3..", "->"), expected_min3);
+}
+
+#[test]
+fn test_varlen_optional_match_range_emits_intermediates() {
+    // The second bug site: OPTIONAL MATCH var-length range. Over the chain
+    // N0->N1->N2->N3, `OPTIONAL MATCH (a)-[:R*1..3]->(b)` must emit the
+    // intermediate-depth nodes (N1, N2, N3), not only the terminal depth.
+    let db = AletheiaDB::new().unwrap();
+    let mut ids = Vec::new();
+    for i in 0..4 {
+        let id = db
+            .create_node(
+                "N",
+                PropertyMapBuilder::new()
+                    .insert("name", format!("N{i}"))
+                    .build(),
+            )
+            .unwrap();
+        ids.push(id);
+    }
+    for i in 0..3 {
+        db.create_edge(ids[i], ids[i + 1], "R", CorePropertyMap::new())
+            .unwrap();
+    }
+    let rows = collect_rows(
+        db.execute_cypher("MATCH (a:N {name: 'N0'}) OPTIONAL MATCH (a)-[:R*1..3]->(b) RETURN b")
+            .unwrap(),
+    );
+    let mut names: Vec<String> = rows.iter().filter_map(row_name).collect();
+    names.sort();
+    assert_eq!(names, vec!["N1", "N2", "N3"]);
+}
+
+#[test]
+fn test_varlen_optional_match_range_unmatched_preserves_row_with_null() {
+    // A leaf node (N3, no out-edges) with an OPTIONAL MATCH var-length pattern
+    // that matches nothing must still preserve the base row and bind `b` to
+    // null (left-outer semantics), rather than dropping the row.
+    let db = AletheiaDB::new().unwrap();
+    let mut ids = Vec::new();
+    for i in 0..4 {
+        let id = db
+            .create_node(
+                "N",
+                PropertyMapBuilder::new()
+                    .insert("name", format!("N{i}"))
+                    .build(),
+            )
+            .unwrap();
+        ids.push(id);
+    }
+    for i in 0..3 {
+        db.create_edge(ids[i], ids[i + 1], "R", CorePropertyMap::new())
+            .unwrap();
+    }
+    let rows = collect_rows(
+        db.execute_cypher("MATCH (a:N {name: 'N3'}) OPTIONAL MATCH (a)-[:R*1..3]->(b) RETURN a, b")
+            .unwrap(),
+    );
+    // Exactly one row (the base row for N3) is preserved even though the
+    // optional var-length pattern matched nothing.
+    assert_eq!(rows.len(), 1);
 }
 
 #[test]

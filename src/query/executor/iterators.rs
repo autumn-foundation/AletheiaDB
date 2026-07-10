@@ -773,6 +773,23 @@ impl ResultIterator for TemporalNodeScanIterator {
 
 /// Iterator for graph traversal using BFS.
 ///
+/// # Variable-length depth-range semantics (`*min..max`)
+///
+/// For a variable-length pattern this iterator binds each **distinct** reachable
+/// target node **once**, at its **shortest** hop-distance from the anchor, and
+/// emits it iff `min <= shortestDepth <= max`. Because the per-input `visited`
+/// set is populated when a node is first enqueued (its shortest BFS depth), a
+/// node whose shortest path is shorter than `min` is marked visited early and is
+/// **not** re-emitted at a longer, in-range depth; likewise an anchor reachable
+/// again only via an in-range cycle is not re-bound.
+///
+/// This is **node-distinct / shortest-path reachability**, a deliberate v1
+/// simplification of openCypher's trail (path-enumeration) semantics. Under full
+/// trail semantics `MATCH (a)-[*2..2]->(b)` over `a->x, a->y, x->y` would also
+/// bind `y` via `a->x->y`; here `y`'s shortest depth is 1, so it is excluded.
+/// Full trail semantics is a tracked follow-up (it requires per-path state and
+/// carries cross-lane perf/regression risk in this shared engine).
+///
 /// # Deduplication Semantics
 ///
 /// The `visited` set is cleared for each new input node. This means:
@@ -794,6 +811,11 @@ pub struct TraversalIterator {
     input: Box<dyn ResultIterator>,
     direction: Direction,
     label: Option<String>,
+    /// Minimum depth (inclusive) at which a reached node is emitted. A node is
+    /// bound iff `min_depth <= shortestDepth <= depth` (node-distinct /
+    /// shortest-path reachability; see the struct-level docs).
+    min_depth: usize,
+    /// Maximum depth (inclusive); BFS expansion stops beyond this depth.
     depth: usize,
     current: Arc<CurrentStorage>,
     historical: Arc<RwLock<HistoricalStorage>>,
@@ -813,10 +835,12 @@ impl TraversalIterator {
     /// This is the core engine for `MATCH (a)-[*]->(b)` operations. It manages
     /// a frontier of visited nodes to prevent infinite loops in cyclic graphs,
     /// and conditionally queries the historical storage if a temporal context is present.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         input: Box<dyn ResultIterator>,
         direction: Direction,
         label: Option<String>,
+        min_depth: usize,
         depth: usize,
         current: Arc<CurrentStorage>,
         historical: Arc<RwLock<HistoricalStorage>>,
@@ -826,6 +850,7 @@ impl TraversalIterator {
             input,
             direction,
             label,
+            min_depth,
             depth,
             current,
             historical,
@@ -997,28 +1022,44 @@ impl ResultIterator for TraversalIterator {
         loop {
             // Process current frontier
             if let Some((node_id, path, current_depth)) = self.frontier.pop_front() {
-                if current_depth >= self.depth {
-                    // Reached target depth, yield result
+                // Expansion and yielding are INDEPENDENT so a range like `*1..3`
+                // both emits intermediate-depth nodes AND keeps exploring to the
+                // maximum depth. First expand (if we have not reached the max
+                // depth), enqueuing unvisited neighbors one hop deeper.
+                if current_depth < self.depth {
+                    let neighbors = self.get_neighbors(node_id);
+                    for (target, edge_id) in neighbors {
+                        // Node-distinct / shortest-path reachability: a node is
+                        // enqueued (and thus later emitted) once, at its shortest
+                        // BFS depth. This also makes cyclic graphs terminate. It
+                        // is a v1 simplification of openCypher trail semantics --
+                        // a target whose shortest path is below `min_depth` is
+                        // marked visited here and never re-emitted deeper (see the
+                        // struct-level docs).
+                        if self.visited.insert(target) {
+                            // ⚡ Bolt Optimization: Pre-allocate capacity for new path to avoid reallocations.
+                            // We are adding exactly 2 elements (edge and node) to the current path length.
+                            let mut new_path = Vec::with_capacity(path.len() + 2);
+                            new_path.extend_from_slice(&path);
+                            new_path.push(EntityId::Edge(edge_id));
+                            new_path.push(EntityId::Node(target));
+                            self.frontier
+                                .push_back((target, new_path, current_depth + 1));
+                        }
+                    }
+                }
+
+                // Then, if this node's depth falls within [min_depth, depth],
+                // yield it. The depth-0 start node is never emitted.
+                if current_depth >= 1
+                    && current_depth >= self.min_depth
+                    && current_depth <= self.depth
+                {
                     match self.current.get_node(node_id) {
                         Ok(node) => {
                             return Some(Ok(QueryRow::with_path(EntityResult::Node(node), path)));
                         }
                         Err(e) => return Some(Err(e)),
-                    }
-                }
-
-                // Expand neighbors
-                let neighbors = self.get_neighbors(node_id);
-                for (target, edge_id) in neighbors {
-                    if self.visited.insert(target) {
-                        // ⚡ Bolt Optimization: Pre-allocate capacity for new path to avoid reallocations.
-                        // We are adding exactly 2 elements (edge and node) to the current path length.
-                        let mut new_path = Vec::with_capacity(path.len() + 2);
-                        new_path.extend_from_slice(&path);
-                        new_path.push(EntityId::Edge(edge_id));
-                        new_path.push(EntityId::Node(target));
-                        self.frontier
-                            .push_back((target, new_path, current_depth + 1));
                     }
                 }
                 continue;
@@ -1410,12 +1451,14 @@ impl OptionalApplyIterator {
                 OptionalPhysicalStep::Traverse {
                     direction,
                     label,
+                    min_depth,
                     depth,
                     temporal_context,
                 } => Box::new(TraversalIterator::new(
                     iter,
                     *direction,
                     label.clone(),
+                    *min_depth,
                     *depth,
                     Arc::clone(&self.current),
                     Arc::clone(&self.historical),
@@ -4276,6 +4319,7 @@ mod tests {
             vec![OptionalPhysicalStep::Traverse {
                 direction: Direction::Outgoing,
                 label: Some("KNOWS".to_string()),
+                min_depth: 1,
                 depth: 1,
                 temporal_context: None,
             }],
@@ -4347,6 +4391,7 @@ mod tests {
             vec![OptionalPhysicalStep::Traverse {
                 direction: Direction::Outgoing,
                 label: Some("KNOWS".to_string()),
+                min_depth: 1,
                 depth: 1,
                 temporal_context: None,
             }],
