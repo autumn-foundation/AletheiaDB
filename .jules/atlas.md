@@ -90,3 +90,10 @@
 ## 2026-06-21 - Splitting Redb Cold Storage Blob
 **Tangle:** `src/storage/redb_cold_storage.rs` was over 4100 lines long, a "Blob" module holding both core cold storage logic and over 2000 lines of tests. It made navigation and understanding the core operations difficult.
 **Blueprint:** Refactored into a `src/storage/redb_cold_storage/` module. Kept the core data definitions and implementation in `mod.rs` (reduced to ~2000 lines) and moved all tests to `tests.rs` (~2000 lines), maintaining the `#[cfg(test)]` block functionality but with better physical separation.
+
+## 2024-05-27 - Splitting the MCP Server God Object
+**Tangle:** `src/mcp/server.rs` was a 6,000-line "God Object" containing the server lifecycle, authentication, and all 48 tool handler implementations. This violated the Single Responsibility Principle and made navigation extremely difficult.
+**Blueprint:** Refactored `src/mcp/server.rs` into a `src/mcp/server/` module directory.
+1. Kept the core `AletheiaMcpServer` struct, lifecycle, and request routing in `mod.rs`.
+2. Extracted tool handlers into cohesive submodules based on their domain (`nodes.rs`, `edges.rs`, `temporal.rs`, `vector.rs`, `traversal.rs`, `schema.rs`, `hybrid.rs`, `audit.rs`).
+3. Moved tests to `tests.rs`.
