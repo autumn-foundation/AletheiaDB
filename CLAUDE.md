@@ -502,6 +502,56 @@ temporal/history tools (`get_node_at_time`, `get_edge_at_time`,
 `get_node_history`), which have no `include_vectors` flag and always return
 full vectors.
 
+**Token-budget-aware responses (Issue #3353)**: the thirteen budgetable read
+tools — `get_node`, `list_nodes`, `get_edge`, `list_edges`,
+`get_outgoing_edges`, `get_incoming_edges`, `traverse`, `find_similar`,
+`hybrid_query`, `query`, `find_nodes_at_time`, `get_node_history`, `get_schema`
+(the single source of truth is `BUDGETABLE_READ_TOOLS`; not *every* read tool —
+e.g. `get_node_at_time`, `get_edge_history`, `diff_node_versions`,
+`temporal_extent`, `database_stats`, `count_nodes` are out of scope) — accept an
+optional `max_response_tokens` (estimated as `ceil(utf8_bytes / 4)`) or the
+byte-exact `max_response_bytes`, so a context-bounded caller can say "spend at
+most N tokens answering this" instead of guessing a row `limit`. These three
+parameters (`max_response_tokens`, `max_response_bytes`, `priority_properties`)
+are injected into each budgetable tool's advertised `inputSchema.properties`, so
+they are machine-discoverable, not just described in prose. The serialized
+response — **including its own truncation metadata** — is guaranteed not to
+exceed the stated budget (hard contract, CI conformance sweep 256..32K tokens,
+0 overruns). This bound governs **success** responses; a structured *error*
+response (e.g. the too-small-budget `INVALID_ARGUMENT` below) is itself small
+and returned intact. The rare non-object success payload (JSON scalar/array or
+plain text) cannot degrade along the entity ladder but is still held to the byte
+cap via a disclosed truncation marker (never emitted unbounded). Over budget the
+response degrades along a deterministic, disclosed ladder — full →
+`elided_properties` (bulky property values become `{elided: true, ...}`
+descriptors, reusing #3220's convention, and only when the descriptor is
+actually smaller than the value, so the ladder never enlarges the response) →
+`entity_summaries` (properties reduced to protected keys;
+ids/labels/relationships/temporal coordinates/provenance/scores always survive)
+→ `counts_and_handles` (entity arrays truncated to the prefix that fits, with the
+object's own `count`/`row_count`/`has_more`/`next_offset`/`truncated` siblings
+rewritten to describe the retained prefix so a paginating caller sees no gap and
+no duplicate) — carrying a `budget` block that names the rung applied per
+section. Every elision/truncation site carries a **fetch handle**: a concrete
+`get_node`/`get_edge` call with `include_vectors: true` for an elided entity, a
+`get_node_at_time`/`get_edge_at_time` call for an elided history version (parent
+id + that version's own coordinates, not the current state), and for a truncated
+array a concrete `offset`-advancing resume call on paginated tools
+(`list_nodes`/`traverse`/`find_nodes_at_time`) or an honest "re-request with a
+larger budget" disclosure on non-paginated ones — so nothing is lost: an agent
+following handles reconstructs the full response. `priority_properties` names
+properties to protect; they out-survive unprotected ones at every rung.
+`find_similar`/`hybrid_query` never drop or reorder ranked results to meet a
+budget (only per-result payloads degrade), and temporal responses never omit
+temporal coordinates. A budget too small for even the minimal rung returns a
+#3234 `INVALID_ARGUMENT` stating a minimum viable budget that is self-consistent
+(re-issuing at the reported `min_viable_tokens` succeeds) — never a silently
+empty success. Omitting the budget parameters reproduces prior behavior exactly,
+and a **misspelled/unknown budget key** (e.g. `max_tokens`) is ignored — the
+full response is returned — so use the exact key names. Write/admin tools are out
+of scope. See
+[docs/guides/mcp-query-tool.md](docs/guides/mcp-query-tool.md#token-budget-aware-responses-issue-3353).
+
 **Temporal extent (Issue #3238)**: `temporal_extent` reports the dataset's
 queryable bi-temporal extent — the earliest/latest valid-time and
 transaction-time coordinates across recorded history (including
@@ -517,6 +567,54 @@ bounds folded from hot-tier history. Coverage caveat: bounds span the
 current process lifetime plus hot-tier history restored at startup —
 versions cold-migrated before the last restart are not reflected. See
 [docs/guides/mcp-query-tool.md](docs/guides/mcp-query-tool.md#discovering-the-queryable-temporal-extent-temporal_extent).
+
+**Cursor continuation for large scans (Issue #3360)**: the bounded read tools
+(`list_nodes`, `find_nodes_at_time`, `get_outgoing_edges`,
+`get_incoming_edges`, `traverse`) accept an additive `use_cursor: true` on the
+first call (returning an opaque `cursor` token) and a `cursor` continuation
+token thereafter — passed back **with no other parameters** — for
+**snapshot-anchored** paging that is consistent, duplicate-free, and gap-free
+under concurrent writes. Every page of one scan is evaluated at the
+bi-temporal coordinate captured on the first page (disclosed as
+`snapshot_valid_time`/`snapshot_transaction_time`), leveraging the existing
+point-in-time read semantics: a row **created** after the first page is never
+seen, a row **deleted** after it is still seen, and the union of all pages
+equals exactly the unbounded result at that one moment — **up to the candidate
+cap** (the node scans route through the #3236 finders, capped at
+`max_schema_as_of_entities`, default 50,000, lowest ids; a page with
+`sampled: true` means the scan is bounded by that cap, not exhausted — narrow
+with a property filter for full coverage). The node/adjacency tools use a
+**keyset** (ascending id) that avoids re-emitting prior result pages (no
+dup/gap); candidate enumeration is still O(total) per page in v1 (each page
+re-runs the full candidate/adjacency scan — a true depth-independent keyset
+seek is a follow-up); `traverse` pins the snapshot but continues by an internal
+offset over its deterministic DFS in v1. Note `use_cursor:true` on
+`get_outgoing_edges`/`get_incoming_edges`/`traverse` with no `as_of` answers
+"as of first-page now" via the bi-temporal-at-now path, and therefore
+**excludes future-valid** (`valid_from > now`) edges/nodes that a plain
+current-state (non-cursor) call would return — the same tradeoff #3236
+documents for point-in-time reads. Tokens are opaque,
+printable, bounded base64url strings signed with a per-process secret (so
+tampered/wrong-tool tokens are rejected `INVALID_ARGUMENT`, never wrong data;
+they do not survive a server restart). Cursors have a documented, configurable
+**TTL** (default 5 min, `cursor_ttl_seconds`) and a per-connection **cap** on
+concurrently live cursors (default 128; both via
+`AletheiaMcpServer::with_cursor_config`); resuming after expiry or exceeding
+the cap returns `FAILED_PRECONDITION` with remediation guidance, and expired
+cursors pin no storage. The design is **stateless** (all resume state is in
+the token) with only a tiny in-process registry for cap enforcement. Cursor
+composition with #3353 token budgets is **live** (both features have landed):
+within one call the cursor page is produced first, then the token budget shapes
+that page, so a budget-limited page ends smaller while the cursor still resumes
+the same snapshot-anchored scan (v1 caveat: the continuation key advances by the
+underlying scan, not the last budget-trimmed row, so page a budgeted cursor scan
+losslessly via the budget ladder's offset handle or a larger budget — see the
+guide). Offset paging (#3226)
+remains unchanged for backward compatibility. The `query` tool returns a structured
+`unsupported_construct` error for cursor requests in v1 (no silent fallback);
+`list_edges` is not cursorable (it does not enumerate edges — use the
+adjacency tools). See
+[docs/guides/mcp-query-tool.md](docs/guides/mcp-query-tool.md#paging-large-results-cursor-continuation).
 
 **Authentication & RBAC (Issue #3350)**: both server surfaces (MCP and
 HTTP) require an API key by default and refuse to start with zero

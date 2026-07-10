@@ -805,6 +805,31 @@ pub struct GetNodeHistoryRequest {
     pub node_id: u64,
 }
 
+/// Request to produce a signed audit export of an entity's history (Issue #3358).
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct AuditExportRequest {
+    /// The entity kind to export: `node` or `edge`.
+    #[schemars(description = "Entity kind to export: 'node' or 'edge'")]
+    pub entity_type: String,
+
+    /// The unique identifier of the entity.
+    #[schemars(description = "The unique identifier of the node or edge to export")]
+    pub entity_id: u64,
+
+    /// Operator-supplied database identity recorded in the artifact.
+    #[serde(default)]
+    #[schemars(description = "Optional database identity recorded in the artifact metadata")]
+    pub database_id: Option<String>,
+
+    /// Property keys to redact at export (values omitted, redaction recorded).
+    #[serde(default)]
+    #[schemars(
+        description = "Optional list of property keys to redact at export; their values are \
+                       omitted but the redaction is recorded and remains verifiable"
+    )]
+    pub redact_keys: Vec<String>,
+}
+
 /// Request to compute the difference between two versions of a node.
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct DiffNodeVersionsRequest {

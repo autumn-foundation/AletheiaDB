@@ -45,8 +45,8 @@ use super::ring_buffer::PendingEntry;
 use crate::core::error::{Error, Result, StorageError};
 
 use super::segment_reader::{
-    WAL_HEADER_SIZE, WAL_MAGIC, WAL_VERSION_ENCRYPTED_PROVENANCE_PRINCIPAL,
-    WAL_VERSION_PROVENANCE_PRINCIPAL,
+    WAL_HEADER_SIZE, WAL_MAGIC, WAL_VERSION_DELETE_VERSION_ID,
+    WAL_VERSION_ENCRYPTED_DELETE_VERSION_ID,
 };
 
 /// Metadata about a WAL segment's LSN range.
@@ -387,13 +387,20 @@ impl FlushCoordinator {
             return Ok(());
         }
 
-        // New segments always use the principal-carrying provenance
-        // format (Issues #3224 + #3350): version 6 for encrypted
-        // segments, version 5 for plaintext.
+        // New segments use the delete-version-id format (Issue #3406), a strict
+        // superset of the transaction-framing format (Issue #3413) which is in
+        // turn a superset of the principal-carrying provenance format (Issues
+        // #3224 + #3350): version 10 for encrypted segments, version 9 for
+        // plaintext. It keeps the BeginTx/CommitTx framing markers AND appends
+        // the tombstone/retraction version_id to delete/retract payloads.
+        // Non-transactional producers simply omit the framing markers; the
+        // version bump signals both the markers AND the extended payload MAY be
+        // present so old readers reject the segment cleanly rather than
+        // misparsing.
         let write_version = if self.config.wal_cipher.is_some() {
-            WAL_VERSION_ENCRYPTED_PROVENANCE_PRINCIPAL
+            WAL_VERSION_ENCRYPTED_DELETE_VERSION_ID
         } else {
-            WAL_VERSION_PROVENANCE_PRINCIPAL
+            WAL_VERSION_DELETE_VERSION_ID
         };
 
         // Allocate the next segment id, rolling past any existing non-empty
@@ -1144,12 +1151,12 @@ mod tests {
             "existing v3 segment must not be appended to"
         );
 
-        // ...the write must have rolled forward to a fresh segment with a
-        // matching (v5) header...
+        // ...the write must have rolled forward to a fresh segment with the
+        // current writer (v9 delete-version-id) header...
         assert_eq!(coordinator.current_segment_id(), 2);
         let new_segment = std::fs::read(dir.path().join("000002.log")).unwrap();
         assert_eq!(&new_segment[0..4], &WAL_MAGIC);
-        assert_eq!(new_segment[4], WAL_VERSION_PROVENANCE_PRINCIPAL);
+        assert_eq!(new_segment[4], WAL_VERSION_DELETE_VERSION_ID);
 
         // ...and a full-directory replay succeeds, with the new entry's
         // principal intact.
@@ -1379,7 +1386,7 @@ mod tests {
 
         assert!(data.len() >= WAL_HEADER_SIZE);
         assert_eq!(&data[0..4], &WAL_MAGIC);
-        assert_eq!(data[4], WAL_VERSION_PROVENANCE_PRINCIPAL);
+        assert_eq!(data[4], WAL_VERSION_DELETE_VERSION_ID);
     }
 
     #[test]

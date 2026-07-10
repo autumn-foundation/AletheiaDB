@@ -28,11 +28,12 @@ use crate::core::constraint::ConstraintRegistry;
 use crate::core::error::Result;
 use crate::core::graph::{Edge, Node};
 use crate::core::id::{TxId, VersionId};
+use crate::core::temporal::Timestamp;
 use crate::core::version::VersionMetadata;
 use crate::storage::current::CurrentStorage;
 use crate::storage::historical::HistoricalStorage;
 use crate::storage::wal::concurrent_system::ConcurrentWalSystem;
-use crate::storage::wal::{LSN, WalOperation};
+use crate::storage::wal::{LSN, WalEntry, WalOperation};
 
 /// Replay WAL entries starting from a given LSN into existing storage instances.
 ///
@@ -160,8 +161,16 @@ pub(crate) fn replay_wal_into_storage_with_constraints(
         );
     }
 
-    for entry in wal_entries {
-        match entry.operation {
+    // Resolve transaction framing (Issue #3413) BEFORE applying: pair every
+    // operation with the timestamp it must be recorded at, and drop any
+    // uncommitted transaction tail. Framed data ops committed by a durable
+    // `CommitTx` are paired with that marker's authoritative commit timestamp
+    // (so an atomic batch's versions all share ONE transaction time); legacy
+    // (pre-v7) and non-transactional entries keep their own logged timestamp.
+    let resolved = resolve_transaction_frames(wal_entries);
+
+    for (operation, commit_timestamp) in resolved {
+        match operation {
             WalOperation::CreateNode {
                 node_id,
                 label,
@@ -204,8 +213,11 @@ pub(crate) fn replay_wal_into_storage_with_constraints(
 
                 let interned_label = label;
 
-                // Transaction time comes from when the WAL entry was logged
-                let commit_timestamp = entry.timestamp;
+                // Transaction time is `commit_timestamp` (Issue #3413): for a
+                // framed transaction this is the CommitTx marker's single
+                // authoritative commit time (shared by every op in the batch);
+                // for legacy/non-transactional entries it is the entry's own
+                // logged timestamp. Either way it is supplied by the caller.
                 let metadata = VersionMetadata::new(TxId::new(RECOVERY_TX_ID), commit_timestamp);
                 // Reuse whichever store already applied this create so that
                 // `current.current_version == historical head id` stays
@@ -288,7 +300,6 @@ pub(crate) fn replay_wal_into_storage_with_constraints(
 
                 let interned_label = label;
 
-                let commit_timestamp = entry.timestamp;
                 let metadata = VersionMetadata::new(TxId::new(RECOVERY_TX_ID), commit_timestamp);
                 let version_id = match (live_head, &current_edge) {
                     (Some(vid), _) => vid,
@@ -344,7 +355,6 @@ pub(crate) fn replay_wal_into_storage_with_constraints(
 
                 let interned_label = label;
 
-                let commit_timestamp = entry.timestamp;
                 let metadata = VersionMetadata::new(TxId::new(RECOVERY_TX_ID), commit_timestamp);
 
                 let node = Node::with_metadata(
@@ -401,7 +411,6 @@ pub(crate) fn replay_wal_into_storage_with_constraints(
 
                 let interned_label = label;
 
-                let commit_timestamp = entry.timestamp;
                 let metadata = VersionMetadata::new(TxId::new(RECOVERY_TX_ID), commit_timestamp);
 
                 let edge = Edge::with_metadata(
@@ -444,6 +453,7 @@ pub(crate) fn replay_wal_into_storage_with_constraints(
             WalOperation::DeleteNode {
                 node_id,
                 valid_from,
+                version_id: logged_tombstone_id,
             } => {
                 // Idempotent re-application guard, per store (review round 2,
                 // #3428). Background persistence may snapshot current and
@@ -459,7 +469,6 @@ pub(crate) fn replay_wal_into_storage_with_constraints(
                 //       behavior) left the head open forever.
                 // The historical side applies iff the head is still live; the
                 // current side applies iff the node is present.
-                let commit_timestamp = entry.timestamp;
                 let current_node = current.get_node(node_id).ok();
                 let historical_head = historical.get_current_node_version(node_id);
                 let live_head = historical_head.filter(|vid| {
@@ -494,8 +503,17 @@ pub(crate) fn replay_wal_into_storage_with_constraints(
                         )?;
                     }
 
-                    let tombstone_version_id = VersionId::new(next_version_id)?;
-                    next_version_id += 1;
+                    // Honor the LOGGED tombstone version_id (Issue #3406) so the
+                    // recovered version chain is bit-identical to the live one
+                    // and replay is idempotent; segments predating
+                    // WAL_VERSION_DELETE_VERSION_ID carry no id, so synthesize as
+                    // before. Either way, advance next_version_id past it to keep
+                    // future synthesized ids collision-free.
+                    let tombstone_version_id = match logged_tombstone_id {
+                        Some(vid) => vid,
+                        None => VersionId::new(next_version_id)?,
+                    };
+                    next_version_id = next_version_id.max(tombstone_version_id.as_u64() + 1);
 
                     // Honor the LOGGED valid_from (possibly backdated, Issues
                     // #3221/#3400) — mirroring the live path's
@@ -520,10 +538,10 @@ pub(crate) fn replay_wal_into_storage_with_constraints(
             WalOperation::DeleteEdge {
                 edge_id,
                 valid_from,
+                version_id: logged_tombstone_id,
             } => {
                 // Per-store re-application guard — see the DeleteNode arm
                 // above (review round 2, #3428).
-                let commit_timestamp = entry.timestamp;
                 let current_edge = current.get_edge(edge_id).ok();
                 let historical_head = historical.get_current_edge_version(edge_id);
                 let live_head = historical_head.filter(|vid| {
@@ -568,8 +586,14 @@ pub(crate) fn replay_wal_into_storage_with_constraints(
                         )?;
                     }
 
-                    let tombstone_version_id = VersionId::new(next_version_id)?;
-                    next_version_id += 1;
+                    // Honor the LOGGED tombstone version_id (Issue #3406); see
+                    // the DeleteNode arm above for rationale and the synthesis
+                    // fallback for pre-v9 segments.
+                    let tombstone_version_id = match logged_tombstone_id {
+                        Some(vid) => vid,
+                        None => VersionId::new(next_version_id)?,
+                    };
+                    next_version_id = next_version_id.max(tombstone_version_id.as_u64() + 1);
 
                     // Honor the LOGGED valid_from (possibly backdated, Issues
                     // #3221/#3400) — mirroring the live path's
@@ -593,7 +617,11 @@ pub(crate) fn replay_wal_into_storage_with_constraints(
                     current.delete_edge_direct(edge_id)?;
                 }
             }
-            WalOperation::RetractNode { node_id, valid_to } => {
+            WalOperation::RetractNode {
+                node_id,
+                valid_to,
+                version_id: logged_retraction_id,
+            } => {
                 // Valid-time retraction (Issue #3230). Reconstruct exactly what
                 // the original commit did:
                 //   (a) close the head version's TRANSACTION time (its valid
@@ -608,7 +636,6 @@ pub(crate) fn replay_wal_into_storage_with_constraints(
                 // head already retracted/tombstoned means this retraction's
                 // historical effect was applied); the current-side removal
                 // applies iff the node is present.
-                let commit_timestamp = entry.timestamp;
                 let current_node = current.get_node(node_id).ok();
                 let head_version_id = historical.get_current_node_version(node_id);
                 let live_head = head_version_id.filter(|vid| {
@@ -650,8 +677,14 @@ pub(crate) fn replay_wal_into_storage_with_constraints(
                         )?;
                     }
 
-                    let retraction_version_id = VersionId::new(next_version_id)?;
-                    next_version_id += 1;
+                    // Honor the LOGGED retraction version_id (Issue #3406); see
+                    // the DeleteNode arm for rationale and the pre-v9 synthesis
+                    // fallback.
+                    let retraction_version_id = match logged_retraction_id {
+                        Some(vid) => vid,
+                        None => VersionId::new(next_version_id)?,
+                    };
+                    next_version_id = next_version_id.max(retraction_version_id.as_u64() + 1);
 
                     historical.add_retracted_node_version(
                         node_id,
@@ -668,11 +701,14 @@ pub(crate) fn replay_wal_into_storage_with_constraints(
                     current.delete_node_direct(node_id, commit_timestamp)?;
                 }
             }
-            WalOperation::RetractEdge { edge_id, valid_to } => {
+            WalOperation::RetractEdge {
+                edge_id,
+                valid_to,
+                version_id: logged_retraction_id,
+            } => {
                 // Valid-time retraction of an edge (Issue #3230); mirrors the
                 // RetractNode arm above, honoring the logged `valid_to`, with
                 // the same per-store re-application guards (#3428).
-                let commit_timestamp = entry.timestamp;
                 let current_edge = current.get_edge(edge_id).ok();
                 let head_version_id = historical.get_current_edge_version(edge_id);
                 let live_head = head_version_id.filter(|vid| {
@@ -722,8 +758,14 @@ pub(crate) fn replay_wal_into_storage_with_constraints(
                         )?;
                     }
 
-                    let retraction_version_id = VersionId::new(next_version_id)?;
-                    next_version_id += 1;
+                    // Honor the LOGGED retraction version_id (Issue #3406); see
+                    // the DeleteNode arm for rationale and the pre-v9 synthesis
+                    // fallback.
+                    let retraction_version_id = match logged_retraction_id {
+                        Some(vid) => vid,
+                        None => VersionId::new(next_version_id)?,
+                    };
+                    next_version_id = next_version_id.max(retraction_version_id.as_u64() + 1);
 
                     historical.add_retracted_edge_version(
                         edge_id,
@@ -755,12 +797,220 @@ pub(crate) fn replay_wal_into_storage_with_constraints(
                     reg.undeclare(label, property);
                 }
             }
+            // Transaction framing markers (Issue #3413) are consumed by
+            // `resolve_transaction_frames` above and never reach this apply
+            // loop; the arm exists only for match exhaustiveness.
+            WalOperation::BeginTx { .. } | WalOperation::CommitTx { .. } => {}
         }
     }
 
     let final_lsn = wal.current_lsn();
 
     Ok((final_lsn, max_node_id, max_edge_id, next_version_id))
+}
+
+/// Warn about a discarded (torn / uncommitted) transaction frame during replay.
+fn warn_discarded_frame(reason: &str, dropped: usize) {
+    #[cfg(feature = "observability")]
+    tracing::warn!(
+        "Discarding {} buffered WAL op(s) during recovery: {}",
+        dropped,
+        reason
+    );
+    #[cfg(not(feature = "observability"))]
+    eprintln!(
+        "WARNING: discarding {} buffered WAL op(s) during recovery: {}",
+        dropped, reason
+    );
+}
+
+/// Are the buffered ops' LSNs strictly consecutive (`l, l+1, l+2, …`)?
+///
+/// A committing transaction owns one contiguous LSN band (single atomic
+/// `allocate_batch`), so a gap means the buffer does not correspond to an
+/// intact batch and the frame must be rejected (Issue #3413, integrity check
+/// R4).
+fn lsns_contiguous(pending: &[(LSN, WalOperation)]) -> bool {
+    pending
+        .windows(2)
+        .all(|w| w[1].0.0 == w[0].0.0.wrapping_add(1))
+}
+
+/// Resolve transaction framing (Issue #3413), turning the raw, LSN-ordered WAL
+/// entry stream into the ordered list of `(operation, transaction_timestamp)`
+/// pairs that replay must apply — with uncommitted transaction tails removed.
+///
+/// # Load-bearing invariant: replay begins at a transaction-frame boundary
+///
+/// This resolver assumes the entry stream it is handed **never begins in the
+/// middle of a `[BeginTx .. CommitTx]` band** — i.e. `start_lsn` is always a
+/// band start (or a legacy/unframed boundary), never a data op or `CommitTx`
+/// whose `BeginTx` was already skipped. Production guarantees this: startup
+/// replays from an inclusive `start_lsn = manifest.lsn` (see `db::config`), and
+/// the manifest LSN is the observable next-to-allocate LSN, which
+/// `allocate_batch` only ever advances by a WHOLE `[BeginTx .. CommitTx]` band
+/// in one atomic step — so it can never fall mid-band. If that invariant were
+/// ever violated (see the note on `checkpoint.rs`'s exclusive `.next()`
+/// convention, currently test-only and unwired), a `CommitTx` could arrive with
+/// no open frame; this resolver treats that as a **benign skip** (its `BeginTx`
+/// lies below `start_lsn`, so there are no buffered ops to apply) rather than a
+/// "failed validation" corruption warning.
+///
+/// # Framed-replay invariant
+///
+/// A committing `WriteTransaction` writes `[BeginTx, ..data ops.., CommitTx]`
+/// as one atomic, contiguous LSN band inside a single flush epoch (see
+/// `api::transaction::write::wal::log_operations_to_wal`). Because the durable
+/// suffix of the WAL is always an LSN-ordered *prefix* of what was appended,
+/// the terminal `CommitTx` marker is present on disk **iff** every op of its
+/// batch is — so:
+///
+/// * A `BeginTx … data … CommitTx` frame whose marker validated (matching
+///   `tx_id`, `entry_count` equal to the buffered op count, contiguous LSNs)
+///   is applied **atomically**, and every one of its ops is stamped with the
+///   marker's single `commit_timestamp`. This is what makes an atomic batch's
+///   versions share one transaction time so `AS OF SYSTEM_TIME` can never
+///   observe a half-batch.
+/// * A frame whose marker never reached disk (a crash tail), or that fails the
+///   integrity checks, is **discarded whole** — never applied as a torn prefix.
+/// * Entries from pre-v7 segments (`!framed`), and any op appended outside a
+///   frame (raw `append`/`append_async`, control ops such as checkpoints and
+///   constraint declarations), keep the legacy **immediate-apply** path using
+///   their own logged timestamp. This preserves the behavior of every existing
+///   non-transactional WAL producer unchanged.
+fn resolve_transaction_frames(entries: Vec<WalEntry>) -> Vec<(WalOperation, Timestamp)> {
+    let mut resolved: Vec<(WalOperation, Timestamp)> = Vec::with_capacity(entries.len());
+    // Buffered data ops of the currently-open frame, with their LSNs.
+    let mut pending: Vec<(LSN, WalOperation)> = Vec::new();
+    // `(tx_id, begin_lsn)` of the currently-open frame, if any. The `BeginTx`
+    // LSN is retained so the terminal `CommitTx` can bracket-check the band
+    // (Issue #3413 integrity check R5): the whole `[BeginTx .. CommitTx]` band
+    // must be gap-free at BOTH ends, not just internally contiguous.
+    let mut open_tx: Option<(u64, LSN)> = None;
+
+    for entry in entries {
+        // Legacy / non-transactional entries apply immediately with their own
+        // logged timestamp (pre-v7 segments never carry framing markers).
+        if !entry.framed {
+            resolved.push((entry.operation, entry.timestamp));
+            continue;
+        }
+
+        // Copy the header fields we need before moving `operation` out.
+        let entry_lsn = entry.lsn;
+        let entry_ts = entry.timestamp;
+
+        match entry.operation {
+            WalOperation::BeginTx { tx_id } => {
+                if !pending.is_empty() {
+                    warn_discarded_frame(
+                        "new BeginTx encountered before the previous frame committed",
+                        pending.len(),
+                    );
+                    pending.clear();
+                }
+                open_tx = Some((tx_id, entry_lsn));
+            }
+            WalOperation::CommitTx {
+                tx_id,
+                entry_count,
+                commit_timestamp,
+            } => {
+                match open_tx {
+                    // Benign skip (see the load-bearing invariant on this fn): a
+                    // `CommitTx` with no open frame is a band whose `BeginTx`
+                    // lies below `start_lsn`. Under the production invariant this
+                    // never happens; if it ever did, `pending` is empty and there
+                    // is nothing to apply — quietly skip rather than emit a
+                    // spurious corruption warning.
+                    None => {
+                        debug_assert!(
+                            pending.is_empty(),
+                            "a CommitTx with no open frame must have no buffered ops"
+                        );
+                    }
+                    Some((open_id, begin_lsn)) => {
+                        // Bracket check (R5): the band must be gap-free at both
+                        // ends — the first data op immediately follows BeginTx
+                        // and CommitTx immediately follows the last data op — in
+                        // addition to being internally contiguous (R4) and
+                        // matching the marker's tx_id / entry_count.
+                        let brackets_ok = pending.first().map(|(l, _)| l.0)
+                            == Some(begin_lsn.0.wrapping_add(1))
+                            && pending.last().map(|(l, _)| l.0.wrapping_add(1))
+                                == Some(entry_lsn.0);
+                        let valid = open_id == tx_id
+                            && pending.len() == entry_count as usize
+                            && lsns_contiguous(&pending)
+                            && brackets_ok;
+                        if valid {
+                            // Commit the frame atomically: every op takes the
+                            // marker's authoritative commit timestamp.
+                            for (_lsn, op) in pending.drain(..) {
+                                resolved.push((op, commit_timestamp));
+                            }
+                        } else {
+                            warn_discarded_frame(
+                                "CommitTx failed validation (tx_id / entry_count / LSN contiguity / band brackets)",
+                                pending.len(),
+                            );
+                            pending.clear();
+                        }
+                    }
+                }
+                open_tx = None;
+            }
+            // Self-committing control ops are never written inside a
+            // transaction batch; if a frame is somehow open it is torn, so
+            // discard it, then apply the control op immediately.
+            op @ (WalOperation::Checkpoint { .. }
+            | WalOperation::DeclareUniqueConstraint { .. }
+            | WalOperation::DropUniqueConstraint { .. }) => {
+                if !pending.is_empty() {
+                    warn_discarded_frame(
+                        "control op encountered inside an open transaction frame",
+                        pending.len(),
+                    );
+                    pending.clear();
+                }
+                open_tx = None;
+                resolved.push((op, entry_ts));
+            }
+            // A framed data op.
+            op => {
+                if open_tx.is_some() {
+                    pending.push((entry_lsn, op));
+                } else {
+                    // ⚠️ LANDMINE (Issue #3413): a framed data op with NO open
+                    // frame falls through to immediate-apply with its OWN
+                    // per-entry timestamp — exactly the per-op timestamp
+                    // bisection transaction framing exists to prevent. This is
+                    // deliberately reachable ONLY for raw `append`/`append_async`
+                    // into a v7+ segment (test/tooling paths), which carry the
+                    // `framed` flag from the segment version yet legitimately
+                    // have no `BeginTx`; for them immediate-apply is correct.
+                    // The real committing producer (`log_operations_to_wal`)
+                    // ALWAYS brackets its data ops in a `[BeginTx .. CommitTx]`
+                    // band, so a *transactional* op never lands here. If any
+                    // future producer raw-appends framed data ops that were
+                    // meant to share a commit timestamp, this branch would
+                    // silently re-bisect them — audit this path before adding
+                    // one.
+                    resolved.push((op, entry_ts));
+                }
+            }
+        }
+    }
+
+    // Any buffer still open at end-of-stream is an uncommitted crash tail.
+    if !pending.is_empty() {
+        warn_discarded_frame(
+            "WAL ended with an uncommitted transaction frame (crash tail)",
+            pending.len(),
+        );
+    }
+
+    resolved
 }
 
 /// Replay ONLY constraint declaration/drop entries from the full WAL history.
@@ -788,6 +1038,308 @@ pub(crate) fn replay_constraint_declarations_from_wal(
         }
     }
     Ok(())
+}
+
+/// Unit tests for the `resolve_transaction_frames` framing resolver
+/// (Issue #3413). These exercise the buffer-until-marker logic directly on
+/// synthetic `WalEntry` streams, independent of disk/replay.
+#[cfg(test)]
+mod framing_tests {
+    use super::*;
+    use crate::core::hlc::HybridTimestamp;
+    use crate::core::interning::GLOBAL_INTERNER;
+    use crate::core::property::PropertyMap;
+
+    fn ts(v: i64) -> Timestamp {
+        HybridTimestamp::new_unchecked(v, 0)
+    }
+
+    fn create_node_op(id: u64) -> WalOperation {
+        WalOperation::CreateNode {
+            node_id: crate::core::NodeId::new(id).unwrap(),
+            label: GLOBAL_INTERNER.intern("FramingTest").unwrap(),
+            properties: PropertyMap::new(),
+            valid_from: ts(1),
+            provenance: None,
+        }
+    }
+
+    /// Build an entry as read from a framed (v7+) segment.
+    fn framed(lsn: u64, op: WalOperation, timestamp: Timestamp) -> WalEntry {
+        WalEntry {
+            lsn: LSN(lsn),
+            timestamp,
+            operation: op,
+            checksum: 0,
+            framed: true,
+        }
+    }
+
+    /// Build an entry as read from a legacy (pre-v7) segment.
+    fn legacy(lsn: u64, op: WalOperation, timestamp: Timestamp) -> WalEntry {
+        WalEntry {
+            lsn: LSN(lsn),
+            timestamp,
+            operation: op,
+            checksum: 0,
+            framed: false,
+        }
+    }
+
+    fn node_id_of(op: &WalOperation) -> u64 {
+        match op {
+            WalOperation::CreateNode { node_id, .. } => node_id.as_u64(),
+            other => panic!("expected CreateNode, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn commits_framed_batch_atomically_with_marker_timestamp() {
+        let marker_ts = ts(9999);
+        let entries = vec![
+            framed(1, WalOperation::BeginTx { tx_id: 7 }, ts(10)),
+            framed(2, create_node_op(1), ts(11)),
+            framed(3, create_node_op(2), ts(12)),
+            framed(
+                4,
+                WalOperation::CommitTx {
+                    tx_id: 7,
+                    entry_count: 2,
+                    commit_timestamp: marker_ts,
+                },
+                ts(13),
+            ),
+        ];
+        let resolved = resolve_transaction_frames(entries);
+        assert_eq!(resolved.len(), 2);
+        // Both ops re-stamped with the SINGLE marker timestamp (AC#3).
+        for (_op, t) in &resolved {
+            assert_eq!(*t, marker_ts);
+        }
+        assert_eq!(node_id_of(&resolved[0].0), 1);
+        assert_eq!(node_id_of(&resolved[1].0), 2);
+    }
+
+    #[test]
+    fn discards_uncommitted_tail_at_eof() {
+        // BeginTx + data ops, marker never arrived (crash tail).
+        let entries = vec![
+            framed(1, WalOperation::BeginTx { tx_id: 1 }, ts(10)),
+            framed(2, create_node_op(1), ts(11)),
+            framed(3, create_node_op(2), ts(12)),
+        ];
+        let resolved = resolve_transaction_frames(entries);
+        assert!(resolved.is_empty(), "uncommitted frame must be discarded");
+    }
+
+    #[test]
+    fn keeps_committed_frame_then_discards_following_uncommitted_frame() {
+        let entries = vec![
+            framed(1, WalOperation::BeginTx { tx_id: 1 }, ts(10)),
+            framed(2, create_node_op(1), ts(11)),
+            framed(
+                3,
+                WalOperation::CommitTx {
+                    tx_id: 1,
+                    entry_count: 1,
+                    commit_timestamp: ts(100),
+                },
+                ts(12),
+            ),
+            framed(4, WalOperation::BeginTx { tx_id: 2 }, ts(13)),
+            framed(5, create_node_op(2), ts(14)),
+            // tx 2's CommitTx lost.
+        ];
+        let resolved = resolve_transaction_frames(entries);
+        assert_eq!(resolved.len(), 1, "only the committed frame survives");
+        assert_eq!(node_id_of(&resolved[0].0), 1);
+        assert_eq!(resolved[0].1, ts(100));
+    }
+
+    #[test]
+    fn discards_frame_on_entry_count_mismatch() {
+        let entries = vec![
+            framed(1, WalOperation::BeginTx { tx_id: 1 }, ts(10)),
+            framed(2, create_node_op(1), ts(11)),
+            framed(
+                3,
+                WalOperation::CommitTx {
+                    tx_id: 1,
+                    entry_count: 5, // wrong: only 1 data op buffered
+                    commit_timestamp: ts(100),
+                },
+                ts(12),
+            ),
+        ];
+        assert!(resolve_transaction_frames(entries).is_empty());
+    }
+
+    #[test]
+    fn discards_frame_on_non_contiguous_lsns() {
+        let entries = vec![
+            framed(1, WalOperation::BeginTx { tx_id: 1 }, ts(10)),
+            framed(2, create_node_op(1), ts(11)),
+            framed(9, create_node_op(2), ts(12)), // LSN gap
+            framed(
+                10,
+                WalOperation::CommitTx {
+                    tx_id: 1,
+                    entry_count: 2,
+                    commit_timestamp: ts(100),
+                },
+                ts(13),
+            ),
+        ];
+        assert!(resolve_transaction_frames(entries).is_empty());
+    }
+
+    #[test]
+    fn discards_frame_on_tx_id_mismatch() {
+        let entries = vec![
+            framed(1, WalOperation::BeginTx { tx_id: 1 }, ts(10)),
+            framed(2, create_node_op(1), ts(11)),
+            framed(
+                3,
+                WalOperation::CommitTx {
+                    tx_id: 2, // does not match the open BeginTx
+                    entry_count: 1,
+                    commit_timestamp: ts(100),
+                },
+                ts(12),
+            ),
+        ];
+        assert!(resolve_transaction_frames(entries).is_empty());
+    }
+
+    #[test]
+    fn legacy_unframed_entries_apply_immediately_with_own_timestamp() {
+        // Pre-v7 segment: no markers, each op keeps its own logged timestamp.
+        let entries = vec![
+            legacy(1, create_node_op(1), ts(50)),
+            legacy(2, create_node_op(2), ts(60)),
+        ];
+        let resolved = resolve_transaction_frames(entries);
+        assert_eq!(resolved.len(), 2);
+        assert_eq!(resolved[0].1, ts(50));
+        assert_eq!(resolved[1].1, ts(60));
+    }
+
+    #[test]
+    fn control_op_is_self_committing_and_not_buffered() {
+        // A framed Checkpoint applies immediately even though it lives in a
+        // v7 segment; it must not be swallowed into a pending buffer.
+        let entries = vec![framed(
+            1,
+            WalOperation::Checkpoint {
+                lsn: LSN(1),
+                timestamp: ts(5),
+            },
+            ts(70),
+        )];
+        let resolved = resolve_transaction_frames(entries);
+        assert_eq!(resolved.len(), 1);
+        assert!(matches!(resolved[0].0, WalOperation::Checkpoint { .. }));
+        assert_eq!(resolved[0].1, ts(70));
+    }
+
+    #[test]
+    fn control_op_discards_an_open_frame_then_applies() {
+        // Defensive: a control op appearing while a frame is open discards the
+        // (torn) buffer and still applies the control op.
+        let entries = vec![
+            framed(1, WalOperation::BeginTx { tx_id: 1 }, ts(10)),
+            framed(2, create_node_op(1), ts(11)),
+            framed(
+                3,
+                WalOperation::DeclareUniqueConstraint {
+                    label: GLOBAL_INTERNER.intern("L").unwrap(),
+                    property: GLOBAL_INTERNER.intern("p").unwrap(),
+                },
+                ts(80),
+            ),
+        ];
+        let resolved = resolve_transaction_frames(entries);
+        assert_eq!(resolved.len(), 1);
+        assert!(matches!(
+            resolved[0].0,
+            WalOperation::DeclareUniqueConstraint { .. }
+        ));
+    }
+
+    /// Fix #3413 (defensive benign skip): a `CommitTx` that arrives with no
+    /// open frame (its `BeginTx` lay below `start_lsn`) applies nothing and is
+    /// NOT a validation failure. Unreachable in production (replay always
+    /// starts at a band boundary) but must degrade gracefully if it ever isn't.
+    #[test]
+    fn stray_commit_tx_with_no_open_frame_is_benign_skip() {
+        let entries = vec![framed(
+            5,
+            WalOperation::CommitTx {
+                tx_id: 9,
+                entry_count: 0,
+                commit_timestamp: ts(100),
+            },
+            ts(13),
+        )];
+        let resolved = resolve_transaction_frames(entries);
+        assert!(
+            resolved.is_empty(),
+            "a stray CommitTx with no open frame must apply nothing"
+        );
+    }
+
+    /// Fix #3413 (band bracket check, R5): a frame that is internally contiguous
+    /// AND matches tx_id/entry_count but has a GAP between `BeginTx` and the
+    /// first data op (head gap) must be discarded — the band is not fully
+    /// bracketed, so an op may be missing at the head.
+    #[test]
+    fn discards_frame_on_head_gap_between_begin_and_first_op() {
+        let entries = vec![
+            framed(1, WalOperation::BeginTx { tx_id: 1 }, ts(10)),
+            // Head gap: first data op at LSN 3, not 2 (BeginTx.lsn + 1).
+            framed(3, create_node_op(1), ts(11)),
+            framed(4, create_node_op(2), ts(12)),
+            framed(
+                5,
+                WalOperation::CommitTx {
+                    tx_id: 1,
+                    entry_count: 2,
+                    commit_timestamp: ts(100),
+                },
+                ts(13),
+            ),
+        ];
+        assert!(
+            resolve_transaction_frames(entries).is_empty(),
+            "a head-gapped band (BeginTx not immediately followed by first data op) must discard"
+        );
+    }
+
+    /// Fix #3413 (band bracket check, R5): a GAP between the last data op and
+    /// the terminal `CommitTx` (tail gap) must also discard the frame, even
+    /// though the data ops are internally contiguous.
+    #[test]
+    fn discards_frame_on_tail_gap_between_last_op_and_commit() {
+        let entries = vec![
+            framed(1, WalOperation::BeginTx { tx_id: 1 }, ts(10)),
+            framed(2, create_node_op(1), ts(11)),
+            framed(3, create_node_op(2), ts(12)),
+            // Tail gap: CommitTx at LSN 5, not 4 (last data op.lsn + 1).
+            framed(
+                5,
+                WalOperation::CommitTx {
+                    tx_id: 1,
+                    entry_count: 2,
+                    commit_timestamp: ts(100),
+                },
+                ts(13),
+            ),
+        ];
+        assert!(
+            resolve_transaction_frames(entries).is_empty(),
+            "a tail-gapped band (last data op not immediately followed by CommitTx) must discard"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -857,8 +1409,12 @@ mod tests {
             provenance: None,
         })
         .unwrap();
-        wal.append(WalOperation::RetractNode { node_id, valid_to })
-            .unwrap();
+        wal.append(WalOperation::RetractNode {
+            node_id,
+            valid_to,
+            version_id: None,
+        })
+        .unwrap();
         wal.flush().unwrap();
 
         let current = CurrentStorage::new();
@@ -987,8 +1543,12 @@ mod tests {
             provenance: None,
         })
         .unwrap();
-        wal.append(WalOperation::RetractEdge { edge_id, valid_to })
-            .unwrap();
+        wal.append(WalOperation::RetractEdge {
+            edge_id,
+            valid_to,
+            version_id: None,
+        })
+        .unwrap();
         wal.flush().unwrap();
 
         let current = CurrentStorage::new();
@@ -1191,6 +1751,7 @@ mod tests {
         wal.append(WalOperation::DeleteNode {
             node_id,
             valid_from: time::now(),
+            version_id: None,
         })
         .unwrap();
         wal.append(WalOperation::CreateNode {
@@ -1298,6 +1859,7 @@ mod tests {
         wal.append(WalOperation::DeleteEdge {
             edge_id,
             valid_from: time::now(),
+            version_id: None,
         })
         .unwrap();
         wal.append(WalOperation::CreateEdge {
@@ -1437,11 +1999,13 @@ mod tests {
         wal.append(WalOperation::DeleteEdge {
             edge_id,
             valid_from: time::now(),
+            version_id: None,
         })
         .unwrap();
         wal.append(WalOperation::DeleteNode {
             node_id,
             valid_from: time::now(),
+            version_id: None,
         })
         .unwrap();
         wal.flush().unwrap();
@@ -1522,11 +2086,13 @@ mod tests {
         wal.append(WalOperation::DeleteEdge {
             edge_id,
             valid_from: time::now(),
+            version_id: None,
         })
         .unwrap();
         wal.append(WalOperation::DeleteNode {
             node_id,
             valid_from: time::now(),
+            version_id: None,
         })
         .unwrap();
         wal.flush().unwrap();

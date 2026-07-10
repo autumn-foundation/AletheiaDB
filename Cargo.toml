@@ -102,6 +102,11 @@ aws-sdk-kms = { version = "1.106.0", optional = true }
 # Constant-time equality for API-key digest comparison (Issue #3350).
 subtle = "2.6"
 
+# Ed25519 asymmetric signatures for signed audit-export artifacts (Issue #3358).
+# Chosen over HMAC so third parties verify offline with ONLY the signer's public
+# key. Pure-Rust, RFC 8032 deterministic signatures → reproducible artifacts.
+ed25519-dalek = { version = "2", optional = true }
+
 [dev-dependencies]
 criterion = "0.8"
 proptest = "1.11"
@@ -177,7 +182,13 @@ observability = ["dep:tracing"]
 metrics-rs = ["observability", "dep:metrics"]
 
 # Default features
-default = ["config-toml"]
+default = ["config-toml", "audit-export"]
+
+# Signed audit export of entity history for compliance (Issue #3358).
+# Pulls Ed25519 (asymmetric offline-verifiable signatures) and serde (artifact
+# (de)serialization). On by default so the `aletheia` CLI ships audit-export /
+# audit-verify; cleanly excluded under --no-default-features.
+audit-export = ["dep:ed25519-dalek", "dep:serde"]
 
 # Async runtime support
 tokio = ["dep:tokio"]
@@ -205,8 +216,8 @@ embeddings = [
 # ONNX embedding support pulls in embed_anything's ort backend.
 embeddings-onnx = ["embeddings", "embed_anything/ort"]
 
-# MCP server support
-mcp-server = ["dep:rmcp", "dep:tokio", "serde", "dep:base64"]
+# MCP server support (exposes the audit_export tool, so it implies audit-export)
+mcp-server = ["dep:rmcp", "dep:tokio", "serde", "dep:base64", "audit-export"]
 
 # Sharding RPC client support (uses blocking reqwest)
 sharding-rpc = ["dep:reqwest", "serde", "dep:native-tls"]

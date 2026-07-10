@@ -107,3 +107,6 @@ pr_description.md
 
 # Re-include Python SDK sources (overrides "*.py" above)
 !python/**/*.py
+
+# Re-include CI helper scripts (overrides "*.py" above)
+!.github/scripts/*.py
