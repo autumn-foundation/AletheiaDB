@@ -847,3 +847,193 @@ fn json_type_name(value: &Value) -> &'static str {
         Value::Object(_) => "object",
     }
 }
+
+#[cfg(test)]
+mod unit_tests {
+    use super::*;
+
+    fn budget_req(bytes: u64, priority: &[&str]) -> BudgetRequest {
+        BudgetRequest {
+            effective_bytes: bytes,
+            max_tokens: None,
+            max_bytes: Some(bytes),
+            priority_properties: priority.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    /// F3: eliding several small (below-descriptor-cost) properties must never
+    /// make the elide rung serialize larger than the full rung — the ladder is
+    /// monotonic.
+    #[test]
+    fn f3_elide_rung_never_larger_than_full() {
+        // Several ~60-90 byte string properties, each smaller than the elision
+        // descriptor's fixed cost, so none should be elided.
+        let node = json!({
+            "id": 1,
+            "label": "Doc",
+            "properties": {
+                "a": "a".repeat(60),
+                "b": "b".repeat(75),
+                "c": "c".repeat(90),
+                "d": "d".repeat(80),
+            }
+        });
+        let budget = budget_req(10_000, &[]);
+        let args = json!({});
+        let full = build_candidate(node.clone(), Rung::Full, &budget, "get_node", &args, 10_000);
+        let elided = build_candidate(
+            node.clone(),
+            Rung::ElideProperties,
+            &budget,
+            "get_node",
+            &args,
+            10_000,
+        );
+        // Compare the payload excluding the disclosed `budget` metadata block:
+        // its `rung` label alone is intrinsically longer for the elide rung
+        // ("elided_properties" vs "full") and is not data the caller pays for
+        // in content terms. What must never grow is the *data* itself.
+        assert!(
+            payload_bytes(&elided) <= payload_bytes(&full),
+            "elide-rung payload ({}) must not exceed full-rung payload ({})",
+            payload_bytes(&elided),
+            payload_bytes(&full),
+        );
+        // None of the small props should have been elided.
+        assert!(
+            !json_contains_elided(&elided),
+            "no property small enough to shrink should be elided"
+        );
+
+        // A genuinely bulky property, by contrast, IS elided and shrinks.
+        let big = json!({
+            "id": 2,
+            "label": "Doc",
+            "properties": { "bio": "x".repeat(4000) }
+        });
+        let big_full = build_candidate(big.clone(), Rung::Full, &budget, "get_node", &args, 10_000);
+        let big_elided = build_candidate(
+            big,
+            Rung::ElideProperties,
+            &budget,
+            "get_node",
+            &args,
+            10_000,
+        );
+        assert!(json_contains_elided(&big_elided), "bulky prop must elide");
+        assert!(measured_bytes(&big_elided) < measured_bytes(&big_full));
+    }
+
+    fn json_contains_elided(value: &Value) -> bool {
+        match value {
+            Value::Object(m) => {
+                if m.get("elided").and_then(Value::as_bool).unwrap_or(false) {
+                    return true;
+                }
+                m.values().any(json_contains_elided)
+            }
+            Value::Array(a) => a.iter().any(json_contains_elided),
+            _ => false,
+        }
+    }
+
+    /// Serialized size of a candidate with the disclosed `budget` metadata block
+    /// removed, so payload-only (data) growth can be compared across rungs
+    /// without the intrinsic difference in the rung label string.
+    fn payload_bytes(value: &Value) -> usize {
+        let mut v = value.clone();
+        if let Value::Object(m) = &mut v {
+            m.remove("budget");
+        }
+        measured_bytes(&v)
+    }
+
+    /// F2: a `get_node_history` version's fetch handle addresses the exact
+    /// superseded version via `get_node_at_time` with the PARENT node id (from
+    /// the wrapper) plus the version's own coordinates — never a null id.
+    #[test]
+    fn f2_history_version_handle_targets_parent_at_time() {
+        let history = json!({
+            "node_id": 42,
+            "version_count": 1,
+            "versions": [
+                {
+                    "version_id": 7,
+                    "version_number": 1,
+                    "valid_from": "2024-01-01T00:00:00Z",
+                    "valid_to": null,
+                    "transaction_from": "2024-01-02T00:00:00Z",
+                    "transaction_to": null,
+                    "label": "Person",
+                    "properties": { "bio": "x".repeat(4000) }
+                }
+            ]
+        });
+        let budget = budget_req(600, &[]);
+        let shaped = build_candidate(
+            history,
+            Rung::Summaries,
+            &budget,
+            "get_node_history",
+            &json!({ "node_id": 42 }),
+            600,
+        );
+        let handle = find_any_fetch(&shaped).expect("a version fetch handle must exist");
+        assert_eq!(handle["tool"], json!("get_node_at_time"));
+        assert_eq!(handle["arguments"]["node_id"], json!(42));
+        assert_eq!(
+            handle["arguments"]["valid_time"],
+            json!("2024-01-01T00:00:00Z")
+        );
+        assert_eq!(
+            handle["arguments"]["transaction_time"],
+            json!("2024-01-02T00:00:00Z")
+        );
+    }
+
+    fn find_any_fetch(value: &Value) -> Option<Value> {
+        match value {
+            Value::Object(m) => {
+                if let Some(f) = m.get("fetch")
+                    && f.get("tool").is_some()
+                {
+                    return Some(f.clone());
+                }
+                m.values().find_map(find_any_fetch)
+            }
+            Value::Array(a) => a.iter().find_map(find_any_fetch),
+            _ => None,
+        }
+    }
+
+    /// F6: a non-object payload is still held to the byte cap with a disclosed
+    /// truncation marker rather than emitted unbounded.
+    #[test]
+    fn f6_enforce_raw_cap_truncates_with_marker() {
+        let budget = budget_req(80, &[]);
+        let long = "z".repeat(1000);
+        let out = enforce_raw_cap(long, &budget).expect("should truncate, not error");
+        assert!(out.len() <= 80, "raw payload capped: {} bytes", out.len());
+        assert!(out.contains("truncated"), "truncation is disclosed");
+    }
+
+    #[test]
+    fn f6_enforce_raw_cap_too_small_errors() {
+        let budget = budget_req(4, &[]);
+        let err = enforce_raw_cap("hello world".repeat(10), &budget).unwrap_err();
+        assert_eq!(err.code(), McpErrorCode::InvalidArgument);
+    }
+
+    /// T5: the byte cap holds for multibyte/unicode payloads, and truncation
+    /// never splits a UTF-8 char boundary (the result is valid UTF-8).
+    #[test]
+    fn t5_enforce_raw_cap_respects_utf8_boundaries() {
+        let budget = budget_req(90, &[]);
+        // Each 'é' / emoji is multibyte; a naive byte cut could split them.
+        let s = "héllo wörld 🌍🌎🌏 ".repeat(50);
+        let out = enforce_raw_cap(s, &budget).expect("truncates");
+        assert!(out.len() <= 90, "byte cap holds: {} bytes", out.len());
+        // Valid UTF-8 by construction (String), and re-checkable:
+        assert!(std::str::from_utf8(out.as_bytes()).is_ok());
+    }
+}
