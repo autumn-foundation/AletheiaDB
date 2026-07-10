@@ -673,6 +673,7 @@ impl CypherParser {
                         Ok(CypherExpr::FunctionCall {
                             name: qualified_name,
                             args,
+                            distinct: false,
                         })
                     } else {
                         // Property access: var.prop
@@ -686,7 +687,11 @@ impl CypherParser {
                     self.advance();
                     let args = self.parse_function_args(depth)?;
                     self.expect(TokenKind::RParen)?;
-                    Ok(CypherExpr::FunctionCall { name, args })
+                    Ok(CypherExpr::FunctionCall {
+                        name,
+                        args,
+                        distinct: false,
+                    })
                 } else {
                     // Bare variable
                     Ok(CypherExpr::Variable(name))
@@ -703,9 +708,28 @@ impl CypherParser {
                 let name_tok = self.advance().clone();
                 let name = name_tok.text.to_uppercase();
                 self.expect(TokenKind::LParen)?;
-                let args = self.parse_function_args(depth)?;
+                // Optional DISTINCT quantifier: count(DISTINCT n.dept).
+                let distinct = self.eat(TokenKind::Distinct);
+                // `count(*)` -- the star wildcard is only valid as the sole
+                // argument (typically for count). `DISTINCT *` is rejected
+                // (openCypher does not allow `count(DISTINCT *)`).
+                let args = if self.at(TokenKind::Star) {
+                    if distinct {
+                        return Err(self.error(
+                            "DISTINCT * is not allowed (use count(*) or count(DISTINCT expr))",
+                        ));
+                    }
+                    self.advance();
+                    vec![CypherExpr::Star]
+                } else {
+                    self.parse_function_args(depth)?
+                };
                 self.expect(TokenKind::RParen)?;
-                Ok(CypherExpr::FunctionCall { name, args })
+                Ok(CypherExpr::FunctionCall {
+                    name,
+                    args,
+                    distinct,
+                })
             }
 
             // Literal values

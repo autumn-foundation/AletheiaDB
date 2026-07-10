@@ -28,6 +28,7 @@ use crate::http::converters::{
 };
 use crate::http::error::{AletheiaHttpError, ResourceLimitExceeded};
 use crate::http::state::AppState;
+use crate::http::trace::HttpTrace;
 use crate::query::QueryBuilder;
 use crate::query::converter::{parse_query, parse_query_with_params};
 use crate::query::ir::{Predicate, PredicateValue};
@@ -62,7 +63,15 @@ pub struct HealthResponse {
 /// Classified [`AccessClass::Metrics`]: every role may probe liveness, but
 /// (in required-auth mode) only with a valid credential.
 #[get("/status")]
-pub async fn health_check(auth: AuthContext) -> Result<Json<HealthResponse>, AletheiaHttpError> {
+pub async fn health_check(
+    trace: HttpTrace,
+    auth: AuthContext,
+) -> Result<Json<HealthResponse>, AletheiaHttpError> {
+    trace.record_operation("health");
+    // Enter the root span so the probe is a first-class (non-orphaned) span.
+    // There is no `.await` inside this block, so holding the guard is sound.
+    #[cfg(feature = "observability")]
+    let _entered = trace.span().entered();
     auth.authorize(AccessClass::Metrics)?;
     Ok(Json(HealthResponse {
         status: "healthy".to_string(),
@@ -198,14 +207,25 @@ fn json_to_predicate_value(v: &Value) -> Option<PredicateValue> {
 }
 
 /// Run a CPU/IO-bound closure on the blocking pool and unwrap the join error.
+///
+/// The caller's current `tracing` span is propagated into the blocking thread
+/// and entered for the duration of `f`, so the database's own child spans
+/// (`aletheiadb.query.execute`, `aletheiadb.transaction.commit`, …) nest under
+/// the HTTP root span even though they run on a different thread (Issue #3376).
 async fn blocking<F, T>(f: F) -> Result<T, AletheiaHttpError>
 where
     F: FnOnce() -> Result<T, AletheiaHttpError> + Send + 'static,
     T: Send + 'static,
 {
-    tokio::task::spawn_blocking(f)
-        .await
-        .map_err(|e| AletheiaHttpError::Internal(e.to_string()))?
+    #[cfg(feature = "observability")]
+    let span = tracing::Span::current();
+    tokio::task::spawn_blocking(move || {
+        #[cfg(feature = "observability")]
+        let _entered = span.enter();
+        f()
+    })
+    .await
+    .map_err(|e| AletheiaHttpError::Internal(e.to_string()))?
 }
 
 // ============================================================================
@@ -806,16 +826,46 @@ where
 /// server defaults + the optional per-call `limits` override (a request that
 /// asks for more than the operator ceiling is rejected `422` here, before any
 /// DB work), and enforced around execution by [`enforce_query_limits`].
+///
+/// The whole handler body runs inside the [`HttpTrace`] root span (Issue
+/// #3376), so the database's query/write child spans nest underneath it, the
+/// operation name / result count / error code are stamped onto the span, and a
+/// failure carries the active trace id back to the caller for correlation.
 #[post("/query")]
 pub async fn handle_query(
+    trace: HttpTrace,
     auth: AuthContext,
     state: AppState,
     Json(envelope): Json<QueryEnvelope>,
-) -> Result<Response, AletheiaHttpError> {
+) -> Response {
     let QueryEnvelope {
         request: req,
         limits,
     } = envelope;
+
+    // Compute and stamp per-request attributes only when the span will actually
+    // be recorded (Issue #3376, MED2 / Perf). A feature-absent build compiles
+    // this block out entirely; a runtime-disabled or head-sampled-out span
+    // short-circuits `is_recording()` so the (otherwise-wasted) attribute
+    // computation — including `request_is_temporal`'s statement scan — never
+    // runs.
+    #[cfg(feature = "observability")]
+    let recording = trace.is_recording();
+    #[cfg(feature = "observability")]
+    if recording {
+        trace.record_operation(operation_name(&req));
+        trace.record_temporal_scope(request_is_temporal(&req));
+    }
+    #[cfg(feature = "otel")]
+    maybe_capture_statement(&trace, &req);
+    // In an observability-off build the extractor still runs (zero-sized no-op),
+    // but nothing consumes `trace`; keep it "used" without renaming the field
+    // (which is genuinely used under `observability`).
+    #[cfg(not(feature = "observability"))]
+    let _ = &trace;
+
+    #[cfg(feature = "observability")]
+    let span = trace.span();
 
     // Classify the operation once. The access class drives BOTH authorization
     // and limit semantics: a write is exempt from the result row/byte caps and
@@ -824,96 +874,215 @@ pub async fn handle_query(
     let access_class = query_access_class(&req);
     let is_write = matches!(access_class, AccessClass::Write);
 
-    // Authorization first: auth rejects (401/403) before limit logic runs.
-    auth.authorize(access_class)?;
+    // Authorization + limit resolution + dispatch, wrapped in the trace root
+    // span so DB child spans nest underneath it and the trace id is available
+    // for correlation on any failure (Issue #3376). Resource limits (Issue
+    // #3368) are resolved and enforced inside, so a limit rejection (422/413/
+    // 429) is stamped and trace-correlated exactly like any other error.
+    let work = async move {
+        // Authorization first: auth rejects (401/403) before limit logic runs.
+        auth.authorize(access_class)?;
 
-    // Resolve effective limits; an over-ceiling per-call override is a 422
-    // rejected up front, before any database work.
-    let effective = state
-        .query_limits()
-        .effective(limits.as_ref())
-        .map_err(AletheiaHttpError::InvalidLimitOverride)?;
+        // Resolve effective limits; an over-ceiling per-call override is a 422
+        // rejected up front, before any database work.
+        let effective = state
+            .query_limits()
+            .effective(limits.as_ref())
+            .map_err(AletheiaHttpError::InvalidLimitOverride)?;
 
-    let db = state.db_arc();
-    // Verified principal name (if any) for provenance stamping on write
-    // operations (Issue #3350). Anonymous mode yields None.
-    let principal = auth.principal().map(|p| p.name.clone());
+        let db = state.db_arc();
+        // Verified principal name (if any) for provenance stamping on write
+        // operations (Issue #3350). Anonymous mode yields None.
+        let principal = auth.principal().map(|p| p.name.clone());
 
-    // Build (but do not yet await) the operation future so the wall-clock
-    // timeout in `enforce_query_limits` wraps the actual execution.
-    let op = async move {
-        match req {
-            QueryRequest::CreateNode { label, properties } => {
-                handle_create_node(db, label, properties, principal).await
+        // Build (but do not yet await) the operation future so the wall-clock
+        // timeout in `enforce_query_limits` wraps the actual execution.
+        let op = async move {
+            match req {
+                QueryRequest::CreateNode { label, properties } => {
+                    handle_create_node(db, label, properties, principal).await
+                }
+                QueryRequest::GetNode { node_id } => handle_get_node(db, node_id).await,
+                QueryRequest::BulkCreateNodes { nodes } => {
+                    handle_bulk_create_nodes(db, nodes, principal).await
+                }
+                QueryRequest::BulkGetNodes { node_ids } => {
+                    handle_bulk_get_nodes(db, node_ids).await
+                }
+                QueryRequest::BulkUpdateNodes { updates } => {
+                    handle_bulk_update_nodes(db, updates, principal).await
+                }
+                QueryRequest::BulkDeleteNodes { node_ids, cascade } => {
+                    handle_bulk_delete_nodes(db, node_ids, cascade).await
+                }
+                QueryRequest::FindNode {
+                    label,
+                    properties,
+                    limit,
+                    offset,
+                } => handle_find_node(db, label, properties, limit, offset).await,
+                QueryRequest::FindNeighbors {
+                    node_id,
+                    limit,
+                    offset,
+                } => handle_find_neighbors(db, node_id, limit, offset).await,
+                QueryRequest::ExecuteQuery { query, parameters } => {
+                    handle_execute_query(db, query, parameters).await
+                }
+                QueryRequest::BulkExecuteQuery { queries } => {
+                    handle_bulk_execute_query(db, queries).await
+                }
             }
-            QueryRequest::GetNode { node_id } => handle_get_node(db, node_id).await,
-            QueryRequest::BulkCreateNodes { nodes } => {
-                handle_bulk_create_nodes(db, nodes, principal).await
-            }
-            QueryRequest::BulkGetNodes { node_ids } => handle_bulk_get_nodes(db, node_ids).await,
-            QueryRequest::BulkUpdateNodes { updates } => {
-                handle_bulk_update_nodes(db, updates, principal).await
-            }
-            QueryRequest::BulkDeleteNodes { node_ids, cascade } => {
-                handle_bulk_delete_nodes(db, node_ids, cascade).await
-            }
-            QueryRequest::FindNode {
-                label,
-                properties,
-                limit,
-                offset,
-            } => handle_find_node(db, label, properties, limit, offset).await,
-            QueryRequest::FindNeighbors {
-                node_id,
-                limit,
-                offset,
-            } => handle_find_neighbors(db, node_id, limit, offset).await,
-            QueryRequest::ExecuteQuery { query, parameters } => {
-                handle_execute_query(db, query, parameters).await
-            }
-            QueryRequest::BulkExecuteQuery { queries } => {
-                handle_bulk_execute_query(db, queries).await
-            }
-        }
+        };
+
+        let (data, truncated) = enforce_query_limits(&effective, is_write, op).await?;
+        Ok::<(Value, bool, EffectiveQueryLimits), AletheiaHttpError>((data, truncated, effective))
     };
 
-    let (data, truncated) = enforce_query_limits(&effective, is_write, op).await?;
+    #[cfg(feature = "observability")]
+    let result = {
+        use tracing::Instrument;
+        work.instrument(span.clone()).await
+    };
+    #[cfg(not(feature = "observability"))]
+    let result = work.await;
 
-    // Build and serialize the response envelope exactly ONCE (Issue #3368
-    // review perf-High: the earlier design double-serialized every response to
-    // measure the byte cap). We serialize the final wire envelope here, measure
-    // the byte cap against those real wire bytes (review correctness: the cap
-    // must count the envelope, not the inner `data`), and hand the pre-encoded
-    // bytes straight to the response — never back through `Json(..)`, which
-    // would serialize a second time. `Json` itself uses `serde_json::to_vec`,
-    // so these bytes are byte-identical to what `Json(body)` would produce.
-    let body = ApiResponse::success_with_truncation(data, truncated);
-    let bytes =
-        serde_json::to_vec(&body).map_err(|e| AletheiaHttpError::Internal(e.to_string()))?;
+    // Build the final response. On success the result count is stamped on the
+    // span (Issue #3376) and the wire envelope is serialized exactly ONCE
+    // (Issue #3368 perf-High) so the result-byte cap is measured against the
+    // real wire bytes. Any error — including a limit rejection surfaced here —
+    // is funneled through the single trace-aware error path below so it carries
+    // the `error.code` span attribute and the `trace_id`/`x-trace-id`.
+    let outcome: Result<Response, AletheiaHttpError> = match result {
+        Ok((data, truncated, effective)) => {
+            #[cfg(feature = "observability")]
+            if recording {
+                trace.record_result_count(result_count(&data));
+            }
+            let body = ApiResponse::success_with_truncation(data, truncated);
+            match serde_json::to_vec(&body) {
+                Ok(bytes) => {
+                    // Result-byte cap — READ-class only, and only when a finite
+                    // cap is set. A committed write's acknowledgement has already
+                    // taken effect; a post-commit 413 would lie about durability,
+                    // so writes are exempt. Measured against the real wire bytes
+                    // (never back through `Json(..)`, which would serialize a
+                    // second time — these bytes are byte-identical to it).
+                    if !is_write
+                        && effective.max_response_bytes > 0
+                        && bytes.len() > effective.max_response_bytes
+                    {
+                        Err(AletheiaHttpError::ResourceLimitExceeded(
+                            ResourceLimitExceeded {
+                                dimension: LimitDimension::ResultBytes,
+                                limit: effective.max_response_bytes as u64,
+                                consumed: Some(bytes.len() as u64),
+                                retriable: false,
+                            },
+                        ))
+                    } else {
+                        Ok((
+                            StatusCode::OK,
+                            [(
+                                header::CONTENT_TYPE,
+                                HeaderValue::from_static("application/json"),
+                            )],
+                            bytes,
+                        )
+                            .into_response())
+                    }
+                }
+                Err(e) => Err(AletheiaHttpError::Internal(e.to_string())),
+            }
+        }
+        Err(e) => Err(e),
+    };
 
-    // Result-byte cap — READ-class only, and only when a finite cap is set. A
-    // committed write's acknowledgement has already taken effect; a post-commit
-    // 413 would lie about durability, so writes are exempt.
-    if !is_write && effective.max_response_bytes > 0 && bytes.len() > effective.max_response_bytes {
-        return Err(AletheiaHttpError::ResourceLimitExceeded(
-            ResourceLimitExceeded {
-                dimension: LimitDimension::ResultBytes,
-                limit: effective.max_response_bytes as u64,
-                consumed: Some(bytes.len() as u64),
-                retriable: false,
-            },
-        ));
+    match outcome {
+        Ok(response) => response,
+        Err(e) => {
+            #[cfg(feature = "observability")]
+            if recording {
+                trace.record_error(e.code_str());
+            }
+            #[cfg(feature = "observability")]
+            let trace_id = span.in_scope(crate::http::trace::active_trace_id);
+            #[cfg(not(feature = "observability"))]
+            let trace_id = crate::http::trace::active_trace_id();
+            e.into_response_with_trace(trace_id)
+        }
     }
+}
 
-    Ok((
-        StatusCode::OK,
-        [(
-            header::CONTENT_TYPE,
-            HeaderValue::from_static("application/json"),
-        )],
-        bytes,
-    )
-        .into_response())
+/// The stable operation-name attribute for a `/query` request (bounded set,
+/// never user data).
+#[cfg(feature = "observability")]
+fn operation_name(req: &QueryRequest) -> &'static str {
+    match req {
+        QueryRequest::FindNode { .. } => "find_node",
+        QueryRequest::GetNode { .. } => "get_node",
+        QueryRequest::CreateNode { .. } => "create_node",
+        QueryRequest::BulkCreateNodes { .. } => "bulk_create_nodes",
+        QueryRequest::BulkGetNodes { .. } => "bulk_get_nodes",
+        QueryRequest::BulkUpdateNodes { .. } => "bulk_update_nodes",
+        QueryRequest::BulkDeleteNodes { .. } => "bulk_delete_nodes",
+        QueryRequest::FindNeighbors { .. } => "find_neighbors",
+        QueryRequest::ExecuteQuery { .. } => "execute_query",
+        QueryRequest::BulkExecuteQuery { .. } => "bulk_execute_query",
+    }
+}
+
+/// Result-count attribute for a response payload: array length, `nodes` array
+/// length for the bulk-get shape, otherwise `1` for a single entity.
+#[cfg(feature = "observability")]
+fn result_count(data: &Value) -> usize {
+    match data {
+        Value::Array(items) => items.len(),
+        Value::Object(map) => map
+            .get("nodes")
+            .and_then(Value::as_array)
+            .map_or(1, Vec::len),
+        _ => 1,
+    }
+}
+
+/// Whether a request carries a temporal (`AS OF`) scope. Only statement-based
+/// operations can; detection is a cheap case-insensitive substring check that
+/// never inspects property values.
+#[cfg(feature = "observability")]
+fn request_is_temporal(req: &QueryRequest) -> bool {
+    /// Allocation-free, case-insensitive scan for the `as of` temporal marker.
+    /// The previous `to_ascii_lowercase().contains(..)` allocated a full
+    /// lowercased copy of the statement on every request; scanning byte windows
+    /// with `eq_ignore_ascii_case` matches identically for the ASCII needle
+    /// while allocating nothing (Issue #3376, MED2 / Perf).
+    fn is_as_of(query: &str) -> bool {
+        const NEEDLE: &[u8] = b"as of";
+        query
+            .as_bytes()
+            .windows(NEEDLE.len())
+            .any(|w| w.eq_ignore_ascii_case(NEEDLE))
+    }
+    match req {
+        QueryRequest::ExecuteQuery { query, .. } => is_as_of(query),
+        QueryRequest::BulkExecuteQuery { queries } => queries.iter().any(|q| is_as_of(&q.query)),
+        _ => false,
+    }
+}
+
+/// Attach sanitized statement text to the span when statement capture is
+/// explicitly enabled. Only single-statement `execute_query` is captured; the
+/// statement is the query template (parameters are `$`-bound, so no property
+/// values are interpolated). Off by default (Issue #3376 privacy model).
+#[cfg(feature = "otel")]
+fn maybe_capture_statement(trace: &HttpTrace, req: &QueryRequest) {
+    if !crate::observability::otel::is_active() || !crate::observability::otel::capture_statements()
+    {
+        return;
+    }
+    if let QueryRequest::ExecuteQuery { query, .. } = req {
+        trace.record_statement(query);
+    }
 }
 
 /// Collect the crate's HTTP routes as a `Vec<Route>`.

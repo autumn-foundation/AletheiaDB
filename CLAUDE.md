@@ -731,10 +731,41 @@ let results = db.execute_cypher_with_params("MATCH (n:Person {name: $name}) RETU
 - Directions: `->` (outgoing), `<-` (incoming), `-` (both)
 - Filtering: `WHERE n.age > 18 AND n.name = 'Alice'`
 - Results: `RETURN`, `RETURN DISTINCT`, `AS` aliases
-- Ordering: `ORDER BY n.age DESC`
+- Aggregation (Issue #558): `count(*)`, `count(expr)`, `count(DISTINCT expr)`,
+  `sum`/`avg`/`min`/`max`/`collect` (each with optional `DISTINCT`), with
+  openCypher **implicit grouping** — non-aggregate `RETURN` items become the
+  group key (`RETURN n.dept, count(*)` groups by `n.dept`; a keyless
+  `RETURN count(*)` is one global row, `0` over empty input). `ORDER BY` over
+  aggregate output sorts by the output column / aggregate alias.
+- Ordering: `ORDER BY n.age DESC` — multi-key `ORDER BY a, b` sorts by `a`
+  (primary) then `b`; openCypher null placement (nulls **last** for `ASC`,
+  **first** for `DESC`)
 - Pagination: `SKIP 10 LIMIT 20`
 - Query chaining: `WITH b WHERE b.score > 0.5 RETURN b`
 - Parameters: `$paramName`
+
+**Aggregation v1 limitations (Issue #558):**
+- **Grouping by a whole node/edge is rejected** (`RETURN n, count(*)` returns a
+  structured `UnsupportedFeature` error): the single-entity row model cannot
+  express node-identity grouping — group by a property (`n.id`) instead.
+  `count(n)` (bare variable) is allowed and counts non-null bindings.
+  `count(DISTINCT *)` is a parse error (openCypher disallows it).
+- **`min`/`max`/`sum`/`avg` over mixed or non-numeric types are lenient**:
+  non-numeric values are skipped by `sum`/`avg`, and `min`/`max` treat
+  incomparable pairs as equal (retain input order) rather than erroring. An
+  all-integer `sum` that overflows `i64` promotes to `Float` (never silently
+  wraps).
+- **`RETURN DISTINCT <scalar projection>`** (e.g. `RETURN DISTINCT n.dept`)
+  deduplicates by entity id, **not** the projected value — a pre-existing
+  projection-model limitation (property projection is not yet lowered into the
+  row), independent of aggregation.
+- **MCP `query`-tool rendering (cross-lane)**: aggregate rows are carried on
+  `QueryRow.columns` with a null entity, but the MCP serializer
+  (`query_row_to_json`, `src/mcp/server.rs`) ignores `columns` and renders the
+  row as `{"entity": null, ...}`. Aggregation is correct at the
+  `execute_cypher`/Rust-API level; surfacing it through MCP is a one-branch
+  follow-up for the MCP lane owner (serialize `row.columns` via
+  `property_value_to_json` and make `query_columns()` dynamic).
 
 **Temporal Extensions:**
 - `AS OF TIMESTAMP '2024-01-15T10:00:00Z'`

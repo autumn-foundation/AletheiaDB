@@ -468,6 +468,17 @@ impl QueryPlanner {
             // Aggregation operations
             QueryOp::Count => Ok(LogicalOp::unary(UnaryOp::Count, input)),
 
+            QueryOp::Aggregate {
+                group_keys,
+                aggregates,
+            } => Ok(LogicalOp::unary(
+                UnaryOp::Aggregate {
+                    group_keys: group_keys.clone(),
+                    aggregates: aggregates.clone(),
+                },
+                input,
+            )),
+
             QueryOp::Distinct => Ok(LogicalOp::unary(UnaryOp::Distinct, input)),
 
             QueryOp::Project(props) => Ok(LogicalOp::unary(UnaryOp::Project(props.clone()), input)),
@@ -509,6 +520,7 @@ impl QueryPlanner {
             QueryOp::Limit(_) => "Limit",
             QueryOp::Skip(_) => "Skip",
             QueryOp::Count => "Count",
+            QueryOp::Aggregate { .. } => "Aggregate",
             QueryOp::Distinct => "Distinct",
             QueryOp::Project(_) => "Project",
             QueryOp::Sort { .. } => "Sort",
@@ -577,6 +589,14 @@ impl QueryPlanner {
             LogicalOp::Scan(scan) => self.scan_to_physical(scan, temporal),
 
             LogicalOp::Unary { op, input } => {
+                // Fold a chain of consecutive Sort ops (from a multi-key
+                // `ORDER BY a, b, c`) into ONE multi-key PhysicalOp::Sort so the
+                // FIRST-emitted key is primary. Emitting one stable Sort per key
+                // would otherwise invert precedence (the last-applied stable
+                // sort dominates). Fixes both Cypher and AQL (Issue #558).
+                if matches!(op, UnaryOp::Sort { .. }) {
+                    return self.fold_sort_chain(logical, temporal);
+                }
                 let physical_input = self.to_physical_op(input, temporal)?;
                 self.unary_to_physical(op, physical_input, temporal)
             }
@@ -589,6 +609,46 @@ impl QueryPlanner {
 
             LogicalOp::Empty => Ok(PhysicalOp::Empty),
         }
+    }
+
+    /// Fold a chain of consecutive [`UnaryOp::Sort`] operators into a single
+    /// multi-key [`PhysicalOp::Sort`].
+    ///
+    /// The logical chain nests outermost = last-emitted `ORDER BY` key,
+    /// innermost = first-emitted key. openCypher wants the first key to be
+    /// primary, so we collect from the outside in, then reverse: the resulting
+    /// `keys` vector is in precedence order (first = primary). The base (first
+    /// non-Sort operator) is converted once.
+    fn fold_sort_chain(
+        &self,
+        logical: &LogicalOp,
+        temporal: &Option<TemporalContext>,
+    ) -> Result<PhysicalOp> {
+        use super::plan::SortKey;
+
+        let mut keys: Vec<(SortKey, bool)> = Vec::new();
+        let mut cursor = logical;
+        let base = loop {
+            match cursor {
+                LogicalOp::Unary {
+                    op: UnaryOp::Sort { key, descending },
+                    input,
+                } => {
+                    keys.push((key.clone(), *descending));
+                    cursor = input;
+                }
+                other => break other,
+            }
+        };
+
+        let physical_input = self.to_physical_op(base, temporal)?;
+        // Reverse so the first-emitted (innermost) key becomes primary.
+        keys.reverse();
+
+        Ok(PhysicalOp::Sort {
+            input: Box::new(physical_input),
+            keys,
+        })
     }
 
     /// Helper to validate vector index existence
@@ -849,10 +909,11 @@ impl QueryPlanner {
                 })
             }
 
+            // A lone Sort (not part of a chain intercepted by the fold in
+            // `to_physical_op`) lowers to a single-key multi-key Sort.
             UnaryOp::Sort { key, descending } => Ok(PhysicalOp::Sort {
                 input: Box::new(input),
-                key: key.clone(),
-                descending: *descending,
+                keys: vec![(key.clone(), *descending)],
             }),
 
             UnaryOp::Project(props) => Ok(PhysicalOp::Project {
@@ -866,6 +927,15 @@ impl QueryPlanner {
 
             UnaryOp::Count => Ok(PhysicalOp::Count {
                 input: Box::new(input),
+            }),
+
+            UnaryOp::Aggregate {
+                group_keys,
+                aggregates,
+            } => Ok(PhysicalOp::Aggregate {
+                input: Box::new(input),
+                group_keys: group_keys.clone(),
+                aggregates: aggregates.clone(),
             }),
 
             UnaryOp::TemporalTrack { time_range } => Ok(PhysicalOp::TemporalTrack {
