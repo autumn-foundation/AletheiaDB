@@ -255,6 +255,7 @@ impl RecoveryTestHarness {
                         wal.append(WalOperation::DeleteNode {
                             node_id: NodeId::new(*id)?,
                             valid_from: timestamp_counter,
+                            version_id: None,
                         })?;
                         created_nodes.remove(id);
                     }
@@ -302,6 +303,7 @@ impl RecoveryTestHarness {
                         wal.append(WalOperation::DeleteEdge {
                             edge_id: EdgeId::new(*id)?,
                             valid_from: timestamp_counter,
+                            version_id: None,
                         })?;
                         created_edges.remove(id);
                     }

@@ -389,6 +389,7 @@ fn test_checkpoint_recovery_with_deletes() -> Result<()> {
     wal.append(WalOperation::DeleteNode {
         node_id: NodeId::new(2)?,
         valid_from: time::now(),
+        version_id: None,
     })?;
 
     wal.flush()?;
@@ -514,7 +515,11 @@ fn test_retraction_then_checkpoint_survives_recovery() -> Result<()> {
         valid_from,
         provenance: None,
     })?;
-    wal.append(WalOperation::RetractNode { node_id, valid_to })?;
+    wal.append(WalOperation::RetractNode {
+        node_id,
+        valid_to,
+        version_id: None,
+    })?;
     wal.flush()?;
 
     // First recovery replays the create + retraction, then we checkpoint
@@ -614,7 +619,11 @@ fn test_retraction_replayed_after_checkpoint() -> Result<()> {
     }
 
     // The retraction lands in the WAL after the checkpoint.
-    wal.append(WalOperation::RetractNode { node_id, valid_to })?;
+    wal.append(WalOperation::RetractNode {
+        node_id,
+        valid_to,
+        version_id: None,
+    })?;
     wal.flush()?;
 
     // Recovery loads the checkpoint, then replays ONLY the retraction.
@@ -732,7 +741,11 @@ fn test_checkpoint_restore_only_preserves_node_bitemporal_fidelity() -> Result<(
         valid_from,
         provenance: None,
     })?;
-    wal.append(WalOperation::RetractNode { node_id, valid_to })?;
+    wal.append(WalOperation::RetractNode {
+        node_id,
+        valid_to,
+        version_id: None,
+    })?;
     wal.flush()?;
 
     // First recovery replays the full WAL (the known-good path), giving the
@@ -916,7 +929,11 @@ fn test_checkpoint_restore_only_preserves_edge_bitemporal_fidelity() -> Result<(
         valid_from,
         provenance: None,
     })?;
-    wal.append(WalOperation::RetractEdge { edge_id, valid_to })?;
+    wal.append(WalOperation::RetractEdge {
+        edge_id,
+        valid_to,
+        version_id: None,
+    })?;
     wal.flush()?;
 
     let checkpoint_lsn = LSN(wal.current_lsn().0.saturating_sub(1));
