@@ -632,6 +632,14 @@ pub struct TemporalNodeScanIterator {
     /// Pre-computed interned ID of the label filter for efficient comparison.
     /// Avoids repeated hashmap lookups in apply_label_filter().
     interned_label_filter: Option<crate::core::interning::InternedString>,
+    /// When `true`, a candidate that has no version at the requested
+    /// bi-temporal point (or whose version metadata is missing) is silently
+    /// skipped instead of surfacing an error. This is the correct semantics
+    /// for a point-in-time label *scan* (Issues #550/#551): the candidate set
+    /// is "every node ever versioned", most of which need not exist at the
+    /// queried instant. The per-node lookup path (default `false`) keeps
+    /// propagating the error, since there the caller explicitly named the id.
+    skip_missing: bool,
 }
 
 impl TemporalNodeScanIterator {
@@ -668,7 +676,21 @@ impl TemporalNodeScanIterator {
             historical,
             label_filter,
             interned_label_filter,
+            skip_missing: false,
         }
+    }
+
+    /// Enable point-in-time *scan* semantics: candidates absent at the queried
+    /// bi-temporal point are skipped rather than raising
+    /// [`TemporalError::NodeNotFoundAtTime`](crate::core::error::TemporalError::NodeNotFoundAtTime).
+    ///
+    /// Used by the Cypher/AQL label-scan `AS OF` path (Issues #550/#551), where
+    /// the candidate set is every ever-versioned node and most of them simply
+    /// did not exist at the instant being asked about.
+    #[must_use]
+    pub fn skipping_missing(mut self) -> Self {
+        self.skip_missing = true;
+        self
     }
 
     /// Retrieve the temporal version of a node at the configured time point.
@@ -752,6 +774,10 @@ impl ResultIterator for TemporalNodeScanIterator {
             let node_id = self.node_ids.next()?;
 
             match self.filter_node(node_id, &guard) {
+                // In scan mode, a candidate absent at the queried instant is not
+                // an error -- it simply isn't in the result set. Skip it and
+                // keep scanning instead of aborting the whole query.
+                Some(Err(e)) if self.skip_missing && is_missing_at_time(&e) => continue,
                 Some(result) => return Some(result), // Found valid node or error
                 None => continue,                    // Label filter didn't match, try next
             }
@@ -773,7 +799,209 @@ impl ResultIterator for TemporalNodeScanIterator {
     }
 }
 
+/// Returns `true` for the "this entity has no version at the queried
+/// bi-temporal point" family of errors, which a point-in-time *scan*
+/// (Issues #550/#551) treats as "not in the result set" rather than a hard
+/// failure. A per-node lookup, where the caller explicitly named the id, keeps
+/// propagating these as errors.
+fn is_missing_at_time(err: &crate::core::error::Error) -> bool {
+    use crate::core::error::{Error, TemporalError};
+    matches!(
+        err,
+        Error::Temporal(TemporalError::NodeNotFoundAtTime { .. })
+            | Error::Temporal(TemporalError::VersionNotFound(_))
+    )
+}
+
+/// Iterator for valid-time range label scans (`BETWEEN ... AND ...`, Issue #552).
+///
+/// # Semantics
+///
+/// Given a candidate set of node ids and a valid-time range `[valid_from,
+/// valid_to)`, this yields every version of each candidate that is **believed
+/// at** the observed `transaction_time` (its transaction interval contains TT
+/// -- the same predicate a point-in-time `AS OF` uses) **and** whose valid-time
+/// interval *overlaps* the range, optionally filtered by `label`.
+///
+/// Semantically this is an **as-of-TT snapshot across a valid-time range**: it
+/// equals the union, over every valid instant `v` in `[valid_from, valid_to)`,
+/// of `AS OF (v, TT)`, deduplicated by version. Earlier valid segments that are
+/// no longer believed at TT (superseded by a later transaction-time write, or
+/// closed by a retraction) are **excluded**, consistent with `AS OF`, so no
+/// stale beliefs and no duplicate rows appear.
+///
+/// In the current storage model each forward write closes the prior version's
+/// transaction interval (transaction-time supersession), so at a fixed TT at
+/// most one version per node is believed; a node therefore contributes at most
+/// one row -- its believed-at-TT state -- and only when that state's valid
+/// interval overlaps the range. (Were the store to retain multiple co-current
+/// valid segments, this would naturally emit one row per in-range version.)
+/// Because a single node can have several versions overlapping the range, this
+/// iterator may emit **multiple rows per node** -- one per overlapping version
+/// -- which is the openCypher-ish reading of a `BETWEEN` range query.
+///
+/// # Eager reconstruction
+///
+/// Like [`BatchTemporalNodeIterator`], all rows are reconstructed eagerly under
+/// a single historical read lock during construction. A range scan is inherently
+/// heavier than a point lookup, and eager collection keeps the lock held for a
+/// bounded, predictable window instead of across the entire (lazy) drain.
+///
+/// # Ordering
+///
+/// At a fixed `transaction_time` at most one version per node is believed (see
+/// the type-level note above), so a node contributes at most one row; multiple
+/// rows arise only across DISTINCT nodes. Nodes are emitted in the order of the
+/// supplied candidate list. The per-node selection is still sorted
+/// oldest-`valid_from`-first (ties broken by version id) so that, were the store
+/// ever to retain multiple co-current versions, the output would remain
+/// deterministic.
+pub struct TemporalNodeRangeScanIterator {
+    results: std::vec::IntoIter<Result<QueryRow>>,
+}
+
+impl TemporalNodeRangeScanIterator {
+    /// Build a range-scan iterator, reconstructing all overlapping versions up
+    /// front under a single read lock.
+    ///
+    /// # Arguments
+    ///
+    /// * `node_ids` - Candidate node ids (typically every ever-versioned node)
+    /// * `valid_from` - Inclusive start of the valid-time range
+    /// * `valid_to` - Exclusive end of the valid-time range
+    /// * `transaction_time` - Transaction time the range is observed at
+    /// * `historical` - Historical storage
+    /// * `label_filter` - Optional label the versions must match
+    pub fn new(
+        node_ids: Vec<NodeId>,
+        valid_from: Timestamp,
+        valid_to: Timestamp,
+        transaction_time: Timestamp,
+        historical: Arc<RwLock<HistoricalStorage>>,
+        label_filter: Option<String>,
+    ) -> Self {
+        // An invalid range (end < start) yields nothing rather than erroring:
+        // the converter already validated it, but defend anyway.
+        let Ok(range) = crate::core::temporal::TimeRange::new(valid_from, valid_to) else {
+            return TemporalNodeRangeScanIterator {
+                results: Vec::new().into_iter(),
+            };
+        };
+
+        // Resolve the label filter to its interned id once. If the label was
+        // never interned, nothing can match -- yield an empty result.
+        let interned_label = label_filter
+            .as_ref()
+            .and_then(|label| GLOBAL_INTERNER.get_id(label));
+        if label_filter.is_some() && interned_label.is_none() {
+            return TemporalNodeRangeScanIterator {
+                results: Vec::new().into_iter(),
+            };
+        }
+
+        let guard = historical.read();
+        let mut results: Vec<Result<QueryRow>> = Vec::new();
+
+        for node_id in node_ids {
+            // Walk the version chain from the head backwards.
+            let Some(head) = guard.get_current_node_version(node_id) else {
+                continue;
+            };
+            let mut selected = Vec::new();
+            let mut cursor = Some(head);
+            while let Some(vid) = cursor {
+                let Some(version) = guard.get_node_version(vid) else {
+                    break;
+                };
+                cursor = version.prev_version;
+
+                // Label filter (label can change across versions).
+                if let Some(lbl) = interned_label
+                    && version.label != lbl
+                {
+                    continue;
+                }
+                // Keep only versions BELIEVED at the observation transaction time
+                // -- the exact same tx-visibility predicate the point-in-time
+                // `AS OF` selector (`find_node_version_at_time`) uses. This makes
+                // the range scan an as-of-TT snapshot ACROSS the valid range:
+                // versions whose transaction interval was closed by a later
+                // correction or retraction (beliefs no longer held at TT) are
+                // excluded, exactly as a point `AS OF` would exclude them. Because
+                // at a fixed TT there is at most one version per valid instant,
+                // this also yields no duplicate rows.
+                if !version
+                    .temporal
+                    .transaction_time()
+                    .contains(transaction_time)
+                {
+                    continue;
+                }
+                // Keep versions whose valid interval overlaps the range.
+                // (`overlaps` already excludes empty tombstone intervals.)
+                if !version.temporal.valid_time().overlaps(&range) {
+                    continue;
+                }
+                selected.push((
+                    version.temporal.valid_time().start(),
+                    version.node_id,
+                    version.label,
+                    vid,
+                ));
+            }
+
+            // Deterministic per-node ordering: oldest valid_from first.
+            selected.sort_by(|a, b| a.0.cmp(&b.0).then(a.3.cmp(&b.3)));
+
+            for (valid_from_ts, matched_node_id, matched_label, vid) in selected {
+                match guard.reconstruct_node_properties(vid) {
+                    Ok(properties) => {
+                        let node = Node::new(matched_node_id, matched_label, properties, vid);
+                        results
+                            .push(Ok(QueryRow::from_entity(EntityResult::Node(node))
+                                .at_time(valid_from_ts)));
+                    }
+                    Err(e) => results.push(Err(e)),
+                }
+            }
+        }
+
+        drop(guard);
+
+        TemporalNodeRangeScanIterator {
+            results: results.into_iter(),
+        }
+    }
+}
+
+impl ResultIterator for TemporalNodeRangeScanIterator {
+    fn next(&mut self) -> Option<Result<QueryRow>> {
+        self.results.next()
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.results.size_hint()
+    }
+}
+
 /// Iterator for graph traversal using BFS.
+///
+/// # Variable-length depth-range semantics (`*min..max`)
+///
+/// For a variable-length pattern this iterator binds each **distinct** reachable
+/// target node **once**, at its **shortest** hop-distance from the anchor, and
+/// emits it iff `min <= shortestDepth <= max`. Because the per-input `visited`
+/// set is populated when a node is first enqueued (its shortest BFS depth), a
+/// node whose shortest path is shorter than `min` is marked visited early and is
+/// **not** re-emitted at a longer, in-range depth; likewise an anchor reachable
+/// again only via an in-range cycle is not re-bound.
+///
+/// This is **node-distinct / shortest-path reachability**, a deliberate v1
+/// simplification of openCypher's trail (path-enumeration) semantics. Under full
+/// trail semantics `MATCH (a)-[*2..2]->(b)` over `a->x, a->y, x->y` would also
+/// bind `y` via `a->x->y`; here `y`'s shortest depth is 1, so it is excluded.
+/// Full trail semantics is a tracked follow-up (it requires per-path state and
+/// carries cross-lane perf/regression risk in this shared engine).
 ///
 /// # Deduplication Semantics
 ///
@@ -796,6 +1024,11 @@ pub struct TraversalIterator {
     input: Box<dyn ResultIterator>,
     direction: Direction,
     label: Option<String>,
+    /// Minimum depth (inclusive) at which a reached node is emitted. A node is
+    /// bound iff `min_depth <= shortestDepth <= depth` (node-distinct /
+    /// shortest-path reachability; see the struct-level docs).
+    min_depth: usize,
+    /// Maximum depth (inclusive); BFS expansion stops beyond this depth.
     depth: usize,
     current: Arc<CurrentStorage>,
     historical: Arc<RwLock<HistoricalStorage>>,
@@ -815,10 +1048,12 @@ impl TraversalIterator {
     /// This is the core engine for `MATCH (a)-[*]->(b)` operations. It manages
     /// a frontier of visited nodes to prevent infinite loops in cyclic graphs,
     /// and conditionally queries the historical storage if a temporal context is present.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         input: Box<dyn ResultIterator>,
         direction: Direction,
         label: Option<String>,
+        min_depth: usize,
         depth: usize,
         current: Arc<CurrentStorage>,
         historical: Arc<RwLock<HistoricalStorage>>,
@@ -828,6 +1063,7 @@ impl TraversalIterator {
             input,
             direction,
             label,
+            min_depth,
             depth,
             current,
             historical,
@@ -999,28 +1235,44 @@ impl ResultIterator for TraversalIterator {
         loop {
             // Process current frontier
             if let Some((node_id, path, current_depth)) = self.frontier.pop_front() {
-                if current_depth >= self.depth {
-                    // Reached target depth, yield result
+                // Expansion and yielding are INDEPENDENT so a range like `*1..3`
+                // both emits intermediate-depth nodes AND keeps exploring to the
+                // maximum depth. First expand (if we have not reached the max
+                // depth), enqueuing unvisited neighbors one hop deeper.
+                if current_depth < self.depth {
+                    let neighbors = self.get_neighbors(node_id);
+                    for (target, edge_id) in neighbors {
+                        // Node-distinct / shortest-path reachability: a node is
+                        // enqueued (and thus later emitted) once, at its shortest
+                        // BFS depth. This also makes cyclic graphs terminate. It
+                        // is a v1 simplification of openCypher trail semantics --
+                        // a target whose shortest path is below `min_depth` is
+                        // marked visited here and never re-emitted deeper (see the
+                        // struct-level docs).
+                        if self.visited.insert(target) {
+                            // ⚡ Bolt Optimization: Pre-allocate capacity for new path to avoid reallocations.
+                            // We are adding exactly 2 elements (edge and node) to the current path length.
+                            let mut new_path = Vec::with_capacity(path.len() + 2);
+                            new_path.extend_from_slice(&path);
+                            new_path.push(EntityId::Edge(edge_id));
+                            new_path.push(EntityId::Node(target));
+                            self.frontier
+                                .push_back((target, new_path, current_depth + 1));
+                        }
+                    }
+                }
+
+                // Then, if this node's depth falls within [min_depth, depth],
+                // yield it. The depth-0 start node is never emitted.
+                if current_depth >= 1
+                    && current_depth >= self.min_depth
+                    && current_depth <= self.depth
+                {
                     match self.current.get_node(node_id) {
                         Ok(node) => {
                             return Some(Ok(QueryRow::with_path(EntityResult::Node(node), path)));
                         }
                         Err(e) => return Some(Err(e)),
-                    }
-                }
-
-                // Expand neighbors
-                let neighbors = self.get_neighbors(node_id);
-                for (target, edge_id) in neighbors {
-                    if self.visited.insert(target) {
-                        // ⚡ Bolt Optimization: Pre-allocate capacity for new path to avoid reallocations.
-                        // We are adding exactly 2 elements (edge and node) to the current path length.
-                        let mut new_path = Vec::with_capacity(path.len() + 2);
-                        new_path.extend_from_slice(&path);
-                        new_path.push(EntityId::Edge(edge_id));
-                        new_path.push(EntityId::Node(target));
-                        self.frontier
-                            .push_back((target, new_path, current_depth + 1));
                     }
                 }
                 continue;
@@ -1412,12 +1664,14 @@ impl OptionalApplyIterator {
                 OptionalPhysicalStep::Traverse {
                     direction,
                     label,
+                    min_depth,
                     depth,
                     temporal_context,
                 } => Box::new(TraversalIterator::new(
                     iter,
                     *direction,
                     label.clone(),
+                    *min_depth,
                     *depth,
                     Arc::clone(&self.current),
                     Arc::clone(&self.historical),
@@ -4777,6 +5031,7 @@ mod tests {
             vec![OptionalPhysicalStep::Traverse {
                 direction: Direction::Outgoing,
                 label: Some("KNOWS".to_string()),
+                min_depth: 1,
                 depth: 1,
                 temporal_context: None,
             }],
@@ -4848,6 +5103,7 @@ mod tests {
             vec![OptionalPhysicalStep::Traverse {
                 direction: Direction::Outgoing,
                 label: Some("KNOWS".to_string()),
+                min_depth: 1,
                 depth: 1,
                 temporal_context: None,
             }],

@@ -563,9 +563,10 @@ max of interval starts and *closed* ends, so the open-interval sentinel
 never leaks. Overall bounds are O(1) reads of a write-time-maintained
 aggregate and only ever widen while the server runs (cacheable per
 session). Optional `by_label: true` adds per-node-label / per-edge-type
-bounds folded from hot-tier history. Coverage caveat: bounds span the
-current process lifetime plus hot-tier history restored at startup —
-versions cold-migrated before the last restart are not reflected. See
+bounds folded from hot-tier history. Overall bounds also span history
+migrated to the cold tier across restarts (Issue #3389): the cold store
+persists its per-dimension extent bounds and they are merged into the
+aggregate at startup (the per-label breakdown remains hot-tier-only). See
 [docs/guides/mcp-query-tool.md](docs/guides/mcp-query-tool.md#discovering-the-queryable-temporal-extent-temporal_extent).
 
 **Cursor continuation for large scans (Issue #3360)**: the bounded read tools
@@ -717,7 +718,16 @@ let results = db.execute_cypher_with_params("MATCH (n:Person {name: $name}) RETU
   earlier variable is rejected, and comma-separated patterns per optional
   clause are rejected (no variable-binding analysis yet -- all three would
   silently produce wrong rows)
-- Variable-depth: `-[:KNOWS*1..3]->`
+- Variable-depth: `-[:KNOWS*1..3]->` -- binds the far node to every node
+  reachable within the range (Issue #548); `*min..max`, `*..max`, `*min..`,
+  `*n`, and bare `*` are all honored. **Known v1 limitations**: (1) matching is
+  **node-distinct / shortest-path reachability**, a deliberate simplification of
+  openCypher trail (path-enumeration) semantics -- each distinct target is bound
+  once at its *shortest* hop-distance, so a node whose shortest path is below
+  `min` (or an anchor reached only via an in-range cycle) is not re-emitted at a
+  longer in-range depth (full trail semantics is a tracked follow-up); (2) the
+  open-ended upper bounds (`*` and `*min..`) are capped at depth **10**
+  (`DEFAULT_MAX_TRAVERSAL_DEPTH`; a configurable cap is a follow-up).
 - Directions: `->` (outgoing), `<-` (incoming), `-` (both)
 - Filtering: `WHERE n.age > 18 AND n.name = 'Alice'`
 - Results: `RETURN`, `RETURN DISTINCT`, `AS` aliases

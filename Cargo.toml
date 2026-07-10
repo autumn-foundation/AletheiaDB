@@ -474,6 +474,13 @@ harness = false
 path = "benches/uniqueness_constraints.rs"
 required-features = []
 
+# Per-query resource limits on the HTTP /query surface (Issue #3368)
+[[bench]]
+name = "http_query_limits"
+harness = false
+path = "benches/http_query_limits.rs"
+required-features = ["http-server"]
+
 # Unified CLI binary for local operations + daemon management
 [[bin]]
 name = "aletheia"

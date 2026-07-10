@@ -408,6 +408,13 @@ impl CostModel {
                 ..
             } => self.estimate_temporal_lookup(node_ids.len(), *use_batch, stats),
 
+            // Temporal label scans reconstruct every ever-versioned candidate at
+            // the requested point/range: approximate as a batched temporal lookup
+            // over the current node population.
+            PhysicalOp::TemporalNodeScan { .. } | PhysicalOp::TemporalNodeRangeScan { .. } => {
+                self.estimate_temporal_lookup(stats.node_count().max(1), true, stats)
+            }
+
             PhysicalOp::TemporalVectorSearch { k, .. } => {
                 self.estimate_temporal_vector_search(*k, stats)
             }
@@ -513,6 +520,10 @@ impl CostModel {
             PhysicalOp::PropertyScan { estimated_rows, .. } => *estimated_rows,
             PhysicalOp::HnswSearch { k, .. } => *k,
             PhysicalOp::TemporalNodeLookup { node_ids, .. } => node_ids.len(),
+            // Temporal label scans reconstruct historical candidates; a range
+            // scan can emit several rows per node, so nudge its estimate up.
+            PhysicalOp::TemporalNodeScan { .. } => stats.node_count(),
+            PhysicalOp::TemporalNodeRangeScan { .. } => stats.node_count().saturating_mul(2),
             PhysicalOp::TemporalVectorSearch { k, .. } => *k,
             PhysicalOp::IndexedTraversal { input, depth, .. } => {
                 let input_card = self.estimate_cardinality(input, stats);
@@ -836,6 +847,7 @@ mod tests {
             }),
             direction: crate::query::ir::Direction::Outgoing,
             label: None,
+            min_depth: 2,
             depth: 2,
             temporal_context: None,
         };

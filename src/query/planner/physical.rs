@@ -219,6 +219,30 @@ impl PhysicalPlan {
                     line.push_str(&format!(" [property={}]", prop));
                 }
             }
+            PhysicalOp::TemporalNodeScan {
+                label,
+                valid_time,
+                transaction_time,
+            } => {
+                line.push_str(&format!(" (vt={}, tt={})", valid_time, transaction_time));
+                if let Some(l) = label {
+                    line.push_str(&format!(" [label={}]", l));
+                }
+            }
+            PhysicalOp::TemporalNodeRangeScan {
+                label,
+                valid_from,
+                valid_to,
+                transaction_time,
+            } => {
+                line.push_str(&format!(
+                    " (valid=[{}, {}), tt={})",
+                    valid_from, valid_to, transaction_time
+                ));
+                if let Some(l) = label {
+                    line.push_str(&format!(" [label={}]", l));
+                }
+            }
             PhysicalOp::SimilarToNode {
                 k,
                 label_filter,
@@ -418,6 +442,50 @@ pub enum PhysicalOp {
         property_key: Option<String>,
     },
 
+    /// Point-in-time label scan (`AS OF`).
+    ///
+    /// The temporal analogue of [`NodeScan`](PhysicalOp::NodeScan): instead of
+    /// scanning current storage it reconstructs every historically-versioned
+    /// node **as it existed** at `(valid_time, transaction_time)`, keeping only
+    /// those matching the optional `label`. Nodes that did not exist at that
+    /// bi-temporal point are skipped (not errors). Produced by the planner when
+    /// a label scan carries a point-in-time `TemporalContext` (Issues #550,
+    /// #551).
+    TemporalNodeScan {
+        /// Optional label filter
+        label: Option<String>,
+        /// Valid time for the reconstruction
+        valid_time: Timestamp,
+        /// Transaction time for the reconstruction
+        transaction_time: Timestamp,
+    },
+
+    /// Valid-time range label scan (`BETWEEN ... AND ...`).
+    ///
+    /// An **as-of-`transaction_time` snapshot across a valid-time range**: emits
+    /// every node version believed at `transaction_time` (its transaction
+    /// interval contains it -- the same predicate a point `AS OF` uses) whose
+    /// valid-time interval **overlaps** `[valid_from, valid_to)`, keeping only
+    /// those matching the optional `label`. Equals the union, over every valid
+    /// instant in the range, of `AS OF (v, transaction_time)`, deduplicated by
+    /// version -- so versions superseded in transaction time (later writes /
+    /// retractions) are excluded, consistent with `AS OF`, with no stale or
+    /// duplicate rows. Because each forward write supersedes the prior version
+    /// in transaction time, at most one version per node is believed at a fixed
+    /// `transaction_time`, so a node contributes at most one row. Produced by
+    /// the planner when a label scan carries a `valid_time_between` range
+    /// (Issue #552).
+    TemporalNodeRangeScan {
+        /// Optional label filter
+        label: Option<String>,
+        /// Inclusive start of the valid-time range
+        valid_from: Timestamp,
+        /// Exclusive end of the valid-time range
+        valid_to: Timestamp,
+        /// Transaction time the range is observed at
+        transaction_time: Timestamp,
+    },
+
     /// Find nodes similar to a specific node by extracting its embedding
     /// and performing k-NN search. This is a compound operation that:
     /// 1. Looks up the source node
@@ -456,7 +524,13 @@ pub enum PhysicalOp {
         direction: Direction,
         /// Optional edge label filter
         label: Option<String>,
-        /// Maximum depth
+        /// Minimum depth (inclusive). A target is bound iff
+        /// `min_depth <= shortestDepth <= depth` -- node-distinct /
+        /// shortest-path reachability, a deliberate v1 simplification of
+        /// openCypher's `*min..max` trail semantics (see `TraversalIterator`
+        /// docs; full trail semantics is a tracked follow-up).
+        min_depth: usize,
+        /// Maximum depth (inclusive).
         depth: usize,
         /// Optional temporal context (valid_time, transaction_time) for edge filtering.
         /// When present, only edges that existed at the specified point in time are traversed.
@@ -625,7 +699,9 @@ pub enum OptionalPhysicalStep {
         direction: Direction,
         /// Optional edge label filter.
         label: Option<String>,
-        /// Maximum depth.
+        /// Minimum depth (inclusive), mirroring [`PhysicalOp::IndexedTraversal`].
+        min_depth: usize,
+        /// Maximum depth (inclusive).
         depth: usize,
         /// Optional temporal context (valid_time, transaction_time) for edge
         /// filtering, mirroring [`PhysicalOp::IndexedTraversal`].
@@ -647,6 +723,8 @@ impl PhysicalOp {
             PhysicalOp::HnswSearch { .. } => "HnswSearch",
             PhysicalOp::TemporalNodeLookup { .. } => "TemporalNodeLookup",
             PhysicalOp::TemporalVectorSearch { .. } => "TemporalVectorSearch",
+            PhysicalOp::TemporalNodeScan { .. } => "TemporalNodeScan",
+            PhysicalOp::TemporalNodeRangeScan { .. } => "TemporalNodeRangeScan",
             PhysicalOp::SimilarToNode { .. } => "SimilarToNode",
             PhysicalOp::PropertyScan { .. } => "PropertyScan",
             PhysicalOp::IndexedTraversal { .. } => "IndexedTraversal",
@@ -680,6 +758,8 @@ impl PhysicalOp {
                 | PhysicalOp::HnswSearch { .. }
                 | PhysicalOp::TemporalNodeLookup { .. }
                 | PhysicalOp::TemporalVectorSearch { .. }
+                | PhysicalOp::TemporalNodeScan { .. }
+                | PhysicalOp::TemporalNodeRangeScan { .. }
                 | PhysicalOp::SimilarToNode { .. }
                 | PhysicalOp::PropertyScan { .. }
                 | PhysicalOp::Empty
@@ -696,6 +776,8 @@ impl PhysicalOp {
             | PhysicalOp::HnswSearch { .. }
             | PhysicalOp::TemporalNodeLookup { .. }
             | PhysicalOp::TemporalVectorSearch { .. }
+            | PhysicalOp::TemporalNodeScan { .. }
+            | PhysicalOp::TemporalNodeRangeScan { .. }
             | PhysicalOp::SimilarToNode { .. }
             | PhysicalOp::PropertyScan { .. }
             | PhysicalOp::Empty => 1,
@@ -790,6 +872,27 @@ impl PhysicalOp {
                     .unwrap_or_default();
                 format!("{prefix}{name} (k: {}, ts: {}{})", k, timestamp, prop_str)
             }
+            PhysicalOp::TemporalNodeScan {
+                label,
+                valid_time,
+                transaction_time,
+            } => {
+                format!(
+                    "{prefix}{name} (label: {:?}, vt: {}, tt: {})",
+                    label, valid_time, transaction_time
+                )
+            }
+            PhysicalOp::TemporalNodeRangeScan {
+                label,
+                valid_from,
+                valid_to,
+                transaction_time,
+            } => {
+                format!(
+                    "{prefix}{name} (label: {:?}, valid: [{}, {}), tt: {})",
+                    label, valid_from, valid_to, transaction_time
+                )
+            }
             PhysicalOp::SimilarToNode {
                 source_node,
                 property_key,
@@ -805,6 +908,7 @@ impl PhysicalOp {
                 input,
                 direction,
                 label,
+                min_depth,
                 depth,
                 temporal_context,
             } => {
@@ -814,9 +918,10 @@ impl PhysicalOp {
                     String::new()
                 };
                 format!(
-                    "{prefix}{name} (dir: {:?}, label: {:?}, depth: {}{})\n{}",
+                    "{prefix}{name} (dir: {:?}, label: {:?}, depth: {}..{}{})\n{}",
                     direction,
                     label,
+                    min_depth,
                     depth,
                     temporal_str,
                     input.explain_indent(indent + 1)
@@ -1032,6 +1137,7 @@ mod tests {
                 input: Box::new(PhysicalOp::Empty),
                 direction: Direction::Outgoing,
                 label: None,
+                min_depth: 1,
                 depth: 1,
                 temporal_context: None,
             }
@@ -1220,6 +1326,7 @@ mod tests {
                 input: Box::new(PhysicalOp::Empty),
                 direction: Direction::Outgoing,
                 label: None,
+                min_depth: 1,
                 depth: 1,
                 temporal_context: None,
             }
@@ -1504,6 +1611,7 @@ mod tests {
             input: Box::new(PhysicalOp::Empty),
             direction: Direction::Outgoing,
             label: Some("KNOWS".to_string()),
+            min_depth: 2,
             depth: 2,
             temporal_context: None,
         };
@@ -1512,7 +1620,7 @@ mod tests {
         assert!(explain.contains("IndexedTraversal"));
         assert!(explain.contains("Outgoing"));
         assert!(explain.contains("KNOWS"));
-        assert!(explain.contains("depth: 2"));
+        assert!(explain.contains("depth: 2..2"));
     }
 
     #[test]
@@ -1844,6 +1952,7 @@ mod tests {
                     }),
                     direction: Direction::Outgoing,
                     label: Some("KNOWS".to_string()),
+                    min_depth: 2,
                     depth: 2,
                     temporal_context: None,
                 }),
@@ -2118,6 +2227,7 @@ mod tests {
             steps: vec![OptionalPhysicalStep::Traverse {
                 direction: Direction::Outgoing,
                 label: Some("KNOWS".to_string()),
+                min_depth: 1,
                 depth: 1,
                 temporal_context: None,
             }],

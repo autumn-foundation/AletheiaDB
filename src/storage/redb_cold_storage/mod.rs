@@ -53,7 +53,8 @@
 
 use crate::core::error::{Result, StorageError};
 use crate::core::id::VersionId;
-use crate::core::version::{EdgeVersion, EntityVersion, NodeVersion};
+use crate::core::temporal::{BiTemporalInterval, TIMESTAMP_MAX, Timestamp};
+use crate::core::version::{EdgeVersion, EntityVersion, NodeVersion, TemporalVersion};
 use crate::storage::wal::LSN;
 use rayon::prelude::*;
 use redb::{ReadableDatabase, ReadableTable, ReadableTableMetadata, TableHandle};
@@ -77,6 +78,183 @@ const METADATA_TABLE: redb::TableDefinition<'static, &'static str, &'static [u8]
 
 /// Metadata keys stored in the metadata table.
 const FLUSHED_LSN_KEY: &str = "flushed_lsn";
+
+/// Metadata key for the persisted cold-tier bi-temporal extent (Issue #3389).
+const TEMPORAL_EXTENT_KEY: &str = "temporal_extent";
+
+/// Layout version tag for the persisted extent record. Records with an
+/// unrecognized version are treated as absent, so an older binary that cannot
+/// understand a newer layout simply falls back to hot-tier-only bounds rather
+/// than misreading bytes.
+const EXTENT_RECORD_VERSION: u8 = 1;
+
+/// Byte length of a serialized [`ColdTemporalExtentBounds`]:
+/// 1 version tag + 4 dimensions × (1 presence flag + 8 wallclock + 4 logical).
+const EXTENT_RECORD_LEN: usize = 1 + 4 * 13;
+
+/// Persisted bi-temporal extent bounds for the cold tier (Issue #3389).
+///
+/// Cold-migrated versions are removed from the hot-tier temporal indexes, so
+/// after a restart the write-time extent aggregate — which is rebuilt from the
+/// hot tier only — would silently omit them, wrongly narrowing the reported
+/// [`temporal_extent`](crate::AletheiaDB::temporal_extent). To close that gap
+/// the cold store maintains these bounds incrementally as versions are written
+/// to it, persisted durably in the `metadata` table;
+/// [`RedbColdStorage::get_temporal_extent_bounds`] returns them at startup so
+/// they can be merged back into the aggregate.
+///
+/// Bounds follow the exact convention of the in-memory extent aggregate:
+/// `earliest` is the minimum interval start; `latest` is the maximum of
+/// interval starts and *closed* interval ends — an open (`TIMESTAMP_MAX`) end
+/// contributes only its start, so the open-interval sentinel never leaks. All
+/// four fields are `None` on an empty cold tier and become `Some` together
+/// once any version is stored. Merging is monotonic (bounds only ever widen).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ColdTemporalExtentBounds {
+    /// Minimum valid-time interval start observed across cold versions.
+    pub valid_earliest: Option<Timestamp>,
+    /// Maximum finite valid-time coordinate observed across cold versions.
+    pub valid_latest: Option<Timestamp>,
+    /// Minimum transaction-time interval start observed across cold versions.
+    pub tx_earliest: Option<Timestamp>,
+    /// Maximum finite transaction-time coordinate observed across cold versions.
+    pub tx_latest: Option<Timestamp>,
+}
+
+impl ColdTemporalExtentBounds {
+    /// `true` when no bounds have been observed (all fields `None`).
+    fn is_empty(&self) -> bool {
+        self.valid_earliest.is_none()
+            && self.valid_latest.is_none()
+            && self.tx_earliest.is_none()
+            && self.tx_latest.is_none()
+    }
+
+    /// Fold one `[start, end)` range into a single dimension's bounds, applying
+    /// the extent convention: `earliest` = min start; `latest` = max of starts
+    /// and *closed* ends (an open `TIMESTAMP_MAX` end contributes only its
+    /// start, so the sentinel never leaks).
+    fn observe_range(
+        earliest: &mut Option<Timestamp>,
+        latest: &mut Option<Timestamp>,
+        start: Timestamp,
+        end: Timestamp,
+    ) {
+        *earliest = Some(earliest.map_or(start, |e| e.min(start)));
+        // TimeRange guarantees end >= start, so a closed end is itself the
+        // latest candidate; open ends fall back to the start.
+        let candidate = if end == TIMESTAMP_MAX { start } else { end };
+        *latest = Some(latest.map_or(candidate, |l| l.max(candidate)));
+    }
+
+    /// Fold one bi-temporal interval (both dimensions) into these bounds.
+    fn observe_interval(&mut self, temporal: &BiTemporalInterval) {
+        let valid = temporal.valid_time();
+        Self::observe_range(
+            &mut self.valid_earliest,
+            &mut self.valid_latest,
+            valid.start(),
+            valid.end(),
+        );
+        let tx = temporal.transaction_time();
+        Self::observe_range(
+            &mut self.tx_earliest,
+            &mut self.tx_latest,
+            tx.start(),
+            tx.end(),
+        );
+    }
+
+    /// Accumulate the bounds contributed by a batch of versions.
+    fn from_versions<V: TemporalVersion>(versions: &[V]) -> Self {
+        let mut bounds = Self::default();
+        for version in versions {
+            bounds.observe_interval(version.temporal());
+        }
+        bounds
+    }
+
+    /// Merge another set of bounds into these (monotonic widen-only union).
+    fn merge(&mut self, other: &Self) {
+        Self::merge_dim(
+            &mut self.valid_earliest,
+            &mut self.valid_latest,
+            other.valid_earliest,
+            other.valid_latest,
+        );
+        Self::merge_dim(
+            &mut self.tx_earliest,
+            &mut self.tx_latest,
+            other.tx_earliest,
+            other.tx_latest,
+        );
+    }
+
+    fn merge_dim(
+        earliest: &mut Option<Timestamp>,
+        latest: &mut Option<Timestamp>,
+        other_earliest: Option<Timestamp>,
+        other_latest: Option<Timestamp>,
+    ) {
+        if let Some(e) = other_earliest {
+            *earliest = Some(earliest.map_or(e, |cur| cur.min(e)));
+        }
+        if let Some(l) = other_latest {
+            *latest = Some(latest.map_or(l, |cur| cur.max(l)));
+        }
+    }
+
+    /// Serialize to the fixed-length metadata record layout.
+    fn to_bytes(self) -> [u8; EXTENT_RECORD_LEN] {
+        let mut buf = [0u8; EXTENT_RECORD_LEN];
+        buf[0] = EXTENT_RECORD_VERSION;
+        let mut offset = 1;
+        for field in [
+            self.valid_earliest,
+            self.valid_latest,
+            self.tx_earliest,
+            self.tx_latest,
+        ] {
+            if let Some(ts) = field {
+                buf[offset] = 1;
+                buf[offset + 1..offset + 9].copy_from_slice(&ts.wallclock().to_le_bytes());
+                buf[offset + 9..offset + 13].copy_from_slice(&ts.logical().to_le_bytes());
+            }
+            offset += 13;
+        }
+        buf
+    }
+
+    /// Deserialize from the metadata record layout. Returns `Ok(None)` for an
+    /// unrecognized version tag or wrong length (treated as absent), never an
+    /// error, so a forward-incompatible record can never panic startup.
+    fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() != EXTENT_RECORD_LEN || bytes[0] != EXTENT_RECORD_VERSION {
+            return None;
+        }
+        let read_field = |offset: usize| -> Option<Timestamp> {
+            if bytes[offset] == 0 {
+                return None;
+            }
+            let mut wall = [0u8; 8];
+            wall.copy_from_slice(&bytes[offset + 1..offset + 9]);
+            let mut logical = [0u8; 4];
+            logical.copy_from_slice(&bytes[offset + 9..offset + 13]);
+            // Values were validated when the source versions were created, so
+            // reconstructing them from trusted internal storage is sound.
+            Some(Timestamp::new_unchecked(
+                i64::from_le_bytes(wall),
+                u32::from_le_bytes(logical),
+            ))
+        };
+        Some(Self {
+            valid_earliest: read_field(1),
+            valid_latest: read_field(14),
+            tx_earliest: read_field(27),
+            tx_latest: read_field(40),
+        })
+    }
+}
 
 /// Batch size threshold where parallel pre-compression becomes worthwhile.
 const PARALLEL_COMPRESSION_THRESHOLD: usize = 1_024;
@@ -971,6 +1149,91 @@ impl RedbColdStorage {
         Ok(())
     }
 
+    /// Read the persisted cold-tier bi-temporal extent bounds (Issue #3389).
+    ///
+    /// Returns `Ok(None)` when the cold tier has never stored a version (no
+    /// extent record yet) or when the persisted record uses an unrecognized
+    /// layout version — both mean "no cold bounds to contribute", so callers
+    /// leave the hot-tier extent untouched. Otherwise returns the bounds
+    /// accumulated across every version ever written to this cold store,
+    /// following the same `earliest`/`latest` convention as the in-memory
+    /// extent aggregate (the open-interval sentinel never appears).
+    ///
+    /// This is an O(1) single metadata read; it is the startup counterpart to
+    /// the incremental bounds maintained on every cold write, letting
+    /// [`temporal_extent`](crate::AletheiaDB::temporal_extent) span history
+    /// migrated to cold before the current process started.
+    pub fn get_temporal_extent_bounds(&self) -> Result<Option<ColdTemporalExtentBounds>> {
+        let read_txn = self
+            .db
+            .begin_read()
+            .map_err(map_transaction_error("Failed to begin read transaction"))?;
+        let table = match read_txn.open_table(METADATA_TABLE) {
+            Ok(table) => table,
+            // A cold store that never persisted metadata has no such table.
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
+            Err(e) => {
+                return Err(StorageError::io_error(format!(
+                    "Failed to open metadata table: {}",
+                    e
+                ))
+                .into());
+            }
+        };
+
+        match table.get(TEMPORAL_EXTENT_KEY) {
+            Ok(Some(value)) => Ok(ColdTemporalExtentBounds::from_bytes(value.value())),
+            Ok(None) => Ok(None),
+            Err(e) => {
+                Err(StorageError::io_error(format!("Failed to read temporal_extent: {}", e)).into())
+            }
+        }
+    }
+
+    /// Merge a batch of freshly-written versions' bounds into the persisted
+    /// cold-tier extent, within the caller's write transaction (Issue #3389).
+    ///
+    /// A no-op when the delta is empty (nothing observed). The read-modify-write
+    /// happens on the same `metadata` table the caller already opens, so the
+    /// extent update is atomic with the version writes: either the versions and
+    /// their widened bounds both commit, or neither does.
+    fn merge_extent_into_metadata(
+        table: &mut redb::Table<'_, &'static str, &'static [u8]>,
+        delta: &ColdTemporalExtentBounds,
+    ) -> Result<()> {
+        if delta.is_empty() {
+            return Ok(());
+        }
+        let mut current = match table.get(TEMPORAL_EXTENT_KEY) {
+            Ok(Some(value)) => {
+                // An existing record with an UNRECOGNIZED version tag decodes to
+                // `None` and is clobbered here: `unwrap_or_default()` starts from
+                // empty bounds and rebuilds them widen-only from post-write
+                // deltas. That makes a downgrade across a future
+                // `EXTENT_RECORD_VERSION` bump lossy (bounds a newer binary
+                // persisted are dropped, then re-accumulated only from writes the
+                // older binary performs) — acceptable because the extent is
+                // advisory (under-reporting is safe) and only ever widens.
+                ColdTemporalExtentBounds::from_bytes(value.value()).unwrap_or_default()
+            }
+            Ok(None) => ColdTemporalExtentBounds::default(),
+            Err(e) => {
+                return Err(StorageError::io_error(format!(
+                    "Failed to read temporal_extent: {}",
+                    e
+                ))
+                .into());
+            }
+        };
+        current.merge(delta);
+        table
+            .insert(TEMPORAL_EXTENT_KEY, current.to_bytes().as_slice())
+            .map_err(|e| -> crate::core::error::Error {
+                StorageError::io_error(format!("Failed to write temporal_extent: {}", e)).into()
+            })?;
+        Ok(())
+    }
+
     // ========================================================================
     // Logic moved from ColdStorage trait impl
     // ========================================================================
@@ -1015,6 +1278,17 @@ impl RedbColdStorage {
             table
                 .insert(version.version_id().as_u64(), to_store.as_slice())
                 .map_err(map_storage_error("Failed to store version"))?;
+        }
+
+        // Widen the persisted cold-tier extent atomically with the version
+        // write, so it survives restarts (Issue #3389).
+        {
+            let mut delta = ColdTemporalExtentBounds::default();
+            delta.observe_interval(version.temporal());
+            let mut meta = write_txn
+                .open_table(METADATA_TABLE)
+                .map_err(map_table_error("Failed to open metadata table"))?;
+            Self::merge_extent_into_metadata(&mut meta, &delta)?;
         }
 
         write_txn
@@ -1522,6 +1796,7 @@ impl RedbColdStorage {
 
         let prepared = prepare_fn(versions)?;
         let version_count = prepared.entries.len() as u64;
+        let extent_delta = ColdTemporalExtentBounds::from_versions(versions);
 
         let write_txn = self
             .db
@@ -1529,6 +1804,15 @@ impl RedbColdStorage {
             .map_err(map_transaction_error("Failed to begin write transaction"))?;
 
         Self::write_prepared_batch_to_table(&write_txn, table_def, &prepared)?;
+
+        // Widen the persisted cold-tier extent atomically with the batch so it
+        // survives restarts (Issue #3389).
+        {
+            let mut meta = write_txn
+                .open_table(METADATA_TABLE)
+                .map_err(map_table_error("Failed to open metadata table"))?;
+            Self::merge_extent_into_metadata(&mut meta, &extent_delta)?;
+        }
 
         write_txn
             .commit()
@@ -1722,12 +2006,17 @@ impl RedbColdStorage {
         // Store edge versions
         Self::write_prepared_batch_to_table(&write_txn, EDGE_VERSIONS_TABLE, &prepared_edges)?;
 
-        // Update flushed_lsn atomically with the batch
+        // Update flushed_lsn and widen the persisted cold-tier extent
+        // atomically with the batch (Issue #3389).
         {
             let mut table = write_txn
                 .open_table(METADATA_TABLE)
                 .map_err(map_table_error("Failed to open metadata table"))?;
             Self::set_flushed_lsn_internal(&mut table, lsn)?;
+
+            let mut extent_delta = ColdTemporalExtentBounds::from_versions(nodes);
+            extent_delta.merge(&ColdTemporalExtentBounds::from_versions(edges));
+            Self::merge_extent_into_metadata(&mut table, &extent_delta)?;
         }
 
         // Commit atomically
