@@ -45,6 +45,18 @@ tracy-client = { version = "0.18", optional = true, default-features = false }
 tracing = { version = "0.1", optional = true }
 metrics = { version = "0.24", optional = true }
 
+# OpenTelemetry distributed tracing (Issue #3376), optional via the `otel`
+# feature. The OTLP exporter uses the HTTP/protobuf transport over the
+# already-present `reqwest` client, so no tonic/protoc build dependency is
+# introduced. `tracing-opentelemetry` bridges the crate's existing `tracing`
+# spans (ADR 0056) into OpenTelemetry; `tracing-subscriber` provides the
+# registry the OTel layer installs into.
+opentelemetry = { version = "0.30", optional = true }
+opentelemetry_sdk = { version = "0.30", optional = true, features = ["rt-tokio"] }
+opentelemetry-otlp = { version = "0.30", optional = true, default-features = false, features = ["trace", "http-proto", "reqwest-client"] }
+tracing-opentelemetry = { version = "0.31", optional = true }
+tracing-subscriber = { version = "0.3", optional = true, features = ["registry", "env-filter", "fmt", "std"] }
+
 # MCP server support (optional)
 # Note: rmcp re-exports schemars, so we don't need a separate dependency
 rmcp = { version = "1.7", features = ["server", "transport-io"], optional = true }
@@ -180,6 +192,21 @@ tracy = ["tracy-client/enable"]
 # Observability features
 observability = ["dep:tracing"]
 metrics-rs = ["observability", "dep:metrics"]
+
+# OpenTelemetry distributed tracing + OTLP export (Issue #3376).
+# Composes with `observability` (reuses its span vocabulary / ADR 0056
+# contract) and adds an OTLP exporter, sampler, W3C context propagation, and
+# a process-wide subscriber installer. Zero cost when absent: the whole
+# `observability::otel` module and every call site are `#[cfg]`-compiled out.
+otel = [
+    "observability",
+    "dep:opentelemetry",
+    "dep:opentelemetry_sdk",
+    "dep:opentelemetry-otlp",
+    "dep:tracing-opentelemetry",
+    "dep:tracing-subscriber",
+    "dep:tokio",
+]
 
 # Default features
 default = ["config-toml", "audit-export"]
@@ -334,6 +361,13 @@ name = "performance_targets"
 harness = false
 path = "benches/performance_targets.rs"
 required-features = []
+
+# OpenTelemetry tracing overhead gate (Issue #3376): disabled vs enabled.
+[[bench]]
+name = "otel_overhead"
+harness = false
+path = "benches/otel_overhead.rs"
+required-features = ["otel"]
 
 # Storage layer - raw storage primitives and fast path
 [[bench]]
