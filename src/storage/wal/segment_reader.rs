@@ -196,6 +196,28 @@ fn payload_version(version: u8) -> u8 {
     }
 }
 
+/// The newest *plaintext* WAL entry payload version — the exact shape that
+/// `serialization::serialize_operation_into` writes and that
+/// `flush_coordinator` stamps on new plaintext segments
+/// (currently [`WAL_VERSION_DELETE_VERSION_ID`], v9).
+///
+/// Derived from [`WAL_VERSION_MAX`] (the newest *encrypted* container version,
+/// v10) via [`payload_version`], so it can NEVER lag a format bump: any change
+/// that raises `WAL_VERSION_MAX` and extends `payload_version`'s mapping is
+/// tracked automatically. Round-trip harnesses that serialize a fresh entry and
+/// re-parse it (e.g. the `wal_entry_parsing` fuzz target via
+/// `crate::fuzzing::wal::parse_current_entry`) MUST parse at this version:
+/// parsing at a stale version skips the framing (#3413, v7) and delete/retract
+/// `version_id` (#3406, v9) bytes the serializer wrote, misaligns the buffer,
+/// and fails the entry checksum.
+///
+/// History of the newest plaintext version: #3224→3, #3421→5, #3413→7,
+/// #3406→9. Bump on every WAL plaintext format increase.
+#[inline]
+pub(crate) fn newest_plaintext_wal_version() -> u8 {
+    payload_version(WAL_VERSION_MAX)
+}
+
 /// Size of the WAL segment header (magic + version).
 pub(crate) const WAL_HEADER_SIZE: usize = 5;
 
