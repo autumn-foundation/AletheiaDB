@@ -117,12 +117,15 @@ mod tests {
     /// #3224/#3350 provenance skew.
     #[test]
     fn every_op_roundtrips_at_serialize_version() {
+        // Capture a single timestamp so every op's temporal field is
+        // deterministic within this test run (avoids per-op `time::now()`).
+        let now = time::now();
         let ops = vec![
             WalOperation::CreateNode {
                 node_id: NodeId::new(1).unwrap(),
                 label: InternedString::from_raw(0),
                 properties: PropertyMap::new(),
-                valid_from: time::now(),
+                valid_from: now,
                 provenance: None,
             },
             WalOperation::CreateEdge {
@@ -131,7 +134,7 @@ mod tests {
                 target: NodeId::new(3).unwrap(),
                 label: InternedString::from_raw(0),
                 properties: PropertyMap::new(),
-                valid_from: time::now(),
+                valid_from: now,
                 provenance: None,
             },
             WalOperation::UpdateNode {
@@ -139,7 +142,7 @@ mod tests {
                 version_id: VersionId::new(4).unwrap(),
                 label: InternedString::from_raw(0),
                 properties: PropertyMap::new(),
-                valid_from: time::now(),
+                valid_from: now,
                 provenance: None,
             },
             WalOperation::UpdateEdge {
@@ -147,28 +150,28 @@ mod tests {
                 version_id: VersionId::new(5).unwrap(),
                 label: InternedString::from_raw(0),
                 properties: PropertyMap::new(),
-                valid_from: time::now(),
+                valid_from: now,
                 provenance: None,
             },
             // The version-gated ops (#3406) — the crux of #3467.
             WalOperation::DeleteNode {
                 node_id: NodeId::new(1).unwrap(),
-                valid_from: time::now(),
+                valid_from: now,
                 version_id: Some(VersionId::new(6).unwrap()),
             },
             WalOperation::DeleteEdge {
                 edge_id: EdgeId::new(2).unwrap(),
-                valid_from: time::now(),
+                valid_from: now,
                 version_id: Some(VersionId::new(7).unwrap()),
             },
             WalOperation::RetractNode {
                 node_id: NodeId::new(1).unwrap(),
-                valid_to: time::now(),
+                valid_to: now,
                 version_id: Some(VersionId::new(8).unwrap()),
             },
             WalOperation::RetractEdge {
                 edge_id: EdgeId::new(2).unwrap(),
-                valid_to: time::now(),
+                valid_to: now,
                 version_id: Some(VersionId::new(9).unwrap()),
             },
             // Transaction-framing markers (#3413).
@@ -176,7 +179,7 @@ mod tests {
             WalOperation::CommitTx {
                 tx_id: 42,
                 entry_count: 3,
-                commit_timestamp: time::now(),
+                commit_timestamp: now,
             },
         ];
 
