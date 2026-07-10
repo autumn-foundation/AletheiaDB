@@ -455,8 +455,11 @@ pub enum PhysicalOp {
         direction: Direction,
         /// Optional edge label filter
         label: Option<String>,
-        /// Minimum depth (inclusive). A node bound at depth `d` is emitted only
-        /// when `min_depth <= d <= depth` (openCypher `*min..max` semantics).
+        /// Minimum depth (inclusive). A target is bound iff
+        /// `min_depth <= shortestDepth <= depth` -- node-distinct /
+        /// shortest-path reachability, a deliberate v1 simplification of
+        /// openCypher's `*min..max` trail semantics (see `TraversalIterator`
+        /// docs; full trail semantics is a tracked follow-up).
         min_depth: usize,
         /// Maximum depth (inclusive).
         depth: usize,
@@ -1504,7 +1507,7 @@ mod tests {
         assert!(explain.contains("IndexedTraversal"));
         assert!(explain.contains("Outgoing"));
         assert!(explain.contains("KNOWS"));
-        assert!(explain.contains("depth: 2"));
+        assert!(explain.contains("depth: 2..2"));
     }
 
     #[test]

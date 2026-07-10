@@ -773,6 +773,23 @@ impl ResultIterator for TemporalNodeScanIterator {
 
 /// Iterator for graph traversal using BFS.
 ///
+/// # Variable-length depth-range semantics (`*min..max`)
+///
+/// For a variable-length pattern this iterator binds each **distinct** reachable
+/// target node **once**, at its **shortest** hop-distance from the anchor, and
+/// emits it iff `min <= shortestDepth <= max`. Because the per-input `visited`
+/// set is populated when a node is first enqueued (its shortest BFS depth), a
+/// node whose shortest path is shorter than `min` is marked visited early and is
+/// **not** re-emitted at a longer, in-range depth; likewise an anchor reachable
+/// again only via an in-range cycle is not re-bound.
+///
+/// This is **node-distinct / shortest-path reachability**, a deliberate v1
+/// simplification of openCypher's trail (path-enumeration) semantics. Under full
+/// trail semantics `MATCH (a)-[*2..2]->(b)` over `a->x, a->y, x->y` would also
+/// bind `y` via `a->x->y`; here `y`'s shortest depth is 1, so it is excluded.
+/// Full trail semantics is a tracked follow-up (it requires per-path state and
+/// carries cross-lane perf/regression risk in this shared engine).
+///
 /// # Deduplication Semantics
 ///
 /// The `visited` set is cleared for each new input node. This means:
@@ -794,7 +811,9 @@ pub struct TraversalIterator {
     input: Box<dyn ResultIterator>,
     direction: Direction,
     label: Option<String>,
-    /// Minimum depth (inclusive) at which a reached node is emitted.
+    /// Minimum depth (inclusive) at which a reached node is emitted. A node is
+    /// bound iff `min_depth <= shortestDepth <= depth` (node-distinct /
+    /// shortest-path reachability; see the struct-level docs).
     min_depth: usize,
     /// Maximum depth (inclusive); BFS expansion stops beyond this depth.
     depth: usize,
@@ -1010,9 +1029,13 @@ impl ResultIterator for TraversalIterator {
                 if current_depth < self.depth {
                     let neighbors = self.get_neighbors(node_id);
                     for (target, edge_id) in neighbors {
-                        // Per-input-node isomorphism: a node reachable at
-                        // multiple depths is enqueued (and thus emitted) once,
-                        // which also makes cyclic graphs terminate.
+                        // Node-distinct / shortest-path reachability: a node is
+                        // enqueued (and thus later emitted) once, at its shortest
+                        // BFS depth. This also makes cyclic graphs terminate. It
+                        // is a v1 simplification of openCypher trail semantics --
+                        // a target whose shortest path is below `min_depth` is
+                        // marked visited here and never re-emitted deeper (see the
+                        // struct-level docs).
                         if self.visited.insert(target) {
                             // ⚡ Bolt Optimization: Pre-allocate capacity for new path to avoid reallocations.
                             // We are adding exactly 2 elements (edge and node) to the current path length.
