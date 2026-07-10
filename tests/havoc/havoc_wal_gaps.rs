@@ -2,8 +2,10 @@ use aletheiadb::core::id::NodeId;
 use aletheiadb::core::interning::GLOBAL_INTERNER;
 use aletheiadb::core::property::PropertyMap;
 use aletheiadb::core::temporal::time;
+use aletheiadb::storage::wal::DurabilityMode;
 use aletheiadb::storage::wal::concurrent::{ConcurrentWal, ConcurrentWalConfig};
-use aletheiadb::storage::wal::entry::{MAX_WAL_ENTRY_SIZE, WalOperation};
+use aletheiadb::storage::wal::concurrent_system::{ConcurrentWalSystem, ConcurrentWalSystemConfig};
+use aletheiadb::storage::wal::entry::{LSN, MAX_WAL_ENTRY_SIZE, WalOperation};
 use tempfile::tempdir;
 
 fn test_operation(id: u64) -> WalOperation {
@@ -55,6 +57,22 @@ fn huge_operation(id: u64) -> WalOperation {
     }
 }
 
+// ---------------------------------------------------------------------------
+// DELIBERATE BEHAVIOR CHANGE (Issue #3414): serialize-first batch append.
+//
+// This test USED TO PIN the buggy partial-append behavior: a batch whose
+// middle entry failed to serialize left the entries appended *before* the
+// failure sitting in the ring buffer, where a later flush swept them to disk
+// and recovery replayed them -- a batch the caller was told FAILED
+// resurrected as a prefix. The old assertions literally required LSN 1 to be
+// present and panicked ("Boring") if the sequence was contiguous.
+//
+// #3414 makes `append_batch` serialize EVERY entry up front (the fallible
+// phase) and only begins appending once all entries have serialized
+// successfully. A serialization failure therefore leaves ZERO WAL residue.
+// This test is flipped ON PURPOSE to pin that new zero-residue contract: no
+// entry of the failed batch may appear in the ring buffer.
+// ---------------------------------------------------------------------------
 #[test]
 fn test_havoc_wal_batch_gaps() {
     let dir = tempdir().unwrap();
@@ -64,7 +82,7 @@ fn test_havoc_wal_batch_gaps() {
     // 1. Create a batch: [Valid, Huge (Invalid), Valid]
     let ops = vec![test_operation(1), huge_operation(2), test_operation(3)];
 
-    // 2. Append batch - should fail
+    // 2. Append batch - should fail (oversized middle entry)
     let result = wal.append_batch(ops);
     assert!(
         result.is_err(),
@@ -87,48 +105,107 @@ fn test_havoc_wal_batch_gaps() {
 
     println!("Drained LSNs: {:?}", lsns);
 
-    // 5. Verify the wreckage: Gaps in LSN sequence
-    // Expected: LSN 1 (from first op in batch) MIGHT be there?
-    // No, `append_batch` loop:
-    // 1. Allocates 3 LSNs (current, current+1, current+2).
-    // 2. Loop idx=0: Serialize (ok), Append (ok). LSN 1 written.
-    // 3. Loop idx=1: Serialize (fail), Return Err.
-    // 4. Loop idx=2: Never executed.
-
-    // So LSN 1 should be written.
-    // LSN 2 was allocated but serialization failed.
-    // LSN 3 was allocated but loop aborted.
-    // Next LSN allocated by `append_async` should be 4.
-
-    // So we expect LSNs: [1, 4]
-    // Gap: 2, 3 are missing.
-
+    // 5. Verify the NEW contract: the failed batch left ZERO residue.
+    //
+    // `append_batch` reserves the LSN range (1, 2, 3) atomically, then
+    // serializes all three entries BEFORE appending any. Serializing the
+    // oversized middle entry fails, so the whole batch is abandoned without a
+    // single append. The reserved-but-unwritten LSN range is benign -- the
+    // single-op `append_async` path already produces the identical hole on a
+    // serialize failure, and recovery seeds the allocator from the max
+    // *written* LSN. `append_async(op4)` therefore lands at LSN 4.
     assert!(
-        lsns.contains(&1),
-        "LSN 1 should be present (written before failure)"
+        !lsns.contains(&1),
+        "LSN 1 must be ABSENT: no prefix of the failed batch may be appended (was present pre-#3414)"
     );
     assert!(
         !lsns.contains(&2),
-        "LSN 2 should be missing (failed serialization)"
+        "LSN 2 must be absent (failed serialization)"
     );
-    assert!(!lsns.contains(&3), "LSN 3 should be missing (aborted loop)");
+    assert!(!lsns.contains(&3), "LSN 3 must be absent (batch abandoned)");
     assert!(
         lsns.contains(&lsn_after.0),
-        "LSN after batch should be present"
+        "the post-failure valid append must be present"
     );
 
-    // Prove non-contiguity
-    let mut contiguous = true;
-    for i in 0..lsns.len() - 1 {
-        if lsns[i + 1] != lsns[i] + 1 {
-            contiguous = false;
-            break;
-        }
+    // The only drained entry is the post-failure op -- the batch is invisible.
+    assert_eq!(
+        lsns.len(),
+        1,
+        "exactly one entry (the post-failure op) should be present; the failed batch left zero residue, got {:?}",
+        lsns
+    );
+
+    println!("✅ ZERO-RESIDUE: failed batch left no entries in the ring buffer.");
+}
+
+// ---------------------------------------------------------------------------
+// Real on-disk replay regression test (Issue #3414).
+//
+// This is the crash-recovery-faithful version of the bug: it flushes to real
+// on-disk WAL segments and then reads them back through the same segment
+// reader that crash recovery uses (`read_from`). On the buggy (pre-#3414)
+// code the prefix entry (node 1) that the failed batch orphaned in the ring
+// buffer gets swept to disk by the *next* unrelated flush and reappears on
+// replay. After #3414 the failed batch never appends anything, so replay sees
+// only writes that actually succeeded.
+// ---------------------------------------------------------------------------
+#[test]
+fn test_havoc_wal_batch_no_residue_on_replay() {
+    let dir = tempdir().unwrap();
+    let wal_path = dir.path().join("wal");
+    std::fs::create_dir_all(&wal_path).unwrap();
+
+    // Synchronous durability: a successful write is flushed to on-disk
+    // segments immediately, so `read_from` observes exactly what crash
+    // recovery would replay.
+    let config =
+        ConcurrentWalSystemConfig::new(&wal_path).with_durability_mode(DurabilityMode::Synchronous);
+    let system = ConcurrentWalSystem::new(config).unwrap();
+
+    // Batch: [Valid(1), Huge(2) - invalid, Valid(3)]
+    let ops = vec![test_operation(1), huge_operation(2), test_operation(3)];
+    let result = system.append_batch(ops);
+    assert!(
+        result.is_err(),
+        "batch containing an oversized entry must fail"
+    );
+
+    // A later, genuinely valid write that MUST persist and replay. On the
+    // buggy code this flush is what sweeps the orphaned prefix (node 1) to
+    // disk.
+    let lsn_after = system.append_sync(test_operation(4)).unwrap();
+    println!("post-failure durable write at LSN {:?}", lsn_after);
+
+    // Force REAL replay: read entries back from the on-disk WAL segments,
+    // exactly as crash recovery does (no index snapshot exists at this layer
+    // to short-circuit it).
+    let replayed = system.read_from(LSN(1)).unwrap();
+    let replayed_ids: Vec<u64> = replayed
+        .iter()
+        .filter_map(|e| match &e.operation {
+            WalOperation::CreateNode { node_id, .. } => Some(node_id.as_u64()),
+            _ => None,
+        })
+        .collect();
+    println!("replayed node ids: {:?}", replayed_ids);
+
+    // No entry of the FAILED batch may survive replay.
+    for failed_id in [1u64, 2, 3] {
+        assert!(
+            !replayed_ids.contains(&failed_id),
+            "node {} from the FAILED batch must NOT be replayed (found {:?})",
+            failed_id,
+            replayed_ids
+        );
     }
 
-    if !contiguous {
-        println!("👺 HAVOC SUCCESS: Found gaps in LSN sequence! System is fragile.");
-    } else {
-        panic!("Boring. LSNs are contiguous. Failed to break it.");
-    }
+    // The post-failure write is durable and replayed.
+    assert!(
+        replayed_ids.contains(&4),
+        "the post-failure durable write (node 4) must be replayed, found {:?}",
+        replayed_ids
+    );
+
+    println!("✅ ZERO-RESIDUE ON REPLAY: failed batch left no on-disk entries.");
 }

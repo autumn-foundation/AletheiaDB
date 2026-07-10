@@ -414,16 +414,33 @@ impl ConcurrentWal {
         // Allocate all LSNs in a single atomic operation
         let (first_lsn, _last_lsn) = self.lsn_allocator.allocate_batch(count);
 
-        // Pre-allocate result vector
-        let mut lsns = Vec::with_capacity(operations.len());
-
-        // Serialize and append each operation individually since each entry has its own LSN.
-        // The main optimization is the single batch LSN allocation above (vs N atomic operations).
+        // Phase 1 (fallible): serialize EVERY entry up front. Only once all
+        // entries have serialized successfully do we begin appending. If any
+        // entry fails to serialize (e.g. an oversized entry rejected by the
+        // MAX_WAL_ENTRY_SIZE guard), we return the error WITHOUT having
+        // appended anything, so the failed batch leaves ZERO WAL residue -- no
+        // prefix is written, flushed, or replayed on recovery (Issue #3414).
+        //
+        // The reserved LSN range is consumed but unwritten on failure, which
+        // is benign: recovery seeds the allocator from the max *written* LSN,
+        // and the single-op `append_async` path already produces the identical
+        // hole on a serialize failure. Rolling back the shared atomic
+        // allocator would be unsound under concurrent batches, so we reserve
+        // up front and simply bail without appending.
+        let mut serialized: Vec<(LSN, Vec<u8>)> = Vec::with_capacity(count as usize);
         for (idx, operation) in operations.into_iter().enumerate() {
             let lsn = LSN(first_lsn.0 + idx as u64);
-            lsns.push(lsn);
-
             let data = self.serialize_entry(lsn, &operation)?;
+            serialized.push((lsn, data));
+        }
+
+        // Phase 2 (append): every entry serialized successfully, so append
+        // them all. An append failure here (buffer closed) is covered by the
+        // WAL transaction-framing work (Issue #3413) and is out of scope for
+        // this contained serialize-first fix.
+        let mut lsns = Vec::with_capacity(serialized.len());
+        for (lsn, data) in serialized {
+            lsns.push(lsn);
             let stripe = self.get_stripe();
 
             match stripe.append_blocking(lsn, data) {
@@ -471,17 +488,26 @@ impl ConcurrentWal {
         // Allocate all LSNs in a single atomic operation
         let (first_lsn, _last_lsn) = self.lsn_allocator.allocate_batch(count);
 
-        // Pre-allocate result vectors
-        let mut lsns = Vec::with_capacity(operations.len());
-        let mut handles = Vec::with_capacity(operations.len());
-
-        // Serialize and append each operation individually since each entry has its own LSN.
-        // The main optimization is the single batch LSN allocation above (vs N atomic operations).
+        // Phase 1 (fallible): serialize EVERY entry up front, exactly as in
+        // `append_batch`. A serialization failure (e.g. an oversized entry)
+        // returns the error WITHOUT appending anything, so the failed batch
+        // leaves ZERO WAL residue -- nothing is written, flushed, or replayed
+        // (Issue #3414). The reserved-but-unwritten LSN range is benign (see
+        // `append_batch` for the rationale).
+        let mut serialized: Vec<(LSN, Vec<u8>)> = Vec::with_capacity(count as usize);
         for (idx, operation) in operations.into_iter().enumerate() {
             let lsn = LSN(first_lsn.0 + idx as u64);
-            lsns.push(lsn);
-
             let data = self.serialize_entry(lsn, &operation)?;
+            serialized.push((lsn, data));
+        }
+
+        // Phase 2 (append): every entry serialized successfully, so append
+        // them all. An append failure here (buffer closed) is covered by the
+        // WAL transaction-framing work (Issue #3413) and is out of scope here.
+        let mut lsns = Vec::with_capacity(serialized.len());
+        let mut handles = Vec::with_capacity(serialized.len());
+        for (lsn, data) in serialized {
+            lsns.push(lsn);
             let stripe = self.get_stripe();
 
             match stripe.append_sync_blocking(lsn, data) {
