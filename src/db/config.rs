@@ -420,7 +420,11 @@ impl AletheiaDB {
                     wal_cipher.as_ref(),
                 )?
             } else {
-                startup_wal_entries.iter().map(|e| e.lsn).max()
+                // `read_from` returns entries globally sorted by LSN
+                // (segment_reader: `entries.sort_by_key(|e| e.lsn)`), so the
+                // last element carries the max LSN in O(1). Empty WAL -> `None`
+                // -> the seed is a no-op.
+                startup_wal_entries.last().map(|e| e.lsn)
             };
             seed_lsn_allocator_from_max(&wal, seed_max_lsn);
 
@@ -575,15 +579,21 @@ impl AletheiaDB {
 
                 // Issue #3429: feed the differential replay the suffix of the
                 // single startup read (entries with LSN >= start_lsn), rather
-                // than re-reading the segment directory a third time. `read_from`
-                // returns entries globally sorted by LSN, so this filtered
-                // suffix is byte-identical to what `read_from(start_lsn)` would
-                // have produced (same contiguous, LSN-ordered tail the framing
-                // resolver expects).
-                let replay_entries: Vec<_> = std::mem::take(&mut startup_wal_entries)
-                    .into_iter()
-                    .filter(|entry| entry.lsn >= start_lsn)
-                    .collect();
+                // than re-reading the segment directory a third time.
+                //
+                // CORRECTNESS: `read_from` returns entries globally sorted by
+                // LSN (segment_reader: `entries.sort_by_key(|e| e.lsn)`), so
+                // `partition_point` finds the first index with LSN >= start_lsn
+                // and `drain(..idx)` discards exactly the entries below it — a
+                // contiguous, in-place split with no extra allocation. This is
+                // byte-identical to what `read_from(start_lsn)` would have
+                // produced (the same LSN-ordered tail the framing resolver
+                // expects). If the sort is ever removed upstream, this
+                // partition (and the O(1) seed above) breaks — keep them
+                // together.
+                let split = startup_wal_entries.partition_point(|entry| entry.lsn < start_lsn);
+                startup_wal_entries.drain(..split);
+                let replay_entries = std::mem::take(&mut startup_wal_entries);
 
                 let mut historical_guard = db.historical.write();
                 let (_final_lsn, max_node_id, max_edge_id, next_version_id) =
