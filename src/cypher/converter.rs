@@ -33,7 +33,7 @@
 //! # }
 //! ```
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use super::ast::*;
@@ -109,6 +109,24 @@ impl CypherParameterValue {
             )),
         }
     }
+}
+
+/// The projection shape of a `WITH` clause, as resolved for the positional
+/// pipeline (Issue #556). The pipeline carries a single entity per row, so a
+/// `WITH` either carries everything (`*`) or carries the current binding under
+/// its original or an aliased name.
+enum WithProjection {
+    /// `WITH *` -- carry every visible variable forward unchanged.
+    All,
+    /// `WITH <source>` or `WITH <source> AS <output>` -- carry the current
+    /// positional binding forward, renaming it to `output`.
+    Single {
+        /// The source variable being projected (must be the current binding).
+        source: String,
+        /// The output name it is bound to downstream (equal to `source` when
+        /// no `AS` alias is given).
+        output: String,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -196,8 +214,21 @@ impl CypherConverter {
                 // last node of each OPTIONAL MATCH pattern (or a WITH
                 // projection). Subsequent OPTIONAL MATCH clauses must
                 // continue from this binding (see convert_optional_pattern).
-                let mut current_var: Option<&str> =
-                    pattern.last().and_then(Self::last_node_variable);
+                let mut current_var: Option<String> = pattern
+                    .last()
+                    .and_then(Self::last_node_variable)
+                    .map(str::to_string);
+
+                // Variable scoping (Issue #556). `visible` holds the names in
+                // scope at the current point; `dropped` accumulates names a
+                // `WITH` has projected away. A downstream reference to a dropped
+                // name is a scope violation (rejected, never answered against a
+                // stale binding). The base pattern's variables seed the scope.
+                let mut visible: HashSet<String> = HashSet::new();
+                for pat in &pattern {
+                    Self::collect_pattern_variables(pat, &mut visible);
+                }
+                let mut dropped: HashSet<String> = HashSet::new();
 
                 // 2. Convert temporal clause → TemporalContext + ops
                 let temporal_context = if let Some(ref temporal_clause) = temporal {
@@ -206,21 +237,22 @@ impl CypherConverter {
                     None
                 };
 
-                // 3. Interleave WITH clauses (→ Filter ops for WITH WHERE) and
-                //    OPTIONAL MATCH clauses (→ Optional ops) in source order.
+                // 3. Interleave WITH clauses (→ projection + Distinct/Sort/Skip/
+                //    Limit/Filter ops) and OPTIONAL MATCH clauses (→ Optional
+                //    ops) in source order.
                 let mut with_idx = 0;
                 for opt_match in &optional_matches {
                     while with_idx < opt_match.preceding_withs && with_idx < with_clauses.len() {
-                        self.convert_with_clause(&with_clauses[with_idx], &mut ops)?;
-                        // A `WITH v` projection makes `v` the current binding
-                        // for the clauses that follow. Other projection shapes
-                        // are not lowered and leave the positional row (and
-                        // therefore the current binding) unchanged.
-                        if let [CypherReturnItem::Variable(name)] =
-                            with_clauses[with_idx].items.as_slice()
-                        {
-                            current_var = Some(name.as_str());
-                        }
+                        let later_ordering =
+                            Self::has_later_ordering(&with_clauses, with_idx, &return_clause);
+                        self.convert_with_clause(
+                            &with_clauses[with_idx],
+                            &mut ops,
+                            &mut visible,
+                            &mut dropped,
+                            &mut current_var,
+                            later_ordering,
+                        )?;
                         with_idx += 1;
                     }
                     // Without variable-binding analysis, comma-separated
@@ -238,22 +270,66 @@ impl CypherConverter {
                     }
                     let mut sub_ops = Vec::new();
                     for pat in &opt_match.pattern {
-                        self.convert_optional_pattern(pat, &mut sub_ops, current_var)?;
+                        self.convert_optional_pattern(pat, &mut sub_ops, current_var.as_deref())?;
+                        // The optional pattern's variables enter scope.
+                        Self::collect_pattern_variables(pat, &mut visible);
+                        for element in &pat.elements {
+                            if let CypherPatternElement::Node(node) = element
+                                && let Some(v) = &node.variable
+                            {
+                                dropped.remove(v);
+                            }
+                            if let CypherPatternElement::Relationship(rel) = element
+                                && let Some(v) = &rel.variable
+                            {
+                                dropped.remove(v);
+                            }
+                        }
                     }
                     // The next clause continues from this pattern's last node.
-                    current_var = opt_match.pattern.last().and_then(Self::last_node_variable);
+                    current_var = opt_match
+                        .pattern
+                        .last()
+                        .and_then(Self::last_node_variable)
+                        .map(str::to_string);
                     if let Some(ref where_expr) = opt_match.where_clause {
                         // Per openCypher, the clause's WHERE is part of the
                         // optional pattern: it must run before the
                         // matched/unmatched decision, hence inside the op.
+                        self.reject_dropped_refs(where_expr, &dropped, "OPTIONAL MATCH ... WHERE")?;
                         let predicate = self.convert_expr_to_predicate(where_expr)?;
                         sub_ops.push(QueryOp::Filter(predicate));
                     }
                     ops.push(QueryOp::Optional { ops: sub_ops });
                 }
                 while with_idx < with_clauses.len() {
-                    self.convert_with_clause(&with_clauses[with_idx], &mut ops)?;
+                    let later_ordering =
+                        Self::has_later_ordering(&with_clauses, with_idx, &return_clause);
+                    self.convert_with_clause(
+                        &with_clauses[with_idx],
+                        &mut ops,
+                        &mut visible,
+                        &mut dropped,
+                        &mut current_var,
+                        later_ordering,
+                    )?;
                     with_idx += 1;
+                }
+
+                // Enforce scoping on the final RETURN: a RETURN item (or its
+                // ORDER BY) that references a variable a `WITH` dropped is a
+                // scope violation. (The positional pipeline returns the current
+                // entity regardless of which in-scope variable is named -- a
+                // pre-existing limitation -- but a reference to an
+                // out-of-scope, dropped variable is unambiguously wrong and is
+                // rejected here rather than answered against the wrong entity.)
+                for item in &return_clause.items {
+                    if let CypherReturnItem::Expression { expr, .. } = item {
+                        self.reject_dropped_refs(expr, &dropped, "RETURN")?;
+                    }
+                }
+                for order_item in &return_clause.order_by {
+                    self.reject_dropped_refs(&order_item.expr, &dropped, "RETURN ... ORDER BY")?;
                 }
 
                 // 4. Aggregation (openCypher implicit grouping). If any RETURN
@@ -474,16 +550,280 @@ impl CypherConverter {
             .flatten()
     }
 
-    /// Convert a `WITH` clause into query operations (currently only its
-    /// `WHERE` sub-clause produces a `Filter`; projections are not lowered).
+    /// Convert a `WITH` clause into query operations, threading variable scope
+    /// through the pipeline (Issue #556).
+    ///
+    /// openCypher evaluates a `WITH` body as: project the items, apply
+    /// `DISTINCT`, then `ORDER BY`, `SKIP`, `LIMIT`, and finally the trailing
+    /// `WHERE` (which filters the *projected* rows). This method emits that
+    /// pipeline as ops and updates `visible` / `dropped` / `current_var`.
+    ///
+    /// # Projection boundary (positional pipeline)
+    ///
+    /// AletheiaDB's query pipeline carries exactly one entity per row, so a
+    /// `WITH` can only *carry forward* the current positional binding: a bare
+    /// or aliased reference to `current_var`, or `*` (carry everything). Any
+    /// other projection -- multiple items, a property or computed expression,
+    /// an aggregate, or a re-projection of a non-current variable -- has no
+    /// faithful representation and is **rejected** with a structured
+    /// [`CypherError::UnsupportedFeature`] rather than answered against the
+    /// wrong entity.
     fn convert_with_clause(
         &self,
         with: &CypherWith,
         ops: &mut Vec<QueryOp>,
+        visible: &mut HashSet<String>,
+        dropped: &mut HashSet<String>,
+        current_var: &mut Option<String>,
+        later_ordering: bool,
     ) -> Result<(), CypherError> {
+        // 1. Resolve the projection shape and update the scope.
+        match Self::with_projection(with)? {
+            WithProjection::All => {
+                // `WITH *` carries every visible variable forward: scope and
+                // positional binding are unchanged.
+            }
+            WithProjection::Single { source, output } => {
+                // The pipeline is positioned on `current_var`; it cannot
+                // reposition to a different variable, so only the current
+                // binding (optionally aliased) can be carried forward.
+                if current_var.as_deref() != Some(source.as_str()) {
+                    return Err(CypherError::UnsupportedFeature(match current_var {
+                        Some(cur) => format!(
+                            "WITH can only carry forward the current pattern variable \
+                             '{cur}' (optionally aliased) or '*'; re-projecting \
+                             '{source}' would require repositioning the positional \
+                             pipeline, which is not supported"
+                        ),
+                        None => format!(
+                            "WITH can only carry forward the current pattern variable \
+                             (optionally aliased) or '*', but the preceding clause's \
+                             last node is unnamed; projecting '{source}' is not \
+                             supported"
+                        ),
+                    }));
+                }
+                // Everything except the projected output leaves scope.
+                for name in visible.iter() {
+                    if name != &output {
+                        dropped.insert(name.clone());
+                    }
+                }
+                visible.clear();
+                visible.insert(output.clone());
+                dropped.remove(&output);
+                *current_var = Some(output);
+            }
+        }
+
+        // 2. DISTINCT deduplicates the projected rows.
+        if with.distinct {
+            ops.push(QueryOp::Distinct);
+        }
+
+        // 3. ORDER BY / SKIP / LIMIT on the projected rows.
+        //
+        //    A `WITH` ORDER BY is meaningful when it selects a SKIP/LIMIT
+        //    window, or when it is the last ordering applied before RETURN. A
+        //    bare intermediate ORDER BY (no SKIP/LIMIT) that is followed by a
+        //    later ORDER BY is fully overridden by that later ordering, so it
+        //    is a no-op that is safely dropped -- openCypher leaves the tie
+        //    order of the overridden sort unspecified. Dropping it also avoids
+        //    an incorrect fold in the physical planner, which merges
+        //    *consecutive* Sort ops into one multi-key Sort; when a SKIP/LIMIT
+        //    window IS present the intervening Skip/Limit op breaks that fold.
+        if !with.order_by.is_empty() {
+            for order_item in &with.order_by {
+                self.reject_dropped_refs(&order_item.expr, dropped, "WITH ... ORDER BY")?;
+            }
+            let has_window = with.skip.is_some() || with.limit.is_some();
+            if has_window || !later_ordering {
+                for order_item in &with.order_by {
+                    let sort_key = self.convert_order_item_to_sort_key(order_item)?;
+                    ops.push(QueryOp::Sort {
+                        key: sort_key,
+                        descending: order_item.descending,
+                    });
+                }
+            }
+        }
+        if let Some(skip) = with.skip {
+            ops.push(QueryOp::Skip(skip));
+        }
+        if let Some(limit) = with.limit {
+            ops.push(QueryOp::Limit(limit));
+        }
+
+        // 4. The trailing WHERE filters the projected rows.
         if let Some(ref where_expr) = with.where_clause {
+            self.reject_dropped_refs(where_expr, dropped, "WITH ... WHERE")?;
             let predicate = self.convert_expr_to_predicate(where_expr)?;
             ops.push(QueryOp::Filter(predicate));
+        }
+        Ok(())
+    }
+
+    /// Resolve the projection shape of a `WITH` clause, rejecting any shape the
+    /// positional pipeline cannot carry (see [`Self::convert_with_clause`]).
+    fn with_projection(with: &CypherWith) -> Result<WithProjection, CypherError> {
+        match with.items.as_slice() {
+            [CypherReturnItem::Star] => Ok(WithProjection::All),
+            [single] => Self::single_projection(single),
+            _ => Err(CypherError::UnsupportedFeature(
+                "WITH projecting multiple items is not supported: the positional \
+                 execution pipeline carries a single entity per row. Project one \
+                 variable (optionally aliased) or '*'."
+                    .to_string(),
+            )),
+        }
+    }
+
+    /// Resolve a single `WITH` item into its `(source, output)` variable names.
+    ///
+    /// Only a bare variable (`WITH a`) or an aliased variable (`WITH a AS b`)
+    /// is representable; a computed expression, property access, aggregate, or
+    /// `*` in this position is rejected.
+    fn single_projection(item: &CypherReturnItem) -> Result<WithProjection, CypherError> {
+        match item {
+            CypherReturnItem::Variable(v) => Ok(WithProjection::Single {
+                source: v.clone(),
+                output: v.clone(),
+            }),
+            CypherReturnItem::Expression {
+                expr: CypherExpr::Variable(v),
+                alias,
+            } => Ok(WithProjection::Single {
+                source: v.clone(),
+                output: alias.clone().unwrap_or_else(|| v.clone()),
+            }),
+            CypherReturnItem::Star => Err(CypherError::UnsupportedFeature(
+                "WITH '*' cannot be mixed with other projected items".to_string(),
+            )),
+            CypherReturnItem::Expression { expr, .. } => {
+                Err(CypherError::UnsupportedFeature(format!(
+                    "WITH can only project a bound variable (optionally aliased) or \
+                     '*'; projecting the expression {expr:?} is not supported -- \
+                     computed columns and aggregates in WITH are a follow-up"
+                )))
+            }
+        }
+    }
+
+    /// Whether any clause *after* the `WITH` at `with_idx` applies its own
+    /// ordering: a later `WITH` with an `ORDER BY`, or the final `RETURN` with
+    /// an `ORDER BY`. Used to decide whether a bare intermediate `WITH`
+    /// ORDER BY (no SKIP/LIMIT) is observable or is overridden downstream.
+    fn has_later_ordering(
+        with_clauses: &[CypherWith],
+        with_idx: usize,
+        return_clause: &CypherReturn,
+    ) -> bool {
+        if !return_clause.order_by.is_empty() {
+            return true;
+        }
+        with_clauses
+            .iter()
+            .skip(with_idx + 1)
+            .any(|w| !w.order_by.is_empty())
+    }
+
+    /// Collect the variable names bound by a graph pattern (node and
+    /// relationship variables) into `out`.
+    fn collect_pattern_variables(pattern: &CypherPattern, out: &mut HashSet<String>) {
+        for element in &pattern.elements {
+            match element {
+                CypherPatternElement::Node(node) => {
+                    if let Some(v) = &node.variable {
+                        out.insert(v.clone());
+                    }
+                }
+                CypherPatternElement::Relationship(rel) => {
+                    if let Some(v) = &rel.variable {
+                        out.insert(v.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    /// Reject an expression that references any variable a `WITH` has dropped
+    /// from scope (Issue #556 scoping enforcement). `context` names the clause
+    /// for the error message.
+    fn reject_dropped_refs(
+        &self,
+        expr: &CypherExpr,
+        dropped: &HashSet<String>,
+        context: &str,
+    ) -> Result<(), CypherError> {
+        let mut refs = HashSet::new();
+        Self::collect_expr_variables(expr, &mut refs, 0)?;
+        for name in &refs {
+            if dropped.contains(name) {
+                return Err(CypherError::SemanticError(format!(
+                    "{context} references variable '{name}', which is not in scope \
+                     after a WITH projection dropped it; project it through the \
+                     WITH (e.g. `WITH ..., {name}`) to keep it visible"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Collect the variable names referenced by an expression (both bare
+    /// variables and the base of a property access) into `out`.
+    ///
+    /// Depth-guarded like the predicate converter: `convert` is `pub`, so a
+    /// hand-built expression could nest past the parser's own cap. The bound
+    /// mirrors [`MAX_CONVERT_DEPTH`] so it never fires for parsed input.
+    fn collect_expr_variables(
+        expr: &CypherExpr,
+        out: &mut HashSet<String>,
+        depth: usize,
+    ) -> Result<(), CypherError> {
+        if depth > MAX_CONVERT_DEPTH {
+            return Err(CypherError::ParseError {
+                position: 0,
+                message: "expression nesting too deep for scope analysis (max 256)".to_string(),
+            });
+        }
+        match expr {
+            CypherExpr::Variable(name) => {
+                out.insert(name.clone());
+            }
+            CypherExpr::Property { variable, .. } => {
+                out.insert(variable.clone());
+            }
+            CypherExpr::Value(_) | CypherExpr::Star => {}
+            CypherExpr::Comparison { left, right, .. } => {
+                Self::collect_expr_variables(left, out, depth + 1)?;
+                Self::collect_expr_variables(right, out, depth + 1)?;
+            }
+            CypherExpr::And(left, right) | CypherExpr::Or(left, right) => {
+                Self::collect_expr_variables(left, out, depth + 1)?;
+                Self::collect_expr_variables(right, out, depth + 1)?;
+            }
+            CypherExpr::Not(inner)
+            | CypherExpr::IsNull(inner)
+            | CypherExpr::IsNotNull(inner)
+            | CypherExpr::Grouped(inner) => {
+                Self::collect_expr_variables(inner, out, depth + 1)?;
+            }
+            CypherExpr::In { expr, values } => {
+                Self::collect_expr_variables(expr, out, depth + 1)?;
+                for value in values {
+                    Self::collect_expr_variables(value, out, depth + 1)?;
+                }
+            }
+            CypherExpr::Contains { expr, .. }
+            | CypherExpr::StartsWith { expr, .. }
+            | CypherExpr::EndsWith { expr, .. } => {
+                Self::collect_expr_variables(expr, out, depth + 1)?;
+            }
+            CypherExpr::FunctionCall { args, .. } | CypherExpr::List(args) => {
+                for arg in args {
+                    Self::collect_expr_variables(arg, out, depth + 1)?;
+                }
+            }
         }
         Ok(())
     }
