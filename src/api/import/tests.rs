@@ -338,9 +338,11 @@ fn edge_count_accumulates_across_multiple_chunks() {
     assert_eq!(db.edge_count(), 5);
 }
 
-// kills: `ImportError::Io(_) => return Err(err.into())` and the Io-fatality of the open
-// path. Opening a nonexistent file is fatal even under SkipAndReport: the importer must
-// return `Err`, never a "success" report with the file recorded as a skipped row.
+// pins: the Io-fatality of the OPEN path only. Opening a nonexistent file is fatal even
+// under SkipAndReport: the importer must return `Err`, never a "success" report with the
+// file recorded as a skipped row. NOTE: this does NOT reach the `handle_row_failure`
+// `ImportError::Io(_) => return Err(...)` arm — the open fails before any row is read, so
+// that arm's mutation is killed separately by `handle_row_failure_io_is_fatal_in_skip_mode`.
 #[test]
 fn io_error_is_fatal_even_in_skip_mode() {
     let files = TempDir::new().unwrap();
@@ -356,6 +358,38 @@ fn io_error_is_fatal_even_in_skip_mode() {
     );
     // Nothing was imported and nothing was silently downgraded to a skipped row.
     assert_eq!(db.node_count(), 0);
+}
+
+// kills: the `ImportError::Io(_) => return Err(err.into())` arm in the PRIVATE
+// `handle_row_failure`. That arm is unreachable via the public API (the reader opens the
+// whole file before yielding rows, so a mid-stream reader Io error cannot occur today), so
+// only a direct call to the private method — legal from this in-crate `#[cfg(test)]` module
+// — can exercise it. A synthetic `ImportError::Io` under SkipAndReport must return `Err`
+// (fatal), never be downgraded to a skipped row; the arm mutation (return Ok / push to
+// skipped) is thereby killed.
+#[test]
+fn handle_row_failure_io_is_fatal_in_skip_mode() {
+    let (_tmp, db) = create_test_db().unwrap();
+    let importer = db.import().failure_mode(FailureMode::SkipAndReport);
+
+    // Build a synthetic Io error by wrapping a std::io::Error (the variant holds its string).
+    let io_err = std::io::Error::new(std::io::ErrorKind::Other, "synthetic mid-stream I/O");
+    let mut report = ImportReport::default();
+    let result = importer.handle_row_failure(ImportError::Io(io_err.to_string()), &mut report);
+
+    assert!(
+        result.is_err(),
+        "a synthetic mid-stream Io error must be fatal in skip mode, got: {result:?}"
+    );
+    // The Io error was NOT silently downgraded to a skipped row or unresolved endpoint.
+    assert!(
+        report.skipped.is_empty(),
+        "Io must not be recorded as a skipped row"
+    );
+    assert!(
+        report.unresolved_endpoints.is_empty(),
+        "Io must not be recorded as an unresolved endpoint"
+    );
 }
 
 // kills: removing the `if matches!(value, PropertyValue::Null) { continue; }` in
@@ -563,8 +597,11 @@ fn edge_valid_time_backfill_round_trips_with_as_of() {
     );
 }
 
-// kills: `batch_size.max(1)` -> a mutant that lets a 0 batch size through in a way that
-// drops rows. A batch_size of 0 must clamp to 1 and still import every row.
+// DEFENSIVE (not a kill): documents that batch_size(0) still imports every row. This does
+// NOT kill the `batch_size.max(1)` mutant: under the `chunk.len() >= batch_size` flush
+// guard a batch_size of 0 flushes after every row regardless of whether `.max(1)` clamps to
+// 1 or lets 0 through, so `.max(1)` is behaviorally unobservable here. Kept as a regression
+// guard for the observable end-state (all rows imported).
 #[test]
 fn batch_size_zero_clamps_and_imports_all() {
     let files = TempDir::new().unwrap();
@@ -580,4 +617,33 @@ fn batch_size_zero_clamps_and_imports_all() {
     let report = importer.nodes_from_csv(&nodes, person_nodes("id")).unwrap();
     assert_eq!(report.nodes_imported, 5);
     assert_eq!(db.node_count(), 5);
+}
+
+// kills: the `if raw.trim().is_empty() { return Ok(None) }` blank-cell guard in
+// extract_valid_time. A node row whose valid_time column is BLANK must fall back to
+// transaction time (None), so the row still imports cleanly and is visible in current
+// state — never rejected as a malformed timestamp.
+#[test]
+fn blank_valid_time_column_defaults_to_now_and_imports() {
+    let files = TempDir::new().unwrap();
+    let (_tmp, db) = create_test_db().unwrap();
+
+    // alice's `known_since` cell is blank -> should default to import (tx) time.
+    let nodes = write_file(
+        &files,
+        "nodes.csv",
+        "id,name,age,known_since\nalice,Alice,30,\n",
+    );
+
+    let mapping = person_nodes("id").valid_time_column("known_since");
+    let mut importer = db.import();
+    let report = importer.nodes_from_csv(&nodes, mapping).unwrap();
+    assert_eq!(report.nodes_imported, 1);
+    assert!(report.skipped.is_empty());
+
+    let alice = importer.resolve_key("alice").unwrap();
+    // Visible in current state, exactly like a row with no valid_time column at all.
+    assert!(db.get_node(alice).is_ok());
+    let now = time::now();
+    assert!(db.get_node_at_time(alice, now, now).is_ok());
 }

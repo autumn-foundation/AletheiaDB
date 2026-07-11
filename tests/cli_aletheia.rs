@@ -159,6 +159,21 @@ fn node_get_wrong_arity_exits_one() {
     assert!(r.stderr.contains("usage:"), "stderr={:?}", r.stderr);
 }
 
+#[test]
+fn node_unknown_subcommand_exits_one() {
+    // kills: the `Some(sub) => Err("unknown node subcommand '{sub}'")` arm in handle_node
+    // being stubbed to Ok / a different message.
+    let dir = TempDir::new().unwrap();
+    let r = run(&["node", "frobnicate"], Some(dir.path()));
+    assert_eq!(r.code, 1, "unknown node subcommand must exit 1");
+    assert!(
+        r.stderr.contains("unknown node subcommand"),
+        "stderr={:?}",
+        r.stderr
+    );
+    assert!(r.stderr.contains("frobnicate"), "stderr={:?}", r.stderr);
+}
+
 // ============================================================================
 // edge create / get + argument guards
 // ============================================================================
@@ -241,6 +256,21 @@ fn edge_get_wrong_arity_exits_one() {
     let r = run(&["edge", "get"], Some(dir.path()));
     assert_eq!(r.code, 1, "missing edge id must exit 1");
     assert!(r.stderr.contains("usage:"), "stderr={:?}", r.stderr);
+}
+
+#[test]
+fn edge_unknown_subcommand_exits_one() {
+    // kills: the `Some(sub) => Err("unknown edge subcommand '{sub}'")` arm in handle_edge
+    // being stubbed to Ok / a different message.
+    let dir = TempDir::new().unwrap();
+    let r = run(&["edge", "frobnicate"], Some(dir.path()));
+    assert_eq!(r.code, 1, "unknown edge subcommand must exit 1");
+    assert!(
+        r.stderr.contains("unknown edge subcommand"),
+        "stderr={:?}",
+        r.stderr
+    );
+    assert!(r.stderr.contains("frobnicate"), "stderr={:?}", r.stderr);
 }
 
 // ============================================================================
@@ -407,6 +437,45 @@ fn traverse_both_includes_outgoing_edge() {
     assert_eq!(
         results[0].get("node_id").and_then(|v| v.as_u64()),
         Some(b_id)
+    );
+}
+
+#[test]
+fn traverse_both_includes_incoming_edge() {
+    // kills: dropping the `|| direction == "both"` disjunct from the INCOMING branch.
+    // The existing both-test runs from the SOURCE (which has no incoming edge and so
+    // cannot detect an incoming-branch mutation); traversing `both` from the TARGET
+    // node — which HAS an incoming KNOWS edge from a — must surface that edge as
+    // `direction:"incoming"` pointing back at a.
+    let dir = TempDir::new().unwrap();
+    let (a_id, b_id) = build_edge_graph(dir.path());
+
+    let r = run(
+        &[
+            "traverse",
+            &b_id.to_string(),
+            "KNOWS",
+            "--direction",
+            "both",
+        ],
+        Some(dir.path()),
+    );
+    assert_eq!(r.code, 0, "stderr={:?}", r.stderr);
+    let j = stdout_json(&r.stdout);
+    assert_eq!(j.get("direction"), Some(&serde_json::json!("both")));
+    let results = j.get("results").and_then(|v| v.as_array()).unwrap();
+    assert_eq!(
+        results.len(),
+        1,
+        "both from target must include the incoming edge; got {results:?}"
+    );
+    assert_eq!(
+        results[0].get("direction"),
+        Some(&serde_json::json!("incoming"))
+    );
+    assert_eq!(
+        results[0].get("node_id").and_then(|v| v.as_u64()),
+        Some(a_id)
     );
 }
 
@@ -581,4 +650,67 @@ fn restore_into_non_empty_dir_errors() {
         "stderr must report the non-empty target; stderr={:?}",
         second.stderr
     );
+}
+
+// ============================================================================
+// daemon status — pid-file parsing / status error arms (no process spawn)
+//
+// Each test writes its pid-file into its own TempDir. `daemon status` never
+// spawns or opens a database, so these exercise the read_daemon_metadata /
+// daemon_status branches deterministically.
+// ============================================================================
+
+#[test]
+fn daemon_status_absent_pid_file_reports_not_running() {
+    // kills: the `None => println!("daemon is not running (no pid file)")` arm in
+    // daemon_status being stubbed to an error / different message.
+    let dir = TempDir::new().unwrap();
+    let pid_file = dir.path().join("absent.pid");
+    let r = run(
+        &["daemon", "status", "--pid-file", pid_file.to_str().unwrap()],
+        None,
+    );
+    assert_eq!(
+        r.code, 0,
+        "status on an absent pid file must exit 0; stderr={:?}",
+        r.stderr
+    );
+    assert!(
+        r.stdout.contains("not running"),
+        "stdout must report not running; stdout={:?}",
+        r.stdout
+    );
+}
+
+#[test]
+fn daemon_status_pid_file_missing_exe_line_exits_one() {
+    // kills: the `exe_line = lines.next().ok_or_else(... "missing executable line")`
+    // guard in read_daemon_metadata (a pid file with a pid line but no exe line).
+    let dir = TempDir::new().unwrap();
+    let pid_file = dir.path().join("noexe.pid");
+    std::fs::write(&pid_file, "12345\n").unwrap();
+    let r = run(
+        &["daemon", "status", "--pid-file", pid_file.to_str().unwrap()],
+        None,
+    );
+    assert_eq!(r.code, 1, "pid file missing exe line must exit 1");
+    assert!(
+        r.stderr.contains("missing executable line"),
+        "stderr={:?}",
+        r.stderr
+    );
+}
+
+#[test]
+fn daemon_status_non_numeric_pid_exits_one() {
+    // kills: the `pid_line.parse::<u32>()` Err path in read_daemon_metadata.
+    let dir = TempDir::new().unwrap();
+    let pid_file = dir.path().join("badpid.pid");
+    std::fs::write(&pid_file, "notanumber\n/usr/bin/aletheia-server\n").unwrap();
+    let r = run(
+        &["daemon", "status", "--pid-file", pid_file.to_str().unwrap()],
+        None,
+    );
+    assert_eq!(r.code, 1, "non-numeric pid must exit 1");
+    assert!(r.stderr.contains("invalid pid"), "stderr={:?}", r.stderr);
 }
