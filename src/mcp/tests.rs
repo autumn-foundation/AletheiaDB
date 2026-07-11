@@ -3851,6 +3851,7 @@ mod query_tool_tests {
                 label: "Person".to_string(),
                 properties: Some(props),
                 provenance: None,
+                derived_from: None,
             });
             let _: NodeResponse = parse_response(&resp).expect("seed node should succeed");
         }
