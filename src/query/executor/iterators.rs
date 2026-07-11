@@ -138,27 +138,41 @@ enum ScanFilter {
 ///
 /// # Performance
 ///
-/// Resident memory is O(1), but the scan is **O(max_id) in time**: it visits
-/// every id in `[0, max_id)`, including ids with no live node. Node ids are
-/// monotonic and never reused (recovery `reset` sets the next id to
-/// `max_id + 1`), so `max_id` is the high-water mark of ids ever allocated,
-/// not the current live count. When `max_id` greatly exceeds the live node
-/// count -- e.g. after a bulk delete, or when post-compaction leaves a sparse
-/// id space -- the scan spends most of its time skipping dead ids and is
-/// pathologically slow relative to the number of nodes actually yielded. This
-/// is a deliberate trade: the old eager `Vec<NodeId>` path could hard-OOM on a
-/// large id range, whereas this streaming scan degrades only to a soft
-/// slowdown proportional to `max_id`.
+/// The iterator picks one of two strategies at construction (Issue #3422),
+/// based on O(1) reads of the live node count and the id high-water mark:
+///
+/// - **Sweep** (dense / huge-live / tiny id spaces): streams ids over
+///   `[0, max_id)` exactly as PR #3418 did. Resident memory is O(1), time is
+///   O(max_id). Ids with no live node are skipped cheaply via the 16-byte
+///   header fast path. This is optimal when the id space is densely populated,
+///   since `max_id` is close to the live count.
+/// - **Paged** (sparse id spaces): pages the live keys of `node_headers` in
+///   ascending-id chunks of `page_size` (K), yielding each page's ids before
+///   fetching the next. Dead ids (deletion tombstones, reserved-but-unused
+///   ids, post-compaction gaps) are **never visited**, so time is O(live)
+///   rather than O(max_id), while resident memory stays O(K) -- it never
+///   materializes the whole id set (the OOM vector PR #3418 removed).
+///
+/// The sparse/paged path is chosen only when it does strictly less work than
+/// the sweep (`live * ceil(live/K) < max_id`) and the live count is bounded, so
+/// dense graphs never regress and a once-huge-now-tiny graph (e.g. 1B ids ever
+/// allocated, 1K now live) recovers O(live) full-scan time instead of sweeping
+/// ~1B dead ids. Node ids are monotonic and never reused, so `max_id` is the
+/// high-water mark of ids ever allocated, not the live count -- which is
+/// exactly why the naive sweep degraded.
 ///
 /// # Concurrency
 ///
-/// Each `next()` acquires the relevant DashMap shard lock only for the duration
-/// of a single `node_has_label` / `get_node` call and releases it before
-/// yielding. No shard lock is held across a yield, so the iterator cannot
-/// deadlock against concurrent writers and does not violate the crate's lock
-/// acquisition order. `max_id` is a relaxed snapshot: nodes created after
-/// construction may or may not be observed, which is the expected semantics for
-/// an unsynchronized full scan.
+/// Neither strategy holds a DashMap shard lock across a yield. The sweep
+/// acquires a shard lock only for the duration of a single `node_has_label` /
+/// `contains_node` / `get_node` call. The paged path collects each page under
+/// brief per-shard locks that are all released before any row is yielded (see
+/// [`CurrentStorage::collect_node_id_page`]); between yields no lock is held.
+/// So the iterator cannot deadlock against concurrent writers and does not
+/// violate the crate's lock acquisition order. Both the `max_id` sweep bound
+/// and the paged key snapshot are relaxed (non-isolated): nodes created or
+/// deleted after a page is captured may or may not be observed, which is the
+/// expected semantics for an unsynchronized full scan.
 ///
 /// # Examples
 ///
@@ -173,20 +187,88 @@ enum ScanFilter {
 pub struct NodeScanIterator {
     filter: ScanFilter,
     current: Arc<CurrentStorage>,
-    current_id: u64,
-    max_id: u64,
+    /// Which scanning strategy is in flight, plus its live cursor state.
+    mode: ScanMode,
+    /// Page size (K) for the paged strategy; ignored by the sweep.
+    page_size: usize,
+    /// Instrumentation: number of candidate ids examined so far. In the sweep
+    /// path this counts every id in `[0, max_id)` visited (including dead ids
+    /// skipped by the header fast paths); in the paged path it counts only the
+    /// live ids materialized across pages. It is the test/bench proxy for scan
+    /// work, exposed via [`Self::work_units`], and lets a test assert that a
+    /// full scan's cost tracks the live node count rather than `max_id`.
+    work_units: u64,
+}
+
+/// Default page size (K) for the chunked `node_headers` scan (Issue #3422).
+///
+/// Bounds resident memory of the paged strategy to O(K) node ids while keeping
+/// per-page overhead amortized. Tunable in tests/benches via
+/// [`NodeScanIterator::with_strategy`].
+const DEFAULT_NODE_SCAN_PAGE_SIZE: usize = 4096;
+
+/// Above this live-node count the paged strategy's per-page re-scan cost stops
+/// paying for itself, so the scan stays on the memory-flat sweep even for a
+/// sparse id space. See [`NodeScanIterator::prefer_paged`].
+const MAX_PAGED_LIVE_NODES: u64 = 2_000_000;
+
+/// Full-scan strategy selector (Issue #3422). `Auto` picks sweep vs paged from
+/// the live count and id high-water mark; the `Force*` variants are test/bench
+/// hooks to exercise a specific path deterministically.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScanStrategy {
+    /// Choose sweep or paged automatically from live count vs `max_id`.
+    Auto,
+    /// Always use the dense `[0, max_id)` sweep (PR #3418 behavior).
+    ForceSweep,
+    /// Always use the chunked `node_headers` keyset paging (Issue #3422).
+    ForcePaged,
+}
+
+/// Internal scan strategy state.
+enum ScanMode {
+    /// Dense streaming sweep of `[0, max_id)` (PR #3418).
+    Sweep { current_id: u64, max_id: u64 },
+    /// Chunked keyset paging over live `node_headers` keys (Issue #3422).
+    ///
+    /// `buffer` drains the current ascending-id page; `cursor` is the last id
+    /// yielded (the keyset boundary for the next page); `exhausted` is set once
+    /// a short/empty page proves the live key space after the cursor is drained.
+    Paged {
+        buffer: std::vec::IntoIter<NodeId>,
+        cursor: Option<u64>,
+        exhausted: bool,
+    },
 }
 
 impl NodeScanIterator {
-    /// Create a new NodeScanIterator.
+    /// Create a new NodeScanIterator, auto-selecting the scan strategy.
+    ///
+    /// See the type-level `# Performance` docs for how the sweep vs paged
+    /// strategy is chosen; behavior and results are identical to the prior
+    /// sweep-only iterator, only the traversal cost differs.
     pub fn new(label: Option<String>, current: Arc<CurrentStorage>) -> Self {
-        // Snapshot the id upper bound once. `get_max_node_id` returns the
-        // index's insert-maintained high-water-mark (`max id ever inserted + 1`)
-        // rather than any id generator, so scanning `[0, max_id)` covers every
-        // node present regardless of which generator allocated its id. Ids start
-        // at 0, so the range is `[0, max_id)`.
-        let max_id = current.get_max_node_id();
+        Self::with_strategy(
+            label,
+            current,
+            ScanStrategy::Auto,
+            DEFAULT_NODE_SCAN_PAGE_SIZE,
+        )
+    }
 
+    /// Construct with an explicit [`ScanStrategy`] and page size.
+    ///
+    /// Public but hidden: `new` (auto strategy, default page size) is the
+    /// supported entry point. This exists so tests/benches can pin a specific
+    /// strategy and page size to measure before/after scan cost deterministically.
+    #[doc(hidden)]
+    pub fn with_strategy(
+        label: Option<String>,
+        current: Arc<CurrentStorage>,
+        strategy: ScanStrategy,
+        page_size: usize,
+    ) -> Self {
         // Resolve the label to an interned id exactly once. A requested-but-
         // unknown label short-circuits to `None` so the scan yields nothing,
         // rather than degrading to an unfiltered scan.
@@ -198,25 +280,167 @@ impl NodeScanIterator {
             },
         };
 
+        let page_size = page_size.max(1);
+
+        let mode = if matches!(filter, ScanFilter::None) {
+            // No node can ever match; an empty sweep drains immediately without
+            // touching storage.
+            ScanMode::Sweep {
+                current_id: 0,
+                max_id: 0,
+            }
+        } else {
+            // Snapshot the id upper bound once. `get_max_node_id` returns the
+            // index's insert-maintained high-water-mark (`max id ever inserted
+            // + 1`) rather than any id generator, so a sweep of `[0, max_id)`
+            // covers every node present regardless of which generator allocated
+            // its id.
+            let max_id = current.get_max_node_id();
+            match strategy {
+                ScanStrategy::ForceSweep => ScanMode::Sweep {
+                    current_id: 0,
+                    max_id,
+                },
+                ScanStrategy::ForcePaged => Self::new_paged_mode(),
+                ScanStrategy::Auto => {
+                    Self::choose_mode(current.node_count() as u64, max_id, page_size)
+                }
+            }
+        };
+
         NodeScanIterator {
             filter,
             current,
-            current_id: 0,
-            max_id,
+            mode,
+            page_size,
+            work_units: 0,
         }
     }
-}
 
-impl ResultIterator for NodeScanIterator {
-    fn next(&mut self) -> Option<Result<QueryRow>> {
-        // A label that was never interned can match no node.
-        if matches!(self.filter, ScanFilter::None) {
-            return None;
+    /// Fresh, empty paged-mode state (cursor at the start, nothing buffered).
+    fn new_paged_mode() -> ScanMode {
+        ScanMode::Paged {
+            buffer: Vec::new().into_iter(),
+            cursor: None,
+            exhausted: false,
+        }
+    }
+
+    /// Pick sweep vs paged from O(1) counters (Issue #3422).
+    fn choose_mode(live: u64, max_id: u64, page_size: usize) -> ScanMode {
+        if Self::prefer_paged(live, max_id, page_size) {
+            Self::new_paged_mode()
+        } else {
+            ScanMode::Sweep {
+                current_id: 0,
+                max_id,
+            }
+        }
+    }
+
+    /// Whether the chunked paged strategy is expected to beat the dense sweep.
+    ///
+    /// The sweep probes `max_id` ids. The paged strategy re-scans the live
+    /// header set once per page, so it costs about `live * ceil(live / K)`
+    /// header reads across `ceil(live / K)` pages. Prefer paging only when that
+    /// is strictly cheaper than the sweep and the live count is bounded (so a
+    /// huge-live graph -- where the sweep is already ~O(live) and memory-flat --
+    /// never pays the quadratic re-scan).
+    fn prefer_paged(live: u64, max_id: u64, page_size: usize) -> bool {
+        if live == 0 || live > MAX_PAGED_LIVE_NODES {
+            return false;
+        }
+        let k = page_size.max(1) as u128;
+        let pages = (live as u128).div_ceil(k);
+        let paged_cost = (live as u128).saturating_mul(pages);
+        paged_cost < max_id as u128
+    }
+
+    /// Total candidate ids examined so far (see the [`work_units`] field docs).
+    ///
+    /// Test/bench instrumentation, not part of the query contract.
+    ///
+    /// [`work_units`]: Self::work_units
+    #[doc(hidden)]
+    pub fn work_units(&self) -> u64 {
+        self.work_units
+    }
+
+    /// Collect one page of live node ids honoring the active label filter.
+    ///
+    /// Static (no `self`) so the caller can borrow `current`/`filter`
+    /// immutably alongside a mutable borrow of `self.mode` (disjoint fields).
+    fn collect_page(
+        current: &CurrentStorage,
+        filter: &ScanFilter,
+        after: Option<u64>,
+        k: usize,
+    ) -> Vec<NodeId> {
+        match filter {
+            ScanFilter::All => current.collect_node_id_page(after, k, None),
+            ScanFilter::Label(label_id) => current.collect_node_id_page(after, k, Some(*label_id)),
+            ScanFilter::None => Vec::new(),
+        }
+    }
+
+    /// Refill the paged buffer with the next chunk of live node ids.
+    ///
+    /// Returns `false` when the scan is exhausted (no more live ids after the
+    /// cursor); otherwise the buffer holds at least one id.
+    fn refill_page(&mut self) -> bool {
+        let (after, already_exhausted) = match &self.mode {
+            ScanMode::Paged {
+                cursor, exhausted, ..
+            } => (*cursor, *exhausted),
+            ScanMode::Sweep { .. } => return false,
+        };
+        if already_exhausted {
+            return false;
         }
 
-        while self.current_id < self.max_id {
-            let id_val = self.current_id;
-            self.current_id += 1;
+        let k = self.page_size;
+        // Disjoint borrows: `current`/`filter` immutable, `mode` untouched here.
+        let page = Self::collect_page(&self.current, &self.filter, after, k);
+
+        match &mut self.mode {
+            ScanMode::Paged {
+                buffer,
+                cursor,
+                exhausted,
+            } => {
+                if page.is_empty() {
+                    *exhausted = true;
+                    return false;
+                }
+                // A short page means the live key space after the cursor is
+                // drained; mark exhausted so the next drain stops without a
+                // fruitless re-scan.
+                if page.len() < k {
+                    *exhausted = true;
+                }
+                *cursor = page.last().map(|id| id.as_u64());
+                *buffer = page.into_iter();
+                true
+            }
+            ScanMode::Sweep { .. } => false,
+        }
+    }
+
+    /// Advance the dense `[0, max_id)` sweep (PR #3418 behavior).
+    fn next_sweep(&mut self) -> Option<Result<QueryRow>> {
+        loop {
+            let id_val = match &mut self.mode {
+                ScanMode::Sweep { current_id, max_id } => {
+                    if *current_id >= *max_id {
+                        return None;
+                    }
+                    let v = *current_id;
+                    *current_id += 1;
+                    v
+                }
+                ScanMode::Paged { .. } => return None,
+            };
+            self.work_units += 1;
 
             // Fast path: reject non-matching labels via the compact node header
             // before ever loading the full node.
@@ -227,12 +451,7 @@ impl ResultIterator for NodeScanIterator {
             }
 
             // Fast path: for an unfiltered scan, skip gaps in the sparse id
-            // space with a cheap O(1) header existence check. This avoids
-            // allocating and immediately dropping a `NodeNotFound`
-            // `StorageError` for every dead id, which dominates when
-            // `max_id` greatly exceeds the live node count. The `get_node`
-            // `NodeNotFound` arm below still guards against a node deleted
-            // concurrently between this check and the load.
+            // space with a cheap O(1) header existence check.
             if matches!(self.filter, ScanFilter::All) && !self.current.contains_node(id_val) {
                 continue;
             }
@@ -251,16 +470,72 @@ impl ResultIterator for NodeScanIterator {
                 Err(e) => return Some(Err(e)),
             }
         }
-        None
+    }
+
+    /// Advance the chunked `node_headers` keyset paging (Issue #3422).
+    fn next_paged(&mut self) -> Option<Result<QueryRow>> {
+        loop {
+            // Pull the next id from the current page, refilling as it drains.
+            let id_val = loop {
+                let next = match &mut self.mode {
+                    ScanMode::Paged { buffer, .. } => buffer.next(),
+                    ScanMode::Sweep { .. } => return None,
+                };
+                match next {
+                    Some(id) => break id.as_u64(),
+                    None => {
+                        if !self.refill_page() {
+                            return None;
+                        }
+                    }
+                }
+            };
+
+            self.work_units += 1;
+
+            let id = match NodeId::new(id_val) {
+                Ok(id) => id,
+                Err(_) => continue,
+            };
+
+            match self.current.get_node(id) {
+                Ok(node) => return Some(Ok(QueryRow::from_entity(EntityResult::Node(node)))),
+                // The id was live when the page was captured but was deleted
+                // before this load; skip it (relaxed snapshot semantics).
+                Err(crate::core::error::Error::Storage(
+                    crate::core::error::StorageError::NodeNotFound(_),
+                )) => continue,
+                Err(e) => return Some(Err(e)),
+            }
+        }
+    }
+}
+
+impl ResultIterator for NodeScanIterator {
+    fn next(&mut self) -> Option<Result<QueryRow>> {
+        // A label that was never interned can match no node.
+        if matches!(self.filter, ScanFilter::None) {
+            return None;
+        }
+
+        match self.mode {
+            ScanMode::Sweep { .. } => self.next_sweep(),
+            ScanMode::Paged { .. } => self.next_paged(),
+        }
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
         if matches!(self.filter, ScanFilter::None) {
             return (0, Some(0));
         }
-        // Upper bound only: the range may contain gaps that are skipped.
-        let remaining = self.max_id.saturating_sub(self.current_id);
-        (0, Some(remaining as usize))
+        match &self.mode {
+            // Upper bound only: the range may contain gaps that are skipped.
+            ScanMode::Sweep { current_id, max_id } => {
+                (0, Some(max_id.saturating_sub(*current_id) as usize))
+            }
+            // Paged: the remaining live count is not cheaply known here.
+            ScanMode::Paged { .. } => (0, None),
+        }
     }
 }
 

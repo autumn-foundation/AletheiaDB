@@ -2057,6 +2057,94 @@ impl CurrentStorage {
             .collect()
     }
 
+    /// Collect one bounded page of live node ids for a chunked full scan
+    /// (Issue #3422).
+    ///
+    /// Returns the (at most) `limit` **smallest** live node ids strictly
+    /// greater than `after`, in ascending order. Passing `after = None` starts
+    /// from the beginning; passing the last id of the previous page as `after`
+    /// yields the next page. This ascending-id keyset makes paging
+    /// duplicate-free and gap-free across calls.
+    ///
+    /// When `label` is `Some`, only ids of live nodes carrying that interned
+    /// label are considered (via the hot 16-byte header index); when `None`,
+    /// every live node id is considered.
+    ///
+    /// # Why this recovers O(live) scan time
+    ///
+    /// The candidates come from the live `node_headers`/`nodes` index, so ids
+    /// with no live node (deletion tombstones, reserved-but-unused ids,
+    /// post-compaction gaps) are **never visited** -- unlike a dense
+    /// `[0, max_id)` sweep whose cost tracks the id high-water mark. A full scan
+    /// built on this therefore costs O(live), not O(max_id).
+    ///
+    /// # Memory
+    ///
+    /// Selection uses a bounded max-heap of at most `limit` ids, so resident
+    /// memory is O(`limit`) regardless of how many live nodes exist -- the
+    /// caller never materializes the whole id set (the OOM vector PR #3418
+    /// removed). `limit == 0` returns an empty page.
+    ///
+    /// # Concurrency
+    ///
+    /// Enumeration briefly holds each `node_headers` DashMap shard lock only
+    /// while copying ids into the heap, releasing every lock before returning;
+    /// no lock is held across the returned page. The snapshot is relaxed (not
+    /// isolated): a node inserted or deleted concurrently with enumeration may
+    /// or may not appear, matching the existing unsynchronized full-scan
+    /// semantics.
+    pub fn collect_node_id_page(
+        &self,
+        after: Option<u64>,
+        limit: usize,
+        label: Option<crate::core::interning::InternedString>,
+    ) -> Vec<NodeId> {
+        if limit == 0 {
+            return Vec::new();
+        }
+
+        // Bounded max-heap keeping the `limit` smallest ids seen so far that are
+        // strictly greater than `after`. The heap's max is the current
+        // page boundary; a smaller candidate evicts it.
+        let mut heap: std::collections::BinaryHeap<u64> =
+            std::collections::BinaryHeap::with_capacity(limit + 1);
+        let mut consider = |id: NodeId| {
+            let value = id.as_u64();
+            if let Some(a) = after
+                && value <= a
+            {
+                return;
+            }
+            if heap.len() < limit {
+                heap.push(value);
+            } else if let Some(&current_max) = heap.peek()
+                && value < current_max
+            {
+                heap.pop();
+                heap.push(value);
+            }
+        };
+
+        match label {
+            Some(label_id) => {
+                for id in self.indexes.filter_nodes_by_label(label_id) {
+                    consider(id);
+                }
+            }
+            None => {
+                for id in self.indexes.iter_node_ids() {
+                    consider(id);
+                }
+            }
+        }
+
+        // `into_sorted_vec` on a max-heap yields ascending order.
+        heap.into_sorted_vec()
+            .into_iter()
+            .filter_map(|value| NodeId::new(value).ok())
+            .collect()
+    }
+
     /// Get nodes by label.
     ///
     /// Returns an iterator over all nodes with the given label.
