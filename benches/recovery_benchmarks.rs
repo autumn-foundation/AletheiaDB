@@ -450,12 +450,26 @@ fn build_cold_wal(node_count: usize) -> TempDir {
 }
 
 /// Issue #3429: measure the full `AletheiaDB::with_unified_config` startup that
-/// replays a cold WAL (no index snapshot). Before the fold, startup decoded the
-/// segment directory in three independent full passes (max-LSN allocator seed,
-/// constraint declaration scan, differential replay); after the fold it decodes
-/// once and reuses the result for all three. This benchmark opens the same
-/// pre-populated WAL directory repeatedly, so the whole cost measured is the
-/// startup decode+replay path the fold optimizes.
+/// replays a cold WAL (no index snapshot).
+///
+/// This bench runs with `persistence(enabled: false)`, i.e. the **WAL-only**
+/// startup path. On that path the fold is **2 -> 1**: before the fold startup
+/// decoded the segment directory twice (max-LSN allocator seed, then the
+/// differential replay's full read from LSN 0); after the fold it decodes once
+/// and reuses the result for both. There is no constraint-declaration scan on
+/// the WAL-only path (the replay loop applies constraint ops inline), so this
+/// bench does not exercise the 3 -> 1 fold of the index-persistence path.
+///
+/// The index-persistence path's 3 -> 1 fold, and specifically that a constraint
+/// declared BELOW the manifest LSN is still recovered after the fold, is pinned
+/// by the `t3429_below_manifest_constraint_and_tail_survive_single_pass_startup`
+/// regression test (tests/lsn_recovery_regression.rs) rather than this bench — a
+/// persistence-enabled bench variant is deliberately avoided because reopening
+/// the same data_dir per iteration would pollute the measurement via the
+/// drop-time snapshot.
+///
+/// This benchmark opens the same pre-populated WAL directory repeatedly, so the
+/// whole cost measured is the startup decode+replay path the fold optimizes.
 fn bench_startup_full_wal_decode(c: &mut Criterion) {
     let mut group = c.benchmark_group("recovery_startup_full_wal_decode");
     group.sample_size(10);
