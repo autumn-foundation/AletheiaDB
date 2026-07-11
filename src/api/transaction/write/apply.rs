@@ -617,6 +617,18 @@ pub(crate) fn apply_changes<'a>(
     // Acquire lock on historical storage once before processing all operations.
     let mut historical = tx.historical.write();
 
+    // Issue #3416 Pt1 — commit-time write-skew re-check for node deletes/retracts.
+    //
+    // Under snapshot isolation, a node delete/retract that saw 0 connected edges
+    // at op time cannot see a CONCURRENT transaction's create_edge that commits
+    // between this tx's snapshot and its commit (disjoint write sets escape
+    // first-committer-wins). Committing anyway would leave an edge pointing at a
+    // deleted/retracted node — a silent orphan through the #3209 "safe by
+    // default" path. We re-check here because `historical.write()` is the commit
+    // serialization point: no other tx can be applying while we hold it, so
+    // committed adjacency now reflects every earlier-committed transaction.
+    detect_delete_orphan_write_skew(tx)?;
+
     // Issue #3406: the closing-version IDs (delete tombstones + retraction
     // versions) are pre-generated once per commit — BEFORE the WAL log phase —
     // so the identical ids are recorded in the WAL and applied here. We simply
@@ -653,6 +665,103 @@ pub(crate) fn apply_changes<'a>(
     // `finalize_current_commit_timestamps` so a concurrent `historical.read()`
     // snapshot cannot observe a committed node/edge with `commit_timestamp: None`.
     Ok(historical)
+}
+
+/// Commit-time re-check that a buffered node delete/retract does not orphan an
+/// edge that a concurrent transaction committed after this tx's snapshot
+/// (Issue #3416 Pt1 -- snapshot-isolation write-skew).
+///
+/// For each buffered `DeleteNode`/`RetractNode`, we enumerate the victim's
+/// committed connected edges (distinct). An edge trips the abort only when it
+/// is **both**: (1) committed **after** this tx's snapshot (`commit_timestamp >
+/// snapshot_timestamp`) -- i.e. it is a concurrently-appeared edge, the SI
+/// write-skew -- and (2) **not** also being closed (deleted/retracted) by this
+/// same transaction.
+///
+/// The `commit_timestamp > snapshot_timestamp` gate is deliberate: an edge that
+/// was already visible at this tx's snapshot is the documented low-level
+/// orphan-preserving `delete_node` behavior (see CLAUDE.md "Orphaned Edges on
+/// Node Deletion") and must NOT abort. Only a NEW concurrent edge violates the
+/// #3209 "never orphan" guarantee.
+///
+/// On a violation we abort with `TransactionError::ValidationFailed`, which the
+/// MCP layer classifies as `FAILED_PRECONDITION` (non-retriable): the correct
+/// caller response is to re-evaluate (the edge now exists, so a fresh delete
+/// would be refused by #3209 or require detach), not to blindly retry.
+///
+/// # Locking
+///
+/// Called while `historical.write()` (order class 3) is held. It reads the
+/// adjacency indexes (`outgoing`/`incoming`, classes 6/7) and current-storage
+/// edge map -- all LATER than `historical` in the documented lock order -- and
+/// never calls back into `historical`/`wal`/`current_timestamp`, so no
+/// lock-order inversion is introduced.
+///
+/// # Cost
+///
+/// O(degree) committed-adjacency reads per buffered node delete/retract, at
+/// commit only. Zero cost for transactions that delete/retract no nodes.
+fn detect_delete_orphan_write_skew(tx: &WriteTransaction) -> Result<()> {
+    use crate::api::transaction::BufferedWrite;
+
+    // Edges this tx itself closes (delete or retract) never orphan the victim.
+    let mut closed_edges: std::collections::HashSet<EdgeId> = std::collections::HashSet::new();
+    for write in tx.buffer.operations() {
+        match write {
+            BufferedWrite::DeleteEdge { edge_id, .. }
+            | BufferedWrite::RetractEdge { edge_id, .. } => {
+                closed_edges.insert(*edge_id);
+            }
+            _ => {}
+        }
+    }
+
+    let snapshot_ts = tx.snapshot.snapshot_timestamp;
+
+    for write in tx.buffer.operations() {
+        let node_id = match write {
+            BufferedWrite::DeleteNode { node_id, .. }
+            | BufferedWrite::RetractNode { node_id, .. } => *node_id,
+            _ => continue,
+        };
+
+        // Distinct committed connected edges (a self-loop appears in both
+        // directions but is one edge -- mirrors Issue #3416 Pt2/Pt3 counting).
+        let mut edge_ids = tx.current.get_outgoing_edges(node_id);
+        edge_ids.extend(tx.current.get_incoming_edges(node_id));
+        edge_ids.sort_unstable();
+        edge_ids.dedup();
+
+        for edge_id in edge_ids {
+            if closed_edges.contains(&edge_id) {
+                continue; // this tx closes the edge too -- no orphan
+            }
+            // Only a concurrently-committed edge (commit_ts > our snapshot) is a
+            // write-skew; a pre-snapshot edge is the documented orphan-preserving
+            // low-level delete and is left untouched.
+            if let Ok(edge) = tx.current.get_edge(edge_id)
+                && let Some(commit_ts) = edge.metadata.commit_timestamp
+                && commit_ts > snapshot_ts
+            {
+                return Err(crate::core::error::TransactionError::ValidationFailed {
+                    reason: format!(
+                        "Write-skew detected: node {} was deleted/retracted, but edge {} \
+                         referencing it was created by a concurrent transaction (committed at \
+                         {} after this transaction's snapshot at {}). Committing would orphan \
+                         the edge. Re-evaluate the delete (the node now has a connected edge) \
+                         or use a detach/cascade delete.",
+                        node_id.as_u64(),
+                        edge_id.as_u64(),
+                        commit_ts,
+                        snapshot_ts
+                    ),
+                }
+                .into());
+            }
+        }
+    }
+
+    Ok(())
 }
 
 /// Finalize commit timestamps in current storage after a successful `apply_changes`.
