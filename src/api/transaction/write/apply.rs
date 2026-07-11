@@ -617,17 +617,30 @@ pub(crate) fn apply_changes<'a>(
     // Acquire lock on historical storage once before processing all operations.
     let mut historical = tx.historical.write();
 
-    // Issue #3416 Pt1 — commit-time write-skew re-check for node deletes/retracts.
+    // Issue #3416 Pt1 — commit-time SI write-skew re-checks for node
+    // deletes/retracts AND edge creations, run under the SAME exclusive
+    // `historical.write()` guard so the two orderings are symmetric: whichever
+    // of a concurrent delete-node / create-edge pair applies SECOND aborts, so
+    // exactly one wins and no orphan is committed in EITHER ordering.
     //
-    // Under snapshot isolation, a node delete/retract that saw 0 connected edges
-    // at op time cannot see a CONCURRENT transaction's create_edge that commits
-    // between this tx's snapshot and its commit (disjoint write sets escape
-    // first-committer-wins). Committing anyway would leave an edge pointing at a
-    // deleted/retracted node — a silent orphan through the #3209 "safe by
-    // default" path. We re-check here because `historical.write()` is the commit
-    // serialization point: no other tx can be applying while we hold it, so
-    // committed adjacency now reflects every earlier-committed transaction.
+    // `historical.write()` is the commit serialization point: no other tx can be
+    // applying while we hold it, so committed current state now reflects every
+    // earlier-committed transaction. Both checks read current storage / adjacency
+    // (leaf / order-class 6-7) while holding `historical` (class 3), never call
+    // back into `historical`/`wal`/`current_timestamp`, and touch no adjacency
+    // locks out of order — consistent with the CLAUDE.md lock order.
+    //
+    // Ordering (i): delete/retract applies second. It cannot see a concurrent
+    // create_edge that committed after its snapshot (disjoint write sets escape
+    // first-committer-wins); the delete-side check re-counts committed connected
+    // edges and aborts on a newly-appeared one.
     detect_delete_orphan_write_skew(tx)?;
+    // Ordering (ii): create_edge applies second. Its endpoint existence was
+    // checked by `validate()` BEFORE the timestamp/WAL/apply phase and the apply
+    // path does no endpoint re-check, so a concurrent delete of an endpoint that
+    // commits between validate() and here would leave a dangling edge. The
+    // create-side check re-verifies both endpoints under the guard.
+    detect_create_edge_dangling_endpoint(tx)?;
 
     // Issue #3406: the closing-version IDs (delete tombstones + retraction
     // versions) are pre-generated once per commit — BEFORE the WAL log phase —
@@ -704,6 +717,19 @@ pub(crate) fn apply_changes<'a>(
 fn detect_delete_orphan_write_skew(tx: &WriteTransaction) -> Result<()> {
     use crate::api::transaction::BufferedWrite;
 
+    // Short-circuit (NIT): most transactions delete/retract no nodes; skip
+    // building the closed-edges set and rescanning when there is nothing to
+    // check.
+    let has_node_close = tx.buffer.operations().iter().any(|w| {
+        matches!(
+            w,
+            BufferedWrite::DeleteNode { .. } | BufferedWrite::RetractNode { .. }
+        )
+    });
+    if !has_node_close {
+        return Ok(());
+    }
+
     // Edges this tx itself closes (delete or retract) never orphan the victim.
     let mut closed_edges: std::collections::HashSet<EdgeId> = std::collections::HashSet::new();
     for write in tx.buffer.operations() {
@@ -754,6 +780,101 @@ fn detect_delete_orphan_write_skew(tx: &WriteTransaction) -> Result<()> {
                         edge_id.as_u64(),
                         commit_ts,
                         snapshot_ts
+                    ),
+                }
+                .into());
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Commit-time re-check that a buffered `CreateEdge` does not commit with an
+/// endpoint that a concurrent transaction deleted/retracted after this tx's
+/// snapshot (Issue #3416 Pt1 -- the MIRROR of the delete-side write-skew).
+///
+/// This closes the second ordering: the edge creator's endpoints are validated
+/// by [`validation::validate`](super::validation::validate) *before* the
+/// timestamp/WAL/apply phase, and [`apply_edge_write`] does NO endpoint check,
+/// so a concurrent node delete that commits between `validate()` and this point
+/// would leave a dangling edge. Run under the same `historical.write()` guard as
+/// the delete-side check, the two orderings become symmetric: whichever tx
+/// applies second aborts.
+///
+/// An endpoint is considered present iff it is resolvable at apply time --
+/// **either** live in committed current storage **or** created/updated earlier
+/// in THIS transaction's buffer (a same-tx-created endpoint is valid; a same-tx
+/// *delete* of an endpoint under a still-live edge is already rejected by
+/// `validate()`, mirroring that function's `node_exists` logic exactly). A
+/// `CreateEdge` whose edge is itself deleted/retracted later in this same tx is
+/// skipped -- it commits no live edge, so a concurrently-deleted endpoint
+/// orphans nothing (this also keeps a same-tx `create_edge` + cascade / Pt4 from
+/// self-aborting). Because `validate()` already passed, an endpoint absent here
+/// is definitionally a concurrent deletion, so no snapshot-timestamp gate is
+/// needed (unlike the delete side, where a pre-snapshot edge is the documented
+/// orphan-preserving case).
+///
+/// Aborts with `TransactionError::ValidationFailed` (-> MCP `FAILED_PRECONDITION`,
+/// non-retriable).
+///
+/// # Locking
+///
+/// Called while `historical.write()` (order class 3) is held; reads only the
+/// current-storage node map (a leaf) and this tx's buffer, never calling back
+/// into `historical`/`wal`/`current_timestamp`. No lock-order inversion.
+///
+/// # Cost
+///
+/// O(1) buffer/current lookups per buffered `CreateEdge`, at commit only. Zero
+/// cost for transactions that create no edges.
+fn detect_create_edge_dangling_endpoint(tx: &WriteTransaction) -> Result<()> {
+    use crate::api::transaction::BufferedWrite;
+
+    // Resolve an endpoint exactly as `validation::validate` does: a same-tx
+    // buffered node counts as present iff its latest op is a create/update; a
+    // committed node counts as present iff it is still in current storage.
+    let endpoint_present = |node_id: NodeId| -> bool {
+        if tx.buffer.has_modified_node(node_id) {
+            matches!(
+                tx.buffer.get_node_write(node_id),
+                Some(BufferedWrite::CreateNode { .. } | BufferedWrite::UpdateNode { .. })
+            )
+        } else {
+            tx.current.get_node(node_id).is_ok()
+        }
+    };
+
+    for write in tx.buffer.operations() {
+        let (edge_id, source, target) = match write {
+            BufferedWrite::CreateEdge {
+                edge_id,
+                source,
+                target,
+                ..
+            } => (*edge_id, *source, *target),
+            _ => continue,
+        };
+
+        // Skip an edge created and then deleted/retracted within this same tx:
+        // it commits no live edge (mirrors the Pt4 skip in `validation::validate`).
+        if matches!(
+            tx.buffer.get_edge_write(edge_id),
+            Some(BufferedWrite::DeleteEdge { .. } | BufferedWrite::RetractEdge { .. })
+        ) {
+            continue;
+        }
+
+        for endpoint in [source, target] {
+            if !endpoint_present(endpoint) {
+                return Err(crate::core::error::TransactionError::ValidationFailed {
+                    reason: format!(
+                        "Write-skew detected: edge {} references node {}, which was \
+                         deleted or retracted by a concurrent transaction after this \
+                         transaction's snapshot. Committing would create a dangling edge. \
+                         Re-check the endpoint's existence and retry.",
+                        edge_id.as_u64(),
+                        endpoint.as_u64(),
                     ),
                 }
                 .into());
