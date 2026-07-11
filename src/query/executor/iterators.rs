@@ -2501,10 +2501,10 @@ impl AggregateIterator {
             let group = groups.remove(&key).expect("group present in order");
             let mut columns: Vec<(String, PropertyValue)> =
                 Vec::with_capacity(self.group_keys.len() + self.aggregates.len());
-            for (gk, val) in self.group_keys.iter().zip(group.key_values.into_iter()) {
+            for (gk, val) in self.group_keys.iter().zip(group.key_values) {
                 columns.push((gk.alias.clone(), val));
             }
-            for (spec, acc) in self.aggregates.iter().zip(group.accumulators.into_iter()) {
+            for (spec, acc) in self.aggregates.iter().zip(group.accumulators) {
                 columns.push((spec.alias.clone(), acc.finalize()));
             }
             rows.push(QueryRow::from_columns(columns));

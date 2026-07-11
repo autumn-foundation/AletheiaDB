@@ -371,6 +371,7 @@ impl AletheiaDB {
                 durability_mode,
                 write_buffer_size: config.wal.write_buffer_size,
                 wal_cipher: wal_cipher.clone(),
+                tolerate_torn_tail: config.wal.tolerate_torn_tail,
             };
 
             let wal = Arc::new(ConcurrentWalSystem::new(wal_system_config)?);
@@ -428,6 +429,7 @@ impl AletheiaDB {
                 persistence_thread_handle: None,
                 encryption_manager: encryption_manager.clone(),
                 constraint_registry: Arc::new(crate::core::constraint::ConstraintRegistry::new()),
+                lineage: Arc::new(crate::core::lineage::LineageStore::new()),
                 _tempdir: None,
             };
 
@@ -690,6 +692,7 @@ impl AletheiaDB {
                 durability_mode,
                 write_buffer_size: wal_config.write_buffer_size,
                 wal_cipher: None,
+                tolerate_torn_tail: wal_config.tolerate_torn_tail,
             };
 
             let wal = Arc::new(ConcurrentWalSystem::new(wal_system_config)?);
@@ -721,6 +724,7 @@ impl AletheiaDB {
                 persistence_thread_handle: None,
                 encryption_manager: None,
                 constraint_registry: Arc::new(crate::core::constraint::ConstraintRegistry::new()),
+                lineage: Arc::new(crate::core::lineage::LineageStore::new()),
                 _tempdir: None,
             };
             seed_startup_current_timestamp(&db)?;
