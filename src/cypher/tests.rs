@@ -4412,4 +4412,125 @@ mod unwind {
         let count = db.execute_cypher(&query).unwrap().count_all().unwrap();
         assert_eq!(count, 1, "one row holding the nested list");
     }
+
+    // ---- ORDER BY large-integer precision (review fix #1) -------------------
+
+    #[test]
+    fn order_by_preserves_large_integer_precision_ascending() {
+        // 2^53 and 2^53+1 both round to 2^53 as f64, so an f64-coerced compare
+        // treats them as equal and keeps input order (WRONG). Native i64
+        // comparison must order them correctly.
+        let asc = single_column(
+            &run("UNWIND [9007199254740993, 9007199254740992] AS x RETURN x ORDER BY x"),
+            "x",
+        );
+        assert_eq!(
+            asc,
+            vec![
+                PropertyValue::Int(9007199254740992),
+                PropertyValue::Int(9007199254740993),
+            ]
+        );
+    }
+
+    #[test]
+    fn order_by_preserves_large_integer_precision_descending() {
+        let desc = single_column(
+            &run("UNWIND [9007199254740992, 9007199254740993] AS x RETURN x ORDER BY x DESC"),
+            "x",
+        );
+        assert_eq!(
+            desc,
+            vec![
+                PropertyValue::Int(9007199254740993),
+                PropertyValue::Int(9007199254740992),
+            ]
+        );
+    }
+
+    #[test]
+    fn order_by_orders_nanosecond_timestamps() {
+        // Nanosecond epoch timestamps (~1.7e18) exceed 2^53 and collide under
+        // f64 coercion; native i64 comparison keeps them distinct and ordered.
+        let asc = single_column(
+            &run(
+                "UNWIND [1700000000000000002, 1700000000000000000, 1700000000000000001] \
+                 AS x RETURN x ORDER BY x",
+            ),
+            "x",
+        );
+        assert_eq!(
+            asc,
+            vec![
+                PropertyValue::Int(1700000000000000000),
+                PropertyValue::Int(1700000000000000001),
+                PropertyValue::Int(1700000000000000002),
+            ]
+        );
+    }
+
+    // ---- embedding parameter as list source (review fix #5) ----------------
+
+    #[test]
+    fn embedding_parameter_unwinds_to_float_rows() {
+        // The MCP layer coerces a bare numeric array to `Embedding`; unwinding
+        // it must yield one Float row per component, not be rejected.
+        let db = crate::AletheiaDB::new().unwrap();
+        let mut params = HashMap::new();
+        params.insert(
+            "arr".to_string(),
+            CypherParameterValue::Embedding(std::sync::Arc::from(
+                vec![1.0f32, 2.0, 3.0].as_slice(),
+            )),
+        );
+        let rows: Vec<_> = db
+            .execute_cypher_with_params("UNWIND $arr AS x RETURN x", params)
+            .unwrap()
+            .collect_all()
+            .unwrap()
+            .into_iter()
+            .map(|row| row.columns.unwrap())
+            .collect();
+        let values: Vec<_> = rows.iter().map(|c| c[0].1.clone()).collect();
+        assert_eq!(
+            values,
+            vec![
+                PropertyValue::Float(1.0),
+                PropertyValue::Float(2.0),
+                PropertyValue::Float(3.0),
+            ]
+        );
+    }
+
+    // ---- list-literal width cap (review fix #6) ----------------------------
+
+    #[test]
+    fn list_literal_at_width_cap_parses() {
+        // Exactly MAX_EXPRESSION_TERMS (4096) elements is allowed.
+        let inner = vec!["1"; 4096].join(", ");
+        let query = format!("UNWIND [{inner}] AS x RETURN x");
+        let count = CypherParser::parse(&query)
+            .map(|stmt| match stmt {
+                CypherStatement::Unwind { source, .. } => match source {
+                    CypherExpr::List(elems) => elems.len(),
+                    other => panic!("expected list source, got {other:?}"),
+                },
+                other => panic!("expected Unwind, got {other:?}"),
+            })
+            .expect("a 4096-element list must parse");
+        assert_eq!(count, 4096);
+    }
+
+    #[test]
+    fn list_literal_over_width_cap_errors_gracefully() {
+        // 4097 elements exceeds the cap and must yield a ParseError instead of
+        // allocating an unbounded AST.
+        let inner = vec!["1"; 4097].join(", ");
+        let query = format!("UNWIND [{inner}] AS x RETURN x");
+        let err = CypherParser::parse(&query);
+        assert!(
+            matches!(err, Err(CypherError::ParseError { .. })),
+            "an over-cap list literal must yield a ParseError, got {err:?}"
+        );
+    }
 }

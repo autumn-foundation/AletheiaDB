@@ -698,6 +698,13 @@ impl CypherParser {
                 if !self.at(TokenKind::RBracket) {
                     elements.push(self.parse_expression(depth + 1)?);
                     while self.eat(TokenKind::Comma) {
+                        // Cap the element count (mirroring MAX_EXPRESSION_TERMS
+                        // for AND/OR chains): a pathological multi-MB literal
+                        // would otherwise allocate ~1M AST nodes. Return a
+                        // graceful ParseError instead (issue #3404-adjacent).
+                        if elements.len() >= MAX_EXPRESSION_TERMS {
+                            return Err(self.error("list literal has too many elements (max 4096)"));
+                        }
                         elements.push(self.parse_expression(depth + 1)?);
                     }
                 }
