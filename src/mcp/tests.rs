@@ -3673,6 +3673,170 @@ mod query_tool_tests {
         );
     }
 
+    // --- #558 MCP surface: Cypher aggregate/computed rows must render their
+    // named column values (not `entity: null`). See the aggregation limitation
+    // note in CLAUDE.md that this closes at the MCP layer.
+
+    #[cfg(feature = "cypher")]
+    #[test]
+    fn test_query_cypher_aggregate_count_renders_value_not_null() {
+        let server = create_test_server();
+        for name in ["a", "b", "c", "d", "e"] {
+            seed_named(&server, "Person", name);
+        }
+        let value = run_query(
+            &server,
+            QueryRequest {
+                language: "cypher".to_string(),
+                query: "MATCH (n:Person) RETURN count(*)".to_string(),
+                params: None,
+                limit: None,
+            },
+        );
+        assert_eq!(value["row_count"].as_u64(), Some(1), "{value}");
+        // The aggregate value must be surfaced under its column name, not lost
+        // to an `entity: null` rendering.
+        assert_eq!(
+            value["rows"][0]["count(*)"].as_i64(),
+            Some(5),
+            "aggregate count must render its value under its column name: {value}"
+        );
+        assert!(
+            value["rows"][0]["entity"].is_null(),
+            "aggregate row must not carry a non-null entity payload: {value}"
+        );
+        // Column metadata names the aggregate column (not the static schema).
+        let cols = value["columns"].as_array().expect("columns array");
+        assert!(
+            cols.iter().any(|c| c["name"].as_str() == Some("count(*)")),
+            "columns must name the aggregate column: {value}"
+        );
+    }
+
+    #[cfg(feature = "cypher")]
+    #[test]
+    fn test_query_cypher_grouped_aggregate_renders_group_and_count() {
+        let server = create_test_server();
+        for (name, dept) in [
+            ("a", "Eng"),
+            ("b", "Eng"),
+            ("c", "Eng"),
+            ("d", "Sales"),
+            ("e", "Sales"),
+        ] {
+            let mut props = HashMap::new();
+            props.insert("name".to_string(), serde_json::json!(name));
+            props.insert("dept".to_string(), serde_json::json!(dept));
+            let resp = server.create_node(CreateNodeRequest {
+                valid_time: None,
+                label: "Person".to_string(),
+                properties: Some(props),
+                provenance: None,
+            });
+            let _: NodeResponse = parse_response(&resp).expect("seed node should succeed");
+        }
+        let value = run_query(
+            &server,
+            QueryRequest {
+                language: "cypher".to_string(),
+                query: "MATCH (n:Person) RETURN n.dept, count(*)".to_string(),
+                params: None,
+                limit: None,
+            },
+        );
+        assert_eq!(value["row_count"].as_u64(), Some(2), "{value}");
+        let rows = value["rows"].as_array().expect("rows array");
+        let mut counts = HashMap::new();
+        for r in rows {
+            let dept = r["n.dept"]
+                .as_str()
+                .unwrap_or_else(|| panic!("group column `n.dept` must be present: {value}"))
+                .to_string();
+            let cnt = r["count(*)"]
+                .as_i64()
+                .unwrap_or_else(|| panic!("aggregate column `count(*)` must be present: {value}"));
+            counts.insert(dept, cnt);
+        }
+        assert_eq!(counts.get("Eng"), Some(&3), "{value}");
+        assert_eq!(counts.get("Sales"), Some(&2), "{value}");
+        let cols = value["columns"].as_array().expect("columns array");
+        let names: Vec<&str> = cols.iter().filter_map(|c| c["name"].as_str()).collect();
+        assert!(
+            names.contains(&"n.dept") && names.contains(&"count(*)"),
+            "columns must list both the group key and the aggregate: {value}"
+        );
+    }
+
+    #[cfg(feature = "cypher")]
+    #[test]
+    fn test_query_cypher_aggregate_alias_names_column() {
+        let server = create_test_server();
+        for name in ["a", "b", "c"] {
+            seed_named(&server, "Person", name);
+        }
+        let value = run_query(
+            &server,
+            QueryRequest {
+                language: "cypher".to_string(),
+                query: "MATCH (n:Person) RETURN count(*) AS c".to_string(),
+                params: None,
+                limit: None,
+            },
+        );
+        assert_eq!(
+            value["rows"][0]["c"].as_i64(),
+            Some(3),
+            "aliased aggregate value must render under its alias: {value}"
+        );
+        let cols = value["columns"].as_array().expect("columns array");
+        assert!(
+            cols.iter().any(|c| c["name"].as_str() == Some("c")),
+            "columns must name the aggregate alias `c`: {value}"
+        );
+    }
+
+    #[cfg(feature = "cypher")]
+    #[test]
+    fn test_query_cypher_plain_entity_row_rendering_unchanged() {
+        // Non-regression: a plain entity query keeps the exact
+        // entity/score/path/timestamp row shape and static column schema.
+        let server = create_test_server();
+        seed_named(&server, "Person", "Alice");
+        let value = run_query(
+            &server,
+            QueryRequest {
+                language: "cypher".to_string(),
+                query: "MATCH (n:Person {name: 'Alice'}) RETURN n".to_string(),
+                params: None,
+                limit: None,
+            },
+        );
+        let row = &value["rows"][0];
+        assert_eq!(row["entity"]["label"].as_str(), Some("Person"), "{value}");
+        assert_eq!(
+            row["entity"]["properties"]["name"].as_str(),
+            Some("Alice"),
+            "{value}"
+        );
+        assert!(row.get("score").is_some(), "score key present: {value}");
+        assert!(row.get("path").is_some(), "path key present: {value}");
+        assert!(
+            row.get("timestamp").is_some(),
+            "timestamp key present: {value}"
+        );
+        let names: Vec<&str> = value["columns"]
+            .as_array()
+            .expect("columns array")
+            .iter()
+            .filter_map(|c| c["name"].as_str())
+            .collect();
+        assert_eq!(
+            names,
+            vec!["entity", "score", "path", "timestamp"],
+            "plain entity query keeps the static column schema: {value}"
+        );
+    }
+
     #[cfg(feature = "cypher")]
     #[test]
     fn test_query_cypher_optional_match_null_row_serializes_as_json_null() {
