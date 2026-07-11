@@ -58,8 +58,20 @@ fn post_status(addr: &str, path: &str, body: &[u8]) -> Option<u16> {
     );
 
     stream.write_all(request_head.as_bytes()).ok()?;
-    stream.write_all(body).ok()?;
-    stream.flush().ok()?;
+    // Race: the server may reject the oversized body and RST/close the
+    // connection before we finish writing it, so `write_all`/`flush` can fail
+    // with BrokenPipe/ConnectionReset even though a valid `413` status line is
+    // already waiting to be read. Tolerate those write errors and still attempt
+    // the read — the status line, not a clean write, is the real assertion.
+    if let Err(e) = stream.write_all(body) {
+        if !matches!(
+            e.kind(),
+            std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::ConnectionReset
+        ) {
+            return None;
+        }
+    }
+    let _ = stream.flush();
 
     let mut response = Vec::new();
     // Read until EOF (server sends `Connection: close`) or the read times out.
@@ -138,7 +150,11 @@ fn run_server_enforces_413_over_the_wire() {
     });
 
     // ── Oversized body must be rejected with 413 through the production stack. ──
-    let big_array: Vec<serde_json::Value> = (0..8_000).map(|_| serde_json::json!(1)).collect();
+    // Kept modest (~8 KiB, just over the 4 KiB limit) so it reliably fits a
+    // single socket send and does not depend on the write completing after the
+    // server has already RST the connection (see the write-tolerance in
+    // `post_status`).
+    let big_array: Vec<serde_json::Value> = (0..4_000).map(|_| serde_json::json!(1)).collect();
     let oversized = serde_json::to_vec(&serde_json::json!({
         "operation": "execute_query",
         "query": "MATCH (n) RETURN n",

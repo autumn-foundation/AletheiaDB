@@ -24,6 +24,7 @@ use std::sync::Arc;
 
 use aletheiadb::AletheiaDB;
 use aletheiadb::auth::AuthMode;
+use aletheiadb::core::property::MAX_VECTOR_DIMENSIONS;
 use aletheiadb::http::{AppState, ServerConfig, build_test_router};
 use autumn_web::test::{TestApp, TestClient};
 use axum::body::Body;
@@ -34,12 +35,6 @@ use serde_json::json;
 /// can only come from the structural cap (Issue #3426), proving the two bounds
 /// are independent.
 const GENEROUS_BODY_LIMIT: usize = 8 * 1024 * 1024;
-
-/// Mirror of `crate::core::property::MAX_VECTOR_DIMENSIONS` (100_000). Kept as a
-/// local literal because the constant is `pub` but this integration test drives
-/// only the public HTTP surface; if the real cap changes, the `+ 1` request
-/// below must still exceed it — see the `at_dimension_cap` companion assertion.
-const MAX_VECTOR_DIMENSIONS: usize = 100_000;
 
 fn client_with_limit(max_body: usize) -> TestClient {
     let db = Arc::new(AletheiaDB::new().expect("create DB"));
@@ -66,7 +61,7 @@ async fn oversized_embedding_parameter_is_rejected_with_400() {
     // the body compact (~200 KB) — well under GENEROUS_BODY_LIMIT, so the byte
     // gate cannot fire and the `400` must originate in the converter.
     let big_embedding: Vec<serde_json::Value> =
-        (0..=MAX_VECTOR_DIMENSIONS).map(|_| json!(1)).collect();
+        (0..MAX_VECTOR_DIMENSIONS + 1).map(|_| json!(1)).collect();
     let payload = json!({
         "operation": "execute_query",
         "query": "MATCH (n) RETURN n",

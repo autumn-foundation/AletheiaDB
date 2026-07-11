@@ -175,26 +175,35 @@ pub fn json_to_parameter_value(value: &serde_json::Value) -> Result<ParameterVal
             Ok(ParameterValue::Value(PredicateValue::String(s.clone())))
         }
         serde_json::Value::Array(arr) => {
-            // Structural width cap (defense-in-depth, Issue #3426). The request
-            // body-size limit (Issue #3108 / #3424) bounds the *bytes* on this
-            // ingest path, but it must not be the sole width bound: a future
-            // operator raising `max_request_body_bytes` should not silently
-            // reopen a structural amplification vector.
+            // Structural width cap (defense-in-depth, Issue #3426). This
+            // mirrors the sibling property path's structural vector-dimension
+            // bound (`json_to_property_value`): it bounds the converted
+            // embedding allocation (the downstream `Arc<[f32]>`) and rejects
+            // absurd dimensions early with a clear error.
+            //
+            // NOTE: this check runs *after* serde_json has already
+            // materialized the full `Vec<serde_json::Value>` for the array, so
+            // it does NOT bound peak parse-time memory for the request body --
+            // that remains governed by `max_request_body_bytes`
+            // (`DefaultBodyLimit`, Issue #3108 / #3424), exactly like the
+            // post-parse property-path cap. The two limits are complementary:
+            // the body-size limit bounds request bytes, this cap bounds the
+            // embedding width we convert to.
             //
             // This path is non-recursive: a parameter array is ALWAYS
             // interpreted as a flat numeric embedding (a nested array or object
             // element yields the float error below, never a general list and
             // never deeper recursion), so depth is bounded at 1 by construction
             // and `MAX_VECTOR_DIMENSIONS` is the single, semantically-precise
-            // structural cap. Unlike the sibling property path
-            // (`json_to_property_value`), which can also produce a generic
-            // `Array` and therefore needs the broader `MAX_ARRAY_ELEMENTS`
-            // bound, that cap would be provably unreachable here: the
-            // compile-time invariant below guarantees `MAX_VECTOR_DIMENSIONS <
-            // MAX_ARRAY_ELEMENTS`, so the vector cap always rejects first. The
-            // assert makes the invariant explicit at the check site (enforced in
-            // every build, not just tests) so nobody re-adds a redundant
-            // array-elements check should the constants ever drift.
+            // structural cap. Unlike the sibling property path, which can also
+            // produce a generic `Array` and therefore needs the broader
+            // `MAX_ARRAY_ELEMENTS` bound, that cap would be provably unreachable
+            // here: the compile-time invariant below guarantees
+            // `MAX_VECTOR_DIMENSIONS < MAX_ARRAY_ELEMENTS`, so the vector cap
+            // always rejects first. The assert makes the invariant explicit at
+            // the check site (enforced in every build, not just tests) so nobody
+            // re-adds a redundant array-elements check should the constants ever
+            // drift.
             const {
                 assert!(
                     crate::core::property::MAX_VECTOR_DIMENSIONS
@@ -568,6 +577,18 @@ mod tests {
             matches!(ok, Ok(ParameterValue::Embedding(_))),
             "an embedding exactly at the dimension cap must be accepted"
         );
+    }
+
+    #[test]
+    fn test_json_to_parameter_value_empty_array_ok() {
+        // The lower boundary: an empty array (len 0) trivially passes the
+        // dimension cap and converts to an empty embedding — the cap only
+        // rejects the upper end.
+        let empty = json_to_parameter_value(&serde_json::Value::Array(vec![]));
+        match empty {
+            Ok(ParameterValue::Embedding(e)) => assert_eq!(e.len(), 0),
+            other => panic!("expected an empty embedding, got {:?}", other.map(|_| ())),
+        }
     }
 
     #[test]
