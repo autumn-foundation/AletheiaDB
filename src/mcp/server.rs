@@ -419,6 +419,7 @@ impl AletheiaMcpServer {
     ///     properties: Some(props),
     ///     valid_time: None,
     ///     provenance: None,
+    ///     derived_from: None,
     /// };
     /// ```
     ///
@@ -784,6 +785,22 @@ impl AletheiaMcpServer {
     /// An empty database returns explicit `null` bounds, never epoch 0.
     pub fn temporal_extent(&self, req: TemporalExtentRequest) -> String {
         Self::extract_text(self.handle_temporal_extent(
+            serde_json::to_value(req).expect("request serialization should not fail"),
+        ))
+    }
+
+    /// Query the upstream derivation lineage of a fact (Issue #3371): "what
+    /// was this fact derived from?", transitively — the evidence chain.
+    pub fn lineage_upstream(&self, req: crate::mcp::tools::LineageQueryRequest) -> String {
+        Self::extract_text(self.handle_lineage_upstream(
+            serde_json::to_value(req).expect("request serialization should not fail"),
+        ))
+    }
+
+    /// Query the downstream derivation lineage of a fact (Issue #3371): "what
+    /// has been derived from this fact?", transitively — the blast radius.
+    pub fn lineage_downstream(&self, req: crate::mcp::tools::LineageQueryRequest) -> String {
+        Self::extract_text(self.handle_lineage_downstream(
             serde_json::to_value(req).expect("request serialization should not fail"),
         ))
     }
@@ -1232,6 +1249,49 @@ impl AletheiaMcpServer {
             (None, Some(name)) => Provenance::builder().principal(name).build().ok(),
             (None, None) => None,
         })
+    }
+
+    /// Parse a single MCP [`LineageRefRequest`] into a core
+    /// [`LineageRef`](crate::core::lineage::LineageRef) (Issue #3371).
+    ///
+    /// Validates `entity_kind` (`"node"`/`"edge"`, case-insensitive) and that
+    /// the id and version are in range. Structural validity only — whether the
+    /// version actually *exists* is checked by the write path
+    /// (`validate_sources`) so a dangling reference becomes a `NOT_FOUND`
+    /// rather than an `INVALID_ARGUMENT`.
+    fn parse_lineage_ref(
+        &self,
+        req: &crate::mcp::tools::LineageRefRequest,
+    ) -> std::result::Result<crate::core::lineage::LineageRef, CallToolResult> {
+        let version = VersionId::new(req.version)
+            .map_err(|e| self.invalid_argument(&format!("Invalid derived_from version: {e}")))?;
+        let entity = match req.entity_kind.trim().to_ascii_lowercase().as_str() {
+            "node" => crate::core::id::EntityId::Node(NodeId::new(req.id).map_err(|e| {
+                self.invalid_argument(&format!("Invalid derived_from node id: {e}"))
+            })?),
+            "edge" => crate::core::id::EntityId::Edge(EdgeId::new(req.id).map_err(|e| {
+                self.invalid_argument(&format!("Invalid derived_from edge id: {e}"))
+            })?),
+            other => {
+                return Err(self.invalid_argument(&format!(
+                    "Invalid derived_from entity_kind '{other}': expected 'node' or 'edge'"
+                )));
+            }
+        };
+        Ok(crate::core::lineage::LineageRef { entity, version })
+    }
+
+    /// Parse the optional `derived_from` list on a write request into core
+    /// [`LineageRef`](crate::core::lineage::LineageRef)s (Issue #3371). `None`
+    /// or an empty list yields an empty vec (no lineage recorded).
+    fn parse_derived_from(
+        &self,
+        value: &Option<Vec<crate::mcp::tools::LineageRefRequest>>,
+    ) -> std::result::Result<Vec<crate::core::lineage::LineageRef>, CallToolResult> {
+        match value {
+            None => Ok(Vec::new()),
+            Some(list) => list.iter().map(|r| self.parse_lineage_ref(r)).collect(),
+        }
     }
 
     /// Parse an optional transaction time, returning the current time if not specified.
@@ -1847,6 +1907,11 @@ impl AletheiaMcpServer {
             Err(result) => return result,
         };
 
+        let derived_from = match self.parse_derived_from(&req.derived_from) {
+            Ok(refs) => refs,
+            Err(result) => return result,
+        };
+
         let mut options = crate::api::transaction::WriteRequestOptions::new();
         if let Some(valid_from) = valid_from {
             options = options.with_valid_from(valid_from);
@@ -1855,10 +1920,21 @@ impl AletheiaMcpServer {
             options = options.with_provenance(provenance);
         }
 
-        match self
-            .db
-            .create_node_with_options(&req.label, properties, options)
-        {
+        let created = if derived_from.is_empty() {
+            self.db
+                .create_node_with_options(&req.label, properties, options)
+        } else {
+            self.db
+                .create_node_with_options_and_lineage(
+                    &req.label,
+                    properties,
+                    options,
+                    &derived_from,
+                )
+                .map(|(node_id, _version)| node_id)
+        };
+
+        match created {
             Ok(node_id) => match self.db.get_node(node_id) {
                 Ok(node) => {
                     let now = time::now();
@@ -1903,6 +1979,11 @@ impl AletheiaMcpServer {
             Err(result) => return result,
         };
 
+        let derived_from = match self.parse_derived_from(&req.derived_from) {
+            Ok(refs) => refs,
+            Err(result) => return result,
+        };
+
         let mut options = crate::api::transaction::WriteRequestOptions::new();
         if let Some(valid_from) = valid_from {
             options = options.with_valid_from(valid_from);
@@ -1911,10 +1992,16 @@ impl AletheiaMcpServer {
             options = options.with_provenance(provenance);
         }
 
-        match self
-            .db
-            .update_node_with_options(node_id, properties, options)
-        {
+        let updated = if derived_from.is_empty() {
+            self.db
+                .update_node_with_options(node_id, properties, options)
+        } else {
+            self.db
+                .update_node_with_options_and_lineage(node_id, properties, options, &derived_from)
+                .map(|_version| ())
+        };
+
+        match updated {
             Ok(()) => match self.db.get_node(node_id) {
                 Ok(node) => {
                     let now = time::now();
@@ -2545,6 +2632,11 @@ impl AletheiaMcpServer {
             Err(result) => return result,
         };
 
+        let derived_from = match self.parse_derived_from(&req.derived_from) {
+            Ok(refs) => refs,
+            Err(result) => return result,
+        };
+
         let mut options = crate::api::transaction::WriteRequestOptions::new();
         if let Some(valid_from) = valid_from {
             options = options.with_valid_from(valid_from);
@@ -2553,10 +2645,23 @@ impl AletheiaMcpServer {
             options = options.with_provenance(provenance);
         }
 
-        match self
-            .db
-            .create_edge_with_options(source_id, target_id, &req.label, properties, options)
-        {
+        let created = if derived_from.is_empty() {
+            self.db
+                .create_edge_with_options(source_id, target_id, &req.label, properties, options)
+        } else {
+            self.db
+                .create_edge_with_options_and_lineage(
+                    source_id,
+                    target_id,
+                    &req.label,
+                    properties,
+                    options,
+                    &derived_from,
+                )
+                .map(|(edge_id, _version)| edge_id)
+        };
+
+        match created {
             Ok(edge_id) => match self.db.get_edge(edge_id) {
                 Ok(edge) => {
                     let now = time::now();
@@ -2601,6 +2706,11 @@ impl AletheiaMcpServer {
             Err(result) => return result,
         };
 
+        let derived_from = match self.parse_derived_from(&req.derived_from) {
+            Ok(refs) => refs,
+            Err(result) => return result,
+        };
+
         let mut options = crate::api::transaction::WriteRequestOptions::new();
         if let Some(valid_from) = valid_from {
             options = options.with_valid_from(valid_from);
@@ -2609,10 +2719,16 @@ impl AletheiaMcpServer {
             options = options.with_provenance(provenance);
         }
 
-        match self
-            .db
-            .update_edge_with_options(edge_id, properties, options)
-        {
+        let updated = if derived_from.is_empty() {
+            self.db
+                .update_edge_with_options(edge_id, properties, options)
+        } else {
+            self.db
+                .update_edge_with_options_and_lineage(edge_id, properties, options, &derived_from)
+                .map(|_version| ())
+        };
+
+        match updated {
             Ok(()) => match self.db.get_edge(edge_id) {
                 Ok(edge) => {
                     let now = time::now();
@@ -4306,6 +4422,120 @@ impl AletheiaMcpServer {
         }
     }
 
+    /// Convert a core [`EntityId`](crate::core::id::EntityId) into the
+    /// `(entity_kind, id)` pair used in lineage JSON responses.
+    fn lineage_entity_parts(entity: crate::core::id::EntityId) -> (&'static str, u64) {
+        match entity {
+            crate::core::id::EntityId::Node(id) => ("node", id.as_u64()),
+            crate::core::id::EntityId::Edge(id) => ("edge", id.as_u64()),
+        }
+    }
+
+    /// Serialize one resolved lineage entry (version-pinned ref + depth +
+    /// current-state status) for a lineage query response (Issue #3371).
+    fn lineage_entry_to_json(entry: &crate::db::LineageViewEntry) -> serde_json::Value {
+        let (entity_kind, id) = Self::lineage_entity_parts(entry.reference.entity);
+        json!({
+            "entity_kind": entity_kind,
+            "id": id,
+            "version": entry.reference.version.as_u64(),
+            "depth": entry.depth,
+            "status": entry.status.as_str(),
+        })
+    }
+
+    /// Shared implementation of the `lineage_upstream` / `lineage_downstream`
+    /// tools (Issue #3371): resolve the root, run the closure in `direction`,
+    /// paginate, and shape the response with `has_more`/`next_offset` (#3226).
+    fn handle_lineage_query(&self, args: serde_json::Value, upstream: bool) -> CallToolResult {
+        let req: crate::mcp::tools::LineageQueryRequest = match serde_json::from_value(args) {
+            Ok(r) => r,
+            Err(e) => return self.invalid_argument(&format!("Invalid arguments: {}", e)),
+        };
+
+        let root_req = crate::mcp::tools::LineageRefRequest {
+            entity_kind: req.entity_kind.clone(),
+            id: req.id,
+            version: req.version,
+        };
+        let root = match self.parse_lineage_ref(&root_req) {
+            Ok(r) => r,
+            Err(result) => return result,
+        };
+
+        let as_of =
+            match self.parse_opt_timestamp("as_of_transaction_time", &req.as_of_transaction_time) {
+                Ok(v) => v,
+                Err(result) => return result,
+            };
+
+        let page_limit = req.limit.unwrap_or(100);
+        let offset = req.offset.unwrap_or(0);
+        // Fetch enough to cover the requested page window; slicing happens
+        // below so `offset` paginates a stable breadth-first ordering.
+        let fetch_limit = offset.saturating_add(page_limit);
+
+        let mut options = crate::core::lineage::LineageQueryOptions::new().with_limit(fetch_limit);
+        if let Some(max_depth) = req.max_depth {
+            options = options.with_max_depth(max_depth);
+        }
+        if let Some(as_of) = as_of {
+            options = options.with_as_of(as_of);
+        }
+
+        let view = if upstream {
+            self.db.upstream_lineage(root, options)
+        } else {
+            self.db.downstream_lineage(root, options)
+        };
+
+        let page: Vec<serde_json::Value> = view
+            .entries
+            .iter()
+            .skip(offset)
+            .take(page_limit)
+            .map(Self::lineage_entry_to_json)
+            .collect();
+        // The store already bounded the fetch to `fetch_limit`; anything it
+        // dropped (limit or depth cap) is reported via `has_more`.
+        let has_more = view.has_more;
+        let returned = page.len();
+
+        let (root_kind, root_id) = Self::lineage_entity_parts(root.entity);
+        let mut response = json!({
+            "direction": if upstream { "upstream" } else { "downstream" },
+            "root": {
+                "entity_kind": root_kind,
+                "id": root_id,
+                "version": root.version.as_u64(),
+            },
+            "entries": page,
+            "count": returned,
+        });
+        if let Some(obj) = response.as_object_mut() {
+            obj.insert("has_more".to_string(), json!(has_more));
+            if has_more {
+                obj.insert(
+                    "next_offset".to_string(),
+                    json!(offset.saturating_add(returned)),
+                );
+            }
+        }
+        self.success_json(response)
+    }
+
+    /// Handle the `lineage_upstream` tool (Issue #3371): "what was this fact
+    /// derived from?" — the transitive evidence chain.
+    fn handle_lineage_upstream(&self, args: serde_json::Value) -> CallToolResult {
+        self.handle_lineage_query(args, true)
+    }
+
+    /// Handle the `lineage_downstream` tool (Issue #3371): "what has been
+    /// derived from this fact?" — the retraction blast-radius report.
+    fn handle_lineage_downstream(&self, args: serde_json::Value) -> CallToolResult {
+        self.handle_lineage_query(args, false)
+    }
+
     /// Handle the `audit_export` tool (Issue #3358).
     ///
     /// Produces a signed, offline-verifiable evidence artifact of an entity's
@@ -5148,6 +5378,8 @@ impl AletheiaMcpServer {
             "query" => self.handle_query(args),
             "get_schema" => self.handle_get_schema(args),
             "temporal_extent" => self.handle_temporal_extent(args),
+            "lineage_upstream" => self.handle_lineage_upstream(args),
+            "lineage_downstream" => self.handle_lineage_downstream(args),
             "audit_export" => self.handle_audit_export(args),
             "database_stats" => self.handle_database_stats(args),
             _ => self.error_result(
@@ -5691,6 +5923,38 @@ fn tool_definitions() -> Vec<Tool> {
              (edge_types); per-label bounds are computed from hot-tier history only and may \
              be narrower than the overall bounds (or a label absent) after cold migration.",
             make_input_schema::<TemporalExtentRequest>(),
+        ),
+        Tool::new(
+            "lineage_upstream",
+            "Query the UPSTREAM derivation lineage of a fact (Issue #3371): 'what was this fact \
+             derived from?', transitively — the evidence chain for citation-grade answers. \
+             Arguments: entity_kind ('node'|'edge'), id, version (lineage is version-pinned; use \
+             the exact version whose evidence you want), optional max_depth (transitive hop cap; \
+             1 = direct parents), optional limit (default 100) and offset for pagination, and \
+             optional as_of_transaction_time (ISO 8601 / RFC 3339 or integer microseconds) to see \
+             lineage as it was recorded by that transaction time. Returns {direction:'upstream', \
+             root, entries[], count, has_more, next_offset?}; each entry is a version-pinned ref \
+             {entity_kind, id, version} plus depth (min hops from the root) and status \
+             ('current'|'superseded'|'absent'). Lineage records are immutable, so a source that \
+             was later retracted/deleted still resolves and is marked 'absent'. Declare lineage at \
+             write time via the create_node/create_edge/update_node/update_edge `derived_from` \
+             parameter.",
+            make_input_schema::<LineageQueryRequest>(),
+        ),
+        Tool::new(
+            "lineage_downstream",
+            "Query the DOWNSTREAM derivation lineage of a fact (Issue #3371): 'what has been \
+             derived from this fact?', transitively — the retraction BLAST RADIUS. When an input \
+             fact is found wrong or retracted, one call enumerates every transitively derived \
+             fact so you can assess contamination. Arguments: entity_kind ('node'|'edge'), id, \
+             version, optional max_depth (transitive hop cap; 1 = direct children), optional limit \
+             (default 100) and offset for pagination, and optional as_of_transaction_time (ISO \
+             8601 / RFC 3339 or integer microseconds). Returns {direction:'downstream', root, \
+             entries[], count, has_more, next_offset?}; each entry is a version-pinned ref \
+             {entity_kind, id, version} plus depth (min hops from the root) and status \
+             ('current'|'superseded'|'absent'). Version-pinned: the closure reflects exactly the \
+             versions that declared this fact as a source.",
+            make_input_schema::<LineageQueryRequest>(),
         ),
         Tool::new(
             "audit_export",

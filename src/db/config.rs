@@ -429,6 +429,7 @@ impl AletheiaDB {
                 persistence_thread_handle: None,
                 encryption_manager: encryption_manager.clone(),
                 constraint_registry: Arc::new(crate::core::constraint::ConstraintRegistry::new()),
+                lineage: Arc::new(crate::core::lineage::LineageStore::new()),
                 _tempdir: None,
             };
 
@@ -723,6 +724,7 @@ impl AletheiaDB {
                 persistence_thread_handle: None,
                 encryption_manager: None,
                 constraint_registry: Arc::new(crate::core::constraint::ConstraintRegistry::new()),
+                lineage: Arc::new(crate::core::lineage::LineageStore::new()),
                 _tempdir: None,
             };
             seed_startup_current_timestamp(&db)?;

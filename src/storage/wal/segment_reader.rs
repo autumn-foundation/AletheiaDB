@@ -214,6 +214,9 @@ fn payload_version(version: u8) -> u8 {
 /// History of the newest plaintext version: #3224→3, #3421→5, #3413→7,
 /// #3406→9. Bump on every WAL plaintext format increase.
 #[inline]
+// Only referenced by the fuzz-only `crate::fuzzing` module, so it is compiled
+// only under `any(fuzzing, feature = "fuzzing")`; on non-fuzzing builds it is
+// omitted entirely (no dead-code hit) while fuzz targets still get it.
 #[cfg(any(fuzzing, feature = "fuzzing"))]
 pub(crate) fn newest_plaintext_wal_version() -> u8 {
     payload_version(WAL_VERSION_MAX)
