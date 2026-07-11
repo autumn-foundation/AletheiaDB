@@ -61,13 +61,20 @@ fn demo_time_travel_answer_differs_from_current_state() {
     let (_success, stdout) = run_demo();
 
     // The AS OF differentiator: Alice is a "CTO" now but was an "Engineer" on
-    // the founding day. Both must appear in the guided output.
+    // the founding day. Assert on the exact founding-day line — a marker UNIQUE
+    // to the point-in-time (AS OF) reconstruction — so the test fails if AS OF
+    // silently regresses to returning the CURRENT (CTO) state. (A bare
+    // "Engineer" substring is printed anyway by Bob/Carol/the filler engineers
+    // in the traversal section, so it cannot guard this claim.)
     assert!(
-        stdout.contains("CTO"),
-        "expected current-state title 'CTO'.\nfull output:\n{stdout}"
+        stdout.contains("→ On founding day, Alice was: Engineer"),
+        "expected the AS OF founding-day line to report 'Engineer' (the \
+         point-in-time reconstruction must not return current state).\n\
+         full output:\n{stdout}"
     );
+    // And the current-state line must still show the latest title.
     assert!(
-        stdout.contains("Engineer"),
-        "expected founding-day title 'Engineer'.\nfull output:\n{stdout}"
+        stdout.contains("→ Alice is currently: CTO"),
+        "expected the current-state line to report 'CTO'.\nfull output:\n{stdout}"
     );
 }

@@ -193,7 +193,8 @@ fn demo_prop_str(node: &Node, key: &str) -> String {
 /// Seeds a small story-driven bi-temporal dataset into `db` and prints a guided
 /// sequence of showcase queries: a current-state lookup, an `AS OF`
 /// point-in-time lookup, a graph traversal, and the full version history of a
-/// node. Mirrors the narrative in `examples/demo.rs`.
+/// node. Tells the same story as `examples/demo.rs` (the query ordering and
+/// filler count differ; both flows are exercised in CI).
 ///
 /// Extracted from [`handle_demo`] so the seed + query flow is unit-testable
 /// against an injected database instance.
@@ -311,6 +312,16 @@ fn run_demo(db: &AletheiaDB) -> Result<(), String> {
         "  what you just saw: the SAME node, a different answer — \
          \"{title_founding}\" then vs \"{title_now}\" now.\n"
     );
+
+    // Guard the demo's headline invariant: the AS OF reconstruction must return
+    // the *founding-day* fact, not silently regress to current state. Uses the
+    // demo's `Result<(), String>` convention rather than a panic to match the
+    // CLI error style (cf. the `assert_ne!` guard in examples/demo.rs:140).
+    if title_founding == title_now {
+        return Err(format!(
+            "demo invariant broken: AS OF returned current state ({title_now})"
+        ));
+    }
 
     // ── Query 3: a traversal ────────────────────────────────────────────────
     println!("── Query 3 of 4: Traversal (who does Alice know?) ──");
@@ -1078,7 +1089,17 @@ mod tests {
     #[test]
     fn demo_props_builds_expected_map() {
         let map = demo_props(&[("name", "Alice"), ("title", "Engineer")]);
-        assert!(!map.is_empty());
+        // Round-trip the inserted values, not just non-emptiness.
+        assert_eq!(
+            map.get("name").map(demo_display_value).as_deref(),
+            Some("Alice"),
+            "name should round-trip"
+        );
+        assert_eq!(
+            map.get("title").map(demo_display_value).as_deref(),
+            Some("Engineer"),
+            "title should round-trip"
+        );
     }
 
     #[test]

@@ -40,10 +40,12 @@ directory, no server:
 aletheia demo
 ```
 
-`aletheia demo` seeds the identical ephemeral, story-driven graph in-memory and
-prints the same guided sequence (current-state lookup, `AS OF` time-travel,
-traversal, and version history). It mirrors `cargo run --example demo` and is
-covered by the same CI behavior guard, so the two never drift.
+`aletheia demo` seeds the same ephemeral, story-driven graph in-memory and
+prints an equivalent guided sequence (current-state lookup, `AS OF` time-travel,
+traversal, and version history — the CLI uses a smaller filler count and orders
+the traversal and time-travel queries differently). Both flows are exercised in
+CI (`tests/cli_demo.rs` guards the CLI; `tests/quickstart_demo.rs` guards
+`cargo run --example demo`).
 
 You'll see four guided queries, each with a one-line "what you just saw":
 
