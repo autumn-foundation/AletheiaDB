@@ -54,3 +54,9 @@
 - Combining `Chronos` (history) and `ConceptAlgebra` (vector math) creates a powerful predictive capability.
 - Validating time-windows for history extraction is critical; gaps in history need careful handling (currently assumes linear velocity).
 - This unlocks "Future Search" use cases (e.g., predicting user interests).
+## DejaVu
+**Concept:** A semantic recurrence detector that compares a node's current vector state against its own historical states (self-recurrence) or the historical states of another node (cross-node recurrence).
+**Fate:** Merged (Experimental)
+**Lesson:**
+- Linking `get_node_history` directly to vector similarity checking enables powerful temporal-semantic queries like "is this node repeating a past pattern?"
+- Skipping the very last version during self-recurrence checks is crucial, otherwise a node will constantly match its immediate present state as a false "recurrence."

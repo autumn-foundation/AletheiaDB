@@ -9,6 +9,7 @@
 pub mod ariadne;
 pub mod aura;
 pub mod chronos;
+pub mod dejavu;
 pub mod echo;
 pub mod kairos;
 pub mod mnemosyne;
