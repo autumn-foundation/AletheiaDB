@@ -181,21 +181,15 @@ fn execute_unwind(
         order_rows(&mut projected, descending)?;
     }
 
-    // SKIP / LIMIT paginate the final rows.
+    // SKIP / LIMIT paginate the final rows. An absent LIMIT is an unbounded
+    // `take`, collapsing the Some/None arms into one pipeline.
     let skip = ret.skip.unwrap_or(0);
-    let rows: Vec<QueryRow> = match ret.limit {
-        Some(limit) => projected
-            .into_iter()
-            .skip(skip)
-            .take(limit)
-            .map(|(_, columns)| QueryRow::from_columns(columns))
-            .collect(),
-        None => projected
-            .into_iter()
-            .skip(skip)
-            .map(|(_, columns)| QueryRow::from_columns(columns))
-            .collect(),
-    };
+    let rows: Vec<QueryRow> = projected
+        .into_iter()
+        .skip(skip)
+        .take(ret.limit.unwrap_or(usize::MAX))
+        .map(|(_, columns)| QueryRow::from_columns(columns))
+        .collect();
 
     Ok(QueryResults::new(Box::new(VecResultIterator::new(rows))))
 }
@@ -233,6 +227,14 @@ fn unwind_source_values(
                         out.push(param_to_property(item, 0)?);
                     }
                     Ok(out)
+                }
+                // A dense vector / embedding parameter is a valid list source:
+                // the MCP layer coerces a bare numeric array (`$arr = [1,2,3]`)
+                // to `Embedding`, so `UNWIND $arr AS x` must behave like the
+                // identical list literal rather than being rejected. Each
+                // component becomes one `Float` row.
+                CypherParameterValue::Embedding(e) => {
+                    Ok(e.iter().map(|c| PropertyValue::Float(*c as f64)).collect())
                 }
                 other => Err(CypherError::SemanticError(format!(
                     "UNWIND requires a list or null, but parameter ${name} is a \
@@ -454,14 +456,16 @@ fn project_element(
 // ---------------------------------------------------------------------------
 
 /// Deduplicate projected rows by their output column tuple (first wins).
+///
+/// Equality is `PropertyValue`'s, so `Int(1)` and `Float(1.0)` are treated as
+/// *distinct* rows -- an intentional divergence from openCypher numeric
+/// coercion, consistent with AletheiaDB's DB-wide `PropertyValue` equality.
 fn distinct_rows(rows: Vec<UnwindRow>) -> Vec<UnwindRow> {
-    let mut seen: Vec<Vec<(String, PropertyValue)>> = Vec::new();
-    let mut out = Vec::with_capacity(rows.len());
+    let mut out: Vec<UnwindRow> = Vec::with_capacity(rows.len());
     for (value, columns) in rows {
-        if seen.iter().any(|existing| existing == &columns) {
+        if out.iter().any(|(_, existing)| existing == &columns) {
             continue;
         }
-        seen.push(columns.clone());
         out.push((value, columns));
     }
     out
@@ -480,10 +484,15 @@ fn order_rows(rows: &mut Vec<UnwindRow>, descending: bool) -> Result<(), CypherE
         .into_iter()
         .partition(|(value, _)| matches!(value, PropertyValue::Null));
 
-    non_nulls.sort_by(|(a, _), (b, _)| compare_scalar(a, b, kind));
-    if descending {
-        non_nulls.reverse();
-    }
+    // Sort directly in the requested direction (a stable sort followed by
+    // `reverse()` would invert the order of equal-key rows).
+    non_nulls.sort_by(|(a, _), (b, _)| {
+        if descending {
+            compare_scalar(b, a, kind)
+        } else {
+            compare_scalar(a, b, kind)
+        }
+    });
 
     if descending {
         // nulls first, then descending values.
@@ -542,7 +551,15 @@ fn order_kind(rows: &[UnwindRow]) -> Result<OrderKind, CypherError> {
 /// Compare two non-null scalar [`PropertyValue`]s of the given kind.
 fn compare_scalar(a: &PropertyValue, b: &PropertyValue, kind: OrderKind) -> Ordering {
     match kind {
-        OrderKind::Numeric => scalar_f64(a).total_cmp(&scalar_f64(b)),
+        // Compare same-typed numerics natively: `i64 -> f64` loses precision
+        // above 2^53, collapsing distinct large integers (nanosecond epoch
+        // timestamps, Snowflake IDs) to spurious ties and mis-ordering them.
+        // Only genuinely mixed Int/Float pairs fall back to `f64` coercion.
+        OrderKind::Numeric => match (a, b) {
+            (PropertyValue::Int(x), PropertyValue::Int(y)) => x.cmp(y),
+            (PropertyValue::Float(x), PropertyValue::Float(y)) => x.total_cmp(y),
+            _ => scalar_f64(a).total_cmp(&scalar_f64(b)),
+        },
         OrderKind::Text => match (a, b) {
             (PropertyValue::String(x), PropertyValue::String(y)) => x.as_ref().cmp(y.as_ref()),
             _ => Ordering::Equal,
