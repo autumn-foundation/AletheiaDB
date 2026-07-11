@@ -12413,6 +12413,134 @@ mod apply_batch_tests {
         assert!(server.db().get_node(NodeId::new(guessed).unwrap()).is_err());
     }
 
+    /// The batch-created-ref guard fires BEFORE the `detach` flag is
+    /// consulted: a `delete_node` with `detach: true` targeting the guessed
+    /// integer id of a node created earlier in the SAME batch is rejected with
+    /// the v1-scope INVALID_ARGUMENT (Issue #3417), not routed into the
+    /// cascade/detach path. The whole batch aborts and zero writes survive.
+    #[test]
+    fn apply_batch_detach_delete_of_batch_created_node_aborts_before_detach() {
+        let server = create_test_server();
+        let seeded = seed_person(&server, "Seed");
+        // The batch's create will be allocated `seeded + 1`.
+        let guessed = seeded + 1;
+
+        let value = apply_err(
+            &server,
+            json!([
+                {"op": "create_node", "label": "Person",
+                 "properties": {"name": "Ghost"}},
+                {"op": "delete_node", "node_id": guessed, "detach": true},
+            ]),
+            "INVALID_ARGUMENT",
+        );
+        assert_eq!(value["error"]["details"]["failed_op_index"], json!(1));
+        assert_eq!(value["error"]["details"]["created_at_index"], json!(0));
+        let msg = value["error"]["message"].as_str().unwrap();
+        assert!(
+            msg.contains("created in the same batch") && msg.contains("not supported in v1"),
+            "detach-delete of a batch-created id must get the v1-scope message: {msg}"
+        );
+
+        // Zero writes survived: only the seeded node exists, and the
+        // guessed id resolves to nothing.
+        assert_eq!(server.db().node_count(), 1);
+        assert!(server.db().get_node(NodeId::new(guessed).unwrap()).is_err());
+    }
+
+    /// `created_at_index` reports the ACTUAL originating create op, not always
+    /// `0`: a batch that creates node A (op 0) then node B (op 1) and then
+    /// writes B's guessed integer id (op 2) is rejected naming op 1 as the
+    /// creator. The whole batch aborts and zero writes survive (Issue #3417).
+    #[test]
+    fn apply_batch_guessed_id_of_second_batch_created_node_reports_correct_index() {
+        let server = create_test_server();
+        let seeded = seed_person(&server, "Seed");
+        // Sequential allocation: op 0 gets `seeded + 1` (node A), op 1 gets
+        // `seeded + 2` (node B). Op 2 targets B's guessed id.
+        let guessed_b = seeded + 2;
+
+        let value = apply_err(
+            &server,
+            json!([
+                {"op": "create_node", "label": "Person", "properties": {"name": "A"}},
+                {"op": "create_node", "label": "Person", "properties": {"name": "B"}},
+                {"op": "update_node", "node_id": guessed_b, "properties": {"x": 1}},
+            ]),
+            "INVALID_ARGUMENT",
+        );
+        assert_eq!(value["error"]["details"]["failed_op_index"], json!(2));
+        // Proves the guard names the create op that allocated the guessed id
+        // (op 1), not a hardcoded 0.
+        assert_eq!(value["error"]["details"]["created_at_index"], json!(1));
+        let msg = value["error"]["message"].as_str().unwrap();
+        assert!(
+            msg.contains("created in the same batch") && msg.contains("not supported in v1"),
+            "guessed second-create id write must get the v1-scope message: {msg}"
+        );
+
+        // Zero writes survived: only the seeded node exists; neither guessed id
+        // resolves to a committed node.
+        assert_eq!(server.db().node_count(), 1);
+        assert!(
+            server
+                .db()
+                .get_node(NodeId::new(seeded + 1).unwrap())
+                .is_err()
+        );
+        assert!(
+            server
+                .db()
+                .get_node(NodeId::new(guessed_b).unwrap())
+                .is_err()
+        );
+    }
+
+    /// `delete_edge` against a guessed batch-created edge id emits the SAME
+    /// message substrings the node / `update_edge` variants assert, bringing
+    /// its coverage to parity (Issue #3417). Whole batch aborts, zero writes.
+    #[test]
+    fn apply_batch_guessed_id_delete_edge_message_parity() {
+        let server = create_test_server();
+        let a = seed_person(&server, "A");
+        let b = seed_person(&server, "B");
+
+        // Anchor the guess to reality: the next create_edge (op 0 of the
+        // failing batch) is allocated `anchor + 1`.
+        let anchor = apply_ok(
+            &server,
+            json!([
+                {"op": "create_edge", "source_id": a, "target_id": b, "label": "KNOWS"},
+            ]),
+        );
+        let guessed_edge = anchor["results"][0]["edge_id"].as_u64().unwrap() + 1;
+
+        let value = apply_err(
+            &server,
+            json!([
+                {"op": "create_edge", "source_id": a, "target_id": b, "label": "KNOWS"},
+                {"op": "delete_edge", "edge_id": guessed_edge},
+            ]),
+            "INVALID_ARGUMENT",
+        );
+        assert_eq!(value["error"]["details"]["failed_op_index"], json!(1));
+        assert_eq!(value["error"]["details"]["created_at_index"], json!(0));
+        let msg = value["error"]["message"].as_str().unwrap();
+        assert!(
+            msg.contains("created in the same batch")
+                && msg.contains("not supported in v1")
+                && msg.contains("Commit the creation first"),
+            "delete_edge guard message must match the node/update_edge variants: {msg}"
+        );
+        assert!(
+            server
+                .db()
+                .get_edge(EdgeId::new(guessed_edge).unwrap())
+                .is_err(),
+            "the aborted batch's edge must not be committed"
+        );
+    }
+
     /// The edge counterpart: a guessed integer id of a batch-created EDGE
     /// submitted to `update_edge` / `delete_edge` is rejected by the same
     /// batch-created-ref guard (Issue #3417), whole batch aborts, zero writes.
