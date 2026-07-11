@@ -4558,8 +4558,16 @@ mod commit_failure_visibility_tests {
     }
 
     /// Guard: a successful commit and an explicit rollback both leave the active
-    /// set at baseline (no double-abort / no leak), so the #3415 fix does not
-    /// regress the happy paths.
+    /// set at baseline (no leak), so the #3415 fix does not regress the happy
+    /// paths.
+    ///
+    /// Note: this asserts the active-set-clean invariant only. It does NOT
+    /// enforce "no double-abort" — `register_abort` is an idempotent
+    /// `HashSet::remove`, so a spurious `Drop` on an already-`Committed`/
+    /// `Aborted` transaction would leave `active_count()` unchanged and this
+    /// test would still pass. Double-abort is harmless by construction (the
+    /// broadened `Drop` guard only matches `Active`/`Preparing`, and the
+    /// removal is idempotent regardless), not a property this test verifies.
     #[test]
     fn test_success_and_rollback_leave_active_set_clean() {
         let db = AletheiaDB::new().expect("db");
