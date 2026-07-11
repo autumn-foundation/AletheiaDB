@@ -145,7 +145,7 @@ impl<'a> DejaVu<'a> {
         }
 
         // Sort descending by similarity
-        recurrences.sort_by(|a, b| b.similarity.partial_cmp(&a.similarity).unwrap());
+        recurrences.sort_by(|a, b| b.similarity.total_cmp(&a.similarity));
 
         Ok(recurrences)
     }
