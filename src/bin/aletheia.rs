@@ -109,16 +109,18 @@ fn handle_backup(args: Vec<String>) -> Result<(), String> {
     let summary = db
         .backup(std::path::Path::new(path))
         .map_err(|e| format!("backup failed: {e}"))?;
-    println!(
-        "{{\"ok\":true,\"bytes_written\":{},\"node_versions\":{},\"edge_versions\":{},\
-         \"current_node_count\":{},\"current_edge_count\":{},\"source_lsn\":{}}}",
-        summary.bytes_written,
-        summary.node_versions,
-        summary.edge_versions,
-        summary.current_node_count,
-        summary.current_edge_count,
-        summary.source_lsn,
-    );
+    let value = serde_json::json!({
+        "ok": true,
+        "bytes_written": summary.bytes_written,
+        "node_versions": summary.node_versions,
+        "edge_versions": summary.edge_versions,
+        "current_node_count": summary.current_node_count,
+        "current_edge_count": summary.current_edge_count,
+        "source_lsn": summary.source_lsn,
+    });
+    let rendered =
+        serde_json::to_string(&value).map_err(|e| format!("failed to render JSON output: {e}"))?;
+    println!("{rendered}");
     Ok(())
 }
 
@@ -134,8 +136,22 @@ fn handle_restore(args: Vec<String>) -> Result<(), String> {
         })?;
     AletheiaDB::restore_to_data_dir(std::path::Path::new(path), &data_dir)
         .map_err(|e| format!("restore failed: {e}"))?;
-    println!("{{\"ok\":true,\"data_dir\":\"{}\"}}", data_dir.display());
+    println!("{}", restore_success_json(&data_dir)?);
     Ok(())
+}
+
+/// Builds the JSON success line emitted by `aletheia restore`.
+///
+/// The data-directory path is serialized through `serde_json` so any characters
+/// that are special in JSON strings (notably Windows path backslashes, e.g.
+/// `C:\Users\...`, which are invalid `\U`/`\R` escapes if interpolated raw) are
+/// correctly escaped and the output stays valid JSON on every platform.
+fn restore_success_json(data_dir: &Path) -> Result<String, String> {
+    let value = serde_json::json!({
+        "ok": true,
+        "data_dir": data_dir.display().to_string(),
+    });
+    serde_json::to_string(&value).map_err(|e| format!("failed to render JSON output: {e}"))
 }
 
 /// Opens the AletheiaDB database, honouring environment-driven config:
@@ -716,11 +732,14 @@ mod audit {
         let key = AuditSigningKey::generate();
         key.write_to_file(path)
             .map_err(|e| format!("failed to write key file: {e}"))?;
-        println!(
-            "{{\"ok\":true,\"key_file\":\"{}\",\"public_key\":\"{}\"}}",
-            path,
-            key.public_key().to_hex()
-        );
+        let value = serde_json::json!({
+            "ok": true,
+            "key_file": path,
+            "public_key": key.public_key().to_hex(),
+        });
+        let rendered = serde_json::to_string(&value)
+            .map_err(|e| format!("failed to render JSON output: {e}"))?;
+        println!("{rendered}");
         Ok(())
     }
 
@@ -765,16 +784,18 @@ mod audit {
             .map_err(|e| format!("failed to serialize artifact: {e}"))?;
         std::fs::write(&out, &bytes).map_err(|e| format!("failed to write artifact: {e}"))?;
 
-        println!(
-            "{{\"ok\":true,\"artifact\":\"{}\",\"entity_count\":{},\"version_count\":{},\
-             \"public_key\":\"{}\",\"chain_root\":\"{}\",\"anchor_lsn\":{}}}",
-            out,
-            export.entity_count(),
-            export.version_count(),
-            key.public_key().to_hex(),
-            export.chain.root,
-            export.metadata().chain_anchor.source_lsn,
-        );
+        let value = serde_json::json!({
+            "ok": true,
+            "artifact": out,
+            "entity_count": export.entity_count(),
+            "version_count": export.version_count(),
+            "public_key": key.public_key().to_hex(),
+            "chain_root": export.chain.root,
+            "anchor_lsn": export.metadata().chain_anchor.source_lsn,
+        });
+        let rendered = serde_json::to_string(&value)
+            .map_err(|e| format!("failed to render JSON output: {e}"))?;
+        println!("{rendered}");
         Ok(())
     }
 
@@ -854,6 +875,25 @@ mod tests {
         // but it still returns Err, so the assertion holds.
         let result = handle_restore(vec!["nonexistent.albk".to_string()]);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn restore_success_json_escapes_backslash_paths() {
+        // kills: reverting handle_restore to raw string interpolation of the data
+        // dir path, which emits invalid JSON for Windows backslash paths (`\U`/`\R`
+        // are illegal JSON escapes) — the exact failure CI caught on windows-latest.
+        // pins: restore output is serde-serialized so it parses AND the data_dir
+        // string round-trips byte-for-byte on every platform.
+        let win_path = Path::new(r"C:\Users\RUNNER~1\Temp\.tmpX");
+        let out = restore_success_json(win_path).expect("serialization must succeed");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&out).expect("restore output must be valid JSON");
+        assert_eq!(parsed["ok"], serde_json::json!(true));
+        assert_eq!(
+            parsed["data_dir"],
+            serde_json::json!(win_path.display().to_string()),
+            "data_dir must round-trip exactly through JSON escaping"
+        );
     }
 
     #[test]
