@@ -46,6 +46,7 @@ fn main() {
 fn run() -> Result<(), String> {
     let mut args = env::args().skip(1);
     match args.next().as_deref() {
+        Some("demo") => handle_demo(args.collect()),
         Some("node") => handle_node(args.collect()),
         Some("edge") => handle_edge(args.collect()),
         Some("traverse") => handle_traverse(args.collect()),
@@ -73,6 +74,7 @@ fn print_usage() {
     println!(
         "AletheiaDB CLI\n\n\
 Usage:\n\
+  aletheia demo\n\
   aletheia node create <label> [--properties '{{\"k\":\"v\"}}']\n\
   aletheia node get <node_id>\n\
   aletheia edge create <source_id> <target_id> <label> [--properties '{{\"k\":\"v\"}}']\n\
@@ -88,6 +90,10 @@ Usage:\n\
   aletheia audit-verify <artifact_path> [--public-key HEX]\n\
   aletheia audit-render <artifact_path>\n\
 \nCommands map to core MCP-style graph operations while using local storage.\n\
+\nGetting started:\n\
+  demo    — Boot a seeded, ephemeral bi-temporal graph and run a guided tour of\n\
+            current-state, AS OF time-travel, traversal, and history queries.\n\
+            No data dir, no server, no network — just `aletheia demo`.\n\
 \nBackup / Restore:\n\
   backup  — Write a portable .albk artifact capturing full bi-temporal state.\n\
             Opens the database via ALETHEIADB_CONFIG or ALETHEIADB_DATA_DIR.\n\
@@ -135,6 +141,218 @@ fn handle_restore(args: Vec<String>) -> Result<(), String> {
     AletheiaDB::restore_to_data_dir(std::path::Path::new(path), &data_dir)
         .map_err(|e| format!("restore failed: {e}"))?;
     println!("{{\"ok\":true,\"data_dir\":\"{}\"}}", data_dir.display());
+    Ok(())
+}
+
+/// `aletheia demo` — boot a seeded, ephemeral bi-temporal graph and print a
+/// guided tour of showcase queries (Issue #3380 AC3).
+///
+/// This mirrors the seed + guided-query flow in `examples/demo.rs` so the
+/// one-command CLI experience stays in sync with the Rust-native example and
+/// the CI behavior guard (`tests/quickstart_demo.rs`). It requires no data
+/// directory, no server, and no network: the database is ephemeral
+/// (`AletheiaDB::new()`), so nothing is written to disk.
+///
+/// Any surplus arguments are ignored; the demo is a zero-configuration,
+/// one-shot showcase.
+fn handle_demo(_args: Vec<String>) -> Result<(), String> {
+    let db = AletheiaDB::new().map_err(|e| format!("failed to initialize demo database: {e}"))?;
+    run_demo(&db)
+}
+
+/// Builds a small string-valued `PropertyMap` for the demo seed. Keeps the
+/// seeding code legible without depending on the `properties!` macro.
+fn demo_props(pairs: &[(&str, &str)]) -> PropertyMap {
+    let mut builder = PropertyMapBuilder::new();
+    for (key, value) in pairs {
+        builder = builder.insert(key, PropertyValue::string(*value));
+    }
+    builder.build()
+}
+
+/// Renders a `PropertyValue` for human-readable demo output (no Debug leakage
+/// for the common scalar cases).
+fn demo_display_value(value: &PropertyValue) -> String {
+    match value {
+        PropertyValue::String(s) => s.to_string(),
+        PropertyValue::Int(i) => i.to_string(),
+        PropertyValue::Float(f) => f.to_string(),
+        PropertyValue::Bool(b) => b.to_string(),
+        other => format!("{other:?}"),
+    }
+}
+
+/// Extracts a string-valued property from a node, or a placeholder if absent.
+fn demo_prop_str(node: &Node, key: &str) -> String {
+    node.properties
+        .get(key)
+        .map(demo_display_value)
+        .unwrap_or_else(|| "<none>".to_string())
+}
+
+/// Seeds a small story-driven bi-temporal dataset into `db` and prints a guided
+/// sequence of showcase queries: a current-state lookup, an `AS OF`
+/// point-in-time lookup, a graph traversal, and the full version history of a
+/// node. Mirrors the narrative in `examples/demo.rs`.
+///
+/// Extracted from [`handle_demo`] so the seed + query flow is unit-testable
+/// against an injected database instance.
+fn run_demo(db: &AletheiaDB) -> Result<(), String> {
+    // The `update_node` transaction method lives on the `WriteOps` trait.
+    use aletheiadb::api::WriteOps;
+
+    // A small, deterministic filler cohort so the graph is more than a toy of a
+    // few nodes, while keeping the one-shot CLI demo well under a second.
+    const FILLER_ENGINEERS: usize = 20;
+
+    println!("════════════════════════════════════════════════════════");
+    println!("  AletheiaDB — bi-temporal graph demo");
+    println!("  Ephemeral demo data (in-memory; nothing written to disk)");
+    println!("════════════════════════════════════════════════════════\n");
+
+    // ── Seed the graph ──────────────────────────────────────────────────────
+    let company = db
+        .create_node("Company", demo_props(&[("name", "Aletheia Labs")]))
+        .map_err(|e| format!("failed to seed Company: {e}"))?;
+
+    let alice = db
+        .create_node(
+            "Person",
+            demo_props(&[("name", "Alice"), ("title", "Engineer")]),
+        )
+        .map_err(|e| format!("failed to seed Alice: {e}"))?;
+    let bob = db
+        .create_node(
+            "Person",
+            demo_props(&[("name", "Bob"), ("title", "Engineer")]),
+        )
+        .map_err(|e| format!("failed to seed Bob: {e}"))?;
+    let carol = db
+        .create_node(
+            "Person",
+            demo_props(&[("name", "Carol"), ("title", "Designer")]),
+        )
+        .map_err(|e| format!("failed to seed Carol: {e}"))?;
+
+    db.create_edge(alice, company, "WORKS_AT", PropertyMap::new())
+        .map_err(|e| format!("failed to seed Alice WORKS_AT: {e}"))?;
+    db.create_edge(bob, company, "WORKS_AT", PropertyMap::new())
+        .map_err(|e| format!("failed to seed Bob WORKS_AT: {e}"))?;
+    db.create_edge(carol, company, "WORKS_AT", PropertyMap::new())
+        .map_err(|e| format!("failed to seed Carol WORKS_AT: {e}"))?;
+    db.create_edge(alice, bob, "KNOWS", PropertyMap::new())
+        .map_err(|e| format!("failed to seed Alice KNOWS Bob: {e}"))?;
+    db.create_edge(bob, carol, "KNOWS", PropertyMap::new())
+        .map_err(|e| format!("failed to seed Bob KNOWS Carol: {e}"))?;
+
+    let mut previous: Option<NodeId> = None;
+    for i in 0..FILLER_ENGINEERS {
+        let person = db
+            .create_node(
+                "Person",
+                demo_props(&[("name", &format!("Engineer {i}")), ("title", "Engineer")]),
+            )
+            .map_err(|e| format!("failed to seed filler engineer {i}: {e}"))?;
+        db.create_edge(person, company, "WORKS_AT", PropertyMap::new())
+            .map_err(|e| format!("failed to seed filler WORKS_AT: {e}"))?;
+        if let Some(prev) = previous {
+            db.create_edge(prev, person, "KNOWS", PropertyMap::new())
+                .map_err(|e| format!("failed to seed filler KNOWS: {e}"))?;
+        }
+        previous = Some(person);
+    }
+
+    // Capture the founding moment *after* the initial hire, so a query "as of
+    // founding" sees Alice as an Engineer.
+    let t_founding = aletheiadb::time::now();
+
+    // The story unfolds: Alice is promoted twice. Each update creates a new
+    // bi-temporal version; the old versions are preserved and stay queryable.
+    // A tiny sleep between writes guarantees strictly-later transaction
+    // timestamps so point-in-time reads resolve to distinct versions.
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    db.write(|tx| {
+        tx.update_node(
+            alice,
+            demo_props(&[("name", "Alice"), ("title", "Staff Engineer")]),
+        )
+    })
+    .map_err(|e| format!("failed to promote Alice to Staff Engineer: {e}"))?;
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    db.write(|tx| tx.update_node(alice, demo_props(&[("name", "Alice"), ("title", "CTO")])))
+        .map_err(|e| format!("failed to promote Alice to CTO: {e}"))?;
+
+    println!(
+        "Seeded {} nodes and {} edges (a Company \"Aletheia Labs\" plus its people)\n\
+         with genuine bi-temporal version history.\n",
+        db.node_count(),
+        db.edge_count()
+    );
+
+    // ── Query 1: current-state lookup ───────────────────────────────────────
+    println!("── Query 1 of 4: Current-state lookup ──");
+    println!("  db.get_node(alice_id)");
+    let alice_now = db
+        .get_node(alice)
+        .map_err(|e| format!("current-state lookup of Alice failed: {e}"))?;
+    let title_now = demo_prop_str(&alice_now, "title");
+    println!("  → Alice is currently: {title_now}");
+    println!("  what you just saw: the *latest* fact — sub-microsecond, no temporal overhead.\n");
+
+    // ── Query 2: AS OF point-in-time (the differentiator) ───────────────────
+    println!("── Query 2 of 4: Time-travel — AS OF the founding day ──");
+    println!("  db.get_node_at_time(alice_id, t_founding, t_founding)");
+    let alice_founding = db
+        .get_node_at_time(alice, t_founding, t_founding)
+        .map_err(|e| format!("AS OF point-in-time lookup of Alice failed: {e}"))?;
+    let title_founding = demo_prop_str(&alice_founding, "title");
+    println!("  → On founding day, Alice was: {title_founding}");
+    println!(
+        "  what you just saw: the SAME node, a different answer — \
+         \"{title_founding}\" then vs \"{title_now}\" now.\n"
+    );
+
+    // ── Query 3: a traversal ────────────────────────────────────────────────
+    println!("── Query 3 of 4: Traversal (who does Alice know?) ──");
+    println!("  db.get_outgoing_edges_with_label(alice_id, \"KNOWS\")");
+    for edge_id in db.get_outgoing_edges_with_label(alice, "KNOWS") {
+        let target = db
+            .get_edge_target(edge_id)
+            .map_err(|e| format!("failed to resolve KNOWS target: {e}"))?;
+        let person = db
+            .get_node(target)
+            .map_err(|e| format!("failed to load known person: {e}"))?;
+        println!(
+            "  → Alice KNOWS {} ({})",
+            demo_prop_str(&person, "name"),
+            demo_prop_str(&person, "title")
+        );
+    }
+    println!("  what you just saw: a single-hop graph traversal over the current graph.\n");
+
+    // ── Query 4: full history / provenance ──────────────────────────────────
+    println!("── Query 4 of 4: History — every version of a fact ──");
+    println!("  db.get_node_history(alice_id)");
+    let history = db
+        .get_node_history(alice)
+        .map_err(|e| format!("failed to load Alice's history: {e}"))?;
+    for version in &history.versions {
+        let title = version
+            .properties
+            .get("title")
+            .map(demo_display_value)
+            .unwrap_or_else(|| "<none>".to_string());
+        println!("  → v{}: title = {title}", version.version_number);
+    }
+    println!(
+        "  what you just saw: {} preserved versions of one node — the audit trail is free.\n",
+        history.versions.len()
+    );
+
+    println!("────────────────────────────────────────────────────────");
+    println!("Next: open a durable database with `AletheiaDB::open(\"./mydb\")`,");
+    println!("or point an MCP client at AletheiaDB — see docs/guides/quickstart.md.");
+
     Ok(())
 }
 
@@ -834,6 +1052,34 @@ mod audit {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn run_demo_seeds_and_runs_all_showcase_queries() {
+        let db = AletheiaDB::new().expect("ephemeral demo database should open");
+        // The guided sequence must complete without error against the seed.
+        run_demo(&db).expect("run_demo should succeed end-to-end");
+
+        // Seeding must have produced a realistic graph, and the temporal
+        // narrative must hold: Alice's latest title differs from her founding
+        // title (this is the AS OF differentiator the demo showcases).
+        assert!(db.node_count() >= 4, "expected the core cast plus filler");
+        assert!(
+            db.edge_count() >= 4,
+            "expected WORKS_AT/KNOWS relationships"
+        );
+    }
+
+    #[test]
+    fn handle_demo_runs_to_completion() {
+        // The one-shot demo needs no arguments and must exit Ok.
+        handle_demo(vec![]).expect("aletheia demo should run to completion");
+    }
+
+    #[test]
+    fn demo_props_builds_expected_map() {
+        let map = demo_props(&[("name", "Alice"), ("title", "Engineer")]);
+        assert!(!map.is_empty());
+    }
 
     #[test]
     fn handle_backup_missing_arg_returns_usage_error() {

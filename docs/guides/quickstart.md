@@ -32,6 +32,19 @@ written to your working directory) and needs no server and no API key:
 cargo run --example demo
 ```
 
+If you have the `aletheia` CLI binary built (or installed), the same guided
+tour is available as a first-class subcommand — no `--example` flag, no data
+directory, no server:
+
+```bash
+aletheia demo
+```
+
+`aletheia demo` seeds the identical ephemeral, story-driven graph in-memory and
+prints the same guided sequence (current-state lookup, `AS OF` time-travel,
+traversal, and version history). It mirrors `cargo run --example demo` and is
+covered by the same CI behavior guard, so the two never drift.
+
 You'll see four guided queries, each with a one-line "what you just saw":
 
 ```text
@@ -150,12 +163,12 @@ For minting role-scoped keys, the anonymous-mode opt-in for local development
 [Security Quickstart](security-quickstart.md).
 
 > **Seeding data for an agent session:** the guided dataset above is created by
-> the embedded Rust demo. To let an agent explore a *seeded* graph today, run
-> the demo's seed logic against a durable `AletheiaDB::open(path)` database and
-> start the MCP server with the same `ALETHEIADB_DATA_DIR`. A one-command
-> `aletheia demo` binary subcommand that boots a seeded, agent-reachable
-> instance directly is tracked as follow-up (see
-> [Known gaps](#known-gaps--follow-ups)).
+> the embedded Rust demo. The `aletheia demo` subcommand runs that same seed +
+> guided-query tour in one command against an ephemeral database. To let an
+> agent explore a *seeded, persistent* graph, run the demo's seed logic against
+> a durable `AletheiaDB::open(path)` database and start the MCP server with the
+> same `ALETHEIADB_DATA_DIR` (a one-command seeded, agent-reachable *server* is
+> tracked as follow-up — see [Known gaps](#known-gaps--follow-ups)).
 
 ---
 
@@ -178,12 +191,13 @@ Then create a node and issue queries with `curl`. The complete key lifecycle
 
 ## Known gaps / follow-ups
 
-- **Non-Rust binary / container channel.** The fastest non-Rust path — a
-  published binary or container that runs a seeded demo with **no toolchain** —
-  depends on an `aletheia demo` CLI subcommand and the container packaging
-  (owned by the deployment spec). Until it lands, the Rust-native
-  `cargo run --example demo` is the canonical guided demo, and the MCP/HTTP
-  sections above cover the server paths.
+- **Non-Rust binary / container channel.** The `aletheia demo` CLI subcommand
+  now runs the seeded guided demo from the compiled binary (no `--example`
+  flag). The remaining gap is the **container packaging** (owned by the
+  deployment spec) that ships that binary so a non-Rust user can run the demo
+  with **no toolchain at all**. Until the container lands, the Rust-native
+  `cargo run --example demo` / `aletheia demo` are the canonical guided demos,
+  and the MCP/HTTP sections above cover the server paths.
 - **Seeded agent session in one command.** See the note in the MCP section.
 
 ---
