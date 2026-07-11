@@ -67,7 +67,7 @@ use crate::storage::CurrentStorage;
 
 use super::builder::Query;
 use super::ir::QueryOp;
-use super::plan::{LogicalOp, LogicalPlan, ScanOp, TemporalContext, UnaryOp};
+use super::plan::{LogicalOp, LogicalPlan, OptionalStep, ScanOp, TemporalContext, UnaryOp};
 
 pub use cost::{Cost, CostModel};
 pub use physical::{PhysicalOp, PhysicalPlan};
@@ -84,6 +84,21 @@ const DEFAULT_PROPERTY_SCAN_ROWS: usize = 100;
 
 /// Fallback maximum traversal depth when the query specifies unbounded (`Variable`) depth.
 const DEFAULT_MAX_TRAVERSAL_DEPTH: usize = 10;
+
+/// Resolve the effective maximum traversal depth for a [`TraversalDepth`],
+/// clamping the unbounded upper cases to [`DEFAULT_MAX_TRAVERSAL_DEPTH`].
+///
+/// Both `Variable` (`*`) and the `*N..` / `Min` form (which the converter
+/// models as `Range { min, max: usize::MAX }`) are unbounded above and must be
+/// capped so BFS terminates; finite bounds (`Exact`, `Max`, closed `Range`)
+/// pass through unchanged. Configurable caps are a noted follow-up.
+fn cap_traversal_depth(depth: &super::ir::TraversalDepth) -> usize {
+    match depth.max_depth() {
+        Some(max) if max == usize::MAX => DEFAULT_MAX_TRAVERSAL_DEPTH,
+        Some(max) => max,
+        None => DEFAULT_MAX_TRAVERSAL_DEPTH,
+    }
+}
 
 /// Default `top_k` for vector re-rank when the caller does not provide one.
 const DEFAULT_VECTOR_TOP_K: usize = 10;
@@ -265,6 +280,15 @@ impl QueryPlanner {
 
     /// Apply a QueryOp to the current logical plan
     fn apply_query_op(&self, current: Option<LogicalOp>, op: &QueryOp) -> Result<LogicalOp> {
+        // Optional (OPTIONAL MATCH) can appear both in source position (as a
+        // leading clause with its own scan) and as a per-row apply operator.
+        if let QueryOp::Optional { ops } = op {
+            let source_position = current.is_none();
+            let steps = self.convert_optional_steps(ops, source_position)?;
+            let input = current.unwrap_or(LogicalOp::Empty);
+            return Ok(LogicalOp::unary(UnaryOp::OptionalApply { steps }, input));
+        }
+
         // Check if it is a source operation (starts a new pipeline)
         if let Some(source_op) = self.apply_source_op(op)? {
             return Ok(source_op);
@@ -274,6 +298,55 @@ impl QueryPlanner {
         let input = current.ok_or_else(|| self.missing_source_error(op))?;
 
         self.apply_unary_op(input, op)
+    }
+
+    /// Convert the sub-operations of a [`QueryOp::Optional`] into
+    /// [`OptionalStep`]s for the logical plan.
+    ///
+    /// In source position (a leading `OPTIONAL MATCH`) the first sub-op must
+    /// be a `ScanNodes` source; otherwise only traversals and filters are
+    /// allowed.
+    fn convert_optional_steps(
+        &self,
+        ops: &[QueryOp],
+        source_position: bool,
+    ) -> Result<Vec<OptionalStep>> {
+        let mut steps = Vec::with_capacity(ops.len());
+        for (i, op) in ops.iter().enumerate() {
+            let step = match op {
+                QueryOp::ScanNodes { label } if source_position && i == 0 => OptionalStep::Scan {
+                    label: label.clone(),
+                },
+                QueryOp::TraverseOut { label, depth } => OptionalStep::Traverse {
+                    direction: super::ir::Direction::Outgoing,
+                    label: label.clone(),
+                    depth: *depth,
+                },
+                QueryOp::TraverseIn { label, depth } => OptionalStep::Traverse {
+                    direction: super::ir::Direction::Incoming,
+                    label: label.clone(),
+                    depth: *depth,
+                },
+                QueryOp::TraverseBoth { label, depth } => OptionalStep::Traverse {
+                    direction: super::ir::Direction::Both,
+                    label: label.clone(),
+                    depth: *depth,
+                },
+                QueryOp::Filter(predicate) => OptionalStep::Filter(predicate.clone()),
+                other => {
+                    return Err(Error::Query(QueryError::SyntaxError {
+                        message: format!("unsupported operation inside OPTIONAL MATCH: {other:?}"),
+                    }));
+                }
+            };
+            steps.push(step);
+        }
+        if source_position && !matches!(steps.first(), Some(OptionalStep::Scan { .. })) {
+            return Err(Error::Query(QueryError::SyntaxError {
+                message: "a leading OPTIONAL MATCH must begin with a node scan".to_string(),
+            }));
+        }
+        Ok(steps)
     }
 
     /// Try to apply a source operation. Returns Ok(Some(op)) if successful,
@@ -395,6 +468,17 @@ impl QueryPlanner {
             // Aggregation operations
             QueryOp::Count => Ok(LogicalOp::unary(UnaryOp::Count, input)),
 
+            QueryOp::Aggregate {
+                group_keys,
+                aggregates,
+            } => Ok(LogicalOp::unary(
+                UnaryOp::Aggregate {
+                    group_keys: group_keys.clone(),
+                    aggregates: aggregates.clone(),
+                },
+                input,
+            )),
+
             QueryOp::Distinct => Ok(LogicalOp::unary(UnaryOp::Distinct, input)),
 
             QueryOp::Project(props) => Ok(LogicalOp::unary(UnaryOp::Project(props.clone()), input)),
@@ -436,6 +520,7 @@ impl QueryPlanner {
             QueryOp::Limit(_) => "Limit",
             QueryOp::Skip(_) => "Skip",
             QueryOp::Count => "Count",
+            QueryOp::Aggregate { .. } => "Aggregate",
             QueryOp::Distinct => "Distinct",
             QueryOp::Project(_) => "Project",
             QueryOp::Sort { .. } => "Sort",
@@ -504,6 +589,14 @@ impl QueryPlanner {
             LogicalOp::Scan(scan) => self.scan_to_physical(scan, temporal),
 
             LogicalOp::Unary { op, input } => {
+                // Fold a chain of consecutive Sort ops (from a multi-key
+                // `ORDER BY a, b, c`) into ONE multi-key PhysicalOp::Sort so the
+                // FIRST-emitted key is primary. Emitting one stable Sort per key
+                // would otherwise invert precedence (the last-applied stable
+                // sort dominates). Fixes both Cypher and AQL (Issue #558).
+                if matches!(op, UnaryOp::Sort { .. }) {
+                    return self.fold_sort_chain(logical, temporal);
+                }
                 let physical_input = self.to_physical_op(input, temporal)?;
                 self.unary_to_physical(op, physical_input, temporal)
             }
@@ -516,6 +609,46 @@ impl QueryPlanner {
 
             LogicalOp::Empty => Ok(PhysicalOp::Empty),
         }
+    }
+
+    /// Fold a chain of consecutive [`UnaryOp::Sort`] operators into a single
+    /// multi-key [`PhysicalOp::Sort`].
+    ///
+    /// The logical chain nests outermost = last-emitted `ORDER BY` key,
+    /// innermost = first-emitted key. openCypher wants the first key to be
+    /// primary, so we collect from the outside in, then reverse: the resulting
+    /// `keys` vector is in precedence order (first = primary). The base (first
+    /// non-Sort operator) is converted once.
+    fn fold_sort_chain(
+        &self,
+        logical: &LogicalOp,
+        temporal: &Option<TemporalContext>,
+    ) -> Result<PhysicalOp> {
+        use super::plan::SortKey;
+
+        let mut keys: Vec<(SortKey, bool)> = Vec::new();
+        let mut cursor = logical;
+        let base = loop {
+            match cursor {
+                LogicalOp::Unary {
+                    op: UnaryOp::Sort { key, descending },
+                    input,
+                } => {
+                    keys.push((key.clone(), *descending));
+                    cursor = input;
+                }
+                other => break other,
+            }
+        };
+
+        let physical_input = self.to_physical_op(base, temporal)?;
+        // Reverse so the first-emitted (innermost) key becomes primary.
+        keys.reverse();
+
+        Ok(PhysicalOp::Sort {
+            input: Box::new(physical_input),
+            keys,
+        })
     }
 
     /// Helper to validate vector index existence
@@ -570,10 +703,59 @@ impl QueryPlanner {
             ScanOp::NodeScan {
                 label,
                 estimated_rows,
-            } => Ok(PhysicalOp::NodeScan {
-                label: label.clone(),
-                estimated_rows: estimated_rows.unwrap_or(DEFAULT_SCAN_ESTIMATED_ROWS),
-            }),
+            } => {
+                // Bi-temporal label scans (Issues #550/#551/#552). When the query
+                // carries a temporal context the label scan must reconstruct
+                // history instead of reading current storage -- otherwise
+                // `MATCH (n:Label) AS OF T RETURN n` silently returns present-day
+                // data. When no temporal context is present the fast current-state
+                // path below is 100% unchanged.
+                if let Some(ctx) = temporal.as_ref() {
+                    // Point-in-time (`AS OF`). Any single dimension is enough; the
+                    // missing dimension resolves to "now" via `resolve_now()`, so
+                    // `AS OF VALID_TIME` and `AS OF SYSTEM_TIME` alone both work.
+                    if ctx.valid_time_as_of.is_some() || ctx.transaction_time_as_of.is_some() {
+                        let (valid_time, transaction_time) = ctx.resolve_now();
+                        return Ok(PhysicalOp::TemporalNodeScan {
+                            label: label.clone(),
+                            valid_time,
+                            transaction_time,
+                        });
+                    }
+                    // Valid-time range (`BETWEEN ... AND ...`): every version whose
+                    // valid interval overlaps the range, observed at the current
+                    // transaction time (or an explicit system-time anchor).
+                    if let Some(range) = ctx.valid_time_between {
+                        let transaction_time = ctx
+                            .transaction_time_as_of
+                            .unwrap_or_else(crate::core::temporal::time::now);
+                        return Ok(PhysicalOp::TemporalNodeRangeScan {
+                            label: label.clone(),
+                            valid_from: range.start(),
+                            valid_to: range.end(),
+                            transaction_time,
+                        });
+                    }
+                    // A transaction-time RANGE (`FOR SYSTEM_TIME BETWEEN ...`,
+                    // reachable via the SQL:2011 parser / `QueryBuilder`) has no
+                    // label-scan lowering yet. Reject it with a structured error
+                    // rather than silently falling through to the current-state
+                    // `NodeScan` below (which would return present-day data -- the
+                    // exact bug class this PR fixes, for the tx-range dimension).
+                    if ctx.transaction_time_between.is_some() {
+                        return Err(Error::Query(QueryError::UnsupportedFeature {
+                            feature: "transaction-time range scan (FOR SYSTEM_TIME BETWEEN) on a \
+                                      label scan is not supported; use AS OF SYSTEM_TIME for a \
+                                      point-in-time transaction-time query"
+                                .to_string(),
+                        }));
+                    }
+                }
+                Ok(PhysicalOp::NodeScan {
+                    label: label.clone(),
+                    estimated_rows: estimated_rows.unwrap_or(DEFAULT_SCAN_ESTIMATED_ROWS),
+                })
+            }
 
             ScanOp::EdgeScan {
                 edge_type,
@@ -706,7 +888,8 @@ impl QueryPlanner {
                     input: Box::new(input),
                     direction: *direction,
                     label: label.clone(),
-                    depth: depth.max_depth().unwrap_or(DEFAULT_MAX_TRAVERSAL_DEPTH),
+                    min_depth: depth.min_depth(),
+                    depth: cap_traversal_depth(depth),
                     temporal_context: temporal_ctx,
                 })
             }
@@ -726,10 +909,11 @@ impl QueryPlanner {
                 })
             }
 
+            // A lone Sort (not part of a chain intercepted by the fold in
+            // `to_physical_op`) lowers to a single-key multi-key Sort.
             UnaryOp::Sort { key, descending } => Ok(PhysicalOp::Sort {
                 input: Box::new(input),
-                key: key.clone(),
-                descending: *descending,
+                keys: vec![(key.clone(), *descending)],
             }),
 
             UnaryOp::Project(props) => Ok(PhysicalOp::Project {
@@ -745,10 +929,51 @@ impl QueryPlanner {
                 input: Box::new(input),
             }),
 
+            UnaryOp::Aggregate {
+                group_keys,
+                aggregates,
+            } => Ok(PhysicalOp::Aggregate {
+                input: Box::new(input),
+                group_keys: group_keys.clone(),
+                aggregates: aggregates.clone(),
+            }),
+
             UnaryOp::TemporalTrack { time_range } => Ok(PhysicalOp::TemporalTrack {
                 input: Box::new(input),
                 time_range: *time_range,
             }),
+
+            UnaryOp::OptionalApply { steps } => {
+                // Mirror UnaryOp::Traverse: extract the temporal context for
+                // edge filtering inside optional traversal steps.
+                let temporal_ctx = temporal.as_ref().and_then(|ctx| ctx.as_of_tuple());
+                let physical_steps = steps
+                    .iter()
+                    .map(|step| match step {
+                        OptionalStep::Scan { label } => physical::OptionalPhysicalStep::Scan {
+                            label: label.clone(),
+                        },
+                        OptionalStep::Traverse {
+                            direction,
+                            label,
+                            depth,
+                        } => physical::OptionalPhysicalStep::Traverse {
+                            direction: *direction,
+                            label: label.clone(),
+                            min_depth: depth.min_depth(),
+                            depth: cap_traversal_depth(depth),
+                            temporal_context: temporal_ctx,
+                        },
+                        OptionalStep::Filter(predicate) => {
+                            physical::OptionalPhysicalStep::Filter(predicate.clone())
+                        }
+                    })
+                    .collect();
+                Ok(PhysicalOp::OptionalApply {
+                    input: Box::new(input),
+                    steps: physical_steps,
+                })
+            }
         }
     }
 
@@ -1479,6 +1704,110 @@ mod tests {
     }
 
     #[test]
+    fn test_temporal_node_scan_with_context() {
+        // Companion to `test_temporal_node_lookup_with_context`: a *label scan*
+        // carrying a point-in-time context must lower to `TemporalNodeScan`, not
+        // the current-state `NodeScan` (Issues #550/#551) -- otherwise
+        // `MATCH (n:Label) AS OF T RETURN n` silently returns present-day data.
+        let planner = test_planner();
+        let now = crate::core::temporal::time::now();
+        let query = Query {
+            ops: vec![QueryOp::ScanNodes {
+                label: Some("Person".to_string()),
+            }],
+            temporal_context: Some(TemporalContext::as_of(now, now)),
+            hints: QueryHints::default(),
+        };
+
+        let plan = planner.plan(query).unwrap();
+        assert!(
+            matches!(plan.root, PhysicalOp::TemporalNodeScan { .. }),
+            "AS OF label scan must lower to TemporalNodeScan, got {:?}",
+            plan.root.name()
+        );
+    }
+
+    #[test]
+    fn test_temporal_node_scan_single_dimension_context() {
+        // A single-dimension `AS OF SYSTEM_TIME` (only transaction time set)
+        // must still lower to the temporal scan; the missing dimension resolves
+        // to "now" (Issue #551).
+        let planner = test_planner();
+        let now = crate::core::temporal::time::now();
+        let query = Query {
+            ops: vec![QueryOp::ScanNodes {
+                label: Some("Person".to_string()),
+            }],
+            temporal_context: Some(TemporalContext::as_of_transaction_time(now)),
+            hints: QueryHints::default(),
+        };
+
+        let plan = planner.plan(query).unwrap();
+        assert!(matches!(plan.root, PhysicalOp::TemporalNodeScan { .. }));
+    }
+
+    #[test]
+    fn test_temporal_node_range_scan_with_between_context() {
+        // A `BETWEEN` valid-time range on a label scan must lower to
+        // `TemporalNodeRangeScan` (Issue #552).
+        let planner = test_planner();
+        let range = crate::core::temporal::TimeRange::new(1_000.into(), 2_000.into()).unwrap();
+        let query = Query {
+            ops: vec![QueryOp::ScanNodes {
+                label: Some("Person".to_string()),
+            }],
+            temporal_context: Some(TemporalContext::valid_time_between(range)),
+            hints: QueryHints::default(),
+        };
+
+        let plan = planner.plan(query).unwrap();
+        assert!(
+            matches!(plan.root, PhysicalOp::TemporalNodeRangeScan { .. }),
+            "BETWEEN label scan must lower to TemporalNodeRangeScan, got {:?}",
+            plan.root.name()
+        );
+    }
+
+    #[test]
+    fn test_node_scan_without_temporal_context_unchanged() {
+        // Regression: with no temporal context the fast current-state path is
+        // untouched -- still a plain `NodeScan`.
+        let planner = test_planner();
+        let query = Query {
+            ops: vec![QueryOp::ScanNodes {
+                label: Some("Person".to_string()),
+            }],
+            temporal_context: None,
+            hints: QueryHints::default(),
+        };
+
+        let plan = planner.plan(query).unwrap();
+        assert!(matches!(plan.root, PhysicalOp::NodeScan { .. }));
+    }
+
+    #[test]
+    fn test_transaction_time_between_label_scan_rejected() {
+        // A transaction-time RANGE context on a label scan has no lowering yet;
+        // it must be REJECTED with a structured error, never fall through to a
+        // current-state NodeScan (which would silently return present-day data).
+        let planner = test_planner();
+        let range = crate::core::temporal::TimeRange::new(1_000.into(), 2_000.into()).unwrap();
+        let query = Query {
+            ops: vec![QueryOp::ScanNodes {
+                label: Some("Person".to_string()),
+            }],
+            temporal_context: Some(TemporalContext::transaction_time_between(range)),
+            hints: QueryHints::default(),
+        };
+
+        let err = planner.plan(query).unwrap_err();
+        assert!(
+            matches!(err, Error::Query(QueryError::UnsupportedFeature { .. })),
+            "transaction_time_between must be an UnsupportedFeature error, got {err:?}"
+        );
+    }
+
+    #[test]
     fn test_temporal_vector_search_with_context() {
         let planner = test_planner();
         let embedding = [0.1f32; 4];
@@ -1877,5 +2206,285 @@ mod tests {
             "Plan should contain EdgeScan: {}",
             explain
         );
+    }
+
+    // ==================== OPTIONAL MATCH (OptionalApply) Tests ====================
+
+    /// A non-leading `QueryOp::Optional` plans to a `PhysicalOp::OptionalApply`
+    /// whose steps mirror the traverse + filter sub-ops (per-row apply form).
+    #[test]
+    fn test_optional_apply_planning_after_scan() {
+        let planner = test_planner();
+        let query = Query {
+            ops: vec![
+                QueryOp::ScanNodes {
+                    label: Some("Person".to_string()),
+                },
+                QueryOp::Optional {
+                    ops: vec![
+                        QueryOp::TraverseOut {
+                            label: Some("KNOWS".to_string()),
+                            depth: TraversalDepth::Exact(1),
+                        },
+                        QueryOp::Filter(Predicate::eq("name", "Alice")),
+                    ],
+                },
+            ],
+            temporal_context: None,
+            hints: QueryHints::default(),
+        };
+
+        let plan = planner.plan(query).unwrap();
+        match &plan.root {
+            PhysicalOp::OptionalApply { input, steps } => {
+                assert!(matches!(**input, PhysicalOp::NodeScan { .. }));
+                assert_eq!(steps.len(), 2);
+                match &steps[0] {
+                    physical::OptionalPhysicalStep::Traverse {
+                        direction,
+                        label,
+                        min_depth,
+                        depth,
+                        temporal_context,
+                    } => {
+                        assert_eq!(*direction, Direction::Outgoing);
+                        assert_eq!(label.as_deref(), Some("KNOWS"));
+                        assert_eq!(*min_depth, 1);
+                        assert_eq!(*depth, 1);
+                        assert!(temporal_context.is_none());
+                    }
+                    other => panic!("expected Traverse step, got {other:?}"),
+                }
+                assert!(matches!(
+                    steps[1],
+                    physical::OptionalPhysicalStep::Filter(_)
+                ));
+            }
+            other => panic!("expected OptionalApply root, got {other:?}"),
+        }
+    }
+
+    /// TraverseIn / TraverseBoth inside an optional map to Incoming / Both,
+    /// and unbounded `Variable` depth falls back to the planner default.
+    #[test]
+    fn test_optional_apply_traverse_directions_and_default_depth() {
+        let planner = test_planner();
+        let query = Query {
+            ops: vec![
+                QueryOp::ScanNodes { label: None },
+                QueryOp::Optional {
+                    ops: vec![
+                        QueryOp::TraverseIn {
+                            label: None,
+                            depth: TraversalDepth::Exact(2),
+                        },
+                        QueryOp::TraverseBoth {
+                            label: None,
+                            depth: TraversalDepth::Variable,
+                        },
+                    ],
+                },
+            ],
+            temporal_context: None,
+            hints: QueryHints::default(),
+        };
+
+        let plan = planner.plan(query).unwrap();
+        match &plan.root {
+            PhysicalOp::OptionalApply { steps, .. } => {
+                match &steps[0] {
+                    physical::OptionalPhysicalStep::Traverse {
+                        direction, depth, ..
+                    } => {
+                        assert_eq!(*direction, Direction::Incoming);
+                        assert_eq!(*depth, 2);
+                    }
+                    other => panic!("expected Traverse step, got {other:?}"),
+                }
+                match &steps[1] {
+                    physical::OptionalPhysicalStep::Traverse {
+                        direction, depth, ..
+                    } => {
+                        assert_eq!(*direction, Direction::Both);
+                        assert_eq!(*depth, DEFAULT_MAX_TRAVERSAL_DEPTH);
+                    }
+                    other => panic!("expected Traverse step, got {other:?}"),
+                }
+            }
+            other => panic!("expected OptionalApply root, got {other:?}"),
+        }
+    }
+
+    /// A leading `Optional` (source position) plans to OptionalApply over an
+    /// Empty input with a Scan first step (standalone form).
+    #[test]
+    fn test_leading_optional_match_planning() {
+        let planner = test_planner();
+        let query = Query {
+            ops: vec![QueryOp::Optional {
+                ops: vec![
+                    QueryOp::ScanNodes {
+                        label: Some("Person".to_string()),
+                    },
+                    QueryOp::TraverseOut {
+                        label: Some("KNOWS".to_string()),
+                        depth: TraversalDepth::Exact(1),
+                    },
+                ],
+            }],
+            temporal_context: None,
+            hints: QueryHints::default(),
+        };
+
+        let plan = planner.plan(query).unwrap();
+        match &plan.root {
+            PhysicalOp::OptionalApply { input, steps } => {
+                assert!(matches!(**input, PhysicalOp::Empty));
+                assert_eq!(steps.len(), 2);
+                match &steps[0] {
+                    physical::OptionalPhysicalStep::Scan { label } => {
+                        assert_eq!(label.as_deref(), Some("Person"));
+                    }
+                    other => panic!("expected Scan step, got {other:?}"),
+                }
+            }
+            other => panic!("expected OptionalApply root, got {other:?}"),
+        }
+    }
+
+    /// Sub-ops other than scan/traverse/filter are rejected inside an
+    /// optional pattern.
+    #[test]
+    fn test_optional_unsupported_op_rejected() {
+        let planner = test_planner();
+        let query = Query {
+            ops: vec![
+                QueryOp::ScanNodes { label: None },
+                QueryOp::Optional {
+                    ops: vec![QueryOp::Limit(10)],
+                },
+            ],
+            temporal_context: None,
+            hints: QueryHints::default(),
+        };
+
+        let err = planner.plan(query).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("unsupported operation inside OPTIONAL MATCH"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// A leading OPTIONAL MATCH whose first sub-op is not a node scan is
+    /// rejected.
+    #[test]
+    fn test_leading_optional_without_scan_rejected() {
+        let planner = test_planner();
+        let query = Query {
+            ops: vec![QueryOp::Optional {
+                ops: vec![QueryOp::TraverseOut {
+                    label: None,
+                    depth: TraversalDepth::Exact(1),
+                }],
+            }],
+            temporal_context: None,
+            hints: QueryHints::default(),
+        };
+
+        let err = planner.plan(query).unwrap_err();
+        assert!(
+            err.to_string().contains("must begin with a node scan"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// A scan is only allowed as the *first* step of a *leading* optional:
+    /// in apply position (after a source), it is rejected.
+    #[test]
+    fn test_optional_scan_rejected_in_apply_position() {
+        let planner = test_planner();
+        let query = Query {
+            ops: vec![
+                QueryOp::ScanNodes { label: None },
+                QueryOp::Optional {
+                    ops: vec![QueryOp::ScanNodes {
+                        label: Some("Person".to_string()),
+                    }],
+                },
+            ],
+            temporal_context: None,
+            hints: QueryHints::default(),
+        };
+
+        let err = planner.plan(query).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("unsupported operation inside OPTIONAL MATCH"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// Even in a leading optional, a scan after the first step is rejected
+    /// (the `i == 0` guard).
+    #[test]
+    fn test_leading_optional_second_scan_rejected() {
+        let planner = test_planner();
+        let query = Query {
+            ops: vec![QueryOp::Optional {
+                ops: vec![
+                    QueryOp::ScanNodes {
+                        label: Some("Person".to_string()),
+                    },
+                    QueryOp::ScanNodes {
+                        label: Some("Place".to_string()),
+                    },
+                ],
+            }],
+            temporal_context: None,
+            hints: QueryHints::default(),
+        };
+
+        let err = planner.plan(query).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("unsupported operation inside OPTIONAL MATCH"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// The query's AS OF temporal context propagates into optional traverse
+    /// steps, mirroring `UnaryOp::Traverse`.
+    #[test]
+    fn test_optional_traverse_inherits_temporal_context() {
+        let planner = test_planner();
+        let query = Query {
+            ops: vec![
+                QueryOp::ScanNodes { label: None },
+                QueryOp::Optional {
+                    ops: vec![QueryOp::TraverseOut {
+                        label: None,
+                        depth: TraversalDepth::Exact(1),
+                    }],
+                },
+            ],
+            temporal_context: Some(TemporalContext::as_of(1000.into(), 2000.into())),
+            hints: QueryHints::default(),
+        };
+
+        let plan = planner.plan(query).unwrap();
+        match &plan.root {
+            PhysicalOp::OptionalApply { steps, .. } => match &steps[0] {
+                physical::OptionalPhysicalStep::Traverse {
+                    temporal_context, ..
+                } => {
+                    let (valid, tx) = temporal_context.expect("temporal context must propagate");
+                    assert_eq!(valid, 1000.into());
+                    assert_eq!(tx, 2000.into());
+                }
+                other => panic!("expected Traverse step, got {other:?}"),
+            },
+            other => panic!("expected OptionalApply root, got {other:?}"),
+        }
     }
 }

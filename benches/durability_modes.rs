@@ -651,6 +651,7 @@ fn bench_wal_append(c: &mut Criterion) {
                         label: GLOBAL_INTERNER.intern("Person").unwrap(),
                         properties: PropertyMapBuilder::new().build(),
                         valid_from: time::now(),
+                        provenance: None,
                     },
                     "create_edge" => WalOperation::CreateEdge {
                         edge_id: black_box(aletheiadb::core::id::EdgeId::new(1).unwrap()),
@@ -659,6 +660,7 @@ fn bench_wal_append(c: &mut Criterion) {
                         label: GLOBAL_INTERNER.intern("KNOWS").unwrap(),
                         properties: PropertyMapBuilder::new().build(),
                         valid_from: time::now(),
+                        provenance: None,
                     },
                     _ => WalOperation::UpdateNode {
                         node_id: aletheiadb::core::id::NodeId::new(1).unwrap(),
@@ -666,6 +668,7 @@ fn bench_wal_append(c: &mut Criterion) {
                         label: GLOBAL_INTERNER.intern("Person").unwrap(),
                         properties: PropertyMapBuilder::new().build(),
                         valid_from: time::now(),
+                        provenance: None,
                     },
                 };
                 // Guard against sync-mode append_async footgun: in synchronous mode
@@ -707,6 +710,7 @@ fn bench_wal_throughput(c: &mut Criterion) {
                         label: GLOBAL_INTERNER.intern("Person").unwrap(),
                         properties: PropertyMapBuilder::new().build(),
                         valid_from: time::now(),
+                        provenance: None,
                     };
                     black_box(wal.append_async(operation).unwrap());
                 }
@@ -753,6 +757,7 @@ fn bench_wal_with_sync(c: &mut Criterion) {
                     label: GLOBAL_INTERNER.intern("Person").unwrap(),
                     properties: PropertyMapBuilder::new().build(),
                     valid_from: time::now(),
+                    provenance: None,
                 };
                 wal.append_async(operation).unwrap();
                 wal.commit().unwrap(); // ✅ Commit with configured durability mode

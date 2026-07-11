@@ -52,7 +52,7 @@ graph TB
     Historical -->|pre-anchor hook| TVIndex
     Historical -->|post-commit event| TVIndex
 
-    Current -->|get_temporal_vector_index| TVIndex
+    Current -->|get_temporal_vector_index_for| TVIndex
 
     style DB fill:#e1f5ff
     style Historical fill:#fff4e1
@@ -178,7 +178,7 @@ if version.is_anchor() {
 pub fn enable_temporal_vector_index(&self, property_name: &str, config: TemporalVectorConfig) -> Result<()> {
     // 1. Create temporal vector index in CurrentStorage
     self.current.enable_temporal_vector_index(property_name, config)?;
-    let temporal_index = self.current.get_temporal_vector_index().ok_or(...)?;
+    let temporal_index = self.current.get_temporal_vector_index_for(property_name).ok_or(...)?;
 
     // 2. Register pre-anchor hooks (strong consistency)
     // Both node and edge hooks perform the same action, so we create one and clone it

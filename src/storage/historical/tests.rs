@@ -352,6 +352,127 @@ fn test_stats() {
 }
 
 // ============================================================
+// Average Delta Chain Length (Issue #366)
+// ============================================================
+
+#[test]
+fn test_calculate_avg_delta_chain_hand_computed() {
+    // Issue #366: hand-computed expected average over known constructed chains.
+    // With anchor_interval=10, the first version of each entity is an anchor and
+    // the following versions (up to the interval) are deltas.
+    let mut storage = HistoricalStorage::with_config(AnchorConfig {
+        anchor_interval: 10,
+        max_delta_chain: 20,
+    });
+    let label = GLOBAL_INTERNER.intern("Test").unwrap();
+
+    // Node 1: 4 versions -> 1 anchor + 3 deltas
+    for i in 0..4u64 {
+        storage
+            .add_node_version(
+                NodeId::new(1).unwrap(),
+                VersionId::new(100 + i).unwrap(),
+                (1000 + (i as i64) * 100).into(),
+                (1000 + (i as i64) * 100).into(),
+                label,
+                PropertyMapBuilder::new().insert("v", i as i64).build(),
+                false, // not a tombstone
+            )
+            .unwrap();
+    }
+
+    // Node 2: 1 version -> 1 anchor + 0 deltas
+    storage
+        .add_node_version(
+            NodeId::new(2).unwrap(),
+            VersionId::new(200).unwrap(),
+            1000.into(),
+            1000.into(),
+            label,
+            PropertyMapBuilder::new().build(),
+            false, // not a tombstone
+        )
+        .unwrap();
+
+    // Expected: (3 deltas + 0 deltas) / 2 anchors = 1.5
+    assert!((storage.calculate_avg_delta_chain() - 1.5).abs() < f64::EPSILON);
+}
+
+#[test]
+fn test_calculate_avg_delta_chain_empty_storage_fallback() {
+    // Issue #366: empty historical storage falls back to the default estimate 5.0.
+    let storage = HistoricalStorage::new();
+    assert!((storage.calculate_avg_delta_chain() - 5.0).abs() < f64::EPSILON);
+}
+
+#[test]
+fn test_calculate_avg_delta_chain_includes_edge_versions() {
+    // Issue #366: the average considers both node and edge version chains.
+    let mut storage = HistoricalStorage::with_config(AnchorConfig {
+        anchor_interval: 10,
+        max_delta_chain: 20,
+    });
+    let label = GLOBAL_INTERNER.intern("Test").unwrap();
+
+    // Node chain: 3 versions -> 1 anchor + 2 deltas
+    for i in 0..3u64 {
+        storage
+            .add_node_version(
+                NodeId::new(1).unwrap(),
+                VersionId::new(100 + i).unwrap(),
+                (1000 + (i as i64) * 100).into(),
+                (1000 + (i as i64) * 100).into(),
+                label,
+                PropertyMapBuilder::new().insert("v", i as i64).build(),
+                false, // not a tombstone
+            )
+            .unwrap();
+    }
+
+    // Edge chain: 3 versions -> 1 anchor + 2 deltas
+    for i in 0..3u64 {
+        storage
+            .add_edge_version(
+                EdgeId::new(1).unwrap(),
+                VersionId::new(300 + i).unwrap(),
+                (1000 + (i as i64) * 100).into(),
+                (1000 + (i as i64) * 100).into(),
+                label,
+                NodeId::new(1).unwrap(),
+                NodeId::new(2).unwrap(),
+                PropertyMapBuilder::new().insert("w", i as i64).build(),
+                false, // not a tombstone
+            )
+            .unwrap();
+    }
+
+    // Expected: (2 node deltas + 2 edge deltas) / (1 + 1 anchors) = 2.0
+    assert!((storage.calculate_avg_delta_chain() - 2.0).abs() < f64::EPSILON);
+}
+
+#[test]
+fn test_calculate_avg_delta_chain_anchors_only_is_zero() {
+    // Anchors with no deltas: the actual average chain length is 0.0
+    // (every lookup hits an anchor directly), not the 5.0 fallback.
+    let mut storage = HistoricalStorage::new();
+    let label = GLOBAL_INTERNER.intern("Test").unwrap();
+
+    storage
+        .add_node_version(
+            NodeId::new(1).unwrap(),
+            VersionId::new(100).unwrap(),
+            1000.into(),
+            1000.into(),
+            label,
+            PropertyMapBuilder::new().build(),
+            false, // not a tombstone
+        )
+        .unwrap();
+
+    assert!(storage.calculate_avg_delta_chain().abs() < f64::EPSILON);
+}
+
+// ============================================================
 // Vector Property Tests (VS-012)
 // ============================================================
 //
@@ -4906,4 +5027,420 @@ fn test_reconstruct_nonexistent_edge_version_returns_version_not_found() {
         crate::core::error::Error::Storage(StorageError::VersionNotFound(_)) => {}
         err => panic!("Expected VersionNotFound for a never-added edge version, got: {err:?}"),
     }
+}
+
+#[test]
+fn test_get_nodes_at_time_with_label_filters_on_version_label_before_reconstruction() {
+    // Unit test for the label-aware batch lookup (Issue #3236): the label
+    // check runs on the version record itself, so off-label and not-visible
+    // candidates are skipped (no `None` placeholders) and only label
+    // matches come back, reconstructed at the queried coordinate.
+    let mut storage = HistoricalStorage::new();
+
+    let person = GLOBAL_INTERNER.intern("Person").unwrap();
+    let company = GLOBAL_INTERNER.intern("Company").unwrap();
+
+    let person_id = NodeId::new(1).unwrap();
+    let company_id = NodeId::new(2).unwrap();
+    let late_person_id = NodeId::new(3).unwrap();
+    let never_versioned = NodeId::new(4).unwrap();
+
+    // Two nodes visible from t=1000, one Person created only at t=3000.
+    storage
+        .add_node_version(
+            person_id,
+            VersionId::new(100).unwrap(),
+            1000.into(),
+            1000.into(),
+            person,
+            PropertyMapBuilder::new().insert("name", "Alice").build(),
+            false,
+        )
+        .unwrap();
+    storage
+        .add_node_version(
+            company_id,
+            VersionId::new(101).unwrap(),
+            1000.into(),
+            1000.into(),
+            company,
+            PropertyMapBuilder::new().insert("name", "Acme").build(),
+            false,
+        )
+        .unwrap();
+    storage
+        .add_node_version(
+            late_person_id,
+            VersionId::new(102).unwrap(),
+            3000.into(),
+            3000.into(),
+            person,
+            PropertyMapBuilder::new().insert("name", "Bob").build(),
+            false,
+        )
+        .unwrap();
+
+    let candidates = [person_id, company_id, late_person_id, never_versioned];
+
+    // At t=2000 only the first Person matches: the Company is filtered by
+    // label, the late Person is not yet visible, and the never-versioned id
+    // is skipped without error.
+    let found = storage
+        .get_nodes_at_time_with_label(&candidates, person, 2000.into(), 2000.into())
+        .unwrap();
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].id, person_id);
+    assert_eq!(found[0].label, person);
+    assert_eq!(
+        found[0].properties.get("name"),
+        Some(&crate::core::property::PropertyValue::from("Alice"))
+    );
+
+    // At t=4000 both Person nodes match, in input order.
+    let found = storage
+        .get_nodes_at_time_with_label(&candidates, person, 4000.into(), 4000.into())
+        .unwrap();
+    assert_eq!(
+        found.iter().map(|n| n.id).collect::<Vec<_>>(),
+        vec![person_id, late_person_id]
+    );
+
+    // The Company label sees only the company node.
+    let found = storage
+        .get_nodes_at_time_with_label(&candidates, company, 2000.into(), 2000.into())
+        .unwrap();
+    assert_eq!(
+        found.iter().map(|n| n.id).collect::<Vec<_>>(),
+        vec![company_id]
+    );
+}
+
+// ============================================================================
+// Version read metadata: provenance + bi-temporal interval (Issue #3232)
+// ============================================================================
+
+#[test]
+fn test_get_node_version_read_metadata_hot_tier_hit() {
+    let mut storage = HistoricalStorage::new();
+    let node_id = NodeId::new(1).unwrap();
+    let version_id = VersionId::new(100).unwrap();
+    let label = GLOBAL_INTERNER.intern("Person").unwrap();
+    let props = PropertyMapBuilder::new().insert("name", "Alice").build();
+    let provenance = Arc::new(
+        Provenance::builder()
+            .source("test-suite")
+            .confidence(0.9)
+            .build()
+            .unwrap(),
+    );
+
+    storage
+        .add_node_version_with_provenance(
+            node_id,
+            version_id,
+            1_000.into(),
+            2_000.into(),
+            label,
+            props,
+            false,
+            Some(Arc::clone(&provenance)),
+        )
+        .unwrap();
+
+    let (prov, interval) = storage
+        .get_node_version_read_metadata(version_id)
+        .unwrap()
+        .expect("hot-tier version must be found");
+    let prov = prov.expect("provenance stored on the version must be returned");
+    assert_eq!(prov.source(), Some("test-suite"));
+    assert_eq!(prov.confidence(), Some(0.9));
+    assert_eq!(interval.valid_time().start(), 1_000.into());
+    assert_eq!(interval.transaction_time().start(), 2_000.into());
+    assert!(interval.transaction_time().is_current());
+}
+
+#[test]
+fn test_get_node_version_read_metadata_missing_version_returns_none() {
+    // A version id that exists in no tier (and with no tiered storage
+    // configured) must resolve to Ok(None) via the tiered fallback path,
+    // never an error: the MCP layer relies on this to distinguish
+    // "no metadata" from "metadata lookup failed".
+    let storage = HistoricalStorage::new();
+    let missing = VersionId::new(424_242).unwrap();
+    assert!(
+        storage
+            .get_node_version_read_metadata(missing)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn test_get_edge_version_read_metadata_hot_tier_hit() {
+    let mut storage = HistoricalStorage::new();
+    let edge_id = EdgeId::new(10).unwrap();
+    let version_id = VersionId::new(200).unwrap();
+    let label = GLOBAL_INTERNER.intern("KNOWS").unwrap();
+    let props = PropertyMapBuilder::new().insert("weight", 1.0f64).build();
+    let provenance = Arc::new(
+        Provenance::builder()
+            .source("edge-test-suite")
+            .note("hot tier")
+            .build()
+            .unwrap(),
+    );
+
+    storage
+        .add_edge_version_with_provenance(
+            edge_id,
+            version_id,
+            3_000.into(),
+            4_000.into(),
+            label,
+            NodeId::new(1).unwrap(),
+            NodeId::new(2).unwrap(),
+            props,
+            false,
+            Some(Arc::clone(&provenance)),
+        )
+        .unwrap();
+
+    let (prov, interval) = storage
+        .get_edge_version_read_metadata(version_id)
+        .unwrap()
+        .expect("hot-tier version must be found");
+    let prov = prov.expect("provenance stored on the version must be returned");
+    assert_eq!(prov.source(), Some("edge-test-suite"));
+    assert_eq!(prov.note(), Some("hot tier"));
+    assert_eq!(interval.valid_time().start(), 3_000.into());
+    assert_eq!(interval.transaction_time().start(), 4_000.into());
+    assert!(interval.transaction_time().is_current());
+}
+
+#[test]
+fn test_get_edge_version_read_metadata_missing_version_returns_none() {
+    // Edge mirror of the node missing-version case above.
+    let storage = HistoricalStorage::new();
+    let missing = VersionId::new(424_243).unwrap();
+    assert!(
+        storage
+            .get_edge_version_read_metadata(missing)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn test_get_node_version_read_metadata_cold_tier_fallback() {
+    use crate::storage::redb_cold_storage::RedbColdStorage;
+    use crate::storage::tiered_storage::TieredStorage;
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let db_path = temp_dir.path().join("cold.redb");
+    let cold = Arc::new(RedbColdStorage::with_default_config(&db_path).unwrap());
+    let tiered = Arc::new(TieredStorage::with_default_config(cold));
+
+    let version_id = VersionId::new(7_100).unwrap();
+    let temporal = BiTemporalInterval::with_valid_time(1_000.into(), 2_000.into());
+    let version = NodeVersion::new_anchor(
+        version_id,
+        NodeId::new(7).unwrap(),
+        temporal,
+        GLOBAL_INTERNER.intern("Person").unwrap(),
+        PropertyMapBuilder::new()
+            .insert("name", "Cold Alice")
+            .build(),
+    );
+    tiered.store_node_version(&version).unwrap();
+
+    let mut storage = HistoricalStorage::new();
+    storage.set_tiered_storage(tiered);
+
+    // The version was never added to the hot tier, so the lookup must fall
+    // back through the tiered path and hit cold storage.
+    let (prov, interval) = storage
+        .get_node_version_read_metadata(version_id)
+        .unwrap()
+        .expect("cold-tier version must be found");
+    assert!(prov.is_none(), "anchor was stored without provenance");
+    assert_eq!(interval.valid_time().start(), 1_000.into());
+    assert_eq!(interval.transaction_time().start(), 2_000.into());
+}
+
+#[test]
+fn test_get_edge_version_read_metadata_cold_tier_fallback() {
+    use crate::storage::redb_cold_storage::RedbColdStorage;
+    use crate::storage::tiered_storage::TieredStorage;
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let db_path = temp_dir.path().join("cold.redb");
+    let cold = Arc::new(RedbColdStorage::with_default_config(&db_path).unwrap());
+    let tiered = Arc::new(TieredStorage::with_default_config(cold));
+
+    let version_id = VersionId::new(7_200).unwrap();
+    let temporal = BiTemporalInterval::with_valid_time(3_000.into(), 4_000.into());
+    let version = EdgeVersion::new_anchor(
+        version_id,
+        EdgeId::new(70).unwrap(),
+        temporal,
+        GLOBAL_INTERNER.intern("KNOWS").unwrap(),
+        NodeId::new(7).unwrap(),
+        NodeId::new(8).unwrap(),
+        PropertyMapBuilder::new().insert("weight", 2.0f64).build(),
+    );
+    tiered.store_edge_version(&version).unwrap();
+
+    let mut storage = HistoricalStorage::new();
+    storage.set_tiered_storage(tiered);
+
+    // Edge mirror of the node cold-tier fallback case above.
+    let (prov, interval) = storage
+        .get_edge_version_read_metadata(version_id)
+        .unwrap()
+        .expect("cold-tier version must be found");
+    assert!(prov.is_none(), "anchor was stored without provenance");
+    assert_eq!(interval.valid_time().start(), 3_000.into());
+    assert_eq!(interval.transaction_time().start(), 4_000.into());
+}
+
+// ============================================================================
+// Issue #3387: rebuild_version_chains preserves restored (persisted) state
+// ============================================================================
+
+/// Restored chain links pointing at a version ABSENT from the hot map
+/// (cold-migrated) must survive `rebuild_version_chains`: the heuristic must
+/// fill only MISSING links, never rewire hot versions around the gap, and
+/// must not touch an already-closed transaction time.
+///
+/// Chain on disk: v1 <-> v2 <-> v3, with v2 cold-migrated (absent here).
+/// v1: tx [1000, 2000) CLOSED, next = Some(v2)
+/// v3: tx [3000, open),        prev = Some(v2)
+#[test]
+fn test_rebuild_version_chains_preserves_restored_links_across_cold_gap() {
+    let mut storage = HistoricalStorage::new();
+    let node_id = NodeId::new(1).unwrap();
+    let label = GLOBAL_INTERNER.intern("ColdGapNode").unwrap();
+
+    let v1_id = VersionId::new(1).unwrap();
+    let v2_id = VersionId::new(2).unwrap(); // cold-migrated: never inserted
+    let v3_id = VersionId::new(3).unwrap();
+
+    let v1_tx_end: Timestamp = 2000.into();
+    let mut v1 = NodeVersion::new_anchor(
+        v1_id,
+        node_id,
+        BiTemporalInterval::current(1000.into())
+            .close_transaction_time(v1_tx_end)
+            .unwrap(),
+        label,
+        PropertyMapBuilder::new().insert("name", "v1").build(),
+    );
+    v1.next_version = Some(v2_id);
+
+    let mut v3 = NodeVersion::new_anchor(
+        v3_id,
+        node_id,
+        BiTemporalInterval::current(3000.into()),
+        label,
+        PropertyMapBuilder::new().insert("name", "v3").build(),
+    );
+    v3.prev_version = Some(v2_id);
+
+    storage.insert_restored_node_version(v1).unwrap();
+    storage.insert_restored_node_version(v3).unwrap();
+
+    storage.rebuild_version_chains();
+
+    let v1 = storage.node_versions.get(&v1_id).unwrap();
+    assert_eq!(
+        v1.next_version,
+        Some(v2_id),
+        "restored next link into the cold tier must not be rewired to v3"
+    );
+    assert_eq!(v1.prev_version, None, "v1 is the oldest: prev stays None");
+    assert_eq!(
+        v1.temporal.transaction_time().end(),
+        v1_tx_end,
+        "already-closed tx end must not be re-closed at v3's tx start"
+    );
+
+    let v3 = storage.node_versions.get(&v3_id).unwrap();
+    assert_eq!(
+        v3.prev_version,
+        Some(v2_id),
+        "restored prev link into the cold tier must not be rewired to v1"
+    );
+    assert_eq!(v3.next_version, None, "v3 is the head: next stays None");
+    assert!(v3.temporal.transaction_time().is_current());
+
+    // Head still resolves to the latest-tx version.
+    assert_eq!(storage.get_current_node_version(node_id), Some(v3_id));
+}
+
+/// Edge mirror of
+/// [`test_rebuild_version_chains_preserves_restored_links_across_cold_gap`]:
+/// the edge section of `rebuild_version_chains` has its own fill-only-missing
+/// guards that a node-only test would not exercise.
+#[test]
+fn test_rebuild_edge_version_chains_preserves_restored_links_across_cold_gap() {
+    let mut storage = HistoricalStorage::new();
+    let edge_id = EdgeId::new(1).unwrap();
+    let source = NodeId::new(1).unwrap();
+    let target = NodeId::new(2).unwrap();
+    let label = GLOBAL_INTERNER.intern("COLD_GAP_EDGE").unwrap();
+
+    let v1_id = VersionId::new(11).unwrap();
+    let v2_id = VersionId::new(12).unwrap(); // cold-migrated: never inserted
+    let v3_id = VersionId::new(13).unwrap();
+
+    let v1_tx_end: Timestamp = 2000.into();
+    let mut v1 = EdgeVersion::new_anchor(
+        v1_id,
+        edge_id,
+        BiTemporalInterval::current(1000.into())
+            .close_transaction_time(v1_tx_end)
+            .unwrap(),
+        label,
+        source,
+        target,
+        PropertyMapBuilder::new().insert("w", 1i64).build(),
+    );
+    v1.next_version = Some(v2_id);
+
+    let mut v3 = EdgeVersion::new_anchor(
+        v3_id,
+        edge_id,
+        BiTemporalInterval::current(3000.into()),
+        label,
+        source,
+        target,
+        PropertyMapBuilder::new().insert("w", 3i64).build(),
+    );
+    v3.prev_version = Some(v2_id);
+
+    storage.insert_restored_edge_version(v1).unwrap();
+    storage.insert_restored_edge_version(v3).unwrap();
+
+    storage.rebuild_version_chains();
+
+    let v1 = storage.edge_versions.get(&v1_id).unwrap();
+    assert_eq!(
+        v1.next_version,
+        Some(v2_id),
+        "restored next link into the cold tier must not be rewired to v3"
+    );
+    assert_eq!(
+        v1.temporal.transaction_time().end(),
+        v1_tx_end,
+        "already-closed tx end must not be re-closed at v3's tx start"
+    );
+
+    let v3 = storage.edge_versions.get(&v3_id).unwrap();
+    assert_eq!(
+        v3.prev_version,
+        Some(v2_id),
+        "restored prev link into the cold tier must not be rewired to v1"
+    );
+    assert_eq!(v3.next_version, None);
+    assert_eq!(storage.get_current_edge_version(edge_id), Some(v3_id));
 }

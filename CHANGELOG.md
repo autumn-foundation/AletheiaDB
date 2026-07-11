@@ -7,6 +7,241 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Atomic multi-write batches with local refs via MCP (Issue #3231): the new
+  `apply_batch` tool accepts an **ordered** array of write operations
+  (`create_node`, `create_edge`, `update_node`, `update_edge`, `delete_node`,
+  `delete_edge`, each supporting the #3221 optional `valid_time`) that commit
+  **all-or-nothing** in a single `WriteTransaction` (one WAL batch append,
+  one GroupCommit fsync). A `create_node` may carry a `ref` alias; later edge
+  operations may reference batch-created nodes as `"$alias"` or positionally
+  as `"$<index>"` — forward/unknown/duplicate refs are rejected statically
+  with a precise `details.failed_op_index` before any transaction opens. Any
+  failure (validation, constraint violation, #3209 detach refusal — enforced
+  against committed **and** batch-created edges via a batch-local adjacency
+  ledger) rolls the whole batch back: zero writes become visible. On success
+  the response returns per-operation results in input order (entity ids,
+  version ids for creates/updates) plus a `ref_map` of every alias to its
+  committed real id. Batch size is capped (default 1000, tunable via
+  `AletheiaMcpServer::with_max_batch_operations`; the limit is echoed on
+  rejection per #3226). New `WriteTransaction::buffered_node_version` /
+  `buffered_edge_version` accessors surface the eagerly-allocated per-op
+  version ids. v1 scope: ops may not update/delete a batch-created entity,
+  each committed entity accepts at most one write per batch, and delete
+  results carry no version id. See
+  [docs/guides/mcp-query-tool.md](docs/guides/mcp-query-tool.md#atomic-multi-write-batches-apply_batch).
+
+- Authentication and role-based access control on both server surfaces
+  (Issue #3350): the HTTP server (`aletheia-server`) and the MCP server
+  (`aletheia-mcp`) require an API key by default and refuse to start with
+  zero credentials; anonymous operation is an explicit, loudly-warned
+  opt-in (`ALETHEIADB_AUTH_MODE=anonymous`, fail-closed on invalid values).
+  Four roles (`admin`/`writer`/`reader`/`metrics`) gate every HTTP route
+  and MCP tool via classifications kept in lockstep with
+  `docs/guides/access-control-matrix.md` by CI conformance tests. Key
+  lifecycle is served by the HTTP `POST/GET /admin/keys` and
+  `POST /admin/keys/revoke` endpoints over a persisted, hashed key store
+  (`{data_dir}/auth/keys.json`, SHA-256 digests only, `0600`, atomic
+  writes with directory fsync); credentials are re-verified per call so
+  revocation is immediate. Auth failures are a uniform `UNAUTHENTICATED`
+  (never distinguishing missing/unknown/revoked); role denials are
+  `PERMISSION_DENIED` — both additive to the #3234 error-code enum.
+  Authenticated writes stamp the verified principal's name into version
+  provenance (`provenance.principal`) on the structured create/update
+  node/edge paths of both surfaces (deletes/retracts and HTTP AQL-statement
+  writes do not stamp a principal yet — known follow-up). Persistence
+  format versions bump **backward-compatibly** to carry the new provenance
+  field: WAL v5 (plaintext) / v6 (encrypted), index-persistence manifest
+  v3, backup artifact v3, cold-storage record tag v3 — all older artifacts
+  still load, with `principal: None`. The autumn-web framework's
+  sensitive actuator endpoints (`/actuator/env`, `/actuator/configprops`,
+  unauthenticated `PUT /actuator/loggers/{name}`, `/actuator/tasks`,
+  `/actuator/jobs`, `/actuator/prometheus`) are force-disabled in every
+  profile via a hardened config loader, since framework routes bypass the
+  API-key layer; the remaining health/metadata framework routes are
+  documented in `docs/guides/security-quickstart.md`.
+
+- Valid-time retraction (Issue #3230): `AletheiaDB::retract_node`,
+  `retract_node_detach`, and `retract_edge` (plus
+  `WriteTransaction::retract_node`/`retract_edge` and the MCP
+  `retract_node`/`retract_edge` tools) close an entity's valid-time
+  interval at a chosen `valid_to` (default now; backdating and
+  up-to-one-year future dating supported) **without deleting its history**.
+  `AS OF VALID_TIME` before `valid_to` still returns the fact; at/after it
+  does not; `AS OF SYSTEM_TIME` before the retraction's commit still shows
+  the fact open-ended (append-only — the past record is never rewritten).
+  `retract_node` mirrors the #3209 safe-by-default contract: it refuses
+  with the count of **distinct** connected edges (a self-loop counts once)
+  unless `detach` co-retracts them atomically at the same `valid_to`.
+  Re-retracting an already-retracted (or deleted) entity is an idempotent
+  no-op returning the existing interval. New WAL operations
+  `RetractNode`/`RetractEdge` replay faithfully on crash recovery, honoring
+  the logged `valid_to`. See
+  [docs/guides/mcp-query-tool.md](docs/guides/mcp-query-tool.md#retracting-a-fact-closing-valid-time).
+
+- Queryable bi-temporal extent (Issue #3238):
+  `AletheiaDB::temporal_extent()` / `temporal_extent_by_label()` and the MCP
+  `temporal_extent` tool report the dataset's earliest/latest valid-time and
+  transaction-time coordinates across recorded history — including
+  expired/superseded versions and delete tombstones — so a caller (notably
+  an LLM over MCP) can calibrate `AS OF` queries to land inside real data.
+  Overall bounds are O(1) reads of an aggregate the temporal indexes
+  maintain at write time and only ever widen while the process runs; an
+  empty database returns explicit `null`s/`None`s, never epoch 0. Optional
+  `by_label: true` adds per-node-label / per-edge-type bounds folded from
+  hot-tier history. Known limitation: on databases with cold-storage
+  migration, versions migrated to the cold tier before the last restart are
+  not reflected (the indexes rebuild from hot-tier versions at startup).
+
+- Valid-time writes on the convenience API and MCP tools (Issue #3221):
+  `AletheiaDB::create_node_with_valid_time`, `create_edge_with_valid_time`,
+  `update_node_with_valid_time`, `update_edge_with_valid_time`,
+  `delete_node_with_valid_time`, and `delete_edge_with_valid_time` expose the
+  existing `WriteOps::*_with_valid_time` trait methods on the top-level type.
+  The MCP `create_node`, `create_edge`, `update_node`, `update_edge`,
+  `delete_node`, and `delete_edge` tools gain an optional `valid_time` field
+  (ISO 8601 / RFC 3339 or microseconds since epoch) so an LLM can record a
+  fact's real-world effective date — including when it stopped being true —
+  in a single tool call. Purely additive; omitting `valid_time` reproduces
+  prior behavior exactly. On `delete_node`, `valid_time` is not supported
+  together with `detach: true` (cascade delete does not support backdating).
+
+### Changed
+
+- Bulk MCP read responses now evaluate `is_current` against a single
+  per-request timestamp (Issue #3391): the wallclock is captured once per
+  tool call and every entity's `temporal.is_current` in that response
+  (`list_nodes`, `traverse`, `get_outgoing_edges`/`get_incoming_edges`,
+  `find_similar`, `find_nodes_at_time`, `hybrid_query`, ...) is judged
+  against the same instant, instead of one clock read per serialized
+  entity. See
+  [docs/guides/mcp-query-tool.md](docs/guides/mcp-query-tool.md#temporal-bounds-on-read-responses).
+- Removed the legacy single-property temporal vector index state (Issue
+  #450): the internal `TemporalVectorIndexState` (which mirrored only the
+  most recently enabled temporal index) is gone, and the multi-property
+  `temporal_vector_indexes` DashMap introduced by Issue #389 is now the
+  single source of truth. No public types were removed, but one behavior
+  changed when **multiple** temporal vector indexes are enabled: the
+  property-less temporal APIs — `AletheiaDB::find_similar_as_of`
+  (deprecated), `similarity_search(...).at_time(...)`,
+  `GraphView::find_similar_as_of`, `query::hybrid::find_similar_as_of`, and
+  `CurrentStorage::find_similar_as_of` / `find_similar_in_range` — now
+  deterministically query the **alphabetically first** temporal-indexed
+  property (mirroring the non-temporal default-property rule) instead of
+  the most recently enabled one. Migration: name the property explicitly.
+
+  ```rust
+  // Before (ambiguous with several temporal indexes -- used the
+  // index that happened to be enabled last):
+  let results = db.find_similar_as_of(&query, 10, ts)?;
+
+  // After (explicit property -- recommended):
+  let results = db.find_similar_as_of_in("content_embedding", &query, 10, ts)?;
+  ```
+
+- Vector index loading at startup is now parallel with per-index error
+  isolation (Issue #451): with index persistence enabled, all per-property
+  HNSW vector indexes are loaded concurrently (one rayon task per property)
+  and a corrupted or unreadable vector index (bad `meta.idx`,
+  `mappings.idx`, `current.usearch`, or `current.usearch.mappings`; unknown
+  metric; out-of-range mapping key; even a panic inside one load task) is
+  skipped with a warning instead of aborting the loading of every remaining
+  vector index. Startup logs a loaded/skipped summary when any index is
+  skipped and reports the actually restored vector count per index. A
+  skipped index is recovered with the new
+  `AletheiaDB::rebuild_vector_index(property, config)`, which re-enables the
+  index and backfills it from the vector properties of current nodes —
+  merely re-enabling via `enable_vector_index` creates an empty index that
+  the next persistence cycle writes over the on-disk files, losing the
+  vectors. See
+  [docs/guides/index-persistence-guide.md](docs/guides/index-persistence-guide.md#vector-index-persistence).
+
+- `PersistenceConfig::default()` no longer enables index persistence
+  (Issue #3388). The old default (`enabled: true` with the cwd-relative
+  `data_dir: "data"`) made every database built from a default or builder
+  config silently write index snapshots into `./data` on shutdown and load
+  whatever `./data` happened to contain on startup, so unrelated instances
+  sharing a working directory could observe each other's data and a stale
+  `./data` could short-circuit WAL replay (this caused a real CI flake).
+  Index persistence is now opt-in: set `enabled: true` together with an
+  explicit `data_dir`, or use the canonical durable entry points
+  `AletheiaDB::open(path)` / `durable_config_for_data_dir(path)`, which are
+  unaffected. **Breaking for callers that relied on the implicit default:**
+  a config that never touches `PersistenceConfig` no longer persists indexes
+  (the WAL still provides durability when configured). TOML configs must now
+  set `enabled = true` under `[persistence]`; a `[persistence]` section that
+  omits `enabled` (even one that sets `data_dir` or `load_on_startup`) is
+  treated as disabled.
+
+- **BREAKING**: `ReadOps::get_outgoing_edges`, `ReadOps::get_incoming_edges`,
+  and `ReadOps::get_outgoing_edges_with_label` now return
+  `Result<Vec<EdgeId>>` instead of `Vec<EdgeId>` (Issue #359). A node that
+  does not exist (or is not visible in the transaction's snapshot) returns
+  `Err(NodeNotFound)`, consistent with `get_node`/`get_edge`; an existing
+  node with no (matching) edges returns `Ok(vec![])`, so callers can finally
+  distinguish "node has no edges" from "node doesn't exist". Within a write
+  transaction the existence check is buffer-aware: a node created in the
+  transaction exists, a node deleted in it does not. The non-transactional
+  `AletheiaDB::get_outgoing_edges`/`get_incoming_edges`/
+  `get_outgoing_edges_with_label` convenience methods are unchanged.
+  Migration: append `?` (or `.unwrap_or_default()` to keep
+  the old silent-empty behavior) at call sites. The `ReadOps` trait methods
+  also gained comprehensive rustdoc with runnable examples covering the
+  empty-vs-missing contract (Issue #358).
+  Two edge-case behavior changes ride along: `retract_node_detach` on a node
+  previously removed via the plain (non-cascade) `delete_node` no longer
+  co-retracts that node's orphaned edges (`edges_retracted: 0`) — consistent
+  with the documented "retracting a deleted node is a no-op" contract; and
+  `delete_node_cascade` on a node already deleted in the same transaction
+  now fails fast with `NodeNotFound` at edge enumeration (same final outcome
+  as before, earlier failure point).
+
+- MCP tool error responses are now structured (Issue #3234): every error is
+  `{"error": {"code", "message", "retriable", "details"?}}` instead of
+  `{"error": "<string>"}`. `code` is drawn from a stable seven-value enum
+  (`NOT_FOUND`, `INVALID_ARGUMENT`, `CONSTRAINT_VIOLATION`,
+  `FAILED_PRECONDITION`, `CONFLICT`, `UNAVAILABLE`, `INTERNAL`); `retriable`
+  is `true` only for transient classes (timeouts, clock skew,
+  serialization/write conflicts) and always `false` for caller-fault classes;
+  `details` carries optional per-code metadata (e.g. the DETACH refusal's
+  `connected_edges`, a unique violation's `existing_node_id`). The previous
+  free-text error message is preserved verbatim at `error.message`. The
+  `query` tool keeps its own `kind` field verbatim, with `code`/`retriable`
+  added additively alongside it. **Breaking for consumers that read `error`
+  as a string** (e.g. `error.as_str()`): the JSON type of the `error` value
+  changed from string to object. See
+  [docs/guides/mcp-query-tool.md](docs/guides/mcp-query-tool.md#structured-error-codes-and-the-retriable-contract).
+
+### Fixed
+
+- Multi-property temporal vector indexes now all receive write-path updates
+  (Issue #450): with two or more temporal vector indexes enabled, node
+  creates/updates now index vectors into **every** matching property index,
+  deletes remove the node from every index, and post-commit snapshot
+  notifications reach every index. Previously only the most recently enabled
+  temporal index was maintained, silently leaving earlier-enabled temporal
+  indexes empty for point-in-time queries.
+- WAL: the flush coordinator no longer appends to an existing segment file
+  whose header format version differs from the version the writer emits
+  (Issue #3423). Replay derives the parse version solely from the segment
+  header, so such an append produced a mixed-version segment whose newer
+  entries failed CRC/parsing on recovery. The writer now reads the header
+  of any existing non-empty segment it is about to reuse and rolls forward
+  to the next segment id on a mismatched (or unreadable) header; a failed
+  WAL-directory scan during startup id-recovery now warns instead of
+  silently under-reporting the next segment id.
+- `create_edge_with_valid_time` now enforces the same "not more than one
+  year in the future" cap as every other `*_with_valid_time` operation; it
+  previously accepted an arbitrarily-far-future `valid_time` on edges.
+- The "valid_time must not precede entity creation" check on
+  `update_node_with_valid_time`, `update_edge_with_valid_time`,
+  `delete_node_with_valid_time`, and `delete_edge_with_valid_time` now
+  compares against the entity's true original creation time instead of its
+  most recent version, so backfilling a correction between two existing
+  (already backdated) versions no longer fails with a spurious
+  `ValidTimeBeforeEntityCreation` error.
+
 ## [0.1.1] - 2026-05-12
 
 ### Fixed

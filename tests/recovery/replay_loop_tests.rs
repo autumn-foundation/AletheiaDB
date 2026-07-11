@@ -74,6 +74,7 @@ fn test_recover_tracks_max_node_id() -> Result<()> {
             label: GLOBAL_INTERNER.intern("Test").unwrap(),
             properties: PropertyMap::new(),
             valid_from: time::now(),
+            provenance: None,
         })?;
     }
     wal.flush()?;
@@ -112,6 +113,7 @@ fn test_recover_tracks_max_edge_id() -> Result<()> {
             label: GLOBAL_INTERNER.intern("Node").unwrap(),
             properties: PropertyMap::new(),
             valid_from: time::now(),
+            provenance: None,
         })?;
     }
 
@@ -124,6 +126,7 @@ fn test_recover_tracks_max_edge_id() -> Result<()> {
             label: GLOBAL_INTERNER.intern("CONNECTS").unwrap(),
             properties: PropertyMap::new(),
             valid_from: time::now(),
+            provenance: None,
         })?;
     }
     wal.flush()?;
@@ -168,6 +171,7 @@ fn test_recover_tracks_max_version_id() -> Result<()> {
         label: GLOBAL_INTERNER.intern("Node").unwrap(),
         properties: PropertyMap::new(),
         valid_from: time::now(),
+        provenance: None,
     })?;
 
     // Append updates with various version IDs
@@ -178,6 +182,7 @@ fn test_recover_tracks_max_version_id() -> Result<()> {
             label: GLOBAL_INTERNER.intern("Updated").unwrap(),
             properties: PropertyMap::new(),
             valid_from: time::now(),
+            provenance: None,
         })?;
     }
     wal.flush()?;
@@ -220,6 +225,7 @@ fn test_recover_handles_non_sequential_version_ids() -> Result<()> {
         label: GLOBAL_INTERNER.intern("Node").unwrap(),
         properties: PropertyMap::new(),
         valid_from: time::now(),
+        provenance: None,
     })?;
 
     // Update with version 100 (large jump)
@@ -229,6 +235,7 @@ fn test_recover_handles_non_sequential_version_ids() -> Result<()> {
         label: GLOBAL_INTERNER.intern("Updated").unwrap(),
         properties: PropertyMap::new(),
         valid_from: time::now(),
+        provenance: None,
     })?;
 
     // Update with version 50 (out of order - should still track max=100)
@@ -238,12 +245,14 @@ fn test_recover_handles_non_sequential_version_ids() -> Result<()> {
         label: GLOBAL_INTERNER.intern("Another").unwrap(),
         properties: PropertyMap::new(),
         valid_from: time::now(),
+        provenance: None,
     })?;
 
     // Delete creates tombstone (should get next version after max)
     wal.append(WalOperation::DeleteNode {
         node_id,
         valid_from: time::now(),
+        version_id: None,
     })?;
 
     wal.flush()?;
@@ -282,6 +291,7 @@ fn test_recover_with_multiple_operation_types() -> Result<()> {
         label: GLOBAL_INTERNER.intern("Person").unwrap(),
         properties: PropertyMap::new(),
         valid_from: time::now(),
+        provenance: None,
     })?;
 
     // Create edge
@@ -292,6 +302,7 @@ fn test_recover_with_multiple_operation_types() -> Result<()> {
         label: GLOBAL_INTERNER.intern("KNOWS").unwrap(),
         properties: PropertyMap::new(),
         valid_from: time::now(),
+        provenance: None,
     })?;
 
     // Update node
@@ -301,12 +312,14 @@ fn test_recover_with_multiple_operation_types() -> Result<()> {
         label: GLOBAL_INTERNER.intern("Person").unwrap(),
         properties: PropertyMap::new(),
         valid_from: time::now(),
+        provenance: None,
     })?;
 
     // Delete node
     wal.append(WalOperation::DeleteNode {
         node_id,
         valid_from: time::now(),
+        version_id: None,
     })?;
 
     wal.flush()?;
@@ -341,6 +354,7 @@ fn test_recover_from_checkpoint_lsn() -> Result<()> {
             label: GLOBAL_INTERNER.intern("Test").unwrap(),
             properties: PropertyMap::new(),
             valid_from: time::now(),
+            provenance: None,
         })?;
     }
     wal.flush()?;
@@ -396,6 +410,7 @@ fn test_recover_handles_checkpoint_marker() -> Result<()> {
             label: GLOBAL_INTERNER.intern("Test").unwrap(),
             properties: PropertyMap::new(),
             valid_from: time::now(),
+            provenance: None,
         })?;
     }
 
@@ -412,6 +427,7 @@ fn test_recover_handles_checkpoint_marker() -> Result<()> {
             label: GLOBAL_INTERNER.intern("Test").unwrap(),
             properties: PropertyMap::new(),
             valid_from: time::now(),
+            provenance: None,
         })?;
     }
 

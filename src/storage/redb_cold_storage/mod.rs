@@ -53,15 +53,16 @@
 
 use crate::core::error::{Result, StorageError};
 use crate::core::id::VersionId;
-use crate::core::version::{EdgeVersion, EntityVersion, NodeVersion};
+use crate::core::temporal::{BiTemporalInterval, TIMESTAMP_MAX, Timestamp};
+use crate::core::version::{EdgeVersion, EntityVersion, NodeVersion, TemporalVersion};
 use crate::storage::wal::LSN;
 use rayon::prelude::*;
-use redb::{ReadableDatabase, ReadableTable, TableHandle};
+use redb::{ReadableDatabase, ReadableTable, ReadableTableMetadata, TableHandle};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-#[cfg(feature = "config-toml")]
+#[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
 #[cfg(test)]
@@ -77,6 +78,183 @@ const METADATA_TABLE: redb::TableDefinition<'static, &'static str, &'static [u8]
 
 /// Metadata keys stored in the metadata table.
 const FLUSHED_LSN_KEY: &str = "flushed_lsn";
+
+/// Metadata key for the persisted cold-tier bi-temporal extent (Issue #3389).
+const TEMPORAL_EXTENT_KEY: &str = "temporal_extent";
+
+/// Layout version tag for the persisted extent record. Records with an
+/// unrecognized version are treated as absent, so an older binary that cannot
+/// understand a newer layout simply falls back to hot-tier-only bounds rather
+/// than misreading bytes.
+const EXTENT_RECORD_VERSION: u8 = 1;
+
+/// Byte length of a serialized [`ColdTemporalExtentBounds`]:
+/// 1 version tag + 4 dimensions × (1 presence flag + 8 wallclock + 4 logical).
+const EXTENT_RECORD_LEN: usize = 1 + 4 * 13;
+
+/// Persisted bi-temporal extent bounds for the cold tier (Issue #3389).
+///
+/// Cold-migrated versions are removed from the hot-tier temporal indexes, so
+/// after a restart the write-time extent aggregate — which is rebuilt from the
+/// hot tier only — would silently omit them, wrongly narrowing the reported
+/// [`temporal_extent`](crate::AletheiaDB::temporal_extent). To close that gap
+/// the cold store maintains these bounds incrementally as versions are written
+/// to it, persisted durably in the `metadata` table;
+/// [`RedbColdStorage::get_temporal_extent_bounds`] returns them at startup so
+/// they can be merged back into the aggregate.
+///
+/// Bounds follow the exact convention of the in-memory extent aggregate:
+/// `earliest` is the minimum interval start; `latest` is the maximum of
+/// interval starts and *closed* interval ends — an open (`TIMESTAMP_MAX`) end
+/// contributes only its start, so the open-interval sentinel never leaks. All
+/// four fields are `None` on an empty cold tier and become `Some` together
+/// once any version is stored. Merging is monotonic (bounds only ever widen).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ColdTemporalExtentBounds {
+    /// Minimum valid-time interval start observed across cold versions.
+    pub valid_earliest: Option<Timestamp>,
+    /// Maximum finite valid-time coordinate observed across cold versions.
+    pub valid_latest: Option<Timestamp>,
+    /// Minimum transaction-time interval start observed across cold versions.
+    pub tx_earliest: Option<Timestamp>,
+    /// Maximum finite transaction-time coordinate observed across cold versions.
+    pub tx_latest: Option<Timestamp>,
+}
+
+impl ColdTemporalExtentBounds {
+    /// `true` when no bounds have been observed (all fields `None`).
+    fn is_empty(&self) -> bool {
+        self.valid_earliest.is_none()
+            && self.valid_latest.is_none()
+            && self.tx_earliest.is_none()
+            && self.tx_latest.is_none()
+    }
+
+    /// Fold one `[start, end)` range into a single dimension's bounds, applying
+    /// the extent convention: `earliest` = min start; `latest` = max of starts
+    /// and *closed* ends (an open `TIMESTAMP_MAX` end contributes only its
+    /// start, so the sentinel never leaks).
+    fn observe_range(
+        earliest: &mut Option<Timestamp>,
+        latest: &mut Option<Timestamp>,
+        start: Timestamp,
+        end: Timestamp,
+    ) {
+        *earliest = Some(earliest.map_or(start, |e| e.min(start)));
+        // TimeRange guarantees end >= start, so a closed end is itself the
+        // latest candidate; open ends fall back to the start.
+        let candidate = if end == TIMESTAMP_MAX { start } else { end };
+        *latest = Some(latest.map_or(candidate, |l| l.max(candidate)));
+    }
+
+    /// Fold one bi-temporal interval (both dimensions) into these bounds.
+    fn observe_interval(&mut self, temporal: &BiTemporalInterval) {
+        let valid = temporal.valid_time();
+        Self::observe_range(
+            &mut self.valid_earliest,
+            &mut self.valid_latest,
+            valid.start(),
+            valid.end(),
+        );
+        let tx = temporal.transaction_time();
+        Self::observe_range(
+            &mut self.tx_earliest,
+            &mut self.tx_latest,
+            tx.start(),
+            tx.end(),
+        );
+    }
+
+    /// Accumulate the bounds contributed by a batch of versions.
+    fn from_versions<V: TemporalVersion>(versions: &[V]) -> Self {
+        let mut bounds = Self::default();
+        for version in versions {
+            bounds.observe_interval(version.temporal());
+        }
+        bounds
+    }
+
+    /// Merge another set of bounds into these (monotonic widen-only union).
+    fn merge(&mut self, other: &Self) {
+        Self::merge_dim(
+            &mut self.valid_earliest,
+            &mut self.valid_latest,
+            other.valid_earliest,
+            other.valid_latest,
+        );
+        Self::merge_dim(
+            &mut self.tx_earliest,
+            &mut self.tx_latest,
+            other.tx_earliest,
+            other.tx_latest,
+        );
+    }
+
+    fn merge_dim(
+        earliest: &mut Option<Timestamp>,
+        latest: &mut Option<Timestamp>,
+        other_earliest: Option<Timestamp>,
+        other_latest: Option<Timestamp>,
+    ) {
+        if let Some(e) = other_earliest {
+            *earliest = Some(earliest.map_or(e, |cur| cur.min(e)));
+        }
+        if let Some(l) = other_latest {
+            *latest = Some(latest.map_or(l, |cur| cur.max(l)));
+        }
+    }
+
+    /// Serialize to the fixed-length metadata record layout.
+    fn to_bytes(self) -> [u8; EXTENT_RECORD_LEN] {
+        let mut buf = [0u8; EXTENT_RECORD_LEN];
+        buf[0] = EXTENT_RECORD_VERSION;
+        let mut offset = 1;
+        for field in [
+            self.valid_earliest,
+            self.valid_latest,
+            self.tx_earliest,
+            self.tx_latest,
+        ] {
+            if let Some(ts) = field {
+                buf[offset] = 1;
+                buf[offset + 1..offset + 9].copy_from_slice(&ts.wallclock().to_le_bytes());
+                buf[offset + 9..offset + 13].copy_from_slice(&ts.logical().to_le_bytes());
+            }
+            offset += 13;
+        }
+        buf
+    }
+
+    /// Deserialize from the metadata record layout. Returns `Ok(None)` for an
+    /// unrecognized version tag or wrong length (treated as absent), never an
+    /// error, so a forward-incompatible record can never panic startup.
+    fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() != EXTENT_RECORD_LEN || bytes[0] != EXTENT_RECORD_VERSION {
+            return None;
+        }
+        let read_field = |offset: usize| -> Option<Timestamp> {
+            if bytes[offset] == 0 {
+                return None;
+            }
+            let mut wall = [0u8; 8];
+            wall.copy_from_slice(&bytes[offset + 1..offset + 9]);
+            let mut logical = [0u8; 4];
+            logical.copy_from_slice(&bytes[offset + 9..offset + 13]);
+            // Values were validated when the source versions were created, so
+            // reconstructing them from trusted internal storage is sound.
+            Some(Timestamp::new_unchecked(
+                i64::from_le_bytes(wall),
+                u32::from_le_bytes(logical),
+            ))
+        };
+        Some(Self {
+            valid_earliest: read_field(1),
+            valid_latest: read_field(14),
+            tx_earliest: read_field(27),
+            tx_latest: read_field(40),
+        })
+    }
+}
 
 /// Batch size threshold where parallel pre-compression becomes worthwhile.
 const PARALLEL_COMPRESSION_THRESHOLD: usize = 1_024;
@@ -119,7 +297,7 @@ impl PreparedVersionBatch {
 
 /// Compression algorithm for cold storage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-#[cfg_attr(feature = "config-toml", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub enum CompressionAlgorithm {
     /// No compression (fastest, but uses more disk space)
     None,
@@ -169,8 +347,8 @@ impl CompressionAlgorithm {
 /// assert!(matches!(config.compression, CompressionAlgorithm::Zstd));
 /// ```
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "config-toml", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "config-toml", serde(default))]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "serde", serde(default))]
 pub struct ColdStorageConfig {
     /// Compression algorithm to use.
     pub compression: CompressionAlgorithm,
@@ -214,9 +392,11 @@ impl Default for ColdStorageConfig {
 /// ```
 #[derive(Debug, Clone, Default)]
 pub struct ColdStorageStats {
-    /// Total number of node versions stored.
+    /// Total number of node versions stored. Seeded from the persisted table
+    /// length when an existing database is opened, then incremented per store.
     pub node_versions_stored: u64,
-    /// Total number of edge versions stored.
+    /// Total number of edge versions stored. Seeded from the persisted table
+    /// length when an existing database is opened, then incremented per store.
     pub edge_versions_stored: u64,
     /// Total number of node version reads.
     pub node_version_reads: u64,
@@ -241,6 +421,10 @@ impl ColdStorageStats {
     ///
     /// This helps monitor the effectiveness of the chosen compression algorithm
     /// in the cold storage tier. A higher ratio indicates better compression.
+    ///
+    /// The underlying byte counters are not persisted, so this ratio covers
+    /// writes made since the storage was opened (1.0 when nothing has been
+    /// written yet by this process).
     ///
     /// ## Examples
     ///
@@ -398,8 +582,8 @@ fn map_compaction_error(
 ///     .cache_size_bytes(1024 * 1024 * 64); // 64MB cache
 /// ```
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "config-toml", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "config-toml", serde(default))]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "serde", serde(default))]
 pub struct RedbConfig {
     /// Compression algorithm for stored values.
     pub compression: CompressionAlgorithm,
@@ -556,6 +740,13 @@ impl RedbColdStorage {
     ///
     /// If the parent directories do not exist, this method will attempt to create them.
     ///
+    /// When opening an existing database, the `node_versions_stored` and
+    /// `edge_versions_stored` statistics counters are seeded from the
+    /// persisted table lengths (an O(1) metadata read), so
+    /// [`stats`](Self::stats) reflects the full on-disk history rather than
+    /// only writes made by the current process. Byte and read counters are
+    /// not persisted and always start at zero.
+    ///
     /// # Examples
     ///
     /// ```rust
@@ -586,26 +777,51 @@ impl RedbColdStorage {
             .begin_write()
             .map_err(map_transaction_error("Failed to begin write transaction"))?;
 
-        // Open tables to create them
-        write_txn
-            .open_table(NODE_VERSIONS_TABLE)
-            .map_err(map_table_error("Failed to create node_versions table"))?;
-        write_txn
-            .open_table(EDGE_VERSIONS_TABLE)
-            .map_err(map_table_error("Failed to create edge_versions table"))?;
-        write_txn
-            .open_table(METADATA_TABLE)
-            .map_err(map_table_error("Failed to create metadata table"))?;
+        // Open tables to create them, and read their persisted entry counts so
+        // the version counters can be seeded below. `Table::len()` is an O(1)
+        // read of the B-tree root's cached length — no scan.
+        let (persisted_node_versions, persisted_edge_versions) = {
+            let node_table = write_txn
+                .open_table(NODE_VERSIONS_TABLE)
+                .map_err(map_table_error("Failed to create node_versions table"))?;
+            let edge_table = write_txn
+                .open_table(EDGE_VERSIONS_TABLE)
+                .map_err(map_table_error("Failed to create edge_versions table"))?;
+            write_txn
+                .open_table(METADATA_TABLE)
+                .map_err(map_table_error("Failed to create metadata table"))?;
+            (
+                node_table
+                    .len()
+                    .map_err(map_storage_error("Failed to read node_versions length"))?,
+                edge_table
+                    .len()
+                    .map_err(map_storage_error("Failed to read edge_versions length"))?,
+            )
+        };
 
         write_txn
             .commit()
             .map_err(map_commit_error("Failed to commit table creation"))?;
 
+        // Seed the version counters from the persisted tables so a reopened
+        // database reports its full cold history instead of misleading zeros
+        // (Issue #3222). Byte counters (raw/compressed) are not recoverable
+        // from table metadata, so `compression_ratio()` and the read counters
+        // remain since-process-start.
+        let stats = AtomicColdStorageStats::new();
+        stats
+            .node_versions_stored
+            .store(persisted_node_versions, Ordering::Relaxed);
+        stats
+            .edge_versions_stored
+            .store(persisted_edge_versions, Ordering::Relaxed);
+
         Ok(Self {
             path,
             db,
             config,
-            stats: AtomicColdStorageStats::new(),
+            stats,
             cipher: None,
             #[cfg(test)]
             fail_writes: AtomicBool::new(false),
@@ -933,6 +1149,91 @@ impl RedbColdStorage {
         Ok(())
     }
 
+    /// Read the persisted cold-tier bi-temporal extent bounds (Issue #3389).
+    ///
+    /// Returns `Ok(None)` when the cold tier has never stored a version (no
+    /// extent record yet) or when the persisted record uses an unrecognized
+    /// layout version — both mean "no cold bounds to contribute", so callers
+    /// leave the hot-tier extent untouched. Otherwise returns the bounds
+    /// accumulated across every version ever written to this cold store,
+    /// following the same `earliest`/`latest` convention as the in-memory
+    /// extent aggregate (the open-interval sentinel never appears).
+    ///
+    /// This is an O(1) single metadata read; it is the startup counterpart to
+    /// the incremental bounds maintained on every cold write, letting
+    /// [`temporal_extent`](crate::AletheiaDB::temporal_extent) span history
+    /// migrated to cold before the current process started.
+    pub fn get_temporal_extent_bounds(&self) -> Result<Option<ColdTemporalExtentBounds>> {
+        let read_txn = self
+            .db
+            .begin_read()
+            .map_err(map_transaction_error("Failed to begin read transaction"))?;
+        let table = match read_txn.open_table(METADATA_TABLE) {
+            Ok(table) => table,
+            // A cold store that never persisted metadata has no such table.
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
+            Err(e) => {
+                return Err(StorageError::io_error(format!(
+                    "Failed to open metadata table: {}",
+                    e
+                ))
+                .into());
+            }
+        };
+
+        match table.get(TEMPORAL_EXTENT_KEY) {
+            Ok(Some(value)) => Ok(ColdTemporalExtentBounds::from_bytes(value.value())),
+            Ok(None) => Ok(None),
+            Err(e) => {
+                Err(StorageError::io_error(format!("Failed to read temporal_extent: {}", e)).into())
+            }
+        }
+    }
+
+    /// Merge a batch of freshly-written versions' bounds into the persisted
+    /// cold-tier extent, within the caller's write transaction (Issue #3389).
+    ///
+    /// A no-op when the delta is empty (nothing observed). The read-modify-write
+    /// happens on the same `metadata` table the caller already opens, so the
+    /// extent update is atomic with the version writes: either the versions and
+    /// their widened bounds both commit, or neither does.
+    fn merge_extent_into_metadata(
+        table: &mut redb::Table<'_, &'static str, &'static [u8]>,
+        delta: &ColdTemporalExtentBounds,
+    ) -> Result<()> {
+        if delta.is_empty() {
+            return Ok(());
+        }
+        let mut current = match table.get(TEMPORAL_EXTENT_KEY) {
+            Ok(Some(value)) => {
+                // An existing record with an UNRECOGNIZED version tag decodes to
+                // `None` and is clobbered here: `unwrap_or_default()` starts from
+                // empty bounds and rebuilds them widen-only from post-write
+                // deltas. That makes a downgrade across a future
+                // `EXTENT_RECORD_VERSION` bump lossy (bounds a newer binary
+                // persisted are dropped, then re-accumulated only from writes the
+                // older binary performs) — acceptable because the extent is
+                // advisory (under-reporting is safe) and only ever widens.
+                ColdTemporalExtentBounds::from_bytes(value.value()).unwrap_or_default()
+            }
+            Ok(None) => ColdTemporalExtentBounds::default(),
+            Err(e) => {
+                return Err(StorageError::io_error(format!(
+                    "Failed to read temporal_extent: {}",
+                    e
+                ))
+                .into());
+            }
+        };
+        current.merge(delta);
+        table
+            .insert(TEMPORAL_EXTENT_KEY, current.to_bytes().as_slice())
+            .map_err(|e| -> crate::core::error::Error {
+                StorageError::io_error(format!("Failed to write temporal_extent: {}", e)).into()
+            })?;
+        Ok(())
+    }
+
     // ========================================================================
     // Logic moved from ColdStorage trait impl
     // ========================================================================
@@ -977,6 +1278,17 @@ impl RedbColdStorage {
             table
                 .insert(version.version_id().as_u64(), to_store.as_slice())
                 .map_err(map_storage_error("Failed to store version"))?;
+        }
+
+        // Widen the persisted cold-tier extent atomically with the version
+        // write, so it survives restarts (Issue #3389).
+        {
+            let mut delta = ColdTemporalExtentBounds::default();
+            delta.observe_interval(version.temporal());
+            let mut meta = write_txn
+                .open_table(METADATA_TABLE)
+                .map_err(map_table_error("Failed to open metadata table"))?;
+            Self::merge_extent_into_metadata(&mut meta, &delta)?;
         }
 
         write_txn
@@ -1484,6 +1796,7 @@ impl RedbColdStorage {
 
         let prepared = prepare_fn(versions)?;
         let version_count = prepared.entries.len() as u64;
+        let extent_delta = ColdTemporalExtentBounds::from_versions(versions);
 
         let write_txn = self
             .db
@@ -1491,6 +1804,15 @@ impl RedbColdStorage {
             .map_err(map_transaction_error("Failed to begin write transaction"))?;
 
         Self::write_prepared_batch_to_table(&write_txn, table_def, &prepared)?;
+
+        // Widen the persisted cold-tier extent atomically with the batch so it
+        // survives restarts (Issue #3389).
+        {
+            let mut meta = write_txn
+                .open_table(METADATA_TABLE)
+                .map_err(map_table_error("Failed to open metadata table"))?;
+            Self::merge_extent_into_metadata(&mut meta, &extent_delta)?;
+        }
 
         write_txn
             .commit()
@@ -1684,12 +2006,17 @@ impl RedbColdStorage {
         // Store edge versions
         Self::write_prepared_batch_to_table(&write_txn, EDGE_VERSIONS_TABLE, &prepared_edges)?;
 
-        // Update flushed_lsn atomically with the batch
+        // Update flushed_lsn and widen the persisted cold-tier extent
+        // atomically with the batch (Issue #3389).
         {
             let mut table = write_txn
                 .open_table(METADATA_TABLE)
                 .map_err(map_table_error("Failed to open metadata table"))?;
             Self::set_flushed_lsn_internal(&mut table, lsn)?;
+
+            let mut extent_delta = ColdTemporalExtentBounds::from_versions(nodes);
+            extent_delta.merge(&ColdTemporalExtentBounds::from_versions(edges));
+            Self::merge_extent_into_metadata(&mut table, &extent_delta)?;
         }
 
         // Commit atomically
@@ -1749,6 +2076,18 @@ impl RedbColdStorage {
 // Serialization helpers using bitcode
 // ============================================================================
 
+/// Serializable wrapper for write-time provenance (Issues #3224 + #3350).
+///
+/// Mirrors [`crate::core::provenance::Provenance`]'s fields exactly.
+#[derive(bitcode::Encode, bitcode::Decode)]
+struct SerializableProvenance {
+    source: Option<String>,
+    confidence: Option<f64>,
+    note: Option<String>,
+    correlation_id: Option<String>,
+    principal: Option<String>,
+}
+
 /// Serializable wrapper for NodeVersion.
 #[derive(bitcode::Encode, bitcode::Decode)]
 struct SerializableNodeVersion {
@@ -1762,6 +2101,7 @@ struct SerializableNodeVersion {
     data: SerializableVersionData,
     next_version: Option<u64>,
     prev_version: Option<u64>,
+    provenance: Option<SerializableProvenance>,
 }
 
 /// Serializable wrapper for EdgeVersion.
@@ -1779,7 +2119,116 @@ struct SerializableEdgeVersion {
     data: SerializableVersionData,
     next_version: Option<u64>,
     prev_version: Option<u64>,
+    provenance: Option<SerializableProvenance>,
 }
+
+/// Pre-principal (Issue #3350) shape of the provenance bundle -- the
+/// Issue #3224 shape without the `principal` field. Only referenced by the
+/// frozen `..V2` record shapes below.
+#[derive(bitcode::Encode, bitcode::Decode)]
+struct SerializableProvenanceV2 {
+    source: Option<String>,
+    confidence: Option<f64>,
+    note: Option<String>,
+    correlation_id: Option<String>,
+}
+
+/// Pre-principal (Issue #3350) shape of [`SerializableNodeVersion`]: written
+/// with the [`COLD_RECORD_MAGIC_V2`] prefix by Issue-#3224-era binaries.
+/// Identical to the current shape except its provenance bundle lacks
+/// `principal`.
+#[derive(bitcode::Encode, bitcode::Decode)]
+struct SerializableNodeVersionV2 {
+    id: u64,
+    node_id: u64,
+    temporal_valid_start: i64,
+    temporal_valid_end: i64,
+    temporal_tx_start: i64,
+    temporal_tx_end: i64,
+    label: String,
+    data: SerializableVersionData,
+    next_version: Option<u64>,
+    prev_version: Option<u64>,
+    provenance: Option<SerializableProvenanceV2>,
+}
+
+/// Pre-principal (Issue #3350) shape of [`SerializableEdgeVersion`].
+#[derive(bitcode::Encode, bitcode::Decode)]
+struct SerializableEdgeVersionV2 {
+    id: u64,
+    edge_id: u64,
+    temporal_valid_start: i64,
+    temporal_valid_end: i64,
+    temporal_tx_start: i64,
+    temporal_tx_end: i64,
+    label: String,
+    source: u64,
+    target: u64,
+    data: SerializableVersionData,
+    next_version: Option<u64>,
+    prev_version: Option<u64>,
+    provenance: Option<SerializableProvenanceV2>,
+}
+
+/// Pre-provenance (Issue #3224) shape of [`SerializableNodeVersion`].
+///
+/// Cold-storage records have no version tag at all, so a legacy record is
+/// indistinguishable from a current one except by trying to decode it. This
+/// frozen shape is the fallback `decode_node_version` tries when the
+/// tag-prefixed decodes don't apply (see [`COLD_RECORD_MAGIC_V2`] /
+/// [`COLD_RECORD_MAGIC_V3`]).
+#[derive(bitcode::Encode, bitcode::Decode)]
+struct SerializableNodeVersionV1 {
+    id: u64,
+    node_id: u64,
+    temporal_valid_start: i64,
+    temporal_valid_end: i64,
+    temporal_tx_start: i64,
+    temporal_tx_end: i64,
+    label: String,
+    data: SerializableVersionData,
+    next_version: Option<u64>,
+    prev_version: Option<u64>,
+}
+
+/// Pre-provenance (Issue #3224) shape of [`SerializableEdgeVersion`].
+#[derive(bitcode::Encode, bitcode::Decode)]
+struct SerializableEdgeVersionV1 {
+    id: u64,
+    edge_id: u64,
+    temporal_valid_start: i64,
+    temporal_valid_end: i64,
+    temporal_tx_start: i64,
+    temporal_tx_end: i64,
+    label: String,
+    source: u64,
+    target: u64,
+    data: SerializableVersionData,
+    next_version: Option<u64>,
+    prev_version: Option<u64>,
+}
+
+/// Magic sequence prepended to cold-storage records written with provenance
+/// support (Issue #3224). Legacy (pre-#3224) records have no tag at all --
+/// `decode_node_version`/`decode_edge_version` fall back to the untagged
+/// [`SerializableNodeVersionV1`]/[`SerializableEdgeVersionV1`] shape when the
+/// leading bytes don't match this magic (or the tagged decode fails).
+///
+/// This is a 4-byte sequence rather than a single tag byte specifically to
+/// make an accidental collision with a legacy record's leading bytes (which
+/// start with a bitcode-encoded `id: u64`) astronomically unlikely rather
+/// than merely unlikely: a 1-in-256 chance (single byte) is a real risk over
+/// the lifetime of a large cold-storage table, a 1-in-4-billion chance is
+/// not. The value itself is arbitrary but deliberately not a small integer
+/// (to avoid any structural resemblance to a plausible bitcode-encoded id).
+const COLD_RECORD_MAGIC_V2: [u8; 4] = [0xA1, 0x37, 0xC0, 0xDE];
+
+/// Magic sequence prepended to cold-storage records written with the
+/// authenticated-principal provenance field (Issue #3350). Same collision
+/// rationale as [`COLD_RECORD_MAGIC_V2`]; a distinct value so decoders can
+/// tell the two tagged generations apart (the V2 provenance bundle lacks
+/// the `principal` field).
+const COLD_RECORD_MAGIC_V3: [u8; 4] = [0xB2, 0x48, 0xD1, 0xEF];
 
 /// Serializable wrapper for VersionData.
 #[derive(bitcode::Encode, bitcode::Decode)]
@@ -1837,9 +2286,61 @@ pub fn encode_node_version(version: &NodeVersion) -> Vec<u8> {
         data: encode_version_data(&version.data),
         next_version: version.next_version.map(|v| v.as_u64()),
         prev_version: version.prev_version.map(|v| v.as_u64()),
+        provenance: encode_provenance(version.provenance.as_deref()),
     };
 
-    bitcode::encode(&serializable)
+    let mut out = Vec::with_capacity(COLD_RECORD_MAGIC_V3.len());
+    out.extend_from_slice(&COLD_RECORD_MAGIC_V3);
+    out.extend_from_slice(&bitcode::encode(&serializable));
+    out
+}
+
+/// Convert an in-memory [`Provenance`](crate::core::provenance::Provenance)
+/// into its cold-storage representation.
+fn encode_provenance(
+    provenance: Option<&crate::core::provenance::Provenance>,
+) -> Option<SerializableProvenance> {
+    provenance.map(|p| SerializableProvenance {
+        source: p.source().map(String::from),
+        confidence: p.confidence(),
+        note: p.note().map(String::from),
+        correlation_id: p.correlation_id().map(String::from),
+        principal: p.principal().map(String::from),
+    })
+}
+
+/// Restore a cold-storage provenance bundle back into an in-memory
+/// [`Provenance`](crate::core::provenance::Provenance).
+fn decode_provenance(
+    persisted: Option<SerializableProvenance>,
+) -> Result<Option<std::sync::Arc<crate::core::provenance::Provenance>>> {
+    let Some(p) = persisted else {
+        return Ok(None);
+    };
+    use crate::core::provenance::Provenance;
+    let provenance = Provenance::from_parts(
+        p.source,
+        p.confidence,
+        p.note,
+        p.correlation_id,
+        p.principal,
+    )
+    .map_err(|e| StorageError::corruption(format!("Invalid persisted provenance: {}", e)))?;
+    Ok(Some(std::sync::Arc::new(provenance)))
+}
+
+/// Restore a pre-principal (Issue #3350) cold-storage provenance bundle:
+/// same as [`decode_provenance`] with `principal: None`.
+fn decode_provenance_v2(
+    persisted: Option<SerializableProvenanceV2>,
+) -> Result<Option<std::sync::Arc<crate::core::provenance::Provenance>>> {
+    decode_provenance(persisted.map(|p| SerializableProvenance {
+        source: p.source,
+        confidence: p.confidence,
+        note: p.note,
+        correlation_id: p.correlation_id,
+        principal: None,
+    }))
 }
 
 /// Decode a `NodeVersion` from a previously serialized byte payload.
@@ -1854,41 +2355,117 @@ pub fn decode_node_version(data: &[u8]) -> Result<NodeVersion> {
     use crate::core::interning::GLOBAL_INTERNER;
     use crate::core::temporal::{BiTemporalInterval, TimeRange};
 
-    let serializable: SerializableNodeVersion = bitcode::decode(data)
-        .map_err(|e| StorageError::corruption(format!("Failed to decode node version: {}", e)))?;
+    // Tagged records carry provenance: V3 (Issue #3350) bundles include the
+    // authenticated principal, V2 (Issue #3224) bundles do not. Untagged
+    // records are pre-provenance and are decoded via the frozen `..V1`
+    // shape instead. There is no version marker on legacy records at all,
+    // so the magic sequences themselves are the only signal -- see
+    // `COLD_RECORD_MAGIC_V2` / `COLD_RECORD_MAGIC_V3`.
+    //
+    // A magic-byte match means this is unambiguously a record of that tagged
+    // generation (legacy records never carry either prefix), so a decode
+    // failure past the magic indicates real corruption -- it must be
+    // surfaced directly rather than falling through to an older decoder,
+    // which would otherwise misinterpret the remaining bytes
+    // (magic-matched-but-corrupt is not "maybe legacy").
+    let (
+        label,
+        temporal_valid_start,
+        temporal_valid_end,
+        temporal_tx_start,
+        temporal_tx_end,
+        id,
+        node_id,
+        data_field,
+        next_version,
+        prev_version,
+        provenance,
+    ) = if data.starts_with(&COLD_RECORD_MAGIC_V3) {
+        let s: SerializableNodeVersion = bitcode::decode(&data[COLD_RECORD_MAGIC_V3.len()..])
+            .map_err(|e| {
+                StorageError::corruption(format!("Failed to decode node version V3: {}", e))
+            })?;
+        (
+            s.label,
+            s.temporal_valid_start,
+            s.temporal_valid_end,
+            s.temporal_tx_start,
+            s.temporal_tx_end,
+            s.id,
+            s.node_id,
+            s.data,
+            s.next_version,
+            s.prev_version,
+            decode_provenance(s.provenance)?,
+        )
+    } else if data.starts_with(&COLD_RECORD_MAGIC_V2) {
+        let s: SerializableNodeVersionV2 = bitcode::decode(&data[COLD_RECORD_MAGIC_V2.len()..])
+            .map_err(|e| {
+                StorageError::corruption(format!("Failed to decode node version V2: {}", e))
+            })?;
+        (
+            s.label,
+            s.temporal_valid_start,
+            s.temporal_valid_end,
+            s.temporal_tx_start,
+            s.temporal_tx_end,
+            s.id,
+            s.node_id,
+            s.data,
+            s.next_version,
+            s.prev_version,
+            decode_provenance_v2(s.provenance)?,
+        )
+    } else {
+        let s: SerializableNodeVersionV1 = bitcode::decode(data).map_err(|e| {
+            StorageError::corruption(format!("Failed to decode node version V1: {}", e))
+        })?;
+        (
+            s.label,
+            s.temporal_valid_start,
+            s.temporal_valid_end,
+            s.temporal_tx_start,
+            s.temporal_tx_end,
+            s.id,
+            s.node_id,
+            s.data,
+            s.next_version,
+            s.prev_version,
+            None,
+        )
+    };
 
     let valid_time = TimeRange::new(
-        HybridTimestamp::new_unchecked(serializable.temporal_valid_start, 0),
-        HybridTimestamp::new_unchecked(serializable.temporal_valid_end, 0),
+        HybridTimestamp::new_unchecked(temporal_valid_start, 0),
+        HybridTimestamp::new_unchecked(temporal_valid_end, 0),
     )
     .map_err(|e| StorageError::corruption(format!("Invalid valid time range: {}", e)))?;
     let tx_time = TimeRange::new(
-        HybridTimestamp::new_unchecked(serializable.temporal_tx_start, 0),
-        HybridTimestamp::new_unchecked(serializable.temporal_tx_end, 0),
+        HybridTimestamp::new_unchecked(temporal_tx_start, 0),
+        HybridTimestamp::new_unchecked(temporal_tx_end, 0),
     )
     .map_err(|e| StorageError::corruption(format!("Invalid transaction time range: {}", e)))?;
 
     Ok(NodeVersion {
-        id: VersionId::new(serializable.id)
+        id: VersionId::new(id)
             .map_err(|e| StorageError::corruption(format!("Invalid version ID: {}", e)))?,
-        node_id: NodeId::new(serializable.node_id)
+        node_id: NodeId::new(node_id)
             .map_err(|e| StorageError::corruption(format!("Invalid node ID: {}", e)))?,
         commit_timestamp: tx_time.start(),
         temporal: BiTemporalInterval::new(valid_time, tx_time),
         label: GLOBAL_INTERNER
-            .intern(&serializable.label)
+            .intern(&label)
             .map_err(|e| StorageError::corruption(format!("Failed to intern label: {}", e)))?,
-        data: decode_version_data(serializable.data)?,
-        next_version: serializable
-            .next_version
+        data: decode_version_data(data_field)?,
+        next_version: next_version
             .map(VersionId::new)
             .transpose()
             .map_err(|e| StorageError::corruption(format!("Invalid next version ID: {}", e)))?,
-        prev_version: serializable
-            .prev_version
+        prev_version: prev_version
             .map(VersionId::new)
             .transpose()
             .map_err(|e| StorageError::corruption(format!("Invalid prev version ID: {}", e)))?,
+        provenance,
     })
 }
 
@@ -1916,9 +2493,13 @@ pub fn encode_edge_version(version: &EdgeVersion) -> Vec<u8> {
         data: encode_version_data(&version.data),
         next_version: version.next_version.map(|v| v.as_u64()),
         prev_version: version.prev_version.map(|v| v.as_u64()),
+        provenance: encode_provenance(version.provenance.as_deref()),
     };
 
-    bitcode::encode(&serializable)
+    let mut out = Vec::with_capacity(COLD_RECORD_MAGIC_V3.len());
+    out.extend_from_slice(&COLD_RECORD_MAGIC_V3);
+    out.extend_from_slice(&bitcode::encode(&serializable));
+    out
 }
 
 /// Decode an `EdgeVersion` from a byte payload.
@@ -1933,45 +2514,120 @@ pub fn decode_edge_version(data: &[u8]) -> Result<EdgeVersion> {
     use crate::core::interning::GLOBAL_INTERNER;
     use crate::core::temporal::{BiTemporalInterval, TimeRange};
 
-    let serializable: SerializableEdgeVersion = bitcode::decode(data)
-        .map_err(|e| StorageError::corruption(format!("Failed to decode edge version: {}", e)))?;
+    // See `decode_node_version` for why a magic-byte match means a decode
+    // failure past the magic must be surfaced immediately rather than
+    // falling back to the untagged legacy shape.
+    #[allow(clippy::type_complexity)]
+    let (
+        label,
+        temporal_valid_start,
+        temporal_valid_end,
+        temporal_tx_start,
+        temporal_tx_end,
+        id,
+        edge_id,
+        source,
+        target,
+        data_field,
+        next_version,
+        prev_version,
+        provenance,
+    ) = if data.starts_with(&COLD_RECORD_MAGIC_V3) {
+        let s: SerializableEdgeVersion = bitcode::decode(&data[COLD_RECORD_MAGIC_V3.len()..])
+            .map_err(|e| {
+                StorageError::corruption(format!("Failed to decode edge version V3: {}", e))
+            })?;
+        (
+            s.label,
+            s.temporal_valid_start,
+            s.temporal_valid_end,
+            s.temporal_tx_start,
+            s.temporal_tx_end,
+            s.id,
+            s.edge_id,
+            s.source,
+            s.target,
+            s.data,
+            s.next_version,
+            s.prev_version,
+            decode_provenance(s.provenance)?,
+        )
+    } else if data.starts_with(&COLD_RECORD_MAGIC_V2) {
+        let s: SerializableEdgeVersionV2 = bitcode::decode(&data[COLD_RECORD_MAGIC_V2.len()..])
+            .map_err(|e| {
+                StorageError::corruption(format!("Failed to decode edge version V2: {}", e))
+            })?;
+        (
+            s.label,
+            s.temporal_valid_start,
+            s.temporal_valid_end,
+            s.temporal_tx_start,
+            s.temporal_tx_end,
+            s.id,
+            s.edge_id,
+            s.source,
+            s.target,
+            s.data,
+            s.next_version,
+            s.prev_version,
+            decode_provenance_v2(s.provenance)?,
+        )
+    } else {
+        let s: SerializableEdgeVersionV1 = bitcode::decode(data).map_err(|e| {
+            StorageError::corruption(format!("Failed to decode edge version V1: {}", e))
+        })?;
+        (
+            s.label,
+            s.temporal_valid_start,
+            s.temporal_valid_end,
+            s.temporal_tx_start,
+            s.temporal_tx_end,
+            s.id,
+            s.edge_id,
+            s.source,
+            s.target,
+            s.data,
+            s.next_version,
+            s.prev_version,
+            None,
+        )
+    };
 
     let valid_time = TimeRange::new(
-        HybridTimestamp::new_unchecked(serializable.temporal_valid_start, 0),
-        HybridTimestamp::new_unchecked(serializable.temporal_valid_end, 0),
+        HybridTimestamp::new_unchecked(temporal_valid_start, 0),
+        HybridTimestamp::new_unchecked(temporal_valid_end, 0),
     )
     .map_err(|e| StorageError::corruption(format!("Invalid valid time range: {}", e)))?;
     let tx_time = TimeRange::new(
-        HybridTimestamp::new_unchecked(serializable.temporal_tx_start, 0),
-        HybridTimestamp::new_unchecked(serializable.temporal_tx_end, 0),
+        HybridTimestamp::new_unchecked(temporal_tx_start, 0),
+        HybridTimestamp::new_unchecked(temporal_tx_end, 0),
     )
     .map_err(|e| StorageError::corruption(format!("Invalid transaction time range: {}", e)))?;
 
     Ok(EdgeVersion {
-        id: VersionId::new(serializable.id)
+        id: VersionId::new(id)
             .map_err(|e| StorageError::corruption(format!("Invalid version ID: {}", e)))?,
-        edge_id: EdgeId::new(serializable.edge_id)
+        edge_id: EdgeId::new(edge_id)
             .map_err(|e| StorageError::corruption(format!("Invalid edge ID: {}", e)))?,
         commit_timestamp: tx_time.start(),
         temporal: BiTemporalInterval::new(valid_time, tx_time),
         label: GLOBAL_INTERNER
-            .intern(&serializable.label)
+            .intern(&label)
             .map_err(|e| StorageError::corruption(format!("Failed to intern label: {}", e)))?,
-        source: NodeId::new(serializable.source)
+        source: NodeId::new(source)
             .map_err(|e| StorageError::corruption(format!("Invalid source ID: {}", e)))?,
-        target: NodeId::new(serializable.target)
+        target: NodeId::new(target)
             .map_err(|e| StorageError::corruption(format!("Invalid target ID: {}", e)))?,
-        data: decode_version_data(serializable.data)?,
-        next_version: serializable
-            .next_version
+        data: decode_version_data(data_field)?,
+        next_version: next_version
             .map(VersionId::new)
             .transpose()
             .map_err(|e| StorageError::corruption(format!("Invalid next version ID: {}", e)))?,
-        prev_version: serializable
-            .prev_version
+        prev_version: prev_version
             .map(VersionId::new)
             .transpose()
             .map_err(|e| StorageError::corruption(format!("Invalid prev version ID: {}", e)))?,
+        provenance,
     })
 }
 

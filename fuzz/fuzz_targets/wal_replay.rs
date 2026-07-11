@@ -52,6 +52,7 @@ fuzz_target!(|case: WalReplayCase| {
                         label,
                         properties: int_properties(value),
                         valid_from: timestamp_from_step(step),
+                        provenance: None,
                     })
                 }
             }
@@ -68,6 +69,7 @@ fuzz_target!(|case: WalReplayCase| {
                         label,
                         properties: int_properties(value),
                         valid_from: timestamp_from_step(step),
+                        provenance: None,
                     })
                 } else {
                     None
@@ -80,6 +82,7 @@ fuzz_target!(|case: WalReplayCase| {
                         node_id: NodeId::new(raw_node_id)
                             .expect("bounded fuzz node ID must be valid"),
                         valid_from: timestamp_from_step(step),
+                        version_id: None,
                     })
                 } else {
                     None

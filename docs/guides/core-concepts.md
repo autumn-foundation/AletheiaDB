@@ -89,6 +89,54 @@ let historical = db.get_node_at_time(
 
 Both times default to "now" if you want the current view.
 
+### Recording Facts at a Specific Valid Time
+
+By default, `create_node`/`create_edge`/`update_node`/`update_edge` set valid
+time to "now" — the moment the transaction runs. But an LLM extracting facts
+from a document is usually recording something that became true **in the
+past** (or, less commonly, that won't become true until a **future** date).
+Use the `_with_valid_time` variants to assert the real-world effective date
+directly, without hand-writing a transaction:
+
+```rust
+use aletheiadb::{AletheiaDB, properties};
+use aletheiadb::core::temporal::time;
+
+# fn main() -> Result<(), Box<dyn std::error::Error>> {
+# let db = AletheiaDB::new()?;
+// An LLM reads a document today and extracts: "Alice became CEO on 2021-03-01".
+let march_2021 = time::from_secs(1614556800);
+
+let alice = db.create_node_with_valid_time(
+    "Person",
+    properties! { "name" => "Alice", "title" => "CEO" },
+    Some(march_2021),
+)?;
+
+// The fact is retrievable as of its stated valid time...
+let as_of_2021 = db.get_node_at_valid_time(alice, march_2021)?;
+assert_eq!(as_of_2021.properties.get("title").unwrap().as_str(), Some("CEO"));
+
+// ...and invisible before it, even though we recorded it just now.
+let before = time::from_secs(1609459200); // 2021-01-01
+assert!(db.get_node_at_valid_time(alice, before).is_err());
+# Ok(())
+# }
+```
+
+Passing `None` (or calling the plain `create_node`/`create_edge`) behaves
+exactly as before — this is purely additive. **Transaction time is always
+system-assigned** to the commit time; there is no way for a caller to forge
+when a fact was actually recorded, which preserves provenance integrity. A
+`valid_from` that is malformed, more than a year in the future, or precedes
+an entity's own creation time is rejected with a typed `TemporalError`,
+never silently coerced.
+
+The same `_with_valid_time` methods are available on `update_node`/`update_edge`
+(to backdate a correction) and `delete_node`/`delete_edge` (to backdate when a
+fact stopped being true). See the [MCP query tool guide](mcp-query-tool.md#recording-facts-at-a-specific-valid-time)
+for the equivalent MCP tool usage.
+
 ---
 
 ## Storage Architecture

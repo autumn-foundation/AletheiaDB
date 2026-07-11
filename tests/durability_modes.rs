@@ -832,8 +832,9 @@ fn test_segment_rotation_with_background_thread() {
     // Drop database to trigger final flush and ensure proper cleanup
     drop(db);
 
-    // See issue #365: Add recovery test once AletheiaDB supports WAL replay on open
-    // For now, this test verifies:
+    // Issue #365 is covered by `test_wal_recovery_on_reopen` in
+    // tests/wal_recovery_integration.rs (full crash + reopen with WAL replay).
+    // This test verifies:
     // 1. Writes succeed across segment rotation
     // 2. Background thread doesn't crash when segment rotates
     // 3. All nodes remain accessible in memory
@@ -1314,6 +1315,7 @@ fn test_recovery_after_concurrent_writes() {
                             label: GLOBAL_INTERNER.intern("CrashTest").unwrap(),
                             properties: PropertyMap::new(),
                             valid_from: time::now(),
+                            provenance: None,
                         };
 
                         // Retry with backoff on backpressure
@@ -1448,6 +1450,7 @@ fn test_recovery_partial_flush_ordering() {
                             label: GLOBAL_INTERNER.intern("PartialCrashTest").unwrap(),
                             properties: PropertyMap::new(),
                             valid_from: time::now(),
+                            provenance: None,
                         };
                         let _ = wal_ref.append_async(operation);
                     }

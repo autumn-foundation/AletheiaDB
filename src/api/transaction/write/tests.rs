@@ -793,9 +793,122 @@ mod general_tests {
         assert_eq!(tx.node_count(), 2);
         assert_eq!(tx.edge_count(), 1);
         assert!(tx.get_node(node1).is_ok());
-        assert_eq!(tx.get_outgoing_edges(node1).len(), 1);
-        assert_eq!(tx.get_incoming_edges(node2).len(), 1);
-        assert_eq!(tx.get_outgoing_edges_with_label(node1, "KNOWS").len(), 1);
+        assert_eq!(tx.get_outgoing_edges(node1).unwrap().len(), 1);
+        assert_eq!(tx.get_incoming_edges(node2).unwrap().len(), 1);
+        assert_eq!(
+            tx.get_outgoing_edges_with_label(node1, "KNOWS")
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    // Issue #359: edge-listing methods return Result so callers can
+    // distinguish "node doesn't exist" (Err) from "node has no edges" (Ok(empty)).
+
+    #[test]
+    fn test_write_tx_get_outgoing_edges_nonexistent_node_errors() {
+        let (tx, _temp_dir) = create_test_write_tx();
+
+        let missing = NodeId::new(999).unwrap();
+        let result = tx.get_outgoing_edges(missing);
+        assert!(
+            matches!(
+                result,
+                Err(crate::core::error::Error::Storage(
+                    crate::core::error::StorageError::NodeNotFound(id)
+                )) if id == missing
+            ),
+            "get_outgoing_edges on a nonexistent node must return Err(NodeNotFound), got {result:?}"
+        );
+        assert!(
+            tx.get_incoming_edges(missing).is_err(),
+            "get_incoming_edges on a nonexistent node must return Err"
+        );
+        assert!(
+            tx.get_outgoing_edges_with_label(missing, "KNOWS").is_err(),
+            "get_outgoing_edges_with_label on a nonexistent node must return Err"
+        );
+    }
+
+    #[test]
+    fn test_write_tx_get_outgoing_edges_node_created_in_tx_ok() {
+        let (mut tx, _temp_dir) = create_test_write_tx();
+
+        // Node exists only in this transaction's write buffer.
+        let props = PropertyMapBuilder::new().build();
+        let node = tx.create_node("Person", props).unwrap();
+
+        let edges = tx
+            .get_outgoing_edges(node)
+            .expect("node created in this tx must be visible to the existence check");
+        assert!(edges.is_empty(), "expected Ok(empty), got {edges:?}");
+
+        let edges = tx
+            .get_incoming_edges(node)
+            .expect("node created in this tx must be visible to the existence check");
+        assert!(edges.is_empty(), "expected Ok(empty), got {edges:?}");
+
+        let edges = tx
+            .get_outgoing_edges_with_label(node, "KNOWS")
+            .expect("node created in this tx must be visible to the existence check");
+        assert!(edges.is_empty(), "expected Ok(empty), got {edges:?}");
+    }
+
+    /// Pins the documented write-transaction caveat: an edge created in this
+    /// transaction (still buffered, not yet committed) is NOT listed by the
+    /// edge-listing methods — only the node existence check is buffer-aware.
+    #[test]
+    fn test_write_tx_buffered_edge_not_listed_before_commit() {
+        let (mut tx, _temp_dir) = create_test_write_tx();
+        let current = Arc::clone(&tx.current);
+
+        // Source and target are committed nodes; the edge exists only in the
+        // transaction's write buffer.
+        let props = PropertyMapBuilder::new().build();
+        let source = current.create_node("Person", props.clone()).unwrap();
+        let target = current.create_node("Person", props.clone()).unwrap();
+        tx.create_edge(source, target, "KNOWS", props).unwrap();
+
+        assert_eq!(
+            tx.get_outgoing_edges(source).unwrap(),
+            Vec::new(),
+            "an edge buffered in this tx must not be listed before commit"
+        );
+        assert_eq!(
+            tx.get_incoming_edges(target).unwrap(),
+            Vec::new(),
+            "an edge buffered in this tx must not be listed before commit"
+        );
+        assert_eq!(
+            tx.get_outgoing_edges_with_label(source, "KNOWS").unwrap(),
+            Vec::new(),
+            "an edge buffered in this tx must not be listed before commit"
+        );
+    }
+
+    #[test]
+    fn test_write_tx_get_outgoing_edges_node_deleted_in_tx_errors() {
+        let (mut tx, _temp_dir) = create_test_write_tx();
+        let current = Arc::clone(&tx.current);
+
+        // Node exists in current storage, but is deleted in this transaction.
+        let props = PropertyMapBuilder::new().build();
+        let node = current.create_node("Person", props).unwrap();
+        tx.delete_node(node).unwrap();
+
+        assert!(
+            tx.get_outgoing_edges(node).is_err(),
+            "node deleted in this tx must not be treated as existing"
+        );
+        assert!(
+            tx.get_incoming_edges(node).is_err(),
+            "node deleted in this tx must not be treated as existing"
+        );
+        assert!(
+            tx.get_outgoing_edges_with_label(node, "KNOWS").is_err(),
+            "node deleted in this tx must not be treated as existing"
+        );
     }
 
     #[test]
@@ -2413,6 +2526,162 @@ mod conflict_detection_tests {
             "Storage should consistently show latest committed state"
         );
     }
+
+    /// Assert a commit failed with `SerializationFailure`.
+    fn assert_serialization_failure(result: crate::core::error::Result<()>, context: &str) {
+        let err = result.expect_err(context);
+        let err_str = format!("{:?}", err);
+        assert!(
+            err_str.contains("SerializationFailure"),
+            "{context}: expected SerializationFailure, got: {err_str}"
+        );
+    }
+
+    /// Issue #3230 conflict arm: a buffered RetractNode must abort when a
+    /// concurrent UPDATE of the same node committed after our snapshot —
+    /// the valid_from the retraction was validated against is stale.
+    #[test]
+    fn test_retract_node_conflicts_with_concurrent_update() {
+        let harness = TestHarness::new();
+
+        let node_id = {
+            let mut tx = harness.create_tx();
+            let id = tx
+                .create_node("Person", PropertyMapBuilder::new().build())
+                .unwrap();
+            tx.commit().unwrap();
+            id
+        };
+
+        // tx1 buffers a retraction.
+        let mut tx1 = harness.create_tx();
+        tx1.retract_node(node_id, time::now()).unwrap();
+
+        // tx2 updates and commits first.
+        let mut tx2 = harness.create_tx();
+        tx2.update_node(
+            node_id,
+            PropertyMapBuilder::new().insert("age", 31i64).build(),
+        )
+        .unwrap();
+        tx2.commit().unwrap();
+
+        assert_serialization_failure(
+            tx1.commit(),
+            "retract must lose to a concurrent committed update",
+        );
+
+        // First committer wins: the node is still present with tx2's state.
+        let node = harness.current.get_node(node_id).unwrap();
+        assert_eq!(node.get_property("age").and_then(|v| v.as_int()), Some(31));
+    }
+
+    /// Issue #3230 conflict arm: a buffered RetractNode must abort when a
+    /// concurrent DELETE of the same node committed first (the
+    /// entity-gone branch of the RetractNode arm).
+    #[test]
+    fn test_retract_node_conflicts_with_concurrent_delete() {
+        let harness = TestHarness::new();
+
+        let node_id = {
+            let mut tx = harness.create_tx();
+            let id = tx
+                .create_node("Person", PropertyMapBuilder::new().build())
+                .unwrap();
+            tx.commit().unwrap();
+            id
+        };
+
+        let mut tx1 = harness.create_tx();
+        tx1.retract_node(node_id, time::now()).unwrap();
+
+        let mut tx2 = harness.create_tx();
+        tx2.delete_node(node_id).unwrap();
+        tx2.commit().unwrap();
+
+        assert_serialization_failure(
+            tx1.commit(),
+            "retract must lose to a concurrent committed delete",
+        );
+        assert!(harness.current.get_node(node_id).is_err());
+    }
+
+    /// Issue #3230 conflict arm: RetractEdge vs concurrent edge update.
+    #[test]
+    fn test_retract_edge_conflicts_with_concurrent_update() {
+        let harness = TestHarness::new();
+
+        let edge_id = {
+            let mut tx = harness.create_tx();
+            let n1 = tx
+                .create_node("Person", PropertyMapBuilder::new().build())
+                .unwrap();
+            let n2 = tx
+                .create_node("Person", PropertyMapBuilder::new().build())
+                .unwrap();
+            let e = tx
+                .create_edge(n1, n2, "KNOWS", PropertyMapBuilder::new().build())
+                .unwrap();
+            tx.commit().unwrap();
+            e
+        };
+
+        let mut tx1 = harness.create_tx();
+        tx1.retract_edge(edge_id, time::now()).unwrap();
+
+        let mut tx2 = harness.create_tx();
+        tx2.update_edge(
+            edge_id,
+            PropertyMapBuilder::new().insert("weight", 2i64).build(),
+        )
+        .unwrap();
+        tx2.commit().unwrap();
+
+        assert_serialization_failure(
+            tx1.commit(),
+            "edge retract must lose to a concurrent committed update",
+        );
+        let edge = harness.current.get_edge(edge_id).unwrap();
+        assert_eq!(
+            edge.get_property("weight").and_then(|v| v.as_int()),
+            Some(2)
+        );
+    }
+
+    /// Issue #3230 conflict arm: RetractEdge vs concurrent edge delete
+    /// (the entity-gone branch of the RetractEdge arm).
+    #[test]
+    fn test_retract_edge_conflicts_with_concurrent_delete() {
+        let harness = TestHarness::new();
+
+        let edge_id = {
+            let mut tx = harness.create_tx();
+            let n1 = tx
+                .create_node("Person", PropertyMapBuilder::new().build())
+                .unwrap();
+            let n2 = tx
+                .create_node("Person", PropertyMapBuilder::new().build())
+                .unwrap();
+            let e = tx
+                .create_edge(n1, n2, "KNOWS", PropertyMapBuilder::new().build())
+                .unwrap();
+            tx.commit().unwrap();
+            e
+        };
+
+        let mut tx1 = harness.create_tx();
+        tx1.retract_edge(edge_id, time::now()).unwrap();
+
+        let mut tx2 = harness.create_tx();
+        tx2.delete_edge(edge_id).unwrap();
+        tx2.commit().unwrap();
+
+        assert_serialization_failure(
+            tx1.commit(),
+            "edge retract must lose to a concurrent committed delete",
+        );
+        assert!(harness.current.get_edge(edge_id).is_err());
+    }
 }
 
 mod clock_skew_tests {
@@ -3361,6 +3630,211 @@ mod bitemporal_validation_tests {
         );
     }
 
+    /// Test: `create_edge_with_valid_time` rejects a far-future `valid_time`, mirroring
+    /// `test_create_node_rejects_far_future_valid_time`. Regression test for a gap where
+    /// `create_edge_with_valid_time` was the only one of the six `*_with_valid_time`
+    /// methods that never called `validate_valid_from_future`, silently accepting an
+    /// arbitrarily-far-future `valid_time` on edges.
+    #[test]
+    fn test_create_edge_rejects_far_future_valid_time() {
+        use crate::core::error::TemporalError;
+        use crate::core::hlc::HybridTimestamp;
+
+        let harness = TestHarness::new();
+
+        let mut tx = harness.begin_write();
+        let src = tx.create_node("Person", PropertyMap::new()).unwrap();
+        let tgt = tx.create_node("Person", PropertyMap::new()).unwrap();
+        tx.commit().unwrap();
+
+        let two_years_future_wallclock = time::now().wallclock() + 2 * 365 * 24 * 3_600_000_000;
+        let two_years_future = HybridTimestamp::new(two_years_future_wallclock, 0).unwrap();
+
+        let mut tx2 = harness.begin_write();
+        let result = tx2.create_edge_with_valid_time(
+            src,
+            tgt,
+            "KNOWS",
+            PropertyMap::new(),
+            Some(two_years_future),
+        );
+
+        assert!(
+            result.is_err(),
+            "Should reject far-future valid_time on edge creation"
+        );
+        match result.unwrap_err() {
+            crate::core::error::Error::Temporal(TemporalError::ValidTimeTooFarInFuture {
+                ..
+            }) => {}
+            other => panic!("Expected ValidTimeTooFarInFuture, got: {:?}", other),
+        }
+    }
+
+    /// Test: backfilling a node update between two existing (already backdated) versions
+    /// succeeds. Regression test for a bug where the "not before creation" floor was
+    /// computed from the *latest* version's `valid_from` instead of the entity's true
+    /// original creation time, spuriously rejecting legitimate backfills.
+    #[test]
+    fn test_update_node_valid_time_backfill_between_existing_versions_succeeds() {
+        use crate::core::hlc::HybridTimestamp;
+
+        let harness = TestHarness::new();
+        let now = time::now().wallclock();
+        let t0 = HybridTimestamp::new(now - 3 * 3_600_000_000, 0).unwrap(); // 3h ago: true creation
+        let t2 = HybridTimestamp::new(now - 2 * 3_600_000_000, 0).unwrap(); // 2h ago: latest version
+        let t1 = HybridTimestamp::new(now - 2 * 3_600_000_000 - 1_800_000_000, 0).unwrap(); // 2h30m ago: t0 < t1 < t2
+
+        let mut tx = harness.begin_write();
+        let node_id = tx
+            .create_node_with_valid_time("Person", PropertyMap::new(), Some(t0))
+            .unwrap();
+        tx.commit().unwrap();
+
+        let mut tx2 = harness.begin_write();
+        tx2.update_node_with_valid_time(
+            node_id,
+            PropertyMapBuilder::new().insert("name", "Bob").build(),
+            Some(t2),
+        )
+        .unwrap();
+        tx2.commit().unwrap();
+
+        // Backfill a correction between t0 and t2: must succeed, not spuriously reject
+        // against t2 (the latest version) instead of t0 (the true creation time).
+        let mut tx3 = harness.begin_write();
+        let result = tx3.update_node_with_valid_time(
+            node_id,
+            PropertyMapBuilder::new().insert("name", "Carol").build(),
+            Some(t1),
+        );
+        assert!(
+            result.is_ok(),
+            "Backfill between existing versions should succeed, got: {:?}",
+            result
+        );
+    }
+
+    /// Edge mirror of `test_update_node_valid_time_backfill_between_existing_versions_succeeds`.
+    #[test]
+    fn test_update_edge_valid_time_backfill_between_existing_versions_succeeds() {
+        use crate::core::hlc::HybridTimestamp;
+
+        let harness = TestHarness::new();
+        let now = time::now().wallclock();
+        let t0 = HybridTimestamp::new(now - 3 * 3_600_000_000, 0).unwrap();
+        let t2 = HybridTimestamp::new(now - 2 * 3_600_000_000, 0).unwrap();
+        let t1 = HybridTimestamp::new(now - 2 * 3_600_000_000 - 1_800_000_000, 0).unwrap();
+
+        let mut tx = harness.begin_write();
+        let src = tx.create_node("Person", PropertyMap::new()).unwrap();
+        let tgt = tx.create_node("Person", PropertyMap::new()).unwrap();
+        tx.commit().unwrap();
+
+        let mut tx2 = harness.begin_write();
+        let edge_id = tx2
+            .create_edge_with_valid_time(src, tgt, "KNOWS", PropertyMap::new(), Some(t0))
+            .unwrap();
+        tx2.commit().unwrap();
+
+        let mut tx3 = harness.begin_write();
+        tx3.update_edge_with_valid_time(
+            edge_id,
+            PropertyMapBuilder::new().insert("strength", 5i64).build(),
+            Some(t2),
+        )
+        .unwrap();
+        tx3.commit().unwrap();
+
+        let mut tx4 = harness.begin_write();
+        let result = tx4.update_edge_with_valid_time(
+            edge_id,
+            PropertyMapBuilder::new().insert("strength", 3i64).build(),
+            Some(t1),
+        );
+        assert!(
+            result.is_ok(),
+            "Backfill between existing edge versions should succeed, got: {:?}",
+            result
+        );
+    }
+
+    /// Node-delete mirror of the update backfill regression test: deleting with a
+    /// `valid_time` between an entity's true creation and a later update must succeed.
+    #[test]
+    fn test_delete_node_valid_time_backfill_between_existing_versions_succeeds() {
+        use crate::core::hlc::HybridTimestamp;
+
+        let harness = TestHarness::new();
+        let now = time::now().wallclock();
+        let t0 = HybridTimestamp::new(now - 3 * 3_600_000_000, 0).unwrap();
+        let t2 = HybridTimestamp::new(now - 2 * 3_600_000_000, 0).unwrap();
+        let t1 = HybridTimestamp::new(now - 2 * 3_600_000_000 - 1_800_000_000, 0).unwrap();
+
+        let mut tx = harness.begin_write();
+        let node_id = tx
+            .create_node_with_valid_time("Person", PropertyMap::new(), Some(t0))
+            .unwrap();
+        tx.commit().unwrap();
+
+        let mut tx2 = harness.begin_write();
+        tx2.update_node_with_valid_time(
+            node_id,
+            PropertyMapBuilder::new().insert("name", "Bob").build(),
+            Some(t2),
+        )
+        .unwrap();
+        tx2.commit().unwrap();
+
+        let mut tx3 = harness.begin_write();
+        let result = tx3.delete_node_with_valid_time(node_id, Some(t1));
+        assert!(
+            result.is_ok(),
+            "Delete backfill between existing versions should succeed, got: {:?}",
+            result
+        );
+    }
+
+    /// Edge-delete mirror of the node-delete backfill regression test.
+    #[test]
+    fn test_delete_edge_valid_time_backfill_between_existing_versions_succeeds() {
+        use crate::core::hlc::HybridTimestamp;
+
+        let harness = TestHarness::new();
+        let now = time::now().wallclock();
+        let t0 = HybridTimestamp::new(now - 3 * 3_600_000_000, 0).unwrap();
+        let t2 = HybridTimestamp::new(now - 2 * 3_600_000_000, 0).unwrap();
+        let t1 = HybridTimestamp::new(now - 2 * 3_600_000_000 - 1_800_000_000, 0).unwrap();
+
+        let mut tx = harness.begin_write();
+        let src = tx.create_node("Person", PropertyMap::new()).unwrap();
+        let tgt = tx.create_node("Person", PropertyMap::new()).unwrap();
+        tx.commit().unwrap();
+
+        let mut tx2 = harness.begin_write();
+        let edge_id = tx2
+            .create_edge_with_valid_time(src, tgt, "KNOWS", PropertyMap::new(), Some(t0))
+            .unwrap();
+        tx2.commit().unwrap();
+
+        let mut tx3 = harness.begin_write();
+        tx3.update_edge_with_valid_time(
+            edge_id,
+            PropertyMapBuilder::new().insert("strength", 5i64).build(),
+            Some(t2),
+        )
+        .unwrap();
+        tx3.commit().unwrap();
+
+        let mut tx4 = harness.begin_write();
+        let result = tx4.delete_edge_with_valid_time(edge_id, Some(t1));
+        assert!(
+            result.is_ok(),
+            "Edge delete backfill between existing versions should succeed, got: {:?}",
+            result
+        );
+    }
+
     /// Test: The maximum valid timestamp boundary is accepted and just above is rejected.
     ///
     /// `HybridTimestamp::new` rejects wallclock values exceeding `MAX_VALID_TIMESTAMP`
@@ -3953,5 +4427,174 @@ mod lock_poisoning_tests {
             }
             err => panic!("expected LockPoisoned error, got: {err:?}"),
         }
+    }
+}
+
+/// Regression tests for Issue #3415.
+///
+/// A commit that fails *after* `commit_with_timestamp_inner` transitions the
+/// transaction into `TxState::Preparing` (write-write conflict, constraint,
+/// WAL, or apply failure) must still release the transaction's `TxId` from
+/// `TxVisibilityManager::active` when the consumed `WriteTransaction` is
+/// dropped. Before the fix, `Drop` only aborted `TxState::Active` transactions,
+/// so a failed commit leaked its `TxId` in the active set forever — pinning the
+/// snapshot horizon and growing `active_count()` without bound under retries.
+///
+/// These tests drive a deterministic write-write conflict (no failure-injection
+/// hook needed): two transactions update the same committed node; the first
+/// committer wins and the second commit fails in `Preparing`.
+#[cfg(test)]
+mod commit_failure_visibility_tests {
+    use crate::AletheiaDB;
+    use crate::api::WriteOps;
+    use crate::core::property::PropertyMapBuilder;
+
+    /// A single commit that fails via write-write conflict must return the
+    /// active-transaction count to its baseline (the leaked-`TxId` regression).
+    #[test]
+    fn test_conflict_failed_commit_releases_txid() {
+        let db = AletheiaDB::new().expect("db");
+
+        // Seed a committed node that both transactions will contend on.
+        let node_id = db
+            .write(|tx| {
+                let id = tx.create_node(
+                    "Person",
+                    PropertyMapBuilder::new().insert("age", 30i64).build(),
+                )?;
+                Ok::<_, crate::Error>(id)
+            })
+            .expect("seed node");
+
+        let baseline = db.visibility_manager.active_count();
+        assert_eq!(baseline, 0, "no transactions should be active at baseline");
+
+        // tx1 and tx2 both start (both registered active) and update the same node.
+        let mut tx1 = db.write_transaction().expect("tx1");
+        tx1.update_node(
+            node_id,
+            PropertyMapBuilder::new().insert("age", 31i64).build(),
+        )
+        .expect("tx1 update");
+
+        let mut tx2 = db.write_transaction().expect("tx2");
+        tx2.update_node(
+            node_id,
+            PropertyMapBuilder::new().insert("age", 32i64).build(),
+        )
+        .expect("tx2 update");
+
+        assert_eq!(
+            db.visibility_manager.active_count(),
+            2,
+            "both in-flight transactions must be registered active"
+        );
+
+        // First committer wins.
+        tx2.commit().expect("tx2 commit should succeed");
+
+        // Second commit fails with a write-write conflict *in the Preparing
+        // phase*, consuming and dropping tx1.
+        let result = tx1.commit();
+        assert!(
+            result.is_err(),
+            "tx1 commit should fail due to write-write conflict"
+        );
+
+        // The failed commit must have released tx1's TxId from the active set.
+        assert_eq!(
+            db.visibility_manager.active_count(),
+            baseline,
+            "a commit failing in Preparing must release its TxId (Issue #3415)"
+        );
+    }
+
+    /// Repeated conflict-failed commits must not grow the active set: the count
+    /// stays flat at baseline rather than leaking one `TxId` per failure.
+    #[test]
+    fn test_repeated_conflict_failures_do_not_leak() {
+        let db = AletheiaDB::new().expect("db");
+
+        let node_id = db
+            .write(|tx| {
+                let id = tx.create_node(
+                    "Person",
+                    PropertyMapBuilder::new().insert("age", 0i64).build(),
+                )?;
+                Ok::<_, crate::Error>(id)
+            })
+            .expect("seed node");
+
+        let baseline = db.visibility_manager.active_count();
+        assert_eq!(baseline, 0);
+
+        for i in 0..50i64 {
+            let mut loser = db.write_transaction().expect("loser tx");
+            loser
+                .update_node(node_id, PropertyMapBuilder::new().insert("age", i).build())
+                .expect("loser update");
+
+            let mut winner = db.write_transaction().expect("winner tx");
+            winner
+                .update_node(
+                    node_id,
+                    PropertyMapBuilder::new().insert("age", i + 1000).build(),
+                )
+                .expect("winner update");
+
+            // Winner commits first, loser fails in Preparing and is dropped.
+            winner.commit().expect("winner commit");
+            assert!(loser.commit().is_err(), "loser commit should conflict");
+
+            // After each failed commit the active set must be back to baseline —
+            // no monotonic growth (Issue #3415 amplification path).
+            assert_eq!(
+                db.visibility_manager.active_count(),
+                baseline,
+                "active_count leaked after {} conflict-failed commits",
+                i + 1
+            );
+        }
+    }
+
+    /// Guard: a successful commit and an explicit rollback both leave the active
+    /// set at baseline (no leak), so the #3415 fix does not regress the happy
+    /// paths.
+    ///
+    /// Note: this asserts the active-set-clean invariant only. It does NOT
+    /// enforce "no double-abort" — `register_abort` is an idempotent
+    /// `HashSet::remove`, so a spurious `Drop` on an already-`Committed`/
+    /// `Aborted` transaction would leave `active_count()` unchanged and this
+    /// test would still pass. Double-abort is harmless by construction (the
+    /// broadened `Drop` guard only matches `Active`/`Preparing`, and the
+    /// removal is idempotent regardless), not a property this test verifies.
+    #[test]
+    fn test_success_and_rollback_leave_active_set_clean() {
+        let db = AletheiaDB::new().expect("db");
+        let baseline = db.visibility_manager.active_count();
+
+        // Successful commit.
+        let mut tx = db.write_transaction().expect("tx");
+        tx.create_node("Person", PropertyMapBuilder::new().build())
+            .expect("create");
+        assert_eq!(db.visibility_manager.active_count(), baseline + 1);
+        tx.commit().expect("commit");
+        assert_eq!(
+            db.visibility_manager.active_count(),
+            baseline,
+            "successful commit must release its TxId"
+        );
+
+        // Explicit rollback.
+        let mut tx = db.write_transaction().expect("tx");
+        tx.create_node("Person", PropertyMapBuilder::new().build())
+            .expect("create");
+        assert_eq!(db.visibility_manager.active_count(), baseline + 1);
+        tx.rollback().expect("rollback");
+        assert_eq!(
+            db.visibility_manager.active_count(),
+            baseline,
+            "explicit rollback must release its TxId"
+        );
     }
 }

@@ -118,9 +118,9 @@ sequenceDiagram
 pub trait ReadOps {
     fn get_node(&self, id: NodeId) -> Result<Node>;
     fn get_edge(&self, id: EdgeId) -> Result<Edge>;
-    fn get_outgoing_edges(&self, node_id: NodeId) -> Vec<EdgeId>;
-    fn get_incoming_edges(&self, node_id: NodeId) -> Vec<EdgeId>;
-    fn get_outgoing_edges_with_label(&self, node_id: NodeId, label: &str) -> Vec<EdgeId>;
+    fn get_outgoing_edges(&self, node_id: NodeId) -> Result<Vec<EdgeId>>;
+    fn get_incoming_edges(&self, node_id: NodeId) -> Result<Vec<EdgeId>>;
+    fn get_outgoing_edges_with_label(&self, node_id: NodeId, label: &str) -> Result<Vec<EdgeId>>;
     fn node_count(&self) -> usize;
     fn edge_count(&self) -> usize;
 }

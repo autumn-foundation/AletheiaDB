@@ -1,0 +1,21 @@
+# cargo-mutants configuration — see https://mutants.rs/ and
+# TESTING.md § Mutation Testing.
+#
+# Scope note: src/mcp/** is deliberately NOT excluded. It is the actively
+# developed LLM-facing surface and must stay under mutation pressure.
+# (ADR-0035 originally described an mcp exclusion, but it never shipped;
+# see the 2026-07-08 addendum in docs/adr/0035-mutation-testing.md.)
+
+# Skip mutants inside `fmt` methods of Debug/Display impls: formatting output
+# is cosmetic, and tests asserting exact Debug/Display strings are brittle
+# without adding correctness value. Patterns are matched against the full
+# mutant name, e.g.:
+#   src/db/mod.rs:182:9: replace <impl std::fmt::Debug for AletheiaDB>::fmt -> std::fmt::Result with Ok(Default::default())
+# The trailing `.*>` (not `[^>]*>`) is needed because generic self types
+# close with an extra `>`, e.g. <impl fmt::Debug for NodeConnection<C>>::fmt.
+exclude_re = [
+    # Debug impls (also matches operator mutants inside the fmt body).
+    "<impl [^>]*Debug.*>::fmt",
+    # Display impls.
+    "<impl [^>]*Display.*>::fmt",
+]

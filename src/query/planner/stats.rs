@@ -157,6 +157,12 @@ pub struct Statistics {
     ///
     /// - **Low value (near 1.0)**: Most lookups hit anchors directly (fast).
     /// - **High value**: Lookups require applying many deltas (slow).
+    ///
+    /// Since Issue #366 this is the actual average computed by
+    /// [`HistoricalStorage::calculate_avg_delta_chain`](crate::storage::historical::HistoricalStorage::calculate_avg_delta_chain)
+    /// (total deltas / total anchors, over both node and edge versions),
+    /// not a hardcoded estimate. The 5.0 fallback only applies when the
+    /// historical storage is empty.
     avg_delta_chain: AtomicF64,
 
     /// Property statistics for selectivity estimation.

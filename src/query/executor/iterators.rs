@@ -17,7 +17,10 @@ use crate::core::interning::GLOBAL_INTERNER;
 use crate::core::property::PropertyValue;
 use crate::core::vector::cosine_similarity;
 use crate::core::{NodeId, Timestamp};
-use crate::query::ir::{Direction, Predicate, PredicateValue};
+use crate::query::ir::{
+    AggregateArg, AggregateFunc, AggregateGroupKey, AggregateSpec, Direction, Predicate,
+    PredicateValue, SortKey,
+};
 use crate::storage::current::CurrentStorage;
 use crate::storage::historical::HistoricalStorage;
 
@@ -102,38 +105,60 @@ impl ResultIterator for NodeLookupIterator {
     }
 }
 
-/// Iterator for node scans with optional label filter.
+/// Label filter state for a [`NodeScanIterator`], resolved once at construction.
 ///
-/// # Memory Considerations
+/// Resolving the requested label to its interned id up front lets the scan use
+/// the fast 16-byte `node_headers` path (see [`CurrentStorage::node_has_label`])
+/// instead of loading and cloning a full `Node` just to inspect its label.
+enum ScanFilter {
+    /// No label filter: every existing node is yielded.
+    All,
+    /// Yield only nodes whose interned label equals this id.
+    Label(crate::core::interning::InternedString),
+    /// A label was requested but has never been interned, so no node can match.
+    /// The scan yields nothing (as opposed to [`ScanFilter::All`]).
+    None,
+}
+
+/// Sequential node scan iterator, optionally applying a label filter.
 ///
-/// **WARNING**: This iterator collects all node IDs into a `Vec` upfront during
-/// initialization. For very large graphs (millions of nodes), this can cause:
+/// # Memory Behavior
 ///
-/// - **High memory consumption**: O(n) where n = number of nodes
-/// - **Initial latency**: Delay before the first result is produced
+/// This iterator streams node ids lazily over the half-open range
+/// `[0, max_id)`, where `max_id` is current storage's insert-maintained node-id
+/// high-water-mark (see [`CurrentStorage::get_max_node_id`]), captured once at
+/// construction. It never materializes the full id set, so each `next()` call
+/// allocates O(1) regardless of graph size. This makes a full scan immune to
+/// the out-of-memory failure that eager `Vec<NodeId>` materialization caused on
+/// very large graphs.
 ///
-/// This design is a trade-off due to the `Send` bound on `ResultIterator` and
-/// the fact that DashMap's iterators hold internal locks that cannot be sent
-/// across threads. The current implementation prioritizes correctness and
-/// simplicity over optimal memory usage for full scans.
+/// Ids with no live node (gaps from deletion, or ids reserved but never used)
+/// are skipped cheaply: both label and unfiltered scans reject them via the
+/// compact 16-byte header fast path before loading any full node.
 ///
-/// ## Mitigation Strategies
+/// # Performance
 ///
-/// For production workloads with large graphs:
-/// 1. **Use label filters** - `scan(Some("Person"))` limits the scan scope
-/// 2. **Use LIMIT** - Add `.limit(n)` to queries to enable early termination
-/// 3. **Prefer targeted queries** - Use `start(node_id)` instead of full scans
+/// Resident memory is O(1), but the scan is **O(max_id) in time**: it visits
+/// every id in `[0, max_id)`, including ids with no live node. Node ids are
+/// monotonic and never reused (recovery `reset` sets the next id to
+/// `max_id + 1`), so `max_id` is the high-water mark of ids ever allocated,
+/// not the current live count. When `max_id` greatly exceeds the live node
+/// count -- e.g. after a bulk delete, or when post-compaction leaves a sparse
+/// id space -- the scan spends most of its time skipping dead ids and is
+/// pathologically slow relative to the number of nodes actually yielded. This
+/// is a deliberate trade: the old eager `Vec<NodeId>` path could hard-OOM on a
+/// large id range, whereas this streaming scan degrades only to a soft
+/// slowdown proportional to `max_id`.
 ///
-/// ## Future Improvements (Issue #307)
+/// # Concurrency
 ///
-/// Possible optimizations include:
-/// - Streaming iteration using channels (`std::sync::mpsc`)
-/// - Chunked iteration to limit memory per batch
-/// - Index-based iteration that doesn't require holding locks
-///
-/// Sequential node scan iterator.
-///
-/// Scans through nodes sequentially, optionally applying a label filter.
+/// Each `next()` acquires the relevant DashMap shard lock only for the duration
+/// of a single `node_has_label` / `get_node` call and releases it before
+/// yielding. No shard lock is held across a yield, so the iterator cannot
+/// deadlock against concurrent writers and does not violate the crate's lock
+/// acquisition order. `max_id` is a relaxed snapshot: nodes created after
+/// construction may or may not be observed, which is the expected semantics for
+/// an unsynchronized full scan.
 ///
 /// # Examples
 ///
@@ -146,71 +171,96 @@ impl ResultIterator for NodeLookupIterator {
 /// let iter = NodeScanIterator::new(Some("Person".to_string()), current);
 /// ```
 pub struct NodeScanIterator {
-    label: Option<String>,
+    filter: ScanFilter,
     current: Arc<CurrentStorage>,
-    initialized: bool,
-    node_ids: Option<std::vec::IntoIter<NodeId>>,
+    current_id: u64,
+    max_id: u64,
 }
 
 impl NodeScanIterator {
     /// Create a new NodeScanIterator.
     pub fn new(label: Option<String>, current: Arc<CurrentStorage>) -> Self {
-        NodeScanIterator {
-            label,
-            current,
-            initialized: false,
-            node_ids: None,
-        }
-    }
+        // Snapshot the id upper bound once. `get_max_node_id` returns the
+        // index's insert-maintained high-water-mark (`max id ever inserted + 1`)
+        // rather than any id generator, so scanning `[0, max_id)` covers every
+        // node present regardless of which generator allocated its id. Ids start
+        // at 0, so the range is `[0, max_id)`.
+        let max_id = current.get_max_node_id();
 
-    fn initialize(&mut self) {
-        if self.initialized {
-            return;
-        }
-        self.initialized = true;
-
-        // Collect all node IDs upfront.
-        //
-        // NOTE: This is a known memory concern for large graphs. See the struct
-        // documentation above for details and mitigation strategies.
-        //
-        // The current implementation trades memory efficiency for correctness:
-        // DashMap iterators cannot be sent across threads (not Send), and the
-        // ResultIterator trait requires Send for parallel query execution.
-        let ids: Vec<NodeId> = if let Some(ref label) = self.label {
-            self.current.get_node_ids_by_label(label)
-        } else {
-            self.current.get_all_node_ids()
+        // Resolve the label to an interned id exactly once. A requested-but-
+        // unknown label short-circuits to `None` so the scan yields nothing,
+        // rather than degrading to an unfiltered scan.
+        let filter = match label {
+            Option::None => ScanFilter::All,
+            Some(ref l) => match GLOBAL_INTERNER.get_id(l) {
+                Some(id) => ScanFilter::Label(id),
+                Option::None => ScanFilter::None,
+            },
         };
-        self.node_ids = Some(ids.into_iter());
+
+        NodeScanIterator {
+            filter,
+            current,
+            current_id: 0,
+            max_id,
+        }
     }
 }
 
 impl ResultIterator for NodeScanIterator {
     fn next(&mut self) -> Option<Result<QueryRow>> {
-        self.initialize();
+        // A label that was never interned can match no node.
+        if matches!(self.filter, ScanFilter::None) {
+            return None;
+        }
 
-        loop {
-            match self.node_ids.as_mut()?.next() {
-                Some(id) => {
-                    match self.current.get_node(id) {
-                        Ok(node) => {
-                            // Check label filter by comparing InternedString IDs
-                            if let Some(ref label_str) = self.label {
-                                // Get the InternedString ID for the filter label
-                                let label_id = GLOBAL_INTERNER.get_id(label_str);
-                                if label_id != Some(node.label) {
-                                    continue; // Skip this node
-                                }
-                            }
-                            return Some(Ok(QueryRow::from_entity(EntityResult::Node(node))));
-                        }
-                        Err(e) => return Some(Err(e)),
-                    }
-                }
-                None => return None,
+        while self.current_id < self.max_id {
+            let id_val = self.current_id;
+            self.current_id += 1;
+
+            // Fast path: reject non-matching labels via the compact node header
+            // before ever loading the full node.
+            if let ScanFilter::Label(label_id) = self.filter
+                && !self.current.node_has_label(id_val, label_id)
+            {
+                continue;
+            }
+
+            // Fast path: for an unfiltered scan, skip gaps in the sparse id
+            // space with a cheap O(1) header existence check. This avoids
+            // allocating and immediately dropping a `NodeNotFound`
+            // `StorageError` for every dead id, which dominates when
+            // `max_id` greatly exceeds the live node count. The `get_node`
+            // `NodeNotFound` arm below still guards against a node deleted
+            // concurrently between this check and the load.
+            if matches!(self.filter, ScanFilter::All) && !self.current.contains_node(id_val) {
+                continue;
+            }
+
+            let id = match NodeId::new(id_val) {
+                Ok(id) => id,
+                Err(_) => continue,
+            };
+
+            match self.current.get_node(id) {
+                Ok(node) => return Some(Ok(QueryRow::from_entity(EntityResult::Node(node)))),
+                // Sparse id space: skip ids with no live node.
+                Err(crate::core::error::Error::Storage(
+                    crate::core::error::StorageError::NodeNotFound(_),
+                )) => continue,
+                Err(e) => return Some(Err(e)),
             }
         }
+        None
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        if matches!(self.filter, ScanFilter::None) {
+            return (0, Some(0));
+        }
+        // Upper bound only: the range may contain gaps that are skipped.
+        let remaining = self.max_id.saturating_sub(self.current_id);
+        (0, Some(remaining as usize))
     }
 }
 
@@ -277,6 +327,58 @@ impl ResultIterator for VectorResultIterator {
     fn size_hint(&self) -> (usize, Option<usize>) {
         self.results.size_hint()
     }
+}
+
+/// Reconstruct a node as it existed at `(valid_time, transaction_time)` from an
+/// already-locked historical storage (Issue #356).
+///
+/// This is the single, flat implementation of the temporal reconstruction path
+/// shared by [`TemporalNodeIterator`], [`BatchTemporalNodeIterator`], and
+/// [`TemporalNodeScanIterator`], replacing the previously duplicated (and
+/// originally deeply nested) per-iterator logic:
+///
+/// 1. Find the version valid at the requested bi-temporal point.
+/// 2. Retrieve the version metadata (validates that
+///    `find_node_version_at_time` only returns existing version IDs).
+/// 3. Reconstruct properties from the anchor+delta compression.
+/// 4. Build a `Node` with the historical label and properties.
+///
+/// The caller decides the locking strategy (per-node vs batch) and passes the
+/// already-locked storage, so this helper never affects lock semantics.
+///
+/// # Errors
+///
+/// - [`TemporalError::NodeNotFoundAtTime`](crate::core::error::TemporalError::NodeNotFoundAtTime)
+///   if no version exists at the requested time point
+/// - [`TemporalError::VersionNotFound`](crate::core::error::TemporalError::VersionNotFound)
+///   if version metadata is missing (data inconsistency)
+/// - Any error from property reconstruction
+fn reconstruct_node_at(
+    historical: &HistoricalStorage,
+    node_id: NodeId,
+    valid_time: Timestamp,
+    transaction_time: Timestamp,
+) -> Result<Node> {
+    // Step 1: Find the version valid at the requested time
+    let version_id = historical
+        .find_node_version_at_time(node_id, valid_time, transaction_time)
+        .ok_or(crate::core::error::TemporalError::NodeNotFoundAtTime {
+            node_id,
+            valid_time,
+            transaction_time,
+        })?;
+
+    // Step 2: Get the version metadata (also validates the invariant that
+    // find_node_version_at_time only returns existing version IDs)
+    let version = historical.get_node_version(version_id).ok_or(
+        crate::core::error::TemporalError::VersionNotFound(version_id),
+    )?;
+
+    // Step 3: Reconstruct the properties from the version
+    let properties = historical.reconstruct_node_properties(version_id)?;
+
+    // Step 4: Build and return the node with the historical data
+    Ok(Node::new(node_id, version.label, properties, version_id))
 }
 
 /// Iterator for temporal node lookups.
@@ -361,26 +463,9 @@ impl ResultIterator for TemporalNodeIterator {
             // For bulk queries, use BatchTemporalNodeIterator instead
             let historical = self.historical.read();
 
-            // Find the version valid at the requested time
-            let version_id = historical
-                .find_node_version_at_time(id, self.valid_time, self.transaction_time)
-                .ok_or(crate::core::error::TemporalError::NodeNotFoundAtTime {
-                    node_id: id,
-                    valid_time: self.valid_time,
-                    transaction_time: self.transaction_time,
-                })?;
-
-            // Get the version metadata (also validates the invariant that
-            // find_node_version_at_time only returns existing version IDs)
-            let version = historical.get_node_version(version_id).ok_or(
-                crate::core::error::TemporalError::VersionNotFound(version_id),
-            )?;
-
-            // Reconstruct the properties from the version
-            let properties = historical.reconstruct_node_properties(version_id)?;
-
-            // Construct a node with the historical data
-            let node = Node::new(id, version.label, properties, version_id);
+            // Reconstruct the node at the requested bi-temporal point (Issue #356)
+            let node =
+                reconstruct_node_at(&historical, id, self.valid_time, self.transaction_time)?;
 
             Ok(QueryRow::from_entity(EntityResult::Node(node)).at_time(self.valid_time))
         })
@@ -470,26 +555,8 @@ impl BatchTemporalNodeIterator {
         let results: Vec<Result<QueryRow>> = node_ids
             .into_iter()
             .map(|id| {
-                // Find the version valid at the requested time
-                let version_id = guard
-                    .find_node_version_at_time(id, valid_time, transaction_time)
-                    .ok_or(crate::core::error::TemporalError::NodeNotFoundAtTime {
-                        node_id: id,
-                        valid_time,
-                        transaction_time,
-                    })?;
-
-                // Get the version metadata (also validates the invariant that
-                // find_node_version_at_time only returns existing version IDs)
-                let version = guard.get_node_version(version_id).ok_or(
-                    crate::core::error::TemporalError::VersionNotFound(version_id),
-                )?;
-
-                // Reconstruct the properties from the version
-                let properties = guard.reconstruct_node_properties(version_id)?;
-
-                // Construct a node with the historical data
-                let node = Node::new(id, version.label, properties, version_id);
+                // Reconstruct the node at the requested bi-temporal point (Issue #356)
+                let node = reconstruct_node_at(&guard, id, valid_time, transaction_time)?;
 
                 Ok(QueryRow::from_entity(EntityResult::Node(node)).at_time(valid_time))
             })
@@ -566,6 +633,14 @@ pub struct TemporalNodeScanIterator {
     /// Pre-computed interned ID of the label filter for efficient comparison.
     /// Avoids repeated hashmap lookups in apply_label_filter().
     interned_label_filter: Option<crate::core::interning::InternedString>,
+    /// When `true`, a candidate that has no version at the requested
+    /// bi-temporal point (or whose version metadata is missing) is silently
+    /// skipped instead of surfacing an error. This is the correct semantics
+    /// for a point-in-time label *scan* (Issues #550/#551): the candidate set
+    /// is "every node ever versioned", most of which need not exist at the
+    /// queried instant. The per-node lookup path (default `false`) keeps
+    /// propagating the error, since there the caller explicitly named the id.
+    skip_missing: bool,
 }
 
 impl TemporalNodeScanIterator {
@@ -602,16 +677,27 @@ impl TemporalNodeScanIterator {
             historical,
             label_filter,
             interned_label_filter,
+            skip_missing: false,
         }
+    }
+
+    /// Enable point-in-time *scan* semantics: candidates absent at the queried
+    /// bi-temporal point are skipped rather than raising
+    /// [`TemporalError::NodeNotFoundAtTime`](crate::core::error::TemporalError::NodeNotFoundAtTime).
+    ///
+    /// Used by the Cypher/AQL label-scan `AS OF` path (Issues #550/#551), where
+    /// the candidate set is every ever-versioned node and most of them simply
+    /// did not exist at the instant being asked about.
+    #[must_use]
+    pub fn skipping_missing(mut self) -> Self {
+        self.skip_missing = true;
+        self
     }
 
     /// Retrieve the temporal version of a node at the configured time point.
     ///
-    /// This helper method encapsulates the temporal reconstruction logic:
-    /// 1. Find the version valid at (valid_time, transaction_time)
-    /// 2. Retrieve the version metadata
-    /// 3. Reconstruct properties from anchor+delta compression
-    /// 4. Return a fully reconstructed Node
+    /// Thin wrapper over the shared [`reconstruct_node_at`] helper (Issue #356),
+    /// binding this iterator's configured `(valid_time, transaction_time)`.
     ///
     /// # Errors
     ///
@@ -624,26 +710,7 @@ impl TemporalNodeScanIterator {
         node_id: NodeId,
         guard: &parking_lot::RwLockReadGuard<'_, HistoricalStorage>,
     ) -> Result<Node> {
-        // Step 1: Find the version valid at the requested time
-        let version_id = guard
-            .find_node_version_at_time(node_id, self.valid_time, self.transaction_time)
-            .ok_or(crate::core::error::TemporalError::NodeNotFoundAtTime {
-                node_id,
-                valid_time: self.valid_time,
-                transaction_time: self.transaction_time,
-            })?;
-
-        // Step 2: Get the version metadata (also validates the invariant that
-        // find_node_version_at_time only returns existing version IDs)
-        let version = guard.get_node_version(version_id).ok_or(
-            crate::core::error::TemporalError::VersionNotFound(version_id),
-        )?;
-
-        // Step 3: Reconstruct properties
-        let properties = guard.reconstruct_node_properties(version_id)?;
-
-        // Step 4: Build and return the node
-        Ok(Node::new(node_id, version.label, properties, version_id))
+        reconstruct_node_at(guard, node_id, self.valid_time, self.transaction_time)
     }
 
     /// Check if a node passes the label filter.
@@ -708,6 +775,10 @@ impl ResultIterator for TemporalNodeScanIterator {
             let node_id = self.node_ids.next()?;
 
             match self.filter_node(node_id, &guard) {
+                // In scan mode, a candidate absent at the queried instant is not
+                // an error -- it simply isn't in the result set. Skip it and
+                // keep scanning instead of aborting the whole query.
+                Some(Err(e)) if self.skip_missing && is_missing_at_time(&e) => continue,
                 Some(result) => return Some(result), // Found valid node or error
                 None => continue,                    // Label filter didn't match, try next
             }
@@ -729,7 +800,209 @@ impl ResultIterator for TemporalNodeScanIterator {
     }
 }
 
+/// Returns `true` for the "this entity has no version at the queried
+/// bi-temporal point" family of errors, which a point-in-time *scan*
+/// (Issues #550/#551) treats as "not in the result set" rather than a hard
+/// failure. A per-node lookup, where the caller explicitly named the id, keeps
+/// propagating these as errors.
+fn is_missing_at_time(err: &crate::core::error::Error) -> bool {
+    use crate::core::error::{Error, TemporalError};
+    matches!(
+        err,
+        Error::Temporal(TemporalError::NodeNotFoundAtTime { .. })
+            | Error::Temporal(TemporalError::VersionNotFound(_))
+    )
+}
+
+/// Iterator for valid-time range label scans (`BETWEEN ... AND ...`, Issue #552).
+///
+/// # Semantics
+///
+/// Given a candidate set of node ids and a valid-time range `[valid_from,
+/// valid_to)`, this yields every version of each candidate that is **believed
+/// at** the observed `transaction_time` (its transaction interval contains TT
+/// -- the same predicate a point-in-time `AS OF` uses) **and** whose valid-time
+/// interval *overlaps* the range, optionally filtered by `label`.
+///
+/// Semantically this is an **as-of-TT snapshot across a valid-time range**: it
+/// equals the union, over every valid instant `v` in `[valid_from, valid_to)`,
+/// of `AS OF (v, TT)`, deduplicated by version. Earlier valid segments that are
+/// no longer believed at TT (superseded by a later transaction-time write, or
+/// closed by a retraction) are **excluded**, consistent with `AS OF`, so no
+/// stale beliefs and no duplicate rows appear.
+///
+/// In the current storage model each forward write closes the prior version's
+/// transaction interval (transaction-time supersession), so at a fixed TT at
+/// most one version per node is believed; a node therefore contributes at most
+/// one row -- its believed-at-TT state -- and only when that state's valid
+/// interval overlaps the range. (Were the store to retain multiple co-current
+/// valid segments, this would naturally emit one row per in-range version.)
+/// Because a single node can have several versions overlapping the range, this
+/// iterator may emit **multiple rows per node** -- one per overlapping version
+/// -- which is the openCypher-ish reading of a `BETWEEN` range query.
+///
+/// # Eager reconstruction
+///
+/// Like [`BatchTemporalNodeIterator`], all rows are reconstructed eagerly under
+/// a single historical read lock during construction. A range scan is inherently
+/// heavier than a point lookup, and eager collection keeps the lock held for a
+/// bounded, predictable window instead of across the entire (lazy) drain.
+///
+/// # Ordering
+///
+/// At a fixed `transaction_time` at most one version per node is believed (see
+/// the type-level note above), so a node contributes at most one row; multiple
+/// rows arise only across DISTINCT nodes. Nodes are emitted in the order of the
+/// supplied candidate list. The per-node selection is still sorted
+/// oldest-`valid_from`-first (ties broken by version id) so that, were the store
+/// ever to retain multiple co-current versions, the output would remain
+/// deterministic.
+pub struct TemporalNodeRangeScanIterator {
+    results: std::vec::IntoIter<Result<QueryRow>>,
+}
+
+impl TemporalNodeRangeScanIterator {
+    /// Build a range-scan iterator, reconstructing all overlapping versions up
+    /// front under a single read lock.
+    ///
+    /// # Arguments
+    ///
+    /// * `node_ids` - Candidate node ids (typically every ever-versioned node)
+    /// * `valid_from` - Inclusive start of the valid-time range
+    /// * `valid_to` - Exclusive end of the valid-time range
+    /// * `transaction_time` - Transaction time the range is observed at
+    /// * `historical` - Historical storage
+    /// * `label_filter` - Optional label the versions must match
+    pub fn new(
+        node_ids: Vec<NodeId>,
+        valid_from: Timestamp,
+        valid_to: Timestamp,
+        transaction_time: Timestamp,
+        historical: Arc<RwLock<HistoricalStorage>>,
+        label_filter: Option<String>,
+    ) -> Self {
+        // An invalid range (end < start) yields nothing rather than erroring:
+        // the converter already validated it, but defend anyway.
+        let Ok(range) = crate::core::temporal::TimeRange::new(valid_from, valid_to) else {
+            return TemporalNodeRangeScanIterator {
+                results: Vec::new().into_iter(),
+            };
+        };
+
+        // Resolve the label filter to its interned id once. If the label was
+        // never interned, nothing can match -- yield an empty result.
+        let interned_label = label_filter
+            .as_ref()
+            .and_then(|label| GLOBAL_INTERNER.get_id(label));
+        if label_filter.is_some() && interned_label.is_none() {
+            return TemporalNodeRangeScanIterator {
+                results: Vec::new().into_iter(),
+            };
+        }
+
+        let guard = historical.read();
+        let mut results: Vec<Result<QueryRow>> = Vec::new();
+
+        for node_id in node_ids {
+            // Walk the version chain from the head backwards.
+            let Some(head) = guard.get_current_node_version(node_id) else {
+                continue;
+            };
+            let mut selected = Vec::new();
+            let mut cursor = Some(head);
+            while let Some(vid) = cursor {
+                let Some(version) = guard.get_node_version(vid) else {
+                    break;
+                };
+                cursor = version.prev_version;
+
+                // Label filter (label can change across versions).
+                if let Some(lbl) = interned_label
+                    && version.label != lbl
+                {
+                    continue;
+                }
+                // Keep only versions BELIEVED at the observation transaction time
+                // -- the exact same tx-visibility predicate the point-in-time
+                // `AS OF` selector (`find_node_version_at_time`) uses. This makes
+                // the range scan an as-of-TT snapshot ACROSS the valid range:
+                // versions whose transaction interval was closed by a later
+                // correction or retraction (beliefs no longer held at TT) are
+                // excluded, exactly as a point `AS OF` would exclude them. Because
+                // at a fixed TT there is at most one version per valid instant,
+                // this also yields no duplicate rows.
+                if !version
+                    .temporal
+                    .transaction_time()
+                    .contains(transaction_time)
+                {
+                    continue;
+                }
+                // Keep versions whose valid interval overlaps the range.
+                // (`overlaps` already excludes empty tombstone intervals.)
+                if !version.temporal.valid_time().overlaps(&range) {
+                    continue;
+                }
+                selected.push((
+                    version.temporal.valid_time().start(),
+                    version.node_id,
+                    version.label,
+                    vid,
+                ));
+            }
+
+            // Deterministic per-node ordering: oldest valid_from first.
+            selected.sort_by(|a, b| a.0.cmp(&b.0).then(a.3.cmp(&b.3)));
+
+            for (valid_from_ts, matched_node_id, matched_label, vid) in selected {
+                match guard.reconstruct_node_properties(vid) {
+                    Ok(properties) => {
+                        let node = Node::new(matched_node_id, matched_label, properties, vid);
+                        results
+                            .push(Ok(QueryRow::from_entity(EntityResult::Node(node))
+                                .at_time(valid_from_ts)));
+                    }
+                    Err(e) => results.push(Err(e)),
+                }
+            }
+        }
+
+        drop(guard);
+
+        TemporalNodeRangeScanIterator {
+            results: results.into_iter(),
+        }
+    }
+}
+
+impl ResultIterator for TemporalNodeRangeScanIterator {
+    fn next(&mut self) -> Option<Result<QueryRow>> {
+        self.results.next()
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.results.size_hint()
+    }
+}
+
 /// Iterator for graph traversal using BFS.
+///
+/// # Variable-length depth-range semantics (`*min..max`)
+///
+/// For a variable-length pattern this iterator binds each **distinct** reachable
+/// target node **once**, at its **shortest** hop-distance from the anchor, and
+/// emits it iff `min <= shortestDepth <= max`. Because the per-input `visited`
+/// set is populated when a node is first enqueued (its shortest BFS depth), a
+/// node whose shortest path is shorter than `min` is marked visited early and is
+/// **not** re-emitted at a longer, in-range depth; likewise an anchor reachable
+/// again only via an in-range cycle is not re-bound.
+///
+/// This is **node-distinct / shortest-path reachability**, a deliberate v1
+/// simplification of openCypher's trail (path-enumeration) semantics. Under full
+/// trail semantics `MATCH (a)-[*2..2]->(b)` over `a->x, a->y, x->y` would also
+/// bind `y` via `a->x->y`; here `y`'s shortest depth is 1, so it is excluded.
+/// Full trail semantics is a tracked follow-up (it requires per-path state and
+/// carries cross-lane perf/regression risk in this shared engine).
 ///
 /// # Deduplication Semantics
 ///
@@ -752,6 +1025,11 @@ pub struct TraversalIterator {
     input: Box<dyn ResultIterator>,
     direction: Direction,
     label: Option<String>,
+    /// Minimum depth (inclusive) at which a reached node is emitted. A node is
+    /// bound iff `min_depth <= shortestDepth <= depth` (node-distinct /
+    /// shortest-path reachability; see the struct-level docs).
+    min_depth: usize,
+    /// Maximum depth (inclusive); BFS expansion stops beyond this depth.
     depth: usize,
     current: Arc<CurrentStorage>,
     historical: Arc<RwLock<HistoricalStorage>>,
@@ -771,10 +1049,12 @@ impl TraversalIterator {
     /// This is the core engine for `MATCH (a)-[*]->(b)` operations. It manages
     /// a frontier of visited nodes to prevent infinite loops in cyclic graphs,
     /// and conditionally queries the historical storage if a temporal context is present.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         input: Box<dyn ResultIterator>,
         direction: Direction,
         label: Option<String>,
+        min_depth: usize,
         depth: usize,
         current: Arc<CurrentStorage>,
         historical: Arc<RwLock<HistoricalStorage>>,
@@ -784,6 +1064,7 @@ impl TraversalIterator {
             input,
             direction,
             label,
+            min_depth,
             depth,
             current,
             historical,
@@ -955,28 +1236,44 @@ impl ResultIterator for TraversalIterator {
         loop {
             // Process current frontier
             if let Some((node_id, path, current_depth)) = self.frontier.pop_front() {
-                if current_depth >= self.depth {
-                    // Reached target depth, yield result
+                // Expansion and yielding are INDEPENDENT so a range like `*1..3`
+                // both emits intermediate-depth nodes AND keeps exploring to the
+                // maximum depth. First expand (if we have not reached the max
+                // depth), enqueuing unvisited neighbors one hop deeper.
+                if current_depth < self.depth {
+                    let neighbors = self.get_neighbors(node_id);
+                    for (target, edge_id) in neighbors {
+                        // Node-distinct / shortest-path reachability: a node is
+                        // enqueued (and thus later emitted) once, at its shortest
+                        // BFS depth. This also makes cyclic graphs terminate. It
+                        // is a v1 simplification of openCypher trail semantics --
+                        // a target whose shortest path is below `min_depth` is
+                        // marked visited here and never re-emitted deeper (see the
+                        // struct-level docs).
+                        if self.visited.insert(target) {
+                            // ⚡ Bolt Optimization: Pre-allocate capacity for new path to avoid reallocations.
+                            // We are adding exactly 2 elements (edge and node) to the current path length.
+                            let mut new_path = Vec::with_capacity(path.len() + 2);
+                            new_path.extend_from_slice(&path);
+                            new_path.push(EntityId::Edge(edge_id));
+                            new_path.push(EntityId::Node(target));
+                            self.frontier
+                                .push_back((target, new_path, current_depth + 1));
+                        }
+                    }
+                }
+
+                // Then, if this node's depth falls within [min_depth, depth],
+                // yield it. The depth-0 start node is never emitted.
+                if current_depth >= 1
+                    && current_depth >= self.min_depth
+                    && current_depth <= self.depth
+                {
                     match self.current.get_node(node_id) {
                         Ok(node) => {
                             return Some(Ok(QueryRow::with_path(EntityResult::Node(node), path)));
                         }
                         Err(e) => return Some(Err(e)),
-                    }
-                }
-
-                // Expand neighbors
-                let neighbors = self.get_neighbors(node_id);
-                for (target, edge_id) in neighbors {
-                    if self.visited.insert(target) {
-                        // ⚡ Bolt Optimization: Pre-allocate capacity for new path to avoid reallocations.
-                        // We are adding exactly 2 elements (edge and node) to the current path length.
-                        let mut new_path = Vec::with_capacity(path.len() + 2);
-                        new_path.extend_from_slice(&path);
-                        new_path.push(EntityId::Edge(edge_id));
-                        new_path.push(EntityId::Node(target));
-                        self.frontier
-                            .push_back((target, new_path, current_depth + 1));
                     }
                 }
                 continue;
@@ -1181,6 +1478,54 @@ impl FilterIterator {
     }
 }
 
+impl FilterIterator {
+    /// Evaluate a predicate against a null binding (an unmatched
+    /// `OPTIONAL MATCH` row).
+    ///
+    /// Approximates openCypher three-valued logic at the "not true" level:
+    /// any comparison, string predicate, or membership test involving the
+    /// null binding is not-true (row filtered), `IS NULL` (encoded as
+    /// `Eq { value: Null }`) is true, and `IS NOT NULL` (encoded as
+    /// `Ne { value: Null }`) is false.
+    ///
+    /// Known deviation: `NOT` uses two-valued negation (`NOT (null.p = 1)`
+    /// keeps the row where openCypher's `NOT null` would drop it). This
+    /// mirrors the engine's existing missing-property semantics.
+    fn evaluate_null(&self, predicate: &Predicate) -> bool {
+        match predicate {
+            Predicate::True => true,
+            Predicate::False => false,
+            // `x IS NULL` is converted to Eq { value: Null }: true for a null row.
+            Predicate::Eq {
+                value: PredicateValue::Null,
+                ..
+            } => true,
+            // `x IS NOT NULL` is converted to Ne { value: Null }: false for a null row.
+            Predicate::Ne {
+                value: PredicateValue::Null,
+                ..
+            } => false,
+            // A null binding has no properties.
+            Predicate::NotExists(_) => true,
+            Predicate::Exists(_) => false,
+            // Any comparison/membership/string predicate against null is not-true.
+            Predicate::Eq { .. }
+            | Predicate::Ne { .. }
+            | Predicate::Gt { .. }
+            | Predicate::Gte { .. }
+            | Predicate::Lt { .. }
+            | Predicate::Lte { .. }
+            | Predicate::In { .. }
+            | Predicate::Contains { .. }
+            | Predicate::StartsWith { .. }
+            | Predicate::EndsWith { .. } => false,
+            Predicate::And(preds) => preds.iter().all(|p| self.evaluate_null(p)),
+            Predicate::Or(preds) => preds.iter().any(|p| self.evaluate_null(p)),
+            Predicate::Not(pred) => !self.evaluate_null(pred),
+        }
+    }
+}
+
 impl ResultIterator for FilterIterator {
     fn next(&mut self) -> Option<Result<QueryRow>> {
         loop {
@@ -1188,6 +1533,14 @@ impl ResultIterator for FilterIterator {
                 Some(Ok(row)) => {
                     if let Some(node) = row.entity.as_node() {
                         if self.evaluate(node) {
+                            return Some(Ok(row));
+                        }
+                        // Filter didn't pass, continue to next
+                    } else if row.entity.is_null() {
+                        // Null bindings from unmatched OPTIONAL MATCH rows are
+                        // evaluated with null semantics (comparisons are
+                        // not-true, IS NULL is true).
+                        if self.evaluate_null(&self.predicate) {
                             return Some(Ok(row));
                         }
                         // Filter didn't pass, continue to next
@@ -1200,6 +1553,212 @@ impl ResultIterator for FilterIterator {
                 None => return None,
             }
         }
+    }
+}
+
+/// Iterator that yields a single, pre-built row.
+///
+/// Used by [`OptionalApplyIterator`] to seed the per-row optional
+/// sub-pipeline with the current input row.
+struct SeedRowIterator {
+    row: Option<QueryRow>,
+}
+
+impl SeedRowIterator {
+    fn new(row: QueryRow) -> Self {
+        SeedRowIterator { row: Some(row) }
+    }
+}
+
+impl ResultIterator for SeedRowIterator {
+    fn next(&mut self) -> Option<Result<QueryRow>> {
+        self.row.take().map(Ok)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let n = usize::from(self.row.is_some());
+        (n, Some(n))
+    }
+}
+
+/// Iterator implementing left-outer (`OPTIONAL MATCH`) semantics.
+///
+/// For each input row, the configured sub-pipeline (traversal hops and
+/// filters) is executed seeded from that row:
+///
+/// - If it produces at least one row, those rows are yielded (matched case).
+/// - If it produces nothing, a single row with [`EntityResult::Null`] is
+///   yielded instead, preserving the input row (unmatched case).
+///
+/// Because the sub-pipeline includes the optional pattern's inline property
+/// filters and its `WHERE` clause, filtering happens *before* the
+/// matched/unmatched decision, per openCypher semantics.
+///
+/// When the first step is a `Scan` the iterator is *standalone* (a leading
+/// `OPTIONAL MATCH` with no prior rows): the sub-pipeline runs exactly once
+/// from its own node scan, and an empty result yields one null row.
+///
+/// A null seed row (from a preceding unmatched optional) traverses to nothing,
+/// so a chained `OPTIONAL MATCH` over it yields another null row -- null
+/// propagates without dropping the row.
+pub struct OptionalApplyIterator {
+    input: Box<dyn ResultIterator>,
+    steps: Vec<crate::query::planner::physical::OptionalPhysicalStep>,
+    current: Arc<CurrentStorage>,
+    historical: Arc<RwLock<HistoricalStorage>>,
+    /// True when the first step is a Scan (leading OPTIONAL MATCH form).
+    standalone: bool,
+    /// The sub-pipeline currently being drained (one per seed row).
+    inner: Option<Box<dyn ResultIterator>>,
+    /// Whether the current sub-pipeline has produced at least one row.
+    inner_matched: bool,
+    /// Set when the input (or the single standalone run) is exhausted.
+    done: bool,
+    /// The seed row currently being processed, kept so an unmatched fallback
+    /// preserves its metadata (score, path, timestamp). `None` in the
+    /// standalone form, which has no seed row.
+    current_seed: Option<QueryRow>,
+}
+
+impl OptionalApplyIterator {
+    /// Create a new OptionalApplyIterator.
+    pub fn new(
+        input: Box<dyn ResultIterator>,
+        steps: Vec<crate::query::planner::physical::OptionalPhysicalStep>,
+        current: Arc<CurrentStorage>,
+        historical: Arc<RwLock<HistoricalStorage>>,
+    ) -> Self {
+        use crate::query::planner::physical::OptionalPhysicalStep;
+        let standalone = matches!(steps.first(), Some(OptionalPhysicalStep::Scan { .. }));
+        Self {
+            input,
+            steps,
+            current,
+            historical,
+            standalone,
+            inner: None,
+            inner_matched: false,
+            done: false,
+            current_seed: None,
+        }
+    }
+
+    /// Build the optional sub-pipeline for one seed row (or, for the
+    /// standalone form, from the leading scan step).
+    fn build_pipeline(&self, seed: Option<QueryRow>) -> Box<dyn ResultIterator> {
+        use crate::query::planner::physical::OptionalPhysicalStep;
+
+        let mut iter: Box<dyn ResultIterator> = match seed {
+            Some(row) => Box::new(SeedRowIterator::new(row)),
+            None => Box::new(EmptyIterator),
+        };
+
+        for step in &self.steps {
+            iter = match step {
+                OptionalPhysicalStep::Scan { label } => {
+                    // Source step (standalone form): replaces the seed input.
+                    Box::new(NodeScanIterator::new(
+                        label.clone(),
+                        Arc::clone(&self.current),
+                    ))
+                }
+                OptionalPhysicalStep::Traverse {
+                    direction,
+                    label,
+                    min_depth,
+                    depth,
+                    temporal_context,
+                } => Box::new(TraversalIterator::new(
+                    iter,
+                    *direction,
+                    label.clone(),
+                    *min_depth,
+                    *depth,
+                    Arc::clone(&self.current),
+                    Arc::clone(&self.historical),
+                    *temporal_context,
+                )),
+                OptionalPhysicalStep::Filter(predicate) => {
+                    Box::new(FilterIterator::new(iter, predicate.clone()))
+                }
+            };
+        }
+
+        iter
+    }
+}
+
+impl ResultIterator for OptionalApplyIterator {
+    fn next(&mut self) -> Option<Result<QueryRow>> {
+        loop {
+            // Drain the current sub-pipeline, if any.
+            if let Some(inner) = self.inner.as_mut() {
+                match inner.next() {
+                    Some(Ok(row)) => {
+                        self.inner_matched = true;
+                        return Some(Ok(row));
+                    }
+                    Some(Err(e)) => {
+                        // Abandon the errored seed entirely: a consumer that
+                        // iterates past the error must not receive a
+                        // fabricated null row for it.
+                        self.inner = None;
+                        self.inner_matched = false;
+                        self.current_seed = None;
+                        return Some(Err(e));
+                    }
+                    None => {
+                        let unmatched = !self.inner_matched;
+                        self.inner = None;
+                        let seed = self.current_seed.take();
+                        if unmatched {
+                            // Left-outer semantics: preserve the input row --
+                            // including its metadata (score, path, timestamp)
+                            // -- with a null binding. The standalone form has
+                            // no seed row, so it falls back to a bare null row.
+                            let mut row =
+                                seed.unwrap_or_else(|| QueryRow::from_entity(EntityResult::Null));
+                            row.entity = EntityResult::Null;
+                            return Some(Ok(row));
+                        }
+                        continue;
+                    }
+                }
+            }
+
+            if self.done {
+                return None;
+            }
+
+            if self.standalone {
+                // Leading OPTIONAL MATCH: run the scan pipeline exactly once.
+                self.inner = Some(self.build_pipeline(None));
+                self.inner_matched = false;
+                self.done = true;
+                continue;
+            }
+
+            // Pull the next seed row from the input.
+            match self.input.next() {
+                Some(Ok(seed)) => {
+                    self.current_seed = Some(seed.clone());
+                    self.inner = Some(self.build_pipeline(Some(seed)));
+                    self.inner_matched = false;
+                }
+                Some(Err(e)) => return Some(Err(e)),
+                None => {
+                    self.done = true;
+                    return None;
+                }
+            }
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        // At least one row per remaining input row (matched rows may add
+        // more, so no useful upper bound).
+        let (lower, _) = self.input.size_hint();
+        (lower, None)
     }
 }
 
@@ -1599,6 +2158,584 @@ impl ResultIterator for PropertyScanIterator {
             },
             None => None,
         }
+    }
+}
+
+// ============================================================================
+// Aggregation, DISTINCT, and ORDER BY iterators
+// ============================================================================
+
+/// Read a node property value from a row, for grouping / aggregation / sorting.
+///
+/// Returns `None` when the row has no backing node (e.g. a null binding or a
+/// computed aggregate row) or the property is absent.
+fn row_property<'a>(row: &'a QueryRow, key: &str) -> Option<&'a PropertyValue> {
+    row.entity.as_node().and_then(|n| n.properties.get(key))
+}
+
+/// Numeric view of a scalar property (`Int`/`Float`), used for sum/avg and
+/// numeric ordering. `None` for non-numeric values.
+fn property_as_f64(value: &PropertyValue) -> Option<f64> {
+    match value {
+        PropertyValue::Int(i) => Some(*i as f64),
+        PropertyValue::Float(f) => Some(*f),
+        _ => None,
+    }
+}
+
+/// Total order over comparable scalar property values (numbers compared
+/// numerically, strings lexicographically, bools by value). Non-comparable or
+/// mixed pairs compare `Equal` so they retain input order.
+fn compare_property(a: &PropertyValue, b: &PropertyValue) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    match (a, b) {
+        (PropertyValue::Int(x), PropertyValue::Int(y)) => x.cmp(y),
+        (
+            PropertyValue::Int(_) | PropertyValue::Float(_),
+            PropertyValue::Int(_) | PropertyValue::Float(_),
+        ) => match (property_as_f64(a), property_as_f64(b)) {
+            (Some(x), Some(y)) => x.partial_cmp(&y).unwrap_or(Ordering::Equal),
+            _ => Ordering::Equal,
+        },
+        (PropertyValue::String(x), PropertyValue::String(y)) => x.as_ref().cmp(y.as_ref()),
+        (PropertyValue::Bool(x), PropertyValue::Bool(y)) => x.cmp(y),
+        _ => Ordering::Equal,
+    }
+}
+
+/// A hashable, `Eq` projection of a scalar property value used both for
+/// grouping keys and for `DISTINCT` deduplication of aggregate arguments.
+/// Floats are keyed by their bit pattern (total order); non-scalar values fall
+/// back to their debug representation.
+#[derive(Clone, PartialEq, Eq, Hash)]
+enum GroupKeyValue {
+    Null,
+    Bool(bool),
+    Int(i64),
+    Float(u64),
+    Str(String),
+    Other(String),
+}
+
+impl GroupKeyValue {
+    fn from_property(value: Option<&PropertyValue>) -> Self {
+        match value {
+            None | Some(PropertyValue::Null) => GroupKeyValue::Null,
+            Some(PropertyValue::Bool(b)) => GroupKeyValue::Bool(*b),
+            Some(PropertyValue::Int(i)) => GroupKeyValue::Int(*i),
+            Some(PropertyValue::Float(f)) => Self::float_key(*f),
+            Some(PropertyValue::String(s)) => GroupKeyValue::Str(s.to_string()),
+            Some(other) => GroupKeyValue::Other(format!("{other:?}")),
+        }
+    }
+
+    /// Map a float to a grouping/DISTINCT key, canonicalizing `-0.0 -> 0.0`
+    /// (signed zeros group together) and unifying an integral float with the
+    /// equal integer (so `1` and `1.0` land in the same group / distinct set).
+    fn float_key(f: f64) -> Self {
+        let f = if f == 0.0 { 0.0 } else { f };
+        if f.is_finite() && f.fract() == 0.0 && f >= i64::MIN as f64 && f <= i64::MAX as f64 {
+            GroupKeyValue::Int(f as i64)
+        } else {
+            GroupKeyValue::Float(f.to_bits())
+        }
+    }
+}
+
+/// The resolved per-row input to one aggregate, computed once per row in
+/// [`AggregateIterator::drain`].
+enum AggInput<'a> {
+    /// `count(*)` -- count the row unconditionally.
+    Star,
+    /// `count(n)` -- count the row iff its bound entity is non-null.
+    Entity { present: bool },
+    /// `func(n.prop)` -- the row's value for the property (`None`/`Null` =
+    /// absent, skipped by every value aggregate).
+    Value(Option<&'a PropertyValue>),
+}
+
+/// Per-group, per-aggregate accumulator.
+struct AggAccumulator {
+    func: AggregateFunc,
+    distinct: bool,
+    /// Values already counted, for the `DISTINCT` quantifier.
+    seen: HashSet<GroupKeyValue>,
+    count: i64,
+    /// Integer running sum (i128 headroom against overflow) for all-integer sums.
+    sum_i: i128,
+    /// Floating running sum, always maintained (used for avg and float sums).
+    sum_f: f64,
+    saw_float: bool,
+    numeric_count: i64,
+    min: Option<PropertyValue>,
+    max: Option<PropertyValue>,
+    collected: Vec<PropertyValue>,
+}
+
+impl AggAccumulator {
+    fn new(spec: &AggregateSpec) -> Self {
+        AggAccumulator {
+            func: spec.func,
+            distinct: spec.distinct,
+            seen: HashSet::new(),
+            count: 0,
+            sum_i: 0,
+            sum_f: 0.0,
+            saw_float: false,
+            numeric_count: 0,
+            min: None,
+            max: None,
+            collected: Vec::new(),
+        }
+    }
+
+    /// Fold one input row into the accumulator.
+    ///
+    /// `count(*)` ([`AggInput::Star`]) counts the row unconditionally and
+    /// `count(n)` ([`AggInput::Entity`]) counts non-null bindings, both
+    /// ignoring `DISTINCT`. Otherwise the value ([`AggInput::Value`]) feeds the
+    /// function; `None`/`Null` values are skipped (openCypher semantics).
+    fn update(&mut self, input: AggInput<'_>) {
+        let v = match input {
+            AggInput::Star => {
+                // Only Count uses Star (enforced by the converter).
+                self.count += 1;
+                return;
+            }
+            AggInput::Entity { present } => {
+                // Only Count uses Entity; count non-null bindings.
+                if present {
+                    self.count += 1;
+                }
+                return;
+            }
+            AggInput::Value(Some(v)) if !matches!(v, PropertyValue::Null) => v,
+            AggInput::Value(_) => return,
+        };
+
+        if self.distinct {
+            let key = GroupKeyValue::from_property(Some(v));
+            if !self.seen.insert(key) {
+                return;
+            }
+        }
+
+        match self.func {
+            AggregateFunc::Count => self.count += 1,
+            AggregateFunc::Sum | AggregateFunc::Avg => {
+                if let Some(f) = property_as_f64(v) {
+                    self.sum_f += f;
+                    self.numeric_count += 1;
+                    match v {
+                        PropertyValue::Int(i) => self.sum_i += i128::from(*i),
+                        PropertyValue::Float(_) => self.saw_float = true,
+                        _ => {}
+                    }
+                }
+            }
+            AggregateFunc::Min => {
+                let replace = match &self.min {
+                    None => true,
+                    Some(m) => compare_property(v, m) == std::cmp::Ordering::Less,
+                };
+                if replace {
+                    self.min = Some(v.clone());
+                }
+            }
+            AggregateFunc::Max => {
+                let replace = match &self.max {
+                    None => true,
+                    Some(m) => compare_property(v, m) == std::cmp::Ordering::Greater,
+                };
+                if replace {
+                    self.max = Some(v.clone());
+                }
+            }
+            AggregateFunc::Collect => self.collected.push(v.clone()),
+        }
+    }
+
+    /// Produce the final aggregate value for this group.
+    fn finalize(self) -> PropertyValue {
+        match self.func {
+            AggregateFunc::Count => PropertyValue::Int(self.count),
+            AggregateFunc::Sum => {
+                if self.numeric_count == 0 {
+                    // openCypher: sum over no values is 0 (integer).
+                    PropertyValue::Int(0)
+                } else if self.saw_float {
+                    PropertyValue::Float(self.sum_f)
+                } else {
+                    // Checked cast: an all-integer sum that overflows i64 falls
+                    // back to Float rather than silently wrapping.
+                    match i64::try_from(self.sum_i) {
+                        Ok(v) => PropertyValue::Int(v),
+                        Err(_) => PropertyValue::Float(self.sum_i as f64),
+                    }
+                }
+            }
+            AggregateFunc::Avg => {
+                if self.numeric_count == 0 {
+                    PropertyValue::Null
+                } else {
+                    PropertyValue::Float(self.sum_f / self.numeric_count as f64)
+                }
+            }
+            AggregateFunc::Min => self.min.unwrap_or(PropertyValue::Null),
+            AggregateFunc::Max => self.max.unwrap_or(PropertyValue::Null),
+            AggregateFunc::Collect => PropertyValue::Array(Arc::new(self.collected)),
+        }
+    }
+}
+
+/// A single group's state during aggregation.
+struct AggGroup {
+    /// The group-key values (in `group_keys` order), captured from the first
+    /// row of the group for output.
+    key_values: Vec<PropertyValue>,
+    accumulators: Vec<AggAccumulator>,
+}
+
+/// Grouped aggregation iterator (openCypher implicit grouping).
+///
+/// Eagerly drains its input on the first `next()`, hash-groups rows by the
+/// group-key tuple, folds each aggregate per group, and then emits exactly one
+/// computed-column [`QueryRow`] per group (via [`QueryRow::from_columns`]) in
+/// group-discovery order. A global aggregation (no group keys) always emits one
+/// row even over empty input; a grouped aggregation over empty input emits no
+/// rows.
+pub struct AggregateIterator {
+    input: Option<Box<dyn ResultIterator>>,
+    group_keys: Vec<AggregateGroupKey>,
+    aggregates: Vec<AggregateSpec>,
+    output: std::vec::IntoIter<QueryRow>,
+    drained: bool,
+}
+
+impl AggregateIterator {
+    /// Create a new aggregation iterator.
+    pub fn new(
+        input: Box<dyn ResultIterator>,
+        group_keys: Vec<AggregateGroupKey>,
+        aggregates: Vec<AggregateSpec>,
+    ) -> Self {
+        AggregateIterator {
+            input: Some(input),
+            group_keys,
+            aggregates,
+            output: Vec::new().into_iter(),
+            drained: false,
+        }
+    }
+
+    fn drain(&mut self) -> Result<()> {
+        let mut input = match self.input.take() {
+            Some(i) => i,
+            None => return Ok(()),
+        };
+
+        let mut order: Vec<Vec<GroupKeyValue>> = Vec::new();
+        let mut groups: std::collections::HashMap<Vec<GroupKeyValue>, AggGroup> =
+            std::collections::HashMap::new();
+
+        // A global aggregation always yields exactly one row, even over empty
+        // input: seed the single (empty-key) group up front.
+        if self.group_keys.is_empty() {
+            let key: Vec<GroupKeyValue> = Vec::new();
+            order.push(key.clone());
+            groups.insert(
+                key,
+                AggGroup {
+                    key_values: Vec::new(),
+                    accumulators: self.aggregates.iter().map(AggAccumulator::new).collect(),
+                },
+            );
+        }
+
+        while let Some(row) = input.next() {
+            let row = row?;
+            let key: Vec<GroupKeyValue> = self
+                .group_keys
+                .iter()
+                .map(|gk| GroupKeyValue::from_property(row_property(&row, &gk.property_key)))
+                .collect();
+
+            if !groups.contains_key(&key) {
+                order.push(key.clone());
+                let key_values = self
+                    .group_keys
+                    .iter()
+                    .map(|gk| {
+                        row_property(&row, &gk.property_key)
+                            .cloned()
+                            .unwrap_or(PropertyValue::Null)
+                    })
+                    .collect();
+                let accumulators = self.aggregates.iter().map(AggAccumulator::new).collect();
+                groups.insert(
+                    key.clone(),
+                    AggGroup {
+                        key_values,
+                        accumulators,
+                    },
+                );
+            }
+
+            let group = groups
+                .get_mut(&key)
+                .expect("group inserted above must be present");
+            for (spec, acc) in self.aggregates.iter().zip(group.accumulators.iter_mut()) {
+                let input = match &spec.arg {
+                    AggregateArg::Star => AggInput::Star,
+                    AggregateArg::Entity => AggInput::Entity {
+                        present: !row.entity.is_null(),
+                    },
+                    AggregateArg::Property(k) => AggInput::Value(row_property(&row, k)),
+                };
+                acc.update(input);
+            }
+        }
+
+        let mut rows = Vec::with_capacity(order.len());
+        for key in order {
+            let group = groups.remove(&key).expect("group present in order");
+            let mut columns: Vec<(String, PropertyValue)> =
+                Vec::with_capacity(self.group_keys.len() + self.aggregates.len());
+            for (gk, val) in self.group_keys.iter().zip(group.key_values) {
+                columns.push((gk.alias.clone(), val));
+            }
+            for (spec, acc) in self.aggregates.iter().zip(group.accumulators) {
+                columns.push((spec.alias.clone(), acc.finalize()));
+            }
+            rows.push(QueryRow::from_columns(columns));
+        }
+        self.output = rows.into_iter();
+        Ok(())
+    }
+}
+
+impl ResultIterator for AggregateIterator {
+    fn next(&mut self) -> Option<Result<QueryRow>> {
+        if !self.drained {
+            self.drained = true;
+            if let Err(e) = self.drain() {
+                return Some(Err(e));
+            }
+        }
+        self.output.next().map(Ok)
+    }
+}
+
+/// A whole-row deduplication key for `DISTINCT`.
+#[derive(PartialEq, Eq, Hash)]
+enum DistinctRowKey {
+    /// Keyed by the row's entity identity (node/edge id, or `None` for a null
+    /// binding).
+    Entity(Option<EntityId>),
+    /// A computed aggregate row, keyed by its rendered columns.
+    Columns(String),
+}
+
+/// `RETURN DISTINCT` iterator: yields each distinct row once, preserving first
+/// occurrence order.
+pub struct DistinctIterator {
+    input: Box<dyn ResultIterator>,
+    seen: HashSet<DistinctRowKey>,
+}
+
+impl DistinctIterator {
+    /// Create a new DISTINCT iterator over `input`.
+    pub fn new(input: Box<dyn ResultIterator>) -> Self {
+        DistinctIterator {
+            input,
+            seen: HashSet::new(),
+        }
+    }
+
+    fn key(row: &QueryRow) -> DistinctRowKey {
+        if let Some(cols) = &row.columns {
+            DistinctRowKey::Columns(format!("{cols:?}"))
+        } else {
+            DistinctRowKey::Entity(row.entity.id())
+        }
+    }
+}
+
+impl ResultIterator for DistinctIterator {
+    fn next(&mut self) -> Option<Result<QueryRow>> {
+        loop {
+            match self.input.next()? {
+                Ok(row) => {
+                    if self.seen.insert(Self::key(&row)) {
+                        return Some(Ok(row));
+                    }
+                }
+                Err(e) => return Some(Err(e)),
+            }
+        }
+    }
+}
+
+/// Look up a value for ordering by column/property name: first a node property
+/// (entity rows), then a computed aggregate column (`row.columns`) so ORDER BY
+/// can sort grouped/aggregate rows by a group key or aggregate alias.
+fn row_value<'a>(row: &'a QueryRow, key: &str) -> Option<&'a PropertyValue> {
+    if let Some(v) = row_property(row, key) {
+        return Some(v);
+    }
+    row.columns
+        .as_ref()
+        .and_then(|cols| cols.iter().find(|(k, _)| k == key).map(|(_, v)| v))
+}
+
+/// `ORDER BY` iterator: buffers the entire input and stably sorts it by one or
+/// more keys in precedence order (first key primary), then streams the result.
+///
+/// Each key carries its own ascending/descending flag. Null placement follows
+/// openCypher: a missing/null sort value orders **last** for an ascending key
+/// and **first** for a descending key. Property keys fall back to computed
+/// aggregate columns via [`row_value`], so grouped results can be ordered by a
+/// group key or aggregate alias.
+pub struct SortIterator {
+    input: Option<Box<dyn ResultIterator>>,
+    keys: Vec<(SortKey, bool)>,
+    output: std::vec::IntoIter<QueryRow>,
+    drained: bool,
+}
+
+impl SortIterator {
+    /// Create a new ORDER BY iterator sorting by `keys` (first = primary).
+    pub fn new(input: Box<dyn ResultIterator>, keys: Vec<(SortKey, bool)>) -> Self {
+        SortIterator {
+            input: Some(input),
+            keys,
+            output: Vec::new().into_iter(),
+            drained: false,
+        }
+    }
+
+    fn drain(&mut self) -> Result<()> {
+        let mut input = match self.input.take() {
+            Some(i) => i,
+            None => return Ok(()),
+        };
+        let mut rows: Vec<QueryRow> = Vec::new();
+        while let Some(row) = input.next() {
+            rows.push(row?);
+        }
+        rows.sort_by(|a, b| self.cmp_rows(a, b));
+        self.output = rows.into_iter();
+        Ok(())
+    }
+
+    fn cmp_rows(&self, a: &QueryRow, b: &QueryRow) -> std::cmp::Ordering {
+        use std::cmp::Ordering;
+        for (key, descending) in &self.keys {
+            let ord = Self::cmp_by_key(a, b, key, *descending);
+            if ord != Ordering::Equal {
+                return ord;
+            }
+        }
+        Ordering::Equal
+    }
+
+    /// Compare two rows by a single key, applying openCypher null placement
+    /// (nulls last for ASC, first for DESC).
+    fn cmp_by_key(
+        a: &QueryRow,
+        b: &QueryRow,
+        key: &SortKey,
+        descending: bool,
+    ) -> std::cmp::Ordering {
+        use std::cmp::Ordering;
+        match key {
+            SortKey::Property(prop) => match (row_value(a, prop), row_value(b, prop)) {
+                (Some(x), Some(y)) => {
+                    let ord = compare_property(x, y);
+                    if descending { ord.reverse() } else { ord }
+                }
+                // openCypher: nulls last for ASC, first for DESC.
+                (Some(_), None) => {
+                    if descending {
+                        Ordering::Greater
+                    } else {
+                        Ordering::Less
+                    }
+                }
+                (None, Some(_)) => {
+                    if descending {
+                        Ordering::Less
+                    } else {
+                        Ordering::Greater
+                    }
+                }
+                (None, None) => Ordering::Equal,
+            },
+            SortKey::Score => {
+                let ord = a.score.partial_cmp(&b.score).unwrap_or(Ordering::Equal);
+                if descending { ord.reverse() } else { ord }
+            }
+            SortKey::Timestamp => {
+                let av = a.timestamp.map(|t| t.wallclock());
+                let bv = b.timestamp.map(|t| t.wallclock());
+                let ord = av.cmp(&bv);
+                if descending { ord.reverse() } else { ord }
+            }
+        }
+    }
+}
+
+impl ResultIterator for SortIterator {
+    fn next(&mut self) -> Option<Result<QueryRow>> {
+        if !self.drained {
+            self.drained = true;
+            if let Err(e) = self.drain() {
+                return Some(Err(e));
+            }
+        }
+        self.output.next().map(Ok)
+    }
+}
+
+/// `Count` aggregate iterator: drains the input and yields a single computed
+/// row with the total row count under the column name `count`.
+pub struct CountIterator {
+    input: Option<Box<dyn ResultIterator>>,
+    done: bool,
+}
+
+impl CountIterator {
+    /// Create a new count iterator over `input`.
+    pub fn new(input: Box<dyn ResultIterator>) -> Self {
+        CountIterator {
+            input: Some(input),
+            done: false,
+        }
+    }
+}
+
+impl ResultIterator for CountIterator {
+    fn next(&mut self) -> Option<Result<QueryRow>> {
+        if self.done {
+            return None;
+        }
+        self.done = true;
+        let mut input = self.input.take()?;
+        let mut count: i64 = 0;
+        while let Some(row) = input.next() {
+            if let Err(e) = row {
+                return Some(Err(e));
+            }
+            count += 1;
+        }
+        Some(Ok(QueryRow::from_columns(vec![(
+            "count".to_string(),
+            PropertyValue::Int(count),
+        )])))
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (usize::from(!self.done), Some(usize::from(!self.done)))
     }
 }
 
@@ -2769,6 +3906,129 @@ mod tests {
         assert!(iter.next().is_none());
     }
 
+    #[test]
+    fn test_node_scan_iterator_skips_deleted_ids() {
+        // The lazy id-range scan must tolerate gaps: deleting a node in the
+        // middle of the id space leaves a `NodeNotFound` hole that the scan
+        // skips rather than erroring on.
+        let current = Arc::new(CurrentStorage::new());
+        let a = current
+            .create_node("Person", PropertyMapBuilder::new().insert("n", "a").build())
+            .unwrap();
+        let b = current
+            .create_node("Person", PropertyMapBuilder::new().insert("n", "b").build())
+            .unwrap();
+        let c = current
+            .create_node("Person", PropertyMapBuilder::new().insert("n", "c").build())
+            .unwrap();
+
+        current.delete_node(b).unwrap();
+
+        let mut iter = NodeScanIterator::new(None, Arc::clone(&current));
+        let mut ids = Vec::new();
+        while let Some(Ok(row)) = iter.next() {
+            ids.push(row.entity.node_id().unwrap());
+        }
+
+        assert_eq!(ids, vec![a, c], "scan should skip the deleted id {b:?}");
+    }
+
+    #[test]
+    fn test_node_scan_iterator_bounds_by_index_not_storage_id_gen() {
+        // Regression (PR #3418): the scan bound must come from the index's
+        // insert-maintained high-water-mark, NOT CurrentStorage's own
+        // `node_id_gen`. The transactional write path allocates node ids from a
+        // database-level generator and applies them via `insert_node_direct`,
+        // leaving the storage-local generator at 0. If the scan bounded itself
+        // by that generator it would see `max_id == 0` and yield zero rows for
+        // every node in the database. Here we reproduce that path directly:
+        // insert nodes whose ids did NOT come from `current.node_id_gen`.
+        let current = Arc::new(CurrentStorage::new());
+        let ts = crate::core::temporal::time::now();
+        let label = GLOBAL_INTERNER.intern("Person").unwrap();
+
+        let expected: Vec<NodeId> = (0u64..3)
+            .map(|i| {
+                let id = NodeId::new(i).unwrap();
+                let node = Node::new(
+                    id,
+                    label,
+                    PropertyMapBuilder::new()
+                        .insert("n", format!("{i}"))
+                        .build(),
+                    VersionId::new(i + 1).unwrap(),
+                );
+                current.insert_node_direct(node, ts).unwrap();
+                id
+            })
+            .collect();
+
+        // The scan bound must reflect the ids inserted (index high-water-mark),
+        // not the storage's own id generator (which insert_node_direct never
+        // advances, so it is still 0). Under the pre-fix implementation this
+        // returned 0 and the scan below yielded nothing.
+        assert_eq!(
+            current.get_max_node_id(),
+            3,
+            "scan bound must come from the index high-water-mark, not the storage id generator"
+        );
+
+        let mut iter = NodeScanIterator::new(None, Arc::clone(&current));
+        let mut ids = Vec::new();
+        while let Some(Ok(row)) = iter.next() {
+            ids.push(row.entity.node_id().unwrap());
+        }
+
+        assert_eq!(
+            ids, expected,
+            "full scan must find nodes applied via insert_node_direct, \
+             proving the bound comes from the index not the storage id generator"
+        );
+    }
+
+    #[test]
+    fn test_node_scan_iterator_unknown_label_yields_nothing() {
+        // A label filter whose label was never interned must yield zero rows,
+        // NOT degrade into an unfiltered full scan.
+        let current = Arc::new(CurrentStorage::new());
+        current
+            .create_node("Person", PropertyMapBuilder::new().insert("n", "a").build())
+            .unwrap();
+
+        let mut iter =
+            NodeScanIterator::new(Some("NeverInternedLabel".to_string()), Arc::clone(&current));
+        assert!(
+            iter.next().is_none(),
+            "unknown label must match no nodes, not all of them"
+        );
+        assert_eq!(iter.size_hint(), (0, Some(0)));
+    }
+
+    #[test]
+    fn test_node_scan_iterator_size_hint_is_bounded_without_materializing() {
+        // size_hint reports a finite upper bound derived from the id range,
+        // proving the iterator knows its bound without collecting all ids.
+        let current = Arc::new(CurrentStorage::new());
+        for i in 0..4 {
+            current
+                .create_node(
+                    "Person",
+                    PropertyMapBuilder::new()
+                        .insert("n", format!("{i}"))
+                        .build(),
+                )
+                .unwrap();
+        }
+
+        let mut iter = NodeScanIterator::new(None, Arc::clone(&current));
+        // Upper bound equals the number of ids allocated so far.
+        assert_eq!(iter.size_hint(), (0, Some(4)));
+
+        iter.next();
+        // After consuming one id the remaining upper bound shrinks.
+        assert_eq!(iter.size_hint(), (0, Some(3)));
+    }
+
     // ==================== VectorResultIterator Tests ====================
 
     #[test]
@@ -2880,6 +4140,187 @@ mod tests {
         let mut iter = TemporalNodeIterator::new(node_ids, now, now, historical);
 
         assert!(iter.next().is_none());
+    }
+
+    // Characterization tests (Issue #356): capture the exact behavior of the
+    // temporal reconstruction path before/after flattening it into a shared
+    // helper. Behavior must not change.
+
+    /// Helper: extract the "name" string property from a QueryRow's node.
+    fn row_name(row: &QueryRow) -> String {
+        let node = row.entity.as_node().expect("row should contain a node");
+        match node.properties.get("name") {
+            Some(PropertyValue::String(s)) => s.to_string(),
+            other => panic!("unexpected name property: {:?}", other),
+        }
+    }
+
+    /// Helper: historical storage with two versions of node 1:
+    /// name=Alice at t=1000, name=Alicia at t=2000 (valid == tx time).
+    fn historical_with_two_versions() -> Arc<RwLock<HistoricalStorage>> {
+        use crate::storage::historical::HistoricalStorage;
+
+        let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
+        let label = GLOBAL_INTERNER.intern("Person").unwrap();
+        {
+            let mut hist = historical.write();
+            hist.add_node_version(
+                NodeId::new(1).unwrap(),
+                VersionId::new(100).unwrap(),
+                1000.into(),
+                1000.into(),
+                label,
+                PropertyMapBuilder::new().insert("name", "Alice").build(),
+                false, // not a tombstone
+            )
+            .unwrap();
+            hist.add_node_version(
+                NodeId::new(1).unwrap(),
+                VersionId::new(101).unwrap(),
+                2000.into(),
+                2000.into(),
+                label,
+                PropertyMapBuilder::new().insert("name", "Alicia").build(),
+                false, // not a tombstone
+            )
+            .unwrap();
+        }
+        historical
+    }
+
+    #[test]
+    fn test_temporal_node_iterator_not_found_before_first_version() {
+        let historical = historical_with_two_versions();
+        let node_ids = vec![NodeId::new(1).unwrap()];
+
+        // Query before the node's first version: not found at that time
+        let mut iter = TemporalNodeIterator::new(node_ids, 500.into(), 500.into(), historical);
+
+        let result = iter.next().unwrap();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_temporal_node_iterator_multiple_versions_selects_point_in_time() {
+        let historical = historical_with_two_versions();
+
+        // Between the two versions: the older version's properties are returned
+        let mut iter = TemporalNodeIterator::new(
+            vec![NodeId::new(1).unwrap()],
+            1500.into(),
+            1500.into(),
+            historical.clone(),
+        );
+        let row = iter.next().unwrap().unwrap();
+        assert_eq!(row_name(&row), "Alice");
+        assert_eq!(row.timestamp, Some(1500.into()));
+
+        // At/after the second version: the newer version's properties are returned
+        let mut iter = TemporalNodeIterator::new(
+            vec![NodeId::new(1).unwrap()],
+            2500.into(),
+            2500.into(),
+            historical,
+        );
+        let row = iter.next().unwrap().unwrap();
+        assert_eq!(row_name(&row), "Alicia");
+    }
+
+    #[test]
+    fn test_temporal_node_iterator_boundary_timestamps() {
+        let historical = historical_with_two_versions();
+
+        // Exactly at the first version's start: that version is visible
+        let mut iter = TemporalNodeIterator::new(
+            vec![NodeId::new(1).unwrap()],
+            1000.into(),
+            1000.into(),
+            historical.clone(),
+        );
+        let row = iter.next().unwrap().unwrap();
+        assert_eq!(row_name(&row), "Alice");
+
+        // Exactly at the second version's start: the new version wins
+        // (intervals are half-open: the old version ends at 2000, the new begins)
+        let mut iter = TemporalNodeIterator::new(
+            vec![NodeId::new(1).unwrap()],
+            2000.into(),
+            2000.into(),
+            historical,
+        );
+        let row = iter.next().unwrap().unwrap();
+        assert_eq!(row_name(&row), "Alicia");
+    }
+
+    #[test]
+    fn test_temporal_node_iterator_tombstone_semantics() {
+        use crate::storage::historical::HistoricalStorage;
+
+        let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
+        let label = GLOBAL_INTERNER.intern("Person").unwrap();
+        {
+            let mut hist = historical.write();
+            hist.add_node_version(
+                NodeId::new(1).unwrap(),
+                VersionId::new(100).unwrap(),
+                1000.into(),
+                1000.into(),
+                label,
+                PropertyMapBuilder::new().insert("name", "Alice").build(),
+                false, // not a tombstone
+            )
+            .unwrap();
+            // Tombstone (deletion) at t=2000
+            hist.add_node_version(
+                NodeId::new(1).unwrap(),
+                VersionId::new(101).unwrap(),
+                2000.into(),
+                2000.into(),
+                label,
+                PropertyMapBuilder::new().build(),
+                true, // tombstone
+            )
+            .unwrap();
+        }
+
+        // Before the deletion: node is visible with its original properties
+        let mut iter = TemporalNodeIterator::new(
+            vec![NodeId::new(1).unwrap()],
+            1500.into(),
+            1500.into(),
+            historical.clone(),
+        );
+        let row = iter.next().unwrap().unwrap();
+        assert_eq!(row_name(&row), "Alice");
+
+        // After the deletion: node is not found at that time
+        let mut iter = TemporalNodeIterator::new(
+            vec![NodeId::new(1).unwrap()],
+            2500.into(),
+            2500.into(),
+            historical,
+        );
+        let result = iter.next().unwrap();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_batch_temporal_node_iterator_multiple_versions_selects_point_in_time() {
+        // The batch iterator must reconstruct the same point-in-time state as
+        // the per-node iterator (shared logic, Issue #356).
+        let historical = historical_with_two_versions();
+
+        let mut iter = BatchTemporalNodeIterator::new(
+            vec![NodeId::new(1).unwrap()],
+            1500.into(),
+            1500.into(),
+            historical,
+        )
+        .unwrap();
+
+        let row = iter.next().unwrap().unwrap();
+        assert_eq!(row_name(&row), "Alice");
+        assert_eq!(row.timestamp, Some(1500.into()));
     }
 
     // ==================== BatchTemporalNodeIterator Tests ====================
@@ -3467,5 +4908,350 @@ mod tests {
 
         // This used to unwrap and panic because input was taken in the first call
         assert!(iter.next().is_none());
+    }
+
+    // ==================== evaluate_null Tests ====================
+
+    /// Exhaustively covers every arm of [`FilterIterator::evaluate_null`]:
+    /// comparisons/membership/string predicates over a null binding are
+    /// not-true, `IS NULL` (encoded `Eq { value: Null }`) is true,
+    /// `IS NOT NULL` (encoded `Ne { value: Null }`) is false, a null binding
+    /// has no properties (`Exists` false / `NotExists` true), and the
+    /// boolean connectives compose (with `Not` documented as two-valued).
+    #[test]
+    fn test_evaluate_null_all_predicate_arms() {
+        let filter = FilterIterator::new(Box::new(EmptyIterator), Predicate::True);
+        let eval = |p: &Predicate| filter.evaluate_null(p);
+
+        // Constants.
+        assert!(eval(&Predicate::True));
+        assert!(!eval(&Predicate::False));
+
+        // IS NULL / IS NOT NULL encodings.
+        assert!(eval(&Predicate::Eq {
+            key: "x".into(),
+            value: PredicateValue::Null,
+        }));
+        assert!(!eval(&Predicate::Ne {
+            key: "x".into(),
+            value: PredicateValue::Null,
+        }));
+
+        // Eq/Ne against non-null values are not-true.
+        assert!(!eval(&Predicate::eq("x", 1i64)));
+        assert!(!eval(&Predicate::ne("x", 1i64)));
+
+        // Ordering comparisons are not-true.
+        assert!(!eval(&Predicate::Gt {
+            key: "x".into(),
+            value: PredicateValue::Int(1),
+        }));
+        assert!(!eval(&Predicate::Lt {
+            key: "x".into(),
+            value: PredicateValue::Int(1),
+        }));
+        assert!(!eval(&Predicate::Gte {
+            key: "x".into(),
+            value: PredicateValue::Int(1),
+        }));
+        assert!(!eval(&Predicate::Lte {
+            key: "x".into(),
+            value: PredicateValue::Int(1),
+        }));
+
+        // Membership and string predicates are not-true.
+        assert!(!eval(&Predicate::In {
+            key: "x".into(),
+            values: vec![PredicateValue::Int(1), PredicateValue::Null],
+        }));
+        assert!(!eval(&Predicate::Contains {
+            key: "x".into(),
+            substring: "a".into(),
+        }));
+        assert!(!eval(&Predicate::StartsWith {
+            key: "x".into(),
+            prefix: "a".into(),
+        }));
+        assert!(!eval(&Predicate::EndsWith {
+            key: "x".into(),
+            suffix: "a".into(),
+        }));
+
+        // A null binding has no properties.
+        assert!(!eval(&Predicate::Exists("x".into())));
+        assert!(eval(&Predicate::NotExists("x".into())));
+
+        // Connectives compose.
+        assert!(eval(&Predicate::And(vec![
+            Predicate::True,
+            Predicate::NotExists("x".into()),
+        ])));
+        assert!(!eval(&Predicate::And(vec![
+            Predicate::True,
+            Predicate::eq("x", 1i64),
+        ])));
+        assert!(eval(&Predicate::Or(vec![
+            Predicate::eq("x", 1i64),
+            Predicate::Eq {
+                key: "x".into(),
+                value: PredicateValue::Null,
+            },
+        ])));
+        assert!(!eval(&Predicate::Or(vec![
+            Predicate::False,
+            Predicate::eq("x", 1i64),
+        ])));
+
+        // Not is two-valued (documented deviation from openCypher 3VL):
+        // NOT (not-true) is true.
+        assert!(eval(&Predicate::Not(Box::new(Predicate::eq("x", 1i64)))));
+        assert!(!eval(&Predicate::Not(Box::new(Predicate::True))));
+    }
+
+    // ==================== OptionalApplyIterator Tests ====================
+
+    fn optional_test_storages() -> (
+        Arc<CurrentStorage>,
+        Arc<RwLock<crate::storage::historical::HistoricalStorage>>,
+    ) {
+        let current = Arc::new(CurrentStorage::new());
+        let historical = Arc::new(RwLock::new(
+            crate::storage::historical::HistoricalStorage::with_config(
+                crate::core::version::AnchorConfig::default(),
+            ),
+        ));
+        (current, historical)
+    }
+
+    /// The unmatched fallback row must preserve the seed row's metadata
+    /// (score, path, timestamp), with only the entity replaced by Null.
+    #[test]
+    fn test_optional_apply_unmatched_preserves_seed_metadata() {
+        use crate::query::planner::physical::OptionalPhysicalStep;
+
+        let (current, historical) = optional_test_storages();
+
+        let seed = QueryRow::with_score(EntityResult::Node(test_node(1, "Alice")), 0.75)
+            .at_time(Timestamp::from(12345i64));
+        let input = Box::new(MockIterator::from_results(vec![Ok(seed)]));
+
+        // A Filter(False) step can never match: the seed row falls back to
+        // the null form.
+        let mut iter = OptionalApplyIterator::new(
+            input,
+            vec![OptionalPhysicalStep::Filter(Predicate::False)],
+            current,
+            historical,
+        );
+
+        let row = iter.next().expect("one row expected").expect("no error");
+        assert!(row.entity.is_null(), "unmatched seed must bind null");
+        assert_eq!(row.score, Some(0.75), "seed score must be preserved");
+        assert_eq!(
+            row.timestamp,
+            Some(Timestamp::from(12345i64)),
+            "seed timestamp must be preserved"
+        );
+        assert!(iter.next().is_none());
+    }
+
+    /// The standalone (leading OPTIONAL MATCH) form has no seed row: the
+    /// unmatched fallback is a bare null row.
+    #[test]
+    fn test_optional_apply_standalone_unmatched_bare_null_row() {
+        use crate::query::planner::physical::OptionalPhysicalStep;
+
+        let (current, historical) = optional_test_storages();
+
+        let mut iter = OptionalApplyIterator::new(
+            Box::new(EmptyIterator),
+            vec![OptionalPhysicalStep::Scan {
+                label: Some("Person".to_string()),
+            }],
+            current,
+            historical,
+        );
+
+        let row = iter.next().expect("one row expected").expect("no error");
+        assert!(row.entity.is_null());
+        assert!(row.score.is_none());
+        assert!(row.path.is_none());
+        assert!(row.timestamp.is_none());
+        assert!(iter.next().is_none());
+    }
+
+    /// The matched case: a seed row whose optional traversal produces rows
+    /// yields those rows (not a null fallback), then moves to the next seed.
+    #[test]
+    fn test_optional_apply_matched_rows_pass_through() {
+        use crate::query::planner::physical::OptionalPhysicalStep;
+
+        let (current, historical) = optional_test_storages();
+        let alice = current
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "Alice").build(),
+            )
+            .unwrap();
+        let bob = current
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "Bob").build(),
+            )
+            .unwrap();
+        current
+            .create_edge(alice, bob, "KNOWS", PropertyMapBuilder::new().build())
+            .unwrap();
+
+        let seed = QueryRow::from_entity(EntityResult::Node(current.get_node(alice).unwrap()));
+        let input = Box::new(MockIterator::from_results(vec![Ok(seed)]));
+
+        let mut iter = OptionalApplyIterator::new(
+            input,
+            vec![OptionalPhysicalStep::Traverse {
+                direction: Direction::Outgoing,
+                label: Some("KNOWS".to_string()),
+                min_depth: 1,
+                depth: 1,
+                temporal_context: None,
+            }],
+            current,
+            historical,
+        );
+
+        let row = iter.next().expect("one row expected").expect("no error");
+        assert_eq!(
+            row.entity.node_id(),
+            Some(bob),
+            "matched optional must yield the traversal target, not null"
+        );
+        // The matched seed must NOT be followed by a fabricated null row.
+        assert!(iter.next().is_none());
+    }
+
+    /// An error from the input (seed) iterator is propagated as-is.
+    #[test]
+    fn test_optional_apply_input_error_propagates() {
+        use crate::query::planner::physical::OptionalPhysicalStep;
+
+        let (current, historical) = optional_test_storages();
+        let input = Box::new(MockIterator::from_results(vec![Err(
+            crate::core::error::Error::other("test error"),
+        )]));
+
+        let mut iter = OptionalApplyIterator::new(
+            input,
+            vec![OptionalPhysicalStep::Filter(Predicate::True)],
+            current,
+            historical,
+        );
+
+        assert!(iter.next().expect("error row expected").is_err());
+        assert!(iter.next().is_none());
+    }
+
+    /// An error inside the optional sub-pipeline abandons the seed: the
+    /// error is surfaced and NO fabricated null row follows for that seed.
+    #[test]
+    fn test_optional_apply_inner_error_abandons_seed() {
+        use crate::query::planner::physical::OptionalPhysicalStep;
+
+        let (current, historical) = optional_test_storages();
+        let alice = current
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "Alice").build(),
+            )
+            .unwrap();
+        let bob = current
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "Bob").build(),
+            )
+            .unwrap();
+        current
+            .create_edge(alice, bob, "KNOWS", PropertyMapBuilder::new().build())
+            .unwrap();
+        let seed = QueryRow::from_entity(EntityResult::Node(current.get_node(alice).unwrap()));
+        // Delete Bob but keep the edge (low-level delete_node preserves
+        // edges): the traversal reaches a missing endpoint and errors.
+        current.delete_node(bob).unwrap();
+
+        let input = Box::new(MockIterator::from_results(vec![Ok(seed)]));
+        let mut iter = OptionalApplyIterator::new(
+            input,
+            vec![OptionalPhysicalStep::Traverse {
+                direction: Direction::Outgoing,
+                label: Some("KNOWS".to_string()),
+                min_depth: 1,
+                depth: 1,
+                temporal_context: None,
+            }],
+            current,
+            historical,
+        );
+
+        assert!(iter.next().expect("error row expected").is_err());
+        // The errored seed must not fall back to a null row.
+        assert!(iter.next().is_none());
+    }
+
+    /// size_hint: at least one row per remaining input row, no upper bound.
+    #[test]
+    fn test_optional_apply_size_hint() {
+        use crate::query::planner::physical::OptionalPhysicalStep;
+
+        let (current, historical) = optional_test_storages();
+        let input = Box::new(MockIterator::from_nodes(vec![
+            test_node(1, "Alice"),
+            test_node(2, "Bob"),
+        ]));
+
+        let iter = OptionalApplyIterator::new(
+            input,
+            vec![OptionalPhysicalStep::Filter(Predicate::True)],
+            current,
+            historical,
+        );
+        assert_eq!(iter.size_hint(), (2, None));
+    }
+
+    /// SeedRowIterator yields its single row exactly once, with exact hints.
+    #[test]
+    fn test_seed_row_iterator() {
+        let row = QueryRow::from_entity(EntityResult::Node(test_node(1, "Alice")));
+        let mut iter = SeedRowIterator::new(row);
+
+        assert_eq!(iter.size_hint(), (1, Some(1)));
+        assert!(iter.next().expect("one row").is_ok());
+        assert_eq!(iter.size_hint(), (0, Some(0)));
+        assert!(iter.next().is_none());
+    }
+
+    /// FilterIterator applies null semantics to null-binding rows from an
+    /// unmatched OPTIONAL MATCH: IS NULL keeps them, comparisons drop them.
+    #[test]
+    fn test_filter_iterator_null_row_semantics() {
+        // `x IS NULL` (encoded Eq { value: Null }) keeps the null row.
+        let input = Box::new(MockIterator::from_results(vec![Ok(QueryRow::from_entity(
+            EntityResult::Null,
+        ))]));
+        let mut keep = FilterIterator::new(
+            input,
+            Predicate::Eq {
+                key: "x".into(),
+                value: PredicateValue::Null,
+            },
+        );
+        let row = keep.next().expect("one row expected").expect("no error");
+        assert!(row.entity.is_null());
+        assert!(keep.next().is_none());
+
+        // A comparison against the null binding is not-true: row dropped.
+        let input = Box::new(MockIterator::from_results(vec![Ok(QueryRow::from_entity(
+            EntityResult::Null,
+        ))]));
+        let mut dropped = FilterIterator::new(input, Predicate::eq("x", 1i64));
+        assert!(dropped.next().is_none());
     }
 }

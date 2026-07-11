@@ -312,6 +312,23 @@ impl StringInterner {
         self.resolve_with(id, f)
     }
 
+    /// Resolve an interned string to an owned `String`, or compute a fallback
+    /// if the ID is somehow not (or no longer) present.
+    ///
+    /// A resolve miss should not happen for an ID obtained from a live
+    /// `Node`/`Edge`/property key, but callers across the codebase each need
+    /// their own fallback text (an empty string, a diagnostic placeholder,
+    /// etc.) for the case where it does. This centralizes the resolve step
+    /// so each call site only has to supply its fallback.
+    pub fn resolve_or_else<F: FnOnce() -> String>(
+        &self,
+        id: InternedString,
+        fallback: F,
+    ) -> String {
+        self.resolve_with(id, |s| s.to_string())
+            .unwrap_or_else(fallback)
+    }
+
     /// Check if a string has been interned.
     pub fn contains<S: AsRef<str>>(&self, string: S) -> bool {
         self.string_to_id.contains_key(string.as_ref())

@@ -76,7 +76,7 @@ use std::sync::{Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-#[cfg(feature = "config-toml")]
+#[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
 /// Interval for checking shutdown signal in the background worker.
@@ -105,8 +105,8 @@ const DROP_TIMEOUT: Duration = Duration::from_secs(5);
 /// - Check for migration every 60 seconds
 /// - Trigger if memory usage exceeds 1GB
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "config-toml", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "config-toml", serde(default))]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "serde", serde(default))]
 pub struct MigrationPolicy {
     /// Migrate versions older than this duration.
     ///

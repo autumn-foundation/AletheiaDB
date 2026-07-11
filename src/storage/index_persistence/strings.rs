@@ -74,7 +74,7 @@ pub fn save_string_interner(path: &Path) -> Result<()> {
 /// save_string_interner(&path).unwrap();
 ///
 /// let data = load_string_interner(&path).unwrap();
-/// assert_eq!(data.version, 1);
+/// assert_eq!(data.version, aletheiadb::storage::index_persistence::MANIFEST_VERSION);
 /// ```
 ///
 /// # Errors

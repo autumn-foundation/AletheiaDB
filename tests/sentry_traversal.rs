@@ -69,6 +69,7 @@ mod tests {
                 input: Box::new(PhysicalOp::NodeLookup { node_ids: vec![a] }),
                 direction: aletheiadb::query::ir::Direction::Outgoing,
                 label: None,
+                min_depth: 2,
                 depth: 2,
                 temporal_context: None,
             },
@@ -107,6 +108,7 @@ mod tests {
                 }), // Double A
                 direction: aletheiadb::query::ir::Direction::Outgoing,
                 label: None,
+                min_depth: 1,
                 depth: 1,
                 temporal_context: None,
             },

@@ -226,6 +226,10 @@ pub fn traverse_and_rank<G: GraphView + ?Sized>(
 /// # Behavior Notes
 ///
 /// - Requires temporal vector indexing to be enabled via `enable_temporal_vector_index()`
+/// - With multiple temporal vector indexes enabled and no property specified,
+///   the alphabetically first indexed property is queried; prefer
+///   `AletheiaDB::find_similar_as_of_in` with an explicit property to
+///   disambiguate
 /// - Returns results from the nearest snapshot at or before the given timestamp
 /// - If no snapshots exist at the given timestamp, returns an error
 /// - Empty results indicate no vectors existed at that timestamp (not an error)

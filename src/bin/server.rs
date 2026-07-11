@@ -15,8 +15,8 @@
 //! # Run with permissive CORS (development only!)
 //! ALETHEIADB_CORS_PERMISSIVE=true cargo run --bin aletheia-server --features http-server
 //!
-//! # Health check
-//! curl http://localhost:1963/status
+//! # Health check (auth is required by default: pass a valid API key)
+//! curl -H "x-api-key: $ALETHEIADB_BOOTSTRAP_ADMIN_KEY" http://localhost:1963/status
 //! ```
 //!
 //! # Environment Variables
@@ -32,10 +32,37 @@
 //!   the server persists state across restarts. When unset (and `ALETHEIADB_CONFIG`
 //!   is also unset), runs in-memory (ephemeral — useful for demos, useless
 //!   for production).
+//! - `ALETHEIADB_AUTH_MODE`: `required` (default) or `anonymous`. In
+//!   `required` mode every request must present a valid API key
+//!   (`Authorization: Bearer <key>` or `x-api-key`), and the server refuses
+//!   to start with zero credentials. `anonymous` disables authentication
+//!   entirely (explicit opt-in; a prominent warning is logged). Invalid
+//!   values fall back to `required` (fail-closed) with a warning.
+//! - `ALETHEIADB_BOOTSTRAP_ADMIN_KEY`: Plaintext admin key installed at
+//!   startup as principal `bootstrap-admin` (role `admin`). Memory-only —
+//!   re-supply it on every start, or use it once to mint persisted keys via
+//!   `POST /admin/keys` (persisted under `{data_dir}/auth/keys.json` when a
+//!   data dir is configured).
 //!
 //! # Endpoints
 //!
-//! - `GET /status` - Health check endpoint, returns `{"status": "healthy"}`
+//! All AletheiaDB endpoints require a credential in `required` mode
+//! (`Authorization: Bearer <key>` or `x-api-key`); see
+//! `docs/guides/access-control-matrix.md` for role classes.
+//!
+//! - `GET /status` - Health check endpoint (metrics class), returns
+//!   `{"status": "healthy"}`
+//! - `POST /query` - JSON query API (`find_node`, `create_node`, bulk ops,
+//!   `execute_query`, ...); read or write class per operation
+//! - `POST /admin/keys` - Mint an API key (admin class)
+//! - `GET /admin/keys` - List principals, masked (admin class)
+//! - `POST /admin/keys/revoke` - Revoke a key by principal id (admin class)
+//!
+//! The autumn-web framework additionally serves unauthenticated
+//! health/metadata routes (`/health`, `/live`, `/ready`, `/startup`,
+//! `/actuator/health|info|metrics|a11y|ui`); its sensitive actuator group is
+//! force-disabled in every profile. See
+//! `docs/guides/security-quickstart.md`.
 //!
 //! # Security Notes
 //!
@@ -48,6 +75,7 @@
 //! The server handles SIGTERM and SIGINT signals for graceful shutdown,
 //! allowing in-flight requests to complete before terminating.
 
+use aletheiadb::auth::{SecretString, auth_mode_from_env};
 use aletheiadb::http::{CorsConfig, ServerConfig, run_server};
 use std::env;
 use std::path::PathBuf;
@@ -112,6 +140,18 @@ fn parse_data_dir() -> Option<PathBuf> {
     aletheiadb::config::data_dir_from_env()
 }
 
+/// Parse `ALETHEIADB_BOOTSTRAP_ADMIN_KEY` into a redacted secret, if set.
+///
+/// The value is trimmed: the HTTP extractor trims presented tokens, so an
+/// env value with stray whitespace (e.g. from `echo` without `-n` piped into
+/// the environment) could otherwise never verify.
+fn parse_bootstrap_admin_key() -> Option<SecretString> {
+    match env::var("ALETHEIADB_BOOTSTRAP_ADMIN_KEY") {
+        Ok(raw) if !raw.trim().is_empty() => Some(SecretString::new(raw.trim())),
+        _ => None,
+    }
+}
+
 #[autumn_web::main]
 async fn main() {
     let port = parse_port();
@@ -119,9 +159,16 @@ async fn main() {
     let cors = parse_cors_config();
     let data_dir = parse_data_dir();
 
-    let mut builder = ServerConfig::builder().port(port).host(host).cors(cors);
+    let mut builder = ServerConfig::builder()
+        .port(port)
+        .host(host)
+        .cors(cors)
+        .auth_mode(auth_mode_from_env());
     if let Some(path) = data_dir {
         builder = builder.data_dir(path);
+    }
+    if let Some(key) = parse_bootstrap_admin_key() {
+        builder = builder.bootstrap_admin_key(key);
     }
     let config = builder.build();
 

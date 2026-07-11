@@ -1,6 +1,6 @@
 [package]
 name = "aletheiadb"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.92"
 authors = ["AletheiaDB Contributors"]
@@ -44,6 +44,18 @@ tracy-client = { version = "0.18", optional = true, default-features = false }
 # Observability contract (optional via feature flags)
 tracing = { version = "0.1", optional = true }
 metrics = { version = "0.24", optional = true }
+
+# OpenTelemetry distributed tracing (Issue #3376), optional via the `otel`
+# feature. The OTLP exporter uses the HTTP/protobuf transport over the
+# already-present `reqwest` client, so no tonic/protoc build dependency is
+# introduced. `tracing-opentelemetry` bridges the crate's existing `tracing`
+# spans (ADR 0056) into OpenTelemetry; `tracing-subscriber` provides the
+# registry the OTel layer installs into.
+opentelemetry = { version = "0.30", optional = true }
+opentelemetry_sdk = { version = "0.30", optional = true, features = ["rt-tokio"] }
+opentelemetry-otlp = { version = "0.30", optional = true, default-features = false, features = ["trace", "http-proto", "reqwest-client"] }
+tracing-opentelemetry = { version = "0.31", optional = true }
+tracing-subscriber = { version = "0.3", optional = true, features = ["registry", "env-filter", "fmt", "std"] }
 
 # MCP server support (optional)
 # Note: rmcp re-exports schemars, so we don't need a separate dependency
@@ -98,6 +110,14 @@ hkdf = "0.13"
 sha2 = "0.11"
 zeroize = { version = "1.8", features = ["derive"] }
 aws-sdk-kms = { version = "1.106.0", optional = true }
+
+# Constant-time equality for API-key digest comparison (Issue #3350).
+subtle = "2.6"
+
+# Ed25519 asymmetric signatures for signed audit-export artifacts (Issue #3358).
+# Chosen over HMAC so third parties verify offline with ONLY the signer's public
+# key. Pure-Rust, RFC 8032 deterministic signatures → reproducible artifacts.
+ed25519-dalek = { version = "2", optional = true }
 
 [dev-dependencies]
 criterion = "0.8"
@@ -173,14 +193,43 @@ tracy = ["tracy-client/enable"]
 observability = ["dep:tracing"]
 metrics-rs = ["observability", "dep:metrics"]
 
+# OpenTelemetry distributed tracing + OTLP export (Issue #3376).
+# Composes with `observability` (reuses its span vocabulary / ADR 0056
+# contract) and adds an OTLP exporter, sampler, W3C context propagation, and
+# a process-wide subscriber installer. Zero cost when absent: the whole
+# `observability::otel` module and every call site are `#[cfg]`-compiled out.
+otel = [
+    "observability",
+    "dep:opentelemetry",
+    "dep:opentelemetry_sdk",
+    "dep:opentelemetry-otlp",
+    "dep:tracing-opentelemetry",
+    "dep:tracing-subscriber",
+    "dep:tokio",
+]
+
 # Default features
-default = ["config-toml"]
+default = ["config-toml", "audit-export"]
+
+# Signed audit export of entity history for compliance (Issue #3358).
+# Pulls Ed25519 (asymmetric offline-verifiable signatures) and serde (artifact
+# (de)serialization). On by default so the `aletheia` CLI ships audit-export /
+# audit-verify; cleanly excluded under --no-default-features.
+audit-export = ["dep:ed25519-dalek", "dep:serde"]
 
 # Async runtime support
 tokio = ["dep:tokio"]
 
+# Unified serde support (Issue #3390).
+# Single flag that pulls in the optional `serde` dependency and gates every
+# `#[derive(Serialize, Deserialize)]` / serde attribute in the crate. Any
+# feature that needs serde derives depends on this rather than `dep:serde`
+# directly, so serde-enabled code compiles identically regardless of which
+# high-level feature turned it on.
+serde = ["dep:serde"]
+
 # Configuration file support (TOML)
-config-toml = ["dep:serde", "dep:toml"]
+config-toml = ["serde", "dep:toml"]
 
 # Embedding generation via embed_anything.
 embeddings = [
@@ -194,11 +243,11 @@ embeddings = [
 # ONNX embedding support pulls in embed_anything's ort backend.
 embeddings-onnx = ["embeddings", "embed_anything/ort"]
 
-# MCP server support
-mcp-server = ["dep:rmcp", "dep:tokio", "dep:serde", "dep:base64"]
+# MCP server support (exposes the audit_export tool, so it implies audit-export)
+mcp-server = ["dep:rmcp", "dep:tokio", "serde", "dep:base64", "audit-export"]
 
 # Sharding RPC client support (uses blocking reqwest)
-sharding-rpc = ["dep:reqwest", "dep:serde", "dep:native-tls"]
+sharding-rpc = ["dep:reqwest", "serde", "dep:native-tls"]
 
 # SQL:2011 temporal syntax support
 sql = ["dep:sqlparser"]
@@ -218,14 +267,16 @@ http-server = [
     "dep:tower",
     "dep:tower-http",
     "dep:tokio",
-    "dep:serde",
+    "serde",
+    "dep:base64",
+    "dep:tracing",
 ]
 
 # MVCC snapshot-focused integration tests
 mvcc-snapshots-tdd = []
 
 # Encryption at rest (ADR-0028)
-encryption = ["dep:serde"]
+encryption = ["serde"]
 
 # AWS KMS key provider (optional)
 encryption-aws-kms = ["encryption", "dep:tokio"]
@@ -311,6 +362,13 @@ harness = false
 path = "benches/performance_targets.rs"
 required-features = []
 
+# OpenTelemetry tracing overhead gate (Issue #3376): disabled vs enabled.
+[[bench]]
+name = "otel_overhead"
+harness = false
+path = "benches/otel_overhead.rs"
+required-features = ["otel"]
+
 # Storage layer - raw storage primitives and fast path
 [[bench]]
 name = "current_state"
@@ -368,6 +426,19 @@ required-features = []
 name = "temporal_query"
 harness = false
 path = "benches/temporal_query.rs"
+required-features = []
+
+# Queryable bi-temporal extent (Issue #3238) - O(1) aggregate read + by-label fold
+[[bench]]
+name = "temporal_extent"
+harness = false
+path = "benches/temporal_extent.rs"
+required-features = []
+
+[[bench]]
+name = "derivation_lineage"
+harness = false
+path = "benches/derivation_lineage.rs"
 required-features = []
 
 [[bench]]
@@ -442,6 +513,13 @@ name = "uniqueness_constraints"
 harness = false
 path = "benches/uniqueness_constraints.rs"
 required-features = []
+
+# Per-query resource limits on the HTTP /query surface (Issue #3368)
+[[bench]]
+name = "http_query_limits"
+harness = false
+path = "benches/http_query_limits.rs"
+required-features = ["http-server"]
 
 # Unified CLI binary for local operations + daemon management
 [[bin]]

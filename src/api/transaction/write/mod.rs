@@ -11,7 +11,7 @@
 
 use super::{
     ReadOps, TransactionSnapshot, TxId, TxMetadata, TxState, TxVisibilityManager, WriteBuffer,
-    WriteOps,
+    WriteOps, WriteRequestOptions,
 };
 use crate::core::error::{Result, ResultExt, StorageError, TransactionError};
 use crate::core::graph::{Edge, Node};
@@ -401,6 +401,16 @@ impl WriteTransaction {
             None
         };
 
+        // Issue #3406: pre-generate the closing (delete tombstone / retraction)
+        // version ids BEFORE WAL logging, so the SAME ids are both (a) recorded
+        // in the WAL delete/retract payloads and (b) applied to historical
+        // storage. This makes crash recovery reproduce the live version chain
+        // bit-for-bit instead of synthesizing ids that can diverge from — or
+        // collide with — later-logged version ids. Generated here (id
+        // generators are lock-free atomics, order class 5) before the
+        // `current_timestamp` lock is taken, preserving the lock-order contract.
+        let closing_version_ids = self.pregenerate_closing_version_ids()?;
+
         // Acquire commit timestamp and perform mode-aware WAL flush.
         //
         // CRITICAL: We must hold the timestamp lock until WAL logging is complete
@@ -531,7 +541,7 @@ impl WriteTransaction {
 
             // Log operations to WAL (lock-free striped append!)
             // This must happen BEFORE applying changes for durability.
-            wal::log_operations_to_wal(self, commit)?;
+            wal::log_operations_to_wal(self, commit, &closing_version_ids)?;
 
             #[cfg(feature = "observability")]
             let wal_logged = std::time::Instant::now();
@@ -585,18 +595,53 @@ impl WriteTransaction {
 
         // Apply all changes atomically.
         // Nodes/edges are written with commit_timestamp: None during this phase.
-        apply::apply_changes(self, commit_timestamp)?;
+        //
+        // Issue #3425: `apply_changes` returns the `historical.write()` guard
+        // instead of dropping it internally. We hold it across finalization below
+        // so the current-side writes and their `commit_timestamp` finalization are
+        // atomic w.r.t. any snapshot (checkpoint / backup) holding `historical.read()`
+        // — closing the *in-memory* window in which a committed node/edge could be
+        // captured with `commit_timestamp: None`. (The persisted index format does
+        // not serialize `commit_timestamp` and reconstructs it as committed on
+        // restore, so this fix hardens the in-memory snapshot invariant rather than
+        // fixing any on-disk corruption.) This respects the documented lock order
+        // (`historical` precedes `snapshot_lock` and adjacency), so no lock-order
+        // inversion is introduced.
+        //
+        // The pre-generated closing version ids (Issue #3406) are consumed here
+        // in the same buffer order they were logged to the WAL.
+        let historical_guard = apply::apply_changes(self, commit_timestamp, &closing_version_ids)?;
 
-        // Notify temporal vector index of transaction completion (for snapshot creation)
-        // Only call this if the transaction modified vector properties to avoid unnecessary overhead
-        if self.buffer.has_vector_operations() {
-            self.current.on_temporal_vector_transaction()?;
-        }
+        // Test-only interleaving hook (Issue #3425): fires at the exact point
+        // between the historical writes and the commit-timestamp finalization,
+        // while `historical_guard` is held. Production builds compile this away.
+        #[cfg(test)]
+        commit_test_hooks::run_pre_finalize_hook();
 
         // Finalize commit timestamps in current storage.
         // Only reached on the success path — sets commit_timestamp: Some(T) on all
         // written nodes/edges, making them visible to future snapshot readers.
         apply::finalize_current_commit_timestamps(self, commit_timestamp);
+
+        // Finalization complete: release the historical write guard. Snapshots
+        // blocked on `historical.read()` now proceed and observe resolved timestamps.
+        //
+        // Issue #3425: only `finalize_current_commit_timestamps` must run under the
+        // guard to close the snapshot finalize window. The temporal-vector notify
+        // below is deliberately kept OUTSIDE the guard: it touches only the vector
+        // index's own locks and is independent of current-side commit_timestamp
+        // finalization, so serializing its (potentially O(N log N)) HNSW snapshot
+        // build under the global historical write lock would only add latency
+        // without any correctness benefit.
+        drop(historical_guard);
+
+        // Notify temporal vector index of transaction completion (for snapshot creation).
+        // Only call this if the transaction modified vector properties to avoid unnecessary overhead.
+        // No ordering dependency on finalize: the vectors were already added to the
+        // index during `apply_changes`; this only triggers snapshot creation.
+        if self.buffer.has_vector_operations() {
+            self.current.on_temporal_vector_transaction()?;
+        }
 
         // Commit the constraint guard before registering with the visibility manager.
         // Committing first ensures that freed old-value slots are released before
@@ -630,6 +675,42 @@ impl WriteTransaction {
         }
 
         Ok(commit_timestamp)
+    }
+
+    /// Pre-generate the closing version ids for every buffered delete/retract
+    /// operation, in buffer order (Issue #3406).
+    ///
+    /// Delete tombstones and valid-time retractions each append exactly one
+    /// closing version; both draw from the shared `version_id_gen`. Generating
+    /// them here — before the WAL log phase — lets the exact same id be written
+    /// into the WAL payload AND applied to historical storage, so crash
+    /// recovery reproduces the live version chain instead of synthesizing a
+    /// (potentially colliding) id.
+    ///
+    /// The returned vector has one id per delete/retract op in the buffer,
+    /// ordered to match the iteration order used by both
+    /// [`wal::log_operations_to_wal`] and [`apply::apply_changes`].
+    fn pregenerate_closing_version_ids(&self) -> Result<Vec<VersionId>> {
+        let num_closing = self
+            .buffer
+            .operations()
+            .iter()
+            .filter(|op| {
+                matches!(
+                    op,
+                    super::BufferedWrite::DeleteNode { .. }
+                        | super::BufferedWrite::DeleteEdge { .. }
+                        | super::BufferedWrite::RetractNode { .. }
+                        | super::BufferedWrite::RetractEdge { .. }
+                )
+            })
+            .count();
+
+        let mut ids = Vec::with_capacity(num_closing);
+        for _ in 0..num_closing {
+            ids.push(VersionId::new_unchecked(self.version_id_gen.next()?));
+        }
+        Ok(ids)
     }
 
     /// Rollback the transaction.
@@ -755,7 +836,8 @@ impl ReadOps for WriteTransaction {
                         commit_timestamp: None,
                     },
                 ))),
-                super::BufferedWrite::DeleteNode { .. } => {
+                super::BufferedWrite::DeleteNode { .. }
+                | super::BufferedWrite::RetractNode { .. } => {
                     Some(Err(StorageError::NodeNotFound(id).into()))
                 }
                 _ => None, // Not a node operation
@@ -830,7 +912,8 @@ impl ReadOps for WriteTransaction {
                         commit_timestamp: None,
                     },
                 ))),
-                super::BufferedWrite::DeleteEdge { .. } => {
+                super::BufferedWrite::DeleteEdge { .. }
+                | super::BufferedWrite::RetractEdge { .. } => {
                     Some(Err(StorageError::EdgeNotFound(id).into()))
                 }
                 _ => None, // Not an edge operation
@@ -860,16 +943,25 @@ impl ReadOps for WriteTransaction {
         result.record_error_metric()
     }
 
-    fn get_outgoing_edges(&self, node_id: NodeId) -> Vec<EdgeId> {
-        self.current.get_outgoing_edges(node_id)
+    fn get_outgoing_edges(&self, node_id: NodeId) -> Result<Vec<EdgeId>> {
+        // Existence check (Issue #359): consults the write buffer first (a node
+        // created in this tx exists; a node deleted in this tx does not), then
+        // falls back to a snapshot-isolated storage read.
+        self.get_node(node_id)?;
+        Ok(self.current.get_outgoing_edges(node_id))
     }
 
-    fn get_incoming_edges(&self, node_id: NodeId) -> Vec<EdgeId> {
-        self.current.get_incoming_edges(node_id)
+    fn get_incoming_edges(&self, node_id: NodeId) -> Result<Vec<EdgeId>> {
+        // Existence check (Issue #359): see get_outgoing_edges.
+        self.get_node(node_id)?;
+        Ok(self.current.get_incoming_edges(node_id))
     }
 
-    fn get_outgoing_edges_with_label(&self, node_id: NodeId, label: &str) -> Vec<EdgeId> {
-        self.current.get_outgoing_edges_with_label(node_id, label)
+    fn get_outgoing_edges_with_label(&self, node_id: NodeId, label: &str) -> Result<Vec<EdgeId>> {
+        // Existence check (Issue #359): see get_outgoing_edges. An existing node
+        // with no edges matching `label` is Ok(empty).
+        self.get_node(node_id)?;
+        Ok(self.current.get_outgoing_edges_with_label(node_id, label))
     }
 
     fn node_count(&self) -> usize {
@@ -946,12 +1038,51 @@ impl ReadOps for WriteTransaction {
     }
 }
 
+/// Buffered-version introspection (Issue #3231).
+///
+/// The `apply_batch` MCP surface reports a per-operation `version_id` for
+/// creates and updates. Those version ids are allocated eagerly at op call
+/// time and stored in the corresponding [`BufferedWrite`](super::BufferedWrite)
+/// variant; these accessors surface them without touching storage or any
+/// synchronization primitive — they are plain reads of the transaction's own
+/// write buffer (no lock-order implications).
+impl WriteTransaction {
+    /// Version ID of the latest buffered create/update for `node_id`, if any.
+    ///
+    /// Returns `None` when the node has no buffered write in this transaction,
+    /// or when its latest buffered write is a delete/retract (tombstone
+    /// versions are allocated at apply time and are not surfaced here).
+    pub fn buffered_node_version(&self, node_id: NodeId) -> Option<VersionId> {
+        match self.buffer.get_node_write(node_id) {
+            Some(
+                super::BufferedWrite::CreateNode { version_id, .. }
+                | super::BufferedWrite::UpdateNode { version_id, .. },
+            ) => Some(*version_id),
+            _ => None,
+        }
+    }
+
+    /// Version ID of the latest buffered create/update for `edge_id`, if any.
+    ///
+    /// Returns `None` when the edge has no buffered write in this transaction,
+    /// or when its latest buffered write is a delete/retract.
+    pub fn buffered_edge_version(&self, edge_id: EdgeId) -> Option<VersionId> {
+        match self.buffer.get_edge_write(edge_id) {
+            Some(
+                super::BufferedWrite::CreateEdge { version_id, .. }
+                | super::BufferedWrite::UpdateEdge { version_id, .. },
+            ) => Some(*version_id),
+            _ => None,
+        }
+    }
+}
+
 impl WriteOps for WriteTransaction {
-    fn create_node_with_valid_time(
+    fn create_node_with_options(
         &mut self,
         label: &str,
         properties: PropertyMap,
-        valid_from: Option<Timestamp>,
+        options: WriteRequestOptions,
     ) -> Result<NodeId> {
         let result = (|| {
             // Check transaction state
@@ -970,10 +1101,17 @@ impl WriteOps for WriteTransaction {
 
             // Get timestamp: use provided valid_from or default to transaction start time
             let timestamp = self.start_timestamp;
-            let valid_from = valid_from.unwrap_or(timestamp);
+            let valid_from = options.valid_from.unwrap_or(timestamp);
 
             // Validate valid_from is not too far in future
             validation::validate_valid_from_future(valid_from)?;
+
+            // Normalize an all-absent provenance bundle to `None` -- never
+            // persist a fabricated empty object (Issue #3224).
+            let provenance = options
+                .provenance
+                .filter(|p| !p.is_empty())
+                .map(std::sync::Arc::new);
 
             // Buffer the write
             self.buffer.add(super::BufferedWrite::CreateNode {
@@ -982,6 +1120,7 @@ impl WriteOps for WriteTransaction {
                 label: label_interned,
                 properties,
                 valid_from,
+                provenance,
             })?;
 
             Ok(node_id)
@@ -990,13 +1129,13 @@ impl WriteOps for WriteTransaction {
         result.record_error_metric()
     }
 
-    fn create_edge_with_valid_time(
+    fn create_edge_with_options(
         &mut self,
         source: NodeId,
         target: NodeId,
         label: &str,
         properties: PropertyMap,
-        valid_from: Option<Timestamp>,
+        options: WriteRequestOptions,
     ) -> Result<EdgeId> {
         let result = (|| {
             // Check transaction state
@@ -1015,7 +1154,17 @@ impl WriteOps for WriteTransaction {
 
             // Get timestamp: use provided valid_from or default to transaction start time
             let timestamp = self.start_timestamp;
-            let valid_from = valid_from.unwrap_or(timestamp);
+            let valid_from = options.valid_from.unwrap_or(timestamp);
+
+            // Validate valid_from is not too far in future
+            validation::validate_valid_from_future(valid_from)?;
+
+            // Normalize an all-absent provenance bundle to `None` -- never
+            // persist a fabricated empty object (Issue #3224).
+            let provenance = options
+                .provenance
+                .filter(|p| !p.is_empty())
+                .map(std::sync::Arc::new);
 
             // Buffer the write
             self.buffer.add(super::BufferedWrite::CreateEdge {
@@ -1026,6 +1175,7 @@ impl WriteOps for WriteTransaction {
                 label: label_interned,
                 properties,
                 valid_from,
+                provenance,
             })?;
 
             Ok(edge_id)
@@ -1034,11 +1184,11 @@ impl WriteOps for WriteTransaction {
         result.record_error_metric()
     }
 
-    fn update_node_with_valid_time(
+    fn update_node_with_options(
         &mut self,
         node_id: NodeId,
         properties: PropertyMap,
-        valid_from: Option<Timestamp>,
+        options: WriteRequestOptions,
     ) -> Result<()> {
         let result = (|| {
             // Check transaction state
@@ -1068,24 +1218,31 @@ impl WriteOps for WriteTransaction {
 
             // Get timestamp: use provided valid_from or default to transaction start time
             let timestamp = self.start_timestamp;
-            let valid_from = valid_from.unwrap_or(timestamp);
+            let valid_from = options.valid_from.unwrap_or(timestamp);
 
             // Validate valid_from is not too far in future
             validation::validate_valid_from_future(valid_from)?;
 
             // Validate valid_from is not before entity creation
-            let historical = self.historical.read();
-            if let Some(current_version_id) = historical.get_current_node_version(node_id)
-                && let Some(current_version) = historical.get_node_version(current_version_id)
-            {
-                let creation_time = current_version.temporal.valid_time().start();
-                drop(historical); // Release lock before calling validation
+            let creation_time = {
+                let historical = self.historical.read();
+                historical.node_creation_time(node_id)
+            };
+            if let Some(creation_time) = creation_time {
                 validation::validate_valid_from_not_before_creation(
                     &format!("node:{}", node_id.as_u64()),
                     creation_time,
                     valid_from,
                 )?;
             }
+
+            // Normalize an all-absent provenance bundle to `None` -- never
+            // persist a fabricated empty object (Issue #3224). This update's
+            // provenance is independent of whatever the prior version carried.
+            let provenance = options
+                .provenance
+                .filter(|p| !p.is_empty())
+                .map(std::sync::Arc::new);
 
             // Buffer the write with merged properties
             self.buffer.add(super::BufferedWrite::UpdateNode {
@@ -1094,6 +1251,7 @@ impl WriteOps for WriteTransaction {
                 label: node.label,
                 properties: merged_properties,
                 valid_from,
+                provenance,
             })?;
 
             Ok(())
@@ -1102,11 +1260,11 @@ impl WriteOps for WriteTransaction {
         result.record_error_metric()
     }
 
-    fn update_edge_with_valid_time(
+    fn update_edge_with_options(
         &mut self,
         edge_id: EdgeId,
         properties: PropertyMap,
-        valid_from: Option<Timestamp>,
+        options: WriteRequestOptions,
     ) -> Result<()> {
         let result = (|| {
             // Check transaction state
@@ -1136,7 +1294,7 @@ impl WriteOps for WriteTransaction {
 
             // Get timestamp: use provided valid_from or default to transaction start time
             let timestamp = self.start_timestamp;
-            let valid_from = valid_from.unwrap_or(timestamp);
+            let valid_from = options.valid_from.unwrap_or(timestamp);
 
             // Validate valid_from is not too far in future
             validation::validate_valid_from_future(valid_from)?;
@@ -1144,10 +1302,7 @@ impl WriteOps for WriteTransaction {
             // Validate valid_from is not before the edge's own creation time
             let creation_time = {
                 let historical = self.historical.read();
-                historical
-                    .get_current_edge_version(edge_id)
-                    .and_then(|vid| historical.get_edge_version(vid))
-                    .map(|v| v.temporal.valid_time().start())
+                historical.edge_creation_time(edge_id)
             };
             if let Some(creation_time) = creation_time {
                 validation::validate_valid_from_not_before_creation(
@@ -1156,6 +1311,14 @@ impl WriteOps for WriteTransaction {
                     valid_from,
                 )?;
             }
+
+            // Normalize an all-absent provenance bundle to `None` -- never
+            // persist a fabricated empty object (Issue #3224). This update's
+            // provenance is independent of whatever the prior version carried.
+            let provenance = options
+                .provenance
+                .filter(|p| !p.is_empty())
+                .map(std::sync::Arc::new);
 
             // Buffer the write with merged properties
             self.buffer.add(super::BufferedWrite::UpdateEdge {
@@ -1166,6 +1329,7 @@ impl WriteOps for WriteTransaction {
                 label: edge.label,
                 properties: merged_properties,
                 valid_from,
+                provenance,
             })?;
 
             Ok(())
@@ -1206,12 +1370,11 @@ impl WriteOps for WriteTransaction {
             validation::validate_valid_from_future(valid_from)?;
 
             // Validate valid_from is not before entity creation
-            let historical = self.historical.read();
-            if let Some(current_version_id) = historical.get_current_node_version(node_id)
-                && let Some(current_version) = historical.get_node_version(current_version_id)
-            {
-                let creation_time = current_version.temporal.valid_time().start();
-                drop(historical); // Release lock before calling validation
+            let creation_time = {
+                let historical = self.historical.read();
+                historical.node_creation_time(node_id)
+            };
+            if let Some(creation_time) = creation_time {
                 validation::validate_valid_from_not_before_creation(
                     &format!("node:{}", node_id.as_u64()),
                     creation_time,
@@ -1252,8 +1415,8 @@ impl WriteOps for WriteTransaction {
         // in the same transaction (but not yet committed) won't be found and deleted.
         // This is consistent with the existing ReadOps behavior but may leave orphaned
         // edges in same-transaction scenarios. See issue for future improvement.
-        let outgoing_edges = self.get_outgoing_edges(node_id);
-        let incoming_edges = self.get_incoming_edges(node_id);
+        let outgoing_edges = self.get_outgoing_edges(node_id)?;
+        let incoming_edges = self.get_incoming_edges(node_id)?;
 
         // Delete all connected edges first to maintain referential integrity
         // This prevents orphaned edges that reference a deleted node
@@ -1303,10 +1466,7 @@ impl WriteOps for WriteTransaction {
             // Validate valid_from is not before the edge's own creation time
             let creation_time = {
                 let historical = self.historical.read();
-                historical
-                    .get_current_edge_version(edge_id)
-                    .and_then(|vid| historical.get_edge_version(vid))
-                    .map(|v| v.temporal.valid_time().start())
+                historical.edge_creation_time(edge_id)
             };
             if let Some(creation_time) = creation_time {
                 validation::validate_valid_from_not_before_creation(
@@ -1329,14 +1489,356 @@ impl WriteOps for WriteTransaction {
     }
 }
 
+/// Valid-time retraction (Issue #3230).
+///
+/// Retraction closes an entity's valid-time interval at `valid_to` without
+/// deleting its history. It is a first-class bi-temporal operation, distinct
+/// from deletion:
+///
+/// - The pre-retraction head version's **transaction time** is closed at the
+///   retraction's commit time while its valid interval stays open-ended, so
+///   `AS OF SYSTEM_TIME` queries positioned before the retraction still show
+///   the fact as currently valid (append-only — the past record is never
+///   rewritten).
+/// - A **new version** is appended with the same properties and the closed
+///   valid interval `[valid_from, valid_to)`, so `AS OF VALID_TIME` queries
+///   strictly before `valid_to` keep returning the entity, while queries at
+///   or after `valid_to` do not.
+/// - The entity is removed from **current storage**: like a delete, a
+///   retracted entity is absent from current-state queries — but its full
+///   history remains queryable.
+impl WriteTransaction {
+    /// Buffer a valid-time retraction of a node.
+    ///
+    /// Idempotency: retracting an already-retracted (or deleted) node is a
+    /// no-op that returns the *existing* `valid_to` (with
+    /// `already_retracted: true`) — no version is appended and no WAL entry
+    /// is written, regardless of the `valid_to` passed here. This holds for
+    /// writes already buffered in THIS transaction too: a second
+    /// `retract_node` of the same node returns the first call's buffered
+    /// `valid_to`, and retracting a node this transaction has already
+    /// `delete_node`-ed mirrors the committed-delete case (a degenerate
+    /// `[d, d)` interval where `d` is the buffered deletion's valid time)
+    /// rather than double-buffering a write.
+    ///
+    /// # Errors
+    ///
+    /// - [`TemporalError::ValidTimeBeforeEntityCreation`](crate::core::error::TemporalError::ValidTimeBeforeEntityCreation)
+    ///   if `valid_to` precedes the node's current `valid_from`
+    ///   (`valid_to == valid_from` is allowed and yields an empty interval).
+    /// - [`TemporalError::ValidTimeTooFarInFuture`](crate::core::error::TemporalError::ValidTimeTooFarInFuture)
+    ///   if `valid_to` is more than one year in the future.
+    /// - [`StorageError::NodeNotFound`](crate::core::error::StorageError::NodeNotFound)
+    ///   if the node never existed.
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
+    pub fn retract_node(
+        &mut self,
+        node_id: NodeId,
+        valid_to: Timestamp,
+    ) -> Result<super::RetractionResult> {
+        let result = (|| {
+            // Check transaction state
+            if self.state != TxState::Active {
+                return Err(TransactionError::InvalidState {
+                    current: format!("{:?}", self.state),
+                    expected: "Active".to_string(),
+                }
+                .into());
+            }
+
+            // A retraction or deletion already buffered in THIS transaction
+            // is a no-op (mirrors the committed already-retracted/deleted
+            // cases below): without this guard a double retract — or a
+            // delete followed by a retract — would buffer two writes for
+            // the same node, WAL-appending twice and risking a half-applied
+            // state if the commit fails between them.
+            match self.buffer.get_node_write(node_id) {
+                Some(super::BufferedWrite::RetractNode {
+                    valid_to: buffered_valid_to,
+                    ..
+                }) => {
+                    let buffered_valid_to = *buffered_valid_to;
+                    let valid_from = self.head_node_valid_from(node_id);
+                    return Ok(super::RetractionResult {
+                        valid_from,
+                        valid_to: buffered_valid_to,
+                        already_retracted: true,
+                        edges_retracted: 0,
+                    });
+                }
+                Some(super::BufferedWrite::DeleteNode { valid_from, .. }) => {
+                    // Delete-parity: a committed delete leaves a tombstone
+                    // with the degenerate interval [d, d); report the same
+                    // shape for a deletion still sitting in this buffer.
+                    let deleted_at = *valid_from;
+                    return Ok(super::RetractionResult {
+                        valid_from: deleted_at,
+                        valid_to: deleted_at,
+                        already_retracted: true,
+                        edges_retracted: 0,
+                    });
+                }
+                _ => {}
+            }
+
+            match self.current.get_node(node_id) {
+                Ok(node) => {
+                    // If the node being retracted contains vector properties, mark
+                    // the buffer so the temporal vector index is notified on commit.
+                    if !self.buffer.has_vector_operations() && node.properties.contains_vector() {
+                        self.buffer.mark_has_vector_operations();
+                    }
+
+                    // The closed interval starts at the head version's
+                    // valid_from; `valid_to` must not precede it.
+                    let valid_from = self.head_node_valid_from(node_id);
+
+                    validation::validate_valid_from_future(valid_to)?;
+                    validation::validate_valid_from_not_before_creation(
+                        &format!("node:{}", node_id.as_u64()),
+                        valid_from,
+                        valid_to,
+                    )?;
+
+                    self.buffer
+                        .add(super::BufferedWrite::RetractNode { node_id, valid_to })?;
+
+                    Ok(super::RetractionResult {
+                        valid_from,
+                        valid_to,
+                        already_retracted: false,
+                        edges_retracted: 0,
+                    })
+                }
+                Err(err) => {
+                    // Absent from current state: either already retracted or
+                    // deleted (idempotent no-op) or it never existed.
+                    if let Some(interval) = self.closed_node_valid_interval(node_id) {
+                        return Ok(super::RetractionResult {
+                            valid_from: interval.start(),
+                            valid_to: interval.end(),
+                            already_retracted: true,
+                            edges_retracted: 0,
+                        });
+                    }
+                    Err(err)
+                }
+            }
+        })();
+
+        result.record_error_metric()
+    }
+
+    /// Buffer a valid-time retraction of an edge.
+    ///
+    /// See [`retract_node`](Self::retract_node) for the bi-temporal
+    /// semantics, idempotency contract, and errors (with
+    /// [`StorageError::EdgeNotFound`](crate::core::error::StorageError::EdgeNotFound)
+    /// for a never-existing edge).
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
+    pub fn retract_edge(
+        &mut self,
+        edge_id: EdgeId,
+        valid_to: Timestamp,
+    ) -> Result<super::RetractionResult> {
+        let result = (|| {
+            // Check transaction state
+            if self.state != TxState::Active {
+                return Err(TransactionError::InvalidState {
+                    current: format!("{:?}", self.state),
+                    expected: "Active".to_string(),
+                }
+                .into());
+            }
+
+            // A retraction already buffered in THIS transaction (e.g. the
+            // detach form visiting a self-loop from both adjacency
+            // directions) is a no-op returning the buffered end; a deletion
+            // already buffered in this transaction mirrors the
+            // committed-delete case (degenerate [d, d) tombstone interval)
+            // — see the identical guard in retract_node.
+            match self.buffer.get_edge_write(edge_id) {
+                Some(super::BufferedWrite::RetractEdge {
+                    valid_to: buffered_valid_to,
+                    ..
+                }) => {
+                    let buffered_valid_to = *buffered_valid_to;
+                    let valid_from = self.head_edge_valid_from(edge_id);
+                    return Ok(super::RetractionResult {
+                        valid_from,
+                        valid_to: buffered_valid_to,
+                        already_retracted: true,
+                        edges_retracted: 0,
+                    });
+                }
+                Some(super::BufferedWrite::DeleteEdge { valid_from, .. }) => {
+                    let deleted_at = *valid_from;
+                    return Ok(super::RetractionResult {
+                        valid_from: deleted_at,
+                        valid_to: deleted_at,
+                        already_retracted: true,
+                        edges_retracted: 0,
+                    });
+                }
+                _ => {}
+            }
+
+            match self.current.get_edge(edge_id) {
+                Ok(edge) => {
+                    if !self.buffer.has_vector_operations() && edge.properties.contains_vector() {
+                        self.buffer.mark_has_vector_operations();
+                    }
+
+                    let valid_from = self.head_edge_valid_from(edge_id);
+
+                    validation::validate_valid_from_future(valid_to)?;
+                    validation::validate_valid_from_not_before_creation(
+                        &format!("edge:{}", edge_id.as_u64()),
+                        valid_from,
+                        valid_to,
+                    )?;
+
+                    self.buffer
+                        .add(super::BufferedWrite::RetractEdge { edge_id, valid_to })?;
+
+                    Ok(super::RetractionResult {
+                        valid_from,
+                        valid_to,
+                        already_retracted: false,
+                        edges_retracted: 0,
+                    })
+                }
+                Err(err) => {
+                    if let Some(interval) = self.closed_edge_valid_interval(edge_id) {
+                        return Ok(super::RetractionResult {
+                            valid_from: interval.start(),
+                            valid_to: interval.end(),
+                            already_retracted: true,
+                            edges_retracted: 0,
+                        });
+                    }
+                    Err(err)
+                }
+            }
+        })();
+
+        result.record_error_metric()
+    }
+
+    /// The head version's `valid_from` for a node, falling back to the
+    /// transaction start time when the node has no recorded versions (e.g.
+    /// storage assembled without historical bookkeeping in tests).
+    fn head_node_valid_from(&self, node_id: NodeId) -> Timestamp {
+        let historical = self.historical.read();
+        historical
+            .get_current_node_version(node_id)
+            .and_then(|vid| historical.get_node_version(vid))
+            .map(|v| v.temporal.valid_time().start())
+            .unwrap_or(self.start_timestamp)
+    }
+
+    /// The head version's `valid_from` for an edge; see
+    /// [`head_node_valid_from`](Self::head_node_valid_from).
+    fn head_edge_valid_from(&self, edge_id: EdgeId) -> Timestamp {
+        let historical = self.historical.read();
+        historical
+            .get_current_edge_version(edge_id)
+            .and_then(|vid| historical.get_edge_version(vid))
+            .map(|v| v.temporal.valid_time().start())
+            .unwrap_or(self.start_timestamp)
+    }
+
+    /// If the node's head version carries a CLOSED valid interval (it was
+    /// retracted, or deleted via a tombstone), return that interval.
+    fn closed_node_valid_interval(
+        &self,
+        node_id: NodeId,
+    ) -> Option<crate::core::temporal::TimeRange> {
+        let historical = self.historical.read();
+        historical
+            .get_current_node_version(node_id)
+            .and_then(|vid| historical.get_node_version(vid))
+            .map(|v| v.temporal.valid_time())
+            .filter(|valid| !valid.is_current())
+    }
+
+    /// Edge counterpart of
+    /// [`closed_node_valid_interval`](Self::closed_node_valid_interval).
+    fn closed_edge_valid_interval(
+        &self,
+        edge_id: EdgeId,
+    ) -> Option<crate::core::temporal::TimeRange> {
+        let historical = self.historical.read();
+        historical
+            .get_current_edge_version(edge_id)
+            .and_then(|vid| historical.get_edge_version(vid))
+            .map(|v| v.temporal.valid_time())
+            .filter(|valid| !valid.is_current())
+    }
+}
+
 impl Drop for WriteTransaction {
     fn drop(&mut self) {
-        // Auto-rollback if not committed
-        if self.state == TxState::Active {
+        // Auto-rollback if the transaction never reached a terminal state.
+        //
+        // `Preparing` must be released here too (Issue #3415): a commit that
+        // fails at any pre-`register_commit` step (validation, conflict,
+        // constraint, WAL, or apply) leaves the consumed transaction in
+        // `Preparing`. Without covering that state, its `TxId` would never be
+        // removed from `TxVisibilityManager::active`, leaking one entry per
+        // failed commit and pinning the snapshot horizon forever. The success
+        // path transitions `Preparing -> Committed` before drop, so a committed
+        // transaction never matches and is never double-aborted; an explicit
+        // `rollback()`/`abort()` sets `Aborted` and likewise does not match.
+        if matches!(self.state, TxState::Active | TxState::Preparing) {
             self.buffer.clear();
             // Register abort with visibility manager
             self.visibility_manager.register_abort(self.tx_id);
             self.state = TxState::Aborted;
+        }
+    }
+}
+
+/// Test-only interleaving hooks for the commit path (Issue #3425).
+///
+/// These let a test park a committing writer at a precise point — between the
+/// historical writes and the commit-timestamp finalization — so a concurrent
+/// snapshot (checkpoint / backup) can be driven into the exact window the
+/// hardening closes. The entire module is `#[cfg(test)]`, so it is compiled
+/// out of production builds and adds zero cost to the commit hot path.
+#[cfg(test)]
+pub(crate) mod commit_test_hooks {
+    use std::sync::{Arc, Mutex};
+
+    type Hook = Arc<dyn Fn() + Send + Sync>;
+
+    static PRE_FINALIZE_HOOK: Mutex<Option<Hook>> = Mutex::new(None);
+
+    /// Install a hook fired just before `finalize_current_commit_timestamps`.
+    pub(crate) fn set_pre_finalize_hook(hook: Hook) {
+        *PRE_FINALIZE_HOOK
+            .lock()
+            .expect("pre-finalize hook mutex poisoned") = Some(hook);
+    }
+
+    /// Remove any installed pre-finalize hook.
+    pub(crate) fn clear_pre_finalize_hook() {
+        *PRE_FINALIZE_HOOK
+            .lock()
+            .expect("pre-finalize hook mutex poisoned") = None;
+    }
+
+    /// Invoke the installed pre-finalize hook, if any.
+    ///
+    /// The `Arc` is cloned out from under the mutex so the hook body never runs
+    /// while holding the registry lock (the hook may block for a long time).
+    pub(crate) fn run_pre_finalize_hook() {
+        let hook = PRE_FINALIZE_HOOK
+            .lock()
+            .expect("pre-finalize hook mutex poisoned")
+            .clone();
+        if let Some(hook) = hook {
+            hook();
         }
     }
 }

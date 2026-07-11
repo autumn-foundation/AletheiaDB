@@ -35,7 +35,9 @@
 use super::entry::WalEntry;
 use super::entry::{LSN, WalOperation};
 use crate::core::error::Result;
+use crate::core::id::VersionId;
 use crate::core::interning::InternedString;
+use crate::core::provenance::Provenance;
 use crate::core::temporal::Timestamp;
 
 // WAL operation type tags for the binary format.
@@ -49,11 +51,115 @@ pub(crate) const OP_DELETE_NODE: u8 = 6;
 pub(crate) const OP_DELETE_EDGE: u8 = 7;
 pub(crate) const OP_DECLARE_UNIQUE_CONSTRAINT: u8 = 8;
 pub(crate) const OP_DROP_UNIQUE_CONSTRAINT: u8 = 9;
+pub(crate) const OP_RETRACT_NODE: u8 = 10;
+pub(crate) const OP_RETRACT_EDGE: u8 = 11;
+
+/// Sentinel u64 stored in a v9+ delete/retract payload when the operation
+/// carries no tombstone `version_id` (Issue #3406). `u64::MAX` is always
+/// `> MAX_VALID_ID` (`u64::MAX - 1000`), so it can never collide with a real
+/// version id and round-trips cleanly back to `None` on parse. In practice the
+/// live write path always logs `Some(id)`; the sentinel only exists to make the
+/// `Option<VersionId>` serialization total.
+pub(crate) const TOMBSTONE_VERSION_ID_ABSENT: u64 = u64::MAX;
+/// Terminal transaction-commit marker (Issue #3413). Only appears in segments
+/// at or above `WAL_VERSION_TX_FRAMING`.
+pub(crate) const OP_COMMIT_TX: u8 = 12;
+/// Leading transaction-begin marker (Issue #3413). Only appears in segments at
+/// or above `WAL_VERSION_TX_FRAMING`.
+pub(crate) const OP_BEGIN_TX: u8 = 13;
 
 /// Helper to serialize an InternedString into the buffer (4-byte ID)
 #[inline(always)]
 fn serialize_interned_string(s: InternedString, buffer: &mut Vec<u8>) {
     buffer.extend_from_slice(&s.as_u32().to_le_bytes());
+}
+
+/// Serialize an optional tombstone/retraction `version_id` as a fixed 8-byte LE
+/// u64 (Issue #3406). `None` is encoded as [`TOMBSTONE_VERSION_ID_ABSENT`], a
+/// value that can never be a valid version id, so parsing round-trips it back
+/// to `None` and drives the replay synthesis fallback.
+#[inline]
+fn serialize_tombstone_version_id(version_id: Option<VersionId>, buffer: &mut Vec<u8>) {
+    let raw = version_id.map_or(TOMBSTONE_VERSION_ID_ABSENT, |v| v.as_u64());
+    buffer.extend_from_slice(&raw.to_le_bytes());
+}
+
+/// Serialize an optional `&str`: `[1-byte presence][4-byte LE len][UTF-8 bytes]`.
+#[inline]
+fn serialize_opt_str(s: Option<&str>, buffer: &mut Vec<u8>) {
+    match s {
+        None => buffer.push(0),
+        Some(s) => {
+            buffer.push(1);
+            let bytes = s.as_bytes();
+            buffer.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+            buffer.extend_from_slice(bytes);
+        }
+    }
+}
+
+/// Serialize an optional `f64`: `[1-byte presence][8-byte LE value]`.
+#[inline]
+fn serialize_opt_f64(v: Option<f64>, buffer: &mut Vec<u8>) {
+    match v {
+        None => buffer.push(0),
+        Some(v) => {
+            buffer.push(1);
+            buffer.extend_from_slice(&v.to_le_bytes());
+        }
+    }
+}
+
+/// Byte size of an optional `&str` as serialized by [`serialize_opt_str`].
+#[inline]
+fn opt_str_size(s: Option<&str>) -> usize {
+    1 + s.map(|s| 4 + s.len()).unwrap_or(0)
+}
+
+/// Byte size of an optional `f64` as serialized by [`serialize_opt_f64`].
+#[inline]
+fn opt_f64_size(v: Option<f64>) -> usize {
+    1 + if v.is_some() { 8 } else { 0 }
+}
+
+/// Serialize an optional [`Provenance`] bundle:
+/// `[1-byte presence][source][confidence][note][correlation_id][principal]`.
+///
+/// The five fields are only present when the outer presence byte is nonzero;
+/// each is itself independently optional (see [`serialize_opt_str`] /
+/// [`serialize_opt_f64`]). Written unconditionally by writers on this format
+/// version -- readers on older WAL versions never look for these bytes at
+/// all (see `WAL_VERSION_PROVENANCE` / `WAL_VERSION_PROVENANCE_PRINCIPAL`
+/// in `segment_reader.rs`; `principal` was added by Issue #3350).
+#[inline]
+fn serialize_provenance_into(provenance: Option<&Provenance>, buffer: &mut Vec<u8>) {
+    match provenance {
+        None => buffer.push(0),
+        Some(p) => {
+            buffer.push(1);
+            serialize_opt_str(p.source(), buffer);
+            serialize_opt_f64(p.confidence(), buffer);
+            serialize_opt_str(p.note(), buffer);
+            serialize_opt_str(p.correlation_id(), buffer);
+            serialize_opt_str(p.principal(), buffer);
+        }
+    }
+}
+
+/// Byte size of an optional [`Provenance`] bundle as serialized by
+/// [`serialize_provenance_into`].
+#[inline]
+fn provenance_serialized_size(provenance: Option<&Provenance>) -> usize {
+    match provenance {
+        None => 1,
+        Some(p) => {
+            1 + opt_str_size(p.source())
+                + opt_f64_size(p.confidence())
+                + opt_str_size(p.note())
+                + opt_str_size(p.correlation_id())
+                + opt_str_size(p.principal())
+        }
+    }
 }
 
 /// Estimate the required buffer capacity for serializing a WAL entry.
@@ -115,6 +221,7 @@ fn serialize_interned_string(s: InternedString, buffer: &mut Vec<u8>) {
 /// let delete_op = WalOperation::DeleteNode {
 ///     node_id: NodeId::try_from(1).unwrap(),
 ///     valid_from: Timestamp::from(12345),
+///     version_id: None, // no logged tombstone id (synthesized on replay)
 /// };
 ///
 /// // Fixed overhead (24 bytes) + DeleteNode payload (21 bytes)
@@ -129,33 +236,57 @@ pub(crate) fn estimate_entry_capacity(operation: &WalOperation) -> usize {
     const TIMESTAMP_SIZE: usize = 12;
 
     let variable_size = match operation {
-        WalOperation::CreateNode { properties, .. } => {
-            // op type (1) + node_id (8) + label (4-byte InternedString ID) + properties + valid_from (12)
+        WalOperation::CreateNode {
+            properties,
+            provenance,
+            ..
+        } => {
+            // op type (1) + node_id (8) + label (4-byte InternedString ID) + properties + valid_from (12) + provenance
             let base = 1 + 8 + 4 + TIMESTAMP_SIZE;
-            base + properties.serialized_size()
+            base + properties.serialized_size() + provenance_serialized_size(provenance.as_ref())
         }
-        WalOperation::CreateEdge { properties, .. } => {
-            // op type (1) + edge_id (8) + source (8) + target (8) + label (4-byte InternedString ID) + properties + valid_from (12)
+        WalOperation::CreateEdge {
+            properties,
+            provenance,
+            ..
+        } => {
+            // op type (1) + edge_id (8) + source (8) + target (8) + label (4-byte InternedString ID) + properties + valid_from (12) + provenance
             let base = 1 + 8 + 8 + 8 + 4 + TIMESTAMP_SIZE;
-            base + properties.serialized_size()
+            base + properties.serialized_size() + provenance_serialized_size(provenance.as_ref())
         }
-        WalOperation::UpdateNode { properties, .. } => {
-            // op type (1) + node_id (8) + version_id (8) + label (4-byte InternedString ID) + properties + valid_from (12)
+        WalOperation::UpdateNode {
+            properties,
+            provenance,
+            ..
+        } => {
+            // op type (1) + node_id (8) + version_id (8) + label (4-byte InternedString ID) + properties + valid_from (12) + provenance
             let base = 1 + 8 + 8 + 4 + TIMESTAMP_SIZE;
-            base + properties.serialized_size()
+            base + properties.serialized_size() + provenance_serialized_size(provenance.as_ref())
         }
-        WalOperation::UpdateEdge { properties, .. } => {
-            // op type (1) + edge_id (8) + version_id (8) + label (4-byte InternedString ID) + properties + valid_from (12)
+        WalOperation::UpdateEdge {
+            properties,
+            provenance,
+            ..
+        } => {
+            // op type (1) + edge_id (8) + version_id (8) + label (4-byte InternedString ID) + properties + valid_from (12) + provenance
             let base = 1 + 8 + 8 + 4 + TIMESTAMP_SIZE;
-            base + properties.serialized_size()
+            base + properties.serialized_size() + provenance_serialized_size(provenance.as_ref())
         }
         WalOperation::DeleteNode { .. } => {
-            // op type (1) + node_id (8) + valid_from (12)
-            1 + 8 + TIMESTAMP_SIZE
+            // op type (1) + node_id (8) + valid_from (12) + version_id (8, #3406)
+            1 + 8 + TIMESTAMP_SIZE + 8
         }
         WalOperation::DeleteEdge { .. } => {
-            // op type (1) + edge_id (8) + valid_from (12)
-            1 + 8 + TIMESTAMP_SIZE
+            // op type (1) + edge_id (8) + valid_from (12) + version_id (8, #3406)
+            1 + 8 + TIMESTAMP_SIZE + 8
+        }
+        WalOperation::RetractNode { .. } => {
+            // op type (1) + node_id (8) + valid_to (12) + version_id (8, #3406)
+            1 + 8 + TIMESTAMP_SIZE + 8
+        }
+        WalOperation::RetractEdge { .. } => {
+            // op type (1) + edge_id (8) + valid_to (12) + version_id (8, #3406)
+            1 + 8 + TIMESTAMP_SIZE + 8
         }
         WalOperation::Checkpoint { .. } => {
             // op type (1) + lsn (8) + timestamp (12)
@@ -165,6 +296,14 @@ pub(crate) fn estimate_entry_capacity(operation: &WalOperation) -> usize {
         | WalOperation::DropUniqueConstraint { .. } => {
             // op type (1) + label (4) + property (4)
             1 + 4 + 4
+        }
+        WalOperation::BeginTx { .. } => {
+            // op type (1) + tx_id (8)
+            1 + 8
+        }
+        WalOperation::CommitTx { .. } => {
+            // op type (1) + tx_id (8) + entry_count (4) + commit_timestamp (12)
+            1 + 8 + 4 + TIMESTAMP_SIZE
         }
     };
 
@@ -201,6 +340,7 @@ pub(crate) fn estimate_entry_capacity(operation: &WalOperation) -> usize {
 /// let op = WalOperation::DeleteNode {
 ///     node_id: NodeId::try_from(42).unwrap(),
 ///     valid_from: Timestamp::from(100),
+///     version_id: None, // no logged tombstone id (synthesized on replay)
 /// };
 ///
 /// // 1. Pre-allocate the buffer using our estimate
@@ -241,12 +381,14 @@ pub(crate) fn serialize_operation_into(
             label,
             properties,
             valid_from,
+            provenance,
         } => {
             buffer.push(OP_CREATE_NODE);
             buffer.extend_from_slice(&node_id.as_u64().to_le_bytes());
             serialize_interned_string(*label, buffer);
             properties.serialize_into(buffer)?;
             valid_from.serialize_into(buffer);
+            serialize_provenance_into(provenance.as_ref(), buffer);
         }
         WalOperation::CreateEdge {
             edge_id,
@@ -255,6 +397,7 @@ pub(crate) fn serialize_operation_into(
             label,
             properties,
             valid_from,
+            provenance,
         } => {
             buffer.push(OP_CREATE_EDGE);
             buffer.extend_from_slice(&edge_id.as_u64().to_le_bytes());
@@ -263,6 +406,7 @@ pub(crate) fn serialize_operation_into(
             serialize_interned_string(*label, buffer);
             properties.serialize_into(buffer)?;
             valid_from.serialize_into(buffer);
+            serialize_provenance_into(provenance.as_ref(), buffer);
         }
         WalOperation::UpdateNode {
             node_id,
@@ -270,6 +414,7 @@ pub(crate) fn serialize_operation_into(
             label,
             properties,
             valid_from,
+            provenance,
         } => {
             buffer.push(OP_UPDATE_NODE);
             buffer.extend_from_slice(&node_id.as_u64().to_le_bytes());
@@ -277,6 +422,7 @@ pub(crate) fn serialize_operation_into(
             serialize_interned_string(*label, buffer);
             properties.serialize_into(buffer)?;
             valid_from.serialize_into(buffer);
+            serialize_provenance_into(provenance.as_ref(), buffer);
         }
         WalOperation::UpdateEdge {
             edge_id,
@@ -284,6 +430,7 @@ pub(crate) fn serialize_operation_into(
             label,
             properties,
             valid_from,
+            provenance,
         } => {
             buffer.push(OP_UPDATE_EDGE);
             buffer.extend_from_slice(&edge_id.as_u64().to_le_bytes());
@@ -291,22 +438,51 @@ pub(crate) fn serialize_operation_into(
             serialize_interned_string(*label, buffer);
             properties.serialize_into(buffer)?;
             valid_from.serialize_into(buffer);
+            serialize_provenance_into(provenance.as_ref(), buffer);
         }
         WalOperation::DeleteNode {
             node_id,
             valid_from,
+            version_id,
         } => {
             buffer.push(OP_DELETE_NODE);
             buffer.extend_from_slice(&node_id.as_u64().to_le_bytes());
             valid_from.serialize_into(buffer);
+            // Issue #3406: log the tombstone version id (v9+ format). New
+            // segments always use the highest version, so this field is always
+            // present on disk; the sentinel handles a `None` (never produced by
+            // the live path) so the encoding is total.
+            serialize_tombstone_version_id(*version_id, buffer);
         }
         WalOperation::DeleteEdge {
             edge_id,
             valid_from,
+            version_id,
         } => {
             buffer.push(OP_DELETE_EDGE);
             buffer.extend_from_slice(&edge_id.as_u64().to_le_bytes());
             valid_from.serialize_into(buffer);
+            serialize_tombstone_version_id(*version_id, buffer);
+        }
+        WalOperation::RetractNode {
+            node_id,
+            valid_to,
+            version_id,
+        } => {
+            buffer.push(OP_RETRACT_NODE);
+            buffer.extend_from_slice(&node_id.as_u64().to_le_bytes());
+            valid_to.serialize_into(buffer);
+            serialize_tombstone_version_id(*version_id, buffer);
+        }
+        WalOperation::RetractEdge {
+            edge_id,
+            valid_to,
+            version_id,
+        } => {
+            buffer.push(OP_RETRACT_EDGE);
+            buffer.extend_from_slice(&edge_id.as_u64().to_le_bytes());
+            valid_to.serialize_into(buffer);
+            serialize_tombstone_version_id(*version_id, buffer);
         }
         WalOperation::Checkpoint { lsn, timestamp } => {
             buffer.push(OP_CHECKPOINT);
@@ -323,6 +499,20 @@ pub(crate) fn serialize_operation_into(
             buffer.push(OP_DROP_UNIQUE_CONSTRAINT);
             serialize_interned_string(*label, buffer);
             serialize_interned_string(*property, buffer);
+        }
+        WalOperation::BeginTx { tx_id } => {
+            buffer.push(OP_BEGIN_TX);
+            buffer.extend_from_slice(&tx_id.to_le_bytes());
+        }
+        WalOperation::CommitTx {
+            tx_id,
+            entry_count,
+            commit_timestamp,
+        } => {
+            buffer.push(OP_COMMIT_TX);
+            buffer.extend_from_slice(&tx_id.to_le_bytes());
+            buffer.extend_from_slice(&entry_count.to_le_bytes());
+            commit_timestamp.serialize_into(buffer);
         }
     }
 
@@ -390,16 +580,17 @@ mod tests {
 
     #[test]
     fn test_estimate_capacity_delete_node() {
-        // DeleteNode: op type (1) + node_id (8) + valid_from (12) = 21 bytes
+        // DeleteNode: op type (1) + node_id (8) + valid_from (12) + version_id (8) = 29 bytes
         // Fixed overhead: 24 bytes
-        // Total: 45 bytes
+        // Total: 53 bytes (Issue #3406 added the 8-byte tombstone version_id)
         let op = WalOperation::DeleteNode {
             node_id: NodeId::new(1).unwrap(),
             valid_from: test_timestamp(),
+            version_id: Some(VersionId::new(7).unwrap()),
         };
 
         let estimated = estimate_entry_capacity(&op);
-        assert_eq!(estimated, 45, "DeleteNode should be exactly 45 bytes");
+        assert_eq!(estimated, 53, "DeleteNode should be exactly 53 bytes");
 
         // Verify by actually serializing
         let entry = WalEntry::new(LSN(1), op);
@@ -414,17 +605,66 @@ mod tests {
     }
 
     #[test]
-    fn test_estimate_capacity_delete_edge() {
-        // DeleteEdge: op type (1) + edge_id (8) + valid_from (12) = 21 bytes
-        // Fixed overhead: 24 bytes
-        // Total: 45 bytes
-        let op = WalOperation::DeleteEdge {
-            edge_id: EdgeId::new(1).unwrap(),
-            valid_from: test_timestamp(),
+    fn test_estimate_capacity_retract_node() {
+        // RetractNode: op type (1) + node_id (8) + valid_to (12) + version_id (8) = 29 bytes
+        // Fixed overhead: 24 bytes => 53 total (same shape as DeleteNode, #3406).
+        let op = WalOperation::RetractNode {
+            node_id: NodeId::new(1).unwrap(),
+            valid_to: test_timestamp(),
+            version_id: Some(VersionId::new(7).unwrap()),
         };
 
         let estimated = estimate_entry_capacity(&op);
-        assert_eq!(estimated, 45, "DeleteEdge should be exactly 45 bytes");
+        assert_eq!(estimated, 53, "RetractNode should be exactly 53 bytes");
+
+        let entry = WalEntry::new(LSN(1), op);
+        let mut buffer = Vec::new();
+        serialize_entry_into(&entry, &mut buffer).unwrap();
+        assert!(
+            buffer.len() <= estimated,
+            "Actual size {} should not exceed estimate {}",
+            buffer.len(),
+            estimated
+        );
+    }
+
+    #[test]
+    fn test_estimate_capacity_retract_edge() {
+        // RetractEdge: op type (1) + edge_id (8) + valid_to (12) + version_id (8) = 29 bytes
+        // Fixed overhead: 24 bytes => 53 total (same shape as DeleteEdge, #3406).
+        let op = WalOperation::RetractEdge {
+            edge_id: EdgeId::new(1).unwrap(),
+            valid_to: test_timestamp(),
+            version_id: Some(VersionId::new(7).unwrap()),
+        };
+
+        let estimated = estimate_entry_capacity(&op);
+        assert_eq!(estimated, 53, "RetractEdge should be exactly 53 bytes");
+
+        let entry = WalEntry::new(LSN(1), op);
+        let mut buffer = Vec::new();
+        serialize_entry_into(&entry, &mut buffer).unwrap();
+        assert!(
+            buffer.len() <= estimated,
+            "Actual size {} should not exceed estimate {}",
+            buffer.len(),
+            estimated
+        );
+    }
+
+    #[test]
+    fn test_estimate_capacity_delete_edge() {
+        // DeleteEdge: op type (1) + edge_id (8) + valid_from (12) + version_id (8) = 29 bytes
+        // Fixed overhead: 24 bytes
+        // Total: 53 bytes (Issue #3406 added the 8-byte tombstone version_id)
+        let op = WalOperation::DeleteEdge {
+            edge_id: EdgeId::new(1).unwrap(),
+            valid_from: test_timestamp(),
+            version_id: Some(VersionId::new(7).unwrap()),
+        };
+
+        let estimated = estimate_entry_capacity(&op);
+        assert_eq!(estimated, 53, "DeleteEdge should be exactly 53 bytes");
 
         // Verify by actually serializing
         let entry = WalEntry::new(LSN(1), op);
@@ -440,21 +680,23 @@ mod tests {
 
     #[test]
     fn test_estimate_capacity_create_node_empty_properties() {
-        // CreateNode with empty properties:
+        // CreateNode with empty properties, no provenance:
         // Fixed: 24 bytes (LSN + Timestamp + Checksum)
-        // op type (1) + node_id (8) + label (4-byte InternedString) + properties (4 for empty count) + valid_from (12)
-        // = 24 + 1 + 8 + 4 + 4 + 12 = 53 bytes
+        // op type (1) + node_id (8) + label (4-byte InternedString) + properties (4 for empty count)
+        // + valid_from (12) + provenance presence byte (1, absent)
+        // = 24 + 1 + 8 + 4 + 4 + 12 + 1 = 54 bytes
         let op = WalOperation::CreateNode {
             node_id: NodeId::new(1).unwrap(),
             label: GLOBAL_INTERNER.intern("test").unwrap(),
             properties: PropertyMapBuilder::new().build(),
             valid_from: test_timestamp(),
+            provenance: None,
         };
 
         let estimated = estimate_entry_capacity(&op);
         assert_eq!(
-            estimated, 53,
-            "CreateNode with empty properties should be 53 bytes"
+            estimated, 54,
+            "CreateNode with empty properties (no provenance) should be 54 bytes"
         );
 
         // Verify by actually serializing
@@ -483,6 +725,7 @@ mod tests {
             label: GLOBAL_INTERNER.intern("Person").unwrap(),
             properties,
             valid_from: test_timestamp(),
+            provenance: None,
         };
 
         let estimated = estimate_entry_capacity(&op);
@@ -524,6 +767,7 @@ mod tests {
             label: GLOBAL_INTERNER.intern("KNOWS").unwrap(),
             properties,
             valid_from: test_timestamp(),
+            provenance: None,
         };
 
         let estimated = estimate_entry_capacity(&op);
@@ -562,6 +806,7 @@ mod tests {
             label: GLOBAL_INTERNER.intern("Document").unwrap(),
             properties,
             valid_from: test_timestamp(),
+            provenance: None,
         };
 
         let estimated = estimate_entry_capacity(&op);
@@ -602,6 +847,7 @@ mod tests {
             label: GLOBAL_INTERNER.intern("LargeNode").unwrap(),
             properties,
             valid_from: test_timestamp(),
+            provenance: None,
         };
 
         let estimated = estimate_entry_capacity(&op);
@@ -632,7 +878,7 @@ mod tests {
 mod prop_tests {
     use super::*;
     use crate::core::hlc::HybridTimestamp;
-    use crate::core::id::NodeId;
+    use crate::core::id::{EdgeId, NodeId};
     use crate::core::interning::GLOBAL_INTERNER;
     use crate::core::property::{PropertyMap, PropertyMapBuilder, PropertyValue};
     use proptest::prelude::*;
@@ -676,6 +922,18 @@ mod prop_tests {
         any::<i64>().prop_map(|t| HybridTimestamp::new_unchecked(t, 0))
     }
 
+    // Helper to generate an OPTIONAL tombstone/retraction version id (Issue
+    // #3406). Generates both `Some(id)` and `None` so the `u64::MAX` absent
+    // sentinel is fuzzed alongside real ids. The `Some` range stays well below
+    // both the sentinel and `MAX_VALID_ID`, so a fuzzed id is never mistaken for
+    // the sentinel and always survives `VersionId::new` validation on parse.
+    fn arb_opt_version_id() -> impl Strategy<Value = Option<VersionId>> {
+        prop_oneof![
+            Just(None),
+            (1u64..1_000_000u64).prop_map(|id| Some(VersionId::new_unchecked(id))),
+        ]
+    }
+
     // Helper to generate WalOperation
     fn arb_wal_operation() -> impl Strategy<Value = WalOperation> {
         prop_oneof![
@@ -692,17 +950,22 @@ mod prop_tests {
                         label,
                         properties,
                         valid_from,
+                        provenance: None,
                     }
                 }),
-            // DeleteNode
+            // DeleteNode (Issue #3406: fuzz BOTH a logged tombstone id AND the
+            // `None`/sentinel case, so the u64::MAX absent encoding is exercised
+            // through the estimate/serialize path too).
             (
                 (1u64..u64::MAX).prop_map(|id| NodeId::new(id).unwrap()),
-                arb_timestamp()
+                arb_timestamp(),
+                arb_opt_version_id(),
             )
-                .prop_map(|(node_id, valid_from)| {
+                .prop_map(|(node_id, valid_from, version_id)| {
                     WalOperation::DeleteNode {
                         node_id,
                         valid_from,
+                        version_id,
                     }
                 }),
             // Checkpoint
@@ -744,6 +1007,53 @@ mod prop_tests {
             // Small payloads might have high constant overhead relative to size, so be lenient
             if actual > 100 {
                 prop_assert!(estimated <= actual * 2, "Estimate {} > 2x Actual {}", estimated, actual);
+            }
+        }
+
+        /// Issue #3406: every delete/retract op's optional tombstone
+        /// `version_id` — INCLUDING the `None` case (encoded as the u64::MAX
+        /// sentinel) — round-trips serialize -> parse byte-for-byte. Fuzzing
+        /// `None` alongside `Some(id)` ensures the sentinel is decoded back to
+        /// `None` (not a spurious `Some(u64::MAX)`), and that the parser
+        /// consumes exactly the bytes serialized.
+        #[test]
+        fn delete_retract_version_id_round_trips(
+            id in 1u64..1_000_000u64,
+            ts in 1i64..1_000_000_000_000i64,
+            version_id in arb_opt_version_id(),
+        ) {
+            use crate::storage::wal::segment_reader::{parse_entry_at, WAL_VERSION_DELETE_VERSION_ID};
+            let ts = HybridTimestamp::new_unchecked(ts, 0);
+            let ops = [
+                WalOperation::DeleteNode {
+                    node_id: NodeId::new(id).unwrap(),
+                    valid_from: ts,
+                    version_id,
+                },
+                WalOperation::DeleteEdge {
+                    edge_id: EdgeId::new(id).unwrap(),
+                    valid_from: ts,
+                    version_id,
+                },
+                WalOperation::RetractNode {
+                    node_id: NodeId::new(id).unwrap(),
+                    valid_to: ts,
+                    version_id,
+                },
+                WalOperation::RetractEdge {
+                    edge_id: EdgeId::new(id).unwrap(),
+                    valid_to: ts,
+                    version_id,
+                },
+            ];
+            for op in ops {
+                let entry = WalEntry::new(LSN(1), op.clone());
+                let mut buffer = Vec::new();
+                serialize_entry_into(&entry, &mut buffer).unwrap();
+                let (parsed, consumed) =
+                    parse_entry_at(&buffer, 0, WAL_VERSION_DELETE_VERSION_ID).unwrap();
+                prop_assert_eq!(consumed, buffer.len());
+                prop_assert_eq!(parsed.operation, op);
             }
         }
     }

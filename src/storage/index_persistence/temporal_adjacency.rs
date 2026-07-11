@@ -95,8 +95,14 @@ pub fn load_temporal_adjacency_index(data_dir: &Path) -> Result<Arc<TemporalAdja
         ))
     })?;
 
-    // Validate version
-    if data.version != MANIFEST_VERSION {
+    // Validate version. Like the other index formats (graph, manifest,
+    // strings, vector), this only rejects strictly-newer versions: the
+    // on-disk shape of `TemporalAdjacencyData` has not changed since it was
+    // introduced, so any older file sharing the crate-wide `MANIFEST_VERSION`
+    // counter (e.g. bumped by an unrelated format's schema change, such as
+    // Issue #3224's provenance addition to the temporal-index format) is
+    // still byte-compatible and must keep loading correctly.
+    if data.version > MANIFEST_VERSION {
         return Err(IndexPersistenceError::Serialization(format!(
             "Unsupported temporal adjacency format version: {} (expected: {})",
             data.version, MANIFEST_VERSION
@@ -222,4 +228,67 @@ fn convert_from_persisted(
         tx_from,
         tx_to,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression test: `TemporalAdjacencyData`'s on-disk shape has not
+    /// changed since it was introduced, but it shares the crate-wide
+    /// `MANIFEST_VERSION` counter with unrelated formats (e.g. the
+    /// temporal-index format bumped by Issue #3224's provenance addition).
+    /// A file written when `MANIFEST_VERSION` was 1 must still load
+    /// correctly after an unrelated format bump takes the shared constant
+    /// to 2 or higher, since this format's bytes are unaffected.
+    #[test]
+    fn load_accepts_older_manifest_version_with_unchanged_shape() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let data_dir = temp_dir.path().to_path_buf();
+        let adjacency_dir = data_dir.join("temporal_adjacency");
+        std::fs::create_dir_all(&adjacency_dir).unwrap();
+
+        // Simulate a file written by a build where MANIFEST_VERSION was
+        // still 1 (before some unrelated format's schema bump). The shape
+        // of `TemporalAdjacencyData` itself is unchanged, so this must
+        // still decode successfully.
+        let data = TemporalAdjacencyData {
+            magic: TEMPORAL_ADJACENCY_MAGIC,
+            version: 1,
+            outgoing: vec![],
+        };
+        let bytes = bitcode::encode(&data);
+        std::fs::write(adjacency_dir.join("adjacency.idx"), &bytes).unwrap();
+
+        let loaded = load_temporal_adjacency_index(&data_dir).unwrap();
+        let t = crate::core::temporal::time::now();
+        assert_eq!(
+            loaded
+                .get_outgoing_at_time(NodeId::new(1).unwrap(), t, t)
+                .len(),
+            0
+        );
+    }
+
+    #[test]
+    fn load_rejects_strictly_newer_manifest_version() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let data_dir = temp_dir.path().to_path_buf();
+        let adjacency_dir = data_dir.join("temporal_adjacency");
+        std::fs::create_dir_all(&adjacency_dir).unwrap();
+
+        let data = TemporalAdjacencyData {
+            magic: TEMPORAL_ADJACENCY_MAGIC,
+            version: MANIFEST_VERSION + 1,
+            outgoing: vec![],
+        };
+        let bytes = bitcode::encode(&data);
+        std::fs::write(adjacency_dir.join("adjacency.idx"), &bytes).unwrap();
+
+        match load_temporal_adjacency_index(&data_dir) {
+            Err(IndexPersistenceError::Serialization(_)) => {}
+            Err(other) => panic!("expected Serialization error, got {other:?}"),
+            Ok(_) => panic!("expected an error, but load succeeded"),
+        }
+    }
 }

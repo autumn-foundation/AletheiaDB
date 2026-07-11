@@ -11,6 +11,7 @@ use crate::index::adjacency::AdjacencyEntry;
 use crate::index::incremental_adjacency::{CompactionScheduler, IncrementalAdjacencyIndex};
 use dashmap::DashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread::JoinHandle;
 
 // Note: AdjacencyGuard was removed in favor of MergedAdjacencyGuard from incremental_adjacency.
@@ -59,6 +60,19 @@ pub struct CurrentIndexes {
     outgoing_compaction: Option<(CompactionScheduler, JoinHandle<()>)>,
     /// Optional background compaction scheduler for incoming index
     incoming_compaction: Option<(CompactionScheduler, JoinHandle<()>)>,
+    /// Monotonic high-water-mark: `max(node id ever inserted) + 1`, i.e. an
+    /// exclusive upper bound on the node id space.
+    ///
+    /// Maintained by [`insert_node`](Self::insert_node) via a relaxed
+    /// `fetch_max` and never decremented on delete, so it bounds the full range
+    /// of ids that could hold a live node. The query executor's full-scan
+    /// iterator uses it to sweep `[0, bound)` lazily without materializing the
+    /// id set. Reading the index directly (rather than an id generator) is
+    /// essential: in the transactional write path node ids are allocated by a
+    /// database-level generator and inserted here via `insert_node_direct`, so
+    /// the storage's own id generator is never advanced and cannot bound a
+    /// scan.
+    max_node_id: AtomicU64,
 }
 
 impl CurrentIndexes {
@@ -75,6 +89,7 @@ impl CurrentIndexes {
             incoming: Arc::new(IncrementalAdjacencyIndex::new()),
             outgoing_compaction: None,
             incoming_compaction: None,
+            max_node_id: AtomicU64::new(0),
         }
     }
 
@@ -102,6 +117,7 @@ impl CurrentIndexes {
             incoming,
             outgoing_compaction: Some((outgoing_scheduler, outgoing_handle)),
             incoming_compaction: Some((incoming_scheduler, incoming_handle)),
+            max_node_id: AtomicU64::new(0),
         }
     }
 
@@ -152,8 +168,24 @@ impl CurrentIndexes {
     /// can scan 16-byte headers instead of full nodes.
     pub fn insert_node(&self, node: Node) {
         let header = NodeHeader::from(&node);
+        // Advance the exclusive high-water-mark before moving the node. Relaxed
+        // ordering suffices: the scan bound is an approximate upper bound, and
+        // node visibility itself is governed by the DashMap insert below.
+        self.max_node_id
+            .fetch_max(node.id.as_u64().wrapping_add(1), Ordering::Relaxed);
         self.nodes.insert(node.id, node);
         self.node_headers.insert(header.id, header);
+    }
+
+    /// Exclusive upper bound on the node id space: `max(id ever inserted) + 1`.
+    ///
+    /// Returns `0` for an empty index. This is a relaxed, monotonically
+    /// non-decreasing read intended for bounding a lazy full scan over
+    /// `[0, bound)`; it is not a live node count and does not shrink when nodes
+    /// are deleted.
+    #[inline]
+    pub fn max_node_id_exclusive(&self) -> u64 {
+        self.max_node_id.load(Ordering::Relaxed)
     }
 
     /// Insert an edge into the indexes.

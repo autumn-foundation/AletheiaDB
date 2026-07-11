@@ -20,15 +20,23 @@ fn main() -> Result<()> {
 }
 ```
 
-`AletheiaDB::new()` creates a **disk-backed** database in `./aletheiadb/wal`
-(relative to the current working directory) with Group Commit durability. Data
-survives process restart. For a different path, in-memory testing, or custom
-durability settings, use `AletheiaDB::with_unified_config()` — see
-[Persistence Guide](PERSISTENCE.md).
+`AletheiaDB::new()` creates an **ephemeral**, tempdir-backed database — it
+does not survive process restart. That's the right choice for this guide's
+examples, tests, and scratch sessions. For a database that persists at a
+path you choose, use `AletheiaDB::open(path)` instead:
 
-> **Note on leftover state**: If you run examples in the same directory repeatedly,
-> you may see `InvalidTimeRange` errors from previous runs. Clear `./aletheiadb`
-> between runs, or point each run at its own directory via `AletheiaDBConfig`.
+```rust
+let db = AletheiaDB::open("./mydb")?;
+```
+
+> **Note on leftover state**: Unlike `new()`, data at a path passed to
+> `open()` survives between runs. If you run this guide's examples against
+> the same `./mydb` directory more than once, each run adds its own nodes on
+> top of the last rather than starting fresh. Delete `./mydb` between runs,
+> or point each run at its own path, if you want a clean slate.
+
+For custom durability settings or cold storage, use
+`AletheiaDB::with_unified_config()` — see [Persistence Guide](PERSISTENCE.md).
 
 ---
 

@@ -219,6 +219,30 @@ impl PhysicalPlan {
                     line.push_str(&format!(" [property={}]", prop));
                 }
             }
+            PhysicalOp::TemporalNodeScan {
+                label,
+                valid_time,
+                transaction_time,
+            } => {
+                line.push_str(&format!(" (vt={}, tt={})", valid_time, transaction_time));
+                if let Some(l) = label {
+                    line.push_str(&format!(" [label={}]", l));
+                }
+            }
+            PhysicalOp::TemporalNodeRangeScan {
+                label,
+                valid_from,
+                valid_to,
+                transaction_time,
+            } => {
+                line.push_str(&format!(
+                    " (valid=[{}, {}), tt={})",
+                    valid_from, valid_to, transaction_time
+                ));
+                if let Some(l) = label {
+                    line.push_str(&format!(" [label={}]", l));
+                }
+            }
             PhysicalOp::SimilarToNode {
                 k,
                 label_filter,
@@ -262,10 +286,8 @@ impl PhysicalPlan {
             PhysicalOp::VectorRerank { k, .. } => {
                 line.push_str(&format!(" (k={})", k));
             }
-            PhysicalOp::Sort {
-                key, descending, ..
-            } => {
-                line.push_str(&format!(" (key={:?}, desc={})", key, descending));
+            PhysicalOp::Sort { keys, .. } => {
+                line.push_str(&format!(" (keys={:?})", keys));
             }
             PhysicalOp::HashJoin {
                 left_key,
@@ -293,9 +315,11 @@ impl PhysicalPlan {
             | PhysicalOp::Project { input, .. }
             | PhysicalOp::Distinct { input, .. }
             | PhysicalOp::Count { input, .. }
+            | PhysicalOp::Aggregate { input, .. }
             | PhysicalOp::Materialize { input, .. }
             | PhysicalOp::TemporalTrack { input, .. }
-            | PhysicalOp::IndexedTraversal { input, .. } => {
+            | PhysicalOp::IndexedTraversal { input, .. }
+            | PhysicalOp::OptionalApply { input, .. } => {
                 self.explain_op(input, output, indent + 1, "└─ ");
             }
 
@@ -416,6 +440,50 @@ pub enum PhysicalOp {
         property_key: Option<String>,
     },
 
+    /// Point-in-time label scan (`AS OF`).
+    ///
+    /// The temporal analogue of [`NodeScan`](PhysicalOp::NodeScan): instead of
+    /// scanning current storage it reconstructs every historically-versioned
+    /// node **as it existed** at `(valid_time, transaction_time)`, keeping only
+    /// those matching the optional `label`. Nodes that did not exist at that
+    /// bi-temporal point are skipped (not errors). Produced by the planner when
+    /// a label scan carries a point-in-time `TemporalContext` (Issues #550,
+    /// #551).
+    TemporalNodeScan {
+        /// Optional label filter
+        label: Option<String>,
+        /// Valid time for the reconstruction
+        valid_time: Timestamp,
+        /// Transaction time for the reconstruction
+        transaction_time: Timestamp,
+    },
+
+    /// Valid-time range label scan (`BETWEEN ... AND ...`).
+    ///
+    /// An **as-of-`transaction_time` snapshot across a valid-time range**: emits
+    /// every node version believed at `transaction_time` (its transaction
+    /// interval contains it -- the same predicate a point `AS OF` uses) whose
+    /// valid-time interval **overlaps** `[valid_from, valid_to)`, keeping only
+    /// those matching the optional `label`. Equals the union, over every valid
+    /// instant in the range, of `AS OF (v, transaction_time)`, deduplicated by
+    /// version -- so versions superseded in transaction time (later writes /
+    /// retractions) are excluded, consistent with `AS OF`, with no stale or
+    /// duplicate rows. Because each forward write supersedes the prior version
+    /// in transaction time, at most one version per node is believed at a fixed
+    /// `transaction_time`, so a node contributes at most one row. Produced by
+    /// the planner when a label scan carries a `valid_time_between` range
+    /// (Issue #552).
+    TemporalNodeRangeScan {
+        /// Optional label filter
+        label: Option<String>,
+        /// Inclusive start of the valid-time range
+        valid_from: Timestamp,
+        /// Exclusive end of the valid-time range
+        valid_to: Timestamp,
+        /// Transaction time the range is observed at
+        transaction_time: Timestamp,
+    },
+
     /// Find nodes similar to a specific node by extracting its embedding
     /// and performing k-NN search. This is a compound operation that:
     /// 1. Looks up the source node
@@ -454,7 +522,13 @@ pub enum PhysicalOp {
         direction: Direction,
         /// Optional edge label filter
         label: Option<String>,
-        /// Maximum depth
+        /// Minimum depth (inclusive). A target is bound iff
+        /// `min_depth <= shortestDepth <= depth` -- node-distinct /
+        /// shortest-path reachability, a deliberate v1 simplification of
+        /// openCypher's `*min..max` trail semantics (see `TraversalIterator`
+        /// docs; full trail semantics is a tracked follow-up).
+        min_depth: usize,
+        /// Maximum depth (inclusive).
         depth: usize,
         /// Optional temporal context (valid_time, transaction_time) for edge filtering.
         /// When present, only edges that existed at the specified point in time are traversed.
@@ -520,14 +594,19 @@ pub enum PhysicalOp {
         property_key: Option<String>,
     },
 
-    /// Sort by key
+    /// Sort by one or more keys (stable, multi-key).
+    ///
+    /// `keys` lists `(key, descending)` pairs in **precedence order**: the
+    /// first entry is the primary sort key, the second breaks ties, and so on.
+    /// A folded chain of `ORDER BY a, b, c` produces a single `Sort` with
+    /// `keys = [(a, ..), (b, ..), (c, ..)]` (Issue #558 fold), so the primary
+    /// key is never inverted by stable-sort composition.
     Sort {
         /// Input operator
         input: Box<PhysicalOp>,
-        /// Sort key
-        key: SortKey,
-        /// Descending order
-        descending: bool,
+        /// Sort keys in precedence order (first = primary), each with its own
+        /// descending flag.
+        keys: Vec<(SortKey, bool)>,
     },
 
     /// Limit with optional offset
@@ -560,6 +639,20 @@ pub enum PhysicalOp {
         input: Box<PhysicalOp>,
     },
 
+    /// Grouped aggregation (openCypher implicit grouping).
+    ///
+    /// Partitions input rows by `group_keys` (empty = one global group) and
+    /// computes each entry of `aggregates` per group, emitting one computed
+    /// column row per group. Maps 1:1 to the executor's `AggregateIterator`.
+    Aggregate {
+        /// Input operator providing the rows to aggregate.
+        input: Box<PhysicalOp>,
+        /// Grouping keys (empty = single global group).
+        group_keys: Vec<crate::query::ir::AggregateGroupKey>,
+        /// Aggregate expressions computed per group.
+        aggregates: Vec<crate::query::ir::AggregateSpec>,
+    },
+
     /// Track temporal changes
     TemporalTrack {
         /// Input operator
@@ -574,8 +667,52 @@ pub enum PhysicalOp {
         input: Box<PhysicalOp>,
     },
 
+    /// Left-outer application of an optional sub-pattern (`OPTIONAL MATCH`).
+    ///
+    /// For each input row the `steps` sub-pipeline is executed seeded from
+    /// that row; if it yields nothing, one null-bound row is emitted so the
+    /// input row is preserved. When the first step is
+    /// [`OptionalPhysicalStep::Scan`] the operator is standalone (leading
+    /// `OPTIONAL MATCH`): the sub-pipeline runs once from its own scan and
+    /// `input` (typically [`PhysicalOp::Empty`]) is ignored.
+    OptionalApply {
+        /// Input operator providing seed rows.
+        input: Box<PhysicalOp>,
+        /// The optional sub-pipeline, applied per seed row.
+        steps: Vec<OptionalPhysicalStep>,
+    },
+
     /// Empty result set
     Empty,
+}
+
+/// A single step inside a [`PhysicalOp::OptionalApply`] sub-pipeline.
+#[derive(Debug, Clone)]
+pub enum OptionalPhysicalStep {
+    /// Scan source for a standalone (first-clause) `OPTIONAL MATCH`.
+    /// Only valid as the first step.
+    Scan {
+        /// Optional node label filter.
+        label: Option<String>,
+    },
+
+    /// A traversal hop inside the optional pattern.
+    Traverse {
+        /// Traversal direction.
+        direction: Direction,
+        /// Optional edge label filter.
+        label: Option<String>,
+        /// Minimum depth (inclusive), mirroring [`PhysicalOp::IndexedTraversal`].
+        min_depth: usize,
+        /// Maximum depth (inclusive).
+        depth: usize,
+        /// Optional temporal context (valid_time, transaction_time) for edge
+        /// filtering, mirroring [`PhysicalOp::IndexedTraversal`].
+        temporal_context: Option<(Timestamp, Timestamp)>,
+    },
+
+    /// A predicate filter inside the optional pattern.
+    Filter(Predicate),
 }
 
 impl PhysicalOp {
@@ -589,6 +726,8 @@ impl PhysicalOp {
             PhysicalOp::HnswSearch { .. } => "HnswSearch",
             PhysicalOp::TemporalNodeLookup { .. } => "TemporalNodeLookup",
             PhysicalOp::TemporalVectorSearch { .. } => "TemporalVectorSearch",
+            PhysicalOp::TemporalNodeScan { .. } => "TemporalNodeScan",
+            PhysicalOp::TemporalNodeRangeScan { .. } => "TemporalNodeRangeScan",
             PhysicalOp::SimilarToNode { .. } => "SimilarToNode",
             PhysicalOp::PropertyScan { .. } => "PropertyScan",
             PhysicalOp::IndexedTraversal { .. } => "IndexedTraversal",
@@ -603,8 +742,10 @@ impl PhysicalOp {
             PhysicalOp::Project { .. } => "Project",
             PhysicalOp::Distinct { .. } => "Distinct",
             PhysicalOp::Count { .. } => "Count",
+            PhysicalOp::Aggregate { .. } => "Aggregate",
             PhysicalOp::TemporalTrack { .. } => "TemporalTrack",
             PhysicalOp::Materialize { .. } => "Materialize",
+            PhysicalOp::OptionalApply { .. } => "OptionalApply",
             PhysicalOp::Empty => "Empty",
         }
     }
@@ -620,6 +761,8 @@ impl PhysicalOp {
                 | PhysicalOp::HnswSearch { .. }
                 | PhysicalOp::TemporalNodeLookup { .. }
                 | PhysicalOp::TemporalVectorSearch { .. }
+                | PhysicalOp::TemporalNodeScan { .. }
+                | PhysicalOp::TemporalNodeRangeScan { .. }
                 | PhysicalOp::SimilarToNode { .. }
                 | PhysicalOp::PropertyScan { .. }
                 | PhysicalOp::Empty
@@ -636,6 +779,8 @@ impl PhysicalOp {
             | PhysicalOp::HnswSearch { .. }
             | PhysicalOp::TemporalNodeLookup { .. }
             | PhysicalOp::TemporalVectorSearch { .. }
+            | PhysicalOp::TemporalNodeScan { .. }
+            | PhysicalOp::TemporalNodeRangeScan { .. }
             | PhysicalOp::SimilarToNode { .. }
             | PhysicalOp::PropertyScan { .. }
             | PhysicalOp::Empty => 1,
@@ -648,8 +793,10 @@ impl PhysicalOp {
             | PhysicalOp::Project { input, .. }
             | PhysicalOp::Distinct { input, .. }
             | PhysicalOp::Count { input, .. }
+            | PhysicalOp::Aggregate { input, .. }
             | PhysicalOp::TemporalTrack { input, .. }
-            | PhysicalOp::Materialize { input, .. } => 1 + input.depth(),
+            | PhysicalOp::Materialize { input, .. }
+            | PhysicalOp::OptionalApply { input, .. } => 1 + input.depth(),
 
             PhysicalOp::HashJoin { left, right, .. }
             | PhysicalOp::Union { left, right }
@@ -728,6 +875,27 @@ impl PhysicalOp {
                     .unwrap_or_default();
                 format!("{prefix}{name} (k: {}, ts: {}{})", k, timestamp, prop_str)
             }
+            PhysicalOp::TemporalNodeScan {
+                label,
+                valid_time,
+                transaction_time,
+            } => {
+                format!(
+                    "{prefix}{name} (label: {:?}, vt: {}, tt: {})",
+                    label, valid_time, transaction_time
+                )
+            }
+            PhysicalOp::TemporalNodeRangeScan {
+                label,
+                valid_from,
+                valid_to,
+                transaction_time,
+            } => {
+                format!(
+                    "{prefix}{name} (label: {:?}, valid: [{}, {}), tt: {})",
+                    label, valid_from, valid_to, transaction_time
+                )
+            }
             PhysicalOp::SimilarToNode {
                 source_node,
                 property_key,
@@ -743,6 +911,7 @@ impl PhysicalOp {
                 input,
                 direction,
                 label,
+                min_depth,
                 depth,
                 temporal_context,
             } => {
@@ -752,9 +921,10 @@ impl PhysicalOp {
                     String::new()
                 };
                 format!(
-                    "{prefix}{name} (dir: {:?}, label: {:?}, depth: {}{})\n{}",
+                    "{prefix}{name} (dir: {:?}, label: {:?}, depth: {}..{}{})\n{}",
                     direction,
                     label,
+                    min_depth,
                     depth,
                     temporal_str,
                     input.explain_indent(indent + 1)
@@ -831,8 +1001,10 @@ impl PhysicalOp {
             | PhysicalOp::Project { input, .. }
             | PhysicalOp::Distinct { input, .. }
             | PhysicalOp::Count { input, .. }
+            | PhysicalOp::Aggregate { input, .. }
             | PhysicalOp::TemporalTrack { input, .. }
-            | PhysicalOp::Materialize { input, .. } => Some(input),
+            | PhysicalOp::Materialize { input, .. }
+            | PhysicalOp::OptionalApply { input, .. } => Some(input),
             _ => None,
         }
     }
@@ -968,6 +1140,7 @@ mod tests {
                 input: Box::new(PhysicalOp::Empty),
                 direction: Direction::Outgoing,
                 label: None,
+                min_depth: 1,
                 depth: 1,
                 temporal_context: None,
             }
@@ -1033,8 +1206,7 @@ mod tests {
         assert_eq!(
             PhysicalOp::Sort {
                 input: Box::new(PhysicalOp::Empty),
-                key: SortKey::Property("name".to_string()),
-                descending: false
+                keys: vec![(SortKey::Property("name".to_string()), false)],
             }
             .name(),
             "Sort"
@@ -1156,6 +1328,7 @@ mod tests {
                 input: Box::new(PhysicalOp::Empty),
                 direction: Direction::Outgoing,
                 label: None,
+                min_depth: 1,
                 depth: 1,
                 temporal_context: None,
             }
@@ -1324,8 +1497,7 @@ mod tests {
         assert_eq!(
             PhysicalOp::Sort {
                 input: Box::new(base.clone()),
-                key: SortKey::Property("name".to_string()),
-                descending: false
+                keys: vec![(SortKey::Property("name".to_string()), false)],
             }
             .depth(),
             2
@@ -1440,6 +1612,7 @@ mod tests {
             input: Box::new(PhysicalOp::Empty),
             direction: Direction::Outgoing,
             label: Some("KNOWS".to_string()),
+            min_depth: 2,
             depth: 2,
             temporal_context: None,
         };
@@ -1448,7 +1621,7 @@ mod tests {
         assert!(explain.contains("IndexedTraversal"));
         assert!(explain.contains("Outgoing"));
         assert!(explain.contains("KNOWS"));
-        assert!(explain.contains("depth: 2"));
+        assert!(explain.contains("depth: 2..2"));
     }
 
     #[test]
@@ -1497,8 +1670,7 @@ mod tests {
         // Sort
         let sort = PhysicalOp::Sort {
             input: Box::new(PhysicalOp::Empty),
-            key: SortKey::Property("name".to_string()),
-            descending: false,
+            keys: vec![(SortKey::Property("name".to_string()), false)],
         };
         let explain = sort.explain();
         assert!(explain.contains("Sort"));
@@ -1780,6 +1952,7 @@ mod tests {
                     }),
                     direction: Direction::Outgoing,
                     label: Some("KNOWS".to_string()),
+                    min_depth: 2,
                     depth: 2,
                     temporal_context: None,
                 }),
@@ -2041,5 +2214,55 @@ mod tests {
             estimated_rows: 100,
         };
         assert!(op.get_input().is_none());
+    }
+
+    // ==================== OptionalApply Coverage Tests ====================
+
+    fn optional_apply_op() -> PhysicalOp {
+        PhysicalOp::OptionalApply {
+            input: Box::new(PhysicalOp::NodeScan {
+                label: Some("Person".to_string()),
+                estimated_rows: 100,
+            }),
+            steps: vec![OptionalPhysicalStep::Traverse {
+                direction: Direction::Outgoing,
+                label: Some("KNOWS".to_string()),
+                min_depth: 1,
+                depth: 1,
+                temporal_context: None,
+            }],
+        }
+    }
+
+    #[test]
+    fn test_optional_apply_op_metadata() {
+        let op = optional_apply_op();
+        assert_eq!(op.name(), "OptionalApply");
+        assert!(!op.is_leaf());
+        // Unary operator: one level above its NodeScan input.
+        assert_eq!(op.depth(), 2);
+        assert!(matches!(op.get_input(), Some(PhysicalOp::NodeScan { .. })));
+    }
+
+    #[test]
+    fn test_optional_apply_op_explain_recurses_into_input() {
+        let explain = optional_apply_op().explain();
+        assert!(explain.contains("OptionalApply"), "{explain}");
+        assert!(explain.contains("NodeScan"), "{explain}");
+    }
+
+    #[test]
+    fn test_physical_plan_explain_optional_apply() {
+        let plan = PhysicalPlan {
+            root: optional_apply_op(),
+            estimated_cost: Cost::default(),
+            temporal_context: None,
+            parallel: false,
+            include_provenance: false,
+        };
+        let explain = plan.explain();
+        assert!(explain.contains("OptionalApply"), "{explain}");
+        // The plan-level explain must recurse into OptionalApply's input.
+        assert!(explain.contains("NodeScan"), "{explain}");
     }
 }

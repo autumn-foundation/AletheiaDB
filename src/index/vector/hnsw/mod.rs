@@ -69,6 +69,14 @@ impl Drop for FilterCallbackGuard {
 /// Maximum number of results that can be requested in a search.
 const MAX_K: usize = 100_000;
 
+/// Maximum valid usearch key.
+///
+/// Keys above this cap are rejected both when allocating new keys (overflow
+/// protection in `add`) and when restoring persisted mappings
+/// (`restore_mapping`), so a corrupted `mappings.idx` containing a huge key
+/// can never overflow `usearch_key + 1` or poison `next_key`.
+pub(crate) const MAX_VALID_KEY: u64 = u64::MAX - 1000;
+
 /// Number of sharded locks for entry updates.
 const NUM_ENTRY_LOCKS: usize = 64;
 
@@ -489,10 +497,32 @@ impl HnswIndex {
             .collect()
     }
 
-    pub(crate) fn restore_mapping(&self, node_id: crate::core::id::NodeId, usearch_key: u64) {
+    /// Restore a persisted `NodeId` <-> usearch key mapping (Issue #451).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `usearch_key` exceeds [`MAX_VALID_KEY`]: such a
+    /// key can only come from a corrupted or malicious `mappings.idx` (the
+    /// key allocator in `add` never hands them out), and accepting it would
+    /// overflow `usearch_key + 1` or poison `next_key` so every later insert
+    /// fails with key-overflow protection.
+    pub(crate) fn restore_mapping(
+        &self,
+        node_id: crate::core::id::NodeId,
+        usearch_key: u64,
+    ) -> Result<()> {
+        if usearch_key > MAX_VALID_KEY {
+            return Err(Error::Vector(VectorError::IndexError(format!(
+                "Refusing to restore mapping for node {}: usearch key {} exceeds maximum valid key {}",
+                node_id.as_u64(),
+                usearch_key,
+                MAX_VALID_KEY
+            ))));
+        }
         self.id_mapping.insert(node_id, usearch_key);
         self.reverse_mapping.insert(usearch_key, node_id);
         self.next_key.fetch_max(usearch_key + 1, Ordering::SeqCst);
+        Ok(())
     }
 
     /// Load a persisted index from disk into memory.
@@ -996,7 +1026,6 @@ impl VectorIndex for HnswIndex {
                     Ok(())
                 }
                 dashmap::mapref::entry::Entry::Vacant(entry) => {
-                    const MAX_VALID_KEY: u64 = u64::MAX - 1000;
                     drop(entry);
 
                     let key = loop {

@@ -87,13 +87,23 @@ pub mod cypher;
 // Optional HTTP server module
 #[cfg(feature = "http-server")]
 pub mod http;
+// Authentication + RBAC core (Issue #3350, Phase 1). Shared by the HTTP
+// server today and the MCP server in Phase 2, hence gated on either feature.
+#[cfg(any(feature = "http-server", feature = "mcp-server"))]
+pub mod auth;
+// Signed audit export of entity history for compliance (Issue #3358).
+// Offline-verifiable Ed25519-signed evidence artifacts built on history reads.
+#[cfg(feature = "audit-export")]
+pub mod audit;
 // Test utilities: available in unit tests and when the simulation feature is enabled
 // (integration tests under `--features simulation` need create_test_db).
 #[cfg(any(test, feature = "simulation"))]
 pub mod test_utils;
 
-// Deterministic Simulation Testing framework (issue #154)
-#[cfg(feature = "simulation")]
+// Deterministic Simulation Testing framework (issue #154).
+// Also available in unit tests without the feature flag so in-crate tests can
+// inject a `SimulatedClock` into `time::now()` (Issue #3391).
+#[cfg(any(test, feature = "simulation"))]
 pub mod simulation;
 
 // Internal cargo-fuzz hooks and Arbitrary implementations (issue #155).
@@ -113,8 +123,8 @@ pub use core::temporal::time;
 pub use core::{
     BiTemporalInterval, ChangeFeedPage, ChangeFeedQuery, ChangeRecord, ChangeType, Edge, EdgeId,
     EntityId, EntityKind, GLOBAL_INTERNER, InternedString, Node, NodeHeader, NodeId, PropertyKey,
-    PropertyMap, PropertyMapBuilder, PropertyValue, StringInterner, TimeRange, Timestamp,
-    VersionId,
+    PropertyMap, PropertyMapBuilder, PropertyValue, Provenance, StringInterner, TimeRange,
+    Timestamp, VersionId,
 };
 
 pub use api::{ReadOps, ReadTransaction, TxId, TxState, WriteOps, WriteTransaction};
@@ -122,8 +132,11 @@ pub use core::error::{
     ConstraintError, Error, QueryError, Result, StorageError, TemporalError, TransactionError,
 };
 pub use db::{
-    AletheiaDB, BackupSummary, SimilarityQuery, SimilaritySource, UniqueConstraintBuilder,
-    VectorIndexBuilder,
+    AletheiaDB, BackupSummary, ColdStorageDetails, ColdStorageTierStats, CurrentStateStats,
+    DatabaseStats, EdgeTypeSchema, FactStatus, GraphSchema, HistoricalDepthStats, LabelExtent,
+    LabelSchema, LineageView, LineageViewEntry, SchemaInstant, SimilarityQuery, SimilaritySource,
+    TemporalExtent, TierAccessStats, TimeBounds, UniqueConstraintBuilder, VectorIndexBuilder,
+    WalStateStats,
 };
 pub use index::{
     AdjacencyIndex, CurrentIndexes, TemporalIndexes,

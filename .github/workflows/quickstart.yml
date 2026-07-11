@@ -1,0 +1,94 @@
+name: Quickstart TTFQ
+
+# Enforces Issue #3380: the 60-second guided quickstart must keep working.
+# Runs the full scripted demo sequence and fails if any printed query errors
+# or if time-to-first-query (TTFQ, run-time only — the one-time build is not
+# counted) exceeds the 60-second budget.
+
+on:
+  push:
+    branches: [ main, trunk, develop ]
+  pull_request:
+    branches: [ main, trunk, develop ]
+
+# Least-privilege GITHUB_TOKEN: the jobs only check out the repo and run the
+# demo — no writes to PRs, issues, pages, or the repo — so read-only contents
+# access is sufficient.
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  # Run-time budget for the demo, in seconds (the build is timed separately
+  # below and excluded from this gate).
+  TTFQ_BUDGET_SECONDS: 60
+
+jobs:
+  quickstart:
+    name: 60-second demo
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v5
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo build
+        uses: actions/cache@v5
+        with:
+          path: target
+          key: ${{ runner.os }}-v2-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
+
+      # One-time build cost, reported but NOT part of the TTFQ gate.
+      - name: Build the demo (one-time, not counted toward TTFQ)
+        run: |
+          build_start=$(date +%s)
+          cargo build --example demo
+          build_end=$(date +%s)
+          echo "Cold/warm build wall-clock: $((build_end - build_start)) s (excluded from TTFQ)"
+
+      # The scripted sequence: run the demo, enforce the run-time budget, and
+      # assert every guided query produced its expected line.
+      - name: Run the guided demo and enforce TTFQ budget
+        run: |
+          run_start=$(date +%s%3N)
+          ./target/debug/examples/demo | tee demo_output.txt
+          status=${PIPESTATUS[0]}
+          run_end=$(date +%s%3N)
+          elapsed_ms=$((run_end - run_start))
+          echo "----------------------------------------------------------"
+          echo "Demo exit status: ${status}"
+          echo "Demo run wall-clock: ${elapsed_ms} ms (budget: ${TTFQ_BUDGET_SECONDS}000 ms)"
+
+          if [ "${status}" -ne 0 ]; then
+            echo "::error::demo exited non-zero — a guided query errored"
+            exit 1
+          fi
+
+          budget_ms=$((TTFQ_BUDGET_SECONDS * 1000))
+          if [ "${elapsed_ms}" -gt "${budget_ms}" ]; then
+            echo "::error::TTFQ ${elapsed_ms} ms exceeded budget ${budget_ms} ms"
+            exit 1
+          fi
+
+      - name: Assert every guided query printed its result verbatim
+        run: |
+          set -e
+          grep -q "Alice is currently: CTO" demo_output.txt
+          grep -q "Alice KNOWS Bob" demo_output.txt
+          grep -q "On founding day, Alice was: Engineer" demo_output.txt
+          grep -q '"Engineer" then vs "CTO" now' demo_output.txt
+          grep -q "v3: title = CTO" demo_output.txt
+          echo "All guided queries produced their expected output."
