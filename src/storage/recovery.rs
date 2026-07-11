@@ -136,6 +136,42 @@ pub(crate) fn replay_wal_into_storage_with_constraints(
     current: &CurrentStorage,
     historical: &mut HistoricalStorage,
     start_lsn: LSN,
+    next_version_id: u64,
+    constraint_registry: Option<&ConstraintRegistry>,
+) -> Result<(LSN, Option<u64>, Option<u64>, u64)> {
+    // Read the segment directory once, then apply. Callers that have already
+    // read the WAL for startup (Issue #3429) skip this read entirely and call
+    // `replay_entries_into_storage_with_constraints` directly with the
+    // pre-decoded entries, avoiding a redundant full decode of the WAL.
+    let wal_entries = wal.read_from(start_lsn)?;
+    replay_entries_into_storage_with_constraints(
+        wal,
+        wal_entries,
+        current,
+        historical,
+        next_version_id,
+        constraint_registry,
+    )
+}
+
+/// Apply an already-decoded WAL entry stream to storage (Issue #3429).
+///
+/// This is the body of [`replay_wal_into_storage_with_constraints`] with the
+/// segment read hoisted out. The startup path decodes the WAL exactly once and
+/// feeds the resulting entries here (filtered to `>= start_lsn`) so recovery no
+/// longer re-reads the segment directory for the differential replay. `wal` is
+/// retained only to report the post-replay `current_lsn()`; every operation
+/// applied comes from `wal_entries`, never from a fresh read.
+///
+/// The caller MUST pass exactly the entries with `LSN >= start_lsn` (in the
+/// same LSN-sorted order [`ConcurrentWalSystem::read_from`] produces): the
+/// transaction-framing resolver below is order-sensitive and expects the same
+/// contiguous suffix a direct `read_from(start_lsn)` would return.
+pub(crate) fn replay_entries_into_storage_with_constraints(
+    wal: &ConcurrentWalSystem,
+    wal_entries: Vec<WalEntry>,
+    current: &CurrentStorage,
+    historical: &mut HistoricalStorage,
     mut next_version_id: u64,
     constraint_registry: Option<&ConstraintRegistry>,
 ) -> Result<(LSN, Option<u64>, Option<u64>, u64)> {
@@ -144,21 +180,11 @@ pub(crate) fn replay_wal_into_storage_with_constraints(
     let mut max_node_id: Option<u64> = None;
     let mut max_edge_id: Option<u64> = None;
 
-    let wal_entries = wal.read_from(start_lsn)?;
-
     if !wal_entries.is_empty() {
         #[cfg(feature = "observability")]
-        tracing::info!(
-            "Replaying {} WAL entries from LSN {}",
-            wal_entries.len(),
-            start_lsn.0
-        );
+        tracing::info!("Replaying {} WAL entries", wal_entries.len());
         #[cfg(not(feature = "observability"))]
-        eprintln!(
-            "Replaying {} WAL entries from LSN {}",
-            wal_entries.len(),
-            start_lsn.0
-        );
+        eprintln!("Replaying {} WAL entries", wal_entries.len());
     }
 
     // Resolve transaction framing (Issue #3413) BEFORE applying: pair every
@@ -1015,18 +1041,43 @@ fn resolve_transaction_frames(entries: Vec<WalEntry>) -> Vec<(WalOperation, Time
 
 /// Replay ONLY constraint declaration/drop entries from the full WAL history.
 ///
-/// Called during index-persistence startup BEFORE the regular snapshot-based
-/// WAL replay.  Because constraint declarations are written to the WAL before
-/// the corresponding node data, they may lie at LSNs below the persisted
-/// snapshot LSN and therefore be skipped by the normal differential replay.
-/// This pass reads every WAL entry from LSN 0 and replays only the two
-/// constraint-related operations, giving us the net constraint state.
+/// Because constraint declarations are written to the WAL before the
+/// corresponding node data, they may lie at LSNs below the persisted snapshot
+/// LSN and therefore be skipped by the normal differential replay. This reads
+/// every WAL entry from LSN 0 and replays only the two constraint-related
+/// operations, giving the net constraint state.
+///
+/// As of Issue #3429 the startup path no longer calls this: it decodes the WAL
+/// once and folds the constraint net-state out of the already-read entries via
+/// [`apply_constraint_declarations`], avoiding a dedicated full read. This
+/// wrapper (a thin `read_from` + `apply_constraint_declarations`) is retained
+/// for the recovery unit tests that exercise the read-and-apply path directly.
+#[cfg(test)]
 pub(crate) fn replay_constraint_declarations_from_wal(
     wal: &ConcurrentWalSystem,
     registry: &ConstraintRegistry,
 ) -> Result<()> {
     let all_entries = wal.read_from(LSN::initial())?;
-    for entry in all_entries {
+    apply_constraint_declarations(&all_entries, registry);
+    Ok(())
+}
+
+/// Fold the constraint declare/drop net-state out of an already-decoded WAL
+/// entry stream (Issue #3429).
+///
+/// Same net effect as [`replay_constraint_declarations_from_wal`] but operates
+/// on entries the startup path has *already* read from disk, so recovery does
+/// not decode the segment directory a second time just to recover constraint
+/// state. `entries` is expected to span the full WAL history (from
+/// [`LSN::initial()`]) so declarations that predate the index snapshot LSN --
+/// and would be skipped by the differential replay -- are still applied.
+///
+/// Declares and drops are replayed in stream order; the net set is
+/// order-dependent (declare then drop == dropped), matching the prior full-read
+/// pass exactly. Borrows the entries (does not consume them) so the same vector
+/// can then be filtered and handed to the differential replay.
+pub(crate) fn apply_constraint_declarations(entries: &[WalEntry], registry: &ConstraintRegistry) {
+    for entry in entries {
         match entry.operation {
             WalOperation::DeclareUniqueConstraint { label, property } => {
                 registry.declare(label, property);
@@ -1037,7 +1088,6 @@ pub(crate) fn replay_constraint_declarations_from_wal(
             _ => {}
         }
     }
-    Ok(())
 }
 
 /// Unit tests for the `resolve_transaction_frames` framing resolver

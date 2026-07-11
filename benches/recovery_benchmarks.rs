@@ -20,6 +20,8 @@
 
 mod common;
 
+use aletheiadb::AletheiaDB;
+use aletheiadb::config::{AletheiaDBConfig, WalConfigBuilder};
 use aletheiadb::core::id::NodeId;
 use aletheiadb::core::interning::GLOBAL_INTERNER;
 use aletheiadb::core::property::PropertyMapBuilder;
@@ -28,6 +30,8 @@ use aletheiadb::index::vector::DistanceMetric;
 use aletheiadb::index::vector::hnsw::HnswConfig;
 use aletheiadb::storage::current::CurrentStorage;
 use aletheiadb::storage::historical::HistoricalStorage;
+use aletheiadb::storage::index_persistence::PersistenceConfig;
+use aletheiadb::storage::wal::DurabilityMode;
 use aletheiadb::storage::wal::WalOperation;
 use aletheiadb::storage::wal::concurrent_system::{ConcurrentWalSystem, ConcurrentWalSystemConfig};
 use aletheiadb::storage::{CheckpointManager, UnifiedCheckpointConfig};
@@ -408,6 +412,84 @@ fn bench_recovery_vector_indexed(c: &mut Criterion) {
 }
 
 // ============================================================================
+// Benchmark 6: Full startup WAL decode (Issue #3429)
+// ============================================================================
+
+/// Populate a WAL directory with `node_count` create operations and no index
+/// snapshot, returning the temp dir that owns it. The WAL is fsync-durable on
+/// drop; because index persistence is disabled here, no snapshot/manifest is
+/// written, so a reopen must replay the WAL in full.
+fn build_cold_wal(node_count: usize) -> TempDir {
+    let temp_dir = TempDir::new().unwrap();
+    let wal_dir = temp_dir.path().join("wal");
+    let config = AletheiaDBConfig::builder()
+        .wal(
+            WalConfigBuilder::new()
+                .wal_dir(wal_dir)
+                .durability_mode(DurabilityMode::Synchronous)
+                .build(),
+        )
+        .persistence(PersistenceConfig {
+            enabled: false,
+            ..PersistenceConfig::default()
+        })
+        .build();
+    let db = AletheiaDB::with_unified_config(config).unwrap();
+    for i in 0..node_count {
+        db.create_node(
+            "BenchNode",
+            PropertyMapBuilder::new()
+                .insert("i", i as i64)
+                .insert("name", format!("node-{i}"))
+                .build(),
+        )
+        .unwrap();
+    }
+    drop(db);
+    temp_dir
+}
+
+/// Issue #3429: measure the full `AletheiaDB::with_unified_config` startup that
+/// replays a cold WAL (no index snapshot). Before the fold, startup decoded the
+/// segment directory in three independent full passes (max-LSN allocator seed,
+/// constraint declaration scan, differential replay); after the fold it decodes
+/// once and reuses the result for all three. This benchmark opens the same
+/// pre-populated WAL directory repeatedly, so the whole cost measured is the
+/// startup decode+replay path the fold optimizes.
+fn bench_startup_full_wal_decode(c: &mut Criterion) {
+    let mut group = c.benchmark_group("recovery_startup_full_wal_decode");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(20));
+
+    for &node_count in &[5_000usize, 25_000usize] {
+        let source = build_cold_wal(node_count);
+        let wal_dir = source.path().join("wal");
+
+        group.bench_function(format!("{node_count}_ops_cold_wal"), |b| {
+            b.iter(|| {
+                let config = AletheiaDBConfig::builder()
+                    .wal(
+                        WalConfigBuilder::new()
+                            .wal_dir(wal_dir.clone())
+                            .durability_mode(DurabilityMode::Synchronous)
+                            .build(),
+                    )
+                    .persistence(PersistenceConfig {
+                        enabled: false,
+                        ..PersistenceConfig::default()
+                    })
+                    .build();
+                let db = AletheiaDB::with_unified_config(config).unwrap();
+                assert_eq!(db.node_count(), node_count);
+                black_box(db);
+            });
+        });
+    }
+
+    group.finish();
+}
+
+// ============================================================================
 // Criterion Configuration
 // ============================================================================
 
@@ -418,7 +500,8 @@ criterion_group!(
         bench_recovery_medium_dataset,
         bench_recovery_large_dataset,
         bench_recovery_wal_replay,
-        bench_recovery_vector_indexed
+        bench_recovery_vector_indexed,
+        bench_startup_full_wal_decode
 );
 
 criterion_main!(benches);
