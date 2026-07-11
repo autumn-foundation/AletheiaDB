@@ -299,3 +299,285 @@ fn batching_across_multiple_chunks() {
     assert_eq!(report.nodes_imported, 25);
     assert_eq!(db.node_count(), 25);
 }
+
+// kills: `report.edges_imported += count` -> `= count` (mod.rs commit_edge_chunk).
+// Edges spanning multiple batch chunks must ACCUMULATE, not overwrite with the last
+// chunk's count. batch_size(2) over 5 edges -> chunks of 2,2,1; the sum is 5, but the
+// `= count` mutant would leave only the final chunk's 1.
+#[test]
+fn edge_count_accumulates_across_multiple_chunks() {
+    let files = TempDir::new().unwrap();
+    let (_tmp, db) = create_test_db().unwrap();
+
+    // Six nodes so we can draw five distinct edges between them.
+    let mut node_csv = String::from("id,name,age\n");
+    for i in 0..6 {
+        node_csv.push_str(&format!("n{i},Name{i},{i}\n"));
+    }
+    let nodes = write_file(&files, "nodes.csv", &node_csv);
+
+    // Five edges => with batch_size(2) they flush as chunks of 2, 2, 1.
+    let edges = write_file(
+        &files,
+        "edges.csv",
+        "src,dst\nn0,n1\nn1,n2\nn2,n3\nn3,n4\nn4,n5\n",
+    );
+
+    let mut importer = db.import().batch_size(2);
+    importer.nodes_from_csv(&nodes, person_nodes("id")).unwrap();
+    let report = importer
+        .edges_from_csv(
+            &edges,
+            EdgeMapping::new(LabelSource::fixed("KNOWS"), "src", "dst"),
+        )
+        .expect("edges import");
+
+    // Exact total across all chunks (kills `= count`).
+    assert_eq!(report.edges_imported, 5);
+    // And every edge is actually persisted in the DB.
+    assert_eq!(db.edge_count(), 5);
+}
+
+// kills: `ImportError::Io(_) => return Err(err.into())` and the Io-fatality of the open
+// path. Opening a nonexistent file is fatal even under SkipAndReport: the importer must
+// return `Err`, never a "success" report with the file recorded as a skipped row.
+#[test]
+fn io_error_is_fatal_even_in_skip_mode() {
+    let files = TempDir::new().unwrap();
+    let (_tmp, db) = create_test_db().unwrap();
+    let missing = files.path().join("does_not_exist.csv");
+
+    let mut importer = db.import().failure_mode(FailureMode::SkipAndReport);
+    let result = importer.nodes_from_csv(&missing, person_nodes("id"));
+
+    assert!(
+        result.is_err(),
+        "an I/O error must be fatal even in SkipAndReport mode, got: {result:?}"
+    );
+    // Nothing was imported and nothing was silently downgraded to a skipped row.
+    assert_eq!(db.node_count(), 0);
+}
+
+// kills: removing the `if matches!(value, PropertyValue::Null) { continue; }` in
+// build_properties. A blank cell for a non-string mapped column coerces to Null and must
+// become an ABSENT property, not a stored null. Removing the `continue` would either
+// store the property as null (making get() return Some) or fail the insert.
+#[test]
+fn blank_cell_becomes_absent_property_not_null() {
+    let files = TempDir::new().unwrap();
+    let (_tmp, db) = create_test_db().unwrap();
+
+    // alice's `age` cell is blank -> coerces to Null -> should be skipped entirely.
+    let nodes = write_file(&files, "nodes.csv", "id,name,age\nalice,Alice,\n");
+
+    let mut importer = db.import();
+    importer.nodes_from_csv(&nodes, person_nodes("id")).unwrap();
+    let alice = importer.resolve_key("alice").unwrap();
+    let node = db.get_node(alice).unwrap();
+
+    // The blank Int cell must be absent, never present-as-null.
+    assert_eq!(node.properties.get("age"), None);
+    // The non-blank String property is still stored.
+    assert_eq!(
+        node.properties.get("name"),
+        Some(&PropertyValue::string("Alice"))
+    );
+}
+
+// kills: `chunk.len() >= self.config.batch_size` -> `>` on the NODE flush (import_nodes).
+// Under Abort, batch_size(2) with [good1, good2, bad3]: the correct `>=` flushes the full
+// chunk [good1, good2] as one committed transaction BEFORE bad3 aborts, so exactly 2
+// nodes persist. The `>` mutant never reaches the boundary, so nothing is flushed before
+// the abort and 0 nodes persist.
+#[test]
+fn node_flush_boundary_partial_commit_on_abort() {
+    let files = TempDir::new().unwrap();
+    let (_tmp, db) = create_test_db().unwrap();
+
+    // Row 3 has a non-integer age -> malformed under Abort.
+    let nodes = write_file(
+        &files,
+        "nodes.csv",
+        "id,name,age\ng1,G1,1\ng2,G2,2\nbad,Bad,notanumber\n",
+    );
+
+    let mut importer = db.import().batch_size(2);
+    let err = importer
+        .nodes_from_csv(&nodes, person_nodes("id"))
+        .expect_err("malformed row 3 must abort");
+    assert!(err.to_string().contains("row 3"), "message: {err}");
+
+    // The first full chunk flushed at the `>=` boundary before the abort.
+    assert_eq!(db.node_count(), 2);
+}
+
+// kills: `chunk.len() >= self.config.batch_size` -> `>` on the EDGE flush (import_edges).
+// Same partial-commit reasoning as the node side, exercised on the edge path.
+#[test]
+fn edge_flush_boundary_partial_commit_on_abort() {
+    let files = TempDir::new().unwrap();
+    let (_tmp, db) = create_test_db().unwrap();
+
+    let nodes = write_file(&files, "nodes.csv", "id,name,age\na,A,1\nb,B,2\nc,C,3\n");
+    // Edge row 3 has a non-integer `weight` -> a Row error AFTER endpoint resolution.
+    let edges = write_file(
+        &files,
+        "edges.csv",
+        "src,dst,weight\na,b,10\nb,c,20\nc,a,notanumber\n",
+    );
+
+    let mut importer = db.import().batch_size(2);
+    importer.nodes_from_csv(&nodes, person_nodes("id")).unwrap();
+
+    let edge_mapping = EdgeMapping::new(LabelSource::fixed("KNOWS"), "src", "dst").property(
+        "weight",
+        "weight",
+        ColumnType::Int,
+    );
+    let err = importer
+        .edges_from_csv(&edges, edge_mapping)
+        .expect_err("malformed edge row 3 must abort");
+    assert!(err.to_string().contains("row 3"), "message: {err}");
+
+    // The first full edge chunk flushed at the `>=` boundary before the abort.
+    assert_eq!(db.edge_count(), 2);
+}
+
+// kills: swapping the Source/Target endpoint side in prepare_edge. Existing tests only
+// cover an unresolved TARGET; this pins the SOURCE side. src `ghost` is unresolved while
+// the target resolves, so resolution must fail on the Source endpoint first.
+#[test]
+fn unresolved_source_endpoint_reported() {
+    let files = TempDir::new().unwrap();
+    let (_tmp, db) = create_test_db().unwrap();
+
+    let nodes = write_file(&files, "nodes.csv", "id,name,age\nalice,Alice,30\n");
+    // src `ghost` does not exist; dst `alice` does.
+    let edges = write_file(&files, "edges.csv", "src,dst\nghost,alice\n");
+
+    let mut importer = db.import().failure_mode(FailureMode::SkipAndReport);
+    importer.nodes_from_csv(&nodes, person_nodes("id")).unwrap();
+    let report = importer
+        .edges_from_csv(
+            &edges,
+            EdgeMapping::new(LabelSource::fixed("KNOWS"), "src", "dst"),
+        )
+        .expect("skip mode");
+
+    assert_eq!(report.edges_imported, 0);
+    assert_eq!(report.unresolved_endpoints.len(), 1);
+    let unresolved = &report.unresolved_endpoints[0];
+    assert_eq!(unresolved.side, Endpoint::Source);
+    assert_eq!(unresolved.key, "ghost");
+    assert_eq!(unresolved.row, 1);
+}
+
+// kills: the empty-key guard in prepare_node (the `key column '...' is empty` branch and
+// its precise row number).
+#[test]
+fn empty_key_column_errors_with_row_number() {
+    let files = TempDir::new().unwrap();
+    let (_tmp, db) = create_test_db().unwrap();
+
+    // Row 1 has a blank `id` (key) cell.
+    let nodes = write_file(&files, "nodes.csv", "id,name,age\n,Alice,30\n");
+
+    let mut importer = db.import();
+    let err = importer
+        .nodes_from_csv(&nodes, person_nodes("id"))
+        .expect_err("blank key must error");
+    let msg = err.to_string();
+    assert!(msg.contains("row 1"), "message: {msg}");
+    assert!(msg.contains("key column 'id' is empty"), "message: {msg}");
+    assert_eq!(db.node_count(), 0);
+}
+
+// kills: the empty-label guard in resolve_label (the `label column '...' is empty` branch
+// and its precise row number), used when the label comes from a column.
+#[test]
+fn empty_label_column_errors_with_row_number() {
+    let files = TempDir::new().unwrap();
+    let (_tmp, db) = create_test_db().unwrap();
+
+    // Row 1 has a blank `kind` (label) cell.
+    let nodes = write_file(&files, "nodes.csv", "id,kind,name\nn1,,Alice\n");
+
+    let mapping = NodeMapping::new(LabelSource::column("kind"), "id").property(
+        "name",
+        "name",
+        ColumnType::String,
+    );
+    let mut importer = db.import();
+    let err = importer
+        .nodes_from_csv(&nodes, mapping)
+        .expect_err("blank label must error");
+    let msg = err.to_string();
+    assert!(msg.contains("row 1"), "message: {msg}");
+    assert!(
+        msg.contains("label column 'kind' is empty"),
+        "message: {msg}"
+    );
+    assert_eq!(db.node_count(), 0);
+}
+
+// kills: dropping the edge-side `extract_valid_time` in prepare_edge. Only node valid_time
+// is currently pinned; this confirms an edge's per-row valid_time backfills and round-trips
+// with a point-in-time edge read.
+#[test]
+fn edge_valid_time_backfill_round_trips_with_as_of() {
+    let files = TempDir::new().unwrap();
+    let (_tmp, db) = create_test_db().unwrap();
+
+    let nodes = write_file(
+        &files,
+        "nodes.csv",
+        "id,name,age\nalice,Alice,30\nbob,Bob,25\n",
+    );
+    // The KNOWS edge is valid from 2021-01-01.
+    let edges = write_file(&files, "edges.csv", "src,dst,since\nalice,bob,2021-01-01\n");
+
+    let mut importer = db.import();
+    importer.nodes_from_csv(&nodes, person_nodes("id")).unwrap();
+    let alice = importer.resolve_key("alice").unwrap();
+
+    let edge_mapping =
+        EdgeMapping::new(LabelSource::fixed("KNOWS"), "src", "dst").valid_time_column("since");
+    importer.edges_from_csv(&edges, edge_mapping).unwrap();
+
+    let out = db.get_outgoing_edges(alice);
+    assert_eq!(out.len(), 1);
+    let edge_id = out[0];
+
+    let now = time::now();
+    // 2021-06-01 (after valid_from): edge is visible.
+    let after = time::from_secs(1_622_505_600);
+    assert!(
+        db.get_edge_at_time(edge_id, after, now).is_ok(),
+        "edge should be valid after its valid_from"
+    );
+    // 2020-06-01 (before valid_from): edge is NOT yet valid.
+    let before = time::from_secs(1_590_969_600);
+    assert!(
+        db.get_edge_at_time(edge_id, before, now).is_err(),
+        "edge should not be valid before its valid_from"
+    );
+}
+
+// kills: `batch_size.max(1)` -> a mutant that lets a 0 batch size through in a way that
+// drops rows. A batch_size of 0 must clamp to 1 and still import every row.
+#[test]
+fn batch_size_zero_clamps_and_imports_all() {
+    let files = TempDir::new().unwrap();
+    let (_tmp, db) = create_test_db().unwrap();
+
+    let mut csv = String::from("id,name,age\n");
+    for i in 0..5 {
+        csv.push_str(&format!("n{i},Name{i},{i}\n"));
+    }
+    let nodes = write_file(&files, "nodes.csv", &csv);
+
+    let mut importer = db.import().batch_size(0);
+    let report = importer.nodes_from_csv(&nodes, person_nodes("id")).unwrap();
+    assert_eq!(report.nodes_imported, 5);
+    assert_eq!(db.node_count(), 5);
+}
