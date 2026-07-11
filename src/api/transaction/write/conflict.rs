@@ -48,24 +48,19 @@ pub(crate) fn detect_conflicts(tx: &WriteTransaction) -> Result<()> {
     // Without this skip, the "missing committed row => deleted by another tx"
     // branches below would raise a spurious SerializationFailure for a
     // create-then-update/delete/retract in one transaction.
-    let created_nodes: HashSet<NodeId> = tx
-        .buffer
-        .operations()
-        .iter()
-        .filter_map(|w| match w {
-            BufferedWrite::CreateNode { node_id, .. } => Some(*node_id),
-            _ => None,
-        })
-        .collect();
-    let created_edges: HashSet<EdgeId> = tx
-        .buffer
-        .operations()
-        .iter()
-        .filter_map(|w| match w {
-            BufferedWrite::CreateEdge { edge_id, .. } => Some(*edge_id),
-            _ => None,
-        })
-        .collect();
+    let mut created_nodes: HashSet<NodeId> = HashSet::new();
+    let mut created_edges: HashSet<EdgeId> = HashSet::new();
+    for write in tx.buffer.operations() {
+        match write {
+            BufferedWrite::CreateNode { node_id, .. } => {
+                created_nodes.insert(*node_id);
+            }
+            BufferedWrite::CreateEdge { edge_id, .. } => {
+                created_edges.insert(*edge_id);
+            }
+            _ => {}
+        }
+    }
 
     for write in tx.buffer.operations() {
         match write {

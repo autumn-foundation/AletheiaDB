@@ -1457,11 +1457,17 @@ impl WriteOps for WriteTransaction {
         // Collect all edges connected to this node (both outgoing and incoming)
         // We do this before any deletions to avoid borrowing issues
         //
-        // LIMITATION: This uses ReadOps methods which currently don't support
-        // read-your-writes semantics for edge traversal. This means edges created
-        // in the same transaction (but not yet committed) won't be found and deleted.
-        // This is consistent with the existing ReadOps behavior but may leave orphaned
-        // edges in same-transaction scenarios. See issue for future improvement.
+        // LIMITATION (buffer-aware cascade adjacency — tracked for #3416):
+        // the #3417 read-your-own-writes fix makes the node existence check
+        // (above) and per-edge delete_edge reads buffer-aware, but the
+        // adjacency ENUMERATION below still routes through
+        // get_outgoing_edges/get_incoming_edges, which read committed
+        // adjacency only. So a same-tx create_node → create_edge → cascade
+        // does NOT see (and cannot delete) the same-tx-created edge, which can
+        // leave it orphaned. Buffer-aware adjacency is deferred to #3416. Note
+        // this does not affect the MCP #3209 refuse/detach idempotency
+        // contract, which is enforced at the MCP layer over committed
+        // adjacency and is unaffected by this gap.
         let outgoing_edges = self.get_outgoing_edges(node_id)?;
         let incoming_edges = self.get_incoming_edges(node_id)?;
 

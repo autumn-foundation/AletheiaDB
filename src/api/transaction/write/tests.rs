@@ -4754,10 +4754,214 @@ mod buffer_aware_read_tests {
         );
     }
 
-    /// Collapse: create then delete the same node in one tx commits cleanly
-    /// (no phantom left behind, node absent).
+    /// Headline #3417 scenario for nodes: create → update → update in ONE tx.
+    /// The SECOND update must read-your-own-writes onto the FIRST update's
+    /// buffered state (not a stale committed/created read), so all three
+    /// writes compose in the committed result.
     #[test]
-    fn test_3417_create_then_delete_collapse_commits_clean() {
+    fn test_3417_create_update_update_node_chain_merges() {
+        let harness = TestHarness::new();
+        let mut tx = harness.create_tx();
+
+        let node_id = tx
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new()
+                    .insert("name", "Alice")
+                    .insert("age", 30i64)
+                    .build(),
+            )
+            .unwrap();
+        // First update: sets age onto the buffered CREATE.
+        tx.update_node(
+            node_id,
+            PropertyMapBuilder::new().insert("age", 31i64).build(),
+        )
+        .unwrap();
+        // Second update: MUST merge onto the buffered FIRST update, adding a
+        // new key while preserving the first update's age and the created name.
+        tx.update_node(
+            node_id,
+            PropertyMapBuilder::new().insert("city", "NYC").build(),
+        )
+        .unwrap();
+
+        tx.commit().unwrap();
+
+        let node = harness.current.get_node(node_id).unwrap();
+        assert_eq!(
+            node.get_property("name").and_then(|v| v.as_str()),
+            Some("Alice"),
+            "created property must survive both updates"
+        );
+        assert_eq!(
+            node.get_property("age").and_then(|v| v.as_int()),
+            Some(31),
+            "first update must survive the second (chained merge, not stale read)"
+        );
+        assert_eq!(
+            node.get_property("city").and_then(|v| v.as_str()),
+            Some("NYC"),
+            "second update's new key must be present"
+        );
+    }
+
+    /// Headline #3417 scenario for a COMMITTED node: two updates in one tx must
+    /// compose — the second reads the buffered first update, not committed
+    /// state (which is exactly the bug: a second write dropping the first's
+    /// merge). This is the multi-write-per-committed-entity case #3417 names.
+    #[test]
+    fn test_3417_double_update_committed_node_composes() {
+        let harness = TestHarness::new();
+
+        let node_id = {
+            let mut tx = harness.create_tx();
+            let id = tx
+                .create_node(
+                    "Person",
+                    PropertyMapBuilder::new()
+                        .insert("name", "Bob")
+                        .insert("age", 40i64)
+                        .build(),
+                )
+                .unwrap();
+            tx.commit().unwrap();
+            id
+        };
+
+        let mut tx = harness.create_tx();
+        // First update onto committed state.
+        tx.update_node(
+            node_id,
+            PropertyMapBuilder::new().insert("age", 41i64).build(),
+        )
+        .unwrap();
+        // Second update MUST see the buffered first update (age=41) and add a
+        // key, rather than re-reading committed state (age=40) and dropping it.
+        tx.update_node(
+            node_id,
+            PropertyMapBuilder::new().insert("city", "LA").build(),
+        )
+        .unwrap();
+        tx.commit().unwrap();
+
+        let node = harness.current.get_node(node_id).unwrap();
+        assert_eq!(
+            node.get_property("name").and_then(|v| v.as_str()),
+            Some("Bob"),
+            "committed property untouched by the updates must survive"
+        );
+        assert_eq!(
+            node.get_property("age").and_then(|v| v.as_int()),
+            Some(41),
+            "first update must not be dropped by the second (composed merge)"
+        );
+        assert_eq!(
+            node.get_property("city").and_then(|v| v.as_str()),
+            Some("LA"),
+            "second update's key must be present"
+        );
+    }
+
+    /// Edge equivalent of the headline scenario: create → update → update edge
+    /// in ONE tx composes all three writes.
+    #[test]
+    fn test_3417_create_update_update_edge_chain_merges() {
+        let harness = TestHarness::new();
+        let mut tx = harness.create_tx();
+
+        let n1 = tx
+            .create_node("Person", PropertyMapBuilder::new().build())
+            .unwrap();
+        let n2 = tx
+            .create_node("Person", PropertyMapBuilder::new().build())
+            .unwrap();
+        let edge_id = tx
+            .create_edge(
+                n1,
+                n2,
+                "KNOWS",
+                PropertyMapBuilder::new().insert("weight", 1i64).build(),
+            )
+            .unwrap();
+        tx.update_edge(
+            edge_id,
+            PropertyMapBuilder::new().insert("weight", 2i64).build(),
+        )
+        .unwrap();
+        tx.update_edge(
+            edge_id,
+            PropertyMapBuilder::new().insert("since", 2020i64).build(),
+        )
+        .unwrap();
+
+        tx.commit().unwrap();
+
+        let edge = harness.current.get_edge(edge_id).unwrap();
+        assert_eq!(
+            edge.get_property("weight").and_then(|v| v.as_int()),
+            Some(2),
+            "first edge update must survive the second (chained merge)"
+        );
+        assert_eq!(
+            edge.get_property("since").and_then(|v| v.as_int()),
+            Some(2020),
+            "second edge update's new key must be present"
+        );
+    }
+
+    /// A same-tx create_edge → update_edge must NOT raise a spurious
+    /// SerializationFailure at commit (dedicated edge conflict-skip coverage,
+    /// mirroring the node case).
+    #[test]
+    fn test_3417_create_then_update_edge_no_spurious_conflict() {
+        let harness = TestHarness::new();
+        let mut tx = harness.create_tx();
+
+        let n1 = tx
+            .create_node("Person", PropertyMapBuilder::new().build())
+            .unwrap();
+        let n2 = tx
+            .create_node("Person", PropertyMapBuilder::new().build())
+            .unwrap();
+        let edge_id = tx
+            .create_edge(
+                n1,
+                n2,
+                "KNOWS",
+                PropertyMapBuilder::new().insert("weight", 1i64).build(),
+            )
+            .unwrap();
+        tx.update_edge(
+            edge_id,
+            PropertyMapBuilder::new().insert("weight", 2i64).build(),
+        )
+        .unwrap();
+
+        let result = tx.commit();
+        assert!(
+            result.is_ok(),
+            "create-then-update of an edge in one tx must commit without a \
+             spurious write-write conflict, got: {:?}",
+            result.err()
+        );
+    }
+
+    /// Collapse: create then delete the same node in one tx commits cleanly
+    /// and leaves **current state** clean (no phantom, node absent).
+    ///
+    /// Scope: this asserts CURRENT-STATE cleanliness only. The historical
+    /// record is intentionally NOT collapsed: apply replays the buffer in
+    /// order, so it writes a create version AND a delete tombstone, both
+    /// stamped with the same commit_timestamp. The create version therefore
+    /// ends up with a zero-width transaction-time interval (opened and closed
+    /// at the same commit instant) and the tombstone closes the valid-time
+    /// interval — i.e. the node is never visible at any (valid, tx) coordinate
+    /// after this commit. Verifying that bi-temporal shape is out of scope for
+    /// this test (and for #3417); it belongs with the apply/temporal-index
+    /// coverage.
+    #[test]
+    fn test_3417_create_then_delete_collapse_current_state_clean() {
         let harness = TestHarness::new();
         let node_before = harness.current.node_count();
 
@@ -4775,12 +4979,13 @@ mod buffer_aware_read_tests {
 
         assert!(
             harness.current.get_node(node_id).is_err(),
-            "collapsed node must be absent"
+            "collapsed node must be absent from current state"
         );
         assert_eq!(
             harness.current.node_count(),
             node_before,
-            "no phantom node should remain after a create-then-delete collapse"
+            "no phantom node should remain in current state after a \
+             create-then-delete collapse"
         );
     }
 
@@ -4817,5 +5022,72 @@ mod buffer_aware_read_tests {
 
         drop(tx_a);
         drop(tx_b);
+    }
+
+    /// Cross-transaction MVCC safety: the write-path read is deliberately
+    /// UN-filtered (it sees the latest committed version, not just versions
+    /// visible to this tx's snapshot), so a concurrent commit landing AFTER
+    /// tx_b's snapshot is read by tx_b's update — but `detect_conflicts` MUST
+    /// still abort tx_b with `SerializationFailure` at commit (first-committer
+    /// wins). This is the abort the unfiltered read relies on for correctness.
+    #[test]
+    fn test_3417_cross_tx_committed_after_snapshot_still_conflicts() {
+        let harness = TestHarness::new();
+
+        // Committed baseline node.
+        let node_id = {
+            let mut tx = harness.create_tx();
+            let id = tx
+                .create_node(
+                    "Person",
+                    PropertyMapBuilder::new().insert("age", 1i64).build(),
+                )
+                .unwrap();
+            tx.commit().unwrap();
+            id
+        };
+
+        // tx_b captures its snapshot BEFORE tx_a commits.
+        let mut tx_b = harness.create_tx();
+
+        // tx_a commits a new version of the node AFTER tx_b's snapshot.
+        let mut tx_a = harness.create_tx();
+        tx_a.update_node(
+            node_id,
+            PropertyMapBuilder::new().insert("age", 2i64).build(),
+        )
+        .unwrap();
+        tx_a.commit().unwrap();
+
+        // tx_b's write-path read is unfiltered, so this update succeeds (it
+        // reads the just-committed version)...
+        tx_b.update_node(
+            node_id,
+            PropertyMapBuilder::new().insert("age", 3i64).build(),
+        )
+        .unwrap();
+
+        // ...but the commit MUST abort: tx_a committed after tx_b's snapshot.
+        let result = tx_b.commit();
+        assert!(
+            result.is_err(),
+            "tx_b must abort: a concurrent commit landed after its snapshot"
+        );
+        assert!(
+            format!("{:?}", result.unwrap_err()).contains("SerializationFailure"),
+            "expected SerializationFailure (first-committer-wins)"
+        );
+
+        // First committer (tx_a) wins.
+        assert_eq!(
+            harness
+                .current
+                .get_node(node_id)
+                .unwrap()
+                .get_property("age")
+                .and_then(|v| v.as_int()),
+            Some(2),
+            "first committer's value must stand"
+        );
     }
 }
