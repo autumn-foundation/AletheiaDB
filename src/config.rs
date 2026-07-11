@@ -97,6 +97,35 @@ pub struct WalConfig {
     /// This determines the tradeoff between durability guarantees and performance.
     /// Default: GroupCommit (10ms delay, 200 batch size)
     pub durability_mode: crate::storage::wal::DurabilityMode,
+
+    /// Recovery policy for a crash-torn trailing entry (Issue #3433).
+    ///
+    /// When `true` (the default), WAL replay stops at a crash-torn trailing
+    /// entry in the FINAL segment — the shapes a crash during append leaves: a
+    /// partial header, a payload truncated past end-of-file, a zeroed/garbage
+    /// op-type byte, or a checksum mismatch on a half-written payload — applying
+    /// everything decoded before it and logging a warning, instead of
+    /// hard-failing startup. A torn tail was never acknowledged, so discarding
+    /// it is correct, not data loss.
+    ///
+    /// Tolerance never swallows real corruption: an undecodable entry FOLLOWED
+    /// BY a valid committed entry (a valid frame after it in an encrypted
+    /// segment, or a higher-LSN entry found by the plaintext forward probe) is
+    /// mid-log damage, not a torn tail, and ALWAYS hard-errors — even with this
+    /// flag `true`. Corruption in a non-final segment always hard-errors too.
+    ///
+    /// When `false`, recovery is fail-stop: every genuine-torn-tail shape above
+    /// aborts startup so an operator can inspect the log manually, instead of
+    /// automatic tail truncation. The ONE exception, in both modes, is an
+    /// all-zero pre-allocation padding window at the end of a segment: that is
+    /// treated as end-of-log, never an error (hard-erroring on it would brick
+    /// normal startup).
+    ///
+    /// Scope: this opt-out governs the RECOVERY REPLAY path only. The #3428
+    /// LSN-seeding scan (`max_lsn_in_dir`) stays torn-tail-tolerant regardless,
+    /// so setting this to `false` does not re-brick the writer at seed time.
+    /// Default: true
+    pub tolerate_torn_tail: bool,
 }
 
 impl Default for WalConfig {
@@ -110,6 +139,7 @@ impl Default for WalConfig {
             wal_dir: std::path::PathBuf::from("aletheiadb/wal"),
             segments_to_retain: 10,
             durability_mode: crate::storage::wal::DurabilityMode::group_commit_default(),
+            tolerate_torn_tail: true,
         }
     }
 }
@@ -302,6 +332,16 @@ impl WalConfigBuilder {
     /// Set the durability mode.
     pub fn durability_mode(mut self, mode: crate::storage::wal::DurabilityMode) -> Self {
         self.config.durability_mode = mode;
+        self
+    }
+
+    /// Set the crash-torn-tail recovery policy (Issue #3433).
+    ///
+    /// `true` (default) tolerates a torn trailing entry in the final WAL
+    /// segment on replay; `false` selects fail-stop recovery (any parse
+    /// failure aborts startup). See [`WalConfig::tolerate_torn_tail`].
+    pub fn tolerate_torn_tail(mut self, tolerate: bool) -> Self {
+        self.config.tolerate_torn_tail = tolerate;
         self
     }
 
