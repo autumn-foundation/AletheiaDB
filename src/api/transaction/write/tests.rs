@@ -4429,3 +4429,164 @@ mod lock_poisoning_tests {
         }
     }
 }
+
+/// Regression tests for Issue #3415.
+///
+/// A commit that fails *after* `commit_with_timestamp_inner` transitions the
+/// transaction into `TxState::Preparing` (write-write conflict, constraint,
+/// WAL, or apply failure) must still release the transaction's `TxId` from
+/// `TxVisibilityManager::active` when the consumed `WriteTransaction` is
+/// dropped. Before the fix, `Drop` only aborted `TxState::Active` transactions,
+/// so a failed commit leaked its `TxId` in the active set forever — pinning the
+/// snapshot horizon and growing `active_count()` without bound under retries.
+///
+/// These tests drive a deterministic write-write conflict (no failure-injection
+/// hook needed): two transactions update the same committed node; the first
+/// committer wins and the second commit fails in `Preparing`.
+#[cfg(test)]
+mod commit_failure_visibility_tests {
+    use crate::AletheiaDB;
+    use crate::api::WriteOps;
+    use crate::core::property::PropertyMapBuilder;
+
+    /// A single commit that fails via write-write conflict must return the
+    /// active-transaction count to its baseline (the leaked-`TxId` regression).
+    #[test]
+    fn test_conflict_failed_commit_releases_txid() {
+        let db = AletheiaDB::new().expect("db");
+
+        // Seed a committed node that both transactions will contend on.
+        let node_id = db
+            .write(|tx| {
+                let id = tx.create_node(
+                    "Person",
+                    PropertyMapBuilder::new().insert("age", 30i64).build(),
+                )?;
+                Ok::<_, crate::Error>(id)
+            })
+            .expect("seed node");
+
+        let baseline = db.visibility_manager.active_count();
+        assert_eq!(baseline, 0, "no transactions should be active at baseline");
+
+        // tx1 and tx2 both start (both registered active) and update the same node.
+        let mut tx1 = db.write_transaction().expect("tx1");
+        tx1.update_node(
+            node_id,
+            PropertyMapBuilder::new().insert("age", 31i64).build(),
+        )
+        .expect("tx1 update");
+
+        let mut tx2 = db.write_transaction().expect("tx2");
+        tx2.update_node(
+            node_id,
+            PropertyMapBuilder::new().insert("age", 32i64).build(),
+        )
+        .expect("tx2 update");
+
+        assert_eq!(
+            db.visibility_manager.active_count(),
+            2,
+            "both in-flight transactions must be registered active"
+        );
+
+        // First committer wins.
+        tx2.commit().expect("tx2 commit should succeed");
+
+        // Second commit fails with a write-write conflict *in the Preparing
+        // phase*, consuming and dropping tx1.
+        let result = tx1.commit();
+        assert!(
+            result.is_err(),
+            "tx1 commit should fail due to write-write conflict"
+        );
+
+        // The failed commit must have released tx1's TxId from the active set.
+        assert_eq!(
+            db.visibility_manager.active_count(),
+            baseline,
+            "a commit failing in Preparing must release its TxId (Issue #3415)"
+        );
+    }
+
+    /// Repeated conflict-failed commits must not grow the active set: the count
+    /// stays flat at baseline rather than leaking one `TxId` per failure.
+    #[test]
+    fn test_repeated_conflict_failures_do_not_leak() {
+        let db = AletheiaDB::new().expect("db");
+
+        let node_id = db
+            .write(|tx| {
+                let id = tx.create_node(
+                    "Person",
+                    PropertyMapBuilder::new().insert("age", 0i64).build(),
+                )?;
+                Ok::<_, crate::Error>(id)
+            })
+            .expect("seed node");
+
+        let baseline = db.visibility_manager.active_count();
+        assert_eq!(baseline, 0);
+
+        for i in 0..50i64 {
+            let mut loser = db.write_transaction().expect("loser tx");
+            loser
+                .update_node(node_id, PropertyMapBuilder::new().insert("age", i).build())
+                .expect("loser update");
+
+            let mut winner = db.write_transaction().expect("winner tx");
+            winner
+                .update_node(
+                    node_id,
+                    PropertyMapBuilder::new().insert("age", i + 1000).build(),
+                )
+                .expect("winner update");
+
+            // Winner commits first, loser fails in Preparing and is dropped.
+            winner.commit().expect("winner commit");
+            assert!(loser.commit().is_err(), "loser commit should conflict");
+
+            // After each failed commit the active set must be back to baseline —
+            // no monotonic growth (Issue #3415 amplification path).
+            assert_eq!(
+                db.visibility_manager.active_count(),
+                baseline,
+                "active_count leaked after {} conflict-failed commits",
+                i + 1
+            );
+        }
+    }
+
+    /// Guard: a successful commit and an explicit rollback both leave the active
+    /// set at baseline (no double-abort / no leak), so the #3415 fix does not
+    /// regress the happy paths.
+    #[test]
+    fn test_success_and_rollback_leave_active_set_clean() {
+        let db = AletheiaDB::new().expect("db");
+        let baseline = db.visibility_manager.active_count();
+
+        // Successful commit.
+        let mut tx = db.write_transaction().expect("tx");
+        tx.create_node("Person", PropertyMapBuilder::new().build())
+            .expect("create");
+        assert_eq!(db.visibility_manager.active_count(), baseline + 1);
+        tx.commit().expect("commit");
+        assert_eq!(
+            db.visibility_manager.active_count(),
+            baseline,
+            "successful commit must release its TxId"
+        );
+
+        // Explicit rollback.
+        let mut tx = db.write_transaction().expect("tx");
+        tx.create_node("Person", PropertyMapBuilder::new().build())
+            .expect("create");
+        assert_eq!(db.visibility_manager.active_count(), baseline + 1);
+        tx.rollback().expect("rollback");
+        assert_eq!(
+            db.visibility_manager.active_count(),
+            baseline,
+            "explicit rollback must release its TxId"
+        );
+    }
+}
