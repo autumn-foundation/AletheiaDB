@@ -918,6 +918,37 @@ impl WriteTransaction {
         }
         self.current.get_edge(id)
     }
+
+    /// Enumerate edges CREATED earlier in THIS transaction that reference
+    /// `node_id` as source or target and are still live in the buffer (Issue
+    /// #3416 Pt4).
+    ///
+    /// `delete_node_cascade` unions this with committed adjacency
+    /// (`self.current.get_outgoing_edges` / `get_incoming_edges`) so a same-tx
+    /// `create_node → create_edge → cascade` reaches the same-tx-created edge,
+    /// which committed adjacency cannot yet see. Only `CreateEdge` ops matter:
+    /// an already-committed edge (including one this tx `UpdateEdge`s) is
+    /// already returned by the current-adjacency read. An edge created then
+    /// deleted/retracted within this tx is filtered out (its latest buffered
+    /// state resolves to Not-Found via [`buffered_edge`](Self::buffered_edge)),
+    /// so the cascade never double-closes it.
+    fn buffered_connected_edges(&self, node_id: NodeId) -> Vec<EdgeId> {
+        let mut edges = Vec::new();
+        for op in self.buffer.operations() {
+            if let super::BufferedWrite::CreateEdge {
+                edge_id,
+                source,
+                target,
+                ..
+            } = op
+                && (*source == node_id || *target == node_id)
+                && matches!(self.buffered_edge(*edge_id), Some(Ok(_)))
+            {
+                edges.push(*edge_id);
+            }
+        }
+        edges
+    }
 }
 
 impl ReadOps for WriteTransaction {
@@ -1454,27 +1485,34 @@ impl WriteOps for WriteTransaction {
         // transaction can be cascade-deleted (read-your-own-writes).
         let _node = self.read_own_node(node_id)?;
 
-        // Collect all edges connected to this node (both outgoing and incoming)
-        // We do this before any deletions to avoid borrowing issues
+        // Collect all edges connected to this node (both outgoing and incoming).
+        // We do this before any deletions to avoid borrowing issues.
         //
-        // LIMITATION (buffer-aware cascade adjacency — tracked for #3416):
-        // the #3417 read-your-own-writes fix makes the node existence check
-        // (above) and per-edge delete_edge reads buffer-aware, but the
-        // adjacency ENUMERATION below still routes through
-        // get_outgoing_edges/get_incoming_edges, which read committed
-        // adjacency only. So a same-tx create_node → create_edge → cascade
-        // does NOT see (and cannot delete) the same-tx-created edge, which can
-        // leave it orphaned. Buffer-aware adjacency is deferred to #3416. Note
-        // this does not affect the MCP #3209 refuse/detach idempotency
-        // contract, which is enforced at the MCP layer over committed
-        // adjacency and is unaffected by this gap.
-        let outgoing_edges = self.get_outgoing_edges(node_id)?;
-        let incoming_edges = self.get_incoming_edges(node_id)?;
+        // Buffer-aware cascade adjacency (Issue #3416 Pt4, folded from the
+        // #3417 review): the committed adjacency (get_outgoing_edges /
+        // get_incoming_edges) is unioned with edges CREATED earlier in THIS
+        // transaction (buffered CreateEdge touching this node), minus edges
+        // already deleted/retracted in this tx. Without the buffer union a
+        // same-tx create_node → create_edge → cascade would leave the
+        // same-tx-created edge orphaned (its endpoint gets a tombstone but the
+        // edge does not).
+        let mut edge_ids = self.get_outgoing_edges(node_id)?;
+        edge_ids.extend(self.get_incoming_edges(node_id)?);
+        edge_ids.extend(self.buffered_connected_edges(node_id));
 
-        // Delete all connected edges first to maintain referential integrity
-        // This prevents orphaned edges that reference a deleted node
-        // Performance: O(degree) where degree is the number of connected edges
-        for edge_id in outgoing_edges.into_iter().chain(incoming_edges) {
+        // Dedup by EdgeId (Issue #3416 Pt3): a self-loop (node -> node) appears
+        // in BOTH the outgoing and incoming lists; without dedup delete_edge
+        // would be called twice for the same edge, buffering two DeleteEdge ops
+        // (double tombstone / double-close at apply time). Sort + dedup means
+        // each distinct connected edge is deleted exactly once. This mirrors
+        // retract_node_detach and apply_batch's manual cascade.
+        edge_ids.sort_unstable();
+        edge_ids.dedup();
+
+        // Delete all connected edges first to maintain referential integrity.
+        // This prevents orphaned edges that reference a deleted node.
+        // Performance: O(degree) where degree is the number of connected edges.
+        for edge_id in edge_ids {
             self.delete_edge(edge_id)?;
         }
 

@@ -1275,6 +1275,277 @@ fn test_count_connected_edges() {
 }
 
 #[test]
+fn test_count_connected_edges_self_loop_is_distinct() {
+    // Issue #3416 Pt2: a self-loop is ONE edge. `count_connected_edges` must
+    // count DISTINCT edge ids (not out_degree + in_degree, which double-counts
+    // a self-loop as 2), so `details.connected_edges` means the same thing the
+    // retract_node / apply_batch DISTINCT enumeration reports.
+    let db = AletheiaDB::new().unwrap();
+
+    let alice = db
+        .create_node("Person", PropertyMapBuilder::new().build())
+        .unwrap();
+
+    // A single self-loop alice -> alice.
+    db.create_edge(alice, alice, "KNOWS", PropertyMapBuilder::new().build())
+        .unwrap();
+    assert_eq!(
+        db.count_connected_edges(alice).unwrap(),
+        1,
+        "a self-loop is one distinct edge, not two"
+    );
+
+    // Mixed: self-loop + a real outgoing + a real incoming = 3 distinct edges.
+    let bob = db
+        .create_node("Person", PropertyMapBuilder::new().build())
+        .unwrap();
+    db.create_edge(alice, bob, "OUT", PropertyMapBuilder::new().build())
+        .unwrap();
+    db.create_edge(bob, alice, "IN", PropertyMapBuilder::new().build())
+        .unwrap();
+    assert_eq!(
+        db.count_connected_edges(alice).unwrap(),
+        3,
+        "self-loop counted once alongside two distinct directed edges"
+    );
+}
+
+#[test]
+fn test_delete_node_cascade_self_loop_single_delete() {
+    // Issue #3416 Pt3: a self-loop appears in BOTH the outgoing and incoming
+    // adjacency lists; without dedup, `delete_node_cascade` would `delete_edge`
+    // it twice in the same tx (double tombstone / double-close). Deduping by
+    // EdgeId means each connected edge is deleted exactly once.
+    let db = AletheiaDB::new().unwrap();
+
+    let alice = db
+        .create_node("Person", PropertyMapBuilder::new().build())
+        .unwrap();
+    let self_loop = db
+        .create_edge(alice, alice, "KNOWS", PropertyMapBuilder::new().build())
+        .unwrap();
+
+    assert_eq!(db.edge_count(), 1);
+
+    // Cascade must succeed (no double-delete error) and remove node + edge.
+    db.write(|tx| tx.delete_node_cascade(alice)).unwrap();
+
+    assert_eq!(db.node_count(), 0);
+    assert_eq!(db.edge_count(), 0);
+    assert!(db.get_node(alice).is_err());
+    assert!(db.get_edge(self_loop).is_err());
+}
+
+#[test]
+fn test_delete_node_cascade_self_loop_mixed_graph_single_delete() {
+    // Issue #3416 Pt3: self-loop + normal in/out edges — every distinct edge
+    // deleted exactly once, no double-delete on the self-loop.
+    let db = AletheiaDB::new().unwrap();
+
+    let alice = db
+        .create_node("Person", PropertyMapBuilder::new().build())
+        .unwrap();
+    let bob = db
+        .create_node("Person", PropertyMapBuilder::new().build())
+        .unwrap();
+
+    db.create_edge(alice, alice, "SELF", PropertyMapBuilder::new().build())
+        .unwrap();
+    db.create_edge(alice, bob, "OUT", PropertyMapBuilder::new().build())
+        .unwrap();
+    db.create_edge(bob, alice, "IN", PropertyMapBuilder::new().build())
+        .unwrap();
+    assert_eq!(db.edge_count(), 3);
+
+    db.write(|tx| tx.delete_node_cascade(alice)).unwrap();
+
+    assert_eq!(db.node_count(), 1); // bob remains
+    assert_eq!(db.edge_count(), 0); // all 3 distinct edges removed once each
+    assert!(db.get_node(alice).is_err());
+}
+
+#[test]
+fn test_delete_node_cascade_removes_same_tx_created_edge() {
+    // Issue #3416 Pt4 (folded from #3417 review): a cascade must see edges
+    // CREATED earlier in the SAME transaction, not just committed adjacency.
+    // create_node -> create_edge(self-loop) -> delete_node_cascade in ONE tx
+    // must leave no orphaned edge after commit.
+    let db = AletheiaDB::new().unwrap();
+
+    let (victim, self_loop) = db
+        .write(|tx| {
+            let victim = tx.create_node("Person", PropertyMapBuilder::new().build())?;
+            let self_loop =
+                tx.create_edge(victim, victim, "KNOWS", PropertyMapBuilder::new().build())?;
+            tx.delete_node_cascade(victim)?;
+            Ok::<_, Error>((victim, self_loop))
+        })
+        .unwrap();
+
+    assert_eq!(db.node_count(), 0);
+    assert_eq!(
+        db.edge_count(),
+        0,
+        "the same-tx-created self-loop must be cascade-deleted, not orphaned"
+    );
+    assert!(db.get_node(victim).is_err());
+    assert!(db.get_edge(self_loop).is_err());
+}
+
+#[test]
+fn test_delete_node_cascade_removes_same_tx_created_directed_edge() {
+    // Issue #3416 Pt4: same-tx create_node(x) already committed, then
+    // create_edge(x -> victim) in the cascade tx; the cascade must delete the
+    // same-tx incoming edge too.
+    let db = AletheiaDB::new().unwrap();
+
+    let x = db
+        .create_node("Person", PropertyMapBuilder::new().build())
+        .unwrap();
+
+    let (victim, edge) = db
+        .write(|tx| {
+            let victim = tx.create_node("Person", PropertyMapBuilder::new().build())?;
+            let edge = tx.create_edge(x, victim, "POINTS_AT", PropertyMapBuilder::new().build())?;
+            tx.delete_node_cascade(victim)?;
+            Ok::<_, Error>((victim, edge))
+        })
+        .unwrap();
+
+    assert_eq!(db.edge_count(), 0, "same-tx incoming edge must be removed");
+    assert!(db.get_node(victim).is_err());
+    assert!(db.get_edge(edge).is_err());
+    assert!(db.get_node(x).is_ok());
+}
+
+#[test]
+fn test_delete_node_write_skew_concurrent_edge_aborts() {
+    // Issue #3416 Pt1: SI write-skew. tx_A stages delete_node(victim) after
+    // seeing 0 connected edges; a SEPARATE tx_B commits create_edge(x ->
+    // victim); tx_A commits. Without a commit-time re-check the disjoint write
+    // sets escape conflict detection and tx_A commits -> a committed edge
+    // pointing at a deleted node (silent orphan). The re-check must ABORT tx_A
+    // with FAILED_PRECONDITION and leave the victim + edge intact.
+    let db = AletheiaDB::new().unwrap();
+
+    let x = db
+        .create_node("Person", PropertyMapBuilder::new().build())
+        .unwrap();
+    let victim = db
+        .create_node("Person", PropertyMapBuilder::new().build())
+        .unwrap();
+    // victim committed with 0 connected edges.
+    assert_eq!(db.count_connected_edges(victim).unwrap(), 0);
+
+    // tx_A: snapshot captured now (before B's edge exists), stage the delete.
+    let mut tx_a = db.write_transaction().unwrap();
+    tx_a.delete_node(victim).unwrap();
+
+    // tx_B: concurrently create + commit an edge x -> victim.
+    let edge = db
+        .write(|tx| tx.create_edge(x, victim, "POINTS_AT", PropertyMapBuilder::new().build()))
+        .unwrap();
+
+    // tx_A commits -> must be rejected as a write-skew precondition failure.
+    let commit_result = tx_a.commit();
+    assert!(
+        commit_result.is_err(),
+        "delete_node must abort when a concurrent edge would be orphaned"
+    );
+    let err = commit_result.unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("orphan") || msg.contains("connected edge"),
+        "abort message should explain the write-skew/orphan: {msg}"
+    );
+
+    // No orphan: victim still present, edge still points at a live node.
+    assert!(db.get_node(victim).is_ok());
+    assert!(db.get_edge(edge).is_ok());
+    assert_eq!(db.get_edge(edge).unwrap().target, victim);
+}
+
+#[test]
+fn test_delete_node_no_concurrent_edge_commits_ok() {
+    // Issue #3416 Pt1 negative: when NO concurrent edge appears, the staged
+    // delete commits fine (the re-check must not abort a legitimate delete).
+    let db = AletheiaDB::new().unwrap();
+
+    let victim = db
+        .create_node("Person", PropertyMapBuilder::new().build())
+        .unwrap();
+
+    let mut tx_a = db.write_transaction().unwrap();
+    tx_a.delete_node(victim).unwrap();
+    // No concurrent writer.
+    tx_a.commit().unwrap();
+
+    assert_eq!(db.node_count(), 0);
+    assert!(db.get_node(victim).is_err());
+}
+
+#[test]
+fn test_delete_node_preexisting_edge_still_orphan_preserving() {
+    // Issue #3416 Pt1 refinement guard: an edge that existed AT tx_A's snapshot
+    // (committed before the snapshot) is the documented low-level
+    // orphan-preserving delete_node behavior and must NOT trip the write-skew
+    // re-check (only edges committed AFTER the snapshot are write-skew).
+    let db = AletheiaDB::new().unwrap();
+
+    let x = db
+        .create_node("Person", PropertyMapBuilder::new().build())
+        .unwrap();
+    let victim = db
+        .create_node("Person", PropertyMapBuilder::new().build())
+        .unwrap();
+    let edge = db
+        .create_edge(x, victim, "POINTS_AT", PropertyMapBuilder::new().build())
+        .unwrap();
+
+    // Snapshot taken AFTER the edge already exists.
+    let mut tx_a = db.write_transaction().unwrap();
+    tx_a.delete_node(victim).unwrap();
+    // Low-level delete preserves the pre-existing edge (documented behavior).
+    tx_a.commit().unwrap();
+
+    assert!(db.get_node(victim).is_err());
+    assert!(db.get_edge(edge).is_ok()); // orphan preserved, no spurious abort
+}
+
+#[test]
+fn test_retract_node_write_skew_concurrent_edge_aborts() {
+    // Issue #3416 Pt1: same write-skew window for retract_node. A concurrent
+    // edge committed after tx_A's snapshot would leave an edge pointing at a
+    // retracted node; the commit-time re-check must abort tx_A.
+    let db = AletheiaDB::new().unwrap();
+
+    let x = db
+        .create_node("Person", PropertyMapBuilder::new().build())
+        .unwrap();
+    let victim = db
+        .create_node("Person", PropertyMapBuilder::new().build())
+        .unwrap();
+
+    let mut tx_a = db.write_transaction().unwrap();
+    tx_a.retract_node(victim, crate::core::temporal::time::now())
+        .unwrap();
+
+    let edge = db
+        .write(|tx| tx.create_edge(x, victim, "POINTS_AT", PropertyMapBuilder::new().build()))
+        .unwrap();
+
+    let commit_result = tx_a.commit();
+    assert!(
+        commit_result.is_err(),
+        "retract_node must abort when a concurrent edge would be orphaned"
+    );
+
+    // Victim still valid, edge intact.
+    assert!(db.get_node(victim).is_ok());
+    assert!(db.get_edge(edge).is_ok());
+}
+
+#[test]
 fn test_delete_edge_via_transaction() {
     let db = AletheiaDB::new().unwrap();
 

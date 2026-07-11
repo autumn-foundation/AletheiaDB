@@ -2301,9 +2301,11 @@ mod conflict_detection_tests {
     /// - Both transactions try to commit concurrently
     ///
     /// Expected behavior (documents actual MVCC implementation):
-    /// - Test Case A: If edge creation commits first, node deletion succeeds because
-    ///   edge addition doesn't modify the node's version (no conflict detected).
-    ///   This creates an orphaned edge, which is acceptable if traversals handle it.
+    /// - Test Case A: If edge creation commits first, the concurrent node
+    ///   deletion is ABORTED at commit by the Issue #3416 Pt1 write-skew
+    ///   re-check: the newly-committed edge (commit_ts after the deleter's
+    ///   snapshot) would be orphaned, so the delete fails with a
+    ///   `FAILED_PRECONDITION`-class error and the node/edge are left intact.
     /// - Test Case B: If node deletion commits first, edge creation fails on commit
     ///   due to referential integrity (endpoint node was deleted after snapshot).
     #[test]
@@ -2344,34 +2346,27 @@ mod conflict_detection_tests {
                 "Edge should be created"
             );
 
-            // tx2 tries to delete node2. According to the current MVCC implementation,
-            // edge addition doesn't modify node2's version, so no conflict is detected
-            // and the deletion succeeds.
+            // tx2 tries to delete node2. Issue #3416 Pt1: the commit-time
+            // write-skew re-check sees the edge tx1 committed after tx2's
+            // snapshot (referencing node2, not closed by tx2) and ABORTS the
+            // delete rather than silently orphaning the edge.
             let result = tx2.commit();
             assert!(
-                result.is_ok(),
-                "tx2 commit should succeed - edge addition doesn't create version conflict on node2"
+                result.is_err(),
+                "tx2 commit must abort - deleting node2 would orphan the concurrently-created edge"
             );
 
-            // Verify node was deleted
+            // Node2 is NOT deleted (write-skew delete was refused).
             assert!(
-                harness.current.get_node(node2).is_err(),
-                "Node should be deleted after successful tx2 commit"
+                harness.current.get_node(node2).is_ok(),
+                "Node2 must remain after the aborted delete"
             );
 
-            // Current implementation: edge becomes orphaned but still exists in storage.
-            // This documents a limitation: the system allows orphaned edges.
-            // TODO(issue): Consider adding cascade delete or stricter referential integrity
-            assert!(
-                harness.current.get_edge(edge_id).is_ok(),
-                "Edge still exists as orphan (documents current behavior)"
-            );
-
-            // Verify the edge references the deleted node (orphaned edge)
+            // The edge is preserved and still references a LIVE node2 — no orphan.
             let edge = harness.current.get_edge(edge_id).unwrap();
             assert_eq!(
                 edge.target, node2,
-                "Edge still references deleted node (orphaned)"
+                "Edge references a live node2 (no orphan created)"
             );
         }
 
