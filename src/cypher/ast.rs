@@ -50,6 +50,29 @@ pub enum CypherStatement {
         /// [`CypherOptionalMatch::preceding_withs`].
         optional_matches: Vec<CypherOptionalMatch>,
     },
+
+    /// A standalone `UNWIND <list> AS <var> RETURN ...` statement (Issue #559).
+    ///
+    /// `UNWIND` expands a list value into one row per element, binding each
+    /// element to `variable`. This variant models the *standalone* form only
+    /// (an `UNWIND` that is not preceded by `MATCH`/`WITH` and does not feed a
+    /// subsequent graph pattern); it is executed directly by the dedicated
+    /// Cypher UNWIND runtime rather than lowered into the graph query pipeline.
+    ///
+    /// openCypher list semantics apply: an empty list and the `null` value both
+    /// expand to zero rows.
+    Unwind {
+        /// The list-valued source expression. Supported forms are a list
+        /// literal (`[...]`), a parameter reference (`$list`), or the `null`
+        /// literal; other (row-context-dependent) expressions are rejected at
+        /// execution time.
+        source: CypherExpr,
+        /// The variable each list element is bound to (the `AS <var>` target).
+        variable: String,
+        /// The trailing `RETURN` projection (with optional `DISTINCT`,
+        /// `ORDER BY`, `SKIP`, `LIMIT`).
+        return_clause: CypherReturn,
+    },
 }
 
 /// A subsequent `OPTIONAL MATCH` clause within a `MATCH` statement.
@@ -274,6 +297,12 @@ pub enum CypherExpr {
     Star,
     /// A parenthesized sub-expression used for grouping.
     Grouped(Box<CypherExpr>),
+    /// A list literal, e.g. `[1, 2, 3]` or `[[1, 2], [3, 4]]`.
+    ///
+    /// Currently produced (and consumed) by the `UNWIND` source position; a
+    /// list literal appearing where a scalar predicate operand is expected is
+    /// rejected during conversion rather than silently mishandled.
+    List(Vec<CypherExpr>),
 }
 
 /// A comparison operator in a Cypher expression.

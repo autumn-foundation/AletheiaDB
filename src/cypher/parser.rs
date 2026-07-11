@@ -167,9 +167,44 @@ impl CypherParser {
         // Check for leading temporal clause (AS OF / FOR / BETWEEN).
         let temporal = self.try_parse_temporal()?;
 
+        // A standalone `UNWIND ... AS ... RETURN ...` statement (Issue #559).
+        // A leading temporal clause has no meaning for a listless UNWIND, so
+        // reject the combination rather than silently ignoring the qualifier.
+        if self.at(TokenKind::Unwind) {
+            if temporal.is_some() {
+                return Err(self.error(
+                    "a temporal clause (AS OF / FOR / BETWEEN) cannot precede a standalone UNWIND",
+                ));
+            }
+            return self.parse_unwind();
+        }
+
         // Now expect a MATCH (or OPTIONAL MATCH).
         let stmt = self.parse_match(temporal)?;
         Ok(stmt)
+    }
+
+    /// Parse a standalone `UNWIND <list> AS <var> RETURN ...` statement.
+    ///
+    /// ```text
+    /// unwind_stmt := UNWIND expr AS identifier return_clause
+    /// ```
+    ///
+    /// The list source is parsed as a full expression (so a list literal
+    /// `[...]`, a parameter `$list`, or the `null` literal are all accepted and
+    /// depth-capped through [`Self::parse_expression`]); whether the resolved
+    /// value is actually list-shaped is validated at execution time.
+    fn parse_unwind(&mut self) -> Result<CypherStatement, CypherError> {
+        self.expect(TokenKind::Unwind)?;
+        let source = self.parse_expression(0)?;
+        self.expect(TokenKind::As)?;
+        let var_tok = self.expect(TokenKind::Identifier)?;
+        let return_clause = self.parse_return()?;
+        Ok(CypherStatement::Unwind {
+            source,
+            variable: var_tok.text,
+            return_clause,
+        })
     }
 
     /// ```text
@@ -649,6 +684,25 @@ impl CypherParser {
                 let inner = self.parse_expression(depth + 1)?;
                 self.expect(TokenKind::RParen)?;
                 Ok(CypherExpr::Grouped(Box::new(inner)))
+            }
+
+            // List literal: `[ expr (',' expr)* ]` (empty list allowed).
+            //
+            // Each element is parsed one nesting level deeper so that a
+            // pathologically nested list literal (`[[[ ... ]]]`) is bounded by
+            // MAX_EXPRESSION_DEPTH and returns a parse error instead of
+            // overflowing the stack (issue #3404).
+            TokenKind::LBracket => {
+                self.advance();
+                let mut elements = Vec::new();
+                if !self.at(TokenKind::RBracket) {
+                    elements.push(self.parse_expression(depth + 1)?);
+                    while self.eat(TokenKind::Comma) {
+                        elements.push(self.parse_expression(depth + 1)?);
+                    }
+                }
+                self.expect(TokenKind::RBracket)?;
+                Ok(CypherExpr::List(elements))
             }
 
             // Identifier: could be variable, property access, dot-qualified function call,

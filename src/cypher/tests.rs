@@ -149,6 +149,7 @@ fn test_parse_simple_match() {
             assert_eq!(pattern[0].elements.len(), 1);
             assert_eq!(return_clause.items.len(), 1);
         }
+        _ => panic!("expected a MATCH statement"),
     }
 }
 
@@ -164,6 +165,7 @@ fn test_parse_match_with_label() {
             assert_eq!(node.variable, Some("n".into()));
             assert_eq!(node.labels, vec!["Person".to_string()]);
         }
+        _ => panic!("expected a MATCH statement"),
     }
 }
 
@@ -185,6 +187,7 @@ fn test_parse_match_with_properties() {
             assert_eq!(node.properties[1].0, "age");
             assert_eq!(node.properties[1].1, CypherValue::Int(30));
         }
+        _ => panic!("expected a MATCH statement"),
     }
 }
 
@@ -201,6 +204,7 @@ fn test_parse_traversal() {
             assert_eq!(rel.rel_types, vec!["KNOWS".to_string()]);
             assert_eq!(rel.direction, CypherDirection::Outgoing);
         }
+        _ => panic!("expected a MATCH statement"),
     }
 }
 
@@ -215,6 +219,7 @@ fn test_parse_incoming_relationship() {
             };
             assert_eq!(rel.direction, CypherDirection::Incoming);
         }
+        _ => panic!("expected a MATCH statement"),
     }
 }
 
@@ -229,6 +234,7 @@ fn test_parse_bidirectional_relationship() {
             };
             assert_eq!(rel.direction, CypherDirection::Both);
         }
+        _ => panic!("expected a MATCH statement"),
     }
 }
 
@@ -243,6 +249,7 @@ fn test_parse_variable_length_path() {
             };
             assert_eq!(rel.depth, Some(CypherDepth::Range { min: 1, max: 3 }));
         }
+        _ => panic!("expected a MATCH statement"),
     }
 }
 
@@ -257,6 +264,7 @@ fn test_parse_unbounded_path() {
             };
             assert_eq!(rel.depth, Some(CypherDepth::Unbounded));
         }
+        _ => panic!("expected a MATCH statement"),
     }
 }
 
@@ -267,6 +275,7 @@ fn test_parse_where_clause() {
         CypherStatement::Match { where_clause, .. } => {
             assert!(where_clause.is_some());
         }
+        _ => panic!("expected a MATCH statement"),
     }
 }
 
@@ -279,6 +288,7 @@ fn test_parse_where_and() {
         CypherStatement::Match { where_clause, .. } => {
             assert!(matches!(where_clause, Some(CypherExpr::And(_, _))));
         }
+        _ => panic!("expected a MATCH statement"),
     }
 }
 
@@ -289,6 +299,7 @@ fn test_parse_limit() {
         CypherStatement::Match { return_clause, .. } => {
             assert_eq!(return_clause.limit, Some(10));
         }
+        _ => panic!("expected a MATCH statement"),
     }
 }
 
@@ -300,6 +311,7 @@ fn test_parse_skip_limit() {
             assert_eq!(return_clause.skip, Some(5));
             assert_eq!(return_clause.limit, Some(10));
         }
+        _ => panic!("expected a MATCH statement"),
     }
 }
 
@@ -311,6 +323,7 @@ fn test_parse_order_by() {
             assert_eq!(return_clause.order_by.len(), 1);
             assert!(return_clause.order_by[0].descending);
         }
+        _ => panic!("expected a MATCH statement"),
     }
 }
 
@@ -321,6 +334,7 @@ fn test_parse_return_distinct() {
         CypherStatement::Match { return_clause, .. } => {
             assert!(return_clause.distinct);
         }
+        _ => panic!("expected a MATCH statement"),
     }
 }
 
@@ -344,6 +358,7 @@ fn test_parse_return_expression_with_alias() {
                 other => panic!("expected Expression without alias, got: {other:?}"),
             }
         }
+        _ => panic!("expected a MATCH statement"),
     }
 }
 
@@ -355,6 +370,7 @@ fn test_parse_return_star() {
             assert_eq!(return_clause.items.len(), 1);
             assert!(matches!(return_clause.items[0], CypherReturnItem::Star));
         }
+        _ => panic!("expected a MATCH statement"),
     }
 }
 
@@ -373,6 +389,7 @@ fn test_parse_parameter() {
                 CypherValue::Parameter("name".to_string())
             );
         }
+        _ => panic!("expected a MATCH statement"),
     }
 }
 
@@ -1338,7 +1355,9 @@ fn test_parse_vector_similarity_in_order_by() {
         "MATCH (d:Document) RETURN d ORDER BY vector.similarity(d.embedding, $query) DESC LIMIT 10",
     )
     .unwrap();
-    let CypherStatement::Match { return_clause, .. } = ast;
+    let CypherStatement::Match { return_clause, .. } = ast else {
+        panic!("expected a MATCH statement");
+    };
     assert_eq!(return_clause.order_by.len(), 1);
     assert!(matches!(
         &return_clause.order_by[0].expr,
@@ -1352,7 +1371,9 @@ fn test_parse_vector_cosine() {
         "MATCH (d:Document) RETURN d, vector.cosine(d.embedding, $query) AS score ORDER BY score DESC",
     )
     .unwrap();
-    let CypherStatement::Match { return_clause, .. } = ast;
+    let CypherStatement::Match { return_clause, .. } = ast else {
+        panic!("expected a MATCH statement");
+    };
     assert!(return_clause.items.len() >= 2);
 }
 
@@ -1419,7 +1440,9 @@ fn test_parse_with_clause() {
          ORDER BY similarity DESC LIMIT 10",
     )
     .unwrap();
-    let CypherStatement::Match { with_clauses, .. } = ast;
+    let CypherStatement::Match { with_clauses, .. } = ast else {
+        panic!("expected a MATCH statement");
+    };
     assert_eq!(with_clauses.len(), 1);
     assert!(with_clauses[0].where_clause.is_some());
     // WITH should have 2 items: b and the function call aliased as similarity
@@ -1430,7 +1453,9 @@ fn test_parse_with_clause() {
 fn test_parse_optional_match() {
     // Plain MATCH is not optional.
     let ast = CypherParser::parse("MATCH (n:Person) RETURN n").unwrap();
-    let CypherStatement::Match { optional, .. } = ast;
+    let CypherStatement::Match { optional, .. } = ast else {
+        panic!("expected a MATCH statement");
+    };
     assert!(!optional);
 
     // A leading OPTIONAL MATCH sets the optional flag.
@@ -1440,7 +1465,10 @@ fn test_parse_optional_match() {
         pattern,
         optional_matches,
         ..
-    } = ast;
+    } = ast
+    else {
+        panic!("expected a MATCH statement");
+    };
     assert!(optional);
     assert_eq!(pattern.len(), 1);
     assert!(optional_matches.is_empty());
@@ -1458,7 +1486,10 @@ fn test_parse_match_then_optional_match() {
         where_clause,
         optional_matches,
         ..
-    } = ast;
+    } = ast
+    else {
+        panic!("expected a MATCH statement");
+    };
     assert!(!optional);
     assert_eq!(pattern.len(), 1);
     // The WHERE belongs to the OPTIONAL MATCH clause, not the base MATCH.
@@ -1484,7 +1515,10 @@ fn test_parse_multiple_optional_matches() {
     .unwrap();
     let CypherStatement::Match {
         optional_matches, ..
-    } = ast;
+    } = ast
+    else {
+        panic!("expected a MATCH statement");
+    };
     assert_eq!(optional_matches.len(), 2);
     assert!(optional_matches[0].where_clause.is_none());
     assert!(optional_matches[1].where_clause.is_none());
@@ -1500,7 +1534,10 @@ fn test_parse_optional_match_after_with() {
         with_clauses,
         optional_matches,
         ..
-    } = ast;
+    } = ast
+    else {
+        panic!("expected a MATCH statement");
+    };
     assert_eq!(with_clauses.len(), 1);
     assert_eq!(optional_matches.len(), 1);
     // The WITH precedes the OPTIONAL MATCH in source order.
@@ -1517,7 +1554,10 @@ fn test_parse_optional_match_base_where_and_clause_where() {
         where_clause,
         optional_matches,
         ..
-    } = ast;
+    } = ast
+    else {
+        panic!("expected a MATCH statement");
+    };
     assert!(where_clause.is_some());
     assert_eq!(optional_matches.len(), 1);
     assert!(optional_matches[0].where_clause.is_some());
@@ -1582,7 +1622,9 @@ fn test_convert_leading_optional_match() {
 #[test]
 fn test_parse_count_aggregation() {
     let ast = CypherParser::parse("MATCH (n:Person)-[:KNOWS]->(m) RETURN count(m)").unwrap();
-    let CypherStatement::Match { return_clause, .. } = ast;
+    let CypherStatement::Match { return_clause, .. } = ast else {
+        panic!("expected a MATCH statement");
+    };
     match &return_clause.items[0] {
         CypherReturnItem::Expression { expr, .. } => {
             assert!(matches!(expr, CypherExpr::FunctionCall { name, .. } if name == "COUNT"));
@@ -1597,7 +1639,9 @@ fn test_parse_multiple_patterns() {
         "MATCH (a:Person), (b:Person) WHERE a.name = 'Alice' AND b.name = 'Bob' RETURN a, b",
     )
     .unwrap();
-    let CypherStatement::Match { pattern, .. } = ast;
+    let CypherStatement::Match { pattern, .. } = ast else {
+        panic!("expected a MATCH statement");
+    };
     assert_eq!(pattern.len(), 2);
 }
 
@@ -4022,5 +4066,350 @@ fn test_e2e_transaction_time_between_rejected() {
         Err(Error::Query(QueryError::UnsupportedFeature { .. })) => {}
         Err(other) => panic!("expected UnsupportedFeature, got {other:?}"),
         Ok(_) => panic!("transaction_time_between must be rejected, not answered"),
+    }
+}
+
+// ============================================================================
+// UNWIND clause (Issue #559)
+// ============================================================================
+
+mod unwind {
+    use super::*;
+    use crate::core::property::PropertyValue;
+    use std::collections::HashMap;
+
+    /// Run a standalone-UNWIND query and return each row's output columns.
+    fn run(query: &str) -> Vec<Vec<(String, PropertyValue)>> {
+        let db = crate::AletheiaDB::new().unwrap();
+        let results = db.execute_cypher(query).unwrap();
+        results
+            .collect_all()
+            .unwrap()
+            .into_iter()
+            .map(|row| row.columns.unwrap_or_default())
+            .collect()
+    }
+
+    /// Extract the single-column value of each row (asserting one column named
+    /// `expected_name`).
+    fn single_column(
+        rows: &[Vec<(String, PropertyValue)>],
+        expected_name: &str,
+    ) -> Vec<PropertyValue> {
+        rows.iter()
+            .map(|cols| {
+                assert_eq!(cols.len(), 1, "expected exactly one output column");
+                assert_eq!(cols[0].0, expected_name, "unexpected column name");
+                cols[0].1.clone()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn list_literal_yields_one_row_per_element() {
+        let rows = run("UNWIND [1, 2, 3] AS x RETURN x");
+        let values = single_column(&rows, "x");
+        assert_eq!(
+            values,
+            vec![
+                PropertyValue::Int(1),
+                PropertyValue::Int(2),
+                PropertyValue::Int(3)
+            ]
+        );
+    }
+
+    #[test]
+    fn empty_list_yields_zero_rows() {
+        let rows = run("UNWIND [] AS x RETURN x");
+        assert!(rows.is_empty(), "empty list must produce zero rows");
+    }
+
+    #[test]
+    fn null_yields_zero_rows() {
+        let rows = run("UNWIND null AS x RETURN x");
+        assert!(rows.is_empty(), "UNWIND null must produce zero rows");
+    }
+
+    #[test]
+    fn parameter_list_yields_rows() {
+        let db = crate::AletheiaDB::new().unwrap();
+        let mut params = HashMap::new();
+        params.insert(
+            "list".to_string(),
+            CypherParameterValue::List(vec![
+                CypherParameterValue::Int(10),
+                CypherParameterValue::Int(20),
+            ]),
+        );
+        let rows: Vec<_> = db
+            .execute_cypher_with_params("UNWIND $list AS item RETURN item", params)
+            .unwrap()
+            .collect_all()
+            .unwrap()
+            .into_iter()
+            .map(|row| row.columns.unwrap())
+            .collect();
+        let values: Vec<_> = rows.iter().map(|c| c[0].1.clone()).collect();
+        assert_eq!(values, vec![PropertyValue::Int(10), PropertyValue::Int(20)]);
+        assert_eq!(rows[0][0].0, "item");
+    }
+
+    #[test]
+    fn parameter_null_yields_zero_rows() {
+        let db = crate::AletheiaDB::new().unwrap();
+        let mut params = HashMap::new();
+        params.insert("list".to_string(), CypherParameterValue::Null);
+        let count = db
+            .execute_cypher_with_params("UNWIND $list AS item RETURN item", params)
+            .unwrap()
+            .count_all()
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn nested_lists_bind_whole_sublists() {
+        let rows = run("UNWIND [[1, 2], [3, 4]] AS pair RETURN pair");
+        let values = single_column(&rows, "pair");
+        assert_eq!(values.len(), 2);
+        assert_eq!(
+            values[0],
+            PropertyValue::Array(std::sync::Arc::new(vec![
+                PropertyValue::Int(1),
+                PropertyValue::Int(2)
+            ]))
+        );
+        assert_eq!(
+            values[1],
+            PropertyValue::Array(std::sync::Arc::new(vec![
+                PropertyValue::Int(3),
+                PropertyValue::Int(4)
+            ]))
+        );
+    }
+
+    #[test]
+    fn string_list_with_alias() {
+        let rows = run("UNWIND ['a', 'b'] AS s RETURN s AS letter");
+        let values = single_column(&rows, "letter");
+        assert_eq!(
+            values,
+            vec![
+                PropertyValue::String("a".into()),
+                PropertyValue::String("b".into())
+            ]
+        );
+    }
+
+    #[test]
+    fn return_star_projects_unwound_variable() {
+        let rows = run("UNWIND [7] AS n RETURN *");
+        let values = single_column(&rows, "n");
+        assert_eq!(values, vec![PropertyValue::Int(7)]);
+    }
+
+    #[test]
+    fn distinct_deduplicates_rows() {
+        let rows = run("UNWIND [1, 1, 2, 2, 3] AS x RETURN DISTINCT x");
+        let values = single_column(&rows, "x");
+        assert_eq!(
+            values,
+            vec![
+                PropertyValue::Int(1),
+                PropertyValue::Int(2),
+                PropertyValue::Int(3)
+            ]
+        );
+    }
+
+    #[test]
+    fn skip_and_limit_paginate() {
+        let rows = run("UNWIND [1, 2, 3, 4, 5] AS x RETURN x SKIP 1 LIMIT 2");
+        let values = single_column(&rows, "x");
+        assert_eq!(values, vec![PropertyValue::Int(2), PropertyValue::Int(3)]);
+    }
+
+    #[test]
+    fn order_by_ascending_and_descending() {
+        let asc = single_column(&run("UNWIND [3, 1, 2] AS x RETURN x ORDER BY x"), "x");
+        assert_eq!(
+            asc,
+            vec![
+                PropertyValue::Int(1),
+                PropertyValue::Int(2),
+                PropertyValue::Int(3)
+            ]
+        );
+        let desc = single_column(&run("UNWIND [3, 1, 2] AS x RETURN x ORDER BY x DESC"), "x");
+        assert_eq!(
+            desc,
+            vec![
+                PropertyValue::Int(3),
+                PropertyValue::Int(2),
+                PropertyValue::Int(1)
+            ]
+        );
+    }
+
+    #[test]
+    fn order_by_places_nulls_last_ascending() {
+        let rows = run("UNWIND [2, null, 1] AS x RETURN x ORDER BY x");
+        let values = single_column(&rows, "x");
+        assert_eq!(
+            values,
+            vec![
+                PropertyValue::Int(1),
+                PropertyValue::Int(2),
+                PropertyValue::Null
+            ]
+        );
+    }
+
+    // ---- reject-not-silently-wrong contract -------------------------------
+
+    #[test]
+    fn scalar_source_is_rejected() {
+        let db = crate::AletheiaDB::new().unwrap();
+        assert!(
+            db.execute_cypher("UNWIND 5 AS x RETURN x").is_err(),
+            "unwinding a scalar must be rejected, not answered"
+        );
+    }
+
+    #[test]
+    fn parameter_scalar_source_is_rejected() {
+        let db = crate::AletheiaDB::new().unwrap();
+        let mut params = HashMap::new();
+        params.insert("list".to_string(), CypherParameterValue::Int(5));
+        assert!(
+            db.execute_cypher_with_params("UNWIND $list AS x RETURN x", params)
+                .is_err(),
+            "a scalar parameter must be rejected"
+        );
+    }
+
+    #[test]
+    fn unwind_after_match_is_rejected() {
+        // `MATCH ... UNWIND ...` needs the graph executor and is not accepted by
+        // the standalone grammar: it must error, never silently drop the UNWIND.
+        let db = crate::AletheiaDB::new().unwrap();
+        assert!(
+            db.execute_cypher("MATCH (n) UNWIND n.tags AS t RETURN t")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn row_dependent_list_element_is_rejected() {
+        let db = crate::AletheiaDB::new().unwrap();
+        assert!(
+            db.execute_cypher("UNWIND [n.x] AS y RETURN y").is_err(),
+            "a property-access list element has no standalone value"
+        );
+    }
+
+    #[test]
+    fn aggregate_in_return_is_rejected() {
+        let db = crate::AletheiaDB::new().unwrap();
+        assert!(
+            db.execute_cypher("UNWIND [1, 2, 3] AS x RETURN count(x)")
+                .is_err(),
+            "aggregation over an UNWIND result is not supported and must error"
+        );
+    }
+
+    #[test]
+    fn foreign_variable_in_return_is_rejected() {
+        let db = crate::AletheiaDB::new().unwrap();
+        assert!(
+            db.execute_cypher("UNWIND [1, 2] AS x RETURN y").is_err(),
+            "RETURN of an unbound variable must be rejected"
+        );
+    }
+
+    // ---- parser / AST shape ------------------------------------------------
+
+    #[test]
+    fn parse_unwind_list_literal_ast() {
+        let stmt = CypherParser::parse("UNWIND [1, 2, 3] AS x RETURN x").unwrap();
+        match stmt {
+            CypherStatement::Unwind {
+                source,
+                variable,
+                return_clause,
+            } => {
+                assert_eq!(variable, "x");
+                match source {
+                    CypherExpr::List(elems) => assert_eq!(elems.len(), 3),
+                    other => panic!("expected list source, got {other:?}"),
+                }
+                assert_eq!(return_clause.items.len(), 1);
+            }
+            other => panic!("expected Unwind, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_unwind_parameter_ast() {
+        let stmt = CypherParser::parse("UNWIND $list AS item RETURN item").unwrap();
+        match stmt {
+            CypherStatement::Unwind {
+                source, variable, ..
+            } => {
+                assert_eq!(variable, "item");
+                assert!(matches!(
+                    source,
+                    CypherExpr::Value(CypherValue::Parameter(ref p)) if p == "list"
+                ));
+            }
+            other => panic!("expected Unwind, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_cypher_query_path_rejects_unwind() {
+        // `parse_cypher` returns a `Query`; a standalone UNWIND has no `Query`
+        // representation and must surface a structured error there.
+        let err = parse_cypher("UNWIND [1] AS x RETURN x");
+        assert!(matches!(err, Err(CypherError::UnsupportedFeature(_))));
+    }
+
+    #[test]
+    fn plan_cypher_routes_unwind_to_rows() {
+        match plan_cypher("UNWIND [1, 2] AS x RETURN x").unwrap() {
+            CypherExecution::Rows(_) => {}
+            CypherExecution::Query(_) => panic!("UNWIND must plan to Rows, not a Query"),
+        }
+        match plan_cypher("MATCH (n:Person) RETURN n").unwrap() {
+            CypherExecution::Query(_) => {}
+            CypherExecution::Rows(_) => panic!("MATCH must plan to a Query"),
+        }
+    }
+
+    // ---- depth / robustness (issue #3404) ----------------------------------
+
+    #[test]
+    fn deeply_nested_list_literal_errors_gracefully() {
+        // ~200 nested list literals exceed the parser's depth cap and must
+        // return a parse error rather than overflowing the stack.
+        let query = format!(
+            "UNWIND {}{}  AS x RETURN x",
+            "[".repeat(200),
+            "]".repeat(200)
+        );
+        let err = CypherParser::parse(&query);
+        assert!(
+            matches!(err, Err(CypherError::ParseError { .. })),
+            "deep nesting must yield a ParseError, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn moderately_nested_list_literal_parses_and_executes() {
+        let query = format!("UNWIND {}{}  AS x RETURN x", "[".repeat(10), "]".repeat(10));
+        let db = crate::AletheiaDB::new().unwrap();
+        let count = db.execute_cypher(&query).unwrap().count_all().unwrap();
+        assert_eq!(count, 1, "one row holding the nested list");
     }
 }

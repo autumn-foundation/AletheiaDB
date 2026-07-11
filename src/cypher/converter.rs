@@ -79,6 +79,11 @@ pub enum CypherParameterValue {
     String(String),
     /// A dense vector embedding for similarity search.
     Embedding(Arc<[f32]>),
+    /// A homogeneous or heterogeneous list of parameter values.
+    ///
+    /// Bound to the `$list` position of a standalone `UNWIND $list AS x`
+    /// (Issue #559). Lists are not valid as scalar predicate values.
+    List(Vec<CypherParameterValue>),
 }
 
 impl CypherParameterValue {
@@ -98,6 +103,9 @@ impl CypherParameterValue {
             CypherParameterValue::String(s) => Ok(PredicateValue::String(s.clone())),
             CypherParameterValue::Embedding(_) => Err(CypherError::ParameterError(
                 "embedding parameters cannot be used as predicate values".to_string(),
+            )),
+            CypherParameterValue::List(_) => Err(CypherError::ParameterError(
+                "list parameters cannot be used as predicate values".to_string(),
             )),
         }
     }
@@ -307,6 +315,17 @@ impl CypherConverter {
                     hints: QueryHints::default(),
                 })
             }
+            // A standalone `UNWIND` produces scalar rows, not stored entities,
+            // so it has no representation in the entity-oriented `Query` IR. It
+            // is executed by the dedicated Cypher UNWIND runtime instead (see
+            // [`crate::cypher::plan_cypher`] / `AletheiaDB::execute_cypher`).
+            // Reject conversion explicitly rather than answer silently wrong.
+            CypherStatement::Unwind { .. } => Err(CypherError::UnsupportedFeature(
+                "UNWIND does not lower into the graph query pipeline; execute it \
+                 via AletheiaDB::execute_cypher (or cypher::plan_cypher), which \
+                 evaluates the list-expansion runtime directly"
+                    .to_string(),
+            )),
         }
     }
 
