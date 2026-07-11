@@ -922,4 +922,356 @@ mod tests {
         let args = vec!["--host".to_string(), "localhost".to_string()];
         assert_eq!(arg_value(&args, "--port"), None);
     }
+
+    // ========================================================================
+    // Issue #3480 — mutation-kill unit tests (Layer 1).
+    //
+    // These cover pure-helper RETURN VALUES and BOUNDARIES not exercised by the
+    // 16 tests above, so return-value-stub and condition-flip mutants are killed.
+    // ========================================================================
+
+    // --- parse_direction: explicit "outgoing" branch (default is separately tested) ---
+
+    #[test]
+    fn parse_direction_accepts_explicit_outgoing() {
+        // kills: match-arm / return-value stubs collapsing explicit "outgoing"
+        // into the error path (the default path already returns "outgoing").
+        let dir = parse_direction(&["--direction".to_string(), "outgoing".to_string()]).unwrap();
+        assert_eq!(dir, "outgoing");
+    }
+
+    // --- parse_node_id / parse_edge_id: happy paths + overflow boundary ---
+
+    #[test]
+    fn parse_node_id_accepts_valid_numeric() {
+        // kills: return-value stubs that ignore the parsed id.
+        let id = parse_node_id("42").unwrap();
+        assert_eq!(id.as_u64(), 42);
+    }
+
+    #[test]
+    fn parse_node_id_accepts_zero() {
+        // kills: off-by-one / boundary flips rejecting the lowest valid id.
+        let id = parse_node_id("0").unwrap();
+        assert_eq!(id.as_u64(), 0);
+    }
+
+    #[test]
+    fn parse_node_id_rejects_out_of_range() {
+        // kills: flips that skip MAX_VALID_ID validation (u64::MAX - 1000 guard).
+        let err = parse_node_id(&u64::MAX.to_string()).unwrap_err();
+        assert!(err.contains("invalid node id"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn parse_edge_id_accepts_valid_numeric() {
+        // kills: return-value stubs that ignore the parsed id.
+        let id = parse_edge_id("7").unwrap();
+        assert_eq!(id.as_u64(), 7);
+    }
+
+    #[test]
+    fn parse_edge_id_rejects_out_of_range() {
+        // kills: flips that skip EdgeId::new range validation.
+        let err = parse_edge_id(&u64::MAX.to_string()).unwrap_err();
+        assert!(err.contains("invalid edge id"), "unexpected error: {err}");
+    }
+
+    // --- json_to_property_value: exact variant per JSON kind + nested-object rejection ---
+
+    #[test]
+    fn json_to_property_value_null() {
+        // kills: match-arm swaps mapping Null to a different variant.
+        let v = json_to_property_value(&serde_json::Value::Null).unwrap();
+        assert!(matches!(v, PropertyValue::Null), "got {v:?}");
+    }
+
+    #[test]
+    fn json_to_property_value_bool_true() {
+        // kills: `*v` -> literal-true/false stubs on the Bool arm.
+        let v = json_to_property_value(&serde_json::json!(true)).unwrap();
+        assert!(matches!(v, PropertyValue::Bool(true)), "got {v:?}");
+    }
+
+    #[test]
+    fn json_to_property_value_bool_false() {
+        // kills: Bool arm stubbed to a constant true.
+        let v = json_to_property_value(&serde_json::json!(false)).unwrap();
+        assert!(matches!(v, PropertyValue::Bool(false)), "got {v:?}");
+    }
+
+    #[test]
+    fn json_to_property_value_integer_maps_to_int() {
+        // kills: swapping the Int/Float branch order or ignoring the value.
+        let v = json_to_property_value(&serde_json::json!(30)).unwrap();
+        assert!(matches!(v, PropertyValue::Int(30)), "got {v:?}");
+    }
+
+    #[test]
+    fn json_to_property_value_negative_integer_maps_to_int() {
+        // kills: as_i64/as_f64 ordering flips (negatives must stay Int).
+        let v = json_to_property_value(&serde_json::json!(-5)).unwrap();
+        assert!(matches!(v, PropertyValue::Int(-5)), "got {v:?}");
+    }
+
+    #[test]
+    fn json_to_property_value_float_maps_to_float() {
+        // kills: dropping the as_f64 fallback branch.
+        let v = json_to_property_value(&serde_json::json!(1.5)).unwrap();
+        match v {
+            PropertyValue::Float(f) => assert!((f - 1.5).abs() < f64::EPSILON, "got {f}"),
+            other => panic!("expected Float, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn json_to_property_value_string() {
+        // kills: String arm stubbed to empty/constant.
+        let v = json_to_property_value(&serde_json::json!("hello")).unwrap();
+        match v {
+            PropertyValue::String(ref s) => assert_eq!(s.to_string(), "hello"),
+            other => panic!("expected String, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn json_to_property_value_array_preserves_elements() {
+        // kills: Array arm stubbed to empty, or element conversion dropped.
+        let v = json_to_property_value(&serde_json::json!([1, "two", true])).unwrap();
+        match v {
+            PropertyValue::Array(ref items) => {
+                assert_eq!(items.len(), 3, "array length must be preserved");
+                assert!(
+                    matches!(items[0], PropertyValue::Int(1)),
+                    "got {:?}",
+                    items[0]
+                );
+                assert!(
+                    matches!(&items[1], PropertyValue::String(s) if s.to_string() == "two"),
+                    "got {:?}",
+                    items[1]
+                );
+                assert!(
+                    matches!(items[2], PropertyValue::Bool(true)),
+                    "got {:?}",
+                    items[2]
+                );
+            }
+            other => panic!("expected Array, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn json_to_property_value_rejects_nested_object() {
+        // kills: removing the Object rejection arm (would silently accept/drop
+        // nested objects instead of erroring).
+        let err = json_to_property_value(&serde_json::json!({"a": 1})).unwrap_err();
+        assert!(
+            err.contains("nested objects are not supported"),
+            "unexpected error: {err}"
+        );
+    }
+
+    // --- json_to_property_map: value fidelity via round-trip ---
+
+    #[test]
+    #[serial_test::serial]
+    fn json_to_property_map_roundtrips_values() {
+        // kills: key/value drops in json_to_property_map (interns keys, so serial).
+        let map = json_to_property_map(r#"{"name":"Alice","age":30,"active":true}"#).unwrap();
+        let json = property_map_to_json(&map);
+        let obj = json.as_object().expect("expected JSON object");
+        assert_eq!(obj.get("name"), Some(&serde_json::json!("Alice")));
+        assert_eq!(obj.get("age"), Some(&serde_json::json!(30)));
+        assert_eq!(obj.get("active"), Some(&serde_json::json!(true)));
+    }
+
+    #[test]
+    fn json_to_property_map_rejects_nested_object_value() {
+        // kills: dropping the propagated nested-object rejection from a map value.
+        let err = json_to_property_map(r#"{"outer":{"inner":1}}"#).unwrap_err();
+        assert!(
+            err.contains("nested objects are not supported"),
+            "unexpected error: {err}"
+        );
+    }
+
+    // --- property_value_to_json: scalar + Vector + SparseVector shapes ---
+
+    #[test]
+    fn property_value_to_json_scalars() {
+        // kills: match-arm swaps on the scalar branches.
+        assert_eq!(
+            property_value_to_json(&PropertyValue::Null),
+            serde_json::Value::Null
+        );
+        assert_eq!(
+            property_value_to_json(&PropertyValue::Bool(true)),
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            property_value_to_json(&PropertyValue::Int(-9)),
+            serde_json::json!(-9)
+        );
+        assert_eq!(
+            property_value_to_json(&PropertyValue::string("x")),
+            serde_json::json!("x")
+        );
+        match property_value_to_json(&PropertyValue::Float(2.5)) {
+            serde_json::Value::Number(n) => {
+                assert!((n.as_f64().unwrap() - 2.5).abs() < f64::EPSILON)
+            }
+            other => panic!("expected number, got {other:?}"),
+        }
+        assert_eq!(
+            property_value_to_json(&PropertyValue::bytes([1u8, 2, 3])),
+            serde_json::json!([1, 2, 3])
+        );
+        assert_eq!(
+            property_value_to_json(&PropertyValue::array(vec![
+                PropertyValue::Int(1),
+                PropertyValue::Int(2),
+            ])),
+            serde_json::json!([1, 2])
+        );
+    }
+
+    #[test]
+    fn property_value_to_json_dense_vector_is_flat_array() {
+        // kills: Vector arm stubbed to null/empty; must render a flat float array.
+        let json = property_value_to_json(&PropertyValue::vector([0.5f32, 1.5, 2.5]));
+        let arr = json.as_array().expect("vector must render as JSON array");
+        assert_eq!(arr.len(), 3);
+        assert!((arr[0].as_f64().unwrap() - 0.5).abs() < 1e-6);
+        assert!((arr[2].as_f64().unwrap() - 2.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn property_value_to_json_sparse_vector_shape() {
+        // kills: SparseVector arm field drops (indices/values/dimensions).
+        use aletheiadb::core::vector::SparseVec;
+        let sparse = SparseVec::new(vec![1u32, 4], vec![0.5f32, -0.25], 8).unwrap();
+        let json = property_value_to_json(&PropertyValue::sparse_vector(sparse));
+        let obj = json
+            .as_object()
+            .expect("sparse vector must render as object");
+        assert_eq!(obj.get("indices"), Some(&serde_json::json!([1, 4])));
+        assert_eq!(obj.get("dimensions"), Some(&serde_json::json!(8)));
+        let values = obj
+            .get("values")
+            .and_then(|v| v.as_array())
+            .expect("values array");
+        assert_eq!(values.len(), 2);
+        assert!((values[0].as_f64().unwrap() - 0.5).abs() < 1e-6);
+    }
+
+    // --- property_map_to_json: key/value round-trip ---
+
+    #[test]
+    #[serial_test::serial]
+    fn property_map_to_json_roundtrips_keys_and_values() {
+        // kills: key resolution / value drops (touches GLOBAL_INTERNER, so serial).
+        let map = PropertyMapBuilder::new()
+            .insert("k1", "v1")
+            .insert("k2", 7i64)
+            .build();
+        let json = property_map_to_json(&map);
+        let obj = json.as_object().expect("expected JSON object");
+        assert_eq!(obj.len(), 2);
+        assert_eq!(obj.get("k1"), Some(&serde_json::json!("v1")));
+        assert_eq!(obj.get("k2"), Some(&serde_json::json!(7)));
+    }
+
+    // --- node_to_json / edge_to_json: field fidelity (kills field-drop stubs) ---
+
+    #[test]
+    #[serial_test::serial]
+    fn node_to_json_contains_id_label_and_properties() {
+        // kills: dropping/mislabeling the id, label, or properties fields.
+        let db = AletheiaDB::new().unwrap();
+        let id = db
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "Alice").build(),
+            )
+            .unwrap();
+        let node = db.get_node(id).unwrap();
+        let json = node_to_json(&node);
+        assert_eq!(json.get("id"), Some(&serde_json::json!(id.as_u64())));
+        assert_eq!(json.get("label"), Some(&serde_json::json!("Person")));
+        assert_eq!(
+            json.get("properties").and_then(|p| p.get("name")),
+            Some(&serde_json::json!("Alice"))
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn edge_to_json_contains_endpoints_label_and_properties() {
+        // kills: swapping/dropping source, target, id, label, or properties.
+        let db = AletheiaDB::new().unwrap();
+        let src = db.create_node("Person", PropertyMap::new()).unwrap();
+        let dst = db.create_node("Person", PropertyMap::new()).unwrap();
+        let edge_id = db
+            .create_edge(
+                src,
+                dst,
+                "KNOWS",
+                PropertyMapBuilder::new().insert("since", 2020i64).build(),
+            )
+            .unwrap();
+        let edge = db.get_edge(edge_id).unwrap();
+        let json = edge_to_json(&edge);
+        assert_eq!(json.get("id"), Some(&serde_json::json!(edge_id.as_u64())));
+        assert_eq!(json.get("label"), Some(&serde_json::json!("KNOWS")));
+        assert_eq!(json.get("source"), Some(&serde_json::json!(src.as_u64())));
+        assert_eq!(json.get("target"), Some(&serde_json::json!(dst.as_u64())));
+        assert_eq!(
+            json.get("properties").and_then(|p| p.get("since")),
+            Some(&serde_json::json!(2020))
+        );
+    }
+
+    // --- resolve_label: resolves a known interned label back to its string ---
+
+    #[test]
+    #[serial_test::serial]
+    fn resolve_label_returns_interned_string() {
+        // kills: resolve_label stubbed to the "<unknown-label>" fallback.
+        let db = AletheiaDB::new().unwrap();
+        let id = db.create_node("Widget", PropertyMap::new()).unwrap();
+        let node = db.get_node(id).unwrap();
+        assert_eq!(resolve_label(node.label), "Widget");
+    }
+
+    // --- parse_optional_properties: empty vs populated ---
+
+    #[test]
+    fn parse_optional_properties_defaults_empty() {
+        // kills: returning a non-empty map when no --properties is supplied.
+        let map = parse_optional_properties(&[]).unwrap();
+        assert!(map.is_empty());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn parse_optional_properties_parses_supplied_json() {
+        // kills: ignoring the --properties value (interns keys, so serial).
+        let map = parse_optional_properties(&[
+            "--properties".to_string(),
+            r#"{"name":"Bob"}"#.to_string(),
+        ])
+        .unwrap();
+        assert!(!map.is_empty());
+        let json = property_map_to_json(&map);
+        assert_eq!(json.get("name"), Some(&serde_json::json!("Bob")));
+    }
+
+    #[test]
+    fn parse_optional_properties_propagates_parse_error() {
+        // kills: swallowing a malformed --properties payload.
+        let err = parse_optional_properties(&["--properties".to_string(), "not json".to_string()])
+            .unwrap_err();
+        assert!(err.contains("invalid JSON"), "unexpected error: {err}");
+    }
 }
