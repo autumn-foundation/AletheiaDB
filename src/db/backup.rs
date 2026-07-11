@@ -143,11 +143,23 @@ impl AletheiaDB {
 
     /// Restore a backup artifact into a **durable** database at `data_dir`.
     ///
-    /// The target directory must be empty (no `indexes/manifest.idx` present)
-    /// to prevent overwriting existing data.
+    /// The target directory must be empty (no index manifest present) to
+    /// prevent overwriting existing data.
     ///
-    /// After restoration, the DB is persisted to `data_dir` and can be
-    /// reopened with `AletheiaDB::with_unified_config(durable_config_for_data_dir(data_dir))`.
+    /// After restoration, the DB is persisted under `data_dir` in the canonical
+    /// durable layout and can be reopened with either
+    /// [`AletheiaDB::open`]`(data_dir)` /
+    /// [`AletheiaDB::open_from_env`] or the equivalent
+    /// `AletheiaDB::with_unified_config(durable_config_for_data_dir(data_dir))`.
+    ///
+    /// The restored index artifacts are materialised at the same on-disk depth
+    /// that [`crate::config::durable_config_for_data_dir`] reads them from: the
+    /// index-persistence root is `data_dir/indexes` (the value that config
+    /// assigns to `PersistenceConfig::data_dir`), and the
+    /// `IndexPersistenceManager` appends its own `indexes/` beneath that base.
+    /// Writing at any other depth (e.g. using `data_dir` directly as the base)
+    /// leaves the manifest where `open`/`open_from_env` cannot find it, so a
+    /// reopen silently comes up empty.
     ///
     /// # Errors
     ///
@@ -155,14 +167,31 @@ impl AletheiaDB {
     /// - `Error::Backup(BackupError::BadMagic)` — invalid artifact.
     /// - `Error::Backup(BackupError::IncompatibleVersion { .. })` — format too new.
     pub fn restore_to_data_dir(path: &Path, data_dir: &Path) -> Result<AletheiaDB> {
-        check_target_empty(data_dir).map_err(Error::Backup)?;
+        // Canonical index-persistence root: the same base that
+        // `durable_config_for_data_dir` assigns to `PersistenceConfig::data_dir`
+        // (the `IndexPersistenceManager` appends its own `indexes/` under this).
+        let index_root = index_persistence_root(data_dir);
+
+        check_target_empty(&index_root).map_err(Error::Backup)?;
 
         let payload = read_artifact(path).map_err(Error::Backup)?;
-        materialize_to_dir(&payload, data_dir).map_err(Error::Backup)?;
+        materialize_to_dir(&payload, &index_root).map_err(Error::Backup)?;
 
-        let config = build_restore_config(data_dir, data_dir.join("wal"));
+        // Reopen through the canonical durable config so the layout written above
+        // is exactly the layout `open`/`open_from_env` will read on restart.
+        let config = crate::config::durable_config_for_data_dir(data_dir);
         AletheiaDB::with_unified_config(config)
     }
+}
+
+/// The index-persistence base directory under a durable data root.
+///
+/// This mirrors [`crate::config::durable_config_for_data_dir`], which sets
+/// `PersistenceConfig::data_dir = data_dir/indexes`. Keeping the join in one
+/// place ensures restore materialises artifacts at the exact depth the durable
+/// reopen path reads them from.
+fn index_persistence_root(data_dir: &Path) -> std::path::PathBuf {
+    data_dir.join("indexes")
 }
 
 /// Build an `AletheiaDBConfig` that loads from an existing persistence directory.
