@@ -292,12 +292,18 @@ impl GroupCommitCoordinator {
         })?;
 
         // Deadlock detection timeout (NOT a performance SLA)
-        let base_timeout =
-            Duration::from_millis(self.config.max_delay_ms * self.config.timeout_multiplier as u64)
-                + Duration::from_millis(self.config.timeout_base_ms);
+        let base_timeout = Duration::from_millis(
+            self.config
+                .max_delay_ms
+                .saturating_mul(self.config.timeout_multiplier as u64),
+        )
+        .saturating_add(Duration::from_millis(self.config.timeout_base_ms));
         let timeout = base_timeout
             .max(Duration::from_millis(self.config.timeout_min_ms))
-            .min(Duration::from_millis(self.config.timeout_max_ms));
+            .min(Duration::from_millis(self.config.timeout_max_ms))
+            // 🛡️ Havoc protection: prevent Instant overflow panics.
+            // 100 years is effectively infinite for a database wait.
+            .min(Duration::from_secs(60 * 60 * 24 * 365 * 100));
 
         // Use a deadline to prevent spurious wakeups from resetting the timeout clock
         let deadline = std::time::Instant::now() + timeout;
@@ -603,6 +609,33 @@ mod tests {
     use std::thread;
 
     // ==================== Original Tests (Updated for Result-based API) ====================
+
+    #[test]
+    fn test_havoc_group_commit_timeout_overflow() {
+        // 👺 Havoc: User can pass huge timeouts which will panic std::time::Instant addition!
+        let config = GroupCommitConfig {
+            max_delay_ms: u64::MAX,
+            max_batch_size: 100,
+            timeout_multiplier: u32::MAX,
+            timeout_base_ms: u64::MAX,
+            timeout_min_ms: u64::MAX,
+            timeout_max_ms: u64::MAX, // Boom
+            recent_errors_capacity: 10,
+        };
+
+        let coord = GroupCommitCoordinator::with_config(config);
+        let (epoch, _) = coord.register_transaction().unwrap();
+
+        // Start a thread that will immediately mark it flushed to avoid hanging for 100 years
+        let coord_clone = std::sync::Arc::new(coord);
+        let coord_flush = std::sync::Arc::clone(&coord_clone);
+        std::thread::spawn(move || {
+            let _ = coord_flush.finish_flush(epoch, Ok(()));
+        });
+
+        // This should NOT panic with "overflow when adding duration to instant"
+        let _ = coord_clone.wait_for_flush(epoch);
+    }
 
     #[test]
     fn test_new_coordinator() {
