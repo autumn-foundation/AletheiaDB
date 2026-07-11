@@ -221,7 +221,7 @@ fn provenance_serialized_size(provenance: Option<&Provenance>) -> usize {
 /// let delete_op = WalOperation::DeleteNode {
 ///     node_id: NodeId::try_from(1).unwrap(),
 ///     valid_from: Timestamp::from(12345),
-///     version_id: None, // tombstone version id (Issue #3406); None here
+///     version_id: None, // no logged tombstone id (synthesized on replay)
 /// };
 ///
 /// // Fixed overhead (24 bytes) + DeleteNode payload (21 bytes)
@@ -340,7 +340,7 @@ pub(crate) fn estimate_entry_capacity(operation: &WalOperation) -> usize {
 /// let op = WalOperation::DeleteNode {
 ///     node_id: NodeId::try_from(42).unwrap(),
 ///     valid_from: Timestamp::from(100),
-///     version_id: None, // tombstone version id (Issue #3406); None here
+///     version_id: None, // no logged tombstone id (synthesized on replay)
 /// };
 ///
 /// // 1. Pre-allocate the buffer using our estimate
@@ -878,7 +878,7 @@ mod tests {
 mod prop_tests {
     use super::*;
     use crate::core::hlc::HybridTimestamp;
-    use crate::core::id::NodeId;
+    use crate::core::id::{EdgeId, NodeId};
     use crate::core::interning::GLOBAL_INTERNER;
     use crate::core::property::{PropertyMap, PropertyMapBuilder, PropertyValue};
     use proptest::prelude::*;
@@ -922,6 +922,18 @@ mod prop_tests {
         any::<i64>().prop_map(|t| HybridTimestamp::new_unchecked(t, 0))
     }
 
+    // Helper to generate an OPTIONAL tombstone/retraction version id (Issue
+    // #3406). Generates both `Some(id)` and `None` so the `u64::MAX` absent
+    // sentinel is fuzzed alongside real ids. The `Some` range stays well below
+    // both the sentinel and `MAX_VALID_ID`, so a fuzzed id is never mistaken for
+    // the sentinel and always survives `VersionId::new` validation on parse.
+    fn arb_opt_version_id() -> impl Strategy<Value = Option<VersionId>> {
+        prop_oneof![
+            Just(None),
+            (1u64..1_000_000u64).prop_map(|id| Some(VersionId::new_unchecked(id))),
+        ]
+    }
+
     // Helper to generate WalOperation
     fn arb_wal_operation() -> impl Strategy<Value = WalOperation> {
         prop_oneof![
@@ -941,16 +953,19 @@ mod prop_tests {
                         provenance: None,
                     }
                 }),
-            // DeleteNode
+            // DeleteNode (Issue #3406: fuzz BOTH a logged tombstone id AND the
+            // `None`/sentinel case, so the u64::MAX absent encoding is exercised
+            // through the estimate/serialize path too).
             (
                 (1u64..u64::MAX).prop_map(|id| NodeId::new(id).unwrap()),
-                arb_timestamp()
+                arb_timestamp(),
+                arb_opt_version_id(),
             )
-                .prop_map(|(node_id, valid_from)| {
+                .prop_map(|(node_id, valid_from, version_id)| {
                     WalOperation::DeleteNode {
                         node_id,
                         valid_from,
-                        version_id: Some(VersionId::new_unchecked(7)),
+                        version_id,
                     }
                 }),
             // Checkpoint
@@ -992,6 +1007,53 @@ mod prop_tests {
             // Small payloads might have high constant overhead relative to size, so be lenient
             if actual > 100 {
                 prop_assert!(estimated <= actual * 2, "Estimate {} > 2x Actual {}", estimated, actual);
+            }
+        }
+
+        /// Issue #3406: every delete/retract op's optional tombstone
+        /// `version_id` — INCLUDING the `None` case (encoded as the u64::MAX
+        /// sentinel) — round-trips serialize -> parse byte-for-byte. Fuzzing
+        /// `None` alongside `Some(id)` ensures the sentinel is decoded back to
+        /// `None` (not a spurious `Some(u64::MAX)`), and that the parser
+        /// consumes exactly the bytes serialized.
+        #[test]
+        fn delete_retract_version_id_round_trips(
+            id in 1u64..1_000_000u64,
+            ts in 1i64..1_000_000_000_000i64,
+            version_id in arb_opt_version_id(),
+        ) {
+            use crate::storage::wal::segment_reader::{parse_entry_at, WAL_VERSION_DELETE_VERSION_ID};
+            let ts = HybridTimestamp::new_unchecked(ts, 0);
+            let ops = [
+                WalOperation::DeleteNode {
+                    node_id: NodeId::new(id).unwrap(),
+                    valid_from: ts,
+                    version_id,
+                },
+                WalOperation::DeleteEdge {
+                    edge_id: EdgeId::new(id).unwrap(),
+                    valid_from: ts,
+                    version_id,
+                },
+                WalOperation::RetractNode {
+                    node_id: NodeId::new(id).unwrap(),
+                    valid_to: ts,
+                    version_id,
+                },
+                WalOperation::RetractEdge {
+                    edge_id: EdgeId::new(id).unwrap(),
+                    valid_to: ts,
+                    version_id,
+                },
+            ];
+            for op in ops {
+                let entry = WalEntry::new(LSN(1), op.clone());
+                let mut buffer = Vec::new();
+                serialize_entry_into(&entry, &mut buffer).unwrap();
+                let (parsed, consumed) =
+                    parse_entry_at(&buffer, 0, WAL_VERSION_DELETE_VERSION_ID).unwrap();
+                prop_assert_eq!(consumed, buffer.len());
+                prop_assert_eq!(parsed.operation, op);
             }
         }
     }
