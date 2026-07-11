@@ -290,19 +290,52 @@ pub fn read_entries_from_dir_with_cipher(
     start_lsn: LSN,
     cipher: Option<&Arc<dyn crate::encryption::cipher::Cipher>>,
 ) -> Result<Vec<WalEntry>> {
+    // Default recovery policy: tolerate a crash-torn trailing entry in the
+    // FINAL segment (Issue #3433). Operators who prefer fail-stop recovery opt
+    // out via the `tolerate_torn_tail = false` recovery config flag, which
+    // reaches this reader through `read_entries_from_dir_with_options`.
+    read_entries_from_dir_with_options(wal_dir, start_lsn, cipher, true)
+}
+
+/// Read all WAL entries from a directory with optional decryption and an
+/// explicit crash-torn-tail recovery policy (Issue #3433).
+///
+/// When `tolerate_torn_tail` is `true` (the default), an undecodable trailing
+/// entry in the **final** segment — the shape a crash during append leaves: a
+/// zeroed/garbage op-type byte, a mid-field truncation, or a checksum mismatch
+/// on a half-written payload — is treated as end-of-log: everything decoded
+/// before it is applied, a WARNING is logged (segment path + byte offset +
+/// underlying error), and the read stops. This generalizes #3413's
+/// truncation-only tolerance to every crash-torn shape.
+///
+/// The tolerance is strictly **tail-scoped**:
+/// * corruption in a NON-final segment (a newer segment exists past it) always
+///   hard-errors — that is real damage, not a torn append;
+/// * for encrypted (length-prefixed) segments, an undecodable frame that is
+///   FOLLOWED BY a valid frame in the final segment also hard-errors (it is
+///   resyncable mid-log corruption). Plaintext entries carry no per-entry
+///   length prefix, so once an entry is undecodable a following entry cannot be
+///   found — for plaintext, an undecodable entry in the final segment is
+///   therefore unavoidably treated as the tail (documented asymmetry).
+///
+/// When `tolerate_torn_tail` is `false`, ANY parse failure hard-errors, exactly
+/// as a strict per-segment [`read_segment`] does — fail-stop recovery.
+pub fn read_entries_from_dir_with_options(
+    wal_dir: &Path,
+    start_lsn: LSN,
+    cipher: Option<&Arc<dyn crate::encryption::cipher::Cipher>>,
+    tolerate_torn_tail: bool,
+) -> Result<Vec<WalEntry>> {
     let mut entries = Vec::new();
 
-    // Read entries from each segment. Only the FINAL segment is allowed to
-    // tolerate a torn trailing entry (a crash during the commit-marker flush,
-    // Issue #3413): a truncated entry at the true end of the last segment is a
-    // benign torn append, whereas the same shape in a NON-final segment (a
-    // later segment exists past it) is real corruption and must still hard-error.
+    // Only the FINAL segment is allowed to tolerate a torn trailing entry, and
+    // only when the caller's recovery policy leaves tolerance on.
     let segment_paths = sorted_segment_paths(wal_dir);
     let last_idx = segment_paths.len().saturating_sub(1);
     for (i, (_, path)) in segment_paths.iter().enumerate() {
-        let tolerate_torn_tail = i == last_idx;
+        let segment_tolerates = tolerate_torn_tail && i == last_idx;
         let segment_entries =
-            read_segment_with_cipher_tolerant(path, start_lsn, cipher, tolerate_torn_tail)?;
+            read_segment_with_cipher_tolerant(path, start_lsn, cipher, segment_tolerates)?;
         entries.extend(segment_entries);
     }
 
@@ -803,29 +836,21 @@ fn read_segment_with_cipher_tolerant(
     Ok(entries)
 }
 
-/// Does `err` denote a WAL parse failure caused by the entry's declared
-/// payload running **past the end of the buffer** (a truncated / torn entry),
-/// as opposed to corruption whose bytes were fully present but wrong?
-///
-/// This is the signal that separates a benign torn append (Issue #3413: a
-/// crash during the commit-marker flush leaves a full 24-byte header but a
-/// truncated payload) from real damage (a checksum mismatch, an unknown op
-/// type, invalid UTF-8 — all of which mean the entry was fully written but is
-/// bad). Every truncation-origin error carries one of these stable,
-/// test-locked substrings emitted whenever a reader needs more bytes than the
-/// buffer holds (`require_bytes`, `HybridTimestamp::deserialize`,
-/// `PropertyMap::deserialize`). Because such an error only fires once the
-/// parser has consumed to the very end of the buffer, a truncation error at a
-/// tail entry provably has no valid entries after it — which is exactly why it
-/// is safe to stop and keep the decodable prefix.
-///
-/// NOTE: sibling Issue #3433 generalizes torn-tail tolerance to all entry
-/// types across replay via a structured signal; here we implement only the
-/// narrow marker-specific slice #3413's own crash-during-marker-flush case
-/// needs.
-fn is_truncation_error(err: &Error) -> bool {
-    let msg = err.to_string();
-    msg.contains("Insufficient buffer size") || msg.contains("too short")
+/// Log a WARNING that replay stopped at a crash-torn trailing entry, under both
+/// logging configurations (Issue #3433). Carries the segment path, byte offset,
+/// and the underlying parse/decrypt error so operators can audit exactly where
+/// the log tail was truncated.
+fn log_torn_tail_warning(path: &Path, offset: usize, err: &Error) {
+    let msg = format!(
+        "Crash-torn trailing WAL entry in final segment {:?} at byte offset {}: {}; \
+         stopping replay here and keeping the decodable prefix (torn entries were never \
+         acknowledged, so discarding them is correct)",
+        path, offset, err
+    );
+    #[cfg(feature = "observability")]
+    tracing::warn!("{}", msg);
+    #[cfg(not(feature = "observability"))]
+    eprintln!("WARNING: {}", msg);
 }
 
 /// Parse plaintext (versions 1/3/5/7) entries from a WAL segment buffer.
@@ -841,9 +866,16 @@ fn parse_plaintext_entries(
     entries: &mut Vec<WalEntry>,
     tolerate_torn_tail: bool,
 ) -> Result<()> {
+    // LSN of the last entry we successfully decoded (regardless of the
+    // `start_lsn` push filter). A genuine continuation entry after an
+    // undecodable one has a strictly higher LSN; this guards the forward probe
+    // (below) against a ~2^-32 CRC false positive from mis-aligned bytes.
+    let mut last_parsed_lsn: Option<LSN> = None;
+
     while *offset < buffer.len() {
         match parse_entry_at(buffer, *offset, version) {
             Ok((entry, bytes_consumed)) => {
+                last_parsed_lsn = Some(entry.lsn);
                 if entry.lsn >= start_lsn {
                     entries.push(entry);
                 }
@@ -852,14 +884,31 @@ fn parse_plaintext_entries(
             Err(e) => {
                 // Distinguish between expected EOF truncation vs. unexpected corruption
                 if *offset + 24 > buffer.len() {
-                    #[cfg(feature = "observability")]
-                    tracing::debug!(
-                        "Partial entry at end of WAL segment {:?} (offset {}/{}), stopping read",
-                        path,
-                        offset,
-                        buffer.len()
-                    );
-                    break;
+                    // Partial header (torn write, < 24 bytes left): the entry
+                    // cannot even form a header, so nothing valid can follow —
+                    // this is a genuine torn tail. An all-zero remainder is
+                    // benign pre-allocation padding and is ALWAYS treated as
+                    // end-of-log (hard-erroring on it would brick normal
+                    // startup). A NONZERO partial header is a torn append:
+                    // tolerated under the flag, fail-stop when opted out
+                    // (Issue #3433 / PR #3461 config fix — this branch used to
+                    // `break` unconditionally, ignoring `tolerate_torn_tail`).
+                    let remainder = &buffer[*offset..];
+                    if remainder.iter().all(|&b| b == 0) {
+                        #[cfg(feature = "observability")]
+                        tracing::debug!(
+                            "Zeroed partial region at end of WAL segment {:?} (offset {}/{}), stopping read",
+                            path,
+                            offset,
+                            buffer.len()
+                        );
+                        break;
+                    }
+                    if tolerate_torn_tail {
+                        log_torn_tail_warning(path, *offset, &e);
+                        break;
+                    }
+                    return Err(e);
                 } else {
                     let header_slice = &buffer[*offset..*offset + 24];
                     if header_slice.iter().all(|&b| b == 0) {
@@ -873,24 +922,34 @@ fn parse_plaintext_entries(
                         break;
                     }
 
-                    // Torn trailing entry (Issue #3413): a full 24-byte header
-                    // but a payload truncated past end-of-buffer, at the true
-                    // end of the FINAL segment (a crash during the commit-marker
-                    // flush). This is a benign torn append — keep the decodable
-                    // prefix and stop. Restricted to a genuine truncation error
-                    // (payload ran past EOF); any other corruption still
-                    // hard-errors, and a non-final segment never sets
-                    // `tolerate_torn_tail`.
-                    if tolerate_torn_tail && is_truncation_error(&e) {
-                        #[cfg(feature = "observability")]
-                        tracing::debug!(
-                            "Torn trailing entry at end of final WAL segment {:?} (offset {}/{}): {}; \
-                             keeping decodable prefix",
-                            path,
-                            offset,
-                            buffer.len(),
-                            e
-                        );
+                    // An undecodable full entry (Issue #3433 / PR #3461
+                    // corruption-safety fix). Plaintext entries carry NO
+                    // per-entry length prefix, so we cannot resync by a length
+                    // field — but we CAN still tell a crash-torn tail apart
+                    // from mid-log corruption by scanning forward for a real
+                    // continuation entry (`plaintext_valid_entry_follows`):
+                    //
+                    // * A valid entry with a HIGHER LSN survives after this one
+                    //   => acknowledged committed data lies past the corruption.
+                    //   This is mid-log damage, NOT a torn tail, and MUST
+                    //   hard-error even with `tolerate_torn_tail = true` — the
+                    //   tolerant default must never silently drop the bytes of a
+                    //   real transaction (which, plaintext being length-prefix
+                    //   free, could be up to a whole 64 MB segment).
+                    // * Nothing valid follows (scan reaches EOF) => a genuine
+                    //   crash-torn tail (zeroed/garbage op-type, mid-field
+                    //   truncation, or a checksum mismatch on a half-written
+                    //   payload). The torn entry was never acknowledged, so we
+                    //   keep the decodable prefix and stop — but only under the
+                    //   flag (a non-final segment or `tolerate_torn_tail = false`
+                    //   still hard-errors).
+                    //
+                    // This mirrors the encrypted path's `encrypted_valid_frame_follows`
+                    // lookahead, closing the plaintext data-loss asymmetry.
+                    if !plaintext_valid_entry_follows(buffer, *offset, version, last_parsed_lsn)
+                        && tolerate_torn_tail
+                    {
+                        log_torn_tail_warning(path, *offset, &e);
                         break;
                     }
 
@@ -917,6 +976,47 @@ fn parse_plaintext_entries(
     Ok(())
 }
 
+/// Scanning forward from `start` (byte by byte, because plaintext WAL entries
+/// carry no per-entry length prefix), does any position decode via
+/// [`parse_entry_at`] into a valid, CRC-checked entry whose LSN is strictly
+/// greater than `last_parsed_lsn`? (Issue #3433 / PR #3461 corruption-safety.)
+///
+/// This is the plaintext analogue of [`encrypted_valid_frame_follows`]. A
+/// `true` answer means a real committed entry survives PAST an undecodable one
+/// — i.e. mid-log corruption, not a crash-torn tail — so replay must hard-error
+/// regardless of `tolerate_torn_tail`. A `false` answer (the scan reaches
+/// end-of-buffer with nothing valid after) means a genuine torn tail, and the
+/// caller applies the flag.
+///
+/// The `> last_parsed_lsn` guard rejects a ~2^-32 CRC false positive from
+/// mis-aligned bytes: a genuine continuation always has a strictly higher LSN
+/// than the last entry we decoded (WAL LSNs increase monotonically). When
+/// nothing has been decoded yet (`None`), any valid following entry counts —
+/// a corrupt first entry with a valid entry after it is still mid-log damage.
+///
+/// The scan runs only on the error path during recovery (rare) and is bounded
+/// by the remaining segment bytes.
+fn plaintext_valid_entry_follows(
+    buffer: &[u8],
+    start: usize,
+    version: u8,
+    last_parsed_lsn: Option<LSN>,
+) -> bool {
+    // `start` itself already failed to parse; begin at the next byte.
+    let mut scan = start + 1;
+    while scan + 24 <= buffer.len() {
+        if let Ok((entry, _)) = parse_entry_at(buffer, scan, version) {
+            match last_parsed_lsn {
+                Some(last) if entry.lsn > last => return true,
+                None => return true,
+                _ => {}
+            }
+        }
+        scan += 1;
+    }
+    false
+}
+
 /// Parse encrypted (versions 2/4/6/8) entries from a WAL segment buffer.
 ///
 /// Each entry is stored as `[4-byte LE length][encrypted entry bytes]`.
@@ -939,17 +1039,30 @@ fn parse_encrypted_entries(
 ) -> Result<()> {
     let entry_version = payload_version(container_version);
     while *offset < buffer.len() {
+        // Byte offset of this frame's length prefix, for torn-tail warnings.
+        let frame_start = *offset;
         // Need at least 4 bytes for the length prefix
         if *offset + 4 > buffer.len() {
-            // Partial length prefix at EOF -- truncated write
-            #[cfg(feature = "observability")]
-            tracing::debug!(
-                "Partial length prefix at end of encrypted WAL segment {:?} (offset {}/{}), stopping read",
+            // Partial length prefix at EOF -- a torn write. An all-zero
+            // remainder is benign pre-allocation padding (always end-of-log);
+            // a nonzero partial prefix is a torn tail: tolerated under the flag,
+            // fail-stop when opted out (Issue #3433 / PR #3461 config fix —
+            // this used to `break` unconditionally, ignoring the flag).
+            let remainder = &buffer[*offset..];
+            if remainder.iter().all(|&b| b == 0) {
+                break;
+            }
+            let err = Error::Storage(StorageError::CorruptedData(format!(
+                "Partial encrypted length prefix at end of WAL segment {:?} (offset {}/{})",
                 path,
-                offset,
+                *offset,
                 buffer.len()
-            );
-            break;
+            )));
+            if tolerate_torn_tail {
+                log_torn_tail_warning(path, frame_start, &err);
+                break;
+            }
+            return Err(err);
         }
 
         // Check for zeroed length prefix (indicates end of data in pre-allocated files)
@@ -959,7 +1072,8 @@ fn parse_encrypted_entries(
         let entry_len = u32::from_le_bytes(len_bytes) as usize;
 
         if entry_len == 0 {
-            // Zero-length entry marks end of valid data
+            // Zero-length entry marks end of valid data (pre-allocation
+            // padding). Always benign — never gated on the flag.
             break;
         }
 
@@ -967,30 +1081,53 @@ fn parse_encrypted_entries(
 
         // Validate entry length
         if *offset + entry_len > buffer.len() {
-            // Truncated encrypted entry at EOF
-            #[cfg(feature = "observability")]
-            tracing::debug!(
-                "Truncated encrypted entry at end of WAL segment {:?} (offset {}, entry_len {}, buf_len {}), stopping read",
+            // Truncated encrypted entry at EOF -- a torn write. A length-prefix
+            // that points past the end of the buffer means the frame body was
+            // never fully written, so nothing valid can follow: a genuine torn
+            // tail. Tolerated under the flag, fail-stop when opted out
+            // (Issue #3433 / PR #3461 config fix — used to `break`
+            // unconditionally, ignoring the flag).
+            let err = Error::Storage(StorageError::CorruptedData(format!(
+                "Truncated encrypted entry at end of WAL segment {:?} (offset {}, entry_len {}, buf_len {})",
                 path,
-                offset,
+                *offset,
                 entry_len,
                 buffer.len()
-            );
-            break;
+            )));
+            if tolerate_torn_tail {
+                log_torn_tail_warning(path, frame_start, &err);
+                break;
+            }
+            return Err(err);
         }
 
         let encrypted_entry = &buffer[*offset..*offset + entry_len];
         *offset += entry_len;
 
-        // Decrypt the entry
+        // Decrypt the entry. A crash-torn tail can leave a length-complete but
+        // undecryptable final frame (Issue #3433). Encrypted frames ARE
+        // length-prefixed, so unlike plaintext we can — and MUST — distinguish a
+        // torn tail from mid-log corruption: tolerate only when NO valid frame
+        // follows this one; if a later frame still decrypts and parses, this is
+        // resyncable mid-log damage and must hard-error even in the final
+        // segment.
         let decrypted =
-            crate::encryption::wal_encryption::decrypt_wal_payload(encrypted_entry, cipher)
-                .map_err(|e| {
-                    Error::Storage(StorageError::Encryption(format!(
+            match crate::encryption::wal_encryption::decrypt_wal_payload(encrypted_entry, cipher) {
+                Ok(d) => d,
+                Err(e) => {
+                    let err = Error::Storage(StorageError::Encryption(format!(
                         "Failed to decrypt WAL entry in segment {:?}: {}",
                         path, e
-                    )))
-                })?;
+                    )));
+                    if tolerate_torn_tail
+                        && !encrypted_valid_frame_follows(buffer, *offset, cipher, entry_version)
+                    {
+                        log_torn_tail_warning(path, frame_start, &err);
+                        break;
+                    }
+                    return Err(err);
+                }
+            };
 
         // Parse the decrypted bytes as a normal entry, using the payload
         // version implied by the container version (plaintext-equivalent).
@@ -1001,22 +1138,13 @@ fn parse_encrypted_entries(
                 }
             }
             Err(e) => {
-                // Torn trailing entry (Issue #3413): a length-complete final
-                // frame that decrypts but whose decrypted payload is truncated
-                // past its own end (a crash during the commit-marker flush at
-                // the true end of the final segment). Mirrors the plaintext
-                // path — keep the decodable prefix on a genuine truncation
-                // error; any other corruption still hard-errors. (The more
-                // common encrypted torn tail — an incomplete length prefix or
-                // frame — is already caught by the benign breaks above.)
-                if tolerate_torn_tail && is_truncation_error(&e) {
-                    #[cfg(feature = "observability")]
-                    tracing::debug!(
-                        "Torn trailing decrypted entry at end of final WAL segment {:?}: {}; \
-                         keeping decodable prefix",
-                        path,
-                        e
-                    );
+                // Same crash-torn-tail policy as the decrypt branch above:
+                // tolerate a length-complete-but-undecodable final frame only
+                // when no valid frame follows it.
+                if tolerate_torn_tail
+                    && !encrypted_valid_frame_follows(buffer, *offset, cipher, entry_version)
+                {
+                    log_torn_tail_warning(path, frame_start, &e);
                     break;
                 }
                 #[cfg(feature = "observability")]
@@ -1035,6 +1163,61 @@ fn parse_encrypted_entries(
         }
     }
     Ok(())
+}
+
+/// Does any length-prefixed encrypted frame at or after `offset` still decrypt
+/// AND parse into a valid WAL entry? (Issue #3433)
+///
+/// Used by [`parse_encrypted_entries`] to distinguish a crash-torn tail from
+/// resyncable mid-log corruption: because encrypted frames are length-prefixed,
+/// a failed frame that is FOLLOWED BY a recoverable frame is real damage (and
+/// must hard-error), whereas a failed frame with nothing decodable after it is
+/// the torn tail (and may be dropped). Partial/zero-length trailing frames end
+/// the scan without counting as "valid following".
+///
+/// KNOWN LIMITATION (defensive follow-up, not fixed here): the 4-byte little-
+/// endian length prefix that frames each ciphertext lives OUTSIDE the AEAD
+/// envelope — it is neither encrypted nor authenticated. A mid-stream corrupted
+/// or tampered length prefix can therefore point the scan at the wrong offset
+/// and desync this lookahead (skip a real following frame, or realign onto
+/// garbage), weakening the torn-tail-vs-mid-log-corruption discrimination for
+/// encrypted segments specifically. Hardening this needs a WAL format change
+/// (bind the length into the frame's AAD, or length-prefix-inside-envelope) and
+/// is tracked separately; do NOT rely on this probe as an integrity guarantee
+/// against an adversary who can edit length prefixes.
+fn encrypted_valid_frame_follows(
+    buffer: &[u8],
+    mut offset: usize,
+    cipher: &Arc<dyn crate::encryption::cipher::Cipher>,
+    entry_version: u8,
+) -> bool {
+    while offset < buffer.len() {
+        if offset + 4 > buffer.len() {
+            return false;
+        }
+        let entry_len = u32::from_le_bytes(
+            buffer[offset..offset + 4]
+                .try_into()
+                .expect("slice length verified above"),
+        ) as usize;
+        if entry_len == 0 {
+            return false;
+        }
+        offset += 4;
+        if offset + entry_len > buffer.len() {
+            return false;
+        }
+        let frame = &buffer[offset..offset + entry_len];
+        offset += entry_len;
+        if let Ok(decrypted) = crate::encryption::wal_encryption::decrypt_wal_payload(frame, cipher)
+            && parse_entry_at(&decrypted, 0, entry_version).is_ok()
+        {
+            return true;
+        }
+        // Otherwise keep scanning: a single bad frame followed by more bad
+        // frames is still a tail unless SOMETHING valid appears later.
+    }
+    false
 }
 
 /// Advance `offset` by `n` bytes with overflow protection.
@@ -1894,6 +2077,357 @@ mod tests {
         assert!(
             read_entries_from_dir(dir.path(), LSN(1)).is_err(),
             "replay reader must keep propagating missing-magic errors"
+        );
+    }
+
+    // =============================================================================
+    // Issue #3433: generalized crash-torn-tail tolerance on the REPLAY path.
+    //
+    // Trunk (#3413) tolerated only a TRUNCATED trailing entry (payload past
+    // EOF). These tests pin that replay (`read_entries_from_dir*`) now stops at
+    // ANY undecodable trailing entry in the FINAL segment — zeroed op-type,
+    // garbage op-type, checksum mismatch on a length-complete payload — while
+    // still hard-erroring on corruption in a NON-final segment and (encrypted)
+    // an undecodable frame FOLLOWED BY a valid frame.
+    // =============================================================================
+
+    /// Serialize one valid `CreateNode` WAL entry for `lsn` and return its raw
+    /// bytes (no segment header).
+    fn serialized_entry_bytes(lsn: u64) -> Vec<u8> {
+        let entry = WalEntry::new(
+            LSN(lsn),
+            WalOperation::CreateNode {
+                node_id: NodeId::new(lsn).unwrap(),
+                label: GLOBAL_INTERNER.intern("TornTail3433").unwrap(),
+                properties: PropertyMap::new(),
+                valid_from: time::now(),
+                provenance: None,
+            },
+        );
+        let mut buffer = Vec::new();
+        serialize_entry_into(&entry, &mut buffer).unwrap();
+        buffer
+    }
+
+    /// Append `bytes` to an existing segment file.
+    fn append_bytes(path: &Path, bytes: &[u8]) {
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new().append(true).open(path).unwrap();
+        file.write_all(bytes).unwrap();
+        file.sync_all().unwrap();
+    }
+
+    /// #3433: a zeroed operation-type byte after a fully-written 24-byte entry
+    /// header (the exact CI shape) is a crash-torn tail in the FINAL segment.
+    /// Replay must keep the decodable prefix and succeed, NOT hard-error.
+    #[test]
+    fn test_replay_tolerates_zeroed_optype_torn_tail() {
+        let dir = TempDir::new().unwrap();
+        let segment_path = dir.path().join("0.log");
+        let last = write_segment_with_lsns(&segment_path, &[5, 7]);
+
+        // 24-byte header from a real entry + op-type 0.
+        let mut torn = last[..24].to_vec();
+        torn.push(0);
+        append_bytes(&segment_path, &torn);
+
+        let entries = read_entries_from_dir(dir.path(), LSN(1))
+            .expect("replay must tolerate a zeroed-op-type torn tail in the final segment");
+        let lsns: Vec<u64> = entries.iter().map(|e| e.lsn.0).collect();
+        assert_eq!(
+            lsns,
+            vec![5, 7],
+            "decodable prefix kept; torn entry dropped"
+        );
+    }
+
+    /// #3433: a garbage (non-zero, unknown) operation-type byte at the tail is
+    /// also a crash-torn tail — tolerated in the final segment.
+    #[test]
+    fn test_replay_tolerates_garbage_optype_torn_tail() {
+        let dir = TempDir::new().unwrap();
+        let segment_path = dir.path().join("0.log");
+        let last = write_segment_with_lsns(&segment_path, &[5, 7]);
+
+        let mut torn = last[..24].to_vec();
+        torn.push(0xEE); // no OP_* code equals this
+        append_bytes(&segment_path, &torn);
+
+        let entries = read_entries_from_dir(dir.path(), LSN(1))
+            .expect("replay must tolerate a garbage-op-type torn tail in the final segment");
+        let lsns: Vec<u64> = entries.iter().map(|e| e.lsn.0).collect();
+        assert_eq!(lsns, vec![5, 7]);
+    }
+
+    /// #3433: a length-COMPLETE trailing entry whose payload byte is corrupted
+    /// (so the CRC32 checksum fails, but no truncation occurred) is a torn tail
+    /// too — half-written-then-crashed. Replay must tolerate it in the final
+    /// segment. (This is the shape #3413's `is_truncation_error` gate did NOT
+    /// cover.)
+    #[test]
+    fn test_replay_tolerates_checksum_mismatch_torn_tail() {
+        let dir = TempDir::new().unwrap();
+        let segment_path = dir.path().join("0.log");
+        write_segment_with_lsns(&segment_path, &[5, 7]);
+
+        // A full valid entry for LSN 9, with one payload byte flipped so the
+        // checksum mismatches. The entry is length-complete (not truncated).
+        let mut torn = serialized_entry_bytes(9);
+        let flip = 30; // past the 24-byte header, inside the op payload
+        torn[flip] ^= 0xFF;
+        append_bytes(&segment_path, &torn);
+
+        let entries = read_entries_from_dir(dir.path(), LSN(1))
+            .expect("replay must tolerate a checksum-mismatch torn tail in the final segment");
+        let lsns: Vec<u64> = entries.iter().map(|e| e.lsn.0).collect();
+        assert_eq!(
+            lsns,
+            vec![5, 7],
+            "the corrupted LSN-9 tail entry must be dropped"
+        );
+    }
+
+    /// #3433 must-hard-error (a): the SAME torn shape in a NON-final segment (a
+    /// newer segment exists after it) is real corruption, not a crash-torn
+    /// append. Replay must still hard-error.
+    #[test]
+    fn test_replay_hard_errors_torn_tail_in_non_final_segment() {
+        let dir = TempDir::new().unwrap();
+        let seg0 = dir.path().join("0.log");
+        let last = write_segment_with_lsns(&seg0, &[5, 7]);
+        let mut torn = last[..24].to_vec();
+        torn.push(0);
+        append_bytes(&seg0, &torn);
+
+        // A later, fully valid segment makes seg0 non-final.
+        write_segment_with_lsns(&dir.path().join("1.log"), &[9]);
+
+        assert!(
+            read_entries_from_dir(dir.path(), LSN(1)).is_err(),
+            "an undecodable entry in a NON-final segment must hard-error, not be tolerated"
+        );
+    }
+
+    /// #3433: a single-segment plaintext WAL whose ONLY segment ends in a torn
+    /// entry (the segment IS the final segment) is tolerated — the common
+    /// single-segment crash case.
+    #[test]
+    fn test_replay_tolerates_torn_tail_single_segment() {
+        let dir = TempDir::new().unwrap();
+        let segment_path = dir.path().join("0.log");
+        let last = write_segment_with_lsns(&segment_path, &[1, 2, 3]);
+        let mut torn = last[..24].to_vec();
+        torn.push(0);
+        append_bytes(&segment_path, &torn);
+
+        let entries = read_entries_from_dir(dir.path(), LSN(1)).expect("single final segment");
+        assert_eq!(entries.len(), 3);
+    }
+
+    /// #3433 must-hard-error (c): the operator opt-out. With
+    /// `tolerate_torn_tail = false`, even a torn tail in the FINAL segment
+    /// hard-errors (fail-stop recovery); with `true` the same input is
+    /// tolerated. Same bytes, opposite outcome — proves the flag gates the
+    /// policy.
+    #[test]
+    fn test_replay_torn_tail_respects_tolerate_flag() {
+        let dir = TempDir::new().unwrap();
+        let segment_path = dir.path().join("0.log");
+        let last = write_segment_with_lsns(&segment_path, &[5, 7]);
+        let mut torn = last[..24].to_vec();
+        torn.push(0);
+        append_bytes(&segment_path, &torn);
+
+        // Fail-stop: opt-out hard-errors on the torn tail.
+        assert!(
+            read_entries_from_dir_with_options(dir.path(), LSN(1), None, false).is_err(),
+            "tolerate_torn_tail=false must hard-error on a torn tail (fail-stop recovery)"
+        );
+
+        // Default: the same torn tail is tolerated.
+        let entries = read_entries_from_dir_with_options(dir.path(), LSN(1), None, true)
+            .expect("tolerate_torn_tail=true must keep the decodable prefix");
+        let lsns: Vec<u64> = entries.iter().map(|e| e.lsn.0).collect();
+        assert_eq!(lsns, vec![5, 7]);
+    }
+
+    // ---- Encrypted (length-prefixed) segments ----
+
+    fn aes_cipher() -> Arc<dyn crate::encryption::cipher::Cipher> {
+        use zeroize::Zeroizing;
+        // Fixed key: the same cipher must decrypt what we encrypt in-test.
+        let key = Zeroizing::new([7u8; 32]);
+        Arc::new(crate::encryption::Aes256GcmCipher::new(&key))
+    }
+
+    /// Encode one encrypted, length-prefixed frame: `[u32 LE len][ciphertext]`.
+    fn encrypted_frame(lsn: u64, cipher: &Arc<dyn crate::encryption::cipher::Cipher>) -> Vec<u8> {
+        let plaintext = serialized_entry_bytes(lsn);
+        let ct =
+            crate::encryption::wal_encryption::encrypt_wal_payload(&plaintext, cipher).unwrap();
+        let mut out = Vec::new();
+        out.extend_from_slice(&(ct.len() as u32).to_le_bytes());
+        out.extend_from_slice(&ct);
+        out
+    }
+
+    /// A length-prefixed frame whose bytes will FAIL to decrypt (garbage
+    /// ciphertext with a plausible length). `len` is >= the cipher's minimum.
+    fn undecryptable_frame() -> Vec<u8> {
+        let body = vec![0xABu8; 80];
+        let mut out = Vec::new();
+        out.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        out.extend_from_slice(&body);
+        out
+    }
+
+    fn write_encrypted_header(path: &Path) {
+        use std::io::Write;
+        let mut file = File::create(path).unwrap();
+        file.write_all(&WAL_MAGIC).unwrap();
+        file.write_all(&[WAL_VERSION_ENCRYPTED_DELETE_VERSION_ID])
+            .unwrap();
+        file.sync_all().unwrap();
+    }
+
+    /// #3433 item #4: an encrypted final segment whose LAST frame fails to
+    /// decrypt (crash-torn tail) is tolerated — the decodable prefix survives.
+    #[test]
+    fn test_replay_tolerates_encrypted_torn_tail() {
+        let dir = TempDir::new().unwrap();
+        let cipher = aes_cipher();
+        let path = dir.path().join("0.log");
+        write_encrypted_header(&path);
+        append_bytes(&path, &encrypted_frame(5, &cipher));
+        append_bytes(&path, &encrypted_frame(7, &cipher));
+        append_bytes(&path, &undecryptable_frame()); // torn tail
+
+        let entries = read_entries_from_dir_with_cipher(dir.path(), LSN(1), Some(&cipher))
+            .expect("encrypted final-segment torn tail must be tolerated");
+        let lsns: Vec<u64> = entries.iter().map(|e| e.lsn.0).collect();
+        assert_eq!(lsns, vec![5, 7]);
+    }
+
+    /// #3433 must-hard-error (b): in an encrypted final segment, an undecodable
+    /// frame FOLLOWED BY a valid frame is resyncable mid-log corruption, NOT a
+    /// torn tail — it must hard-error even though it is the final segment.
+    #[test]
+    fn test_replay_hard_errors_encrypted_undecodable_then_valid() {
+        let dir = TempDir::new().unwrap();
+        let cipher = aes_cipher();
+        let path = dir.path().join("0.log");
+        write_encrypted_header(&path);
+        append_bytes(&path, &encrypted_frame(5, &cipher));
+        append_bytes(&path, &undecryptable_frame()); // corrupt, but NOT the tail
+        append_bytes(&path, &encrypted_frame(9, &cipher)); // valid frame follows
+
+        assert!(
+            read_entries_from_dir_with_cipher(dir.path(), LSN(1), Some(&cipher)).is_err(),
+            "an undecodable encrypted frame followed by a valid frame is mid-log corruption"
+        );
+    }
+
+    // =============================================================================
+    // Issue #3433 CORRECTNESS HARDENING (PR #3461 review): the plaintext replay
+    // path must NOT swallow mid-log corruption, and `tolerate_torn_tail = false`
+    // must be a TRUE fail-stop for every genuine-torn-tail shape.
+    //
+    // The plaintext generalization added by #3461 `break`s at the first
+    // undecodable entry in the final segment. Because plaintext entries carry no
+    // length prefix, that silently dropped EVERY byte after a mid-segment
+    // corrupt entry — including valid COMMITTED entries after it (up to a 64 MB
+    // segment of acknowledged transactions). These tests pin the fix: a
+    // forward-probe distinguishes a genuine torn tail (nothing valid follows →
+    // tolerate under the flag) from mid-log corruption (a valid entry with a
+    // higher LSN follows → HARD ERROR regardless of the flag).
+    // =============================================================================
+
+    /// HIGH (the load-bearing test): a plaintext FINAL segment holding
+    /// `[valid LSN 5][CRC-corrupt full entry LSN 7][valid LSN 9]`. The corrupt
+    /// LSN-7 entry is length-complete (only a payload byte flipped, so it fails
+    /// its CRC but does NOT truncate), and a fully valid LSN-9 entry follows it.
+    /// This is mid-log corruption, NOT a crash-torn tail: replay must HARD ERROR
+    /// rather than silently drop LSN 7 AND LSN 9. Pre-fix, the plaintext path
+    /// `break`s at LSN 7 and returns `Ok([5])`, losing acknowledged LSN 9.
+    #[test]
+    fn plaintext_mid_segment_corruption_with_valid_entries_after_hard_errors() {
+        let dir = TempDir::new().unwrap();
+        let segment_path = dir.path().join("0.log");
+        // Header + valid LSN 5.
+        write_segment_with_lsns(&segment_path, &[5]);
+
+        // CRC-corrupt (but length-complete) full entry for LSN 7.
+        let mut corrupt7 = serialized_entry_bytes(7);
+        corrupt7[30] ^= 0xFF; // past the 24-byte header, inside the op payload
+        append_bytes(&segment_path, &corrupt7);
+
+        // A fully valid entry for LSN 9 AFTER the corruption — this is the
+        // acknowledged data #3461 was silently dropping.
+        append_bytes(&segment_path, &serialized_entry_bytes(9));
+
+        let result = read_entries_from_dir(dir.path(), LSN(1));
+        assert!(
+            result.is_err(),
+            "mid-segment corruption with a valid committed entry after it MUST hard-error \
+             (not silently drop the trailing valid entries); got {:?}",
+            result.map(|e| e.iter().map(|w| w.lsn.0).collect::<Vec<_>>())
+        );
+    }
+
+    /// MEDIUM (config): `tolerate_torn_tail = false` must be a true fail-stop on
+    /// a genuine torn tail. A truncated final write (fewer than a full 24-byte
+    /// header, nonzero) is the shape the pre-fix code `break`s on unconditionally
+    /// — BEFORE the flag check — so the opt-out was silently ignored. With the
+    /// fix, `false` hard-errors and `true` tolerates the SAME bytes.
+    #[test]
+    fn plaintext_torn_tail_fail_stop_when_opted_out() {
+        let dir = TempDir::new().unwrap();
+        let segment_path = dir.path().join("0.log");
+        write_segment_with_lsns(&segment_path, &[5, 7]);
+
+        // A torn/truncated final write: only 12 nonzero bytes made it to disk
+        // (partial header) before the crash. Nothing valid can follow.
+        let truncated = serialized_entry_bytes(9)[..12].to_vec();
+        assert!(truncated.iter().any(|&b| b != 0), "torn bytes are nonzero");
+        append_bytes(&segment_path, &truncated);
+
+        // Fail-stop opt-out MUST error.
+        let opted_out = read_entries_from_dir_with_options(dir.path(), LSN(1), None, false);
+        assert!(
+            opted_out.is_err(),
+            "tolerate_torn_tail=false must fail-stop on a genuine torn tail (partial header); \
+             got {:?}",
+            opted_out.map(|e| e.iter().map(|w| w.lsn.0).collect::<Vec<_>>())
+        );
+
+        // Default tolerance keeps the decodable prefix.
+        let tolerated = read_entries_from_dir_with_options(dir.path(), LSN(1), None, true)
+            .expect("tolerate_torn_tail=true must keep the decodable prefix");
+        let lsns: Vec<u64> = tolerated.iter().map(|e| e.lsn.0).collect();
+        assert_eq!(lsns, vec![5, 7]);
+    }
+
+    /// item 5: a mid-field-truncation torn tail (a full 24-byte header + op-type
+    /// byte + a payload cut off mid-field, nothing valid after) is a genuine torn
+    /// append — tolerated under the default flag in the final segment.
+    #[test]
+    fn plaintext_tolerates_mid_field_truncation_torn_tail() {
+        let dir = TempDir::new().unwrap();
+        let segment_path = dir.path().join("0.log");
+        write_segment_with_lsns(&segment_path, &[5, 7]);
+
+        // 30 bytes: 24-byte header + op-type + a few payload bytes, then EOF
+        // (payload truncated mid-field). Nothing valid follows.
+        let mid_field = serialized_entry_bytes(9)[..30].to_vec();
+        append_bytes(&segment_path, &mid_field);
+
+        let entries = read_entries_from_dir(dir.path(), LSN(1))
+            .expect("a mid-field-truncation torn tail must be tolerated in the final segment");
+        let lsns: Vec<u64> = entries.iter().map(|e| e.lsn.0).collect();
+        assert_eq!(
+            lsns,
+            vec![5, 7],
+            "decodable prefix kept; torn entry dropped"
         );
     }
 
@@ -2837,15 +3371,22 @@ mod tests {
         assert!(entries.is_empty());
     }
 
-    /// Test that partial/truncated entries at end of segment are handled gracefully.
-    ///
-    /// This can happen if a write was interrupted mid-entry.
+    /// A partial/truncated trailing entry (a mid-entry interrupted write) is
+    /// a torn tail. The strict single-segment [`read_segment`] reader (its
+    /// documented contract: "every parse failure when `tolerate_torn_tail` is
+    /// false" hard-errors) must REJECT it — while the recovery dir-reader, which
+    /// opts the final segment into torn-tail tolerance, keeps the decodable
+    /// prefix. (PR #3461: the strict reader previously `break`ed unconditionally
+    /// on a partial header, contradicting its own contract and silently swallowing
+    /// a torn write; that unconditional break is now gated on the flag.)
     #[test]
     fn test_read_segment_with_truncated_entry() {
         use std::io::Write;
 
         let dir = TempDir::new().unwrap();
-        let segment_path = dir.path().join("truncated_segment.log");
+        // Numeric stem so the recovery dir-reader (`read_entries_from_dir`)
+        // enumerates it as a segment.
+        let segment_path = dir.path().join("0.log");
 
         let mut file = File::create(&segment_path).unwrap();
 
@@ -2868,16 +3409,23 @@ mod tests {
         serialize_entry_into(&entry, &mut buffer).unwrap();
         file.write_all(&buffer).unwrap();
 
-        // Write a partial entry (just the LSN, incomplete)
+        // Write a partial entry (just the LSN, incomplete) -- a nonzero partial
+        // header, i.e. a torn write.
         file.write_all(&42u64.to_le_bytes()).unwrap();
 
         file.sync_all().unwrap();
         drop(file);
 
-        // Read the segment - should get the complete entry and stop at truncation
-        let entries = read_segment(&segment_path, LSN(1)).unwrap();
+        // Strict single-segment read: fail-stop on the torn partial tail.
+        assert!(
+            read_segment(&segment_path, LSN(1)).is_err(),
+            "the strict read_segment reader must hard-error on a torn partial tail"
+        );
 
-        // Should only get the one complete entry
+        // Recovery dir-read (final segment tolerant): keeps the complete prefix
+        // and drops the torn partial tail.
+        let entries = read_entries_from_dir(dir.path(), LSN(1))
+            .expect("the recovery reader tolerates a torn tail in the final segment");
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].lsn, LSN(1));
     }
