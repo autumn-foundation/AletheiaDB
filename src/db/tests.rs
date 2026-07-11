@@ -1546,6 +1546,138 @@ fn test_retract_node_write_skew_concurrent_edge_aborts() {
 }
 
 #[test]
+fn test_retract_node_no_concurrent_edge_commits_ok() {
+    // Issue #3416 Pt1 negative (retract side): with NO concurrent edge, a staged
+    // retract commits fine — the commit-time re-check must not abort a
+    // legitimate retract.
+    let db = AletheiaDB::new().unwrap();
+
+    let victim = db
+        .create_node("Person", PropertyMapBuilder::new().build())
+        .unwrap();
+
+    let mut tx_a = db.write_transaction().unwrap();
+    tx_a.retract_node(victim, crate::core::temporal::time::now())
+        .unwrap();
+    // No concurrent writer.
+    tx_a.commit().unwrap();
+
+    // Retract closes valid time but keeps the node out of current state.
+    assert!(db.get_node(victim).is_err());
+}
+
+#[test]
+fn test_create_edge_write_skew_concurrent_delete_aborts() {
+    // Issue #3416 Pt1 MIRROR interleaving (ordering ii). The edge creator
+    // validates endpoints BEFORE the WAL/apply phase; if a concurrent tx
+    // deletes an endpoint in the window between validate() and apply, the
+    // apply-time endpoint re-check must ABORT the edge tx so no dangling edge
+    // is committed. Driven deterministically (single thread) via the
+    // #[cfg(test)] pre-apply hook, which fires after the edge tx has validated
+    // but before it acquires historical.write().
+    use crate::api::transaction::write::commit_test_hooks;
+    use std::cell::Cell;
+    use std::sync::Arc;
+
+    thread_local! {
+        // Only the edge tx's own commit thread arms this; every other commit
+        // in the process (including tx A's nested commit below, and unrelated
+        // concurrent tests) sees the hook as a no-op.
+        static ARMED: Cell<bool> = const { Cell::new(false) };
+    }
+
+    let db = Arc::new(AletheiaDB::new().unwrap());
+    let x = db
+        .create_node("Person", PropertyMapBuilder::new().build())
+        .unwrap();
+    let victim = db
+        .create_node("Person", PropertyMapBuilder::new().build())
+        .unwrap();
+    // victim committed with 0 connected edges.
+    assert_eq!(db.count_connected_edges(victim).unwrap(), 0);
+
+    // Edge tx B: stage create_edge(x -> victim); do NOT commit yet.
+    let mut tx_b = db.write_transaction().unwrap();
+    let edge = tx_b
+        .create_edge(x, victim, "POINTS_AT", PropertyMapBuilder::new().build())
+        .unwrap();
+
+    // Pre-apply hook: exactly once, on the armed (edge-tx) thread, commit the
+    // concurrent tx A that deletes victim. B does not hold historical yet, so A
+    // acquires the guard and commits cleanly (victim has 0 committed edges).
+    {
+        let db_hook = Arc::clone(&db);
+        commit_test_hooks::set_pre_apply_hook(Arc::new(move || {
+            let armed = ARMED.with(|a| a.replace(false));
+            if !armed {
+                return; // no-op for A's own commit and any other tx/thread
+            }
+            db_hook
+                .write(|tx| tx.delete_node(victim))
+                .expect("concurrent delete of victim should commit");
+        }));
+    }
+
+    ARMED.with(|a| a.set(true));
+    let commit_result = tx_b.commit();
+    ARMED.with(|a| a.set(false));
+    commit_test_hooks::clear_pre_apply_hook();
+
+    // The edge tx applied SECOND and must abort — no dangling edge.
+    assert!(
+        commit_result.is_err(),
+        "create_edge must abort when its endpoint was concurrently deleted"
+    );
+    let msg = commit_result.unwrap_err().to_string();
+    assert!(
+        msg.contains("dangling") || msg.contains("deleted or retracted"),
+        "abort message should explain the dangling-edge write-skew: {msg}"
+    );
+
+    // tx A won: victim stays deleted, and NO orphan/dangling edge was committed.
+    assert!(db.get_node(victim).is_err(), "victim was deleted by tx A");
+    assert!(db.get_edge(edge).is_err(), "no dangling edge was committed");
+    assert!(db.get_node(x).is_ok());
+}
+
+#[test]
+fn test_count_connected_edges_parallel_edges_distinct() {
+    // Issue #3416 Pt2 (parallel edges): two DISTINCT edges between the same
+    // ordered pair are two connected edges (dedup is by EdgeId, not by
+    // endpoint pair), and a self-loop adds exactly one more.
+    let db = AletheiaDB::new().unwrap();
+
+    let a = db
+        .create_node("Person", PropertyMapBuilder::new().build())
+        .unwrap();
+    let b = db
+        .create_node("Person", PropertyMapBuilder::new().build())
+        .unwrap();
+
+    // Two parallel a -> b edges: distinct EdgeIds, so both count.
+    db.create_edge(a, b, "KNOWS", PropertyMapBuilder::new().build())
+        .unwrap();
+    db.create_edge(a, b, "LIKES", PropertyMapBuilder::new().build())
+        .unwrap();
+    assert_eq!(
+        db.count_connected_edges(a).unwrap(),
+        2,
+        "two distinct parallel edges count as 2"
+    );
+
+    // Add a self-loop a -> a: one more distinct edge (counted once, not twice).
+    db.create_edge(a, a, "SELF", PropertyMapBuilder::new().build())
+        .unwrap();
+    assert_eq!(
+        db.count_connected_edges(a).unwrap(),
+        3,
+        "self-loop adds exactly one to the two parallel edges"
+    );
+    // b sees only the two parallel incoming edges.
+    assert_eq!(db.count_connected_edges(b).unwrap(), 2);
+}
+
+#[test]
 fn test_delete_edge_via_transaction() {
     let db = AletheiaDB::new().unwrap();
 

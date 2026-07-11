@@ -610,6 +610,15 @@ impl WriteTransaction {
         //
         // The pre-generated closing version ids (Issue #3406) are consumed here
         // in the same buffer order they were logged to the WAL.
+        //
+        // Test-only interleaving hook (Issue #3416 Pt1): fires AFTER
+        // validate/detect_conflicts/WAL but BEFORE `apply_changes` acquires the
+        // `historical.write()` guard, so a test can commit a concurrent
+        // delete/create in this window and exercise the commit-time write-skew
+        // re-checks. Production builds compile this away.
+        #[cfg(test)]
+        commit_test_hooks::run_pre_apply_hook();
+
         let historical_guard = apply::apply_changes(self, commit_timestamp, &closing_version_ids)?;
 
         // Test-only interleaving hook (Issue #3425): fires at the exact point
@@ -1925,6 +1934,43 @@ pub(crate) mod commit_test_hooks {
         let hook = PRE_FINALIZE_HOOK
             .lock()
             .expect("pre-finalize hook mutex poisoned")
+            .clone();
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
+
+    static PRE_APPLY_HOOK: Mutex<Option<Hook>> = Mutex::new(None);
+
+    /// Install a hook fired just BEFORE `apply::apply_changes` (i.e. after
+    /// `validate`/`detect_conflicts`/WAL, before the `historical.write()` guard
+    /// is acquired). This is the symmetric counterpart to the pre-finalize hook
+    /// and is the seam that lets a test drive the Issue #3416 Pt1 MIRROR
+    /// interleaving deterministically: a committing edge-creator can be parked
+    /// here (endpoints already validated, guard not yet held) while a concurrent
+    /// node delete commits, so the edge tx then aborts at its own commit-time
+    /// endpoint re-check. Parking here (rather than at pre-finalize) avoids a
+    /// self-deadlock: the guard is not yet held, so the concurrent deleter can
+    /// acquire `historical.write()` and commit.
+    pub(crate) fn set_pre_apply_hook(hook: Hook) {
+        *PRE_APPLY_HOOK
+            .lock()
+            .expect("pre-apply hook mutex poisoned") = Some(hook);
+    }
+
+    /// Remove any installed pre-apply hook.
+    pub(crate) fn clear_pre_apply_hook() {
+        *PRE_APPLY_HOOK
+            .lock()
+            .expect("pre-apply hook mutex poisoned") = None;
+    }
+
+    /// Invoke the installed pre-apply hook, if any (Arc cloned out from under
+    /// the mutex, as with `run_pre_finalize_hook`).
+    pub(crate) fn run_pre_apply_hook() {
+        let hook = PRE_APPLY_HOOK
+            .lock()
+            .expect("pre-apply hook mutex poisoned")
             .clone();
         if let Some(hook) = hook {
             hook();
