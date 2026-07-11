@@ -39,6 +39,9 @@ pub enum Error {
     /// Provenance bundle validation errors.
     #[error("Provenance error: {0}")]
     Provenance(crate::core::provenance::ProvenanceError),
+    /// Derivation-lineage validation errors (Issue #3371).
+    #[error("Lineage error: {0}")]
+    Lineage(crate::core::lineage::LineageError),
     /// Query-related errors.
     #[error("Query error: {0}")]
     Query(QueryError),
@@ -83,6 +86,7 @@ impl Error {
                 Error::Storage(_) => crate::observability::ErrorCategory::Storage,
                 Error::Temporal(_) => crate::observability::ErrorCategory::Temporal,
                 Error::Provenance(_) => crate::observability::ErrorCategory::Other,
+                Error::Lineage(_) => crate::observability::ErrorCategory::Other,
                 Error::Query(_) => crate::observability::ErrorCategory::Query,
                 Error::Transaction(_) => crate::observability::ErrorCategory::Transaction,
                 Error::Vector(_) => crate::observability::ErrorCategory::Vector,
@@ -137,6 +141,12 @@ impl From<TemporalError> for Error {
 impl From<crate::core::provenance::ProvenanceError> for Error {
     fn from(e: crate::core::provenance::ProvenanceError) -> Self {
         Error::Provenance(e)
+    }
+}
+
+impl From<crate::core::lineage::LineageError> for Error {
+    fn from(e: crate::core::lineage::LineageError) -> Self {
+        Error::Lineage(e)
     }
 }
 

@@ -274,42 +274,87 @@ impl FlushCoordinator {
     }
 
     /// Initialize from existing WAL segments.
+    ///
+    /// # Failure semantics (Issue #3423)
+    ///
+    /// The maximum existing segment id determines where `ensure_segment_open`
+    /// starts allocating. Under-reporting it (e.g. defaulting to 0 after a
+    /// failed directory scan) can land the writer on a stale/existing segment
+    /// and — combined with a payload-version bump — produce an unparseable
+    /// mixed-version segment. We therefore distinguish two cases:
+    ///
+    /// - **Directory does not exist yet** (`NotFound`): a normal first run on
+    ///   a fresh data dir. The scan yields no segments and we start at id 0.
+    ///   This is not an error.
+    /// - **Any other I/O error** (permission denied, not-a-directory, a
+    ///   transient failure): we cannot trust that segment id 0 is unused, so
+    ///   we **fail loud** and propagate the error rather than silently
+    ///   defaulting to 0. The header-version check in `ensure_segment_open`
+    ///   remains a second line of defense, but a swallowed scan error must not
+    ///   be the reason we rely on it.
     fn initialize_from_existing(&self) -> Result<()> {
-        let mut max_segment_id = 0u64;
-
-        match std::fs::read_dir(&self.config.wal_dir) {
-            Ok(entries) => {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if let Some(id) = path
-                        .extension()
-                        .filter(|ext| *ext == "log")
-                        .and_then(|_| path.file_stem())
-                        .and_then(|s| s.to_string_lossy().parse::<u64>().ok())
-                    {
-                        max_segment_id = max_segment_id.max(id);
-                    }
-                }
-            }
+        let max_segment_id = match std::fs::read_dir(&self.config.wal_dir) {
+            // Map each yielded entry to its path (a cheap, non-fallible op)
+            // while preserving per-entry iteration errors as `Err`, then fold
+            // to the max segment id. `scan_max_segment_id` propagates those
+            // per-entry errors instead of swallowing them with `.flatten()`.
+            Ok(entries) => Self::scan_max_segment_id(
+                &self.config.wal_dir,
+                entries.map(|entry| entry.map(|e| e.path())),
+            )?,
+            // First run: the WAL directory has not been created yet. Treat an
+            // absent directory as "no existing segments" and start at id 0.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => 0,
+            // A genuine I/O error opening the directory: refuse to proceed
+            // rather than under-report the max segment id and risk appending
+            // to an existing segment.
             Err(e) => {
-                // Under-reporting the max segment id here would make
-                // `ensure_segment_open` collide with existing segment files.
-                // That collision is now caught defensively by the
-                // header-version check (Issue #3423), but warn loudly so
-                // operators can see the scan failed.
-                eprintln!(
-                    "WARNING: failed to scan WAL directory {} for existing segments ({}); \
-                     segment id allocation starts at 0 and relies on the header-version \
-                     check to avoid appending to mismatched segments",
+                return Err(Error::Storage(StorageError::IoError(format!(
+                    "Failed to scan WAL directory {} for existing segments: {}; \
+                     refusing to start segment allocation at 0 (Issue #3423)",
                     self.config.wal_dir.display(),
                     e
-                );
+                ))));
             }
-        }
+        };
 
         self.current_segment_id
             .store(max_segment_id, Ordering::Relaxed);
         Ok(())
+    }
+
+    /// Fold a WAL-directory listing into the maximum `NNNNNN.log` segment id.
+    ///
+    /// A per-entry iteration error (an `Err` yielded partway through the
+    /// directory scan) is **propagated**, never swallowed: skipping an entry
+    /// could let the returned max id under-report and default the writer
+    /// toward segment id 0, exactly the fail-loud gap this hardening closes
+    /// (Issue #3423). Extracted from `initialize_from_existing` so the
+    /// per-entry error path is unit-testable without a filesystem mock.
+    fn scan_max_segment_id(
+        wal_dir: &Path,
+        entries: impl Iterator<Item = std::io::Result<PathBuf>>,
+    ) -> Result<u64> {
+        let mut max_segment_id = 0u64;
+        for entry in entries {
+            let path = entry.map_err(|e| {
+                Error::Storage(StorageError::IoError(format!(
+                    "Failed to read a WAL directory entry in {}: {}; \
+                     refusing to start segment allocation at 0 (Issue #3423)",
+                    wal_dir.display(),
+                    e
+                )))
+            })?;
+            if let Some(id) = path
+                .extension()
+                .filter(|ext| *ext == "log")
+                .and_then(|_| path.file_stem())
+                .and_then(|s| s.to_string_lossy().parse::<u64>().ok())
+            {
+                max_segment_id = max_segment_id.max(id);
+            }
+        }
+        Ok(max_segment_id)
     }
 
     /// Get the path for a segment file.
@@ -1207,6 +1252,96 @@ mod tests {
             !dir.path().join("000002.log").exists(),
             "no roll-forward for a version-matching segment"
         );
+    }
+
+    /// Regression test for Issue #3423 (secondary hardening): a genuine I/O
+    /// failure while scanning the WAL directory for existing segments must
+    /// **propagate** rather than being swallowed and silently defaulting the
+    /// segment-id counter to 0. Defaulting to 0 after a failed scan is one of
+    /// the ways the writer can land on a stale/existing segment; failing loud
+    /// lets the operator see the problem instead of risking a poisoned
+    /// mixed-version segment.
+    #[test]
+    fn test_initialize_from_existing_propagates_real_io_error() {
+        let dir = tempdir().unwrap();
+        let wal_dir = dir.path().join("wal");
+        let config = FlushCoordinatorConfig::new(&wal_dir);
+
+        // `new()` creates the directory and scans it successfully.
+        let coordinator = FlushCoordinator::new(config).unwrap();
+
+        // Now replace the WAL directory with a regular FILE at the same path.
+        // `read_dir` on a non-directory fails with a real I/O error (NOT
+        // `NotFound`), which the scan must surface rather than swallow.
+        std::fs::remove_dir_all(&wal_dir).unwrap();
+        std::fs::write(&wal_dir, b"not a directory").unwrap();
+
+        let result = coordinator.initialize_from_existing();
+        assert!(
+            result.is_err(),
+            "a real read_dir I/O error must propagate, not silently default to segment id 0"
+        );
+    }
+
+    /// The first-run case -- the WAL directory does not exist yet -- must NOT
+    /// be treated as an error: a missing directory is normal on a fresh data
+    /// dir and must still succeed with segment id 0.
+    #[test]
+    fn test_initialize_from_existing_missing_dir_is_ok() {
+        let dir = tempdir().unwrap();
+        let wal_dir = dir.path().join("wal");
+        let config = FlushCoordinatorConfig::new(&wal_dir);
+
+        // `new()` creates the directory; remove it entirely so the scan hits
+        // a genuinely absent directory (`NotFound`).
+        let coordinator = FlushCoordinator::new(config).unwrap();
+        std::fs::remove_dir_all(&wal_dir).unwrap();
+        assert!(!wal_dir.exists());
+
+        let result = coordinator.initialize_from_existing();
+        assert!(
+            result.is_ok(),
+            "a missing WAL directory (first run) must succeed, not error"
+        );
+        assert_eq!(
+            coordinator.current_segment_id.load(Ordering::Relaxed),
+            0,
+            "an absent WAL directory yields segment id 0"
+        );
+    }
+
+    /// Regression test for Issue #3423 (secondary hardening): a per-entry
+    /// iteration error yielded partway through the WAL-directory scan must
+    /// **propagate**, not be swallowed by `.flatten()`. Swallowing it could
+    /// skip an existing segment, under-report the max id, and default the
+    /// writer toward segment id 0. Exercised directly on the extracted
+    /// `scan_max_segment_id` helper with a synthetic mid-iteration I/O error,
+    /// since a genuine `ReadDir::next()` error is not portably injectable.
+    #[test]
+    fn test_scan_max_segment_id_propagates_per_entry_error() {
+        let wal_dir = Path::new("/some/wal");
+
+        // A well-formed listing with an I/O error yielded between valid
+        // entries must surface the error, not skip past it.
+        let entries: Vec<std::io::Result<PathBuf>> = vec![
+            Ok(wal_dir.join("000001.log")),
+            Err(std::io::Error::other("simulated readdir failure")),
+            Ok(wal_dir.join("000009.log")),
+        ];
+        let result = FlushCoordinator::scan_max_segment_id(wal_dir, entries.into_iter());
+        assert!(
+            result.is_err(),
+            "a per-entry iteration error must propagate, not be swallowed"
+        );
+
+        // Sanity: an all-Ok listing folds to the max id.
+        let ok_entries: Vec<std::io::Result<PathBuf>> = vec![
+            Ok(wal_dir.join("000003.log")),
+            Ok(wal_dir.join("notes.txt")), // ignored (wrong extension)
+            Ok(wal_dir.join("000007.log")),
+        ];
+        let max = FlushCoordinator::scan_max_segment_id(wal_dir, ok_entries.into_iter()).unwrap();
+        assert_eq!(max, 7, "max id folds over well-formed .log entries");
     }
 
     // ============================================================
