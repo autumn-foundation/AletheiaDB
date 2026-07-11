@@ -40,7 +40,12 @@ fn parse_response<T: serde::de::DeserializeOwned>(response: &str) -> Result<T, S
         serde_json::from_str(response).map_err(|e| format!("Failed to parse JSON: {}", e))?;
 
     if let Some(error) = value.get("error") {
-        return Err(error.as_str().unwrap_or("Unknown error").to_string());
+        // Structured error shape (Issue #3234): `{code, message, retriable}`.
+        return Err(error
+            .get("message")
+            .and_then(|m| m.as_str())
+            .unwrap_or("Unknown error")
+            .to_string());
     }
 
     serde_json::from_value(value).map_err(|e| format!("Failed to deserialize: {}", e))
@@ -83,13 +88,19 @@ mod node_tests {
     /// Helper to create two `Person` nodes and return their IDs.
     fn create_two_nodes(server: &AletheiaMcpServer) -> (u64, u64) {
         let n1: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            derived_from: None,
+            valid_time: None,
             label: "Person".to_string(),
             properties: None,
+            provenance: None,
         }))
         .unwrap();
         let n2: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            derived_from: None,
+            valid_time: None,
             label: "Person".to_string(),
             properties: None,
+            provenance: None,
         }))
         .unwrap();
         (n1.id, n2.id)
@@ -100,8 +111,11 @@ mod node_tests {
         let server = create_test_server();
 
         let req = CreateNodeRequest {
+            derived_from: None,
+            valid_time: None,
             label: "Person".to_string(),
             properties: None,
+            provenance: None,
         };
 
         let response = server.create_node(req);
@@ -120,8 +134,11 @@ mod node_tests {
         props.insert("age".to_string(), serde_json::json!(30));
 
         let req = CreateNodeRequest {
+            derived_from: None,
+            valid_time: None,
             label: "Person".to_string(),
             properties: Some(props),
+            provenance: None,
         };
 
         let response = server.create_node(req);
@@ -144,8 +161,11 @@ mod node_tests {
         props.insert("name".to_string(), serde_json::json!("Bob"));
 
         let create_req = CreateNodeRequest {
+            derived_from: None,
+            valid_time: None,
             label: "Person".to_string(),
             properties: Some(props),
+            provenance: None,
         };
 
         let create_response = server.create_node(create_req);
@@ -193,8 +213,11 @@ mod node_tests {
         props.insert("age".to_string(), serde_json::json!(25));
 
         let create_req = CreateNodeRequest {
+            derived_from: None,
+            valid_time: None,
             label: "Person".to_string(),
             properties: Some(props),
+            provenance: None,
         };
 
         let create_response = server.create_node(create_req);
@@ -206,8 +229,11 @@ mod node_tests {
         new_props.insert("city".to_string(), serde_json::json!("London"));
 
         let update_req = UpdateNodeRequest {
+            derived_from: None,
+            valid_time: None,
             node_id: created.id,
             properties: new_props,
+            provenance: None,
         };
 
         let update_response = server.update_node(update_req);
@@ -226,8 +252,11 @@ mod node_tests {
 
         // Create a node
         let create_req = CreateNodeRequest {
+            derived_from: None,
+            valid_time: None,
             label: "ToDelete".to_string(),
             properties: None,
+            provenance: None,
         };
 
         let create_response = server.create_node(create_req);
@@ -238,6 +267,7 @@ mod node_tests {
         let delete_req = DeleteNodeRequest {
             node_id,
             detach: None,
+            valid_time: None,
         };
 
         let delete_response = server.delete_node(delete_req);
@@ -265,15 +295,19 @@ mod node_tests {
         let (source_id, target_id) = create_two_nodes(&server);
 
         server.create_edge(CreateEdgeRequest {
+            derived_from: None,
+            valid_time: None,
             source_id,
             target_id,
             label: "KNOWS".to_string(),
             properties: None,
+            provenance: None,
         });
 
         let delete_response = server.delete_node(DeleteNodeRequest {
             node_id: source_id,
             detach: None,
+            valid_time: None,
         });
         let value: serde_json::Value = serde_json::from_str(&delete_response).unwrap();
 
@@ -300,28 +334,38 @@ mod node_tests {
 
         // A third node so we have both an outgoing and an incoming edge.
         let third = server.create_node(CreateNodeRequest {
+            derived_from: None,
+            valid_time: None,
             label: "Person".to_string(),
             properties: None,
+            provenance: None,
         });
         let third_id: NodeResponse = parse_response(&third).unwrap();
         let third_id = third_id.id;
 
         server.create_edge(CreateEdgeRequest {
+            derived_from: None,
+            valid_time: None,
             source_id,
             target_id,
             label: "KNOWS".to_string(),
             properties: None,
+            provenance: None,
         });
         server.create_edge(CreateEdgeRequest {
+            derived_from: None,
+            valid_time: None,
             source_id: third_id,
             target_id: source_id,
             label: "FOLLOWS".to_string(),
             properties: None,
+            provenance: None,
         });
 
         let delete_response = server.delete_node(DeleteNodeRequest {
             node_id: source_id,
             detach: Some(true),
+            valid_time: None,
         });
         let value: serde_json::Value = serde_json::from_str(&delete_response).unwrap();
 
@@ -371,14 +415,18 @@ mod node_tests {
         // A node with no edges deletes cleanly and reports zero edges removed.
         let server = create_test_server();
         let created: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            derived_from: None,
+            valid_time: None,
             label: "Lonely".to_string(),
             properties: None,
+            provenance: None,
         }))
         .unwrap();
 
         let delete_response = server.delete_node(DeleteNodeRequest {
             node_id: created.id,
             detach: None,
+            valid_time: None,
         });
         let value: serde_json::Value = serde_json::from_str(&delete_response).unwrap();
 
@@ -396,8 +444,11 @@ mod node_tests {
             props.insert("index".to_string(), serde_json::json!(i));
 
             let req = CreateNodeRequest {
+                derived_from: None,
+                valid_time: None,
                 label: "ListTest".to_string(),
                 properties: Some(props),
+                provenance: None,
             };
             server.create_node(req);
         }
@@ -425,15 +476,21 @@ mod node_tests {
         // Create nodes with different labels
         for _ in 0..3 {
             server.create_node(CreateNodeRequest {
+                derived_from: None,
+                valid_time: None,
                 label: "TypeA".to_string(),
                 properties: None,
+                provenance: None,
             });
         }
 
         for _ in 0..2 {
             server.create_node(CreateNodeRequest {
+                derived_from: None,
+                valid_time: None,
                 label: "TypeB".to_string(),
                 properties: None,
+                provenance: None,
             });
         }
 
@@ -463,8 +520,11 @@ mod node_tests {
             props.insert("index".to_string(), serde_json::json!(i));
 
             server.create_node(CreateNodeRequest {
+                derived_from: None,
+                valid_time: None,
                 label: "Paginated".to_string(),
                 properties: Some(props),
+                provenance: None,
             });
         }
 
@@ -512,8 +572,11 @@ mod node_tests {
         // Create some nodes
         for _ in 0..3 {
             server.create_node(CreateNodeRequest {
+                derived_from: None,
+                valid_time: None,
                 label: "Counted".to_string(),
                 properties: None,
+                provenance: None,
             });
         }
 
@@ -530,15 +593,21 @@ mod node_tests {
         // Create nodes with different labels
         for _ in 0..3 {
             server.create_node(CreateNodeRequest {
+                derived_from: None,
+                valid_time: None,
                 label: "CountA".to_string(),
                 properties: None,
+                provenance: None,
             });
         }
 
         for _ in 0..2 {
             server.create_node(CreateNodeRequest {
+                derived_from: None,
+                valid_time: None,
                 label: "CountB".to_string(),
                 properties: None,
+                provenance: None,
             });
         }
 
@@ -565,22 +634,28 @@ mod edge_tests {
 
     fn create_two_nodes(server: &AletheiaMcpServer) -> (u64, u64) {
         let node1 = server.create_node(CreateNodeRequest {
+            derived_from: None,
+            valid_time: None,
             label: "Person".to_string(),
             properties: Some({
                 let mut m = HashMap::new();
                 m.insert("name".to_string(), serde_json::json!("Alice"));
                 m
             }),
+            provenance: None,
         });
         let n1: NodeResponse = parse_response(&node1).unwrap();
 
         let node2 = server.create_node(CreateNodeRequest {
+            derived_from: None,
+            valid_time: None,
             label: "Person".to_string(),
             properties: Some({
                 let mut m = HashMap::new();
                 m.insert("name".to_string(), serde_json::json!("Bob"));
                 m
             }),
+            provenance: None,
         });
         let n2: NodeResponse = parse_response(&node2).unwrap();
 
@@ -593,10 +668,13 @@ mod edge_tests {
         let (source_id, target_id) = create_two_nodes(&server);
 
         let req = CreateEdgeRequest {
+            derived_from: None,
+            valid_time: None,
             source_id,
             target_id,
             label: "KNOWS".to_string(),
             properties: None,
+            provenance: None,
         };
 
         let response = server.create_edge(req);
@@ -617,10 +695,13 @@ mod edge_tests {
         props.insert("strength".to_string(), serde_json::json!(0.9));
 
         let req = CreateEdgeRequest {
+            derived_from: None,
+            valid_time: None,
             source_id,
             target_id,
             label: "KNOWS".to_string(),
             properties: Some(props),
+            provenance: None,
         };
 
         let response = server.create_edge(req);
@@ -642,10 +723,13 @@ mod edge_tests {
         let (source_id, target_id) = create_two_nodes(&server);
 
         let create_response = server.create_edge(CreateEdgeRequest {
+            derived_from: None,
+            valid_time: None,
             source_id,
             target_id,
             label: "KNOWS".to_string(),
             properties: None,
+            provenance: None,
         });
         let created: EdgeResponse = parse_response(&create_response).unwrap();
 
@@ -666,10 +750,13 @@ mod edge_tests {
         let (source_id, target_id) = create_two_nodes(&server);
 
         let create_response = server.create_edge(CreateEdgeRequest {
+            derived_from: None,
+            valid_time: None,
             source_id,
             target_id,
             label: "KNOWS".to_string(),
             properties: None,
+            provenance: None,
         });
         let created: EdgeResponse = parse_response(&create_response).unwrap();
 
@@ -677,8 +764,11 @@ mod edge_tests {
         new_props.insert("weight".to_string(), serde_json::json!(0.5));
 
         let update_response = server.update_edge(UpdateEdgeRequest {
+            derived_from: None,
+            valid_time: None,
             edge_id: created.id,
             properties: new_props,
+            provenance: None,
         });
         let updated: EdgeResponse = parse_response(&update_response).unwrap();
 
@@ -694,15 +784,19 @@ mod edge_tests {
         let (source_id, target_id) = create_two_nodes(&server);
 
         let create_response = server.create_edge(CreateEdgeRequest {
+            derived_from: None,
+            valid_time: None,
             source_id,
             target_id,
             label: "KNOWS".to_string(),
             properties: None,
+            provenance: None,
         });
         let created: EdgeResponse = parse_response(&create_response).unwrap();
 
         let delete_response = server.delete_edge(DeleteEdgeRequest {
             edge_id: created.id,
+            valid_time: None,
         });
         let value: serde_json::Value = serde_json::from_str(&delete_response).unwrap();
         assert_eq!(value.get("success"), Some(&serde_json::json!(true)));
@@ -723,23 +817,32 @@ mod edge_tests {
 
         // Create node3
         let node3 = server.create_node(CreateNodeRequest {
+            derived_from: None,
+            valid_time: None,
             label: "Person".to_string(),
             properties: None,
+            provenance: None,
         });
         let n3: NodeResponse = parse_response(&node3).unwrap();
 
         // Create edges
         server.create_edge(CreateEdgeRequest {
+            derived_from: None,
+            valid_time: None,
             source_id: n1,
             target_id: n2,
             label: "KNOWS".to_string(),
             properties: None,
+            provenance: None,
         });
         server.create_edge(CreateEdgeRequest {
+            derived_from: None,
+            valid_time: None,
             source_id: n2,
             target_id: n3.id,
             label: "KNOWS".to_string(),
             properties: None,
+            provenance: None,
         });
 
         // Note: list_edges doesn't support listing all edges without a node
@@ -767,10 +870,13 @@ mod edge_tests {
         assert_eq!(value.get("count"), Some(&serde_json::json!(0)));
 
         server.create_edge(CreateEdgeRequest {
+            derived_from: None,
+            valid_time: None,
             source_id: n1,
             target_id: n2,
             label: "KNOWS".to_string(),
             properties: None,
+            provenance: None,
         });
 
         let count_response = server.count_edges(CountEdgesRequest { label: None });
@@ -785,23 +891,32 @@ mod edge_tests {
 
         // Create node3
         let node3 = server.create_node(CreateNodeRequest {
+            derived_from: None,
+            valid_time: None,
             label: "Person".to_string(),
             properties: None,
+            provenance: None,
         });
         let n3: NodeResponse = parse_response(&node3).unwrap();
 
         // Create edges from n1
         server.create_edge(CreateEdgeRequest {
+            derived_from: None,
+            valid_time: None,
             source_id: n1,
             target_id: n2,
             label: "KNOWS".to_string(),
             properties: None,
+            provenance: None,
         });
         server.create_edge(CreateEdgeRequest {
+            derived_from: None,
+            valid_time: None,
             source_id: n1,
             target_id: n3.id,
             label: "WORKS_WITH".to_string(),
             properties: None,
+            provenance: None,
         });
 
         // Get all outgoing edges
@@ -830,23 +945,32 @@ mod edge_tests {
 
         // Create node3
         let node3 = server.create_node(CreateNodeRequest {
+            derived_from: None,
+            valid_time: None,
             label: "Person".to_string(),
             properties: None,
+            provenance: None,
         });
         let n3: NodeResponse = parse_response(&node3).unwrap();
 
         // Create edges to n2
         server.create_edge(CreateEdgeRequest {
+            derived_from: None,
+            valid_time: None,
             source_id: n1,
             target_id: n2,
             label: "KNOWS".to_string(),
             properties: None,
+            provenance: None,
         });
         server.create_edge(CreateEdgeRequest {
+            derived_from: None,
+            valid_time: None,
             source_id: n3.id,
             target_id: n2,
             label: "KNOWS".to_string(),
             properties: None,
+            provenance: None,
         });
 
         let response = server.get_incoming_edges(GetIncomingEdgesRequest {
@@ -871,12 +995,15 @@ mod traversal_tests {
         let nodes: Vec<u64> = (0..4)
             .map(|i| {
                 let response = server.create_node(CreateNodeRequest {
+                    derived_from: None,
+                    valid_time: None,
                     label: "Node".to_string(),
                     properties: Some({
                         let mut m = HashMap::new();
                         m.insert("name".to_string(), serde_json::json!(format!("Node{}", i)));
                         m
                     }),
+                    provenance: None,
                 });
                 let node: NodeResponse = parse_response(&response).unwrap();
                 node.id
@@ -886,10 +1013,13 @@ mod traversal_tests {
         // Create edges
         for i in 0..3 {
             server.create_edge(CreateEdgeRequest {
+                derived_from: None,
+                valid_time: None,
                 source_id: nodes[i],
                 target_id: nodes[i + 1],
                 label: "NEXT".to_string(),
                 properties: None,
+                provenance: None,
             });
         }
 
@@ -907,7 +1037,10 @@ mod traversal_tests {
             direction: Some("outgoing".to_string()),
             depth: Some(1),
             limit: None,
+            offset: None,
             include_vectors: None,
+            as_of_valid_time: None,
+            as_of_transaction_time: None,
         });
 
         let value: serde_json::Value = serde_json::from_str(&response).unwrap();
@@ -927,7 +1060,10 @@ mod traversal_tests {
             direction: Some("outgoing".to_string()),
             depth: Some(3),
             limit: None,
+            offset: None,
             include_vectors: None,
+            as_of_valid_time: None,
+            as_of_transaction_time: None,
         });
 
         let value: serde_json::Value = serde_json::from_str(&response).unwrap();
@@ -948,7 +1084,10 @@ mod traversal_tests {
             direction: Some("incoming".to_string()),
             depth: Some(1),
             limit: None,
+            offset: None,
             include_vectors: None,
+            as_of_valid_time: None,
+            as_of_transaction_time: None,
         });
 
         let value: serde_json::Value = serde_json::from_str(&response).unwrap();
@@ -967,7 +1106,10 @@ mod traversal_tests {
             direction: None,
             depth: Some(3),
             limit: Some(2),
+            offset: None,
             include_vectors: None,
+            as_of_valid_time: None,
+            as_of_transaction_time: None,
         });
 
         let value: serde_json::Value = serde_json::from_str(&response).unwrap();
@@ -1029,6 +1171,7 @@ mod vector_tests {
             property_name: "embedding".to_string(),
             embedding: vec![0.1, 0.2, 0.3, 0.4],
             k: Some(5),
+            offset: None,
             include_vectors: None,
         });
 
@@ -1062,8 +1205,11 @@ mod vector_tests {
             );
 
             server.create_node(CreateNodeRequest {
+                derived_from: None,
+                valid_time: None,
                 label: "Document".to_string(),
                 properties: Some(props),
+                provenance: None,
             });
         }
 
@@ -1072,6 +1218,7 @@ mod vector_tests {
             property_name: "embedding".to_string(),
             embedding: vec![0.1, 0.2, 0.3, 0.4],
             k: Some(3),
+            offset: None,
             include_vectors: None,
         });
 
@@ -1094,8 +1241,11 @@ mod temporal_tests {
 
         // Create a node
         let node_response = server.create_node(CreateNodeRequest {
+            derived_from: None,
+            valid_time: None,
             label: "Person".to_string(),
             properties: None,
+            provenance: None,
         });
         let node: NodeResponse = parse_response(&node_response).unwrap();
 
@@ -1116,12 +1266,15 @@ mod temporal_tests {
 
         // Create a node
         let node_response = server.create_node(CreateNodeRequest {
+            derived_from: None,
+            valid_time: None,
             label: "Person".to_string(),
             properties: Some({
                 let mut m = HashMap::new();
                 m.insert("name".to_string(), serde_json::json!("Alice"));
                 m
             }),
+            provenance: None,
         });
         let node: NodeResponse = parse_response(&node_response).unwrap();
 
@@ -1148,22 +1301,31 @@ mod temporal_tests {
 
         // Create nodes and edge
         let n1_response = server.create_node(CreateNodeRequest {
+            derived_from: None,
+            valid_time: None,
             label: "Person".to_string(),
             properties: None,
+            provenance: None,
         });
         let n1: NodeResponse = parse_response(&n1_response).unwrap();
 
         let n2_response = server.create_node(CreateNodeRequest {
+            derived_from: None,
+            valid_time: None,
             label: "Person".to_string(),
             properties: None,
+            provenance: None,
         });
         let n2: NodeResponse = parse_response(&n2_response).unwrap();
 
         let edge_response = server.create_edge(CreateEdgeRequest {
+            derived_from: None,
+            valid_time: None,
             source_id: n1.id,
             target_id: n2.id,
             label: "KNOWS".to_string(),
             properties: None,
+            provenance: None,
         });
         let edge: EdgeResponse = parse_response(&edge_response).unwrap();
 
@@ -1202,8 +1364,11 @@ mod temporal_tests {
     fn test_list_changes_success_shape() {
         let server = create_test_server();
         server.create_node(CreateNodeRequest {
+            derived_from: None,
+            valid_time: None,
             label: "Person".to_string(),
             properties: None,
+            provenance: None,
         });
 
         let response = server.list_changes(list_changes_req());
@@ -1239,8 +1404,11 @@ mod temporal_tests {
     fn test_list_changes_empty_window_is_success() {
         let server = create_test_server();
         server.create_node(CreateNodeRequest {
+            derived_from: None,
+            valid_time: None,
             label: "Person".to_string(),
             properties: None,
+            provenance: None,
         });
         let mut req = list_changes_req();
         req.tx_from = "1000000".to_string();
@@ -1296,22 +1464,28 @@ mod hybrid_tests {
 
         // Create nodes
         let n1_response = server.create_node(CreateNodeRequest {
+            derived_from: None,
+            valid_time: None,
             label: "Person".to_string(),
             properties: Some({
                 let mut m = HashMap::new();
                 m.insert("name".to_string(), serde_json::json!("Alice"));
                 m
             }),
+            provenance: None,
         });
         let n1: NodeResponse = parse_response(&n1_response).unwrap();
 
         let n2_response = server.create_node(CreateNodeRequest {
+            derived_from: None,
+            valid_time: None,
             label: "Person".to_string(),
             properties: Some({
                 let mut m = HashMap::new();
                 m.insert("name".to_string(), serde_json::json!("Bob"));
                 m
             }),
+            provenance: None,
         });
         let _n2: NodeResponse = parse_response(&n2_response).unwrap();
 
@@ -1341,15 +1515,21 @@ mod hybrid_tests {
         // Create nodes with different labels
         for _ in 0..3 {
             server.create_node(CreateNodeRequest {
+                derived_from: None,
+                valid_time: None,
                 label: "Person".to_string(),
                 properties: None,
+                provenance: None,
             });
         }
 
         for _ in 0..2 {
             server.create_node(CreateNodeRequest {
+                derived_from: None,
+                valid_time: None,
                 label: "Document".to_string(),
                 properties: None,
+                provenance: None,
             });
         }
 
@@ -1409,22 +1589,31 @@ mod hybrid_tests {
 
         // Create a simple graph
         let n1_response = server.create_node(CreateNodeRequest {
+            derived_from: None,
+            valid_time: None,
             label: "Person".to_string(),
             properties: None,
+            provenance: None,
         });
         let n1: NodeResponse = parse_response(&n1_response).unwrap();
 
         let n2_response = server.create_node(CreateNodeRequest {
+            derived_from: None,
+            valid_time: None,
             label: "Person".to_string(),
             properties: None,
+            provenance: None,
         });
         let n2: NodeResponse = parse_response(&n2_response).unwrap();
 
         server.create_edge(CreateEdgeRequest {
+            derived_from: None,
+            valid_time: None,
             source_id: n1.id,
             target_id: n2.id,
             label: "KNOWS".to_string(),
             properties: None,
+            provenance: None,
         });
 
         // Query with traversal
@@ -1467,8 +1656,11 @@ mod conversion_tests {
         props.insert("array_val".to_string(), serde_json::json!([1, 2, 3]));
 
         let response = server.create_node(CreateNodeRequest {
+            derived_from: None,
+            valid_time: None,
             label: "Test".to_string(),
             properties: Some(props),
+            provenance: None,
         });
 
         let node: NodeResponse = parse_response(&response).expect("Failed to create node");
@@ -1499,8 +1691,11 @@ mod conversion_tests {
         );
 
         let response = server.create_node(CreateNodeRequest {
+            derived_from: None,
+            valid_time: None,
             label: "Document".to_string(),
             properties: Some(props),
+            provenance: None,
         });
 
         let node: NodeResponse = parse_response(&response).expect("Failed to create node");
@@ -1539,6 +1734,7 @@ mod coverage_tests {
             property_name: "embedding".to_string(),
             embedding: vec![0.1, 0.2, 0.3], // Wrong: 3 dimensions instead of 4
             k: Some(5),
+            offset: None,
             include_vectors: None,
         });
 
@@ -1597,8 +1793,11 @@ mod coverage_tests {
 
         // Create a node first
         let response = server.create_node(CreateNodeRequest {
+            derived_from: None,
+            valid_time: None,
             label: "Event".to_string(),
             properties: None,
+            provenance: None,
         });
         let node: NodeResponse = parse_response(&response).expect("Failed to create node");
 
@@ -1614,7 +1813,7 @@ mod coverage_tests {
         // Either we get the node back or a "not found" type error (since we're querying at a past time)
         // but we should NOT get a timestamp parsing error
         if let Some(error) = value.get("error") {
-            let err_str = error.as_str().unwrap_or("");
+            let err_str = error["message"].as_str().unwrap_or("");
             assert!(
                 !err_str.contains("Invalid timestamp format"),
                 "ISO 8601 timestamp should be parsed correctly, got error: {}",
@@ -1629,8 +1828,11 @@ mod coverage_tests {
 
         // Create a node first
         let response = server.create_node(CreateNodeRequest {
+            derived_from: None,
+            valid_time: None,
             label: "Event".to_string(),
             properties: None,
+            provenance: None,
         });
         let node: NodeResponse = parse_response(&response).expect("Failed to create node");
 
@@ -1644,7 +1846,7 @@ mod coverage_tests {
         // Should not contain a parsing error
         let value: serde_json::Value = serde_json::from_str(&response).unwrap();
         if let Some(error) = value.get("error") {
-            let err_str = error.as_str().unwrap_or("");
+            let err_str = error["message"].as_str().unwrap_or("");
             assert!(
                 !err_str.contains("Invalid timestamp format"),
                 "ISO 8601 timestamp without TZ should be parsed correctly, got error: {}",
@@ -1659,8 +1861,11 @@ mod coverage_tests {
 
         // Create a node first
         let response = server.create_node(CreateNodeRequest {
+            derived_from: None,
+            valid_time: None,
             label: "Event".to_string(),
             properties: None,
+            provenance: None,
         });
         let node: NodeResponse = parse_response(&response).expect("Failed to create node");
 
@@ -1712,12 +1917,15 @@ mod coverage_tests {
         // Create a few nodes
         for i in 0..5 {
             server.create_node(CreateNodeRequest {
+                derived_from: None,
+                valid_time: None,
                 label: "OffsetTest".to_string(),
                 properties: Some({
                     let mut props = HashMap::new();
                     props.insert("index".to_string(), serde_json::json!(i));
                     props
                 }),
+                provenance: None,
             });
         }
 
@@ -1748,21 +1956,27 @@ mod coverage_tests {
         let mut prev_id: Option<u64> = None;
         for i in 0..5 {
             let response = server.create_node(CreateNodeRequest {
+                derived_from: None,
+                valid_time: None,
                 label: "ChainNode".to_string(),
                 properties: Some({
                     let mut props = HashMap::new();
                     props.insert("level".to_string(), serde_json::json!(i));
                     props
                 }),
+                provenance: None,
             });
             let node: NodeResponse = parse_response(&response).unwrap();
 
             if let Some(source_id) = prev_id {
                 server.create_edge(CreateEdgeRequest {
+                    derived_from: None,
+                    valid_time: None,
                     source_id,
                     target_id: node.id,
                     label: "NEXT".to_string(),
                     properties: None,
+                    provenance: None,
                 });
             }
             prev_id = Some(node.id);
@@ -1775,7 +1989,10 @@ mod coverage_tests {
             depth: Some(100), // Very large depth, should be capped
             direction: Some("outgoing".to_string()),
             limit: Some(50),
+            offset: None,
             include_vectors: None,
+            as_of_valid_time: None,
+            as_of_transaction_time: None,
         });
 
         // Should not error
@@ -1833,8 +2050,11 @@ mod error_handling_tests {
         let server = create_test_server();
 
         let req = UpdateNodeRequest {
+            derived_from: None,
+            valid_time: None,
             node_id: 999999,
             properties: HashMap::new(),
+            provenance: None,
         };
 
         let response = server.update_node(req);
@@ -1850,6 +2070,7 @@ mod error_handling_tests {
         let req = DeleteNodeRequest {
             node_id: 999999,
             detach: None,
+            valid_time: None,
         };
 
         let response = server.delete_node(req);
@@ -1878,8 +2099,11 @@ mod error_handling_tests {
         let server = create_test_server();
 
         let req = UpdateEdgeRequest {
+            derived_from: None,
+            valid_time: None,
             edge_id: 999999,
             properties: HashMap::new(),
+            provenance: None,
         };
 
         let response = server.update_edge(req);
@@ -1892,7 +2116,10 @@ mod error_handling_tests {
     fn test_delete_edge_nonexistent() {
         let server = create_test_server();
 
-        let req = DeleteEdgeRequest { edge_id: 999999 };
+        let req = DeleteEdgeRequest {
+            edge_id: 999999,
+            valid_time: None,
+        };
 
         let response = server.delete_edge(req);
         let value: serde_json::Value = serde_json::from_str(&response).unwrap();
@@ -1906,17 +2133,23 @@ mod error_handling_tests {
 
         // Create only target node
         let target_resp = server.create_node(CreateNodeRequest {
+            derived_from: None,
+            valid_time: None,
             label: "Target".to_string(),
             properties: None,
+            provenance: None,
         });
         let target: NodeResponse = parse_response(&target_resp).unwrap();
 
         // Try to create edge with non-existent source
         let req = CreateEdgeRequest {
+            derived_from: None,
+            valid_time: None,
             source_id: 999999,
             target_id: target.id,
             label: "KNOWS".to_string(),
             properties: None,
+            provenance: None,
         };
 
         let response = server.create_edge(req);
@@ -1931,17 +2164,23 @@ mod error_handling_tests {
 
         // Create only source node
         let source_resp = server.create_node(CreateNodeRequest {
+            derived_from: None,
+            valid_time: None,
             label: "Source".to_string(),
             properties: None,
+            provenance: None,
         });
         let source: NodeResponse = parse_response(&source_resp).unwrap();
 
         // Try to create edge with non-existent target
         let req = CreateEdgeRequest {
+            derived_from: None,
+            valid_time: None,
             source_id: source.id,
             target_id: 999999,
             label: "KNOWS".to_string(),
             properties: None,
+            provenance: None,
         };
 
         let response = server.create_edge(req);
@@ -2039,6 +2278,7 @@ mod vector_distance_tests {
             property_name: "embedding".to_string(),
             embedding: vec![0.1, 0.2, 0.3, 0.4],
             k: Some(10000), // Much larger than MAX_VECTOR_K,
+            offset: None,
             include_vectors: None,
         });
 
@@ -2066,12 +2306,15 @@ mod temporal_extended_tests {
 
         // Create a node
         let node_response = server.create_node(CreateNodeRequest {
+            derived_from: None,
+            valid_time: None,
             label: "Event".to_string(),
             properties: Some({
                 let mut m = HashMap::new();
                 m.insert("title".to_string(), serde_json::json!("Conference"));
                 m
             }),
+            provenance: None,
         });
         let node: NodeResponse = parse_response(&node_response).unwrap();
 
@@ -2108,22 +2351,31 @@ mod temporal_extended_tests {
 
         // Create nodes and edge
         let n1_response = server.create_node(CreateNodeRequest {
+            derived_from: None,
+            valid_time: None,
             label: "Person".to_string(),
             properties: None,
+            provenance: None,
         });
         let n1: NodeResponse = parse_response(&n1_response).unwrap();
 
         let n2_response = server.create_node(CreateNodeRequest {
+            derived_from: None,
+            valid_time: None,
             label: "Person".to_string(),
             properties: None,
+            provenance: None,
         });
         let n2: NodeResponse = parse_response(&n2_response).unwrap();
 
         let edge_response = server.create_edge(CreateEdgeRequest {
+            derived_from: None,
+            valid_time: None,
             source_id: n1.id,
             target_id: n2.id,
             label: "KNOWS".to_string(),
             properties: None,
+            provenance: None,
         });
         let edge: EdgeResponse = parse_response(&edge_response).unwrap();
 
@@ -2151,8 +2403,11 @@ mod temporal_extended_tests {
         let server = create_test_server();
 
         let node_response = server.create_node(CreateNodeRequest {
+            derived_from: None,
+            valid_time: None,
             label: "Test".to_string(),
             properties: None,
+            provenance: None,
         });
         let node: NodeResponse = parse_response(&node_response).unwrap();
 
@@ -2165,7 +2420,7 @@ mod temporal_extended_tests {
 
         let value: serde_json::Value = serde_json::from_str(&response).unwrap();
         assert!(value.get("error").is_some());
-        let error_str = value["error"].as_str().unwrap();
+        let error_str = value["error"]["message"].as_str().unwrap();
         assert!(
             error_str.contains("Invalid timestamp format"),
             "Should report invalid timestamp: {}",
@@ -2179,22 +2434,31 @@ mod temporal_extended_tests {
 
         // Create nodes and edge
         let n1_response = server.create_node(CreateNodeRequest {
+            derived_from: None,
+            valid_time: None,
             label: "Person".to_string(),
             properties: None,
+            provenance: None,
         });
         let n1: NodeResponse = parse_response(&n1_response).unwrap();
 
         let n2_response = server.create_node(CreateNodeRequest {
+            derived_from: None,
+            valid_time: None,
             label: "Person".to_string(),
             properties: None,
+            provenance: None,
         });
         let n2: NodeResponse = parse_response(&n2_response).unwrap();
 
         let edge_response = server.create_edge(CreateEdgeRequest {
+            derived_from: None,
+            valid_time: None,
             source_id: n1.id,
             target_id: n2.id,
             label: "KNOWS".to_string(),
             properties: None,
+            provenance: None,
         });
         let edge: EdgeResponse = parse_response(&edge_response).unwrap();
 
@@ -2214,8 +2478,11 @@ mod temporal_extended_tests {
         let server = create_test_server();
 
         let node_response = server.create_node(CreateNodeRequest {
+            derived_from: None,
+            valid_time: None,
             label: "Event".to_string(),
             properties: None,
+            provenance: None,
         });
         let node: NodeResponse = parse_response(&node_response).unwrap();
 
@@ -2228,7 +2495,7 @@ mod temporal_extended_tests {
 
         let value: serde_json::Value = serde_json::from_str(&response).unwrap();
         if let Some(error) = value.get("error") {
-            let err_str = error.as_str().unwrap_or("");
+            let err_str = error["message"].as_str().unwrap_or("");
             assert!(
                 !err_str.contains("Invalid timestamp format"),
                 "Offset timezone should be parsed correctly, got error: {}",
@@ -2250,12 +2517,15 @@ mod traversal_extended_tests {
         let nodes: Vec<u64> = (0..3)
             .map(|i| {
                 let response = server.create_node(CreateNodeRequest {
+                    derived_from: None,
+                    valid_time: None,
                     label: "BiNode".to_string(),
                     properties: Some({
                         let mut m = HashMap::new();
                         m.insert("name".to_string(), serde_json::json!(format!("Node{}", i)));
                         m
                     }),
+                    provenance: None,
                 });
                 let node: NodeResponse = parse_response(&response).unwrap();
                 node.id
@@ -2265,16 +2535,22 @@ mod traversal_extended_tests {
         // Create bidirectional edges
         for i in 0..2 {
             server.create_edge(CreateEdgeRequest {
+                derived_from: None,
+                valid_time: None,
                 source_id: nodes[i],
                 target_id: nodes[i + 1],
                 label: "CONNECTED".to_string(),
                 properties: None,
+                provenance: None,
             });
             server.create_edge(CreateEdgeRequest {
+                derived_from: None,
+                valid_time: None,
                 source_id: nodes[i + 1],
                 target_id: nodes[i],
                 label: "CONNECTED".to_string(),
                 properties: None,
+                provenance: None,
             });
         }
 
@@ -2293,7 +2569,10 @@ mod traversal_extended_tests {
             direction: Some("both".to_string()),
             depth: Some(1),
             limit: None,
+            offset: None,
             include_vectors: None,
+            as_of_valid_time: None,
+            as_of_transaction_time: None,
         });
 
         let value: serde_json::Value = serde_json::from_str(&response).unwrap();
@@ -2306,13 +2585,81 @@ mod traversal_extended_tests {
     }
 
     #[test]
+    fn test_traverse_both_direction_finds_node_reachable_only_via_incoming_edge() {
+        // Regression test: direction:"both" must resolve the correct
+        // neighbor for edges discovered through the *incoming* side too, not
+        // just fall back to `edge.target` (which is `current_id` itself for
+        // an incoming edge, silently dropping the neighbor). Build a graph
+        // with NO reciprocal outgoing edge, so this can only pass if the
+        // incoming half of "both" is resolved correctly.
+        let server = create_test_server();
+
+        let a = {
+            let response = server.create_node(CreateNodeRequest {
+                derived_from: None,
+                valid_time: None,
+                label: "Node".to_string(),
+                properties: None,
+                provenance: None,
+            });
+            let node: NodeResponse = parse_response(&response).unwrap();
+            node.id
+        };
+        let b = {
+            let response = server.create_node(CreateNodeRequest {
+                derived_from: None,
+                valid_time: None,
+                label: "Node".to_string(),
+                properties: None,
+                provenance: None,
+            });
+            let node: NodeResponse = parse_response(&response).unwrap();
+            node.id
+        };
+        // Only B -> A exists; A has no outgoing edge back to B.
+        server.create_edge(CreateEdgeRequest {
+            derived_from: None,
+            valid_time: None,
+            source_id: b,
+            target_id: a,
+            label: "POINTS_AT".to_string(),
+            properties: None,
+            provenance: None,
+        });
+
+        let response = server.traverse(TraverseRequest {
+            start_node_id: a,
+            edge_label: "POINTS_AT".to_string(),
+            direction: Some("both".to_string()),
+            depth: Some(1),
+            limit: None,
+            offset: None,
+            include_vectors: None,
+            as_of_valid_time: None,
+            as_of_transaction_time: None,
+        });
+
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert!(value.get("error").is_none(), "unexpected error: {value}");
+        let count = value["count"].as_u64().unwrap();
+        assert_eq!(
+            count, 1,
+            "direction:\"both\" must find B via the incoming B->A edge, not drop it: {value}"
+        );
+        assert_eq!(value["results"][0]["node"]["id"], b);
+    }
+
+    #[test]
     fn test_traverse_nonexistent_edge_label() {
         let server = create_test_server();
 
         // Create a single node
         let node_response = server.create_node(CreateNodeRequest {
+            derived_from: None,
+            valid_time: None,
             label: "Lonely".to_string(),
             properties: None,
+            provenance: None,
         });
         let node: NodeResponse = parse_response(&node_response).unwrap();
 
@@ -2323,7 +2670,10 @@ mod traversal_extended_tests {
             direction: None,
             depth: Some(3),
             limit: None,
+            offset: None,
             include_vectors: None,
+            as_of_valid_time: None,
+            as_of_transaction_time: None,
         });
 
         let value: serde_json::Value = serde_json::from_str(&response).unwrap();
@@ -2338,22 +2688,31 @@ mod traversal_extended_tests {
 
         // Create A -> B
         let n1_response = server.create_node(CreateNodeRequest {
+            derived_from: None,
+            valid_time: None,
             label: "Node".to_string(),
             properties: None,
+            provenance: None,
         });
         let n1: NodeResponse = parse_response(&n1_response).unwrap();
 
         let n2_response = server.create_node(CreateNodeRequest {
+            derived_from: None,
+            valid_time: None,
             label: "Node".to_string(),
             properties: None,
+            provenance: None,
         });
         let n2: NodeResponse = parse_response(&n2_response).unwrap();
 
         server.create_edge(CreateEdgeRequest {
+            derived_from: None,
+            valid_time: None,
             source_id: n1.id,
             target_id: n2.id,
             label: "NEXT".to_string(),
             properties: None,
+            provenance: None,
         });
 
         // Traverse without specifying direction (should default to outgoing)
@@ -2363,7 +2722,10 @@ mod traversal_extended_tests {
             direction: None, // Default to outgoing
             depth: Some(1),
             limit: None,
+            offset: None,
             include_vectors: None,
+            as_of_valid_time: None,
+            as_of_transaction_time: None,
         });
 
         let value: serde_json::Value = serde_json::from_str(&response).unwrap();
@@ -2377,27 +2739,36 @@ mod traversal_extended_tests {
 
         // Create a star graph: center -> 10 spokes
         let center_response = server.create_node(CreateNodeRequest {
+            derived_from: None,
+            valid_time: None,
             label: "Center".to_string(),
             properties: None,
+            provenance: None,
         });
         let center: NodeResponse = parse_response(&center_response).unwrap();
 
         for i in 0..10 {
             let spoke_response = server.create_node(CreateNodeRequest {
+                derived_from: None,
+                valid_time: None,
                 label: "Spoke".to_string(),
                 properties: Some({
                     let mut m = HashMap::new();
                     m.insert("index".to_string(), serde_json::json!(i));
                     m
                 }),
+                provenance: None,
             });
             let spoke: NodeResponse = parse_response(&spoke_response).unwrap();
 
             server.create_edge(CreateEdgeRequest {
+                derived_from: None,
+                valid_time: None,
                 source_id: center.id,
                 target_id: spoke.id,
                 label: "SPOKE".to_string(),
                 properties: None,
+                provenance: None,
             });
         }
 
@@ -2408,7 +2779,10 @@ mod traversal_extended_tests {
             direction: Some("outgoing".to_string()),
             depth: Some(1),
             limit: Some(5),
+            offset: None,
             include_vectors: None,
+            as_of_valid_time: None,
+            as_of_transaction_time: None,
         });
 
         let value: serde_json::Value = serde_json::from_str(&response).unwrap();
@@ -2430,12 +2804,15 @@ mod hybrid_extended_tests {
 
         // Create a node
         let node_response = server.create_node(CreateNodeRequest {
+            derived_from: None,
+            valid_time: None,
             label: "Person".to_string(),
             properties: Some({
                 let mut m = HashMap::new();
                 m.insert("name".to_string(), serde_json::json!("Alice"));
                 m
             }),
+            provenance: None,
         });
         let node: NodeResponse = parse_response(&node_response).unwrap();
 
@@ -2477,12 +2854,15 @@ mod hybrid_extended_tests {
         let nodes: Vec<u64> = (0..4)
             .map(|i| {
                 let response = server.create_node(CreateNodeRequest {
+                    derived_from: None,
+                    valid_time: None,
                     label: "ChainNode".to_string(),
                     properties: Some({
                         let mut m = HashMap::new();
                         m.insert("level".to_string(), serde_json::json!(i));
                         m
                     }),
+                    provenance: None,
                 });
                 let node: NodeResponse = parse_response(&response).unwrap();
                 node.id
@@ -2491,10 +2871,13 @@ mod hybrid_extended_tests {
 
         for i in 0..3 {
             server.create_edge(CreateEdgeRequest {
+                derived_from: None,
+                valid_time: None,
                 source_id: nodes[i],
                 target_id: nodes[i + 1],
                 label: "CHAIN".to_string(),
                 properties: None,
+                provenance: None,
             });
         }
 
@@ -2525,8 +2908,11 @@ mod hybrid_extended_tests {
         let server = create_test_server();
 
         let node_response = server.create_node(CreateNodeRequest {
+            derived_from: None,
+            valid_time: None,
             label: "Test".to_string(),
             properties: None,
+            provenance: None,
         });
         let node: NodeResponse = parse_response(&node_response).unwrap();
 
@@ -2547,7 +2933,7 @@ mod hybrid_extended_tests {
 
         let value: serde_json::Value = serde_json::from_str(&response).unwrap();
         assert!(value.get("error").is_some());
-        let error = value["error"].as_str().unwrap();
+        let error = value["error"]["message"].as_str().unwrap();
         assert!(
             error.contains("Invalid valid_time"),
             "Should report invalid valid_time"
@@ -2559,8 +2945,11 @@ mod hybrid_extended_tests {
         let server = create_test_server();
 
         let node_response = server.create_node(CreateNodeRequest {
+            derived_from: None,
+            valid_time: None,
             label: "Test".to_string(),
             properties: None,
+            provenance: None,
         });
         let node: NodeResponse = parse_response(&node_response).unwrap();
 
@@ -2581,7 +2970,7 @@ mod hybrid_extended_tests {
 
         let value: serde_json::Value = serde_json::from_str(&response).unwrap();
         assert!(value.get("error").is_some());
-        let error = value["error"].as_str().unwrap();
+        let error = value["error"]["message"].as_str().unwrap();
         assert!(
             error.contains("Invalid transaction_time"),
             "Should report invalid transaction_time"
@@ -2595,12 +2984,15 @@ mod hybrid_extended_tests {
         // Create some nodes
         for i in 0..5 {
             server.create_node(CreateNodeRequest {
+                derived_from: None,
+                valid_time: None,
                 label: "LimitTest".to_string(),
                 properties: Some({
                     let mut m = HashMap::new();
                     m.insert("index".to_string(), serde_json::json!(i));
                     m
                 }),
+                provenance: None,
             });
         }
 
@@ -2648,7 +3040,7 @@ mod hybrid_extended_tests {
 
         let value: serde_json::Value = serde_json::from_str(&response).unwrap();
         assert!(value.get("error").is_some());
-        let error = value["error"].as_str().unwrap();
+        let error = value["error"]["message"].as_str().unwrap();
         assert!(
             error.contains("Vector index not enabled"),
             "Should report missing vector index"
@@ -2669,29 +3061,41 @@ mod edge_extended_tests {
 
         // Create nodes
         let n1_response = server.create_node(CreateNodeRequest {
+            derived_from: None,
+            valid_time: None,
             label: "Person".to_string(),
             properties: None,
+            provenance: None,
         });
         let n1: NodeResponse = parse_response(&n1_response).unwrap();
 
         let n2_response = server.create_node(CreateNodeRequest {
+            derived_from: None,
+            valid_time: None,
             label: "Person".to_string(),
             properties: None,
+            provenance: None,
         });
         let n2: NodeResponse = parse_response(&n2_response).unwrap();
 
         // Create edges with different labels
         server.create_edge(CreateEdgeRequest {
+            derived_from: None,
+            valid_time: None,
             source_id: n1.id,
             target_id: n2.id,
             label: "KNOWS".to_string(),
             properties: None,
+            provenance: None,
         });
         server.create_edge(CreateEdgeRequest {
+            derived_from: None,
+            valid_time: None,
             source_id: n1.id,
             target_id: n2.id,
             label: "WORKS_WITH".to_string(),
             properties: None,
+            provenance: None,
         });
 
         // List edges with label filter
@@ -2714,22 +3118,31 @@ mod edge_extended_tests {
 
         // Create nodes and edges
         let n1_response = server.create_node(CreateNodeRequest {
+            derived_from: None,
+            valid_time: None,
             label: "Person".to_string(),
             properties: None,
+            provenance: None,
         });
         let n1: NodeResponse = parse_response(&n1_response).unwrap();
 
         let n2_response = server.create_node(CreateNodeRequest {
+            derived_from: None,
+            valid_time: None,
             label: "Person".to_string(),
             properties: None,
+            provenance: None,
         });
         let n2: NodeResponse = parse_response(&n2_response).unwrap();
 
         server.create_edge(CreateEdgeRequest {
+            derived_from: None,
+            valid_time: None,
             source_id: n1.id,
             target_id: n2.id,
             label: "KNOWS".to_string(),
             properties: None,
+            provenance: None,
         });
 
         // Count edges with label (should return message about not being supported)
@@ -2755,35 +3168,50 @@ mod edge_extended_tests {
 
         // Create nodes
         let n1_response = server.create_node(CreateNodeRequest {
+            derived_from: None,
+            valid_time: None,
             label: "Person".to_string(),
             properties: None,
+            provenance: None,
         });
         let n1: NodeResponse = parse_response(&n1_response).unwrap();
 
         let n2_response = server.create_node(CreateNodeRequest {
+            derived_from: None,
+            valid_time: None,
             label: "Person".to_string(),
             properties: None,
+            provenance: None,
         });
         let n2: NodeResponse = parse_response(&n2_response).unwrap();
 
         let n3_response = server.create_node(CreateNodeRequest {
+            derived_from: None,
+            valid_time: None,
             label: "Person".to_string(),
             properties: None,
+            provenance: None,
         });
         let n3: NodeResponse = parse_response(&n3_response).unwrap();
 
         // Create edges with different labels pointing to n2
         server.create_edge(CreateEdgeRequest {
+            derived_from: None,
+            valid_time: None,
             source_id: n1.id,
             target_id: n2.id,
             label: "KNOWS".to_string(),
             properties: None,
+            provenance: None,
         });
         server.create_edge(CreateEdgeRequest {
+            derived_from: None,
+            valid_time: None,
             source_id: n3.id,
             target_id: n2.id,
             label: "WORKS_WITH".to_string(),
             properties: None,
+            provenance: None,
         });
 
         // Get incoming edges with label filter
@@ -2816,8 +3244,11 @@ mod list_nodes_extended_tests {
         // Create some nodes
         for i in 0..3 {
             server.create_node(CreateNodeRequest {
+                derived_from: None,
+                valid_time: None,
                 label: format!("Type{}", i),
                 properties: None,
+                provenance: None,
             });
         }
 
@@ -2847,12 +3278,15 @@ mod list_nodes_extended_tests {
         // Create a few nodes
         for i in 0..5 {
             server.create_node(CreateNodeRequest {
+                derived_from: None,
+                valid_time: None,
                 label: "LimitCap".to_string(),
                 properties: Some({
                     let mut m = HashMap::new();
                     m.insert("index".to_string(), serde_json::json!(i));
                     m
                 }),
+                provenance: None,
             });
         }
 
@@ -2884,28 +3318,37 @@ mod list_nodes_extended_tests {
 
         // Create nodes with different names
         server.create_node(CreateNodeRequest {
+            derived_from: None,
+            valid_time: None,
             label: "Person".to_string(),
             properties: Some({
                 let mut m = HashMap::new();
                 m.insert("name".to_string(), serde_json::json!("Alice"));
                 m
             }),
+            provenance: None,
         });
         server.create_node(CreateNodeRequest {
+            derived_from: None,
+            valid_time: None,
             label: "Person".to_string(),
             properties: Some({
                 let mut m = HashMap::new();
                 m.insert("name".to_string(), serde_json::json!("Bob"));
                 m
             }),
+            provenance: None,
         });
         server.create_node(CreateNodeRequest {
+            derived_from: None,
+            valid_time: None,
             label: "Person".to_string(),
             properties: Some({
                 let mut m = HashMap::new();
                 m.insert("name".to_string(), serde_json::json!("Alice"));
                 m
             }),
+            provenance: None,
         });
 
         // Filter by property
@@ -2928,20 +3371,26 @@ mod list_nodes_extended_tests {
         let server = create_test_server();
 
         server.create_node(CreateNodeRequest {
+            derived_from: None,
+            valid_time: None,
             label: "Sensor".to_string(),
             properties: Some({
                 let mut m = HashMap::new();
                 m.insert("reading".to_string(), serde_json::json!(42));
                 m
             }),
+            provenance: None,
         });
         server.create_node(CreateNodeRequest {
+            derived_from: None,
+            valid_time: None,
             label: "Sensor".to_string(),
             properties: Some({
                 let mut m = HashMap::new();
                 m.insert("reading".to_string(), serde_json::json!(99));
                 m
             }),
+            provenance: None,
         });
 
         let response = server.list_nodes(ListNodesRequest {
@@ -2967,12 +3416,15 @@ mod list_nodes_extended_tests {
         let server = create_test_server();
 
         server.create_node(CreateNodeRequest {
+            derived_from: None,
+            valid_time: None,
             label: "Item".to_string(),
             properties: Some({
                 let mut m = HashMap::new();
                 m.insert("color".to_string(), serde_json::json!("red"));
                 m
             }),
+            provenance: None,
         });
 
         let response = server.list_nodes(ListNodesRequest {
@@ -3038,12 +3490,15 @@ mod list_nodes_extended_tests {
         // Create 5 nodes with same property
         for _ in 0..5 {
             server.create_node(CreateNodeRequest {
+                derived_from: None,
+                valid_time: None,
                 label: "Widget".to_string(),
                 properties: Some({
                     let mut m = HashMap::new();
                     m.insert("status".to_string(), serde_json::json!("active"));
                     m
                 }),
+                provenance: None,
             });
         }
 
@@ -3103,8 +3558,11 @@ mod query_tool_tests {
         let mut props = HashMap::new();
         props.insert("name".to_string(), serde_json::json!(name));
         let resp = server.create_node(CreateNodeRequest {
+            derived_from: None,
+            valid_time: None,
             label: label.to_string(),
             properties: Some(props),
+            provenance: None,
         });
         let node: NodeResponse = parse_response(&resp).expect("seed node should succeed");
         node.id
@@ -3331,6 +3789,195 @@ mod query_tool_tests {
         assert_eq!(
             value["rows"][0]["entity"]["properties"]["name"].as_str(),
             Some("Alice")
+        );
+    }
+
+    // --- #558 MCP surface: Cypher aggregate/computed rows must render their
+    // named column values (not `entity: null`). See the aggregation limitation
+    // note in CLAUDE.md that this closes at the MCP layer.
+
+    #[cfg(feature = "cypher")]
+    #[test]
+    fn test_query_cypher_aggregate_count_renders_value_not_null() {
+        let server = create_test_server();
+        for name in ["a", "b", "c", "d", "e"] {
+            seed_named(&server, "Person", name);
+        }
+        let value = run_query(
+            &server,
+            QueryRequest {
+                language: "cypher".to_string(),
+                query: "MATCH (n:Person) RETURN count(*)".to_string(),
+                params: None,
+                limit: None,
+            },
+        );
+        assert_eq!(value["row_count"].as_u64(), Some(1), "{value}");
+        // The aggregate value must be surfaced under its column name, not lost
+        // to an `entity: null` rendering.
+        assert_eq!(
+            value["rows"][0]["count(*)"].as_i64(),
+            Some(5),
+            "aggregate count must render its value under its column name: {value}"
+        );
+        assert!(
+            value["rows"][0]["entity"].is_null(),
+            "aggregate row must not carry a non-null entity payload: {value}"
+        );
+        // Column metadata names the aggregate column (not the static schema).
+        let cols = value["columns"].as_array().expect("columns array");
+        assert!(
+            cols.iter().any(|c| c["name"].as_str() == Some("count(*)")),
+            "columns must name the aggregate column: {value}"
+        );
+    }
+
+    #[cfg(feature = "cypher")]
+    #[test]
+    fn test_query_cypher_grouped_aggregate_renders_group_and_count() {
+        let server = create_test_server();
+        for (name, dept) in [
+            ("a", "Eng"),
+            ("b", "Eng"),
+            ("c", "Eng"),
+            ("d", "Sales"),
+            ("e", "Sales"),
+        ] {
+            let mut props = HashMap::new();
+            props.insert("name".to_string(), serde_json::json!(name));
+            props.insert("dept".to_string(), serde_json::json!(dept));
+            let resp = server.create_node(CreateNodeRequest {
+                valid_time: None,
+                label: "Person".to_string(),
+                properties: Some(props),
+                provenance: None,
+                derived_from: None,
+            });
+            let _: NodeResponse = parse_response(&resp).expect("seed node should succeed");
+        }
+        let value = run_query(
+            &server,
+            QueryRequest {
+                language: "cypher".to_string(),
+                query: "MATCH (n:Person) RETURN n.dept, count(*)".to_string(),
+                params: None,
+                limit: None,
+            },
+        );
+        assert_eq!(value["row_count"].as_u64(), Some(2), "{value}");
+        let rows = value["rows"].as_array().expect("rows array");
+        let mut counts = HashMap::new();
+        for r in rows {
+            let dept = r["n.dept"]
+                .as_str()
+                .unwrap_or_else(|| panic!("group column `n.dept` must be present: {value}"))
+                .to_string();
+            let cnt = r["count(*)"]
+                .as_i64()
+                .unwrap_or_else(|| panic!("aggregate column `count(*)` must be present: {value}"));
+            counts.insert(dept, cnt);
+        }
+        assert_eq!(counts.get("Eng"), Some(&3), "{value}");
+        assert_eq!(counts.get("Sales"), Some(&2), "{value}");
+        let cols = value["columns"].as_array().expect("columns array");
+        let names: Vec<&str> = cols.iter().filter_map(|c| c["name"].as_str()).collect();
+        assert!(
+            names.contains(&"n.dept") && names.contains(&"count(*)"),
+            "columns must list both the group key and the aggregate: {value}"
+        );
+    }
+
+    #[cfg(feature = "cypher")]
+    #[test]
+    fn test_query_cypher_aggregate_alias_names_column() {
+        let server = create_test_server();
+        for name in ["a", "b", "c"] {
+            seed_named(&server, "Person", name);
+        }
+        let value = run_query(
+            &server,
+            QueryRequest {
+                language: "cypher".to_string(),
+                query: "MATCH (n:Person) RETURN count(*) AS c".to_string(),
+                params: None,
+                limit: None,
+            },
+        );
+        assert_eq!(
+            value["rows"][0]["c"].as_i64(),
+            Some(3),
+            "aliased aggregate value must render under its alias: {value}"
+        );
+        let cols = value["columns"].as_array().expect("columns array");
+        assert!(
+            cols.iter().any(|c| c["name"].as_str() == Some("c")),
+            "columns must name the aggregate alias `c`: {value}"
+        );
+    }
+
+    #[cfg(feature = "cypher")]
+    #[test]
+    fn test_query_cypher_plain_entity_row_rendering_unchanged() {
+        // Non-regression: a plain entity query keeps the exact
+        // entity/score/path/timestamp row shape and static column schema.
+        let server = create_test_server();
+        seed_named(&server, "Person", "Alice");
+        let value = run_query(
+            &server,
+            QueryRequest {
+                language: "cypher".to_string(),
+                query: "MATCH (n:Person {name: 'Alice'}) RETURN n".to_string(),
+                params: None,
+                limit: None,
+            },
+        );
+        let row = &value["rows"][0];
+        assert_eq!(row["entity"]["label"].as_str(), Some("Person"), "{value}");
+        assert_eq!(
+            row["entity"]["properties"]["name"].as_str(),
+            Some("Alice"),
+            "{value}"
+        );
+        assert!(row.get("score").is_some(), "score key present: {value}");
+        assert!(row.get("path").is_some(), "path key present: {value}");
+        assert!(
+            row.get("timestamp").is_some(),
+            "timestamp key present: {value}"
+        );
+        let names: Vec<&str> = value["columns"]
+            .as_array()
+            .expect("columns array")
+            .iter()
+            .filter_map(|c| c["name"].as_str())
+            .collect();
+        assert_eq!(
+            names,
+            vec!["entity", "score", "path", "timestamp"],
+            "plain entity query keeps the static column schema: {value}"
+        );
+    }
+
+    #[cfg(feature = "cypher")]
+    #[test]
+    fn test_query_cypher_optional_match_null_row_serializes_as_json_null() {
+        let server = create_test_server();
+        seed_named(&server, "Person", "Alice");
+        // Alice has no outgoing KNOWS edges: OPTIONAL MATCH preserves the
+        // base row and the null binding must surface as JSON null, not crash.
+        let value = run_query(
+            &server,
+            QueryRequest {
+                language: "cypher".to_string(),
+                query: "MATCH (a:Person {name: 'Alice'}) OPTIONAL MATCH (a)-[:KNOWS]->(x) RETURN x"
+                    .to_string(),
+                params: None,
+                limit: None,
+            },
+        );
+        assert_eq!(value["row_count"].as_u64(), Some(1), "{value}");
+        assert!(
+            value["rows"][0]["entity"].is_null(),
+            "unmatched OPTIONAL MATCH row must serialize entity as JSON null: {value}"
         );
     }
 
@@ -3781,12 +4428,18 @@ mod constraint_tests {
         let mut props = HashMap::new();
         props.insert("email".to_string(), serde_json::json!("dup@x"));
         server.create_node(CreateNodeRequest {
+            derived_from: None,
+            valid_time: None,
             label: "Person".to_string(),
             properties: Some(props.clone()),
+            provenance: None,
         });
         server.create_node(CreateNodeRequest {
+            derived_from: None,
+            valid_time: None,
             label: "Person".to_string(),
             properties: Some(props),
+            provenance: None,
         });
 
         let response = server.enable_unique_constraint(EnableUniqueConstraintRequest {
@@ -3855,15 +4508,21 @@ mod constraint_tests {
         props.insert("email".to_string(), serde_json::json!("alice@x"));
 
         let first_response = server.create_node(CreateNodeRequest {
+            derived_from: None,
+            valid_time: None,
             label: "Person".to_string(),
             properties: Some(props.clone()),
+            provenance: None,
         });
         let first: NodeResponse =
             parse_response(&first_response).expect("first create must succeed");
 
         let dup_response = server.create_node(CreateNodeRequest {
+            derived_from: None,
+            valid_time: None,
             label: "Person".to_string(),
             properties: Some(props),
+            provenance: None,
         });
 
         let v = parse_json(&dup_response);
@@ -3895,23 +4554,32 @@ mod constraint_tests {
         let mut props_a = HashMap::new();
         props_a.insert("email".to_string(), serde_json::json!("a@x"));
         let resp_a = server.create_node(CreateNodeRequest {
+            derived_from: None,
+            valid_time: None,
             label: "Person".to_string(),
             properties: Some(props_a),
+            provenance: None,
         });
         let node_a: NodeResponse = parse_response(&resp_a).expect("node A must be created");
 
         let mut props_b = HashMap::new();
         props_b.insert("email".to_string(), serde_json::json!("b@x"));
         server.create_node(CreateNodeRequest {
+            derived_from: None,
+            valid_time: None,
             label: "Person".to_string(),
             properties: Some(props_b),
+            provenance: None,
         });
 
         let mut collision = HashMap::new();
         collision.insert("email".to_string(), serde_json::json!("b@x"));
         let update_response = server.update_node(UpdateNodeRequest {
+            derived_from: None,
+            valid_time: None,
             node_id: node_a.id,
             properties: collision,
+            provenance: None,
         });
 
         let v = parse_json(&update_response);
@@ -3926,19 +4594,22 @@ mod constraint_tests {
 
     #[test]
     fn test_update_node_non_constraint_error_fallthrough() {
-        // Covers server.rs:
-        //   • constraint_violation_result() `else { None }` branch (non-constraint error)
-        //   • handle_update_node `self.error_json(...)` fallthrough (when
-        //     constraint_violation_result returns None)
+        // Covers server.rs: the `db_error(...)` fallthrough in
+        // handle_update_node for non-constraint errors — db_error only emits
+        // the legacy constraint top-level fields (constraint_violation,
+        // existing_node_id, ...) for a ConstraintError::UniqueViolation.
         //
         // We call update_node with a valid-format but non-existent node ID so that
         // `tx.update_node` returns StorageError::NodeNotFound — which is NOT a
-        // ConstraintError::UniqueViolation — and constraint_violation_result returns None.
+        // ConstraintError::UniqueViolation — and db_error takes the plain path.
         let server = create_test_server();
 
         let response = server.update_node(UpdateNodeRequest {
+            derived_from: None,
+            valid_time: None,
             node_id: 99999,
             properties: HashMap::new(),
+            provenance: None,
         });
 
         let v = parse_json(&response);
@@ -3992,26 +4663,34 @@ mod schema_tests {
         let server = create_test_server();
 
         let alice_response = server.create_node(CreateNodeRequest {
+            derived_from: None,
+            valid_time: None,
             label: "Person".to_string(),
             properties: Some({
                 let mut m = HashMap::new();
                 m.insert("name".to_string(), serde_json::json!("Alice"));
                 m
             }),
+            provenance: None,
         });
         let alice: NodeResponse = parse_response(&alice_response).unwrap();
 
         let bob_response = server.create_node(CreateNodeRequest {
+            derived_from: None,
+            valid_time: None,
             label: "Person".to_string(),
             properties: Some({
                 let mut m = HashMap::new();
                 m.insert("email".to_string(), serde_json::json!("bob@example.com"));
                 m
             }),
+            provenance: None,
         });
         let bob: NodeResponse = parse_response(&bob_response).unwrap();
 
         server.create_edge(CreateEdgeRequest {
+            derived_from: None,
+            valid_time: None,
             source_id: alice.id,
             target_id: bob.id,
             label: "KNOWS".to_string(),
@@ -4020,6 +4699,7 @@ mod schema_tests {
                 m.insert("since".to_string(), serde_json::json!(2020));
                 m
             }),
+            provenance: None,
         });
 
         let response = server.get_schema(schema_req(None, None));
@@ -4070,8 +4750,11 @@ mod schema_tests {
         let server = create_test_server();
 
         server.create_node(CreateNodeRequest {
+            derived_from: None,
+            valid_time: None,
             label: "Report".to_string(),
             properties: None,
+            provenance: None,
         });
 
         let now_micros = std::time::SystemTime::now()
@@ -4104,8 +4787,11 @@ mod schema_tests {
         let server = create_test_server();
 
         server.create_node(CreateNodeRequest {
+            derived_from: None,
+            valid_time: None,
             label: "Invoice".to_string(),
             properties: None,
+            provenance: None,
         });
 
         let now_micros = std::time::SystemTime::now()
@@ -4142,8 +4828,11 @@ mod schema_tests {
 
         // Create a node now.
         server.create_node(CreateNodeRequest {
+            derived_from: None,
+            valid_time: None,
             label: "Gadget".to_string(),
             properties: None,
+            provenance: None,
         });
 
         // Still as of the epoch: "Gadget" must remain absent (recorded later).
@@ -4191,31 +4880,46 @@ mod schema_tests {
 
         for _ in 0..3 {
             server.create_node(CreateNodeRequest {
+                derived_from: None,
+                valid_time: None,
                 label: "Person".to_string(),
                 properties: None,
+                provenance: None,
             });
         }
         for _ in 0..2 {
             server.create_node(CreateNodeRequest {
+                derived_from: None,
+                valid_time: None,
                 label: "Company".to_string(),
                 properties: None,
+                provenance: None,
             });
         }
         let n1: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            derived_from: None,
+            valid_time: None,
             label: "Person".to_string(),
             properties: None,
+            provenance: None,
         }))
         .unwrap();
         let n2: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            derived_from: None,
+            valid_time: None,
             label: "Company".to_string(),
             properties: None,
+            provenance: None,
         }))
         .unwrap();
         server.create_edge(CreateEdgeRequest {
+            derived_from: None,
+            valid_time: None,
             source_id: n1.id,
             target_id: n2.id,
             label: "WORKS_AT".to_string(),
             properties: None,
+            provenance: None,
         });
 
         let schema_value: serde_json::Value =
@@ -4270,8 +4974,11 @@ mod vector_elision_tests {
             serde_json::json!(embedding.clone()),
         );
         let response = server.create_node(CreateNodeRequest {
+            derived_from: None,
+            valid_time: None,
             label: "Document".to_string(),
             properties: Some(props),
+            provenance: None,
         });
         let node: NodeResponse = parse_response(&response).expect("Failed to create node");
         (node.id, embedding)
@@ -4373,13 +5080,19 @@ mod vector_elision_tests {
     fn test_get_edge_and_outgoing_incoming_edges_elide_vectors_by_default() {
         let server = create_test_server();
         let n1: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            derived_from: None,
+            valid_time: None,
             label: "Person".to_string(),
             properties: None,
+            provenance: None,
         }))
         .unwrap();
         let n2: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            derived_from: None,
+            valid_time: None,
             label: "Person".to_string(),
             properties: None,
+            provenance: None,
         }))
         .unwrap();
 
@@ -4387,10 +5100,13 @@ mod vector_elision_tests {
         let mut props = HashMap::new();
         props.insert("embedding".to_string(), serde_json::json!(embedding));
         let edge_response = server.create_edge(CreateEdgeRequest {
+            derived_from: None,
+            valid_time: None,
             source_id: n1.id,
             target_id: n2.id,
             label: "SIMILAR_TO".to_string(),
             properties: Some(props),
+            provenance: None,
         });
         let edge: EdgeResponse = parse_response(&edge_response).unwrap();
 
@@ -4468,10 +5184,13 @@ mod vector_elision_tests {
         let (n1_id, _) = create_node_with_embedding(&server, 5);
         let (n2_id, embedding2) = create_node_with_embedding(&server, 5);
         server.create_edge(CreateEdgeRequest {
+            derived_from: None,
+            valid_time: None,
             source_id: n1_id,
             target_id: n2_id,
             label: "NEXT".to_string(),
             properties: None,
+            provenance: None,
         });
 
         let response = server.traverse(TraverseRequest {
@@ -4480,7 +5199,10 @@ mod vector_elision_tests {
             direction: None,
             depth: Some(1),
             limit: None,
+            offset: None,
             include_vectors: None,
+            as_of_valid_time: None,
+            as_of_transaction_time: None,
         });
         let value: serde_json::Value = serde_json::from_str(&response).unwrap();
         let results = value["results"].as_array().expect("results array");
@@ -4496,7 +5218,10 @@ mod vector_elision_tests {
             direction: None,
             depth: Some(1),
             limit: None,
+            offset: None,
             include_vectors: Some(true),
+            as_of_valid_time: None,
+            as_of_transaction_time: None,
         });
         let value: serde_json::Value = serde_json::from_str(&response).unwrap();
         let results = value["results"].as_array().unwrap();
@@ -4527,8 +5252,11 @@ mod vector_elision_tests {
                 ]),
             );
             server.create_node(CreateNodeRequest {
+                derived_from: None,
+                valid_time: None,
                 label: "Document".to_string(),
                 properties: Some(props),
+                provenance: None,
             });
         }
 
@@ -4536,6 +5264,7 @@ mod vector_elision_tests {
             property_name: "embedding".to_string(),
             embedding: vec![0.1, 0.2, 0.3, 0.4],
             k: Some(3),
+            offset: None,
             include_vectors: None,
         });
         let value: serde_json::Value = serde_json::from_str(&response).unwrap();
@@ -4553,6 +5282,7 @@ mod vector_elision_tests {
             property_name: "embedding".to_string(),
             embedding: vec![0.1, 0.2, 0.3, 0.4],
             k: Some(3),
+            offset: None,
             include_vectors: Some(true),
         });
         let value: serde_json::Value = serde_json::from_str(&response).unwrap();
@@ -4586,8 +5316,11 @@ mod vector_elision_tests {
                 ]),
             );
             server.create_node(CreateNodeRequest {
+                derived_from: None,
+                valid_time: None,
                 label: "Document".to_string(),
                 properties: Some(props),
+                provenance: None,
             });
         }
 
@@ -4644,10 +5377,13 @@ mod vector_elision_tests {
         let (n1_id, _) = create_node_with_embedding(&server, 4);
         let (n2_id, embedding2) = create_node_with_embedding(&server, 4);
         server.create_edge(CreateEdgeRequest {
+            derived_from: None,
+            valid_time: None,
             source_id: n1_id,
             target_id: n2_id,
             label: "NEXT".to_string(),
             properties: None,
+            provenance: None,
         });
 
         let response = server.hybrid_query(HybridQueryRequest {
@@ -4743,8 +5479,11 @@ mod vector_elision_tests {
             serde_json::json!([0.1, 0.2, 0.3, 0.4]),
         );
         let response = server.create_node(CreateNodeRequest {
+            derived_from: None,
+            valid_time: None,
             label: "Document".to_string(),
             properties: Some(props),
+            provenance: None,
         });
         let node: NodeResponse = parse_response(&response).expect("Failed to create node");
         assert_eq!(
@@ -4763,8 +5502,11 @@ mod vector_elision_tests {
             serde_json::json!([0.5, 0.6, 0.7, 0.8]),
         );
         let update_response = server.update_node(UpdateNodeRequest {
+            derived_from: None,
+            valid_time: None,
             node_id: node.id,
             properties: new_props,
+            provenance: None,
         });
         let updated: NodeResponse =
             parse_response(&update_response).expect("Failed to update node");
@@ -4790,8 +5532,11 @@ mod vector_elision_tests {
         props.insert("tags".to_string(), serde_json::json!(["a", "b", "c"]));
 
         let response = server.create_node(CreateNodeRequest {
+            derived_from: None,
+            valid_time: None,
             label: "Person".to_string(),
             properties: Some(props),
+            provenance: None,
         });
         let node: NodeResponse = parse_response(&response).expect("Failed to create node");
 
@@ -4808,5 +5553,9801 @@ mod vector_elision_tests {
             }
             previous = Some(fetched.properties);
         }
+    }
+}
+
+// ============================================================================
+// Valid-Time Write Tests (Issue #3221)
+// ============================================================================
+
+/// MCP surface tests for valid-time retraction (Issue #3230).
+mod retraction_tests {
+    use super::*;
+    use chrono::{DateTime, Duration, Utc};
+
+    fn rfc3339_hours_ago(now: DateTime<Utc>, hours: i64) -> String {
+        (now - Duration::hours(hours)).to_rfc3339()
+    }
+
+    /// Create a Person node whose valid_from is `hours` hours before `now`.
+    fn create_person_at(server: &AletheiaMcpServer, now: DateTime<Utc>, hours: i64) -> u64 {
+        let node: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            derived_from: None,
+            label: "Person".to_string(),
+            properties: None,
+            valid_time: Some(rfc3339_hours_ago(now, hours)),
+            provenance: None,
+        }))
+        .expect("create should succeed");
+        node.id
+    }
+
+    /// Parse an interval bound from a retraction response and return its
+    /// microseconds since epoch, asserting the RFC 3339 `Z`-suffixed
+    /// microsecond-precision convention.
+    fn parse_bound_micros(value: &serde_json::Value, key: &str) -> i64 {
+        let s = value[key]
+            .as_str()
+            .unwrap_or_else(|| panic!("{key} must be an RFC 3339 string, got {value}"));
+        assert!(s.ends_with('Z'), "{key} must carry a Z suffix, got {s}");
+        s.parse::<DateTime<Utc>>()
+            .unwrap_or_else(|e| panic!("{key} must parse as RFC 3339 ({e}): {s}"))
+            .timestamp_micros()
+    }
+
+    #[test]
+    fn retract_node_happy_path_returns_rfc3339_interval() {
+        let server = create_test_server();
+        let now = Utc::now();
+        let node_id = create_person_at(&server, now, 2);
+        let t_retract = rfc3339_hours_ago(now, 1);
+
+        let response = server.retract_node(RetractNodeRequest {
+            node_id,
+            valid_time: Some(t_retract.clone()),
+            detach: None,
+        });
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert!(
+            value.get("error").is_none(),
+            "expected success, got {value}"
+        );
+        assert_eq!(value["success"], true);
+        assert_eq!(value["node_id"], node_id);
+        assert_eq!(value["retracted"], true);
+        assert_eq!(value["already_retracted"], false);
+        assert_eq!(value["edges_retracted"], 0);
+
+        // The closed half-open interval [valid_from, valid_to) comes back as
+        // RFC 3339 microsecond-precision strings matching the request times.
+        let valid_from_us = parse_bound_micros(&value, "valid_from");
+        let valid_to_us = parse_bound_micros(&value, "valid_to");
+        assert_eq!(valid_from_us, (now - Duration::hours(2)).timestamp_micros());
+        assert_eq!(valid_to_us, (now - Duration::hours(1)).timestamp_micros());
+
+        // Gone from current state (structured NOT_FOUND).
+        let after = server.get_node(GetNodeRequest {
+            node_id,
+            include_vectors: None,
+        });
+        let after: serde_json::Value = serde_json::from_str(&after).unwrap();
+        assert_eq!(after["error"]["code"], "NOT_FOUND", "got {after}");
+    }
+
+    #[test]
+    fn retract_node_backdated_round_trip_via_get_node_at_time() {
+        let server = create_test_server();
+        let now = Utc::now();
+        let node_id = create_person_at(&server, now, 3);
+
+        let response = server.retract_node(RetractNodeRequest {
+            node_id,
+            valid_time: Some(rfc3339_hours_ago(now, 1)),
+            detach: None,
+        });
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert!(
+            value.get("error").is_none(),
+            "expected success, got {value}"
+        );
+
+        // Still visible at a valid time strictly before T...
+        let before = server.get_node_at_time(GetNodeAtTimeRequest {
+            node_id,
+            valid_time: rfc3339_hours_ago(now, 2),
+            transaction_time: None,
+        });
+        let before: serde_json::Value = serde_json::from_str(&before).unwrap();
+        assert!(before.get("error").is_none(), "expected node, got {before}");
+
+        // ...and not at/after T.
+        let at = server.get_node_at_time(GetNodeAtTimeRequest {
+            node_id,
+            valid_time: rfc3339_hours_ago(now, 1),
+            transaction_time: None,
+        });
+        let at: serde_json::Value = serde_json::from_str(&at).unwrap();
+        assert!(
+            at.get("error").is_some(),
+            "expected not-valid at T, got {at}"
+        );
+
+        let after = server.get_node_at_time(GetNodeAtTimeRequest {
+            node_id,
+            valid_time: rfc3339_hours_ago(now, 0),
+            transaction_time: None,
+        });
+        let after: serde_json::Value = serde_json::from_str(&after).unwrap();
+        assert!(
+            after.get("error").is_some(),
+            "expected not-valid, got {after}"
+        );
+    }
+
+    #[test]
+    fn retract_node_with_connected_edges_refused_failed_precondition() {
+        let server = create_test_server();
+        let now = Utc::now();
+        let a = create_person_at(&server, now, 2);
+        let b = create_person_at(&server, now, 2);
+        let _edge: EdgeResponse = parse_response(&server.create_edge(CreateEdgeRequest {
+            derived_from: None,
+            source_id: a,
+            target_id: b,
+            label: "KNOWS".to_string(),
+            properties: None,
+            valid_time: Some(rfc3339_hours_ago(now, 2)),
+            provenance: None,
+        }))
+        .unwrap();
+
+        let response = server.retract_node(RetractNodeRequest {
+            node_id: a,
+            valid_time: Some(rfc3339_hours_ago(now, 1)),
+            detach: None,
+        });
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+
+        // Structured shape (#3234): FAILED_PRECONDITION + details.
+        assert_eq!(value["error"]["code"], "FAILED_PRECONDITION", "got {value}");
+        assert_eq!(value["error"]["retriable"], false);
+        assert_eq!(value["error"]["details"]["connected_edges"], 1);
+        assert_eq!(value["error"]["details"]["detach_required"], true);
+        assert_eq!(value["error"]["details"]["node_id"], a);
+
+        // Legacy top-level fields preserved additively (#3209 parallel).
+        assert_eq!(value["success"], false);
+        assert_eq!(value["connected_edges"], 1);
+        assert_eq!(value["detach_required"], true);
+        assert_eq!(value["node_id"], a);
+
+        // Never a success that strands edges: node is still present.
+        let still_there = server.get_node(GetNodeRequest {
+            node_id: a,
+            include_vectors: None,
+        });
+        let still_there: serde_json::Value = serde_json::from_str(&still_there).unwrap();
+        assert!(still_there.get("error").is_none(), "got {still_there}");
+    }
+
+    #[test]
+    fn retract_node_detach_coretracts_edges_and_reports_count() {
+        let server = create_test_server();
+        let now = Utc::now();
+        let a = create_person_at(&server, now, 3);
+        let b = create_person_at(&server, now, 3);
+        let edge: EdgeResponse = parse_response(&server.create_edge(CreateEdgeRequest {
+            derived_from: None,
+            source_id: a,
+            target_id: b,
+            label: "KNOWS".to_string(),
+            properties: None,
+            valid_time: Some(rfc3339_hours_ago(now, 3)),
+            provenance: None,
+        }))
+        .unwrap();
+
+        let t_retract = rfc3339_hours_ago(now, 1);
+        let response = server.retract_node(RetractNodeRequest {
+            node_id: a,
+            valid_time: Some(t_retract),
+            detach: Some(true),
+        });
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert!(
+            value.get("error").is_none(),
+            "expected success, got {value}"
+        );
+        assert_eq!(value["edges_retracted"], 1);
+        assert_eq!(value["already_retracted"], false);
+
+        // The co-retracted edge: queryable strictly before T, gone after.
+        let before = server.get_edge_at_time(GetEdgeAtTimeRequest {
+            edge_id: edge.id,
+            valid_time: rfc3339_hours_ago(now, 2),
+            transaction_time: None,
+        });
+        let before: serde_json::Value = serde_json::from_str(&before).unwrap();
+        assert!(before.get("error").is_none(), "expected edge, got {before}");
+
+        let after = server.get_edge_at_time(GetEdgeAtTimeRequest {
+            edge_id: edge.id,
+            valid_time: rfc3339_hours_ago(now, 0),
+            transaction_time: None,
+        });
+        let after: serde_json::Value = serde_json::from_str(&after).unwrap();
+        assert!(
+            after.get("error").is_some(),
+            "expected not-valid, got {after}"
+        );
+
+        // Re-retracting the co-retracted edge is an idempotent no-op
+        // reporting the original valid_to.
+        let re_retract = server.retract_edge(RetractEdgeRequest {
+            edge_id: edge.id,
+            valid_time: Some(rfc3339_hours_ago(now, 0)),
+        });
+        let re_retract: serde_json::Value = serde_json::from_str(&re_retract).unwrap();
+        assert!(re_retract.get("error").is_none(), "got {re_retract}");
+        assert_eq!(re_retract["already_retracted"], true);
+        assert_eq!(
+            parse_bound_micros(&re_retract, "valid_to"),
+            (now - Duration::hours(1)).timestamp_micros(),
+            "idempotent re-retract must return the original valid_to"
+        );
+    }
+
+    #[test]
+    fn retract_node_idempotent_second_call_returns_existing_interval() {
+        let server = create_test_server();
+        let now = Utc::now();
+        let node_id = create_person_at(&server, now, 3);
+
+        let first = server.retract_node(RetractNodeRequest {
+            node_id,
+            valid_time: Some(rfc3339_hours_ago(now, 2)),
+            detach: None,
+        });
+        let first: serde_json::Value = serde_json::from_str(&first).unwrap();
+        assert!(first.get("error").is_none(), "got {first}");
+        assert_eq!(first["already_retracted"], false);
+
+        // Different T on the second call: the EXISTING end comes back.
+        let second = server.retract_node(RetractNodeRequest {
+            node_id,
+            valid_time: Some(rfc3339_hours_ago(now, 1)),
+            detach: None,
+        });
+        let second: serde_json::Value = serde_json::from_str(&second).unwrap();
+        assert!(second.get("error").is_none(), "got {second}");
+        assert_eq!(second["success"], true);
+        assert_eq!(second["already_retracted"], true);
+        assert_eq!(
+            parse_bound_micros(&second, "valid_to"),
+            (now - Duration::hours(2)).timestamp_micros()
+        );
+    }
+
+    #[test]
+    fn retract_node_malformed_valid_time_invalid_argument() {
+        let server = create_test_server();
+        let now = Utc::now();
+        let node_id = create_person_at(&server, now, 2);
+
+        let response = server.retract_node(RetractNodeRequest {
+            node_id,
+            valid_time: Some("not-a-timestamp".to_string()),
+            detach: None,
+        });
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(value["error"]["code"], "INVALID_ARGUMENT", "got {value}");
+        let message = value["error"]["message"].as_str().unwrap();
+        assert!(message.contains("Invalid valid_time"), "got: {message}");
+
+        // Nothing was retracted.
+        let still_there = server.get_node(GetNodeRequest {
+            node_id,
+            include_vectors: None,
+        });
+        let still_there: serde_json::Value = serde_json::from_str(&still_there).unwrap();
+        assert!(still_there.get("error").is_none(), "got {still_there}");
+    }
+
+    #[test]
+    fn retract_node_valid_time_before_valid_from_invalid_argument() {
+        let server = create_test_server();
+        let now = Utc::now();
+        let node_id = create_person_at(&server, now, 1);
+
+        // T strictly before the node's valid_from.
+        let response = server.retract_node(RetractNodeRequest {
+            node_id,
+            valid_time: Some(rfc3339_hours_ago(now, 2)),
+            detach: None,
+        });
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        // Matches #3221's existing mapping for the
+        // ValidTimeBeforeEntityCreation family: INVALID_ARGUMENT.
+        assert_eq!(value["error"]["code"], "INVALID_ARGUMENT", "got {value}");
+        let message = value["error"]["message"].as_str().unwrap();
+        assert!(message.contains("before entity creation"), "got: {message}");
+    }
+
+    #[test]
+    fn retract_node_nonexistent_not_found() {
+        let server = create_test_server();
+        let response = server.retract_node(RetractNodeRequest {
+            node_id: 999_999,
+            valid_time: None,
+            detach: None,
+        });
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(value["error"]["code"], "NOT_FOUND", "got {value}");
+    }
+
+    #[test]
+    fn retract_edge_happy_path_and_omitted_valid_time_defaults_to_now() {
+        let server = create_test_server();
+        let now = Utc::now();
+        let a = create_person_at(&server, now, 2);
+        let b = create_person_at(&server, now, 2);
+        let edge: EdgeResponse = parse_response(&server.create_edge(CreateEdgeRequest {
+            derived_from: None,
+            source_id: a,
+            target_id: b,
+            label: "KNOWS".to_string(),
+            properties: None,
+            valid_time: Some(rfc3339_hours_ago(now, 2)),
+            provenance: None,
+        }))
+        .unwrap();
+
+        // Omitted valid_time defaults to now (#3221 convention).
+        let response = server.retract_edge(RetractEdgeRequest {
+            edge_id: edge.id,
+            valid_time: None,
+        });
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert!(
+            value.get("error").is_none(),
+            "expected success, got {value}"
+        );
+        assert_eq!(value["success"], true);
+        assert_eq!(value["edge_id"], edge.id);
+        assert_eq!(value["retracted"], true);
+        assert_eq!(value["already_retracted"], false);
+
+        let valid_to_us = parse_bound_micros(&value, "valid_to");
+        let delta = (valid_to_us - now.timestamp_micros()).abs();
+        assert!(
+            delta < 60_000_000,
+            "omitted valid_time must default to (approximately) now; delta {delta}us"
+        );
+        assert_eq!(
+            parse_bound_micros(&value, "valid_from"),
+            (now - Duration::hours(2)).timestamp_micros()
+        );
+
+        // History still shows the edge before the retraction instant.
+        let before = server.get_edge_at_time(GetEdgeAtTimeRequest {
+            edge_id: edge.id,
+            valid_time: rfc3339_hours_ago(now, 1),
+            transaction_time: None,
+        });
+        let before: serde_json::Value = serde_json::from_str(&before).unwrap();
+        assert!(before.get("error").is_none(), "expected edge, got {before}");
+    }
+
+    #[test]
+    fn retract_edge_nonexistent_not_found() {
+        let server = create_test_server();
+        let response = server.retract_edge(RetractEdgeRequest {
+            edge_id: 999_999,
+            valid_time: None,
+        });
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(value["error"]["code"], "NOT_FOUND", "got {value}");
+    }
+
+    /// Fix-round #2: `connected_edges` counts DISTINCT edges. A self-loop
+    /// occupies both adjacency directions but is one edge, so the refusal
+    /// must report 1 — the same number `detach: true` then retracts.
+    #[test]
+    fn retract_node_self_loop_refusal_reports_one_and_detach_retracts_one() {
+        let server = create_test_server();
+        let now = Utc::now();
+        let a = create_person_at(&server, now, 3);
+        let _self_loop: EdgeResponse = parse_response(&server.create_edge(CreateEdgeRequest {
+            derived_from: None,
+            source_id: a,
+            target_id: a,
+            label: "SELF".to_string(),
+            properties: None,
+            valid_time: Some(rfc3339_hours_ago(now, 3)),
+            provenance: None,
+        }))
+        .unwrap();
+
+        // Refusal: 1 distinct edge, everywhere the count appears.
+        let refusal = server.retract_node(RetractNodeRequest {
+            node_id: a,
+            valid_time: Some(rfc3339_hours_ago(now, 1)),
+            detach: None,
+        });
+        let refusal: serde_json::Value = serde_json::from_str(&refusal).unwrap();
+        assert_eq!(
+            refusal["error"]["code"], "FAILED_PRECONDITION",
+            "got {refusal}"
+        );
+        assert_eq!(
+            refusal["error"]["details"]["connected_edges"], 1,
+            "a self-loop must count once (distinct edges), got {refusal}"
+        );
+        assert_eq!(refusal["connected_edges"], 1);
+
+        // Detach retracts exactly the refusal count.
+        let detach = server.retract_node(RetractNodeRequest {
+            node_id: a,
+            valid_time: Some(rfc3339_hours_ago(now, 1)),
+            detach: Some(true),
+        });
+        let detach: serde_json::Value = serde_json::from_str(&detach).unwrap();
+        assert!(detach.get("error").is_none(), "got {detach}");
+        assert_eq!(
+            detach["edges_retracted"], 1,
+            "detach must retract the same count the refusal reported"
+        );
+    }
+
+    /// Fix-round #2: one outgoing + one incoming edge from different peers
+    /// — the refusal reports 2, detach retracts 2, and BOTH edges obey the
+    /// before/after-T temporal matrix.
+    #[test]
+    fn retract_node_multi_edge_refusal_reports_two_and_detach_retracts_two() {
+        let server = create_test_server();
+        let now = Utc::now();
+        let x = create_person_at(&server, now, 3);
+        let b = create_person_at(&server, now, 3);
+        let c = create_person_at(&server, now, 3);
+        let e_out: EdgeResponse = parse_response(&server.create_edge(CreateEdgeRequest {
+            derived_from: None,
+            source_id: x,
+            target_id: b,
+            label: "KNOWS".to_string(),
+            properties: None,
+            valid_time: Some(rfc3339_hours_ago(now, 3)),
+            provenance: None,
+        }))
+        .unwrap();
+        let e_in: EdgeResponse = parse_response(&server.create_edge(CreateEdgeRequest {
+            derived_from: None,
+            source_id: c,
+            target_id: x,
+            label: "KNOWS".to_string(),
+            properties: None,
+            valid_time: Some(rfc3339_hours_ago(now, 3)),
+            provenance: None,
+        }))
+        .unwrap();
+
+        let refusal = server.retract_node(RetractNodeRequest {
+            node_id: x,
+            valid_time: Some(rfc3339_hours_ago(now, 1)),
+            detach: None,
+        });
+        let refusal: serde_json::Value = serde_json::from_str(&refusal).unwrap();
+        assert_eq!(
+            refusal["error"]["code"], "FAILED_PRECONDITION",
+            "got {refusal}"
+        );
+        assert_eq!(refusal["error"]["details"]["connected_edges"], 2);
+        assert_eq!(refusal["connected_edges"], 2);
+
+        let detach = server.retract_node(RetractNodeRequest {
+            node_id: x,
+            valid_time: Some(rfc3339_hours_ago(now, 1)),
+            detach: Some(true),
+        });
+        let detach: serde_json::Value = serde_json::from_str(&detach).unwrap();
+        assert!(detach.get("error").is_none(), "got {detach}");
+        assert_eq!(detach["edges_retracted"], 2);
+
+        // Both edges: queryable strictly before T, gone at/after T.
+        for edge_id in [e_out.id, e_in.id] {
+            let before = server.get_edge_at_time(GetEdgeAtTimeRequest {
+                edge_id,
+                valid_time: rfc3339_hours_ago(now, 2),
+                transaction_time: None,
+            });
+            let before: serde_json::Value = serde_json::from_str(&before).unwrap();
+            assert!(
+                before.get("error").is_none(),
+                "edge {edge_id} must remain queryable strictly before T, got {before}"
+            );
+
+            let after = server.get_edge_at_time(GetEdgeAtTimeRequest {
+                edge_id,
+                valid_time: rfc3339_hours_ago(now, 0),
+                transaction_time: None,
+            });
+            let after: serde_json::Value = serde_json::from_str(&after).unwrap();
+            assert!(
+                after.get("error").is_some(),
+                "edge {edge_id} must be gone after T, got {after}"
+            );
+
+            let current = server.get_edge(GetEdgeRequest {
+                edge_id,
+                include_vectors: None,
+            });
+            let current: serde_json::Value = serde_json::from_str(&current).unwrap();
+            assert_eq!(
+                current["error"]["code"], "NOT_FOUND",
+                "edge {edge_id} must be absent from current state, got {current}"
+            );
+        }
+    }
+}
+
+mod valid_time_write_tests {
+    use super::*;
+    use chrono::{DateTime, Duration, Utc};
+
+    /// `now` is the caller's own `Utc::now()`, captured once at the start of the test
+    /// and reused for every offset it computes. Calling `Utc::now()` freshly inside the
+    /// helper would let each call observe a slightly different instant under load,
+    /// making relative orderings between offsets non-deterministic.
+    fn rfc3339_hours_ago(now: DateTime<Utc>, hours: i64) -> String {
+        (now - Duration::hours(hours)).to_rfc3339()
+    }
+
+    fn rfc3339_hours_from_now(now: DateTime<Utc>, hours: i64) -> String {
+        (now + Duration::hours(hours)).to_rfc3339()
+    }
+
+    #[test]
+    fn test_create_node_with_valid_time_backdated_round_trip() {
+        let server = create_test_server();
+        let now = Utc::now();
+
+        let response = server.create_node(CreateNodeRequest {
+            derived_from: None,
+            label: "Person".to_string(),
+            properties: None,
+            valid_time: Some(rfc3339_hours_ago(now, 1)),
+            provenance: None,
+        });
+        let node: NodeResponse = parse_response(&response).expect("create should succeed");
+
+        // Visible shortly after its valid_from.
+        let visible = server.get_node_at_time(GetNodeAtTimeRequest {
+            node_id: node.id,
+            valid_time: rfc3339_hours_ago(now, 0),
+            transaction_time: None,
+        });
+        let value: serde_json::Value = serde_json::from_str(&visible).unwrap();
+        assert!(value.get("error").is_none(), "expected node, got {value}");
+
+        // Invisible strictly before its valid_from.
+        let invisible = server.get_node_at_time(GetNodeAtTimeRequest {
+            node_id: node.id,
+            valid_time: rfc3339_hours_ago(now, 2),
+            transaction_time: None,
+        });
+        let value: serde_json::Value = serde_json::from_str(&invisible).unwrap();
+        assert!(value.get("error").is_some());
+    }
+
+    #[test]
+    fn test_create_node_omitted_valid_time_matches_today() {
+        // Omitting the field entirely (raw JSON) still deserializes.
+        let parsed: CreateNodeRequest =
+            serde_json::from_value(serde_json::json!({ "label": "Person" }))
+                .expect("valid_time should be optional");
+        assert_eq!(parsed.valid_time, None);
+
+        let server = create_test_server();
+        let response = server.create_node(CreateNodeRequest {
+            derived_from: None,
+            label: "Person".to_string(),
+            properties: None,
+            valid_time: None,
+            provenance: None,
+        });
+        let node: NodeResponse = parse_response(&response).expect("create should succeed");
+        assert_eq!(node.label, "Person");
+
+        let now_response = server.get_node_at_time(GetNodeAtTimeRequest {
+            node_id: node.id,
+            valid_time: Utc::now().to_rfc3339(),
+            transaction_time: None,
+        });
+        let value: serde_json::Value = serde_json::from_str(&now_response).unwrap();
+        assert!(value.get("error").is_none());
+    }
+
+    #[test]
+    fn test_create_node_malformed_valid_time_structured_error() {
+        let server = create_test_server();
+
+        let response = server.create_node(CreateNodeRequest {
+            derived_from: None,
+            label: "Person".to_string(),
+            properties: None,
+            valid_time: Some("not-a-timestamp".to_string()),
+            provenance: None,
+        });
+
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        let error = value
+            .get("error")
+            .and_then(|e| e["message"].as_str())
+            .unwrap();
+        assert!(error.contains("Invalid valid_time"), "got: {error}");
+        assert_eq!(server.db().node_count(), 0, "no node should be created");
+    }
+
+    #[test]
+    fn test_create_node_far_future_valid_time_typed_error_surfaced() {
+        let server = create_test_server();
+        let now = Utc::now();
+
+        let response = server.create_node(CreateNodeRequest {
+            derived_from: None,
+            label: "Person".to_string(),
+            properties: None,
+            valid_time: Some(rfc3339_hours_from_now(now, 24 * 400)), // > 1 year
+            provenance: None,
+        });
+
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        let error = value
+            .get("error")
+            .and_then(|e| e["message"].as_str())
+            .unwrap();
+        assert!(error.contains("too far in future"), "got: {error}");
+        assert_eq!(server.db().node_count(), 0);
+    }
+
+    #[test]
+    fn test_create_edge_with_valid_time_backdated_round_trip() {
+        let server = create_test_server();
+        let now = Utc::now();
+
+        let n1: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            derived_from: None,
+            label: "Person".to_string(),
+            properties: None,
+            valid_time: None,
+            provenance: None,
+        }))
+        .unwrap();
+        let n2: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            derived_from: None,
+            label: "Person".to_string(),
+            properties: None,
+            valid_time: None,
+            provenance: None,
+        }))
+        .unwrap();
+
+        let response = server.create_edge(CreateEdgeRequest {
+            derived_from: None,
+            source_id: n1.id,
+            target_id: n2.id,
+            label: "KNOWS".to_string(),
+            properties: None,
+            valid_time: Some(rfc3339_hours_ago(now, 1)),
+            provenance: None,
+        });
+        let edge: EdgeResponse = parse_response(&response).expect("create_edge should succeed");
+
+        let visible = server.get_edge_at_time(GetEdgeAtTimeRequest {
+            edge_id: edge.id,
+            valid_time: rfc3339_hours_ago(now, 0),
+            transaction_time: None,
+        });
+        let value: serde_json::Value = serde_json::from_str(&visible).unwrap();
+        assert!(value.get("error").is_none(), "expected edge, got {value}");
+
+        let invisible = server.get_edge_at_time(GetEdgeAtTimeRequest {
+            edge_id: edge.id,
+            valid_time: rfc3339_hours_ago(now, 2),
+            transaction_time: None,
+        });
+        let value: serde_json::Value = serde_json::from_str(&invisible).unwrap();
+        assert!(value.get("error").is_some());
+    }
+
+    #[test]
+    fn test_update_node_with_valid_time_backdated() {
+        let server = create_test_server();
+        let now = Utc::now();
+
+        let mut props = HashMap::new();
+        props.insert("city".to_string(), serde_json::json!("Paris"));
+        let node: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            derived_from: None,
+            label: "Person".to_string(),
+            properties: Some(props),
+            valid_time: Some(rfc3339_hours_ago(now, 2)),
+            provenance: None,
+        }))
+        .unwrap();
+
+        let mut update_props = HashMap::new();
+        update_props.insert("city".to_string(), serde_json::json!("London"));
+        let update_valid_time = rfc3339_hours_ago(now, 1);
+        let response = server.update_node(UpdateNodeRequest {
+            derived_from: None,
+            node_id: node.id,
+            properties: update_props,
+            valid_time: Some(update_valid_time.clone()),
+            provenance: None,
+        });
+        let updated: NodeResponse = parse_response(&response).expect("update should succeed");
+        assert_eq!(
+            updated.properties.get("city"),
+            Some(&serde_json::json!("London"))
+        );
+
+        // Visible from its own valid_from onward.
+        let at_update = server.get_node_at_time(GetNodeAtTimeRequest {
+            node_id: node.id,
+            valid_time: update_valid_time,
+            transaction_time: None,
+        });
+        let value: serde_json::Value = serde_json::from_str(&at_update).unwrap();
+        let fetched: NodeResponse = serde_json::from_value(value["node"].clone()).unwrap();
+        assert_eq!(
+            fetched.properties.get("city"),
+            Some(&serde_json::json!("London"))
+        );
+    }
+
+    #[test]
+    fn test_update_node_valid_time_before_creation_rejected() {
+        let server = create_test_server();
+
+        let node: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            derived_from: None,
+            label: "Person".to_string(),
+            properties: None,
+            valid_time: None,
+            provenance: None,
+        }))
+        .unwrap();
+
+        let mut update_props = HashMap::new();
+        update_props.insert("name".to_string(), serde_json::json!("Bob"));
+        let response = server.update_node(UpdateNodeRequest {
+            derived_from: None,
+            node_id: node.id,
+            properties: update_props,
+            // Far enough in the past to precede the node's creation time.
+            valid_time: Some("1970-01-01T00:00:01Z".to_string()),
+            provenance: None,
+        });
+
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        let error = value
+            .get("error")
+            .and_then(|e| e["message"].as_str())
+            .unwrap();
+        assert!(error.contains("before entity creation"), "got: {error}");
+    }
+
+    #[test]
+    fn test_transaction_time_not_client_settable() {
+        let server = create_test_server();
+        let now = Utc::now();
+
+        let node: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            derived_from: None,
+            label: "Person".to_string(),
+            properties: None,
+            valid_time: Some(rfc3339_hours_ago(now, 1)),
+            provenance: None,
+        }))
+        .unwrap();
+
+        // As of a transaction_time 30 minutes ago, the write (committed just now)
+        // had not happened yet -- the fact must not be retroactively knowable.
+        let too_early_tx = (now - Duration::minutes(30)).to_rfc3339();
+        let too_early = server.get_node_at_time(GetNodeAtTimeRequest {
+            node_id: node.id,
+            valid_time: rfc3339_hours_ago(now, 0),
+            transaction_time: Some(too_early_tx),
+        });
+        let value: serde_json::Value = serde_json::from_str(&too_early).unwrap();
+        assert!(value.get("error").is_some());
+
+        // Omitting transaction_time defaults to now, where the write is visible.
+        let now_response = server.get_node_at_time(GetNodeAtTimeRequest {
+            node_id: node.id,
+            valid_time: rfc3339_hours_ago(now, 0),
+            transaction_time: None,
+        });
+        let value: serde_json::Value = serde_json::from_str(&now_response).unwrap();
+        assert!(value.get("error").is_none());
+    }
+
+    #[test]
+    fn test_update_edge_with_valid_time_backdated() {
+        let server = create_test_server();
+        let now = Utc::now();
+
+        let n1: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            derived_from: None,
+            label: "Person".to_string(),
+            properties: None,
+            valid_time: None,
+            provenance: None,
+        }))
+        .unwrap();
+        let n2: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            derived_from: None,
+            label: "Person".to_string(),
+            properties: None,
+            valid_time: None,
+            provenance: None,
+        }))
+        .unwrap();
+
+        let mut props = HashMap::new();
+        props.insert("strength".to_string(), serde_json::json!(1));
+        let edge: EdgeResponse = parse_response(&server.create_edge(CreateEdgeRequest {
+            derived_from: None,
+            source_id: n1.id,
+            target_id: n2.id,
+            label: "KNOWS".to_string(),
+            properties: Some(props),
+            valid_time: Some(rfc3339_hours_ago(now, 2)),
+            provenance: None,
+        }))
+        .unwrap();
+
+        let mut update_props = HashMap::new();
+        update_props.insert("strength".to_string(), serde_json::json!(9));
+        let update_valid_time = rfc3339_hours_ago(now, 1);
+        let response = server.update_edge(UpdateEdgeRequest {
+            derived_from: None,
+            edge_id: edge.id,
+            properties: update_props,
+            valid_time: Some(update_valid_time.clone()),
+            provenance: None,
+        });
+        let updated: EdgeResponse = parse_response(&response).expect("update should succeed");
+        assert_eq!(
+            updated.properties.get("strength"),
+            Some(&serde_json::json!(9))
+        );
+
+        let at_update = server.get_edge_at_time(GetEdgeAtTimeRequest {
+            edge_id: edge.id,
+            valid_time: update_valid_time,
+            transaction_time: None,
+        });
+        let value: serde_json::Value = serde_json::from_str(&at_update).unwrap();
+        let fetched: EdgeResponse = serde_json::from_value(value["edge"].clone()).unwrap();
+        assert_eq!(
+            fetched.properties.get("strength"),
+            Some(&serde_json::json!(9))
+        );
+    }
+
+    /// Regression test: `create_edge_with_valid_time` used to be the only one of the six
+    /// `*_with_valid_time` operations that never enforced the 1-year future cap, so an
+    /// edge could silently be created with an arbitrarily-far-future `valid_time`. Mirrors
+    /// `test_create_node_far_future_valid_time_typed_error_surfaced`.
+    #[test]
+    fn test_create_edge_far_future_valid_time_typed_error_surfaced() {
+        let server = create_test_server();
+        let now = Utc::now();
+
+        let n1: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            derived_from: None,
+            label: "Person".to_string(),
+            properties: None,
+            valid_time: None,
+            provenance: None,
+        }))
+        .unwrap();
+        let n2: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            derived_from: None,
+            label: "Person".to_string(),
+            properties: None,
+            valid_time: None,
+            provenance: None,
+        }))
+        .unwrap();
+
+        let response = server.create_edge(CreateEdgeRequest {
+            derived_from: None,
+            source_id: n1.id,
+            target_id: n2.id,
+            label: "KNOWS".to_string(),
+            properties: None,
+            valid_time: Some(rfc3339_hours_from_now(now, 24 * 400)), // > 1 year
+            provenance: None,
+        });
+
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        let error = value
+            .get("error")
+            .and_then(|e| e["message"].as_str())
+            .unwrap();
+        assert!(error.contains("too far in future"), "got: {error}");
+        assert_eq!(server.db().edge_count(), 0);
+    }
+
+    /// `delete_node`'s `valid_time` field: the caller-specified `valid_from` is
+    /// correctly threaded through to the tombstone version, and the node is no longer
+    /// visible as of now. (A probe strictly between create's and delete's `valid_from`
+    /// is not reachable via `get_node_at_time` -- deleting closes the previous version's
+    /// *transaction* time at commit, same documented caveat as
+    /// `update_node_with_valid_time_backdated_round_trip` in `db::ops::tests`.)
+    #[test]
+    fn test_delete_node_with_valid_time_backdated_round_trip() {
+        let server = create_test_server();
+        let now = Utc::now();
+
+        let node: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            derived_from: None,
+            label: "Person".to_string(),
+            properties: None,
+            valid_time: Some(rfc3339_hours_ago(now, 2)),
+            provenance: None,
+        }))
+        .unwrap();
+
+        let delete_valid_time = rfc3339_hours_ago(now, 1);
+        let response = server.delete_node(DeleteNodeRequest {
+            node_id: node.id,
+            detach: None,
+            valid_time: Some(delete_valid_time.clone()),
+        });
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(value.get("success"), Some(&serde_json::json!(true)));
+
+        // The caller-specified valid_from was correctly threaded through to the
+        // tombstone version.
+        let node_id = crate::core::id::NodeId::new(node.id).unwrap();
+        let historical = server.db().historical.read();
+        let version_id = historical.get_current_node_version(node_id).unwrap();
+        let version = historical.get_node_version(version_id).unwrap();
+        let recorded_valid_from = version.temporal.valid_time().start();
+        drop(historical);
+        let expected: chrono::DateTime<Utc> = delete_valid_time.parse().unwrap();
+        assert_eq!(
+            recorded_valid_from.wallclock(),
+            expected.timestamp_micros(),
+            "tombstone valid_from should match the requested delete_valid_time"
+        );
+
+        // No longer visible as of now.
+        let gone = server.get_node_at_time(GetNodeAtTimeRequest {
+            node_id: node.id,
+            valid_time: now.to_rfc3339(),
+            transaction_time: None,
+        });
+        let value: serde_json::Value = serde_json::from_str(&gone).unwrap();
+        assert!(value.get("error").is_some());
+    }
+
+    /// `delete_edge`'s `valid_time` field: edge mirror of the node round trip above --
+    /// same caveat about the probe-strictly-between-versions gap applies.
+    #[test]
+    fn test_delete_edge_with_valid_time_backdated_round_trip() {
+        let server = create_test_server();
+        let now = Utc::now();
+
+        let n1: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            derived_from: None,
+            label: "Person".to_string(),
+            properties: None,
+            valid_time: None,
+            provenance: None,
+        }))
+        .unwrap();
+        let n2: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            derived_from: None,
+            label: "Person".to_string(),
+            properties: None,
+            valid_time: None,
+            provenance: None,
+        }))
+        .unwrap();
+        let edge: EdgeResponse = parse_response(&server.create_edge(CreateEdgeRequest {
+            derived_from: None,
+            source_id: n1.id,
+            target_id: n2.id,
+            label: "KNOWS".to_string(),
+            properties: None,
+            valid_time: Some(rfc3339_hours_ago(now, 2)),
+            provenance: None,
+        }))
+        .unwrap();
+
+        let delete_valid_time = rfc3339_hours_ago(now, 1);
+        let response = server.delete_edge(DeleteEdgeRequest {
+            edge_id: edge.id,
+            valid_time: Some(delete_valid_time.clone()),
+        });
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(value.get("success"), Some(&serde_json::json!(true)));
+
+        // The caller-specified valid_from was correctly threaded through to the
+        // tombstone version.
+        let edge_id = crate::core::id::EdgeId::new(edge.id).unwrap();
+        let historical = server.db().historical.read();
+        let version_id = historical.get_current_edge_version(edge_id).unwrap();
+        let version = historical.get_edge_version(version_id).unwrap();
+        let recorded_valid_from = version.temporal.valid_time().start();
+        drop(historical);
+        let expected: chrono::DateTime<Utc> = delete_valid_time.parse().unwrap();
+        assert_eq!(
+            recorded_valid_from.wallclock(),
+            expected.timestamp_micros(),
+            "tombstone valid_from should match the requested delete_valid_time"
+        );
+
+        // No longer visible as of now.
+        let gone = server.get_edge_at_time(GetEdgeAtTimeRequest {
+            edge_id: edge.id,
+            valid_time: now.to_rfc3339(),
+            transaction_time: None,
+        });
+        let value: serde_json::Value = serde_json::from_str(&gone).unwrap();
+        assert!(value.get("error").is_some());
+    }
+
+    /// `detach: true` (cascade delete) does not support backdating -- passing
+    /// `valid_time` alongside it must be a clear, structured rejection rather than
+    /// silently ignoring `valid_time` or cascading at the wrong time.
+    #[test]
+    fn test_delete_node_detach_with_valid_time_rejected() {
+        let server = create_test_server();
+        let now = Utc::now();
+
+        let n1: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            derived_from: None,
+            label: "Person".to_string(),
+            properties: None,
+            valid_time: None,
+            provenance: None,
+        }))
+        .unwrap();
+        let n2: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            derived_from: None,
+            label: "Person".to_string(),
+            properties: None,
+            valid_time: None,
+            provenance: None,
+        }))
+        .unwrap();
+        parse_response::<EdgeResponse>(&server.create_edge(CreateEdgeRequest {
+            derived_from: None,
+            source_id: n1.id,
+            target_id: n2.id,
+            label: "KNOWS".to_string(),
+            properties: None,
+            valid_time: None,
+            provenance: None,
+        }))
+        .unwrap();
+
+        let response = server.delete_node(DeleteNodeRequest {
+            node_id: n1.id,
+            detach: Some(true),
+            valid_time: Some(rfc3339_hours_ago(now, 1)),
+        });
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert!(value.get("error").is_some(), "expected error, got {value}");
+        assert_ne!(value.get("success"), Some(&serde_json::json!(true)));
+
+        // Node and edge must be untouched by the rejected request.
+        let get_value: serde_json::Value = serde_json::from_str(&server.get_node(GetNodeRequest {
+            node_id: n1.id,
+            include_vectors: None,
+        }))
+        .unwrap();
+        assert!(get_value.get("error").is_none(), "node should still exist");
+    }
+
+    /// Plain cascade delete (`detach: true`, no `valid_time`) must behave exactly as
+    /// before this fix -- a regression guard alongside the new rejection above.
+    #[test]
+    fn test_delete_node_detach_without_valid_time_unchanged() {
+        let server = create_test_server();
+
+        let n1: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            derived_from: None,
+            label: "Person".to_string(),
+            properties: None,
+            valid_time: None,
+            provenance: None,
+        }))
+        .unwrap();
+        let n2: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            derived_from: None,
+            label: "Person".to_string(),
+            properties: None,
+            valid_time: None,
+            provenance: None,
+        }))
+        .unwrap();
+        parse_response::<EdgeResponse>(&server.create_edge(CreateEdgeRequest {
+            derived_from: None,
+            source_id: n1.id,
+            target_id: n2.id,
+            label: "KNOWS".to_string(),
+            properties: None,
+            valid_time: None,
+            provenance: None,
+        }))
+        .unwrap();
+
+        let response = server.delete_node(DeleteNodeRequest {
+            node_id: n1.id,
+            detach: Some(true),
+            valid_time: None,
+        });
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(value.get("success"), Some(&serde_json::json!(true)));
+        assert_eq!(value.get("edges_removed"), Some(&serde_json::json!(1)));
+        assert_eq!(value.get("detached"), Some(&serde_json::json!(true)));
+    }
+}
+
+// ============================================================================
+// Write-Time Provenance Tests (Issue #3224)
+// ============================================================================
+
+mod provenance_write_tests {
+    use super::*;
+
+    #[test]
+    fn test_create_node_with_provenance_persists() {
+        let server = create_test_server();
+
+        let node: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            derived_from: None,
+            label: "Person".to_string(),
+            properties: None,
+            valid_time: None,
+            provenance: Some(ProvenanceRequest {
+                source: Some("hr-system".to_string()),
+                confidence: Some(0.95),
+                note: None,
+                correlation_id: Some("batch-2026-06".to_string()),
+            }),
+        }))
+        .unwrap();
+
+        // Returned directly on the create response.
+        let provenance = node.provenance.expect("provenance should be present");
+        assert_eq!(provenance.source(), Some("hr-system"));
+        assert_eq!(provenance.confidence(), Some(0.95));
+        assert_eq!(provenance.correlation_id(), Some("batch-2026-06"));
+
+        // And retrievable via history (per-version).
+        let history = server.get_node_history(GetNodeHistoryRequest { node_id: node.id });
+        let value: serde_json::Value = serde_json::from_str(&history).unwrap();
+        let versions = value["versions"].as_array().unwrap();
+        assert_eq!(versions.len(), 1);
+        assert_eq!(versions[0]["provenance"]["source"], "hr-system");
+        assert_eq!(versions[0]["provenance"]["confidence"], 0.95);
+    }
+
+    #[test]
+    fn test_create_node_without_provenance_response_unchanged() {
+        let server = create_test_server();
+
+        let response = server.create_node(CreateNodeRequest {
+            derived_from: None,
+            label: "Person".to_string(),
+            properties: None,
+            valid_time: None,
+            provenance: None,
+        });
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert!(
+            value.get("provenance").is_none(),
+            "provenance key must be omitted, not null, when absent; got {value}"
+        );
+    }
+
+    #[test]
+    fn test_create_node_empty_provenance_object_treated_as_absent() {
+        let server = create_test_server();
+
+        let response = server.create_node(CreateNodeRequest {
+            derived_from: None,
+            label: "Person".to_string(),
+            properties: None,
+            valid_time: None,
+            provenance: Some(ProvenanceRequest {
+                source: None,
+                confidence: None,
+                note: None,
+                correlation_id: None,
+            }),
+        });
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert!(
+            value.get("provenance").is_none(),
+            "an all-absent bundle must never be persisted/returned as a fabricated object; got {value}"
+        );
+    }
+
+    #[test]
+    fn test_create_node_provenance_confidence_above_one_rejected() {
+        let server = create_test_server();
+
+        let response = server.create_node(CreateNodeRequest {
+            derived_from: None,
+            label: "Person".to_string(),
+            properties: None,
+            valid_time: None,
+            provenance: Some(ProvenanceRequest {
+                source: None,
+                confidence: Some(1.5),
+                note: None,
+                correlation_id: None,
+            }),
+        });
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        let error = value
+            .get("error")
+            .and_then(|e| e["message"].as_str())
+            .unwrap();
+        assert!(error.contains("confidence"), "got: {error}");
+        assert!(
+            error.contains("0.0") && error.contains("1.0"),
+            "got: {error}"
+        );
+        assert_eq!(server.db().node_count(), 0, "no node should be created");
+    }
+
+    #[test]
+    fn test_create_node_provenance_confidence_below_zero_rejected() {
+        let server = create_test_server();
+
+        let response = server.create_node(CreateNodeRequest {
+            derived_from: None,
+            label: "Person".to_string(),
+            properties: None,
+            valid_time: None,
+            provenance: Some(ProvenanceRequest {
+                source: None,
+                confidence: Some(-0.1),
+                note: None,
+                correlation_id: None,
+            }),
+        });
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        let error = value
+            .get("error")
+            .and_then(|e| e["message"].as_str())
+            .unwrap();
+        assert!(error.contains("confidence"), "got: {error}");
+        assert_eq!(server.db().node_count(), 0);
+    }
+
+    #[test]
+    fn test_create_node_provenance_confidence_boundaries_accepted() {
+        let server = create_test_server();
+
+        for confidence in [0.0, 1.0] {
+            let node: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+                derived_from: None,
+                label: "Person".to_string(),
+                properties: None,
+                valid_time: None,
+                provenance: Some(ProvenanceRequest {
+                    source: None,
+                    confidence: Some(confidence),
+                    note: None,
+                    correlation_id: None,
+                }),
+            }))
+            .expect("boundary confidence should be accepted");
+            assert_eq!(node.provenance.unwrap().confidence(), Some(confidence));
+        }
+    }
+
+    #[test]
+    fn test_update_node_with_provenance_history_per_version() {
+        let server = create_test_server();
+
+        let node: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            derived_from: None,
+            label: "Person".to_string(),
+            properties: None,
+            valid_time: None,
+            provenance: None,
+        }))
+        .unwrap();
+
+        let updated: NodeResponse = parse_response(&server.update_node(UpdateNodeRequest {
+            derived_from: None,
+            node_id: node.id,
+            properties: HashMap::new(),
+            valid_time: None,
+            provenance: Some(ProvenanceRequest {
+                source: Some("csv-import:2026-06".to_string()),
+                confidence: Some(0.4),
+                note: None,
+                correlation_id: None,
+            }),
+        }))
+        .unwrap();
+        assert_eq!(
+            updated.provenance.unwrap().source(),
+            Some("csv-import:2026-06")
+        );
+
+        let history = server.get_node_history(GetNodeHistoryRequest { node_id: node.id });
+        let value: serde_json::Value = serde_json::from_str(&history).unwrap();
+        let versions = value["versions"].as_array().unwrap();
+        assert_eq!(versions.len(), 2);
+        assert!(
+            versions[0].get("provenance").is_none(),
+            "v1 (plain create) should have no provenance"
+        );
+        assert_eq!(versions[1]["provenance"]["source"], "csv-import:2026-06");
+    }
+
+    #[test]
+    fn test_update_node_provenance_confidence_out_of_range_rejected() {
+        let server = create_test_server();
+
+        let node: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            derived_from: None,
+            label: "Person".to_string(),
+            properties: None,
+            valid_time: None,
+            provenance: None,
+        }))
+        .unwrap();
+
+        let response = server.update_node(UpdateNodeRequest {
+            derived_from: None,
+            node_id: node.id,
+            properties: HashMap::new(),
+            valid_time: None,
+            provenance: Some(ProvenanceRequest {
+                source: None,
+                confidence: Some(2.0),
+                note: None,
+                correlation_id: None,
+            }),
+        });
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert!(value.get("error").is_some());
+
+        // The node's properties must be unchanged by the rejected update.
+        let history = server.get_node_history(GetNodeHistoryRequest { node_id: node.id });
+        let history_value: serde_json::Value = serde_json::from_str(&history).unwrap();
+        assert_eq!(history_value["versions"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_create_edge_with_provenance_persists() {
+        let server = create_test_server();
+
+        let n1: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            derived_from: None,
+            label: "Person".to_string(),
+            properties: None,
+            valid_time: None,
+            provenance: None,
+        }))
+        .unwrap();
+        let n2: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            derived_from: None,
+            label: "Person".to_string(),
+            properties: None,
+            valid_time: None,
+            provenance: None,
+        }))
+        .unwrap();
+
+        let edge: EdgeResponse = parse_response(&server.create_edge(CreateEdgeRequest {
+            derived_from: None,
+            source_id: n1.id,
+            target_id: n2.id,
+            label: "KNOWS".to_string(),
+            properties: None,
+            valid_time: None,
+            provenance: Some(ProvenanceRequest {
+                source: Some("claude-mcp".to_string()),
+                confidence: Some(0.7),
+                note: Some("inferred from document".to_string()),
+                correlation_id: None,
+            }),
+        }))
+        .unwrap();
+
+        let provenance = edge.provenance.expect("provenance should be present");
+        assert_eq!(provenance.source(), Some("claude-mcp"));
+        assert_eq!(provenance.note(), Some("inferred from document"));
+
+        let history = server.get_edge_history(GetEdgeHistoryRequest { edge_id: edge.id });
+        let value: serde_json::Value = serde_json::from_str(&history).unwrap();
+        assert_eq!(value["versions"][0]["provenance"]["source"], "claude-mcp");
+    }
+
+    #[test]
+    fn test_create_edge_provenance_confidence_above_one_rejected() {
+        let server = create_test_server();
+
+        let n1: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            derived_from: None,
+            label: "Person".to_string(),
+            properties: None,
+            valid_time: None,
+            provenance: None,
+        }))
+        .unwrap();
+        let n2: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            derived_from: None,
+            label: "Person".to_string(),
+            properties: None,
+            valid_time: None,
+            provenance: None,
+        }))
+        .unwrap();
+
+        let response = server.create_edge(CreateEdgeRequest {
+            derived_from: None,
+            source_id: n1.id,
+            target_id: n2.id,
+            label: "KNOWS".to_string(),
+            properties: None,
+            valid_time: None,
+            provenance: Some(ProvenanceRequest {
+                source: None,
+                confidence: Some(1.1),
+                note: None,
+                correlation_id: None,
+            }),
+        });
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert!(value.get("error").is_some());
+        assert_eq!(server.db().edge_count(), 0, "no edge should be created");
+    }
+
+    #[test]
+    fn test_update_edge_with_provenance_history_per_version() {
+        let server = create_test_server();
+
+        let n1: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            derived_from: None,
+            label: "Person".to_string(),
+            properties: None,
+            valid_time: None,
+            provenance: None,
+        }))
+        .unwrap();
+        let n2: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            derived_from: None,
+            label: "Person".to_string(),
+            properties: None,
+            valid_time: None,
+            provenance: None,
+        }))
+        .unwrap();
+        let edge: EdgeResponse = parse_response(&server.create_edge(CreateEdgeRequest {
+            derived_from: None,
+            source_id: n1.id,
+            target_id: n2.id,
+            label: "KNOWS".to_string(),
+            properties: None,
+            valid_time: None,
+            provenance: None,
+        }))
+        .unwrap();
+
+        let _updated: EdgeResponse = parse_response(&server.update_edge(UpdateEdgeRequest {
+            derived_from: None,
+            edge_id: edge.id,
+            properties: HashMap::new(),
+            valid_time: None,
+            provenance: Some(ProvenanceRequest {
+                source: Some("hr-system".to_string()),
+                confidence: None,
+                note: None,
+                correlation_id: None,
+            }),
+        }))
+        .unwrap();
+
+        let history = server.get_edge_history(GetEdgeHistoryRequest { edge_id: edge.id });
+        let value: serde_json::Value = serde_json::from_str(&history).unwrap();
+        let versions = value["versions"].as_array().unwrap();
+        assert_eq!(versions.len(), 2);
+        assert!(versions[0].get("provenance").is_none());
+        assert_eq!(versions[1]["provenance"]["source"], "hr-system");
+    }
+
+    #[test]
+    fn test_get_node_returns_current_provenance() {
+        let server = create_test_server();
+
+        let node: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            derived_from: None,
+            label: "Person".to_string(),
+            properties: None,
+            valid_time: None,
+            provenance: Some(ProvenanceRequest {
+                source: Some("hr-system".to_string()),
+                confidence: None,
+                note: None,
+                correlation_id: None,
+            }),
+        }))
+        .unwrap();
+
+        let fetched: NodeResponse = parse_response(&server.get_node(GetNodeRequest {
+            node_id: node.id,
+            include_vectors: None,
+        }))
+        .unwrap();
+        assert_eq!(fetched.provenance.unwrap().source(), Some("hr-system"));
+    }
+
+    #[test]
+    fn test_get_node_without_provenance_omits_key() {
+        let server = create_test_server();
+
+        let node: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            derived_from: None,
+            label: "Person".to_string(),
+            properties: None,
+            valid_time: None,
+            provenance: None,
+        }))
+        .unwrap();
+
+        let response = server.get_node(GetNodeRequest {
+            node_id: node.id,
+            include_vectors: None,
+        });
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert!(value.get("provenance").is_none());
+    }
+
+    #[test]
+    fn test_get_node_history_omits_provenance_when_absent() {
+        let server = create_test_server();
+
+        let node: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            derived_from: None,
+            label: "Person".to_string(),
+            properties: None,
+            valid_time: None,
+            provenance: None,
+        }))
+        .unwrap();
+
+        let history = server.get_node_history(GetNodeHistoryRequest { node_id: node.id });
+        let value: serde_json::Value = serde_json::from_str(&history).unwrap();
+        assert!(value["versions"][0].get("provenance").is_none());
+    }
+
+    /// Regression test: `node_to_response`/`edge_to_response` used to
+    /// hardcode `provenance: None`, and only `get_node`/`create_node`/
+    /// `update_node` (and edge equivalents) patched it back in afterward.
+    /// `list_nodes` (and every other read path built on `node_to_response`)
+    /// silently omitted provenance even when it existed. See Issue #3224.
+    #[test]
+    fn test_list_nodes_returns_provenance() {
+        let server = create_test_server();
+
+        let node: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            derived_from: None,
+            label: "ListProvenanceTest".to_string(),
+            properties: None,
+            valid_time: None,
+            provenance: Some(ProvenanceRequest {
+                source: Some("csv-import".to_string()),
+                confidence: None,
+                note: None,
+                correlation_id: None,
+            }),
+        }))
+        .unwrap();
+
+        let response = server.list_nodes(ListNodesRequest {
+            label: Some("ListProvenanceTest".to_string()),
+            property_key: None,
+            property_value: None,
+            limit: None,
+            offset: None,
+            include_vectors: None,
+        });
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        let nodes = value["nodes"].as_array().unwrap();
+        let found = nodes.iter().find(|n| n["id"] == node.id).unwrap();
+        assert_eq!(found["provenance"]["source"], "csv-import");
+    }
+
+    /// See [`test_list_nodes_returns_provenance`] -- same gap, `traverse` path.
+    #[test]
+    fn test_traverse_returns_provenance() {
+        let server = create_test_server();
+
+        let start: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            derived_from: None,
+            label: "Person".to_string(),
+            properties: None,
+            valid_time: None,
+            provenance: None,
+        }))
+        .unwrap();
+        let end: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            derived_from: None,
+            label: "Person".to_string(),
+            properties: None,
+            valid_time: None,
+            provenance: Some(ProvenanceRequest {
+                source: Some("graph-import".to_string()),
+                confidence: None,
+                note: None,
+                correlation_id: None,
+            }),
+        }))
+        .unwrap();
+        parse_response::<EdgeResponse>(&server.create_edge(CreateEdgeRequest {
+            derived_from: None,
+            source_id: start.id,
+            target_id: end.id,
+            label: "KNOWS".to_string(),
+            properties: None,
+            valid_time: None,
+            provenance: None,
+        }))
+        .unwrap();
+
+        let response = server.traverse(TraverseRequest {
+            start_node_id: start.id,
+            edge_label: "KNOWS".to_string(),
+            direction: Some("outgoing".to_string()),
+            depth: Some(1),
+            limit: None,
+            offset: None,
+            include_vectors: None,
+            as_of_valid_time: None,
+            as_of_transaction_time: None,
+        });
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        let results = value["results"].as_array().unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0]["node"]["provenance"]["source"], "graph-import");
+    }
+
+    /// See [`test_list_nodes_returns_provenance`] -- same gap, the bi-temporal
+    /// `get_node_at_time` path. This one matters especially: `get_node_at_time`
+    /// resolves the *as-of* version, not necessarily the node's current head,
+    /// so the returned provenance must be attached to that exact historical
+    /// version rather than "whatever is current now".
+    #[test]
+    fn test_get_node_at_time_returns_provenance_for_that_version() {
+        let server = create_test_server();
+
+        let node: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            derived_from: None,
+            label: "Person".to_string(),
+            properties: None,
+            valid_time: None,
+            provenance: Some(ProvenanceRequest {
+                source: Some("initial-load".to_string()),
+                confidence: None,
+                note: None,
+                correlation_id: None,
+            }),
+        }))
+        .unwrap();
+
+        let as_of_micros = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_micros() as i64;
+
+        // Update with different provenance; the as-of query above must still
+        // report the *original* version's provenance, not this new one.
+        parse_response::<NodeResponse>(&server.update_node(UpdateNodeRequest {
+            derived_from: None,
+            node_id: node.id,
+            properties: HashMap::new(),
+            valid_time: None,
+            provenance: Some(ProvenanceRequest {
+                source: Some("manual-correction".to_string()),
+                confidence: None,
+                note: None,
+                correlation_id: None,
+            }),
+        }))
+        .unwrap();
+
+        let response = server.get_node_at_time(GetNodeAtTimeRequest {
+            node_id: node.id,
+            valid_time: as_of_micros.to_string(),
+            transaction_time: Some(as_of_micros.to_string()),
+        });
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(value["node"]["provenance"]["source"], "initial-load");
+    }
+}
+
+// ============================================================================
+// Point-in-time (AS OF) graph traversal (Issue #3225)
+// ============================================================================
+
+mod traverse_as_of_tests {
+    use super::*;
+    use chrono::{DateTime, Duration, Utc};
+
+    /// `now` is the caller's own `Utc::now()`, captured once at the start of the test
+    /// and reused for every offset it computes, so relative orderings between offsets
+    /// stay deterministic regardless of how long the test takes to run.
+    fn hours_ago(now: DateTime<Utc>, hours: i64) -> String {
+        (now - Duration::hours(hours)).to_rfc3339()
+    }
+
+    fn create_node_at(server: &AletheiaMcpServer, label: &str, valid_time: &str) -> u64 {
+        let response = server.create_node(CreateNodeRequest {
+            derived_from: None,
+            label: label.to_string(),
+            properties: None,
+            valid_time: Some(valid_time.to_string()),
+            provenance: None,
+        });
+        let node: NodeResponse = parse_response(&response).expect("create_node should succeed");
+        node.id
+    }
+
+    fn create_edge_at(
+        server: &AletheiaMcpServer,
+        source_id: u64,
+        target_id: u64,
+        label: &str,
+        valid_time: &str,
+    ) -> u64 {
+        let response = server.create_edge(CreateEdgeRequest {
+            derived_from: None,
+            source_id,
+            target_id,
+            label: label.to_string(),
+            properties: None,
+            valid_time: Some(valid_time.to_string()),
+            provenance: None,
+        });
+        let edge: EdgeResponse = parse_response(&response).expect("create_edge should succeed");
+        edge.id
+    }
+
+    fn traverse_count(
+        server: &AletheiaMcpServer,
+        req: TraverseRequest,
+    ) -> (usize, serde_json::Value) {
+        let response = server.traverse(req);
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert!(value.get("error").is_none(), "unexpected error: {value}");
+        let count = value["count"].as_u64().unwrap() as usize;
+        (count, value)
+    }
+
+    #[test]
+    fn test_traverse_as_of_excludes_edge_created_after_coordinate() {
+        let server = create_test_server();
+        let now = Utc::now();
+
+        let a = create_node_at(&server, "Person", &hours_ago(now, 10));
+        let b = create_node_at(&server, "Person", &hours_ago(now, 10));
+        create_edge_at(&server, a, b, "KNOWS", &hours_ago(now, 2));
+
+        // Before the edge was created: excluded.
+        let (count_before, _) = traverse_count(
+            &server,
+            TraverseRequest {
+                start_node_id: a,
+                edge_label: "KNOWS".to_string(),
+                direction: Some("outgoing".to_string()),
+                depth: Some(1),
+                limit: None,
+                offset: None,
+                include_vectors: None,
+                as_of_valid_time: Some(hours_ago(now, 5)),
+                as_of_transaction_time: None,
+            },
+        );
+        assert_eq!(
+            count_before, 0,
+            "edge created after coordinate must be excluded"
+        );
+
+        // After the edge was created: included.
+        let (count_after, _) = traverse_count(
+            &server,
+            TraverseRequest {
+                start_node_id: a,
+                edge_label: "KNOWS".to_string(),
+                direction: Some("outgoing".to_string()),
+                depth: Some(1),
+                limit: None,
+                offset: None,
+                include_vectors: None,
+                as_of_valid_time: Some(hours_ago(now, 1)),
+                as_of_transaction_time: None,
+            },
+        );
+        assert_eq!(
+            count_after, 1,
+            "edge valid as of coordinate must be included"
+        );
+    }
+
+    #[test]
+    fn test_traverse_as_of_excludes_retired_edge_but_recalls_it_before_retirement() {
+        let server = create_test_server();
+        let now = Utc::now();
+
+        let a = create_node_at(&server, "Person", &hours_ago(now, 10));
+        let b = create_node_at(&server, "Person", &hours_ago(now, 10));
+        let edge_id = create_edge_at(&server, a, b, "KNOWS", &hours_ago(now, 5));
+        // Anchor a transaction-time coordinate right after the edge was created but
+        // before it is (really, physically) deleted below.
+        let tx_time_before_delete = Utc::now().to_rfc3339();
+
+        // Retire (delete) the edge, backdating the retirement itself.
+        let delete_response = server.delete_edge(DeleteEdgeRequest {
+            edge_id,
+            valid_time: Some(hours_ago(now, 2)),
+        });
+        let delete_value: serde_json::Value = serde_json::from_str(&delete_response).unwrap();
+        assert!(
+            delete_value.get("error").is_none(),
+            "delete_edge should succeed: {delete_value}"
+        );
+
+        // Between creation (5h ago) and retirement (2h ago), as recorded by a
+        // transaction time before the deletion was committed: still valid --
+        // recall must be 1.0 even though the edge has since been deleted for real
+        // (mirrors tests/temporal_adjacency_default_enabled_test.rs's recall check).
+        let (count_before_retirement, _) = traverse_count(
+            &server,
+            TraverseRequest {
+                start_node_id: a,
+                edge_label: "KNOWS".to_string(),
+                direction: Some("outgoing".to_string()),
+                depth: Some(1),
+                limit: None,
+                offset: None,
+                include_vectors: None,
+                as_of_valid_time: Some(hours_ago(now, 3)),
+                as_of_transaction_time: Some(tx_time_before_delete),
+            },
+        );
+        assert_eq!(
+            count_before_retirement, 1,
+            "edge valid at coordinate must be recalled despite later deletion"
+        );
+
+        // After retirement (2h ago): excluded.
+        let (count_after_retirement, _) = traverse_count(
+            &server,
+            TraverseRequest {
+                start_node_id: a,
+                edge_label: "KNOWS".to_string(),
+                direction: Some("outgoing".to_string()),
+                depth: Some(1),
+                limit: None,
+                offset: None,
+                include_vectors: None,
+                as_of_valid_time: Some(hours_ago(now, 1)),
+                as_of_transaction_time: None,
+            },
+        );
+        assert_eq!(
+            count_after_retirement, 0,
+            "edge retired before coordinate must be excluded"
+        );
+    }
+
+    #[test]
+    fn test_traverse_as_of_valid_time_vs_transaction_time_disagreement() {
+        let server = create_test_server();
+        let now = Utc::now();
+
+        let a = create_node_at(&server, "Person", &hours_ago(now, 10));
+        let b = create_node_at(&server, "Person", &hours_ago(now, 10));
+        // Valid time is backdated to 5h ago; the *actual* commit (transaction time)
+        // happens for real, right now.
+        create_edge_at(&server, a, b, "KNOWS", &hours_ago(now, 5));
+
+        // valid_time is satisfied (5h ago has passed), but transaction_time asks
+        // "as recorded by 20h ago" -- long before the edge was actually committed.
+        let (count_tx_gate_fails, _) = traverse_count(
+            &server,
+            TraverseRequest {
+                start_node_id: a,
+                edge_label: "KNOWS".to_string(),
+                direction: Some("outgoing".to_string()),
+                depth: Some(1),
+                limit: None,
+                offset: None,
+                include_vectors: None,
+                as_of_valid_time: Some(hours_ago(now, 5)),
+                as_of_transaction_time: Some(hours_ago(now, 20)),
+            },
+        );
+        assert_eq!(
+            count_tx_gate_fails, 0,
+            "transaction-time coordinate before the real commit must exclude the edge \
+             even though valid_time alone would admit it"
+        );
+
+        // valid_time asks for 8h ago (not yet valid), transaction_time defaults to now
+        // (satisfied, since the edge is already committed for real).
+        let (count_vt_gate_fails, _) = traverse_count(
+            &server,
+            TraverseRequest {
+                start_node_id: a,
+                edge_label: "KNOWS".to_string(),
+                direction: Some("outgoing".to_string()),
+                depth: Some(1),
+                limit: None,
+                offset: None,
+                include_vectors: None,
+                as_of_valid_time: Some(hours_ago(now, 8)),
+                as_of_transaction_time: None,
+            },
+        );
+        assert_eq!(
+            count_vt_gate_fails, 0,
+            "valid-time coordinate before the fact became true must exclude the edge \
+             even though transaction_time alone would admit it"
+        );
+
+        // Both axes satisfied: included.
+        let (count_both_satisfied, _) = traverse_count(
+            &server,
+            TraverseRequest {
+                start_node_id: a,
+                edge_label: "KNOWS".to_string(),
+                direction: Some("outgoing".to_string()),
+                depth: Some(1),
+                limit: None,
+                offset: None,
+                include_vectors: None,
+                as_of_valid_time: Some(hours_ago(now, 5)),
+                as_of_transaction_time: None,
+            },
+        );
+        assert_eq!(
+            count_both_satisfied, 1,
+            "both axes satisfied must include the edge"
+        );
+    }
+
+    #[test]
+    fn test_traverse_as_of_empty_when_start_node_not_yet_existing() {
+        let server = create_test_server();
+        let now = Utc::now();
+
+        let a = create_node_at(&server, "Person", &hours_ago(now, 3));
+        let b = create_node_at(&server, "Person", &hours_ago(now, 3));
+        create_edge_at(&server, a, b, "KNOWS", &hours_ago(now, 3));
+
+        // 5h ago: neither node nor edge existed yet.
+        let (count, _) = traverse_count(
+            &server,
+            TraverseRequest {
+                start_node_id: a,
+                edge_label: "KNOWS".to_string(),
+                direction: Some("outgoing".to_string()),
+                depth: Some(1),
+                limit: None,
+                offset: None,
+                include_vectors: None,
+                as_of_valid_time: Some(hours_ago(now, 5)),
+                as_of_transaction_time: None,
+            },
+        );
+        assert_eq!(
+            count, 0,
+            "start node not yet existing must yield empty results, not an error"
+        );
+    }
+
+    #[test]
+    fn test_traverse_as_of_invalid_valid_time_returns_structured_error() {
+        let server = create_test_server();
+        let a = create_node_at(&server, "Person", &Utc::now().to_rfc3339());
+
+        let response = server.traverse(TraverseRequest {
+            start_node_id: a,
+            edge_label: "KNOWS".to_string(),
+            direction: Some("outgoing".to_string()),
+            depth: Some(1),
+            limit: None,
+            offset: None,
+            include_vectors: None,
+            as_of_valid_time: Some("not-a-timestamp".to_string()),
+            as_of_transaction_time: None,
+        });
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        let error = value
+            .get("error")
+            .and_then(|e| e["message"].as_str())
+            .expect("expected a structured error, got no error field");
+        assert!(
+            error.contains("as_of_valid_time"),
+            "error should identify the offending field: {error}"
+        );
+    }
+
+    #[test]
+    fn test_traverse_as_of_invalid_transaction_time_returns_structured_error() {
+        let server = create_test_server();
+        let a = create_node_at(&server, "Person", &Utc::now().to_rfc3339());
+
+        let response = server.traverse(TraverseRequest {
+            start_node_id: a,
+            edge_label: "KNOWS".to_string(),
+            direction: Some("outgoing".to_string()),
+            depth: Some(1),
+            limit: None,
+            offset: None,
+            include_vectors: None,
+            as_of_valid_time: None,
+            as_of_transaction_time: Some("not-a-timestamp".to_string()),
+        });
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        let error = value
+            .get("error")
+            .and_then(|e| e["message"].as_str())
+            .expect("expected a structured error, got no error field");
+        assert!(
+            error.contains("as_of_transaction_time"),
+            "error should identify the offending field: {error}"
+        );
+    }
+
+    #[test]
+    fn test_traverse_as_of_respects_resource_limits() {
+        let server = create_test_server();
+        let now = Utc::now();
+        let valid_time = hours_ago(now, 3);
+
+        // Chain of 5 nodes (4 hops), all backdated to the same valid_time.
+        let mut start = None;
+        let mut prev_id: Option<u64> = None;
+        for _ in 0..5 {
+            let node_id = create_node_at(&server, "ChainNode", &valid_time);
+            start.get_or_insert(node_id);
+            if let Some(source_id) = prev_id {
+                create_edge_at(&server, source_id, node_id, "NEXT", &valid_time);
+            }
+            prev_id = Some(node_id);
+        }
+        let start = start.unwrap();
+
+        // Depth far beyond MAX_TRAVERSAL_DEPTH must be clamped, not error, on the
+        // temporal path exactly as it is on the current-state path.
+        let (count, _) = traverse_count(
+            &server,
+            TraverseRequest {
+                start_node_id: start,
+                edge_label: "NEXT".to_string(),
+                direction: Some("outgoing".to_string()),
+                depth: Some(100),
+                limit: Some(50),
+                offset: None,
+                include_vectors: None,
+                as_of_valid_time: Some(hours_ago(now, 1)),
+                as_of_transaction_time: None,
+            },
+        );
+        assert_eq!(count, 4, "clamped depth should still reach the full chain");
+    }
+
+    #[test]
+    fn test_traverse_as_of_no_temporal_params_matches_current_state() {
+        let server = create_test_server();
+
+        let a = create_node_at(&server, "Person", &Utc::now().to_rfc3339());
+        let b = create_node_at(&server, "Person", &Utc::now().to_rfc3339());
+        create_edge_at(&server, a, b, "KNOWS", &Utc::now().to_rfc3339());
+        let now_after_creation = Utc::now();
+
+        let (count_no_temporal, value_no_temporal) = traverse_count(
+            &server,
+            TraverseRequest {
+                start_node_id: a,
+                edge_label: "KNOWS".to_string(),
+                direction: Some("outgoing".to_string()),
+                depth: Some(1),
+                limit: None,
+                offset: None,
+                include_vectors: None,
+                as_of_valid_time: None,
+                as_of_transaction_time: None,
+            },
+        );
+
+        let (count_as_of_now, value_as_of_now) = traverse_count(
+            &server,
+            TraverseRequest {
+                start_node_id: a,
+                edge_label: "KNOWS".to_string(),
+                direction: Some("outgoing".to_string()),
+                depth: Some(1),
+                limit: None,
+                offset: None,
+                include_vectors: None,
+                as_of_valid_time: Some(now_after_creation.to_rfc3339()),
+                as_of_transaction_time: Some(now_after_creation.to_rfc3339()),
+            },
+        );
+
+        assert_eq!(count_no_temporal, 1);
+        assert_eq!(count_no_temporal, count_as_of_now);
+        assert_eq!(
+            value_no_temporal["results"][0]["node"]["id"],
+            value_as_of_now["results"][0]["node"]["id"],
+            "explicit as_of=now must reproduce the identical current-state answer"
+        );
+    }
+
+    #[test]
+    fn test_traverse_as_of_multi_hop() {
+        let server = create_test_server();
+        let now = Utc::now();
+        let valid_time = hours_ago(now, 3);
+
+        let a = create_node_at(&server, "Person", &valid_time);
+        let b = create_node_at(&server, "Person", &valid_time);
+        let c = create_node_at(&server, "Person", &valid_time);
+        create_edge_at(&server, a, b, "KNOWS", &valid_time);
+        create_edge_at(&server, b, c, "KNOWS", &valid_time);
+
+        let (count, _) = traverse_count(
+            &server,
+            TraverseRequest {
+                start_node_id: a,
+                edge_label: "KNOWS".to_string(),
+                direction: Some("outgoing".to_string()),
+                depth: Some(2),
+                limit: None,
+                offset: None,
+                include_vectors: None,
+                as_of_valid_time: Some(hours_ago(now, 1)),
+                as_of_transaction_time: None,
+            },
+        );
+        assert_eq!(
+            count, 2,
+            "both hops should be reachable as of the coordinate"
+        );
+    }
+
+    #[test]
+    fn test_traverse_as_of_both_direction_finds_node_reachable_only_via_incoming_edge() {
+        // Temporal-path variant of the direction:"both" fix: a node reachable
+        // only through an edge pointing AT the current node (not away from
+        // it) must still be found, not silently dropped because `next_id`
+        // was resolved from the top-level `direction` string alone.
+        let server = create_test_server();
+        let now = Utc::now();
+        let valid_time = hours_ago(now, 3);
+
+        let a = create_node_at(&server, "Person", &valid_time);
+        let b = create_node_at(&server, "Person", &valid_time);
+        // Only B -> A exists; A has no reciprocal outgoing edge.
+        create_edge_at(&server, b, a, "POINTS_AT", &valid_time);
+
+        let (count, value) = traverse_count(
+            &server,
+            TraverseRequest {
+                start_node_id: a,
+                edge_label: "POINTS_AT".to_string(),
+                direction: Some("both".to_string()),
+                depth: Some(1),
+                limit: None,
+                offset: None,
+                include_vectors: None,
+                as_of_valid_time: Some(hours_ago(now, 1)),
+                as_of_transaction_time: None,
+            },
+        );
+        assert_eq!(
+            count, 1,
+            "as_of direction:\"both\" must find B via the incoming B->A edge: {value}"
+        );
+        assert_eq!(value["results"][0]["node"]["id"], b);
+    }
+
+    #[test]
+    fn test_traverse_as_of_stops_at_intermediate_node_missing_at_coordinate() {
+        // A node deleted (without cascading its edges) via the low-level
+        // Rust API -- bypassing the MCP delete_node tool's own
+        // connected-edges safety check, exactly the documented "Orphaned
+        // Edges on Node Deletion" behavior of that API -- must stop a
+        // temporal traversal from continuing past it, even though its
+        // dangling edge was never itself retired.
+        use crate::api::transaction::WriteOps;
+
+        let server = create_test_server();
+        let now = Utc::now();
+        let far_past = hours_ago(now, 10);
+
+        let a = create_node_at(&server, "Person", &far_past);
+        let b = create_node_at(&server, "Person", &far_past);
+        let c = create_node_at(&server, "Person", &far_past);
+        create_edge_at(&server, a, b, "KNOWS", &far_past);
+        create_edge_at(&server, b, c, "KNOWS", &far_past);
+
+        let b_node_id = crate::core::id::NodeId::new(b).unwrap();
+        server
+            .db()
+            .write_with_timestamp(|tx| tx.delete_node(b_node_id))
+            .expect("low-level delete_node should succeed");
+        let after_delete = Utc::now().to_rfc3339();
+
+        let (count, value) = traverse_count(
+            &server,
+            TraverseRequest {
+                start_node_id: a,
+                edge_label: "KNOWS".to_string(),
+                direction: Some("outgoing".to_string()),
+                depth: Some(2),
+                limit: None,
+                offset: None,
+                include_vectors: None,
+                as_of_valid_time: Some(after_delete),
+                as_of_transaction_time: None,
+            },
+        );
+        assert_eq!(
+            count, 0,
+            "traversal must not continue past a node absent at the coordinate: {value}"
+        );
+    }
+}
+
+// ============================================================================
+// Result-Completeness Signal Tests (Issue #3226)
+//
+// Every bounded MCP read tool must let a single call reveal whether more
+// results exist (`has_more`), how to fetch them (`next_offset`, for
+// offset-paginated tools), and, where cheaply derivable, the total matching
+// count (`total_matching`). These tests pin that contract per tool.
+// ============================================================================
+
+mod completeness_tests {
+    use super::*;
+
+    /// Read `has_more` as a bool (defaults to a sentinel that fails assertions
+    /// when the field is entirely absent, so the red phase is meaningful).
+    fn has_more(value: &serde_json::Value) -> Option<bool> {
+        value.get("has_more").and_then(|v| v.as_bool())
+    }
+
+    /// Read `next_offset` as a number when present; `None` when absent or null.
+    fn next_offset(value: &serde_json::Value) -> Option<u64> {
+        value.get("next_offset").and_then(|v| v.as_u64())
+    }
+
+    fn parse(response: &str) -> serde_json::Value {
+        serde_json::from_str(response).expect("valid JSON response")
+    }
+
+    fn seed_labeled(server: &AletheiaMcpServer, label: &str, n: usize) {
+        for i in 0..n {
+            let mut props = HashMap::new();
+            props.insert("index".to_string(), serde_json::json!(i));
+            server.create_node(CreateNodeRequest {
+                derived_from: None,
+                valid_time: None,
+                label: label.to_string(),
+                properties: Some(props),
+                provenance: None,
+            });
+        }
+    }
+
+    // --- list_nodes: label scan ------------------------------------------
+
+    #[test]
+    fn test_list_nodes_has_more_and_next_offset() {
+        let server = create_test_server();
+        seed_labeled(&server, "PersonHM", 250);
+
+        // Page 1: full page, more remains.
+        let page1 = parse(&server.list_nodes(ListNodesRequest {
+            label: Some("PersonHM".to_string()),
+            property_key: None,
+            property_value: None,
+            limit: Some(100),
+            offset: Some(0),
+            include_vectors: None,
+        }));
+        assert_eq!(page1.get("count"), Some(&serde_json::json!(100)));
+        assert_eq!(
+            has_more(&page1),
+            Some(true),
+            "page 1 of 250 has more: {page1}"
+        );
+        assert_eq!(
+            next_offset(&page1),
+            Some(100),
+            "next_offset points at page 2"
+        );
+
+        // Page 2: full page, still more.
+        let page2 = parse(&server.list_nodes(ListNodesRequest {
+            label: Some("PersonHM".to_string()),
+            property_key: None,
+            property_value: None,
+            limit: Some(100),
+            offset: Some(100),
+            include_vectors: None,
+        }));
+        assert_eq!(has_more(&page2), Some(true));
+        assert_eq!(next_offset(&page2), Some(200));
+
+        // Page 3: partial final page, no more.
+        let page3 = parse(&server.list_nodes(ListNodesRequest {
+            label: Some("PersonHM".to_string()),
+            property_key: None,
+            property_value: None,
+            limit: Some(100),
+            offset: Some(200),
+            include_vectors: None,
+        }));
+        assert_eq!(page3.get("count"), Some(&serde_json::json!(50)));
+        assert_eq!(
+            has_more(&page3),
+            Some(false),
+            "final page has no more: {page3}"
+        );
+        assert_eq!(next_offset(&page3), None, "no next_offset on final page");
+    }
+
+    #[test]
+    fn test_list_nodes_label_scan_omits_total_matching() {
+        // A label scan cannot cheaply know the total without a full scan, so
+        // `total_matching` is omitted (not faked); `has_more` carries the signal.
+        let server = create_test_server();
+        seed_labeled(&server, "ScanHM", 5);
+
+        let value = parse(&server.list_nodes(ListNodesRequest {
+            label: Some("ScanHM".to_string()),
+            property_key: None,
+            property_value: None,
+            limit: Some(2),
+            offset: Some(0),
+            include_vectors: None,
+        }));
+        assert_eq!(has_more(&value), Some(true));
+        assert!(
+            value.get("total_matching").is_none(),
+            "label scan must omit total_matching: {value}"
+        );
+    }
+
+    // --- list_nodes: property path ---------------------------------------
+
+    #[test]
+    fn test_list_nodes_property_path_reports_total_matching() {
+        let server = create_test_server();
+        for _ in 0..150 {
+            server.create_node(CreateNodeRequest {
+                derived_from: None,
+                valid_time: None,
+                label: "WidgetHM".to_string(),
+                properties: Some({
+                    let mut m = HashMap::new();
+                    m.insert("status".to_string(), serde_json::json!("active"));
+                    m
+                }),
+                provenance: None,
+            });
+        }
+
+        let page1 = parse(&server.list_nodes(ListNodesRequest {
+            label: Some("WidgetHM".to_string()),
+            property_key: Some("status".to_string()),
+            property_value: Some(serde_json::json!("active")),
+            limit: Some(100),
+            offset: Some(0),
+            include_vectors: None,
+        }));
+        assert_eq!(page1.get("count"), Some(&serde_json::json!(100)));
+        assert_eq!(
+            page1.get("total_matching"),
+            Some(&serde_json::json!(150)),
+            "property path materializes the full id list, so total is cheap: {page1}"
+        );
+        assert_eq!(has_more(&page1), Some(true));
+        assert_eq!(next_offset(&page1), Some(100));
+
+        let page2 = parse(&server.list_nodes(ListNodesRequest {
+            label: Some("WidgetHM".to_string()),
+            property_key: Some("status".to_string()),
+            property_value: Some(serde_json::json!("active")),
+            limit: Some(100),
+            offset: Some(100),
+            include_vectors: None,
+        }));
+        assert_eq!(page2.get("count"), Some(&serde_json::json!(50)));
+        assert_eq!(page2.get("total_matching"), Some(&serde_json::json!(150)));
+        assert_eq!(has_more(&page2), Some(false));
+        assert_eq!(next_offset(&page2), None);
+    }
+
+    // --- list_nodes / list_edges guidance paths --------------------------
+
+    #[test]
+    fn test_list_nodes_unfiltered_has_more_false() {
+        let server = create_test_server();
+        seed_labeled(&server, "AnyHM", 3);
+        let value = parse(&server.list_nodes(ListNodesRequest {
+            label: None,
+            property_key: None,
+            property_value: None,
+            limit: None,
+            offset: None,
+            include_vectors: None,
+        }));
+        assert_eq!(
+            has_more(&value),
+            Some(false),
+            "unfiltered guidance path carries has_more:false for shape consistency: {value}"
+        );
+        assert_eq!(next_offset(&value), None);
+    }
+
+    #[test]
+    fn test_list_edges_has_more_false() {
+        let server = create_test_server();
+        let value = parse(&server.list_edges(ListEdgesRequest {
+            label: None,
+            limit: None,
+            offset: None,
+            include_vectors: None,
+        }));
+        assert_eq!(
+            has_more(&value),
+            Some(false),
+            "list_edges guidance: {value}"
+        );
+        assert_eq!(next_offset(&value), None);
+    }
+
+    // --- outgoing / incoming edges (additive only, never truncated) ------
+
+    fn seed_star(server: &AletheiaMcpServer, out: usize) -> u64 {
+        let center = {
+            let r = server.create_node(CreateNodeRequest {
+                derived_from: None,
+                valid_time: None,
+                label: "Hub".to_string(),
+                properties: None,
+                provenance: None,
+            });
+            let n: NodeResponse = parse_response(&r).unwrap();
+            n.id
+        };
+        for _ in 0..out {
+            let leaf = {
+                let r = server.create_node(CreateNodeRequest {
+                    derived_from: None,
+                    valid_time: None,
+                    label: "Leaf".to_string(),
+                    properties: None,
+                    provenance: None,
+                });
+                let n: NodeResponse = parse_response(&r).unwrap();
+                n.id
+            };
+            server.create_edge(CreateEdgeRequest {
+                derived_from: None,
+                valid_time: None,
+                source_id: center,
+                target_id: leaf,
+                label: "LINK".to_string(),
+                properties: None,
+                provenance: None,
+            });
+        }
+        center
+    }
+
+    #[test]
+    fn test_get_outgoing_edges_completeness() {
+        let server = create_test_server();
+        let center = seed_star(&server, 3);
+        let value = parse(&server.get_outgoing_edges(GetOutgoingEdgesRequest {
+            node_id: center,
+            label: None,
+            include_vectors: None,
+        }));
+        assert_eq!(value.get("count"), Some(&serde_json::json!(3)));
+        assert_eq!(
+            has_more(&value),
+            Some(false),
+            "outgoing edges return the full set: {value}"
+        );
+        assert_eq!(
+            value.get("total_matching"),
+            Some(&serde_json::json!(3)),
+            "total_matching equals the complete count: {value}"
+        );
+    }
+
+    #[test]
+    fn test_get_incoming_edges_completeness() {
+        let server = create_test_server();
+        // Build a hub with 2 incoming edges.
+        let sink = {
+            let r = server.create_node(CreateNodeRequest {
+                derived_from: None,
+                valid_time: None,
+                label: "Sink".to_string(),
+                properties: None,
+                provenance: None,
+            });
+            let n: NodeResponse = parse_response(&r).unwrap();
+            n.id
+        };
+        for _ in 0..2 {
+            let src = {
+                let r = server.create_node(CreateNodeRequest {
+                    derived_from: None,
+                    valid_time: None,
+                    label: "Src".to_string(),
+                    properties: None,
+                    provenance: None,
+                });
+                let n: NodeResponse = parse_response(&r).unwrap();
+                n.id
+            };
+            server.create_edge(CreateEdgeRequest {
+                derived_from: None,
+                valid_time: None,
+                source_id: src,
+                target_id: sink,
+                label: "LINK".to_string(),
+                properties: None,
+                provenance: None,
+            });
+        }
+        let value = parse(&server.get_incoming_edges(GetIncomingEdgesRequest {
+            node_id: sink,
+            label: None,
+            include_vectors: None,
+        }));
+        assert_eq!(value.get("count"), Some(&serde_json::json!(2)));
+        assert_eq!(has_more(&value), Some(false));
+        assert_eq!(value.get("total_matching"), Some(&serde_json::json!(2)));
+    }
+
+    // --- traverse ---------------------------------------------------------
+
+    /// Build a chain start -> n1 -> n2 -> ... of `len` NEXT edges; return ids.
+    fn seed_chain(server: &AletheiaMcpServer, len: usize) -> Vec<u64> {
+        let ids: Vec<u64> = (0..=len)
+            .map(|_| {
+                let r = server.create_node(CreateNodeRequest {
+                    derived_from: None,
+                    valid_time: None,
+                    label: "ChainHM".to_string(),
+                    properties: None,
+                    provenance: None,
+                });
+                let n: NodeResponse = parse_response(&r).unwrap();
+                n.id
+            })
+            .collect();
+        for w in ids.windows(2) {
+            server.create_edge(CreateEdgeRequest {
+                derived_from: None,
+                valid_time: None,
+                source_id: w[0],
+                target_id: w[1],
+                label: "NEXT".to_string(),
+                properties: None,
+                provenance: None,
+            });
+        }
+        ids
+    }
+
+    #[test]
+    fn test_traverse_has_more_and_next_offset_when_truncated() {
+        let server = create_test_server();
+        // start -> 5 further nodes reachable via NEXT.
+        let ids = seed_chain(&server, 5);
+
+        // Truncate at 2 of the 5 reachable nodes.
+        let truncated = parse(&server.traverse(TraverseRequest {
+            start_node_id: ids[0],
+            edge_label: "NEXT".to_string(),
+            direction: None,
+            depth: Some(5),
+            limit: Some(2),
+            offset: None,
+            include_vectors: None,
+            as_of_valid_time: None,
+            as_of_transaction_time: None,
+        }));
+        assert_eq!(truncated.get("count"), Some(&serde_json::json!(2)));
+        assert_eq!(
+            has_more(&truncated),
+            Some(true),
+            "traversal truncated by limit signals more: {truncated}"
+        );
+        assert_eq!(next_offset(&truncated), Some(2));
+
+        // A limit above the reachable count exhausts the traversal.
+        let complete = parse(&server.traverse(TraverseRequest {
+            start_node_id: ids[0],
+            edge_label: "NEXT".to_string(),
+            direction: None,
+            depth: Some(5),
+            limit: Some(100),
+            offset: None,
+            include_vectors: None,
+            as_of_valid_time: None,
+            as_of_transaction_time: None,
+        }));
+        assert_eq!(complete.get("count"), Some(&serde_json::json!(5)));
+        assert_eq!(has_more(&complete), Some(false), "exhausted: {complete}");
+        assert_eq!(next_offset(&complete), None);
+    }
+
+    #[test]
+    fn test_traverse_offset_paginates() {
+        let server = create_test_server();
+        let ids = seed_chain(&server, 5); // 5 reachable nodes
+
+        // Collect the ids returned across two offset pages of size 2 plus a
+        // final page; the union must equal the single-shot full traversal.
+        let full = parse(&server.traverse(TraverseRequest {
+            start_node_id: ids[0],
+            edge_label: "NEXT".to_string(),
+            direction: None,
+            depth: Some(5),
+            limit: Some(100),
+            offset: None,
+            include_vectors: None,
+            as_of_valid_time: None,
+            as_of_transaction_time: None,
+        }));
+        let full_count = full.get("count").and_then(|c| c.as_u64()).unwrap();
+        assert_eq!(full_count, 5);
+
+        let page2 = parse(&server.traverse(TraverseRequest {
+            start_node_id: ids[0],
+            edge_label: "NEXT".to_string(),
+            direction: None,
+            depth: Some(5),
+            limit: Some(2),
+            offset: Some(2),
+            include_vectors: None,
+            as_of_valid_time: None,
+            as_of_transaction_time: None,
+        }));
+        assert_eq!(page2.get("count"), Some(&serde_json::json!(2)));
+        assert_eq!(
+            has_more(&page2),
+            Some(true),
+            "offset 2 of 5 has more: {page2}"
+        );
+        assert_eq!(next_offset(&page2), Some(4));
+
+        let page3 = parse(&server.traverse(TraverseRequest {
+            start_node_id: ids[0],
+            edge_label: "NEXT".to_string(),
+            direction: None,
+            depth: Some(5),
+            limit: Some(2),
+            offset: Some(4),
+            include_vectors: None,
+            as_of_valid_time: None,
+            as_of_transaction_time: None,
+        }));
+        assert_eq!(page3.get("count"), Some(&serde_json::json!(1)));
+        assert_eq!(has_more(&page3), Some(false), "last page: {page3}");
+        assert_eq!(next_offset(&page3), None);
+    }
+
+    // --- find_similar -----------------------------------------------------
+
+    /// Seed up to 5 documents with well-separated (near-orthogonal) 4-dim
+    /// embeddings: the four axis-aligned unit vectors plus the all-ones
+    /// vector. Against a query embedding like `[0.1, 0.2, 0.3, 0.4]`, cosine
+    /// similarity to each is strictly distinct (0.183, 0.365, 0.548, 0.730,
+    /// 0.913) with wide gaps between them, so ranking is unambiguous and a
+    /// deterministic count/`has_more` assertion never depends on HNSW
+    /// (approximate) search resolving a near-tied score consistently.
+    fn seed_vectors(server: &AletheiaMcpServer, n: usize) {
+        assert!(
+            n <= 5,
+            "seed_vectors only defines 5 well-separated directions"
+        );
+        server.enable_vector_index(EnableVectorIndexRequest {
+            property_name: "embedding".to_string(),
+            dimensions: 4,
+            distance_metric: Some("cosine".to_string()),
+        });
+        for i in 0..n {
+            let mut props = HashMap::new();
+            props.insert("name".to_string(), serde_json::json!(format!("Doc{i}")));
+            let embedding: [f32; 4] = if i < 4 {
+                let mut e = [0.0_f32; 4];
+                e[i] = 1.0;
+                e
+            } else {
+                [1.0; 4]
+            };
+            props.insert("embedding".to_string(), serde_json::json!(embedding));
+            server.create_node(CreateNodeRequest {
+                derived_from: None,
+                valid_time: None,
+                label: "Document".to_string(),
+                properties: Some(props),
+                provenance: None,
+            });
+        }
+    }
+
+    #[test]
+    fn test_find_similar_has_more_and_offset_paginates() {
+        let server = create_test_server();
+        seed_vectors(&server, 5);
+        let query = vec![0.1_f32, 0.2, 0.3, 0.4];
+
+        // k=2 of 5 available -> more remains.
+        let page1 = parse(&server.find_similar(FindSimilarRequest {
+            property_name: "embedding".to_string(),
+            embedding: query.clone(),
+            k: Some(2),
+            offset: None,
+            include_vectors: None,
+        }));
+        assert_eq!(page1.get("count"), Some(&serde_json::json!(2)));
+        assert_eq!(has_more(&page1), Some(true), "2 of 5 similar: {page1}");
+        assert_eq!(next_offset(&page1), Some(2));
+
+        // Offset into the middle.
+        let page2 = parse(&server.find_similar(FindSimilarRequest {
+            property_name: "embedding".to_string(),
+            embedding: query.clone(),
+            k: Some(2),
+            offset: Some(2),
+            include_vectors: None,
+        }));
+        assert_eq!(page2.get("count"), Some(&serde_json::json!(2)));
+        assert_eq!(has_more(&page2), Some(true));
+        assert_eq!(next_offset(&page2), Some(4));
+
+        // k beyond the available set exhausts it.
+        let complete = parse(&server.find_similar(FindSimilarRequest {
+            property_name: "embedding".to_string(),
+            embedding: query,
+            k: Some(50),
+            offset: None,
+            include_vectors: None,
+        }));
+        assert_eq!(has_more(&complete), Some(false), "exhausted: {complete}");
+        assert_eq!(next_offset(&complete), None);
+    }
+
+    // --- success-metric sweep --------------------------------------------
+
+    #[test]
+    fn test_all_bounded_read_tools_carry_has_more() {
+        let server = create_test_server();
+        // Minimal data touching every tool.
+        let center = seed_star(&server, 2);
+        seed_vectors(&server, 2);
+
+        let responses = vec![
+            (
+                "list_nodes(label)",
+                server.list_nodes(ListNodesRequest {
+                    label: Some("Leaf".to_string()),
+                    property_key: None,
+                    property_value: None,
+                    limit: Some(1),
+                    offset: None,
+                    include_vectors: None,
+                }),
+            ),
+            (
+                "list_nodes(unfiltered)",
+                server.list_nodes(ListNodesRequest {
+                    label: None,
+                    property_key: None,
+                    property_value: None,
+                    limit: None,
+                    offset: None,
+                    include_vectors: None,
+                }),
+            ),
+            (
+                "list_edges",
+                server.list_edges(ListEdgesRequest {
+                    label: None,
+                    limit: None,
+                    offset: None,
+                    include_vectors: None,
+                }),
+            ),
+            (
+                "get_outgoing_edges",
+                server.get_outgoing_edges(GetOutgoingEdgesRequest {
+                    node_id: center,
+                    label: None,
+                    include_vectors: None,
+                }),
+            ),
+            (
+                "get_incoming_edges",
+                server.get_incoming_edges(GetIncomingEdgesRequest {
+                    node_id: center,
+                    label: None,
+                    include_vectors: None,
+                }),
+            ),
+            (
+                "traverse",
+                server.traverse(TraverseRequest {
+                    start_node_id: center,
+                    edge_label: "LINK".to_string(),
+                    direction: None,
+                    depth: Some(1),
+                    limit: Some(1),
+                    offset: None,
+                    include_vectors: None,
+                    as_of_valid_time: None,
+                    as_of_transaction_time: None,
+                }),
+            ),
+            (
+                "find_similar",
+                server.find_similar(FindSimilarRequest {
+                    property_name: "embedding".to_string(),
+                    embedding: vec![0.1, 0.2, 0.3, 0.4],
+                    k: Some(1),
+                    offset: None,
+                    include_vectors: None,
+                }),
+            ),
+        ];
+
+        for (name, resp) in responses {
+            let value = parse(&resp);
+            assert!(
+                value.get("has_more").and_then(|v| v.as_bool()).is_some(),
+                "{name} response must carry a boolean has_more: {value}"
+            );
+        }
+    }
+
+    // --- limit/k==0 must not produce a non-progressing page --------------
+    //
+    // A page must be able to carry a continuation cursor: limit/k:0 with
+    // has_more:true and next_offset==offset (an unchanged offset) would trap
+    // a paginating caller in an infinite loop. `limit`/`k` are clamped to a
+    // minimum of 1 so a page always advances.
+
+    #[test]
+    fn test_list_nodes_limit_zero_is_clamped_to_one() {
+        let server = create_test_server();
+        seed_labeled(&server, "ClampHM", 3);
+        let value = parse(&server.list_nodes(ListNodesRequest {
+            label: Some("ClampHM".to_string()),
+            property_key: None,
+            property_value: None,
+            limit: Some(0),
+            offset: None,
+            include_vectors: None,
+        }));
+        assert_eq!(
+            value.get("count"),
+            Some(&serde_json::json!(1)),
+            "limit:0 must be clamped to at least 1, not return an empty page: {value}"
+        );
+        assert_eq!(has_more(&value), Some(true));
+        assert_eq!(next_offset(&value), Some(1), "page must advance: {value}");
+    }
+
+    #[test]
+    fn test_traverse_limit_zero_is_clamped_to_one() {
+        let server = create_test_server();
+        let ids = seed_chain(&server, 3);
+        let value = parse(&server.traverse(TraverseRequest {
+            start_node_id: ids[0],
+            edge_label: "NEXT".to_string(),
+            direction: None,
+            depth: Some(3),
+            limit: Some(0),
+            offset: None,
+            include_vectors: None,
+            as_of_valid_time: None,
+            as_of_transaction_time: None,
+        }));
+        assert_eq!(
+            value.get("count"),
+            Some(&serde_json::json!(1)),
+            "limit:0 must be clamped to at least 1, not return an empty page: {value}"
+        );
+        assert_eq!(has_more(&value), Some(true));
+        assert_eq!(next_offset(&value), Some(1), "page must advance: {value}");
+    }
+
+    #[test]
+    fn test_find_similar_k_zero_is_clamped_to_one() {
+        let server = create_test_server();
+        seed_vectors(&server, 3);
+        let value = parse(&server.find_similar(FindSimilarRequest {
+            property_name: "embedding".to_string(),
+            embedding: vec![0.1, 0.2, 0.3, 0.4],
+            k: Some(0),
+            offset: None,
+            include_vectors: None,
+        }));
+        assert_eq!(
+            value.get("count"),
+            Some(&serde_json::json!(1)),
+            "k:0 must be clamped to at least 1, not return an empty page: {value}"
+        );
+        assert_eq!(has_more(&value), Some(true));
+        assert_eq!(next_offset(&value), Some(1), "page must advance: {value}");
+    }
+
+    // --- traverse must not walk unboundedly through dangling edges -------
+
+    #[test]
+    fn test_traverse_bounded_peek_past_dangling_edges() {
+        let server = create_test_server();
+        // start -> n1 -> n2 -> n3 -> n4, then n2..n4 are deleted via the
+        // low-level (non-cascade) API, which per CLAUDE.md's "Orphaned
+        // Edges" section leaves their connecting edges dangling in storage.
+        let ids = seed_chain(&server, 4);
+        for &dangling_id in &ids[2..=4] {
+            server
+                .db()
+                .delete_node_with_valid_time(
+                    crate::core::id::NodeId::new(dangling_id).unwrap(),
+                    None,
+                )
+                .unwrap();
+        }
+
+        // n1 is the sole live node beyond `start` and becomes the one-item
+        // page (limit:1). Before this fix, proving `has_more` required
+        // resolving one MORE node beyond the page -- but every node past n1
+        // is dangling, so the old code would walk the entire dangling chain
+        // (n2, n3, n4) via "keep expanding regardless", find nothing
+        // resolvable, and wrongly report has_more:false. The fix instead
+        // reads `has_more` off whatever `traversal_next_hops` already queued
+        // for n1 (the edge to n2) without resolving it, so it correctly
+        // reports uncertainty as has_more:true in O(1) extra work rather
+        // than an O(dangling-chain-length) walk that still gets it wrong.
+        let response = parse(&server.traverse(TraverseRequest {
+            start_node_id: ids[0],
+            edge_label: "NEXT".to_string(),
+            direction: None,
+            depth: Some(10),
+            limit: Some(1),
+            offset: None,
+            include_vectors: None,
+            as_of_valid_time: None,
+            as_of_transaction_time: None,
+        }));
+        assert_eq!(response.get("count"), Some(&serde_json::json!(1)));
+        assert_eq!(
+            has_more(&response),
+            Some(true),
+            "a pending (even if unresolved) frontier candidate must not be silently \
+             reported as has_more:false: {response}"
+        );
+    }
+}
+
+// ============================================================================
+// Point-in-time (AS OF) node find by label and property (Issue #3236)
+// ============================================================================
+//
+// `find_nodes_at_time` resolves "the Person named Alice, as of T" without a
+// prior NodeId: it returns each matching node AS IT EXISTED at the queried
+// bi-temporal coordinate, excluding nodes that did not exist (or whose
+// property value did not hold) at that point.
+
+mod find_nodes_at_time_tests {
+    use super::*;
+    use chrono::{DateTime, Utc};
+
+    /// Capture an RFC 3339 anchor strictly after every previously committed
+    /// write: an HLC commit stamp in the same microsecond as the anchor
+    /// carries a logical component > 0 and would order *after* it, so sleep
+    /// past the microsecond boundary first.
+    fn anchor_after_commits() -> String {
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        Utc::now().to_rfc3339()
+    }
+
+    fn base_req(label: &str, valid_time: &str) -> FindNodesAtTimeRequest {
+        FindNodesAtTimeRequest {
+            label: label.to_string(),
+            property_key: None,
+            property_value: None,
+            valid_time: valid_time.to_string(),
+            transaction_time: None,
+            limit: None,
+            offset: None,
+            include_vectors: None,
+        }
+    }
+
+    fn name_req(label: &str, name: &str, valid_time: &str) -> FindNodesAtTimeRequest {
+        FindNodesAtTimeRequest {
+            property_key: Some("name".to_string()),
+            property_value: Some(serde_json::json!(name)),
+            ..base_req(label, valid_time)
+        }
+    }
+
+    fn find(server: &AletheiaMcpServer, req: FindNodesAtTimeRequest) -> serde_json::Value {
+        serde_json::from_str(&server.find_nodes_at_time(req))
+            .expect("find_nodes_at_time should return valid JSON")
+    }
+
+    fn node_ids(value: &serde_json::Value) -> Vec<u64> {
+        value["nodes"]
+            .as_array()
+            .unwrap_or_else(|| panic!("expected a nodes array, got: {value}"))
+            .iter()
+            .map(|n| n["id"].as_u64().expect("node id should be a u64"))
+            .collect()
+    }
+
+    fn create_named(server: &AletheiaMcpServer, label: &str, name: &str) -> u64 {
+        let node: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            derived_from: None,
+            label: label.to_string(),
+            properties: Some(HashMap::from([(
+                "name".to_string(),
+                serde_json::json!(name),
+            )])),
+            valid_time: None,
+            provenance: None,
+        }))
+        .expect("create should succeed");
+        node.id
+    }
+
+    fn rename(server: &AletheiaMcpServer, node_id: u64, name: &str) {
+        let _: NodeResponse = parse_response(&server.update_node(UpdateNodeRequest {
+            derived_from: None,
+            node_id,
+            properties: HashMap::from([("name".to_string(), serde_json::json!(name))]),
+            valid_time: None,
+            provenance: None,
+        }))
+        .expect("update should succeed");
+    }
+
+    fn delete(server: &AletheiaMcpServer, node_id: u64) {
+        let response = server.delete_node(DeleteNodeRequest {
+            node_id,
+            detach: None,
+            valid_time: None,
+        });
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(value["success"], serde_json::json!(true), "{value}");
+    }
+
+    fn assert_invalid_argument(response: &str, must_mention: &str) {
+        let value: serde_json::Value = serde_json::from_str(response).unwrap();
+        assert_eq!(
+            value["error"]["code"],
+            serde_json::json!("INVALID_ARGUMENT"),
+            "expected INVALID_ARGUMENT, got: {value}"
+        );
+        let message = value["error"]["message"].as_str().unwrap_or_default();
+        assert!(
+            message.contains(must_mention),
+            "error message should mention '{must_mention}': {message}"
+        );
+    }
+
+    /// Build a request anchored at the same instant on BOTH dimensions.
+    /// Recalling a superseded (or deleted) version requires this: the
+    /// superseding write closes the old version's *transaction* interval,
+    /// so with `transaction_time` defaulted to now only the latest recorded
+    /// version is visible (same convention as `traverse`'s `as_of_*`, see
+    /// the guide).
+    fn name_req_at(label: &str, name: &str, t: &str) -> FindNodesAtTimeRequest {
+        FindNodesAtTimeRequest {
+            transaction_time: Some(t.to_string()),
+            ..name_req(label, name, t)
+        }
+    }
+
+    #[test]
+    fn returns_node_as_it_existed_at_t_not_current_state() {
+        let server = create_test_server();
+        let id = create_named(&server, "Person", "Alice");
+        let t1 = anchor_after_commits();
+        rename(&server, id, "Bob");
+        let t2 = anchor_after_commits();
+
+        // At (t1, t1) the node matched "Alice" and its returned properties
+        // are the reconstructed at-time state, not the current one.
+        let value = find(&server, name_req_at("Person", "Alice", &t1));
+        assert_eq!(node_ids(&value), vec![id], "{value}");
+        assert_eq!(value["nodes"][0]["properties"]["name"], "Alice");
+        // "Bob" did not hold yet at t1...
+        let value = find(&server, name_req_at("Person", "Bob", &t1));
+        assert!(node_ids(&value).is_empty(), "{value}");
+        // ...and the situation reverses at t2.
+        let value = find(&server, name_req_at("Person", "Bob", &t2));
+        assert_eq!(node_ids(&value), vec![id]);
+        assert_eq!(value["nodes"][0]["properties"]["name"], "Bob");
+        let value = find(&server, name_req_at("Person", "Alice", &t2));
+        assert!(node_ids(&value).is_empty(), "{value}");
+    }
+
+    #[test]
+    fn node_created_after_t_is_excluded() {
+        let server = create_test_server();
+        let t0 = anchor_after_commits();
+        let id = create_named(&server, "Person", "Alice");
+        let t1 = anchor_after_commits();
+
+        let value = find(&server, name_req("Person", "Alice", &t0));
+        assert!(
+            node_ids(&value).is_empty(),
+            "node created after T must be excluded: {value}"
+        );
+        let value = find(&server, name_req("Person", "Alice", &t1));
+        assert_eq!(node_ids(&value), vec![id]);
+    }
+
+    /// T2 (review): the "both dimensions required" contract as a NEGATIVE
+    /// test. Anchoring only `valid_time` before a deletion while
+    /// `transaction_time` defaults to now must NOT recall the deleted node
+    /// -- the deletion already closed the version's transaction interval.
+    #[test]
+    fn deleted_node_not_recalled_when_transaction_time_omitted() {
+        let server = create_test_server();
+        let id = create_named(&server, "Person", "Alice");
+        let t_before = anchor_after_commits();
+        delete(&server, id);
+        std::thread::sleep(std::time::Duration::from_millis(2));
+
+        // valid_time anchored before the deletion, transaction_time omitted
+        // (defaults to now): empty, per the documented contract.
+        let value = find(&server, name_req("Person", "Alice", &t_before));
+        assert!(
+            node_ids(&value).is_empty(),
+            "past valid_time + defaulted transaction_time must not recall a deleted node: {value}"
+        );
+        assert_eq!(value["total_matching"], serde_json::json!(0));
+
+        // Label-only path obeys the same contract.
+        let value = find(&server, base_req("Person", &t_before));
+        assert!(node_ids(&value).is_empty(), "{value}");
+    }
+
+    #[test]
+    fn node_deleted_before_t_recalled_when_both_dimensions_anchored() {
+        let server = create_test_server();
+        let id = create_named(&server, "Person", "Alice");
+        let t_before = anchor_after_commits();
+        delete(&server, id);
+        let t_after = anchor_after_commits();
+
+        // Both dimensions anchored before the deletion recall the node even
+        // though it no longer exists in current state.
+        let value = find(
+            &server,
+            FindNodesAtTimeRequest {
+                transaction_time: Some(t_before.clone()),
+                ..name_req("Person", "Alice", &t_before)
+            },
+        );
+        assert_eq!(node_ids(&value), vec![id], "{value}");
+
+        // At a coordinate after the deletion the node is gone.
+        let value = find(
+            &server,
+            FindNodesAtTimeRequest {
+                transaction_time: Some(t_after.clone()),
+                ..name_req("Person", "Alice", &t_after)
+            },
+        );
+        assert!(node_ids(&value).is_empty(), "{value}");
+    }
+
+    #[test]
+    fn label_only_as_of_scan_without_property_filter() {
+        let server = create_test_server();
+        let a = create_named(&server, "Person", "Alice");
+        let b = create_named(&server, "Person", "Bob");
+        let _c = create_named(&server, "Company", "Acme");
+        let t1 = anchor_after_commits();
+        delete(&server, b);
+        let t2 = anchor_after_commits();
+
+        let value = find(
+            &server,
+            FindNodesAtTimeRequest {
+                transaction_time: Some(t1.clone()),
+                ..base_req("Person", &t1)
+            },
+        );
+        assert_eq!(node_ids(&value), vec![a, b], "{value}");
+
+        let value = find(
+            &server,
+            FindNodesAtTimeRequest {
+                transaction_time: Some(t2.clone()),
+                ..base_req("Person", &t2)
+            },
+        );
+        assert_eq!(node_ids(&value), vec![a], "{value}");
+    }
+
+    #[test]
+    fn current_state_equivalence_with_list_nodes_property_filter() {
+        let server = create_test_server();
+        let _a = create_named(&server, "Person", "Alice");
+        let _b = create_named(&server, "Person", "Bob");
+        let _c = create_named(&server, "Person", "Alice");
+        let now = anchor_after_commits();
+
+        let list_value: serde_json::Value =
+            serde_json::from_str(&server.list_nodes(ListNodesRequest {
+                label: Some("Person".to_string()),
+                property_key: Some("name".to_string()),
+                property_value: Some(serde_json::json!("Alice")),
+                limit: None,
+                offset: None,
+                include_vectors: None,
+            }))
+            .unwrap();
+        let mut current_ids = node_ids(&list_value);
+        current_ids.sort_unstable();
+
+        let at_now = find(&server, name_req("Person", "Alice", &now));
+        assert_eq!(
+            node_ids(&at_now),
+            current_ids,
+            "valid_time=now + transaction_time=now must equal the current-state result set"
+        );
+    }
+
+    #[test]
+    fn pagination_limit_offset_and_completeness_metadata() {
+        let server = create_test_server();
+        let mut created: Vec<u64> = (0..3)
+            .map(|_| create_named(&server, "Person", "Alice"))
+            .collect();
+        created.sort_unstable();
+        let now = anchor_after_commits();
+
+        // Page 1 (limit 1): stable ordering, exact total, continuation cursor.
+        let page1 = find(
+            &server,
+            FindNodesAtTimeRequest {
+                limit: Some(1),
+                ..name_req("Person", "Alice", &now)
+            },
+        );
+        assert_eq!(node_ids(&page1), vec![created[0]], "{page1}");
+        assert_eq!(page1["count"], serde_json::json!(1));
+        assert_eq!(page1["total_matching"], serde_json::json!(3));
+        assert_eq!(page1["has_more"], serde_json::json!(true));
+        assert_eq!(page1["next_offset"], serde_json::json!(1));
+
+        // Page 2 continues where page 1 left off, and its continuation
+        // metadata advances from the requested offset (T6: next_offset must
+        // be exercised at offset > 0, not just on page 1).
+        let page2 = find(
+            &server,
+            FindNodesAtTimeRequest {
+                limit: Some(1),
+                offset: Some(1),
+                ..name_req("Person", "Alice", &now)
+            },
+        );
+        assert_eq!(node_ids(&page2), vec![created[1]], "{page2}");
+        assert_eq!(page2["has_more"], serde_json::json!(true));
+        assert_eq!(page2["next_offset"], serde_json::json!(2));
+
+        // Final page reports has_more: false.
+        let page3 = find(
+            &server,
+            FindNodesAtTimeRequest {
+                limit: Some(1),
+                offset: Some(2),
+                ..name_req("Person", "Alice", &now)
+            },
+        );
+        assert_eq!(node_ids(&page3), vec![created[2]], "{page3}");
+        assert_eq!(page3["has_more"], serde_json::json!(false));
+    }
+
+    /// T4 (review, mutation killer): `limit: 0` is clamped UP to 1 (a page
+    /// must be able to carry a continuation cursor), exactly like
+    /// `list_nodes` -- one node comes back, not zero.
+    #[test]
+    fn limit_zero_is_clamped_up_to_one() {
+        let server = create_test_server();
+        let mut created: Vec<u64> = (0..2)
+            .map(|_| create_named(&server, "Person", "Alice"))
+            .collect();
+        created.sort_unstable();
+        let now = anchor_after_commits();
+
+        let value = find(
+            &server,
+            FindNodesAtTimeRequest {
+                limit: Some(0),
+                ..name_req("Person", "Alice", &now)
+            },
+        );
+        assert!(value.get("error").is_none(), "{value}");
+        assert_eq!(value["limit"], serde_json::json!(1));
+        assert_eq!(
+            node_ids(&value),
+            vec![created[0]],
+            "limit 0 must clamp to 1 and return one node, not zero: {value}"
+        );
+        assert_eq!(value["count"], serde_json::json!(1));
+        assert_eq!(value["has_more"], serde_json::json!(true));
+    }
+
+    #[test]
+    fn oversized_limit_and_offset_are_clamped_not_errors() {
+        let server = create_test_server();
+        let _ = create_named(&server, "Person", "Alice");
+        let now = anchor_after_commits();
+
+        // Far beyond MAX_RESULT_LIMIT / MAX_PAGINATION_OFFSET: clamped,
+        // exactly like list_nodes -- never an error.
+        let value = find(
+            &server,
+            FindNodesAtTimeRequest {
+                limit: Some(1_000_000),
+                offset: Some(1_000_000),
+                ..name_req("Person", "Alice", &now)
+            },
+        );
+        assert!(value.get("error").is_none(), "{value}");
+        assert_eq!(value["limit"], serde_json::json!(10_000));
+        assert_eq!(value["offset"], serde_json::json!(10_000));
+        assert!(node_ids(&value).is_empty(), "offset past the end: {value}");
+    }
+
+    #[test]
+    fn invalid_or_empty_timestamps_return_structured_errors() {
+        let server = create_test_server();
+
+        let response = server.find_nodes_at_time(base_req("Person", "not-a-timestamp"));
+        assert_invalid_argument(&response, "valid_time");
+
+        let response = server.find_nodes_at_time(base_req("Person", ""));
+        assert_invalid_argument(&response, "valid_time");
+
+        let response = server.find_nodes_at_time(FindNodesAtTimeRequest {
+            transaction_time: Some("not-a-timestamp".to_string()),
+            ..base_req("Person", &Utc::now().to_rfc3339())
+        });
+        assert_invalid_argument(&response, "transaction_time");
+    }
+
+    #[test]
+    fn property_key_without_value_and_reverse_return_structured_errors() {
+        let server = create_test_server();
+        let now = Utc::now().to_rfc3339();
+
+        let response = server.find_nodes_at_time(FindNodesAtTimeRequest {
+            property_key: Some("name".to_string()),
+            ..base_req("Person", &now)
+        });
+        assert_invalid_argument(&response, "property_key");
+
+        let response = server.find_nodes_at_time(FindNodesAtTimeRequest {
+            property_value: Some(serde_json::json!("Alice")),
+            ..base_req("Person", &now)
+        });
+        assert_invalid_argument(&response, "property_value");
+    }
+
+    #[test]
+    fn unsupported_property_value_type_returns_structured_error() {
+        let server = create_test_server();
+        let response = server.find_nodes_at_time(FindNodesAtTimeRequest {
+            property_key: Some("name".to_string()),
+            property_value: Some(serde_json::json!({"nested": "object"})),
+            ..base_req("Person", &Utc::now().to_rfc3339())
+        });
+        assert_invalid_argument(&response, "property_value");
+    }
+
+    #[test]
+    fn response_carries_resolved_bitemporal_coordinate_as_rfc3339() {
+        let server = create_test_server();
+        let _ = create_named(&server, "Person", "Alice");
+        let anchor = anchor_after_commits();
+        let anchor_micros = DateTime::parse_from_rfc3339(&anchor)
+            .unwrap()
+            .timestamp_micros();
+
+        let value = find(&server, name_req("Person", "Alice", &anchor));
+
+        // The resolved valid_time round-trips to the exact requested instant.
+        let valid_time = value["valid_time"].as_str().expect("valid_time present");
+        assert_eq!(
+            DateTime::parse_from_rfc3339(valid_time)
+                .expect("valid_time should be RFC 3339")
+                .timestamp_micros(),
+            anchor_micros
+        );
+
+        // The omitted transaction_time resolves to a concrete "now", not a
+        // placeholder -- it must parse and be at/after the anchor.
+        let tx_time = value["transaction_time"]
+            .as_str()
+            .expect("transaction_time present");
+        let tx_micros = DateTime::parse_from_rfc3339(tx_time)
+            .expect("transaction_time should be RFC 3339")
+            .timestamp_micros();
+        assert!(
+            tx_micros >= anchor_micros,
+            "resolved transaction_time {tx_time} should not precede the request anchor {anchor}"
+        );
+    }
+
+    #[test]
+    fn unknown_label_returns_empty_set_not_error() {
+        let server = create_test_server();
+        let value = find(
+            &server,
+            base_req("NeverSeenLabel3236", &Utc::now().to_rfc3339()),
+        );
+        assert!(value.get("error").is_none(), "{value}");
+        assert!(node_ids(&value).is_empty());
+        assert_eq!(value["total_matching"], serde_json::json!(0));
+        assert_eq!(value["has_more"], serde_json::json!(false));
+        assert_eq!(value["sampled"], serde_json::json!(false));
+    }
+
+    /// T3 (review): vector/embedding properties follow the #3220 elision
+    /// convention on this tool -- elided `{type, dim, elided: true}`
+    /// descriptor by default, full float array with `include_vectors: true`.
+    #[test]
+    fn vector_properties_elided_by_default_and_full_with_include_vectors() {
+        let server = create_test_server();
+        let embedding: Vec<f32> = (0..16).map(|i| (i as f32) * 0.001 + 0.1).collect();
+        let node: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            derived_from: None,
+            label: "Document".to_string(),
+            properties: Some(HashMap::from([
+                ("name".to_string(), serde_json::json!("Doc1")),
+                ("embedding".to_string(), serde_json::json!(embedding)),
+            ])),
+            valid_time: None,
+            provenance: None,
+        }))
+        .expect("create should succeed");
+        let now = anchor_after_commits();
+
+        // Default: elided descriptor, exactly like list_nodes.
+        let value = find(&server, base_req("Document", &now));
+        assert_eq!(node_ids(&value), vec![node.id], "{value}");
+        assert_eq!(
+            value["nodes"][0]["properties"]["embedding"],
+            serde_json::json!({"type": "vector", "dim": 16, "elided": true})
+        );
+        // Non-vector properties are untouched.
+        assert_eq!(value["nodes"][0]["properties"]["name"], "Doc1");
+
+        // include_vectors: true restores the full, lossless array.
+        let value = find(
+            &server,
+            FindNodesAtTimeRequest {
+                include_vectors: Some(true),
+                ..base_req("Document", &now)
+            },
+        );
+        let returned: Vec<f32> = value["nodes"][0]["properties"]["embedding"]
+            .as_array()
+            .expect("embedding should be a full array")
+            .iter()
+            .map(|v| v.as_f64().unwrap() as f32)
+            .collect();
+        assert_eq!(returned, embedding);
+    }
+
+    /// T7 (review): candidate-set truncation (the C1 cap) is disclosed via
+    /// `sampled: true`, with `total_matching` counting matches within the
+    /// sampled candidate set only. The cap is the same configurable
+    /// `max_schema_as_of_entities` bi-temporal `get_schema` uses, injected
+    /// small here (mirroring the schema_as_of cap test).
+    #[test]
+    fn truncated_candidate_scan_discloses_sampled_true() {
+        use crate::config::{AletheiaDBConfig, HistoricalConfigBuilder};
+        use crate::test_utils::create_test_db_with_config;
+
+        let config = AletheiaDBConfig::builder()
+            .historical(
+                HistoricalConfigBuilder::new()
+                    .max_schema_as_of_entities(2)
+                    .build(),
+            )
+            .build();
+        let (_tmp, db) = create_test_db_with_config(config).unwrap();
+        let server = AletheiaMcpServer::new(Arc::new(db));
+
+        let mut created: Vec<u64> = (0..4)
+            .map(|_| create_named(&server, "Person", "Alice"))
+            .collect();
+        created.sort_unstable();
+        let now = anchor_after_commits();
+
+        let value = find(&server, name_req("Person", "Alice", &now));
+        assert_eq!(value["sampled"], serde_json::json!(true), "{value}");
+        // total_matching is honest about the sampled candidate set: the cap
+        // keeps the lowest 2 node ids, both of which match.
+        assert_eq!(value["total_matching"], serde_json::json!(2));
+        assert_eq!(node_ids(&value), created[..2].to_vec(), "{value}");
+    }
+}
+
+// ============================================================================
+// Structured Error Codes with Retriable Flag (Issue #3234)
+// ============================================================================
+//
+// Every MCP error response must be `{ "error": { "code", "message",
+// "retriable", "details"? } }` where `code` is drawn from the documented,
+// stable enum and `retriable` is `true` only for transient failure classes.
+// These tests drive every distinct MCP error path and assert the exact code,
+// plus a registry-driven sweep that automatically covers newly added tools.
+
+mod structured_error_tests {
+    use super::*;
+    use serde_json::json;
+
+    /// Every code documented for the MCP error contract (Issue #3234;
+    /// UNAUTHENTICATED / PERMISSION_DENIED added by Issue #3350).
+    const DOCUMENTED_CODES: &[&str] = &[
+        "NOT_FOUND",
+        "INVALID_ARGUMENT",
+        "CONSTRAINT_VIOLATION",
+        "FAILED_PRECONDITION",
+        "CONFLICT",
+        "UNAVAILABLE",
+        "INTERNAL",
+        "UNAUTHENTICATED",
+        "PERMISSION_DENIED",
+    ];
+
+    /// Dispatch a tool through the same table `call_tool` uses and parse the
+    /// JSON payload. Returns `(parsed_json, is_error)`.
+    fn dispatch(
+        server: &AletheiaMcpServer,
+        tool: &str,
+        args: serde_json::Value,
+    ) -> (serde_json::Value, bool) {
+        let result = server.dispatch_tool(tool, args);
+        let is_error = result.is_error.unwrap_or(false);
+        let text = result
+            .content
+            .first()
+            .and_then(|c| c.as_text().map(|t| t.text.clone()))
+            .expect("tool result should carry text content");
+        let value = serde_json::from_str(&text).expect("tool response should be valid JSON");
+        (value, is_error)
+    }
+
+    /// Assert the response carries the Issue #3234 structured error shape and
+    /// return `(code, retriable, message)`.
+    fn assert_structured_error(value: &serde_json::Value, context: &str) -> (String, bool, String) {
+        let error = value
+            .get("error")
+            .unwrap_or_else(|| panic!("[{context}] expected an `error` payload, got: {value}"));
+        let obj = error.as_object().unwrap_or_else(|| {
+            panic!("[{context}] `error` must be a structured object, not free text: {error}")
+        });
+        let code = obj
+            .get("code")
+            .and_then(|c| c.as_str())
+            .unwrap_or_else(|| panic!("[{context}] error must carry a string `code`: {error}"))
+            .to_string();
+        assert!(
+            DOCUMENTED_CODES.contains(&code.as_str()),
+            "[{context}] code {code:?} is not in the documented enum"
+        );
+        let retriable = obj
+            .get("retriable")
+            .and_then(|r| r.as_bool())
+            .unwrap_or_else(|| {
+                panic!("[{context}] error must carry a boolean `retriable`: {error}")
+            });
+        let message = obj
+            .get("message")
+            .and_then(|m| m.as_str())
+            .unwrap_or_else(|| panic!("[{context}] error must carry a string `message`: {error}"))
+            .to_string();
+        assert!(
+            !message.is_empty(),
+            "[{context}] error message must not be empty"
+        );
+        (code, retriable, message)
+    }
+
+    /// Convenience: dispatch, require an error, assert shape + expected code.
+    fn assert_error_code(
+        server: &AletheiaMcpServer,
+        tool: &str,
+        args: serde_json::Value,
+        expected_code: &str,
+    ) -> serde_json::Value {
+        let (value, is_error) = dispatch(server, tool, args);
+        assert!(is_error, "[{tool}] expected an error result, got: {value}");
+        let (code, retriable, _msg) = assert_structured_error(&value, tool);
+        assert_eq!(code, expected_code, "[{tool}] wrong code: {value}");
+        // Caller-fault classes are never advisorily retriable.
+        if matches!(
+            expected_code,
+            "NOT_FOUND" | "INVALID_ARGUMENT" | "CONSTRAINT_VIOLATION" | "FAILED_PRECONDITION"
+        ) {
+            assert!(!retriable, "[{tool}] {expected_code} must not be retriable");
+        }
+        value
+    }
+
+    fn seed_node(server: &AletheiaMcpServer, label: &str, name: &str) -> u64 {
+        let node: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            derived_from: None,
+            label: label.to_string(),
+            properties: Some(HashMap::from([(
+                "name".to_string(),
+                serde_json::Value::String(name.to_string()),
+            )])),
+            valid_time: None,
+            provenance: None,
+        }))
+        .expect("seed node should succeed");
+        node.id
+    }
+
+    // ------------------------------------------------------------------
+    // Registry-driven sweep: every advertised tool, present and future,
+    // must return the structured shape on its invalid-arguments path.
+    // A tool added to `tool_definitions()`/`dispatch_tool` is covered
+    // here automatically, with zero test changes.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn every_advertised_tool_returns_structured_error_on_invalid_arguments() {
+        let server = create_test_server();
+        let mut errored = 0;
+        for tool in server.list_tools_for_test() {
+            let (value, is_error) = dispatch(&server, &tool, serde_json::Value::Null);
+            if is_error {
+                errored += 1;
+                let (code, _, message) = assert_structured_error(&value, &tool);
+                // A tool present in tool_definitions() but missing from
+                // dispatch_tool's match would fall into the "Unknown tool"
+                // NOT_FOUND arm and silently pass a shape-only sweep. Catch
+                // that drift explicitly.
+                assert!(
+                    !message.contains("Unknown tool"),
+                    "[{tool}] advertised but not dispatched: {message}"
+                );
+                // Null args can only fail argument deserialization, so the
+                // code must be exactly INVALID_ARGUMENT.
+                assert_eq!(
+                    code, "INVALID_ARGUMENT",
+                    "[{tool}] null args must classify as INVALID_ARGUMENT: {value}"
+                );
+            }
+        }
+        assert!(
+            errored > 0,
+            "sweep must exercise at least one error path (null args should fail deserialization)"
+        );
+    }
+
+    #[test]
+    fn unknown_tool_returns_not_found() {
+        let server = create_test_server();
+        let value = assert_error_code(
+            &server,
+            "definitely_not_a_tool",
+            serde_json::Value::Null,
+            "NOT_FOUND",
+        );
+        let (_, _, message) = assert_structured_error(&value, "unknown tool");
+        assert!(message.contains("Unknown tool"), "got: {message}");
+    }
+
+    // ------------------------------------------------------------------
+    // INVALID_ARGUMENT paths
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn malformed_arguments_return_invalid_argument() {
+        let server = create_test_server();
+        let value = assert_error_code(
+            &server,
+            "get_node",
+            json!({"node_id": "not-a-number"}),
+            "INVALID_ARGUMENT",
+        );
+        let (_, _, message) = assert_structured_error(&value, "get_node malformed");
+        assert!(message.contains("Invalid arguments"), "got: {message}");
+    }
+
+    #[test]
+    fn out_of_range_id_returns_invalid_argument() {
+        let server = create_test_server();
+        let value = assert_error_code(
+            &server,
+            "get_node",
+            json!({"node_id": u64::MAX}),
+            "INVALID_ARGUMENT",
+        );
+        // Message fidelity: the bare StorageError text, byte-for-byte
+        // identical to what pre-#3234 releases returned as the whole `error`
+        // value — no "Storage error: " wrapper prefix.
+        let (_, _, message) = assert_structured_error(&value, "get_node out-of-range");
+        let expected = crate::core::error::StorageError::InvalidId {
+            id: u64::MAX,
+            id_type: "node",
+        }
+        .to_string();
+        assert_eq!(message, expected, "got: {message}");
+        assert!(
+            message.starts_with("Invalid node ID"),
+            "message must be the bare StorageError text: {message}"
+        );
+        assert!(
+            !message.starts_with("Storage error: "),
+            "message must not gain a Storage error prefix: {message}"
+        );
+
+        let value = assert_error_code(
+            &server,
+            "get_edge",
+            json!({"edge_id": u64::MAX}),
+            "INVALID_ARGUMENT",
+        );
+        let (_, _, message) = assert_structured_error(&value, "get_edge out-of-range");
+        assert!(
+            message.starts_with("Invalid edge ID"),
+            "message must be the bare StorageError text: {message}"
+        );
+    }
+
+    #[test]
+    fn invalid_timestamp_returns_invalid_argument() {
+        let server = create_test_server();
+        let value = assert_error_code(
+            &server,
+            "create_node",
+            json!({"label": "Person", "valid_time": "not-a-timestamp"}),
+            "INVALID_ARGUMENT",
+        );
+        let (_, _, message) = assert_structured_error(&value, "create_node bad valid_time");
+        assert!(message.contains("Invalid valid_time"), "got: {message}");
+
+        let node_id = seed_node(&server, "Person", "Alice");
+        assert_error_code(
+            &server,
+            "get_node_at_time",
+            json!({"node_id": node_id, "valid_time": "not-a-timestamp"}),
+            "INVALID_ARGUMENT",
+        );
+        assert_error_code(
+            &server,
+            "traverse",
+            json!({
+                "start_node_id": node_id,
+                "edge_label": "KNOWS",
+                "as_of_valid_time": "not-a-timestamp"
+            }),
+            "INVALID_ARGUMENT",
+        );
+        assert_error_code(
+            &server,
+            "list_changes",
+            json!({"tx_from": "not-a-timestamp", "tx_to": "2026-01-01T00:00:00Z"}),
+            "INVALID_ARGUMENT",
+        );
+    }
+
+    #[test]
+    fn invalid_provenance_confidence_returns_invalid_argument() {
+        let server = create_test_server();
+        let value = assert_error_code(
+            &server,
+            "create_node",
+            json!({"label": "Person", "provenance": {"confidence": 1.5}}),
+            "INVALID_ARGUMENT",
+        );
+        let (_, _, message) = assert_structured_error(&value, "create_node bad provenance");
+        assert!(message.contains("confidence"), "got: {message}");
+    }
+
+    #[test]
+    fn list_nodes_inconsistent_property_filter_returns_invalid_argument() {
+        let server = create_test_server();
+        assert_error_code(
+            &server,
+            "list_nodes",
+            json!({"label": "Person", "property_key": "name"}),
+            "INVALID_ARGUMENT",
+        );
+        // Property filter without label is likewise a caller fault.
+        assert_error_code(
+            &server,
+            "list_nodes",
+            json!({"property_key": "name", "property_value": "Alice"}),
+            "INVALID_ARGUMENT",
+        );
+    }
+
+    #[test]
+    fn delete_node_valid_time_with_detach_returns_invalid_argument() {
+        let server = create_test_server();
+        let node_id = seed_node(&server, "Person", "Alice");
+        assert_error_code(
+            &server,
+            "delete_node",
+            json!({
+                "node_id": node_id,
+                "detach": true,
+                "valid_time": "2024-01-01T00:00:00Z"
+            }),
+            "INVALID_ARGUMENT",
+        );
+    }
+
+    #[test]
+    fn hybrid_query_without_entry_point_returns_invalid_argument() {
+        let server = create_test_server();
+        assert_error_code(&server, "hybrid_query", json!({}), "INVALID_ARGUMENT");
+    }
+
+    #[test]
+    fn find_similar_dimension_mismatch_returns_invalid_argument() {
+        let server = create_test_server();
+        let (_, is_error) = dispatch(
+            &server,
+            "enable_vector_index",
+            json!({"property_name": "embedding", "dimensions": 4}),
+        );
+        assert!(!is_error, "enabling the index should succeed");
+        assert_error_code(
+            &server,
+            "find_similar",
+            json!({"property_name": "embedding", "embedding": [0.1, 0.2, 0.3]}),
+            "INVALID_ARGUMENT",
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // NOT_FOUND paths
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn missing_entities_return_not_found() {
+        let server = create_test_server();
+        let value = assert_error_code(&server, "get_node", json!({"node_id": 424242}), "NOT_FOUND");
+        let (_, _, message) = assert_structured_error(&value, "get_node missing");
+        assert!(message.contains("Node not found"), "got: {message}");
+
+        assert_error_code(&server, "get_edge", json!({"edge_id": 424242}), "NOT_FOUND");
+        assert_error_code(
+            &server,
+            "update_node",
+            json!({"node_id": 424242, "properties": {"a": 1}}),
+            "NOT_FOUND",
+        );
+        assert_error_code(
+            &server,
+            "update_edge",
+            json!({"edge_id": 424242, "properties": {"a": 1}}),
+            "NOT_FOUND",
+        );
+        assert_error_code(
+            &server,
+            "delete_node",
+            json!({"node_id": 424242}),
+            "NOT_FOUND",
+        );
+        assert_error_code(
+            &server,
+            "delete_edge",
+            json!({"edge_id": 424242}),
+            "NOT_FOUND",
+        );
+        // A missing endpoint surfaces from the transaction layer as a
+        // validation failure: the request is well-formed, but the graph is
+        // not in the state it requires -> FAILED_PRECONDITION.
+        assert_error_code(
+            &server,
+            "create_edge",
+            json!({"source_id": 424242, "target_id": 424243, "label": "KNOWS"}),
+            "FAILED_PRECONDITION",
+        );
+    }
+
+    #[test]
+    fn node_absent_at_temporal_coordinate_returns_not_found() {
+        let server = create_test_server();
+        let node_id = seed_node(&server, "Person", "Alice");
+        // Long before the node's creation: not found at that coordinate.
+        assert_error_code(
+            &server,
+            "get_node_at_time",
+            json!({"node_id": node_id, "valid_time": "2000-01-01T00:00:00Z"}),
+            "NOT_FOUND",
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // FAILED_PRECONDITION paths
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn find_similar_without_index_returns_failed_precondition() {
+        let server = create_test_server();
+        let value = assert_error_code(
+            &server,
+            "find_similar",
+            json!({"property_name": "missing_prop", "embedding": [0.1, 0.2]}),
+            "FAILED_PRECONDITION",
+        );
+        let (_, _, message) = assert_structured_error(&value, "find_similar no index");
+        assert!(
+            message.contains("Vector index not enabled"),
+            "got: {message}"
+        );
+
+        // Same precondition through the hybrid query path.
+        assert_error_code(
+            &server,
+            "hybrid_query",
+            json!({"query_embedding": [0.1, 0.2], "vector_property": "missing_prop"}),
+            "FAILED_PRECONDITION",
+        );
+    }
+
+    /// Issue #3209's DETACH-delete refusal migrated to the structured shape:
+    /// `FAILED_PRECONDITION` with `details.connected_edges`, while the legacy
+    /// top-level `connected_edges` / `detach_required` fields remain (no loss).
+    #[test]
+    fn detach_refusal_returns_failed_precondition_with_connected_edges_details() {
+        let server = create_test_server();
+        let a = seed_node(&server, "Person", "Alice");
+        let b = seed_node(&server, "Person", "Bob");
+        let (_, is_error) = dispatch(
+            &server,
+            "create_edge",
+            json!({"source_id": a, "target_id": b, "label": "KNOWS"}),
+        );
+        assert!(!is_error, "edge creation should succeed");
+
+        let value = assert_error_code(
+            &server,
+            "delete_node",
+            json!({"node_id": a}),
+            "FAILED_PRECONDITION",
+        );
+
+        // Structured details carry the machine-readable count.
+        assert_eq!(
+            value["error"]["details"]["connected_edges"].as_u64(),
+            Some(1),
+            "details.connected_edges must report the edge count: {value}"
+        );
+        // Legacy #3209 fields are preserved additively at the top level.
+        assert_eq!(value["connected_edges"].as_u64(), Some(1), "got: {value}");
+        assert_eq!(value["detach_required"].as_bool(), Some(true));
+        assert_eq!(value["success"].as_bool(), Some(false));
+        assert_eq!(value["node_id"].as_u64(), Some(a));
+        // Free text is preserved as error.message.
+        let (_, _, message) = assert_structured_error(&value, "detach refusal");
+        assert!(message.contains("connected edge"), "got: {message}");
+        assert!(message.contains("detach"), "got: {message}");
+    }
+
+    // ------------------------------------------------------------------
+    // CONSTRAINT_VIOLATION paths
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn unique_violation_returns_constraint_violation_with_details() {
+        let server = create_test_server();
+        let (_, is_error) = dispatch(
+            &server,
+            "enable_unique_constraint",
+            json!({"label": "Person", "property": "email"}),
+        );
+        assert!(!is_error, "enabling the constraint should succeed");
+
+        let (_, is_error) = dispatch(
+            &server,
+            "create_node",
+            json!({"label": "Person", "properties": {"email": "a@example.com"}}),
+        );
+        assert!(!is_error, "first node should succeed");
+
+        let value = assert_error_code(
+            &server,
+            "create_node",
+            json!({"label": "Person", "properties": {"email": "a@example.com"}}),
+            "CONSTRAINT_VIOLATION",
+        );
+        // Structured details carry the constraint metadata.
+        assert_eq!(
+            value["error"]["details"]["label"].as_str(),
+            Some("Person"),
+            "got: {value}"
+        );
+        assert_eq!(
+            value["error"]["details"]["property"].as_str(),
+            Some("email")
+        );
+        assert!(value["error"]["details"]["existing_node_id"].is_u64());
+        // Legacy top-level fields are preserved additively.
+        assert_eq!(value["constraint_violation"].as_bool(), Some(true));
+        assert_eq!(value["label"].as_str(), Some("Person"));
+        assert_eq!(value["property"].as_str(), Some("email"));
+        assert!(value["existing_node_id"].is_u64());
+    }
+
+    #[test]
+    fn enable_constraint_over_duplicates_returns_failed_precondition() {
+        // DuplicateOnEnable is a *state* problem — duplicates already exist
+        // in the graph, so the enable cannot succeed until the data is fixed.
+        // That is FAILED_PRECONDITION, not a constraint rejecting this write.
+        let server = create_test_server();
+        for _ in 0..2 {
+            let (_, is_error) = dispatch(
+                &server,
+                "create_node",
+                json!({"label": "Person", "properties": {"email": "dup@example.com"}}),
+            );
+            assert!(!is_error);
+        }
+        assert_error_code(
+            &server,
+            "enable_unique_constraint",
+            json!({"label": "Person", "property": "email"}),
+            "FAILED_PRECONDITION",
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // The `query` tool: `kind` is preserved verbatim (its own contract,
+    // Issue #3213) while `code`/`retriable` are added additively.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn query_tool_errors_keep_kind_and_gain_code_and_retriable() {
+        let server = create_test_server();
+
+        // read_only_violation
+        let (value, is_error) = dispatch(
+            &server,
+            "query",
+            json!({"language": "aql", "query": "CREATE (n:Person) RETURN n"}),
+        );
+        assert!(is_error);
+        assert_eq!(
+            value["error"]["kind"].as_str(),
+            Some("read_only_violation"),
+            "the query tool's kind field must be preserved: {value}"
+        );
+        let (code, retriable, _) = assert_structured_error(&value, "query read-only");
+        assert_eq!(code, "INVALID_ARGUMENT");
+        assert!(!retriable);
+
+        // invalid_request (unsupported language)
+        let (value, is_error) = dispatch(
+            &server,
+            "query",
+            json!({"language": "sparql", "query": "SELECT ?s WHERE { ?s ?p ?o }"}),
+        );
+        assert!(is_error);
+        assert_eq!(value["error"]["kind"].as_str(), Some("invalid_request"));
+        let (code, _, _) = assert_structured_error(&value, "query bad language");
+        assert_eq!(code, "INVALID_ARGUMENT");
+
+        // parse_error
+        let (value, is_error) = dispatch(
+            &server,
+            "query",
+            json!({"language": "aql", "query": "THIS IS NOT A QUERY"}),
+        );
+        assert!(is_error);
+        assert_eq!(
+            value["error"]["kind"].as_str(),
+            Some("parse_error"),
+            "got: {value}"
+        );
+        let (code, _, _) = assert_structured_error(&value, "query parse error");
+        assert_eq!(code, "INVALID_ARGUMENT");
+    }
+
+    // ------------------------------------------------------------------
+    // History / independent-dimension temporal tools (Phase 11)
+    // ------------------------------------------------------------------
+
+    fn seed_edge(server: &AletheiaMcpServer, source: u64, target: u64) -> u64 {
+        let (value, is_error) = dispatch(
+            server,
+            "create_edge",
+            json!({"source_id": source, "target_id": target, "label": "KNOWS"}),
+        );
+        assert!(!is_error, "seed edge should succeed: {value}");
+        value["id"].as_u64().expect("created edge must carry an id")
+    }
+
+    /// Every history/temporal tool must classify a missing entity as
+    /// NOT_FOUND. Note the message here still flows through `db_error` (the
+    /// storage lookup fails, not the ID parse), so assert the code, not the
+    /// message text.
+    #[test]
+    fn history_tools_missing_entity_returns_not_found() {
+        let server = create_test_server();
+        let ts = "2026-01-01T00:00:00Z";
+        let cases: Vec<(&str, serde_json::Value)> = vec![
+            (
+                "get_node_at_valid_time",
+                json!({"node_id": 424242, "valid_time": ts}),
+            ),
+            (
+                "get_node_at_transaction_time",
+                json!({"node_id": 424242, "transaction_time": ts}),
+            ),
+            ("get_node_history", json!({"node_id": 424242})),
+            (
+                "diff_node_versions",
+                json!({"node_id": 424242, "from_version": 1, "to_version": 2}),
+            ),
+            (
+                "get_edge_at_valid_time",
+                json!({"edge_id": 424242, "valid_time": ts}),
+            ),
+            (
+                "get_edge_at_transaction_time",
+                json!({"edge_id": 424242, "transaction_time": ts}),
+            ),
+            ("get_edge_history", json!({"edge_id": 424242})),
+            (
+                "diff_edge_versions",
+                json!({"edge_id": 424242, "from_version": 1, "to_version": 2}),
+            ),
+        ];
+        for (tool, args) in cases {
+            assert_error_code(&server, tool, args, "NOT_FOUND");
+        }
+    }
+
+    /// Every history/temporal tool that takes a timestamp must classify an
+    /// unparseable one as INVALID_ARGUMENT — even when the entity exists.
+    #[test]
+    fn history_tools_bad_timestamp_returns_invalid_argument() {
+        let server = create_test_server();
+        let a = seed_node(&server, "Person", "Alice");
+        let b = seed_node(&server, "Person", "Bob");
+        let edge_id = seed_edge(&server, a, b);
+        let cases: Vec<(&str, serde_json::Value)> = vec![
+            (
+                "get_node_at_valid_time",
+                json!({"node_id": a, "valid_time": "not-a-timestamp"}),
+            ),
+            (
+                "get_node_at_transaction_time",
+                json!({"node_id": a, "transaction_time": "not-a-timestamp"}),
+            ),
+            (
+                "get_edge_at_valid_time",
+                json!({"edge_id": edge_id, "valid_time": "not-a-timestamp"}),
+            ),
+            (
+                "get_edge_at_transaction_time",
+                json!({"edge_id": edge_id, "transaction_time": "not-a-timestamp"}),
+            ),
+        ];
+        for (tool, args) in cases {
+            assert_error_code(&server, tool, args, "INVALID_ARGUMENT");
+        }
+    }
+
+    #[test]
+    fn edge_absent_at_temporal_coordinate_returns_not_found() {
+        let server = create_test_server();
+        let a = seed_node(&server, "Person", "Alice");
+        let b = seed_node(&server, "Person", "Bob");
+        let edge_id = seed_edge(&server, a, b);
+        // Long before the edge's creation: not found at that coordinate.
+        assert_error_code(
+            &server,
+            "get_edge_at_time",
+            json!({"edge_id": edge_id, "valid_time": "2000-01-01T00:00:00Z"}),
+            "NOT_FOUND",
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // hybrid_query argument classification
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn hybrid_query_bad_temporal_arguments_return_invalid_argument() {
+        let server = create_test_server();
+        let node_id = seed_node(&server, "Person", "Alice");
+        let value = assert_error_code(
+            &server,
+            "hybrid_query",
+            json!({"start_node_id": node_id, "valid_time": "not-a-timestamp"}),
+            "INVALID_ARGUMENT",
+        );
+        let (_, _, message) = assert_structured_error(&value, "hybrid_query bad valid_time");
+        assert!(message.contains("Invalid valid_time"), "got: {message}");
+
+        let value = assert_error_code(
+            &server,
+            "hybrid_query",
+            json!({"start_node_id": node_id, "transaction_time": "not-a-timestamp"}),
+            "INVALID_ARGUMENT",
+        );
+        let (_, _, message) = assert_structured_error(&value, "hybrid_query bad tx_time");
+        assert!(
+            message.contains("Invalid transaction_time"),
+            "got: {message}"
+        );
+    }
+
+    #[test]
+    fn hybrid_query_embedding_dimension_mismatch_returns_invalid_argument() {
+        let server = create_test_server();
+        let (_, is_error) = dispatch(
+            &server,
+            "enable_vector_index",
+            json!({"property_name": "embedding", "dimensions": 4}),
+        );
+        assert!(!is_error, "enabling the index should succeed");
+        assert_error_code(
+            &server,
+            "hybrid_query",
+            json!({"query_embedding": [0.1, 0.2, 0.3], "vector_property": "embedding"}),
+            "INVALID_ARGUMENT",
+        );
+    }
+
+    #[test]
+    fn hybrid_query_missing_start_node_returns_not_found() {
+        let server = create_test_server();
+        assert_error_code(
+            &server,
+            "hybrid_query",
+            json!({"start_node_id": 424242}),
+            "NOT_FOUND",
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Adjacency, schema, create_edge endpoint parsing, list_changes
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn adjacency_tools_out_of_range_id_returns_invalid_argument() {
+        let server = create_test_server();
+        for tool in ["get_outgoing_edges", "get_incoming_edges"] {
+            let value = assert_error_code(
+                &server,
+                tool,
+                json!({"node_id": u64::MAX}),
+                "INVALID_ARGUMENT",
+            );
+            let (_, _, message) = assert_structured_error(&value, tool);
+            assert!(
+                message.starts_with("Invalid node ID"),
+                "[{tool}] bare StorageError text expected: {message}"
+            );
+        }
+        // Pin the current contract for an in-range but *missing* node: the
+        // adjacency tools return an empty adjacency (success), not NOT_FOUND.
+        for tool in ["get_outgoing_edges", "get_incoming_edges"] {
+            let (value, is_error) = dispatch(&server, tool, json!({"node_id": 424242}));
+            assert!(
+                !is_error,
+                "[{tool}] missing node currently yields an empty adjacency: {value}"
+            );
+            assert_eq!(value["count"].as_u64(), Some(0), "got: {value}");
+        }
+    }
+
+    #[test]
+    fn get_schema_bad_as_of_returns_invalid_argument() {
+        let server = create_test_server();
+        assert_error_code(
+            &server,
+            "get_schema",
+            json!({"as_of_valid_time": "not-a-timestamp"}),
+            "INVALID_ARGUMENT",
+        );
+        assert_error_code(
+            &server,
+            "get_schema",
+            json!({"as_of_transaction_time": "not-a-timestamp"}),
+            "INVALID_ARGUMENT",
+        );
+    }
+
+    #[test]
+    fn create_edge_out_of_range_endpoints_return_invalid_argument() {
+        let server = create_test_server();
+        let value = assert_error_code(
+            &server,
+            "create_edge",
+            json!({"source_id": u64::MAX, "target_id": 1, "label": "KNOWS"}),
+            "INVALID_ARGUMENT",
+        );
+        let (_, _, message) = assert_structured_error(&value, "create_edge bad source_id");
+        assert!(message.contains("Invalid source_id"), "got: {message}");
+
+        let value = assert_error_code(
+            &server,
+            "create_edge",
+            json!({"source_id": 1, "target_id": u64::MAX, "label": "KNOWS"}),
+            "INVALID_ARGUMENT",
+        );
+        let (_, _, message) = assert_structured_error(&value, "create_edge bad target_id");
+        assert!(message.contains("Invalid target_id"), "got: {message}");
+    }
+
+    #[test]
+    fn list_changes_bad_tx_to_returns_invalid_argument() {
+        let server = create_test_server();
+        let value = assert_error_code(
+            &server,
+            "list_changes",
+            json!({"tx_from": "2026-01-01T00:00:00Z", "tx_to": "not-a-timestamp"}),
+            "INVALID_ARGUMENT",
+        );
+        let (_, _, message) = assert_structured_error(&value, "list_changes bad tx_to");
+        assert!(message.contains("Invalid tx_to"), "got: {message}");
+    }
+}
+
+// ============================================================================
+// Temporal Extent Tests (temporal_extent, Issue #3238)
+// ============================================================================
+
+mod temporal_extent_tests {
+    use super::*;
+
+    fn extent_req(by_label: Option<bool>) -> TemporalExtentRequest {
+        TemporalExtentRequest { by_label }
+    }
+
+    fn create_node_at(server: &AletheiaMcpServer, label: &str, valid_time: &str) -> NodeResponse {
+        let response = server.create_node(CreateNodeRequest {
+            derived_from: None,
+            valid_time: Some(valid_time.to_string()),
+            label: label.to_string(),
+            properties: Some({
+                let mut m = HashMap::new();
+                m.insert("name".to_string(), serde_json::json!("x"));
+                m
+            }),
+            provenance: None,
+        });
+        parse_response(&response).expect("create node")
+    }
+
+    fn assert_rfc3339(value: &serde_json::Value, context: &str) {
+        let s = value
+            .as_str()
+            .unwrap_or_else(|| panic!("{context} must be a string: {value}"));
+        chrono::DateTime::parse_from_rfc3339(s)
+            .unwrap_or_else(|e| panic!("{context} must be RFC3339, got '{s}': {e}"));
+    }
+
+    #[test]
+    fn test_temporal_extent_tool_listed_in_registry() {
+        let server = create_test_server();
+        let tools = server.list_tools_for_test();
+        assert!(
+            tools.iter().any(|name| name == "temporal_extent"),
+            "temporal_extent must be registered in the tool list"
+        );
+    }
+
+    #[test]
+    fn test_temporal_extent_empty_database_returns_null_bounds() {
+        let server = create_test_server();
+
+        let response = server.temporal_extent(extent_req(None));
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+
+        assert!(value.get("error").is_none(), "unexpected error: {value}");
+        // Bounds must be explicit nulls -- present in the payload, and
+        // definitely not epoch/1970 strings.
+        for dim in ["valid_time", "transaction_time"] {
+            for bound in ["earliest", "latest"] {
+                let b = value[dim]
+                    .get(bound)
+                    .unwrap_or_else(|| panic!("{dim}.{bound} must be present"));
+                assert!(
+                    b.is_null(),
+                    "{dim}.{bound} on an empty DB must be null, got {b}"
+                );
+            }
+        }
+        // Without by_label, no breakdown keys appear at all.
+        assert!(value.get("node_labels").is_none());
+        assert!(value.get("edge_types").is_none());
+    }
+
+    #[test]
+    fn test_temporal_extent_empty_database_by_label_returns_empty_breakdown() {
+        let server = create_test_server();
+
+        let response = server.temporal_extent(extent_req(Some(true)));
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+
+        assert!(value.get("error").is_none(), "unexpected error: {value}");
+        assert!(value["valid_time"]["earliest"].is_null());
+        assert!(value["transaction_time"]["latest"].is_null());
+        assert_eq!(value["node_labels"].as_array().unwrap().len(), 0);
+        assert_eq!(value["edge_types"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn test_temporal_extent_populated_shape_and_rfc3339() {
+        let server = create_test_server();
+
+        let alice = create_node_at(&server, "Person", "2021-03-01T00:00:00Z");
+        let acme = create_node_at(&server, "Company", "2023-06-15T00:00:00Z");
+        server.create_edge(CreateEdgeRequest {
+            derived_from: None,
+            valid_time: Some("2024-01-01T00:00:00Z".to_string()),
+            source_id: alice.id,
+            target_id: acme.id,
+            label: "WORKS_AT".to_string(),
+            properties: None,
+            provenance: None,
+        });
+
+        let response = server.temporal_extent(extent_req(None));
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+
+        assert!(value.get("error").is_none(), "unexpected error: {value}");
+
+        // Valid-time bounds reflect the backdated writes exactly (all
+        // intervals are open-ended, so only their starts count).
+        assert_eq!(
+            value["valid_time"]["earliest"],
+            serde_json::json!("2021-03-01T00:00:00.000000Z")
+        );
+        assert_eq!(
+            value["valid_time"]["latest"],
+            serde_json::json!("2024-01-01T00:00:00.000000Z")
+        );
+
+        // Transaction-time bounds are system-assigned but must be real,
+        // parseable RFC3339 strings (not sentinels, not micros integers).
+        assert_rfc3339(&value["transaction_time"]["earliest"], "tx earliest");
+        assert_rfc3339(&value["transaction_time"]["latest"], "tx latest");
+
+        // No breakdown without by_label.
+        assert!(value.get("node_labels").is_none());
+        assert!(value.get("edge_types").is_none());
+    }
+
+    #[test]
+    fn test_temporal_extent_expired_version_still_counts_toward_earliest() {
+        let server = create_test_server();
+
+        let alice = create_node_at(&server, "Person", "2021-03-01T00:00:00Z");
+        // Supersede the original version: its interval is closed, but its
+        // backdated start must still bound `earliest` (extent covers ALL
+        // recorded history, not just current state).
+        server.update_node(UpdateNodeRequest {
+            derived_from: None,
+            valid_time: Some("2025-01-01T00:00:00Z".to_string()),
+            node_id: alice.id,
+            properties: {
+                let mut m = HashMap::new();
+                m.insert("name".to_string(), serde_json::json!("Alice v2"));
+                m
+            },
+            provenance: None,
+        });
+
+        let response = server.temporal_extent(extent_req(None));
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+
+        assert!(value.get("error").is_none(), "unexpected error: {value}");
+        assert_eq!(
+            value["valid_time"]["earliest"],
+            serde_json::json!("2021-03-01T00:00:00.000000Z"),
+            "superseded version must still count toward earliest"
+        );
+        assert_eq!(
+            value["valid_time"]["latest"],
+            serde_json::json!("2025-01-01T00:00:00.000000Z")
+        );
+    }
+
+    #[test]
+    fn test_temporal_extent_by_label_breakdown() {
+        let server = create_test_server();
+
+        let alice = create_node_at(&server, "Person", "2021-03-01T00:00:00Z");
+        let acme = create_node_at(&server, "Company", "2023-06-15T00:00:00Z");
+        server.create_edge(CreateEdgeRequest {
+            derived_from: None,
+            valid_time: Some("2024-01-01T00:00:00Z".to_string()),
+            source_id: alice.id,
+            target_id: acme.id,
+            label: "WORKS_AT".to_string(),
+            properties: None,
+            provenance: None,
+        });
+
+        let response = server.temporal_extent(extent_req(Some(true)));
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+
+        assert!(value.get("error").is_none(), "unexpected error: {value}");
+
+        let node_labels = value["node_labels"].as_array().unwrap();
+        assert_eq!(node_labels.len(), 2);
+        // Sorted by label: Company before Person.
+        assert_eq!(node_labels[0]["label"], serde_json::json!("Company"));
+        assert_eq!(
+            node_labels[0]["valid_time"]["earliest"],
+            serde_json::json!("2023-06-15T00:00:00.000000Z")
+        );
+        assert_eq!(node_labels[1]["label"], serde_json::json!("Person"));
+        assert_eq!(
+            node_labels[1]["valid_time"]["earliest"],
+            serde_json::json!("2021-03-01T00:00:00.000000Z")
+        );
+        assert_rfc3339(
+            &node_labels[1]["transaction_time"]["earliest"],
+            "Person tx earliest",
+        );
+
+        let edge_types = value["edge_types"].as_array().unwrap();
+        assert_eq!(edge_types.len(), 1);
+        assert_eq!(edge_types[0]["edge_type"], serde_json::json!("WORKS_AT"));
+        assert_eq!(
+            edge_types[0]["valid_time"]["earliest"],
+            serde_json::json!("2024-01-01T00:00:00.000000Z")
+        );
+
+        // Overall bounds still cover the union of all labels.
+        assert_eq!(
+            value["valid_time"]["earliest"],
+            serde_json::json!("2021-03-01T00:00:00.000000Z")
+        );
+        assert_eq!(
+            value["valid_time"]["latest"],
+            serde_json::json!("2024-01-01T00:00:00.000000Z")
+        );
+    }
+
+    #[test]
+    fn test_temporal_extent_deleted_node_tombstone_still_counts() {
+        // Deletions count toward the extent: a node backdated to 2021 and
+        // then deleted must still bound valid_time.earliest, and both
+        // dimensions' latest must reflect the deletion event.
+        let server = create_test_server();
+
+        let alice = create_node_at(&server, "Person", "2021-03-01T00:00:00Z");
+        let delete_response = server.delete_node(DeleteNodeRequest {
+            node_id: alice.id,
+            detach: None,
+            valid_time: None,
+        });
+        let delete_value: serde_json::Value = serde_json::from_str(&delete_response).unwrap();
+        assert!(
+            delete_value.get("error").is_none(),
+            "unexpected delete error: {delete_value}"
+        );
+
+        let response = server.temporal_extent(extent_req(None));
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert!(value.get("error").is_none(), "unexpected error: {value}");
+
+        assert_eq!(
+            value["valid_time"]["earliest"],
+            serde_json::json!("2021-03-01T00:00:00.000000Z"),
+            "a deleted node's backdated start must still bound earliest"
+        );
+
+        // The deletion closed the valid interval at ~now and recorded the
+        // tombstone: both latest bounds move past the 2021 backdate.
+        for dim in ["valid_time", "transaction_time"] {
+            assert_rfc3339(&value[dim]["latest"], &format!("{dim} latest"));
+            let latest =
+                chrono::DateTime::parse_from_rfc3339(value[dim]["latest"].as_str().unwrap())
+                    .unwrap();
+            let backdate = chrono::DateTime::parse_from_rfc3339("2022-01-01T00:00:00Z").unwrap();
+            assert!(
+                latest > backdate,
+                "{dim} latest must reflect the deletion event, got {latest}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_as_of_before_extent_is_empty_inside_extent_has_data() {
+        // The answerability contract the extent exists to provide: an AS OF
+        // query strictly before valid_time.earliest returns empty, while the
+        // same query inside the extent returns data.
+        let server = create_test_server();
+
+        create_node_at(&server, "Person", "2021-03-01T00:00:00Z");
+
+        let response = server.temporal_extent(extent_req(None));
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(
+            value["valid_time"]["earliest"],
+            serde_json::json!("2021-03-01T00:00:00.000000Z")
+        );
+
+        // AS OF before the extent: empty (indistinguishable from "never
+        // existed" -- exactly why temporal_extent must be consulted first).
+        let before = server.get_schema(GetSchemaRequest {
+            as_of_valid_time: Some("2019-01-01T00:00:00Z".to_string()),
+            as_of_transaction_time: None,
+        });
+        let before: serde_json::Value = serde_json::from_str(&before).unwrap();
+        assert!(before.get("error").is_none(), "unexpected error: {before}");
+        assert_eq!(
+            before["node_labels"].as_array().unwrap().len(),
+            0,
+            "AS OF before valid_time.earliest must return empty"
+        );
+
+        // The same query inside the extent returns the data.
+        let inside = server.get_schema(GetSchemaRequest {
+            as_of_valid_time: Some("2022-01-01T00:00:00Z".to_string()),
+            as_of_transaction_time: None,
+        });
+        let inside: serde_json::Value = serde_json::from_str(&inside).unwrap();
+        assert!(inside.get("error").is_none(), "unexpected error: {inside}");
+        let labels = inside["node_labels"].as_array().unwrap();
+        assert_eq!(labels.len(), 1, "AS OF inside the extent must return data");
+        assert_eq!(labels[0]["label"], serde_json::json!("Person"));
+    }
+}
+
+// ============================================================================
+// Database Stats Tests (Issue #3222)
+// ============================================================================
+
+mod database_stats_tests {
+    use super::*;
+
+    fn stats_response(server: &AletheiaMcpServer) -> serde_json::Value {
+        let response = server.database_stats(DatabaseStatsRequest {});
+        serde_json::from_str(&response).expect("database_stats must return valid JSON")
+    }
+
+    /// AC1 + AC9 (empty DB well-formed): the tool takes no required arguments
+    /// and returns a single well-formed JSON object even on an empty database.
+    #[test]
+    fn test_database_stats_empty_db_well_formed() {
+        let server = create_test_server();
+        let value = stats_response(&server);
+
+        assert!(value.get("error").is_none(), "unexpected error: {value}");
+        assert_eq!(value["current"]["node_count"], serde_json::json!(0));
+        assert_eq!(value["current"]["edge_count"], serde_json::json!(0));
+        assert_eq!(
+            value["historical"]["total_node_versions"],
+            serde_json::json!(0)
+        );
+        assert_eq!(
+            value["historical"]["total_edge_versions"],
+            serde_json::json!(0)
+        );
+        assert_eq!(value["historical"]["unique_nodes"], serde_json::json!(0));
+        assert_eq!(value["historical"]["unique_edges"], serde_json::json!(0));
+        assert_eq!(value["historical"]["anchor_count"], serde_json::json!(0));
+        assert_eq!(value["historical"]["delta_count"], serde_json::json!(0));
+        // Disabled subsystems must be tagged, never zero-reported (AC7).
+        assert_eq!(value["cold_storage"]["enabled"], serde_json::json!(false));
+        assert_eq!(value["wal"]["enabled"], serde_json::json!(true));
+    }
+
+    /// AC3 + AC9 (populated DB shape): counts reflect data, version counters
+    /// track updates, and anchors + deltas always sum to the version totals.
+    #[test]
+    fn test_database_stats_populated_db_shape() {
+        let server = create_test_server();
+
+        let (a, b) = {
+            let a: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+                derived_from: None,
+                valid_time: None,
+                label: "Person".to_string(),
+                properties: None,
+                provenance: None,
+            }))
+            .unwrap();
+            let b: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+                derived_from: None,
+                valid_time: None,
+                label: "Person".to_string(),
+                properties: None,
+                provenance: None,
+            }))
+            .unwrap();
+            (a.id, b.id)
+        };
+        server.create_edge(CreateEdgeRequest {
+            derived_from: None,
+            valid_time: None,
+            source_id: a,
+            target_id: b,
+            label: "KNOWS".to_string(),
+            properties: None,
+            provenance: None,
+        });
+        // An update creates an extra node version beyond the creates.
+        server.update_node(UpdateNodeRequest {
+            derived_from: None,
+            valid_time: None,
+            node_id: a,
+            properties: {
+                let mut m = HashMap::new();
+                m.insert("name".to_string(), serde_json::json!("Alice"));
+                m
+            },
+            provenance: None,
+        });
+
+        let value = stats_response(&server);
+        assert!(value.get("error").is_none(), "unexpected error: {value}");
+
+        assert_eq!(value["current"]["node_count"], serde_json::json!(2));
+        assert_eq!(value["current"]["edge_count"], serde_json::json!(1));
+
+        let hist = &value["historical"];
+        assert_eq!(hist["unique_nodes"], serde_json::json!(2));
+        assert_eq!(hist["unique_edges"], serde_json::json!(1));
+        let total_node_versions = hist["total_node_versions"].as_u64().unwrap();
+        assert_eq!(
+            total_node_versions, 3,
+            "2 creates + 1 update must yield exactly 3 node versions: {value}"
+        );
+        assert_eq!(hist["total_edge_versions"], serde_json::json!(1));
+
+        // Compression accounting must be internally consistent.
+        let anchors = hist["anchor_count"].as_u64().unwrap();
+        let deltas = hist["delta_count"].as_u64().unwrap();
+        let total_versions = total_node_versions + hist["total_edge_versions"].as_u64().unwrap();
+        assert_eq!(
+            anchors + deltas,
+            total_versions,
+            "anchors + deltas must equal total versions: {value}"
+        );
+        assert!(anchors >= 1, "at least one anchor expected: {value}");
+        // With the default anchor interval (10), the update after a create is
+        // stored as a delta: the anchor/delta split must actually engage, and
+        // the anchor share must therefore drop below 1.0.
+        assert!(
+            deltas >= 1,
+            "an update following a create must be stored as a delta: {value}"
+        );
+        let ratio = hist["compression_ratio"].as_f64().unwrap();
+        assert!(
+            ratio > 0.0 && ratio < 1.0,
+            "compression_ratio must be in (0.0, 1.0) once a delta exists: {value}"
+        );
+    }
+
+    /// AC4 + AC7 + AC9 (disabled tier tagged): a database without cold
+    /// storage must report `cold_storage: {"enabled": false}` with NO count
+    /// fields, so an LLM can never mistake "disabled" for "0 cold versions".
+    #[test]
+    fn test_database_stats_cold_storage_disabled_is_tagged_not_zero() {
+        let server = create_test_server();
+        let value = stats_response(&server);
+
+        // Exact shape: no counts, no tier distribution, no extra keys --
+        // anything beyond the tag could be mistaken for real (zero) data.
+        assert_eq!(
+            value["cold_storage"],
+            serde_json::json!({"enabled": false}),
+            "disabled cold_storage must be exactly {{\"enabled\": false}}: {value}"
+        );
+    }
+
+    /// AC4 (enabled tier reports distribution): with cold storage configured,
+    /// the snapshot reports cold counts and the hot/warm/cold access
+    /// distribution.
+    #[test]
+    fn test_database_stats_cold_storage_enabled_reports_tiers() {
+        use crate::config::{AletheiaDBConfig, HistoricalConfigBuilder, WalConfigBuilder};
+
+        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let config = AletheiaDBConfig::builder()
+            .wal(
+                WalConfigBuilder::new()
+                    .wal_dir(temp_dir.path().join("wal"))
+                    .build(),
+            )
+            .persistence(crate::storage::index_persistence::PersistenceConfig {
+                enabled: false,
+                ..Default::default()
+            })
+            .historical(
+                HistoricalConfigBuilder::new()
+                    .enable_cold_storage(true)
+                    .cold_storage_path(temp_dir.path().join("cold.redb"))
+                    .build(),
+            )
+            .build();
+        let db = Arc::new(AletheiaDB::with_unified_config(config).expect("db init"));
+        let server = AletheiaMcpServer::new(db);
+
+        let value = stats_response(&server);
+        assert!(value.get("error").is_none(), "unexpected error: {value}");
+
+        let cold = value["cold_storage"]
+            .as_object()
+            .expect("cold_storage must be an object");
+        assert_eq!(cold["enabled"], serde_json::json!(true));
+        assert_eq!(cold["node_versions_stored"], serde_json::json!(0));
+        assert_eq!(cold["edge_versions_stored"], serde_json::json!(0));
+        let tier_access = cold["tier_access"]
+            .as_object()
+            .expect("enabled cold storage must report tier_access distribution");
+        for key in ["hot_hits", "warm_hits", "cold_hits", "misses"] {
+            assert!(
+                tier_access.contains_key(key),
+                "tier_access must contain {key}: {value}"
+            );
+        }
+    }
+
+    /// AC5 (WAL state): durability mode is a stable token and the
+    /// next-to-be-allocated LSN is reported and advances with writes.
+    #[test]
+    fn test_database_stats_wal_state_reported() {
+        let server = create_test_server();
+        let value = stats_response(&server);
+
+        let wal = value["wal"].as_object().expect("wal must be an object");
+        assert_eq!(wal["enabled"], serde_json::json!(true));
+        let mode = wal["durability_mode"].as_str().unwrap();
+        assert!(
+            ["synchronous", "async", "group_commit", "async_batched"].contains(&mode),
+            "durability_mode must be a stable token, got: {mode}"
+        );
+        let lsn_before = wal["current_lsn"].as_u64().unwrap();
+        assert!(lsn_before >= 1, "LSN starts at 1: {value}");
+
+        server.create_node(CreateNodeRequest {
+            derived_from: None,
+            valid_time: None,
+            label: "Person".to_string(),
+            properties: None,
+            provenance: None,
+        });
+
+        let value_after = stats_response(&server);
+        let lsn_after = value_after["wal"]["current_lsn"].as_u64().unwrap();
+        assert!(
+            lsn_after > lsn_before,
+            "LSN must advance after a write: {lsn_before} -> {lsn_after}"
+        );
+        assert!(value_after["wal"]["healthy"].as_bool().unwrap());
+    }
+
+    /// AC1: the tool is advertised in the MCP tool list.
+    #[test]
+    fn test_database_stats_registered_in_tool_list() {
+        let server = create_test_server();
+        let tools = server.list_tools_for_test();
+        assert!(
+            tools.iter().any(|t| t == "database_stats"),
+            "database_stats must be advertised: {tools:?}"
+        );
+    }
+
+    /// AC2: the MCP tool is a thin aggregator over the public API — both
+    /// surfaces must report identical numbers on the same database.
+    #[test]
+    fn test_database_stats_matches_public_api() {
+        let server = create_test_server();
+        server.create_node(CreateNodeRequest {
+            derived_from: None,
+            valid_time: None,
+            label: "Person".to_string(),
+            properties: None,
+            provenance: None,
+        });
+
+        let value = stats_response(&server);
+        let api_stats = server.db().stats();
+        let api_value = serde_json::to_value(&api_stats).expect("DatabaseStats must serialize");
+        assert_eq!(
+            value, api_value,
+            "MCP response must be exactly the serialized public DatabaseStats"
+        );
+    }
+
+    /// Wire-level argument handling: `call_tool` delivers missing arguments
+    /// as JSON null, and clients may also send an empty object or extra
+    /// unknown keys — all must succeed. A non-object argument value must be
+    /// rejected with a structured error, not a panic.
+    #[test]
+    fn test_database_stats_raw_argument_edge_cases() {
+        let server = create_test_server();
+
+        // No `arguments` at all (call_tool surfaces this as null).
+        let value: serde_json::Value =
+            serde_json::from_str(&server.database_stats_raw(serde_json::Value::Null))
+                .expect("null args must yield valid JSON");
+        assert!(
+            value.get("error").is_none(),
+            "null arguments must succeed: {value}"
+        );
+        assert!(value.get("current").is_some());
+
+        // Empty object.
+        let value: serde_json::Value =
+            serde_json::from_str(&server.database_stats_raw(serde_json::json!({})))
+                .expect("empty-object args must yield valid JSON");
+        assert!(
+            value.get("error").is_none(),
+            "empty-object arguments must succeed: {value}"
+        );
+
+        // Unknown keys are tolerated (the request struct is not
+        // deny_unknown_fields), so a slightly-wrong client still gets stats.
+        let value: serde_json::Value =
+            serde_json::from_str(&server.database_stats_raw(serde_json::json!({"unexpected": 1})))
+                .expect("unknown-key args must yield valid JSON");
+        assert!(
+            value.get("error").is_none(),
+            "unknown keys must be tolerated: {value}"
+        );
+        assert!(value.get("wal").is_some());
+
+        // A non-object argument value is a malformed request: structured
+        // error (Issue #3234 shape), never a panic or silent success.
+        let value: serde_json::Value =
+            serde_json::from_str(&server.database_stats_raw(serde_json::json!("bogus")))
+                .expect("invalid args must still yield valid JSON");
+        let error = value
+            .get("error")
+            .and_then(|e| e.as_object())
+            .expect("non-object arguments must produce a structured error object");
+        assert_eq!(
+            error.get("code").and_then(|c| c.as_str()),
+            Some("INVALID_ARGUMENT"),
+            "malformed arguments must be INVALID_ARGUMENT: {value}"
+        );
+        assert_eq!(
+            error.get("retriable").and_then(|r| r.as_bool()),
+            Some(false),
+            "INVALID_ARGUMENT is never retriable: {value}"
+        );
+        let message = error
+            .get("message")
+            .and_then(|m| m.as_str())
+            .expect("structured error must carry a message");
+        assert!(
+            message.contains("Invalid arguments"),
+            "error must identify the argument problem: {value}"
+        );
+    }
+
+    /// Schema contract: the exact key sets of every response object are
+    /// load-bearing for MCP consumers — a renamed or dropped key is a
+    /// breaking change that must fail this test.
+    #[test]
+    fn test_database_stats_key_sets_are_stable() {
+        use crate::config::{AletheiaDBConfig, HistoricalConfigBuilder, WalConfigBuilder};
+
+        fn keys(value: &serde_json::Value) -> Vec<&str> {
+            let mut keys: Vec<&str> = value
+                .as_object()
+                .expect("expected a JSON object")
+                .keys()
+                .map(String::as_str)
+                .collect();
+            keys.sort_unstable();
+            keys
+        }
+
+        // Cold-enabled server so the flattened details keys are present too.
+        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let config = AletheiaDBConfig::builder()
+            .wal(
+                WalConfigBuilder::new()
+                    .wal_dir(temp_dir.path().join("wal"))
+                    .build(),
+            )
+            .persistence(crate::storage::index_persistence::PersistenceConfig {
+                enabled: false,
+                ..Default::default()
+            })
+            .historical(
+                HistoricalConfigBuilder::new()
+                    .enable_cold_storage(true)
+                    .cold_storage_path(temp_dir.path().join("cold.redb"))
+                    .build(),
+            )
+            .build();
+        let db = Arc::new(AletheiaDB::with_unified_config(config).expect("db init"));
+        let server = AletheiaMcpServer::new(db);
+
+        let value = stats_response(&server);
+        assert_eq!(
+            keys(&value),
+            vec!["cold_storage", "current", "historical", "wal"]
+        );
+        assert_eq!(keys(&value["current"]), vec!["edge_count", "node_count"]);
+        assert_eq!(
+            keys(&value["historical"]),
+            vec![
+                "anchor_count",
+                "compression_ratio",
+                "delta_count",
+                "edge_anchor_count",
+                "edge_delta_count",
+                "node_anchor_count",
+                "node_delta_count",
+                "total_edge_versions",
+                "total_node_versions",
+                "unique_edges",
+                "unique_nodes",
+            ]
+        );
+        assert_eq!(
+            keys(&value["cold_storage"]),
+            vec![
+                "compression_ratio",
+                "edge_versions_stored",
+                "enabled",
+                "node_versions_stored",
+                "tier_access",
+            ]
+        );
+        assert_eq!(
+            keys(&value["cold_storage"]["tier_access"]),
+            vec!["cold_hits", "hot_hits", "misses", "warm_hits"]
+        );
+        assert_eq!(
+            keys(&value["wal"]),
+            vec![
+                "current_lsn",
+                "durability_mode",
+                "enabled",
+                "healthy",
+                "total_appends",
+            ]
+        );
+    }
+
+    /// Deletions through the MCP surface must be reflected coherently:
+    /// current-state counts shrink, while the bi-temporal record (unique
+    /// entities and their versions) is retained and grows — a delete is a
+    /// recorded change, not an erasure.
+    #[test]
+    fn test_database_stats_reflects_deletions() {
+        let server = create_test_server();
+
+        let (a, b) = {
+            let a: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+                derived_from: None,
+                valid_time: None,
+                label: "Person".to_string(),
+                properties: None,
+                provenance: None,
+            }))
+            .unwrap();
+            let b: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+                derived_from: None,
+                valid_time: None,
+                label: "Person".to_string(),
+                properties: None,
+                provenance: None,
+            }))
+            .unwrap();
+            (a.id, b.id)
+        };
+        let edge: EdgeResponse = parse_response(&server.create_edge(CreateEdgeRequest {
+            derived_from: None,
+            valid_time: None,
+            source_id: a,
+            target_id: b,
+            label: "KNOWS".to_string(),
+            properties: None,
+            provenance: None,
+        }))
+        .unwrap();
+
+        let before = stats_response(&server);
+        assert_eq!(before["current"]["node_count"], serde_json::json!(2));
+        assert_eq!(before["current"]["edge_count"], serde_json::json!(1));
+        let node_versions_before = before["historical"]["total_node_versions"]
+            .as_u64()
+            .unwrap();
+        let edge_versions_before = before["historical"]["total_edge_versions"]
+            .as_u64()
+            .unwrap();
+
+        // Delete the edge, then node `a` (now unconnected).
+        let del_edge: serde_json::Value =
+            serde_json::from_str(&server.delete_edge(DeleteEdgeRequest {
+                edge_id: edge.id,
+                valid_time: None,
+            }))
+            .unwrap();
+        assert_eq!(del_edge.get("success"), Some(&serde_json::json!(true)));
+        let del_node: serde_json::Value =
+            serde_json::from_str(&server.delete_node(DeleteNodeRequest {
+                node_id: a,
+                detach: None,
+                valid_time: None,
+            }))
+            .unwrap();
+        assert_eq!(del_node.get("success"), Some(&serde_json::json!(true)));
+
+        let after = stats_response(&server);
+        assert_eq!(after["current"]["node_count"], serde_json::json!(1));
+        assert_eq!(after["current"]["edge_count"], serde_json::json!(0));
+
+        // The bi-temporal record is retained: both nodes and the edge still
+        // have history, and the deletions were recorded as new versions.
+        assert_eq!(after["historical"]["unique_nodes"], serde_json::json!(2));
+        assert_eq!(after["historical"]["unique_edges"], serde_json::json!(1));
+        assert!(
+            after["historical"]["total_node_versions"].as_u64().unwrap() > node_versions_before,
+            "a node deletion must be recorded as a version, not an erasure: \
+             before={node_versions_before}, after={after}"
+        );
+        assert!(
+            after["historical"]["total_edge_versions"].as_u64().unwrap() > edge_versions_before,
+            "an edge deletion must be recorded as a version, not an erasure: \
+             before={edge_versions_before}, after={after}"
+        );
+    }
+}
+
+// ============================================================================
+// Temporal bounds on read responses (Issue #3232)
+// ============================================================================
+
+mod temporal_bounds_tests {
+    use super::*;
+
+    /// Extract the `temporal` block from an entity JSON object, failing the
+    /// test if it is absent.
+    fn temporal_of(entity: &serde_json::Value) -> serde_json::Value {
+        entity
+            .get("temporal")
+            .unwrap_or_else(|| panic!("response must carry a `temporal` block: {entity}"))
+            .clone()
+    }
+
+    /// Parse an RFC3339 string back to microseconds since epoch.
+    fn rfc3339_to_micros(s: &str) -> i64 {
+        chrono::DateTime::parse_from_rfc3339(s)
+            .unwrap_or_else(|e| panic!("`{s}` must be RFC3339: {e}"))
+            .timestamp_micros()
+    }
+
+    /// Assert the shape shared by every current (live) version: RFC3339
+    /// `*_from` bounds, explicit-null open `*_to` bounds (present, never
+    /// omitted), and `is_current: true`.
+    fn assert_current_open_bounds(temporal: &serde_json::Value) {
+        for key in ["valid_from", "transaction_from"] {
+            let s = temporal[key]
+                .as_str()
+                .unwrap_or_else(|| panic!("`{key}` must be an RFC3339 string: {temporal}"));
+            rfc3339_to_micros(s);
+        }
+        for key in ["valid_to", "transaction_to"] {
+            let v = temporal.get(key).unwrap_or_else(|| {
+                panic!("`{key}` must be present (as null), not omitted: {temporal}")
+            });
+            assert!(
+                v.is_null(),
+                "`{key}` must be JSON null for open bounds: {temporal}"
+            );
+        }
+        assert_eq!(
+            temporal["is_current"],
+            serde_json::json!(true),
+            "a live version must report is_current: true: {temporal}"
+        );
+    }
+
+    fn create_person(server: &AletheiaMcpServer, name: &str) -> serde_json::Value {
+        let mut props = HashMap::new();
+        props.insert("name".to_string(), serde_json::json!(name));
+        let response = server.create_node(CreateNodeRequest {
+            derived_from: None,
+            valid_time: None,
+            label: "Person".to_string(),
+            properties: Some(props),
+            provenance: None,
+        });
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert!(value.get("error").is_none(), "create_node failed: {value}");
+        value
+    }
+
+    fn create_knows_edge(
+        server: &AletheiaMcpServer,
+        source_id: u64,
+        target_id: u64,
+    ) -> serde_json::Value {
+        let response = server.create_edge(CreateEdgeRequest {
+            derived_from: None,
+            source_id,
+            target_id,
+            label: "KNOWS".to_string(),
+            properties: None,
+            valid_time: None,
+            provenance: None,
+        });
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert!(value.get("error").is_none(), "create_edge failed: {value}");
+        value
+    }
+
+    fn now_micros() -> i64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_micros() as i64
+    }
+
+    #[test]
+    fn test_create_and_get_node_carry_temporal_bounds() {
+        let server = create_test_server();
+
+        let created = create_person(&server, "Alice");
+        assert_current_open_bounds(&temporal_of(&created));
+
+        let get_response = server.get_node(GetNodeRequest {
+            node_id: created["id"].as_u64().unwrap(),
+            include_vectors: None,
+        });
+        let retrieved: serde_json::Value = serde_json::from_str(&get_response).unwrap();
+        assert_current_open_bounds(&temporal_of(&retrieved));
+
+        // Existing top-level fields are unchanged (additive contract) and the
+        // typed response still round-trips.
+        let typed: NodeResponse = parse_response(&get_response).expect("typed parse must work");
+        assert_eq!(typed.label, "Person");
+        assert_eq!(
+            typed.properties.get("name"),
+            Some(&serde_json::json!("Alice"))
+        );
+    }
+
+    #[test]
+    fn test_create_and_get_edge_carry_temporal_bounds() {
+        let server = create_test_server();
+
+        let a = create_person(&server, "Alice")["id"].as_u64().unwrap();
+        let b = create_person(&server, "Bob")["id"].as_u64().unwrap();
+
+        let created = create_knows_edge(&server, a, b);
+        assert_current_open_bounds(&temporal_of(&created));
+
+        let get_response = server.get_edge(GetEdgeRequest {
+            edge_id: created["id"].as_u64().unwrap(),
+            include_vectors: None,
+        });
+        let retrieved: serde_json::Value = serde_json::from_str(&get_response).unwrap();
+        assert_current_open_bounds(&temporal_of(&retrieved));
+
+        let typed: EdgeResponse = parse_response(&get_response).expect("typed parse must work");
+        assert_eq!(typed.label, "KNOWS");
+        assert_eq!(typed.source_id, a);
+        assert_eq!(typed.target_id, b);
+
+        // Point-in-time edge read carries the block too. Capture one shared
+        // "now" so both dimensions anchor the same bi-temporal instant.
+        let now = now_micros().to_string();
+        let at_time_response = server.get_edge_at_time(GetEdgeAtTimeRequest {
+            edge_id: created["id"].as_u64().unwrap(),
+            valid_time: now.clone(),
+            transaction_time: Some(now),
+        });
+        let at_time: serde_json::Value = serde_json::from_str(&at_time_response).unwrap();
+        assert!(
+            at_time.get("error").is_none(),
+            "get_edge_at_time failed: {at_time}"
+        );
+        assert_current_open_bounds(&temporal_of(&at_time["edge"]));
+    }
+
+    #[test]
+    fn test_list_nodes_and_traverse_stamp_each_node() {
+        let server = create_test_server();
+
+        let a = create_person(&server, "Alice")["id"].as_u64().unwrap();
+        let b = create_person(&server, "Bob")["id"].as_u64().unwrap();
+        create_knows_edge(&server, a, b);
+
+        let list_response = server.list_nodes(ListNodesRequest {
+            label: Some("Person".to_string()),
+            property_key: None,
+            property_value: None,
+            limit: None,
+            offset: None,
+            include_vectors: None,
+        });
+        let listed: serde_json::Value = serde_json::from_str(&list_response).unwrap();
+        let nodes = listed["nodes"].as_array().expect("nodes array");
+        assert_eq!(nodes.len(), 2);
+        for node in nodes {
+            assert_current_open_bounds(&temporal_of(node));
+        }
+
+        let traverse_response = server.traverse(TraverseRequest {
+            start_node_id: a,
+            edge_label: "KNOWS".to_string(),
+            direction: None,
+            depth: None,
+            limit: None,
+            offset: None,
+            include_vectors: None,
+            as_of_valid_time: None,
+            as_of_transaction_time: None,
+        });
+        let traversed: serde_json::Value = serde_json::from_str(&traverse_response).unwrap();
+        let results = traversed["results"].as_array().expect("results array");
+        assert_eq!(results.len(), 1);
+        for result in results {
+            assert_current_open_bounds(&temporal_of(&result["node"]));
+        }
+    }
+
+    #[test]
+    fn test_adjacency_and_update_responses_carry_temporal_bounds() {
+        let server = create_test_server();
+
+        let a = create_person(&server, "Alice")["id"].as_u64().unwrap();
+        let b = create_person(&server, "Bob")["id"].as_u64().unwrap();
+        let edge_id = create_knows_edge(&server, a, b)["id"].as_u64().unwrap();
+
+        for response in [
+            server.get_outgoing_edges(GetOutgoingEdgesRequest {
+                node_id: a,
+                label: None,
+                include_vectors: None,
+            }),
+            server.get_incoming_edges(GetIncomingEdgesRequest {
+                node_id: b,
+                label: None,
+                include_vectors: None,
+            }),
+        ] {
+            let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+            let edges = value["edges"].as_array().expect("edges array");
+            assert_eq!(edges.len(), 1);
+            for edge in edges {
+                assert_current_open_bounds(&temporal_of(edge));
+            }
+        }
+
+        // update_node / update_edge responses reflect the NEW version's
+        // bounds: still open-ended and current.
+        let mut props = HashMap::new();
+        props.insert("age".to_string(), serde_json::json!(31));
+        let update_node_response = server.update_node(UpdateNodeRequest {
+            derived_from: None,
+            valid_time: None,
+            node_id: a,
+            properties: props.clone(),
+            provenance: None,
+        });
+        let updated_node: serde_json::Value = serde_json::from_str(&update_node_response).unwrap();
+        assert_current_open_bounds(&temporal_of(&updated_node));
+
+        let update_edge_response = server.update_edge(UpdateEdgeRequest {
+            derived_from: None,
+            edge_id,
+            properties: props,
+            valid_time: None,
+            provenance: None,
+        });
+        let updated_edge: serde_json::Value = serde_json::from_str(&update_edge_response).unwrap();
+        assert_current_open_bounds(&temporal_of(&updated_edge));
+    }
+
+    #[test]
+    fn test_superseded_version_has_closed_bounds_and_is_not_current() {
+        let server = create_test_server();
+
+        let node_id = create_person(&server, "Alice")["id"].as_u64().unwrap();
+
+        // Anchor a bi-temporal coordinate strictly after the create and
+        // strictly before the update.
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let anchor = now_micros();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+
+        let mut props = HashMap::new();
+        props.insert("name".to_string(), serde_json::json!("Alice v2"));
+        parse_response::<NodeResponse>(&server.update_node(UpdateNodeRequest {
+            derived_from: None,
+            valid_time: None,
+            node_id,
+            properties: props,
+            provenance: None,
+        }))
+        .expect("update must succeed");
+
+        // The at-time read anchored before the update returns the superseded
+        // version: both bounds closed, not current.
+        let at_time_response = server.get_node_at_time(GetNodeAtTimeRequest {
+            node_id,
+            valid_time: anchor.to_string(),
+            transaction_time: Some(anchor.to_string()),
+        });
+        let at_time: serde_json::Value = serde_json::from_str(&at_time_response).unwrap();
+        assert!(
+            at_time.get("error").is_none(),
+            "get_node_at_time failed: {at_time}"
+        );
+        let superseded = temporal_of(&at_time["node"]);
+        let valid_to = superseded["valid_to"].as_str().unwrap_or_else(|| {
+            panic!("superseded valid_to must be a closed RFC3339 bound: {superseded}")
+        });
+        let transaction_to = superseded["transaction_to"].as_str().unwrap_or_else(|| {
+            panic!("superseded transaction_to must be a closed RFC3339 bound: {superseded}")
+        });
+        assert!(rfc3339_to_micros(valid_to) > anchor);
+        assert!(rfc3339_to_micros(transaction_to) > anchor);
+        assert_eq!(
+            superseded["is_current"],
+            serde_json::json!(false),
+            "a superseded version must report is_current: false: {superseded}"
+        );
+
+        // A current read after the update shows the NEW version's bounds:
+        // open-ended, current, and starting after the anchor.
+        let current_response = server.get_node(GetNodeRequest {
+            node_id,
+            include_vectors: None,
+        });
+        let current: serde_json::Value = serde_json::from_str(&current_response).unwrap();
+        let current_temporal = temporal_of(&current);
+        assert_current_open_bounds(&current_temporal);
+        assert!(
+            rfc3339_to_micros(current_temporal["transaction_from"].as_str().unwrap()) > anchor,
+            "current version must start after the anchor: {current_temporal}"
+        );
+    }
+
+    #[test]
+    fn test_temporal_bounds_agree_with_node_history() {
+        let server = create_test_server();
+
+        let node_id = create_person(&server, "Alice")["id"].as_u64().unwrap();
+
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let anchor = now_micros();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+
+        let mut props = HashMap::new();
+        props.insert("name".to_string(), serde_json::json!("Alice v2"));
+        parse_response::<NodeResponse>(&server.update_node(UpdateNodeRequest {
+            derived_from: None,
+            valid_time: None,
+            node_id,
+            properties: props,
+            provenance: None,
+        }))
+        .expect("update must succeed");
+
+        let history_response = server.get_node_history(GetNodeHistoryRequest { node_id });
+        let history: serde_json::Value = serde_json::from_str(&history_response).unwrap();
+        let versions = history["versions"].as_array().expect("versions array");
+        assert_eq!(versions.len(), 2, "expected two versions: {history}");
+
+        // History emits micros-as-string; the temporal block's RFC3339 must
+        // decode to the same microsecond values for the same version.
+        let history_micros = |v: &serde_json::Value, key: &str| -> Option<i64> {
+            let field = v.get(key).unwrap_or(&serde_json::Value::Null);
+            if field.is_null() {
+                None
+            } else {
+                Some(field.as_str().unwrap().parse::<i64>().unwrap())
+            }
+        };
+        let temporal_micros = |t: &serde_json::Value, key: &str| -> Option<i64> {
+            let field = t.get(key).unwrap_or_else(|| {
+                panic!("temporal block must always carry `{key}` (null when open): {t}")
+            });
+            if field.is_null() {
+                None
+            } else {
+                Some(rfc3339_to_micros(field.as_str().unwrap()))
+            }
+        };
+
+        let superseded_history = versions
+            .iter()
+            .find(|v| !v["transaction_to"].is_null())
+            .expect("one superseded version");
+        let current_history = versions
+            .iter()
+            .find(|v| v["transaction_to"].is_null())
+            .expect("one current version");
+
+        let at_time_response = server.get_node_at_time(GetNodeAtTimeRequest {
+            node_id,
+            valid_time: anchor.to_string(),
+            transaction_time: Some(anchor.to_string()),
+        });
+        let at_time: serde_json::Value = serde_json::from_str(&at_time_response).unwrap();
+        let superseded_temporal = temporal_of(&at_time["node"]);
+
+        let current_response = server.get_node(GetNodeRequest {
+            node_id,
+            include_vectors: None,
+        });
+        let current: serde_json::Value = serde_json::from_str(&current_response).unwrap();
+        let current_temporal = temporal_of(&current);
+
+        for key in [
+            "valid_from",
+            "valid_to",
+            "transaction_from",
+            "transaction_to",
+        ] {
+            assert_eq!(
+                temporal_micros(&superseded_temporal, key),
+                history_micros(superseded_history, key),
+                "superseded `{key}` must agree with history: {superseded_temporal} vs {superseded_history}"
+            );
+            assert_eq!(
+                temporal_micros(&current_temporal, key),
+                history_micros(current_history, key),
+                "current `{key}` must agree with history: {current_temporal} vs {current_history}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_not_yet_valid_fact_reports_is_current_false() {
+        let server = create_test_server();
+
+        // A fact that only becomes true one hour from now: both bounds are
+        // open, yet the valid interval does not contain the current time, so
+        // is_current must be false. This isolates the valid-time conjunct of
+        // is_current -- a transaction-time-only implementation would wrongly
+        // report true here.
+        let future = now_micros() + 3_600_000_000;
+        let mut props = HashMap::new();
+        props.insert("name".to_string(), serde_json::json!("Alice"));
+        let response = server.create_node(CreateNodeRequest {
+            derived_from: None,
+            valid_time: Some(future.to_string()),
+            label: "Person".to_string(),
+            properties: Some(props),
+            provenance: None,
+        });
+        let created: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert!(
+            created.get("error").is_none(),
+            "create_node with a future valid_time must succeed: {created}"
+        );
+
+        let assert_future_not_current = |temporal: &serde_json::Value| {
+            for key in ["valid_to", "transaction_to"] {
+                let v = temporal.get(key).unwrap_or_else(|| {
+                    panic!("`{key}` must be present (as null), not omitted: {temporal}")
+                });
+                assert!(
+                    v.is_null(),
+                    "`{key}` must be JSON null for open bounds: {temporal}"
+                );
+            }
+            assert_eq!(
+                rfc3339_to_micros(temporal["valid_from"].as_str().unwrap()),
+                future,
+                "valid_from must decode to the future valid time exactly: {temporal}"
+            );
+            assert_eq!(
+                temporal["is_current"],
+                serde_json::json!(false),
+                "a not-yet-valid fact must report is_current: false even though \
+                 both bounds are open: {temporal}"
+            );
+        };
+        assert_future_not_current(&temporal_of(&created));
+
+        let get_response = server.get_node(GetNodeRequest {
+            node_id: created["id"].as_u64().unwrap(),
+            include_vectors: None,
+        });
+        let retrieved: serde_json::Value = serde_json::from_str(&get_response).unwrap();
+        assert_future_not_current(&temporal_of(&retrieved));
+    }
+
+    #[test]
+    fn test_backdated_create_reflects_valid_time_in_temporal_block() {
+        let server = create_test_server();
+
+        // A fact backdated one hour: valid since then (and still valid), so
+        // it is current, but valid_from must reflect the caller-supplied
+        // valid time while transaction_from is the (later) system-assigned
+        // commit time.
+        let backdated = now_micros() - 3_600_000_000;
+        let mut props = HashMap::new();
+        props.insert("name".to_string(), serde_json::json!("Alice"));
+        let response = server.create_node(CreateNodeRequest {
+            derived_from: None,
+            valid_time: Some(backdated.to_string()),
+            label: "Person".to_string(),
+            properties: Some(props),
+            provenance: None,
+        });
+        let created: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert!(
+            created.get("error").is_none(),
+            "create_node with a backdated valid_time must succeed: {created}"
+        );
+
+        let temporal = temporal_of(&created);
+        assert_current_open_bounds(&temporal);
+        assert_eq!(
+            rfc3339_to_micros(temporal["valid_from"].as_str().unwrap()),
+            backdated,
+            "valid_from must decode to the backdated valid time exactly: {temporal}"
+        );
+        assert!(
+            rfc3339_to_micros(temporal["transaction_from"].as_str().unwrap()) > backdated,
+            "transaction_from is system-assigned and must be later than the \
+             backdated valid time: {temporal}"
+        );
+    }
+
+    #[test]
+    fn test_deleted_node_at_time_read_has_closed_transaction_to() {
+        let server = create_test_server();
+
+        let node_id = create_person(&server, "Alice")["id"].as_u64().unwrap();
+
+        // Anchor a bi-temporal coordinate strictly after the create and
+        // strictly before the delete.
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let anchor = now_micros();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+
+        let delete_response = server.delete_node(DeleteNodeRequest {
+            node_id,
+            detach: None,
+            valid_time: None,
+        });
+        let deleted: serde_json::Value = serde_json::from_str(&delete_response).unwrap();
+        assert!(
+            deleted.get("error").is_none(),
+            "delete_node failed: {deleted}"
+        );
+
+        // The at-time read anchored before the delete returns the pre-delete
+        // version. The delete writer closes that version's transaction_time
+        // at the delete's commit timestamp, so transaction_to must be a
+        // closed RFC3339 bound strictly after the anchor and the version must
+        // no longer be current. (valid_to is implementation-dependent for
+        // deletes -- the tombstone carries the valid-time closure -- so it is
+        // deliberately not asserted here.)
+        let at_time_response = server.get_node_at_time(GetNodeAtTimeRequest {
+            node_id,
+            valid_time: anchor.to_string(),
+            transaction_time: Some(anchor.to_string()),
+        });
+        let at_time: serde_json::Value = serde_json::from_str(&at_time_response).unwrap();
+        assert!(
+            at_time.get("error").is_none(),
+            "get_node_at_time anchored before the delete must still see the \
+             pre-delete version: {at_time}"
+        );
+        let temporal = temporal_of(&at_time["node"]);
+        let transaction_to = temporal["transaction_to"].as_str().unwrap_or_else(|| {
+            panic!("deleted version's transaction_to must be a closed RFC3339 bound: {temporal}")
+        });
+        assert!(
+            rfc3339_to_micros(transaction_to) > anchor,
+            "transaction_to must be the delete's commit time, strictly after \
+             the anchor: {temporal}"
+        );
+        assert_eq!(
+            temporal["is_current"],
+            serde_json::json!(false),
+            "a deleted version must report is_current: false: {temporal}"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Conversion-level unit tests for `is_current` on hand-constructed
+    // `BiTemporalInterval`s (HLC-robust semantics: transaction dimension is
+    // judged by interval openness, valid dimension at wallclock granularity).
+    // ------------------------------------------------------------------
+
+    use crate::core::hlc::HybridTimestamp;
+    use crate::core::temporal::{BiTemporalInterval, TimeRange, time};
+
+    #[test]
+    fn test_is_current_true_for_hlc_logical_component_in_current_microsecond() {
+        // An HLC commit stamp in the CURRENT microsecond with logical > 0
+        // orders strictly after SystemTime-now (logical = 0) in the same
+        // microsecond. Under the old `contains(now)` rule this live,
+        // open-ended head version reported is_current: false; it must now
+        // report true.
+        let now = time::now();
+        let commit = HybridTimestamp::new(now.wallclock(), 5).expect("valid HLC stamp");
+        let interval = BiTemporalInterval::now(commit, commit);
+        let bounds = TemporalBounds::from(&interval);
+        assert!(
+            bounds.is_current,
+            "an open head version committed in the current microsecond with \
+             logical > 0 must be current: {bounds:?}"
+        );
+    }
+
+    #[test]
+    fn test_is_current_true_when_hlc_frontier_runs_ahead_of_wallclock() {
+        // After a tolerated backward OS-clock step, the HLC frontier runs
+        // AHEAD of SystemTime, so commit stamps land slightly in the
+        // wallclock future (here: +50ms) while the fact's valid time is not
+        // skewed. The transaction interval is open -- by definition the
+        // currently-recorded version -- so is_current must be true; the old
+        // tx_from-vs-now comparison misreported false for minutes.
+        let now = time::now();
+        let skewed_commit =
+            HybridTimestamp::new(now.wallclock() + 50_000, 0).expect("valid skewed stamp");
+        let interval = BiTemporalInterval::with_valid_time(now, skewed_commit);
+        let bounds = TemporalBounds::from(&interval);
+        assert!(
+            bounds.is_current,
+            "an open head version whose commit stamp runs ahead of the OS \
+             clock must be current: {bounds:?}"
+        );
+    }
+
+    #[test]
+    fn test_is_current_false_for_explicit_future_valid_time() {
+        // An explicitly backdated-to-the-future fact (valid_from = now + 1h)
+        // is not yet true in reality, so is_current must be false even
+        // though both intervals are open-ended.
+        let now = time::now();
+        let future_valid =
+            HybridTimestamp::new(now.wallclock() + 3_600_000_000, 0).expect("valid future stamp");
+        let interval = BiTemporalInterval::with_valid_time(future_valid, now);
+        let bounds = TemporalBounds::from(&interval);
+        assert!(
+            !bounds.is_current,
+            "a not-yet-valid fact must not be current even with open \
+             intervals: {bounds:?}"
+        );
+    }
+
+    #[test]
+    fn test_is_current_false_for_closed_transaction_interval() {
+        // A superseded version (closed transaction interval) is never
+        // current, even if its valid interval still contains now.
+        let now = time::now();
+        let hour_ago =
+            HybridTimestamp::new(now.wallclock() - 3_600_000_000, 0).expect("valid past stamp");
+        let second_ago =
+            HybridTimestamp::new(now.wallclock() - 1_000_000, 0).expect("valid past stamp");
+        let interval = BiTemporalInterval::new(
+            TimeRange::from(hour_ago),
+            TimeRange::new(hour_ago, second_ago).expect("valid closed range"),
+        );
+        let bounds = TemporalBounds::from(&interval);
+        assert!(
+            !bounds.is_current,
+            "a superseded (closed-transaction) version must not be current \
+             even while still valid: {bounds:?}"
+        );
+    }
+
+    #[test]
+    fn test_is_current_false_for_expired_valid_interval() {
+        // A fact whose valid time ended in the past is not current, even
+        // though its transaction interval is still open (it is still the
+        // recorded version of that fact).
+        let now = time::now();
+        let two_hours_ago =
+            HybridTimestamp::new(now.wallclock() - 7_200_000_000, 0).expect("valid past stamp");
+        let hour_ago =
+            HybridTimestamp::new(now.wallclock() - 3_600_000_000, 0).expect("valid past stamp");
+        let interval = BiTemporalInterval::new(
+            TimeRange::new(two_hours_ago, hour_ago).expect("valid closed range"),
+            TimeRange::from(two_hours_ago),
+        );
+        let bounds = TemporalBounds::from(&interval);
+        assert!(
+            !bounds.is_current,
+            "an expired fact must not be current even with an open \
+             transaction interval: {bounds:?}"
+        );
+    }
+
+    #[test]
+    fn test_wallclock_beyond_chrono_range_falls_back_to_raw_micros() {
+        // chrono can only represent dates up to ~year 262143 (~8.2e18
+        // micros), while valid HLC wallclocks extend to MAX_VALID_TIMESTAMP
+        // (i64::MAX - 1000). A bound past chrono's range must fall back to
+        // the raw microsecond count as a string instead of silently
+        // rendering the 1970 epoch.
+        let huge_micros = 9_000_000_000_000_000_000i64;
+        let far_future = HybridTimestamp::new(huge_micros, 0).expect("legal HLC wallclock");
+        let interval = BiTemporalInterval::new(
+            TimeRange::from(far_future),
+            TimeRange::from(HybridTimestamp::new(1_000_000, 0).expect("valid stamp")),
+        );
+
+        let bounds = TemporalBounds::from(&interval);
+        assert_eq!(
+            bounds.valid_from,
+            huge_micros.to_string(),
+            "out-of-chrono-range wallclock must serialize as raw micros: {bounds:?}"
+        );
+        assert!(
+            bounds.valid_to.is_none(),
+            "open-ended valid_to must stay None: {bounds:?}"
+        );
+        // The in-range transaction bound must still be RFC3339.
+        assert_eq!(rfc3339_to_micros(&bounds.transaction_from), 1_000_000);
+        // A fact whose valid time hasn't begun is not current.
+        assert!(!bounds.is_current, "far-future fact is not current");
+    }
+
+    #[test]
+    fn test_from_interval_at_valid_from_equal_to_now_is_current() {
+        // Half-open interval semantics: a fact becomes true AT valid_from,
+        // so an explicit `now` exactly equal to valid_from is current
+        // (Issue #3391: `from_interval_at` evaluates at the caller's
+        // request-scoped instant, not a fresh wallclock read).
+        let t = HybridTimestamp::new(1_700_000_000_000_000, 0).expect("valid stamp");
+        let interval = BiTemporalInterval::now(t, t);
+        let bounds = TemporalBounds::from_interval_at(&interval, t);
+        assert!(
+            bounds.is_current,
+            "a fact is current from valid_from inclusive: {bounds:?}"
+        );
+    }
+
+    #[test]
+    fn test_from_interval_at_one_micro_before_valid_from_is_not_current() {
+        // One microsecond before valid_from the fact is not yet true.
+        let t = HybridTimestamp::new(1_700_000_000_000_000, 0).expect("valid stamp");
+        let interval = BiTemporalInterval::now(t, t);
+        let just_before = HybridTimestamp::new(t.wallclock() - 1, 0).expect("valid earlier stamp");
+        let bounds = TemporalBounds::from_interval_at(&interval, just_before);
+        assert!(
+            !bounds.is_current,
+            "a fact is not current one microsecond before valid_from: {bounds:?}"
+        );
+    }
+
+    #[test]
+    fn test_node_with_unresolvable_version_omits_temporal_and_provenance() {
+        // Best-effort degrade path (mirrors provenance, Issue #3224): when
+        // the version metadata cannot be loaded from any tier, the read must
+        // still succeed with the `temporal` and `provenance` blocks omitted
+        // -- never a fabricated value, never a whole-response failure.
+        use crate::core::id::{NodeId, VersionId};
+
+        let server = create_test_server();
+        let created = create_person(&server, "Ghost");
+        let node_id = created["id"].as_u64().unwrap();
+
+        // Re-point the stored node's current_version at a version id that
+        // exists in no tier, simulating unreadable version metadata.
+        let mut node = server
+            .db()
+            .current
+            .get_node(NodeId::new(node_id).unwrap())
+            .unwrap();
+        node.current_version = VersionId::new(9_999_999).unwrap();
+        server
+            .db()
+            .current
+            .update_node_direct(node, time::now())
+            .unwrap();
+
+        let response = server.get_node(GetNodeRequest {
+            node_id,
+            include_vectors: None,
+        });
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert!(
+            value.get("error").is_none(),
+            "read must still succeed when metadata is unreadable: {value}"
+        );
+        assert_eq!(value["id"].as_u64(), Some(node_id));
+        assert_eq!(value["label"], "Person");
+        assert_eq!(value["properties"]["name"], "Ghost");
+        assert!(
+            value.get("temporal").is_none(),
+            "temporal must be omitted, not fabricated: {value}"
+        );
+        assert!(
+            value.get("provenance").is_none(),
+            "provenance must be omitted, not fabricated: {value}"
+        );
+    }
+
+    #[test]
+    fn test_edge_with_unresolvable_version_omits_temporal_and_provenance() {
+        // Edge mirror of the node degrade case above.
+        use crate::core::id::{EdgeId, VersionId};
+
+        let server = create_test_server();
+        let alice = create_person(&server, "Alice");
+        let bob = create_person(&server, "Bob");
+        let edge = create_knows_edge(
+            &server,
+            alice["id"].as_u64().unwrap(),
+            bob["id"].as_u64().unwrap(),
+        );
+        let edge_id = edge["id"].as_u64().unwrap();
+
+        let mut stored = server
+            .db()
+            .current
+            .get_edge(EdgeId::new(edge_id).unwrap())
+            .unwrap();
+        stored.current_version = VersionId::new(9_999_998).unwrap();
+        server.db().current.update_edge_direct(stored).unwrap();
+
+        let response = server.get_edge(GetEdgeRequest {
+            edge_id,
+            include_vectors: None,
+        });
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert!(
+            value.get("error").is_none(),
+            "read must still succeed when metadata is unreadable: {value}"
+        );
+        assert_eq!(value["id"].as_u64(), Some(edge_id));
+        assert_eq!(value["label"], "KNOWS");
+        assert!(
+            value.get("temporal").is_none(),
+            "temporal must be omitted, not fabricated: {value}"
+        );
+        assert!(
+            value.get("provenance").is_none(),
+            "provenance must be omitted, not fabricated: {value}"
+        );
+    }
+}
+
+// ============================================================================
+// Atomic multi-write batches with local refs (`apply_batch`, Issue #3231)
+// ============================================================================
+
+mod apply_batch_tests {
+    use super::*;
+    use crate::core::id::{EdgeId, NodeId};
+    use crate::core::temporal::{Timestamp, time};
+    use serde_json::json;
+
+    /// 2020-01-01T00:00:00Z in microseconds since epoch — a safely-backdated
+    /// valid time for #3221-style per-op valid_time assertions.
+    const T_PAST_MICROS: i64 = 1_577_836_800_000_000;
+
+    /// Dispatch `apply_batch` through the same table `call_tool` uses.
+    /// Returns `(parsed_json, is_error)`.
+    fn dispatch_batch(
+        server: &AletheiaMcpServer,
+        args: serde_json::Value,
+    ) -> (serde_json::Value, bool) {
+        let result = server.dispatch_tool("apply_batch", args);
+        let is_error = result.is_error.unwrap_or(false);
+        let text = result
+            .content
+            .first()
+            .and_then(|c| c.as_text().map(|t| t.text.clone()))
+            .expect("tool result should carry text content");
+        let value = serde_json::from_str(&text).expect("tool response should be valid JSON");
+        (value, is_error)
+    }
+
+    /// Apply a batch given just the operations array.
+    fn apply(server: &AletheiaMcpServer, ops: serde_json::Value) -> (serde_json::Value, bool) {
+        dispatch_batch(server, json!({ "operations": ops }))
+    }
+
+    /// Apply a batch and require success, returning the parsed response.
+    fn apply_ok(server: &AletheiaMcpServer, ops: serde_json::Value) -> serde_json::Value {
+        let (value, is_error) = apply(server, ops);
+        assert!(!is_error, "expected batch success, got: {value}");
+        assert_eq!(value["success"], json!(true), "got: {value}");
+        value
+    }
+
+    /// Apply a batch and require a structured error with the given code,
+    /// returning the full response payload.
+    fn apply_err(
+        server: &AletheiaMcpServer,
+        ops: serde_json::Value,
+        expected_code: &str,
+    ) -> serde_json::Value {
+        let (value, is_error) = apply(server, ops);
+        assert!(is_error, "expected batch error, got: {value}");
+        let error = value
+            .get("error")
+            .unwrap_or_else(|| panic!("expected structured error payload: {value}"));
+        assert_eq!(
+            error["code"].as_str(),
+            Some(expected_code),
+            "wrong code: {value}"
+        );
+        assert!(
+            error["message"].as_str().is_some_and(|m| !m.is_empty()),
+            "error must carry a message: {value}"
+        );
+        assert!(
+            error["retriable"].as_bool().is_some(),
+            "error must carry retriable: {value}"
+        );
+        // Caller-fault classes are never retriable (#3234 contract).
+        if matches!(expected_code, "INVALID_ARGUMENT" | "FAILED_PRECONDITION") {
+            assert_eq!(
+                error["retriable"],
+                json!(false),
+                "{expected_code} must be non-retriable: {value}"
+            );
+        }
+        value
+    }
+
+    /// Seed a committed `Person` node with a `name` property via the
+    /// single-op tool and return its id.
+    fn seed_person(server: &AletheiaMcpServer, name: &str) -> u64 {
+        let node: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            derived_from: None,
+            label: "Person".to_string(),
+            properties: Some(HashMap::from([(
+                "name".to_string(),
+                serde_json::Value::String(name.to_string()),
+            )])),
+            valid_time: None,
+            provenance: None,
+        }))
+        .expect("seed node should succeed");
+        node.id
+    }
+
+    /// Seed a committed edge between two committed nodes and return its id.
+    fn seed_edge(server: &AletheiaMcpServer, source: u64, target: u64) -> u64 {
+        let edge: EdgeResponse = parse_response(&server.create_edge(CreateEdgeRequest {
+            derived_from: None,
+            source_id: source,
+            target_id: target,
+            label: "KNOWS".to_string(),
+            properties: None,
+            valid_time: None,
+            provenance: None,
+        }))
+        .expect("seed edge should succeed");
+        edge.id
+    }
+
+    // ------------------------------------------------------------------
+    // Registration and argument-shape basics
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn apply_batch_registered_in_tool_list() {
+        let server = create_test_server();
+        let tools = server.list_tools_for_test();
+        assert!(
+            tools.iter().any(|t| t == "apply_batch"),
+            "apply_batch must be advertised: {tools:?}"
+        );
+    }
+
+    /// Schema drift guard: the advertised input schema must mention all six
+    /// op variant names, so an added/renamed variant that misses the schema
+    /// (or a schemars regression collapsing the tagged enum) fails loudly.
+    #[test]
+    fn apply_batch_schema_advertises_all_six_op_variants() {
+        let server = create_test_server();
+        let schema = server
+            .tool_input_schema_for_test("apply_batch")
+            .expect("apply_batch must advertise an input schema");
+        let schema_text = schema.to_string();
+        for variant in [
+            "create_node",
+            "create_edge",
+            "update_node",
+            "update_edge",
+            "delete_node",
+            "delete_edge",
+        ] {
+            assert!(
+                schema_text.contains(variant),
+                "apply_batch input schema must mention op variant {variant}: {schema_text}"
+            );
+        }
+    }
+
+    #[test]
+    fn apply_batch_null_args_returns_invalid_argument() {
+        let server = create_test_server();
+        let (value, is_error) = dispatch_batch(&server, serde_json::Value::Null);
+        assert!(is_error, "null args must error: {value}");
+        assert_eq!(value["error"]["code"], json!("INVALID_ARGUMENT"));
+    }
+
+    #[test]
+    fn apply_batch_empty_operations_is_noop_success() {
+        let server = create_test_server();
+        let value = apply_ok(&server, json!([]));
+        assert_eq!(value["results"], json!([]));
+        assert_eq!(value["ref_map"], json!({}));
+        assert_eq!(value["operation_count"], json!(0));
+        assert_eq!(server.db().node_count(), 0);
+    }
+
+    // ------------------------------------------------------------------
+    // Happy paths: subgraph in one call, local refs, version ids
+    // ------------------------------------------------------------------
+
+    /// The issue's success metric: an entity-with-relationships subgraph of
+    /// three-plus operations lands in ONE call, with every alias resolved to
+    /// a committed real ID and per-op version ids for creates/updates.
+    #[test]
+    fn apply_batch_creates_subgraph_with_refs_and_version_ids() {
+        let server = create_test_server();
+        let value = apply_ok(
+            &server,
+            json!([
+                {"op": "create_node", "label": "Person", "ref": "alice",
+                 "properties": {"name": "Alice"}},
+                {"op": "create_node", "label": "Person", "ref": "bob",
+                 "properties": {"name": "Bob"}},
+                {"op": "create_edge", "source_id": "$alice", "target_id": "$bob",
+                 "label": "KNOWS", "properties": {"since": 2024}},
+            ]),
+        );
+
+        assert_eq!(value["operation_count"], json!(3));
+        let results = value["results"].as_array().expect("results array");
+        assert_eq!(results.len(), 3);
+
+        // Per-op results in input order, each echoing its index and op.
+        assert_eq!(results[0]["op"], json!("create_node"));
+        assert_eq!(results[0]["index"], json!(0));
+        assert_eq!(results[0]["ref"], json!("alice"));
+        let alice_id = results[0]["node_id"].as_u64().expect("alice node_id");
+        assert!(
+            results[0]["version_id"].as_u64().is_some(),
+            "create_node result must carry a version_id: {value}"
+        );
+
+        assert_eq!(results[1]["op"], json!("create_node"));
+        let bob_id = results[1]["node_id"].as_u64().expect("bob node_id");
+
+        assert_eq!(results[2]["op"], json!("create_edge"));
+        let edge_id = results[2]["edge_id"].as_u64().expect("edge_id");
+        assert_eq!(results[2]["source_id"], json!(alice_id));
+        assert_eq!(results[2]["target_id"], json!(bob_id));
+        assert!(results[2]["version_id"].as_u64().is_some());
+
+        // ref_map maps every caller-supplied alias to its committed real ID.
+        assert_eq!(value["ref_map"]["alice"], json!(alice_id));
+        assert_eq!(value["ref_map"]["bob"], json!(bob_id));
+
+        // All three writes are committed and visible.
+        assert_eq!(server.db().node_count(), 2);
+        assert_eq!(server.db().edge_count(), 1);
+        let edge = server.db().get_edge(EdgeId::new(edge_id).unwrap()).unwrap();
+        assert_eq!(edge.source.as_u64(), alice_id);
+        assert_eq!(edge.target.as_u64(), bob_id);
+    }
+
+    /// Edge endpoints may mix pre-existing committed IDs and local refs
+    /// (including positional `$0`-style refs) interchangeably.
+    #[test]
+    fn apply_batch_edge_mixes_committed_id_and_local_ref() {
+        let server = create_test_server();
+        let existing = seed_person(&server, "Carol");
+
+        let value = apply_ok(
+            &server,
+            json!([
+                {"op": "create_node", "label": "Person", "properties": {"name": "Dave"}},
+                {"op": "create_edge", "source_id": "$0", "target_id": existing,
+                 "label": "KNOWS"},
+            ]),
+        );
+
+        let results = value["results"].as_array().unwrap();
+        let dave_id = results[0]["node_id"].as_u64().unwrap();
+        assert_eq!(results[1]["source_id"], json!(dave_id));
+        assert_eq!(results[1]["target_id"], json!(existing));
+        assert_eq!(server.db().edge_count(), 1);
+    }
+
+    #[test]
+    fn apply_batch_returns_version_ids_in_input_order_for_creates_and_updates() {
+        let server = create_test_server();
+        let existing = seed_person(&server, "Eve");
+        let other = seed_person(&server, "Grace");
+        let seeded_edge = seed_edge(&server, existing, other);
+
+        let value = apply_ok(
+            &server,
+            json!([
+                {"op": "create_node", "label": "Person", "ref": "f",
+                 "properties": {"name": "Frank"}},
+                {"op": "update_node", "node_id": existing,
+                 "properties": {"name": "Eve II"}},
+                {"op": "create_edge", "source_id": "$f", "target_id": existing,
+                 "label": "KNOWS"},
+                {"op": "update_edge", "edge_id": seeded_edge,
+                 "properties": {"weight": 5}},
+            ]),
+        );
+
+        let results = value["results"].as_array().unwrap();
+        assert_eq!(results.len(), 4);
+        for (i, expected_op) in ["create_node", "update_node", "create_edge", "update_edge"]
+            .iter()
+            .enumerate()
+        {
+            assert_eq!(results[i]["index"], json!(i));
+            assert_eq!(results[i]["op"], json!(*expected_op));
+            assert!(
+                results[i]["version_id"].as_u64().is_some(),
+                "op {i} must carry version_id: {value}"
+            );
+        }
+        // The updates targeted the committed entities and reported them back.
+        assert_eq!(results[1]["node_id"], json!(existing));
+        assert_eq!(results[3]["edge_id"], json!(seeded_edge));
+
+        // PATCH semantics as in the single-op tools: node property updated...
+        let node = server
+            .db()
+            .get_node(NodeId::new(existing).unwrap())
+            .unwrap();
+        let name = node
+            .properties
+            .iter()
+            .find_map(|(k, v)| {
+                crate::core::interning::GLOBAL_INTERNER
+                    .resolve_with(*k, |s| s == "name")
+                    .unwrap_or(false)
+                    .then(|| format!("{v:?}"))
+            })
+            .unwrap_or_default();
+        assert!(name.contains("Eve II"), "update must apply: {name}");
+
+        // ...and the edge property merge took effect too.
+        let edge = server
+            .db()
+            .get_edge(EdgeId::new(seeded_edge).unwrap())
+            .unwrap();
+        let weight = edge
+            .properties
+            .iter()
+            .find_map(|(k, v)| {
+                crate::core::interning::GLOBAL_INTERNER
+                    .resolve_with(*k, |s| s == "weight")
+                    .unwrap_or(false)
+                    .then(|| format!("{v:?}"))
+            })
+            .unwrap_or_default();
+        assert!(weight.contains('5'), "edge update must apply: {weight}");
+    }
+
+    #[test]
+    fn apply_batch_delete_edge_and_delete_node_report_no_version_id() {
+        let server = create_test_server();
+        let a = seed_person(&server, "A");
+        let b = seed_person(&server, "B");
+        let e = seed_edge(&server, a, b);
+
+        let value = apply_ok(
+            &server,
+            json!([
+                {"op": "delete_edge", "edge_id": e},
+                {"op": "delete_node", "node_id": a},
+            ]),
+        );
+        let results = value["results"].as_array().unwrap();
+        assert_eq!(results[0]["op"], json!("delete_edge"));
+        assert_eq!(results[0]["edge_id"], json!(e));
+        assert!(
+            results[0].get("version_id").is_none_or(|v| v.is_null()),
+            "deletes carry no version_id in v1: {value}"
+        );
+        assert_eq!(results[1]["op"], json!("delete_node"));
+        assert_eq!(results[1]["node_id"], json!(a));
+        assert_eq!(results[1]["edges_removed"], json!(0));
+        assert_eq!(server.db().node_count(), 1);
+        assert_eq!(server.db().edge_count(), 0);
+    }
+
+    // ------------------------------------------------------------------
+    // Static pre-validation: refs
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn apply_batch_forward_ref_rejected_with_op_index_and_nothing_committed() {
+        let server = create_test_server();
+        let value = apply_err(
+            &server,
+            json!([
+                {"op": "create_edge", "source_id": "$late", "target_id": "$late",
+                 "label": "KNOWS"},
+                {"op": "create_node", "label": "Person", "ref": "late"},
+            ]),
+            "INVALID_ARGUMENT",
+        );
+        let details = &value["error"]["details"];
+        assert_eq!(details["failed_op_index"], json!(0), "got: {value}");
+        assert_eq!(details["ref"], json!("$late"));
+        assert_eq!(details["defined_at_index"], json!(1));
+        assert_eq!(server.db().node_count(), 0, "nothing may commit");
+        assert_eq!(server.db().edge_count(), 0);
+    }
+
+    #[test]
+    fn apply_batch_unknown_ref_rejected_invalid_argument() {
+        let server = create_test_server();
+        let value = apply_err(
+            &server,
+            json!([
+                {"op": "create_node", "label": "Person", "ref": "a"},
+                {"op": "create_edge", "source_id": "$a", "target_id": "$ghost",
+                 "label": "KNOWS"},
+            ]),
+            "INVALID_ARGUMENT",
+        );
+        let details = &value["error"]["details"];
+        assert_eq!(details["failed_op_index"], json!(1));
+        assert_eq!(details["ref"], json!("$ghost"));
+        assert_eq!(server.db().node_count(), 0);
+    }
+
+    #[test]
+    fn apply_batch_duplicate_alias_rejected_with_first_definition_index() {
+        let server = create_test_server();
+        let value = apply_err(
+            &server,
+            json!([
+                {"op": "create_node", "label": "Person", "ref": "dup"},
+                {"op": "create_node", "label": "Person", "ref": "dup"},
+            ]),
+            "INVALID_ARGUMENT",
+        );
+        let details = &value["error"]["details"];
+        assert_eq!(details["failed_op_index"], json!(1));
+        assert_eq!(details["first_defined_at_index"], json!(0));
+        assert_eq!(server.db().node_count(), 0);
+    }
+
+    #[test]
+    fn apply_batch_unknown_op_type_rejected_with_index() {
+        let server = create_test_server();
+        let value = apply_err(
+            &server,
+            json!([
+                {"op": "create_node", "label": "Person"},
+                {"op": "upsert_node", "label": "Person"},
+            ]),
+            "INVALID_ARGUMENT",
+        );
+        assert_eq!(value["error"]["details"]["failed_op_index"], json!(1));
+        assert_eq!(server.db().node_count(), 0);
+    }
+
+    #[test]
+    fn apply_batch_empty_ref_alias_rejected() {
+        let server = create_test_server();
+        let value = apply_err(
+            &server,
+            json!([
+                {"op": "create_node", "label": "Person", "ref": ""},
+            ]),
+            "INVALID_ARGUMENT",
+        );
+        assert_eq!(value["error"]["details"]["failed_op_index"], json!(0));
+        assert_eq!(server.db().node_count(), 0);
+    }
+
+    #[test]
+    fn apply_batch_dollar_prefixed_ref_alias_rejected() {
+        let server = create_test_server();
+        let value = apply_err(
+            &server,
+            json!([
+                {"op": "create_node", "label": "Person"},
+                {"op": "create_node", "label": "Person", "ref": "$a"},
+            ]),
+            "INVALID_ARGUMENT",
+        );
+        assert_eq!(value["error"]["details"]["failed_op_index"], json!(1));
+        let msg = value["error"]["message"].as_str().unwrap();
+        assert!(
+            msg.contains('$'),
+            "message must explain the '$' rule: {msg}"
+        );
+        assert_eq!(server.db().node_count(), 0);
+    }
+
+    #[test]
+    fn apply_batch_purely_numeric_ref_alias_rejected() {
+        let server = create_test_server();
+        let value = apply_err(
+            &server,
+            json!([
+                {"op": "create_node", "label": "Person", "ref": "7"},
+            ]),
+            "INVALID_ARGUMENT",
+        );
+        assert_eq!(value["error"]["details"]["failed_op_index"], json!(0));
+        let msg = value["error"]["message"].as_str().unwrap();
+        assert!(
+            msg.contains("numeric"),
+            "message must explain the positional reservation: {msg}"
+        );
+        assert_eq!(server.db().node_count(), 0);
+    }
+
+    /// A '$'-ref whose name is not all-ASCII-digits must never parse
+    /// positionally ("+5" would satisfy usize::from_str): it falls through
+    /// to alias lookup and errors as an unknown ref.
+    #[test]
+    fn apply_batch_plus_prefixed_positional_ref_rejected_as_unknown() {
+        let server = create_test_server();
+        let value = apply_err(
+            &server,
+            json!([
+                {"op": "create_node", "label": "Person"},
+                {"op": "create_edge", "source_id": "$+0", "target_id": "$0",
+                 "label": "KNOWS"},
+            ]),
+            "INVALID_ARGUMENT",
+        );
+        let details = &value["error"]["details"];
+        assert_eq!(details["failed_op_index"], json!(1));
+        assert_eq!(details["ref"], json!("$+0"));
+        assert_eq!(server.db().node_count(), 0);
+    }
+
+    /// Pins the chosen leading-zeros behavior: an all-digits name parses
+    /// positionally, so "$00" is the same reference as "$0".
+    #[test]
+    fn apply_batch_numeric_ref_with_leading_zeros_resolves_positionally() {
+        let server = create_test_server();
+        let value = apply_ok(
+            &server,
+            json!([
+                {"op": "create_node", "label": "Person", "properties": {"name": "Zero"}},
+                {"op": "create_edge", "source_id": "$00", "target_id": "$0",
+                 "label": "SELF"},
+            ]),
+        );
+        let results = value["results"].as_array().unwrap();
+        let node_id = results[0]["node_id"].as_u64().unwrap();
+        assert_eq!(results[1]["source_id"], json!(node_id));
+        assert_eq!(results[1]["target_id"], json!(node_id));
+        assert_eq!(server.db().edge_count(), 1);
+    }
+
+    /// A plain numeric string as a write target is a type error, not a
+    /// v1-scope rejection; a '$'-ref gets the v1-scope message.
+    #[test]
+    fn apply_batch_numeric_string_node_id_rejected_with_integer_message() {
+        let server = create_test_server();
+
+        let value = apply_err(
+            &server,
+            json!([
+                {"op": "update_node", "node_id": "123", "properties": {"x": 1}},
+            ]),
+            "INVALID_ARGUMENT",
+        );
+        assert_eq!(value["error"]["details"]["failed_op_index"], json!(0));
+        let msg = value["error"]["message"].as_str().unwrap();
+        assert!(
+            msg.contains("must be an integer node id") && msg.contains("\"123\""),
+            "numeric string must get the type-error message: {msg}"
+        );
+
+        let value = apply_err(
+            &server,
+            json!([
+                {"op": "update_node", "node_id": "$ghost", "properties": {"x": 1}},
+            ]),
+            "INVALID_ARGUMENT",
+        );
+        let msg = value["error"]["message"].as_str().unwrap();
+        assert!(
+            msg.contains("not supported in v1"),
+            "'$'-refs must get the v1-scope message: {msg}"
+        );
+        assert_eq!(server.db().node_count(), 0);
+    }
+
+    /// Per-op provenance is validated through the SAME shared helper the
+    /// single-op tools use (`parse_opt_provenance`, the #3350 stamping
+    /// seam), with the error re-shaped to carry the batch's op index.
+    #[test]
+    fn apply_batch_invalid_provenance_rejected_per_op() {
+        let server = create_test_server();
+        let value = apply_err(
+            &server,
+            json!([
+                {"op": "create_node", "label": "Person"},
+                {"op": "create_node", "label": "Person",
+                 "provenance": {"source": "sensor", "confidence": 3.5}},
+            ]),
+            "INVALID_ARGUMENT",
+        );
+        assert_eq!(value["error"]["details"]["failed_op_index"], json!(1));
+        let msg = value["error"]["message"].as_str().unwrap();
+        assert!(
+            msg.contains("confidence"),
+            "shared-helper message must be preserved: {msg}"
+        );
+        assert_eq!(server.db().node_count(), 0);
+    }
+
+    /// #3413-adjacent bi-temporal guard: a batch-created edge that a later
+    /// detach-delete would elide may NOT carry an explicit valid_time — the
+    /// elision would silently erase the backdated fact.
+    #[test]
+    fn apply_batch_backdated_edge_annihilation_rejected() {
+        let server = create_test_server();
+        let x = seed_person(&server, "X");
+        let nodes_before = server.db().node_count();
+
+        let value = apply_err(
+            &server,
+            json!([
+                {"op": "create_node", "label": "Person", "ref": "a"},
+                {"op": "create_edge", "source_id": "$a", "target_id": x,
+                 "label": "KNOWS", "valid_time": T_PAST_MICROS.to_string()},
+                {"op": "delete_node", "node_id": x, "detach": true},
+            ]),
+            "INVALID_ARGUMENT",
+        );
+        let details = &value["error"]["details"];
+        assert_eq!(details["failed_op_index"], json!(1), "got: {value}");
+        assert_eq!(details["removed_by_delete_at_index"], json!(2));
+        let msg = value["error"]["message"].as_str().unwrap();
+        assert!(
+            msg.contains("valid_time"),
+            "message must explain the carve-out: {msg}"
+        );
+
+        // Rejected statically: nothing committed.
+        assert_eq!(server.db().node_count(), nodes_before);
+        assert_eq!(server.db().edge_count(), 0);
+    }
+
+    /// The same batch WITHOUT the explicit valid_time is fine (the edge is
+    /// elided with no history loss — it never carried a backdated fact).
+    #[test]
+    fn apply_batch_non_backdated_edge_annihilation_still_allowed() {
+        let server = create_test_server();
+        let x = seed_person(&server, "X");
+        let value = apply_ok(
+            &server,
+            json!([
+                {"op": "create_node", "label": "Person", "ref": "a"},
+                {"op": "create_edge", "source_id": "$a", "target_id": x,
+                 "label": "KNOWS"},
+                {"op": "delete_node", "node_id": x, "detach": true},
+            ]),
+        );
+        assert_eq!(
+            value["results"][1]["removed_by_delete_at_index"],
+            json!(2),
+            "elision path unchanged for non-backdated edges: {value}"
+        );
+        assert_eq!(server.db().edge_count(), 0);
+    }
+
+    // ------------------------------------------------------------------
+    // v1 scope: writes against batch-created refs, double writes
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn apply_batch_update_of_batch_created_ref_rejected_v1() {
+        let server = create_test_server();
+        let value = apply_err(
+            &server,
+            json!([
+                {"op": "create_node", "label": "Person", "ref": "a"},
+                {"op": "update_node", "node_id": "$a", "properties": {"x": 1}},
+            ]),
+            "INVALID_ARGUMENT",
+        );
+        assert_eq!(value["error"]["details"]["failed_op_index"], json!(1));
+        let msg = value["error"]["message"].as_str().unwrap();
+        assert!(
+            msg.contains("not supported"),
+            "message must state the v1 limitation: {msg}"
+        );
+        assert_eq!(server.db().node_count(), 0);
+    }
+
+    #[test]
+    fn apply_batch_delete_of_batch_created_ref_rejected_v1() {
+        let server = create_test_server();
+        let value = apply_err(
+            &server,
+            json!([
+                {"op": "create_node", "label": "Person", "ref": "a"},
+                {"op": "delete_node", "node_id": "$a"},
+            ]),
+            "INVALID_ARGUMENT",
+        );
+        assert_eq!(value["error"]["details"]["failed_op_index"], json!(1));
+        assert_eq!(server.db().node_count(), 0);
+    }
+
+    #[test]
+    fn apply_batch_second_write_to_same_committed_entity_rejected() {
+        let server = create_test_server();
+        let existing = seed_person(&server, "G");
+        let value = apply_err(
+            &server,
+            json!([
+                {"op": "update_node", "node_id": existing, "properties": {"x": 1}},
+                {"op": "update_node", "node_id": existing, "properties": {"x": 2}},
+            ]),
+            "INVALID_ARGUMENT",
+        );
+        let details = &value["error"]["details"];
+        assert_eq!(details["failed_op_index"], json!(1));
+        assert_eq!(details["first_write_op_index"], json!(0));
+        // The seeded node is untouched.
+        assert_eq!(server.db().node_count(), 1);
+    }
+
+    #[test]
+    fn apply_batch_create_edge_referencing_earlier_deleted_node_rejected() {
+        let server = create_test_server();
+        let a = seed_person(&server, "H");
+        let b = seed_person(&server, "I");
+        let value = apply_err(
+            &server,
+            json!([
+                {"op": "delete_node", "node_id": a},
+                {"op": "create_edge", "source_id": a, "target_id": b, "label": "KNOWS"},
+            ]),
+            "INVALID_ARGUMENT",
+        );
+        assert_eq!(value["error"]["details"]["failed_op_index"], json!(1));
+        assert_eq!(server.db().node_count(), 2, "nothing may commit");
+    }
+
+    // ------------------------------------------------------------------
+    // Cap enforcement
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn apply_batch_at_cap_succeeds_and_over_cap_rejected_with_limit_echoed() {
+        let server = AletheiaMcpServer::new(create_test_db()).with_max_batch_operations(2);
+
+        // Exactly at the cap: fine.
+        let value = apply_ok(
+            &server,
+            json!([
+                {"op": "create_node", "label": "Person"},
+                {"op": "create_node", "label": "Person"},
+            ]),
+        );
+        assert_eq!(value["operation_count"], json!(2));
+
+        // One over: rejected before anything runs, limit echoed (#3226).
+        let value = apply_err(
+            &server,
+            json!([
+                {"op": "create_node", "label": "Person"},
+                {"op": "create_node", "label": "Person"},
+                {"op": "create_node", "label": "Person"},
+            ]),
+            "INVALID_ARGUMENT",
+        );
+        let details = &value["error"]["details"];
+        assert_eq!(details["limit"], json!(2));
+        assert_eq!(details["submitted"], json!(3));
+        assert_eq!(server.db().node_count(), 2, "over-cap batch must not run");
+    }
+
+    #[test]
+    fn apply_batch_default_cap_is_1000() {
+        let server = create_test_server();
+        let ops: Vec<serde_json::Value> = (0..1001)
+            .map(|_| json!({"op": "create_node", "label": "Person"}))
+            .collect();
+        let value = apply_err(&server, json!(ops), "INVALID_ARGUMENT");
+        assert_eq!(value["error"]["details"]["limit"], json!(1000));
+        assert_eq!(value["error"]["details"]["submitted"], json!(1001));
+        assert_eq!(server.db().node_count(), 0);
+    }
+
+    // ------------------------------------------------------------------
+    // Atomicity (AC8: the flagship test)
+    // ------------------------------------------------------------------
+
+    /// Inject a failure mid-batch (update of a nonexistent node at op index
+    /// 2) and assert via count_nodes/count_edges that ZERO of the batch's
+    /// writes survived — including ops that already executed (indices 0, 1)
+    /// and ops after the failing one (index 3).
+    #[test]
+    fn apply_batch_mid_batch_failure_leaves_counts_unchanged() {
+        let server = create_test_server();
+        let baseline = seed_person(&server, "Baseline");
+        let nodes_before = server.db().node_count();
+        let edges_before = server.db().edge_count();
+
+        let value = apply_err(
+            &server,
+            json!([
+                {"op": "create_node", "label": "Person", "ref": "a",
+                 "properties": {"name": "Ghost A"}},
+                {"op": "create_node", "label": "Person", "ref": "b",
+                 "properties": {"name": "Ghost B"}},
+                {"op": "update_node", "node_id": 999_999, "properties": {"x": 1}},
+                {"op": "create_edge", "source_id": "$a", "target_id": "$b",
+                 "label": "KNOWS"},
+            ]),
+            "NOT_FOUND",
+        );
+        assert_eq!(
+            value["error"]["details"]["failed_op_index"],
+            json!(2),
+            "the failing op index must be reported: {value}"
+        );
+
+        // AC8: zero writes survived.
+        assert_eq!(server.db().node_count(), nodes_before);
+        assert_eq!(server.db().edge_count(), edges_before);
+        // And the batch-created ghosts are truly absent from lookups.
+        let ghosts = server.db().find_nodes_by_property(
+            "Person",
+            "name",
+            &crate::core::PropertyValue::String("Ghost A".into()),
+        );
+        assert!(ghosts.is_empty(), "no partial write may be visible");
+        // The pre-existing node is untouched.
+        assert!(server.db().get_node(NodeId::new(baseline).unwrap()).is_ok());
+    }
+
+    /// Pins the behavior when a caller *guesses* the numeric id a batch
+    /// create will allocate and submits it as a write target: prevalidation
+    /// accepts it (it is a plain integer), but transaction reads see
+    /// committed state only, so the op fails NOT_FOUND at core op time and
+    /// the whole batch aborts — zero writes survive.
+    #[test]
+    fn apply_batch_guessed_id_of_batch_created_node_aborts_whole_batch() {
+        let server = create_test_server();
+        let seeded = seed_person(&server, "Seed");
+        // Node ids are allocated sequentially: the batch's create will get
+        // seeded + 1. Submitting that id "works" structurally but must not
+        // let the caller write to an uncommitted entity.
+        let guessed = seeded + 1;
+
+        let value = apply_err(
+            &server,
+            json!([
+                {"op": "create_node", "label": "Person",
+                 "properties": {"name": "Ghost"}},
+                {"op": "update_node", "node_id": guessed, "properties": {"x": 1}},
+            ]),
+            "NOT_FOUND",
+        );
+        assert_eq!(value["error"]["details"]["failed_op_index"], json!(1));
+
+        // Zero writes survived: only the seeded node exists, and the
+        // guessed id resolves to nothing.
+        assert_eq!(server.db().node_count(), 1);
+        assert!(server.db().get_node(NodeId::new(guessed).unwrap()).is_err());
+    }
+
+    #[test]
+    fn apply_batch_unique_constraint_violation_aborts_whole_batch() {
+        let server = create_test_server();
+        let response = server.enable_unique_constraint(EnableUniqueConstraintRequest {
+            label: "Person".to_string(),
+            property: "email".to_string(),
+        });
+        assert!(
+            !response.contains("\"error\""),
+            "constraint enable should succeed: {response}"
+        );
+        let _existing: NodeResponse = parse_response(&server.create_node(CreateNodeRequest {
+            derived_from: None,
+            label: "Person".to_string(),
+            properties: Some(HashMap::from([(
+                "email".to_string(),
+                serde_json::Value::String("a@x.com".to_string()),
+            )])),
+            valid_time: None,
+            provenance: None,
+        }))
+        .unwrap();
+
+        let value = apply_err(
+            &server,
+            json!([
+                {"op": "create_node", "label": "Person",
+                 "properties": {"name": "Fresh"}},
+                {"op": "create_node", "label": "Person",
+                 "properties": {"email": "a@x.com"}},
+            ]),
+            "CONSTRAINT_VIOLATION",
+        );
+        assert!(
+            value["error"]["details"].get("failed_op_index").is_some(),
+            "details must carry failed_op_index (possibly null for commit-time \
+             constraint failures): {value}"
+        );
+        // The whole batch aborted: only the seeded node exists.
+        assert_eq!(server.db().node_count(), 1);
+    }
+
+    // ------------------------------------------------------------------
+    // #3209 safe-by-default delete inside a batch
+    // ------------------------------------------------------------------
+
+    /// A batch-created edge counts toward the #3209 refusal even though it
+    /// is invisible to committed-state adjacency (the in-batch case).
+    #[test]
+    fn apply_batch_delete_node_with_batch_created_edge_refused_without_detach() {
+        let server = create_test_server();
+        let x = seed_person(&server, "X");
+        let nodes_before = server.db().node_count();
+
+        let value = apply_err(
+            &server,
+            json!([
+                {"op": "create_node", "label": "Person", "ref": "a"},
+                {"op": "create_edge", "source_id": "$a", "target_id": x,
+                 "label": "KNOWS"},
+                {"op": "delete_node", "node_id": x},
+            ]),
+            "FAILED_PRECONDITION",
+        );
+        let details = &value["error"]["details"];
+        assert_eq!(details["failed_op_index"], json!(2));
+        assert_eq!(details["connected_edges"], json!(1));
+        assert_eq!(details["detach_required"], json!(true));
+        // Legacy top-level fields preserved, mirroring the single-op tool.
+        assert_eq!(value["connected_edges"], json!(1));
+
+        // Atomic refusal: nothing committed.
+        assert_eq!(server.db().node_count(), nodes_before);
+        assert_eq!(server.db().edge_count(), 0);
+    }
+
+    /// With `detach: true`, the cascade also removes batch-created edges
+    /// touching the node (which `delete_node_cascade` alone cannot see).
+    #[test]
+    fn apply_batch_delete_node_detach_true_removes_batch_created_edges() {
+        let server = create_test_server();
+        let x = seed_person(&server, "X");
+
+        let value = apply_ok(
+            &server,
+            json!([
+                {"op": "create_node", "label": "Person", "ref": "a",
+                 "properties": {"name": "Survivor"}},
+                {"op": "create_edge", "source_id": "$a", "target_id": x,
+                 "label": "KNOWS"},
+                {"op": "delete_node", "node_id": x, "detach": true},
+            ]),
+        );
+
+        let results = value["results"].as_array().unwrap();
+        // The batch-created edge was removed by the later detach delete.
+        assert_eq!(
+            results[1]["removed_by_delete_at_index"],
+            json!(2),
+            "create_edge result must report the removing op: {value}"
+        );
+        assert_eq!(results[2]["op"], json!("delete_node"));
+        assert_eq!(results[2]["detached"], json!(true));
+        assert_eq!(
+            results[2]["edges_removed"],
+            json!(1),
+            "the batch-created edge counts as removed: {value}"
+        );
+
+        // Final state: X gone, the batch node exists, no edges at all.
+        assert_eq!(server.db().node_count(), 1);
+        assert_eq!(server.db().edge_count(), 0);
+        assert!(server.db().get_node(NodeId::new(x).unwrap()).is_err());
+        let survivor = server.db().find_nodes_by_property(
+            "Person",
+            "name",
+            &crate::core::PropertyValue::String("Survivor".into()),
+        );
+        assert_eq!(survivor.len(), 1);
+    }
+
+    #[test]
+    fn apply_batch_delete_node_detach_true_cascades_committed_edges() {
+        let server = create_test_server();
+        let a = seed_person(&server, "A");
+        let b = seed_person(&server, "B");
+        let _e = seed_edge(&server, a, b);
+
+        let value = apply_ok(
+            &server,
+            json!([
+                {"op": "delete_node", "node_id": a, "detach": true},
+            ]),
+        );
+        assert_eq!(value["results"][0]["edges_removed"], json!(1));
+        assert_eq!(server.db().node_count(), 1);
+        assert_eq!(server.db().edge_count(), 0);
+    }
+
+    /// A batch-created self-loop appears in both adjacency directions but is
+    /// one edge: the refusal must count it once (mirrors retract_node dedup).
+    #[test]
+    fn apply_batch_self_loop_edge_then_delete_counts_edge_once() {
+        let server = create_test_server();
+        let x = seed_person(&server, "X");
+
+        let value = apply_err(
+            &server,
+            json!([
+                {"op": "create_edge", "source_id": x, "target_id": x,
+                 "label": "SELF"},
+                {"op": "delete_node", "node_id": x},
+            ]),
+            "FAILED_PRECONDITION",
+        );
+        assert_eq!(
+            value["error"]["details"]["connected_edges"],
+            json!(1),
+            "self-loop must count once: {value}"
+        );
+        assert_eq!(server.db().edge_count(), 0);
+    }
+
+    /// Updating a committed edge and then detach-deleting one of its
+    /// endpoints in the same batch is refused with BOTH op indices — the
+    /// cascade would silently discard the update.
+    #[test]
+    fn apply_batch_update_edge_then_detach_delete_endpoint_refused_with_both_indices() {
+        let server = create_test_server();
+        let a = seed_person(&server, "A");
+        let b = seed_person(&server, "B");
+        let e = seed_edge(&server, a, b);
+
+        let value = apply_err(
+            &server,
+            json!([
+                {"op": "update_edge", "edge_id": e, "properties": {"weight": 9}},
+                {"op": "delete_node", "node_id": a, "detach": true},
+            ]),
+            "FAILED_PRECONDITION",
+        );
+        let details = &value["error"]["details"];
+        assert_eq!(details["failed_op_index"], json!(1), "got: {value}");
+        assert_eq!(details["updated_at_index"], json!(0));
+        assert_eq!(details["edge_id"], json!(e));
+        assert_eq!(details["node_id"], json!(a));
+
+        // Atomic refusal: nothing changed.
+        assert_eq!(server.db().node_count(), 2);
+        assert_eq!(server.db().edge_count(), 1);
+    }
+
+    /// Explicitly writing to a committed edge that an earlier detach-delete
+    /// in the same batch already cascaded away is refused with the removing
+    /// op's index.
+    #[test]
+    fn apply_batch_delete_edge_removed_by_cascade_refused() {
+        let server = create_test_server();
+        let a = seed_person(&server, "A");
+        let b = seed_person(&server, "B");
+        let e = seed_edge(&server, a, b);
+
+        let value = apply_err(
+            &server,
+            json!([
+                {"op": "delete_node", "node_id": a, "detach": true},
+                {"op": "delete_edge", "edge_id": e},
+            ]),
+            "FAILED_PRECONDITION",
+        );
+        let details = &value["error"]["details"];
+        assert_eq!(details["failed_op_index"], json!(1), "got: {value}");
+        assert_eq!(details["removed_at_index"], json!(0));
+        assert_eq!(details["edge_id"], json!(e));
+
+        // Atomic refusal: the cascade itself was rolled back too.
+        assert_eq!(server.db().node_count(), 2);
+        assert_eq!(server.db().edge_count(), 1);
+    }
+
+    /// Committed edges already deleted earlier in the same batch no longer
+    /// count toward the #3209 refusal.
+    #[test]
+    fn apply_batch_delete_node_after_batch_deleted_edges_succeeds_without_detach() {
+        let server = create_test_server();
+        let a = seed_person(&server, "A");
+        let b = seed_person(&server, "B");
+        let e = seed_edge(&server, a, b);
+
+        let value = apply_ok(
+            &server,
+            json!([
+                {"op": "delete_edge", "edge_id": e},
+                {"op": "delete_node", "node_id": a},
+            ]),
+        );
+        assert_eq!(value["results"][1]["edges_removed"], json!(0));
+        assert_eq!(server.db().node_count(), 1);
+        assert_eq!(server.db().edge_count(), 0);
+    }
+
+    // ------------------------------------------------------------------
+    // Per-op valid_time (#3221 inside a batch)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn apply_batch_valid_time_honored_per_op() {
+        let server = create_test_server();
+        let value = apply_ok(
+            &server,
+            json!([
+                {"op": "create_node", "label": "Person", "ref": "old",
+                 "properties": {"name": "Old"},
+                 "valid_time": T_PAST_MICROS.to_string()},
+                {"op": "create_node", "label": "Person", "ref": "new",
+                 "properties": {"name": "New"}},
+            ]),
+        );
+        let old_id = value["results"][0]["node_id"].as_u64().unwrap();
+        let new_id = value["results"][1]["node_id"].as_u64().unwrap();
+        let now = time::now();
+
+        // The backdated node existed (valid-time) back in 2020...
+        assert!(
+            server
+                .db()
+                .get_node_at_time(
+                    NodeId::new(old_id).unwrap(),
+                    Timestamp::from(T_PAST_MICROS),
+                    now
+                )
+                .is_ok(),
+            "backdated valid_time must be honored"
+        );
+        // ...but not one second before its valid_from.
+        assert!(
+            server
+                .db()
+                .get_node_at_time(
+                    NodeId::new(old_id).unwrap(),
+                    Timestamp::from(T_PAST_MICROS - 1_000_000),
+                    now
+                )
+                .is_err()
+        );
+        // The non-backdated node did not exist in 2020.
+        assert!(
+            server
+                .db()
+                .get_node_at_time(
+                    NodeId::new(new_id).unwrap(),
+                    Timestamp::from(T_PAST_MICROS),
+                    now
+                )
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn apply_batch_valid_time_and_detach_rejected_per_op() {
+        let server = create_test_server();
+        let x = seed_person(&server, "X");
+        let nodes_before = server.db().node_count();
+
+        let value = apply_err(
+            &server,
+            json!([
+                {"op": "create_node", "label": "Person",
+                 "valid_time": T_PAST_MICROS.to_string()},
+                {"op": "delete_node", "node_id": x, "detach": true,
+                 "valid_time": T_PAST_MICROS.to_string()},
+            ]),
+            "INVALID_ARGUMENT",
+        );
+        assert_eq!(value["error"]["details"]["failed_op_index"], json!(1));
+        assert_eq!(server.db().node_count(), nodes_before);
+    }
+
+    // ------------------------------------------------------------------
+    // WAL durability and recovery
+    // ------------------------------------------------------------------
+
+    /// A committed batch survives a clean shutdown + reopen. NOTE: with a
+    /// clean shutdown, `open()` loads the index SNAPSHOT written at close
+    /// and replays no WAL entries — this test therefore verifies
+    /// snapshot-based restart, not WAL replay. Genuine WAL replay of a
+    /// batch is exercised by
+    /// `apply_batch_committed_batch_survives_wal_replay_without_index_snapshot`.
+    #[test]
+    fn apply_batch_committed_batch_survives_wal_recovery() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let path = temp_dir.path().join("batch-db");
+
+        {
+            let db = Arc::new(AletheiaDB::open(&path).expect("open durable db"));
+            let server = AletheiaMcpServer::new(db);
+            apply_ok(
+                &server,
+                json!([
+                    {"op": "create_node", "label": "Person", "ref": "a",
+                     "properties": {"name": "Durable A"}},
+                    {"op": "create_node", "label": "Person", "ref": "b",
+                     "properties": {"name": "Durable B"}},
+                    {"op": "create_edge", "source_id": "$a", "target_id": "$b",
+                     "label": "KNOWS"},
+                ]),
+            );
+            assert_eq!(server.db().node_count(), 2);
+            assert_eq!(server.db().edge_count(), 1);
+        }
+
+        // Reopen: the shutdown index snapshot must restore the whole batch.
+        let db = AletheiaDB::open(&path).expect("reopen durable db");
+        assert_eq!(db.node_count(), 2, "batch nodes must survive recovery");
+        assert_eq!(db.edge_count(), 1, "batch edge must survive recovery");
+        let found = db.find_nodes_by_property(
+            "Person",
+            "name",
+            &crate::core::PropertyValue::String("Durable A".into()),
+        );
+        assert_eq!(found.len(), 1);
+    }
+
+    /// Forces GENUINE WAL replay: after a clean shutdown, the index
+    /// snapshot directory is deleted, so the reopen can only rebuild state
+    /// from the WAL. The full subgraph — nodes, edge, endpoints, and
+    /// properties — must be restored from the batch's WAL entries alone.
+    #[test]
+    fn apply_batch_committed_batch_survives_wal_replay_without_index_snapshot() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let path = temp_dir.path().join("batch-db-replay");
+
+        let (alice_id, bob_id, edge_id) = {
+            let db = Arc::new(AletheiaDB::open(&path).expect("open durable db"));
+            let server = AletheiaMcpServer::new(db);
+            let value = apply_ok(
+                &server,
+                json!([
+                    {"op": "create_node", "label": "Person", "ref": "a",
+                     "properties": {"name": "Replay A"}},
+                    {"op": "create_node", "label": "Person", "ref": "b",
+                     "properties": {"name": "Replay B"}},
+                    {"op": "create_edge", "source_id": "$a", "target_id": "$b",
+                     "label": "KNOWS", "properties": {"since": 2024}},
+                ]),
+            );
+            let results = value["results"].as_array().unwrap();
+            (
+                results[0]["node_id"].as_u64().unwrap(),
+                results[1]["node_id"].as_u64().unwrap(),
+                results[2]["edge_id"].as_u64().unwrap(),
+            )
+        };
+
+        // Delete the index snapshot so `open()` cannot short-circuit the
+        // WAL: the reopen below must genuinely replay the batch's entries.
+        std::fs::remove_dir_all(path.join("indexes")).expect("remove index snapshot dir");
+
+        let db = AletheiaDB::open(&path).expect("reopen durable db");
+        assert_eq!(db.node_count(), 2, "batch nodes must survive WAL replay");
+        assert_eq!(db.edge_count(), 1, "batch edge must survive WAL replay");
+
+        // Nodes restored with their properties.
+        for (name, id) in [("Replay A", alice_id), ("Replay B", bob_id)] {
+            let found = db.find_nodes_by_property(
+                "Person",
+                "name",
+                &crate::core::PropertyValue::String(name.into()),
+            );
+            assert_eq!(found.len(), 1, "{name} must be restored via WAL replay");
+            assert_eq!(found[0].as_u64(), id, "{name} must keep its node id");
+        }
+
+        // Edge restored with its endpoints and property.
+        let edge = db
+            .get_edge(EdgeId::new(edge_id).unwrap())
+            .expect("batch edge must be restored via WAL replay");
+        assert_eq!(edge.source.as_u64(), alice_id);
+        assert_eq!(edge.target.as_u64(), bob_id);
+        let since = edge
+            .properties
+            .iter()
+            .find_map(|(k, v)| {
+                crate::core::interning::GLOBAL_INTERNER
+                    .resolve_with(*k, |s| s == "since")
+                    .unwrap_or(false)
+                    .then(|| format!("{v:?}"))
+            })
+            .unwrap_or_default();
+        assert!(
+            since.contains("2024"),
+            "edge property must survive WAL replay: {since}"
+        );
+    }
+
+    /// A batch that fails at op time aborts BEFORE the WAL is ever touched
+    /// (WAL append happens only at commit), so nothing is appended and
+    /// recovery trivially restores nothing — this pins that a failed batch
+    /// leaves no WAL residue to resurrect.
+    #[test]
+    fn apply_batch_failed_batch_leaves_nothing_after_recovery() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let path = temp_dir.path().join("batch-db-failed");
+
+        {
+            let db = Arc::new(AletheiaDB::open(&path).expect("open durable db"));
+            let server = AletheiaMcpServer::new(db);
+            apply_err(
+                &server,
+                json!([
+                    {"op": "create_node", "label": "Person",
+                     "properties": {"name": "Ghost"}},
+                    {"op": "update_node", "node_id": 424_242, "properties": {"x": 1}},
+                ]),
+                "NOT_FOUND",
+            );
+            assert_eq!(server.db().node_count(), 0);
+        }
+
+        let db = AletheiaDB::open(&path).expect("reopen durable db");
+        assert_eq!(db.node_count(), 0, "failed batch must leave no trace");
+        assert_eq!(db.edge_count(), 0);
+    }
+}
+
+// ============================================================================
+// Per-request `now` for is_current evaluation (Issue #3391)
+// ============================================================================
+
+mod per_request_now_tests {
+    use super::*;
+    use crate::simulation::SimulatedClock;
+    use crate::simulation::clock::{reset_simulated_read_count, simulated_read_count};
+
+    fn now_micros() -> i64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_micros() as i64
+    }
+
+    fn create_node_with_valid_time(
+        server: &AletheiaMcpServer,
+        label: &str,
+        name: &str,
+        valid_time_micros: Option<i64>,
+    ) {
+        let mut props = HashMap::new();
+        props.insert("name".to_string(), serde_json::json!(name));
+        let response = server.create_node(CreateNodeRequest {
+            derived_from: None,
+            label: label.to_string(),
+            properties: Some(props),
+            valid_time: valid_time_micros.map(|m| m.to_string()),
+            provenance: None,
+        });
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert!(value.get("error").is_none(), "create_node failed: {value}");
+    }
+
+    /// List nodes with the given label and return each node's
+    /// `temporal.is_current` flag, in response order.
+    fn list_is_current_flags(server: &AletheiaMcpServer, label: &str) -> Vec<bool> {
+        let response = server.list_nodes(ListNodesRequest {
+            label: Some(label.to_string()),
+            property_key: None,
+            property_value: None,
+            limit: None,
+            offset: None,
+            include_vectors: None,
+        });
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert!(value.get("error").is_none(), "list_nodes failed: {value}");
+        value["nodes"]
+            .as_array()
+            .expect("nodes must be an array")
+            .iter()
+            .map(|n| {
+                n["temporal"]["is_current"]
+                    .as_bool()
+                    .unwrap_or_else(|| panic!("temporal.is_current must be a bool: {n}"))
+            })
+            .collect()
+    }
+
+    /// Boundary fixture (Issue #3391): every entity in one bulk response must
+    /// be judged against the SAME evaluation timestamp.
+    ///
+    /// Two nodes share an identical future `valid_from`. A simulated clock
+    /// that advances by 1µs on every read is swept across that boundary, one
+    /// microsecond at a time, covering every read the request performs. If
+    /// `is_current` were evaluated per entity (a fresh `now()` per
+    /// conversion), the two entities would be judged at strictly different
+    /// timestamps, so some sweep offset must place one entity before the
+    /// boundary and the other at/after it — disagreeing flags. With the
+    /// wallclock captured once per request, the flags always agree.
+    #[test]
+    fn test_list_nodes_entities_share_one_evaluation_timestamp() {
+        let server = create_test_server();
+
+        // Both facts become true at exactly the same future instant.
+        let valid_from = now_micros() + 3_600_000_000; // +1 hour
+        create_node_with_valid_time(&server, "Person", "Alice", Some(valid_from));
+        create_node_with_valid_time(&server, "Person", "Bob", Some(valid_from));
+
+        let mut clock = SimulatedClock::new(valid_from - 1);
+        let _guard = clock.inject_advancing(1);
+
+        // Calibration: measure how many clock reads one request performs so
+        // the sweep below covers every read index.
+        reset_simulated_read_count();
+        let flags = list_is_current_flags(&server, "Person");
+        assert_eq!(flags.len(), 2, "both nodes must be listed");
+        let reads_per_request = simulated_read_count();
+
+        for offset in 0..=reads_per_request as i64 {
+            clock.jump_to(valid_from - offset);
+            let flags = list_is_current_flags(&server, "Person");
+            assert_eq!(flags.len(), 2, "both nodes must be listed");
+            assert_eq!(
+                flags[0], flags[1],
+                "entities in one list_nodes response were evaluated against \
+                 different 'now' values (clock started {offset} µs before the \
+                 shared valid_from, advancing 1 µs per read): {flags:?}"
+            );
+        }
+    }
+
+    /// The number of wallclock reads a bulk response performs must not scale
+    /// with the number of entities returned: the request captures `now` once
+    /// and evaluates every entity against it.
+    #[test]
+    fn test_list_nodes_clock_reads_do_not_scale_with_entity_count() {
+        let server = create_test_server();
+
+        create_node_with_valid_time(&server, "Solo", "only", None);
+        for i in 0..6 {
+            create_node_with_valid_time(&server, "Crowd", &format!("member-{i}"), None);
+        }
+
+        let clock = SimulatedClock::new(now_micros());
+        let _guard = clock.inject(); // frozen clock; we only count reads
+
+        reset_simulated_read_count();
+        let solo_flags = list_is_current_flags(&server, "Solo");
+        let solo_reads = simulated_read_count();
+        assert_eq!(solo_flags.len(), 1);
+
+        reset_simulated_read_count();
+        let crowd_flags = list_is_current_flags(&server, "Crowd");
+        let crowd_reads = simulated_read_count();
+        assert_eq!(crowd_flags.len(), 6);
+
+        assert_eq!(
+            crowd_reads, solo_reads,
+            "clock reads must not scale with the entity count of the \
+             response (1 entity: {solo_reads} reads, 6 entities: \
+             {crowd_reads} reads)"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Scale-invariance regression coverage for the other bulk handlers
+    // (review follow-up on #3391): each handler captures `now` once per
+    // request, so its clock-read count must not grow with the number of
+    // entities in the response.
+    // ------------------------------------------------------------------
+
+    /// Create a node and return its id.
+    fn create_node_id(server: &AletheiaMcpServer, label: &str, name: &str) -> u64 {
+        let mut props = HashMap::new();
+        props.insert("name".to_string(), serde_json::json!(name));
+        let response = server.create_node(CreateNodeRequest {
+            derived_from: None,
+            label: label.to_string(),
+            properties: Some(props),
+            valid_time: None,
+            provenance: None,
+        });
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert!(value.get("error").is_none(), "create_node failed: {value}");
+        value["id"].as_u64().expect("node id must be a u64")
+    }
+
+    /// Create an edge between two nodes.
+    fn create_test_edge(server: &AletheiaMcpServer, source_id: u64, target_id: u64) {
+        let response = server.create_edge(CreateEdgeRequest {
+            derived_from: None,
+            source_id,
+            target_id,
+            label: "NEXT".to_string(),
+            properties: None,
+            valid_time: None,
+            provenance: None,
+        });
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert!(value.get("error").is_none(), "create_edge failed: {value}");
+    }
+
+    /// Run `small` and `large` under a frozen simulated clock (resetting the
+    /// read counter before each measured request) and assert the handler's
+    /// clock-read count does not scale with the entity count of the
+    /// response. `entities_key` is the response field holding the entity
+    /// array (e.g. `"nodes"`, `"edges"`, `"results"`).
+    fn assert_clock_reads_do_not_scale(
+        handler: &str,
+        entities_key: &str,
+        small_count: usize,
+        small: impl Fn() -> String,
+        large_count: usize,
+        large: impl Fn() -> String,
+    ) {
+        let clock = SimulatedClock::new(now_micros());
+        let _guard = clock.inject(); // frozen clock; we only count reads
+
+        reset_simulated_read_count();
+        let small_value: serde_json::Value = serde_json::from_str(&small()).unwrap();
+        let small_reads = simulated_read_count();
+
+        reset_simulated_read_count();
+        let large_value: serde_json::Value = serde_json::from_str(&large()).unwrap();
+        let large_reads = simulated_read_count();
+
+        for (value, expected) in [(&small_value, small_count), (&large_value, large_count)] {
+            assert!(value.get("error").is_none(), "{handler} failed: {value}");
+            let len = value[entities_key].as_array().map(|a| a.len());
+            assert_eq!(
+                len,
+                Some(expected),
+                "{handler}: unexpected entity count under '{entities_key}': {value}"
+            );
+        }
+
+        assert_eq!(
+            large_reads, small_reads,
+            "{handler}: clock reads must not scale with the entity count of \
+             the response ({small_count} entities: {small_reads} reads, \
+             {large_count} entities: {large_reads} reads)"
+        );
+    }
+
+    #[test]
+    fn test_traverse_clock_reads_do_not_scale_with_entity_count() {
+        let server = create_test_server();
+
+        let solo_hub = create_node_id(&server, "Hub", "solo-hub");
+        let crowd_hub = create_node_id(&server, "Hub", "crowd-hub");
+        let leaf = create_node_id(&server, "Leaf", "solo-leaf");
+        create_test_edge(&server, solo_hub, leaf);
+        for i in 0..6 {
+            let leaf = create_node_id(&server, "Leaf", &format!("crowd-leaf-{i}"));
+            create_test_edge(&server, crowd_hub, leaf);
+        }
+
+        let traverse = |start_node_id: u64| {
+            server.traverse(TraverseRequest {
+                start_node_id,
+                edge_label: "NEXT".to_string(),
+                direction: Some("outgoing".to_string()),
+                depth: Some(1),
+                limit: None,
+                offset: None,
+                include_vectors: None,
+                as_of_valid_time: None,
+                as_of_transaction_time: None,
+            })
+        };
+
+        assert_clock_reads_do_not_scale(
+            "traverse",
+            "results",
+            1,
+            || traverse(solo_hub),
+            6,
+            || traverse(crowd_hub),
+        );
+    }
+
+    #[test]
+    fn test_get_outgoing_edges_clock_reads_do_not_scale_with_entity_count() {
+        let server = create_test_server();
+
+        let solo_src = create_node_id(&server, "Src", "solo-src");
+        let crowd_src = create_node_id(&server, "Src", "crowd-src");
+        let target = create_node_id(&server, "Dst", "solo-target");
+        create_test_edge(&server, solo_src, target);
+        for i in 0..6 {
+            let target = create_node_id(&server, "Dst", &format!("crowd-target-{i}"));
+            create_test_edge(&server, crowd_src, target);
+        }
+
+        let outgoing = |node_id: u64| {
+            server.get_outgoing_edges(GetOutgoingEdgesRequest {
+                node_id,
+                label: None,
+                include_vectors: None,
+            })
+        };
+
+        assert_clock_reads_do_not_scale(
+            "get_outgoing_edges",
+            "edges",
+            1,
+            || outgoing(solo_src),
+            6,
+            || outgoing(crowd_src),
+        );
+    }
+
+    #[test]
+    fn test_get_incoming_edges_clock_reads_do_not_scale_with_entity_count() {
+        let server = create_test_server();
+
+        let solo_dst = create_node_id(&server, "Dst", "solo-dst");
+        let crowd_dst = create_node_id(&server, "Dst", "crowd-dst");
+        let source = create_node_id(&server, "Src", "solo-source");
+        create_test_edge(&server, source, solo_dst);
+        for i in 0..6 {
+            let source = create_node_id(&server, "Src", &format!("crowd-source-{i}"));
+            create_test_edge(&server, source, crowd_dst);
+        }
+
+        let incoming = |node_id: u64| {
+            server.get_incoming_edges(GetIncomingEdgesRequest {
+                node_id,
+                label: None,
+                include_vectors: None,
+            })
+        };
+
+        assert_clock_reads_do_not_scale(
+            "get_incoming_edges",
+            "edges",
+            1,
+            || incoming(solo_dst),
+            6,
+            || incoming(crowd_dst),
+        );
+    }
+
+    #[test]
+    fn test_find_similar_clock_reads_do_not_scale_with_entity_count() {
+        let server = create_test_server();
+
+        let response = server.enable_vector_index(EnableVectorIndexRequest {
+            property_name: "embedding".to_string(),
+            dimensions: 4,
+            distance_metric: Some("cosine".to_string()),
+        });
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert!(
+            value.get("error").is_none(),
+            "enable_vector_index failed: {value}"
+        );
+
+        for i in 1..=8 {
+            let mut props = HashMap::new();
+            props.insert("name".to_string(), serde_json::json!(format!("Doc{i}")));
+            props.insert(
+                "embedding".to_string(),
+                serde_json::json!([
+                    (i as f32) * 0.1,
+                    (i as f32) * 0.2,
+                    (i as f32) * 0.3,
+                    (i as f32) * 0.4
+                ]),
+            );
+            let response = server.create_node(CreateNodeRequest {
+                derived_from: None,
+                label: "Document".to_string(),
+                properties: Some(props),
+                valid_time: None,
+                provenance: None,
+            });
+            let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+            assert!(value.get("error").is_none(), "create_node failed: {value}");
+        }
+
+        let find = |k: usize| {
+            server.find_similar(FindSimilarRequest {
+                property_name: "embedding".to_string(),
+                embedding: vec![0.1, 0.2, 0.3, 0.4],
+                k: Some(k),
+                offset: None,
+                include_vectors: None,
+            })
+        };
+
+        assert_clock_reads_do_not_scale("find_similar", "results", 1, || find(1), 6, || find(6));
+    }
+
+    #[test]
+    fn test_find_nodes_at_time_clock_reads_do_not_scale_with_entity_count() {
+        let server = create_test_server();
+
+        create_node_id(&server, "FSolo", "only");
+        for i in 0..6 {
+            create_node_id(&server, "FCrowd", &format!("member-{i}"));
+        }
+
+        // Anchor the point-in-time lookup at (now, now); the frozen
+        // simulated clock in the helper starts at the same real instant, so
+        // every node created above is visible.
+        let valid_time = now_micros().to_string();
+
+        let find = |label: &str| {
+            server.find_nodes_at_time(FindNodesAtTimeRequest {
+                label: label.to_string(),
+                property_key: None,
+                property_value: None,
+                valid_time: valid_time.clone(),
+                transaction_time: None,
+                limit: None,
+                offset: None,
+                include_vectors: None,
+            })
+        };
+
+        assert_clock_reads_do_not_scale(
+            "find_nodes_at_time",
+            "nodes",
+            1,
+            || find("FSolo"),
+            6,
+            || find("FCrowd"),
+        );
+    }
+
+    #[test]
+    fn test_hybrid_query_clock_reads_do_not_scale_with_entity_count() {
+        let server = create_test_server();
+
+        create_node_id(&server, "HSolo", "only");
+        for i in 0..6 {
+            create_node_id(&server, "HCrowd", &format!("member-{i}"));
+        }
+
+        let query = |label: &str| {
+            server.hybrid_query(HybridQueryRequest {
+                start_node_id: None,
+                traverse_edge: None,
+                traverse_depth: None,
+                vector_property: None,
+                query_embedding: None,
+                top_k: None,
+                valid_time: None,
+                transaction_time: None,
+                filter_label: Some(label.to_string()),
+                limit: Some(100),
+                include_vectors: None,
+            })
+        };
+
+        assert_clock_reads_do_not_scale(
+            "hybrid_query",
+            "results",
+            1,
+            || query("HSolo"),
+            6,
+            || query("HCrowd"),
+        );
+    }
+}
+
+// ============================================================================
+// Token-budget-aware response shaping (Issue #3353)
+// ============================================================================
+
+#[cfg(test)]
+mod budget_tests {
+    use super::*;
+    use serde_json::{Value, json};
+
+    /// Dispatch a tool and return the *raw* serialized response text plus its
+    /// error flag. The raw text length is exactly what is emitted on the wire,
+    /// so it is the quantity the budget contract bounds.
+    fn dispatch_raw(server: &AletheiaMcpServer, tool: &str, args: Value) -> (String, bool) {
+        let result = server.dispatch_tool(tool, args);
+        let is_error = result.is_error.unwrap_or(false);
+        let text = result
+            .content
+            .first()
+            .and_then(|c| c.as_text().map(|t| t.text.clone()))
+            .expect("tool result should carry text content");
+        (text, is_error)
+    }
+
+    fn dispatch_json(server: &AletheiaMcpServer, tool: &str, args: Value) -> (Value, bool) {
+        let (text, is_error) = dispatch_raw(server, tool, args);
+        let value = serde_json::from_str(&text).expect("response should be valid JSON");
+        (value, is_error)
+    }
+
+    /// Create a node whose properties are large enough to blow a small budget.
+    fn seed_big_node(server: &AletheiaMcpServer, label: &str, name: &str) -> u64 {
+        let bio = "x".repeat(4000);
+        let args = json!({
+            "label": label,
+            "properties": {
+                "name": name,
+                "bio": bio,
+                "notes": "y".repeat(2000),
+            }
+        });
+        let (value, is_error) = dispatch_json(server, "create_node", args);
+        assert!(!is_error, "seed create_node failed: {value}");
+        value.get("id").and_then(Value::as_u64).expect("node id")
+    }
+
+    fn seed_many(server: &AletheiaMcpServer, label: &str, n: usize) -> Vec<u64> {
+        (0..n)
+            .map(|i| seed_big_node(server, label, &format!("n{i}")))
+            .collect()
+    }
+
+    // ---- AC1: omitting the budget leaves behavior unchanged ----------------
+
+    #[test]
+    fn ac1_omitting_budget_is_unchanged() {
+        let server = create_test_server();
+        let id = seed_big_node(&server, "Person", "Alice");
+        let (with_none, _) = dispatch_json(&server, "get_node", json!({ "node_id": id }));
+        // Full bio present, no budget block.
+        assert!(
+            with_none.get("budget").is_none(),
+            "no budget block expected"
+        );
+        let bio = with_none["properties"]["bio"].as_str().unwrap();
+        assert_eq!(bio.len(), 4000, "full bio returned when no budget set");
+    }
+
+    // ---- AC2: hard contract, conformance sweep -----------------------------
+
+    #[test]
+    fn ac2_conformance_sweep_never_overruns() {
+        let server = create_test_server();
+        // Enable a vector index so find_similar/hybrid_query have data.
+        let _ = server.dispatch_tool(
+            "enable_vector_index",
+            json!({ "property_name": "embedding", "dimensions": 4, "metric": "cosine" }),
+        );
+        let ids = seed_many(&server, "Person", 40);
+        // A couple of edges for edge tools / traversal.
+        for w in ids.windows(2).take(20) {
+            let _ = server.dispatch_tool(
+                "create_edge",
+                json!({ "source_id": w[0], "target_id": w[1], "label": "KNOWS",
+                        "properties": { "detail": "z".repeat(1500) } }),
+            );
+        }
+
+        let budgets = [256u64, 512, 1024, 2048, 4096, 8192, 16384, 32768];
+        let cases: Vec<(&str, Value)> = vec![
+            ("get_node", json!({ "node_id": ids[0] })),
+            ("list_nodes", json!({ "label": "Person", "limit": 40 })),
+            ("get_edge", json!({ "edge_id": 1 })),
+            ("list_edges", json!({ "limit": 40 })),
+            ("get_outgoing_edges", json!({ "node_id": ids[0] })),
+            ("get_incoming_edges", json!({ "node_id": ids[1] })),
+            (
+                "traverse",
+                json!({ "start_node_id": ids[0], "max_depth": 3 }),
+            ),
+            ("get_node_history", json!({ "node_id": ids[0] })),
+            ("get_schema", json!({})),
+            (
+                "find_nodes_at_time",
+                json!({ "label": "Person", "valid_time": "2999-01-01T00:00:00Z" }),
+            ),
+        ];
+
+        for &budget in &budgets {
+            for (tool, base) in &cases {
+                let mut args = base.clone();
+                args.as_object_mut()
+                    .unwrap()
+                    .insert("max_response_tokens".into(), json!(budget));
+                let (text, is_error) = dispatch_raw(&server, tool, args);
+                if is_error {
+                    // Too-small budgets legitimately error (AC6); that is not an overrun.
+                    continue;
+                }
+                let cap = (budget * super::super::budget::BYTES_PER_TOKEN) as usize;
+                assert!(
+                    text.len() <= cap,
+                    "[{tool} @ {budget} tok] overran budget: {} bytes > cap {} bytes",
+                    text.len(),
+                    cap
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn ac2_byte_budget_is_exact() {
+        let server = create_test_server();
+        let ids = seed_many(&server, "Doc", 20);
+        let _ = ids;
+        for cap in [400usize, 900, 1500, 3000] {
+            let (text, is_error) = dispatch_raw(
+                &server,
+                "list_nodes",
+                json!({ "label": "Doc", "limit": 20, "max_response_bytes": cap }),
+            );
+            if is_error {
+                continue;
+            }
+            assert!(
+                text.len() <= cap,
+                "byte budget {cap} overran: {} bytes",
+                text.len()
+            );
+        }
+    }
+
+    // ---- AC3: deterministic, disclosed rung --------------------------------
+
+    #[test]
+    fn ac3_rung_is_disclosed_and_deterministic() {
+        let server = create_test_server();
+        let id = seed_big_node(&server, "Person", "Alice");
+        let (a, _) = dispatch_json(
+            &server,
+            "get_node",
+            json!({ "node_id": id, "max_response_tokens": 300 }),
+        );
+        let (b, _) = dispatch_json(
+            &server,
+            "get_node",
+            json!({ "node_id": id, "max_response_tokens": 300 }),
+        );
+        assert_eq!(a, b, "same request+budget+data must degrade identically");
+        let budget = a.get("budget").expect("budget block present");
+        assert_eq!(budget["applied"], json!(true));
+        assert!(budget.get("rung").and_then(Value::as_str).is_some());
+        assert_eq!(
+            budget["token_estimation_basis"],
+            json!("ceil(utf8_bytes / 4)")
+        );
+        // Structure survives: id and label kept.
+        assert_eq!(a["id"], json!(id));
+        assert!(a.get("label").is_some());
+    }
+
+    #[test]
+    fn ac3_ladder_progression() {
+        let server = create_test_server();
+        let id = seed_big_node(&server, "Person", "Alice");
+        // Generous budget -> full.
+        let (full, _) = dispatch_json(
+            &server,
+            "get_node",
+            json!({ "node_id": id, "max_response_tokens": 20000 }),
+        );
+        assert_eq!(full["budget"]["rung"], json!("full"));
+        // Mid budget -> some form of elision/summary (bio gone as full string).
+        let (mid, _) = dispatch_json(
+            &server,
+            "get_node",
+            json!({ "node_id": id, "max_response_tokens": 400 }),
+        );
+        let rung = mid["budget"]["rung"].as_str().unwrap();
+        assert!(
+            rung == "elided_properties" || rung == "entity_summaries",
+            "expected a degraded rung, got {rung}"
+        );
+        // bio must no longer be a full 4000-char string.
+        let bio = &mid["properties"]["bio"];
+        assert!(
+            bio.as_str().map(|s| s.len()).unwrap_or(0) < 4000,
+            "bio should have degraded"
+        );
+    }
+
+    // ---- AC4: fetch handles reconstruct omitted content --------------------
+
+    #[test]
+    fn ac4_fetch_handle_recovers_full_content() {
+        let server = create_test_server();
+        let id = seed_big_node(&server, "Person", "Alice");
+        let (shaped, _) = dispatch_json(
+            &server,
+            "get_node",
+            json!({ "node_id": id, "max_response_tokens": 400 }),
+        );
+        // Find a fetch handle somewhere in the shaped properties.
+        let handle = find_fetch_handle(&shaped).expect("a fetch handle must be present");
+        let tool = handle["tool"].as_str().unwrap().to_string();
+        let mut args = handle["arguments"].clone();
+        assert_eq!(tool, "get_node");
+        // Following the handle (no budget) returns the full bio.
+        let (recovered, is_error) = dispatch_json(&server, &tool, {
+            args.as_object_mut().unwrap();
+            args
+        });
+        assert!(!is_error, "handle call failed: {recovered}");
+        assert_eq!(
+            recovered["properties"]["bio"].as_str().unwrap().len(),
+            4000,
+            "handle reconstructs the omitted content exactly"
+        );
+    }
+
+    fn find_fetch_handle(value: &Value) -> Option<Value> {
+        match value {
+            Value::Object(map) => {
+                if let Some(fetch) = map.get("fetch")
+                    && fetch.get("tool").is_some()
+                {
+                    return Some(fetch.clone());
+                }
+                for v in map.values() {
+                    if let Some(h) = find_fetch_handle(v) {
+                        return Some(h);
+                    }
+                }
+                None
+            }
+            Value::Array(items) => items.iter().find_map(find_fetch_handle),
+            _ => None,
+        }
+    }
+
+    // ---- AC5: priority_properties out-survive ------------------------------
+
+    #[test]
+    fn ac5_priority_properties_protected() {
+        let server = create_test_server();
+        let id = seed_big_node(&server, "Person", "Alice");
+        // Protect "bio" even though it is the bulkiest property. The budget is
+        // tight enough to force degradation (bio ~4000B + notes ~2000B exceeds
+        // it) but roomy enough to keep the protected bio in full.
+        let (shaped, is_error) = dispatch_json(
+            &server,
+            "get_node",
+            json!({ "node_id": id, "max_response_tokens": 1500,
+                    "priority_properties": ["bio"] }),
+        );
+        assert!(!is_error, "should fit with bio protected: {shaped}");
+        assert_ne!(
+            shaped["budget"]["rung"],
+            json!("full"),
+            "budget must be tight enough to force degradation"
+        );
+        // bio kept in full; an unprotected bulky prop (notes) elided/dropped.
+        assert_eq!(
+            shaped["properties"]["bio"].as_str().map(|s| s.len()),
+            Some(4000),
+            "protected property survives"
+        );
+        let notes = &shaped["properties"]["notes"];
+        let notes_full = notes.as_str().map(|s| s.len() == 2000).unwrap_or(false);
+        assert!(
+            !notes_full,
+            "unprotected bulky property should degrade first"
+        );
+    }
+
+    // ---- AC6: too-small budget -> structured error -------------------------
+
+    #[test]
+    fn ac6_too_small_budget_errors_with_min_viable() {
+        let server = create_test_server();
+        let ids = seed_many(&server, "Person", 30);
+        let _ = ids;
+        let (value, is_error) = dispatch_json(
+            &server,
+            "list_nodes",
+            json!({ "label": "Person", "limit": 30, "max_response_tokens": 1 }),
+        );
+        assert!(
+            is_error,
+            "tiny budget must error, not silently empty: {value}"
+        );
+        let err = value.get("error").expect("structured error");
+        assert_eq!(err["code"], json!("INVALID_ARGUMENT"));
+        assert_eq!(err["retriable"], json!(false));
+        assert!(
+            err["details"].get("min_viable_tokens").is_some(),
+            "error must state the minimum viable budget: {err}"
+        );
+    }
+
+    #[test]
+    fn ac6_malformed_budget_rejected() {
+        let server = create_test_server();
+        let id = seed_big_node(&server, "Person", "Alice");
+        let (value, is_error) = dispatch_json(
+            &server,
+            "get_node",
+            json!({ "node_id": id, "max_response_tokens": 0 }),
+        );
+        assert!(is_error);
+        assert_eq!(value["error"]["code"], json!("INVALID_ARGUMENT"));
+    }
+
+    // ---- AC7: ranked tools never drop/reorder results ----------------------
+
+    #[test]
+    fn ac7_find_similar_never_drops_results() {
+        let server = create_test_server();
+        let _ = server.dispatch_tool(
+            "enable_vector_index",
+            json!({ "property_name": "embedding", "dimensions": 4, "metric": "cosine" }),
+        );
+        // Seed nodes with embeddings and bulky payloads.
+        let mut ids = Vec::new();
+        for i in 0..6 {
+            let (v, e) = dispatch_json(
+                &server,
+                "create_node",
+                json!({ "label": "Doc", "properties": {
+                    "name": format!("d{i}"),
+                    "bio": "b".repeat(3000),
+                    "embedding": [i as f32, 0.0, 0.0, 1.0],
+                }}),
+            );
+            assert!(!e, "seed failed: {v}");
+            ids.push(v["id"].as_u64().unwrap());
+        }
+        let (unbudgeted, _) = dispatch_json(
+            &server,
+            "find_similar",
+            json!({ "node_id": ids[0], "limit": 5 }),
+        );
+        let full_count = count_results(&unbudgeted);
+        let (budgeted, is_error) = dispatch_json(
+            &server,
+            "find_similar",
+            json!({ "node_id": ids[0], "limit": 5, "max_response_tokens": 900 }),
+        );
+        if is_error {
+            // Acceptable only via AC6 (budget too small even for summaries).
+            assert_eq!(budgeted["error"]["code"], json!("INVALID_ARGUMENT"));
+            return;
+        }
+        let budgeted_count = count_results(&budgeted);
+        assert_eq!(
+            budgeted_count, full_count,
+            "ranked results must not be dropped to meet a budget"
+        );
+        // Scores preserved for every result.
+        assert!(scores_present(&budgeted), "scores must survive budgeting");
+    }
+
+    fn count_results(value: &Value) -> usize {
+        for key in ["results", "similar", "nodes"] {
+            if let Some(arr) = value.get(key).and_then(Value::as_array) {
+                return arr.len();
+            }
+        }
+        0
+    }
+
+    fn scores_present(value: &Value) -> bool {
+        for key in ["results", "similar", "nodes"] {
+            if let Some(arr) = value.get(key).and_then(Value::as_array) {
+                return arr
+                    .iter()
+                    .all(|r| r.get("score").is_some() || r.get("similarity_score").is_some());
+            }
+        }
+        false
+    }
+
+    // ---- T4: real classification test (not tautological) -------------------
+
+    #[test]
+    fn budgetable_set_is_nonempty_and_classified_read() {
+        use crate::auth::AccessClass;
+        // The set must be non-empty...
+        assert!(
+            !super::super::server::BUDGETABLE_READ_TOOLS.is_empty(),
+            "budgetable set must not be empty"
+        );
+        // ...and every entry must be classified as a Read tool in the RBAC
+        // access matrix (lockstep with the auth surface, not a self-referential
+        // `is_budgetable_read_tool` check).
+        for tool in super::super::server::BUDGETABLE_READ_TOOLS {
+            let class = super::super::auth::tool_access_class(tool);
+            assert_eq!(
+                class,
+                Some(AccessClass::Read),
+                "{tool} must be classified AccessClass::Read (got {class:?})"
+            );
+        }
+    }
+
+    // ---- F7: budget params are discoverable in every tool's inputSchema ----
+
+    #[test]
+    fn f7_budget_params_present_in_every_budgetable_input_schema() {
+        let server = create_test_server();
+        for tool in super::super::server::BUDGETABLE_READ_TOOLS {
+            let schema = server
+                .tool_input_schema_for_test(tool)
+                .unwrap_or_else(|| panic!("{tool} must be advertised"));
+            let props = schema
+                .get("properties")
+                .and_then(Value::as_object)
+                .unwrap_or_else(|| panic!("{tool} inputSchema must have properties"));
+            for key in [
+                "max_response_tokens",
+                "max_response_bytes",
+                "priority_properties",
+            ] {
+                assert!(
+                    props.contains_key(key),
+                    "{tool} inputSchema must expose `{key}` (found: {:?})",
+                    props.keys().collect::<Vec<_>>()
+                );
+            }
+            // Types are correct: two positive integers, one array of strings.
+            assert_eq!(props["max_response_tokens"]["type"], json!("integer"));
+            assert_eq!(props["max_response_bytes"]["type"], json!("integer"));
+            assert_eq!(props["priority_properties"]["type"], json!("array"));
+        }
+    }
+
+    // ---- F1 + F5: rung-4 truncation resume covers all rows, no gap/dupe ----
+
+    #[test]
+    fn f1_truncated_list_nodes_resume_has_no_gaps_or_dupes() {
+        let server = create_test_server();
+        let all_ids = seed_many(&server, "Person", 30);
+
+        // Full, unbudgeted page (limit high enough to hold all).
+        let (full, _) = dispatch_json(
+            &server,
+            "list_nodes",
+            json!({ "label": "Person", "limit": 100 }),
+        );
+        let full_ids = collect_node_ids(&full);
+        assert_eq!(full_ids.len(), all_ids.len(), "seeded set fully listed");
+
+        // Budgeted request tight enough to force rung-4 truncation.
+        let (page1, is_error) = dispatch_json(
+            &server,
+            "list_nodes",
+            json!({ "label": "Person", "limit": 100, "max_response_tokens": 400 }),
+        );
+        assert!(!is_error, "budgeted list_nodes should succeed: {page1}");
+        assert_eq!(
+            page1["budget"]["rung"],
+            json!("counts_and_handles"),
+            "budget must be tight enough to truncate the array"
+        );
+        let page1_ids = collect_node_ids(&page1);
+
+        // F1: `count` sibling reflects the retained prefix, and `next_offset`
+        // advances by exactly that (not the original limit).
+        assert_eq!(
+            page1["count"].as_u64().unwrap() as usize,
+            page1_ids.len(),
+            "count sibling must match retained rows"
+        );
+        assert_eq!(page1["has_more"], json!(true), "has_more must flip to true");
+        assert_eq!(
+            page1["next_offset"].as_u64().unwrap() as usize,
+            page1_ids.len(),
+            "next_offset must resume at the cut point"
+        );
+
+        // F5: the truncation fetch handle is a concrete resume call.
+        let handle = truncation_handle(&page1).expect("a truncation fetch handle must exist");
+        assert_eq!(handle["tool"], json!("list_nodes"));
+        let resume_args = handle["arguments"].clone();
+        assert_eq!(
+            resume_args["offset"].as_u64().unwrap() as usize,
+            page1_ids.len(),
+            "resume offset must equal the retained count"
+        );
+
+        // Follow the disclosed resume call (unbudgeted): the union must equal
+        // the full set with NO gaps and NO dupes.
+        let (page2, e2) = dispatch_json(&server, "list_nodes", resume_args);
+        assert!(!e2, "resume call must succeed: {page2}");
+        let page2_ids = collect_node_ids(&page2);
+
+        let mut union = page1_ids.clone();
+        union.extend(page2_ids.iter().copied());
+        let mut sorted_union = union.clone();
+        sorted_union.sort_unstable();
+        let before_dedup = sorted_union.len();
+        sorted_union.dedup();
+        assert_eq!(
+            before_dedup,
+            sorted_union.len(),
+            "no duplicate rows across pages"
+        );
+
+        let mut expected = full_ids.clone();
+        expected.sort_unstable();
+        assert_eq!(
+            sorted_union, expected,
+            "union of pages == full set (no gaps)"
+        );
+    }
+
+    fn collect_node_ids(value: &Value) -> Vec<u64> {
+        value
+            .get("nodes")
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(|n| n.get("id").and_then(Value::as_u64))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Find the rung-4 truncation disclosure's fetch handle in `budget.sections`.
+    fn truncation_handle(value: &Value) -> Option<Value> {
+        let sections = value.get("budget")?.get("sections")?.as_array()?;
+        for s in sections {
+            if s.get("rung").and_then(Value::as_str) == Some("counts_and_handles")
+                && let Some(fetch) = s.get("fetch")
+                && fetch.get("tool").is_some()
+            {
+                return Some(fetch.clone());
+            }
+        }
+        None
+    }
+
+    // ---- F4: counts_and_handles succeeds at a tight budget (no false AC6) --
+
+    #[test]
+    fn f4_counts_and_handles_succeeds_at_tight_budget() {
+        let server = create_test_server();
+        let _ = seed_many(&server, "Person", 30);
+        // A budget large enough for the minimal rung-4 response but tight enough
+        // that the metadata block matters — must SUCCEED, not falsely AC6-error.
+        let cap = 2000usize;
+        let (value, is_error) = dispatch_raw(
+            &server,
+            "list_nodes",
+            json!({ "label": "Person", "limit": 100, "max_response_bytes": cap }),
+        );
+        assert!(
+            !is_error,
+            "tight-but-viable budget must succeed, not error: {value}"
+        );
+        assert!(
+            value.len() <= cap,
+            "assembled response must fit: {}",
+            value.len()
+        );
+        let parsed: Value = serde_json::from_str(&value).unwrap();
+        assert_eq!(parsed["budget"]["rung"], json!("counts_and_handles"));
+    }
+
+    // ---- T6: re-issuing at the reported min_viable_tokens succeeds ---------
+
+    #[test]
+    fn t6_reissue_at_min_viable_budget_succeeds() {
+        let server = create_test_server();
+        let id = seed_big_node(&server, "Person", "Alice");
+        let (value, is_error) = dispatch_json(
+            &server,
+            "get_node",
+            json!({ "node_id": id, "max_response_tokens": 1 }),
+        );
+        assert!(is_error, "tiny budget must error first");
+        let min_viable = value["error"]["details"]["min_viable_tokens"]
+            .as_u64()
+            .expect("min_viable_tokens present");
+        // Re-issue at the reported minimum — must now succeed.
+        let (retry, retry_err) = dispatch_json(
+            &server,
+            "get_node",
+            json!({ "node_id": id, "max_response_tokens": min_viable }),
+        );
+        assert!(
+            !retry_err,
+            "re-issuing at min_viable_tokens={min_viable} must succeed: {retry}"
+        );
+        assert_eq!(retry["id"], json!(id));
+    }
+
+    // ---- T5: byte budget holds for multibyte/unicode property payloads -----
+
+    #[test]
+    fn t5_byte_budget_holds_for_unicode_property() {
+        let server = create_test_server();
+        let big = "🌍héllo".repeat(500); // multibyte, ~ several KB
+        let (created, e) = dispatch_json(
+            &server,
+            "create_node",
+            json!({ "label": "Doc", "properties": { "name": "u", "bio": big } }),
+        );
+        assert!(!e, "seed failed: {created}");
+        let id = created["id"].as_u64().unwrap();
+        for cap in [300usize, 700, 1200] {
+            let (text, is_error) = dispatch_raw(
+                &server,
+                "get_node",
+                json!({ "node_id": id, "max_response_bytes": cap }),
+            );
+            if is_error {
+                continue;
+            }
+            assert!(
+                text.len() <= cap,
+                "unicode byte budget {cap} overran: {} bytes",
+                text.len()
+            );
+            assert!(
+                std::str::from_utf8(text.as_bytes()).is_ok(),
+                "response must remain valid UTF-8"
+            );
+        }
+    }
+
+    // ---- F5 (non-paginated): truncation handle has no bogus offset ---------
+
+    #[test]
+    fn f5_non_paginated_truncation_handle_omits_offset() {
+        let server = create_test_server();
+        let hub = seed_big_node(&server, "Hub", "center");
+        // Many bulky outgoing edges so get_outgoing_edges (no offset paging)
+        // reaches rung-4 truncation.
+        for _ in 0..25 {
+            let tgt = seed_big_node(&server, "Person", "t");
+            let _ = server.dispatch_tool(
+                "create_edge",
+                json!({ "source_id": hub, "target_id": tgt, "label": "KNOWS",
+                        "properties": { "detail": "z".repeat(400) } }),
+            );
+        }
+        let (value, is_error) = dispatch_json(
+            &server,
+            "get_outgoing_edges",
+            json!({ "node_id": hub, "max_response_tokens": 500 }),
+        );
+        if is_error {
+            return; // AC6 acceptable at extreme tightness
+        }
+        if value["budget"]["rung"] == json!("counts_and_handles")
+            && let Some(handle) = truncation_edge_handle(&value)
+        {
+            assert_eq!(handle["tool"], json!("get_outgoing_edges"));
+            assert!(
+                handle.get("arguments").is_none(),
+                "non-paginated tool must not fabricate an offset resume call: {handle}"
+            );
+        }
+    }
+
+    fn truncation_edge_handle(value: &Value) -> Option<Value> {
+        let sections = value.get("budget")?.get("sections")?.as_array()?;
+        for s in sections {
+            if s.get("rung").and_then(Value::as_str) == Some("counts_and_handles")
+                && let Some(fetch) = s.get("fetch")
+                && fetch.get("tool").is_some()
+            {
+                return Some(fetch.clone());
+            }
+        }
+        None
+    }
+
+    // ---- T1: AC2 sweep extended to ranked + query tools --------------------
+
+    /// Seed Doc nodes carrying both a 4-d embedding and a bulky bio, so the
+    /// ranked/query tools have data large enough to force degradation.
+    fn seed_vector_docs(server: &AletheiaMcpServer, n: usize) -> Vec<u64> {
+        let _ = server.dispatch_tool(
+            "enable_vector_index",
+            json!({ "property_name": "embedding", "dimensions": 4, "metric": "cosine" }),
+        );
+        let mut ids = Vec::new();
+        for i in 0..n {
+            let (v, e) = dispatch_json(
+                server,
+                "create_node",
+                json!({ "label": "Doc", "properties": {
+                    "name": format!("d{i}"),
+                    "bio": "b".repeat(2500),
+                    "embedding": [i as f32, 1.0, 0.0, 1.0],
+                }}),
+            );
+            assert!(!e, "seed failed: {v}");
+            ids.push(v["id"].as_u64().unwrap());
+        }
+        ids
+    }
+
+    #[test]
+    fn t1_ranked_and_query_byte_cap_sweep_is_nonvacuous() {
+        let server = create_test_server();
+        let ids = seed_vector_docs(&server, 12);
+        // A few edges so hybrid traversal has neighbors.
+        for w in ids.windows(2).take(8) {
+            let _ = server.dispatch_tool(
+                "create_edge",
+                json!({ "source_id": w[0], "target_id": w[1], "label": "REL",
+                        "properties": { "note": "n".repeat(600) } }),
+            );
+        }
+        let cases: Vec<(&str, Value)> = vec![
+            (
+                "find_similar",
+                json!({ "property_name": "embedding", "embedding": [0.0, 1.0, 0.0, 1.0], "k": 10 }),
+            ),
+            (
+                "hybrid_query",
+                json!({ "start_node_id": ids[0], "traverse_edge": "REL", "traverse_depth": 2,
+                        "limit": 10 }),
+            ),
+            (
+                "query",
+                json!({ "language": "aql", "query": "MATCH (n:Doc) RETURN n", "limit": 20 }),
+            ),
+        ];
+        let budgets = [512u64, 1024, 2048, 4096, 8192];
+        let mut successful_cases = 0usize;
+        for &budget in &budgets {
+            for (tool, base) in &cases {
+                let mut args = base.clone();
+                args.as_object_mut()
+                    .unwrap()
+                    .insert("max_response_bytes".into(), json!(budget));
+                let (text, is_error) = dispatch_raw(&server, tool, args);
+                if is_error {
+                    continue;
+                }
+                successful_cases += 1;
+                assert!(
+                    text.len() as u64 <= budget,
+                    "[{tool} @ {budget}B] overran: {} bytes",
+                    text.len()
+                );
+            }
+        }
+        // The sweep must not pass vacuously (every case erroring).
+        assert!(
+            successful_cases > 0,
+            "conformance sweep produced zero successful budgeted responses"
+        );
+    }
+
+    // ---- T2: dedicated query-tool budget + hybrid_query AC7 ----------------
+
+    #[test]
+    fn t2_query_tool_budget_shapes_bulky_rows() {
+        let server = create_test_server();
+        let _ = seed_vector_docs(&server, 10);
+        let (full, ferr) = dispatch_json(
+            &server,
+            "query",
+            json!({ "language": "aql", "query": "MATCH (n:Doc) RETURN n", "limit": 20 }),
+        );
+        assert!(!ferr, "unbudgeted query failed: {full}");
+        let full_rows = full["rows"].as_array().map(|a| a.len()).unwrap_or(0);
+        assert!(full_rows > 0, "query returned rows");
+
+        let (shaped, is_error) = dispatch_json(
+            &server,
+            "query",
+            json!({ "language": "aql", "query": "MATCH (n:Doc) RETURN n", "limit": 20,
+                    "max_response_tokens": 500 }),
+        );
+        if is_error {
+            assert_eq!(shaped["error"]["code"], json!("INVALID_ARGUMENT"));
+            return;
+        }
+        // Budget block present; rows degraded (bulky bio elided/summarized or
+        // rows truncated) but row_count stays consistent with the array length.
+        assert_eq!(shaped["budget"]["applied"], json!(true));
+        let rc = shaped["row_count"].as_u64().unwrap() as usize;
+        let arr = shaped["rows"].as_array().map(|a| a.len()).unwrap_or(0);
+        assert_eq!(rc, arr, "row_count must match retained rows (F1)");
+    }
+
+    #[test]
+    fn t2_hybrid_query_preserves_count_and_scores_under_budget() {
+        let server = create_test_server();
+        let ids = seed_vector_docs(&server, 6);
+        for w in ids.windows(2) {
+            let _ = server.dispatch_tool(
+                "create_edge",
+                json!({ "source_id": ids[0], "target_id": w[1], "label": "REL",
+                        "properties": { "note": "n".repeat(500) } }),
+            );
+        }
+        let base = json!({ "start_node_id": ids[0], "traverse_edge": "REL",
+                           "traverse_depth": 1, "limit": 10 });
+        let (full, _) = dispatch_json(&server, "hybrid_query", base.clone());
+        let full_count = full["results"].as_array().map(|a| a.len()).unwrap_or(0);
+
+        let mut args = base;
+        args.as_object_mut()
+            .unwrap()
+            .insert("max_response_tokens".into(), json!(700));
+        let (budgeted, is_error) = dispatch_json(&server, "hybrid_query", args);
+        if is_error {
+            assert_eq!(budgeted["error"]["code"], json!("INVALID_ARGUMENT"));
+            return;
+        }
+        let budgeted_count = budgeted["results"].as_array().map(|a| a.len()).unwrap_or(0);
+        assert_eq!(
+            budgeted_count, full_count,
+            "ranked hybrid results must not be dropped to meet a budget (AC7)"
+        );
+        for r in budgeted["results"].as_array().unwrap() {
+            assert!(
+                r.get("similarity_score").is_some(),
+                "similarity_score must be present on every ranked result: {r}"
+            );
+        }
+    }
+
+    // ---- T3: AC7 ordering preserved for ranked tools -----------------------
+
+    #[test]
+    fn t3_find_similar_preserves_result_ordering_under_budget() {
+        let server = create_test_server();
+        let _ = seed_vector_docs(&server, 8);
+        let q = json!({ "property_name": "embedding", "embedding": [0.0, 1.0, 0.0, 1.0], "k": 6 });
+
+        let (full, _) = dispatch_json(&server, "find_similar", q.clone());
+        let full_seq = ordered_id_score(&full);
+        assert!(
+            !full_seq.is_empty(),
+            "unbudgeted find_similar returned results"
+        );
+
+        let mut args = q;
+        args.as_object_mut()
+            .unwrap()
+            .insert("max_response_tokens".into(), json!(700));
+        let (budgeted, is_error) = dispatch_json(&server, "find_similar", args);
+        if is_error {
+            assert_eq!(budgeted["error"]["code"], json!("INVALID_ARGUMENT"));
+            return;
+        }
+        let budgeted_seq = ordered_id_score(&budgeted);
+        assert_eq!(
+            budgeted_seq, full_seq,
+            "ranked ordering (id + score sequence) must be identical under budget"
+        );
+    }
+
+    /// The ordered (id, score-bits) sequence of a ranked response's results, so
+    /// ordering — not just membership — can be compared exactly.
+    fn ordered_id_score(value: &Value) -> Vec<(u64, u64)> {
+        value
+            .get("results")
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .map(|r| {
+                        let id = r
+                            .get("node")
+                            .and_then(|n| n.get("id"))
+                            .and_then(Value::as_u64)
+                            .unwrap_or(0);
+                        let score = r
+                            .get("score")
+                            .or_else(|| r.get("similarity_score"))
+                            .and_then(Value::as_f64)
+                            .map(f64::to_bits)
+                            .unwrap_or(0);
+                        (id, score)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+}
+
+// ============================================================================
+// Snapshot-anchored cursor continuation (Issue #3360)
+// ============================================================================
+
+mod cursor_tests {
+    use super::*;
+    use std::collections::BTreeSet;
+    use std::time::Duration;
+
+    /// Drive a tool through the real MCP dispatch table and parse its JSON.
+    fn call(server: &AletheiaMcpServer, name: &str, args: serde_json::Value) -> serde_json::Value {
+        let result = server.dispatch_tool(name, args);
+        let text = AletheiaMcpServer::extract_text(result);
+        serde_json::from_str(&text).expect("tool returned valid json")
+    }
+
+    /// Create `n` `Person` nodes, returning their ids in creation order.
+    fn make_people(server: &AletheiaMcpServer, n: usize) -> Vec<u64> {
+        (0..n)
+            .map(|i| {
+                server
+                    .db()
+                    .create_node(
+                        "Person",
+                        PropertyMapBuilder::new()
+                            .insert("name", format!("p{i}"))
+                            .build(),
+                    )
+                    .expect("create_node")
+                    .as_u64()
+            })
+            .collect()
+    }
+
+    // AC1 + AC7: cursor pages the full labelled set, in deterministic ascending
+    // id order, with no duplicates and no gaps; the last page carries no cursor.
+    #[test]
+    fn list_nodes_cursor_pages_full_set_deterministically() {
+        let server = create_test_server();
+        let expected: BTreeSet<u64> = make_people(&server, 25).into_iter().collect();
+
+        let mut seen: BTreeSet<u64> = BTreeSet::new();
+        let mut prev_page_max: Option<u64> = None;
+        let mut args = serde_json::json!({"label": "Person", "use_cursor": true, "limit": 10});
+        let mut pages = 0;
+        loop {
+            let v = call(&server, "list_nodes", args.clone());
+            assert_eq!(v["paging"], "cursor");
+            assert_eq!(v["total_matching"], 25);
+            let ids: Vec<u64> = v["nodes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|n| n["id"].as_u64().unwrap())
+                .collect();
+            // Ascending within the page, and every id strictly past the prior
+            // page's max (keyset, deterministic boundaries).
+            assert!(
+                ids.windows(2).all(|w| w[0] < w[1]),
+                "ids ascend within page"
+            );
+            if let Some(m) = prev_page_max {
+                assert!(ids.iter().all(|&id| id > m), "keyset seek past prior page");
+            }
+            prev_page_max = ids.iter().max().copied();
+            for id in ids {
+                assert!(seen.insert(id), "duplicate id {id} across pages");
+            }
+            pages += 1;
+            match v.get("cursor").and_then(|c| c.as_str()) {
+                Some(tok) => {
+                    assert_eq!(v["has_more"], true);
+                    assert!(v["cursor_ttl_seconds"].as_u64().unwrap() > 0);
+                    args = serde_json::json!({"cursor": tok});
+                }
+                None => {
+                    assert_eq!(v["has_more"], false);
+                    break;
+                }
+            }
+            assert!(pages < 10, "runaway paging");
+        }
+        assert_eq!(seen, expected, "union of pages equals the full set");
+        assert_eq!(pages, 3, "25 rows / 10 per page = 3 pages");
+    }
+
+    // AC2 (headline): all pages of one scan are evaluated at the first page's
+    // bi-temporal coordinate. Interleaving writes between pages leaks nothing:
+    // zero duplicates, zero omissions, and no post-snapshot writes appear.
+    #[test]
+    fn find_nodes_at_time_cursor_is_snapshot_consistent_under_concurrent_writes() {
+        let server = create_test_server();
+        let expected: BTreeSet<u64> = make_people(&server, 25).into_iter().collect();
+
+        // Pin an explicit snapshot coordinate now that the 25 exist.
+        let snap = crate::core::temporal::time::now().wallclock().to_string();
+
+        let v1 = call(
+            &server,
+            "find_nodes_at_time",
+            serde_json::json!({
+                "label": "Person",
+                "valid_time": snap,
+                "transaction_time": snap,
+                "use_cursor": true,
+                "limit": 10
+            }),
+        );
+        assert_eq!(v1["has_more"], true);
+        let mut seen: BTreeSet<u64> = v1["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|n| n["id"].as_u64().unwrap())
+            .collect();
+        let cursor = v1["cursor"].as_str().unwrap().to_string();
+
+        // --- Concurrent writes between page 1 and the rest ---
+        // Five brand-new Persons (recorded AFTER the snapshot).
+        make_people(&server, 5);
+        // Delete an original that page 1 has not yet returned (highest id; page 1
+        // returned the lowest 10). Recorded AFTER the snapshot.
+        let victim = *expected.iter().next_back().unwrap();
+        let del = call(
+            &server,
+            "delete_node",
+            serde_json::json!({"node_id": victim}),
+        );
+        assert!(del.get("error").is_none(), "delete should succeed: {del}");
+
+        // Drain the remaining pages via the cursor.
+        let mut args = serde_json::json!({"cursor": cursor});
+        loop {
+            let v = call(&server, "find_nodes_at_time", args.clone());
+            for n in v["nodes"].as_array().unwrap() {
+                assert!(
+                    seen.insert(n["id"].as_u64().unwrap()),
+                    "duplicate row across pages"
+                );
+            }
+            match v.get("cursor").and_then(|c| c.as_str()) {
+                Some(tok) => args = serde_json::json!({"cursor": tok}),
+                None => break,
+            }
+        }
+
+        // Exactly the original 25: the 5 later inserts are invisible (created
+        // after the snapshot), the deleted node is still present (deleted after
+        // the snapshot), no duplicates, no omissions.
+        assert_eq!(seen, expected);
+        assert!(
+            seen.contains(&victim),
+            "a node deleted after the snapshot still appears in the scan"
+        );
+    }
+
+    // AC3: a tampered token is rejected with a structured INVALID_ARGUMENT
+    // error (never wrong data), through the tool surface.
+    #[test]
+    fn tampered_cursor_returns_invalid_argument() {
+        let server = create_test_server();
+        make_people(&server, 15);
+        let v1 = call(
+            &server,
+            "list_nodes",
+            serde_json::json!({"label": "Person", "use_cursor": true, "limit": 5}),
+        );
+        let tok = v1["cursor"].as_str().unwrap();
+        // Corrupt the final character of the signed token.
+        let mut bad = tok.to_string();
+        bad.pop();
+        bad.push(if tok.ends_with('A') { 'B' } else { 'A' });
+
+        let v = call(&server, "list_nodes", serde_json::json!({"cursor": bad}));
+        assert_eq!(v["error"]["code"], "INVALID_ARGUMENT");
+        assert_eq!(v["error"]["retriable"], false);
+    }
+
+    // AC5: resuming after expiry returns a structured FAILED_PRECONDITION with
+    // remediation guidance (re-issue the query).
+    #[test]
+    fn expired_cursor_returns_failed_precondition() {
+        let server = AletheiaMcpServer::new(create_test_db())
+            .with_cursor_config(Duration::from_secs(0), 128);
+        make_people(&server, 15);
+        let v1 = call(
+            &server,
+            "list_nodes",
+            serde_json::json!({"label": "Person", "use_cursor": true, "limit": 5}),
+        );
+        let tok = v1["cursor"].as_str().unwrap().to_string();
+        let v = call(&server, "list_nodes", serde_json::json!({"cursor": tok}));
+        assert_eq!(v["error"]["code"], "FAILED_PRECONDITION");
+        assert_eq!(v["error"]["retriable"], false);
+    }
+
+    // AC5: exceeding the per-connection live-cursor cap is a structured
+    // FAILED_PRECONDITION echoing the cap.
+    #[test]
+    fn exceeding_live_cursor_cap_returns_failed_precondition() {
+        let server = AletheiaMcpServer::new(create_test_db())
+            .with_cursor_config(Duration::from_secs(300), 1);
+        make_people(&server, 30);
+        // First scan opens the one permitted live cursor.
+        let v1 = call(
+            &server,
+            "list_nodes",
+            serde_json::json!({"label": "Person", "use_cursor": true, "limit": 5}),
+        );
+        assert!(v1["cursor"].is_string());
+        // A second independent first-page scan exceeds the cap.
+        let v2 = call(
+            &server,
+            "list_nodes",
+            serde_json::json!({"label": "Person", "use_cursor": true, "limit": 5}),
+        );
+        assert_eq!(v2["error"]["code"], "FAILED_PRECONDITION");
+        assert_eq!(v2["error"]["details"]["max_live_cursors"], 1);
+    }
+
+    // AC3: a cursor minted by one tool cannot be replayed against another.
+    #[test]
+    fn cross_tool_cursor_replay_is_rejected() {
+        let server = create_test_server();
+        make_people(&server, 15);
+        let v1 = call(
+            &server,
+            "list_nodes",
+            serde_json::json!({"label": "Person", "use_cursor": true, "limit": 5}),
+        );
+        let tok = v1["cursor"].as_str().unwrap().to_string();
+        let v = call(
+            &server,
+            "find_nodes_at_time",
+            serde_json::json!({"cursor": tok}),
+        );
+        assert_eq!(v["error"]["code"], "INVALID_ARGUMENT");
+    }
+
+    // AC1: adjacency tools page a node's edges by edge id, no dup, no gap.
+    #[test]
+    fn get_outgoing_edges_cursor_pages_full_adjacency() {
+        let server = create_test_server();
+        let src = server
+            .db()
+            .create_node("Person", PropertyMapBuilder::new().build())
+            .unwrap();
+        let mut expected: BTreeSet<u64> = BTreeSet::new();
+        for _ in 0..12 {
+            let dst = server
+                .db()
+                .create_node("Person", PropertyMapBuilder::new().build())
+                .unwrap();
+            let eid = server
+                .db()
+                .create_edge(src, dst, "KNOWS", crate::core::PropertyMap::default())
+                .unwrap();
+            expected.insert(eid.as_u64());
+        }
+
+        let mut seen: BTreeSet<u64> = BTreeSet::new();
+        let mut args = serde_json::json!({"node_id": src.as_u64(), "use_cursor": true, "limit": 5});
+        loop {
+            let v = call(&server, "get_outgoing_edges", args.clone());
+            assert_eq!(v["total_matching"], 12);
+            for e in v["edges"].as_array().unwrap() {
+                assert!(seen.insert(e["id"].as_u64().unwrap()), "duplicate edge");
+            }
+            match v.get("cursor").and_then(|c| c.as_str()) {
+                Some(tok) => args = serde_json::json!({"cursor": tok}),
+                None => break,
+            }
+        }
+        assert_eq!(seen, expected);
+    }
+
+    // AC1: traverse cursor pages every reachable node exactly once (snapshot
+    // pinned across pages).
+    #[test]
+    fn traverse_cursor_pages_all_reachable_nodes() {
+        let server = create_test_server();
+        let src = server
+            .db()
+            .create_node("Person", PropertyMapBuilder::new().build())
+            .unwrap();
+        let mut expected: BTreeSet<u64> = BTreeSet::new();
+        for _ in 0..12 {
+            let dst = server
+                .db()
+                .create_node("Person", PropertyMapBuilder::new().build())
+                .unwrap();
+            server
+                .db()
+                .create_edge(src, dst, "KNOWS", crate::core::PropertyMap::default())
+                .unwrap();
+            expected.insert(dst.as_u64());
+        }
+
+        let mut seen: BTreeSet<u64> = BTreeSet::new();
+        let mut args = serde_json::json!({
+            "start_node_id": src.as_u64(),
+            "edge_label": "KNOWS",
+            "use_cursor": true,
+            "limit": 5
+        });
+        loop {
+            let v = call(&server, "traverse", args.clone());
+            assert_eq!(v["paging"], "cursor");
+            for r in v["results"].as_array().unwrap() {
+                assert!(
+                    seen.insert(r["node"]["id"].as_u64().unwrap()),
+                    "duplicate node across traverse pages"
+                );
+            }
+            match v.get("cursor").and_then(|c| c.as_str()) {
+                Some(tok) => args = serde_json::json!({"cursor": tok}),
+                None => break,
+            }
+        }
+        assert_eq!(seen, expected);
+    }
+
+    // AC7: the query tool refuses cursor paging with a structured
+    // unsupported_construct-class error rather than silently falling back.
+    #[test]
+    fn query_tool_cursor_is_unsupported_not_silent() {
+        let server = create_test_server();
+        let v = call(
+            &server,
+            "query",
+            serde_json::json!({
+                "language": "aql",
+                "query": "MATCH (n:Person) RETURN n",
+                "use_cursor": true
+            }),
+        );
+        assert_eq!(v["error"]["kind"], "unsupported_construct");
+        assert_eq!(v["error"]["code"], "INVALID_ARGUMENT");
+    }
+
+    // AC1/disclosure: list_edges is not cursorable and says so, pointing at the
+    // cursor-paged adjacency tools (no silent no-op).
+    #[test]
+    fn list_edges_cursor_is_refused_with_alternatives() {
+        let server = create_test_server();
+        let v = call(
+            &server,
+            "list_edges",
+            serde_json::json!({"use_cursor": true}),
+        );
+        assert_eq!(v["error"]["code"], "INVALID_ARGUMENT");
+        let alts = v["error"]["details"]["cursorable_alternatives"]
+            .as_array()
+            .expect("alternatives listed");
+        assert!(alts.iter().any(|a| a == "get_outgoing_edges"));
+    }
+
+    // AC6: cursor mode is opt-in; without use_cursor/cursor the legacy offset
+    // response shape (offset/limit, no `paging` marker) is unchanged.
+    #[test]
+    fn offset_paging_remains_the_default_and_unchanged() {
+        let server = create_test_server();
+        make_people(&server, 3);
+        let v = call(
+            &server,
+            "list_nodes",
+            serde_json::json!({"label": "Person", "limit": 2}),
+        );
+        assert!(v.get("paging").is_none(), "no cursor marker in offset mode");
+        assert_eq!(v["offset"], 0);
+        assert_eq!(v["has_more"], true);
+        assert_eq!(v["next_offset"], 2);
+    }
+
+    // FIX-A (discoverability): every cursorable tool advertises `use_cursor`
+    // and `cursor` in its inputSchema.properties with descriptions, so a client
+    // / LLM can discover snapshot cursor paging without reading source.
+    #[test]
+    fn all_cursorable_tools_advertise_cursor_params_in_schema() {
+        let server = create_test_server();
+        for tool in [
+            "list_nodes",
+            "find_nodes_at_time",
+            "get_outgoing_edges",
+            "get_incoming_edges",
+            "traverse",
+        ] {
+            let schema = server
+                .tool_input_schema_for_test(tool)
+                .unwrap_or_else(|| panic!("{tool} has an input schema"));
+            let props = schema["properties"]
+                .as_object()
+                .unwrap_or_else(|| panic!("{tool} schema has properties"));
+            assert!(
+                props.contains_key("use_cursor"),
+                "{tool} must expose `use_cursor` in inputSchema"
+            );
+            assert!(
+                props.contains_key("cursor"),
+                "{tool} must expose `cursor` in inputSchema"
+            );
+            assert!(
+                props["use_cursor"]["description"].is_string(),
+                "{tool} `use_cursor` carries a description"
+            );
+            assert!(
+                props["cursor"]["description"].is_string(),
+                "{tool} `cursor` carries a description"
+            );
+            assert_eq!(
+                props["use_cursor"]["type"], "boolean",
+                "{tool} `use_cursor` is boolean"
+            );
+            assert_eq!(
+                props["cursor"]["type"], "string",
+                "{tool} `cursor` is string"
+            );
+        }
+    }
+
+    // FIX-F (list_nodes snapshot consistency): list_nodes cursor pins (now, now)
+    // on page 1. Creating AND deleting nodes mid-stream must leave the union of
+    // pages equal to the page-1 snapshot set: created-after excluded,
+    // deleted-after still present, no dup/gap, across >2 pages.
+    #[test]
+    fn list_nodes_cursor_snapshot_consistent_under_concurrent_create_and_delete() {
+        let server = create_test_server();
+        let expected: BTreeSet<u64> = make_people(&server, 25).into_iter().collect();
+
+        // Page 1 (limit 8 -> at least 4 pages) pins the snapshot at "now".
+        let v1 = call(
+            &server,
+            "list_nodes",
+            serde_json::json!({"label": "Person", "use_cursor": true, "limit": 8}),
+        );
+        assert_eq!(v1["has_more"], true);
+        let mut seen: BTreeSet<u64> = v1["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|n| n["id"].as_u64().unwrap())
+            .collect();
+        let mut cursor = v1["cursor"].as_str().unwrap().to_string();
+
+        // Concurrent writes recorded AFTER the page-1 snapshot:
+        //  - 5 brand-new Persons (must be invisible to the scan), and
+        //  - delete an original not yet returned (highest id) -- still visible.
+        make_people(&server, 5);
+        let victim = *expected.iter().next_back().unwrap();
+        let del = call(
+            &server,
+            "delete_node",
+            serde_json::json!({"node_id": victim}),
+        );
+        assert!(del.get("error").is_none(), "delete should succeed: {del}");
+
+        let mut pages = 1;
+        loop {
+            let v = call(&server, "list_nodes", serde_json::json!({"cursor": cursor}));
+            for n in v["nodes"].as_array().unwrap() {
+                assert!(
+                    seen.insert(n["id"].as_u64().unwrap()),
+                    "duplicate row across pages"
+                );
+            }
+            pages += 1;
+            match v.get("cursor").and_then(|c| c.as_str()) {
+                Some(tok) => cursor = tok.to_string(),
+                None => break,
+            }
+            assert!(pages < 10, "runaway paging");
+        }
+
+        assert!(pages > 2, "scan spanned more than two pages, got {pages}");
+        assert_eq!(seen, expected, "union of pages == page-1 snapshot set");
+        assert!(
+            seen.contains(&victim),
+            "a node deleted after the snapshot is still present"
+        );
+    }
+
+    // FIX-G (deletion of an already-returned row): deleting a node that page 1
+    // already emitted, between pages, must not remove it from the scan (it was
+    // present at the pinned snapshot) and must not duplicate/skip anything.
+    #[test]
+    fn list_nodes_cursor_deletion_of_already_returned_row_stays_in_scan() {
+        let server = create_test_server();
+        let expected: BTreeSet<u64> = make_people(&server, 12).into_iter().collect();
+
+        let v1 = call(
+            &server,
+            "list_nodes",
+            serde_json::json!({"label": "Person", "use_cursor": true, "limit": 5}),
+        );
+        let page1: Vec<u64> = v1["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|n| n["id"].as_u64().unwrap())
+            .collect();
+        assert_eq!(v1["has_more"], true);
+        let mut seen: BTreeSet<u64> = page1.iter().copied().collect();
+        let mut cursor = v1["cursor"].as_str().unwrap().to_string();
+
+        // Delete a row page 1 ALREADY returned (the lowest id) after the
+        // snapshot -- it must stay in the union.
+        let already_returned = *page1.first().unwrap();
+        let del = call(
+            &server,
+            "delete_node",
+            serde_json::json!({"node_id": already_returned}),
+        );
+        assert!(del.get("error").is_none(), "delete should succeed: {del}");
+
+        loop {
+            let v = call(&server, "list_nodes", serde_json::json!({"cursor": cursor}));
+            for n in v["nodes"].as_array().unwrap() {
+                assert!(
+                    seen.insert(n["id"].as_u64().unwrap()),
+                    "duplicate row across pages"
+                );
+            }
+            match v.get("cursor").and_then(|c| c.as_str()) {
+                Some(tok) => cursor = tok.to_string(),
+                None => break,
+            }
+        }
+
+        assert_eq!(seen, expected, "union still equals the full snapshot set");
+        assert!(
+            seen.contains(&already_returned),
+            "an already-returned row deleted mid-stream stays in the scan"
+        );
+    }
+
+    // FIX-G (update mid-stream): a node updated AFTER the page-1 snapshot must
+    // be returned AS IT WAS at the snapshot -- verify the reconstructed PROPERTY
+    // value, not just the id.
+    #[test]
+    fn list_nodes_cursor_returns_updated_node_as_of_snapshot() {
+        let server = create_test_server();
+        let ids = make_people(&server, 6); // names p0..p5, ascending ids
+        let sorted: Vec<u64> = {
+            let mut s = ids.clone();
+            s.sort_unstable();
+            s
+        };
+
+        // Page 1 (limit 3) pins the snapshot and returns the lowest 3 ids.
+        let v1 = call(
+            &server,
+            "list_nodes",
+            serde_json::json!({"label": "Person", "use_cursor": true, "limit": 3}),
+        );
+        assert_eq!(v1["has_more"], true);
+        let cursor = v1["cursor"].as_str().unwrap().to_string();
+
+        // Update a node NOT yet returned (the 4th lowest id) to a new name,
+        // recorded AFTER the snapshot.
+        let target = sorted[3];
+        let upd = call(
+            &server,
+            "update_node",
+            serde_json::json!({"node_id": target, "properties": {"name": "UPDATED_AFTER_SNAPSHOT"}}),
+        );
+        assert!(upd.get("error").is_none(), "update should succeed: {upd}");
+
+        // Drain remaining pages; find the target and assert its reconstructed
+        // name is the pre-update value (snapshot state), not "UPDATED...".
+        let mut args = serde_json::json!({"cursor": cursor});
+        let mut found_name: Option<String> = None;
+        loop {
+            let v = call(&server, "list_nodes", args.clone());
+            for n in v["nodes"].as_array().unwrap() {
+                if n["id"].as_u64().unwrap() == target {
+                    found_name = Some(n["properties"]["name"].as_str().unwrap().to_string());
+                }
+            }
+            match v.get("cursor").and_then(|c| c.as_str()) {
+                Some(tok) => args = serde_json::json!({"cursor": tok}),
+                None => break,
+            }
+        }
+        assert_eq!(
+            found_name.as_deref(),
+            Some("p3"),
+            "updated-after node is returned as-it-was at the pinned snapshot"
+        );
+    }
+
+    // FIX-G (incoming adjacency coverage): get_incoming_edges cursor pages a
+    // node's incoming edges by edge id, no dup / no gap (mirrors the outgoing
+    // test).
+    #[test]
+    fn get_incoming_edges_cursor_pages_full_adjacency() {
+        let server = create_test_server();
+        let dst = server
+            .db()
+            .create_node("Person", PropertyMapBuilder::new().build())
+            .unwrap();
+        let mut expected: BTreeSet<u64> = BTreeSet::new();
+        for _ in 0..12 {
+            let src = server
+                .db()
+                .create_node("Person", PropertyMapBuilder::new().build())
+                .unwrap();
+            let eid = server
+                .db()
+                .create_edge(src, dst, "KNOWS", crate::core::PropertyMap::default())
+                .unwrap();
+            expected.insert(eid.as_u64());
+        }
+
+        let mut seen: BTreeSet<u64> = BTreeSet::new();
+        let mut args = serde_json::json!({"node_id": dst.as_u64(), "use_cursor": true, "limit": 5});
+        loop {
+            let v = call(&server, "get_incoming_edges", args.clone());
+            assert_eq!(v["paging"], "cursor");
+            assert_eq!(v["total_matching"], 12);
+            for e in v["edges"].as_array().unwrap() {
+                assert!(seen.insert(e["id"].as_u64().unwrap()), "duplicate edge");
+            }
+            match v.get("cursor").and_then(|c| c.as_str()) {
+                Some(tok) => args = serde_json::json!({"cursor": tok}),
+                None => break,
+            }
+        }
+        assert_eq!(seen, expected);
+    }
+
+    // FIX-F (adjacency snapshot consistency): get_outgoing_edges cursor pins the
+    // snapshot on page 1; a mid-stream edge create+delete must leave the union
+    // equal to the page-1 adjacency (created-after excluded, deleted-after
+    // present), no dup/gap.
+    #[test]
+    fn get_outgoing_edges_cursor_snapshot_consistent_under_concurrent_edge_writes() {
+        let server = create_test_server();
+        let src = server
+            .db()
+            .create_node("Person", PropertyMapBuilder::new().build())
+            .unwrap();
+        let mut expected: BTreeSet<u64> = BTreeSet::new();
+        let mut edge_ids: Vec<u64> = Vec::new();
+        for _ in 0..12 {
+            let dst = server
+                .db()
+                .create_node("Person", PropertyMapBuilder::new().build())
+                .unwrap();
+            let eid = server
+                .db()
+                .create_edge(src, dst, "KNOWS", crate::core::PropertyMap::default())
+                .unwrap();
+            expected.insert(eid.as_u64());
+            edge_ids.push(eid.as_u64());
+        }
+
+        let v1 = call(
+            &server,
+            "get_outgoing_edges",
+            serde_json::json!({"node_id": src.as_u64(), "use_cursor": true, "limit": 5}),
+        );
+        assert_eq!(v1["has_more"], true);
+        let mut seen: BTreeSet<u64> = v1["edges"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["id"].as_u64().unwrap())
+            .collect();
+        let mut cursor = v1["cursor"].as_str().unwrap().to_string();
+
+        // Concurrent writes recorded AFTER the snapshot: add a new edge
+        // (invisible) and delete an existing one not yet returned (still
+        // present at the pinned snapshot).
+        let new_dst = server
+            .db()
+            .create_node("Person", PropertyMapBuilder::new().build())
+            .unwrap();
+        server
+            .db()
+            .create_edge(src, new_dst, "KNOWS", crate::core::PropertyMap::default())
+            .unwrap();
+        let victim_edge = *edge_ids.iter().max().unwrap();
+        let del = call(
+            &server,
+            "delete_edge",
+            serde_json::json!({"edge_id": victim_edge}),
+        );
+        assert!(
+            del.get("error").is_none(),
+            "delete_edge should succeed: {del}"
+        );
+
+        loop {
+            let v = call(
+                &server,
+                "get_outgoing_edges",
+                serde_json::json!({"cursor": cursor}),
+            );
+            for e in v["edges"].as_array().unwrap() {
+                assert!(seen.insert(e["id"].as_u64().unwrap()), "duplicate edge");
+            }
+            match v.get("cursor").and_then(|c| c.as_str()) {
+                Some(tok) => cursor = tok.to_string(),
+                None => break,
+            }
+        }
+
+        assert_eq!(seen, expected, "union == page-1 adjacency snapshot");
+        assert!(
+            seen.contains(&victim_edge),
+            "an edge deleted after the snapshot is still present in the scan"
+        );
+    }
+
+    // FIX-F (traverse snapshot consistency): traverse cursor pins the snapshot
+    // on page 1; adding + deleting graph elements mid-stream must leave the
+    // reachable set equal to the page-1 snapshot reachable set, no dup/skip.
+    #[test]
+    fn traverse_cursor_snapshot_consistent_under_concurrent_graph_mutation() {
+        let server = create_test_server();
+        let src = server
+            .db()
+            .create_node("Person", PropertyMapBuilder::new().build())
+            .unwrap();
+        let mut expected: BTreeSet<u64> = BTreeSet::new();
+        let mut edge_ids: Vec<u64> = Vec::new();
+        for _ in 0..12 {
+            let dst = server
+                .db()
+                .create_node("Person", PropertyMapBuilder::new().build())
+                .unwrap();
+            let eid = server
+                .db()
+                .create_edge(src, dst, "KNOWS", crate::core::PropertyMap::default())
+                .unwrap();
+            expected.insert(dst.as_u64());
+            edge_ids.push(eid.as_u64());
+        }
+
+        let v1 = call(
+            &server,
+            "traverse",
+            serde_json::json!({
+                "start_node_id": src.as_u64(),
+                "edge_label": "KNOWS",
+                "use_cursor": true,
+                "limit": 5
+            }),
+        );
+        assert_eq!(v1["has_more"], true);
+        let mut seen: BTreeSet<u64> = v1["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["node"]["id"].as_u64().unwrap())
+            .collect();
+        let mut cursor = v1["cursor"].as_str().unwrap().to_string();
+
+        // Mutate the graph AFTER the snapshot: add a new reachable node+edge
+        // (must be invisible) and delete an existing edge to a not-yet-returned
+        // dst (its dst stays reachable at the pinned snapshot).
+        let new_dst = server
+            .db()
+            .create_node("Person", PropertyMapBuilder::new().build())
+            .unwrap();
+        server
+            .db()
+            .create_edge(src, new_dst, "KNOWS", crate::core::PropertyMap::default())
+            .unwrap();
+        let victim_edge = *edge_ids.iter().max().unwrap();
+        let del = call(
+            &server,
+            "delete_edge",
+            serde_json::json!({"edge_id": victim_edge}),
+        );
+        assert!(
+            del.get("error").is_none(),
+            "delete_edge should succeed: {del}"
+        );
+
+        loop {
+            let v = call(&server, "traverse", serde_json::json!({"cursor": cursor}));
+            for r in v["results"].as_array().unwrap() {
+                assert!(
+                    seen.insert(r["node"]["id"].as_u64().unwrap()),
+                    "duplicate node across traverse pages"
+                );
+            }
+            match v.get("cursor").and_then(|c| c.as_str()) {
+                Some(tok) => cursor = tok.to_string(),
+                None => break,
+            }
+        }
+
+        assert!(
+            !seen.contains(&new_dst.as_u64()),
+            "a node reachable only via an edge created after the snapshot is invisible"
+        );
+        assert_eq!(
+            seen, expected,
+            "reachable set == page-1 snapshot reachable set"
+        );
+    }
+
+    // FIX-G (TTL boundary companion to the pre-expired TTL=0 test): a cursor
+    // issued under a positive TTL verifies successfully immediately (it is well
+    // within the validity window). Combined with
+    // `expired_cursor_returns_failed_precondition` (TTL=0, already expired) this
+    // brackets the TTL boundary. Limitation: no injectable clock exists, so the
+    // exact expiry instant is not asserted -- only valid-within-window and
+    // already-expired.
+    #[test]
+    fn cursor_valid_within_positive_ttl_window() {
+        let server = AletheiaMcpServer::new(create_test_db())
+            .with_cursor_config(Duration::from_secs(300), 128);
+        make_people(&server, 15);
+        let v1 = call(
+            &server,
+            "list_nodes",
+            serde_json::json!({"label": "Person", "use_cursor": true, "limit": 5}),
+        );
+        let tok = v1["cursor"].as_str().unwrap().to_string();
+        // Resuming immediately is comfortably inside the 300s window.
+        let v2 = call(&server, "list_nodes", serde_json::json!({"cursor": tok}));
+        assert!(
+            v2.get("error").is_none(),
+            "a cursor within its TTL window must verify: {v2}"
+        );
+        assert_eq!(v2["paging"], "cursor");
+    }
+}
+
+#[cfg(feature = "audit-export")]
+mod audit_export_tool_tests {
+    use super::create_test_server;
+    use crate::audit::{AuditSigningKey, verify_json_bytes};
+    use crate::core::hex;
+    use serde_json::json;
+
+    const SEED: [u8; 32] = [23u8; 32];
+
+    fn dispatch_json(
+        server: &super::AletheiaMcpServer,
+        tool: &str,
+        args: serde_json::Value,
+    ) -> (serde_json::Value, bool) {
+        let result = server.dispatch_tool(tool, args);
+        let is_error = result.is_error.unwrap_or(false);
+        let text = result
+            .content
+            .first()
+            .and_then(|c| c.as_text().map(|t| t.text.clone()))
+            .expect("tool result should carry text content");
+        (serde_json::from_str(&text).expect("valid JSON"), is_error)
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn audit_export_tool_signs_and_verifies_offline() {
+        // SAFETY: env mutation serialized via #[serial]; restored below.
+        unsafe {
+            std::env::set_var("ALETHEIADB_AUDIT_SIGNING_KEY", hex::encode(&SEED));
+        }
+
+        let server = create_test_server();
+        let (created, is_err) = dispatch_json(
+            &server,
+            "create_node",
+            json!({"label": "Person", "properties": {"name": "Alice", "ssn": "secret"}}),
+        );
+        assert!(!is_err, "create_node failed: {created}");
+        let node_id = created["id"].as_u64().expect("node_id");
+
+        let (resp, is_err) = dispatch_json(
+            &server,
+            "audit_export",
+            json!({
+                "entity_type": "node",
+                "entity_id": node_id,
+                "database_id": "prod-db",
+                "redact_keys": ["ssn"],
+            }),
+        );
+        assert!(!is_err, "audit_export failed: {resp}");
+        assert_eq!(resp["version_count"].as_u64(), Some(1));
+
+        let pubkey_hex = resp["public_key"].as_str().unwrap();
+        let expected_pub = AuditSigningKey::from_seed_bytes(SEED).public_key();
+        assert_eq!(pubkey_hex, expected_pub.to_hex());
+
+        // The artifact verifies offline against the operator's public key.
+        let artifact_bytes = serde_json::to_vec(&resp["artifact"]).unwrap();
+        let report = verify_json_bytes(&artifact_bytes, Some(&expected_pub))
+            .expect("MCP-produced artifact must verify offline");
+        assert!(report.passed);
+        assert!(report.redacted_keys.iter().any(|k| k == "ssn"));
+        // Redacted value must not have leaked into the artifact.
+        assert!(
+            !String::from_utf8(artifact_bytes)
+                .unwrap()
+                .contains("secret")
+        );
+
+        unsafe {
+            std::env::remove_var("ALETHEIADB_AUDIT_SIGNING_KEY");
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn audit_export_tool_without_signing_key_is_failed_precondition() {
+        // SAFETY: env mutation serialized via #[serial].
+        unsafe {
+            std::env::remove_var("ALETHEIADB_AUDIT_SIGNING_KEY");
+        }
+        let server = create_test_server();
+        let (created, _) = dispatch_json(
+            &server,
+            "create_node",
+            json!({"label": "Person", "properties": {"name": "Bob"}}),
+        );
+        let node_id = created["id"].as_u64().unwrap();
+        let (resp, is_err) = dispatch_json(
+            &server,
+            "audit_export",
+            json!({"entity_type": "node", "entity_id": node_id}),
+        );
+        assert!(is_err, "expected an error without a signing key");
+        assert_eq!(resp["error"]["code"].as_str(), Some("FAILED_PRECONDITION"));
+    }
+
+    #[test]
+    fn audit_export_tool_rejects_bad_entity_type() {
+        let server = create_test_server();
+        let (resp, is_err) = dispatch_json(
+            &server,
+            "audit_export",
+            json!({"entity_type": "widget", "entity_id": 1}),
+        );
+        assert!(is_err);
+        assert_eq!(resp["error"]["code"].as_str(), Some("INVALID_ARGUMENT"));
+    }
+}
+
+/// MCP surface for derivation lineage (Issue #3371): the `derived_from` write
+/// parameter, the `lineage_upstream`/`lineage_downstream` query tools, their
+/// structured errors, and RBAC.
+mod lineage_tool_tests {
+    use super::create_test_server;
+    use crate::auth::{AuthMode, AuthStore, Role, SecretString};
+    use crate::core::id::NodeId;
+    use crate::mcp::{AletheiaMcpServer, McpAuthConfig};
+    use serde_json::json;
+    use std::sync::Arc;
+
+    fn dispatch_json(
+        server: &AletheiaMcpServer,
+        tool: &str,
+        args: serde_json::Value,
+    ) -> (serde_json::Value, bool) {
+        let result = server.dispatch_tool(tool, args);
+        let is_error = result.is_error.unwrap_or(false);
+        let text = result
+            .content
+            .first()
+            .and_then(|c| c.as_text().map(|t| t.text.clone()))
+            .expect("tool result should carry text content");
+        (serde_json::from_str(&text).expect("valid JSON"), is_error)
+    }
+
+    /// The current version id of a node (via the in-crate db handle), which an
+    /// LLM would obtain from `get_node_history`.
+    fn node_version(server: &AletheiaMcpServer, id: u64) -> u64 {
+        server
+            .db()
+            .node_lineage_ref(NodeId::new(id).unwrap())
+            .expect("current version")
+            .version
+            .as_u64()
+    }
+
+    #[test]
+    fn create_node_with_derived_from_records_lineage_and_queries_both_directions() {
+        let server = create_test_server();
+
+        let (a, is_err) = dispatch_json(
+            &server,
+            "create_node",
+            json!({"label": "Doc", "properties": {"t": "A"}}),
+        );
+        assert!(!is_err, "create A failed: {a}");
+        let a_id = a["id"].as_u64().unwrap();
+        let a_ver = node_version(&server, a_id);
+
+        let (b, is_err) = dispatch_json(
+            &server,
+            "create_node",
+            json!({"label": "Doc", "properties": {"t": "B"}}),
+        );
+        assert!(!is_err, "create B failed: {b}");
+        let b_id = b["id"].as_u64().unwrap();
+        let b_ver = node_version(&server, b_id);
+
+        // Summary derived from both documents.
+        let (c, is_err) = dispatch_json(
+            &server,
+            "create_node",
+            json!({
+                "label": "Summary",
+                "properties": {"t": "A+B"},
+                "derived_from": [
+                    {"entity_kind": "node", "id": a_id, "version": a_ver},
+                    {"entity_kind": "node", "id": b_id, "version": b_ver},
+                ],
+            }),
+        );
+        assert!(!is_err, "create with derived_from failed: {c}");
+        let c_id = c["id"].as_u64().unwrap();
+        let c_ver = node_version(&server, c_id);
+
+        // Upstream of the summary: both documents at depth 1.
+        let (up, is_err) = dispatch_json(
+            &server,
+            "lineage_upstream",
+            json!({"entity_kind": "node", "id": c_id, "version": c_ver}),
+        );
+        assert!(!is_err, "lineage_upstream failed: {up}");
+        assert_eq!(up["direction"], "upstream");
+        assert_eq!(up["count"].as_u64(), Some(2));
+        assert_eq!(up["has_more"], json!(false));
+        let up_ids: Vec<u64> = up["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["id"].as_u64().unwrap())
+            .collect();
+        assert!(up_ids.contains(&a_id) && up_ids.contains(&b_id));
+        for e in up["entries"].as_array().unwrap() {
+            assert_eq!(e["depth"].as_u64(), Some(1));
+            assert_eq!(e["status"], "current");
+        }
+
+        // Downstream of document A: reaches the summary.
+        let (down, is_err) = dispatch_json(
+            &server,
+            "lineage_downstream",
+            json!({"entity_kind": "node", "id": a_id, "version": a_ver}),
+        );
+        assert!(!is_err, "lineage_downstream failed: {down}");
+        assert_eq!(down["direction"], "downstream");
+        assert_eq!(down["count"].as_u64(), Some(1));
+        assert_eq!(down["entries"][0]["id"].as_u64(), Some(c_id));
+        assert_eq!(down["entries"][0]["depth"].as_u64(), Some(1));
+    }
+
+    #[test]
+    fn dangling_derived_from_reference_is_not_found() {
+        let server = create_test_server();
+        let (resp, is_err) = dispatch_json(
+            &server,
+            "create_node",
+            json!({
+                "label": "Summary",
+                "properties": {},
+                "derived_from": [
+                    {"entity_kind": "node", "id": 1, "version": 9_999_999u64}
+                ],
+            }),
+        );
+        assert!(is_err, "dangling ref must fail: {resp}");
+        assert_eq!(resp["error"]["code"].as_str(), Some("NOT_FOUND"));
+        // No node was created.
+        assert_eq!(server.db().node_count(), 0);
+    }
+
+    #[test]
+    fn invalid_entity_kind_is_invalid_argument() {
+        let server = create_test_server();
+        let (resp, is_err) = dispatch_json(
+            &server,
+            "lineage_upstream",
+            json!({"entity_kind": "widget", "id": 1, "version": 1}),
+        );
+        assert!(is_err);
+        assert_eq!(resp["error"]["code"].as_str(), Some("INVALID_ARGUMENT"));
+    }
+
+    fn server_with_role(role: Role) -> AletheiaMcpServer {
+        let store = Arc::new(AuthStore::new());
+        let (_principal, key) = store.create_key("t", role).expect("create key");
+        AletheiaMcpServer::with_auth(
+            server_db(),
+            McpAuthConfig::new(AuthMode::Required, Arc::clone(&store))
+                .with_credential(SecretString::new(key.as_str())),
+        )
+    }
+
+    fn server_db() -> Arc<crate::db::AletheiaDB> {
+        Arc::new(crate::db::AletheiaDB::new().expect("db"))
+    }
+
+    #[test]
+    fn reader_denied_create_node_with_derived_from() {
+        // create_node is writer-class; a reader is denied before any write —
+        // including when it carries the `derived_from` lineage parameter.
+        let server = server_with_role(Role::Reader);
+        let (resp, is_err) = dispatch_json(
+            &server,
+            "create_node",
+            json!({
+                "label": "Summary",
+                "properties": {},
+                "derived_from": [{"entity_kind": "node", "id": 1, "version": 1}],
+            }),
+        );
+        assert!(is_err);
+        assert_eq!(resp["error"]["code"].as_str(), Some("PERMISSION_DENIED"));
+    }
+
+    #[test]
+    fn metrics_role_denied_lineage_query_but_reader_allowed() {
+        // lineage_upstream is reader-class: a metrics-only principal is denied,
+        // a reader is authorized (the call then fails/succeeds on its own merits,
+        // never with an auth code).
+        let metrics = server_with_role(Role::Metrics);
+        let (resp, is_err) = dispatch_json(
+            &metrics,
+            "lineage_upstream",
+            json!({"entity_kind": "node", "id": 1, "version": 1}),
+        );
+        assert!(is_err);
+        assert_eq!(resp["error"]["code"].as_str(), Some("PERMISSION_DENIED"));
+
+        let reader = server_with_role(Role::Reader);
+        let (resp, _is_err) = dispatch_json(
+            &reader,
+            "lineage_upstream",
+            json!({"entity_kind": "node", "id": 1, "version": 1}),
+        );
+        // Reader is authorized: an empty closure for an unknown root is a valid
+        // (non-error) response, never an auth denial.
+        assert_ne!(
+            resp.get("error")
+                .and_then(|e| e.get("code"))
+                .and_then(|c| c.as_str()),
+            Some("PERMISSION_DENIED")
+        );
     }
 }

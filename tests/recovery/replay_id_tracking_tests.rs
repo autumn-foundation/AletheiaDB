@@ -40,6 +40,7 @@ fn test_recover_initializes_node_id_generator() -> Result<()> {
             label: GLOBAL_INTERNER.intern("Node").unwrap(),
             properties: PropertyMap::new(),
             valid_from: time::now(),
+            provenance: None,
         })?;
     }
     wal.flush()?;
@@ -78,6 +79,7 @@ fn test_recover_initializes_edge_id_generator() -> Result<()> {
             label: GLOBAL_INTERNER.intern("Node").unwrap(),
             properties: PropertyMap::new(),
             valid_from: time::now(),
+            provenance: None,
         })?;
     }
 
@@ -90,6 +92,7 @@ fn test_recover_initializes_edge_id_generator() -> Result<()> {
             label: GLOBAL_INTERNER.intern("CONNECTS").unwrap(),
             properties: PropertyMap::new(),
             valid_from: time::now(),
+            provenance: None,
         })?;
     }
     wal.flush()?;
@@ -133,6 +136,7 @@ fn test_recover_initializes_version_id_generator() -> Result<()> {
         label: GLOBAL_INTERNER.intern("Node").unwrap(),
         properties: PropertyMapBuilder::new().insert("count", 0_i64).build(),
         valid_from: time::now(),
+        provenance: None,
     })?;
 
     // Update 4 times (versions 2, 3, 4, 5)
@@ -143,6 +147,7 @@ fn test_recover_initializes_version_id_generator() -> Result<()> {
             label: GLOBAL_INTERNER.intern("Node").unwrap(),
             properties: PropertyMapBuilder::new().insert("count", i).build(),
             valid_from: time::now(),
+            provenance: None,
         })?;
     }
     wal.flush()?;
@@ -184,6 +189,7 @@ fn test_recover_handles_gaps_in_ids() -> Result<()> {
             label: GLOBAL_INTERNER.intern("Node").unwrap(),
             properties: PropertyMap::new(),
             valid_from: time::now(),
+            provenance: None,
         })?;
     }
     wal.flush()?;
@@ -221,6 +227,7 @@ fn test_recover_with_deletes_tracks_max_ids() -> Result<()> {
             label: GLOBAL_INTERNER.intern("Node").unwrap(),
             properties: PropertyMap::new(),
             valid_from: time::now(),
+            provenance: None,
         })?;
     }
 
@@ -228,6 +235,7 @@ fn test_recover_with_deletes_tracks_max_ids() -> Result<()> {
     wal.append(WalOperation::DeleteNode {
         node_id: NodeId::new(2).unwrap(),
         valid_from: time::now(),
+        version_id: None,
     })?;
     wal.flush()?;
 
@@ -289,6 +297,7 @@ fn test_recover_single_zero_node_id_advances_generator() -> Result<()> {
         label: GLOBAL_INTERNER.intern("Node")?,
         properties: PropertyMap::new(),
         valid_from: time::now(),
+        provenance: None,
     })?;
     wal.flush()?;
 
@@ -324,6 +333,7 @@ fn test_recover_all_generators_independent() -> Result<()> {
             label: GLOBAL_INTERNER.intern("Node").unwrap(),
             properties: PropertyMap::new(),
             valid_from: time::now(),
+            provenance: None,
         })?;
     }
 
@@ -336,6 +346,7 @@ fn test_recover_all_generators_independent() -> Result<()> {
             label: GLOBAL_INTERNER.intern("CONNECTS").unwrap(),
             properties: PropertyMap::new(),
             valid_from: time::now(),
+            provenance: None,
         })?;
     }
 
@@ -346,6 +357,7 @@ fn test_recover_all_generators_independent() -> Result<()> {
         label: GLOBAL_INTERNER.intern("UpdatedNode").unwrap(),
         properties: PropertyMap::new(),
         valid_from: time::now(),
+        provenance: None,
     })?;
     wal.flush()?;
 

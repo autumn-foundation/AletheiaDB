@@ -14,7 +14,14 @@ AletheiaDB provides **three complementary persistence systems** for different us
 | **Index Persistence** | Fast cold starts | Current state indexes | 6-30x faster startup |
 | **Cold Storage (Redb)** | Unlimited history | Historical versions (bi-temporal) | Enables unlimited depth |
 
-**⚠️ Common Mistake:** Trying to call `AletheiaDB::open()`. That API does not exist. For restart, use `with_unified_config()` with persistence enabled.
+**Quickest path:** `AletheiaDB::open(path)` gives you Pattern 2 (WAL + Index
+Persistence) in one line — see below. Reach for `with_unified_config()`
+directly only when you need to tune durability mode, stripe counts, or add
+cold storage (Pattern 3).
+
+> **Migration note (Issue #3388):** Index persistence is now opt-in —
+> `PersistenceConfig::default()` has `enabled: false`; set `enabled: true`
+> with an explicit `data_dir` (or use `AletheiaDB::open(path)`) to persist.
 
 ## Current Reality (Important)
 
@@ -44,10 +51,21 @@ let config = AletheiaDBConfig::builder()
 
 ### Pattern 2: Fast Restarts (WAL + Index Persistence)
 **Use when:** You need fast startup and data persistence
+
+The one-liner:
+```rust
+let db = AletheiaDB::open("data")?;
+```
+
+Equivalent explicit config (useful if you later need to layer in Pattern 3):
 ```rust
 let config = AletheiaDBConfig::builder()
     .wal(WalConfigBuilder::new()
         .wal_dir("data/wal")
+        .durability_mode(DurabilityMode::GroupCommit {
+            max_delay_ms: 10,
+            max_batch_size: 200,
+        })
         .build())
     .persistence(PersistenceConfig {
         enabled: true,
@@ -56,6 +74,7 @@ let config = AletheiaDBConfig::builder()
         ..Default::default()
     })
     .build();
+let db = AletheiaDB::with_unified_config(config)?;
 ```
 - ✅ Data survives crashes
 - ✅ Fast startup (6-30x faster)

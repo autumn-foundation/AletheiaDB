@@ -128,7 +128,7 @@ impl<'a> Synergy<'a> {
                 let mut neighbor_vectors = Vec::new();
 
                 // Get internal outgoing edges
-                let outgoing = tx.get_outgoing_edges(node_id);
+                let outgoing = tx.get_outgoing_edges(node_id)?;
                 for edge_id in outgoing {
                     if let Ok(edge) = tx.get_edge(edge_id) {
                         let target = edge.target;
@@ -141,7 +141,7 @@ impl<'a> Synergy<'a> {
                 }
 
                 // Get internal incoming edges
-                let incoming = tx.get_incoming_edges(node_id);
+                let incoming = tx.get_incoming_edges(node_id)?;
                 for edge_id in incoming {
                     if let Ok(edge) = tx.get_edge(edge_id) {
                         let source = edge.source;

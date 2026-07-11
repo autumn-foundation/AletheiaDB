@@ -25,8 +25,12 @@ pub mod backup;
 pub mod config;
 /// Uniqueness constraint builder.
 pub mod constraint_builder;
+/// Queryable bi-temporal extent of the dataset (Issue #3238).
+pub mod extent;
 /// GraphView implementation.
 pub mod graph_view;
+/// Fact-to-fact derivation lineage API (Issue #3371).
+pub mod lineage;
 /// Basic graph operations (CRUD).
 pub mod ops;
 /// Query builder and executor hooks.
@@ -35,6 +39,8 @@ pub mod query;
 pub mod schema;
 /// Unified vector similarity query builder.
 pub mod similarity_query;
+/// Database-wide statistics snapshot (Issue #3222).
+pub mod stats;
 /// Temporal query operations.
 pub mod temporal;
 #[cfg(test)]
@@ -49,8 +55,15 @@ pub mod vector_builder;
 
 pub use crate::storage::backup::BackupSummary;
 pub use constraint_builder::UniqueConstraintBuilder;
+pub use extent::{LabelExtent, TemporalExtent, TimeBounds};
+pub use lineage::{FactStatus, LineageView, LineageViewEntry};
+pub use ops::NodesAtTime;
 pub use schema::{EdgeTypeSchema, GraphSchema, LabelSchema, SchemaInstant};
 pub use similarity_query::{SimilarityQuery, SimilaritySource};
+pub use stats::{
+    ColdStorageDetails, ColdStorageTierStats, CurrentStateStats, DatabaseStats,
+    HistoricalDepthStats, TierAccessStats, WalStateStats,
+};
 pub use vector_builder::VectorIndexBuilder;
 
 /// Main AletheiaDB database.
@@ -170,6 +183,15 @@ pub struct AletheiaDB {
     pub(crate) encryption_manager: Option<Arc<crate::encryption::EncryptionManager>>,
     /// Uniqueness constraint registry (declarations + reservation index).
     pub(crate) constraint_registry: Arc<crate::core::constraint::ConstraintRegistry>,
+    /// Fact-to-fact derivation lineage index (Issue #3371).
+    ///
+    /// Records that a fact version was derived from a set of source fact
+    /// versions and answers upstream/downstream closure queries. Immutable,
+    /// append-only, and independent of the graph/version stores so retracting
+    /// or superseding a fact never disturbs lineage pointing at it. v1 is
+    /// in-memory (does not survive restart) to keep the WAL format untouched
+    /// (Issue #3413); see [`crate::core::lineage`].
+    pub(crate) lineage: Arc<crate::core::lineage::LineageStore>,
     /// Backing tempdir for ephemeral databases created via [`AletheiaDB::new`].
     /// Declared last so it is dropped last (Rust drops struct fields in
     /// declaration order); this guarantees the WAL/persistence file handles

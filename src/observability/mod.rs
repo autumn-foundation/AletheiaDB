@@ -12,6 +12,9 @@ pub mod metrics;
 #[cfg(feature = "metrics-rs")]
 pub mod metrics_rs_adapter;
 
+#[cfg(feature = "otel")]
+pub mod otel;
+
 use arc_swap::ArcSwap;
 use std::sync::{Arc, LazyLock};
 
@@ -46,6 +49,10 @@ pub const SPAN_STORAGE_HISTORICAL_QUERY: &str = "aletheiadb.storage.historical.q
 /// Span: commits a write transaction.
 pub const SPAN_TRANSACTION_COMMIT: &str = "aletheiadb.transaction.commit";
 
+/// Span: serves an inbound HTTP request (the root span of the HTTP surface,
+/// under which query/write child spans nest). Issue #3376.
+pub const SPAN_HTTP_REQUEST: &str = "aletheiadb.http.request";
+
 /// OTel semantic attribute: database system name.
 pub const ATTR_DB_SYSTEM_NAME: &str = "db.system.name";
 
@@ -69,6 +76,31 @@ pub const ATTR_ERROR_CATEGORY: &str = "aletheiadb.error.category";
 
 /// AletheiaDB attribute: bounded operation status.
 pub const ATTR_STATUS: &str = "aletheiadb.status";
+
+/// AletheiaDB attribute: high-level operation name (e.g. the `/query`
+/// operation tag). Bounded set; never contains user data.
+pub const ATTR_OPERATION: &str = "aletheiadb.operation";
+
+/// AletheiaDB attribute: number of entities/rows returned by an operation.
+pub const ATTR_RESULT_COUNT: &str = "aletheiadb.result.count";
+
+/// AletheiaDB attribute: whether the operation was temporally scoped
+/// (`as_of`) versus current-state.
+pub const ATTR_TEMPORAL_SCOPE: &str = "aletheiadb.temporal.scope";
+
+/// AletheiaDB attribute: structured error code (Issue #3234) on failure.
+pub const ATTR_ERROR_CODE: &str = "aletheiadb.error.code";
+
+/// OTel semantic attribute: HTTP request method.
+pub const ATTR_HTTP_REQUEST_METHOD: &str = "http.request.method";
+
+/// OTel semantic attribute: URL path (route), never the query string.
+pub const ATTR_URL_PATH: &str = "url.path";
+
+/// OTel semantic attribute: sanitized database statement text. Emitted only
+/// when statement capture is explicitly opted into; property *values* are
+/// never included.
+pub const ATTR_DB_QUERY_TEXT: &str = "db.query.text";
 
 static METRICS_RECORDER: LazyLock<ArcSwap<SharedMetricsRecorder>> =
     LazyLock::new(|| ArcSwap::from_pointee(SharedMetricsRecorder::new(Arc::new(NoOpMetrics))));
@@ -316,6 +348,35 @@ pub fn transaction_commit_span(tx_id: &str, durability_mode: &str) -> tracing::S
         "db.operation.name" = "transaction.commit",
         "aletheiadb.transaction.id" = tx_id,
         "aletheiadb.durability.mode" = durability_mode,
+    )
+}
+
+/// Create the root HTTP request span (Issue #3376).
+///
+/// The span carries the request method and route path up front. The
+/// operation name, result count, temporal scope, statement text, and error
+/// code are recorded later via [`tracing::Span::record`] once known — they are
+/// declared here as empty fields so the recording sites are cheap and the
+/// attribute set is stable. Credentials are deliberately never captured.
+#[must_use]
+pub fn http_request_span(method: &str, path: &str) -> tracing::Span {
+    // `parent: None` makes this a true root span, independent of any ambient
+    // tracing span (e.g. a tower `TraceLayer` request span). An incoming W3C
+    // context is attached afterward via `otel::attach_parent`, so the span is
+    // either a fresh root (absent traceparent) or nests under the caller's
+    // remote span — never accidentally under framework middleware.
+    tracing::info_span!(
+        parent: None,
+        SPAN_HTTP_REQUEST,
+        "db.system.name" = DB_SYSTEM_NAME,
+        "http.request.method" = method,
+        "url.path" = path,
+        "aletheiadb.operation" = tracing::field::Empty,
+        "aletheiadb.result.count" = tracing::field::Empty,
+        "aletheiadb.temporal.scope" = tracing::field::Empty,
+        "aletheiadb.error.code" = tracing::field::Empty,
+        "db.query.text" = tracing::field::Empty,
+        "otel.status_code" = tracing::field::Empty,
     )
 }
 

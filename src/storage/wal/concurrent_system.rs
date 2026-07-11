@@ -80,6 +80,13 @@ pub struct ConcurrentWalSystemConfig {
     /// When set, entries are encrypted before writing to disk and segments
     /// use version 2 format. Passed through to `FlushCoordinatorConfig`.
     pub wal_cipher: Option<Arc<dyn crate::encryption::cipher::Cipher>>,
+    /// Recovery policy for a crash-torn trailing entry (Issue #3433).
+    ///
+    /// When `true` (the default), [`ConcurrentWalSystem::read_from`] tolerates
+    /// an undecodable trailing entry in the final WAL segment during replay;
+    /// when `false`, any parse failure hard-errors (fail-stop recovery). See
+    /// [`crate::config::WalConfig::tolerate_torn_tail`].
+    pub tolerate_torn_tail: bool,
 }
 
 impl std::fmt::Debug for ConcurrentWalSystemConfig {
@@ -97,6 +104,7 @@ impl std::fmt::Debug for ConcurrentWalSystemConfig {
                 "wal_cipher",
                 &self.wal_cipher.as_ref().map(|c| c.algorithm_name()),
             )
+            .field("tolerate_torn_tail", &self.tolerate_torn_tail)
             .finish()
     }
 }
@@ -113,6 +121,7 @@ impl Default for ConcurrentWalSystemConfig {
             durability_mode: DurabilityMode::Synchronous,
             write_buffer_size: 64 * 1024, // 64 KB
             wal_cipher: None,
+            tolerate_torn_tail: true,
         }
     }
 }
@@ -307,6 +316,9 @@ pub struct ConcurrentWalSystem {
     group_commit: Option<Arc<GroupCommitCoordinator>>,
     /// Counter for consecutive flush errors (for health monitoring).
     consecutive_flush_errors: Arc<AtomicU64>,
+    /// Crash-torn-tail recovery policy applied by [`Self::read_from`]
+    /// (Issue #3433).
+    tolerate_torn_tail: bool,
 }
 
 impl ConcurrentWalSystem {
@@ -407,6 +419,7 @@ impl ConcurrentWalSystem {
             durability_mode: config.durability_mode,
             group_commit,
             consecutive_flush_errors,
+            tolerate_torn_tail: config.tolerate_torn_tail,
         })
     }
 
@@ -684,6 +697,26 @@ impl ConcurrentWalSystem {
         self.wal.current_lsn()
     }
 
+    /// Set the next LSN to allocate.
+    ///
+    /// **Warning**: Recovery-only (Issue #3420). Call this during startup —
+    /// before any write is accepted — to seed the allocator past every LSN
+    /// already durable on disk (WAL segments and/or index manifest). Calling
+    /// it during normal operation will cause duplicate LSNs.
+    ///
+    /// Hardened after review (PR #3428): `pub(crate)` so external users
+    /// cannot corrupt allocator state, a no-op when it would move the
+    /// allocator BACKWARDS (the underlying allocator uses `fetch_max`
+    /// semantics), and a debug assertion that no appends have happened yet.
+    pub(crate) fn set_next_lsn(&self, lsn: LSN) {
+        debug_assert_eq!(
+            self.total_appends(),
+            0,
+            "set_next_lsn is recovery-only and must run before any append"
+        );
+        self.wal.set_next_lsn(lsn);
+    }
+
     /// Get total entries appended.
     pub fn total_appends(&self) -> u64 {
         self.wal.total_appends()
@@ -727,8 +760,17 @@ impl ConcurrentWalSystem {
     ///
     /// This reads all segment files in the WAL directory and returns entries
     /// with LSN >= start_lsn. Used for recovery.
+    ///
+    /// Honors the configured crash-torn-tail recovery policy (Issue #3433): by
+    /// default an undecodable trailing entry in the final segment stops replay
+    /// there (keeping the intact prefix); with `tolerate_torn_tail = false` any
+    /// parse failure hard-errors.
     pub fn read_from(&self, start_lsn: LSN) -> Result<Vec<super::WalEntry>> {
-        crate::storage::wal_reader::read_wal_entries(self.wal_dir(), start_lsn)
+        crate::storage::wal_reader::read_wal_entries_with_options(
+            self.wal_dir(),
+            start_lsn,
+            self.tolerate_torn_tail,
+        )
     }
 
     /// Shutdown the WAL system gracefully.
@@ -775,6 +817,7 @@ mod tests {
             label: GLOBAL_INTERNER.intern(format!("Node{}", id)).unwrap(),
             properties: PropertyMap::new(),
             valid_from: time::now(),
+            provenance: None,
         }
     }
 

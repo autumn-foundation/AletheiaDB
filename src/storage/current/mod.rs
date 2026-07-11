@@ -27,7 +27,7 @@ pub use iterators::*;
 pub use stats::CurrentStats;
 use stats::FilterStats;
 pub use vector::VectorIndexInfo;
-use vector::{TemporalVectorIndexEntry, TemporalVectorIndexState, VectorIndexEntry};
+use vector::{TemporalVectorIndexEntry, VectorIndexEntry};
 
 /// Maximum number of vector-indexed properties allowed per database.
 ///
@@ -58,8 +58,6 @@ pub struct CurrentStorage {
     /// Multi-property temporal vector indexes (Issue #389 fix)
     /// Maps property name -> TemporalVectorIndexEntry
     temporal_vector_indexes: DashMap<String, TemporalVectorIndexEntry>,
-    /// Legacy temporal vector index state (for backward compatibility)
-    temporal_vector_index_state: Arc<RwLock<TemporalVectorIndexState>>,
     /// Adaptive over-fetch statistics per label (Issue #334)
     /// Maps label -> FilterStats for tracking label-specific filter pass rates
     ///
@@ -85,7 +83,6 @@ impl CurrentStorage {
             version_id_gen: IdGenerator::new(),
             vector_indexes: DashMap::new(),
             temporal_vector_indexes: DashMap::new(),
-            temporal_vector_index_state: Arc::new(RwLock::new(TemporalVectorIndexState::new())),
             filter_stats: DashMap::new(),
             snapshot_lock: RwLock::new(()),
         }
@@ -311,6 +308,74 @@ impl CurrentStorage {
                 config: config.clone(),
             },
         );
+    }
+
+    /// Rebuild a vector index from the vector properties of current nodes.
+    ///
+    /// This is the recovery path for a vector index that was skipped at
+    /// startup because its persisted files were corrupted or unreadable
+    /// (Issue #451): it enables the index with `config` if it is not
+    /// registered, then scans every current node and (re-)indexes the
+    /// node's `property_name` vector.
+    ///
+    /// If an index is already registered for `property_name`, `config` is
+    /// ignored and the backfill runs against the existing index (existing
+    /// entries for a node are updated in place, so the call is idempotent).
+    /// The rebuild covers **current state only** — temporal vector indexes
+    /// are not touched.
+    ///
+    /// Returns the number of node vectors indexed by the backfill.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the index cannot be created (e.g. the maximum
+    /// number of vector-indexed properties is reached) or if indexing a
+    /// node's vector fails (e.g. dimension mismatch with `config`).
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
+    pub fn rebuild_vector_index(&self, property_name: &str, config: HnswConfig) -> Result<usize> {
+        // Ensure an index is registered for the property, creating one from
+        // `config` if absent. A concurrent enable between the check and the
+        // call is benign: the index exists afterwards either way, and the
+        // backfill proceeds against whichever index won.
+        if !self.is_vector_index_enabled_for(property_name) {
+            match self.enable_vector_index(property_name, config) {
+                Ok(()) => {}
+                Err(_) if self.is_vector_index_enabled_for(property_name) => {}
+                Err(e) => return Err(e),
+            }
+        }
+
+        // Clone the Arc so no DashMap shard guard is held while scanning
+        // nodes (only the vector index map and node storage reads are
+        // involved; no other synchronization primitive is acquired).
+        let index = self
+            .vector_indexes
+            .get(property_name)
+            .map(|entry| Arc::clone(&entry.value().index))
+            .ok_or_else(|| {
+                crate::core::error::Error::Vector(crate::core::error::VectorError::IndexError(
+                    format!(
+                        "Vector index for property '{}' disappeared during rebuild",
+                        property_name
+                    ),
+                ))
+            })?;
+
+        // Backfill: registering the index BEFORE scanning means nodes created
+        // concurrently are indexed by the normal write path; `add` updates
+        // an existing entry in place, so double-indexing is harmless.
+        let mut indexed = 0usize;
+        for node in self.all_nodes() {
+            if let Some(vector) = node
+                .properties
+                .get(property_name)
+                .and_then(|v| v.as_vector())
+            {
+                index.add(node.id, vector)?;
+                indexed += 1;
+            }
+        }
+        Ok(indexed)
     }
 
     /// Get a reference to the HNSW index and its config for a specific property.
@@ -657,13 +722,18 @@ impl CurrentStorage {
     pub fn insert_node_direct(&self, node: Node, timestamp: Timestamp) -> Result<()> {
         // Synchronize with snapshot creation
         let _lock = self.snapshot_lock.read();
-        // CRITICAL: Index vector BEFORE inserting node. If vector indexing fails,
-        // we have not modified any graph state, so we can safely return error without rollback.
-        // This prevents the VS-030 bug where transaction-created nodes bypassed indexing,
-        // causing them to be missing from HNSW index and invisible to find_similar queries.
+        // CRITICAL: Index vectors BEFORE inserting the node so an indexing
+        // failure never leaves a node visible in the graph but missing from an
+        // index. This prevents the VS-030 bug where transaction-created nodes
+        // bypassed indexing, causing them to be missing from the HNSW index and
+        // invisible to find_similar queries.
+        // NOTE: with multiple vector/temporal indexes enabled, a mid-fan-out
+        // failure returns Err with indexes visited earlier already updated
+        // (partial work); the node itself is never inserted into the main
+        // indexes.
         self.try_index_vector(node.id, &node.properties)?;
 
-        // Index in temporal vector index if enabled
+        // Index in every enabled temporal vector index
         self.try_index_temporal_vector(node.id, &node.properties, timestamp)?;
 
         // Vector indexing succeeded, now insert the node into the main indexes.
@@ -690,13 +760,16 @@ impl CurrentStorage {
         // Save old node for vector index update
         let old_props = self.indexes.with_node(node.id, |n| n.properties.clone());
 
-        // Update vector index BEFORE updating node in main indexes.
-        // If vector indexing fails, we haven't modified any state yet.
+        // Update vector indexes BEFORE updating the node in the main indexes,
+        // so the node's visible state never gets ahead of the indexes.
+        // NOTE: with multiple vector/temporal indexes enabled, a mid-fan-out
+        // failure returns Err with indexes visited earlier already updated
+        // (partial work); the node update itself is not applied.
         if let Some(old_p) = old_props {
             self.update_vector_index(node.id, &node.properties, &old_p)?;
         }
 
-        // Update temporal vector index if enabled
+        // Update every enabled temporal vector index
         self.try_index_temporal_vector(node.id, &node.properties, timestamp)?;
 
         // Finally, insert node into main indexes. This avoids node.clone().
@@ -1027,6 +1100,63 @@ impl CurrentStorage {
     #[inline]
     pub fn node_count(&self) -> usize {
         self.indexes.node_count()
+    }
+
+    /// Get an exclusive upper bound on node ids present in current storage.
+    ///
+    /// Used by the query executor's full-scan iterator to bound a lazy id sweep
+    /// over `[0, max_id)` without materializing the id set.
+    ///
+    /// This reads the index's insert-maintained high-water-mark
+    /// ([`CurrentIndexes::max_node_id_exclusive`]), **not** this storage's own
+    /// `node_id_gen`. In the transactional write path node ids are allocated by
+    /// a database-level generator and applied here via
+    /// [`Self::insert_node_direct`], so the storage-local `node_id_gen` is never
+    /// advanced and would report `0` -- collapsing every full scan to zero rows.
+    /// The index high-water-mark is advanced by every insert regardless of where
+    /// the id originated, so it is the correct scan bound. It is a relaxed,
+    /// monotonically non-decreasing read and must not be used for
+    /// snapshot-isolation decisions.
+    #[inline]
+    pub fn get_max_node_id(&self) -> u64 {
+        self.indexes.max_node_id_exclusive()
+    }
+
+    /// Fast-path label check using the compact node header.
+    ///
+    /// Returns `true` iff a live node with `node_id` exists and its interned
+    /// label equals `label_id`, reading only the 16-byte header instead of
+    /// loading and cloning the full node. Returns `false` for a missing/invalid
+    /// id, so callers can use it to skip gaps in a sparse id space.
+    #[inline]
+    pub fn node_has_label(
+        &self,
+        node_id: u64,
+        label_id: crate::core::interning::InternedString,
+    ) -> bool {
+        match NodeId::new(node_id) {
+            Ok(id) => self
+                .indexes
+                .get_node_header(id)
+                .is_some_and(|header| header.label == label_id),
+            Err(_) => false,
+        }
+    }
+
+    /// Fast-path existence check using the compact node header.
+    ///
+    /// Returns `true` iff a live node with `node_id` exists, reading only the
+    /// 16-byte header instead of loading and cloning the full node. Returns
+    /// `false` for a missing/invalid id, so callers can use it to cheaply skip
+    /// gaps in a sparse id space. This mirrors [`Self::node_has_label`] but
+    /// omits the label comparison. Acquires only a brief DashMap shard lock,
+    /// which is released before returning.
+    #[inline]
+    pub fn contains_node(&self, node_id: u64) -> bool {
+        match NodeId::new(node_id) {
+            Ok(id) => self.indexes.get_node_header(id).is_some(),
+            Err(_) => false,
+        }
     }
 
     /// Get the number of edges.
@@ -1440,18 +1570,8 @@ impl CurrentStorage {
         // Insert into multi-property DashMap
         self.temporal_vector_indexes.insert(
             property_name.to_string(),
-            TemporalVectorIndexEntry {
-                index: Arc::clone(&index),
-                config: config.clone(),
-            },
+            TemporalVectorIndexEntry { index, config },
         );
-
-        // Also update legacy state for backward compatibility
-        // (uses the most recently added index)
-        let mut state = self.temporal_vector_index_state.write();
-        state.index = Some(index);
-        state.property_name = Some(property_name.to_string());
-        state.config = Some(config);
 
         Ok(())
     }
@@ -1488,18 +1608,47 @@ impl CurrentStorage {
             .map(|entry| Arc::clone(&entry.index))
     }
 
-    /// Get a reference to the temporal vector index if enabled (legacy single-property API).
+    /// Get the default property name for temporal vector indexing.
     ///
-    /// Returns `None` if temporal vector indexing is not enabled.
-    /// For multi-property support, use `get_temporal_vector_index_for` instead.
-    pub(crate) fn get_temporal_vector_index(&self) -> Option<Arc<TemporalVectorIndex>> {
-        let state = self.temporal_vector_index_state.read();
-        state.index.clone()
+    /// This backs the property-less temporal query APIs (`find_similar_as_of`,
+    /// `find_similar_in_range`). It deterministically selects the alphabetically
+    /// first property name from the enabled temporal vector indexes, mirroring
+    /// [`get_default_vector_property_name`](Self::get_default_vector_property_name).
+    ///
+    /// Returns `None` if no temporal vector indexes are enabled.
+    fn get_default_temporal_vector_property_name(&self) -> Option<String> {
+        if self.temporal_vector_indexes.is_empty() {
+            return None;
+        }
+
+        // Optimization: if len == 1, just take it (no sorting needed)
+        if self.temporal_vector_indexes.len() == 1 {
+            return self
+                .temporal_vector_indexes
+                .iter()
+                .next()
+                .map(|r| r.key().clone());
+        }
+
+        // Find min key alphabetically. Use `.fold` instead of `.min_by` so each
+        // DashMap guard is dropped immediately (see get_default_vector_property_name).
+        self.temporal_vector_indexes
+            .iter()
+            .fold(None, |min: Option<String>, current| {
+                let key = current.key();
+                match min {
+                    Some(m) if m.as_str() <= key.as_str() => Some(m),
+                    _ => Some(key.clone()),
+                }
+            })
     }
 
     /// Find k most similar nodes at a specific point in time.
     ///
     /// Returns nodes similar to the query embedding as they existed at the given timestamp.
+    /// Queries the default temporal vector index (the alphabetically first indexed
+    /// property when multiple temporal indexes are enabled). Use
+    /// [`find_similar_as_of_in`](Self::find_similar_as_of_in) to target a specific property.
     ///
     /// # Arguments
     ///
@@ -1533,15 +1682,16 @@ impl CurrentStorage {
         k: usize,
         timestamp: Timestamp,
     ) -> Result<Vec<(NodeId, f32)>> {
-        let state = self.temporal_vector_index_state.read();
-        let index = state.index.as_ref().ok_or_else(|| {
-            crate::core::error::Error::Vector(crate::core::error::VectorError::IndexError(
+        let property_name = self
+            .get_default_temporal_vector_property_name()
+            .ok_or_else(|| {
+                crate::core::error::Error::Vector(crate::core::error::VectorError::IndexError(
                 "Temporal vector index is not enabled. Call enable_temporal_vector_index() first."
                     .to_string(),
             ))
-        })?;
+            })?;
 
-        index.find_similar_as_of(embedding, k, timestamp)
+        self.find_similar_as_of_in(&property_name, embedding, k, timestamp)
     }
 
     /// Find k most similar nodes at a specific point in time for a specific property.
@@ -1734,54 +1884,93 @@ impl CurrentStorage {
         k: usize,
         time_range: crate::core::temporal::TimeRange,
     ) -> Result<TemporalSearchResults> {
-        let state = self.temporal_vector_index_state.read();
-        let index = state.index.as_ref().ok_or_else(|| {
-            crate::core::error::Error::Vector(crate::core::error::VectorError::IndexError(
+        let property_name = self
+            .get_default_temporal_vector_property_name()
+            .ok_or_else(|| {
+                crate::core::error::Error::Vector(crate::core::error::VectorError::IndexError(
                 "Temporal vector index is not enabled. Call enable_temporal_vector_index() first."
                     .to_string(),
             ))
-        })?;
+            })?;
+
+        let index = self
+            .get_temporal_vector_index_for(&property_name)
+            .ok_or_else(|| {
+                crate::core::error::Error::Vector(crate::core::error::VectorError::IndexError(
+                "Temporal vector index is not enabled. Call enable_temporal_vector_index() first."
+                    .to_string(),
+            ))
+            })?;
 
         index.find_similar_in_range(embedding, k, time_range)
     }
 
-    /// Notify the temporal vector index of a transaction.
+    /// Notify all temporal vector indexes of a transaction.
     ///
     /// This should be called after committing a transaction to trigger snapshot
-    /// creation based on the configured strategy.
+    /// creation based on each index's configured strategy.
     #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn on_temporal_vector_transaction(&self) -> Result<()> {
-        let state = self.temporal_vector_index_state.read();
-        if let Some(index) = &state.index {
+        for (_, index) in self.collect_temporal_vector_indexes() {
             index.on_transaction()?;
         }
         Ok(())
     }
 
-    /// Helper to index a vector in the temporal index.
+    /// Collect `(property_name, index)` pairs for all enabled temporal vector indexes.
+    ///
+    /// Snapshots the DashMap into a `Vec` so callers never invoke index operations
+    /// while holding DashMap shard guards.
+    fn collect_temporal_vector_indexes(&self) -> Vec<(String, Arc<TemporalVectorIndex>)> {
+        if self.temporal_vector_indexes.is_empty() {
+            return Vec::new();
+        }
+        self.temporal_vector_indexes
+            .iter()
+            .map(|entry| (entry.key().clone(), Arc::clone(&entry.value().index)))
+            .collect()
+    }
+
+    /// Helper to index a node's vectors in every enabled temporal vector index.
+    ///
+    /// Returns `Err` on the first index that fails; indexes visited earlier in
+    /// the fan-out will have already been updated (partial work), matching the
+    /// behavior of [`try_index_vector`](Self::try_index_vector). Callers must
+    /// not assume a failure left every temporal index untouched.
     fn try_index_temporal_vector(
         &self,
         node_id: NodeId,
         properties: &PropertyMap,
         timestamp: Timestamp,
     ) -> Result<()> {
-        let state = self.temporal_vector_index_state.read();
-        if let Some(index) = &state.index
-            && let Some(prop_name) = &state.property_name
-            && let Some(vector) = properties.get(prop_name).and_then(|v| v.as_vector())
-        {
-            index.add(node_id, vector, timestamp)?;
+        for (property_name, index) in self.collect_temporal_vector_indexes() {
+            if let Some(vector) = properties.get(&property_name).and_then(|v| v.as_vector()) {
+                index.add(node_id, vector, timestamp)?;
+            }
         }
         Ok(())
     }
 
-    /// Helper to remove a vector from the temporal index.
+    /// Helper to remove a node's vectors from every enabled temporal vector index.
+    ///
+    /// Mirrors [`try_remove_from_index`](Self::try_remove_from_index): removal is
+    /// attempted on ALL indexes even when one fails, so a per-index error never
+    /// leaves stale entries behind in the remaining indexes. The first error
+    /// encountered is returned after every index has been attempted. Note that
+    /// `remove` may fail for an index that never contained the node; callers
+    /// treating removal as best-effort (e.g. `delete_node_direct`) ignore the
+    /// returned error for this reason.
     fn try_remove_temporal_vector(&self, node_id: NodeId, timestamp: Timestamp) -> Result<()> {
-        let state = self.temporal_vector_index_state.read();
-        if let Some(index) = &state.index {
-            index.remove(node_id, timestamp)?;
+        let mut first_err = None;
+        for (_, index) in self.collect_temporal_vector_indexes() {
+            if let Err(e) = index.remove(node_id, timestamp) {
+                first_err.get_or_insert(e);
+            }
         }
-        Ok(())
+        match first_err {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
     }
 
     /// Get statistics about the current storage

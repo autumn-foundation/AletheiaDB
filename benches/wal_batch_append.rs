@@ -47,6 +47,7 @@ fn create_test_operations(count: usize) -> Vec<WalOperation> {
                 .insert("name", format!("Node {}", i))
                 .build(),
             valid_from: time::now(),
+            provenance: None,
         })
         .collect()
 }
@@ -59,6 +60,7 @@ fn create_minimal_operations(count: usize) -> Vec<WalOperation> {
             label: GLOBAL_INTERNER.intern("N").unwrap(),
             properties: PropertyMapBuilder::new().build(),
             valid_from: time::now(),
+            provenance: None,
         })
         .collect()
 }

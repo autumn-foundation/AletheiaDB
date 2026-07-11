@@ -927,6 +927,69 @@ fn test_find_similar_as_of_in() {
     assert_eq!(results[0].0, node_id);
 }
 
+/// Issue #450: `on_temporal_vector_transaction` must notify EVERY enabled
+/// temporal vector index -- not just one (the removed legacy single-index
+/// state only notified the most recently enabled index). With
+/// `SnapshotStrategy::TransactionInterval(1)`, each notification must advance
+/// the snapshot count of BOTH indexes.
+#[test]
+fn test_on_temporal_vector_transaction_notifies_all_indexes() {
+    use crate::index::vector::temporal::{SnapshotStrategy, TemporalVectorConfig};
+    use crate::index::vector::{DistanceMetric, HnswConfig};
+
+    let db = AletheiaDB::new().unwrap();
+
+    for property in ["a_embedding", "b_embedding"] {
+        let hnsw_config = HnswConfig::new(4, DistanceMetric::Cosine);
+        let temporal_config = TemporalVectorConfig {
+            snapshot_strategy: SnapshotStrategy::TransactionInterval(1),
+            ..TemporalVectorConfig::default_with_hnsw(hnsw_config)
+        };
+        db.enable_temporal_vector_index(property, temporal_config)
+            .unwrap();
+    }
+
+    // Add a vector to each temporal index.
+    db.create_node(
+        "Doc",
+        PropertyMapBuilder::new()
+            .insert_vector("a_embedding", &[1.0f32, 0.0, 0.0, 0.0])
+            .build(),
+    )
+    .unwrap();
+    db.create_node(
+        "Doc",
+        PropertyMapBuilder::new()
+            .insert_vector("b_embedding", &[0.0f32, 1.0, 0.0, 0.0])
+            .build(),
+    )
+    .unwrap();
+
+    let a_index = db
+        .current
+        .get_temporal_vector_index_for("a_embedding")
+        .expect("temporal index for 'a_embedding' should exist");
+    let b_index = db
+        .current
+        .get_temporal_vector_index_for("b_embedding")
+        .expect("temporal index for 'b_embedding' should exist");
+    let a_before = a_index.snapshot_count();
+    let b_before = b_index.snapshot_count();
+
+    db.current.on_temporal_vector_transaction().unwrap();
+
+    assert!(
+        a_index.snapshot_count() > a_before,
+        "transaction notification must reach the 'a_embedding' temporal index \
+         (snapshot count stayed at {a_before})"
+    );
+    assert!(
+        b_index.snapshot_count() > b_before,
+        "transaction notification must reach the 'b_embedding' temporal index \
+         (snapshot count stayed at {b_before})"
+    );
+}
+
 #[test]
 fn test_find_nodes_by_property_facade() {
     let db = AletheiaDB::new().unwrap();
@@ -1539,6 +1602,51 @@ fn test_refresh_statistics() {
 
     let stats = db.statistics();
     assert!(stats.node_count() >= 3);
+}
+
+#[test]
+fn test_refresh_statistics_avg_delta_chain_from_historical() {
+    // Issue #366: refresh_statistics must feed the planner the actual average
+    // delta chain length computed from historical storage, not a hardcoded
+    // estimate.
+    let db = AletheiaDB::new().unwrap();
+
+    let node = db
+        .create_node(
+            "Person",
+            PropertyMapBuilder::new().insert("v", 0i64).build(),
+        )
+        .unwrap();
+    // Three updates create delta versions behind the initial anchor.
+    for i in 1..=3i64 {
+        db.update_node_with_valid_time(
+            node,
+            PropertyMapBuilder::new().insert("v", i).build(),
+            None,
+        )
+        .unwrap();
+    }
+
+    db.refresh_statistics();
+
+    // Hand-compute the expected value from the historical storage counters.
+    let hist = db.historical_stats().unwrap();
+    let total_deltas = (hist.node_delta_count + hist.edge_delta_count) as f64;
+    let total_anchors = (hist.node_anchor_count + hist.edge_anchor_count) as f64;
+    assert!(total_anchors > 0.0, "expected at least one anchor version");
+    assert!(
+        total_deltas > 0.0,
+        "expected delta versions from the updates"
+    );
+    let expected = total_deltas / total_anchors;
+
+    let stats = db.statistics();
+    assert!(
+        (stats.average_delta_chain_length() - expected).abs() < f64::EPSILON,
+        "avg delta chain {} should equal deltas/anchors {}",
+        stats.average_delta_chain_length(),
+        expected
+    );
 }
 
 #[test]
@@ -2528,4 +2636,412 @@ fn test_schema_as_of_entity_cap_is_configurable_and_discloses_sampling() {
     let current = db.schema().unwrap();
     assert!(!current.sampled);
     assert_eq!(current.total_nodes, 3);
+}
+
+// ============================================================================
+// DatabaseStats unit tests (Issue #3222)
+// ============================================================================
+
+/// `AletheiaDB::stats()` must serialize to the documented shape, with
+/// disabled subsystems explicitly tagged (`enabled: false`, no count keys)
+/// and enabled subsystems carrying their counters.
+///
+/// Serialization (`serde::Serialize` on `DatabaseStats`) only exists when
+/// `config-toml` or `mcp-server` is enabled, so this test is gated the same
+/// way; `test_stats_populated_matches_underlying_counters` keeps the
+/// non-serde behavior covered in minimal builds.
+#[cfg(feature = "serde")]
+#[test]
+fn test_stats_serialization_shape_empty_db() {
+    let db = AletheiaDB::new().unwrap();
+    let stats = db.stats();
+    let value = serde_json::to_value(&stats).expect("DatabaseStats must be serializable");
+
+    assert_eq!(value["current"]["node_count"], serde_json::json!(0));
+    assert_eq!(value["current"]["edge_count"], serde_json::json!(0));
+    assert_eq!(
+        value["historical"]["total_node_versions"],
+        serde_json::json!(0)
+    );
+    assert_eq!(value["historical"]["anchor_count"], serde_json::json!(0));
+    assert_eq!(value["historical"]["delta_count"], serde_json::json!(0));
+
+    let cold = value["cold_storage"].as_object().unwrap();
+    assert_eq!(cold["enabled"], serde_json::json!(false));
+    assert!(
+        !cold.contains_key("node_versions_stored"),
+        "disabled cold storage must not report counts: {value}"
+    );
+
+    let wal = value["wal"].as_object().unwrap();
+    assert_eq!(wal["enabled"], serde_json::json!(true));
+    assert!(wal["current_lsn"].as_u64().unwrap() >= 1);
+    assert!(wal["durability_mode"].is_string());
+}
+
+/// Populated DB: `stats()` mirrors the underlying O(1) counters exactly.
+#[test]
+fn test_stats_populated_matches_underlying_counters() {
+    let db = AletheiaDB::new().unwrap();
+    let n1 = db
+        .create_node("Person", PropertyMapBuilder::new().build())
+        .unwrap();
+    let _n2 = db
+        .create_node("Person", PropertyMapBuilder::new().build())
+        .unwrap();
+    db.update_node_with_valid_time(
+        n1,
+        PropertyMapBuilder::new().insert("name", "Alice").build(),
+        None,
+    )
+    .unwrap();
+
+    let stats = db.stats();
+    assert_eq!(stats.current.node_count, 2);
+    assert_eq!(stats.current.edge_count, 0);
+
+    let hist = db.historical_stats().unwrap();
+    assert_eq!(
+        stats.historical.total_node_versions,
+        hist.total_node_versions
+    );
+    // 2 creates + 1 update = exactly 3 node versions.
+    assert_eq!(stats.historical.total_node_versions, 3);
+    assert_eq!(stats.historical.unique_nodes, hist.unique_nodes);
+    assert_eq!(
+        stats.historical.anchor_count,
+        hist.node_anchor_count + hist.edge_anchor_count
+    );
+    assert_eq!(
+        stats.historical.delta_count,
+        hist.node_delta_count + hist.edge_delta_count
+    );
+    // With the default anchor interval (10), the update after a create is
+    // stored as a delta — the compression machinery must actually engage.
+    assert!(
+        stats.historical.delta_count >= 1,
+        "an update following a create must produce at least one delta, got: {stats:?}"
+    );
+    assert!(
+        stats.historical.compression_ratio < 1.0,
+        "with >= 1 delta the anchor share must drop below 1.0, got: {}",
+        stats.historical.compression_ratio
+    );
+}
+
+/// With cold storage configured, `stats()` reports the cold tier as enabled
+/// with counters and the hot/warm/cold access distribution.
+///
+/// Gated like `test_stats_serialization_shape_empty_db`: the serde derive
+/// this test exercises only exists under `config-toml`/`mcp-server`.
+#[cfg(feature = "serde")]
+#[test]
+fn test_stats_cold_storage_enabled() {
+    use crate::config::{AletheiaDBConfig, HistoricalConfigBuilder, WalConfigBuilder};
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let config = AletheiaDBConfig::builder()
+        .wal(
+            WalConfigBuilder::new()
+                .wal_dir(temp_dir.path().join("wal"))
+                .build(),
+        )
+        .persistence(crate::storage::index_persistence::PersistenceConfig {
+            enabled: false,
+            ..Default::default()
+        })
+        .historical(
+            HistoricalConfigBuilder::new()
+                .enable_cold_storage(true)
+                .cold_storage_path(temp_dir.path().join("cold.redb"))
+                .build(),
+        )
+        .build();
+    let db = AletheiaDB::with_unified_config(config).unwrap();
+
+    let value = serde_json::to_value(db.stats()).unwrap();
+    let cold = value["cold_storage"].as_object().unwrap();
+    assert_eq!(cold["enabled"], serde_json::json!(true));
+    assert_eq!(cold["node_versions_stored"], serde_json::json!(0));
+    assert!(cold["tier_access"].is_object());
+}
+
+/// After versions actually migrate to the cold tier, `stats()` must report
+/// them under `cold_storage` (and the hot historical counters must shrink
+/// accordingly) — the enabled-tier path with nonzero counters.
+#[test]
+fn test_stats_cold_storage_reports_migrated_versions() {
+    use crate::storage::migration::{MigrationPolicyBuilder, MigrationService};
+    use crate::storage::redb_cold_storage::RedbColdStorage;
+    use crate::storage::tiered_storage::TieredStorage;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    let db = AletheiaDB::new().unwrap();
+    let n1 = db
+        .create_node("Person", PropertyMapBuilder::new().build())
+        .unwrap();
+    db.update_node_with_valid_time(
+        n1,
+        PropertyMapBuilder::new().insert("name", "Alice").build(),
+        None,
+    )
+    .unwrap();
+
+    // Attach a cold tier and migrate everything older than the head version.
+    let temp_dir = tempfile::tempdir().unwrap();
+    let cold =
+        Arc::new(RedbColdStorage::with_default_config(temp_dir.path().join("cold.redb")).unwrap());
+    let tiered = Arc::new(TieredStorage::with_default_config(Arc::clone(&cold)));
+    db.__test_historical_storage()
+        .write()
+        .set_tiered_storage(tiered);
+
+    let policy = MigrationPolicyBuilder::new()
+        .age_threshold(Duration::ZERO)
+        .build();
+    let service = MigrationService::new(Arc::clone(&cold), policy);
+    let hot_versions_before = db.stats().historical.total_node_versions;
+    let migrated = db
+        .__test_historical_storage()
+        .write()
+        .migrate_to_cold(&service)
+        .unwrap();
+    assert!(migrated >= 1, "at least the non-head version must migrate");
+
+    let stats = db.stats();
+    assert!(stats.cold_storage.enabled);
+    let details = stats
+        .cold_storage
+        .details
+        .expect("enabled cold storage must carry details");
+    assert_eq!(
+        details.node_versions_stored, migrated as u64,
+        "cold tier must report exactly the migrated versions"
+    );
+    assert_eq!(
+        stats.historical.total_node_versions,
+        hot_versions_before - migrated,
+        "migrated versions must leave the hot historical counters"
+    );
+}
+
+/// Regression test for Issue #3425: a checkpoint/backup snapshot must never
+/// capture a *committed* node whose `commit_timestamp` is still `None`.
+///
+/// The latent bug: the commit path finalized `commit_timestamp`
+/// (`None -> Some(T)`) *after* dropping the `historical.write()` guard and took
+/// no snapshot lock, leaving a narrow window in which a snapshot holding
+/// `historical.read()` could clone a committed node while its timestamp was
+/// still `None` (which downstream visibility logic treats as uncommitted).
+///
+/// The hardening (Option A in the issue) holds the `historical.write()` guard
+/// across finalization, making the current-write + finalize atomic w.r.t. any
+/// `historical.read()`-holding snapshot.
+///
+/// This test uses the `#[cfg(test)]` pre-finalize hook to deterministically park
+/// a committing writer in that exact window while a checker thread mimics
+/// `create_checkpoint`'s snapshot block -- holding `historical.read()` (outer)
+/// then `snapshot_lock.write()` (inner), exactly as the issue describes -- and
+/// inspects every captured node. Before the fix the checker observes
+/// `commit_timestamp: None` (RED). After the fix the checker's `historical.read()`
+/// blocks until finalize completes under the writer's held guard, so it only ever
+/// sees resolved timestamps (GREEN).
+/// Serializes the finalize-window tests (#3425). Both install the *global*
+/// `commit_test_hooks` pre-finalize hook, so they must never run concurrently or
+/// they would clobber each other's hook and interleave unpredictably.
+static FINALIZE_WINDOW_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[test]
+fn test_checkpoint_never_captures_uncommitted_finalize_window_3425() {
+    use crate::api::transaction::write::commit_test_hooks;
+    use crate::storage::wal::LSN;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Barrier};
+    use std::time::{Duration, Instant};
+
+    let _serial = FINALIZE_WINDOW_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+
+    let db = Arc::new(AletheiaDB::new().unwrap());
+
+    // Writer sets this when it enters the finalize window (pre-finalize hook).
+    let in_window = Arc::new(AtomicBool::new(false));
+    // Both threads rendezvous before the writer begins its commit.
+    let barrier = Arc::new(Barrier::new(2));
+
+    // Install a pre-finalize hook that (1) announces the window and (2) parks the
+    // writer long enough for the checker to attempt its snapshot. In the buggy
+    // code the `historical.write()` guard is already dropped here; in the fixed
+    // code it is still held across this sleep.
+    {
+        let in_window = Arc::clone(&in_window);
+        commit_test_hooks::set_pre_finalize_hook(Arc::new(move || {
+            in_window.store(true, Ordering::SeqCst);
+            std::thread::sleep(Duration::from_millis(200));
+        }));
+    }
+
+    // Writer thread: commit a single node. Its commit fires the hook.
+    let writer = {
+        let db = Arc::clone(&db);
+        let barrier = Arc::clone(&barrier);
+        std::thread::spawn(move || {
+            barrier.wait();
+            let props = PropertyMapBuilder::new().insert("name", "Alice").build();
+            db.create_node("Person", props).expect("create_node failed");
+        })
+    };
+
+    // Checker thread: once the writer is in the window, replicate the checkpoint
+    // snapshot block and assert no captured node is finalize-pending.
+    let checker = {
+        let db = Arc::clone(&db);
+        let in_window = Arc::clone(&in_window);
+        let barrier = Arc::clone(&barrier);
+        std::thread::spawn(move || {
+            barrier.wait();
+            // Spin until the writer signals it has entered the finalize window.
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !in_window.load(Ordering::SeqCst) {
+                assert!(Instant::now() < deadline, "writer never entered window");
+                std::thread::yield_now();
+            }
+
+            // Mimic `create_checkpoint`'s consistent-snapshot block: hold the
+            // historical read guard (outer) then the snapshot lock (inner).
+            let hist_guard = db.historical.read();
+            let snap_lock = db.current.snapshot_lock.write();
+            let snapshot = db.current.create_snapshot(LSN(0));
+            let captured_none = snapshot
+                .nodes()
+                .iter()
+                .any(|n| n.metadata.commit_timestamp.is_none());
+            drop(snap_lock);
+            drop(hist_guard);
+            captured_none
+        })
+    };
+
+    writer.join().expect("writer thread panicked");
+    let captured_none = checker.join().expect("checker thread panicked");
+
+    commit_test_hooks::clear_pre_finalize_hook();
+
+    assert!(
+        !captured_none,
+        "Issue #3425: checkpoint snapshot captured a committed node with \
+         commit_timestamp: None inside the finalize window"
+    );
+}
+
+/// Regression test for Issue #3425 on the **`backup()`** path specifically.
+///
+/// The checkpoint test above only replicates the checkpoint lock ordering. This
+/// test drives the *real* `AletheiaDB::backup()` code concurrently with a writer
+/// parked in the finalize window, and — via a `#[cfg(test)]` seam inside
+/// `backup()` — inspects the exact current-storage snapshot `backup()` captured.
+///
+/// Before the Finding-1 fix, `backup()` cloned the current snapshot BEFORE (and
+/// outside) the `historical.read()` guard, so it could observe a committed node
+/// whose `commit_timestamp` is still `None` (RED). After the fix the snapshot is
+/// taken INSIDE `historical.read()`, which blocks on the writer's held
+/// `historical.write()` guard until finalize completes, so it only ever sees a
+/// resolved timestamp (GREEN).
+#[test]
+fn test_backup_never_captures_uncommitted_finalize_window_3425() {
+    use crate::api::transaction::write::commit_test_hooks;
+    use crate::db::backup::backup_test_hooks;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Barrier};
+    use std::time::{Duration, Instant};
+
+    let _serial = FINALIZE_WINDOW_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+
+    let db = Arc::new(AletheiaDB::new().unwrap());
+
+    // Writer sets this when it enters the finalize window (pre-finalize hook).
+    let in_window = Arc::new(AtomicBool::new(false));
+    // Records whether the snapshot that real `backup()` captured held a committed
+    // node with `commit_timestamp: None` (the bug).
+    let captured_none = Arc::new(AtomicBool::new(false));
+    // Set once the backup hook has fired (so we know backup reached its snapshot).
+    let backup_snapshotted = Arc::new(AtomicBool::new(false));
+    // Both threads rendezvous before the writer begins its commit.
+    let barrier = Arc::new(Barrier::new(2));
+
+    // Pre-finalize hook: announce the window and park the writer so the backup
+    // thread can run. In the buggy code the `historical.write()` guard is already
+    // dropped here; in the fixed code it is still held across this sleep.
+    {
+        let in_window = Arc::clone(&in_window);
+        commit_test_hooks::set_pre_finalize_hook(Arc::new(move || {
+            in_window.store(true, Ordering::SeqCst);
+            std::thread::sleep(Duration::from_millis(200));
+        }));
+    }
+
+    // Backup post-snapshot hook: inspect the real snapshot `backup()` took.
+    {
+        let captured_none = Arc::clone(&captured_none);
+        let backup_snapshotted = Arc::clone(&backup_snapshotted);
+        backup_test_hooks::set_post_current_snapshot_hook(Arc::new(move |snapshot| {
+            let has_none = snapshot
+                .nodes()
+                .iter()
+                .any(|n| n.metadata.commit_timestamp.is_none());
+            captured_none.store(has_none, Ordering::SeqCst);
+            backup_snapshotted.store(true, Ordering::SeqCst);
+        }));
+    }
+
+    // Writer thread: commit a single node. Its commit fires the pre-finalize hook.
+    let writer = {
+        let db = Arc::clone(&db);
+        let barrier = Arc::clone(&barrier);
+        std::thread::spawn(move || {
+            barrier.wait();
+            let props = PropertyMapBuilder::new().insert("name", "Alice").build();
+            db.create_node("Person", props).expect("create_node failed");
+        })
+    };
+
+    // Backup thread: once the writer is in the window, run the real backup path.
+    let backup_thread = {
+        let db = Arc::clone(&db);
+        let in_window = Arc::clone(&in_window);
+        let barrier = Arc::clone(&barrier);
+        std::thread::spawn(move || {
+            barrier.wait();
+            // Spin until the writer signals it has entered the finalize window.
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !in_window.load(Ordering::SeqCst) {
+                assert!(Instant::now() < deadline, "writer never entered window");
+                std::thread::yield_now();
+            }
+
+            let tmp = tempfile::TempDir::new().expect("tempdir");
+            let path = tmp.path().join("finalize_window.albk");
+            db.backup(&path).expect("backup failed");
+        })
+    };
+
+    writer.join().expect("writer thread panicked");
+    backup_thread.join().expect("backup thread panicked");
+
+    commit_test_hooks::clear_pre_finalize_hook();
+    backup_test_hooks::clear_post_current_snapshot_hook();
+
+    assert!(
+        backup_snapshotted.load(Ordering::SeqCst),
+        "backup never captured its current snapshot (hook did not fire)"
+    );
+    assert!(
+        !captured_none.load(Ordering::SeqCst),
+        "Issue #3425: backup() captured a committed node with \
+         commit_timestamp: None inside the finalize window"
+    );
 }

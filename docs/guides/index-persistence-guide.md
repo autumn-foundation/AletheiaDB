@@ -20,6 +20,10 @@ AletheiaDB's index persistence layer enables **fast cold starts** by saving all 
 - ✅ Temporal indexes (bi-temporal version chains)
 - ✅ String interner (label/property key deduplication)
 
+> **Migration note (Issue #3388):** Index persistence is now opt-in —
+> `PersistenceConfig::default()` has `enabled: false`; set `enabled: true`
+> with an explicit `data_dir` (or use `AletheiaDB::open(path)`) to persist.
+
 ## Current Reality (Important)
 
 As of 2026-02, the active restart/recovery path is:
@@ -31,19 +35,29 @@ As of 2026-02, the active restart/recovery path is:
 Notes:
 - `StringInterner` is persisted and restored; interned IDs survive restart.
 - Legacy references to `storage::persistence` / `PersistenceManager` are obsolete.
-- `AletheiaDB::open()` is not an API in this codebase.
+- `AletheiaDB::open(path)` is the one-line entry point for this restart/recovery path with default settings.
 
 ## File-Based Persistence Quickstart
 
-**⚠️ Common Mistake:** Trying to use `AletheiaDB::open()` for startup. That API does not exist. Use `with_unified_config()` for full index/interner restore.
+The default settings above are exactly what `AletheiaDB::open(path)` gives you:
 
-### The Right Way (File-Based Persistence)
+```rust
+let db = AletheiaDB::open(std::env::current_dir()?.join(".my-app-data"))?;
+```
+
+### Custom Paths and Tuning (Full Control)
+
+Reach for `with_unified_config()` directly when you need to override
+defaults — e.g. non-default persistence trigger policies — for full
+index/interner restore:
 
 ```rust
 use aletheiadb::{AletheiaDB, AletheiaDBConfig};
 use aletheiadb::config::WalConfigBuilder;
 use aletheiadb::storage::index_persistence::PersistenceConfig;
-use std::time::Duration;
+use aletheiadb::storage::index_persistence::formats::{
+    GraphPersistencePolicy, PersistencePolicies,
+};
 
 // Configure database with custom paths
 let db_path = std::env::current_dir()?.join(".my-app-data");
@@ -56,7 +70,14 @@ let config = AletheiaDBConfig::builder()
         enabled: true,
         data_dir: db_path.join("indexes"),  // Index persistence location
         load_on_startup: true,  // Load existing indexes on startup
-        auto_persist_interval: Duration::from_secs(300),  // Save every 5min
+        policies: PersistencePolicies {
+            // Save the graph index every 5min instead of the 10min default
+            graph: GraphPersistencePolicy {
+                time_interval_secs: 300,
+                ..Default::default()
+            },
+            ..Default::default()
+        },
         ..Default::default()
     })
     .build();
@@ -68,14 +89,22 @@ let db = AletheiaDB::with_unified_config(config)?;
 **What this creates:**
 ```
 .my-app-data/
-├── wal/           # Write-ahead log (transaction durability)
-│   ├── 00000X.log # WAL segments
+├── wal/                # Write-ahead log (transaction durability)
+│   ├── 00000X.log      # WAL segments
 │   └── manifest.json
-└── indexes/       # Persisted indexes (fast restart)
-    ├── graph.bin.zst        # Graph structure (compressed)
-    ├── temporal.bin.zst     # Temporal indexes
-    └── vector_*.bin         # Vector HNSW indexes
+└── indexes/            # PersistenceConfig.data_dir (fast restart)
+    └── indexes/        # …the manager nests everything under a second indexes/
+        ├── manifest.idx           # Index registry + LSN
+        ├── strings/               # String interner
+        ├── graph/adjacency.idx    # Graph structure
+        ├── temporal/versions.idx  # Temporal indexes
+        └── vector/<prop>/         # Vector HNSW indexes (per property)
 ```
+
+The doubled `indexes/indexes/` segment is real, not a typo: `data_dir` is the
+persistence *base* directory and the manager stores all index files under an
+`indexes/` subdirectory of it. `AletheiaDB::open(path)` sets
+`data_dir = path.join("indexes")`, producing exactly this layout.
 
 **Benefits:**
 - ✅ Data survives process restarts
@@ -155,14 +184,64 @@ data/my-database/
 │       ├── embedding/
 │       │   ├── meta.idx
 │       │   ├── mappings.idx
-│       │   └── current.usearch
+│       │   ├── current.usearch
+│       │   └── current.usearch.mappings
 │       └── title_embedding/
 │           ├── meta.idx
 │           ├── mappings.idx
-│           └── current.usearch
+│           ├── current.usearch
+│           └── current.usearch.mappings
 └── wal/                       # Write-ahead log (separate)
     └── ...
 ```
+
+### Vector Index Persistence
+
+Each vector-indexed property gets its own directory under `indexes/vector/`
+containing four files:
+
+| File | Format | Contents |
+|------|--------|----------|
+| `meta.idx` | bitcode + CRC32 (`GVEC` magic, versioned) | Property name, dimensions, distance metric, HNSW hyper-parameters (`m`, `ef_construction`, `ef_search`), vector count |
+| `mappings.idx` | bitcode + CRC32 | `NodeId` <-> usearch key translation table |
+| `current.usearch` | usearch native binary | The HNSW graph itself (vectors + links) |
+| `current.usearch.mappings` | sidecar written alongside the usearch file | `NodeId` <-> usearch key mapping + integrity metadata used by `HnswIndex::load` |
+
+**Save:** vector indexes are persisted by `persist_indexes()`, the background
+persistence worker (per the vector persistence policy), and shutdown
+persistence — no separate call needed.
+
+**Load (Issue #451):** on startup with `load_on_startup: true`, all
+per-property vector indexes are loaded **in parallel** (one rayon task per
+property) and registered before the database becomes ready. The full HNSW
+graph is restored from `current.usearch` — vectors are **not** re-indexed
+from node properties, so startup cost is disk I/O, not index construction.
+After the restart, `find_similar` / `find_similar_in` work immediately and
+newly created nodes with vector properties are indexed as usual.
+
+**Per-index error isolation:** a corrupted or unreadable vector index
+(bad `meta.idx`, `mappings.idx`, `current.usearch`, or
+`current.usearch.mappings`; unknown metric; out-of-range mapping key) is
+skipped with a warning; it never aborts startup and never prevents the
+remaining vector indexes from loading. A skipped index is simply not
+registered, and its directory is **left in place on disk** — nothing is
+deleted or quarantined, so the same warning repeats on every startup until
+the index is rebuilt and re-persisted (automatic quarantine-rename of
+skipped directories is a possible future enhancement).
+
+**Recovering a skipped index:** call
+`db.rebuild_vector_index("property", config)` — it re-enables the index
+(with the same `HnswConfig` you originally used) and **backfills it from the
+vector properties of current nodes**, restoring searchability for
+pre-existing data. The next persistence cycle then overwrites the corrupt
+files with the rebuilt index.
+
+> **Warning — do not just re-enable:** `enable_vector_index` creates an
+> **empty** index with no backfill. If you re-enable a skipped index without
+> rebuilding, the next persistence cycle (background worker, shutdown, or
+> `persist_indexes()`) overwrites the on-disk files with that empty index,
+> permanently losing the previously indexed vectors. Always use
+> `rebuild_vector_index` to recover a skipped index.
 
 ### Persistence Config Options
 
@@ -338,7 +417,7 @@ fn setup_shutdown_handler(
 1. **Use parallel loading** - `load_indexes_parallel()` loads graph, temporal, and vector indexes concurrently (~3x faster)
 2. **Use memory-mapped loading** - `load_graph_index_mmap()` for multi-GB indexes that exceed available RAM
 3. **Use SSD storage** for index files
-4. **Enable multiple vector indexes** (they load in parallel)
+4. **Multiple vector indexes load in parallel** on startup (one rayon task per property, Issue #451)
 5. **Keep manifest small** (it loads first)
 6. **Prewarm the page cache** (OS-level optimization)
 
@@ -414,11 +493,11 @@ Error: Size limit exceeded: Vector dimension 150000 exceeds maximum allowed dime
 
 **Solution:**
 ```rust
-// Delete the malformed file
-fs::remove_file("data/my-db/indexes/vector/embedding/mappings.idx")?;
-
-// Rebuild vector index
-db.rebuild_vector_index("embedding")?;
+// Rebuild the vector index from node properties (re-enables it if it was
+// skipped at startup, then backfills; the next persist overwrites the
+// malformed files)
+use aletheiadb::index::vector::{DistanceMetric, HnswConfig};
+db.rebuild_vector_index("embedding", HnswConfig::new(384, DistanceMetric::Cosine))?;
 ```
 
 #### 3. Missing Index File
@@ -538,6 +617,7 @@ println!("LSN: {}", metrics.current_lsn);
 ```rust
 PersistenceConfig {
     enabled: true,
+    data_dir: ".dev-data/indexes".into(),  // Always set explicitly when enabling
     save_interval_secs: 60,      // Save every minute
     save_on_shutdown: true,       // Always save on exit
     ..Default::default()
@@ -548,6 +628,7 @@ PersistenceConfig {
 ```rust
 PersistenceConfig {
     enabled: true,
+    data_dir: "/var/lib/my-app/indexes".into(),  // Always set explicitly when enabling
     save_interval_secs: 300,     // Save every 5 minutes
     save_on_shutdown: true,       // Always save on exit
     save_after_transactions: Some(10000),  // Also save after 10K txns

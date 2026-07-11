@@ -42,7 +42,20 @@ use crate::storage::snapshot::{CurrentStorageSnapshot, HistoricalStorageSnapshot
 pub const BACKUP_MAGIC: [u8; 4] = *b"ALBK";
 
 /// Current backup format version.
-pub const BACKUP_FORMAT_VERSION: u16 = 1;
+///
+/// Version history:
+/// - **1 -> 2** (Issue #3224): the embedded `TemporalIndexData`'s
+///   `NodeVersionEntry`/`EdgeVersionEntry` gained an optional `provenance`
+///   field.
+/// - **2 -> 3** (Issue #3350): the embedded `PersistedProvenance` gained an
+///   optional `principal` field (authenticated-principal provenance).
+/// - **3 -> 4** (Issue #3387): the entries gained `tx_end`/`tx_end_logical`
+///   (transaction-time closure) and `prev_version`/`next_version` (version
+///   chain links).
+///
+/// Older artifacts are still restorable -- see [`BackupPayloadV1`],
+/// [`BackupPayloadV2`], [`BackupPayloadV3`] and `read_artifact`.
+pub const BACKUP_FORMAT_VERSION: u16 = 4;
 
 /// Maximum allowed decompressed payload size (5 GiB).
 ///
@@ -135,6 +148,151 @@ pub(crate) struct BackupPayload {
     pub graph: GraphIndexData,
     /// Complete temporal version history.
     pub temporal: TemporalIndexData,
+}
+
+/// Pre-provenance (Issue #3224) `BackupPayload` shape, i.e. `BACKUP_FORMAT_VERSION == 1`.
+///
+/// Identical to [`BackupPayload`] except `temporal` uses the frozen
+/// [`crate::storage::index_persistence::formats::legacy_v1::TemporalIndexDataV1`]
+/// shape. Kept only so `read_artifact` can restore version-1 artifacts.
+#[derive(Debug, Clone, Encode, Decode)]
+pub(crate) struct BackupPayloadV1 {
+    /// Unix timestamp (microseconds) when the backup was created.
+    pub created_at_micros: i64,
+    /// WAL LSN at which the consistent snapshot was taken.
+    pub source_lsn: u64,
+    /// Number of current nodes.
+    pub current_node_count: u64,
+    /// Number of current edges.
+    pub current_edge_count: u64,
+    /// Number of node versions (hot + cold).
+    pub node_version_count: u64,
+    /// Number of edge versions (hot + cold).
+    pub edge_version_count: u64,
+    /// String interner state.
+    pub interner: StringInternerData,
+    /// Current graph state (nodes and edges).
+    pub graph: GraphIndexData,
+    /// Complete temporal version history (pre-provenance shape).
+    pub temporal: crate::storage::index_persistence::formats::legacy_v1::TemporalIndexDataV1,
+}
+
+impl From<BackupPayloadV1> for BackupPayload {
+    fn from(v1: BackupPayloadV1) -> Self {
+        BackupPayload {
+            created_at_micros: v1.created_at_micros,
+            source_lsn: v1.source_lsn,
+            current_node_count: v1.current_node_count,
+            current_edge_count: v1.current_edge_count,
+            node_version_count: v1.node_version_count,
+            edge_version_count: v1.edge_version_count,
+            interner: v1.interner,
+            graph: v1.graph,
+            temporal: v1.temporal.into(),
+        }
+    }
+}
+
+/// Pre-principal (Issue #3350) `BackupPayload` shape, i.e.
+/// `BACKUP_FORMAT_VERSION == 2`.
+///
+/// Identical to [`BackupPayload`] except `temporal` uses the frozen
+/// [`crate::storage::index_persistence::formats::legacy_v2::TemporalIndexDataV2`]
+/// shape (provenance without the `principal` field, no tx-end / chain-link
+/// fields). Kept only so `read_artifact` can restore version-2 artifacts.
+///
+/// Note this shape reuses the LIVE `StringInternerData`/`GraphIndexData`
+/// structs (FORMAT-FROZEN, see `index_persistence::formats`): they are
+/// unchanged since v1, and any future layout change to them must freeze
+/// copies here first.
+#[derive(Debug, Clone, Encode, Decode)]
+pub(crate) struct BackupPayloadV2 {
+    /// Unix timestamp (microseconds) when the backup was created.
+    pub created_at_micros: i64,
+    /// WAL LSN at which the consistent snapshot was taken.
+    pub source_lsn: u64,
+    /// Number of current nodes.
+    pub current_node_count: u64,
+    /// Number of current edges.
+    pub current_edge_count: u64,
+    /// Number of node versions (hot + cold).
+    pub node_version_count: u64,
+    /// Number of edge versions (hot + cold).
+    pub edge_version_count: u64,
+    /// String interner state.
+    pub interner: StringInternerData,
+    /// Current graph state (nodes and edges).
+    pub graph: GraphIndexData,
+    /// Complete temporal version history (pre-principal shape).
+    pub temporal: crate::storage::index_persistence::formats::legacy_v2::TemporalIndexDataV2,
+}
+
+impl From<BackupPayloadV2> for BackupPayload {
+    fn from(v2: BackupPayloadV2) -> Self {
+        BackupPayload {
+            created_at_micros: v2.created_at_micros,
+            source_lsn: v2.source_lsn,
+            current_node_count: v2.current_node_count,
+            current_edge_count: v2.current_edge_count,
+            node_version_count: v2.node_version_count,
+            edge_version_count: v2.edge_version_count,
+            interner: v2.interner,
+            graph: v2.graph,
+            temporal: v2.temporal.into(),
+        }
+    }
+}
+
+/// Pre-bi-temporal-fidelity (Issue #3387) `BackupPayload` shape, i.e.
+/// `BACKUP_FORMAT_VERSION == 3`.
+///
+/// Identical to [`BackupPayload`] except `temporal` uses the frozen
+/// [`crate::storage::index_persistence::formats::legacy_v3::TemporalIndexDataV3`]
+/// shape (principal-carrying provenance, no tx-end / chain-link fields).
+/// Kept only so `read_artifact` can restore version-3 artifacts.
+///
+/// Frozen reference: the live `BackupPayload` as of trunk commit f2e02c6
+/// (the #3421 merge, the last pre-#3387 trunk commit). Note this shape
+/// reuses the LIVE `StringInternerData`/`GraphIndexData` structs
+/// (FORMAT-FROZEN, see `index_persistence::formats`): they are unchanged
+/// since v1, and any future layout change to them must freeze copies here
+/// first.
+#[derive(Debug, Clone, Encode, Decode)]
+pub(crate) struct BackupPayloadV3 {
+    /// Unix timestamp (microseconds) when the backup was created.
+    pub created_at_micros: i64,
+    /// WAL LSN at which the consistent snapshot was taken.
+    pub source_lsn: u64,
+    /// Number of current nodes.
+    pub current_node_count: u64,
+    /// Number of current edges.
+    pub current_edge_count: u64,
+    /// Number of node versions (hot + cold).
+    pub node_version_count: u64,
+    /// Number of edge versions (hot + cold).
+    pub edge_version_count: u64,
+    /// String interner state.
+    pub interner: StringInternerData,
+    /// Current graph state (nodes and edges).
+    pub graph: GraphIndexData,
+    /// Complete temporal version history (pre-fidelity shape).
+    pub temporal: crate::storage::index_persistence::formats::legacy_v3::TemporalIndexDataV3,
+}
+
+impl From<BackupPayloadV3> for BackupPayload {
+    fn from(v3: BackupPayloadV3) -> Self {
+        BackupPayload {
+            created_at_micros: v3.created_at_micros,
+            source_lsn: v3.source_lsn,
+            current_node_count: v3.current_node_count,
+            current_edge_count: v3.current_edge_count,
+            node_version_count: v3.node_version_count,
+            edge_version_count: v3.edge_version_count,
+            interner: v3.interner,
+            graph: v3.graph,
+            temporal: v3.temporal.into(),
+        }
+    }
 }
 
 // ============================================================================
@@ -352,9 +510,12 @@ pub(crate) fn read_artifact(path: &Path) -> Result<BackupPayload, BackupError> {
         return Err(BackupError::BadMagic);
     }
 
-    // Validate format version.
+    // Validate format version. Older (but still-decodable) versions are
+    // accepted -- see `BackupPayloadV1` below for the version-1 fallback
+    // (Issue #3224); only a version newer than this build understands is
+    // rejected.
     let found_version = u16::from_le_bytes([header[4], header[5]]);
-    if found_version != BACKUP_FORMAT_VERSION {
+    if found_version > BACKUP_FORMAT_VERSION {
         return Err(BackupError::IncompatibleVersion {
             found: found_version,
             supported: BACKUP_FORMAT_VERSION,
@@ -379,11 +540,47 @@ pub(crate) fn read_artifact(path: &Path) -> Result<BackupPayload, BackupError> {
         ));
     }
 
-    // Decode bitcode.
-    let payload: BackupPayload = bitcode::decode(&decoded_bytes)
-        .map_err(|e| BackupError::Serialization(format!("bitcode deserialization failed: {e}")))?;
-
-    Ok(payload)
+    // Decode bitcode. The header's `found_version` (already validated above,
+    // and not itself part of the bitcode blob) tells us unambiguously which
+    // payload shape to expect -- no try-decode-and-fallback needed here,
+    // unlike the temporal index file's embedded version (Issue #3224).
+    //
+    // This matches exhaustively on every version this build actually knows
+    // how to decode, rather than treating "not the legacy version" as
+    // synonymous with "current version": a corrupted or hand-crafted header
+    // claiming an unassigned value (e.g. 0, or a version skipped by a future
+    // release) is rejected with a clear `IncompatibleVersion` error instead
+    // of being silently routed through the current-shape decoder.
+    match found_version {
+        1 => {
+            let legacy: BackupPayloadV1 = bitcode::decode(&decoded_bytes).map_err(|e| {
+                BackupError::Serialization(format!("bitcode deserialization failed: {e}"))
+            })?;
+            Ok(legacy.into())
+        }
+        2 => {
+            let legacy: BackupPayloadV2 = bitcode::decode(&decoded_bytes).map_err(|e| {
+                BackupError::Serialization(format!("bitcode deserialization failed: {e}"))
+            })?;
+            Ok(legacy.into())
+        }
+        3 => {
+            let legacy: BackupPayloadV3 = bitcode::decode(&decoded_bytes).map_err(|e| {
+                BackupError::Serialization(format!("bitcode deserialization failed: {e}"))
+            })?;
+            Ok(legacy.into())
+        }
+        v if v == BACKUP_FORMAT_VERSION => {
+            let payload: BackupPayload = bitcode::decode(&decoded_bytes).map_err(|e| {
+                BackupError::Serialization(format!("bitcode deserialization failed: {e}"))
+            })?;
+            Ok(payload)
+        }
+        other => Err(BackupError::IncompatibleVersion {
+            found: other,
+            supported: BACKUP_FORMAT_VERSION,
+        }),
+    }
 }
 
 // ============================================================================
@@ -714,5 +911,405 @@ mod tests {
         let restored = read_artifact(&path).unwrap();
         assert_eq!(restored.source_lsn, 0);
         assert_eq!(restored.current_node_count, 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // Version-1 (pre-provenance, Issue #3224) backup compatibility
+    // -----------------------------------------------------------------------
+
+    fn empty_payload_v1() -> BackupPayloadV1 {
+        use crate::storage::index_persistence::formats::legacy_v1::TemporalIndexDataV1;
+        use crate::storage::index_persistence::formats::{GraphIndexData, StringInternerData};
+        use crate::storage::index_persistence::{
+            GRAPH_MAGIC, INTERNER_MAGIC, MANIFEST_VERSION, TEMPORAL_MAGIC,
+        };
+        BackupPayloadV1 {
+            created_at_micros: 42,
+            source_lsn: 7,
+            current_node_count: 0,
+            current_edge_count: 0,
+            node_version_count: 0,
+            edge_version_count: 0,
+            interner: StringInternerData {
+                magic: INTERNER_MAGIC,
+                version: MANIFEST_VERSION,
+                string_count: 0,
+                strings: vec![],
+            },
+            graph: GraphIndexData {
+                magic: GRAPH_MAGIC,
+                version: MANIFEST_VERSION,
+                node_count: 0,
+                edge_count: 0,
+                nodes: vec![],
+                edges: vec![],
+                outgoing_node_ids: vec![],
+                outgoing_offsets: vec![],
+                outgoing_neighbors: vec![],
+                incoming_node_ids: vec![],
+                incoming_offsets: vec![],
+                incoming_neighbors: vec![],
+            },
+            temporal: TemporalIndexDataV1 {
+                magic: TEMPORAL_MAGIC,
+                version: 1,
+                node_versions: vec![],
+                node_anchors: vec![],
+                edge_versions: vec![],
+                edge_anchors: vec![],
+            },
+        }
+    }
+
+    /// Encode a version-1 artifact byte-for-byte the way pre-#3224 AletheiaDB
+    /// would have: `[MAGIC][version=1][zstd(bitcode(BackupPayloadV1))]`.
+    fn encode_artifact_v1(payload: &BackupPayloadV1) -> Vec<u8> {
+        let encoded = bitcode::encode(payload);
+        let compressed = zstd::encode_all(encoded.as_slice(), 3).unwrap();
+        let mut out = Vec::with_capacity(6 + compressed.len());
+        out.extend_from_slice(&BACKUP_MAGIC);
+        out.extend_from_slice(&1u16.to_le_bytes());
+        out.extend_from_slice(&compressed);
+        out
+    }
+
+    #[test]
+    fn read_artifact_accepts_legacy_v1_format() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("legacy.albk");
+        let bytes = encode_artifact_v1(&empty_payload_v1());
+        std::fs::write(&path, &bytes).unwrap();
+
+        let restored = read_artifact(&path).unwrap();
+
+        assert_eq!(restored.source_lsn, 7);
+        assert_eq!(restored.created_at_micros, 42);
+        assert!(restored.temporal.node_versions.is_empty());
+    }
+
+    /// A version-2 (Issue #3224 era, pre-#3350) artifact -- provenance
+    /// present but without the `principal` field -- must restore with the
+    /// caller-supplied provenance intact and `principal: None`.
+    #[test]
+    fn read_artifact_accepts_legacy_v2_format() {
+        use crate::storage::index_persistence::formats::legacy_v2::{
+            NodeVersionEntryV2, PersistedProvenanceV2, TemporalIndexDataV2,
+        };
+        use crate::storage::index_persistence::formats::{
+            GraphIndexData, PersistedPropertyMap, PersistedVersionType, StringInternerData,
+        };
+        use crate::storage::index_persistence::{
+            GRAPH_MAGIC, INTERNER_MAGIC, MANIFEST_VERSION, TEMPORAL_MAGIC,
+        };
+
+        let payload_v2 = BackupPayloadV2 {
+            created_at_micros: 43,
+            source_lsn: 9,
+            current_node_count: 1,
+            current_edge_count: 0,
+            node_version_count: 1,
+            edge_version_count: 0,
+            interner: StringInternerData {
+                magic: INTERNER_MAGIC,
+                version: MANIFEST_VERSION,
+                string_count: 0,
+                strings: vec![],
+            },
+            graph: GraphIndexData {
+                magic: GRAPH_MAGIC,
+                version: MANIFEST_VERSION,
+                node_count: 0,
+                edge_count: 0,
+                nodes: vec![],
+                edges: vec![],
+                outgoing_node_ids: vec![],
+                outgoing_offsets: vec![],
+                outgoing_neighbors: vec![],
+                incoming_node_ids: vec![],
+                incoming_offsets: vec![],
+                incoming_neighbors: vec![],
+            },
+            temporal: TemporalIndexDataV2 {
+                magic: TEMPORAL_MAGIC,
+                version: 2,
+                node_versions: vec![NodeVersionEntryV2 {
+                    version_id: 1,
+                    node_id: 1,
+                    label_idx: 0,
+                    valid_from: 1000,
+                    valid_to: None,
+                    valid_from_logical: 0,
+                    valid_to_logical: None,
+                    tx_time: 1000,
+                    tx_time_logical: 0,
+                    version_type: PersistedVersionType::Anchor,
+                    properties: PersistedPropertyMap { entries: vec![] },
+                    vector_snapshot_id: None,
+                    provenance: Some(PersistedProvenanceV2 {
+                        source: Some("hr-system".to_string()),
+                        confidence: Some(0.9),
+                        note: None,
+                        correlation_id: None,
+                    }),
+                }],
+                node_anchors: vec![],
+                edge_versions: vec![],
+                edge_anchors: vec![],
+            },
+        };
+
+        // Encode byte-for-byte the way an Issue-#3224-era binary would have:
+        // `[MAGIC][version=2][zstd(bitcode(BackupPayloadV2))]`.
+        let encoded = bitcode::encode(&payload_v2);
+        let compressed = zstd::encode_all(encoded.as_slice(), 3).unwrap();
+        let mut bytes = Vec::with_capacity(6 + compressed.len());
+        bytes.extend_from_slice(&BACKUP_MAGIC);
+        bytes.extend_from_slice(&2u16.to_le_bytes());
+        bytes.extend_from_slice(&compressed);
+
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("legacy_v2.albk");
+        std::fs::write(&path, &bytes).unwrap();
+
+        let restored = read_artifact(&path).unwrap();
+
+        assert_eq!(restored.source_lsn, 9);
+        assert_eq!(restored.temporal.version, MANIFEST_VERSION);
+        assert_eq!(restored.temporal.node_versions.len(), 1);
+        let provenance = restored.temporal.node_versions[0]
+            .provenance
+            .as_ref()
+            .unwrap();
+        assert_eq!(provenance.source.as_deref(), Some("hr-system"));
+        assert!(provenance.principal.is_none());
+        // The Issue #3387 fidelity fields also default to None on the
+        // upgraded v2 entries (open tx interval, no chain links).
+        let entry = &restored.temporal.node_versions[0];
+        assert_eq!(entry.tx_end, None);
+        assert_eq!(entry.tx_end_logical, None);
+        assert_eq!(entry.prev_version, None);
+        assert_eq!(entry.next_version, None);
+    }
+
+    /// Regression test for a bug where restoring a legacy (`BACKUP_FORMAT_VERSION
+    /// == 1`) artifact with actual version data produced a `TemporalIndexData`
+    /// whose entries were upgraded to the current (provenance-carrying) shape
+    /// but whose `version` field still said `1` (copied verbatim from the V1
+    /// struct). Persisting that mismatched struct and reloading it would then
+    /// misdetect it as legacy and misdecode every entry. See Issue #3224.
+    #[test]
+    fn restoring_legacy_v1_backup_with_versions_stamps_current_manifest_version() {
+        use crate::storage::index_persistence::formats::legacy_v1::{
+            NodeVersionEntryV1, TemporalIndexDataV1,
+        };
+        use crate::storage::index_persistence::formats::{
+            PersistedPropertyMap, PersistedVersionType,
+        };
+        use crate::storage::index_persistence::temporal::{
+            load_temporal_index, save_temporal_index,
+        };
+        use crate::storage::index_persistence::{MANIFEST_VERSION, TEMPORAL_MAGIC};
+
+        let dir = TempDir::new().unwrap();
+        let artifact_path = dir.path().join("legacy_with_data.albk");
+
+        let mut payload = empty_payload_v1();
+        payload.node_version_count = 1;
+        payload.temporal = TemporalIndexDataV1 {
+            magic: TEMPORAL_MAGIC,
+            version: 1,
+            node_versions: vec![NodeVersionEntryV1 {
+                version_id: 1,
+                node_id: 1,
+                label_idx: 0,
+                valid_from: 1000,
+                valid_to: None,
+                valid_from_logical: 0,
+                valid_to_logical: None,
+                tx_time: 1000,
+                tx_time_logical: 0,
+                version_type: PersistedVersionType::Anchor,
+                properties: PersistedPropertyMap { entries: vec![] },
+                vector_snapshot_id: None,
+            }],
+            node_anchors: vec![],
+            edge_versions: vec![],
+            edge_anchors: vec![],
+        };
+
+        std::fs::write(&artifact_path, encode_artifact_v1(&payload)).unwrap();
+
+        let restored = read_artifact(&artifact_path).unwrap();
+
+        // The upgraded struct must claim the *current* format version, not
+        // the legacy one it was originally decoded as, since its entries are
+        // already current-shape.
+        assert_eq!(restored.temporal.version, MANIFEST_VERSION);
+        assert_eq!(restored.temporal.node_versions.len(), 1);
+        assert!(restored.temporal.node_versions[0].provenance.is_none());
+
+        // Persist the restored (upgraded) temporal index and reload it, as
+        // `restore_to_data_dir`/normal operation would. Before the fix, this
+        // would silently take the legacy-decode fallback path and either
+        // error or corrupt the entry.
+        let temporal_path = dir.path().join("temporal.idx");
+        save_temporal_index(&restored.temporal, &temporal_path).unwrap();
+        let reloaded = load_temporal_index(&temporal_path).unwrap();
+
+        assert_eq!(reloaded.version, MANIFEST_VERSION);
+        assert_eq!(reloaded.node_versions.len(), 1);
+        assert_eq!(reloaded.node_versions[0].node_id, 1);
+        assert!(reloaded.node_versions[0].provenance.is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // Version-3 (pre-fidelity, Issue #3387) backup compatibility
+    // -----------------------------------------------------------------------
+
+    /// Encode a version-3 artifact byte-for-byte the way a #3350-era
+    /// (pre-#3387) AletheiaDB would have:
+    /// `[MAGIC][version=3][zstd(bitcode(BackupPayloadV3))]`.
+    fn encode_artifact_v3(payload: &BackupPayloadV3) -> Vec<u8> {
+        let encoded = bitcode::encode(payload);
+        let compressed = zstd::encode_all(encoded.as_slice(), 3).unwrap();
+        let mut out = Vec::with_capacity(6 + compressed.len());
+        out.extend_from_slice(&BACKUP_MAGIC);
+        out.extend_from_slice(&3u16.to_le_bytes());
+        out.extend_from_slice(&compressed);
+        out
+    }
+
+    /// A version-3 (Issue #3350 era, pre-#3387) artifact -- provenance WITH
+    /// the `principal` field, but no tx-end / chain-link fields -- must
+    /// restore with the principal preserved and the Issue #3387 fidelity
+    /// fields defaulting to `None`.
+    #[test]
+    fn read_artifact_accepts_legacy_v3_format() {
+        use crate::storage::index_persistence::formats::legacy_v3::{
+            NodeVersionEntryV3, TemporalIndexDataV3,
+        };
+        use crate::storage::index_persistence::formats::{
+            PersistedPropertyMap, PersistedProvenance, PersistedVersionType,
+        };
+        use crate::storage::index_persistence::{MANIFEST_VERSION, TEMPORAL_MAGIC};
+
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("legacy_v3.albk");
+
+        let empty = empty_payload();
+        let payload = BackupPayloadV3 {
+            created_at_micros: 42,
+            source_lsn: 7,
+            current_node_count: 0,
+            current_edge_count: 0,
+            node_version_count: 1,
+            edge_version_count: 0,
+            interner: empty.interner,
+            graph: empty.graph,
+            temporal: TemporalIndexDataV3 {
+                magic: TEMPORAL_MAGIC,
+                version: 3,
+                node_versions: vec![NodeVersionEntryV3 {
+                    version_id: 1,
+                    node_id: 1,
+                    label_idx: 0,
+                    valid_from: 1000,
+                    valid_to: None,
+                    valid_from_logical: 0,
+                    valid_to_logical: None,
+                    tx_time: 1000,
+                    tx_time_logical: 0,
+                    version_type: PersistedVersionType::Anchor,
+                    properties: PersistedPropertyMap { entries: vec![] },
+                    vector_snapshot_id: None,
+                    provenance: Some(PersistedProvenance {
+                        source: Some("hr-system".to_string()),
+                        confidence: None,
+                        note: None,
+                        correlation_id: None,
+                        principal: Some("alice@example.com".to_string()),
+                    }),
+                }],
+                node_anchors: vec![],
+                edge_versions: vec![],
+                edge_anchors: vec![],
+            },
+        };
+
+        std::fs::write(&path, encode_artifact_v3(&payload)).unwrap();
+
+        let restored = read_artifact(&path).unwrap();
+
+        assert_eq!(restored.source_lsn, 7);
+        // The upgraded struct claims the current format version (same
+        // contract as the v1/v2 upgrades above).
+        assert_eq!(restored.temporal.version, MANIFEST_VERSION);
+        assert_eq!(restored.temporal.node_versions.len(), 1);
+        let entry = &restored.temporal.node_versions[0];
+        // The #3350 principal is preserved; the Issue #3387 fidelity fields
+        // default to None (open tx interval, no chain links).
+        let provenance = entry.provenance.as_ref().unwrap();
+        assert_eq!(provenance.principal.as_deref(), Some("alice@example.com"));
+        assert_eq!(entry.tx_end, None);
+        assert_eq!(entry.tx_end_logical, None);
+        assert_eq!(entry.prev_version, None);
+        assert_eq!(entry.next_version, None);
+    }
+
+    /// A version-2 header whose payload does not decode as the frozen
+    /// `BackupPayloadV2` shape is a decode error, not a silent fallback.
+    #[test]
+    fn read_artifact_rejects_corrupt_v2_payload() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("corrupt_v2.albk");
+
+        // Valid header claiming version 2, but the zstd payload holds bytes
+        // that are not a bitcode-encoded BackupPayloadV2.
+        let garbage = zstd::encode_all(&b"not a backup payload"[..], 3).unwrap();
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&BACKUP_MAGIC);
+        bytes.extend_from_slice(&2u16.to_le_bytes());
+        bytes.extend_from_slice(&garbage);
+        std::fs::write(&path, &bytes).unwrap();
+
+        let err = read_artifact(&path).unwrap_err();
+        assert!(
+            matches!(err, BackupError::Serialization(_)),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn read_artifact_rejects_future_version() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("future.albk");
+        let mut bytes = encode_artifact(&empty_payload()).unwrap();
+        // Corrupt the header to claim a version newer than this build supports.
+        bytes[4..6].copy_from_slice(&(BACKUP_FORMAT_VERSION + 1).to_le_bytes());
+        std::fs::write(&path, &bytes).unwrap();
+
+        let err = read_artifact(&path).unwrap_err();
+        assert!(matches!(err, BackupError::IncompatibleVersion { .. }));
+    }
+
+    /// Regression test: the version dispatch must explicitly reject any
+    /// `found_version` it doesn't recognize (e.g. 0, or any value skipped by
+    /// a future release) rather than silently treating "not the legacy
+    /// version" as synonymous with "current version".
+    #[test]
+    fn read_artifact_rejects_unassigned_version_zero() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("zero.albk");
+        let mut bytes = encode_artifact(&empty_payload()).unwrap();
+        // Corrupt the header to claim an unassigned version (below the
+        // legacy version-1 floor, not a valid value in either scheme).
+        bytes[4..6].copy_from_slice(&0u16.to_le_bytes());
+        std::fs::write(&path, &bytes).unwrap();
+
+        let err = read_artifact(&path).unwrap_err();
+        assert!(matches!(
+            err,
+            BackupError::IncompatibleVersion { found: 0, .. }
+        ));
     }
 }

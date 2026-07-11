@@ -1326,6 +1326,323 @@ fn test_edge_version_roundtrip_all_fields() {
     assert_eq!(retrieved.target, version.target);
 }
 
+// -----------------------------------------------------------------------
+// Provenance persistence (Issue #3224)
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_encode_decode_node_version_with_provenance() {
+    use crate::core::provenance::Provenance;
+    use std::sync::Arc;
+
+    let provenance = Arc::new(
+        Provenance::builder()
+            .source("hr-system")
+            .confidence(0.95)
+            .correlation_id("batch-42")
+            .build()
+            .unwrap(),
+    );
+
+    let version = NodeVersion::new_anchor(
+        VersionId::new(1).unwrap(),
+        NodeId::new(1).unwrap(),
+        BiTemporalInterval::current(1000.into()),
+        GLOBAL_INTERNER.intern("Person").unwrap(),
+        PropertyMapBuilder::new().build(),
+    )
+    .with_provenance(Some(provenance.clone()));
+
+    let encoded = encode_node_version(&version);
+    assert!(
+        encoded.starts_with(&COLD_RECORD_MAGIC_V3),
+        "new records must be magic-prefixed"
+    );
+
+    let decoded = decode_node_version(&encoded).unwrap();
+    let decoded_provenance = decoded.provenance.unwrap();
+    assert_eq!(decoded_provenance.source(), Some("hr-system"));
+    assert_eq!(decoded_provenance.confidence(), Some(0.95));
+    assert_eq!(decoded_provenance.correlation_id(), Some("batch-42"));
+}
+
+#[test]
+fn test_encode_decode_node_version_with_principal_provenance() {
+    use crate::core::provenance::Provenance;
+    use std::sync::Arc;
+
+    let provenance = Arc::new(
+        Provenance::builder()
+            .source("hr-system")
+            .principal("ingest-writer")
+            .build()
+            .unwrap(),
+    );
+
+    let version = NodeVersion::new_anchor(
+        VersionId::new(1).unwrap(),
+        NodeId::new(1).unwrap(),
+        BiTemporalInterval::current(1000.into()),
+        GLOBAL_INTERNER.intern("Person").unwrap(),
+        PropertyMapBuilder::new().build(),
+    )
+    .with_provenance(Some(provenance));
+
+    let encoded = encode_node_version(&version);
+    let decoded = decode_node_version(&encoded).unwrap();
+    let decoded_provenance = decoded.provenance.unwrap();
+    assert_eq!(decoded_provenance.source(), Some("hr-system"));
+    assert_eq!(decoded_provenance.principal(), Some("ingest-writer"));
+}
+
+#[test]
+fn test_decode_v2_tagged_node_record_principal_none() {
+    // Simulate a record written by an Issue-#3224-era (pre-#3350) binary:
+    // V2 magic prefix, provenance bundle without the `principal` field.
+    let legacy = SerializableNodeVersionV2 {
+        id: 1,
+        node_id: 7,
+        temporal_valid_start: 1000,
+        temporal_valid_end: crate::core::temporal::TIMESTAMP_MAX.wallclock(),
+        temporal_tx_start: 1000,
+        temporal_tx_end: crate::core::temporal::TIMESTAMP_MAX.wallclock(),
+        label: "Person".to_string(),
+        data: SerializableVersionData::Anchor {
+            properties: vec![],
+            vector_snapshot_id: None,
+        },
+        next_version: None,
+        prev_version: None,
+        provenance: Some(SerializableProvenanceV2 {
+            source: Some("hr-system".to_string()),
+            confidence: Some(0.9),
+            note: None,
+            correlation_id: None,
+        }),
+    };
+    let mut bytes = COLD_RECORD_MAGIC_V2.to_vec();
+    bytes.extend_from_slice(&bitcode::encode(&legacy));
+
+    let decoded = decode_node_version(&bytes).unwrap();
+    assert_eq!(decoded.node_id.as_u64(), 7);
+    let provenance = decoded.provenance.unwrap();
+    assert_eq!(provenance.source(), Some("hr-system"));
+    assert_eq!(provenance.confidence(), Some(0.9));
+    assert_eq!(provenance.principal(), None);
+}
+
+#[test]
+fn test_decode_v2_tagged_edge_record_principal_none() {
+    let legacy = SerializableEdgeVersionV2 {
+        id: 1,
+        edge_id: 3,
+        temporal_valid_start: 1000,
+        temporal_valid_end: crate::core::temporal::TIMESTAMP_MAX.wallclock(),
+        temporal_tx_start: 1000,
+        temporal_tx_end: crate::core::temporal::TIMESTAMP_MAX.wallclock(),
+        label: "KNOWS".to_string(),
+        source: 1,
+        target: 2,
+        data: SerializableVersionData::Anchor {
+            properties: vec![],
+            vector_snapshot_id: None,
+        },
+        next_version: None,
+        prev_version: None,
+        provenance: Some(SerializableProvenanceV2 {
+            source: Some("csv-import".to_string()),
+            confidence: None,
+            note: None,
+            correlation_id: None,
+        }),
+    };
+    let mut bytes = COLD_RECORD_MAGIC_V2.to_vec();
+    bytes.extend_from_slice(&bitcode::encode(&legacy));
+
+    let decoded = decode_edge_version(&bytes).unwrap();
+    assert_eq!(decoded.edge_id.as_u64(), 3);
+    let provenance = decoded.provenance.unwrap();
+    assert_eq!(provenance.source(), Some("csv-import"));
+    assert_eq!(provenance.principal(), None);
+}
+
+#[test]
+fn test_encode_decode_node_version_without_provenance() {
+    let version = NodeVersion::new_anchor(
+        VersionId::new(1).unwrap(),
+        NodeId::new(1).unwrap(),
+        BiTemporalInterval::current(1000.into()),
+        GLOBAL_INTERNER.intern("Person").unwrap(),
+        PropertyMapBuilder::new().build(),
+    );
+
+    let encoded = encode_node_version(&version);
+    let decoded = decode_node_version(&encoded).unwrap();
+    assert!(decoded.provenance.is_none());
+}
+
+#[test]
+fn test_encode_decode_edge_version_with_provenance() {
+    use crate::core::provenance::Provenance;
+    use std::sync::Arc;
+
+    let provenance = Arc::new(
+        Provenance::builder()
+            .source("csv-import")
+            .note("bulk load 2026-06")
+            .build()
+            .unwrap(),
+    );
+
+    let version = EdgeVersion::new_anchor(
+        VersionId::new(1).unwrap(),
+        EdgeId::new(1).unwrap(),
+        BiTemporalInterval::current(1000.into()),
+        GLOBAL_INTERNER.intern("KNOWS").unwrap(),
+        NodeId::new(1).unwrap(),
+        NodeId::new(2).unwrap(),
+        PropertyMapBuilder::new().build(),
+    )
+    .with_provenance(Some(provenance));
+
+    let encoded = encode_edge_version(&version);
+    assert!(encoded.starts_with(&COLD_RECORD_MAGIC_V3));
+
+    let decoded = decode_edge_version(&encoded).unwrap();
+    let decoded_provenance = decoded.provenance.unwrap();
+    assert_eq!(decoded_provenance.source(), Some("csv-import"));
+    assert_eq!(decoded_provenance.note(), Some("bulk load 2026-06"));
+}
+
+#[test]
+fn test_decode_legacy_untagged_node_record_provenance_none() {
+    // Simulate a record written by a pre-#3224 binary: no tag prefix, no
+    // `provenance` field in the wire struct at all.
+    let legacy = SerializableNodeVersionV1 {
+        id: 1,
+        node_id: 1,
+        temporal_valid_start: 1000,
+        temporal_valid_end: crate::core::temporal::TIMESTAMP_MAX.wallclock(),
+        temporal_tx_start: 1000,
+        temporal_tx_end: crate::core::temporal::TIMESTAMP_MAX.wallclock(),
+        label: "Person".to_string(),
+        data: SerializableVersionData::Anchor {
+            properties: vec![],
+            vector_snapshot_id: None,
+        },
+        next_version: None,
+        prev_version: None,
+    };
+    let legacy_bytes = bitcode::encode(&legacy);
+    assert!(
+        !legacy_bytes.starts_with(&COLD_RECORD_MAGIC_V2),
+        "legacy fixture must not accidentally collide with the new magic sequence"
+    );
+
+    let decoded = decode_node_version(&legacy_bytes).unwrap();
+    assert_eq!(decoded.node_id.as_u64(), 1);
+    assert!(decoded.provenance.is_none());
+}
+
+/// Regression test for a real (not merely theoretical) misdetection risk:
+/// before `COLD_RECORD_MAGIC_V2` was widened from a single tag byte to a
+/// 4-byte sequence, any legacy (untagged) record whose leading byte happened
+/// to equal that single tag byte would be misrouted into decoding as the new
+/// tagged shape, silently corrupting or erroring on a valid historical
+/// record. This fabricates a legacy record and prepends the *old* single-byte
+/// tag value the new decoder no longer recognizes, then confirms it still
+/// makes it down the legacy fallback path rather than being misdecoded as
+/// V2 -- this is inherently true for a 4-byte magic vs. a single leading
+/// byte, since matching one byte can never satisfy `starts_with` on four.
+#[test]
+fn test_legacy_record_with_leading_byte_matching_old_single_byte_tag_is_not_misdetected() {
+    let legacy = SerializableNodeVersionV1 {
+        id: 1,
+        node_id: 42,
+        temporal_valid_start: 1000,
+        temporal_valid_end: crate::core::temporal::TIMESTAMP_MAX.wallclock(),
+        temporal_tx_start: 1000,
+        temporal_tx_end: crate::core::temporal::TIMESTAMP_MAX.wallclock(),
+        label: "Person".to_string(),
+        data: SerializableVersionData::Anchor {
+            properties: vec![],
+            vector_snapshot_id: None,
+        },
+        next_version: None,
+        prev_version: None,
+    };
+    let mut legacy_bytes = bitcode::encode(&legacy);
+    // Force the leading byte to collide with what used to be the entire tag
+    // (0x02) -- a single-byte match must no longer be mistaken for the
+    // 4-byte `COLD_RECORD_MAGIC_V2` prefix.
+    legacy_bytes[0] = COLD_RECORD_MAGIC_V2[0];
+    assert!(!legacy_bytes.starts_with(&COLD_RECORD_MAGIC_V2));
+
+    // Decoding a mutated legacy record isn't expected to preserve field
+    // values (we corrupted a byte), but it must not panic and must not be
+    // silently routed through the V2 decoder.
+    let _ = decode_node_version(&legacy_bytes);
+}
+
+#[test]
+fn test_decode_legacy_untagged_edge_record_provenance_none() {
+    let legacy = SerializableEdgeVersionV1 {
+        id: 1,
+        edge_id: 1,
+        temporal_valid_start: 1000,
+        temporal_valid_end: crate::core::temporal::TIMESTAMP_MAX.wallclock(),
+        temporal_tx_start: 1000,
+        temporal_tx_end: crate::core::temporal::TIMESTAMP_MAX.wallclock(),
+        label: "KNOWS".to_string(),
+        source: 1,
+        target: 2,
+        data: SerializableVersionData::Anchor {
+            properties: vec![],
+            vector_snapshot_id: None,
+        },
+        next_version: None,
+        prev_version: None,
+    };
+    let legacy_bytes = bitcode::encode(&legacy);
+
+    let decoded = decode_edge_version(&legacy_bytes).unwrap();
+    assert_eq!(decoded.edge_id.as_u64(), 1);
+    assert!(decoded.provenance.is_none());
+}
+
+#[test]
+fn test_migrate_to_cold_preserves_provenance() {
+    use crate::core::provenance::Provenance;
+    use std::sync::Arc;
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let db_path = temp_dir.path().join("test.redb");
+    let storage = RedbColdStorage::with_default_config(&db_path).unwrap();
+
+    let provenance = Arc::new(
+        Provenance::builder()
+            .source("claude-mcp")
+            .confidence(0.8)
+            .build()
+            .unwrap(),
+    );
+    let version = NodeVersion::new_anchor(
+        VersionId::new(1).unwrap(),
+        NodeId::new(1).unwrap(),
+        BiTemporalInterval::current(1000.into()),
+        GLOBAL_INTERNER.intern("Person").unwrap(),
+        PropertyMapBuilder::new().build(),
+    )
+    .with_provenance(Some(provenance));
+
+    storage.store_node_version(&version).unwrap();
+    let retrieved = storage.get_node_version(version.id).unwrap().unwrap();
+
+    let retrieved_provenance = retrieved.provenance.unwrap();
+    assert_eq!(retrieved_provenance.source(), Some("claude-mcp"));
+    assert_eq!(retrieved_provenance.confidence(), Some(0.8));
+}
+
 #[test]
 fn test_batch_operations_preserve_order() {
     let temp_dir = tempfile::tempdir().unwrap();
@@ -1622,6 +1939,37 @@ fn test_node_version_decode_error_path() {
     let result = storage.get_node_version(VersionId::new(12345).unwrap());
     // Should fail to decompress or decode
     assert!(result.is_err());
+}
+
+/// Regression test: a record whose leading bytes match `COLD_RECORD_MAGIC_V2`
+/// is unambiguously a V2 record. If the bytes *after* the magic fail to
+/// decode as `SerializableNodeVersion` (corruption), `decode_node_version`
+/// must surface that error immediately rather than falling through to the
+/// legacy V1 decoder, which would misinterpret the magic-prefixed buffer.
+#[test]
+fn test_decode_node_version_v2_magic_match_with_corrupt_payload_errors_immediately() {
+    let mut data = COLD_RECORD_MAGIC_V2.to_vec();
+    data.extend_from_slice(&[0xFF; 8]);
+    let err = decode_node_version(&data).unwrap_err();
+    let message = format!("{err}");
+    assert!(
+        message.contains("V2"),
+        "expected a V2-specific decode error, got: {message}"
+    );
+}
+
+/// Edge counterpart of
+/// [`test_decode_node_version_v2_magic_match_with_corrupt_payload_errors_immediately`].
+#[test]
+fn test_decode_edge_version_v2_magic_match_with_corrupt_payload_errors_immediately() {
+    let mut data = COLD_RECORD_MAGIC_V2.to_vec();
+    data.extend_from_slice(&[0xFF; 8]);
+    let err = decode_edge_version(&data).unwrap_err();
+    let message = format!("{err}");
+    assert!(
+        message.contains("V2"),
+        "expected a V2-specific decode error, got: {message}"
+    );
 }
 
 #[test]
@@ -2033,4 +2381,235 @@ fn test_no_cipher_backward_compatible() {
         .expect("node version should exist");
 
     assert_eq!(loaded.version_id(), version.version_id());
+}
+
+// ========================================================================
+// Version-counter seeding at open (Issue #3222 review follow-up)
+// ========================================================================
+
+/// Reopening an existing cold store must seed `node_versions_stored` /
+/// `edge_versions_stored` from the persisted tables — a restarted process
+/// must never report `0` cold versions over a database that holds history.
+#[test]
+fn test_stats_version_counters_seeded_on_reopen() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let db_path = temp_dir.path().join("reopen.redb");
+
+    {
+        let storage = RedbColdStorage::with_default_config(&db_path).unwrap();
+        for i in 1..=3 {
+            storage
+                .store_node_version(&create_test_node_version(i))
+                .unwrap();
+        }
+        storage
+            .store_edge_version(&create_test_edge_version(10))
+            .unwrap();
+
+        let stats = storage.stats();
+        assert_eq!(stats.node_versions_stored, 3);
+        assert_eq!(stats.edge_versions_stored, 1);
+    } // drop: close the database
+
+    let reopened = RedbColdStorage::with_default_config(&db_path).unwrap();
+    let stats = reopened.stats();
+    assert_eq!(
+        stats.node_versions_stored, 3,
+        "reopened store must report persisted node versions, not 0"
+    );
+    assert_eq!(
+        stats.edge_versions_stored, 1,
+        "reopened store must report persisted edge versions, not 0"
+    );
+    // Byte counters are process-lifetime (not persisted): the ratio is 1.0
+    // until this process writes something.
+    assert_eq!(stats.bytes_written_raw, 0);
+    assert_eq!(stats.compression_ratio(), 1.0);
+
+    // Storing more versions on the reopened handle continues from the seed.
+    reopened
+        .store_node_version(&create_test_node_version(4))
+        .unwrap();
+    assert_eq!(reopened.stats().node_versions_stored, 4);
+}
+
+// ========================================================================
+// Persisted cold-tier temporal extent bounds (Issue #3389)
+// ========================================================================
+
+/// Build a node version whose valid interval starts at `valid_start` (open
+/// ended) and whose transaction interval starts at `tx_start`.
+fn node_version_with_times(id: u64, valid_start: i64, tx_start: i64) -> NodeVersion {
+    use crate::core::temporal::TimeRange;
+    NodeVersion::new_anchor(
+        VersionId::new(id).unwrap(),
+        NodeId::new(id).unwrap(),
+        BiTemporalInterval::new(
+            TimeRange::from(Timestamp::from(valid_start)),
+            TimeRange::from(Timestamp::from(tx_start)),
+        ),
+        GLOBAL_INTERNER.intern("Person").unwrap(),
+        PropertyMapBuilder::new().insert("name", "Alice").build(),
+    )
+}
+
+#[test]
+fn extent_bounds_none_when_cold_empty() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = RedbColdStorage::with_default_config(dir.path().join("cold.redb")).unwrap();
+    assert_eq!(
+        store.get_temporal_extent_bounds().unwrap(),
+        None,
+        "an empty cold tier contributes no extent bounds"
+    );
+}
+
+#[test]
+fn extent_bounds_persist_across_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("cold.redb");
+
+    {
+        let store = RedbColdStorage::with_default_config(&path).unwrap();
+        store
+            .store_node_version(&node_version_with_times(1, 1_000, 5_000))
+            .unwrap();
+        // Bounds are visible immediately after the write.
+        let bounds = store.get_temporal_extent_bounds().unwrap().unwrap();
+        assert_eq!(bounds.valid_earliest, Some(Timestamp::from(1_000)));
+        assert_eq!(bounds.tx_earliest, Some(Timestamp::from(5_000)));
+    }
+
+    // Reopen the file (simulated restart): the bounds must survive.
+    let reopened = RedbColdStorage::with_default_config(&path).unwrap();
+    let bounds = reopened.get_temporal_extent_bounds().unwrap().unwrap();
+    assert_eq!(
+        bounds.valid_earliest,
+        Some(Timestamp::from(1_000)),
+        "cold-tier valid earliest must survive reopen"
+    );
+    assert_eq!(bounds.tx_earliest, Some(Timestamp::from(5_000)));
+}
+
+#[test]
+fn extent_bounds_open_valid_to_never_leaks_sentinel() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = RedbColdStorage::with_default_config(dir.path().join("cold.redb")).unwrap();
+    // Open valid_to (TimeRange::from is [start, MAX)).
+    store
+        .store_node_version(&node_version_with_times(1, 2_000, 2_000))
+        .unwrap();
+
+    let bounds = store.get_temporal_extent_bounds().unwrap().unwrap();
+    // A single open-ended fact: latest equals its start, never TIMESTAMP_MAX.
+    assert_eq!(bounds.valid_latest, Some(Timestamp::from(2_000)));
+    assert!(bounds.valid_latest.unwrap() < TIMESTAMP_MAX);
+    assert_eq!(bounds.tx_latest, Some(Timestamp::from(2_000)));
+    assert!(bounds.tx_latest.unwrap() < TIMESTAMP_MAX);
+}
+
+#[test]
+fn extent_bounds_widen_monotonically_across_stores() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = RedbColdStorage::with_default_config(dir.path().join("cold.redb")).unwrap();
+
+    store
+        .store_node_version(&node_version_with_times(1, 3_000, 9_000))
+        .unwrap();
+    // A backdated fact widens earliest; a later one widens latest.
+    store
+        .store_node_version(&node_version_with_times(2, 1_000, 5_000))
+        .unwrap();
+    store
+        .store_node_version(&node_version_with_times(3, 7_000, 12_000))
+        .unwrap();
+
+    let bounds = store.get_temporal_extent_bounds().unwrap().unwrap();
+    assert_eq!(bounds.valid_earliest, Some(Timestamp::from(1_000)));
+    assert_eq!(bounds.valid_latest, Some(Timestamp::from(7_000)));
+    assert_eq!(bounds.tx_earliest, Some(Timestamp::from(5_000)));
+    assert_eq!(bounds.tx_latest, Some(Timestamp::from(12_000)));
+}
+
+#[test]
+fn extent_bounds_updated_by_batch_paths() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = RedbColdStorage::with_default_config(dir.path().join("cold.redb")).unwrap();
+
+    // store_node_versions_batch path.
+    store
+        .store_node_versions_batch(&[
+            node_version_with_times(1, 4_000, 8_000),
+            node_version_with_times(2, 2_000, 6_000),
+        ])
+        .unwrap();
+    let bounds = store.get_temporal_extent_bounds().unwrap().unwrap();
+    assert_eq!(bounds.valid_earliest, Some(Timestamp::from(2_000)));
+
+    // store_batch_with_lsn path widens further.
+    store
+        .store_batch_with_lsn(&[node_version_with_times(3, 1_000, 5_000)], &[], LSN(42))
+        .unwrap();
+    let bounds = store.get_temporal_extent_bounds().unwrap().unwrap();
+    assert_eq!(bounds.valid_earliest, Some(Timestamp::from(1_000)));
+    assert_eq!(bounds.tx_earliest, Some(Timestamp::from(5_000)));
+    // The flushed LSN update in the same path still works alongside the extent.
+    assert_eq!(store.get_flushed_lsn().unwrap(), Some(LSN(42)));
+}
+
+#[test]
+fn extent_bounds_round_trip_serialization() {
+    // Every-field-present round trip (all four dimensions Some).
+    let bounds = ColdTemporalExtentBounds {
+        valid_earliest: Some(Timestamp::from(1_000)),
+        valid_latest: Some(Timestamp::from(9_000)),
+        tx_earliest: Some(Timestamp::from(2_000)),
+        tx_latest: Some(Timestamp::from(8_000)),
+    };
+    let decoded = ColdTemporalExtentBounds::from_bytes(&bounds.to_bytes()).unwrap();
+    assert_eq!(decoded, bounds);
+
+    // Mixed presence: some dimensions Some, others None. Exercises the
+    // per-field presence flag independently in both `to_bytes`/`from_bytes`
+    // arms (a Some field must decode back Some, a None field back None) rather
+    // than the all-present fixture above, which cannot distinguish the arms.
+    let mixed = ColdTemporalExtentBounds {
+        valid_earliest: Some(Timestamp::from(1_000)),
+        valid_latest: None,
+        tx_earliest: None,
+        tx_latest: Some(Timestamp::from(8_000)),
+    };
+    assert_eq!(
+        ColdTemporalExtentBounds::from_bytes(&mixed.to_bytes()).unwrap(),
+        mixed
+    );
+
+    // Extreme wallclock values round-trip losslessly through the i64 encoding.
+    let extremes = ColdTemporalExtentBounds {
+        valid_earliest: Some(Timestamp::new_unchecked(i64::MIN, 0)),
+        valid_latest: Some(Timestamp::new_unchecked(i64::MAX, u32::MAX)),
+        tx_earliest: Some(Timestamp::new_unchecked(i64::MIN, u32::MAX)),
+        tx_latest: Some(Timestamp::new_unchecked(i64::MAX, 0)),
+    };
+    assert_eq!(
+        ColdTemporalExtentBounds::from_bytes(&extremes.to_bytes()).unwrap(),
+        extremes
+    );
+
+    // A default (all-None) record round-trips to all-None.
+    let empty = ColdTemporalExtentBounds::default();
+    assert_eq!(
+        ColdTemporalExtentBounds::from_bytes(&empty.to_bytes()).unwrap(),
+        empty
+    );
+
+    // A record with an unrecognized version tag is treated as absent.
+    let mut bad = bounds.to_bytes();
+    bad[0] = 0xFF;
+    assert_eq!(ColdTemporalExtentBounds::from_bytes(&bad), None);
+    // Wrong length is also treated as absent, never a panic.
+    assert_eq!(ColdTemporalExtentBounds::from_bytes(&[1, 2, 3]), None);
+    // An empty buffer likewise decodes to None (guards the length check
+    // against an index-out-of-bounds panic on `bytes[0]`).
+    assert_eq!(ColdTemporalExtentBounds::from_bytes(&[]), None);
 }

@@ -77,7 +77,64 @@ use crate::core::graph::{Edge, Node};
 use crate::core::id::MAX_VALID_ID;
 use crate::core::id::{EdgeId, NodeId};
 use crate::core::property::{PropertyMap, PropertyValue};
+use crate::core::provenance::Provenance;
 use crate::core::temporal::Timestamp;
+
+/// Optional per-write settings: backdated `valid_from` and/or a write-time
+/// [`Provenance`] bundle (Issue #3224).
+///
+/// Constructed via [`WriteRequestOptions::new`] (or its [`Default`] impl) and the
+/// `with_*` builder methods. Passing `WriteRequestOptions::default()` reproduces the
+/// behavior of the plain `create_node`/`update_node`/etc. convenience methods
+/// exactly (valid time defaults to transaction start time, no provenance).
+#[derive(Debug, Clone, Default)]
+pub struct WriteRequestOptions {
+    pub(crate) valid_from: Option<Timestamp>,
+    pub(crate) provenance: Option<Provenance>,
+}
+
+impl WriteRequestOptions {
+    /// Create an empty set of options (equivalent to [`Default::default`]).
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set when the fact became valid in reality (`None` = transaction start time).
+    #[must_use]
+    pub fn with_valid_from(mut self, valid_from: Timestamp) -> Self {
+        self.valid_from = Some(valid_from);
+        self
+    }
+
+    /// Attach a write-time provenance bundle to this write.
+    #[must_use]
+    pub fn with_provenance(mut self, provenance: Provenance) -> Self {
+        self.provenance = Some(provenance);
+        self
+    }
+}
+
+/// Outcome of a valid-time retraction (Issue #3230).
+///
+/// Returned by [`WriteTransaction::retract_node`]/[`WriteTransaction::retract_edge`]
+/// and the [`AletheiaDB`](crate::db::AletheiaDB) convenience wrappers. The
+/// closed valid interval is half-open: `[valid_from, valid_to)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RetractionResult {
+    /// Start of the entity's (now closed) valid-time interval.
+    pub valid_from: Timestamp,
+    /// End of the entity's valid-time interval (exclusive). For an
+    /// idempotent re-retraction this is the *existing* end, regardless of
+    /// the `valid_to` passed to the call.
+    pub valid_to: Timestamp,
+    /// `true` when the entity was already retracted (or deleted) and this
+    /// call was a no-op: no new version was appended and no WAL entry was
+    /// written.
+    pub already_retracted: bool,
+    /// Number of connected edges co-retracted alongside a node (only set by
+    /// the detach form; `0` otherwise and for edge retractions).
+    pub edges_retracted: usize,
+}
 
 /// Common read operations available in all transaction types
 pub trait ReadOps {
@@ -140,6 +197,22 @@ pub trait ReadOps {
     ///
     /// Returns all edges where `source == node_id` that are visible in the current snapshot.
     ///
+    /// # Arguments
+    ///
+    /// * `node_id` - The source node to get edges from
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(edge_ids)` - The node exists (is visible in this transaction's snapshot).
+    ///   The vector is **empty if the node has no outgoing edges** - that is a valid
+    ///   state, not an error.
+    /// - `Err(NodeNotFound)` - The node does not exist (or is not visible in this
+    ///   transaction's snapshot).
+    ///
+    /// This mirrors [`get_node`](Self::get_node): the same condition (a missing node)
+    /// produces an error, so callers can distinguish "node has no edges" from
+    /// "node doesn't exist" (Issue #359).
+    ///
     /// # Ordering
     ///
     /// The order of edges is **not guaranteed**. Do not rely on edges being returned
@@ -148,35 +221,78 @@ pub trait ReadOps {
     ///
     /// # Snapshot Isolation
     ///
-    /// This method filters edges to ensure only those visible in the current transaction
-    /// snapshot are returned. Edges created by concurrent transactions will not be seen.
+    /// In a read transaction, this method filters edges to ensure only those visible
+    /// in the current transaction snapshot are returned. Edges created by concurrent
+    /// transactions will not be seen.
+    ///
+    /// # Write transactions
+    ///
+    /// In a write transaction, only the **node existence check** is buffer-aware;
+    /// the returned edge list is read directly from committed current storage
+    /// **without snapshot filtering**. Consequently:
+    ///
+    /// - edges committed by concurrent transactions after this transaction
+    ///   started **are** returned,
+    /// - edges created in this transaction (still buffered, not yet committed)
+    ///   are **not** returned, and
+    /// - edges deleted in this transaction are **still** listed until commit.
     ///
     /// # Performance
     ///
-    /// - **Time**: O(degree) to collect visible edges
+    /// - **Time**: O(degree) to collect visible edges, plus a node existence check
+    ///   (O(1) fast path; may consult historical storage, O(log N), on a miss)
     /// - **Space**: Allocates a new `Vec` containing all edge IDs
     ///
     /// # Example
     ///
-    /// ```rust,no_run
-    /// # use aletheiadb::{AletheiaDB, core::NodeId, api::transaction::ReadOps};
+    /// ```rust
+    /// # use aletheiadb::{AletheiaDB, properties, core::NodeId};
+    /// # use aletheiadb::api::transaction::{ReadOps, WriteOps};
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// # let db = AletheiaDB::new()?;
-    /// # let tx = db.read_transaction()?;
-    /// # let node_id = NodeId::new(1)?;
-    /// let edges = tx.get_outgoing_edges(node_id);
+    /// let (alice, bob) = db.write(|tx| {
+    ///     let alice = tx.create_node("Person", properties! { "name" => "Alice" })?;
+    ///     let bob = tx.create_node("Person", properties! { "name" => "Bob" })?;
+    ///     tx.create_edge(alice, bob, "KNOWS", properties! {})?;
+    ///     Ok::<_, aletheiadb::Error>((alice, bob))
+    /// })?;
+    ///
+    /// let tx = db.read_transaction()?;
+    ///
+    /// // Alice has one outgoing edge:
+    /// let edges = tx.get_outgoing_edges(alice)?;
+    /// assert_eq!(edges.len(), 1);
     /// for edge_id in edges {
     ///     let edge = tx.get_edge(edge_id)?;
-    ///     println!("-> {}", edge.target);
+    ///     assert_eq!(edge.target, bob);
     /// }
+    ///
+    /// // Bob exists but has no outgoing edges: Ok(empty), not an error.
+    /// assert!(tx.get_outgoing_edges(bob)?.is_empty());
+    ///
+    /// // A node that doesn't exist is an error, distinguishable from "no edges".
+    /// let missing = NodeId::new(999_999)?;
+    /// assert!(tx.get_outgoing_edges(missing).is_err());
     /// # Ok(())
     /// # }
     /// ```
-    fn get_outgoing_edges(&self, node_id: NodeId) -> Vec<EdgeId>;
+    fn get_outgoing_edges(&self, node_id: NodeId) -> Result<Vec<EdgeId>>;
 
     /// Get incoming edges to a node.
     ///
     /// Returns all edges where `target == node_id` that are visible in the current snapshot.
+    ///
+    /// # Arguments
+    ///
+    /// * `node_id` - The target node to get edges to
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(edge_ids)` - The node exists (is visible in this transaction's snapshot).
+    ///   The vector is **empty if the node has no incoming edges** - that is a valid
+    ///   state, not an error.
+    /// - `Err(NodeNotFound)` - The node does not exist (or is not visible in this
+    ///   transaction's snapshot).
     ///
     /// # Ordering
     ///
@@ -184,31 +300,128 @@ pub trait ReadOps {
     ///
     /// # Snapshot Isolation
     ///
-    /// This method filters edges to ensure only those visible in the current transaction
-    /// snapshot are returned.
+    /// In a read transaction, this method filters edges to ensure only those visible
+    /// in the current transaction snapshot are returned.
+    ///
+    /// # Write transactions
+    ///
+    /// In a write transaction, only the **node existence check** is buffer-aware;
+    /// the returned edge list is read directly from committed current storage
+    /// **without snapshot filtering**. Consequently:
+    ///
+    /// - edges committed by concurrent transactions after this transaction
+    ///   started **are** returned,
+    /// - edges created in this transaction (still buffered, not yet committed)
+    ///   are **not** returned, and
+    /// - edges deleted in this transaction are **still** listed until commit.
     ///
     /// # Performance
     ///
-    /// - **Time**: O(degree) to collect visible edges
+    /// - **Time**: O(degree) to collect visible edges, plus a node existence check
+    ///   (O(1) fast path; may consult historical storage, O(log N), on a miss)
     /// - **Space**: Allocates a new `Vec` containing all edge IDs
-    fn get_incoming_edges(&self, node_id: NodeId) -> Vec<EdgeId>;
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// # use aletheiadb::{AletheiaDB, properties};
+    /// # use aletheiadb::api::transaction::{ReadOps, WriteOps};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// let (alice, bob) = db.write(|tx| {
+    ///     let alice = tx.create_node("Person", properties! { "name" => "Alice" })?;
+    ///     let bob = tx.create_node("Person", properties! { "name" => "Bob" })?;
+    ///     tx.create_edge(alice, bob, "KNOWS", properties! {})?;
+    ///     Ok::<_, aletheiadb::Error>((alice, bob))
+    /// })?;
+    ///
+    /// let tx = db.read_transaction()?;
+    ///
+    /// // Bob has one incoming edge (from Alice):
+    /// assert_eq!(tx.get_incoming_edges(bob)?.len(), 1);
+    ///
+    /// // Alice exists but has no incoming edges: Ok(empty), not an error.
+    /// assert!(tx.get_incoming_edges(alice)?.is_empty());
+    /// # Ok(())
+    /// # }
+    /// ```
+    fn get_incoming_edges(&self, node_id: NodeId) -> Result<Vec<EdgeId>>;
 
     /// Get outgoing edges with a specific label.
     ///
     /// Returns all edges where `source == node_id` AND `label == label` that are
     /// visible in the current snapshot.
     ///
+    /// # Arguments
+    ///
+    /// * `node_id` - The source node
+    /// * `label` - Edge label to filter by (e.g., "KNOWS", "CREATED")
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(edge_ids)` - The node exists (is visible in this transaction's snapshot).
+    ///   The vector is **empty if no outgoing edges carry the given label** - the
+    ///   label is a filter, not an existence check, so an unmatched label on an
+    ///   existing node is a valid state, not an error.
+    /// - `Err(NodeNotFound)` - The node does not exist (or is not visible in this
+    ///   transaction's snapshot).
+    ///
     /// # Ordering
     ///
     /// The order of edges is **not guaranteed**.
     ///
+    /// # Write transactions
+    ///
+    /// In a write transaction, only the **node existence check** is buffer-aware;
+    /// the returned edge list is read directly from committed current storage
+    /// **without snapshot filtering**. Consequently:
+    ///
+    /// - edges committed by concurrent transactions after this transaction
+    ///   started **are** returned,
+    /// - edges created in this transaction (still buffered, not yet committed)
+    ///   are **not** returned, and
+    /// - edges deleted in this transaction are **still** listed until commit.
+    ///
     /// # Performance
     ///
-    /// - **Time**: O(degree) scan with label filtering
+    /// - **Time**: O(degree) scan with label filtering, plus a node existence check
+    ///   (O(1) fast path; may consult historical storage, O(log N), on a miss)
     /// - **Space**: Allocates a new `Vec` containing matching edge IDs
-    fn get_outgoing_edges_with_label(&self, node_id: NodeId, label: &str) -> Vec<EdgeId>;
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// # use aletheiadb::{AletheiaDB, properties};
+    /// # use aletheiadb::api::transaction::{ReadOps, WriteOps};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// let (alice, bob) = db.write(|tx| {
+    ///     let alice = tx.create_node("Person", properties! { "name" => "Alice" })?;
+    ///     let bob = tx.create_node("Person", properties! { "name" => "Bob" })?;
+    ///     tx.create_edge(alice, bob, "KNOWS", properties! {})?;
+    ///     Ok::<_, aletheiadb::Error>((alice, bob))
+    /// })?;
+    ///
+    /// let tx = db.read_transaction()?;
+    ///
+    /// // One outgoing KNOWS edge:
+    /// assert_eq!(tx.get_outgoing_edges_with_label(alice, "KNOWS")?.len(), 1);
+    ///
+    /// // No FOLLOWS edges, but Alice exists: Ok(empty), not an error.
+    /// assert!(tx.get_outgoing_edges_with_label(alice, "FOLLOWS")?.is_empty());
+    /// # Ok(())
+    /// # }
+    /// ```
+    fn get_outgoing_edges_with_label(&self, node_id: NodeId, label: &str) -> Result<Vec<EdgeId>>;
 
     /// Get the approximate number of nodes in the database.
+    ///
+    /// # Returns
+    ///
+    /// The count of nodes currently committed in the storage engine. Returns `0`
+    /// for an empty database. Deleted nodes are not counted. Nodes created in
+    /// this transaction but not yet committed are **not** included. Conversely,
+    /// nodes deleted in this transaction but not yet committed are still included.
     ///
     /// # Consistency Note
     ///
@@ -234,6 +447,13 @@ pub trait ReadOps {
     fn node_count(&self) -> usize;
 
     /// Get the approximate number of edges in the database.
+    ///
+    /// # Returns
+    ///
+    /// The count of edges currently committed in the storage engine. Returns `0`
+    /// for an empty database. Deleted edges are not counted. Edges created in
+    /// this transaction but not yet committed are **not** included. Conversely,
+    /// edges deleted in this transaction but not yet committed are still included.
     ///
     /// # Consistency Note
     ///
@@ -317,6 +537,42 @@ pub trait WriteOps: ReadOps {
         label: &str,
         properties: PropertyMap,
         valid_from: Option<Timestamp>,
+    ) -> Result<NodeId> {
+        let options = WriteRequestOptions {
+            valid_from,
+            provenance: None,
+        };
+        self.create_node_with_options(label, properties, options)
+    }
+
+    /// Create a new node with an optional [`WriteRequestOptions`] bundle (backdated
+    /// `valid_from` and/or a write-time [`Provenance`] bundle, Issue #3224).
+    ///
+    /// This is the most general node-creation method; all other
+    /// `create_node*` methods delegate to it. Passing `WriteRequestOptions::default()`
+    /// is identical to [`create_node`](Self::create_node).
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use aletheiadb::{AletheiaDB, properties, Provenance, api::transaction::{WriteOps, WriteRequestOptions}};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = AletheiaDB::new()?;
+    /// # let mut tx = db.write_transaction()?;
+    /// let provenance = Provenance::builder().source("hr-system").confidence(0.95).build()?;
+    /// let node_id = tx.create_node_with_options(
+    ///     "Person",
+    ///     properties! { "name" => "Alice" },
+    ///     WriteRequestOptions::new().with_provenance(provenance),
+    /// )?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    fn create_node_with_options(
+        &mut self,
+        label: &str,
+        properties: PropertyMap,
+        options: WriteRequestOptions,
     ) -> Result<NodeId>;
 
     /// Create a new node.
@@ -374,6 +630,26 @@ pub trait WriteOps: ReadOps {
         label: &str,
         properties: PropertyMap,
         valid_from: Option<Timestamp>,
+    ) -> Result<EdgeId> {
+        let options = WriteRequestOptions {
+            valid_from,
+            provenance: None,
+        };
+        self.create_edge_with_options(source, target, label, properties, options)
+    }
+
+    /// Create a new edge with an optional [`WriteRequestOptions`] bundle (backdated
+    /// `valid_from` and/or a write-time [`Provenance`] bundle, Issue #3224).
+    ///
+    /// This is the most general edge-creation method; all other
+    /// `create_edge*` methods delegate to it.
+    fn create_edge_with_options(
+        &mut self,
+        source: NodeId,
+        target: NodeId,
+        label: &str,
+        properties: PropertyMap,
+        options: WriteRequestOptions,
     ) -> Result<EdgeId>;
 
     /// Create a new edge.
@@ -439,6 +715,27 @@ pub trait WriteOps: ReadOps {
         node_id: NodeId,
         properties: PropertyMap,
         valid_from: Option<Timestamp>,
+    ) -> Result<()> {
+        let options = WriteRequestOptions {
+            valid_from,
+            provenance: None,
+        };
+        self.update_node_with_options(node_id, properties, options)
+    }
+
+    /// Update a node's properties with an optional [`WriteRequestOptions`] bundle
+    /// (backdated `valid_from` and/or a write-time [`Provenance`] bundle,
+    /// Issue #3224).
+    ///
+    /// This is the most general node-update method; all other
+    /// `update_node*` methods delegate to it. The provenance recorded here
+    /// describes *this* version only -- it is not inherited from the
+    /// version being updated.
+    fn update_node_with_options(
+        &mut self,
+        node_id: NodeId,
+        properties: PropertyMap,
+        options: WriteRequestOptions,
     ) -> Result<()>;
 
     /// Update a node's properties.
@@ -496,6 +793,27 @@ pub trait WriteOps: ReadOps {
         edge_id: EdgeId,
         properties: PropertyMap,
         valid_from: Option<Timestamp>,
+    ) -> Result<()> {
+        let options = WriteRequestOptions {
+            valid_from,
+            provenance: None,
+        };
+        self.update_edge_with_options(edge_id, properties, options)
+    }
+
+    /// Update an edge's properties with an optional [`WriteRequestOptions`] bundle
+    /// (backdated `valid_from` and/or a write-time [`Provenance`] bundle,
+    /// Issue #3224).
+    ///
+    /// This is the most general edge-update method; all other
+    /// `update_edge*` methods delegate to it. The provenance recorded here
+    /// describes *this* version only -- it is not inherited from the
+    /// version being updated.
+    fn update_edge_with_options(
+        &mut self,
+        edge_id: EdgeId,
+        properties: PropertyMap,
+        options: WriteRequestOptions,
     ) -> Result<()>;
 
     /// Update an edge's properties.

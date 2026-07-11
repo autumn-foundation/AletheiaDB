@@ -51,6 +51,7 @@ lint:
 
 # Verify each Nova/semantic-search category compiles standalone
 check-features:
+    @echo "=== no default features ===" && cargo check --no-default-features --tests
     @echo "=== semantic-search ===" && cargo check --features semantic-search
     @echo "=== semantic-reasoning ===" && cargo check --features semantic-reasoning
     @echo "=== semantic-temporal ===" && cargo check --features semantic-temporal
@@ -58,6 +59,16 @@ check-features:
     @echo "=== semantic-characterization ===" && cargo check --features semantic-characterization
     @echo "=== nova umbrella ===" && cargo check --features nova
     @echo "=== nova + semantic-search ===" && cargo check --features nova,semantic-search
+    # Serde-enabling features (Issue #3390): each must compile standalone
+    # against the unified `serde` flag with no default features.
+    @echo "=== serde (standalone) ===" && cargo check --no-default-features --tests --features serde
+    @echo "=== config-toml (standalone) ===" && cargo check --no-default-features --tests --features config-toml
+    @echo "=== mcp-server (standalone) ===" && cargo check --no-default-features --tests --features mcp-server
+    @echo "=== sharding-rpc (standalone) ===" && cargo check --no-default-features --tests --features sharding-rpc
+    @echo "=== http-server (standalone) ===" && cargo check --no-default-features --tests --features http-server
+    @echo "=== encryption (standalone) ===" && cargo check --no-default-features --tests --features encryption
+    @echo "=== encryption-vault (standalone) ===" && cargo check --no-default-features --tests --features encryption-vault
+    @echo "=== encryption-aws-kms (standalone) ===" && cargo check --no-default-features --tests --features encryption-aws-kms
 
 # Format code
 fmt:
@@ -262,6 +273,11 @@ audit:
     cargo audit
 
 # === Mutation Testing ===
+# CI runs these with --test-tool nextest and with
+# --features config-toml,mcp-server,sharding-rpc; locally we stay on plain
+# cargo test with default features so the recipes work without cargo-nextest
+# installed. For runs closer to CI, install nextest and add
+# `--test-tool nextest --features config-toml,mcp-server,sharding-rpc`.
 
 # Run mutation tests on all code
 mutants:
@@ -280,6 +296,14 @@ mutants-branch:
     trap 'rm -f mutants-diff.tmp' EXIT
     git diff origin/trunk.. > mutants-diff.tmp
     cargo mutants --in-place -vV --in-diff mutants-diff.tmp
+
+# Run the CI mutation-score gate against a local mutants.out directory
+mutants-gate dir="mutants.out":
+    python3 .github/scripts/mutants_gate.py gate --mutants-out "{{dir}}" --config .github/mutants-gate.toml
+
+# Run the gate script's unit tests
+mutants-gate-test:
+    python3 .github/scripts/test_mutants_gate.py
 
 # === Miri (Undefined Behavior Detection) ===
 

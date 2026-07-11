@@ -6,6 +6,7 @@
 use crate::core::id::VersionId;
 use crate::core::interning::InternedString;
 use crate::core::property::{PropertyMap, PropertyValue};
+use crate::core::provenance::Provenance;
 use crate::core::temporal::{BiTemporalInterval, Timestamp};
 
 /// Information about a specific version of an entity (node or edge).
@@ -31,6 +32,7 @@ use crate::core::temporal::{BiTemporalInterval, Timestamp};
 ///     temporal: BiTemporalInterval::current(now),
 ///     properties: PropertyMap::new(),
 ///     label: "Person".to_string(),
+///     provenance: None,
 /// };
 ///
 /// let recorded_at = version.temporal.transaction_time().start();
@@ -51,6 +53,11 @@ pub struct VersionInfo {
     pub properties: PropertyMap,
     /// Entity label
     pub label: String,
+    /// Write-time attributive provenance (source, confidence, note, correlation_id).
+    ///
+    /// `None` if this version's write did not supply a bundle -- never a
+    /// fabricated default (Issue #3224).
+    pub provenance: Option<Provenance>,
 }
 
 /// Complete history of an entity (node or edge).
@@ -73,6 +80,7 @@ pub struct VersionInfo {
 ///     temporal: BiTemporalInterval::current(now),
 ///     properties: PropertyMap::new(),
 ///     label: "Person".to_string(),
+///     provenance: None,
 /// };
 ///
 /// let history = EntityHistory { versions: vec![v1] };
@@ -113,6 +121,7 @@ impl EntityHistory {
     ///     temporal: BiTemporalInterval::current(now),
     ///     properties: PropertyMap::new(),
     ///     label: "Person".to_string(),
+    ///     provenance: None,
     /// };
     /// let history = EntityHistory { versions: vec![v1] };
     /// assert_eq!(history.version_count(), 1);
@@ -142,6 +151,7 @@ impl EntityHistory {
     ///     temporal: BiTemporalInterval::current(now),
     ///     properties: PropertyMap::new(),
     ///     label: "Person".to_string(),
+    ///     provenance: None,
     /// };
     /// let history = EntityHistory { versions: vec![v1] };
     /// assert_eq!(history.current_version().unwrap().version_number, 1);
@@ -171,6 +181,7 @@ impl EntityHistory {
     ///     temporal: BiTemporalInterval::current(now),
     ///     properties: PropertyMap::new(),
     ///     label: "Person".to_string(),
+    ///     provenance: None,
     /// };
     /// let history = EntityHistory { versions: vec![v1] };
     /// assert_eq!(history.first_version().unwrap().version_number, 1);
@@ -824,6 +835,7 @@ mod tests {
                 .insert("version", version_num as i64)
                 .build(),
             label: "Test".to_string(),
+            provenance: None,
         }
     }
 

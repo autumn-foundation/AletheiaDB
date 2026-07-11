@@ -37,9 +37,149 @@
 
 use crate::core::error::{Result, StorageError};
 use crate::core::id::{EdgeId, EntityId, NodeId, VersionId};
-use crate::core::temporal::{BiTemporalInterval, TimeRange, Timestamp};
+use crate::core::temporal::{BiTemporalInterval, TIMESTAMP_MAX, TimeRange, Timestamp};
 use dashmap::DashMap;
+use parking_lot::Mutex;
 use smallvec::SmallVec;
+
+/// The earliest/latest finite temporal coordinates observed across every
+/// version recorded in the indexes, per temporal dimension (Issue #3238).
+///
+/// Produced by [`TemporalIndexes::extent`]. `*_latest` follows the extent
+/// convention: the maximum of interval starts and *closed* interval ends;
+/// open-ended intervals (`end == TIMESTAMP_MAX`) contribute only their
+/// start, so the open-interval sentinel never appears here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IndexTemporalExtent {
+    /// Minimum valid-time interval start observed.
+    pub valid_earliest: Timestamp,
+    /// Maximum finite valid-time coordinate observed.
+    pub valid_latest: Timestamp,
+    /// Minimum transaction-time interval start observed.
+    pub tx_earliest: Timestamp,
+    /// Maximum finite transaction-time coordinate observed.
+    pub tx_latest: Timestamp,
+}
+
+/// Write-time maintained bi-temporal extent aggregate (Issue #3238).
+///
+/// Updated on every version insertion and interval close, so
+/// [`TemporalIndexes::extent`] is O(1) instead of an O(total versions) fold
+/// that would hold DashMap shard read-guards for whole-shard traversals
+/// (and, via the commit path's `historical` write lock, could stall the
+/// commit pipeline on large datasets).
+///
+/// # Why this is sound (monotonicity)
+///
+/// Every production mutation of the temporal indexes only *widens* the
+/// extent:
+///
+/// - Insertions add intervals; entries are never removed (there is no
+///   removal API besides [`TemporalIndexes::clear`], which resets this
+///   aggregate). Aborted transactions may leave already-inserted index
+///   entries behind, but those entries stay in the index, so the aggregate
+///   still matches a from-scratch fold.
+/// - Interval closes (`update_*_time_end`) only tighten *open* ends
+///   (`TIMESTAMP_MAX`, which never contributes to `latest`) to a finite
+///   value `>= start` — enforced by `TimeRange::close_at` and the
+///   `is_currently_valid`/`is_currently_recorded` guards on every close
+///   path — so a close can only extend `latest`, never shrink it.
+/// - The retention policy rejects writes over the version limit; it never
+///   prunes existing entries.
+///
+/// # Why a `Mutex` and not four atomics
+///
+/// [`Timestamp`] is a 96-bit [`HybridTimestamp`](crate::core::hlc::HybridTimestamp)
+/// (`i64` wallclock + `u32` logical counter, ordered lexicographically), so
+/// it does not fit a stable `AtomicI64`/`AtomicU64` and Rust has no stable
+/// 128-bit atomics. A `parking_lot::Mutex` around this 4-field struct has a
+/// critical section of a few comparisons — the same single-cache-line
+/// contention profile four CAS-loop atomics would have — and is a strict
+/// leaf lock: nothing else is ever acquired while it is held.
+#[derive(Debug, Clone, Copy, Default)]
+struct ExtentAggregate {
+    valid_earliest: Option<Timestamp>,
+    valid_latest: Option<Timestamp>,
+    tx_earliest: Option<Timestamp>,
+    tx_latest: Option<Timestamp>,
+}
+
+impl ExtentAggregate {
+    /// Fold one `[start, end)` range into one dimension's bounds, per the
+    /// extent convention: `earliest` = min start; `latest` = max of starts
+    /// and *closed* ends (`TIMESTAMP_MAX` open ends contribute only their
+    /// start, so the sentinel never leaks into bounds).
+    fn observe_range(
+        earliest: &mut Option<Timestamp>,
+        latest: &mut Option<Timestamp>,
+        start: Timestamp,
+        end: Timestamp,
+    ) {
+        *earliest = Some(earliest.map_or(start, |e| e.min(start)));
+        // TimeRange guarantees end >= start, so a closed end is itself the
+        // candidate; no max(start, end) needed.
+        let candidate = if end == TIMESTAMP_MAX { start } else { end };
+        *latest = Some(latest.map_or(candidate, |l| l.max(candidate)));
+    }
+
+    /// Fold one bi-temporal interval (both dimensions) into the aggregate.
+    fn observe_interval(&mut self, temporal: &BiTemporalInterval) {
+        let valid = temporal.valid_time();
+        Self::observe_range(
+            &mut self.valid_earliest,
+            &mut self.valid_latest,
+            valid.start(),
+            valid.end(),
+        );
+        let tx = temporal.transaction_time();
+        Self::observe_range(
+            &mut self.tx_earliest,
+            &mut self.tx_latest,
+            tx.start(),
+            tx.end(),
+        );
+    }
+
+    /// Fold another aggregate into this one (used to publish a batch's
+    /// locally-accumulated bounds in one lock acquisition).
+    fn merge(&mut self, other: ExtentAggregate) {
+        Self::merge_dim(
+            &mut self.valid_earliest,
+            &mut self.valid_latest,
+            other.valid_earliest,
+            other.valid_latest,
+        );
+        Self::merge_dim(
+            &mut self.tx_earliest,
+            &mut self.tx_latest,
+            other.tx_earliest,
+            other.tx_latest,
+        );
+    }
+
+    fn merge_dim(
+        earliest: &mut Option<Timestamp>,
+        latest: &mut Option<Timestamp>,
+        other_earliest: Option<Timestamp>,
+        other_latest: Option<Timestamp>,
+    ) {
+        if let Some(e) = other_earliest {
+            *earliest = Some(earliest.map_or(e, |cur| cur.min(e)));
+        }
+        if let Some(l) = other_latest {
+            *latest = Some(latest.map_or(l, |cur| cur.max(l)));
+        }
+    }
+
+    /// Extend one dimension's `latest` with a newly-closed finite end.
+    /// A `TIMESTAMP_MAX` end is ignored (open ends never bound `latest`).
+    fn observe_closed_end(latest: &mut Option<Timestamp>, new_end: Timestamp) {
+        if new_end == TIMESTAMP_MAX {
+            return;
+        }
+        *latest = Some(latest.map_or(new_end, |l| l.max(new_end)));
+    }
+}
 
 /// Policy for handling duplicate versions during batch insertion.
 ///
@@ -724,6 +864,12 @@ pub struct TemporalIndexes {
     index: DashMap<EntityId, EntityTimelines>,
     /// Configuration for temporal indexes.
     config: TemporalIndexConfig,
+    /// Write-time maintained bi-temporal extent (Issue #3238).
+    ///
+    /// Leaf lock: nothing else is ever acquired while it is held; held only
+    /// for a few comparisons per write. See [`ExtentAggregate`] for the
+    /// soundness argument (all index mutations are extent-monotone).
+    extent_aggregate: Mutex<ExtentAggregate>,
 }
 
 impl Default for TemporalIndexes {
@@ -743,6 +889,7 @@ impl TemporalIndexes {
         Self {
             index: DashMap::new(),
             config,
+            extent_aggregate: Mutex::new(ExtentAggregate::default()),
         }
     }
 
@@ -882,6 +1029,14 @@ impl TemporalIndexes {
         let tx = temporal.transaction_time();
         timelines.tx.insert(tx.start(), tx.end(), metadata_idx);
 
+        // Release the shard entry guard before taking the extent leaf lock.
+        drop(timelines);
+
+        // Maintain the O(1) extent aggregate (Issue #3238). Inserted
+        // intervals may already carry closed ends (startup rebuild from
+        // historical versions), so both start and end are observed.
+        self.extent_aggregate.lock().observe_interval(&temporal);
+
         Ok(())
     }
 
@@ -929,6 +1084,13 @@ impl TemporalIndexes {
         // This ensures that deduplication in EntityTimeline works for the same VersionId.
         let mut v_id_to_idx = std::collections::HashMap::with_capacity(versions.len());
 
+        // Accumulate the batch's extent locally; published under one lock
+        // acquisition after both timeline inserts succeed. Duplicate
+        // VersionIds carrying *conflicting* intervals (a data anomaly —
+        // idempotent WAL replay always re-sends identical intervals) may
+        // widen the aggregate beyond the deduplicated timeline contents.
+        let mut batch_extent = ExtentAggregate::default();
+
         for (v_id, temporal) in versions {
             // Store version metadata once in consolidated storage or reuse existing one
             let metadata_idx = if let Some(&idx) = v_id_to_idx.get(&v_id) {
@@ -945,6 +1107,7 @@ impl TemporalIndexes {
 
             let valid = temporal.valid_time();
             let tx = temporal.transaction_time();
+            batch_extent.observe_interval(&temporal);
 
             // Both timeline entries reference the same metadata via index
             valid_entries.push(TimelineEntry {
@@ -961,6 +1124,11 @@ impl TemporalIndexes {
 
         timelines.valid.insert_batch(valid_entries, policy)?;
         timelines.tx.insert_batch(tx_entries, policy)?;
+
+        // Release the shard entry guard before taking the extent leaf lock,
+        // then publish the batch's bounds (only after full success).
+        drop(timelines);
+        self.extent_aggregate.lock().merge(batch_extent);
 
         Ok(())
     }
@@ -983,7 +1151,12 @@ impl TemporalIndexes {
         new_end: Timestamp,
     ) {
         if let Some(mut timelines) = self.index.get_mut(&EntityId::Node(node_id)) {
-            timelines.update_valid_time_end(version_id, new_end);
+            let updated = timelines.update_valid_time_end(version_id, new_end);
+            drop(timelines);
+            if updated {
+                let mut agg = self.extent_aggregate.lock();
+                ExtentAggregate::observe_closed_end(&mut agg.valid_latest, new_end);
+            }
         }
     }
 
@@ -1004,7 +1177,12 @@ impl TemporalIndexes {
         new_end: Timestamp,
     ) {
         if let Some(mut timelines) = self.index.get_mut(&EntityId::Node(node_id)) {
-            timelines.update_transaction_time_end(version_id, new_end);
+            let updated = timelines.update_transaction_time_end(version_id, new_end);
+            drop(timelines);
+            if updated {
+                let mut agg = self.extent_aggregate.lock();
+                ExtentAggregate::observe_closed_end(&mut agg.tx_latest, new_end);
+            }
         }
     }
 
@@ -1026,7 +1204,12 @@ impl TemporalIndexes {
         new_end: Timestamp,
     ) {
         if let Some(mut timelines) = self.index.get_mut(&EntityId::Edge(edge_id)) {
-            timelines.update_valid_time_end(version_id, new_end);
+            let updated = timelines.update_valid_time_end(version_id, new_end);
+            drop(timelines);
+            if updated {
+                let mut agg = self.extent_aggregate.lock();
+                ExtentAggregate::observe_closed_end(&mut agg.valid_latest, new_end);
+            }
         }
     }
 
@@ -1047,7 +1230,12 @@ impl TemporalIndexes {
         new_end: Timestamp,
     ) {
         if let Some(mut timelines) = self.index.get_mut(&EntityId::Edge(edge_id)) {
-            timelines.update_transaction_time_end(version_id, new_end);
+            let updated = timelines.update_transaction_time_end(version_id, new_end);
+            drop(timelines);
+            if updated {
+                let mut agg = self.extent_aggregate.lock();
+                ExtentAggregate::observe_closed_end(&mut agg.tx_latest, new_end);
+            }
         }
     }
 
@@ -1327,6 +1515,81 @@ impl TemporalIndexes {
         }
     }
 
+    /// Report the bi-temporal extent across every version recorded in these
+    /// indexes during the current process lifetime (Issue #3238).
+    ///
+    /// Index entries are inserted for every committed write (including
+    /// delete tombstones) and, once inserted, are never removed — a
+    /// version's payload migrating to cold storage does not shrink the
+    /// bounds while the process runs. Note that at **startup** the indexes
+    /// (and therefore these bounds) are rebuilt from hot-tier historical
+    /// versions only: versions migrated to cold storage before the last
+    /// restart are not reflected.
+    ///
+    /// Returns `None` when no versions have ever been recorded (empty
+    /// database), so callers can report explicit "no data" instead of a
+    /// misleading epoch-0 bound. See [`IndexTemporalExtent`] for the
+    /// `latest` convention (closed ends count; open ends contribute only
+    /// their start).
+    ///
+    /// # Performance
+    ///
+    /// O(1): reads a write-time maintained aggregate under a leaf mutex —
+    /// no index traversal, no DashMap shard guards, no storage I/O. Bounds
+    /// only ever widen while the process runs, so callers may cache the
+    /// result for the duration of a session.
+    pub fn extent(&self) -> Option<IndexTemporalExtent> {
+        let agg = *self.extent_aggregate.lock();
+        match (
+            agg.valid_earliest,
+            agg.valid_latest,
+            agg.tx_earliest,
+            agg.tx_latest,
+        ) {
+            (Some(valid_earliest), Some(valid_latest), Some(tx_earliest), Some(tx_latest)) => {
+                Some(IndexTemporalExtent {
+                    valid_earliest,
+                    valid_latest,
+                    tx_earliest,
+                    tx_latest,
+                })
+            }
+            _ => None,
+        }
+    }
+
+    /// Merge externally-sourced extent bounds into the write-time aggregate
+    /// (Issue #3389).
+    ///
+    /// Each dimension is folded in with the aggregate's normal
+    /// `earliest = min`, `latest = max` union, so this can only **widen** the
+    /// reported extent, never narrow it — matching every in-process mutation.
+    /// A `None` bound leaves that field untouched.
+    ///
+    /// The intended caller is startup restore: versions migrated to the cold
+    /// tier before the current process began are absent from the hot-tier
+    /// rebuild, so their persisted bounds (see
+    /// [`RedbColdStorage::get_temporal_extent_bounds`](crate::storage::redb_cold_storage::RedbColdStorage::get_temporal_extent_bounds))
+    /// are merged here to keep [`extent`](Self::extent) — and thus
+    /// `temporal_extent` — spanning cold history. Because only real observed
+    /// coordinates are merged (the open-interval sentinel is never persisted),
+    /// this preserves the `latest` convention and cannot leak `TIMESTAMP_MAX`.
+    pub fn merge_extent_bounds(
+        &self,
+        valid_earliest: Option<Timestamp>,
+        valid_latest: Option<Timestamp>,
+        tx_earliest: Option<Timestamp>,
+        tx_latest: Option<Timestamp>,
+    ) {
+        let delta = ExtentAggregate {
+            valid_earliest,
+            valid_latest,
+            tx_earliest,
+            tx_latest,
+        };
+        self.extent_aggregate.lock().merge(delta);
+    }
+
     /// Get the total number of indexed version entries.
     ///
     /// Returns the count of unique versions across all entities.
@@ -1347,9 +1610,10 @@ impl TemporalIndexes {
         self.index.iter().map(|entry| *entry.key())
     }
 
-    /// Clear all indexes.
+    /// Clear all indexes (and reset the extent aggregate).
     pub fn clear(&self) {
         self.index.clear();
+        *self.extent_aggregate.lock() = ExtentAggregate::default();
     }
 }
 

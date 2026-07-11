@@ -9,6 +9,7 @@
 use std::sync::Arc;
 
 use aletheiadb::AletheiaDB;
+use aletheiadb::auth::AuthMode;
 use aletheiadb::http::{AppState, ServerConfig, build_test_router};
 use autumn_web::test::{TestApp, TestClient};
 use serde_json::{Value, json};
@@ -16,7 +17,11 @@ use serde_json::{Value, json};
 fn client_with_db() -> (TestClient, Arc<AletheiaDB>) {
     let db = Arc::new(AletheiaDB::new().expect("create DB"));
     let state = AppState::new(db.clone());
-    let config = ServerConfig::default();
+    // Anonymous mode is an explicit opt-in (Issue #3350): these tests
+    // exercise the query API, not authentication (see tests/http_auth.rs).
+    let config = ServerConfig::builder()
+        .auth_mode(AuthMode::Anonymous)
+        .build();
     let router = build_test_router(state, &config).expect("build router");
     (TestApp::from_router(router), db)
 }

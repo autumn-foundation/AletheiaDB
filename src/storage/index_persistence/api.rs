@@ -3,19 +3,39 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-#[cfg(feature = "config-toml")]
+#[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
 use super::formats::PersistencePolicies;
 
 /// Configuration for index persistence.
+///
+/// Index persistence is **opt-in**: the default configuration is disabled.
+/// To enable it, set `enabled: true` and point `data_dir` at an explicit,
+/// application-owned directory:
+///
+/// ```ignore
+/// PersistenceConfig {
+///     enabled: true,
+///     data_dir: my_data_dir.join("indexes"),
+///     load_on_startup: true,
+///     ..Default::default()
+/// }
+/// ```
+///
+/// Or use [`crate::AletheiaDB::open`] /
+/// [`crate::config::durable_config_for_data_dir`], which wire this up for you
+/// under a single data-directory root.
 #[derive(Debug, Clone, PartialEq)]
-#[cfg_attr(feature = "config-toml", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "config-toml", serde(default))]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "serde", serde(default))]
 pub struct PersistenceConfig {
-    /// Whether persistence is enabled
+    /// Whether persistence is enabled. Defaults to `false`; always pair
+    /// `enabled: true` with an explicit `data_dir`.
     pub enabled: bool,
-    /// Base data directory
+    /// Base data directory. The default `"data"` is a cwd-relative
+    /// placeholder that is inert while `enabled` is `false` — override it
+    /// with an explicit path whenever you enable persistence.
     pub data_dir: PathBuf,
     /// Persistence trigger policies
     pub policies: PersistencePolicies,
@@ -25,10 +45,29 @@ pub struct PersistenceConfig {
     pub use_mmap: bool,
 }
 
+/// The default is **disabled** persistence (Issue #3388).
+///
+/// Prior to Issue #3388 the default was `enabled: true` with the
+/// cwd-relative `data_dir: "data"`. Every database built from a default or
+/// builder config silently wrote index snapshots into `./data` on shutdown
+/// and loaded whatever `./data` happened to contain on startup — so
+/// unrelated processes/tests sharing a working directory could observe each
+/// other's data, and a stale `./data` could short-circuit WAL replay.
+///
+/// # Migration
+///
+/// If you relied on the old implicit default, opt in explicitly:
+///
+/// - set `.persistence(PersistenceConfig { enabled: true, data_dir: <your
+///   path>, load_on_startup: true, ..Default::default() })` on the config
+///   builder, or
+/// - use [`crate::AletheiaDB::open`] (or
+///   [`crate::config::durable_config_for_data_dir`]), the canonical durable
+///   entry points, which always use explicit directories.
 impl Default for PersistenceConfig {
     fn default() -> Self {
         Self {
-            enabled: true,
+            enabled: false,
             data_dir: PathBuf::from("data"),
             policies: PersistencePolicies::default(),
             load_on_startup: true,

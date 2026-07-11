@@ -184,6 +184,7 @@ fn create_wal_only_database(operation_count: usize) -> (TempDir, ConcurrentWalSy
                 label: GLOBAL_INTERNER.intern("WalNode").unwrap(),
                 properties: PropertyMapBuilder::new().insert("id", i as i64).build(),
                 valid_from: time::now(),
+                provenance: None,
             }
         } else {
             // Update node operation (update the previous node)
@@ -200,6 +201,7 @@ fn create_wal_only_database(operation_count: usize) -> (TempDir, ConcurrentWalSy
                     .insert("updated", true)
                     .build(),
                 valid_from: time::now(),
+                provenance: None,
             }
         };
 

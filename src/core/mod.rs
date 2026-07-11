@@ -35,8 +35,10 @@ pub mod history;
 pub mod hlc;
 pub mod id;
 pub mod interning;
+pub mod lineage;
 pub mod observer;
 pub mod property;
+pub mod provenance;
 pub mod temporal;
 pub mod vector;
 
@@ -49,7 +51,12 @@ pub use interning::{
     DEFAULT_MAX_INTERNED_STRINGS, GLOBAL_INTERNER, InternedString, MAX_INTERNED_STRINGS_ENV,
     StringInterner,
 };
+pub use lineage::{
+    LineageClosure, LineageEntry, LineageError, LineageQueryOptions, LineageRecord, LineageRef,
+    LineageStore,
+};
 pub use property::{PropertyKey, PropertyMap, PropertyMapBuilder, PropertyValue};
+pub use provenance::{Provenance, ProvenanceBuilder, ProvenanceError};
 pub use temporal::{BiTemporalInterval, TIMESTAMP_MAX, TimeRange, Timestamp};
 pub use vector::{
     // Types and constants

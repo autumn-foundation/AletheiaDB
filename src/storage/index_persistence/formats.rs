@@ -33,7 +33,29 @@ pub struct IndexManifest {
     pub created_at: i64,
     /// Unix timestamp of last modification
     pub last_modified: i64,
-    /// LSN this manifest is consistent with
+    /// WAL position this manifest is consistent with.
+    ///
+    /// # Semantics (Issue #3419)
+    ///
+    /// This is the **next-to-allocate** LSN (`wal.current_lsn()`) captured
+    /// *before* the snapshot was taken — NOT the last-allocated LSN. The
+    /// resulting contract is:
+    ///
+    /// - Every WAL entry with LSN **< lsn** is guaranteed to be reflected in
+    ///   the persisted snapshot.
+    /// - Entries with LSN **>= lsn** may or may not be reflected (a write can
+    ///   race a background persist between the LSN capture and the snapshot
+    ///   read).
+    ///
+    /// Startup replay must therefore begin **AT `lsn` (inclusive)** — never
+    /// at `lsn + 1`, which silently drops the first post-persist write — and
+    /// WAL replay must be idempotent for entries whose effects are already in
+    /// the snapshot (see the re-application guards in
+    /// `storage::recovery::replay_wal_into_storage_with_constraints`).
+    ///
+    /// The allocator must also never allocate below this value after a
+    /// restart (Issue #3420); startup seeds it from
+    /// `max(max LSN in WAL segments + 1, manifest lsn)`.
     pub lsn: u64,
 
     /// Vector index entries (one per property)
@@ -114,6 +136,10 @@ pub struct TemporalAdjacencyIndexManifestEntry {
 // ============================================================================
 
 /// Persisted string interner data.
+///
+/// FORMAT-FROZEN: reused verbatim inside `BackupPayloadV1`/`BackupPayloadV2`
+/// (`storage::backup`). Changing this struct's wire layout requires freezing
+/// a copy for those legacy artifact shapes first.
 #[derive(Debug, Clone, Encode, Decode)]
 pub struct StringInternerData {
     /// Magic bytes: "GSTR"
@@ -131,6 +157,10 @@ pub struct StringInternerData {
 // ============================================================================
 
 /// Persisted graph index data.
+///
+/// FORMAT-FROZEN: reused verbatim inside `BackupPayloadV1`/`BackupPayloadV2`
+/// (`storage::backup`). Changing this struct's wire layout requires freezing
+/// a copy for those legacy artifact shapes first.
 #[derive(Debug, Clone, Encode, Decode)]
 pub struct GraphIndexData {
     /// Magic bytes: "GGRP"
@@ -226,6 +256,11 @@ pub struct PersistedEdge {
 }
 
 /// Persisted property map.
+///
+/// FORMAT-FROZEN: reused verbatim by the frozen legacy temporal shapes
+/// (`legacy_v1`, `legacy_v2`, `legacy_v3`) and the legacy backup payloads
+/// (`BackupPayloadV1`/`V2`). Changing its wire layout silently changes what
+/// those frozen shapes decode -- freeze a copy for them first.
 #[derive(Debug, Clone, Default, PartialEq, Encode, Decode)]
 pub struct PersistedPropertyMap {
     /// Property entries: (key_index, value)
@@ -257,6 +292,30 @@ pub enum PersistedPropertyValue {
 // ============================================================================
 // Temporal Index Format
 // ============================================================================
+
+/// Persisted write-time attributive provenance bundle (Issue #3224).
+///
+/// Mirrors [`crate::core::provenance::Provenance`]'s fields exactly; kept as
+/// a separate bitcode-encodable type since `Provenance` itself has private
+/// fields and validates on construction (not on persistence).
+///
+/// FORMAT-FROZEN: reused verbatim by `legacy_v3` and `BackupPayloadV3`
+/// (the pre-#3350 shape is separately frozen as
+/// `legacy_v2::PersistedProvenanceV2`). Changing its wire layout requires
+/// freezing a copy for those shapes first.
+#[derive(Debug, Clone, Encode, Decode)]
+pub struct PersistedProvenance {
+    /// Source system/identifier that produced the write, if any.
+    pub source: Option<String>,
+    /// Confidence in `[0.0, 1.0]`, if any.
+    pub confidence: Option<f64>,
+    /// Free-text note, if any.
+    pub note: Option<String>,
+    /// Correlation ID grouping co-committed writes, if any.
+    pub correlation_id: Option<String>,
+    /// Authenticated principal that made the write (Issue #3350), if any.
+    pub principal: Option<String>,
+}
 
 /// Persisted temporal index data.
 #[derive(Debug, Clone, Encode, Decode)]
@@ -304,9 +363,23 @@ pub struct NodeVersionEntry {
     pub properties: PersistedPropertyMap,
     /// Vector snapshot ID for provenance tracking
     pub vector_snapshot_id: Option<u64>,
+    /// Write-time attributive provenance bundle (Issue #3224), if supplied.
+    pub provenance: Option<PersistedProvenance>,
+    /// Transaction time end (None = still current knowledge) (Issue #3387).
+    pub tx_end: Option<i64>,
+    /// Transaction time end (logical counter) (Issue #3387).
+    pub tx_end_logical: Option<u32>,
+    /// Previous version in this node's chain (earlier tx time) (Issue #3387).
+    pub prev_version: Option<u64>,
+    /// Next version in this node's chain (later tx time) (Issue #3387).
+    pub next_version: Option<u64>,
 }
 
 /// Persisted node anchor entry.
+///
+/// FORMAT-FROZEN: reused verbatim (unchanged since v1) by the frozen legacy
+/// temporal shapes (`legacy_v1`, `legacy_v2`, `legacy_v3`) and the legacy backup
+/// payloads. Changing its wire layout requires freezing a copy first.
 #[derive(Debug, Clone, Encode, Decode)]
 pub struct NodeAnchorEntry {
     /// Node ID
@@ -320,6 +393,10 @@ pub struct NodeAnchorEntry {
 }
 
 /// Persisted version type.
+///
+/// FORMAT-FROZEN: reused verbatim by the frozen legacy temporal shapes
+/// (`legacy_v1`, `legacy_v2`, `legacy_v3`) and the legacy backup payloads. Changing its
+/// wire layout requires freezing a copy for those shapes first.
 #[derive(Debug, Clone, Encode, Decode)]
 pub enum PersistedVersionType {
     /// Delta referencing a base anchor
@@ -364,9 +441,23 @@ pub struct EdgeVersionEntry {
     pub version_type: PersistedVersionType,
     /// Properties
     pub properties: PersistedPropertyMap,
+    /// Write-time attributive provenance bundle (Issue #3224), if supplied.
+    pub provenance: Option<PersistedProvenance>,
+    /// Transaction time end (None = still current knowledge) (Issue #3387).
+    pub tx_end: Option<i64>,
+    /// Transaction time end (logical counter) (Issue #3387).
+    pub tx_end_logical: Option<u32>,
+    /// Previous version in this edge's chain (earlier tx time) (Issue #3387).
+    pub prev_version: Option<u64>,
+    /// Next version in this edge's chain (later tx time) (Issue #3387).
+    pub next_version: Option<u64>,
 }
 
 /// Persisted edge anchor entry.
+///
+/// FORMAT-FROZEN: reused verbatim (unchanged since v1) by the frozen legacy
+/// temporal shapes (`legacy_v1`, `legacy_v2`, `legacy_v3`) and the legacy backup
+/// payloads. Changing its wire layout requires freezing a copy first.
 #[derive(Debug, Clone, Encode, Decode)]
 pub struct EdgeAnchorEntry {
     /// Edge ID
@@ -538,8 +629,8 @@ pub enum PersistedSnapshotType {
 
 /// Persistence policies for all index types.
 #[derive(Debug, Clone, PartialEq, Default, Encode, Decode)]
-#[cfg_attr(feature = "config-toml", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "config-toml", serde(default))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(default))]
 pub struct PersistencePolicies {
     /// Vector index persistence policy
     pub vector: VectorPersistencePolicy,
@@ -553,8 +644,8 @@ pub struct PersistencePolicies {
 
 /// Vector index persistence policy.
 #[derive(Debug, Clone, PartialEq, Encode, Decode)]
-#[cfg_attr(feature = "config-toml", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "config-toml", serde(default))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(default))]
 pub struct VectorPersistencePolicy {
     /// Persist after N mutations
     pub mutation_threshold: u32,
@@ -573,8 +664,8 @@ impl Default for VectorPersistencePolicy {
 
 /// Graph index persistence policy.
 #[derive(Debug, Clone, PartialEq, Encode, Decode)]
-#[cfg_attr(feature = "config-toml", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "config-toml", serde(default))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(default))]
 pub struct GraphPersistencePolicy {
     /// Persist after adjacency rebuild
     pub on_adjacency_rebuild: bool,
@@ -596,8 +687,8 @@ impl Default for GraphPersistencePolicy {
 
 /// Temporal index persistence policy.
 #[derive(Debug, Clone, PartialEq, Encode, Decode)]
-#[cfg_attr(feature = "config-toml", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "config-toml", serde(default))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(default))]
 pub struct TemporalPersistencePolicy {
     /// Persist after N new versions
     pub version_threshold: u32,
@@ -619,8 +710,8 @@ impl Default for TemporalPersistencePolicy {
 
 /// String interner persistence policy.
 #[derive(Debug, Clone, PartialEq, Encode, Decode)]
-#[cfg_attr(feature = "config-toml", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "config-toml", serde(default))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(default))]
 pub struct StringPersistencePolicy {
     /// Persist after N new strings
     pub new_strings_threshold: u32,
@@ -633,6 +724,552 @@ impl Default for StringPersistencePolicy {
         Self {
             new_strings_threshold: 500,
             time_interval_secs: 600, // 10 minutes
+        }
+    }
+}
+
+// ============================================================================
+// Legacy (pre-provenance) Temporal Index Format (Issue #3224)
+// ============================================================================
+
+/// Frozen copies of the temporal index structs as they existed before
+/// write-time provenance (Issue #3224) was added, i.e. `MANIFEST_VERSION == 1`.
+///
+/// `bitcode` is a positional, non-self-describing format: appending a field
+/// to [`NodeVersionEntry`]/[`EdgeVersionEntry`] changes their wire layout, so
+/// files written by older binaries can no longer decode as the current
+/// structs. These frozen shapes let [`super::temporal::load_temporal_index`]
+/// fall back to the old layout and upgrade in memory (`provenance: None`).
+///
+/// Do not modify these types after they're introduced -- they exist purely
+/// to describe historical on-disk bytes.
+pub mod legacy_v1 {
+    use super::{EdgeAnchorEntry, NodeAnchorEntry, PersistedPropertyMap, PersistedVersionType};
+    use bitcode::{Decode, Encode};
+
+    /// Pre-provenance `TemporalIndexData` (`version == 1`).
+    #[derive(Debug, Clone, Encode, Decode)]
+    pub struct TemporalIndexDataV1 {
+        /// Magic bytes: "GTMP"
+        pub magic: [u8; 4],
+        /// Format version (always 1 for this shape)
+        pub version: u16,
+        /// Node version entries
+        pub node_versions: Vec<NodeVersionEntryV1>,
+        /// Node anchor entries (unchanged since v1)
+        pub node_anchors: Vec<NodeAnchorEntry>,
+        /// Edge version entries
+        pub edge_versions: Vec<EdgeVersionEntryV1>,
+        /// Edge anchor entries (unchanged since v1)
+        pub edge_anchors: Vec<EdgeAnchorEntry>,
+    }
+
+    /// Pre-provenance `NodeVersionEntry` (no `provenance` field).
+    #[derive(Debug, Clone, Encode, Decode)]
+    pub struct NodeVersionEntryV1 {
+        /// Unique version identifier (preserved from original)
+        pub version_id: u64,
+        /// Node ID
+        pub node_id: u64,
+        /// Label index in string interner
+        pub label_idx: u32,
+        /// Valid time start (unix timestamp)
+        pub valid_from: i64,
+        /// Valid time end (None = still valid)
+        pub valid_to: Option<i64>,
+        /// Valid time start (logical counter)
+        pub valid_from_logical: u32,
+        /// Valid time end (logical counter)
+        pub valid_to_logical: Option<u32>,
+        /// Transaction time (unix timestamp)
+        pub tx_time: i64,
+        /// Transaction time (logical counter)
+        pub tx_time_logical: u32,
+        /// Version type (delta or anchor)
+        pub version_type: PersistedVersionType,
+        /// Properties at this version
+        pub properties: PersistedPropertyMap,
+        /// Vector snapshot ID for provenance tracking
+        pub vector_snapshot_id: Option<u64>,
+    }
+
+    /// Pre-provenance `EdgeVersionEntry` (no `provenance` field).
+    #[derive(Debug, Clone, Encode, Decode)]
+    pub struct EdgeVersionEntryV1 {
+        /// Unique version identifier (preserved from original)
+        pub version_id: u64,
+        /// Edge ID
+        pub edge_id: u64,
+        /// Source node ID
+        pub source_id: u64,
+        /// Target node ID
+        pub target_id: u64,
+        /// Label index in string interner
+        pub label_idx: u32,
+        /// Valid time start
+        pub valid_from: i64,
+        /// Valid time end
+        pub valid_to: Option<i64>,
+        /// Valid time start (logical counter)
+        pub valid_from_logical: u32,
+        /// Valid time end (logical counter)
+        pub valid_to_logical: Option<u32>,
+        /// Transaction time
+        pub tx_time: i64,
+        /// Transaction time (logical counter)
+        pub tx_time_logical: u32,
+        /// Version type
+        pub version_type: PersistedVersionType,
+        /// Properties
+        pub properties: PersistedPropertyMap,
+    }
+
+    impl From<NodeVersionEntryV1> for super::NodeVersionEntry {
+        fn from(v1: NodeVersionEntryV1) -> Self {
+            super::NodeVersionEntry {
+                version_id: v1.version_id,
+                node_id: v1.node_id,
+                label_idx: v1.label_idx,
+                valid_from: v1.valid_from,
+                valid_to: v1.valid_to,
+                valid_from_logical: v1.valid_from_logical,
+                valid_to_logical: v1.valid_to_logical,
+                tx_time: v1.tx_time,
+                tx_time_logical: v1.tx_time_logical,
+                version_type: v1.version_type,
+                properties: v1.properties,
+                vector_snapshot_id: v1.vector_snapshot_id,
+                provenance: None,
+                tx_end: None,
+                tx_end_logical: None,
+                prev_version: None,
+                next_version: None,
+            }
+        }
+    }
+
+    impl From<EdgeVersionEntryV1> for super::EdgeVersionEntry {
+        fn from(v1: EdgeVersionEntryV1) -> Self {
+            super::EdgeVersionEntry {
+                version_id: v1.version_id,
+                edge_id: v1.edge_id,
+                source_id: v1.source_id,
+                target_id: v1.target_id,
+                label_idx: v1.label_idx,
+                valid_from: v1.valid_from,
+                valid_to: v1.valid_to,
+                valid_from_logical: v1.valid_from_logical,
+                valid_to_logical: v1.valid_to_logical,
+                tx_time: v1.tx_time,
+                tx_time_logical: v1.tx_time_logical,
+                version_type: v1.version_type,
+                properties: v1.properties,
+                provenance: None,
+                tx_end: None,
+                tx_end_logical: None,
+                prev_version: None,
+                next_version: None,
+            }
+        }
+    }
+
+    impl From<TemporalIndexDataV1> for super::TemporalIndexData {
+        fn from(v1: TemporalIndexDataV1) -> Self {
+            super::TemporalIndexData {
+                magic: v1.magic,
+                // The converted entries are current-shape (provenance field
+                // added by the `NodeVersionEntryV1`/`EdgeVersionEntryV1` `From`
+                // impls above), so the upgraded struct must be stamped with
+                // the current format version, not the legacy one it was read
+                // as. Otherwise `decode_temporal_blob` would misdetect this
+                // struct as legacy on the next load and misdecode it.
+                version: super::super::MANIFEST_VERSION,
+                node_versions: v1.node_versions.into_iter().map(Into::into).collect(),
+                node_anchors: v1.node_anchors,
+                edge_versions: v1.edge_versions.into_iter().map(Into::into).collect(),
+                edge_anchors: v1.edge_anchors,
+            }
+        }
+    }
+}
+
+// ============================================================================
+// Legacy (pre-principal, pre-fidelity) Temporal Index Format (Issue #3350)
+// ============================================================================
+
+/// Frozen copies of the temporal index structs as they existed between
+/// write-time provenance (Issue #3224, `MANIFEST_VERSION == 2`) and the
+/// authenticated-principal provenance field (Issue #3350,
+/// `MANIFEST_VERSION == 3`).
+///
+/// Same rationale as [`legacy_v1`]: `bitcode` is positional and
+/// non-self-describing, so adding `principal` to [`PersistedProvenance`]
+/// changed the wire layout of every entry that embeds it. These frozen
+/// shapes let `super::temporal::load_temporal_index` fall back to the v2
+/// layout and upgrade in memory (`principal: None`; the Issue #3387
+/// `tx_end`/`tx_end_logical`/`prev_version`/`next_version` fidelity fields
+/// also default to `None`, and the restore path falls back to heuristically
+/// rebuilding chains and closures via `rebuild_version_chains`, exactly as
+/// v2 binaries did).
+///
+/// Do not modify these types after they're introduced -- they exist purely
+/// to describe historical on-disk bytes.
+pub mod legacy_v2 {
+    use super::{EdgeAnchorEntry, NodeAnchorEntry, PersistedPropertyMap, PersistedVersionType};
+    use bitcode::{Decode, Encode};
+
+    /// Pre-principal `PersistedProvenance` (`version == 2`): the Issue #3224
+    /// shape without the `principal` field.
+    #[derive(Debug, Clone, Encode, Decode)]
+    pub struct PersistedProvenanceV2 {
+        /// Source system/identifier that produced the write, if any.
+        pub source: Option<String>,
+        /// Confidence in `[0.0, 1.0]`, if any.
+        pub confidence: Option<f64>,
+        /// Free-text note, if any.
+        pub note: Option<String>,
+        /// Correlation ID grouping co-committed writes, if any.
+        pub correlation_id: Option<String>,
+    }
+
+    /// Pre-principal `TemporalIndexData` (`version == 2`).
+    #[derive(Debug, Clone, Encode, Decode)]
+    pub struct TemporalIndexDataV2 {
+        /// Magic bytes: "GTMP"
+        pub magic: [u8; 4],
+        /// Format version (always 2 for this shape)
+        pub version: u16,
+        /// Node version entries
+        pub node_versions: Vec<NodeVersionEntryV2>,
+        /// Node anchor entries (unchanged since v1)
+        pub node_anchors: Vec<NodeAnchorEntry>,
+        /// Edge version entries
+        pub edge_versions: Vec<EdgeVersionEntryV2>,
+        /// Edge anchor entries (unchanged since v1)
+        pub edge_anchors: Vec<EdgeAnchorEntry>,
+    }
+
+    /// Pre-principal `NodeVersionEntry` (provenance without `principal`,
+    /// no tx-end / chain-link fields).
+    #[derive(Debug, Clone, Encode, Decode)]
+    pub struct NodeVersionEntryV2 {
+        /// Unique version identifier (preserved from original)
+        pub version_id: u64,
+        /// Node ID
+        pub node_id: u64,
+        /// Label index in string interner
+        pub label_idx: u32,
+        /// Valid time start (unix timestamp)
+        pub valid_from: i64,
+        /// Valid time end (None = still valid)
+        pub valid_to: Option<i64>,
+        /// Valid time start (logical counter)
+        pub valid_from_logical: u32,
+        /// Valid time end (logical counter)
+        pub valid_to_logical: Option<u32>,
+        /// Transaction time (unix timestamp)
+        pub tx_time: i64,
+        /// Transaction time (logical counter)
+        pub tx_time_logical: u32,
+        /// Version type (delta or anchor)
+        pub version_type: PersistedVersionType,
+        /// Properties at this version
+        pub properties: PersistedPropertyMap,
+        /// Vector snapshot ID for provenance tracking
+        pub vector_snapshot_id: Option<u64>,
+        /// Write-time provenance bundle (pre-principal shape), if supplied.
+        pub provenance: Option<PersistedProvenanceV2>,
+    }
+
+    /// Pre-principal `EdgeVersionEntry` (provenance without `principal`,
+    /// no tx-end / chain-link fields).
+    #[derive(Debug, Clone, Encode, Decode)]
+    pub struct EdgeVersionEntryV2 {
+        /// Unique version identifier (preserved from original)
+        pub version_id: u64,
+        /// Edge ID
+        pub edge_id: u64,
+        /// Source node ID
+        pub source_id: u64,
+        /// Target node ID
+        pub target_id: u64,
+        /// Label index in string interner
+        pub label_idx: u32,
+        /// Valid time start
+        pub valid_from: i64,
+        /// Valid time end
+        pub valid_to: Option<i64>,
+        /// Valid time start (logical counter)
+        pub valid_from_logical: u32,
+        /// Valid time end (logical counter)
+        pub valid_to_logical: Option<u32>,
+        /// Transaction time
+        pub tx_time: i64,
+        /// Transaction time (logical counter)
+        pub tx_time_logical: u32,
+        /// Version type
+        pub version_type: PersistedVersionType,
+        /// Properties
+        pub properties: PersistedPropertyMap,
+        /// Write-time provenance bundle (pre-principal shape), if supplied.
+        pub provenance: Option<PersistedProvenanceV2>,
+    }
+
+    impl From<PersistedProvenanceV2> for super::PersistedProvenance {
+        fn from(v2: PersistedProvenanceV2) -> Self {
+            super::PersistedProvenance {
+                source: v2.source,
+                confidence: v2.confidence,
+                note: v2.note,
+                correlation_id: v2.correlation_id,
+                principal: None,
+            }
+        }
+    }
+
+    impl From<NodeVersionEntryV2> for super::NodeVersionEntry {
+        fn from(v2: NodeVersionEntryV2) -> Self {
+            super::NodeVersionEntry {
+                version_id: v2.version_id,
+                node_id: v2.node_id,
+                label_idx: v2.label_idx,
+                valid_from: v2.valid_from,
+                valid_to: v2.valid_to,
+                valid_from_logical: v2.valid_from_logical,
+                valid_to_logical: v2.valid_to_logical,
+                tx_time: v2.tx_time,
+                tx_time_logical: v2.tx_time_logical,
+                version_type: v2.version_type,
+                properties: v2.properties,
+                vector_snapshot_id: v2.vector_snapshot_id,
+                provenance: v2.provenance.map(Into::into),
+                tx_end: None,
+                tx_end_logical: None,
+                prev_version: None,
+                next_version: None,
+            }
+        }
+    }
+
+    impl From<EdgeVersionEntryV2> for super::EdgeVersionEntry {
+        fn from(v2: EdgeVersionEntryV2) -> Self {
+            super::EdgeVersionEntry {
+                version_id: v2.version_id,
+                edge_id: v2.edge_id,
+                source_id: v2.source_id,
+                target_id: v2.target_id,
+                label_idx: v2.label_idx,
+                valid_from: v2.valid_from,
+                valid_to: v2.valid_to,
+                valid_from_logical: v2.valid_from_logical,
+                valid_to_logical: v2.valid_to_logical,
+                tx_time: v2.tx_time,
+                tx_time_logical: v2.tx_time_logical,
+                version_type: v2.version_type,
+                properties: v2.properties,
+                provenance: v2.provenance.map(Into::into),
+                tx_end: None,
+                tx_end_logical: None,
+                prev_version: None,
+                next_version: None,
+            }
+        }
+    }
+
+    impl From<TemporalIndexDataV2> for super::TemporalIndexData {
+        fn from(v2: TemporalIndexDataV2) -> Self {
+            super::TemporalIndexData {
+                magic: v2.magic,
+                // Stamp the upgraded struct with the current format version
+                // (same rationale as the legacy_v1 upgrade above).
+                version: super::super::MANIFEST_VERSION,
+                node_versions: v2.node_versions.into_iter().map(Into::into).collect(),
+                node_anchors: v2.node_anchors,
+                edge_versions: v2.edge_versions.into_iter().map(Into::into).collect(),
+                edge_anchors: v2.edge_anchors,
+            }
+        }
+    }
+}
+
+// ============================================================================
+// Legacy (pre-bi-temporal-fidelity) Temporal Index Format (Issue #3387)
+// ============================================================================
+
+/// Frozen copies of the temporal index structs as they existed between the
+/// authenticated-principal provenance field (Issue #3350,
+/// `MANIFEST_VERSION == 3`) and the bi-temporal fidelity fields
+/// (Issue #3387, `MANIFEST_VERSION == 4`).
+///
+/// Same rationale as [`legacy_v1`]/[`legacy_v2`]: `bitcode` is positional
+/// and non-self-describing, so appending the `tx_end`/`tx_end_logical`/
+/// `prev_version`/`next_version` fields changes the wire layout and
+/// `version == 3` files written by #3350-era binaries can no longer decode
+/// as the current structs. These frozen shapes let
+/// [`super::temporal::load_temporal_index`] fall back to the v3 layout and
+/// upgrade in memory (fidelity fields `None`; the restore path then falls
+/// back to heuristically rebuilding chains and closures via
+/// `rebuild_version_chains`, exactly as v3 binaries did). The
+/// principal-carrying provenance is preserved as-is: v3 and v4 share the
+/// live [`PersistedProvenance`] shape.
+///
+/// Do not modify these types -- they exist purely to describe historical
+/// on-disk bytes. Frozen reference: the live `NodeVersionEntry`/
+/// `EdgeVersionEntry`/`TemporalIndexData` structs as of trunk commit
+/// f2e02c6 (the #3421 merge, the last pre-#3387 trunk commit). If these
+/// drift from those bytes, the legacy-read round-trip tests become
+/// tautological.
+pub mod legacy_v3 {
+    use super::{
+        EdgeAnchorEntry, NodeAnchorEntry, PersistedPropertyMap, PersistedProvenance,
+        PersistedVersionType,
+    };
+    use bitcode::{Decode, Encode};
+
+    /// Pre-fidelity `TemporalIndexData` (`version == 3`).
+    #[derive(Debug, Clone, Encode, Decode)]
+    pub struct TemporalIndexDataV3 {
+        /// Magic bytes: "GTMP"
+        pub magic: [u8; 4],
+        /// Format version (always 3 for this shape)
+        pub version: u16,
+        /// Node version entries
+        pub node_versions: Vec<NodeVersionEntryV3>,
+        /// Node anchor entries (unchanged since v1)
+        pub node_anchors: Vec<NodeAnchorEntry>,
+        /// Edge version entries
+        pub edge_versions: Vec<EdgeVersionEntryV3>,
+        /// Edge anchor entries (unchanged since v1)
+        pub edge_anchors: Vec<EdgeAnchorEntry>,
+    }
+
+    /// Pre-fidelity `NodeVersionEntry` (principal-carrying provenance, no
+    /// tx-end / chain-link fields).
+    #[derive(Debug, Clone, Encode, Decode)]
+    pub struct NodeVersionEntryV3 {
+        /// Unique version identifier (preserved from original)
+        pub version_id: u64,
+        /// Node ID
+        pub node_id: u64,
+        /// Label index in string interner
+        pub label_idx: u32,
+        /// Valid time start (unix timestamp)
+        pub valid_from: i64,
+        /// Valid time end (None = still valid)
+        pub valid_to: Option<i64>,
+        /// Valid time start (logical counter)
+        pub valid_from_logical: u32,
+        /// Valid time end (logical counter)
+        pub valid_to_logical: Option<u32>,
+        /// Transaction time (unix timestamp)
+        pub tx_time: i64,
+        /// Transaction time (logical counter)
+        pub tx_time_logical: u32,
+        /// Version type (delta or anchor)
+        pub version_type: PersistedVersionType,
+        /// Properties at this version
+        pub properties: PersistedPropertyMap,
+        /// Vector snapshot ID for provenance tracking
+        pub vector_snapshot_id: Option<u64>,
+        /// Write-time attributive provenance bundle (with `principal`).
+        pub provenance: Option<PersistedProvenance>,
+    }
+
+    /// Pre-fidelity `EdgeVersionEntry` (principal-carrying provenance, no
+    /// tx-end / chain-link fields).
+    #[derive(Debug, Clone, Encode, Decode)]
+    pub struct EdgeVersionEntryV3 {
+        /// Unique version identifier (preserved from original)
+        pub version_id: u64,
+        /// Edge ID
+        pub edge_id: u64,
+        /// Source node ID
+        pub source_id: u64,
+        /// Target node ID
+        pub target_id: u64,
+        /// Label index in string interner
+        pub label_idx: u32,
+        /// Valid time start
+        pub valid_from: i64,
+        /// Valid time end
+        pub valid_to: Option<i64>,
+        /// Valid time start (logical counter)
+        pub valid_from_logical: u32,
+        /// Valid time end (logical counter)
+        pub valid_to_logical: Option<u32>,
+        /// Transaction time
+        pub tx_time: i64,
+        /// Transaction time (logical counter)
+        pub tx_time_logical: u32,
+        /// Version type
+        pub version_type: PersistedVersionType,
+        /// Properties
+        pub properties: PersistedPropertyMap,
+        /// Write-time attributive provenance bundle (with `principal`).
+        pub provenance: Option<PersistedProvenance>,
+    }
+
+    impl From<NodeVersionEntryV3> for super::NodeVersionEntry {
+        fn from(v3: NodeVersionEntryV3) -> Self {
+            super::NodeVersionEntry {
+                version_id: v3.version_id,
+                node_id: v3.node_id,
+                label_idx: v3.label_idx,
+                valid_from: v3.valid_from,
+                valid_to: v3.valid_to,
+                valid_from_logical: v3.valid_from_logical,
+                valid_to_logical: v3.valid_to_logical,
+                tx_time: v3.tx_time,
+                tx_time_logical: v3.tx_time_logical,
+                version_type: v3.version_type,
+                properties: v3.properties,
+                vector_snapshot_id: v3.vector_snapshot_id,
+                provenance: v3.provenance,
+                tx_end: None,
+                tx_end_logical: None,
+                prev_version: None,
+                next_version: None,
+            }
+        }
+    }
+
+    impl From<EdgeVersionEntryV3> for super::EdgeVersionEntry {
+        fn from(v3: EdgeVersionEntryV3) -> Self {
+            super::EdgeVersionEntry {
+                version_id: v3.version_id,
+                edge_id: v3.edge_id,
+                source_id: v3.source_id,
+                target_id: v3.target_id,
+                label_idx: v3.label_idx,
+                valid_from: v3.valid_from,
+                valid_to: v3.valid_to,
+                valid_from_logical: v3.valid_from_logical,
+                valid_to_logical: v3.valid_to_logical,
+                tx_time: v3.tx_time,
+                tx_time_logical: v3.tx_time_logical,
+                version_type: v3.version_type,
+                properties: v3.properties,
+                provenance: v3.provenance,
+                tx_end: None,
+                tx_end_logical: None,
+                prev_version: None,
+                next_version: None,
+            }
+        }
+    }
+
+    impl From<TemporalIndexDataV3> for super::TemporalIndexData {
+        fn from(v3: TemporalIndexDataV3) -> Self {
+            super::TemporalIndexData {
+                magic: v3.magic,
+                // Stamp the upgraded struct with the current format version
+                // (same rationale as the legacy_v1 upgrade above).
+                version: super::super::MANIFEST_VERSION,
+                node_versions: v3.node_versions.into_iter().map(Into::into).collect(),
+                node_anchors: v3.node_anchors,
+                edge_versions: v3.edge_versions.into_iter().map(Into::into).collect(),
+                edge_anchors: v3.edge_anchors,
+            }
         }
     }
 }

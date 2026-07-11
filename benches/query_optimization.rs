@@ -149,6 +149,7 @@ fn bench_cost_estimation(c: &mut Criterion) {
             }),
             direction: aletheiadb::query::ir::Direction::Outgoing,
             label: Some("KNOWS".to_string()),
+            min_depth: 2,
             depth: 2,
             temporal_context: None,
         }),
@@ -190,12 +191,53 @@ fn bench_statistics(c: &mut Criterion) {
     group.finish();
 }
 
+/// Benchmark the average delta chain calculation feeding the cost model (Issue #366).
+///
+/// `refresh_statistics` now calls `HistoricalStorage::calculate_avg_delta_chain()`
+/// instead of using a hardcoded estimate. This validates the calculation is O(1)
+/// (cached counters, no version scan), so the statistic stays safe to refresh
+/// frequently regardless of how many versions are stored.
+fn bench_avg_delta_chain(c: &mut Criterion) {
+    use aletheiadb::core::VersionId;
+    use aletheiadb::core::interning::GLOBAL_INTERNER;
+    use aletheiadb::storage::historical::HistoricalStorage;
+
+    let mut group = c.benchmark_group("statistics/avg_delta_chain");
+
+    for version_count in [100u64, 10_000] {
+        let mut storage = HistoricalStorage::new();
+        let label = GLOBAL_INTERNER.intern("Bench").unwrap();
+
+        // ~20 versions per node: chains of 1 anchor + deltas (default interval 10)
+        for i in 0..version_count {
+            storage
+                .add_node_version(
+                    NodeId::new(1 + i / 20).unwrap(),
+                    VersionId::new(1 + i).unwrap(),
+                    (1_000 + i as i64).into(),
+                    (1_000 + i as i64).into(),
+                    label,
+                    PropertyMapBuilder::new().insert("v", i as i64).build(),
+                    false,
+                )
+                .unwrap();
+        }
+
+        group.bench_function(format!("calculate/{version_count}_versions"), |b| {
+            b.iter(|| black_box(storage.calculate_avg_delta_chain()));
+        });
+    }
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_planning_overhead,
     bench_explain,
     bench_cost_estimation,
     bench_statistics,
+    bench_avg_delta_chain,
 );
 
 criterion_main!(benches);

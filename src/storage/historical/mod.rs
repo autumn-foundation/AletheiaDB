@@ -18,6 +18,7 @@ use crate::core::id::{EdgeId, NodeId, VersionId};
 use crate::core::interning::{GLOBAL_INTERNER, InternedString};
 use crate::core::observer::{Observer, StorageEvent, notify_observers};
 use crate::core::property::PropertyMap;
+use crate::core::provenance::Provenance;
 use crate::core::temporal::{BiTemporalInterval, TIMESTAMP_MAX, TimeRange, Timestamp};
 use crate::core::version::{
     AnchorConfig, EdgeVersion, EntityVersion, FastHashMap, NodeVersion, TemporalVersion,
@@ -164,6 +165,14 @@ const ANCHOR_CACHE_SIZE_RATIO: usize = 5; // 20% of main cache
 /// Even with very small main caches, we want enough anchor cache to hold
 /// at least a few anchors to avoid immediate evictions.
 const MIN_ANCHOR_CACHE_SIZE: usize = 100;
+
+/// Default average delta chain length estimate used when historical storage
+/// is empty (Issue #366).
+///
+/// Assumes the default `anchor_interval` of 10 (one anchor followed by up to
+/// nine deltas), matching the query planner's fallback in
+/// [`Statistics::average_delta_chain_length`](crate::query::planner::Statistics::average_delta_chain_length).
+pub const DEFAULT_AVG_DELTA_CHAIN: f64 = 5.0;
 
 /// Historical storage for versioned nodes and edges.
 ///
@@ -517,6 +526,9 @@ impl HistoricalStorage {
     /// This will automatically determine whether to create an anchor or delta
     /// based on the version chain length.
     /// Returns an error if the version limit for this entity is exceeded (DoS protection).
+    ///
+    /// Equivalent to [`add_node_version_with_provenance`](Self::add_node_version_with_provenance)
+    /// with `provenance: None`.
     #[allow(clippy::too_many_arguments)]
     pub fn add_node_version(
         &mut self,
@@ -528,6 +540,35 @@ impl HistoricalStorage {
         properties: PropertyMap,
         is_tombstone: bool,
     ) -> Result<()> {
+        self.add_node_version_with_provenance(
+            node_id,
+            version_id,
+            valid_from,
+            tx_time,
+            label,
+            properties,
+            is_tombstone,
+            None,
+        )
+    }
+
+    /// Add a new version of a node, optionally attaching a write-time
+    /// [`Provenance`](crate::core::provenance::Provenance) bundle (Issue #3224).
+    ///
+    /// Behaves identically to [`add_node_version`](Self::add_node_version) other
+    /// than persisting `provenance` on the created version (anchor or delta).
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_node_version_with_provenance(
+        &mut self,
+        node_id: NodeId,
+        version_id: VersionId,
+        valid_from: Timestamp,
+        tx_time: Timestamp,
+        label: InternedString,
+        properties: PropertyMap,
+        is_tombstone: bool,
+        provenance: Option<Arc<Provenance>>,
+    ) -> Result<()> {
         // Construct bi-temporal interval from separate dimensions
         let mut temporal = BiTemporalInterval::with_valid_time(valid_from, tx_time);
 
@@ -537,6 +578,52 @@ impl HistoricalStorage {
             temporal = temporal.close_valid_time(valid_from)?;
         }
 
+        self.add_node_version_with_interval(
+            node_id, version_id, temporal, label, properties, provenance,
+        )
+    }
+
+    /// Add a *retraction* version of a node (Issue #3230): a real (non-tombstone)
+    /// version whose valid-time interval is closed at `valid_to` —
+    /// `[valid_from, valid_to)` — recorded at transaction time `tx_time`.
+    ///
+    /// Unlike a delete tombstone (whose valid interval is empty,
+    /// `[valid_from, valid_from)`), a retraction preserves the fact's
+    /// pre-`valid_to` validity: `AS OF VALID_TIME` queries strictly before
+    /// `valid_to` continue to see the entity.
+    ///
+    /// `valid_to == valid_from` is allowed and yields an empty interval.
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_retracted_node_version(
+        &mut self,
+        node_id: NodeId,
+        version_id: VersionId,
+        valid_from: Timestamp,
+        valid_to: Timestamp,
+        tx_time: Timestamp,
+        label: InternedString,
+        properties: PropertyMap,
+    ) -> Result<()> {
+        let temporal =
+            BiTemporalInterval::with_valid_time(valid_from, tx_time).close_valid_time(valid_to)?;
+        self.add_node_version_with_interval(node_id, version_id, temporal, label, properties, None)
+    }
+
+    /// Shared implementation for appending a node version with a fully
+    /// constructed bi-temporal interval. See
+    /// [`add_node_version_with_provenance`](Self::add_node_version_with_provenance)
+    /// for the standard open/tombstone intervals and
+    /// [`add_retracted_node_version`](Self::add_retracted_node_version) for
+    /// retraction intervals (Issue #3230).
+    fn add_node_version_with_interval(
+        &mut self,
+        node_id: NodeId,
+        version_id: VersionId,
+        temporal: BiTemporalInterval,
+        label: InternedString,
+        properties: PropertyMap,
+        provenance: Option<Arc<Provenance>>,
+    ) -> Result<()> {
         // Check capacity limit using cached count (O(1) operation, DoS protection)
         let version_count = self.node_version_counts.get(&node_id).copied().unwrap_or(0);
         if version_count >= self.retention_policy.max_versions_per_entity {
@@ -603,6 +690,7 @@ impl HistoricalStorage {
             self.node_versions_since_anchor.insert(node_id, 0);
             NodeVersion::new_anchor(version_id, node_id, temporal, label, properties.clone())
         };
+        version.provenance = provenance;
 
         // Handle pre-anchor hook (BEFORE storing)
         if version.is_anchor() {
@@ -709,6 +797,9 @@ impl HistoricalStorage {
 
     /// Add a new version of an edge.
     /// Returns an error if the version limit for this entity is exceeded (DoS protection).
+    ///
+    /// Equivalent to [`add_edge_version_with_provenance`](Self::add_edge_version_with_provenance)
+    /// with `provenance: None`.
     #[allow(clippy::too_many_arguments)]
     pub fn add_edge_version(
         &mut self,
@@ -722,6 +813,39 @@ impl HistoricalStorage {
         properties: PropertyMap,
         is_tombstone: bool,
     ) -> Result<()> {
+        self.add_edge_version_with_provenance(
+            edge_id,
+            version_id,
+            valid_from,
+            tx_time,
+            label,
+            source,
+            target,
+            properties,
+            is_tombstone,
+            None,
+        )
+    }
+
+    /// Add a new version of an edge, optionally attaching a write-time
+    /// [`Provenance`](crate::core::provenance::Provenance) bundle (Issue #3224).
+    ///
+    /// Behaves identically to [`add_edge_version`](Self::add_edge_version) other
+    /// than persisting `provenance` on the created version (anchor or delta).
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_edge_version_with_provenance(
+        &mut self,
+        edge_id: EdgeId,
+        version_id: VersionId,
+        valid_from: Timestamp,
+        tx_time: Timestamp,
+        label: InternedString,
+        source: NodeId,
+        target: NodeId,
+        properties: PropertyMap,
+        is_tombstone: bool,
+        provenance: Option<Arc<Provenance>>,
+    ) -> Result<()> {
         // Construct bi-temporal interval from separate dimensions
         let mut temporal = BiTemporalInterval::with_valid_time(valid_from, tx_time);
 
@@ -731,6 +855,65 @@ impl HistoricalStorage {
             temporal = temporal.close_valid_time(valid_from)?;
         }
 
+        self.add_edge_version_with_interval(
+            edge_id,
+            version_id,
+            temporal,
+            label,
+            source,
+            target,
+            properties,
+            is_tombstone,
+            provenance,
+        )
+    }
+
+    /// Add a *retraction* version of an edge (Issue #3230). See
+    /// [`add_retracted_node_version`](Self::add_retracted_node_version) for
+    /// the retraction semantics; the edge variant additionally keeps the
+    /// closed interval visible to the temporal adjacency index so AS OF
+    /// traversals strictly before `valid_to` still follow the edge.
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_retracted_edge_version(
+        &mut self,
+        edge_id: EdgeId,
+        version_id: VersionId,
+        valid_from: Timestamp,
+        valid_to: Timestamp,
+        tx_time: Timestamp,
+        label: InternedString,
+        source: NodeId,
+        target: NodeId,
+        properties: PropertyMap,
+    ) -> Result<()> {
+        let temporal =
+            BiTemporalInterval::with_valid_time(valid_from, tx_time).close_valid_time(valid_to)?;
+        self.add_edge_version_with_interval(
+            edge_id, version_id, temporal, label, source, target, properties,
+            false, // not a tombstone: the closed interval must stay traversable pre-valid_to
+            None,
+        )
+    }
+
+    /// Shared implementation for appending an edge version with a fully
+    /// constructed bi-temporal interval.
+    ///
+    /// `is_tombstone` only controls whether the version is skipped when
+    /// inserting into the temporal adjacency index (tombstones represent
+    /// deletions and must not appear in traversal queries).
+    #[allow(clippy::too_many_arguments)]
+    fn add_edge_version_with_interval(
+        &mut self,
+        edge_id: EdgeId,
+        version_id: VersionId,
+        temporal: BiTemporalInterval,
+        label: InternedString,
+        source: NodeId,
+        target: NodeId,
+        properties: PropertyMap,
+        is_tombstone: bool,
+        provenance: Option<Arc<Provenance>>,
+    ) -> Result<()> {
         // Check capacity limit using cached count (O(1) operation, DoS protection)
         let version_count = self.edge_version_counts.get(&edge_id).copied().unwrap_or(0);
         if version_count >= self.retention_policy.max_versions_per_entity {
@@ -809,6 +992,7 @@ impl HistoricalStorage {
                 properties.clone(),
             )
         };
+        version.provenance = provenance;
 
         // Handle pre-anchor hook (BEFORE storing)
         if version.is_anchor() {
@@ -1333,6 +1517,148 @@ impl HistoricalStorage {
         self.edge_version_heads.get(&edge_id).copied()
     }
 
+    /// Get the provenance bundle attached to a node's *current* version, if any.
+    ///
+    /// Returns `Ok(None)` (not an error) if the node exists but its current
+    /// version carries no provenance -- this is the common case for writes
+    /// that never supplied a bundle (Issue #3224). Falls back to cold/tiered
+    /// storage if the current version has been migrated out of hot storage.
+    ///
+    /// This re-resolves "whichever version is current right now", which is a
+    /// separate lookup from any node snapshot the caller may already hold --
+    /// prefer [`get_node_version_provenance`](Self::get_node_version_provenance)
+    /// with an already-fetched `Node`'s `current_version` when consistency
+    /// with that snapshot matters (e.g. a concurrent write must not be able
+    /// to return one version's properties paired with a different version's
+    /// provenance).
+    pub fn get_current_node_provenance(&self, node_id: NodeId) -> Result<Option<Provenance>> {
+        let Some(version_id) = self.get_current_node_version(node_id) else {
+            return Ok(None);
+        };
+        self.get_node_version_provenance(version_id)
+    }
+
+    /// Get the provenance bundle attached to a specific node version, if any.
+    ///
+    /// Unlike [`get_current_node_provenance`](Self::get_current_node_provenance),
+    /// this looks up an exact, caller-supplied version rather than
+    /// re-resolving "whichever version is current right now" -- callers that
+    /// already hold a `Node` snapshot (e.g. from `get_node`) should pass that
+    /// snapshot's `current_version` here for a consistent, race-free read.
+    pub fn get_node_version_provenance(&self, version_id: VersionId) -> Result<Option<Provenance>> {
+        let provenance = if let Some(v) = self.node_versions.get(&version_id) {
+            v.provenance.as_deref().cloned()
+        } else {
+            self.get_node_version_any_tier(version_id)?
+                .provenance
+                .as_deref()
+                .cloned()
+        };
+        Ok(provenance)
+    }
+
+    /// Get the provenance bundle attached to an edge's *current* version, if any.
+    ///
+    /// See [`get_current_node_provenance`](Self::get_current_node_provenance)
+    /// for semantics, including the race-condition note about
+    /// [`get_edge_version_provenance`](Self::get_edge_version_provenance).
+    pub fn get_current_edge_provenance(&self, edge_id: EdgeId) -> Result<Option<Provenance>> {
+        let Some(version_id) = self.get_current_edge_version(edge_id) else {
+            return Ok(None);
+        };
+        self.get_edge_version_provenance(version_id)
+    }
+
+    /// Get the provenance bundle attached to a specific edge version, if any.
+    ///
+    /// See [`get_node_version_provenance`](Self::get_node_version_provenance)
+    /// for why callers holding an `Edge` snapshot should prefer this over
+    /// [`get_current_edge_provenance`](Self::get_current_edge_provenance).
+    pub fn get_edge_version_provenance(&self, version_id: VersionId) -> Result<Option<Provenance>> {
+        let provenance = if let Some(v) = self.edge_versions.get(&version_id) {
+            v.provenance.as_deref().cloned()
+        } else {
+            self.get_edge_version_any_tier(version_id)?
+                .provenance
+                .as_deref()
+                .cloned()
+        };
+        Ok(provenance)
+    }
+
+    /// Get the provenance bundle and bi-temporal interval of a specific node
+    /// version in a single lookup (Issue #3232).
+    ///
+    /// Like [`get_node_version_provenance`](Self::get_node_version_provenance),
+    /// this resolves an exact, caller-supplied version (typically a `Node`
+    /// snapshot's `current_version`) so the returned metadata is consistent
+    /// with the properties already read from that snapshot -- including for
+    /// point-in-time reads, whose lookup paths set `current_version` to the
+    /// matched historical version. Fetching both fields together keeps read
+    /// responses at one historical lookup per entity.
+    ///
+    /// Returns `Ok(None)` when the version cannot be found in any tier.
+    pub fn get_node_version_read_metadata(
+        &self,
+        version_id: VersionId,
+    ) -> Result<Option<(Option<Provenance>, BiTemporalInterval)>> {
+        if let Some(v) = self.node_versions.get(&version_id) {
+            // Fast path: read from hot storage without cloning version data.
+            return Ok(Some((v.provenance.as_deref().cloned(), v.temporal)));
+        }
+        Ok(self
+            .get_node_version_tiered(version_id)?
+            .map(|v| (v.provenance.as_deref().cloned(), v.temporal)))
+    }
+
+    /// Edge counterpart of
+    /// [`get_node_version_read_metadata`](Self::get_node_version_read_metadata).
+    pub fn get_edge_version_read_metadata(
+        &self,
+        version_id: VersionId,
+    ) -> Result<Option<(Option<Provenance>, BiTemporalInterval)>> {
+        if let Some(v) = self.edge_versions.get(&version_id) {
+            // Fast path: read from hot storage without cloning version data.
+            return Ok(Some((v.provenance.as_deref().cloned(), v.temporal)));
+        }
+        Ok(self
+            .get_edge_version_tiered(version_id)?
+            .map(|v| (v.provenance.as_deref().cloned(), v.temporal)))
+    }
+
+    /// Get the node's true creation time: the `valid_from` of its first-ever version.
+    ///
+    /// Walks `prev_version` links from the current head back to the terminal (oldest)
+    /// version. Unlike `get_current_node_version`, which returns the *latest* version,
+    /// this is the correct floor for "was this valid_from before the entity existed"
+    /// checks — the latest version's `valid_from` can be later than the entity's true
+    /// creation time when a prior write already backdated it.
+    pub(crate) fn node_creation_time(&self, node_id: NodeId) -> Option<Timestamp> {
+        let mut version_id = self.get_current_node_version(node_id)?;
+        loop {
+            let version = self.get_node_version(version_id)?;
+            match version.prev_version {
+                Some(prev) => version_id = prev,
+                None => return Some(version.temporal.valid_time().start()),
+            }
+        }
+    }
+
+    /// Get the edge's true creation time: the `valid_from` of its first-ever version.
+    ///
+    /// See [`Self::node_creation_time`] for why this must walk to the terminal version
+    /// rather than reading the current (latest) one.
+    pub(crate) fn edge_creation_time(&self, edge_id: EdgeId) -> Option<Timestamp> {
+        let mut version_id = self.get_current_edge_version(edge_id)?;
+        loop {
+            let version = self.get_edge_version(version_id)?;
+            match version.prev_version {
+                Some(prev) => version_id = prev,
+                None => return Some(version.temporal.valid_time().start()),
+            }
+        }
+    }
+
     /// Get the IDs of every node that has ever had at least one version recorded.
     ///
     /// Used for bi-temporal schema discovery (Issue #3214): the caller reconstructs
@@ -1385,6 +1711,32 @@ impl HistoricalStorage {
         }
 
         result
+    }
+
+    /// Visit every node version retained in hot historical storage
+    /// (read-only, unordered).
+    ///
+    /// Includes expired/superseded versions and delete tombstones — hot
+    /// storage never prunes versions (the retention policy only rejects
+    /// over-limit writes). Versions whose payload has been migrated to cold
+    /// storage are not visited. Used by `AletheiaDB::temporal_extent_by_label`
+    /// (Issue #3238) to fold per-label temporal bounds without allocating an
+    /// intermediate map.
+    pub fn visit_node_versions(&self, mut f: impl FnMut(&NodeVersion)) {
+        for version in self.node_versions.values() {
+            f(version);
+        }
+    }
+
+    /// Visit every edge version retained in hot historical storage
+    /// (read-only, unordered).
+    ///
+    /// Edge counterpart of [`visit_node_versions`](Self::visit_node_versions);
+    /// the same coverage notes apply.
+    pub fn visit_edge_versions(&self, mut f: impl FnMut(&EdgeVersion)) {
+        for version in self.edge_versions.values() {
+            f(version);
+        }
     }
 
     /// Collect changefeed records for every committed version that falls within the given
@@ -2096,6 +2448,60 @@ impl HistoricalStorage {
         Ok(results)
     }
 
+    /// Batch point-in-time node lookup restricted to a single label
+    /// (Issue #3236).
+    ///
+    /// For each candidate id, resolves the version visible at
+    /// `(valid_time, transaction_time)` and checks the version's recorded
+    /// `label` **before** reconstructing properties, so an off-label
+    /// candidate costs only the version-at-time lookup, never a property
+    /// chain replay. Candidates that are not visible at the coordinate, or
+    /// whose at-time label differs, are simply skipped (no `None`
+    /// placeholders), so the output length may be shorter than the input.
+    /// Output order follows input order.
+    ///
+    /// Like [`get_nodes_at_time`](Self::get_nodes_at_time), a property
+    /// reconstruction failure is a systemic error and propagates as `Err`.
+    pub(crate) fn get_nodes_at_time_with_label(
+        &self,
+        node_ids: &[NodeId],
+        label: InternedString,
+        valid_time: Timestamp,
+        transaction_time: Timestamp,
+    ) -> Result<Vec<Node>> {
+        #[cfg(feature = "observability")]
+        let _span =
+            crate::observability::historical_storage_query_span("get_nodes_at_time_with_label")
+                .entered();
+
+        let mut results = Vec::new();
+
+        for &node_id in node_ids {
+            let Some(version_id) =
+                self.find_node_version_at_time(node_id, valid_time, transaction_time)
+            else {
+                continue;
+            };
+            let version = self
+                .node_versions
+                .get(&version_id)
+                .ok_or(StorageError::VersionNotFound(version_id))?;
+            if version.label != label {
+                continue;
+            }
+            let (matched_node_id, matched_label) = (version.node_id, version.label);
+            let properties = self.reconstruct_node_properties(version_id)?;
+            results.push(Node::new(
+                matched_node_id,
+                matched_label,
+                properties,
+                version_id,
+            ));
+        }
+
+        Ok(results)
+    }
+
     /// Get multiple edges as they existed at a specific point in bi-temporal space.
     ///
     /// This retrieves edges in batch to minimize overhead.
@@ -2193,6 +2599,7 @@ impl HistoricalStorage {
                     label: GLOBAL_INTERNER
                         .resolve_with(version.label, |s| s.to_string())
                         .unwrap_or_else(|| version.label.to_string()),
+                    provenance: version.provenance.as_deref().cloned(),
                 });
             }
         }
@@ -2342,6 +2749,7 @@ impl HistoricalStorage {
                     label: GLOBAL_INTERNER
                         .resolve_with(version.label, |s| s.to_string())
                         .unwrap_or_else(|| version.label.to_string()),
+                    provenance: version.provenance.as_deref().cloned(),
                 });
             }
         }
@@ -2636,6 +3044,54 @@ impl HistoricalStorage {
         }
     }
 
+    /// Calculate the average delta chain length across all version chains (Issue #366).
+    ///
+    /// A delta chain is the run of delta versions that follows an anchor in the
+    /// anchor+delta compression scheme. Every chain starts at exactly one anchor,
+    /// so the chains partition the delta versions among the anchors and the exact
+    /// average chain length is `total deltas / total anchors`, computed over both
+    /// node and edge versions.
+    ///
+    /// The result feeds the query planner's temporal-lookup cost model (via
+    /// [`AletheiaDB::refresh_statistics`](crate::db::AletheiaDB::refresh_statistics)):
+    /// it estimates how many delta versions a point-in-time reconstruction must
+    /// walk back through before reaching an anchor.
+    ///
+    /// # Returns
+    ///
+    /// - The actual average delta chain length when historical data exists.
+    ///   A storage containing only anchors returns `0.0` (every lookup hits an
+    ///   anchor directly).
+    /// - [`DEFAULT_AVG_DELTA_CHAIN`] (5.0) when the storage is empty (no anchors),
+    ///   matching the query planner's default assumption of `anchor_interval = 10`.
+    ///
+    /// # Performance
+    ///
+    /// O(1): reads the incrementally-maintained anchor/delta counters (Issue #212);
+    /// no version scan is performed, so this is safe to call on every statistics
+    /// refresh.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use aletheiadb::storage::historical::HistoricalStorage;
+    /// let storage = HistoricalStorage::new();
+    /// // Empty storage falls back to the default estimate
+    /// assert_eq!(storage.calculate_avg_delta_chain(), 5.0);
+    /// ```
+    #[must_use]
+    pub fn calculate_avg_delta_chain(&self) -> f64 {
+        let total_anchors = self.cached_node_anchor_count + self.cached_edge_anchor_count;
+        if total_anchors == 0 {
+            // No historical data: fall back to the default estimate
+            // (assumes anchor_interval=10, so avg chain length ~5)
+            return DEFAULT_AVG_DELTA_CHAIN;
+        }
+
+        let total_deltas = self.cached_node_delta_count + self.cached_edge_delta_count;
+        total_deltas as f64 / total_anchors as f64
+    }
+
     /// Get cache performance metrics (Improvement #3: Adaptive Cache Sizing).
     ///
     /// Returns granular cache performance metrics that show:
@@ -2876,6 +3332,17 @@ impl HistoricalStorage {
     /// - `prev_version` points to the temporally previous version (earlier tx_time)
     /// - `next_version` points to the temporally next version (later tx_time)
     /// - Version heads point to the version with the latest tx_time
+    ///
+    /// # Persisted state is authoritative (Issue #3387)
+    ///
+    /// Current-format checkpoints persist chain links and tx-time closures
+    /// exactly; only *missing* links are filled and only *open* tx intervals
+    /// are heuristically closed here, so faithful restored state is never
+    /// overwritten. Legacy (pre-#3387) files restore with all links `None`
+    /// and all tx intervals open, and get the full heuristic rebuild exactly
+    /// as before. Preserving restored links also keeps links that point at
+    /// cold-migrated versions absent from the hot map (the heuristic would
+    /// rewire around them).
     pub(crate) fn rebuild_version_chains(&mut self) {
         // === Rebuild node version chains ===
 
@@ -2919,8 +3386,14 @@ impl HistoricalStorage {
                 };
 
                 if let Some(version) = self.node_versions.get_mut(&vid) {
-                    version.prev_version = prev;
-                    version.next_version = next;
+                    // Fill only missing links: restored links are exact
+                    // (Issue #3387) and must not be overwritten.
+                    if version.prev_version.is_none() {
+                        version.prev_version = prev;
+                    }
+                    if version.next_version.is_none() {
+                        version.next_version = next;
+                    }
                 }
             }
 
@@ -3013,8 +3486,14 @@ impl HistoricalStorage {
                 };
 
                 if let Some(version) = self.edge_versions.get_mut(&vid) {
-                    version.prev_version = prev;
-                    version.next_version = next;
+                    // Fill only missing links: restored links are exact
+                    // (Issue #3387) and must not be overwritten.
+                    if version.prev_version.is_none() {
+                        version.prev_version = prev;
+                    }
+                    if version.next_version.is_none() {
+                        version.next_version = next;
+                    }
                 }
             }
 

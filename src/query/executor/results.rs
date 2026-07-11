@@ -38,7 +38,7 @@
 use crate::core::error::Result;
 use crate::core::graph::{Edge, Node};
 use crate::core::id::VersionId;
-use crate::core::property::PropertyMap;
+use crate::core::property::{PropertyMap, PropertyValue};
 use crate::core::temporal::Timestamp;
 use crate::core::{EdgeId, NodeId};
 
@@ -66,7 +66,12 @@ pub enum EntityId {
 }
 
 /// Query result entity (full node or edge).
+///
+/// Marked `#[non_exhaustive]`: downstream crates must include a wildcard arm
+/// when matching, so future variants (like the [`EntityResult::Null`] binding
+/// added for `OPTIONAL MATCH`) are not semver-breaking.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum EntityResult {
     /// Full node data
     Node(Node),
@@ -76,18 +81,30 @@ pub enum EntityResult {
     NodeId(NodeId),
     /// Just an edge ID
     EdgeId(EdgeId),
+    /// A null binding produced by an unmatched `OPTIONAL MATCH` pattern.
+    ///
+    /// Preserves the row (openCypher left-outer semantics) while carrying no
+    /// entity. Predicates evaluated against a null row are not-true except
+    /// `IS NULL`-style checks.
+    Null,
 }
 
 impl EntityResult {
-    /// Get the entity ID
-    #[must_use]
-    pub fn id(&self) -> EntityId {
+    /// Get the entity ID, or `None` for a null binding.
+    pub fn id(&self) -> Option<EntityId> {
         match self {
-            EntityResult::Node(n) => EntityId::Node(n.id),
-            EntityResult::Edge(e) => EntityId::Edge(e.id),
-            EntityResult::NodeId(id) => EntityId::Node(*id),
-            EntityResult::EdgeId(id) => EntityId::Edge(*id),
+            EntityResult::Node(n) => Some(EntityId::Node(n.id)),
+            EntityResult::Edge(e) => Some(EntityId::Edge(e.id)),
+            EntityResult::NodeId(id) => Some(EntityId::Node(*id)),
+            EntityResult::EdgeId(id) => Some(EntityId::Edge(*id)),
+            EntityResult::Null => None,
         }
+    }
+
+    /// Returns `true` if this is a null binding from an unmatched optional pattern.
+    #[must_use]
+    pub fn is_null(&self) -> bool {
+        matches!(self, EntityResult::Null)
     }
 
     /// Try to get as a Node
@@ -148,6 +165,16 @@ pub struct QueryRow {
     pub path: Option<Vec<EntityId>>,
     /// The specific point in bi-temporal history this result represents.
     pub timestamp: Option<Timestamp>,
+    /// Computed output columns for a row that does not correspond to a single
+    /// stored entity -- e.g. the grouped result of a Cypher aggregation
+    /// (`RETURN n.dept, count(*)`). Each entry is an `(column_name, value)`
+    /// pair, in projection order.
+    ///
+    /// `None` for ordinary entity rows (the overwhelming common case), so those
+    /// rows are byte-identical to their pre-aggregation form. When `Some`, the
+    /// row's [`entity`](Self::entity) is typically [`EntityResult::Null`]: the
+    /// meaningful payload lives here.
+    pub columns: Option<Vec<(String, PropertyValue)>>,
 }
 
 impl QueryRow {
@@ -159,6 +186,36 @@ impl QueryRow {
             score: None,
             path: None,
             timestamp: None,
+            columns: None,
+        }
+    }
+
+    /// Create a computed-output row carrying named columns rather than a stored
+    /// entity.
+    ///
+    /// Used by aggregation (`RETURN count(*)`, `RETURN n.dept, count(*)`) where
+    /// the output row is derived from a group of input rows and has no single
+    /// backing node/edge. The row's entity is [`EntityResult::Null`]; consumers
+    /// read the payload from [`QueryRow::columns`].
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// use aletheiadb::query::executor::QueryRow;
+    /// use aletheiadb::core::property::PropertyValue;
+    ///
+    /// let row = QueryRow::from_columns(vec![("count(*)".to_string(), PropertyValue::Int(5))]);
+    /// assert!(row.entity.is_null());
+    /// assert_eq!(row.columns.as_ref().unwrap()[0].1, PropertyValue::Int(5));
+    /// ```
+    #[must_use]
+    pub fn from_columns(columns: Vec<(String, PropertyValue)>) -> Self {
+        QueryRow {
+            entity: EntityResult::Null,
+            score: None,
+            path: None,
+            timestamp: None,
+            columns: Some(columns),
         }
     }
 
@@ -181,6 +238,7 @@ impl QueryRow {
             score: Some(score),
             path: None,
             timestamp: None,
+            columns: None,
         }
     }
 
@@ -192,6 +250,7 @@ impl QueryRow {
             score: None,
             path: Some(path),
             timestamp: None,
+            columns: None,
         }
     }
 
@@ -398,6 +457,14 @@ pub struct QueryResult {
     pub paths: Option<Vec<Path>>,
     /// Version IDs for temporal results
     pub versions: Option<Vec<VersionId>>,
+    /// Computed column rows for aggregation results (`RETURN count(*)`,
+    /// `RETURN n.dept, count(*)`).
+    ///
+    /// `Some` when at least one collected row carried [`QueryRow::columns`];
+    /// each inner vector is one output row's `(column_name, value)` pairs in
+    /// projection order. `None` for ordinary entity result sets, so existing
+    /// consumers are unaffected.
+    pub columns: Option<Vec<Vec<(String, PropertyValue)>>>,
 }
 
 impl QueryResult {
@@ -410,6 +477,7 @@ impl QueryResult {
             scores: None,
             paths: None,
             versions: None,
+            columns: None,
         }
     }
 
@@ -422,6 +490,7 @@ impl QueryResult {
             scores: None,
             paths: None,
             versions: None,
+            columns: None,
         }
     }
 
@@ -646,11 +715,13 @@ impl QueryResults {
         // Determine which fields we have (single pass)
         let (mut has_any_scores, mut has_any_paths, mut has_any_versions, mut has_any_nodes) =
             (false, false, false, false);
+        let mut has_any_columns = false;
         let mut node_count = 0usize;
         for row in &rows {
             has_any_scores = has_any_scores || row.score.is_some();
             has_any_paths = has_any_paths || row.path.is_some();
             has_any_versions = has_any_versions || row.timestamp.is_some();
+            has_any_columns = has_any_columns || row.columns.is_some();
             if row.entity.as_node().is_some() {
                 has_any_nodes = true;
                 node_count += 1;
@@ -680,6 +751,11 @@ impl QueryResults {
         } else {
             None
         };
+        let mut columns = if has_any_columns {
+            Some(Vec::with_capacity(capacity))
+        } else {
+            None
+        };
 
         for row in rows {
             let QueryRow {
@@ -687,7 +763,14 @@ impl QueryResults {
                 score,
                 path,
                 timestamp,
+                columns: row_columns,
             } = row;
+
+            // Extract computed aggregation columns (padding rows without any
+            // with an empty column list to preserve positional alignment).
+            if let Some(ref mut cols) = columns {
+                cols.push(row_columns.unwrap_or_default());
+            }
 
             // ⚡ Bolt Optimization: Consumes the entity directly by value instead of cloning
             // properties map via `as_node().map(|n| n.properties.clone())`. This eliminates
@@ -758,6 +841,7 @@ impl QueryResults {
             scores,
             paths,
             versions,
+            columns,
         })
     }
 }
@@ -852,8 +936,8 @@ mod tests {
         assert_eq!(result.node_id(), None);
 
         match result.id() {
-            EntityId::Edge(id) => assert_eq!(id, edge.id),
-            EntityId::Node(_) => panic!("Expected Edge"),
+            Some(EntityId::Edge(id)) => assert_eq!(id, edge.id),
+            other => panic!("Expected Edge, got {:?}", other),
         }
     }
 
@@ -867,9 +951,20 @@ mod tests {
         assert_eq!(result.node_id(), None);
 
         match result.id() {
-            EntityId::Edge(id) => assert_eq!(id, edge_id),
-            EntityId::Node(_) => panic!("Expected Edge"),
+            Some(EntityId::Edge(id)) => assert_eq!(id, edge_id),
+            other => panic!("Expected Edge, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn test_entity_result_null() {
+        let result = EntityResult::Null;
+
+        assert!(result.is_null());
+        assert!(result.as_node().is_none());
+        assert!(result.as_edge().is_none());
+        assert_eq!(result.node_id(), None);
+        assert_eq!(result.id(), None);
     }
 
     #[test]
@@ -918,8 +1013,8 @@ mod tests {
         let entity = EntityResult::NodeId(node_id);
 
         match entity.id() {
-            EntityId::Node(id) => assert_eq!(id, node_id),
-            EntityId::Edge(_) => panic!("Expected Node"),
+            Some(EntityId::Node(id)) => assert_eq!(id, node_id),
+            other => panic!("Expected Node, got {:?}", other),
         }
     }
 

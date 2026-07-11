@@ -36,6 +36,10 @@ let results = traverse_and_rank(&db, alice_id, "KNOWS", &query_embedding, 10)?;
 let results = find_similar_as_of(&db, &query_embedding, 10, timestamp)?;
 ```
 
+> **Note:** With multiple temporal vector indexes enabled, the property-less
+> `find_similar_as_of()` queries the alphabetically first indexed property;
+> use `db.find_similar_as_of_in("property", ...)` to target a specific one.
+
 **2. Query Builder** (complex compositions)
 ```rust
 let results = db.query()
@@ -461,6 +465,10 @@ Predicate::gt("score", 0.5f64)        // f64
 | Temporal vector search | `find_similar_as_of()` | Direct temporal index access |
 | Complex multi-step | Query Builder | Full optimization pipeline |
 | One-off simple queries | Convenience methods | Balance of simplicity/performance |
+
+Note that with multiple temporal vector indexes enabled, the property-less
+`find_similar_as_of()` targets the alphabetically first indexed property —
+use `find_similar_as_of_in("property", ...)` when you need a specific one.
 
 ### Optimize Your Queries
 
