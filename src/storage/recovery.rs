@@ -277,15 +277,27 @@ pub(crate) fn replay_entries_into_storage_with_constraints(
                 }
 
                 if live_head.is_none() {
-                    // Re-creation after a tombstone/retraction: the closed head
-                    // is superseded in transaction time by
-                    // `add_node_version_with_provenance` itself, which routes
-                    // through `close_previous_version_intervals` and closes the
-                    // current head's tx-time at the new version's tx start
-                    // (== `commit_timestamp`) — so no explicit
-                    // `close_node_version_transaction_time` is needed here
-                    // (Issue #3407; the helper is a superset: same target
-                    // version, plus monotonicity guards).
+                    // Re-creation after a tombstone/retraction: supersede the
+                    // closed head in transaction time (mirroring the
+                    // UpdateNode arm) before appending the new incarnation.
+                    //
+                    // DELIBERATELY KEPT — NOT redundant (Issue #3407). The
+                    // following `add_node_version_with_provenance` also closes
+                    // the prior head via `close_previous_version_intervals`,
+                    // BUT that helper guards the tx-time close with a STRICT
+                    // `new_tx_start > prev_tx_start`. When a delete/retract and
+                    // this re-creation land in the SAME transaction they share
+                    // one framed `commit_timestamp`, so the strict `>` SKIPS the
+                    // close and the tombstone head would be left open — leaving
+                    // two versions with overlapping open tx-intervals after
+                    // replay. The explicit close is UNCONDITIONAL (matching the
+                    // live write path in `api/transaction/write/apply.rs`),
+                    // producing the empty `[T, T)` tx-interval live and replay
+                    // alike. See the reachability test in
+                    // `tests/recovery/replay_update_tests.rs`.
+                    if let Some(prev) = historical_head {
+                        historical.close_node_version_transaction_time(prev, commit_timestamp)?;
+                    }
                     historical.add_node_version_with_provenance(
                         node_id,
                         version_id,
@@ -355,11 +367,13 @@ pub(crate) fn replay_entries_into_storage_with_constraints(
                 }
 
                 if live_head.is_none() {
-                    // Re-creation after a tombstone/retraction: the head's
-                    // tx-time closure happens inside
-                    // `add_edge_version_with_provenance` via
-                    // `close_previous_version_intervals` (Issue #3407) — see
-                    // the CreateNode arm above.
+                    // DELIBERATELY KEPT — NOT redundant (Issue #3407); the
+                    // helper's strict `>` tx-time guard skips the close when a
+                    // same-transaction delete/retract + re-create share one
+                    // framed `commit_timestamp`. See the CreateNode arm above.
+                    if let Some(prev) = historical_head {
+                        historical.close_edge_version_transaction_time(prev, commit_timestamp)?;
+                    }
                     historical.add_edge_version_with_provenance(
                         edge_id,
                         version_id,
@@ -409,13 +423,30 @@ pub(crate) fn replay_entries_into_storage_with_constraints(
                 // makes history reconstruction loop forever (observed
                 // empirically: get_node_history OOMs after a double replay).
                 if historical.get_node_version(version_id).is_none() {
-                    // Appending the successor closes the current head's
-                    // transaction time in `close_previous_version_intervals`
-                    // (reached via `add_node_version_with_provenance`), so an
-                    // explicit `close_node_version_transaction_time` on the
-                    // prior head would be redundant (Issue #3407): the helper
-                    // closes the SAME head (`node_version_heads[node_id]`) at
-                    // the same tx timestamp, and adds monotonicity guards.
+                    // DELIBERATELY KEPT — NOT redundant (Issue #3407). The
+                    // `add_node_version_with_provenance` below ALSO closes the
+                    // prior head via `close_previous_version_intervals`, but
+                    // that helper guards the tx-time close with a STRICT
+                    // `new_tx_start > prev_tx_start`. Two updates to the SAME
+                    // node in ONE transaction share a single framed
+                    // `commit_timestamp`, so the successor's tx start EQUALS the
+                    // intermediate version's tx start and the strict `>` SKIPS
+                    // the close — the intermediate would be left OPEN on replay
+                    // while the live path (unconditional close in
+                    // `api/transaction/write/apply.rs`) closes it to the empty
+                    // `[T, T)` interval. Leaving it open produces two versions
+                    // with overlapping open tx-intervals, so an
+                    // `AS OF SYSTEM_TIME = T` read could surface the superseded
+                    // version. This UNCONDITIONAL close keeps replay bit-for-bit
+                    // consistent with the live write path. Regression coverage:
+                    // `replay_double_update_same_node_in_one_tx_closes_intermediate`.
+                    if let Some(prev_version_id) = historical.get_current_node_version(node_id) {
+                        historical.close_node_version_transaction_time(
+                            prev_version_id,
+                            commit_timestamp,
+                        )?;
+                    }
+
                     historical.add_node_version_with_provenance(
                         node_id,
                         version_id,
@@ -460,10 +491,17 @@ pub(crate) fn replay_entries_into_storage_with_constraints(
                 // UpdateNode arm above for why an already-present version_id
                 // must not be appended to history a second time.
                 if historical.get_edge_version(version_id).is_none() {
-                    // The prior head's tx-time closure is handled inside
-                    // `add_edge_version_with_provenance` via
-                    // `close_previous_version_intervals` (Issue #3407) — see
-                    // the UpdateNode arm above.
+                    // DELIBERATELY KEPT — NOT redundant (Issue #3407); the
+                    // helper's strict `>` tx-time guard skips the close when two
+                    // updates to the same edge in ONE transaction share a framed
+                    // `commit_timestamp`. See the UpdateNode arm above.
+                    if let Some(prev_version_id) = historical.get_current_edge_version(edge_id) {
+                        historical.close_edge_version_transaction_time(
+                            prev_version_id,
+                            commit_timestamp,
+                        )?;
+                    }
+
                     historical.add_edge_version_with_provenance(
                         edge_id,
                         version_id,
@@ -524,14 +562,22 @@ pub(crate) fn replay_entries_into_storage_with_constraints(
                 };
 
                 if let Some((label, properties)) = tombstone_payload {
-                    // The current head's transaction time is closed when the
-                    // tombstone is appended below: `add_node_version` routes
-                    // through `close_previous_version_intervals`, which closes
-                    // the SAME head (`node_version_heads[node_id]`) at the
-                    // tombstone's tx start (== `commit_timestamp`). An explicit
-                    // `close_node_version_transaction_time` here would be
-                    // redundant (Issue #3407; the helper is a superset — same
-                    // target version, plus monotonicity guards).
+                    // DELIBERATELY KEPT — NOT redundant (Issue #3407). The
+                    // tombstone `add_node_version` below also closes the prior
+                    // head via `close_previous_version_intervals`, but that
+                    // helper's STRICT `new_tx_start > prev_tx_start` guard SKIPS
+                    // the tx-time close when an update-then-delete of the same
+                    // node in ONE transaction shares a framed `commit_timestamp`
+                    // — leaving the superseded head open on replay while the
+                    // live path (unconditional close) closes it. This
+                    // UNCONDITIONAL close keeps replay consistent with the live
+                    // write path. See the UpdateNode arm above.
+                    if let Some(current_version_id) = historical_head {
+                        historical.close_node_version_transaction_time(
+                            current_version_id,
+                            commit_timestamp,
+                        )?;
+                    }
 
                     // Honor the LOGGED tombstone version_id (Issue #3406) so the
                     // recovered version chain is bit-identical to the live one
@@ -609,9 +655,17 @@ pub(crate) fn replay_entries_into_storage_with_constraints(
                 };
 
                 if let Some((label, source, target, properties)) = tombstone_payload {
-                    // The current head's tx-time closure happens inside
-                    // `add_edge_version` via `close_previous_version_intervals`
-                    // (Issue #3407) — see the DeleteNode arm above.
+                    // DELIBERATELY KEPT — NOT redundant (Issue #3407); the
+                    // helper's strict `>` tx-time guard skips the close when an
+                    // update-then-delete of the same edge in ONE transaction
+                    // shares a framed `commit_timestamp`. See the DeleteNode /
+                    // UpdateNode arms above.
+                    if let Some(current_version_id) = historical_head {
+                        historical.close_edge_version_transaction_time(
+                            current_version_id,
+                            commit_timestamp,
+                        )?;
+                    }
 
                     // Honor the LOGGED tombstone version_id (Issue #3406); see
                     // the DeleteNode arm above for rationale and the synthesis
@@ -697,17 +751,28 @@ pub(crate) fn replay_entries_into_storage_with_constraints(
                         .map(|v| v.temporal.valid_time().start())
                         .unwrap_or(commit_timestamp);
 
-                    // Step (a) — closing the head version's TRANSACTION time —
-                    // is performed by `add_retracted_node_version` below, which
-                    // routes through `close_previous_version_intervals`: it
-                    // closes the SAME head (`node_version_heads[node_id]`) at
-                    // the retraction's tx start (== `commit_timestamp`) while
-                    // leaving the head's valid interval untouched (the helper's
-                    // valid-time guard is `new start > prev start`, and the
-                    // retraction reuses the head's `valid_from`, so it is not
-                    // rewritten — append-only preserved). An explicit
-                    // `close_node_version_transaction_time` here would be
-                    // redundant (Issue #3407).
+                    // Step (a): close the head version's TRANSACTION time (its
+                    // valid interval stays untouched — append-only).
+                    //
+                    // DELIBERATELY KEPT — NOT redundant (Issue #3407). The
+                    // `add_retracted_node_version` below also closes the prior
+                    // head via `close_previous_version_intervals`, but that
+                    // helper's tx-time close is guarded by a STRICT
+                    // `new_tx_start > prev_tx_start`. An update-then-retract of
+                    // the same node in ONE transaction shares a framed
+                    // `commit_timestamp`, so the strict `>` SKIPS the close and
+                    // the superseded head would be left open on replay — while
+                    // the live path (unconditional close) closes it. This
+                    // UNCONDITIONAL close keeps replay consistent with live. (The
+                    // helper additionally leaves the head's valid interval
+                    // untouched here, since the retraction reuses the head's
+                    // `valid_from`.) See the UpdateNode arm above.
+                    if let Some(current_version_id) = head_version_id {
+                        historical.close_node_version_transaction_time(
+                            current_version_id,
+                            commit_timestamp,
+                        )?;
+                    }
 
                     // Honor the LOGGED retraction version_id (Issue #3406); see
                     // the DeleteNode arm for rationale and the pre-v9 synthesis
@@ -783,10 +848,18 @@ pub(crate) fn replay_entries_into_storage_with_constraints(
                         .map(|v| v.temporal.valid_time().start())
                         .unwrap_or(commit_timestamp);
 
-                    // The head version's tx-time closure (step (a)) is handled
-                    // inside `add_retracted_edge_version` via
-                    // `close_previous_version_intervals` (Issue #3407) — see
-                    // the RetractNode arm above.
+                    // Step (a): close the head version's TRANSACTION time.
+                    // DELIBERATELY KEPT — NOT redundant (Issue #3407); the
+                    // helper's strict `>` tx-time guard skips the close when an
+                    // update-then-retract of the same edge in ONE transaction
+                    // shares a framed `commit_timestamp`. See the RetractNode /
+                    // UpdateNode arms above.
+                    if let Some(current_version_id) = head_version_id {
+                        historical.close_edge_version_transaction_time(
+                            current_version_id,
+                            commit_timestamp,
+                        )?;
+                    }
 
                     // Honor the LOGGED retraction version_id (Issue #3406); see
                     // the DeleteNode arm for rationale and the pre-v9 synthesis
@@ -1624,6 +1697,57 @@ mod tests {
         assert!(
             historical
                 .get_edge_at_time(edge_id, valid_to, time::now())
+                .is_err()
+        );
+
+        // Append-only AS OF SYSTEM_TIME contract, post-replay — symmetric with
+        // the RetractNode twin (Issue #3407 review gap): the PRE-retraction
+        // head must still carry an OPEN valid interval with its TRANSACTION
+        // time closed at the LOGGED RetractEdge entry timestamp (never the
+        // replay time, never rewriting the pre-retraction record). This pins
+        // the `close_edge_version_transaction_time` call in the RetractEdge
+        // replay arm — the one Issue #3407 initially proposed removing.
+        let entries = wal.read_from(LSN::initial()).unwrap();
+        let logged_retract_ts = entries
+            .iter()
+            .find(|e| matches!(e.operation, WalOperation::RetractEdge { .. }))
+            .expect("RetractEdge entry must be in the WAL")
+            .timestamp;
+        let logged_create_ts = entries
+            .iter()
+            .find(|e| matches!(e.operation, WalOperation::CreateEdge { .. }))
+            .expect("CreateEdge entry must be in the WAL")
+            .timestamp;
+
+        let history = historical.get_edge_history(edge_id).unwrap();
+        assert_eq!(history.version_count(), 2, "create + retraction versions");
+        let pre_retraction_head = &history.versions[0];
+        assert!(
+            pre_retraction_head.temporal.valid_time().is_current(),
+            "pre-retraction edge head's valid interval must stay open-ended after replay"
+        );
+        assert!(
+            !pre_retraction_head.temporal.transaction_time().is_current(),
+            "pre-retraction edge head's transaction time must be closed after replay"
+        );
+        assert_eq!(
+            pre_retraction_head.temporal.transaction_time().end(),
+            logged_retract_ts,
+            "edge transaction time must close at the LOGGED entry timestamp, not the replay time"
+        );
+
+        // Anchoring AS OF SYSTEM_TIME before the retraction's logged commit
+        // shows the edge open-ended; anchoring at the retraction's commit does
+        // not.
+        assert!(
+            historical
+                .get_edge_at_time(edge_id, time::now(), logged_create_ts)
+                .is_ok(),
+            "AS OF SYSTEM_TIME before the retraction must show the edge open-ended"
+        );
+        assert!(
+            historical
+                .get_edge_at_time(edge_id, time::now(), logged_retract_ts)
                 .is_err()
         );
     }
