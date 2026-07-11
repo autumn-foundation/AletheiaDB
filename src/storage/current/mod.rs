@@ -2099,16 +2099,43 @@ impl CurrentStorage {
         limit: usize,
         label: Option<crate::core::interning::InternedString>,
     ) -> Vec<NodeId> {
+        self.collect_node_id_page_counted(after, limit, label).0
+    }
+
+    /// Like [`Self::collect_node_id_page`], but also returns the number of live
+    /// candidate ids **examined** while building the page.
+    ///
+    /// The examined count is the full per-page enumeration cost -- every id
+    /// yielded by `iter_node_ids` / `filter_nodes_by_label` that the selector
+    /// inspected, not just the (at most) `limit` ids retained. The chunked full
+    /// scan (Issue #3422) uses this as its honest work proxy: because each page
+    /// re-enumerates the whole live key set to find the next `limit` smallest
+    /// ids, the real cost of a full paged scan is `live * pages`, not `live`.
+    /// Counting only the retained ids would understate paged cost by a factor of
+    /// `pages` and make a multi-page scan look artificially cheap.
+    pub(crate) fn collect_node_id_page_counted(
+        &self,
+        after: Option<u64>,
+        limit: usize,
+        label: Option<crate::core::interning::InternedString>,
+    ) -> (Vec<NodeId>, u64) {
         if limit == 0 {
-            return Vec::new();
+            return (Vec::new(), 0);
         }
 
         // Bounded max-heap keeping the `limit` smallest ids seen so far that are
-        // strictly greater than `after`. The heap's max is the current
-        // page boundary; a smaller candidate evicts it.
+        // strictly greater than `after`. The heap's max is the current page
+        // boundary; a smaller candidate evicts it. The heap never exceeds
+        // `limit` (it pops before pushing once full), so `with_capacity(limit)`
+        // is exact and avoids the `limit + 1` overflow risk when `limit` is at
+        // the top of `usize`'s range.
+        let mut examined: u64 = 0;
         let mut heap: std::collections::BinaryHeap<u64> =
-            std::collections::BinaryHeap::with_capacity(limit + 1);
+            std::collections::BinaryHeap::with_capacity(limit);
         let mut consider = |id: NodeId| {
+            // Count every candidate the enumeration inspected: this is the
+            // per-page scan cost the paged strategy pays.
+            examined += 1;
             let value = id.as_u64();
             if let Some(a) = after
                 && value <= a
@@ -2139,10 +2166,12 @@ impl CurrentStorage {
         }
 
         // `into_sorted_vec` on a max-heap yields ascending order.
-        heap.into_sorted_vec()
+        let page = heap
+            .into_sorted_vec()
             .into_iter()
             .filter_map(|value| NodeId::new(value).ok())
-            .collect()
+            .collect();
+        (page, examined)
     }
 
     /// Get nodes by label.

@@ -153,11 +153,15 @@ enum ScanFilter {
 ///   rather than O(max_id), while resident memory stays O(K) -- it never
 ///   materializes the whole id set (the OOM vector PR #3418 removed).
 ///
-/// The sparse/paged path is chosen only when it does strictly less work than
-/// the sweep (`live * ceil(live/K) < max_id`) and the live count is bounded, so
-/// dense graphs never regress and a once-huge-now-tiny graph (e.g. 1B ids ever
-/// allocated, 1K now live) recovers O(live) full-scan time instead of sweeping
-/// ~1B dead ids. Node ids are monotonic and never reused, so `max_id` is the
+/// The sparse/paged path is chosen only when it does **comfortably** less work
+/// than the sweep -- at least 2x less (`2 * live * ceil(live/K) < max_id`) --
+/// and the live count is bounded, so dense *and near-dense* graphs never regress
+/// (a graph with only a few deletion gaps stays on the sweep rather than paying
+/// a heap-sort to dodge them), while a once-huge-now-tiny graph (e.g. 1B ids
+/// ever allocated, 1K now live) recovers O(live) full-scan time instead of
+/// sweeping ~1B dead ids. A fully bulk-deleted graph (0 live, huge `max_id`) is
+/// special-cased to an O(1) exhausted scan rather than an O(max_id) sweep of all
+/// dead ids. Node ids are monotonic and never reused, so `max_id` is the
 /// high-water mark of ids ever allocated, not the live count -- which is
 /// exactly why the naive sweep degraded.
 ///
@@ -193,10 +197,14 @@ pub struct NodeScanIterator {
     page_size: usize,
     /// Instrumentation: number of candidate ids examined so far. In the sweep
     /// path this counts every id in `[0, max_id)` visited (including dead ids
-    /// skipped by the header fast paths); in the paged path it counts only the
-    /// live ids materialized across pages. It is the test/bench proxy for scan
-    /// work, exposed via [`Self::work_units`], and lets a test assert that a
-    /// full scan's cost tracks the live node count rather than `max_id`.
+    /// skipped by the header fast paths). In the paged path it counts every live
+    /// candidate the per-page enumeration inspected across all pages -- i.e. the
+    /// real `live * pages` re-scan cost, **not** just the live ids materialized
+    /// (a single page examines `live` candidates to retain up to `K`, so
+    /// counting only retained ids would understate a multi-page scan by a factor
+    /// of `pages`). It is the test/bench proxy for scan work, exposed via
+    /// [`Self::work_units`], and lets a test assert that a full scan's cost
+    /// tracks the live node count rather than `max_id`.
     work_units: u64,
 }
 
@@ -328,6 +336,19 @@ impl NodeScanIterator {
 
     /// Pick sweep vs paged from O(1) counters (Issue #3422).
     fn choose_mode(live: u64, max_id: u64, page_size: usize) -> ScanMode {
+        // Zero live nodes with a non-trivial id high-water mark is the exact
+        // pathology this PR targets: e.g. a fully bulk-deleted graph where
+        // `node_count() == 0` but `max_id` is still the (possibly huge)
+        // high-water mark of ids ever allocated. A `[0, max_id)` sweep would
+        // examine every dead id just to yield nothing -- O(max_id). Start in an
+        // already-exhausted paged mode so the scan does O(1) work instead.
+        if live == 0 {
+            return ScanMode::Paged {
+                buffer: Vec::new().into_iter(),
+                cursor: None,
+                exhausted: true,
+            };
+        }
         if Self::prefer_paged(live, max_id, page_size) {
             Self::new_paged_mode()
         } else {
@@ -343,9 +364,20 @@ impl NodeScanIterator {
     /// The sweep probes `max_id` ids. The paged strategy re-scans the live
     /// header set once per page, so it costs about `live * ceil(live / K)`
     /// header reads across `ceil(live / K)` pages. Prefer paging only when that
-    /// is strictly cheaper than the sweep and the live count is bounded (so a
-    /// huge-live graph -- where the sweep is already ~O(live) and memory-flat --
-    /// never pays the quadratic re-scan).
+    /// paged cost is comfortably cheaper than the sweep -- specifically at least
+    /// **2x** cheaper (`2 * paged_cost < max_id`) and the live count is bounded.
+    ///
+    /// The 2x margin is deliberate: without it, a *near-dense* graph (say
+    /// `live == max_id - few`, a handful of deletion gaps) would page purely to
+    /// dodge a few cheap gap-skips, paying a heap-sort and per-page re-scan for
+    /// no real win -- contradicting the "strictly less work" intent. Requiring a
+    /// clear margin keeps dense and near-dense graphs on the memory-flat sweep
+    /// and reserves paging for genuinely sparse id spaces (a once-huge-now-tiny
+    /// graph), where it recovers O(live) time. The live bound additionally keeps
+    /// a huge-live graph -- where the sweep is already ~O(live) and memory-flat
+    /// -- off the quadratic re-scan. (`live == 0` is handled earlier in
+    /// [`Self::choose_mode`] as an O(1) exhausted scan, so it never reaches
+    /// here.)
     fn prefer_paged(live: u64, max_id: u64, page_size: usize) -> bool {
         if live == 0 || live > MAX_PAGED_LIVE_NODES {
             return false;
@@ -353,7 +385,8 @@ impl NodeScanIterator {
         let k = page_size.max(1) as u128;
         let pages = (live as u128).div_ceil(k);
         let paged_cost = (live as u128).saturating_mul(pages);
-        paged_cost < max_id as u128
+        // Require paged to be at least 2x cheaper than the sweep (see above).
+        paged_cost.saturating_mul(2) < max_id as u128
     }
 
     /// Total candidate ids examined so far (see the [`work_units`] field docs).
@@ -368,6 +401,11 @@ impl NodeScanIterator {
 
     /// Collect one page of live node ids honoring the active label filter.
     ///
+    /// Returns the page plus the number of live candidates the enumeration
+    /// **examined** to build it (the per-page re-scan cost, `~live`), which the
+    /// caller folds into `work_units` so the paged work proxy reflects the true
+    /// `live * pages` cost rather than only the materialized ids.
+    ///
     /// Static (no `self`) so the caller can borrow `current`/`filter`
     /// immutably alongside a mutable borrow of `self.mode` (disjoint fields).
     fn collect_page(
@@ -375,11 +413,13 @@ impl NodeScanIterator {
         filter: &ScanFilter,
         after: Option<u64>,
         k: usize,
-    ) -> Vec<NodeId> {
+    ) -> (Vec<NodeId>, u64) {
         match filter {
-            ScanFilter::All => current.collect_node_id_page(after, k, None),
-            ScanFilter::Label(label_id) => current.collect_node_id_page(after, k, Some(*label_id)),
-            ScanFilter::None => Vec::new(),
+            ScanFilter::All => current.collect_node_id_page_counted(after, k, None),
+            ScanFilter::Label(label_id) => {
+                current.collect_node_id_page_counted(after, k, Some(*label_id))
+            }
+            ScanFilter::None => (Vec::new(), 0),
         }
     }
 
@@ -400,7 +440,11 @@ impl NodeScanIterator {
 
         let k = self.page_size;
         // Disjoint borrows: `current`/`filter` immutable, `mode` untouched here.
-        let page = Self::collect_page(&self.current, &self.filter, after, k);
+        let (page, examined) = Self::collect_page(&self.current, &self.filter, after, k);
+        // The per-page enumeration examined `examined` live candidates; that is
+        // the real cost this page paid, so fold it into the work proxy here (at
+        // page granularity) rather than per yielded id.
+        self.work_units += examined;
 
         match &mut self.mode {
             ScanMode::Paged {
@@ -491,7 +535,9 @@ impl NodeScanIterator {
                 }
             };
 
-            self.work_units += 1;
+            // Note: work is accounted per-page in `refill_page` (the enumeration
+            // cost), not per yielded id, so the paged work proxy reflects the
+            // true `live * pages` re-scan cost. Do not increment here.
 
             let id = match NodeId::new(id_val) {
                 Ok(id) => id,

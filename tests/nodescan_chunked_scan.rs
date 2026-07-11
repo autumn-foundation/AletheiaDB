@@ -292,3 +292,86 @@ fn empty_graph_yields_nothing() {
     ));
     assert!(paged.is_empty());
 }
+
+/// A **fully bulk-deleted** graph (every node created then deleted) keeps a
+/// large `max_id` high-water mark but zero live nodes. The auto strategy must
+/// not fall back to an O(max_id) sweep of all the dead ids just to yield
+/// nothing -- it must do O(1) work.
+///
+/// This is distinct from [`empty_graph_yields_nothing`]: there `max_id == 0`,
+/// so a sweep is already trivial. Here `max_id == TOTAL` while `node_count ==
+/// 0`, which is exactly the pathology Issue #3422 targets. On the buggy
+/// `prefer_paged` (returning `false` on `live == 0`, then sweeping) the scan
+/// examines all `TOTAL` dead ids (`work_units == TOTAL`); this assertion FAILS.
+/// After the fix (an O(1) exhausted paged scan) `work_units == 0`.
+#[test]
+fn all_deleted_graph_does_o1_work_not_maxid_sweep() {
+    const TOTAL: u64 = 5_000;
+    // Create all TOTAL nodes, then delete every one (keep = empty).
+    let current = sparse_graph(TOTAL, &[]);
+
+    assert_eq!(current.node_count(), 0, "all nodes deleted -> zero live");
+    assert_eq!(
+        current.get_max_node_id(),
+        TOTAL,
+        "max_id stays at the high-water mark after bulk delete"
+    );
+
+    let mut iter = NodeScanIterator::new(None, Arc::clone(&current));
+    let mut yielded = 0u64;
+    while let Some(r) = iter.next() {
+        r.expect("scan row");
+        yielded += 1;
+    }
+    assert_eq!(yielded, 0, "fully-deleted graph yields no rows");
+
+    // The headline property: work is proportional to the LIVE count (0), not to
+    // `max_id` (TOTAL). A sweep would examine every dead id -> work_units==TOTAL.
+    assert!(
+        iter.work_units() < TOTAL,
+        "fully-deleted full scan examined {} candidates (max_id={}); \
+         expected O(1) work, not an O(max_id) sweep of dead ids",
+        iter.work_units(),
+        TOTAL,
+    );
+    // Concretely, the O(1) exhausted paged path does zero enumeration work.
+    assert_eq!(
+        iter.work_units(),
+        0,
+        "an all-deleted scan should examine zero candidates"
+    );
+}
+
+/// Forced paging with the smallest possible page size (`K == 1`, one live id
+/// per page) must stay duplicate-free, gap-free, and ascending across the many
+/// resulting pages -- the tightest multi-page stress of the keyset cursor.
+#[test]
+fn forced_paged_page_size_one_is_dup_and_gap_free() {
+    const TOTAL: u64 = 100;
+    let keep = [2u64, 3, 5, 7, 50, 99];
+    let current = sparse_graph(TOTAL, &keep);
+
+    let mut iter = NodeScanIterator::with_strategy(
+        None,
+        Arc::clone(&current),
+        ScanStrategy::ForcePaged,
+        1, // one id per page -> one page per live node
+    );
+
+    let mut seen: Vec<u64> = Vec::new();
+    while let Some(r) = iter.next() {
+        let row = r.expect("row");
+        seen.push(row.entity.as_node().expect("node").id.as_u64());
+    }
+
+    // No duplicates across single-id pages.
+    let unique: BTreeSet<u64> = seen.iter().copied().collect();
+    assert_eq!(unique.len(), seen.len(), "no duplicate ids across pages");
+    // Exactly the live set.
+    let expected: BTreeSet<u64> = keep.iter().copied().collect();
+    assert_eq!(unique, expected, "every live node exactly once");
+    // Ascending order preserved across pages (keyset paging invariant).
+    let mut sorted = seen.clone();
+    sorted.sort_unstable();
+    assert_eq!(seen, sorted, "ids yielded in ascending id order");
+}

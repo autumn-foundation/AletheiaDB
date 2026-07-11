@@ -10,8 +10,13 @@
 //!   demonstrates the chunked-iteration recovery to O(live).
 //!
 //! Alongside the wall-clock timings, each run prints the `work_units` proxy
-//! (candidate ids examined) for sweep vs paged, which is the count-based proxy
-//! the issue calls for: sweep == `max_id`, paged ~= live.
+//! for sweep vs paged. This proxy counts **candidate ids examined**: for the
+//! sweep it is `max_id` (every id in `[0, max_id)` is probed); for the paged
+//! strategy it is the honest `live * pages` per-page re-enumeration cost, NOT
+//! merely the live ids materialized. The single-page sparse case (1 page) has
+//! `paged_work == live`; the multi-page case (`live > K`) exposes the
+//! `* pages` factor, which is why it is included -- a single-page-only proxy
+//! would understate paged cost and read as an artificial "~live" win.
 
 use std::hint::black_box;
 use std::sync::Arc;
@@ -74,19 +79,23 @@ fn bench_dense_full_scan(c: &mut Criterion) {
     group.finish();
 }
 
-fn bench_sparse_full_scan(c: &mut Criterion) {
-    let mut group = c.benchmark_group("node_scan/sparse");
-
-    // ~1M ids ever allocated, keep every 10_000th -> ~100 live nodes: the
-    // once-huge-now-tiny profile the issue targets.
-    let total = 1_000_000u64;
-    let stride = 10_000u64;
+/// Print the one-off honest work-unit proxy for a sparse graph and register the
+/// sweep/paged/auto wall-clock benches under `group`.
+///
+/// `pages_hint` is the expected number of paged re-enumerations
+/// (`ceil(live / K)`); the multi-page case (`pages_hint > 1`) is what makes the
+/// honest `paged_work == live * pages` factor visible -- a single-page case
+/// alone would read as `paged_work == live` and hide the per-page re-scan cost.
+fn sparse_case(c: &mut Criterion, name: &str, total: u64, stride: u64) {
+    let mut group = c.benchmark_group(format!("node_scan/sparse/{name}"));
     let current = sparse_graph(total, stride);
 
     let live = current.node_count() as u64;
     let max_id = current.get_max_node_id();
+    let pages = live.div_ceil(PAGE_SIZE as u64).max(1);
 
-    // One-off count proxy: sweep examines max_id ids; paged examines ~live.
+    // One-off count proxy: sweep examines max_id ids; paged examines the honest
+    // per-page enumeration cost live * pages (NOT just the live ids retained).
     let (sweep_rows, sweep_work) = drain(NodeScanIterator::with_strategy(
         None,
         Arc::clone(&current),
@@ -100,10 +109,11 @@ fn bench_sparse_full_scan(c: &mut Criterion) {
         PAGE_SIZE,
     ));
     eprintln!(
-        "[node_scan/sparse] live={live} max_id={max_id} | \
+        "[node_scan/sparse/{name}] live={live} max_id={max_id} pages~={pages} | \
          sweep: rows={sweep_rows} work_units={sweep_work} | \
-         paged: rows={paged_rows} work_units={paged_work} | \
+         paged: rows={paged_rows} work_units={paged_work} (== live*pages = {}) | \
          work reduction ~{}x",
+        live.saturating_mul(pages),
         sweep_work / paged_work.max(1),
     );
     assert_eq!(
@@ -141,6 +151,17 @@ fn bench_sparse_full_scan(c: &mut Criterion) {
     });
 
     group.finish();
+}
+
+fn bench_sparse_full_scan(c: &mut Criterion) {
+    // Single-page: ~1M ids ever allocated, keep every 10_000th -> ~100 live
+    // nodes (1 page). The once-huge-now-tiny profile the issue targets.
+    sparse_case(c, "single_page", 1_000_000, 10_000);
+
+    // Multi-page: ~1M ids ever allocated, keep every 100th -> ~10_000 live
+    // nodes, which at K=4096 spans ceil(10000/4096) = 3 pages. This stresses the
+    // honest work proxy: paged_work == live * 3, not live.
+    sparse_case(c, "multi_page", 1_000_000, 100);
 }
 
 criterion_group!(benches, bench_dense_full_scan, bench_sparse_full_scan);
