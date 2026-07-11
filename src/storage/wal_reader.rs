@@ -4,10 +4,12 @@
 //! from disk for recovery purposes.
 
 use std::path::Path;
+use std::sync::Arc;
 
 use super::wal::segment_reader;
 use super::wal::{LSN, WalEntry};
 use crate::core::error::Result;
+use crate::encryption::cipher::Cipher;
 
 /// Read WAL entries from a directory, starting from the specified LSN.
 ///
@@ -40,5 +42,30 @@ pub fn read_wal_entries_with_options(
     start_lsn: LSN,
     tolerate_torn_tail: bool,
 ) -> Result<Vec<WalEntry>> {
-    segment_reader::read_entries_from_dir_with_options(wal_dir, start_lsn, None, tolerate_torn_tail)
+    read_wal_entries_with_cipher_and_options(wal_dir, start_lsn, None, tolerate_torn_tail)
+}
+
+/// Read WAL entries from a directory, decrypting encrypted segments with the
+/// supplied `cipher`, and honoring the crash-torn-tail recovery policy.
+///
+/// This is the cipher-aware counterpart to [`read_wal_entries_with_options`].
+/// Recovery replay for an encryption-at-rest database MUST route through here
+/// with the configured WAL cipher: encrypted segments (versions 2/4/6/8/10)
+/// cannot be decoded without it, so a cipher-less replay of an encrypted WAL
+/// tail hard-errors (`Cannot read encrypted WAL segment ... without a cipher`)
+/// and would otherwise brick startup after a crash that left acknowledged
+/// writes in the WAL past the last index snapshot. Passing `None` reproduces
+/// the plaintext behavior exactly.
+pub fn read_wal_entries_with_cipher_and_options(
+    wal_dir: &Path,
+    start_lsn: LSN,
+    cipher: Option<&Arc<dyn Cipher>>,
+    tolerate_torn_tail: bool,
+) -> Result<Vec<WalEntry>> {
+    segment_reader::read_entries_from_dir_with_options(
+        wal_dir,
+        start_lsn,
+        cipher,
+        tolerate_torn_tail,
+    )
 }
