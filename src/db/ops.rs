@@ -816,16 +816,28 @@ impl AletheiaDB {
     /// Returns [`StorageError::NodeNotFound`](crate::storage::StorageError::NodeNotFound)
     /// if the node does not exist in the current state, so callers never receive
     /// a misleading zero count for a missing node.
+    ///
+    /// # Self-loops count once (Issue #3416)
+    ///
+    /// A self-loop edge (`n -> n`) appears in BOTH the outgoing and incoming
+    /// adjacency lists. This counts **distinct** edge ids, so a self-loop is
+    /// one connected edge, converging with `retract_node` / `retract_node_detach`
+    /// and `apply_batch`'s in-batch delete (all DISTINCT-count) so the #3209
+    /// `details.connected_edges` refusal count means the same thing everywhere.
+    /// A naive `out_degree + in_degree` would double-count a self-loop as 2.
     #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
     pub fn count_connected_edges(&self, node_id: NodeId) -> Result<usize> {
         // Verify the node exists first; an absent node should error rather than
         // silently report zero connected edges.
         let _ = self.current.get_node_label(node_id)?;
-        // Use degree counters rather than materializing edge-id vectors: this
-        // avoids allocations for high-degree nodes.
-        let outgoing = self.current.out_degree(node_id);
-        let incoming = self.current.in_degree(node_id);
-        Ok(outgoing + incoming)
+        // Materialize + dedup edge ids (rather than summing degree counters) so
+        // a self-loop is counted once — the DISTINCT semantics the retract and
+        // apply_batch cascade paths already use.
+        let mut edge_ids = self.current.get_outgoing_edges(node_id);
+        edge_ids.extend(self.current.get_incoming_edges(node_id));
+        edge_ids.sort_unstable();
+        edge_ids.dedup();
+        Ok(edge_ids.len())
     }
 
     /// Get the number of nodes in the current state.

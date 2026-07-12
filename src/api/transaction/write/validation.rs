@@ -69,8 +69,37 @@ pub(crate) fn validate_valid_from_not_before_creation(
 pub(crate) fn validate(tx: &WriteTransaction) -> Result<()> {
     for write in tx.buffer.operations() {
         match write {
-            crate::api::transaction::BufferedWrite::CreateEdge { source, target, .. }
-            | crate::api::transaction::BufferedWrite::UpdateEdge { source, target, .. } => {
+            crate::api::transaction::BufferedWrite::CreateEdge {
+                edge_id,
+                source,
+                target,
+                ..
+            }
+            | crate::api::transaction::BufferedWrite::UpdateEdge {
+                edge_id,
+                source,
+                target,
+                ..
+            } => {
+                // Skip an edge that is created/updated and then deleted or
+                // retracted within THIS SAME transaction (Issue #3416 Pt4): it
+                // has no net referential-integrity requirement because it will
+                // not exist in the committed state. This is what makes a same-tx
+                // create_node → create_edge → delete_node_cascade valid — the
+                // cascade buffers a DeleteEdge for the same-tx edge, so its
+                // source/target node being concurrently deleted is not an
+                // orphan. Without this skip, `get_node_write` would resolve the
+                // victim to its later DeleteNode and spuriously reject the edge.
+                if matches!(
+                    tx.buffer.get_edge_write(*edge_id),
+                    Some(
+                        crate::api::transaction::BufferedWrite::DeleteEdge { .. }
+                            | crate::api::transaction::BufferedWrite::RetractEdge { .. }
+                    )
+                ) {
+                    continue;
+                }
+
                 // Check that source and target nodes exist
                 // They might exist in current storage or be created in this transaction
                 let node_exists = |node_id: &crate::core::NodeId| -> bool {
