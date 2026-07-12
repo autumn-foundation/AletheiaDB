@@ -52,6 +52,7 @@
 
 use std::path::Path;
 
+#[cfg(feature = "serde")]
 use serde::Serialize;
 
 use crate::core::error::{Error, Result};
@@ -77,7 +78,8 @@ pub enum PitrTarget {
 
 /// A bi-coordinate (LSN + transaction time) describing a PITR stop point or a
 /// window bound. Serde-serializable for `--dry-run` JSON output.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(Serialize))]
 pub struct PitrCoord {
     /// The WAL LSN of the coordinate.
     pub lsn: u64,
@@ -108,7 +110,8 @@ impl PitrCoord {
 /// The plan a `--dry-run` PITR inspection produces without materializing or
 /// opening anything: the achievable window plus, for a given target, the
 /// resolved stop coordinate and applied/discarded transaction counts.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(Serialize))]
 pub struct PitrPlan {
     /// The earliest reachable coordinate (the base backup). PITR cannot stop
     /// before this.

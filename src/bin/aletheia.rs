@@ -191,12 +191,23 @@ fn handle_restore(args: Vec<String>) -> Result<(), String> {
     }
 
     if dry_run {
-        let plan = AletheiaDB::inspect_pitr(albk, &wal_archive, target)
-            .map_err(|e| format!("dry-run failed: {e}"))?;
-        let rendered = serde_json::to_string(&plan)
-            .map_err(|e| format!("failed to render JSON output: {e}"))?;
-        println!("{rendered}");
-        return Ok(());
+        #[cfg(feature = "serde")]
+        {
+            let plan = AletheiaDB::inspect_pitr(albk, &wal_archive, target)
+                .map_err(|e| format!("dry-run failed: {e}"))?;
+            let rendered = serde_json::to_string(&plan)
+                .map_err(|e| format!("failed to render JSON output: {e}"))?;
+            println!("{rendered}");
+            return Ok(());
+        }
+        #[cfg(not(feature = "serde"))]
+        {
+            let _ = (albk, &wal_archive, target);
+            return Err(
+                "`--dry-run` JSON output requires the `serde` feature (rebuild with --features serde)"
+                    .to_string(),
+            );
+        }
     }
 
     let data_dir = required_data_dir()?;

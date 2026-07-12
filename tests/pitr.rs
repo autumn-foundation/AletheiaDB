@@ -688,6 +688,7 @@ fn cli_pitr_restore_reopens_with_target_state() {
 
 #[test]
 #[serial]
+#[cfg(feature = "serde")]
 fn cli_pitr_dry_run_prints_plan_json() {
     let s = build_scenario(1, 4);
     let bin = env!("CARGO_BIN_EXE_aletheia");
