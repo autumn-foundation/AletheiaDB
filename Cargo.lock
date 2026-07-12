@@ -104,6 +104,7 @@ dependencies = [
  "embed_anything",
  "hkdf",
  "lazy_static",
+ "libc",
  "loom",
  "memmap2",
  "metrics",
