@@ -10,7 +10,7 @@
 //! ```text
 //! statement    := [temporal] match_stmt
 //! match_stmt   := [OPTIONAL] MATCH pattern_list [where_clause] [temporal] with_clauses return_clause
-//! with_clauses := (WITH return_items [WHERE expr])*
+//! with_clauses := (WITH [DISTINCT] return_items [order_by] [SKIP n] [LIMIT n] [WHERE expr])*
 //! pattern_list := pattern (',' pattern)*
 //! pattern      := node_pattern (rel_pattern node_pattern)*
 //! node_pattern := '(' [var] [':' label]* ['{' props '}'] ')'
@@ -832,12 +832,37 @@ impl CypherParser {
     /// Parse a single `WITH` clause.
     ///
     /// ```text
-    /// with_clause := WITH return_items [WHERE expr]
+    /// with_clause := WITH [DISTINCT] return_items [order_by] [SKIP n] [LIMIT n] [WHERE expr]
     /// ```
+    ///
+    /// The body mirrors a `RETURN` body (`DISTINCT`, items, `ORDER BY`, `SKIP`,
+    /// `LIMIT`); per openCypher a trailing `WHERE` filters the *projected* rows
+    /// and therefore comes after the ordering/pagination sub-clauses (Issue
+    /// #556).
     fn parse_with(&mut self) -> Result<CypherWith, CypherError> {
         self.expect(TokenKind::With)?;
 
+        let distinct = self.eat(TokenKind::Distinct);
+
         let items = self.parse_return_items()?;
+
+        let order_by = if self.at(TokenKind::Order) {
+            self.parse_order_by()?
+        } else {
+            Vec::new()
+        };
+
+        let skip = if self.eat(TokenKind::Skip) {
+            Some(self.parse_usize("expected integer after SKIP")?)
+        } else {
+            None
+        };
+
+        let limit = if self.eat(TokenKind::Limit) {
+            Some(self.parse_usize("expected integer after LIMIT")?)
+        } else {
+            None
+        };
 
         let where_clause = if self.at(TokenKind::Where) {
             Some(self.parse_where()?)
@@ -846,7 +871,11 @@ impl CypherParser {
         };
 
         Ok(CypherWith {
+            distinct,
             items,
+            order_by,
+            skip,
+            limit,
             where_clause,
         })
     }
