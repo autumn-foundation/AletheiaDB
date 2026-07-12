@@ -38,11 +38,11 @@ Related reading: [Core Concepts](core-concepts.md) ·
 | **Attribute** `:ns/name` (non-ref) | **Property** `ns/name` | The `A` of a datom becomes a typed property on the node. |
 | **Ref attribute** (`:db/valueType :db.type/ref`) | **Edge** (typed relationship) | A datom whose value is another entity id becomes a first-class edge. You provide the ref-attribute → edge-label mapping (explicit mapping config). |
 | **Assertion** `[:db/add e a v tx]` | `create_node` / `update_node…` (a new version) | First assertion of an entity → create; later ones → an update (a new version). |
-| **Retraction** `[:db/retract e a v tx]` (whole entity) | `retract_node(id, valid_to)` | Closes the valid-time interval without erasing history. |
+| **Retraction** `[:db/retract e a v tx]` (whole entity) | `retract_node(id, valid_to)` (edge-free) / `retract_node_detach(id, valid_to)` (connected) | Closes the valid-time interval without erasing history. Plain `retract_node` **refuses** if the entity has any connected edge; use `retract_node_detach` to co-retract those edges at the same valid time. |
 | **Cardinality-many** (`:db.cardinality/many`) | multiple **edges** (ref) / a list-valued property or fan-out nodes (scalar) | AletheiaDB properties are single-valued; see [What doesn't map](#what-doesnt-map). |
 | **`:db/txInstant`** (transaction wall-clock) | **`valid_from`** (default rule) **+** provenance | The core mapping: Datomic's only time axis becomes AletheiaDB valid time; the raw `txInstant`/tx-id are *also* kept as provenance. |
 | **Transaction id** (`tx` / `:db/id` of the tx entity) | **Provenance** (`correlation_id` / `note`) | Recorded so you can group facts by their original Datomic transaction. |
-| `d/as-of db t` | `get_node_at_time(id, valid=t, tx=now)` / `AS OF VALID_TIME t` | Because Datomic tx-time maps to AletheiaDB **valid** time, Datomic `as-of` becomes an AletheiaDB **valid-time** `AS OF`. |
+| `d/as-of db t` | `get_node_at_time(id, valid=t, tx=now)` / `AS OF VALID_TIME t` | Because Datomic tx-time maps to AletheiaDB **valid** time, Datomic `as-of` becomes an AletheiaDB **valid-time** `AS OF` (anchor **both** dims for a *superseded* value — `tx=now` returns NotFound for a value later changed; see the [update = supersession](#the-one-subtlety-that-bites-update--supersession) section). |
 | `d/since db t` | `AS OF VALID_TIME` range / `BETWEEN t AND now` | Complement of `as-of`; expressed as a valid-time bound. |
 | `d/history db` | `get_node_history(id)` → `EntityHistory` | Full per-entity version list. |
 | `d/q '[:find …]` Datalog | **Cypher** / **AQL** / MCP `traverse` + `query` | Graph pattern queries; see [Query translation](#query-translation). |
@@ -234,15 +234,26 @@ becomes a valid-time retraction that closes the interval without erasing history
 
 ```rust
 use aletheiadb::core::temporal::time;
-let result = db.retract_node(alice, time::from_secs(1_717_200_000))?; // ~2024-06-01
+// `retract_node` is for edge-free entities: it **refuses** (a
+// `ValidationFailed` error) if the entity has ANY connected edge. A normal
+// graph entity carries ref-derived edges, so use `retract_node_detach`, which
+// co-retracts the connected edges at the same valid time and reports how many
+// in `edges_retracted`.
+let result = db.retract_node_detach(alice, time::from_secs(1_717_200_000))?; // ~2024-06-01
 println!("edges_retracted = {}", result.edges_retracted);
 ```
 
-> **Attribute-level retractions.** A `[:db/retract e a v tx]` that removes a
-> single attribute (not the whole entity) maps to an `update_node…` that drops
-> that property in the new version — AletheiaDB versions are per-entity, so
-> attribute-granular retraction is modeled as a new entity version omitting the
-> value, with the retraction's `txInstant` as its `valid_from`.
+> **Attribute-level retractions (a v1 limitation).** A `[:db/retract e a v tx]`
+> that removes a *single* attribute (not the whole entity) does **not** have a
+> faithful equivalent through the public update API. `update_node…` has
+> **PATCH-merge** semantics: it starts from the existing property map and only
+> *inserts* the keys you pass, so a key you omit keeps its **old value** — it is
+> not dropped. There is no public way to delete a property key via
+> `update_node`. The closest achievable is setting the attribute to
+> `PropertyValue::Null` in the update map (recording an explicit null, which is
+> *not* the same as a true removal), with the retraction's `txInstant` as the
+> new version's `valid_from`. True attribute-granular retraction (dropping a
+> key) is a v1 limitation.
 
 > **Timestamps.** The `time` module offers `from_secs` / `from_millis` /
 > `now()`; convert exported ISO-8601 `:db/txInstant`s to epoch seconds for the
@@ -253,7 +264,10 @@ println!("edges_retracted = {}", result.edges_retracted);
 
 - **Per-entity ordering:** replay each entity's datoms in **ascending Datomic
   `tx`** order (the `d/tx-range` dump is already transaction-ordered). AletheiaDB
-  preserves that as the entity's version chain.
+  preserves that as the entity's version chain. This ordering is **enforced, not
+  advisory**: an `update_node…` whose `valid_from` precedes the node's creation
+  `valid_from` is **rejected** at write time (`validate_valid_from_not_before_creation`),
+  so a mis-ordered replay fails loudly rather than silently corrupting the chain.
 - **Re-runs:** the Rust replay path is **not** automatically idempotent — a
   second run against the same target duplicates the graph. Import into a **fresh**
   database, or guard each create with `importer.resolve_key(db_id)`. Treat a

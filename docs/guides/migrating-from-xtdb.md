@@ -31,7 +31,7 @@ Related reading: [Core Concepts](core-concepts.md) ·
 | **Valid time** (`::xt/valid-time`) | **Valid time** (`valid_from` / `valid_to`) | **Preserved fully.** Mapped through the #3211/#3221 backfill path. |
 | **Transaction time** (`::xt/tx-time`, `::xt/tx-id`) | **Provenance** (`Provenance { source, note, correlation_id, … }`) | See [Temporal semantics](#temporal-semantics-what-is-preserved) — original tx-time is recorded as provenance, *queryable but not on the tx axis*, because AletheiaDB assigns transaction time at import (an invariant, never forged). |
 | `[::xt/put doc valid-from valid-to]` | `create_node_with_valid_time` / `create_node_with_options(.with_valid_from(..))` | One source version → one AletheiaDB version at the same valid time. |
-| `[::xt/delete eid valid-from]` | `retract_node(id, valid_to)` | Closes the valid-time interval **without erasing history**. |
+| `[::xt/delete eid valid-from]` | `retract_node(id, valid_to)` (edge-free) / `retract_node_detach(id, valid_to)` (connected) | Closes the valid-time interval **without erasing history**. Plain `retract_node` **refuses** if the entity has any connected edge; use `retract_node_detach` to co-retract those edges at the same valid time. |
 | `[::xt/evict eid]` (GDPR hard-erase) | *no direct equivalent* | AletheiaDB is append-only for audit integrity. See [What doesn't map](#what-doesnt-map). |
 | `(xt/db node valid-time tx-time)` | `get_node_at_time(id, valid, tx)` / `AS OF VALID_TIME … AS OF SYSTEM_TIME …` | Bi-temporal point read. |
 | `(xt/entity-history db eid …)` | `get_node_history(id)` → `EntityHistory` | Full per-entity version list. |
@@ -144,7 +144,8 @@ took effect, and the original transaction coordinates. A `nil`/absent `:doc` is
 a delete (interval close).
 
 > **XTDB v2** exposes the same information through its history/temporal SQL
-> surface (`system_time` / `valid_time` columns and `FOR ... ALL`). Export the
+> surface (`system_time` / `valid_time` columns and `FOR ALL SYSTEM_TIME` /
+> `FOR ALL VALID_TIME` — the SQL:2011 `FOR SYSTEM_TIME ALL` form). Export the
 > equivalent per-row history to the same JSONL shape; the load step is
 > identical. The *ingestion artifact* — one JSON object per historical version
 > with `valid-time`, original `tx-time`/`tx-id`, and the value — is the contract,
@@ -252,7 +253,12 @@ retraction that closes the valid-time interval without erasing history:
 use aletheiadb::core::temporal::time;
 // The fact stopped being true on ~2024-06-01. AS OF VALID_TIME before that
 // instant still returns the node; at/after it does not.
-let result = db.retract_node(alice, time::from_secs(1_717_200_000))?;
+//
+// `retract_node` is for edge-free entities: it **refuses** (a `ValidationFailed`
+// error) if the node has ANY connected edge. A normal graph entity has
+// relationships, so use `retract_node_detach`, which co-retracts the connected
+// edges at the same valid time and reports how many in `edges_retracted`.
+let result = db.retract_node_detach(alice, time::from_secs(1_717_200_000))?;
 println!("edges_retracted = {}", result.edges_retracted);
 ```
 
@@ -265,7 +271,10 @@ println!("edges_retracted = {}", result.edges_retracted);
 
 - **Per-entity ordering:** replay each entity's versions in **ascending
   valid-time** order (the `:asc` dump above guarantees it). AletheiaDB preserves
-  that order as the entity's version chain.
+  that order as the entity's version chain. This ordering is **enforced, not
+  advisory**: an `update_node…` whose `valid_from` precedes the node's creation
+  `valid_from` is **rejected** at write time (`validate_valid_from_not_before_creation`),
+  so a mis-ordered replay fails loudly instead of silently corrupting the chain.
 - **Re-runs:** the Rust replay path is *not* automatically idempotent — running
   it twice against the same target creates a second, duplicate entity graph.
   Import into a **fresh** database (`AletheiaDB::new()` or a clean data dir), or
