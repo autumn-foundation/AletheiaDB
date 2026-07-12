@@ -7,7 +7,8 @@ analysis in DuckDB, pandas/pyarrow, Spark, or any Parquet-aware tool.
 
 The columnar schema is **stable and documented** (below), and the export/import halves
 share it, so an **export → import round-trip reproduces the graph** for scalars,
-timestamps, and dense-vector embeddings.
+timestamps, dense-vector embeddings, and — via the auto-expanded `properties_json`
+overflow column — bytes / heterogeneous arrays / sparse vectors / type-conflicting keys.
 
 ## Feature flag
 
@@ -86,10 +87,14 @@ state) or `node_versions_exported` / `edge_versions_exported` (history).
 ## CLI
 
 ```bash
-# Import nodes (and optionally edges) from Parquet
+# Import nodes (and optionally edges) from Parquet.
+# Node property/valid-time flags (--property / --valid-time-column) are scoped to nodes;
+# edge property/valid-time flags (--edge-property / --edge-valid-time-column) are scoped
+# to edges, so a node-only column is never applied to the edge file.
 aletheia import nodes.parquet --format parquet --label Person --key id \
     --property name:string --property age:int --valid-time-column valid_time \
-    --edges edges.parquet --edge-label KNOWS --source-key source_key --target-key target_key
+    --edges edges.parquet --edge-label KNOWS --source-key source_key --target-key target_key \
+    --edge-property since:int --edge-valid-time-column since_ts
 
 # Export the current graph (writes <prefix>.nodes.parquet and <prefix>.edges.parquet)
 aletheia export mygraph --format parquet --mode current
@@ -100,10 +105,17 @@ aletheia export mygraph --format parquet --mode history
 ```
 
 `--label` sets a fixed label; use `--label-column COL` to read the label from a column.
-Repeated `--property name:type` map columns to same-named properties
-(`type` ∈ `string|int|float|bool|timestamp|embedding`). The export `<out_prefix>`
-positional is a **path prefix**; the two files are derived from it. Both commands open
-the database via `ALETHEIADB_CONFIG` / `ALETHEIADB_DATA_DIR` (like `backup`/`restore`).
+Repeated `--property name:type` map columns to same-named **node** properties
+(`type` ∈ `string|int|float|bool|timestamp|embedding`); the parallel `--edge-property
+name:type` and `--edge-valid-time-column COL` scope **edge** properties/valid-time
+independently, so the two mappings never collide in a mixed import. The export
+`<out_prefix>` positional is a **path prefix**; the two files are derived from it. Both
+commands open the database via `ALETHEIADB_CONFIG` / `ALETHEIADB_DATA_DIR` (like
+`backup`/`restore`).
+
+**Partial-commit note:** import commits in chunks (one ACID transaction per chunk), so an
+error mid-import can leave earlier chunks committed. On failure the CLI reports how many
+nodes were committed before the error so the operator knows the database is partial.
 
 ---
 
@@ -154,8 +166,9 @@ Shared tail columns:
 | `version` | int64 | no | Sequential version number (1, 2, 3, …). |
 | `valid_from` | timestamp(µs, UTC) | yes | Start of the version's valid interval. |
 | `valid_to` | timestamp(µs, UTC) | yes | **Null = still-open interval** (never a sentinel). |
-| `transaction_time` | timestamp(µs, UTC) | yes | When the version was recorded. |
-| `tombstone` | bool | no | `true` when the version's valid interval is closed (the fact was deleted or retracted, ending its validity). |
+| `transaction_time` | timestamp(µs, UTC) | yes | When the version was recorded (transaction-interval start). |
+| `transaction_to` | timestamp(µs, UTC) | yes | End of the transaction interval; **null = still-recorded (open)**. A non-null value marks a version superseded in transaction time. |
+| `tombstone` | bool | no | `true` iff the version's valid interval is **closed** (see the note below). |
 | `provenance_source` | string | yes | #3224 provenance. |
 | `provenance_confidence` | double | yes | |
 | `provenance_note` | string | yes | |
@@ -164,8 +177,18 @@ Shared tail columns:
 | `properties_json` | string | yes | Overflow column (present only when needed). |
 
 **Open-interval convention:** an open (still-valid or still-current) interval is written
-as a JSON/Parquet **null** `valid_to`, never the internal `TIMESTAMP_MAX` sentinel, so a
-downstream reader never mistakes it for a real far-future timestamp.
+as a JSON/Parquet **null** `valid_to` (and, for the transaction dimension, a null
+`transaction_to`), never the internal `TIMESTAMP_MAX` sentinel, so a downstream reader
+never mistakes it for a real far-future timestamp.
+
+**`tombstone` semantics (v1 limitation):** `tombstone` is exactly *"this version's
+valid interval is closed"* (`valid_to` is non-null). This flags deletions and
+retractions, **but also ordinary valid-time supersessions** — an update that closes the
+prior version's valid interval sets `tombstone = true` on that superseded version even
+though nothing was deleted. The changefeed's delete signal only marks empty (zero-width)
+valid ranges, so it cannot distinguish a non-empty retraction from a supersession either;
+a precise delete/retract-only flag is a tracked follow-up. Read `tombstone` as
+"validity ended here", not strictly "deleted here".
 
 ---
 
@@ -184,9 +207,19 @@ object, e.g.:
 }
 ```
 
-The default importer decodes the **native** columns; re-importing the overflow column
-requires custom decoding of this tagged JSON (a documented follow-up). The encoding is
-lossless and reversible.
+Non-finite floats (`NaN`, `±Infinity`) — which JSON cannot represent natively — are
+encoded as a string sentinel (`"NaN"` / `"Infinity"` / `"-Infinity"`) inside the tagged
+value, so they round-trip losslessly too.
+
+The Parquet importer **auto-expands** this column: when it reads a file carrying the
+AletheiaDB export metadata (`aletheiadb.schema_version`) **and** a `properties_json`
+column, each tagged value is decoded back to its native `PropertyValue` and injected as a
+property on the imported row — you do **not** need to map the overflow keys explicitly
+(an explicit mapping column of the same name still takes precedence). A foreign Parquet
+file that merely happens to have a `properties_json` column is left untouched (no export
+metadata → no auto-expansion). The encoding is lossless and reversible, so an export →
+import round trip reproduces bytes / heterogeneous arrays / sparse vectors /
+type-conflicting keys exactly.
 
 ---
 
@@ -205,13 +238,16 @@ well under 1 GB).
 
 - The HLC **logical counter** (the sub-microsecond tiebreaker inside a timestamp) is
   dropped; only the microsecond wallclock is written.
-- The `properties_json` **overflow** column preserves bytes / arrays / sparse vectors /
-  type-conflicting keys losslessly, but the default importer does not auto-expand it —
-  custom decoding is required to re-import those values.
 - **History enumeration** uses the whole-window changefeed, so deleted/retracted
   entities *are* exported with their full version history and tombstone. A deleted
-  **edge**'s endpoints are not carried on a historical version, so `source_key` /
-  `target_key` are written null for an edge no longer in current state.
+  **edge**'s endpoints are recovered by reconstructing the edge at one of its own
+  versions' coordinates, so `source_key` / `target_key` are populated even for an edge no
+  longer in current state (they are only null in the rare case no version reconstructs).
+
+The `properties_json` **overflow** column is **no longer lossy**: it preserves bytes /
+arrays / sparse vectors / type-conflicting keys (including non-finite floats) losslessly,
+and the Parquet importer auto-expands it on re-import (see above), so those values survive
+a full round trip.
 
 ---
 
@@ -248,7 +284,8 @@ Because open intervals are `NULL` (not a sentinel), the `valid_to IS NULL OR val
 
 Exporting the current state and re-importing into a fresh database reproduces an
 equivalent graph — same node/edge counts and equal property values, including dense
-embeddings by exact bits. Point the import's `valid_time_column` at the exported
+embeddings by exact bits and overflow-column values (bytes / arrays / sparse vectors)
+auto-expanded from `properties_json`. Point the import's `valid_time_column` at the exported
 `valid_time` column to preserve valid-time so `AS OF VALID_TIME` answers match. See the
 export tests in [`src/api/export/tests.rs`](../../src/api/export/tests.rs) for the
 verified round-trip invariants.

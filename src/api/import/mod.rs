@@ -271,6 +271,14 @@ impl<'a> Importer<'a> {
         self.key_to_id.get(key).copied()
     }
 
+    /// Number of nodes committed so far in this session (one per resolved business key).
+    ///
+    /// Useful after an import error to report how much was persisted before the failure,
+    /// since chunks commit incrementally (see the [module docs](self) on atomicity).
+    pub fn imported_node_count(&self) -> usize {
+        self.key_to_id.len()
+    }
+
     // ---- Nodes -----------------------------------------------------------------
 
     /// Import nodes from a CSV file.
@@ -521,6 +529,10 @@ fn build_properties(
     properties: &[PropertyMapping],
 ) -> std::result::Result<PropertyMap, RowError> {
     let mut builder = PropertyMapBuilder::new();
+    // Names inserted from explicit mapping columns; they take precedence over any
+    // auto-expanded overflow key of the same name (Parquet import only).
+    #[cfg(feature = "parquet")]
+    let mut explicit: std::collections::HashSet<String> = std::collections::HashSet::new();
     for mapping in properties {
         let cell = row.cells.get(&mapping.column).ok_or_else(|| RowError {
             row: row.index,
@@ -530,12 +542,28 @@ fn build_properties(
             row: row.index,
             message: format!("column '{}': {message}", mapping.column),
         })?;
+        #[cfg(feature = "parquet")]
+        explicit.insert(mapping.name.clone());
         // Skip nulls so blank cells become absent properties rather than stored nulls.
         if matches!(value, PropertyValue::Null) {
             continue;
         }
         builder = builder
             .try_insert(&mapping.name, value)
+            .map_err(|e| RowError {
+                row: row.index,
+                message: e.to_string(),
+            })?;
+    }
+    // Merge overflow properties auto-expanded from a `properties_json` column of an
+    // AletheiaDB export, so the caller need not map the exotic keys explicitly.
+    #[cfg(feature = "parquet")]
+    for (key, value) in &row.overflow {
+        if explicit.contains(key) || matches!(value, PropertyValue::Null) {
+            continue;
+        }
+        builder = builder
+            .try_insert(key, value.clone())
             .map_err(|e| RowError {
                 row: row.index,
                 message: e.to_string(),

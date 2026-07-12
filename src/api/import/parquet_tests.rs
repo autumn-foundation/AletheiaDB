@@ -11,8 +11,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use arrow::array::{
-    ArrayRef, BooleanArray, Float64Array, Int64Array, ListArray, RecordBatch, StringArray,
-    TimestampMicrosecondArray,
+    ArrayRef, BooleanArray, Date32Array, Float64Array, Int64Array, ListArray, RecordBatch,
+    StringArray, TimestampMicrosecondArray, TimestampSecondArray, UInt64Array,
 };
 use arrow::datatypes::Float32Type;
 // `::parquet` (the crate) is disambiguated from the sibling `super::parquet` module.
@@ -473,6 +473,118 @@ fn empty_file_imports_nothing_without_error() {
         .unwrap();
     assert_eq!(report.rows_read, 0);
     assert_eq!(report.nodes_imported, 0);
+    assert_eq!(db.node_count(), 0);
+}
+
+// --- Hostile Date32 value overflows micros → clean row error, not a panic -------
+
+#[test]
+fn date32_overflow_is_clean_row_error_not_panic() {
+    let files = TempDir::new().unwrap();
+    let (_tmp, db) = create_test_db().unwrap();
+
+    // i32::MAX days * 86_400_000_000 µs/day overflows i64.
+    let dates = Date32Array::from(vec![i32::MAX]);
+    let batch = RecordBatch::try_from_iter(vec![
+        ("id", str_col(vec![Some("n1")])),
+        ("d", Arc::new(dates) as ArrayRef),
+    ])
+    .unwrap();
+    let path = write_parquet(&files, "date_overflow.parquet", &batch, None);
+
+    let mut importer = db.import();
+    let err = importer
+        .nodes_from_parquet(&path, NodeMapping::new(LabelSource::fixed("T"), "id"))
+        .expect_err("overflowing Date32 must produce a clean error, not a panic");
+    let msg = err.to_string();
+    assert!(msg.contains("row 1"), "got: {msg}");
+    assert!(msg.contains("out of representable"), "got: {msg}");
+    assert_eq!(db.node_count(), 0);
+}
+
+// --- Hostile TimestampSecond value overflows micros → clean row error -----------
+
+#[test]
+fn timestamp_second_overflow_is_clean_row_error() {
+    let files = TempDir::new().unwrap();
+    let (_tmp, db) = create_test_db().unwrap();
+
+    // i64::MAX seconds * 1_000_000 overflows i64.
+    let ts = TimestampSecondArray::from(vec![i64::MAX]);
+    let batch = RecordBatch::try_from_iter(vec![
+        ("id", str_col(vec![Some("n1")])),
+        ("t", Arc::new(ts) as ArrayRef),
+    ])
+    .unwrap();
+    let path = write_parquet(&files, "ts_overflow.parquet", &batch, None);
+
+    let mut importer = db.import();
+    let err = importer
+        .nodes_from_parquet(&path, NodeMapping::new(LabelSource::fixed("T"), "id"))
+        .expect_err("overflowing TimestampSecond must produce a clean error");
+    let msg = err.to_string();
+    assert!(msg.contains("row 1"), "got: {msg}");
+    assert!(msg.contains("out of representable"), "got: {msg}");
+    assert_eq!(db.node_count(), 0);
+}
+
+// --- UInt64 above i64::MAX is a clean error (no silent wrap) --------------------
+
+#[test]
+fn uint64_above_i64_max_is_clean_error() {
+    let files = TempDir::new().unwrap();
+    let (_tmp, db) = create_test_db().unwrap();
+
+    let vals = UInt64Array::from(vec![u64::MAX]);
+    let batch = RecordBatch::try_from_iter(vec![
+        ("id", str_col(vec![Some("n1")])),
+        ("big", Arc::new(vals) as ArrayRef),
+    ])
+    .unwrap();
+    let path = write_parquet(&files, "u64.parquet", &batch, None);
+
+    let mut importer = db.import();
+    let err = importer
+        .nodes_from_parquet(&path, NodeMapping::new(LabelSource::fixed("T"), "id"))
+        .expect_err("UInt64 > i64::MAX must error, not wrap");
+    let msg = err.to_string();
+    assert!(msg.contains("row 1"), "got: {msg}");
+    assert!(msg.contains("i64"), "got: {msg}");
+    assert_eq!(db.node_count(), 0);
+}
+
+// --- A null element inside a list<float> embedding is a clean error ------------
+
+#[test]
+fn null_element_in_embedding_list_is_clean_error() {
+    let files = TempDir::new().unwrap();
+    let (_tmp, db) = create_test_db().unwrap();
+
+    // Middle element of the embedding list is null.
+    let list = ListArray::from_iter_primitive::<Float32Type, _, _>(vec![Some(vec![
+        Some(1.0f32),
+        None,
+        Some(3.0f32),
+    ])]);
+    let batch = RecordBatch::try_from_iter(vec![
+        ("id", str_col(vec![Some("doc1")])),
+        ("embedding", Arc::new(list) as ArrayRef),
+    ])
+    .unwrap();
+    let path = write_parquet(&files, "null_elem.parquet", &batch, None);
+
+    let mapping = NodeMapping::new(LabelSource::fixed("Document"), "id").property(
+        "embedding",
+        "embedding",
+        ColumnType::Embedding,
+    );
+    let mut importer = db.import();
+    let err = importer
+        .nodes_from_parquet(&path, mapping)
+        .expect_err("null embedding element must error, not become 0.0");
+    let msg = err.to_string();
+    assert!(msg.contains("row 1"), "got: {msg}");
+    assert!(msg.contains("null element"), "got: {msg}");
     assert_eq!(db.node_count(), 0);
 }
 

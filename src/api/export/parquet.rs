@@ -9,7 +9,9 @@
 //!
 //! The emitted column layout mirrors what the importer
 //! ([`crate::api::import`]) expects, so an export re-imports losslessly for scalars,
-//! timestamps, and `list<float32>` embeddings.
+//! timestamps, and `list<float32>` embeddings — and, via the importer's auto-expansion
+//! of the `properties_json` column, for the overflow values (bytes, heterogeneous
+//! arrays, sparse vectors, and type-conflicting keys) as well.
 
 use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
@@ -50,6 +52,7 @@ const COL_VERSION: &str = "version";
 const COL_VALID_FROM: &str = "valid_from";
 const COL_VALID_TO: &str = "valid_to";
 const COL_TRANSACTION_TIME: &str = "transaction_time";
+const COL_TRANSACTION_TO: &str = "transaction_to";
 const COL_TOMBSTONE: &str = "tombstone";
 const COL_PROV_SOURCE: &str = "provenance_source";
 const COL_PROV_CONFIDENCE: &str = "provenance_confidence";
@@ -323,20 +326,22 @@ impl PropColumns {
 /// Reversible tagged-JSON encoding of a property value routed to the overflow column.
 ///
 /// The inverse is [`overflow_json_to_value`]; together they let bytes, heterogeneous
-/// arrays, sparse vectors, and type-conflicting keys survive an export → decode round
-/// trip losslessly even though the default importer does not auto-expand the column.
+/// arrays, sparse vectors, and type-conflicting keys survive an export → import round
+/// trip losslessly. The Parquet importer auto-expands this column back into native
+/// properties when it recognizes an AletheiaDB export (see `crate::api::import`).
 fn overflow_value_to_json(value: &PropertyValue) -> serde_json::Value {
     use serde_json::json;
     match value {
         PropertyValue::Null => serde_json::Value::Null,
         PropertyValue::Bool(b) => json!({ "t": "bool", "v": b }),
         PropertyValue::Int(i) => json!({ "t": "int", "v": i }),
-        PropertyValue::Float(f) => json!({ "t": "float", "v": f }),
+        PropertyValue::Float(f) => json!({ "t": "float", "v": f64_to_json(*f) }),
         PropertyValue::String(s) => json!({ "t": "str", "v": s.as_ref() }),
         PropertyValue::Bytes(b) => json!({ "t": "bytes", "v": b.as_ref() }),
-        PropertyValue::Vector(v) => {
-            json!({ "t": "vector", "v": v.iter().copied().collect::<Vec<f32>>() })
-        }
+        PropertyValue::Vector(v) => json!({
+            "t": "vector",
+            "v": v.iter().map(|x| f64_to_json(*x as f64)).collect::<Vec<_>>(),
+        }),
         PropertyValue::Array(items) => json!({
             "t": "array",
             "v": items.iter().map(overflow_value_to_json).collect::<Vec<_>>(),
@@ -344,16 +349,50 @@ fn overflow_value_to_json(value: &PropertyValue) -> serde_json::Value {
         PropertyValue::SparseVector(sv) => json!({
             "t": "sparse",
             "indices": sv.indices(),
-            "values": sv.values(),
+            "values": sv.values().iter().map(|x| f64_to_json(*x as f64)).collect::<Vec<_>>(),
             "dim": sv.dimension(),
         }),
     }
 }
 
-/// Inverse of [`overflow_value_to_json`]. Used by tests (and available to custom
-/// re-import tooling) to reconstruct the exact [`PropertyValue`] from its tagged JSON.
-#[cfg(test)]
-pub(super) fn overflow_json_to_value(
+/// Encode an `f64` as JSON that survives a `serde_json` round trip.
+///
+/// `serde_json` serializes a non-finite float (`NaN`, `±Infinity`) to JSON `null`,
+/// which would then fail to decode. Non-finite values are therefore encoded as a
+/// string sentinel and decoded back by [`json_to_f64`], keeping the overflow column
+/// lossless even for non-finite floats.
+fn f64_to_json(f: f64) -> serde_json::Value {
+    use serde_json::json;
+    if f.is_finite() {
+        json!(f)
+    } else if f.is_nan() {
+        json!("NaN")
+    } else if f > 0.0 {
+        json!("Infinity")
+    } else {
+        json!("-Infinity")
+    }
+}
+
+/// Inverse of [`f64_to_json`]: accepts either a JSON number or the string sentinel
+/// used for non-finite floats.
+fn json_to_f64(value: &serde_json::Value) -> Option<f64> {
+    if let Some(f) = value.as_f64() {
+        return Some(f);
+    }
+    match value.as_str()? {
+        "NaN" => Some(f64::NAN),
+        "Infinity" => Some(f64::INFINITY),
+        "-Infinity" => Some(f64::NEG_INFINITY),
+        _ => None,
+    }
+}
+
+/// Inverse of [`overflow_value_to_json`]. Reconstructs the exact [`PropertyValue`]
+/// from its tagged JSON. Used by the Parquet importer to auto-expand the
+/// `properties_json` overflow column of an AletheiaDB export back into native
+/// properties (and by tests).
+pub(crate) fn overflow_json_to_value(
     value: &serde_json::Value,
 ) -> std::result::Result<PropertyValue, String> {
     let obj = value
@@ -371,7 +410,7 @@ pub(super) fn overflow_json_to_value(
             obj.get("v").and_then(|v| v.as_i64()).ok_or("bad int")?,
         )),
         "float" => Ok(PropertyValue::Float(
-            obj.get("v").and_then(|v| v.as_f64()).ok_or("bad float")?,
+            obj.get("v").and_then(json_to_f64).ok_or("bad float")?,
         )),
         "str" => Ok(PropertyValue::string(
             obj.get("v").and_then(|v| v.as_str()).ok_or("bad str")?,
@@ -391,7 +430,7 @@ pub(super) fn overflow_json_to_value(
                 .ok_or("bad vector")?;
             let floats: Vec<f32> = arr
                 .iter()
-                .map(|n| n.as_f64().map(|f| f as f32).ok_or("bad float elem"))
+                .map(|n| json_to_f64(n).map(|f| f as f32).ok_or("bad float elem"))
                 .collect::<std::result::Result<_, _>>()?;
             PropertyValue::try_vector(&floats).map_err(|e| e.to_string())
         }
@@ -416,7 +455,7 @@ pub(super) fn overflow_json_to_value(
                 .and_then(|v| v.as_array())
                 .ok_or("bad values")?
                 .iter()
-                .map(|n| n.as_f64().map(|f| f as f32).ok_or("bad value"))
+                .map(|n| json_to_f64(n).map(|f| f as f32).ok_or("bad value"))
                 .collect::<std::result::Result<_, _>>()?;
             let dim = obj.get("dim").and_then(|v| v.as_u64()).ok_or("bad dim")? as u32;
             let sv = crate::core::vector::SparseVec::new(indices, values, dim)
@@ -695,6 +734,7 @@ const NODE_HISTORY_RESERVED: &[&str] = &[
     COL_VALID_FROM,
     COL_VALID_TO,
     COL_TRANSACTION_TIME,
+    COL_TRANSACTION_TO,
     COL_TOMBSTONE,
     COL_PROV_SOURCE,
     COL_PROV_CONFIDENCE,
@@ -713,6 +753,7 @@ const EDGE_HISTORY_RESERVED: &[&str] = &[
     COL_VALID_FROM,
     COL_VALID_TO,
     COL_TRANSACTION_TIME,
+    COL_TRANSACTION_TO,
     COL_TOMBSTONE,
     COL_PROV_SOURCE,
     COL_PROV_CONFIDENCE,
@@ -729,6 +770,7 @@ fn history_tail_fields() -> Vec<Field> {
         Field::new(COL_VALID_FROM, ts_datatype(), true),
         Field::new(COL_VALID_TO, ts_datatype(), true),
         Field::new(COL_TRANSACTION_TIME, ts_datatype(), true),
+        Field::new(COL_TRANSACTION_TO, ts_datatype(), true),
         Field::new(COL_TOMBSTONE, DataType::Boolean, false),
         Field::new(COL_PROV_SOURCE, DataType::Utf8, true),
         Field::new(COL_PROV_CONFIDENCE, DataType::Float64, true),
@@ -745,6 +787,7 @@ struct HistoryTail {
     valid_from: Vec<Option<i64>>,
     valid_to: Vec<Option<i64>>,
     transaction_time: Vec<Option<i64>>,
+    transaction_to: Vec<Option<i64>>,
     tombstone: Vec<bool>,
     prov_source: Vec<Option<String>>,
     prov_confidence: Vec<Option<f64>>,
@@ -766,8 +809,20 @@ impl HistoryTail {
             Some(valid.end().wallclock())
         });
         self.transaction_time.push(Some(tx.start().wallclock()));
-        // A closed valid interval marks the fact's real-world validity as ended
-        // (deletion / retraction). See the module docs for the exact convention.
+        // Open transaction interval => null (never the TIMESTAMP_MAX sentinel). A closed
+        // transaction interval marks a version superseded in transaction time.
+        self.transaction_to.push(if tx.is_current() {
+            None
+        } else {
+            Some(tx.end().wallclock())
+        });
+        // `tombstone` == "this version's valid interval is closed". This is a v1
+        // heuristic: it flags every version whose real-world validity has an end,
+        // which includes deletions and retractions BUT ALSO ordinary valid-time
+        // supersessions (an update that closes the prior version's valid interval).
+        // The changefeed's `ChangeType::Deleted` only marks empty (zero-width) valid
+        // ranges, so it cannot distinguish a non-empty retraction from a supersession
+        // either; deriving a precise delete/retract-only flag is a tracked follow-up.
         self.tombstone.push(!valid.is_current());
 
         let prov = version.provenance.as_ref();
@@ -796,6 +851,7 @@ impl HistoryTail {
         arrays.push(ts_array(std::mem::take(&mut self.valid_from)));
         arrays.push(ts_array(std::mem::take(&mut self.valid_to)));
         arrays.push(ts_array(std::mem::take(&mut self.transaction_time)));
+        arrays.push(ts_array(std::mem::take(&mut self.transaction_to)));
         arrays.push(Arc::new(BooleanArray::from(std::mem::take(
             &mut self.tombstone,
         ))));
@@ -948,15 +1004,11 @@ pub(super) fn export_edge_history(
         let Ok(history) = db.get_edge_history(eid) else {
             continue;
         };
-        // Endpoints come from the current edge when it is still live; a deleted edge's
-        // endpoints are not carried on a historical version, so they are null.
-        let (source, target) = match db.get_edge(eid) {
-            Ok(edge) => (
-                Some(edge.source.as_u64() as i64),
-                Some(edge.target.as_u64() as i64),
-            ),
-            Err(_) => (None, None),
-        };
+        // Endpoints come from the current edge when it is still live; for a deleted
+        // edge (no current state) they are recovered by reconstructing the edge at one
+        // of its own versions' bi-temporal coordinates. Only when neither resolves are
+        // they written null.
+        let (source, target) = resolve_edge_endpoints(db, eid, &history.versions);
         for version in &history.versions {
             ids.push(eid.as_u64() as i64);
             edge_types.push(Some(version.label.clone()));
@@ -1055,6 +1107,38 @@ fn collect_history_ids(db: &AletheiaDB, kind: EntityKind) -> Result<Vec<u64>> {
         }
     }
     Ok(ids.into_iter().collect())
+}
+
+/// Resolve an edge's `(source, target)` node ids for the history export.
+///
+/// Live edges answer directly via `get_edge`. A deleted edge has no current state and
+/// its endpoints are not carried on a historical `VersionInfo`, but they are
+/// recoverable by reconstructing the edge at one of its own versions' bi-temporal
+/// coordinates (`get_edge_at_time`). Endpoints never change across an edge's versions,
+/// so the first version that reconstructs yields the correct pair. `(None, None)` is
+/// returned only when no version reconstructs.
+fn resolve_edge_endpoints(
+    db: &AletheiaDB,
+    eid: EdgeId,
+    versions: &[VersionInfo],
+) -> (Option<i64>, Option<i64>) {
+    if let Ok(edge) = db.get_edge(eid) {
+        return (
+            Some(edge.source.as_u64() as i64),
+            Some(edge.target.as_u64() as i64),
+        );
+    }
+    for version in versions {
+        let valid_from = version.temporal.valid_time().start();
+        let tx_from = version.temporal.transaction_time().start();
+        if let Ok(edge) = db.get_edge_at_time(eid, valid_from, tx_from) {
+            return (
+                Some(edge.source.as_u64() as i64),
+                Some(edge.target.as_u64() as i64),
+            );
+        }
+    }
+    (None, None)
 }
 
 /// The current node version's valid-time start (epoch micros), if resolvable.

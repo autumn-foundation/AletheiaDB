@@ -46,6 +46,11 @@
 #[cfg(feature = "parquet")]
 mod parquet;
 
+/// Re-export the overflow decoder so the Parquet importer can auto-expand the
+/// `properties_json` column of an AletheiaDB export back into native properties.
+#[cfg(feature = "parquet")]
+pub(crate) use parquet::overflow_json_to_value;
+
 #[cfg(all(test, feature = "parquet"))]
 mod tests;
 

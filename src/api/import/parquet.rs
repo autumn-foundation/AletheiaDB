@@ -44,6 +44,14 @@ const PARQUET_BATCH_SIZE: usize = 8192;
 /// Microseconds in one day, used to widen `Date32` (days since epoch) to micros.
 const MICROS_PER_DAY: i64 = 86_400_000_000;
 
+/// File-metadata key stamped by the AletheiaDB exporter. Its presence marks a file as
+/// our own export, enabling auto-expansion of the `properties_json` overflow column.
+const EXPORT_SCHEMA_VERSION_KEY: &str = "aletheiadb.schema_version";
+
+/// The overflow column name written by the exporter (bytes / heterogeneous arrays /
+/// sparse vectors / type-conflicting keys, as reversible tagged JSON).
+const OVERFLOW_COLUMN: &str = "properties_json";
+
 /// Build a streaming row reader over a Parquet file.
 ///
 /// The file is opened up front (open / metadata-parse failure is fatal, matching the
@@ -53,12 +61,13 @@ pub(crate) fn parquet_rows(path: &Path) -> Result<RowIter, ImportError> {
         .map_err(|e| ImportError::Io(format!("opening {}: {e}", path.display())))?;
     let builder = ParquetRecordBatchReaderBuilder::try_new(file)
         .map_err(|e| ImportError::Io(format!("opening parquet {}: {e}", path.display())))?;
-    let field_names: Vec<String> = builder
-        .schema()
-        .fields()
-        .iter()
-        .map(|f| f.name().clone())
-        .collect();
+    let schema = builder.schema();
+    let field_names: Vec<String> = schema.fields().iter().map(|f| f.name().clone()).collect();
+    // Auto-expand the overflow column only for our own exports (identified by the
+    // schema-version file metadata) that actually carry a `properties_json` column, so a
+    // foreign file with a same-named column is never reinterpreted.
+    let expand_overflow = schema.metadata().contains_key(EXPORT_SCHEMA_VERSION_KEY)
+        && field_names.iter().any(|n| n == OVERFLOW_COLUMN);
     let reader = builder
         .with_batch_size(PARQUET_BATCH_SIZE)
         .build()
@@ -67,6 +76,7 @@ pub(crate) fn parquet_rows(path: &Path) -> Result<RowIter, ImportError> {
     Ok(Box::new(ParquetRowIter {
         reader,
         field_names,
+        expand_overflow,
         batch: None,
         row_in_batch: 0,
         logical_row: 0,
@@ -79,6 +89,9 @@ struct ParquetRowIter {
     reader: ParquetRecordBatchReader,
     /// Column names in schema order; the cell map is keyed by these.
     field_names: Vec<String>,
+    /// Whether to auto-expand the `properties_json` overflow column into native
+    /// properties (true only for an AletheiaDB export carrying that column).
+    expand_overflow: bool,
     /// The batch currently being drained, if any.
     batch: Option<RecordBatch>,
     /// Next row to emit within `batch`.
@@ -148,11 +161,49 @@ impl Iterator for ParquetRowIter {
             }
         }
 
-        Some(Ok(Row {
-            index: row_num,
-            cells,
-        }))
+        let mut row = Row::new(row_num, cells);
+
+        // Auto-expand the overflow column of an AletheiaDB export back into native
+        // properties, so callers need not map the exotic keys explicitly.
+        if self.expand_overflow {
+            match decode_overflow(row.cells.get(OVERFLOW_COLUMN)) {
+                Ok(overflow) => row.overflow = overflow,
+                Err(message) => {
+                    return Some(Err(ImportError::Row(RowError {
+                        row: row_num,
+                        message: format!("column '{OVERFLOW_COLUMN}': {message}"),
+                    })));
+                }
+            }
+        }
+
+        Some(Ok(row))
     }
+}
+
+/// Decode the `properties_json` overflow cell of an AletheiaDB export into native
+/// key → [`PropertyValue`] pairs (the inverse of the exporter's tagged-JSON encoding).
+///
+/// An absent or SQL-null cell yields no properties. A malformed cell (non-string, or a
+/// string that is not a JSON object of tagged values) is a clean decode error carried up
+/// as a `row N:` [`RowError`], never a panic.
+fn decode_overflow(cell: Option<&Cell>) -> Result<Vec<(String, PropertyValue)>, String> {
+    let json = match cell {
+        None | Some(Cell::Native(PropertyValue::Null)) => return Ok(Vec::new()),
+        Some(Cell::Native(PropertyValue::String(s))) => s.to_string(),
+        Some(_) => return Err("expected a JSON string overflow column".to_string()),
+    };
+    let value: serde_json::Value =
+        serde_json::from_str(&json).map_err(|e| format!("invalid overflow JSON: {e}"))?;
+    let obj = value
+        .as_object()
+        .ok_or_else(|| "overflow column must be a JSON object".to_string())?;
+    let mut out = Vec::with_capacity(obj.len());
+    for (key, tagged) in obj {
+        let decoded = crate::api::export::overflow_json_to_value(tagged)?;
+        out.push((key.clone(), decoded));
+    }
+    Ok(out)
 }
 
 /// Downcast an Arrow array to a concrete typed array, erroring on mismatch.
@@ -198,9 +249,14 @@ fn decode_value(array: &dyn Array, row: usize) -> Result<PropertyValue, String> 
         DataType::UInt32 => Ok(PropertyValue::Int(
             downcast::<UInt32Array>(array)?.value(row) as i64,
         )),
-        DataType::UInt64 => Ok(PropertyValue::Int(
-            downcast::<UInt64Array>(array)?.value(row) as i64,
-        )),
+        DataType::UInt64 => {
+            let v = downcast::<UInt64Array>(array)?.value(row);
+            // A UInt64 above i64::MAX cannot be represented losslessly; reject rather
+            // than silently wrapping to a negative i64.
+            let as_i64 =
+                i64::try_from(v).map_err(|_| format!("UInt64 value {v} exceeds the i64 range"))?;
+            Ok(PropertyValue::Int(as_i64))
+        }
         DataType::Float32 => Ok(PropertyValue::Float(
             downcast::<Float32Array>(array)?.value(row) as f64,
         )),
@@ -219,11 +275,20 @@ fn decode_value(array: &dyn Array, row: usize) -> Result<PropertyValue, String> 
         }
         DataType::Date32 => {
             let days = downcast::<Date32Array>(array)?.value(row) as i64;
-            Ok(PropertyValue::Int(days * MICROS_PER_DAY))
+            // A hostile far-future/past date must not panic (debug) or wrap (release).
+            let micros = days.checked_mul(MICROS_PER_DAY).ok_or_else(|| {
+                format!(
+                    "date value {days} (days since epoch) out of representable microsecond range"
+                )
+            })?;
+            Ok(PropertyValue::Int(micros))
         }
         DataType::Date64 => {
             let millis = downcast::<Date64Array>(array)?.value(row);
-            Ok(PropertyValue::Int(millis * 1_000))
+            let micros = millis.checked_mul(1_000).ok_or_else(|| {
+                format!("date value {millis}ms out of representable microsecond range")
+            })?;
+            Ok(PropertyValue::Int(micros))
         }
         DataType::Binary => Ok(PropertyValue::bytes(
             downcast::<BinaryArray>(array)?.value(row),
@@ -240,8 +305,18 @@ fn decode_value(array: &dyn Array, row: usize) -> Result<PropertyValue, String> 
 /// Convert a timestamp value at `row` to microseconds since the Unix epoch.
 fn timestamp_to_micros(array: &dyn Array, row: usize, unit: &TimeUnit) -> Result<i64, String> {
     let micros = match unit {
-        TimeUnit::Second => downcast::<TimestampSecondArray>(array)?.value(row) * 1_000_000,
-        TimeUnit::Millisecond => downcast::<TimestampMillisecondArray>(array)?.value(row) * 1_000,
+        TimeUnit::Second => {
+            let secs = downcast::<TimestampSecondArray>(array)?.value(row);
+            secs.checked_mul(1_000_000).ok_or_else(|| {
+                format!("timestamp value {secs}s out of representable microsecond range")
+            })?
+        }
+        TimeUnit::Millisecond => {
+            let millis = downcast::<TimestampMillisecondArray>(array)?.value(row);
+            millis.checked_mul(1_000).ok_or_else(|| {
+                format!("timestamp value {millis}ms out of representable microsecond range")
+            })?
+        }
         TimeUnit::Microsecond => downcast::<TimestampMicrosecondArray>(array)?.value(row),
         TimeUnit::Nanosecond => downcast::<TimestampNanosecondArray>(array)?.value(row) / 1_000,
     };
@@ -269,10 +344,16 @@ fn decode_embedding<O: OffsetSizeTrait>(
     let mut floats = Vec::with_capacity(len);
     if let Some(f32s) = values.as_any().downcast_ref::<Float32Array>() {
         for i in 0..len {
+            if f32s.is_null(i) {
+                return Err("embedding contains null element".to_string());
+            }
             floats.push(f32s.value(i));
         }
     } else if let Some(f64s) = values.as_any().downcast_ref::<Float64Array>() {
         for i in 0..len {
+            if f64s.is_null(i) {
+                return Err("embedding contains null element".to_string());
+            }
             floats.push(f64s.value(i) as f32);
         }
     } else {

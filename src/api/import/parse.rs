@@ -32,16 +32,33 @@ pub(crate) enum Cell {
 }
 
 /// One parsed input row: the 1-based row/line number plus its named cells.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub(crate) struct Row {
     pub(crate) index: usize,
     pub(crate) cells: HashMap<String, Cell>,
+    /// Already-decoded properties injected into the row independently of the caller's
+    /// column mapping. Populated only by the Parquet reader when it auto-expands the
+    /// `properties_json` overflow column of an AletheiaDB export (Issue #3364); always
+    /// empty for CSV/JSONL. Merged into the built [`PropertyMap`] by
+    /// [`super::build_properties`], with explicit mapping columns taking precedence.
+    #[cfg(feature = "parquet")]
+    pub(crate) overflow: Vec<(String, PropertyValue)>,
 }
 
 /// A boxed, streaming iterator of parsed rows.
 pub(crate) type RowIter = Box<dyn Iterator<Item = Result<Row, ImportError>>>;
 
 impl Row {
+    /// Construct a row from its 1-based index and named cells (no overflow properties).
+    pub(crate) fn new(index: usize, cells: HashMap<String, Cell>) -> Self {
+        Row {
+            index,
+            cells,
+            #[cfg(feature = "parquet")]
+            overflow: Vec::new(),
+        }
+    }
+
     /// Fetch a cell as a string, erroring if the column is absent.
     pub(crate) fn get_str(&self, column: &str) -> Result<String, String> {
         match self.cells.get(column) {
@@ -289,10 +306,7 @@ pub(crate) fn csv_rows(path: &Path) -> Result<RowIter, ImportError> {
                 for (header, value) in headers.iter().zip(record.iter()) {
                     cells.insert(header.to_string(), Cell::Str(value.to_string()));
                 }
-                Ok(Row {
-                    index: row_num,
-                    cells,
-                })
+                Ok(Row::new(row_num, cells))
             }
             Err(e) => Err(ImportError::Row(RowError {
                 row: row_num,
@@ -326,10 +340,7 @@ pub(crate) fn jsonl_rows(path: &Path) -> Result<RowIter, ImportError> {
                             .into_iter()
                             .map(|(k, v)| (k, Cell::Json(v)))
                             .collect::<HashMap<_, _>>();
-                        Some(Ok(Row {
-                            index: line_num,
-                            cells,
-                        }))
+                        Some(Ok(Row::new(line_num, cells)))
                     }
                     Ok(_) => Some(Err(ImportError::Row(RowError {
                         row: line_num,

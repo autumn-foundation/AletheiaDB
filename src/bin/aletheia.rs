@@ -88,12 +88,21 @@ Usage:\n\
   aletheia daemon stop [--pid-file PATH]\n\
   aletheia daemon status [--pid-file PATH]\n\
   aletheia backup <output_path>\n\
-  aletheia restore <input_path>\n\
-  aletheia import <nodes_file> --format parquet --label L --key COL [--property name:type ...]\n\
+  aletheia restore <input_path>"
+    );
+    // The import/export verbs are gated behind the `parquet` feature; only advertise
+    // them when they are actually compiled in (a default build returns "unknown
+    // command" for them otherwise).
+    #[cfg(feature = "parquet")]
+    println!(
+        "  aletheia import <nodes_file> --format parquet --label L --key COL [--property name:type ...]\n\
                   [--label-column COL] [--valid-time-column COL]\n\
-                  [--edges FILE --edge-label L --source-key COL --target-key COL [--property name:type ...]]\n\
-  aletheia export <out_prefix> --format parquet [--mode current|history]\n\
-  aletheia audit-keygen <key_file>\n\
+                  [--edges FILE --edge-label L --source-key COL --target-key COL\n\
+                   [--edge-property name:type ...] [--edge-valid-time-column COL]]\n\
+  aletheia export <out_prefix> --format parquet [--mode current|history]"
+    );
+    println!(
+        "  aletheia audit-keygen <key_file>\n\
   aletheia audit-export <node|edge> <id> --key <key_file> --out <path> [--db-id ID] [--redact k1,k2]\n\
   aletheia audit-verify <artifact_path> [--public-key HEX]\n\
   aletheia audit-render <artifact_path>\n\
@@ -983,17 +992,32 @@ mod parquet_io {
         let node_mapping = build_node_mapping(&args)?;
         let db = open_db()?;
         let mut importer = db.import();
-        let node_report = importer
-            .nodes_from_parquet(&nodes_file, node_mapping)
-            .map_err(|e| format!("node import failed: {e}"))?;
+        // Rows commit in chunks, so an error can leave earlier chunks committed. Report
+        // the count committed so far so the operator knows the database is partial.
+        let node_report = match importer.nodes_from_parquet(&nodes_file, node_mapping) {
+            Ok(report) => report,
+            Err(e) => {
+                return Err(format!(
+                    "node import failed after committing {} node(s): {e} \
+                     (import commits in chunks; the database may be partially written)",
+                    importer.imported_node_count()
+                ));
+            }
+        };
 
         let mut edges_imported = 0usize;
         if let Some(edges_file) = arg_value(&args, "--edges") {
             let edge_mapping = build_edge_mapping(&args)?;
-            let edge_report = importer
-                .edges_from_parquet(&edges_file, edge_mapping)
-                .map_err(|e| format!("edge import failed: {e}"))?;
-            edges_imported = edge_report.edges_imported;
+            match importer.edges_from_parquet(&edges_file, edge_mapping) {
+                Ok(edge_report) => edges_imported = edge_report.edges_imported,
+                Err(e) => {
+                    return Err(format!(
+                        "edge import failed: {e} ({} node(s) committed; edges commit in \
+                         chunks, so the database may be partially written)",
+                        importer.imported_node_count()
+                    ));
+                }
+            }
         }
 
         let value = serde_json::json!({
@@ -1108,16 +1132,18 @@ mod parquet_io {
         }
     }
 
-    /// Parse repeated `--property name:type` flags into `(column, type)` pairs. The
-    /// column and property name are the same (`name`), matching a column-per-key export.
-    fn parse_properties(args: &[String]) -> Result<Vec<(String, ColumnType)>, String> {
+    /// Parse repeated `<flag> name:type` flags into `(column, type)` pairs. The column
+    /// and property name are the same (`name`), matching a column-per-key export. `flag`
+    /// is `--property` for nodes and `--edge-property` for edges so the two mappings are
+    /// scoped independently.
+    fn parse_properties(args: &[String], flag: &str) -> Result<Vec<(String, ColumnType)>, String> {
         let mut out = Vec::new();
-        for spec in arg_values(args, "--property") {
+        for spec in arg_values(args, flag) {
             let (name, ty) = spec
                 .split_once(':')
-                .ok_or_else(|| format!("invalid --property '{spec}' (expected name:type)"))?;
+                .ok_or_else(|| format!("invalid {flag} '{spec}' (expected name:type)"))?;
             if name.is_empty() {
-                return Err(format!("invalid --property '{spec}' (empty name)"));
+                return Err(format!("invalid {flag} '{spec}' (empty name)"));
             }
             out.push((name.to_string(), parse_column_type(ty)?));
         }
@@ -1140,7 +1166,7 @@ mod parquet_io {
         let label = label_source(args)?;
         let key = arg_value(args, "--key").ok_or_else(|| "missing required --key".to_string())?;
         let mut mapping = NodeMapping::new(label, key);
-        for (name, ty) in parse_properties(args)? {
+        for (name, ty) in parse_properties(args, "--property")? {
             mapping = mapping.property_same(name, ty);
         }
         if let Some(col) = arg_value(args, "--valid-time-column") {
@@ -1158,10 +1184,12 @@ mod parquet_io {
         let target = arg_value(args, "--target-key")
             .ok_or_else(|| "missing required --target-key for --edges".to_string())?;
         let mut mapping = EdgeMapping::new(label, source, target);
-        for (name, ty) in parse_properties(args)? {
+        // Edge properties/valid-time use their own flags so they are scoped independently
+        // from the node `--property` / `--valid-time-column` in a mixed import.
+        for (name, ty) in parse_properties(args, "--edge-property")? {
             mapping = mapping.property_same(name, ty);
         }
-        if let Some(col) = arg_value(args, "--valid-time-column") {
+        if let Some(col) = arg_value(args, "--edge-valid-time-column") {
             mapping = mapping.valid_time_column(col);
         }
         Ok(mapping)
@@ -1170,7 +1198,10 @@ mod parquet_io {
     fn usage_import() -> String {
         "usage: aletheia import <nodes_file> --format parquet --label L --key COL \
          [--property name:type ...] [--label-column COL] [--valid-time-column COL] \
-         [--edges FILE --edge-label L --source-key COL --target-key COL]"
+         [--edges FILE --edge-label L --source-key COL --target-key COL \
+         [--edge-property name:type ...] [--edge-valid-time-column COL]] \
+         (note: rows commit in chunks, so an error mid-import can leave the database \
+         partially written)"
             .to_string()
     }
 
@@ -1881,6 +1912,74 @@ mod parquet_cli_tests {
         .expect("history export should succeed");
         assert!(std::path::Path::new(&format!("{prefix}.node_history.parquet")).exists());
         assert!(std::path::Path::new(&format!("{prefix}.edge_history.parquet")).exists());
+    }
+
+    /// A mixed node+edge import where a node `--property` is present must succeed:
+    /// node and edge property mappings are scoped independently (`--property` vs
+    /// `--edge-property`), so the node-only `name` column is not applied to edges
+    /// (which have no such column). Regression test for the guide's mixed example.
+    #[test]
+    fn import_mixed_nodes_and_edges_with_node_property_succeeds() {
+        use arrow::array::{ArrayRef, RecordBatch, StringArray};
+        use std::sync::Arc;
+
+        fn write_parquet(path: &std::path::Path, batch: &RecordBatch) {
+            let file = std::fs::File::create(path).unwrap();
+            let mut writer =
+                ::parquet::arrow::ArrowWriter::try_new(file, batch.schema(), None).unwrap();
+            writer.write(batch).unwrap();
+            writer.close().unwrap();
+        }
+
+        let dir = TempDir::new().unwrap();
+        let nodes_path = dir.path().join("nodes.parquet");
+        let edges_path = dir.path().join("edges.parquet");
+
+        // Node file has a `name` column (a node-only property).
+        let node_batch = RecordBatch::try_from_iter(vec![
+            (
+                "id",
+                Arc::new(StringArray::from(vec!["alice", "bob"])) as ArrayRef,
+            ),
+            (
+                "name",
+                Arc::new(StringArray::from(vec!["Alice", "Bob"])) as ArrayRef,
+            ),
+        ])
+        .unwrap();
+        write_parquet(&nodes_path, &node_batch);
+
+        // Edge file has NO `name` column; a shared node `--property name` would abort.
+        let edge_batch = RecordBatch::try_from_iter(vec![
+            (
+                "src",
+                Arc::new(StringArray::from(vec!["alice"])) as ArrayRef,
+            ),
+            ("dst", Arc::new(StringArray::from(vec!["bob"])) as ArrayRef),
+        ])
+        .unwrap();
+        write_parquet(&edges_path, &edge_batch);
+
+        parquet_io::handle_import(vec![
+            s(nodes_path.to_str().unwrap()),
+            s("--format"),
+            s("parquet"),
+            s("--label"),
+            s("Person"),
+            s("--key"),
+            s("id"),
+            s("--property"),
+            s("name:string"),
+            s("--edges"),
+            s(edges_path.to_str().unwrap()),
+            s("--edge-label"),
+            s("KNOWS"),
+            s("--source-key"),
+            s("src"),
+            s("--target-key"),
+            s("dst"),
+        ])
+        .expect("mixed import with a node --property must succeed");
     }
 
     #[test]

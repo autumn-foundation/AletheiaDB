@@ -361,6 +361,104 @@ fn type_conflicting_key_routes_to_overflow() {
 }
 
 // ---------------------------------------------------------------------------
+// Overflow column auto-expands on re-import (end-to-end, no manual key mapping)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn overflow_column_auto_expands_on_reimport_end_to_end() {
+    let files = TempDir::new().unwrap();
+    let (_tmp, db) = create_test_db().unwrap();
+
+    let bytes = PropertyValue::bytes(vec![1u8, 2, 3, 255, 0, 128]);
+    let array = PropertyValue::array(vec![
+        PropertyValue::Int(7),
+        PropertyValue::string("mixed"),
+        PropertyValue::Bool(false),
+        PropertyValue::Float(2.5),
+    ]);
+    let sparse = PropertyValue::sparse_vector(
+        SparseVec::new(vec![1u32, 5, 9], vec![0.5f32, -0.25, 1.75], 16).unwrap(),
+    );
+
+    let doc = db
+        .create_node(
+            "Doc",
+            PropertyMapBuilder::new()
+                .insert("title", "keep-native")
+                .insert("blob", bytes.clone())
+                .insert("tags", array.clone())
+                .insert("sparse", sparse.clone())
+                .build(),
+        )
+        .unwrap();
+
+    let path = files.path().join("nodes.parquet");
+    db.export().nodes_to_parquet(&path).unwrap();
+
+    // Re-import into a fresh database. The mapping declares ONLY the native `title`
+    // column; the exotic overflow keys are auto-expanded from `properties_json`.
+    let (_tmp2, db2) = create_test_db().unwrap();
+    let mut importer = db2.import();
+    let mapping = NodeMapping::new(LabelSource::column("label"), "id")
+        .property_same("title", ColumnType::String);
+    importer.nodes_from_parquet(&path, mapping).unwrap();
+
+    let id = importer.resolve_key(&doc.as_u64().to_string()).unwrap();
+    let node = db2.get_node(id).unwrap();
+    assert_eq!(
+        node.properties.get("title"),
+        Some(&PropertyValue::string("keep-native"))
+    );
+    // Byte / element-identical round trip of the overflow values.
+    assert_eq!(node.properties.get("blob"), Some(&bytes));
+    assert_eq!(node.properties.get("tags"), Some(&array));
+    assert_eq!(node.properties.get("sparse"), Some(&sparse));
+}
+
+#[test]
+fn overflow_non_finite_floats_round_trip() {
+    let files = TempDir::new().unwrap();
+    let (_tmp, db) = create_test_db().unwrap();
+
+    // A heterogeneous array (overflow-routed) carrying non-finite floats, which
+    // serde_json would otherwise map to `null`.
+    let array = PropertyValue::array(vec![
+        PropertyValue::Float(f64::NAN),
+        PropertyValue::Float(f64::INFINITY),
+        PropertyValue::Float(f64::NEG_INFINITY),
+        PropertyValue::Float(1.5),
+    ]);
+    let doc = db
+        .create_node(
+            "Doc",
+            PropertyMapBuilder::new().insert("arr", array).build(),
+        )
+        .unwrap();
+
+    let path = files.path().join("nodes.parquet");
+    db.export().nodes_to_parquet(&path).unwrap();
+
+    let (_tmp2, db2) = create_test_db().unwrap();
+    let mut importer = db2.import();
+    importer
+        .nodes_from_parquet(&path, NodeMapping::new(LabelSource::column("label"), "id"))
+        .unwrap();
+    let id = importer.resolve_key(&doc.as_u64().to_string()).unwrap();
+    let node = db2.get_node(id).unwrap();
+
+    let items = node
+        .properties
+        .get("arr")
+        .and_then(PropertyValue::as_array)
+        .expect("array present");
+    assert_eq!(items.len(), 4);
+    assert!(matches!(items[0], PropertyValue::Float(f) if f.is_nan()));
+    assert!(matches!(items[1], PropertyValue::Float(f) if f == f64::INFINITY));
+    assert!(matches!(items[2], PropertyValue::Float(f) if f == f64::NEG_INFINITY));
+    assert!(matches!(items[3], PropertyValue::Float(f) if f == 1.5));
+}
+
+// ---------------------------------------------------------------------------
 // History export: one row per version, open valid_to null, tombstone, provenance
 // ---------------------------------------------------------------------------
 
@@ -540,6 +638,155 @@ fn node_history_export_carries_provenance_columns() {
         .unwrap();
     assert_eq!(src.value(0), "ingest");
     assert!((conf.value(0) - 0.9).abs() < 1e-9);
+}
+
+// ---------------------------------------------------------------------------
+// Deleted-edge history recovers its endpoints (not null)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn deleted_edge_history_recovers_source_and_target_keys() {
+    use crate::api::transaction::WriteOps;
+
+    let files = TempDir::new().unwrap();
+    let (_tmp, db) = create_test_db().unwrap();
+
+    let alice = db.create_node("Person", PropertyMap::new()).unwrap();
+    let bob = db.create_node("Person", PropertyMap::new()).unwrap();
+    let edge = db
+        .create_edge(alice, bob, "KNOWS", PropertyMap::new())
+        .unwrap();
+    // Delete the edge: it leaves current state but keeps its history.
+    db.write(|tx| tx.delete_edge(edge)).unwrap();
+
+    let path = files.path().join("edge_history.parquet");
+    let report = db.export().edge_history_to_parquet(&path).unwrap();
+    assert!(report.edge_versions_exported >= 1);
+
+    let (schema, batches) = read_parquet(&path);
+    let src_idx = schema.index_of("source_key").unwrap();
+    let tgt_idx = schema.index_of("target_key").unwrap();
+
+    let mut rows = 0usize;
+    for batch in &batches {
+        let src = batch
+            .column(src_idx)
+            .as_any()
+            .downcast_ref::<arrow::array::Int64Array>()
+            .unwrap();
+        let tgt = batch
+            .column(tgt_idx)
+            .as_any()
+            .downcast_ref::<arrow::array::Int64Array>()
+            .unwrap();
+        for i in 0..src.len() {
+            rows += 1;
+            assert!(!src.is_null(i), "deleted edge source_key must be recovered");
+            assert!(!tgt.is_null(i), "deleted edge target_key must be recovered");
+            assert_eq!(src.value(i), alice.as_u64() as i64);
+            assert_eq!(tgt.value(i), bob.as_u64() as i64);
+        }
+    }
+    assert!(rows >= 1, "expected at least one historical edge version");
+}
+
+// ---------------------------------------------------------------------------
+// History export carries the transaction-interval END (transaction_to)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn node_history_export_has_transaction_to_column_null_for_open() {
+    let files = TempDir::new().unwrap();
+    let (_tmp, db) = create_test_db().unwrap();
+    db.create_node(
+        "Person",
+        PropertyMapBuilder::new().insert("name", "Alice").build(),
+    )
+    .unwrap();
+
+    let path = files.path().join("node_history.parquet");
+    db.export().node_history_to_parquet(&path).unwrap();
+
+    let (schema, batches) = read_parquet(&path);
+    let names = field_names(&schema);
+    assert!(
+        names.contains(&"transaction_to".to_string()),
+        "history schema must expose transaction_to"
+    );
+
+    // The current, still-recorded version has an OPEN transaction interval => null.
+    let tx_to_idx = schema.index_of("transaction_to").unwrap();
+    let open_rows: usize = batches
+        .iter()
+        .map(|batch| {
+            let col = batch
+                .column(tx_to_idx)
+                .as_any()
+                .downcast_ref::<TimestampMicrosecondArray>()
+                .unwrap();
+            (0..col.len()).filter(|&i| col.is_null(i)).count()
+        })
+        .sum();
+    assert!(
+        open_rows >= 1,
+        "the current version must have a null (open) transaction_to"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Tombstone pin: tombstone == "this version's valid interval is closed" (v1)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn node_history_tombstone_equals_closed_valid_interval() {
+    let files = TempDir::new().unwrap();
+    let (_tmp, db) = create_test_db().unwrap();
+    let id = db
+        .create_node(
+            "Person",
+            PropertyMapBuilder::new()
+                .insert("title", "Engineer")
+                .build(),
+        )
+        .unwrap();
+    // A valid-time supersession (ordinary update, NOT a delete/retract).
+    db.write(|tx| {
+        tx.update_node(
+            id,
+            PropertyMapBuilder::new().insert("title", "Staff").build(),
+        )
+    })
+    .unwrap();
+
+    let path = files.path().join("node_history.parquet");
+    db.export().node_history_to_parquet(&path).unwrap();
+
+    let (schema, batches) = read_parquet(&path);
+    let tomb_idx = schema.index_of("tombstone").unwrap();
+    let valid_to_idx = schema.index_of("valid_to").unwrap();
+
+    // Pin the documented v1 semantics exactly: a row is a tombstone iff its valid
+    // interval is closed (non-null valid_to) — which also flags valid-time-superseded
+    // versions, not only deletes/retractions.
+    for batch in &batches {
+        let tomb = batch
+            .column(tomb_idx)
+            .as_any()
+            .downcast_ref::<BooleanArray>()
+            .unwrap();
+        let valid_to = batch
+            .column(valid_to_idx)
+            .as_any()
+            .downcast_ref::<TimestampMicrosecondArray>()
+            .unwrap();
+        for i in 0..tomb.len() {
+            assert_eq!(
+                tomb.value(i),
+                !valid_to.is_null(i),
+                "tombstone must equal (valid interval closed)"
+            );
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
