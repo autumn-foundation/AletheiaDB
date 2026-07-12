@@ -103,9 +103,8 @@ operator can assess blast radius before acting.
 
 The window is bounded **below** by the base backup (PITR cannot reconstruct a
 coordinate before `source_lsn` from base + forward replay) and **above** by the
-archived WAL tail. A target above the tail is not an error — it resolves to a
-full replay ("everything at-or-before the target"). A target **below** the
-window fails with a structured
+archived WAL tail. A target **outside** the window in either direction — below
+the base backup or **above** the archived tail — fails with a structured
 
 ```rust
 BackupError::TargetOutsideWindow { requested, earliest, latest }
@@ -180,6 +179,15 @@ that includes the new vocabulary, or to target a coordinate before the change.
   byte-precise segment truncation/re-encoding is fragile and would touch the
   WAL lane; filtering decoded entries and feeding the existing replay is simpler
   and reuses tested machinery.
-- **Error on targets above the archived tail.** Rejected: the issue's
-  at-or-before tie-break makes "target after all" a well-defined full replay,
-  not an error.
+- **Silently full-replay an explicit target above the archived tail.**
+  Rejected (F2): an explicit above-tail target almost always means the operator
+  misjudged the retained window, and a silent full replay hides that mistake.
+  The at-or-before tie-break's "full replay to the tail" intent is preserved by
+  the **no-target / `--latest`** path instead; an explicit above-tail target is
+  an error naming the window.
+- **Treat a post-backup vocabulary change as a best-effort resolve (id dangles
+  to `None`).** Rejected (F1): the restored interner's `next_id` equals the base
+  string count, so a dangling id does not stay `None` — it collides with the
+  first genuinely-new string a later write interns, silently mislabeling data.
+  A pre-materialize scan that fails cleanly is the only safe option until a
+  durable interner archive lands.

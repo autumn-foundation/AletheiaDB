@@ -139,7 +139,9 @@ aletheia restore <input_path>    # restore → ALETHEIADB_DATA_DIR must be set a
 
 # Point-in-time restore (Issue #3374): replay an archived WAL over the base
 # to a target transaction-time coordinate (see "Point-in-Time Restore" below).
-aletheia restore <input_path> --wal-archive <dir> [--as-of <iso8601|micros> | --lsn <n>] [--dry-run]
+# In-window target -> partial restore; no target / --latest -> full replay to
+# the tail; an explicit target above the tail is an error.
+aletheia restore <input_path> --wal-archive <dir> [--as-of <iso8601|micros> | --lsn <n> | --latest] [--dry-run]
 ```
 
 JSON output from `aletheia backup`:
@@ -225,12 +227,18 @@ ALETHEIADB_DATA_DIR=/restore/side-by-side \
 # ...or at an exact WAL LSN (or microseconds-since-epoch for --as-of):
 ALETHEIADB_DATA_DIR=/restore/side-by-side \
   aletheia restore /backups/base.albk --wal-archive /archive/wal --lsn 110230
+
+# ...or replay the WHOLE archive to its tail (no target, or the --latest alias):
+ALETHEIADB_DATA_DIR=/restore/side-by-side \
+  aletheia restore /backups/base.albk --wal-archive /archive/wal --latest
 ```
 
-`--as-of` and `--lsn` are **mutually exclusive**; pass exactly one. The target directory
-(`ALETHEIADB_DATA_DIR`) must be empty, matching plain restore's atomicity posture. The produced
-directory reopens through the canonical `AletheiaDB::open(data_dir)` path with the target state
-intact.
+`--as-of` and `--lsn` are **mutually exclusive**; pass exactly one (or neither).
+Passing **no target** — a bare `--wal-archive`, or the explicit `--latest` alias —
+performs a **full replay to the archived tail**; `--latest` is mutually exclusive
+with `--as-of`/`--lsn`. The target directory (`ALETHEIADB_DATA_DIR`) must be empty,
+matching plain restore's atomicity posture. The produced directory reopens through
+the canonical `AletheiaDB::open(data_dir)` path with the target state intact.
 
 Rust API:
 

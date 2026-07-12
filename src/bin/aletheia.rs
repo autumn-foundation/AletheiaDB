@@ -85,7 +85,7 @@ Usage:\n\
   aletheia daemon status [--pid-file PATH]\n\
   aletheia backup <output_path>\n\
   aletheia restore <input_path>\n\
-  aletheia restore <input_path> --wal-archive <dir> [--as-of <iso8601|micros> | --lsn <n>] [--dry-run]\n\
+  aletheia restore <input_path> --wal-archive <dir> [--as-of <iso8601|micros> | --lsn <n> | --latest] [--dry-run]\n\
   aletheia audit-keygen <key_file>\n\
   aletheia audit-export <node|edge> <id> --key <key_file> --out <path> [--db-id ID] [--redact k1,k2]\n\
   aletheia audit-verify <artifact_path> [--public-key HEX]\n\
@@ -101,8 +101,11 @@ Usage:\n\
   restore — Restore a .albk artifact into ALETHEIADB_DATA_DIR (must be empty).\n\
             With --wal-archive <dir>, perform a point-in-time restore (PITR):\n\
             replay the archived WAL over the base to --as-of <ts> or --lsn <n>\n\
-            (inclusive, at-or-before). --dry-run reports the achievable window\n\
-            and the count of transactions discarded, without restoring.\n\
+            (inclusive, at-or-before). An in-window target does a partial\n\
+            restore; no target (or --latest) replays the full archive to its\n\
+            tail; an explicit target above the tail is an error. --dry-run\n\
+            reports the achievable window and the count of transactions\n\
+            discarded, without restoring.\n\
 \nSigned audit export (Issue #3358):\n\
   audit-keygen — Generate an Ed25519 signing key (0600) and print its public key.\n\
   audit-export — Sign an entity's full bi-temporal history into a portable artifact.\n\
@@ -142,8 +145,10 @@ fn handle_backup(args: Vec<String>) -> Result<(), String> {
 ///   `ALETHEIADB_DATA_DIR` (unchanged #3217 behavior).
 /// * **Point-in-time restore** (`--wal-archive <dir>`, Issue #3374): replay the
 ///   archived WAL chain over the base to a target transaction-time coordinate
-///   (`--as-of <iso8601|micros>` XOR `--lsn <n>`). `--dry-run` prints the
-///   achievable window + blast radius as JSON without side effects.
+///   (`--as-of <iso8601|micros>` XOR `--lsn <n>`). An in-window target does a
+///   partial restore; no target (or `--latest`) replays the whole archive to
+///   its tail; an explicit target above the tail is rejected (F2). `--dry-run`
+///   prints the achievable window + blast radius as JSON without side effects.
 fn handle_restore(args: Vec<String>) -> Result<(), String> {
     let path = args
         .first()
@@ -154,10 +159,11 @@ fn handle_restore(args: Vec<String>) -> Result<(), String> {
     let wal_archive = arg_value(&args, "--wal-archive");
     let as_of = arg_value(&args, "--as-of");
     let lsn = arg_value(&args, "--lsn");
+    let latest = args.iter().any(|a| a == "--latest");
     let dry_run = args.iter().any(|a| a == "--dry-run");
 
-    // Plain (#3217) restore: no PITR flags.
-    if wal_archive.is_none() && as_of.is_none() && lsn.is_none() && !dry_run {
+    // Plain (#3217) restore: no PITR flags at all.
+    if wal_archive.is_none() && as_of.is_none() && lsn.is_none() && !latest && !dry_run {
         let data_dir = env::var("ALETHEIADB_DATA_DIR")
             .map(PathBuf::from)
             .map_err(|_| {
@@ -175,8 +181,18 @@ fn handle_restore(args: Vec<String>) -> Result<(), String> {
     })?;
     let wal_archive = PathBuf::from(wal_archive);
 
-    // Resolve the target: --as-of XOR --lsn (both optional for --dry-run).
+    // Resolve the explicit target: --as-of XOR --lsn (both optional).
     let target = parse_pitr_target(&as_of, &lsn)?;
+
+    // `--latest` is an explicit "restore to the archived tail" alias; a bare
+    // `--wal-archive` with no target means the same thing. Both are mutually
+    // exclusive with an explicit `--as-of`/`--lsn` target.
+    if latest && target.is_some() {
+        return Err(
+            "--latest is mutually exclusive with --as-of/--lsn (it targets the archived tail)"
+                .to_string(),
+        );
+    }
 
     if dry_run {
         let plan = AletheiaDB::inspect_pitr(albk, &wal_archive, target)
@@ -187,16 +203,34 @@ fn handle_restore(args: Vec<String>) -> Result<(), String> {
         return Ok(());
     }
 
-    let target = target.ok_or_else(|| {
-        "point-in-time restore requires a target: --as-of <iso8601|micros> or --lsn <n>".to_string()
-    })?;
     let data_dir = env::var("ALETHEIADB_DATA_DIR")
         .map(PathBuf::from)
         .map_err(|_| {
             "ALETHEIADB_DATA_DIR must be set to restore into a durable directory".to_string()
         })?;
-    AletheiaDB::restore_to_data_dir_at(albk, &wal_archive, target, &data_dir)
-        .map_err(|e| format!("point-in-time restore failed: {e}"))?;
+
+    match target {
+        // In-window target: partial restore, stopping at-or-before the target.
+        Some(t) => {
+            AletheiaDB::restore_to_data_dir_at(albk, &wal_archive, t, &data_dir)
+                .map_err(|e| format!("point-in-time restore failed: {e}"))?;
+        }
+        // No explicit target (or `--latest`): full replay to the archived tail.
+        // Resolve the tail coordinate from the window and restore to it — the
+        // latest coordinate is in-window (an above-tail explicit target would be
+        // rejected, Issue #3374 F2).
+        None => {
+            let plan = AletheiaDB::inspect_pitr(albk, &wal_archive, None)
+                .map_err(|e| format!("failed to resolve archive tail: {e}"))?;
+            AletheiaDB::restore_to_data_dir_at(
+                albk,
+                &wal_archive,
+                PitrTarget::Lsn(plan.latest.lsn),
+                &data_dir,
+            )
+            .map_err(|e| format!("point-in-time restore failed: {e}"))?;
+        }
+    }
     println!("{}", restore_success_json(&data_dir)?);
     Ok(())
 }

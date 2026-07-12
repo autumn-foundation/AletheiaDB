@@ -415,15 +415,22 @@ impl PitrWindow {
         PitrCoord::new(self.latest_lsn, self.latest_ts)
     }
 
-    /// Reject a target that lies below the achievable window (before the base
-    /// backup). Targets above the latest reachable coordinate are permitted:
-    /// they resolve to a full replay ("everything at-or-before the target").
+    /// Reject a target that lies **outside** the achievable window — below the
+    /// base backup (unreachable from base + forward replay) or above the archived
+    /// WAL tail (Issue #3374, F2). An explicit target above the tail is an error,
+    /// not a silent full replay; a caller who wants "restore to the tail" passes
+    /// no target (`--latest`), which resolves to the latest coordinate — see
+    /// [`AletheiaDB::restore_to_data_dir_at`].
     fn validate(&self, target: &PitrTarget) -> Result<()> {
-        let outside = match target {
+        let below = match target {
             PitrTarget::Lsn(n) => *n < self.source_lsn,
             PitrTarget::AsOf(t) => self.base_ts.is_some_and(|bt| *t < bt),
         };
-        if outside {
+        let above = match target {
+            PitrTarget::Lsn(n) => *n > self.latest_lsn,
+            PitrTarget::AsOf(t) => *t > self.latest_ts,
+        };
+        if below || above {
             let requested = match target {
                 PitrTarget::Lsn(n) => format!("lsn={n}"),
                 PitrTarget::AsOf(t) => PitrCoord::new(0, *t).timestamp_rfc3339,
