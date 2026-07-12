@@ -1,0 +1,405 @@
+//! MCP surface PARITY harness (black-box golden pins).
+//!
+//! Pins the *current, observed* behavior of the AletheiaDB MCP server
+//! (`src/mcp/**`) so a future re-implementation must reproduce it **unchanged**.
+//!
+//! ## Reachability note (important for the design lane)
+//!
+//! The MCP server is driven here through its **public** black-box surface only:
+//!
+//!   - `AletheiaMcpServer::new(db)` / `::with_auth(db, cfg)` constructors, and
+//!   - the per-tool typed methods (`server.get_node(GetNodeRequest{..}) ->
+//!     String`, etc.), each returning the tool's response JSON as a string.
+//!
+//! The registry dispatcher (`dispatch_tool`), the advertised-tool accessor
+//! (`list_tools_for_test`), the token-budget shaper (`apply_budget`), and the
+//! auth gate (`SessionAuth::authorize_tool`) are all `pub(crate)` or reached
+//! only via the `rmcp::ServerHandler` trait (`list_tools`/`call_tool`), which
+//! is NOT nameable from an external test crate (rmcp is not a dev-dependency and
+//! is not re-exported). Per the harness house rules we do NOT add `pub` to
+//! production code to reach them. Consequently the following are pinned by the
+//! EXISTING in-crate suites and only *referenced* in `tests/parity/inventory.json`
+//! (not duplicated here):
+//!
+//!   - advertised-tool registry sweep (every advertised tool dispatchable and
+//!     returns a well-formed structured error on invalid args):
+//!     `src/mcp/tests.rs::every_advertised_tool_returns_structured_error_on_invalid_arguments`
+//!   - RBAC class enforcement (uniform UNAUTHENTICATED, PERMISSION_DENIED
+//!     matrix, every-advertised-tool-classified):
+//!     `src/mcp/auth_tests.rs::every_advertised_tool_has_a_classification`
+//!   - token-budget degradation ladder: `src/mcp/tests.rs` budget suite.
+//!
+//! What this file DOES pin publicly: the structured error-code vocabulary
+//! (via the public `McpErrorCode` enum — the single source of truth for the
+//! wire codes), the success + structured-error envelope shapes, the temporal
+//! block on read responses, and the vector-elision default. It also pins the
+//! full 44-tool inventory + access-class table as a golden constant that a
+//! porter must keep in lockstep with the server.
+//!
+//! Run with:
+//!   cargo test --features mcp-server --test parity_mcp
+
+#![cfg(feature = "mcp-server")]
+
+use std::sync::Arc;
+
+use aletheiadb::AletheiaDB;
+use aletheiadb::mcp::{
+    AletheiaMcpServer, CreateNodeRequest, GetNodeRequest, McpErrorCode, TraverseRequest,
+};
+use serde_json::{Value, json};
+
+// ---------------------------------------------------------------------------
+// Fixtures
+// ---------------------------------------------------------------------------
+
+fn server() -> AletheiaMcpServer {
+    AletheiaMcpServer::new(Arc::new(AletheiaDB::new().expect("create DB")))
+}
+
+/// The 9 stable structured error codes, in the enum's declared order.
+const ALL_CODES: [McpErrorCode; 9] = [
+    McpErrorCode::NotFound,
+    McpErrorCode::InvalidArgument,
+    McpErrorCode::ConstraintViolation,
+    McpErrorCode::FailedPrecondition,
+    McpErrorCode::Conflict,
+    McpErrorCode::Unavailable,
+    McpErrorCode::Internal,
+    McpErrorCode::Unauthenticated,
+    McpErrorCode::PermissionDenied,
+];
+
+fn code_strings() -> Vec<&'static str> {
+    ALL_CODES.iter().map(|c| c.as_str()).collect()
+}
+
+/// Assert a response string is a well-formed structured MCP error:
+/// `{error:{code ∈ enum, message: non-empty string, retriable: bool}}`.
+/// Returns the `code` string.
+fn assert_structured_error(resp: &str, ctx: &str) -> String {
+    let v: Value = serde_json::from_str(resp).unwrap_or_else(|e| panic!("[{ctx}] not JSON: {e}"));
+    let err = v
+        .get("error")
+        .unwrap_or_else(|| panic!("[{ctx}] missing `error`: {v}"));
+    let code = err["code"]
+        .as_str()
+        .unwrap_or_else(|| panic!("[{ctx}] error.code not a string: {v}"))
+        .to_string();
+    assert!(
+        code_strings().contains(&code.as_str()),
+        "[{ctx}] error.code `{code}` not in the stable enum: {v}"
+    );
+    assert!(
+        err["message"].as_str().is_some_and(|s| !s.is_empty()),
+        "[{ctx}] error.message must be a non-empty string: {v}"
+    );
+    assert!(
+        err["retriable"].is_boolean(),
+        "[{ctx}] error.retriable must be present and boolean: {v}"
+    );
+    code
+}
+
+/// Create a node via the public typed method, returning its parsed response.
+fn create_node(server: &AletheiaMcpServer, body: Value) -> Value {
+    let req: CreateNodeRequest =
+        serde_json::from_value(body).expect("valid CreateNodeRequest json");
+    let resp = server.create_node(req);
+    let v: Value = serde_json::from_str(&resp).expect("json");
+    assert!(v.get("error").is_none(), "create_node failed: {v}");
+    v
+}
+
+// ===========================================================================
+// Structured error-code vocabulary — the stability contract.
+// ===========================================================================
+
+/// PARITY: the wire representation of every `McpErrorCode` and its default
+/// retriable classification. A port MUST reproduce these exact strings and
+/// flags. Codes may be ADDED over time (extend this test), but an existing
+/// code changing its spelling or retriable default is a breaking change.
+#[test]
+fn error_code_vocabulary_is_stable() {
+    let pairs: Vec<(&str, bool)> = ALL_CODES
+        .iter()
+        .map(|c| (c.as_str(), c.default_retriable()))
+        .collect();
+
+    assert_eq!(
+        pairs,
+        vec![
+            ("NOT_FOUND", false),
+            ("INVALID_ARGUMENT", false),
+            ("CONSTRAINT_VIOLATION", false),
+            ("FAILED_PRECONDITION", false),
+            ("CONFLICT", true),
+            ("UNAVAILABLE", true),
+            ("INTERNAL", false),
+            ("UNAUTHENTICATED", false),
+            ("PERMISSION_DENIED", false),
+        ],
+        "MCP structured error vocabulary changed — a port must preserve these \
+         codes + retriable defaults (keep tests/parity/inventory.json in sync)"
+    );
+
+    // Only Conflict/Unavailable are transient-by-default.
+    assert!(McpErrorCode::Conflict.default_retriable());
+    assert!(McpErrorCode::Unavailable.default_retriable());
+    assert!(!McpErrorCode::NotFound.default_retriable());
+    assert!(!McpErrorCode::Internal.default_retriable());
+}
+
+// ===========================================================================
+// Success + structured-error envelope shapes (via public typed methods).
+// ===========================================================================
+
+/// PARITY: a create_node success response is a bare entity object carrying
+/// `id`, `label`, `properties`, and a `temporal` block with open (null) upper
+/// bounds and `is_current: true`. No `error` key on success.
+#[test]
+fn success_envelope_and_temporal_block() {
+    let s = server();
+    let v = create_node(
+        &s,
+        json!({ "label": "Person", "properties": { "name": "Alice" } }),
+    );
+
+    assert!(v["id"].as_u64().is_some(), "id must be a number: {v}");
+    assert_eq!(v["label"], "Person");
+    assert_eq!(v["properties"]["name"], "Alice");
+
+    let t = v
+        .get("temporal")
+        .unwrap_or_else(|| panic!("read response must carry a `temporal` block: {v}"));
+    // Lower bounds are RFC3339 strings; upper bounds are explicit JSON null.
+    assert!(
+        t["valid_from"].as_str().is_some(),
+        "valid_from RFC3339 string: {t}"
+    );
+    assert!(
+        t["transaction_from"].as_str().is_some(),
+        "transaction_from RFC3339 string: {t}"
+    );
+    assert!(
+        t.get("valid_to").is_some_and(Value::is_null),
+        "valid_to must be present as null for an open interval: {t}"
+    );
+    assert!(
+        t.get("transaction_to").is_some_and(Value::is_null),
+        "transaction_to must be present as null for an open interval: {t}"
+    );
+    assert_eq!(
+        t["is_current"],
+        json!(true),
+        "a live version is_current: {t}"
+    );
+}
+
+/// PARITY: a lookup of a non-existent (but syntactically valid) node id yields
+/// the structured error envelope with `code = NOT_FOUND`, `retriable = false`.
+#[test]
+fn not_found_structured_error() {
+    let s = server();
+    let req: GetNodeRequest = serde_json::from_value(json!({ "node_id": 999_999 })).unwrap();
+    let resp = s.get_node(req);
+    let code = assert_structured_error(&resp, "get_node/missing");
+    assert_eq!(code, "NOT_FOUND");
+
+    let v: Value = serde_json::from_str(&resp).unwrap();
+    assert_eq!(v["error"]["retriable"], json!(false));
+}
+
+/// PARITY: an out-of-range node id (beyond `MAX_VALID_ID`) is rejected as a
+/// caller-fault structured error (non-retriable) rather than panicking or
+/// succeeding. We pin the envelope + non-retriable flag; the exact code is
+/// asserted to be a caller-fault class.
+#[test]
+fn out_of_range_id_is_non_retriable_structured_error() {
+    let s = server();
+    let req: GetNodeRequest = serde_json::from_value(json!({ "node_id": u64::MAX })).unwrap();
+    let resp = s.get_node(req);
+    let code = assert_structured_error(&resp, "get_node/overflow");
+
+    let v: Value = serde_json::from_str(&resp).unwrap();
+    assert_eq!(
+        v["error"]["retriable"],
+        json!(false),
+        "an out-of-range id is caller-fault, never retriable: {v}"
+    );
+    // Caller-fault classification (not a transient class).
+    assert!(
+        matches!(code.as_str(), "INVALID_ARGUMENT" | "NOT_FOUND"),
+        "overflow id must classify as a caller-fault code, got {code}"
+    );
+}
+
+// ===========================================================================
+// Vector elision default (Issue #3220).
+// ===========================================================================
+
+/// PARITY: an embedding-valued property is elided by default to a
+/// `{type:"vector", dim, elided:true}` descriptor, and `include_vectors:true`
+/// restores the full float array losslessly.
+#[test]
+fn vectors_elided_by_default_and_restorable() {
+    let s = server();
+    let embedding: Vec<f32> = (0..8).map(|i| i as f32 * 0.25).collect();
+    let created = create_node(
+        &s,
+        json!({ "label": "Document", "properties": { "embedding": embedding.clone() } }),
+    );
+    let node_id = created["id"].as_u64().expect("node id");
+
+    // Default: elided descriptor.
+    let req: GetNodeRequest = serde_json::from_value(json!({ "node_id": node_id })).unwrap();
+    let elided: Value = serde_json::from_str(&s.get_node(req)).unwrap();
+    assert_eq!(
+        elided["properties"]["embedding"],
+        json!({ "type": "vector", "dim": 8, "elided": true }),
+        "embedding must be elided by default: {elided}"
+    );
+
+    // include_vectors:true: full array restored.
+    let req: GetNodeRequest =
+        serde_json::from_value(json!({ "node_id": node_id, "include_vectors": true })).unwrap();
+    let full: Value = serde_json::from_str(&s.get_node(req)).unwrap();
+    let got: Vec<f32> = full["properties"]["embedding"]
+        .as_array()
+        .expect("full array")
+        .iter()
+        .map(|v| v.as_f64().unwrap() as f32)
+        .collect();
+    assert_eq!(got, embedding, "include_vectors must be lossless");
+}
+
+// ===========================================================================
+// Representative black-box roundtrip through several tools — proves the public
+// typed entry points are dispatchable and return well-formed JSON.
+// ===========================================================================
+
+/// PARITY: a small graph built and traversed through public typed methods
+/// yields well-formed, non-error JSON (no envelope drift on the happy path).
+#[test]
+fn representative_tool_roundtrip_is_wellformed() {
+    let s = server();
+    let a = create_node(
+        &s,
+        json!({ "label": "Person", "properties": { "name": "A" } }),
+    );
+    let b = create_node(
+        &s,
+        json!({ "label": "Person", "properties": { "name": "B" } }),
+    );
+    let (a_id, b_id) = (a["id"].as_u64().unwrap(), b["id"].as_u64().unwrap());
+
+    // create_edge via JSON-built request.
+    let edge_req: aletheiadb::mcp::CreateEdgeRequest = serde_json::from_value(json!({
+        "source_id": a_id, "target_id": b_id, "label": "KNOWS"
+    }))
+    .unwrap();
+    let edge: Value = serde_json::from_str(&s.create_edge(edge_req)).unwrap();
+    assert!(edge.get("error").is_none(), "create_edge failed: {edge}");
+
+    // traverse from A over KNOWS.
+    let tr_req: TraverseRequest = serde_json::from_value(json!({
+        "start_node_id": a_id, "edge_label": "KNOWS", "depth": 1
+    }))
+    .unwrap();
+    let traversed: Value = serde_json::from_str(&s.traverse(tr_req)).unwrap();
+    assert!(
+        traversed.get("error").is_none(),
+        "traverse failed: {traversed}"
+    );
+}
+
+// ===========================================================================
+// Golden tool inventory — the 44-tool advertised set + access classes.
+//
+// This is the one place the FULL registry is pinned from an external test:
+// because the advertised list (`tool_definitions`) is not reachable through the
+// public API, we mirror it as a golden constant a porter must keep in lockstep
+// with the server and with tests/parity/inventory.json. The in-crate registry
+// sweep (src/mcp/tests.rs) enforces the server side; this enforces the mirror.
+// ===========================================================================
+
+/// (tool_name, access_class) for every advertised MCP tool, per
+/// `src/mcp/auth.rs::TOOL_ACCESS_CLASSES`. Access class ∈ {read, write, metrics}
+/// (MCP advertises no admin-class tools).
+const TOOL_INVENTORY: [(&str, &str); 44] = [
+    ("get_node", "read"),
+    ("create_node", "write"),
+    ("update_node", "write"),
+    ("delete_node", "write"),
+    ("retract_node", "write"),
+    ("retract_edge", "write"),
+    ("delete_node_cascade", "write"),
+    ("list_nodes", "read"),
+    ("count_nodes", "read"),
+    ("get_edge", "read"),
+    ("create_edge", "write"),
+    ("update_edge", "write"),
+    ("delete_edge", "write"),
+    ("apply_batch", "write"),
+    ("list_edges", "read"),
+    ("count_edges", "read"),
+    ("get_outgoing_edges", "read"),
+    ("get_incoming_edges", "read"),
+    ("traverse", "read"),
+    ("find_similar", "read"),
+    ("enable_vector_index", "write"),
+    ("list_vector_indexes", "read"),
+    ("enable_unique_constraint", "write"),
+    ("list_unique_constraints", "read"),
+    ("get_node_at_time", "read"),
+    ("get_edge_at_time", "read"),
+    ("find_nodes_at_time", "read"),
+    ("list_changes", "read"),
+    ("get_node_at_valid_time", "read"),
+    ("get_node_at_transaction_time", "read"),
+    ("get_node_history", "read"),
+    ("diff_node_versions", "read"),
+    ("get_edge_at_valid_time", "read"),
+    ("get_edge_at_transaction_time", "read"),
+    ("get_edge_history", "read"),
+    ("diff_edge_versions", "read"),
+    ("hybrid_query", "read"),
+    ("query", "read"),
+    ("get_schema", "read"),
+    ("temporal_extent", "read"),
+    ("lineage_upstream", "read"),
+    ("lineage_downstream", "read"),
+    ("audit_export", "read"),
+    ("database_stats", "metrics"),
+];
+
+/// PARITY: the advertised MCP tool inventory is exactly 44 tools with the
+/// documented access classes, and every name is unique. Adding/removing a tool
+/// (or reclassifying it) must update this golden AND tests/parity/inventory.json.
+#[test]
+fn tool_inventory_golden_is_stable() {
+    assert_eq!(TOOL_INVENTORY.len(), 44, "MCP advertises exactly 44 tools");
+
+    // Names unique.
+    let mut names: Vec<&str> = TOOL_INVENTORY.iter().map(|(n, _)| *n).collect();
+    let count = names.len();
+    names.sort_unstable();
+    names.dedup();
+    assert_eq!(names.len(), count, "tool names must be unique");
+
+    // Access classes are drawn from the MCP-legal set (no admin tools).
+    for (name, class) in TOOL_INVENTORY {
+        assert!(
+            matches!(class, "read" | "write" | "metrics"),
+            "tool `{name}` has an unexpected access class `{class}`"
+        );
+    }
+
+    // Exactly one metrics tool, and it is database_stats.
+    let metrics: Vec<&str> = TOOL_INVENTORY
+        .iter()
+        .filter(|(_, c)| *c == "metrics")
+        .map(|(n, _)| *n)
+        .collect();
+    assert_eq!(metrics, vec!["database_stats"]);
+}
