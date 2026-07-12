@@ -798,13 +798,34 @@ impl WriteTransaction {
     }
 }
 
-impl ReadOps for WriteTransaction {
-    fn get_node(&self, id: NodeId) -> Result<Node> {
-        let buffered_result = self
-            .buffer
+impl WriteTransaction {
+    /// Resolve a node purely from THIS transaction's write buffer, if it has a
+    /// buffered write for it (read-your-own-writes, Issue #3417).
+    ///
+    /// Returns:
+    /// - `Some(Ok(node))` for a buffered `CreateNode`/`UpdateNode` (the node's
+    ///   in-flight state),
+    /// - `Some(Err(NodeNotFound))` for a buffered `DeleteNode`/`RetractNode`
+    ///   (removed in this tx),
+    /// - `None` when the buffer holds no write for this id, so the caller
+    ///   falls back to committed storage.
+    ///
+    /// This is the single source of buffer-resolution shared by the
+    /// snapshot-isolated [`ReadOps::get_node`] and the write-path
+    /// [`read_own_node`](Self::read_own_node); the two differ only in how they
+    /// treat the committed fallback.
+    fn buffered_node(&self, id: NodeId) -> Option<Result<Node>> {
+        self.buffer
             .get_node_write(id)
             .and_then(|buffered| match buffered {
                 super::BufferedWrite::CreateNode {
+                    node_id,
+                    label,
+                    properties,
+                    version_id,
+                    ..
+                }
+                | super::BufferedWrite::UpdateNode {
                     node_id,
                     label,
                     properties,
@@ -820,15 +841,42 @@ impl ReadOps for WriteTransaction {
                         commit_timestamp: None, // Not yet committed
                     },
                 ))),
-                super::BufferedWrite::UpdateNode {
-                    node_id,
+                super::BufferedWrite::DeleteNode { .. }
+                | super::BufferedWrite::RetractNode { .. } => {
+                    Some(Err(StorageError::NodeNotFound(id).into()))
+                }
+                _ => None, // Not a node operation
+            })
+    }
+
+    /// Resolve an edge purely from THIS transaction's write buffer; see
+    /// [`buffered_node`](Self::buffered_node).
+    fn buffered_edge(&self, id: EdgeId) -> Option<Result<Edge>> {
+        self.buffer
+            .get_edge_write(id)
+            .and_then(|buffered| match buffered {
+                super::BufferedWrite::CreateEdge {
+                    edge_id,
+                    source,
+                    target,
                     label,
                     properties,
                     version_id,
                     ..
-                } => Some(Ok(Node::with_metadata(
-                    *node_id,
+                }
+                | super::BufferedWrite::UpdateEdge {
+                    edge_id,
+                    source,
+                    target,
+                    label,
+                    properties,
+                    version_id,
+                    ..
+                } => Some(Ok(Edge::with_metadata(
+                    *edge_id,
                     *label,
+                    *source,
+                    *target,
                     properties.clone(),
                     *version_id,
                     VersionMetadata {
@@ -836,12 +884,45 @@ impl ReadOps for WriteTransaction {
                         commit_timestamp: None,
                     },
                 ))),
-                super::BufferedWrite::DeleteNode { .. }
-                | super::BufferedWrite::RetractNode { .. } => {
-                    Some(Err(StorageError::NodeNotFound(id).into()))
+                super::BufferedWrite::DeleteEdge { .. }
+                | super::BufferedWrite::RetractEdge { .. } => {
+                    Some(Err(StorageError::EdgeNotFound(id).into()))
                 }
-                _ => None, // Not a node operation
-            });
+                _ => None, // Not an edge operation
+            })
+    }
+
+    /// Read-your-own-writes resolution for the mutating WRITE path (Issue
+    /// #3417): consult this tx's buffer first, then fall back to the latest
+    /// committed version via a **direct** current-storage read.
+    ///
+    /// Unlike [`ReadOps::get_node`], the committed fallback here does NOT apply
+    /// snapshot-visibility filtering. The write path must operate on the latest
+    /// committed version and relies on [`conflict::detect_conflicts`] for
+    /// snapshot-isolation correctness: a version committed at or after this
+    /// tx's snapshot must still be found so the update/delete/retract proceeds
+    /// and the write-write conflict is caught at commit — filtering it out
+    /// would spuriously 404 a live node. The buffer branch makes an entity
+    /// created/updated earlier in THIS transaction visible to a later write.
+    fn read_own_node(&self, id: NodeId) -> Result<Node> {
+        if let Some(buffered) = self.buffered_node(id) {
+            return buffered;
+        }
+        self.current.get_node(id)
+    }
+
+    /// Edge counterpart of [`read_own_node`](Self::read_own_node).
+    fn read_own_edge(&self, id: EdgeId) -> Result<Edge> {
+        if let Some(buffered) = self.buffered_edge(id) {
+            return buffered;
+        }
+        self.current.get_edge(id)
+    }
+}
+
+impl ReadOps for WriteTransaction {
+    fn get_node(&self, id: NodeId) -> Result<Node> {
+        let buffered_result = self.buffered_node(id);
 
         let result = if let Some(result) = buffered_result {
             result
@@ -868,56 +949,7 @@ impl ReadOps for WriteTransaction {
     }
 
     fn get_edge(&self, id: EdgeId) -> Result<Edge> {
-        let buffered_result = self
-            .buffer
-            .get_edge_write(id)
-            .and_then(|buffered| match buffered {
-                super::BufferedWrite::CreateEdge {
-                    edge_id,
-                    source,
-                    target,
-                    label,
-                    properties,
-                    version_id,
-                    ..
-                } => Some(Ok(Edge::with_metadata(
-                    *edge_id,
-                    *label,
-                    *source,
-                    *target,
-                    properties.clone(),
-                    *version_id,
-                    VersionMetadata {
-                        created_by_tx: self.tx_id,
-                        commit_timestamp: None,
-                    },
-                ))),
-                super::BufferedWrite::UpdateEdge {
-                    edge_id,
-                    source,
-                    target,
-                    label,
-                    properties,
-                    version_id,
-                    ..
-                } => Some(Ok(Edge::with_metadata(
-                    *edge_id,
-                    *label,
-                    *source,
-                    *target,
-                    properties.clone(),
-                    *version_id,
-                    VersionMetadata {
-                        created_by_tx: self.tx_id,
-                        commit_timestamp: None,
-                    },
-                ))),
-                super::BufferedWrite::DeleteEdge { .. }
-                | super::BufferedWrite::RetractEdge { .. } => {
-                    Some(Err(StorageError::EdgeNotFound(id).into()))
-                }
-                _ => None, // Not an edge operation
-            });
+        let buffered_result = self.buffered_edge(id);
 
         let result = if let Some(result) = buffered_result {
             result
@@ -1200,8 +1232,12 @@ impl WriteOps for WriteTransaction {
                 .into());
             }
 
-            // Get current node to preserve label and existing properties
-            let node = self.current.get_node(node_id)?;
+            // Get current node to preserve label and existing properties.
+            // Buffer-aware read (Issue #3417): read-your-own-writes so an
+            // update of a node created/updated earlier in THIS transaction
+            // merges onto the buffered state, not committed-only storage
+            // (which would 404 a same-tx-created node).
+            let node = self.read_own_node(node_id)?;
             let version_id = VersionId::new_unchecked(self.version_id_gen.next()?);
 
             // PATCH semantics: Merge new properties with existing ones
@@ -1223,7 +1259,11 @@ impl WriteOps for WriteTransaction {
             // Validate valid_from is not too far in future
             validation::validate_valid_from_future(valid_from)?;
 
-            // Validate valid_from is not before entity creation
+            // Validate valid_from is not before entity creation.
+            // A node created earlier in THIS transaction is not yet in
+            // historical storage (that happens at commit), so
+            // `node_creation_time` returns None and this check is skipped —
+            // acceptable for v1 read-your-own-writes (Issue #3417).
             let creation_time = {
                 let historical = self.historical.read();
                 historical.node_creation_time(node_id)
@@ -1276,8 +1316,11 @@ impl WriteOps for WriteTransaction {
                 .into());
             }
 
-            // Get current edge to preserve source, target, label and existing properties
-            let edge = self.current.get_edge(edge_id)?;
+            // Get current edge to preserve source, target, label and existing
+            // properties. Buffer-aware read (Issue #3417): read-your-own-writes
+            // so an update of a same-tx-created/updated edge merges onto the
+            // buffered state instead of 404-ing against committed storage.
+            let edge = self.read_own_edge(edge_id)?;
             let version_id = VersionId::new_unchecked(self.version_id_gen.next()?);
 
             // PATCH semantics: Merge new properties with existing ones
@@ -1353,8 +1396,10 @@ impl WriteOps for WriteTransaction {
                 .into());
             }
 
-            // Verify node exists and check for vector properties
-            let node = self.current.get_node(node_id)?;
+            // Verify node exists and check for vector properties.
+            // Buffer-aware read (Issue #3417): a node created earlier in THIS
+            // transaction is deletable (read-your-own-writes).
+            let node = self.read_own_node(node_id)?;
 
             // If the node being deleted contains vector properties, mark the buffer
             // to ensure the temporal vector index is notified on commit
@@ -1404,17 +1449,25 @@ impl WriteOps for WriteTransaction {
             .into());
         }
 
-        // Verify node exists before attempting deletion
-        let _node = self.current.get_node(node_id)?;
+        // Verify node exists before attempting deletion.
+        // Buffer-aware read (Issue #3417): a node created earlier in THIS
+        // transaction can be cascade-deleted (read-your-own-writes).
+        let _node = self.read_own_node(node_id)?;
 
         // Collect all edges connected to this node (both outgoing and incoming)
         // We do this before any deletions to avoid borrowing issues
         //
-        // LIMITATION: This uses ReadOps methods which currently don't support
-        // read-your-writes semantics for edge traversal. This means edges created
-        // in the same transaction (but not yet committed) won't be found and deleted.
-        // This is consistent with the existing ReadOps behavior but may leave orphaned
-        // edges in same-transaction scenarios. See issue for future improvement.
+        // LIMITATION (buffer-aware cascade adjacency — tracked for #3416):
+        // the #3417 read-your-own-writes fix makes the node existence check
+        // (above) and per-edge delete_edge reads buffer-aware, but the
+        // adjacency ENUMERATION below still routes through
+        // get_outgoing_edges/get_incoming_edges, which read committed
+        // adjacency only. So a same-tx create_node → create_edge → cascade
+        // does NOT see (and cannot delete) the same-tx-created edge, which can
+        // leave it orphaned. Buffer-aware adjacency is deferred to #3416. Note
+        // this does not affect the MCP #3209 refuse/detach idempotency
+        // contract, which is enforced at the MCP layer over committed
+        // adjacency and is unaffected by this gap.
         let outgoing_edges = self.get_outgoing_edges(node_id)?;
         let incoming_edges = self.get_incoming_edges(node_id)?;
 
@@ -1447,8 +1500,10 @@ impl WriteOps for WriteTransaction {
                 .into());
             }
 
-            // Verify edge exists and check for vector properties
-            let edge = self.current.get_edge(edge_id)?;
+            // Verify edge exists and check for vector properties.
+            // Buffer-aware read (Issue #3417): an edge created earlier in THIS
+            // transaction is deletable (read-your-own-writes).
+            let edge = self.read_own_edge(edge_id)?;
 
             // If the edge being deleted contains vector properties, mark the buffer
             // to ensure the temporal vector index is notified on commit
@@ -1581,7 +1636,11 @@ impl WriteTransaction {
                 _ => {}
             }
 
-            match self.current.get_node(node_id) {
+            // Buffer-aware read (Issue #3417): a node created earlier in THIS
+            // transaction is retractable (read-your-own-writes). The buffered
+            // Retract/Delete cases are already handled by the guard above; a
+            // buffered Create/Update falls through to here.
+            match self.read_own_node(node_id) {
                 Ok(node) => {
                     // If the node being retracted contains vector properties, mark
                     // the buffer so the temporal vector index is notified on commit.
@@ -1683,7 +1742,9 @@ impl WriteTransaction {
                 _ => {}
             }
 
-            match self.current.get_edge(edge_id) {
+            // Buffer-aware read (Issue #3417): an edge created earlier in THIS
+            // transaction is retractable (read-your-own-writes).
+            match self.read_own_edge(edge_id) {
                 Ok(edge) => {
                     if !self.buffer.has_vector_operations() && edge.properties.contains_vector() {
                         self.buffer.mark_has_vector_operations();
