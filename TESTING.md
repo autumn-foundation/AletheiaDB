@@ -67,6 +67,10 @@ just test-one test_node_id_creation
 cargo test core::temporal
 ```
 
+For a reference index of crash-, corruption-, and recovery-scenario tests (what
+each simulates, the invariant asserted, and how to run it), see
+[docs/testing/crash-scenarios.md](docs/testing/crash-scenarios.md).
+
 ### Writing Tests
 
 Follow these guidelines:
