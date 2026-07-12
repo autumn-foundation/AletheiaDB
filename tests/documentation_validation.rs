@@ -162,6 +162,31 @@ fn extract_numbered_lock_order(section: &str) -> Vec<String> {
     entries
 }
 
+/// Returns `true` only if `needle` occurs in `haystack` as a standalone phrase
+/// -- i.e. not embedded inside a longer word. The character immediately before
+/// the match must not be alphabetic and the character immediately after must
+/// not be alphabetic.
+///
+/// This exists so the lock-order assertion below does not false-positive on
+/// unrelated prose: the naive `haystack.contains("either order")` also matches
+/// the substring inside "neither ordering" (`n[either order]ing`), which
+/// appears elsewhere in CLAUDE.md. A whole-phrase check still catches a genuine
+/// "... in either order" statement while ignoring "neither ordering".
+fn contains_whole_phrase(haystack: &str, needle: &str) -> bool {
+    haystack.match_indices(needle).any(|(start, matched)| {
+        let end = start + matched.len();
+        let prev_is_alpha = haystack[..start]
+            .chars()
+            .next_back()
+            .is_some_and(|c| c.is_alphabetic());
+        let next_is_alpha = haystack[end..]
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_alphabetic());
+        !prev_is_alpha && !next_is_alpha
+    })
+}
+
 /// Test that the lock acquisition order is documented for future write-path changes.
 #[test]
 fn test_lock_acquisition_order_documented() {
@@ -183,10 +208,22 @@ fn test_lock_acquisition_order_documented() {
     .map(String::from)
     .collect();
 
-    let claude_section = claude
+    // Scope the CLAUDE.md slice to just the "Lock Acquisition Order" subsection
+    // (heading -> next markdown heading) so unrelated later prose is not
+    // scanned. Without this bound, distant sections such as the Known
+    // Limitations wording "so neither ordering can commit a new dangling edge"
+    // are pulled in -- and "neither ordering" contains the substring
+    // "either order", which false-positives the assertion below.
+    let claude_after_heading = claude
         .split("### Lock Acquisition Order")
         .nth(1)
         .expect("CLAUDE.md should include a lock acquisition order section");
+    let claude_section_end = ["\n## ", "\n### "]
+        .iter()
+        .filter_map(|marker| claude_after_heading.find(marker))
+        .min()
+        .unwrap_or(claude_after_heading.len());
+    let claude_section = &claude_after_heading[..claude_section_end];
     let write_apply_section = write_apply
         .split("//! # Lock Acquisition Order")
         .nth(1)
@@ -206,7 +243,7 @@ fn test_lock_acquisition_order_documented() {
             "{name} should document `outgoing` and `incoming` as separate ordered entries"
         );
         assert!(
-            !section.contains("either order"),
+            !contains_whole_phrase(section, "either order"),
             "{name} should not allow outgoing and incoming adjacency indexes in either order"
         );
     }
