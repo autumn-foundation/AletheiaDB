@@ -22,6 +22,7 @@ use crate::core::hlc::{
 use crate::core::id::{EdgeId, IdGenerator, NodeId, VersionId};
 use crate::core::interning::GLOBAL_INTERNER;
 use crate::core::property::{PropertyMap, PropertyMapBuilder};
+use crate::core::provenance::Provenance;
 use crate::core::temporal::{Timestamp, time};
 use crate::core::version::VersionMetadata;
 use crate::index::temporal::TemporalIndexes;
@@ -1421,10 +1422,10 @@ impl WriteOps for WriteTransaction {
         result.record_error_metric()
     }
 
-    fn delete_node_with_valid_time(
+    fn delete_node_with_options(
         &mut self,
         node_id: NodeId,
-        valid_from: Option<Timestamp>,
+        options: WriteRequestOptions,
     ) -> Result<()> {
         let result = (|| {
             // Check transaction state
@@ -1449,7 +1450,7 @@ impl WriteOps for WriteTransaction {
 
             // Get timestamp: use provided valid_from or default to transaction start time
             let timestamp = self.start_timestamp;
-            let valid_from = valid_from.unwrap_or(timestamp);
+            let valid_from = options.valid_from.unwrap_or(timestamp);
 
             // Validate valid_from is not too far in future
             validation::validate_valid_from_future(valid_from)?;
@@ -1467,10 +1468,18 @@ impl WriteOps for WriteTransaction {
                 )?;
             }
 
+            // Normalize an all-absent provenance bundle to `None` -- never
+            // persist a fabricated empty object (Issue #3224/#3427).
+            let provenance = options
+                .provenance
+                .filter(|p| !p.is_empty())
+                .map(std::sync::Arc::new);
+
             // Buffer the write
             self.buffer.add(super::BufferedWrite::DeleteNode {
                 node_id,
                 valid_from,
+                provenance,
             })?;
 
             Ok(())
@@ -1479,7 +1488,11 @@ impl WriteOps for WriteTransaction {
         result.record_error_metric()
     }
 
-    fn delete_node_cascade(&mut self, node_id: NodeId) -> Result<()> {
+    fn delete_node_cascade_with_options(
+        &mut self,
+        node_id: NodeId,
+        options: WriteRequestOptions,
+    ) -> Result<()> {
         // Check transaction state
         if self.state != TxState::Active {
             return Err(TransactionError::InvalidState {
@@ -1521,21 +1534,26 @@ impl WriteOps for WriteTransaction {
         // Delete all connected edges first to maintain referential integrity.
         // This prevents orphaned edges that reference a deleted node.
         // Performance: O(degree) where degree is the number of connected edges.
+        //
+        // Issue #3427: stamp the SAME options (backdated valid_from and/or the
+        // acting principal's provenance) onto every co-deleted edge's tombstone,
+        // not just the node — a cascade delete attributes every tombstone it
+        // creates. `options` is cloned per edge; the node takes the final move.
         for edge_id in edge_ids {
-            self.delete_edge(edge_id)?;
+            self.delete_edge_with_options(edge_id, options.clone())?;
         }
 
         // Finally, delete the node itself
         // This is safe now because all edges referencing this node have been removed
-        self.delete_node(node_id)?;
+        self.delete_node_with_options(node_id, options)?;
 
         Ok(())
     }
 
-    fn delete_edge_with_valid_time(
+    fn delete_edge_with_options(
         &mut self,
         edge_id: EdgeId,
-        valid_from: Option<Timestamp>,
+        options: WriteRequestOptions,
     ) -> Result<()> {
         let result = (|| {
             // Check transaction state
@@ -1560,7 +1578,7 @@ impl WriteOps for WriteTransaction {
 
             // Get timestamp: use provided valid_from or default to transaction start time
             let timestamp = self.start_timestamp;
-            let valid_from = valid_from.unwrap_or(timestamp);
+            let valid_from = options.valid_from.unwrap_or(timestamp);
 
             // Validate valid_from is not too far in future
             validation::validate_valid_from_future(valid_from)?;
@@ -1578,10 +1596,18 @@ impl WriteOps for WriteTransaction {
                 )?;
             }
 
+            // Normalize an all-absent provenance bundle to `None` -- never
+            // persist a fabricated empty object (Issue #3224/#3427).
+            let provenance = options
+                .provenance
+                .filter(|p| !p.is_empty())
+                .map(std::sync::Arc::new);
+
             // Buffer the write
             self.buffer.add(super::BufferedWrite::DeleteEdge {
                 edge_id,
                 valid_from,
+                provenance,
             })?;
 
             Ok(())
@@ -1637,6 +1663,27 @@ impl WriteTransaction {
         &mut self,
         node_id: NodeId,
         valid_to: Timestamp,
+    ) -> Result<super::RetractionResult> {
+        self.retract_node_with_provenance(node_id, valid_to, None)
+    }
+
+    /// Buffer a valid-time retraction of a node, stamping a write-time
+    /// [`Provenance`](crate::core::provenance::Provenance) bundle recording the
+    /// acting principal onto the retraction version (Issue #3427).
+    ///
+    /// Behaves identically to [`retract_node`](Self::retract_node) other than
+    /// persisting `provenance` on the appended retraction version. Passing
+    /// `None` is exactly [`retract_node`](Self::retract_node). An all-absent
+    /// bundle is normalized to no provenance (never a fabricated empty object).
+    /// On the idempotent no-op path (already retracted/deleted) no version is
+    /// appended, so the provenance is not recorded — matching the "no new
+    /// version, no WAL entry" contract.
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
+    pub fn retract_node_with_provenance(
+        &mut self,
+        node_id: NodeId,
+        valid_to: Timestamp,
+        provenance: Option<Provenance>,
     ) -> Result<super::RetractionResult> {
         let result = (|| {
             // Check transaction state
@@ -1706,8 +1753,17 @@ impl WriteTransaction {
                         valid_to,
                     )?;
 
-                    self.buffer
-                        .add(super::BufferedWrite::RetractNode { node_id, valid_to })?;
+                    // Normalize an all-absent provenance bundle to `None` --
+                    // never persist a fabricated empty object (Issue #3224/#3427).
+                    let provenance = provenance
+                        .filter(|p| !p.is_empty())
+                        .map(std::sync::Arc::new);
+
+                    self.buffer.add(super::BufferedWrite::RetractNode {
+                        node_id,
+                        valid_to,
+                        provenance,
+                    })?;
 
                     Ok(super::RetractionResult {
                         valid_from,
@@ -1746,6 +1802,23 @@ impl WriteTransaction {
         &mut self,
         edge_id: EdgeId,
         valid_to: Timestamp,
+    ) -> Result<super::RetractionResult> {
+        self.retract_edge_with_provenance(edge_id, valid_to, None)
+    }
+
+    /// Buffer a valid-time retraction of an edge, stamping a write-time
+    /// [`Provenance`](crate::core::provenance::Provenance) bundle recording the
+    /// acting principal onto the retraction version (Issue #3427).
+    ///
+    /// See [`retract_node_with_provenance`](Self::retract_node_with_provenance)
+    /// for the provenance-normalization and idempotency contract, and
+    /// [`retract_edge`](Self::retract_edge) for the bi-temporal semantics.
+    #[must_use = "this Result must be used; ignoring errors can lead to silent failures"]
+    pub fn retract_edge_with_provenance(
+        &mut self,
+        edge_id: EdgeId,
+        valid_to: Timestamp,
+        provenance: Option<Provenance>,
     ) -> Result<super::RetractionResult> {
         let result = (|| {
             // Check transaction state
@@ -1806,8 +1879,17 @@ impl WriteTransaction {
                         valid_to,
                     )?;
 
-                    self.buffer
-                        .add(super::BufferedWrite::RetractEdge { edge_id, valid_to })?;
+                    // Normalize an all-absent provenance bundle to `None` --
+                    // never persist a fabricated empty object (Issue #3224/#3427).
+                    let provenance = provenance
+                        .filter(|p| !p.is_empty())
+                        .map(std::sync::Arc::new);
+
+                    self.buffer.add(super::BufferedWrite::RetractEdge {
+                        edge_id,
+                        valid_to,
+                        provenance,
+                    })?;
 
                     Ok(super::RetractionResult {
                         valid_from,

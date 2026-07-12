@@ -213,6 +213,7 @@ pub(crate) fn apply_node_delete(
     commit_timestamp: Timestamp,
     tombstone_id: VersionId,
     historical: &mut HistoricalStorage,
+    provenance: Option<Arc<Provenance>>,
 ) -> Result<()> {
     // Get the node before deleting
     let node = tx.current.get_node(node_id)?;
@@ -225,8 +226,9 @@ pub(crate) fn apply_node_delete(
     // Create tombstone interval using centralized logic
     let tombstone_temporal = create_temporal_interval(valid_from, commit_timestamp, true)?;
 
-    // Add tombstone version to historical storage
-    historical.add_node_version(
+    // Add tombstone version to historical storage, stamping the acting
+    // principal's provenance onto the tombstone (Issue #3427).
+    historical.add_node_version_with_provenance(
         node_id,
         tombstone_id,
         valid_from,
@@ -234,6 +236,7 @@ pub(crate) fn apply_node_delete(
         node.label,
         node.properties.clone(),
         true, // is_tombstone
+        provenance,
     )?;
 
     // Index the tombstone version with the same interval
@@ -256,6 +259,7 @@ pub(crate) fn apply_edge_delete(
     commit_timestamp: Timestamp,
     tombstone_id: VersionId,
     historical: &mut HistoricalStorage,
+    provenance: Option<Arc<Provenance>>,
 ) -> Result<()> {
     // Get the edge before deleting
     let edge = tx.current.get_edge(edge_id)?;
@@ -268,8 +272,9 @@ pub(crate) fn apply_edge_delete(
     // Create tombstone interval using centralized logic
     let tombstone_temporal = create_temporal_interval(valid_from, commit_timestamp, true)?;
 
-    // Add tombstone version to historical storage
-    historical.add_edge_version(
+    // Add tombstone version to historical storage, stamping the acting
+    // principal's provenance onto the tombstone (Issue #3427).
+    historical.add_edge_version_with_provenance(
         edge_id,
         tombstone_id,
         valid_from,
@@ -279,6 +284,7 @@ pub(crate) fn apply_edge_delete(
         edge.target,
         edge.properties.clone(),
         true, // is_tombstone
+        provenance,
     )?;
 
     // Index the tombstone version with the same interval
@@ -312,6 +318,7 @@ pub(crate) fn apply_node_retract(
     commit_timestamp: Timestamp,
     retraction_version_id: VersionId,
     historical: &mut HistoricalStorage,
+    provenance: Option<Arc<Provenance>>,
 ) -> Result<()> {
     // Get the node before removing it from current storage
     let node = tx.current.get_node(node_id)?;
@@ -329,8 +336,9 @@ pub(crate) fn apply_node_retract(
         historical.close_node_version_transaction_time(current_version_id, commit_timestamp)?;
     }
 
-    // (2) Append the retraction version with the closed valid interval.
-    historical.add_retracted_node_version(
+    // (2) Append the retraction version with the closed valid interval,
+    // stamping the acting principal's provenance onto it (Issue #3427).
+    historical.add_retracted_node_version_with_provenance(
         node_id,
         retraction_version_id,
         valid_from,
@@ -338,6 +346,7 @@ pub(crate) fn apply_node_retract(
         commit_timestamp,
         node.label,
         node.properties.clone(),
+        provenance,
     )?;
 
     // Index the retraction version with the same closed interval.
@@ -362,6 +371,7 @@ pub(crate) fn apply_edge_retract(
     commit_timestamp: Timestamp,
     retraction_version_id: VersionId,
     historical: &mut HistoricalStorage,
+    provenance: Option<Arc<Provenance>>,
 ) -> Result<()> {
     // Get the edge before removing it from current storage
     let edge = tx.current.get_edge(edge_id)?;
@@ -377,8 +387,9 @@ pub(crate) fn apply_edge_retract(
         historical.close_edge_version_transaction_time(current_version_id, commit_timestamp)?;
     }
 
-    // (2) Append the retraction version with the closed valid interval.
-    historical.add_retracted_edge_version(
+    // (2) Append the retraction version with the closed valid interval,
+    // stamping the acting principal's provenance onto it (Issue #3427).
+    historical.add_retracted_edge_version_with_provenance(
         edge_id,
         retraction_version_id,
         valid_from,
@@ -388,6 +399,7 @@ pub(crate) fn apply_edge_retract(
         edge.source,
         edge.target,
         edge.properties.clone(),
+        provenance,
     )?;
 
     let temporal = BiTemporalInterval::with_valid_time(valid_from, commit_timestamp)
@@ -493,6 +505,7 @@ pub(crate) fn apply_single_write(
         crate::api::transaction::BufferedWrite::DeleteNode {
             node_id,
             valid_from,
+            provenance,
         } => {
             // Use pre-generated tombstone version ID (no lock needed)
             let tombstone_version_id = VersionId::new_unchecked(tombstone_ids.next().ok_or_else(|| {
@@ -511,11 +524,13 @@ pub(crate) fn apply_single_write(
                 commit_timestamp,
                 tombstone_version_id,
                 historical,
+                provenance.clone(),
             )?;
         }
         crate::api::transaction::BufferedWrite::DeleteEdge {
             edge_id,
             valid_from,
+            provenance,
         } => {
             // Use pre-generated tombstone version ID (no lock needed)
             let tombstone_version_id = VersionId::new_unchecked(tombstone_ids.next().ok_or_else(|| {
@@ -534,9 +549,14 @@ pub(crate) fn apply_single_write(
                 commit_timestamp,
                 tombstone_version_id,
                 historical,
+                provenance.clone(),
             )?;
         }
-        crate::api::transaction::BufferedWrite::RetractNode { node_id, valid_to } => {
+        crate::api::transaction::BufferedWrite::RetractNode {
+            node_id,
+            valid_to,
+            provenance,
+        } => {
             // Retractions draw from the same pre-generated version ID pool
             // as deletes (both append exactly one closing version).
             let retraction_version_id = VersionId::new_unchecked(tombstone_ids.next().ok_or_else(|| {
@@ -555,9 +575,14 @@ pub(crate) fn apply_single_write(
                 commit_timestamp,
                 retraction_version_id,
                 historical,
+                provenance.clone(),
             )?;
         }
-        crate::api::transaction::BufferedWrite::RetractEdge { edge_id, valid_to } => {
+        crate::api::transaction::BufferedWrite::RetractEdge {
+            edge_id,
+            valid_to,
+            provenance,
+        } => {
             let retraction_version_id = VersionId::new_unchecked(tombstone_ids.next().ok_or_else(|| {
                 StorageError::InconsistentState {
                     reason: format!(
@@ -574,6 +599,7 @@ pub(crate) fn apply_single_write(
                 commit_timestamp,
                 retraction_version_id,
                 historical,
+                provenance.clone(),
             )?;
         }
     }

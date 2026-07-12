@@ -2047,6 +2047,24 @@ impl AletheiaMcpServer {
             );
         }
 
+        // Issue #3427: stamp the authenticated session principal onto the
+        // tombstone version's provenance. These destructive tools take NO
+        // caller-supplied provenance (pass `None`), so the bundle is
+        // principal-only and unforgeable from request fields — the principal
+        // is server-derived by `parse_opt_provenance`, never read from the
+        // request JSON. Anonymous sessions yield `None` (no principal field).
+        let provenance = match self.parse_opt_provenance(None) {
+            Ok(p) => p,
+            Err(result) => return result,
+        };
+        let mut options = crate::api::transaction::WriteRequestOptions::new();
+        if let Some(valid_from) = valid_from {
+            options = options.with_valid_from(valid_from);
+        }
+        if let Some(provenance) = provenance {
+            options = options.with_provenance(provenance);
+        }
+
         // Perform the connected-edge check and the deletion inside a single write
         // transaction so they observe the same storage state. Splitting the count
         // into a separate transaction (or doing it before opening one) leaves a
@@ -2072,14 +2090,18 @@ impl AletheiaMcpServer {
 
             if detach {
                 // Cascade-equivalent delete: remove the node and all connected
-                // edges, reporting exactly how many edges were removed.
-                tx.delete_node_cascade(node_id)?;
+                // edges, reporting exactly how many edges were removed. The
+                // options (principal provenance) stamp every co-deleted edge
+                // tombstone too, not just the node (Issue #3427).
+                tx.delete_node_cascade_with_options(node_id, options.clone())?;
                 Ok(Outcome::Deleted {
                     edges_removed: connected_edges,
                 })
             } else {
                 // No connected edges: a plain delete cannot orphan anything.
-                tx.delete_node_with_valid_time(node_id, valid_from)?;
+                // `options` carries the backdated valid_from (if any) and the
+                // acting principal's provenance (Issue #3427).
+                tx.delete_node_with_options(node_id, options.clone())?;
                 Ok(Outcome::Deleted { edges_removed: 0 })
             }
         });
@@ -2144,6 +2166,14 @@ impl AletheiaMcpServer {
             Err(result) => return result,
         };
 
+        // Issue #3427: principal-only, unforgeable provenance (see
+        // handle_delete_node) stamped onto the retraction version — and onto
+        // every co-retracted edge in the detach branch below.
+        let provenance = match self.parse_opt_provenance(None) {
+            Ok(p) => p,
+            Err(result) => return result,
+        };
+
         // Perform the connected-edge check and the retraction inside a single
         // write transaction so they observe the same storage state — no
         // check-then-act gap for a concurrent writer to slip an edge into
@@ -2181,22 +2211,30 @@ impl AletheiaMcpServer {
                 }
 
                 if detach && connected_edges > 0 {
-                    // Co-retract every connected edge at the same valid time.
+                    // Co-retract every connected edge at the same valid time,
+                    // stamping the SAME acting principal onto each edge's
+                    // retraction version as the node's (Issue #3427).
                     let mut edges_retracted = 0;
                     for edge_id in edge_ids {
-                        let edge_result = tx.retract_edge(edge_id, valid_to)?;
+                        let edge_result =
+                            tx.retract_edge_with_provenance(edge_id, valid_to, provenance.clone())?;
                         if !edge_result.already_retracted {
                             edges_retracted += 1;
                         }
                     }
 
-                    let mut result = tx.retract_node(node_id, valid_to)?;
+                    let mut result =
+                        tx.retract_node_with_provenance(node_id, valid_to, provenance.clone())?;
                     result.edges_retracted = edges_retracted;
                     return Ok(Outcome::Retracted(result));
                 }
             }
 
-            Ok(Outcome::Retracted(tx.retract_node(node_id, valid_to)?))
+            Ok(Outcome::Retracted(tx.retract_node_with_provenance(
+                node_id,
+                valid_to,
+                provenance.clone(),
+            )?))
         });
 
         let outcome = match outcome {
@@ -2261,7 +2299,17 @@ impl AletheiaMcpServer {
             Err(result) => return result,
         };
 
-        match self.db.retract_edge(edge_id, valid_to) {
+        // Issue #3427: principal-only, unforgeable provenance (see
+        // handle_delete_node) stamped onto the retraction version.
+        let provenance = match self.parse_opt_provenance(None) {
+            Ok(p) => p,
+            Err(result) => return result,
+        };
+
+        match self
+            .db
+            .retract_edge_with_provenance(edge_id, valid_to, provenance)
+        {
             Ok(result) => self.success_json(json!({
                 "success": true,
                 "edge_id": req.edge_id,
@@ -2289,7 +2337,22 @@ impl AletheiaMcpServer {
             Err(e) => return self.invalid_argument(&e.to_string()),
         };
 
-        match self.db.write(|tx| tx.delete_node_cascade(node_id)) {
+        // Issue #3427: principal-only, unforgeable provenance (see
+        // handle_delete_node) stamped onto the node's tombstone AND every
+        // co-deleted edge's tombstone.
+        let provenance = match self.parse_opt_provenance(None) {
+            Ok(p) => p,
+            Err(result) => return result,
+        };
+        let mut options = crate::api::transaction::WriteRequestOptions::new();
+        if let Some(provenance) = provenance {
+            options = options.with_provenance(provenance);
+        }
+
+        match self
+            .db
+            .write(|tx| tx.delete_node_cascade_with_options(node_id, options.clone()))
+        {
             Ok(()) => self.success_json(json!({
                 "success": true,
                 "deleted_node_id": req.node_id,
@@ -2764,9 +2827,23 @@ impl AletheiaMcpServer {
             Err(result) => return result,
         };
 
+        // Issue #3427: principal-only, unforgeable provenance (see
+        // handle_delete_node) stamped onto the tombstone version.
+        let provenance = match self.parse_opt_provenance(None) {
+            Ok(p) => p,
+            Err(result) => return result,
+        };
+        let mut options = crate::api::transaction::WriteRequestOptions::new();
+        if let Some(valid_from) = valid_from {
+            options = options.with_valid_from(valid_from);
+        }
+        if let Some(provenance) = provenance {
+            options = options.with_provenance(provenance);
+        }
+
         match self
             .db
-            .write(|tx| tx.delete_edge_with_valid_time(edge_id, valid_from))
+            .write(|tx| tx.delete_edge_with_options(edge_id, options.clone()))
         {
             Ok(()) => self.success_json(json!({
                 "success": true,
