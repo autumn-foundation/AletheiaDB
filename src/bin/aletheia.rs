@@ -10,7 +10,9 @@ use std::io::{self, ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use aletheiadb::provenance_chain::{ChainHead, ChainVerification, EntityKind};
+#[cfg(feature = "serde")]
+use aletheiadb::provenance_chain::ChainHead;
+use aletheiadb::provenance_chain::{ChainVerification, EntityKind};
 use aletheiadb::{
     AletheiaDB, Edge, EdgeId, GLOBAL_INTERNER, Node, NodeId, PropertyMap, PropertyMapBuilder,
     PropertyValue,
@@ -182,6 +184,10 @@ fn handle_verify(args: Vec<String>) -> Result<(), String> {
     let db = open_db()?;
 
     // Export-head mode takes precedence: it is an explicit export action.
+    // Exporting/importing a chain head anchor serializes `ChainHead` via
+    // `serde_json`, so it is only available when the `serde` feature is
+    // compiled in.
+    #[cfg(feature = "serde")]
     if let Some(path) = arg_value(&args, "--export-head") {
         let head = db.export_chain_head().map_err(chain_error_hint)?;
         write_chain_head(&head, &path)?;
@@ -190,10 +196,24 @@ fn handle_verify(args: Vec<String>) -> Result<(), String> {
     }
 
     // Against-anchor mode: prove append-only extension of a stored head.
+    #[cfg(feature = "serde")]
     if let Some(path) = arg_value(&args, "--against") {
         let anchor = read_chain_head(&path)?;
         let result = db.verify_chain_against(&anchor).map_err(chain_error_hint)?;
         return finish_verification(&result, "anchor", json);
+    }
+
+    // Without `serde`, the chain-head export/compare CLI is unavailable. Report
+    // a clean error (non-zero exit via `Err`) instead of silently ignoring the
+    // flags or leaving a compile error, mirroring how other feature-gated CLI
+    // paths surface unavailability. The plain `verify` path below still works.
+    #[cfg(not(feature = "serde"))]
+    if arg_value(&args, "--export-head").is_some() || arg_value(&args, "--against").is_some() {
+        return Err(
+            "chain head export/compare requires the `serde` feature (rebuild with \
+             --features serde)"
+                .to_string(),
+        );
     }
 
     // Entity-scoped mode.
@@ -306,6 +326,7 @@ fn render_verification(
 }
 
 /// Render the confirmation for an `--export-head` action.
+#[cfg(feature = "serde")]
 fn render_head_export(head: &ChainHead, path: &str, json: bool) -> Result<String, String> {
     if json {
         let value = serde_json::json!({
@@ -325,6 +346,7 @@ fn render_head_export(head: &ChainHead, path: &str, json: bool) -> Result<String
 }
 
 /// Serialize a [`ChainHead`] to a JSON file (pretty, digests as hex).
+#[cfg(feature = "serde")]
 fn write_chain_head(head: &ChainHead, path: &str) -> Result<(), String> {
     let bytes = serde_json::to_vec_pretty(head)
         .map_err(|e| format!("failed to serialize chain head: {e}"))?;
@@ -332,6 +354,7 @@ fn write_chain_head(head: &ChainHead, path: &str) -> Result<(), String> {
 }
 
 /// Load a [`ChainHead`] previously exported to a JSON file.
+#[cfg(feature = "serde")]
 fn read_chain_head(path: &str) -> Result<ChainHead, String> {
     let bytes =
         fs::read(path).map_err(|e| format!("failed to read chain head from '{path}': {e}"))?;
@@ -1438,6 +1461,7 @@ mod tests {
         assert!(finish_verification(&sample_verification(true), "full", true).is_ok());
     }
 
+    #[cfg(feature = "serde")]
     #[test]
     fn chain_head_round_trips_through_file() {
         let head = ChainHead::genesis(5, 1234);
@@ -1449,6 +1473,7 @@ mod tests {
         assert_eq!(head, loaded);
     }
 
+    #[cfg(feature = "serde")]
     #[test]
     fn read_chain_head_rejects_garbage() {
         let dir = tempfile::tempdir().unwrap();
@@ -1461,6 +1486,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "serde")]
     #[test]
     fn render_head_export_human_and_json() {
         let head = ChainHead::genesis(9, 42);
