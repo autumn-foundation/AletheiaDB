@@ -221,10 +221,14 @@ fn collect_pattern_entity_vars(pattern: &CypherPattern, out: &mut HashSet<String
 
 /// The variable of the last node element of a pattern, if named.
 fn last_node_variable(pattern: &CypherPattern) -> Option<String> {
-    pattern.elements.iter().rev().find_map(|element| match element {
-        CypherPatternElement::Node(n) => n.variable.clone(),
-        CypherPatternElement::Relationship(_) => None,
-    })
+    pattern
+        .elements
+        .iter()
+        .rev()
+        .find_map(|element| match element {
+            CypherPatternElement::Node(n) => n.variable.clone(),
+            CypherPatternElement::Relationship(_) => None,
+        })
 }
 
 /// Collect variable references from a `RETURN` item.

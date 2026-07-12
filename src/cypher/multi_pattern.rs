@@ -105,26 +105,26 @@ pub fn evaluate(
         ));
     }
     for item in &return_clause.items {
-        if let CypherReturnItem::Expression { expr, .. } = item {
-            if expr_has_aggregate(expr) {
-                return Err(CypherError::UnsupportedFeature(
-                    "aggregation over a multi-variable pattern is not supported; \
-                     RETURN the bound variables or their properties directly"
-                        .to_string(),
-                ));
-            }
+        if let CypherReturnItem::Expression { expr, .. } = item
+            && expr_has_aggregate(expr)
+        {
+            return Err(CypherError::UnsupportedFeature(
+                "aggregation over a multi-variable pattern is not supported; \
+                 RETURN the bound variables or their properties directly"
+                    .to_string(),
+            ));
         }
     }
     for p in pattern {
         for element in &p.elements {
-            if let CypherPatternElement::Relationship(rel) = element {
-                if rel.depth.is_some() {
-                    return Err(CypherError::UnsupportedFeature(
-                        "variable-length relationships inside a multi-variable \
-                         bound pattern are not supported in v1"
-                            .to_string(),
-                    ));
-                }
+            if let CypherPatternElement::Relationship(rel) = element
+                && rel.depth.is_some()
+            {
+                return Err(CypherError::UnsupportedFeature(
+                    "variable-length relationships inside a multi-variable \
+                     bound pattern are not supported in v1"
+                        .to_string(),
+                ));
             }
         }
     }
@@ -222,10 +222,10 @@ impl MultiEval<'_> {
         };
         for node in self.node_candidates(first, base)? {
             let mut binding = base.clone();
-            if let Some(var) = &first.variable {
-                if lookup(&binding, var).is_none() {
-                    binding.push((var.clone(), EntityResult::Node(node.clone())));
-                }
+            if let Some(var) = &first.variable
+                && lookup(&binding, var).is_none()
+            {
+                binding.push((var.clone(), EntityResult::Node(node.clone())));
             }
             self.extend_from(&pattern.elements, 1, binding, node.id, out)?;
         }
@@ -303,18 +303,18 @@ impl MultiEval<'_> {
         patt: &CypherNodePattern,
         base: &Binding,
     ) -> Result<Vec<Node>, CypherError> {
-        if let Some(var) = &patt.variable {
-            if let Some(existing) = lookup(base, var) {
-                if let EntityResult::Node(n) = existing {
-                    return Ok(if self.node_element_matches(n, patt)? {
-                        vec![n.clone()]
-                    } else {
-                        Vec::new()
-                    });
-                }
-                // A variable bound to an edge cannot also be a node.
-                return Ok(Vec::new());
+        if let Some(var) = &patt.variable
+            && let Some(existing) = lookup(base, var)
+        {
+            if let EntityResult::Node(n) = existing {
+                return Ok(if self.node_element_matches(n, patt)? {
+                    vec![n.clone()]
+                } else {
+                    Vec::new()
+                });
             }
+            // A variable bound to an edge cannot also be a node.
+            return Ok(Vec::new());
         }
         let mut out = Vec::new();
         for node in &self.nodes {
@@ -410,7 +410,11 @@ impl MultiEval<'_> {
 
     /// Compare a stored [`PropertyValue`] against a pattern [`CypherValue`]
     /// (resolving parameters), with numeric int/float coercion.
-    fn value_equals(&self, actual: &PropertyValue, want: &CypherValue) -> Result<bool, CypherError> {
+    fn value_equals(
+        &self,
+        actual: &PropertyValue,
+        want: &CypherValue,
+    ) -> Result<bool, CypherError> {
         let want = self.cypher_value_to_property(want)?;
         Ok(loosely_equal(actual, &want))
     }
@@ -460,23 +464,23 @@ impl MultiEval<'_> {
                     return Ok(false);
                 };
                 for candidate in values {
-                    if let Some(v) = self.eval_value(candidate, binding)? {
-                        if loosely_equal(&needle, &v) {
-                            return Ok(true);
-                        }
+                    if let Some(v) = self.eval_value(candidate, binding)?
+                        && loosely_equal(&needle, &v)
+                    {
+                        return Ok(true);
                     }
                 }
                 Ok(false)
             }
-            CypherExpr::Contains { expr, substring } => {
-                Ok(self.eval_string(expr, binding)?.is_some_and(|s| s.contains(substring)))
-            }
-            CypherExpr::StartsWith { expr, prefix } => {
-                Ok(self.eval_string(expr, binding)?.is_some_and(|s| s.starts_with(prefix)))
-            }
-            CypherExpr::EndsWith { expr, suffix } => {
-                Ok(self.eval_string(expr, binding)?.is_some_and(|s| s.ends_with(suffix)))
-            }
+            CypherExpr::Contains { expr, substring } => Ok(self
+                .eval_string(expr, binding)?
+                .is_some_and(|s| s.contains(substring))),
+            CypherExpr::StartsWith { expr, prefix } => Ok(self
+                .eval_string(expr, binding)?
+                .is_some_and(|s| s.starts_with(prefix))),
+            CypherExpr::EndsWith { expr, suffix } => Ok(self
+                .eval_string(expr, binding)?
+                .is_some_and(|s| s.ends_with(suffix))),
             CypherExpr::Grouped(inner) => self.eval_predicate(inner, binding),
             CypherExpr::Value(CypherValue::Bool(b)) => Ok(*b),
             other => match self.eval_value(other, binding)? {
@@ -567,7 +571,9 @@ impl MultiEval<'_> {
                         self.project_variable(binding, v, alias.clone(), &mut bindings_out)?;
                     }
                     _ => {
-                        let value = self.eval_value(expr, binding)?.unwrap_or(PropertyValue::Null);
+                        let value = self
+                            .eval_value(expr, binding)?
+                            .unwrap_or(PropertyValue::Null);
                         let name = alias.clone().unwrap_or_else(|| default_column_name(expr));
                         columns_out.push((name, value));
                     }
@@ -634,8 +640,10 @@ impl MultiEval<'_> {
         index.sort_by(|&a, &b| compare_order_keys(&keys[a], &keys[b], ret));
 
         // Apply the permutation.
-        let mut reordered: Vec<Option<(Binding, QueryRow)>> =
-            rows.iter_mut().map(|slot| Some(std::mem::replace(slot, placeholder_slot()))).collect();
+        let mut reordered: Vec<Option<(Binding, QueryRow)>> = rows
+            .iter_mut()
+            .map(|slot| Some(std::mem::replace(slot, placeholder_slot())))
+            .collect();
         for (dst, &src) in index.iter().enumerate() {
             rows[dst] = reordered[src].take().expect("each source used once");
         }
@@ -686,9 +694,9 @@ fn param_to_property(param: &CypherParameterValue) -> PropertyValue {
         CypherParameterValue::Float(f) => PropertyValue::Float(*f),
         CypherParameterValue::String(s) => PropertyValue::String(std::sync::Arc::from(s.as_str())),
         CypherParameterValue::Embedding(e) => PropertyValue::Vector(std::sync::Arc::clone(e)),
-        CypherParameterValue::List(items) => {
-            PropertyValue::Array(std::sync::Arc::new(items.iter().map(param_to_property).collect()))
-        }
+        CypherParameterValue::List(items) => PropertyValue::Array(std::sync::Arc::new(
+            items.iter().map(param_to_property).collect(),
+        )),
     }
 }
 
@@ -703,10 +711,10 @@ fn entity_var_declaration_order(patterns: &[CypherPattern]) -> Vec<String> {
                 CypherPatternElement::Node(n) => n.variable.as_ref(),
                 CypherPatternElement::Relationship(r) => r.variable.as_ref(),
             };
-            if let Some(v) = var {
-                if seen.insert(v.clone()) {
-                    order.push(v.clone());
-                }
+            if let Some(v) = var
+                && seen.insert(v.clone())
+            {
+                order.push(v.clone());
             }
         }
     }
@@ -745,7 +753,9 @@ fn expr_has_aggregate(expr: &CypherExpr) -> bool {
         | CypherExpr::StartsWith { expr, .. }
         | CypherExpr::EndsWith { expr, .. } => expr_has_aggregate(expr),
         CypherExpr::List(items) => items.iter().any(expr_has_aggregate),
-        CypherExpr::Value(_) | CypherExpr::Variable(_) | CypherExpr::Property { .. }
+        CypherExpr::Value(_)
+        | CypherExpr::Variable(_)
+        | CypherExpr::Property { .. }
         | CypherExpr::Star => false,
     }
 }
@@ -793,10 +803,7 @@ fn compare(a: &PropertyValue, b: &PropertyValue, op: CypherCompOp) -> bool {
         CypherCompOp::Lt => partial_cmp(a, b) == Some(Ordering::Less),
         CypherCompOp::Le => matches!(partial_cmp(a, b), Some(Ordering::Less | Ordering::Equal)),
         CypherCompOp::Gt => partial_cmp(a, b) == Some(Ordering::Greater),
-        CypherCompOp::Ge => matches!(
-            partial_cmp(a, b),
-            Some(Ordering::Greater | Ordering::Equal)
-        ),
+        CypherCompOp::Ge => matches!(partial_cmp(a, b), Some(Ordering::Greater | Ordering::Equal)),
     }
 }
 
@@ -827,11 +834,7 @@ fn compare_order_keys(
             }
             (Some(x), Some(y)) => {
                 let base = partial_cmp(x, y).unwrap_or(Ordering::Equal);
-                if descending {
-                    base.reverse()
-                } else {
-                    base
-                }
+                if descending { base.reverse() } else { base }
             }
         };
         if ord != Ordering::Equal {

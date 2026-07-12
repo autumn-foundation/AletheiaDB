@@ -406,7 +406,9 @@ impl AletheiaDB {
         statement: &crate::cypher::ast::CypherStatement,
         params: &std::collections::HashMap<String, crate::cypher::CypherParameterValue>,
     ) -> Result<QueryResults> {
-        Ok(crate::cypher::multi_pattern::evaluate(self, statement, params)?)
+        Ok(crate::cypher::multi_pattern::evaluate(
+            self, statement, params,
+        )?)
     }
 }
 

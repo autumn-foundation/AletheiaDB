@@ -5084,14 +5084,26 @@ mod multi_pattern {
     #[test]
     fn test_multi_pattern_cross_product() {
         let db = AletheiaDB::new().unwrap();
-        db.create_node("Person", PropertyMapBuilder::new().insert("name", "Alice").build())
-            .unwrap();
-        db.create_node("Person", PropertyMapBuilder::new().insert("name", "Bob").build())
-            .unwrap();
-        db.create_node("Company", PropertyMapBuilder::new().insert("name", "Acme").build())
-            .unwrap();
-        db.create_node("Company", PropertyMapBuilder::new().insert("name", "Globex").build())
-            .unwrap();
+        db.create_node(
+            "Person",
+            PropertyMapBuilder::new().insert("name", "Alice").build(),
+        )
+        .unwrap();
+        db.create_node(
+            "Person",
+            PropertyMapBuilder::new().insert("name", "Bob").build(),
+        )
+        .unwrap();
+        db.create_node(
+            "Company",
+            PropertyMapBuilder::new().insert("name", "Acme").build(),
+        )
+        .unwrap();
+        db.create_node(
+            "Company",
+            PropertyMapBuilder::new().insert("name", "Globex").build(),
+        )
+        .unwrap();
 
         let rows = run(&db, "MATCH (a:Person),(b:Company) RETURN a,b");
         assert_eq!(rows.len(), 4, "2 persons x 2 companies = 4 rows");
@@ -5123,12 +5135,18 @@ mod multi_pattern {
         .unwrap();
         db.create_node(
             "Company",
-            PropertyMapBuilder::new().insert("name", "Acme").insert("id", 1i64).build(),
+            PropertyMapBuilder::new()
+                .insert("name", "Acme")
+                .insert("id", 1i64)
+                .build(),
         )
         .unwrap();
         db.create_node(
             "Company",
-            PropertyMapBuilder::new().insert("name", "Globex").insert("id", 2i64).build(),
+            PropertyMapBuilder::new()
+                .insert("name", "Globex")
+                .insert("id", 2i64)
+                .build(),
         )
         .unwrap();
 
@@ -5152,23 +5170,29 @@ mod multi_pattern {
     fn test_chain_binds_all_vars() {
         let db = AletheiaDB::new().unwrap();
         let a = db
-            .create_node("Person", PropertyMapBuilder::new().insert("name", "A").build())
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "A").build(),
+            )
             .unwrap();
         let b = db
-            .create_node("Person", PropertyMapBuilder::new().insert("name", "B").build())
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "B").build(),
+            )
             .unwrap();
         let c = db
-            .create_node("Company", PropertyMapBuilder::new().insert("name", "C").build())
+            .create_node(
+                "Company",
+                PropertyMapBuilder::new().insert("name", "C").build(),
+            )
             .unwrap();
         db.create_edge(a, b, "KNOWS", crate::core::property::PropertyMap::new())
             .unwrap();
         db.create_edge(b, c, "WORKS_AT", crate::core::property::PropertyMap::new())
             .unwrap();
 
-        let rows = run(
-            &db,
-            "MATCH (a)-[:KNOWS]->(b)-[:WORKS_AT]->(c) RETURN a,b,c",
-        );
+        let rows = run(&db, "MATCH (a)-[:KNOWS]->(b)-[:WORKS_AT]->(c) RETURN a,b,c");
         assert_eq!(rows.len(), 1);
         let row = &rows[0];
         assert_eq!(node_prop(bound(row, "a"), "name").unwrap(), "A");
@@ -5208,10 +5232,16 @@ mod multi_pattern {
     fn test_multi_var_property_projection() {
         let db = AletheiaDB::new().unwrap();
         let a = db
-            .create_node("Person", PropertyMapBuilder::new().insert("name", "Alice").build())
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "Alice").build(),
+            )
             .unwrap();
         let b = db
-            .create_node("Person", PropertyMapBuilder::new().insert("name", "Bob").build())
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "Bob").build(),
+            )
             .unwrap();
         db.create_edge(a, b, "KNOWS", crate::core::property::PropertyMap::new())
             .unwrap();
@@ -5233,25 +5263,37 @@ mod multi_pattern {
     fn test_mixed_pattern_join() {
         let db = AletheiaDB::new().unwrap();
         let a = db
-            .create_node("Person", PropertyMapBuilder::new().insert("name", "A1").build())
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "A1").build(),
+            )
             .unwrap();
         let b = db
             .create_node(
                 "Person",
-                PropertyMapBuilder::new().insert("name", "B1").insert("x", 5i64).build(),
+                PropertyMapBuilder::new()
+                    .insert("name", "B1")
+                    .insert("x", 5i64)
+                    .build(),
             )
             .unwrap();
         db.create_edge(a, b, "R", crate::core::property::PropertyMap::new())
             .unwrap();
         db.create_node(
             "L",
-            PropertyMapBuilder::new().insert("name", "C1").insert("y", 5i64).build(),
+            PropertyMapBuilder::new()
+                .insert("name", "C1")
+                .insert("y", 5i64)
+                .build(),
         )
         .unwrap();
         // Distractor that must not join.
         db.create_node(
             "L",
-            PropertyMapBuilder::new().insert("name", "D1").insert("y", 9i64).build(),
+            PropertyMapBuilder::new()
+                .insert("name", "D1")
+                .insert("y", 9i64)
+                .build(),
         )
         .unwrap();
 
@@ -5274,10 +5316,16 @@ mod multi_pattern {
     #[test]
     fn test_return_star_multi_var() {
         let db = AletheiaDB::new().unwrap();
-        db.create_node("Person", PropertyMapBuilder::new().insert("name", "Alice").build())
-            .unwrap();
-        db.create_node("Company", PropertyMapBuilder::new().insert("name", "Acme").build())
-            .unwrap();
+        db.create_node(
+            "Person",
+            PropertyMapBuilder::new().insert("name", "Alice").build(),
+        )
+        .unwrap();
+        db.create_node(
+            "Company",
+            PropertyMapBuilder::new().insert("name", "Acme").build(),
+        )
+        .unwrap();
 
         let rows = run(&db, "MATCH (a:Person),(b:Company) RETURN *");
         assert_eq!(rows.len(), 1);
@@ -5293,21 +5341,33 @@ mod multi_pattern {
         let db = AletheiaDB::new().unwrap();
         db.create_node(
             "Person",
-            PropertyMapBuilder::new().insert("name", "P20").insert("age", 20i64).build(),
+            PropertyMapBuilder::new()
+                .insert("name", "P20")
+                .insert("age", 20i64)
+                .build(),
         )
         .unwrap();
         db.create_node(
             "Person",
-            PropertyMapBuilder::new().insert("name", "P30").insert("age", 30i64).build(),
+            PropertyMapBuilder::new()
+                .insert("name", "P30")
+                .insert("age", 30i64)
+                .build(),
         )
         .unwrap();
         db.create_node(
             "Person",
-            PropertyMapBuilder::new().insert("name", "P40").insert("age", 40i64).build(),
+            PropertyMapBuilder::new()
+                .insert("name", "P40")
+                .insert("age", 40i64)
+                .build(),
         )
         .unwrap();
-        db.create_node("Company", PropertyMapBuilder::new().insert("name", "Acme").build())
-            .unwrap();
+        db.create_node(
+            "Company",
+            PropertyMapBuilder::new().insert("name", "Acme").build(),
+        )
+        .unwrap();
 
         // ORDER BY a.age DESC over the 3x1 product -> [40,30,20]; SKIP 1 LIMIT 1 -> 30.
         let rows = run(
@@ -5328,12 +5388,18 @@ mod multi_pattern {
         let db = AletheiaDB::new().unwrap();
         db.create_node(
             "Person",
-            PropertyMapBuilder::new().insert("name", "Alice").insert("company_id", 1i64).build(),
+            PropertyMapBuilder::new()
+                .insert("name", "Alice")
+                .insert("company_id", 1i64)
+                .build(),
         )
         .unwrap();
         db.create_node(
             "Company",
-            PropertyMapBuilder::new().insert("name", "Acme").insert("id", 99i64).build(),
+            PropertyMapBuilder::new()
+                .insert("name", "Acme")
+                .insert("id", 99i64)
+                .build(),
         )
         .unwrap();
 
@@ -5357,7 +5423,11 @@ mod multi_pattern {
             .unwrap();
 
         let rows = run(&db, "MATCH (a)-[:KNOWS]-(b) RETURN a,b");
-        assert_eq!(rows.len(), 2, "undirected match binds both traversal directions");
+        assert_eq!(
+            rows.len(),
+            2,
+            "undirected match binds both traversal directions"
+        );
         let mut pairs: Vec<(String, String)> = rows
             .iter()
             .map(|r| {
@@ -5380,10 +5450,16 @@ mod multi_pattern {
     #[test]
     fn test_self_pattern_product() {
         let db = AletheiaDB::new().unwrap();
-        db.create_node("Person", PropertyMapBuilder::new().insert("name", "Alice").build())
-            .unwrap();
-        db.create_node("Person", PropertyMapBuilder::new().insert("name", "Bob").build())
-            .unwrap();
+        db.create_node(
+            "Person",
+            PropertyMapBuilder::new().insert("name", "Alice").build(),
+        )
+        .unwrap();
+        db.create_node(
+            "Person",
+            PropertyMapBuilder::new().insert("name", "Bob").build(),
+        )
+        .unwrap();
 
         let rows = run(&db, "MATCH (a:Person),(b:Person) RETURN a,b");
         assert_eq!(rows.len(), 4, "2x2 self product includes a==b diagonal");
@@ -5393,19 +5469,33 @@ mod multi_pattern {
     fn test_single_var_unchanged_still_old_path() {
         let db = AletheiaDB::new().unwrap();
         let alice = db
-            .create_node("Person", PropertyMapBuilder::new().insert("name", "Alice").build())
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "Alice").build(),
+            )
             .unwrap();
         let bob = db
-            .create_node("Person", PropertyMapBuilder::new().insert("name", "Bob").build())
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "Bob").build(),
+            )
             .unwrap();
-        db.create_edge(alice, bob, "KNOWS", crate::core::property::PropertyMap::new())
-            .unwrap();
+        db.create_edge(
+            alice,
+            bob,
+            "KNOWS",
+            crate::core::property::PropertyMap::new(),
+        )
+        .unwrap();
 
         // Single-variable scan stays on the entity path: entity set, bindings None.
         let rows = run(&db, "MATCH (n:Person) RETURN n");
         assert_eq!(rows.len(), 2);
         for row in &rows {
-            assert!(row.bindings.is_none(), "single-var row must not carry bindings");
+            assert!(
+                row.bindings.is_none(),
+                "single-var row must not carry bindings"
+            );
             assert!(matches!(row.entity, EntityResult::Node(_)));
         }
 
