@@ -3098,6 +3098,256 @@ mod tests {
         }
     }
 
+    /// Round-trip a destructive `WalOperation` through an encrypted (v12)
+    /// segment via the cipher-aware read path, returning the decrypted+parsed
+    /// operation. Shared by the RetractNode/DeleteEdge/RetractEdge hardening
+    /// tests below (DeleteNode is covered by
+    /// `test_v12_encrypted_destructive_provenance_survives_decrypt`).
+    fn roundtrip_encrypted_v12_op(op: WalOperation) -> WalOperation {
+        use std::io::Write;
+        let dir = TempDir::new().unwrap();
+        let cipher = aes_cipher();
+        let path = dir.path().join("0.log");
+        {
+            let mut file = File::create(&path).unwrap();
+            file.write_all(&WAL_MAGIC).unwrap();
+            file.write_all(&[WAL_VERSION_ENCRYPTED_DESTRUCTIVE_PROVENANCE])
+                .unwrap();
+            file.sync_all().unwrap();
+        }
+        let entry = WalEntry::new(LSN(5), op);
+        let mut plaintext = Vec::new();
+        serialize_entry_into(&entry, &mut plaintext).unwrap();
+        let ct =
+            crate::encryption::wal_encryption::encrypt_wal_payload(&plaintext, &cipher).unwrap();
+        let mut frame = Vec::new();
+        frame.extend_from_slice(&(ct.len() as u32).to_le_bytes());
+        frame.extend_from_slice(&ct);
+        append_bytes(&path, &frame);
+
+        let mut entries = read_entries_from_dir_with_cipher(dir.path(), LSN(1), Some(&cipher))
+            .expect("encrypted v12 destructive-provenance segment must decrypt+parse");
+        assert_eq!(entries.len(), 1);
+        entries.remove(0).operation
+    }
+
+    /// Issue #3427 (R4, hardening): encrypted-v12 `RetractNode` provenance
+    /// survives the cipher-aware decrypt+parse path.
+    #[test]
+    fn test_v12_encrypted_retract_node_survives_decrypt() {
+        let op = roundtrip_encrypted_v12_op(WalOperation::RetractNode {
+            node_id: NodeId::new(7).unwrap(),
+            valid_to: HybridTimestamp::new(1_700_000, 3).unwrap(),
+            version_id: Some(VersionId::new(321).unwrap()),
+            provenance: Some(full_destructive_provenance()),
+        });
+        match op {
+            WalOperation::RetractNode { provenance, .. } => assert_full_destructive_provenance(
+                provenance
+                    .as_ref()
+                    .expect("RetractNode provenance must survive encrypted v12 decrypt+parse"),
+            ),
+            other => panic!("Expected RetractNode, got {other:?}"),
+        }
+    }
+
+    /// Issue #3427 (R4, hardening): encrypted-v12 `DeleteEdge` provenance
+    /// survives the cipher-aware decrypt+parse path.
+    #[test]
+    fn test_v12_encrypted_delete_edge_survives_decrypt() {
+        let op = roundtrip_encrypted_v12_op(WalOperation::DeleteEdge {
+            edge_id: EdgeId::new(100).unwrap(),
+            valid_from: HybridTimestamp::new(9_876_543, 1).unwrap(),
+            version_id: Some(VersionId::new(556).unwrap()),
+            provenance: Some(full_destructive_provenance()),
+        });
+        match op {
+            WalOperation::DeleteEdge { provenance, .. } => assert_full_destructive_provenance(
+                provenance
+                    .as_ref()
+                    .expect("DeleteEdge provenance must survive encrypted v12 decrypt+parse"),
+            ),
+            other => panic!("Expected DeleteEdge, got {other:?}"),
+        }
+    }
+
+    /// Issue #3427 (R4, hardening): encrypted-v12 `RetractEdge` provenance
+    /// survives the cipher-aware decrypt+parse path.
+    #[test]
+    fn test_v12_encrypted_retract_edge_survives_decrypt() {
+        let op = roundtrip_encrypted_v12_op(WalOperation::RetractEdge {
+            edge_id: EdgeId::new(11).unwrap(),
+            valid_to: HybridTimestamp::new(2_500_000, 5).unwrap(),
+            version_id: Some(VersionId::new(654).unwrap()),
+            provenance: Some(full_destructive_provenance()),
+        });
+        match op {
+            WalOperation::RetractEdge { provenance, .. } => assert_full_destructive_provenance(
+                provenance
+                    .as_ref()
+                    .expect("RetractEdge provenance must survive encrypted v12 decrypt+parse"),
+            ),
+            other => panic!("Expected RetractEdge, got {other:?}"),
+        }
+    }
+
+    /// Issue #3427 (hardening): a v11 destructive entry whose trailing
+    /// provenance blob is truncated must fail to parse with a
+    /// `CorruptedData` error (NEVER a panic — a torn provenance string must
+    /// be a bounds-checked read, not an out-of-bounds slice), and the
+    /// torn-tail machinery must classify it correctly:
+    ///
+    /// * tolerated as a crash-torn tail when it is the FINAL segment's last
+    ///   entry (the torn write was never acknowledged), but
+    /// * a HARD error when the same torn bytes sit in a NON-final (mid-log)
+    ///   segment — acknowledged data lies past it, so silently dropping it is
+    ///   forbidden.
+    #[test]
+    fn test_v11_torn_provenance_blob_is_corrupt_not_panic_and_classified() {
+        use std::io::Write;
+
+        // A fully-serialized v11 RetractNode carrying provenance. The blob's
+        // last field is the principal string, so dropping trailing bytes
+        // truncates it mid-field.
+        let entry = WalEntry::new(
+            LSN(5),
+            WalOperation::RetractNode {
+                node_id: NodeId::new(7).unwrap(),
+                valid_to: HybridTimestamp::new(1_700_000, 3).unwrap(),
+                version_id: Some(VersionId::new(321).unwrap()),
+                provenance: Some(full_destructive_provenance()),
+            },
+        );
+        let mut full = Vec::new();
+        serialize_entry_into(&entry, &mut full).unwrap();
+        let torn = &full[..full.len() - 4];
+
+        // (1) Direct parse of the truncated buffer: CorruptedData, no panic.
+        let err = parse_entry_at(torn, 0, WAL_VERSION_DESTRUCTIVE_PROVENANCE)
+            .expect_err("a truncated trailing provenance blob must fail to parse");
+        assert!(
+            matches!(err, Error::Storage(StorageError::CorruptedData(_))),
+            "a torn provenance blob must surface as CorruptedData (no panic), got {err:?}"
+        );
+
+        // (2) As the sole/final segment: tolerated as a crash-torn tail.
+        let dir = TempDir::new().unwrap();
+        let seg0 = dir.path().join("0.log");
+        {
+            let mut f = File::create(&seg0).unwrap();
+            f.write_all(&WAL_MAGIC).unwrap();
+            f.write_all(&[WAL_VERSION_DESTRUCTIVE_PROVENANCE]).unwrap();
+            f.write_all(torn).unwrap();
+            f.sync_all().unwrap();
+        }
+        let tolerated = read_entries_from_dir_with_options(dir.path(), LSN(1), None, true)
+            .expect("a torn provenance blob in the FINAL segment is a tolerable torn tail");
+        assert!(
+            tolerated.is_empty(),
+            "the torn (never-acknowledged) entry is dropped, not applied: {tolerated:?}"
+        );
+
+        // (3) Same torn bytes in a NON-final (mid-log) segment: hard error. A
+        // valid, higher-LSN entry lives in a later segment (1.log), so 0.log
+        // is no longer the final segment and torn-tail tolerance does not
+        // apply to it — mid-log corruption must fail-stop.
+        let seg1 = dir.path().join("1.log");
+        {
+            let mut f = File::create(&seg1).unwrap();
+            f.write_all(&WAL_MAGIC).unwrap();
+            f.write_all(&[WAL_VERSION_DESTRUCTIVE_PROVENANCE]).unwrap();
+            let good = WalEntry::new(
+                LSN(9),
+                WalOperation::DeleteNode {
+                    node_id: NodeId::new(1).unwrap(),
+                    valid_from: HybridTimestamp::new(2000, 0).unwrap(),
+                    version_id: Some(VersionId::new(2).unwrap()),
+                    provenance: None,
+                },
+            );
+            let mut buf = Vec::new();
+            serialize_entry_into(&good, &mut buf).unwrap();
+            f.write_all(&buf).unwrap();
+            f.sync_all().unwrap();
+        }
+        let err = read_entries_from_dir_with_options(dir.path(), LSN(1), None, true)
+            .expect_err("a torn blob in a non-final segment is mid-log corruption -> hard error");
+        assert!(
+            matches!(err, Error::Storage(StorageError::CorruptedData(_))),
+            "mid-log torn provenance must hard-error as CorruptedData, got {err:?}"
+        );
+    }
+
+    /// Issue #3427 (hardening): an empty-string principal (`Some("")`) is a
+    /// distinct, meaningful value from an absent principal (`None`) and must
+    /// round-trip as such — the field's presence byte (1 vs 0) carries the
+    /// distinction, so a zero-length string is not collapsed into `None`.
+    #[test]
+    fn test_v11_empty_string_principal_roundtrips_distinct_from_none() {
+        // Bundle A: principal explicitly the empty string.
+        let empty_principal = Provenance::builder()
+            .source("mcp")
+            .principal("")
+            .build()
+            .unwrap();
+        let entry_a = WalEntry::new(
+            LSN(1),
+            WalOperation::DeleteNode {
+                node_id: NodeId::new(1).unwrap(),
+                valid_from: HybridTimestamp::new(1000, 0).unwrap(),
+                version_id: Some(VersionId::new(1).unwrap()),
+                provenance: Some(empty_principal),
+            },
+        );
+        let mut buf_a = Vec::new();
+        serialize_entry_into(&entry_a, &mut buf_a).unwrap();
+        let (parsed_a, _) = parse_entry_at(&buf_a, 0, WAL_VERSION_DESTRUCTIVE_PROVENANCE).unwrap();
+        match parsed_a.operation {
+            WalOperation::DeleteNode { provenance, .. } => {
+                let p = provenance.expect("bundle with source+empty-principal must be present");
+                assert_eq!(
+                    p.principal(),
+                    Some(""),
+                    "an empty-string principal must round-trip as Some(\"\"), not None"
+                );
+            }
+            other => panic!("Expected DeleteNode, got {other:?}"),
+        }
+
+        // Bundle B: no principal at all (source only).
+        let no_principal = Provenance::builder().source("mcp").build().unwrap();
+        let entry_b = WalEntry::new(
+            LSN(2),
+            WalOperation::DeleteNode {
+                node_id: NodeId::new(2).unwrap(),
+                valid_from: HybridTimestamp::new(1000, 0).unwrap(),
+                version_id: Some(VersionId::new(2).unwrap()),
+                provenance: Some(no_principal),
+            },
+        );
+        let mut buf_b = Vec::new();
+        serialize_entry_into(&entry_b, &mut buf_b).unwrap();
+        let (parsed_b, _) = parse_entry_at(&buf_b, 0, WAL_VERSION_DESTRUCTIVE_PROVENANCE).unwrap();
+        match parsed_b.operation {
+            WalOperation::DeleteNode { provenance, .. } => {
+                let p = provenance.expect("bundle with source must be present");
+                assert_eq!(
+                    p.principal(),
+                    None,
+                    "an absent principal must round-trip as None"
+                );
+            }
+            other => panic!("Expected DeleteNode, got {other:?}"),
+        }
+
+        // The two serializations differ (presence byte 1+len vs 0), proving
+        // the distinction is carried on the wire, not just in the parsed type.
+        assert_ne!(
+            buf_a, buf_b,
+            "Some(\"\") and None principals must serialize to different bytes"
+        );
+    }
+
     #[test]
     fn test_parse_entry_at_update_node() {
         // Create an UpdateNode entry

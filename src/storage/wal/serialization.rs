@@ -222,6 +222,7 @@ fn provenance_serialized_size(provenance: Option<&Provenance>) -> usize {
 ///     node_id: NodeId::try_from(1).unwrap(),
 ///     valid_from: Timestamp::from(12345),
 ///     version_id: None, // no logged tombstone id (synthesized on replay)
+///     provenance: None, // no acting-principal attribution (#3427)
 /// };
 ///
 /// // Fixed overhead (24 bytes) + DeleteNode payload (21 bytes)
@@ -345,6 +346,7 @@ pub(crate) fn estimate_entry_capacity(operation: &WalOperation) -> usize {
 ///     node_id: NodeId::try_from(42).unwrap(),
 ///     valid_from: Timestamp::from(100),
 ///     version_id: None, // no logged tombstone id (synthesized on replay)
+///     provenance: None, // no acting-principal attribution (#3427)
 /// };
 ///
 /// // 1. Pre-allocate the buffer using our estimate

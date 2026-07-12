@@ -432,16 +432,19 @@ impl FlushCoordinator {
             return Ok(());
         }
 
-        // New segments use the delete-version-id format (Issue #3406), a strict
-        // superset of the transaction-framing format (Issue #3413) which is in
-        // turn a superset of the principal-carrying provenance format (Issues
-        // #3224 + #3350): version 10 for encrypted segments, version 9 for
-        // plaintext. It keeps the BeginTx/CommitTx framing markers AND appends
-        // the tombstone/retraction version_id to delete/retract payloads.
-        // Non-transactional producers simply omit the framing markers; the
-        // version bump signals both the markers AND the extended payload MAY be
-        // present so old readers reject the segment cleanly rather than
-        // misparsing.
+        // New segments use the destructive-op provenance format (Issue #3427):
+        // WAL_VERSION_ENCRYPTED_DESTRUCTIVE_PROVENANCE (v12) for encrypted
+        // segments, WAL_VERSION_DESTRUCTIVE_PROVENANCE (v11) for plaintext. It
+        // is a strict superset of the delete-version-id format (Issue #3406,
+        // v9/v10) — itself a superset of the transaction-framing format (Issue
+        // #3413) and the principal-carrying provenance format (Issues #3224 +
+        // #3350) — additionally appending an optional provenance blob to the
+        // delete/retract payloads so the acting principal on a destructive op
+        // survives crash recovery. It keeps the BeginTx/CommitTx framing
+        // markers AND the tombstone/retraction version_id. Non-transactional
+        // producers simply omit the framing markers; the version bump signals
+        // that the markers AND the extended payloads MAY be present so old
+        // readers reject the segment cleanly rather than misparsing.
         let write_version = if self.config.wal_cipher.is_some() {
             WAL_VERSION_ENCRYPTED_DESTRUCTIVE_PROVENANCE
         } else {
