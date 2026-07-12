@@ -63,6 +63,7 @@ fn post_status(addr: &str, path: &str, body: &[u8]) -> Option<u16> {
     // with BrokenPipe/ConnectionReset even though a valid `413` status line is
     // already waiting to be read. Tolerate those write errors and still attempt
     // the read — the status line, not a clean write, is the real assertion.
+    #[allow(clippy::collapsible_if)]
     if let Err(e) = stream.write_all(body) {
         if !matches!(
             e.kind(),

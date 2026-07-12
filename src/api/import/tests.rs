@@ -373,7 +373,7 @@ fn handle_row_failure_io_is_fatal_in_skip_mode() {
     let importer = db.import().failure_mode(FailureMode::SkipAndReport);
 
     // Build a synthetic Io error by wrapping a std::io::Error (the variant holds its string).
-    let io_err = std::io::Error::new(std::io::ErrorKind::Other, "synthetic mid-stream I/O");
+    let io_err = std::io::Error::other("synthetic mid-stream I/O");
     let mut report = ImportReport::default();
     let result = importer.handle_row_failure(ImportError::Io(io_err.to_string()), &mut report);
 
