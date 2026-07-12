@@ -757,12 +757,14 @@ fn raw_post_status(addr: &str, path: &str, body: &[u8]) -> Option<u16> {
     stream.write_all(head.as_bytes()).ok()?;
     // The server may RST after rejecting the oversized body before we finish
     // writing; tolerate broken-pipe/reset and still read the status line.
-    if let Err(e) = stream.write_all(body)
-        && !matches!(
+    let write_failed_hard = match stream.write_all(body) {
+        Ok(()) => false,
+        Err(e) => !matches!(
             e.kind(),
             std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::ConnectionReset
-        )
-    {
+        ),
+    };
+    if write_failed_hard {
         return None;
     }
     let _ = stream.flush();
