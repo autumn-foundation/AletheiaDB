@@ -5,6 +5,8 @@
 **Type:** Design / Evaluation (no code in this PR)
 **Related:** ADR 0055 (migrate HTTP to autumn), Issues #465, #475, #2905, #3350, #3234, #3368, #3376, #3426, #3353, #3360, #3231, #3209
 
+> **Update 2026-07-12 — P0 spike confirmed.** The one P0 assumption this evaluation flagged as unverified — *does autumn-web 0.5.0 relax the `IntoAppLayer` middleware bound?* — is **CONFIRMED**. A P0 spike compiled `tower-governor`, `ConcurrencyLimit`, `SetResponseHeader`, `RequireApiToken`, and custom layers against 0.5.0: `IntoAppLayer` is a blanket impl over any `tower::Layer<Route>` (`app.rs:438-440`); its "sealed" wording is only a diagnostic wrapper (`app.rs:408`), not a real restriction. Consequences folded in below: rate limiting via `tower-governor` supersedes/reopens ADR 0055 (§2.5, §8), and the remaining bespoke security work narrows to the single token→role RBAC layer (§6).
+
 ---
 
 ## 1. Executive summary + recommendation
@@ -15,13 +17,13 @@ The premise that started this evaluation ("the HTTP layer is basically straight 
 
 So the real decision is not "adopt autumn." It is:
 
-1. **Upgrade `autumn-web` 0.4 → 0.5.0**, which (per the API research, *assumption to confirm at build time*) relaxes `IntoAppLayer` to accept raw tower/axum layers and adds escape hatches — letting us move auth/tracing back to normal layers and **restore `tower-governor` rate limiting, closing the ADR 0055 gap**.
+1. **Upgrade `autumn-web` 0.4 → 0.5.0**, which — **confirmed by the P0 spike (2026-07-12)** — relaxes `IntoAppLayer` to accept raw tower/axum layers and adds escape hatches, letting us move auth/tracing back to normal layers and **restore `tower-governor` rate limiting, superseding/reopening the ADR 0055 gap**. The spike found 0.5.0's `IntoAppLayer` is a **blanket impl over any `tower::Layer<Route>`** (`app.rs:438-440`); the "sealed" appearance is purely a diagnostic wrapper for cleaner error messages (`app.rs:408`, `:881-883`), not a real restriction — `tower-governor`, `ConcurrencyLimit`, `SetResponseHeader`, `RequireApiToken`, and custom layers all compile-mount.
 2. **Adopt `#[api_doc(mcp)]` + `.mount_mcp("/mcp")` + `.openapi(...)`**, so one handler definition becomes an HTTP route **and** an MCP tool **and** an OpenAPI operation, with a guarantee they cannot drift.
 3. **Unify the two divergent error models** (`AletheiaHttpError` vs `McpError`) and the two RBAC classification registries behind one source of truth.
 
 The prize is real: today we maintain **5 HTTP routes + 44 MCP tools as two entirely separate stacks** (a 6.4k-line string-match dispatcher on one side, a polymorphic `/query` enum on the other), with two error shapes and two auth-classification tables kept in sync only by conformance tests. Unification collapses that duplication and gives us OpenAPI + an HTTP MCP transport **for near-free**.
 
-The risk is also real: `autumn-web` is **pre-1.0** (no SemVer guarantee, ~123 open issues), autumn's MCP transport is **HTTP-only (no stdio)** while we ship a stdio `aletheia-mcp` binary today, and several security invariants (auth-on-by-default, constant-time key verify, RBAC-by-token-role, `retriable` error flag) are **not free** in autumn and will silently regress if we are not deliberate.
+The risk is also real: `autumn-web` is **pre-1.0** (no SemVer guarantee, ~123 open issues), and autumn's MCP transport is **HTTP-only (no stdio)** while we ship a stdio `aletheia-mcp` binary today. On security, the P0 spike narrowed what autumn does *not* give us: **auth-on-by-default** (`RequireApiToken` + `secure_mcp`) is confirmed available, and **constant-time key verify** via a custom `ApiTokenStore` is confirmed to compile and be accepted — leaving essentially **one genuinely-bespoke security component: token→role `AccessClass` RBAC**, which autumn does not do natively (`verify` returns only `Option<principal>`, and `#[secured]` role gating is session-based). The structured-error `retriable` flag remains an error-model adapter (§6(f)). These will silently regress if we are not deliberate, so they are written as acceptance tests first.
 
 Hence: **strangler, feature-gated, security invariants written as acceptance tests first.** Detail below.
 
@@ -73,13 +75,13 @@ autumn 0.2's **sealed `IntoAppLayer` bound blocked arbitrary tower/axum middlewa
 
 - **Auth/RBAC lives in a `FromRequestParts` extractor** (`AuthContext`, `src/http/auth.rs:138`) — not a tower layer — *because* layers were blocked (`auth.rs:3` says so verbatim).
 - **OTel tracing lives in a `FromRequestParts` extractor** (`HttpTrace`, `src/http/trace.rs:161`) — same reason (`trace.rs:3`).
-- **Rate limiting is not wired at all.** `actix-governor` → `tower-governor` 0.8 fails the `IntoAppLayer` bound; ADR 0055 defers it to "autumn 0.3 native rate limiting," preserves `RateLimitConfig` in the public API, and tells operators to enforce at the reverse proxy. `TODO(autumn-0.3)` marker at `src/http/server.rs:17-26`.
+- **Rate limiting is not wired at all.** `actix-governor` → `tower-governor` 0.8 failed the **0.4-era** `IntoAppLayer` bound; ADR 0055 punted it to the reverse proxy ("autumn 0.3 native rate limiting"), preserving `RateLimitConfig` in the public API. `TODO(autumn-0.3)` marker at `src/http/server.rs:17-26`. **The P0 spike confirms 0.5.0 accepts `tower-governor`, so upgrading supersedes/reopens ADR 0055's punt:** in-process rate limiting via `tower-governor` (plus `ConcurrencyLimit` for backpressure) becomes available again as a normal layer — see §8 (inbound HTTP/MCP concurrency control).
 - Only two things attach as real layers in prod: autumn's baseline stack, and `DefaultBodyLimit` (`server.rs:230`, chosen specifically because it satisfies `IntoAppLayer`).
 - The **test router is a plain `axum::Router`** (`server.rs:396`) precisely so it can attach the full tower-http stack (CORS, security headers, `TraceLayer`) that prod can't.
 
-**This is the crux of the reconciliation (flagged item #2):** the surface audit ("`IntoAppLayer` blocks middleware") and the API deep-dive ("0.5.0 supports `.layer` + escape hatches") are **both right, about different versions**. The repo is on **0.4**, written against the **0.2** limitation. autumn **0.5.0's** `.layer<L: IntoAppLayer>` reportedly accepts raw tower/axum layers, and `.merge`/`.nest` drop to raw axum on the same `AppState` (API research §6, §8). **If confirmed at build time, this is a direct reason to upgrade:** it lets auth/tracing move back to normal layers *and* restores `tower-governor` rate limiting, closing the ADR 0055 gap as a side effect of this project rather than as separate work.
+**This is the crux of the reconciliation (flagged item #2):** the surface audit ("`IntoAppLayer` blocks middleware") and the API deep-dive ("0.5.0 supports `.layer` + escape hatches") are **both right, about different versions**. The repo is on **0.4**, written against the **0.2** limitation. autumn **0.5.0's** `.layer<L: IntoAppLayer>` accepts raw tower/axum layers, and `.merge`/`.nest` drop to raw axum on the same `AppState` (API research §6, §8). **This is now a confirmed, direct reason to upgrade:** it lets auth/tracing move back to normal layers *and* restores `tower-governor` rate limiting, superseding/reopening the ADR 0055 gap as a side effect of this project rather than as separate work.
 
-> **Assumption to confirm:** that autumn-web 0.5.0 actually relaxes `IntoAppLayer` enough for `tower-governor` and our security-header/CORS layers. The research asserts it; we have not compiled against 0.5.0. First task of any phase is a spike that attaches `tower-governor` under 0.5.0 and confirms it builds.
+> **CONFIRMED (P0 spike, 2026-07-12):** autumn-web 0.5.0 relaxes `IntoAppLayer` enough for `tower-governor` and our security-header/CORS layers. The spike compiled these against 0.5.0 and found `IntoAppLayer` is a **blanket impl over any `tower::Layer<Route>`** meeting axum's service bounds (`impl<L> IntoAppLayer for L where L: tower::Layer<axum::routing::Route> + Clone + Send + Sync + 'static`, `app.rs:438-440`; docstring `app.rs:881-883`). The "sealed" wording is **only a diagnostic wrapper** to surface a clean `IntoAppLayer is not implemented for YourType` message instead of a 40-line associated-type wall (`app.rs:408-416`) — not a real restriction. `tower-governor`, `ConcurrencyLimit`, `SetResponseHeaderLayer`, custom layers, and `RequireApiToken` all compile-mount on 0.5.0. **Caveat (not a blocker):** body-*wrapping* layers (`TraceLayer`, `RequestBodyLimit`) still need axum's usual body-map treatment — but that is axum's own `Router::layer` rule, **not** an autumn seal, so it is a known axum pattern rather than a porting obstacle.
 
 ### 2.6 No streaming anywhere
 
@@ -185,9 +187,9 @@ Nothing in our surface is structurally *ineligible* (no streaming, no multipart)
 
 ### 4.3 Six hats
 
-- **White (facts):** Already on autumn 0.4. 5 routes + 44 tools. Two error models. Auth+tracing are extractors; rate limiting absent (ADR 0055). No streaming. autumn 0.5.0 adds api_doc→MCP+OpenAPI, HTTP-only MCP, reportedly relaxed `IntoAppLayer`. Pre-1.0, ~123 open issues.
+- **White (facts):** Already on autumn 0.4. 5 routes + 44 tools. Two error models. Auth+tracing are extractors; rate limiting absent (ADR 0055). No streaming. autumn 0.5.0 adds api_doc→MCP+OpenAPI, HTTP-only MCP, and (**P0-spike-confirmed**) a relaxed `IntoAppLayer` that is a blanket impl over any `tower::Layer<Route>` (`app.rs:438-440`). Pre-1.0, ~123 open issues.
 - **Red (gut):** The unification is genuinely attractive — one definition, three surfaces, no drift. Nervousness centers on pre-1.0 churn and the security invariants that autumn does *not* give us for free.
-- **Black (risks):** pre-1.0 SemVer breakage; `IntoAppLayer`-relaxation is an unverified assumption; RBAC-by-token-role and constant-time verify are on us; error-shape drift; the batch schema; OpenAPI correctness for temporal/vector types; the embedded-first constraint must never regress.
+- **Black (risks):** pre-1.0 SemVer breakage; `IntoAppLayer`-relaxation is **now P0-confirmed** (no longer a risk); **token→role RBAC is the one bespoke security piece left on us** (auth-on-by-default and constant-time verify are P0-confirmed available/compiling); error-shape drift (the `retriable` adapter); the batch schema; OpenAPI correctness for temporal/vector types; the embedded-first constraint must never regress.
 - **Yellow (value):** kills duplication across 5+44 handlers, two error models, two RBAC tables; **free** OpenAPI + Swagger; an HTTP MCP transport (multi-agent-ready); restored rate limiting; positions us for the 0.6.0 daemon (#475/#2905).
 - **Green (alternatives):** Approach C (HTTP-only) as a de-risked first cut; share libraries without api_doc; upgrade-to-0.5.0 as its own PR before committing to unification.
 - **Blue (process):** Spike 0.5.0 upgrade → write security ACs as failing tests → strangle route-by-route behind the flag → add HTTP `/mcp` beside stdio → cut over → deprecate stdio only if/when the daemon lands. Each step independently revertible.
@@ -226,13 +228,15 @@ The 6.4k-line dispatcher and the security invariants that autumn does *not* hand
 
 Each invariant → an explicit AC + the test that proves it. **These are written as failing tests before any handler is converted.**
 
+**What the P0 spike changed here:** most of these ACs are now "wire up a *confirmed* API" rather than "unknown." The spike confirmed against 0.5.0 that (a) **auth-on-by-default** — `RequireApiToken` (a real `tower::Layer`) + `.secure_mcp` gating `/mcp` — is available; and (c) a **custom constant-time `ApiTokenStore` compiles and is accepted** (the trait's `verify`/`issue`/`revoke` are the documented extension point). That leaves exactly **one genuinely-bespoke security component: the token→role `AccessClass` mapping (AC(b))** — autumn's `verify` returns only `Option<principal>` and `#[secured]` role gating reads the *session* role, not a bearer-token role, so per-token RBAC needs a **thin custom authorization layer** (or role encoded in the principal). That layer is what the RBAC conformance tests must cover on the `/mcp` surface.
+
 | # | Acceptance criterion | Evidence / test |
 |---|----------------------|-----------------|
-| (a) | Server **refuses to start with zero credentials** (Required mode); anonymous is explicit opt-in | Startup-refusal test mirroring `validate_mcp_auth_startup` (`src/mcp/auth.rs:299`) + HTTP equivalent; extend to the autumn `on_startup` path |
-| (b) | **Every route and every MCP tool gated by the correct role** (admin/writer/reader/metrics) | Extend the RBAC conformance sweep (`auth_tests.rs:190`, `documented_matrix_matches_code:137`) to cover `/mcp` tool calls; custom policy layer maps our 4 roles onto API-token principals (autumn's `#[secured]` alone reads *session* role, not token role — insufficient) |
-| (c) | **Constant-time key verification** | Custom `ApiTokenStore` impl using `subtle::ConstantTimeEq` (2.6.1 already a dep); a timing/`ConstantTimeEq`-usage test. **Do NOT** use autumn's built-in stores (SHA-256-then-hashmap-lookup) |
+| (a) | Server **refuses to start with zero credentials** (Required mode); anonymous is explicit opt-in — **auth-on-by-default P0-confirmed available** (`RequireApiToken` + `.secure_mcp`) | Startup-refusal test mirroring `validate_mcp_auth_startup` (`src/mcp/auth.rs:299`) + HTTP equivalent; extend to the autumn `on_startup` path |
+| (b) | **Every route and every MCP tool gated by the correct role** (admin/writer/reader/metrics) — **the single bespoke security component** (see §6 intro) | Extend the RBAC conformance sweep (`auth_tests.rs:190`, `documented_matrix_matches_code:137`) to cover `/mcp` tool calls; a **thin custom authorization layer** maps our 4 `AccessClass` roles onto API-token principals (autumn's `verify` yields only `Option<principal>` and `#[secured]` alone reads *session* role, not token role — insufficient) |
+| (c) | **Constant-time key verification** — custom `ApiTokenStore` **P0-confirmed to compile & be accepted** | Custom `ApiTokenStore` impl using `subtle::ConstantTimeEq` (2.6.1 already a dep); a timing/`ConstantTimeEq`-usage test. **Do NOT** use autumn's built-in stores (SHA-256-then-hashmap-lookup) |
 | (d) | **Credentials never logged** | Log-scrub test asserting no bearer/key material in trace spans or error bodies; SHA-256-hashed keys in `{data_dir}/auth/keys.json` (0600) |
-| (e) | **MCP catalog (`tools/list`) not reachable unauthenticated** | Wrap `.secure_mcp(RequireApiToken layer)`; test asserts `initialize`/`tools/list`/`tools/call` all 401 without a valid credential (autumn leaves the catalog open unless wrapped) |
+| (e) | **MCP catalog (`tools/list`) not reachable unauthenticated** | Wrap `.secure_mcp(RequireApiToken layer)` — `RequireApiToken` P0-confirmed to be a real `tower::Layer` and `secure_mcp` gates `/mcp`; test asserts `initialize`/`tools/list`/`tools/call` all 401 without a valid credential (autumn leaves the catalog open unless wrapped) |
 | (f) | **Structured error contract with `retriable` preserved on both surfaces** | Custom error type + `IntoResponse` emitting `{code,message,retriable,details}`; contract test on HTTP and `/mcp`. autumn's RFC-7807 has `code` but **no `retriable`** and a different shape (#3234) |
 | (g) | **Revocation is immediate** (re-verify per call) | Revoke-then-call test returns 401 on the next request; no caching of verify results across calls |
 
@@ -244,7 +248,7 @@ Each invariant → an explicit AC + the test that proves it. **These are written
 |------|-------------------|
 | **axum 0.8 version alignment** | autumn 0.5.0 pins axum ^0.8, edition 2024, MSRV 1.88; our `axum`/`tower` deps must match. Build matrix + `cargo tree -d` for duplicate axum |
 | **Pre-1.0 autumn (no SemVer, ~123 open issues)** | Pin an exact `=0.5.0`; supply-chain review; contract tests catch behavior drift on upgrade; treat autumn upgrades as breaking until they hit 1.0 |
-| **`IntoAppLayer` relaxation unverified** | **First task = spike:** attach `tower-governor` + security-header layers under 0.5.0; if it still fails the bound, fall back to the extractor pattern and note rate limiting stays reverse-proxy-only |
+| **`IntoAppLayer` relaxation** — **CONFIRMED (P0 spike)**, no longer a risk | Spike compiled `tower-governor` + `ConcurrencyLimit` + security-header + `RequireApiToken` layers under 0.5.0: all mount (blanket impl `app.rs:438-440`; "sealed" is diagnostic-only, `app.rs:408`). Residual note: body-*wrapping* layers (`TraceLayer`, `RequestBodyLimit`) use axum's normal body-map treatment — an axum pattern, not an autumn seal |
 | **Token-budget (#3353) & cursor (#3360) interacting with api_doc schema** | These become typed `Query`/`Json` fields → assert they appear in `openapi.json` and `tools/list` inputSchema; conformance sweep (`ac2_conformance_sweep_never_overruns`, `tests.rs:13627`) must stay green; cursor signing secret + TTL/cap registry carried in `AppState`, not per-request |
 | **6.4k-line `server.rs` match refactor** | Strangle one arm at a time; keep the registry-sweep tests (`auth_tests.rs`, `tests.rs:9258`) green each step; a name→handler table can replace the match mechanically |
 | **Error-shape drift between surfaces** | Single shared error type + `IntoResponse`; golden-file contract test on both surfaces (AC(f)) |
@@ -260,11 +264,11 @@ Each invariant → an explicit AC + the test that proves it. **These are written
 
 | Surface | Lifecycle today | Concern | Recommendation |
 |---------|-----------------|---------|----------------|
-| **HTTP** | axum/hyper keep-alive; `Arc<AletheiaDB>` shared via extractor | Concurrency limit, backpressure, body-size (`DefaultBodyLimit`, #3108), per-query timeout→429 (#3368) | Under 0.5.0, restore a `tower` concurrency-limit + `tower-governor` rate-limit **layer** (closes ADR 0055). Rate limiting is punted to the reverse proxy *today*; a layer can bring it back in-process |
+| **HTTP** | axum/hyper keep-alive; `Arc<AletheiaDB>` shared via extractor | Concurrency limit, backpressure, body-size (`DefaultBodyLimit`, #3108), per-query timeout→429 (#3368) | Under 0.5.0, restore a `tower` `ConcurrencyLimit` (backpressure) + `tower-governor` rate-limit **layer** — **P0-confirmed to compile-mount**, so this **supersedes/reopens ADR 0055's** reverse-proxy punt and brings rate limiting back in-process |
 | **MCP stdio** | one client, process-lifetime, serialized | trivial — single session | Keep as-is for the embedded/CLI case |
 | **MCP over HTTP (new)** | **many concurrent agent sessions** over `POST /mcp` | session limits, backpressure, cursor TTL/cap (#3360) interplay, per-session auth | Needs a **connection/session budget**: max concurrent MCP sessions, per-session cursor cap (already have TTL default 5 min / cap 128), and the same rate-limit layer. This is where multi-agent load actually lands |
 
-**Recommended follow-up issue scope:** *"Inbound connection & MCP-session lifecycle policy for the unified surface"* — concurrency-limit + rate-limit layer (restore ADR 0055), MCP-over-HTTP session cap + backpressure, and cursor registry sizing under many sessions. Explicitly out of scope: any outbound DB pool (none exists; embedded).
+**Recommended follow-up issue scope:** *"Inbound connection & MCP-session lifecycle policy for the unified surface"* — `ConcurrencyLimit` + `tower-governor` rate-limit layer (**supersedes/reopens ADR 0055**, now P0-confirmed available on 0.5.0), MCP-over-HTTP session cap + backpressure, and cursor registry sizing under many sessions. Explicitly out of scope: any outbound DB pool (none exists; embedded).
 
 ---
 
@@ -286,7 +290,7 @@ Expressed per strangler phase as touch-points / new adapters / files.
 
 | Phase | Blast radius | New adapters / files | Complexity |
 |-------|-------------|----------------------|------------|
-| **P0 — 0.5.0 upgrade spike** | `Cargo.toml`, `src/http/server.rs` | none (verify `IntoAppLayer` relaxation; attach `tower-governor`) | **Low-Med** — gated on the unverified assumption; pure de-risking |
+| **P0 — 0.5.0 upgrade spike** | `Cargo.toml`, `src/http/server.rs` | none (attach `tower-governor`) | **Low-Med** — **`IntoAppLayer` relaxation now P0-confirmed**; the spike compiled `tower-governor`/`ConcurrencyLimit`/`RequireApiToken` against 0.5.0, so this phase is de-risked from "unknown" to "wire up a confirmed API" |
 | **P1 — shared foundation** | new `src/server/` module | 1 unified error type + `IntoResponse`; 1 custom `ApiTokenStore` (constant-time); 1 RBAC policy layer; 1 shared response-shaper (budget/vector-elision/temporal-bounds) | **High** — this is where the real design lives; everything downstream reuses it |
 | **P2 — HTTP routes onto api_doc** | `src/http/handlers.rs`, `admin.rs` | convert 5 routes / 10 ops to typed `#[api_doc]` handlers; add `.openapi(...)` | **Med** — mechanical once P1 exists; `/query` polymorphism → typed handlers is the fiddly part |
 | **P3 — MCP over HTTP** | `.mount_mcp` + `.secure_mcp`; `src/mcp/**` | tag reads/writes `#[api_doc(mcp)]`; keep stdio binary | **Med** — coexistence, not replacement |
@@ -299,19 +303,25 @@ Rollback at every phase = revert the phase's routes/flag; conformance sweeps are
 
 ## 11. Open questions for go/no-go
 
-1. **Upgrade to 0.5.0 now?** P0 is a prerequisite for everything and rests on the unverified `IntoAppLayer` relaxation. Approve the spike first, or commit to the whole strangler?
+1. **Upgrade to 0.5.0 now?** P0 is a prerequisite for everything; its central unknown — the `IntoAppLayer` relaxation — is now **P0-spike-confirmed** (blanket impl, `app.rs:438-440`). Commit to the whole strangler, or still stage the upgrade as its own PR first?
 2. **stdio MCP: keep indefinitely, or deprecate once HTTP `/mcp` + the 0.6.0 daemon land?** Recommendation: keep for the embedded/CLI case; revisit at 0.6.0.
 3. **Pre-1.0 autumn tolerance.** Are we comfortable pinning `=0.5.0` and treating every autumn bump as breaking until 1.0, given ~123 open issues?
 4. **`/query` polymorphic endpoint:** convert the 10 ops to 10 typed routes (idiomatic, more OpenAPI ops), or keep one polymorphic route with a hand-written schema? Recommendation: typed routes.
 5. **`apply_batch` over MCP-HTTP:** accept the large nested JSON-Schema autumn derives, or keep batch HTTP-only initially?
 6. **Admin key routes as MCP tools?** Today there are **zero** admin MCP tools. Keep it that way (recommended), or expose key lifecycle over authenticated `/mcp`?
-7. **Rate limiting:** restore as an in-process `tower-governor` layer under 0.5.0 (closes ADR 0055), or keep deferring to the reverse proxy?
+7. **Rate limiting:** restore as an in-process `tower-governor` layer under 0.5.0 (**supersedes/reopens ADR 0055** — P0-confirmed the layer compile-mounts), or keep deferring to the reverse proxy?
 
 ---
 
-## Appendix — items that could NOT be verified in this pass
+## Appendix
 
-- That **autumn-web 0.5.0 actually relaxes `IntoAppLayer`** enough for `tower-governor` and our security-header/CORS layers (asserted by the API research; not compiled). **P0 spike must confirm.**
+### P0 spike — CONFIRMED (2026-07-12)
+
+- **autumn-web 0.5.0 relaxes `IntoAppLayer`** enough for `tower-governor` and our security-header/CORS layers. The spike compiled these against 0.5.0: `IntoAppLayer` is a **blanket impl over any `tower::Layer<Route>`** meeting axum's service bounds (`app.rs:438-440`); the "sealed" appearance is only a diagnostic wrapper for a cleaner error message, not a restriction (`app.rs:408-416`, docstring `:881-883`). `tower-governor`, `ConcurrencyLimit`, `SetResponseHeader`, custom layers, and `RequireApiToken` all compile-mount. Body-*wrapping* layers (`TraceLayer`, `RequestBodyLimit`) still need axum's normal body-map treatment — axum's own rule, not an autumn seal.
+- **`RequireApiToken` is a real `tower::Layer`** and `.secure_mcp` gates `/mcp`; a **custom constant-time `ApiTokenStore` compiles and is accepted** (the trait's `verify`/`issue`/`revoke` extension point). The one security piece autumn does **not** give us is **token→role `AccessClass` RBAC** (`verify` returns only `Option<principal>`; `#[secured]` gates on *session* role) — a thin custom authorization layer (§6(b)).
+
+### Items still NOT verified in this pass
+
 - The exact **wire shape of autumn 0.5.0's RFC-7807** vs our error model, byte-for-byte (research describes it; not observed in a running 0.5.0).
 - Whether the **`maud` workaround** (kept because 0.2.0's `error_pages` imported maud unconditionally, `Cargo.toml:68-70`) is still needed under 0.5.0 with `default-features = false, features = ["mcp"]`.
 - That `#[secured]`/session module **compiles cleanly with `default-features = false`** (research expects it to; unverified).
