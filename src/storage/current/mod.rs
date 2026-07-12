@@ -2362,6 +2362,32 @@ impl CurrentStorage {
         self.indexes.iter_edges().map(|e| e.clone())
     }
 
+    /// Iterate over all nodes by borrow (no per-element clone).
+    ///
+    /// Yields DashMap guard references (`Deref<Target = Node>`) delegated to
+    /// [`CurrentIndexes::iter_nodes`], for read-only scans (e.g. the HLC
+    /// startup seed) that only need to read fields off each node. Prefer this
+    /// over [`Self::all_nodes`], which clones every `Node`, when owned values
+    /// are not required.
+    pub(crate) fn iter_nodes(
+        &self,
+    ) -> impl Iterator<Item = impl std::ops::Deref<Target = Node> + '_> + '_ {
+        self.indexes.iter_nodes()
+    }
+
+    /// Iterate over all edges by borrow (no per-element clone).
+    ///
+    /// Yields DashMap guard references (`Deref<Target = Edge>`) delegated to
+    /// [`CurrentIndexes::iter_edges`], for read-only scans (e.g. the HLC
+    /// startup seed) that only need to read fields off each edge. Prefer this
+    /// over [`Self::all_edges`], which clones every `Edge`, when owned values
+    /// are not required.
+    pub(crate) fn iter_edges(
+        &self,
+    ) -> impl Iterator<Item = impl std::ops::Deref<Target = Edge> + '_> + '_ {
+        self.indexes.iter_edges()
+    }
+
     /// Scan nodes by label, returning an iterator over matching node IDs.
     ///
     /// This method efficiently filters the node collection to find all nodes
