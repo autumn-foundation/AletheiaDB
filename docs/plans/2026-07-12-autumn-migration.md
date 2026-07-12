@@ -6,12 +6,14 @@
 **Related:** ADR 0055 (migrate HTTP to autumn), Issues #465, #475, #2905, #3350, #3234, #3368, #3376, #3426, #3353, #3360, #3231, #3209
 
 > **Update 2026-07-12 — P0 spike confirmed.** The one P0 assumption this evaluation flagged as unverified — *does autumn-web 0.5.0 relax the `IntoAppLayer` middleware bound?* — is **CONFIRMED**. A P0 spike compiled `tower-governor`, `ConcurrencyLimit`, `SetResponseHeader`, `RequireApiToken`, and custom layers against 0.5.0: `IntoAppLayer` is a blanket impl over any `tower::Layer<Route>` (`app.rs:438-440`); its "sealed" wording is only a diagnostic wrapper (`app.rs:408`), not a real restriction. Consequences folded in below: rate limiting via `tower-governor` supersedes/reopens ADR 0055 (§2.5, §8), and the remaining bespoke security work narrows to the single token→role RBAC layer (§6).
+>
+> **Update 2026-07-12 — structural constraint (separate axis).** The same spike proved empirically that **autumn 0.4 and 0.5 cannot coexist in one crate**: 0.5's macros expand to hardcoded `::autumn_web::…` paths with no `proc-macro-crate` rename support, so a combined build fails with 11 type-mismatch errors. This **rules out the original "in-crate feature-flag, route-by-route" staging** and forces **crate-boundary staging** — a separate 0.5 workspace member (§5.0). The strangler recommendation stands; its unit of incrementality is now the workspace member, not a main-crate flag. Upstream `proc-macro-crate` ask filed (§7.1).
 
 ---
 
 ## 1. Executive summary + recommendation
 
-**Verdict: GO — but as an *idiomatic-adoption + MCP-unification* project, not a "port from axum," and staged as a strangler (Approach B), gated behind the existing `http-server` feature so the embedded-library use case stays first-class and untouched.**
+**Verdict: GO — but as an *idiomatic-adoption + MCP-unification* project, not a "port from axum," and staged as a strangler (Approach B) whose unit of incrementality is a *separate workspace member on autumn 0.5* (a crate-boundary, not a per-route feature flag inside the main crate — see §5.0), so the embedded-library use case stays first-class and untouched.**
 
 The premise that started this evaluation ("the HTTP layer is basically straight axum, let's move it to autumn") is **factually wrong and worth correcting up front**: AletheiaDB's HTTP surface is **already on `autumn-web`** (pinned at **0.4** in `Cargo.toml:70`), and has been since ADR 0055 (2026-04-19). What we actually have is autumn used *non-idiomatically* — for app lifecycle and baseline middleware only — with auth and tracing shoved into `FromRequestParts` extractors because the **0.2-era `IntoAppLayer` bound blocked tower middleware**, and with rate limiting dropped entirely (ADR 0055, the `TODO(autumn-0.3)` gap).
 
@@ -25,7 +27,7 @@ The prize is real: today we maintain **5 HTTP routes + 44 MCP tools as two entir
 
 The risk is also real: `autumn-web` is **pre-1.0** (no SemVer guarantee, ~123 open issues), and autumn's MCP transport is **HTTP-only (no stdio)** while we ship a stdio `aletheia-mcp` binary today. On security, the P0 spike narrowed what autumn does *not* give us: **auth-on-by-default** (`RequireApiToken` + `secure_mcp`) is confirmed available, and **constant-time key verify** via a custom `ApiTokenStore` is confirmed to compile and be accepted — leaving essentially **one genuinely-bespoke security component: token→role `AccessClass` RBAC**, which autumn does not do natively (`verify` returns only `Option<principal>`, and `#[secured]` role gating is session-based). The structured-error `retriable` flag remains an error-model adapter (§6(f)). These will silently regress if we are not deliberate, so they are written as acceptance tests first.
 
-Hence: **strangler, feature-gated, security invariants written as acceptance tests first.** Detail below.
+Hence: **strangler at the crate boundary (a separate 0.5 workspace member), security invariants written as acceptance tests first.** One structural constraint the spike proved empirically shapes this: **autumn 0.4 and 0.5 cannot coexist in a single crate** (0.5's macros expand to hardcoded `::autumn_web::…` paths with no `proc-macro-crate` rename support — combined build fails with 11 type-mismatch errors), so the staging is a workspace member, not an in-crate feature flag (§5.0). Detail below.
 
 ---
 
@@ -165,7 +167,7 @@ Nothing in our surface is structurally *ineligible* (no streaming, no multipart)
 ### 4.1 Brainstorming — options generated
 
 - Big-bang rewrite of both surfaces onto `#[api_doc(mcp)]`.
-- Strangler: convert route-by-route / tool-by-tool behind the `http-server` flag.
+- Strangler: convert route-by-route / tool-by-tool. *(Note: the spike later proved this must be at the **crate boundary** — a separate 0.5 workspace member — because in-crate 0.4↔0.5 coexistence is impossible, §5.0. An in-main-crate feature-flag variant of this option is ruled out.)*
 - HTTP-only adoption (api_doc + OpenAPI), defer MCP unification.
 - Keep two surfaces, only **share the response-shaper + error + RBAC libraries** (no api_doc at all).
 - Upgrade to 0.5.0 first as a standalone PR (restore rate limiting + move auth to layers), *then* decide on api_doc separately.
@@ -192,17 +194,28 @@ Nothing in our surface is structurally *ineligible* (no streaming, no multipart)
 - **Black (risks):** pre-1.0 SemVer breakage; `IntoAppLayer`-relaxation is **now P0-confirmed** (no longer a risk); **token→role RBAC is the one bespoke security piece left on us** (auth-on-by-default and constant-time verify are P0-confirmed available/compiling); error-shape drift (the `retriable` adapter); the batch schema; OpenAPI correctness for temporal/vector types; the embedded-first constraint must never regress.
 - **Yellow (value):** kills duplication across 5+44 handlers, two error models, two RBAC tables; **free** OpenAPI + Swagger; an HTTP MCP transport (multi-agent-ready); restored rate limiting; positions us for the 0.6.0 daemon (#475/#2905).
 - **Green (alternatives):** Approach C (HTTP-only) as a de-risked first cut; share libraries without api_doc; upgrade-to-0.5.0 as its own PR before committing to unification.
-- **Blue (process):** Spike 0.5.0 upgrade → write security ACs as failing tests → strangle route-by-route behind the flag → add HTTP `/mcp` beside stdio → cut over → deprecate stdio only if/when the daemon lands. Each step independently revertible.
+- **Blue (process):** Spike 0.5.0 in an isolated crate → write security ACs as failing tests → strangle route-by-route **in the separate 0.5 workspace member** (crate-boundary, §5.0 — not an in-crate flag) → add HTTP `/mcp` beside stdio → cut over → deprecate stdio only if/when the daemon lands. Each step independently revertible.
 
 ---
 
 ## 5. Implementation approaches & recommendation
 
-### A) Big-bang
-Rewrite both surfaces onto the unified `#[api_doc(mcp)]` surface at once; retire the rmcp dispatcher and the `/query` enum in one PR.
+### 5.0 Structural constraint: autumn 0.4 and 0.5 **cannot coexist in one crate** (P0 spike, empirical)
 
-### B) Strangler (feature-flagged, route-by-route) — **RECOMMENDED**
-Upgrade to 0.5.0; introduce the unified handler pattern for one endpoint; convert routes/tools incrementally behind `http-server`; **add HTTP `/mcp` alongside the stdio binary** (coexistence, not replacement); cut over tool-by-tool; rollback = revert the converted route (registry-sweep tests stay green throughout).
+Before choosing an approach, a hard mechanism the L3 spike proved empirically **rules out the original staging plan**. **autumn-macros 0.5.0 expands `#[get]`/`#[post]`/`#[api_doc(mcp)]` to HARDCODED absolute paths `::autumn_web::…` (14+ occurrences in `route.rs`), with NO `proc-macro-crate` rename support.** Because the extern prelude binds `autumn_web` to exactly **one** version, **a single crate cannot host autumn 0.4 and 0.5 simultaneously.** Proven: the standalone 0.5 spike compiles, but a combined `--features http-server,autumn-server` build **fails with 11 type-mismatch errors** (0.5 macro output vs the 0.4 `Route`/`ApiDoc` structs).
+
+**Consequence:** the originally-sketched staging — *"a parallel unified module behind a default-off feature flag **inside the main crate**, converted route-by-route"* — **is impossible while the repo pins autumn 0.4.** Per-route feature-flag coexistence in one crate would require both autumn versions linked at once, which the hardcoded macro paths forbid. The two *real* staging options are:
+
+- **(a) Atomic 0.4→0.5 repo bump.** The whole `src/http` moves to 0.5 in one shot — no in-crate coexistence, one version at all times. Simple, but the cutover is all-at-once for the HTTP surface.
+- **(b) Crate-boundary isolation (RECOMMENDED unit of incrementality).** A **separate workspace member** depends on autumn-web 0.5 **plus a path-dep on aletheiadb's public API**; the main crate's features stay untouched and the change is strictly *additive*. The old 0.4 surface and the new 0.5 surface coexist **at the workspace level** (two crates, each pinning one autumn version) — never inside one crate. This is exactly what the L3 spike is building.
+
+> This constraint is a **separate axis** from the P0 `IntoAppLayer` relaxation (§2.5): the layer/`RequireApiToken`/`ApiTokenStore` verdict stands (all compile on 0.5). This is about the **0.4↔0.5 coexistence mechanism**, not about whether 0.5 accepts our middleware.
+
+### A) Big-bang
+Rewrite both surfaces onto the unified `#[api_doc(mcp)]` surface at once; retire the rmcp dispatcher and the `/query` enum in one PR. Equivalent to staging option (a) taken to its limit — one version, one cutover, no coexistence.
+
+### B) Strangler (crate-boundary, route-by-route) — **RECOMMENDED**
+Stand up the unified surface as a **separate workspace member** on autumn 0.5 (staging option (b)) with a path-dep on aletheiadb's public API; introduce the unified handler pattern for one endpoint **in that new crate**; convert routes/tools incrementally **by adding them to the new crate** (not by feature-flagging inside the main crate — impossible per §5.0); **add HTTP `/mcp` alongside the stdio binary** (coexistence, not replacement); cut over tool-by-tool; rollback = stop routing to / drop the new crate (registry-sweep tests stay green throughout). The unit of incrementality is the **workspace member**, not a per-route flag in the main crate.
 
 ### C) Minimal
 Adopt `#[api_doc]` + OpenAPI on the **HTTP surface only**; leave the rmcp/stdio MCP untouched; defer unification.
@@ -213,14 +226,15 @@ Adopt `#[api_doc]` + OpenAPI on the **HTTP surface only**; leave the rmcp/stdio 
 |-----------|-----------|-------------|-----------|
 | Risk to security invariants | **High** (all at once) | **Low** (per-route ACs gate each step) | Low |
 | Diff size / blast radius | **Very large** (6.4k-line rewrite) | Medium, incremental | Small |
-| Rollback story | Poor (all-or-nothing) | **Excellent** (flip/revert per route) | Excellent |
+| Rollback story | Poor (all-or-nothing) | **Excellent** (revert per route *in the isolated crate*; stop routing to / drop the new workspace member) | Excellent |
+| Coexistence mechanism | option (a) atomic bump — one version | **crate-boundary (b)** — 0.4 & 0.5 in *separate* workspace members (in-crate coexistence impossible, §5.0) | atomic bump of the HTTP crate |
 | Value delivered | Full, but late | Full, incremental | Partial (no MCP unification, no HTTP MCP) |
 | Coexistence with stdio MCP | Forces a stdio decision now | **Keeps stdio; adds HTTP `/mcp`** | stdio untouched |
 | OpenAPI gained | Yes | Yes | Yes |
 
 ### Recommendation — **B, Strangler.**
 
-The 6.4k-line dispatcher and the security invariants that autumn does *not* hand us for free make a big-bang (A) reckless: a single missed classification or a swap to autumn's non-constant-time store is a security regression, and A has no incremental safety net. C is a legitimate *first cut* and is in fact **Phase 1 of B** — but stopping at C forfeits the headline prize (one definition → HTTP + MCP + OpenAPI, no drift) and the HTTP MCP transport we need for the 0.6.0 daemon. B gets C's safety while still reaching full unification, keeps the embedded library and the stdio MCP working the entire time, and makes every step revertible. Bias toward strangler confirmed by the evidence.
+The 6.4k-line dispatcher and the security invariants that autumn does *not* hand us for free make a big-bang (A) reckless: a single missed classification or a swap to autumn's non-constant-time store is a security regression, and A has no incremental safety net. C is a legitimate *first cut* and is in fact **Phase 1 of B** — but stopping at C forfeits the headline prize (one definition → HTTP + MCP + OpenAPI, no drift) and the HTTP MCP transport we need for the 0.6.0 daemon. B gets C's safety while still reaching full unification, keeps the embedded library and the stdio MCP working the entire time, and makes every step revertible. **Crucially, B's incrementality lives at the *crate boundary* (staging option (b), §5.0), not at a per-route feature flag inside the main crate — which the hardcoded-macro-path constraint forbids.** The new unified surface is a separate workspace member on autumn 0.5 with a path-dep on aletheiadb; the main crate (and its 0.4 HTTP surface, until retired) is untouched. Bias toward strangler confirmed by the evidence.
 
 ---
 
@@ -246,6 +260,7 @@ Each invariant → an explicit AC + the test that proves it. **These are written
 
 | Risk | Test / mitigation |
 |------|-------------------|
+| **autumn 0.4↔0.5 cannot coexist in one crate** — **CONFIRMED (P0 spike)** | 0.5's macros expand to hardcoded `::autumn_web::…` paths (14+ in `route.rs`), no `proc-macro-crate` rename support; combined `--features http-server,autumn-server` build fails with **11 type-mismatch errors**. **Mitigation = the strategy itself:** stage at the crate boundary (separate 0.5 workspace member, §5.0), never an in-crate feature flag. See "Upstream asks" below |
 | **axum 0.8 version alignment** | autumn 0.5.0 pins axum ^0.8, edition 2024, MSRV 1.88; our `axum`/`tower` deps must match. Build matrix + `cargo tree -d` for duplicate axum |
 | **Pre-1.0 autumn (no SemVer, ~123 open issues)** | Pin an exact `=0.5.0`; supply-chain review; contract tests catch behavior drift on upgrade; treat autumn upgrades as breaking until they hit 1.0 |
 | **`IntoAppLayer` relaxation** — **CONFIRMED (P0 spike)**, no longer a risk | Spike compiled `tower-governor` + `ConcurrencyLimit` + security-header + `RequireApiToken` layers under 0.5.0: all mount (blanket impl `app.rs:438-440`; "sealed" is diagnostic-only, `app.rs:408`). Residual note: body-*wrapping* layers (`TraceLayer`, `RequestBodyLimit`) use axum's normal body-map treatment — an axum pattern, not an autumn seal |
@@ -255,6 +270,10 @@ Each invariant → an explicit AC + the test that proves it. **These are written
 | **OpenAPI schema correctness for temporal/vector types** | Snapshot-test `openapi.json`; verify RFC-3339 temporal bounds, elided-vector descriptors, and the `apply_batch` nested schema render and validate |
 | **`mount_mcp` path collision** | axum panics at startup on a duplicate `/mcp`; startup smoke test |
 | **`unsafe set_var` autumn env bridge** (edition-2024) | `apply_autumn_env` (`server.rs:328`) already uses `unsafe set_var`; keep it isolated to startup, single-threaded, pre-serve |
+
+### 7.1 Upstream asks (filed with autumn)
+
+- **autumn-macros should adopt `proc-macro-crate` (or `$crate`-style path resolution)** so its `#[get]`/`#[post]`/`#[api_doc]` expansions resolve `autumn_web` through the caller's dependency name instead of the hardcoded absolute path `::autumn_web::…`. Until then, **renamed or parallel-version deps are impossible**, which is precisely why in-crate 0.4↔0.5 coexistence fails (§5.0) and the migration must be staged at the crate boundary. **L3 is filing this upstream issue.** If/when it lands, per-crate feature-flag coexistence (and cleaner multi-version testing) becomes possible and could simplify a future staging.
 
 ---
 
@@ -276,7 +295,7 @@ Each invariant → an explicit AC + the test that proves it. **These are written
 
 | Phase | autumn ver | Deliverable | Constraint |
 |-------|-----------|-------------|------------|
-| **0.5.0 (this work)** | upgrade 0.4→0.5.0 | Unified HTTP+MCP surface: `#[api_doc(mcp)]` handlers, `.mount_mcp("/mcp")` beside stdio, `.openapi(...)`, one error model, one RBAC registry, restored rate-limit layer | Structure it so it **becomes the daemon with zero rearchitecting** |
+| **0.5.0 (this work)** | new **0.5 workspace member** (crate-boundary, §5.0); main crate stays 0.4 until retired | Unified HTTP+MCP surface in the new crate: `#[api_doc(mcp)]` handlers, `.mount_mcp("/mcp")` beside stdio, `.openapi(...)`, one error model, one RBAC registry, restored rate-limit layer | Structure it so it **becomes the daemon with zero rearchitecting**; **no in-crate 0.4↔0.5 coexistence** — the new surface is a separate crate with a path-dep on aletheiadb |
 | **0.6.0 (next)** | autumn daemon serve mode | autumn's forthcoming **embed-assets → one self-contained `aletheia serve` binary**, built with Aletheia in mind (epic **#475**, backlog **#2905** "daemon-owned AletheiaDB for MCP clients") | The 0.5.0 unified surface *is* the daemon's core; the daemon adds process lifetime + asset embedding around it |
 | **Longer term** | autumn plugin | An **`aletheiadb` plugin for autumn** | — |
 
@@ -286,18 +305,18 @@ Each invariant → an explicit AC + the test that proves it. **These are written
 
 ## 10. Effort estimate (complexity / blast-radius / diff-size, not time)
 
-Expressed per strangler phase as touch-points / new adapters / files.
+Expressed per strangler phase as touch-points / new adapters / files. **The unit of work is the new 0.5 workspace member (§5.0), not the main crate's `src/http` — the two autumn versions live in separate crates.**
 
 | Phase | Blast radius | New adapters / files | Complexity |
 |-------|-------------|----------------------|------------|
-| **P0 — 0.5.0 upgrade spike** | `Cargo.toml`, `src/http/server.rs` | none (attach `tower-governor`) | **Low-Med** — **`IntoAppLayer` relaxation now P0-confirmed**; the spike compiled `tower-governor`/`ConcurrencyLimit`/`RequireApiToken` against 0.5.0, so this phase is de-risked from "unknown" to "wire up a confirmed API" |
-| **P1 — shared foundation** | new `src/server/` module | 1 unified error type + `IntoResponse`; 1 custom `ApiTokenStore` (constant-time); 1 RBAC policy layer; 1 shared response-shaper (budget/vector-elision/temporal-bounds) | **High** — this is where the real design lives; everything downstream reuses it |
-| **P2 — HTTP routes onto api_doc** | `src/http/handlers.rs`, `admin.rs` | convert 5 routes / 10 ops to typed `#[api_doc]` handlers; add `.openapi(...)` | **Med** — mechanical once P1 exists; `/query` polymorphism → typed handlers is the fiddly part |
+| **P0 — 0.5.0 spike (isolated crate)** | new workspace member `Cargo.toml`; spike `main.rs` | none (attach `tower-governor`) | **Low-Med** — **`IntoAppLayer` relaxation now P0-confirmed** *and* the **0.4↔0.5 in-crate-coexistence constraint confirmed** (§5.0); the spike compiled `tower-governor`/`ConcurrencyLimit`/`RequireApiToken` against a standalone 0.5 crate, so this phase is de-risked from "unknown" to "wire up a confirmed API in an isolated crate" |
+| **P1 — shared foundation** | **new workspace member** (e.g. `aletheia-server`), path-dep on `aletheiadb` | 1 unified error type + `IntoResponse`; 1 custom `ApiTokenStore` (constant-time); 1 RBAC policy layer; 1 shared response-shaper (budget/vector-elision/temporal-bounds) | **High** — this is where the real design lives; everything downstream reuses it. Lives in the new crate, not `src/` of the main crate |
+| **P2 — HTTP routes onto api_doc** | new crate's handler modules (mirroring `src/http/handlers.rs`, `admin.rs`) | convert 5 routes / 10 ops to typed `#[api_doc]` handlers in the new crate; add `.openapi(...)` | **Med** — mechanical once P1 exists; `/query` polymorphism → typed handlers is the fiddly part |
 | **P3 — MCP over HTTP** | `.mount_mcp` + `.secure_mcp`; `src/mcp/**` | tag reads/writes `#[api_doc(mcp)]`; keep stdio binary | **Med** — coexistence, not replacement |
 | **P4 — strangle the 44-arm match** | `src/mcp/server.rs` (6.4k lines) | replace match with name→handler table sharing P1 shapers; retire duplicated dispatch | **High** — largest single-file churn; done tool-by-tool with registry sweeps green |
 | **P5 — cutover & cleanup** | remove `/query` enum duplication; docs, ADR update | — | **Low-Med** |
 
-Rollback at every phase = revert the phase's routes/flag; conformance sweeps are the ratchet.
+Rollback at every phase = stop routing to / revert the phase's routes in the isolated crate (or drop the new workspace member entirely); conformance sweeps are the ratchet. Because the new surface is a separate crate, the main crate's 0.4 HTTP surface keeps working untouched throughout — the two never link the same autumn version.
 
 ---
 
@@ -310,6 +329,7 @@ Rollback at every phase = revert the phase's routes/flag; conformance sweeps are
 5. **`apply_batch` over MCP-HTTP:** accept the large nested JSON-Schema autumn derives, or keep batch HTTP-only initially?
 6. **Admin key routes as MCP tools?** Today there are **zero** admin MCP tools. Keep it that way (recommended), or expose key lifecycle over authenticated `/mcp`?
 7. **Rate limiting:** restore as an in-process `tower-governor` layer under 0.5.0 (**supersedes/reopens ADR 0055** — P0-confirmed the layer compile-mounts), or keep deferring to the reverse proxy?
+8. **Staging mechanism (forced by §5.0 — 0.4↔0.5 can't coexist in one crate):** option **(a) atomic 0.4→0.5 repo bump** of `src/http`, or option **(b) crate-boundary isolation** (separate 0.5 workspace member with a path-dep on aletheiadb)? Recommendation: **(b)** — it is the strangler's unit of incrementality, strictly additive, and leaves the main crate's gates untouched. (An in-main-crate feature-flag staging is **not** an option — the hardcoded macro paths forbid it.)
 
 ---
 
@@ -319,6 +339,7 @@ Rollback at every phase = revert the phase's routes/flag; conformance sweeps are
 
 - **autumn-web 0.5.0 relaxes `IntoAppLayer`** enough for `tower-governor` and our security-header/CORS layers. The spike compiled these against 0.5.0: `IntoAppLayer` is a **blanket impl over any `tower::Layer<Route>`** meeting axum's service bounds (`app.rs:438-440`); the "sealed" appearance is only a diagnostic wrapper for a cleaner error message, not a restriction (`app.rs:408-416`, docstring `:881-883`). `tower-governor`, `ConcurrencyLimit`, `SetResponseHeader`, custom layers, and `RequireApiToken` all compile-mount. Body-*wrapping* layers (`TraceLayer`, `RequestBodyLimit`) still need axum's normal body-map treatment — axum's own rule, not an autumn seal.
 - **`RequireApiToken` is a real `tower::Layer`** and `.secure_mcp` gates `/mcp`; a **custom constant-time `ApiTokenStore` compiles and is accepted** (the trait's `verify`/`issue`/`revoke` extension point). The one security piece autumn does **not** give us is **token→role `AccessClass` RBAC** (`verify` returns only `Option<principal>`; `#[secured]` gates on *session* role) — a thin custom authorization layer (§6(b)).
+- **autumn 0.4 and 0.5 cannot coexist in one crate** (structural, separate axis from the layer verdict). autumn-macros 0.5.0 expands `#[get]`/`#[post]`/`#[api_doc(mcp)]` to **hardcoded absolute paths `::autumn_web::…`** (14+ occurrences in `route.rs`) with **no `proc-macro-crate` rename support**; the extern prelude binds `autumn_web` to exactly one version. The standalone 0.5 spike compiles, but a combined `--features http-server,autumn-server` build **fails with 11 type-mismatch errors** (0.5 macro output vs 0.4 `Route`/`ApiDoc` structs). This forces crate-boundary staging (§5.0) and motivates the upstream `proc-macro-crate` ask (§7.1).
 
 ### Items still NOT verified in this pass
 
