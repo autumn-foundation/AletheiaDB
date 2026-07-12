@@ -605,8 +605,17 @@ impl AletheiaDB {
     /// # Errors
     ///
     /// - [`BackupError::TargetNotEmpty`] — `data_dir` already holds data.
-    /// - [`BackupError::TargetOutsideWindow`] — `target` is below the base
-    ///   backup (unreachable); the error names the achievable window.
+    /// - [`BackupError::TargetOutsideWindow`] — `target` is outside the
+    ///   achievable window: below the base backup (unreachable) **or** above the
+    ///   archived WAL tail (Issue #3374, F2 — an above-tail target is an error,
+    ///   not a silent full replay). The error names the achievable window. For a
+    ///   deliberate "restore to the tail" pass the latest coordinate (the CLI's
+    ///   no-target / `--latest` path resolves this from
+    ///   [`AletheiaDB::inspect_pitr`]).
+    /// - [`BackupError::WindowCrossesVocabularyChange`] — a transaction
+    ///   at-or-before `target` introduced a label/property key absent from the
+    ///   base backup's interner; replaying it would silently mislabel/drop data,
+    ///   so PITR refuses (Issue #3374, F1).
     /// - Artifact/WAL read or replay failures propagate as [`Error`].
     pub fn restore_to_data_dir_at(
         albk: &Path,
@@ -619,36 +628,89 @@ impl AletheiaDB {
         check_target_empty(&index_root).map_err(Error::Backup)?;
 
         // Read the artifact header and the archive BEFORE materializing, so an
-        // out-of-window target fails without touching the target directory.
+        // out-of-window target (or a vocabulary-change crossing) fails without
+        // touching the target directory.
         let payload = read_artifact(albk).map_err(Error::Backup)?;
         let source_lsn = payload.source_lsn;
+        // The base interner defines ids `0..restored_interner_count`; any WAL id
+        // at or above this references a string introduced after the backup.
+        let restored_interner_count = payload.interner.strings.len() as u32;
 
         let all = read_entries_from_dir_with_options(wal_archive, LSN::initial(), None, true)?;
         let window = compute_window(&all, source_lsn);
         window.validate(&target)?;
 
-        // Post-backup entries drive the bounded data replay; the base snapshot
-        // already covers everything below `source_lsn`.
-        let post = read_entries_from_dir_with_options(wal_archive, LSN(source_lsn), None, true)?;
-        let filtered = filter_bands(post, &target);
+        // Net constraint state at the target from the FULL archive (including
+        // declarations that predate the backup, which the base snapshot does not
+        // carry — the differential replay would otherwise miss them). Only the
+        // constraint ops matter to `apply_constraint_declarations`; filtering to
+        // them keeps this slice small even for large archives.
+        let constraint_slice: Vec<WalEntry> = all
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e.operation,
+                    WalOperation::DeclareUniqueConstraint { .. }
+                        | WalOperation::DropUniqueConstraint { .. }
+                ) && entry_at_or_before(e, &target)
+            })
+            .cloned()
+            .collect();
+
+        // The band prefix (whole bands, differential floor at `source_lsn`).
+        // Parsing from the FULL stream eliminates band-straddle (F5).
+        let filtered = filter_bands(all, &target, source_lsn);
+
+        // Vocabulary-change guard (F1): if any included op — data band or
+        // constraint declaration — references an interner id the base backup
+        // does not define, replaying it verbatim would silently mislabel/drop
+        // data. Refuse cleanly BEFORE materializing anything.
+        if let Some(first_unresolved_id) = first_unresolved_interned_id(
+            filtered.entries.iter().chain(constraint_slice.iter()),
+            restored_interner_count,
+        ) {
+            return Err(Error::Backup(BackupError::WindowCrossesVocabularyChange {
+                first_unresolved_id,
+                restored_interner_count,
+            }));
+        }
 
         // Materialize the base snapshot and open the base-state database. The
         // open path fully finalizes the base (id generators, temporal index,
         // extent, HLC seed) from the snapshot at `source_lsn`.
         materialize_to_dir(&payload, &index_root).map_err(Error::Backup)?;
         drop(payload);
+
+        // Everything past this point mutates the (now committed) base manifest.
+        // If any step fails, the target `indexes/` would otherwise be left
+        // looking like a complete base-only restore (no in-progress sentinel),
+        // blocking a clean retry. Wrap the replay + persistence so any error
+        // removes the target `indexes/` before returning, matching #3217's
+        // "a failed restore leaves a clean target" posture (Issue #3374, F4).
+        let outcome = Self::finish_pitr_replay(data_dir, filtered, &constraint_slice);
+        match outcome {
+            Ok(db) => Ok(db),
+            Err(e) => {
+                let _ = std::fs::remove_dir_all(&index_root);
+                Err(e)
+            }
+        }
+    }
+
+    /// Post-materialize half of [`AletheiaDB::restore_to_data_dir_at`]: open the
+    /// base-state DB, apply the net constraints, replay the band prefix, and
+    /// persist the target state. Extracted so the caller can clean up the target
+    /// directory if any step here fails (Issue #3374, F4).
+    fn finish_pitr_replay(
+        data_dir: &Path,
+        filtered: FilteredBands,
+        constraint_slice: &[WalEntry],
+    ) -> Result<AletheiaDB> {
         let config = crate::config::durable_config_for_data_dir(data_dir.to_path_buf());
         let db = AletheiaDB::with_unified_config(config)?;
 
-        // Net constraint state at the target from the FULL archive (including
-        // declarations that predate the backup, which the base snapshot does
-        // not carry — the differential replay would otherwise miss them).
-        let constraint_slice: Vec<WalEntry> = all
-            .into_iter()
-            .filter(|e| entry_at_or_before(e, &target))
-            .collect();
         crate::storage::recovery::apply_constraint_declarations(
-            &constraint_slice,
+            constraint_slice,
             &db.constraint_registry,
         );
 
