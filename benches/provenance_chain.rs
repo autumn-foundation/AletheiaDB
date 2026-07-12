@@ -14,16 +14,27 @@
 //! deliberately cheap to sample so CI/local runs stay fast; the ratio is
 //! reported, not hard-gated here (headless CI hardware is noisy — gate the
 //! metric on the performance rig).
+//!
+//! Two workloads are covered: the original single-thread **create-only** path
+//! (a best case for the sealer — one leaf per transaction, no property
+//! reconstruction churn) and, added under Issue #3351 task #7, a
+//! **multi-threaded update-heavy** path. Updates supersede prior versions (the
+//! seal path reconstructs full property state and the timeline shifts), and
+//! concurrent writers contend on the bounded seal channel — so the update
+//! variant stresses inline-seal backpressure that the create-only best case
+//! never hits.
 
 mod common;
 
+use aletheiadb::api::transaction::WriteOps;
 use aletheiadb::config::WalConfigBuilder;
 use aletheiadb::provenance_chain::{ChainConfig, ChainFsyncMode};
 use aletheiadb::storage::index_persistence::PersistenceConfig;
 use aletheiadb::storage::wal::DurabilityMode;
-use aletheiadb::{AletheiaDB, AletheiaDBConfig, PropertyMapBuilder};
+use aletheiadb::{AletheiaDB, AletheiaDBConfig, NodeId, PropertyMapBuilder};
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use std::hint::black_box;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 use tempfile::TempDir;
@@ -141,9 +152,76 @@ fn bench_chain_write_throughput(c: &mut Criterion) {
     );
 }
 
+/// Number of writer threads for the concurrent update variant.
+const UPDATE_THREADS: u64 = 4;
+/// Updates each thread performs per benchmark iteration.
+const UPDATES_PER_THREAD: u64 = 250;
+
+/// Drive `UPDATE_THREADS` threads, each issuing `UPDATES_PER_THREAD`
+/// `update_node` writes cycling over the pre-created `nodes`. Updates supersede
+/// prior versions, so the seal path reconstructs full property state and the
+/// per-entity timeline grows — and concurrent writers contend on the bounded
+/// seal channel (inline-seal backpressure) that create-only never exercises.
+fn drive_concurrent_updates(db: &Arc<AletheiaDB>, nodes: &Arc<Vec<NodeId>>, counter: &AtomicU64) {
+    let mut handles = Vec::with_capacity(UPDATE_THREADS as usize);
+    for _ in 0..UPDATE_THREADS {
+        let db = Arc::clone(db);
+        let nodes = Arc::clone(nodes);
+        let base = counter.fetch_add(UPDATES_PER_THREAD, Ordering::Relaxed);
+        handles.push(std::thread::spawn(move || {
+            for i in 0..UPDATES_PER_THREAD {
+                let node = nodes[(base + i) as usize % nodes.len()];
+                let n = base + i;
+                db.write(|tx| {
+                    tx.update_node(
+                        node,
+                        PropertyMapBuilder::new()
+                            .insert("counter", black_box(n) as i64)
+                            .build(),
+                    )?;
+                    Ok::<_, aletheiadb::Error>(())
+                })
+                .expect("update_node");
+            }
+        }));
+    }
+    for h in handles {
+        h.join().expect("writer thread");
+    }
+}
+
+/// Benchmark multi-threaded, update-heavy write throughput with the chain
+/// enabled (Issue #3351 task #7). This is the worst-case complement to the
+/// single-thread create-only best case above.
+fn bench_chain_concurrent_updates(c: &mut Criterion) {
+    let total = UPDATE_THREADS * UPDATES_PER_THREAD;
+    let mut group = c.benchmark_group("provenance_chain_concurrent_updates");
+    group.throughput(Throughput::Elements(total));
+
+    group.bench_function("chain_enabled_updates", |b| {
+        let dir = TempDir::new().expect("temp dir");
+        let db = Arc::new(build_db(dir.path(), true));
+        // Pre-create a pool of nodes the update threads cycle over.
+        let nodes: Vec<NodeId> = (0..64)
+            .map(|i| {
+                db.create_node(
+                    "Bench",
+                    PropertyMapBuilder::new().insert("seed", i as i64).build(),
+                )
+                .expect("seed node")
+            })
+            .collect();
+        let nodes = Arc::new(nodes);
+        let counter = AtomicU64::new(0);
+        b.iter(|| drive_concurrent_updates(&db, &nodes, &counter));
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     name = benches;
     config = common::configure_criterion();
-    targets = bench_chain_write_throughput,
+    targets = bench_chain_write_throughput, bench_chain_concurrent_updates,
 );
 criterion_main!(benches);
