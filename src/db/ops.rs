@@ -1742,10 +1742,15 @@ mod tests {
                 "create + update + retraction = 3 versions, zero loss"
             );
 
-            // v1: [t_create, t_update) — closed by the update.
+            // v1: [t_create, open). #3504: the update supersedes v1 on the
+            // transaction-time dimension only; v1's valid interval stays
+            // open-ended (append-only), exactly like the retraction case below.
             let v1 = &history.versions[0];
             assert_eq!(v1.temporal.valid_time().start(), t_create);
-            assert_eq!(v1.temporal.valid_time().end(), t_update);
+            assert!(
+                v1.temporal.valid_time().is_current(),
+                "superseded v1's valid interval must stay open (#3504, append-only)"
+            );
 
             // v2: the pre-retraction head. Its VALID interval must remain
             // open-ended (append-only: retraction never rewrites the past

@@ -453,10 +453,14 @@ fn test_replay_update_preserves_temporal_intervals() -> Result<()> {
         vf1,
         "superseded version's valid_from must survive replay exactly"
     );
-    assert_eq!(
-        superseded.temporal.valid_time().end(),
-        vf2,
-        "superseded version's valid time must be closed at the successor's LOGGED valid_from"
+    // #3504: the superseded version's valid interval stays OPEN (append-only).
+    // The valid-time close was removed from close_previous_version_intervals
+    // because it violated snapshot isolation on the valid dimension; the
+    // transaction-time close (asserted below) is what partitions the version
+    // chain, so replay must reproduce the superseded valid interval open-ended.
+    assert!(
+        superseded.temporal.valid_time().is_current(),
+        "superseded version's valid time must stay open-ended after replay (#3504)"
     );
     assert_eq!(
         superseded.temporal.transaction_time().start(),
@@ -572,10 +576,13 @@ fn test_replay_update_edge_preserves_temporal_intervals() -> Result<()> {
         vf1,
         "superseded edge version's valid_from must survive replay exactly"
     );
-    assert_eq!(
-        superseded.temporal.valid_time().end(),
-        vf2,
-        "superseded edge version's valid time must be closed at the successor's LOGGED valid_from"
+    // #3504: the superseded edge version's valid interval stays OPEN
+    // (append-only) -- the valid-time close was removed from
+    // close_previous_version_intervals as a snapshot-isolation fix; only the
+    // transaction-time close (asserted below) partitions the version chain.
+    assert!(
+        superseded.temporal.valid_time().is_current(),
+        "superseded edge version's valid time must stay open-ended after replay (#3504)"
     );
     assert_eq!(
         superseded.temporal.transaction_time().start(),
