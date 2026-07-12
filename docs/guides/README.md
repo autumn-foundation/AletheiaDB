@@ -35,6 +35,9 @@ After those four, pick the guides relevant to what you're building.
 - [Sharding Guide](sharding-guide.md) — Domain-based horizontal scaling with 2PC transactions
 - [HTTP State Management](http-state-management.md) — Session and state management for the HTTP API
 
+### Migration & Import
+- [Neo4j Import Guide](neo4j-import.md) — Migrate a Neo4j CSV export (typed headers) with a fidelity report
+
 ---
 
 ## By Role

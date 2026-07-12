@@ -166,11 +166,24 @@ pub(crate) fn parse_valid_time(s: &str) -> Result<Timestamp, String> {
 
 /// Build a streaming row reader over a CSV file (first record is the header).
 pub(crate) fn csv_rows(path: &Path) -> Result<RowIter, ImportError> {
+    csv_rows_with(path, b',', b'"')
+}
+
+/// Build a streaming row reader over a CSV file with a configurable field
+/// delimiter and quote character (Issue #3356).
+///
+/// The Neo4j importer supplies the delimiter/quote from
+/// [`Neo4jCsvOptions`](super::Neo4jCsvOptions). Quoting/escaping follows
+/// RFC 4180 (doubled quotes escape a literal quote); the array delimiter is
+/// applied later, in the Neo4j coercion layer, not here.
+pub(crate) fn csv_rows_with(path: &Path, delimiter: u8, quote: u8) -> Result<RowIter, ImportError> {
     let file = File::open(path)
         .map_err(|e| ImportError::Io(format!("opening {}: {e}", path.display())))?;
     let mut reader = csv::ReaderBuilder::new()
         .has_headers(true)
         .flexible(true)
+        .delimiter(delimiter)
+        .quote(quote)
         .from_reader(file);
 
     let headers = reader
@@ -199,6 +212,30 @@ pub(crate) fn csv_rows(path: &Path) -> Result<RowIter, ImportError> {
     });
 
     Ok(Box::new(iter))
+}
+
+/// Read only the header row of a CSV file (Issue #3356).
+///
+/// The Neo4j importer builds its per-column coercion plan from the
+/// self-describing header before streaming data rows via [`csv_rows_with`]
+/// (whose reader skips the same header). Returns the ordered header fields.
+pub(crate) fn read_csv_header(
+    path: &Path,
+    delimiter: u8,
+    quote: u8,
+) -> Result<Vec<String>, ImportError> {
+    let file = File::open(path)
+        .map_err(|e| ImportError::Io(format!("opening {}: {e}", path.display())))?;
+    let mut reader = csv::ReaderBuilder::new()
+        .has_headers(true)
+        .flexible(true)
+        .delimiter(delimiter)
+        .quote(quote)
+        .from_reader(file);
+    let headers = reader
+        .headers()
+        .map_err(|e| ImportError::Io(format!("reading header of {}: {e}", path.display())))?;
+    Ok(headers.iter().map(|h| h.to_string()).collect())
 }
 
 /// Build a streaming row reader over a JSONL file (one JSON object per line).

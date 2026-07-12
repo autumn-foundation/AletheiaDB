@@ -43,12 +43,20 @@
 //! ```
 
 mod mapping;
+mod neo4j;
 mod parse;
 
 #[cfg(test)]
 mod tests;
 
+#[cfg(test)]
+mod neo4j_tests;
+
 pub use mapping::{ColumnType, EdgeMapping, LabelSource, NodeMapping, PropertyMapping};
+pub use neo4j::{
+    CoercionNote, LabelMapEntry, LabelStrategy, Neo4jCsvOptions, Neo4jFidelityReport, TypeMapEntry,
+    UnsupportedNote,
+};
 
 use std::collections::HashMap;
 use std::fmt;
@@ -59,6 +67,7 @@ use parse::{Row, RowIter};
 use crate::core::error::{Error, Result};
 use crate::core::id::NodeId;
 use crate::core::property::{PropertyMap, PropertyMapBuilder, PropertyValue};
+use crate::core::provenance::Provenance;
 use crate::core::temporal::Timestamp;
 use crate::db::AletheiaDB;
 
@@ -80,6 +89,12 @@ pub struct ImportConfig {
     pub batch_size: usize,
     /// How to react to malformed rows / unresolved endpoints (default [`FailureMode::Abort`]).
     pub failure_mode: FailureMode,
+    /// Optional write-time [`Provenance`] bundle stamped on every imported
+    /// node/edge version (Issue #3224). When `None` (the default) the import
+    /// records no provenance, reproducing the historical behavior of the
+    /// CSV/JSONL importers exactly. The Neo4j importer (Issue #3356) sets this
+    /// to `neo4j-import::<file>`.
+    pub provenance: Option<Provenance>,
 }
 
 impl Default for ImportConfig {
@@ -87,12 +102,13 @@ impl Default for ImportConfig {
         ImportConfig {
             batch_size: 1000,
             failure_mode: FailureMode::Abort,
+            provenance: None,
         }
     }
 }
 
 /// Which end of an edge failed to resolve.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub enum Endpoint {
     /// The edge's source endpoint.
     Source,
@@ -110,7 +126,7 @@ impl fmt::Display for Endpoint {
 }
 
 /// A row that could not be imported, with its 1-based row/line number.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct RowError {
     /// The 1-based row (CSV) or line (JSONL) number.
     pub row: usize,
@@ -125,7 +141,7 @@ impl fmt::Display for RowError {
 }
 
 /// An edge whose source or target business key did not resolve to an imported node.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct UnresolvedEndpoint {
     /// The 1-based row number of the offending edge.
     pub row: usize,
@@ -288,6 +304,18 @@ impl<'a> Importer<'a> {
     }
 
     fn import_nodes(&mut self, rows: RowIter, mapping: &NodeMapping) -> Result<ImportReport> {
+        self.import_nodes_with(rows, |row| prepare_node(row, mapping))
+    }
+
+    /// Shared node-import driver: chunked ACID commit + failure-mode handling,
+    /// parameterized by a per-row `prepare` closure that turns a raw [`Row`]
+    /// into a [`PreparedNode`]. Both the CSV/JSONL importers (Issue #3211) and
+    /// the Neo4j importer (Issue #3356) route through this so the commit path,
+    /// batching, provenance, and `row N:` error contract stay identical.
+    fn import_nodes_with<F>(&mut self, rows: RowIter, mut prepare: F) -> Result<ImportReport>
+    where
+        F: FnMut(&Row) -> std::result::Result<PreparedNode, RowError>,
+    {
         let mut report = ImportReport::default();
         let mut chunk: Vec<PreparedNode> = Vec::with_capacity(self.config.batch_size);
 
@@ -301,7 +329,7 @@ impl<'a> Importer<'a> {
                 }
             };
 
-            match prepare_node(&row, mapping) {
+            match prepare(&row) {
                 Ok(prepared) => chunk.push(prepared),
                 Err(row_err) => match self.config.failure_mode {
                     FailureMode::Abort => return Err(ImportError::Row(row_err).into()),
@@ -328,15 +356,22 @@ impl<'a> Importer<'a> {
         }
         let prepared = std::mem::take(chunk);
         let keys: Vec<String> = prepared.iter().map(|p| p.key.clone()).collect();
+        let provenance = self.config.provenance.clone();
 
         // One ACID transaction for the whole chunk: writes flow through the WAL
         // `append_batch` path (see `api::transaction::write::wal`).
         let ids = self.db.write(move |tx| {
-            use crate::api::transaction::WriteOps;
+            use crate::api::transaction::{WriteOps, WriteRequestOptions};
             let mut ids = Vec::with_capacity(prepared.len());
             for node in prepared {
-                let id =
-                    tx.create_node_with_valid_time(&node.label, node.properties, node.valid_from)?;
+                let mut options = WriteRequestOptions::new();
+                if let Some(valid_from) = node.valid_from {
+                    options = options.with_valid_from(valid_from);
+                }
+                if let Some(provenance) = provenance.clone() {
+                    options = options.with_provenance(provenance);
+                }
+                let id = tx.create_node_with_options(&node.label, node.properties, options)?;
                 ids.push(id);
             }
             Ok::<Vec<NodeId>, Error>(ids)
@@ -372,6 +407,19 @@ impl<'a> Importer<'a> {
     }
 
     fn import_edges(&mut self, rows: RowIter, mapping: &EdgeMapping) -> Result<ImportReport> {
+        self.import_edges_with(rows, |key_to_id, row| prepare_edge(key_to_id, row, mapping))
+    }
+
+    /// Shared edge-import driver: the edge counterpart to [`import_nodes_with`].
+    /// The `prepare` closure receives the accumulated business-key → [`NodeId`]
+    /// map so endpoints resolve against nodes imported earlier in the session.
+    fn import_edges_with<F>(&mut self, rows: RowIter, mut prepare: F) -> Result<ImportReport>
+    where
+        F: FnMut(
+            &HashMap<String, NodeId>,
+            &Row,
+        ) -> std::result::Result<PreparedEdge, EdgePrepError>,
+    {
         let mut report = ImportReport::default();
         let mut chunk: Vec<PreparedEdge> = Vec::with_capacity(self.config.batch_size);
 
@@ -385,7 +433,7 @@ impl<'a> Importer<'a> {
                 }
             };
 
-            match prepare_edge(&self.key_to_id, &row, mapping) {
+            match prepare(&self.key_to_id, &row) {
                 Ok(prepared) => chunk.push(prepared),
                 Err(EdgePrepError::Row(row_err)) => match self.config.failure_mode {
                     FailureMode::Abort => return Err(ImportError::Row(row_err).into()),
@@ -418,16 +466,24 @@ impl<'a> Importer<'a> {
         }
         let prepared = std::mem::take(chunk);
         let count = prepared.len();
+        let provenance = self.config.provenance.clone();
 
         self.db.write(move |tx| {
-            use crate::api::transaction::WriteOps;
+            use crate::api::transaction::{WriteOps, WriteRequestOptions};
             for edge in prepared {
-                tx.create_edge_with_valid_time(
+                let mut options = WriteRequestOptions::new();
+                if let Some(valid_from) = edge.valid_from {
+                    options = options.with_valid_from(valid_from);
+                }
+                if let Some(provenance) = provenance.clone() {
+                    options = options.with_provenance(provenance);
+                }
+                tx.create_edge_with_options(
                     edge.source,
                     edge.target,
                     &edge.label,
                     edge.properties,
-                    edge.valid_from,
+                    options,
                 )?;
             }
             Ok::<(), Error>(())
