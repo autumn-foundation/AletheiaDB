@@ -262,8 +262,9 @@ cypher = []
 
 # Bulk graph importer for CSV/JSONL with per-row valid-time backfill (Issue #3211).
 # serde_json (JSONL) and chrono (timestamp parsing) are already non-optional deps,
-# so the only extra dependency is the `csv` reader.
-import = ["dep:csv"]
+# so the only extra dependency is the `csv` reader. `serde` is pulled so the
+# Neo4j importer's fidelity report (Issue #3356) is always machine-serializable.
+import = ["dep:csv", "serde"]
 
 # HTTP server support (Issue #465) — built on autumn-web.
 http-server = [

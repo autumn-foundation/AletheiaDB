@@ -152,6 +152,7 @@ fn main() -> Result<()> {
         node_id: node_id_25,
         valid_from: time::now(),
         version_id: None,
+        provenance: None,
     })?;
     println!("✓ Deleted node 25");
 

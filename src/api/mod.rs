@@ -100,6 +100,8 @@ pub use transaction::{ReadOps, ReadTransaction, TxId, TxState, WriteOps, WriteTr
 
 #[cfg(feature = "import")]
 pub use import::{
-    ColumnType, EdgeMapping, Endpoint, FailureMode, ImportConfig, ImportError, ImportReport,
-    Importer, LabelSource, NodeMapping, PropertyMapping, RowError, UnresolvedEndpoint,
+    CoercionNote, ColumnType, EdgeMapping, Endpoint, FailureMode, ImportConfig, ImportError,
+    ImportReport, Importer, LabelMapEntry, LabelSource, LabelStrategy, Neo4jCsvOptions,
+    Neo4jFidelityReport, NodeMapping, PropertyMapping, RowError, TypeMapEntry, UnresolvedEndpoint,
+    UnsupportedNote,
 };

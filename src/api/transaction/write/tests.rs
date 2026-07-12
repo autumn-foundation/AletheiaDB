@@ -57,6 +57,7 @@ mod tombstone_tests {
         let op = crate::api::transaction::BufferedWrite::DeleteNode {
             node_id: NodeId::new(1).unwrap(),
             valid_from: time::now(),
+            provenance: None,
         };
 
         // Try to apply it

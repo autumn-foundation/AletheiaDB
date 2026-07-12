@@ -772,6 +772,240 @@ fn authenticated_apply_batch_stamps_principal_on_creates_and_updates() {
 }
 
 // ============================================================================
+// 5b. Destructive-op principal stamping (Issue #3427, Phase C route-through)
+//
+// The four destructive tools (delete_node, delete_edge, retract_node,
+// retract_edge) stamp the AUTHENTICATED SESSION principal onto the
+// tombstone / retraction version's provenance -- server-derived and
+// unforgeable, matching the create/update convention. A deleted/retracted
+// node is gone from current state, so the principal is asserted end-to-end
+// through the read path (get_node_history / get_edge_history), on the last
+// (tombstone/retraction) version.
+// ============================================================================
+
+/// The last version in a node history response (the tombstone / retraction
+/// version for a destructive op).
+fn last_node_version(server: &AletheiaMcpServer, node_id: u64) -> serde_json::Value {
+    let (history, is_error) = dispatch(server, "get_node_history", json!({ "node_id": node_id }));
+    assert!(!is_error, "get_node_history must succeed: {history}");
+    let versions = history["versions"].as_array().expect("history versions");
+    versions.last().expect("at least one version").clone()
+}
+
+/// The last version in an edge history response.
+fn last_edge_version(server: &AletheiaMcpServer, edge_id: u64) -> serde_json::Value {
+    let (history, is_error) = dispatch(server, "get_edge_history", json!({ "edge_id": edge_id }));
+    assert!(!is_error, "get_edge_history must succeed: {history}");
+    let versions = history["versions"].as_array().expect("history versions");
+    versions.last().expect("at least one version").clone()
+}
+
+/// Authenticated `delete_node` stamps the session principal onto the
+/// tombstone version's provenance.
+#[test]
+fn authenticated_delete_node_stamps_principal() {
+    let (server, _store, _id) = server_with_role(Role::Writer);
+    let (created, _) = dispatch(&server, "create_node", json!({"label": "Doc"}));
+    let node_id = created["id"].as_u64().expect("node id");
+
+    let (deleted, is_error) = dispatch(&server, "delete_node", json!({"node_id": node_id}));
+    assert!(!is_error, "delete_node must succeed: {deleted}");
+
+    let tombstone = last_node_version(&server, node_id);
+    assert_eq!(
+        tombstone["provenance"]["principal"],
+        json!("test-writer"),
+        "delete tombstone must carry the session principal: {tombstone}"
+    );
+}
+
+/// Authenticated `delete_edge` stamps the session principal onto the
+/// tombstone version's provenance.
+#[test]
+fn authenticated_delete_edge_stamps_principal() {
+    let (server, _store, _id) = server_with_role(Role::Writer);
+    let (a, _) = dispatch(&server, "create_node", json!({"label": "Person"}));
+    let (b, _) = dispatch(&server, "create_node", json!({"label": "Person"}));
+    let (edge, _) = dispatch(
+        &server,
+        "create_edge",
+        json!({"source_id": a["id"], "target_id": b["id"], "label": "KNOWS"}),
+    );
+    let edge_id = edge["id"].as_u64().expect("edge id");
+
+    let (deleted, is_error) = dispatch(&server, "delete_edge", json!({"edge_id": edge_id}));
+    assert!(!is_error, "delete_edge must succeed: {deleted}");
+
+    let tombstone = last_edge_version(&server, edge_id);
+    assert_eq!(
+        tombstone["provenance"]["principal"],
+        json!("test-writer"),
+        "delete-edge tombstone must carry the session principal: {tombstone}"
+    );
+}
+
+/// Authenticated `retract_node` stamps the session principal onto the
+/// retraction version's provenance.
+#[test]
+fn authenticated_retract_node_stamps_principal() {
+    let (server, _store, _id) = server_with_role(Role::Writer);
+    let (created, _) = dispatch(&server, "create_node", json!({"label": "Doc"}));
+    let node_id = created["id"].as_u64().expect("node id");
+
+    let (retracted, is_error) = dispatch(&server, "retract_node", json!({"node_id": node_id}));
+    assert!(!is_error, "retract_node must succeed: {retracted}");
+
+    let retraction = last_node_version(&server, node_id);
+    assert_eq!(
+        retraction["provenance"]["principal"],
+        json!("test-writer"),
+        "retraction version must carry the session principal: {retraction}"
+    );
+}
+
+/// Authenticated `retract_edge` stamps the session principal onto the
+/// retraction version's provenance.
+#[test]
+fn authenticated_retract_edge_stamps_principal() {
+    let (server, _store, _id) = server_with_role(Role::Writer);
+    let (a, _) = dispatch(&server, "create_node", json!({"label": "Person"}));
+    let (b, _) = dispatch(&server, "create_node", json!({"label": "Person"}));
+    let (edge, _) = dispatch(
+        &server,
+        "create_edge",
+        json!({"source_id": a["id"], "target_id": b["id"], "label": "KNOWS"}),
+    );
+    let edge_id = edge["id"].as_u64().expect("edge id");
+
+    let (retracted, is_error) = dispatch(&server, "retract_edge", json!({"edge_id": edge_id}));
+    assert!(!is_error, "retract_edge must succeed: {retracted}");
+
+    let retraction = last_edge_version(&server, edge_id);
+    assert_eq!(
+        retraction["provenance"]["principal"],
+        json!("test-writer"),
+        "edge retraction version must carry the session principal: {retraction}"
+    );
+}
+
+/// A detach (cascade) `delete_node` attributes EVERY tombstone it creates --
+/// the node AND every co-deleted edge -- with the session principal.
+#[test]
+fn authenticated_detach_delete_stamps_principal_on_co_deleted_edges() {
+    let (server, _store, _id) = server_with_role(Role::Writer);
+    let (a, _) = dispatch(&server, "create_node", json!({"label": "Person"}));
+    let (b, _) = dispatch(&server, "create_node", json!({"label": "Person"}));
+    let a_id = a["id"].as_u64().expect("a id");
+    let (edge, _) = dispatch(
+        &server,
+        "create_edge",
+        json!({"source_id": a["id"], "target_id": b["id"], "label": "KNOWS"}),
+    );
+    let edge_id = edge["id"].as_u64().expect("edge id");
+
+    let (deleted, is_error) = dispatch(
+        &server,
+        "delete_node",
+        json!({"node_id": a_id, "detach": true}),
+    );
+    assert!(!is_error, "detach delete_node must succeed: {deleted}");
+    assert_eq!(deleted["edges_removed"], json!(1), "{deleted}");
+
+    // The node's tombstone carries the principal.
+    let node_tombstone = last_node_version(&server, a_id);
+    assert_eq!(
+        node_tombstone["provenance"]["principal"],
+        json!("test-writer"),
+        "node tombstone must carry the principal: {node_tombstone}"
+    );
+    // AND the co-deleted edge's tombstone carries the SAME principal.
+    let edge_tombstone = last_edge_version(&server, edge_id);
+    assert_eq!(
+        edge_tombstone["provenance"]["principal"],
+        json!("test-writer"),
+        "co-deleted edge tombstone must carry the principal: {edge_tombstone}"
+    );
+}
+
+/// Anonymous-mode destructive ops record NO principal: the tombstone /
+/// retraction version's provenance carries no principal field.
+#[test]
+fn anonymous_destructive_ops_record_no_principal() {
+    let server = AletheiaMcpServer::new(db());
+
+    // delete_node
+    let (n, _) = dispatch(&server, "create_node", json!({"label": "Doc"}));
+    let nid = n["id"].as_u64().expect("node id");
+    let (_, is_error) = dispatch(&server, "delete_node", json!({"node_id": nid}));
+    assert!(!is_error);
+    let tombstone = last_node_version(&server, nid);
+    assert!(
+        tombstone
+            .get("provenance")
+            .and_then(|p| p.get("principal"))
+            .is_none(),
+        "anonymous delete must not record a principal: {tombstone}"
+    );
+
+    // retract_edge
+    let (a, _) = dispatch(&server, "create_node", json!({"label": "Person"}));
+    let (b, _) = dispatch(&server, "create_node", json!({"label": "Person"}));
+    let (edge, _) = dispatch(
+        &server,
+        "create_edge",
+        json!({"source_id": a["id"], "target_id": b["id"], "label": "KNOWS"}),
+    );
+    let eid = edge["id"].as_u64().expect("edge id");
+    let (_, is_error) = dispatch(&server, "retract_edge", json!({"edge_id": eid}));
+    assert!(!is_error);
+    let retraction = last_edge_version(&server, eid);
+    assert!(
+        retraction
+            .get("provenance")
+            .and_then(|p| p.get("principal"))
+            .is_none(),
+        "anonymous retract must not record a principal: {retraction}"
+    );
+}
+
+/// A caller attempting to smuggle a `provenance` / `principal` field into a
+/// destructive-op request must NOT have it honored: these tools take no
+/// caller provenance (serde ignores the unknown field), and the recorded
+/// principal is always the verified SESSION principal, never the forged
+/// value. Unforgeability holds regardless of what the request JSON contains.
+#[test]
+fn forged_principal_on_destructive_op_is_ignored() {
+    let (server, _store, _id) = server_with_role(Role::Writer);
+    let (created, _) = dispatch(&server, "create_node", json!({"label": "Doc"}));
+    let node_id = created["id"].as_u64().expect("node id");
+
+    // Inject bogus provenance/principal fields the tool schema does not accept.
+    let (deleted, is_error) = dispatch(
+        &server,
+        "delete_node",
+        json!({
+            "node_id": node_id,
+            "provenance": {"source": "forged", "principal": "forged-admin"},
+            "principal": "forged-admin"
+        }),
+    );
+    assert!(!is_error, "delete_node must still succeed: {deleted}");
+
+    let tombstone = last_node_version(&server, node_id);
+    assert_eq!(
+        tombstone["provenance"]["principal"],
+        json!("test-writer"),
+        "principal must be the verified session's, never the forged value: {tombstone}"
+    );
+    // The forged `source` must not have been honored either (these tools
+    // carry no caller provenance at all).
+    assert!(
+        tombstone["provenance"].get("source").is_none(),
+        "destructive tools accept no caller provenance source: {tombstone}"
+    );
+}
+
+// ============================================================================
 // AccessClass sanity: the classification only uses classes the role matrix
 // covers (guards against a future class being added without matrix review).
 // ============================================================================

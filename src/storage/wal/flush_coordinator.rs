@@ -45,8 +45,8 @@ use super::ring_buffer::PendingEntry;
 use crate::core::error::{Error, Result, StorageError};
 
 use super::segment_reader::{
-    WAL_HEADER_SIZE, WAL_MAGIC, WAL_VERSION_DELETE_VERSION_ID,
-    WAL_VERSION_ENCRYPTED_DELETE_VERSION_ID,
+    WAL_HEADER_SIZE, WAL_MAGIC, WAL_VERSION_DESTRUCTIVE_PROVENANCE,
+    WAL_VERSION_ENCRYPTED_DESTRUCTIVE_PROVENANCE,
 };
 
 /// Metadata about a WAL segment's LSN range.
@@ -432,20 +432,23 @@ impl FlushCoordinator {
             return Ok(());
         }
 
-        // New segments use the delete-version-id format (Issue #3406), a strict
-        // superset of the transaction-framing format (Issue #3413) which is in
-        // turn a superset of the principal-carrying provenance format (Issues
-        // #3224 + #3350): version 10 for encrypted segments, version 9 for
-        // plaintext. It keeps the BeginTx/CommitTx framing markers AND appends
-        // the tombstone/retraction version_id to delete/retract payloads.
-        // Non-transactional producers simply omit the framing markers; the
-        // version bump signals both the markers AND the extended payload MAY be
-        // present so old readers reject the segment cleanly rather than
-        // misparsing.
+        // New segments use the destructive-op provenance format (Issue #3427):
+        // WAL_VERSION_ENCRYPTED_DESTRUCTIVE_PROVENANCE (v12) for encrypted
+        // segments, WAL_VERSION_DESTRUCTIVE_PROVENANCE (v11) for plaintext. It
+        // is a strict superset of the delete-version-id format (Issue #3406,
+        // v9/v10) — itself a superset of the transaction-framing format (Issue
+        // #3413) and the principal-carrying provenance format (Issues #3224 +
+        // #3350) — additionally appending an optional provenance blob to the
+        // delete/retract payloads so the acting principal on a destructive op
+        // survives crash recovery. It keeps the BeginTx/CommitTx framing
+        // markers AND the tombstone/retraction version_id. Non-transactional
+        // producers simply omit the framing markers; the version bump signals
+        // that the markers AND the extended payloads MAY be present so old
+        // readers reject the segment cleanly rather than misparsing.
         let write_version = if self.config.wal_cipher.is_some() {
-            WAL_VERSION_ENCRYPTED_DELETE_VERSION_ID
+            WAL_VERSION_ENCRYPTED_DESTRUCTIVE_PROVENANCE
         } else {
-            WAL_VERSION_DELETE_VERSION_ID
+            WAL_VERSION_DESTRUCTIVE_PROVENANCE
         };
 
         // Allocate the next segment id, rolling past any existing non-empty
@@ -1197,11 +1200,11 @@ mod tests {
         );
 
         // ...the write must have rolled forward to a fresh segment with the
-        // current writer (v9 delete-version-id) header...
+        // current writer (v11 destructive-provenance) header...
         assert_eq!(coordinator.current_segment_id(), 2);
         let new_segment = std::fs::read(dir.path().join("000002.log")).unwrap();
         assert_eq!(&new_segment[0..4], &WAL_MAGIC);
-        assert_eq!(new_segment[4], WAL_VERSION_DELETE_VERSION_ID);
+        assert_eq!(new_segment[4], WAL_VERSION_DESTRUCTIVE_PROVENANCE);
 
         // ...and a full-directory replay succeeds, with the new entry's
         // principal intact.
@@ -1521,7 +1524,7 @@ mod tests {
 
         assert!(data.len() >= WAL_HEADER_SIZE);
         assert_eq!(&data[0..4], &WAL_MAGIC);
-        assert_eq!(data[4], WAL_VERSION_DELETE_VERSION_ID);
+        assert_eq!(data[4], WAL_VERSION_DESTRUCTIVE_PROVENANCE);
     }
 
     #[test]
