@@ -13,7 +13,12 @@
 use serde::{Deserialize, Serialize};
 
 /// Format version of the artifact. Bumped only on breaking format changes.
-pub const AUDIT_FORMAT_VERSION: u32 = 1;
+///
+/// Bumped to `2` in Issue #3351: the canonical `Bytes` encoding gained a 1-byte
+/// discriminator (decoded-bytes vs raw-string fallback), so leaf/root hashes for
+/// any export containing byte-valued properties changed. Older `v1` artifacts are
+/// rejected by the verifier (their signatures cover the old canonical bytes).
+pub const AUDIT_FORMAT_VERSION: u32 = 2;
 
 /// Hash-chain algorithm identifier embedded in the artifact.
 pub const HASH_ALGORITHM: &str = "sha256-linked-v1";

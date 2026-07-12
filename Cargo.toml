@@ -142,6 +142,11 @@ aws-sdk-kms = { version = "1.106.0", optional = true }
 # Constant-time equality for API-key digest comparison (Issue #3350).
 subtle = "2.6"
 
+# Per-platform O_NOFOLLOW for hardened key-file writes (Issue #3351). Already
+# present transitively; pinned as a direct dep so the audit signing path can name
+# the correct constant instead of hardcoding a platform-specific integer.
+libc = "0.2"
+
 # Ed25519 asymmetric signatures for signed audit-export artifacts (Issue #3358).
 # Chosen over HMAC so third parties verify offline with ONLY the signer's public
 # key. Pure-Rust, RFC 8032 deterministic signatures → reproducible artifacts.
@@ -436,6 +441,12 @@ required-features = []
 name = "durability_modes"
 harness = false
 path = "benches/durability_modes.rs"
+
+# Provenance hash chain write-throughput overhead (Issue #3351)
+[[bench]]
+name = "provenance_chain"
+harness = false
+path = "benches/provenance_chain.rs"
 
 [[bench]]
 name = "checkpoints"

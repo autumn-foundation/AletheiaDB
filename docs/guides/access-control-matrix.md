@@ -99,6 +99,8 @@ is served by the HTTP admin endpoints over the shared persisted store
 | `lineage_upstream` | read |
 | `lineage_downstream` | read |
 | `audit_export` | read |
+| `verify_chain` | read |
+| `export_chain_head` | read |
 | `database_stats` | metrics |
 | `create_node` | write |
 | `update_node` | write |

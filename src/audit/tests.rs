@@ -35,6 +35,40 @@ fn signing_key_debug_hides_secret() {
 }
 
 #[test]
+fn write_to_file_refuses_existing_path() {
+    // Issue #3351: create_new(true) refuses to write over a pre-existing file,
+    // so an attacker-planted file is never followed/truncated.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("key.hex");
+    let k = key();
+    k.write_to_file(&path).unwrap();
+    let err = k.write_to_file(&path).unwrap_err();
+    assert!(
+        matches!(err, AuditError::Io(_)),
+        "second write over an existing path must be refused"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn write_to_file_refuses_symlink_target() {
+    // A symlink planted at the target must not be followed/truncated.
+    let dir = tempfile::tempdir().unwrap();
+    let real = dir.path().join("real.txt");
+    std::fs::write(&real, b"planted-secret").unwrap();
+    let link = dir.path().join("link.hex");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+
+    let err = key().write_to_file(&link).unwrap_err();
+    assert!(
+        matches!(err, AuditError::Io(_)),
+        "writing through a symlink must be refused"
+    );
+    // The pre-existing real file must be untouched.
+    assert_eq!(std::fs::read(&real).unwrap(), b"planted-secret");
+}
+
+#[test]
 fn export_is_deterministic_for_same_content_ordering() {
     // Two exports of the same entity produce identical chains (only the export
     // timestamp/anchor differ, which live in metadata) — the per-version leaves

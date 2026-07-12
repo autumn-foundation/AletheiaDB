@@ -124,9 +124,22 @@ impl Canon {
                 self.tag(5);
                 // Encode the decoded bytes so an equivalent-but-recased hex still
                 // canonicalizes identically; fall back to raw string on garbage.
+                //
+                // A 1-byte discriminator immediately after the tag keeps the two
+                // sub-domains injective: without it, a valid-hex value decoding to
+                // some byte string B and a garbage-hex value whose raw UTF-8 equals
+                // B both emitted `tag(5) || len-prefixed(B)` and therefore collided
+                // (Issue #3351 security fix). `0` = decoded bytes, `1` = raw-string
+                // fallback; they can never share an encoding.
                 match hex::decode(hex) {
-                    Some(bytes) => self.bytes(&bytes),
-                    None => self.str(hex),
+                    Some(bytes) => {
+                        self.buf.push(0);
+                        self.bytes(&bytes);
+                    }
+                    None => {
+                        self.buf.push(1);
+                        self.str(hex);
+                    }
                 }
             }
             ExportedValue::Array { values } => {
@@ -349,4 +362,35 @@ pub(crate) fn hex_to_32(s: &str) -> Option<[u8; 32]> {
     let mut out = [0u8; 32];
     out.copy_from_slice(&v);
     Some(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn canon_value(v: &ExportedValue) -> Vec<u8> {
+        let mut c = Canon::default();
+        c.value(v);
+        c.buf
+    }
+
+    #[test]
+    fn bytes_decoded_and_raw_string_fallback_do_not_collide() {
+        // "68656c6c6f" is valid hex that decodes to the bytes of "hello", so it
+        // takes the decoded-bytes path. "hello" is NOT valid hex, so it takes the
+        // raw-string fallback. Before the Issue #3351 discriminator fix both
+        // produced identical canonical bytes (`tag(5) || len-prefixed "hello"`);
+        // they must now differ.
+        let decoded = ExportedValue::Bytes {
+            hex: "68656c6c6f".to_string(),
+        };
+        let raw_fallback = ExportedValue::Bytes {
+            hex: "hello".to_string(),
+        };
+        assert_ne!(
+            canon_value(&decoded),
+            canon_value(&raw_fallback),
+            "decoded-bytes and raw-string-fallback Bytes must not share a canonical encoding"
+        );
+    }
 }

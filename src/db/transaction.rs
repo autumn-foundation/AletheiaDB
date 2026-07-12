@@ -314,8 +314,12 @@ impl AletheiaDB {
     {
         let mut tx = self.write_transaction().map_err(E::from)?;
         let result = f(&mut tx)?;
+        // Provenance-chain capture (Issue #3351): only when the chain is
+        // enabled; a disabled chain adds nothing beyond this Option check.
+        let chain_capture = self.chain.as_ref().map(|_| self.precapture_chain(&tx));
         record_tx_mutations(self.persistence_tracker.as_ref(), &tx);
-        tx.commit().map_err(E::from)?;
+        let commit_ts = tx.commit_with_timestamp().map_err(E::from)?;
+        self.enqueue_chain_commit(chain_capture, commit_ts);
         Ok(result)
     }
 
@@ -369,8 +373,10 @@ impl AletheiaDB {
     {
         let mut tx = self.write_transaction().map_err(E::from)?;
         let result = f(&mut tx)?;
+        let chain_capture = self.chain.as_ref().map(|_| self.precapture_chain(&tx));
         record_tx_mutations(self.persistence_tracker.as_ref(), &tx);
         let commit_ts = tx.commit_with_timestamp().map_err(E::from)?;
+        self.enqueue_chain_commit(chain_capture, commit_ts);
         Ok((result, commit_ts))
     }
 
@@ -435,8 +441,10 @@ impl AletheiaDB {
             .write_transaction_with_options(options)
             .map_err(E::from)?;
         let result = f(&mut tx)?;
+        let chain_capture = self.chain.as_ref().map(|_| self.precapture_chain(&tx));
         record_tx_mutations(self.persistence_tracker.as_ref(), &tx);
-        tx.commit().map_err(E::from)?;
+        let commit_ts = tx.commit_with_timestamp().map_err(E::from)?;
+        self.enqueue_chain_commit(chain_capture, commit_ts);
         Ok(result)
     }
 
