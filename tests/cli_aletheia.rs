@@ -67,9 +67,9 @@ fn stdout_json(out: &str) -> serde_json::Value {
 fn wait_for_nonempty_file(path: &Path, timeout: std::time::Duration) {
     let start = std::time::Instant::now();
     loop {
-        if let Ok(meta) = std::fs::metadata(path)
-            && meta.is_file()
-            && meta.len() > 0
+        if std::fs::metadata(path)
+            .map(|meta| meta.is_file() && meta.len() > 0)
+            .unwrap_or(false)
         {
             return;
         }
