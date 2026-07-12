@@ -610,6 +610,15 @@ impl WriteTransaction {
         //
         // The pre-generated closing version ids (Issue #3406) are consumed here
         // in the same buffer order they were logged to the WAL.
+        //
+        // Test-only interleaving hook (Issue #3416 Pt1): fires AFTER
+        // validate/detect_conflicts/WAL but BEFORE `apply_changes` acquires the
+        // `historical.write()` guard, so a test can commit a concurrent
+        // delete/create in this window and exercise the commit-time write-skew
+        // re-checks. Production builds compile this away.
+        #[cfg(test)]
+        commit_test_hooks::run_pre_apply_hook();
+
         let historical_guard = apply::apply_changes(self, commit_timestamp, &closing_version_ids)?;
 
         // Test-only interleaving hook (Issue #3425): fires at the exact point
@@ -917,6 +926,37 @@ impl WriteTransaction {
             return buffered;
         }
         self.current.get_edge(id)
+    }
+
+    /// Enumerate edges CREATED earlier in THIS transaction that reference
+    /// `node_id` as source or target and are still live in the buffer (Issue
+    /// #3416 Pt4).
+    ///
+    /// `delete_node_cascade` unions this with committed adjacency
+    /// (`self.current.get_outgoing_edges` / `get_incoming_edges`) so a same-tx
+    /// `create_node → create_edge → cascade` reaches the same-tx-created edge,
+    /// which committed adjacency cannot yet see. Only `CreateEdge` ops matter:
+    /// an already-committed edge (including one this tx `UpdateEdge`s) is
+    /// already returned by the current-adjacency read. An edge created then
+    /// deleted/retracted within this tx is filtered out (its latest buffered
+    /// state resolves to Not-Found via [`buffered_edge`](Self::buffered_edge)),
+    /// so the cascade never double-closes it.
+    fn buffered_connected_edges(&self, node_id: NodeId) -> Vec<EdgeId> {
+        let mut edges = Vec::new();
+        for op in self.buffer.operations() {
+            if let super::BufferedWrite::CreateEdge {
+                edge_id,
+                source,
+                target,
+                ..
+            } = op
+                && (*source == node_id || *target == node_id)
+                && matches!(self.buffered_edge(*edge_id), Some(Ok(_)))
+            {
+                edges.push(*edge_id);
+            }
+        }
+        edges
     }
 }
 
@@ -1454,27 +1494,34 @@ impl WriteOps for WriteTransaction {
         // transaction can be cascade-deleted (read-your-own-writes).
         let _node = self.read_own_node(node_id)?;
 
-        // Collect all edges connected to this node (both outgoing and incoming)
-        // We do this before any deletions to avoid borrowing issues
+        // Collect all edges connected to this node (both outgoing and incoming).
+        // We do this before any deletions to avoid borrowing issues.
         //
-        // LIMITATION (buffer-aware cascade adjacency — tracked for #3416):
-        // the #3417 read-your-own-writes fix makes the node existence check
-        // (above) and per-edge delete_edge reads buffer-aware, but the
-        // adjacency ENUMERATION below still routes through
-        // get_outgoing_edges/get_incoming_edges, which read committed
-        // adjacency only. So a same-tx create_node → create_edge → cascade
-        // does NOT see (and cannot delete) the same-tx-created edge, which can
-        // leave it orphaned. Buffer-aware adjacency is deferred to #3416. Note
-        // this does not affect the MCP #3209 refuse/detach idempotency
-        // contract, which is enforced at the MCP layer over committed
-        // adjacency and is unaffected by this gap.
-        let outgoing_edges = self.get_outgoing_edges(node_id)?;
-        let incoming_edges = self.get_incoming_edges(node_id)?;
+        // Buffer-aware cascade adjacency (Issue #3416 Pt4, folded from the
+        // #3417 review): the committed adjacency (get_outgoing_edges /
+        // get_incoming_edges) is unioned with edges CREATED earlier in THIS
+        // transaction (buffered CreateEdge touching this node), minus edges
+        // already deleted/retracted in this tx. Without the buffer union a
+        // same-tx create_node → create_edge → cascade would leave the
+        // same-tx-created edge orphaned (its endpoint gets a tombstone but the
+        // edge does not).
+        let mut edge_ids = self.get_outgoing_edges(node_id)?;
+        edge_ids.extend(self.get_incoming_edges(node_id)?);
+        edge_ids.extend(self.buffered_connected_edges(node_id));
 
-        // Delete all connected edges first to maintain referential integrity
-        // This prevents orphaned edges that reference a deleted node
-        // Performance: O(degree) where degree is the number of connected edges
-        for edge_id in outgoing_edges.into_iter().chain(incoming_edges) {
+        // Dedup by EdgeId (Issue #3416 Pt3): a self-loop (node -> node) appears
+        // in BOTH the outgoing and incoming lists; without dedup delete_edge
+        // would be called twice for the same edge, buffering two DeleteEdge ops
+        // (double tombstone / double-close at apply time). Sort + dedup means
+        // each distinct connected edge is deleted exactly once. This mirrors
+        // retract_node_detach and apply_batch's manual cascade.
+        edge_ids.sort_unstable();
+        edge_ids.dedup();
+
+        // Delete all connected edges first to maintain referential integrity.
+        // This prevents orphaned edges that reference a deleted node.
+        // Performance: O(degree) where degree is the number of connected edges.
+        for edge_id in edge_ids {
             self.delete_edge(edge_id)?;
         }
 
@@ -1897,6 +1944,43 @@ pub(crate) mod commit_test_hooks {
         let hook = PRE_FINALIZE_HOOK
             .lock()
             .expect("pre-finalize hook mutex poisoned")
+            .clone();
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
+
+    static PRE_APPLY_HOOK: Mutex<Option<Hook>> = Mutex::new(None);
+
+    /// Install a hook fired just BEFORE `apply::apply_changes` (i.e. after
+    /// `validate`/`detect_conflicts`/WAL, before the `historical.write()` guard
+    /// is acquired). This is the symmetric counterpart to the pre-finalize hook
+    /// and is the seam that lets a test drive the Issue #3416 Pt1 MIRROR
+    /// interleaving deterministically: a committing edge-creator can be parked
+    /// here (endpoints already validated, guard not yet held) while a concurrent
+    /// node delete commits, so the edge tx then aborts at its own commit-time
+    /// endpoint re-check. Parking here (rather than at pre-finalize) avoids a
+    /// self-deadlock: the guard is not yet held, so the concurrent deleter can
+    /// acquire `historical.write()` and commit.
+    pub(crate) fn set_pre_apply_hook(hook: Hook) {
+        *PRE_APPLY_HOOK
+            .lock()
+            .expect("pre-apply hook mutex poisoned") = Some(hook);
+    }
+
+    /// Remove any installed pre-apply hook.
+    pub(crate) fn clear_pre_apply_hook() {
+        *PRE_APPLY_HOOK
+            .lock()
+            .expect("pre-apply hook mutex poisoned") = None;
+    }
+
+    /// Invoke the installed pre-apply hook, if any (Arc cloned out from under
+    /// the mutex, as with `run_pre_finalize_hook`).
+    pub(crate) fn run_pre_apply_hook() {
+        let hook = PRE_APPLY_HOOK
+            .lock()
+            .expect("pre-apply hook mutex poisoned")
             .clone();
         if let Some(hook) = hook {
             hook();

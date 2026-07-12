@@ -1134,15 +1134,29 @@ db.between("2024-01-01", "2024-12-31").track_changes(node_id)
 ### Orphaned Edges on Node Deletion
 
 The **low-level Rust** `delete_node` (`src/storage/current/mod.rs`) removes only the
-node itself -- any edges where the deleted node is the source or target remain in
-storage as **orphaned edges**. This edge-preserving behavior is intentional and is
-retained for audit/history use cases where callers manage edge cleanup themselves or
-need to preserve edge records. Traversals that follow these orphaned edges may
-encounter missing endpoints.
+node itself -- any edges where the deleted node is the source or target **and that
+existed at the deleting transaction's snapshot** remain in storage as **orphaned
+edges**. This edge-preserving behavior is intentional and is retained for
+audit/history use cases where callers manage edge cleanup themselves or need to
+preserve edge records. Traversals that follow these orphaned edges may encounter
+missing endpoints.
+
+**Concurrent-write exception (Issue #3416)**: the orphan-preserving behavior applies
+only to *pre-existing* edges. Under snapshot isolation, a `delete_node`/`retract_node`
+(and symmetrically a `create_edge`) that would orphan an edge **committed by a
+concurrent transaction after the deleter's snapshot** now **aborts at commit** with
+`TransactionError::ValidationFailed` (MCP `FAILED_PRECONDITION`, non-retriable),
+first-committer-wins. The check is symmetric under the commit-serialization
+(`historical` write) guard: whichever of the concurrent delete-node / create-edge
+pair applies second aborts, so neither ordering can commit a new dangling edge. A
+single transaction that both creates an edge and deletes its endpoint is unaffected
+(that is the caller's own buffered decision), as are pre-existing edges deleted with
+no concurrent writer.
 
 **Recommended (Rust API)**: Use `delete_node_cascade` instead, which atomically
 deletes the node and all connected edges, preventing orphans. To decide before acting,
-call `db.count_connected_edges(node_id)` to learn how many edges reference a node.
+call `db.count_connected_edges(node_id)` to learn how many edges reference a node
+(DISTINCT edges -- a self-loop counts once, Issue #3416).
 
 **MCP surface is safe-by-default (Issue #3209)**: The MCP `delete_node` tool mirrors
 Cypher's `DETACH DELETE` contract -- it never silently orphans edges:
