@@ -402,6 +402,91 @@ fn finding4_rebuilt_chain_matches_precrash_anchor() {
 }
 
 // ---------------------------------------------------------------------------
+// Finding 4 / AC6 (mid-workload crash): a *genuine* mid-workload crash leaves a
+// SEALED PREFIX on disk plus an UNSEALED TAIL (transactions committed to the WAL
+// but not yet sealed). On reopen the chain loads the durable prefix and rebuilds
+// only the tail from replayed history — and the recombined chain must reproduce
+// the exact pre-crash head digest, so a pre-crash anchor still verifies and full
+// verify passes over the whole recovered prefix.
+//
+// This is stronger than `finding4_rebuilt_chain_matches_precrash_anchor` (which
+// drops the ENTIRE log — an empty prefix). Here we keep the first two sealed
+// records and drop the rest, exercising the load-prefix + rebuild-tail merge.
+// ---------------------------------------------------------------------------
+
+/// Return the byte offset in a `chain.log` just past the first `keep` sealed
+/// record frames. Layout: 12-byte header, then repeated `[u32 BE len][len bytes]`.
+fn offset_after_records(bytes: &[u8], keep: usize) -> usize {
+    let mut pos = 12usize; // header
+    for _ in 0..keep {
+        assert!(pos + 4 <= bytes.len(), "log shorter than requested prefix");
+        let len = u32::from_be_bytes([bytes[pos], bytes[pos + 1], bytes[pos + 2], bytes[pos + 3]])
+            as usize;
+        pos += 4 + len;
+        assert!(pos <= bytes.len(), "frame runs past end of log");
+    }
+    pos
+}
+
+#[test]
+fn finding4_partial_tail_rebuild_matches_precrash_anchor() {
+    let dir = tempfile::tempdir().unwrap();
+    let anchor;
+    {
+        let db = AletheiaDB::with_unified_config(enabled_config(dir.path())).unwrap();
+        let a = db.create_node("Person", props("Alice")).unwrap();
+        let b = db.create_node("Person", props("Bob")).unwrap();
+        db.create_edge(a, b, "KNOWS", props("")).unwrap();
+        db.create_node("Person", props("Carol")).unwrap();
+        wait_for_head_seq(&db, 4);
+        anchor = db.export_chain_head().unwrap();
+        assert_eq!(anchor.seq, 4);
+        // db drops here: all four records + head checkpoint flushed.
+    }
+
+    // Simulate a mid-workload crash: the sealer had durably sealed the first TWO
+    // transactions, but the last two records never reached the sidecar (their
+    // commits are in the WAL/index and will be replayed). Keep the head
+    // checkpoint so the genesis digest survives, matching a real durable chain.
+    let log_path = dir.path().join("chain").join("chain.log");
+    let bytes = std::fs::read(&log_path).unwrap();
+    let cut = offset_after_records(&bytes, 2);
+    assert!(cut < bytes.len(), "expected an unsealed tail to drop");
+    std::fs::write(&log_path, &bytes[..cut]).unwrap();
+
+    // Reopen: loads the 2-record prefix (head at seq 2) and rebuilds txns 3..4
+    // from replayed history.
+    let db = AletheiaDB::with_unified_config(enabled_config(dir.path())).unwrap();
+    let head = db.export_chain_head().unwrap();
+    assert_eq!(
+        head.seq, 4,
+        "prefix loaded + tail rebuilt to the full 4 txns"
+    );
+
+    // The merged (loaded prefix + rebuilt tail) chain reproduces the pre-crash
+    // head digest exactly — no false fork.
+    assert_eq!(
+        head.digest, anchor.digest,
+        "recovered head digest must equal the pre-crash head digest"
+    );
+    let v = db.verify_chain_against(&anchor).unwrap();
+    assert!(
+        v.passed,
+        "pre-crash anchor must verify against the recovered chain: {:?}",
+        v.reason
+    );
+
+    // Full verify passes over the whole recovered prefix.
+    let full = db.verify_chain().unwrap();
+    assert!(
+        full.passed,
+        "full verify over recovered chain: {:?}",
+        full.reason
+    );
+    assert_eq!(full.transactions_checked, 4);
+}
+
+// ---------------------------------------------------------------------------
 // AC7: database_stats surfaces chain status (enabled, head, genesis, and the
 // last verification result once a verify has run).
 // ---------------------------------------------------------------------------
