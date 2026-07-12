@@ -6151,6 +6151,44 @@ mod server_unit_tests {
         val["error"].clone()
     }
 
+    /// EXPLAIN (Issue #562) flows through the MCP `query` tool's
+    /// computed-columns path unchanged: it is not a mutating clause, and its
+    /// single `plan`-column row renders like any aggregate/computed row.
+    #[cfg(feature = "cypher")]
+    #[test]
+    fn handle_query_explain_returns_plan_column() {
+        let db = Arc::new(AletheiaDB::new().expect("db init"));
+        db.create_node("Person", crate::core::property::PropertyMap::new())
+            .unwrap();
+        let server = AletheiaMcpServer::new(db);
+
+        let result = server.handle_query(serde_json::json!({
+            "language": "cypher",
+            "query": "EXPLAIN MATCH (n:Person) RETURN n",
+        }));
+        let text = AletheiaMcpServer::extract_text(result);
+        let val: serde_json::Value = serde_json::from_str(&text).unwrap();
+
+        assert!(
+            val.get("error").is_none(),
+            "EXPLAIN of a read query must not be rejected: {val}"
+        );
+        assert_eq!(val["row_count"], 1, "EXPLAIN yields one row: {val}");
+        let rows = val["rows"].as_array().expect("rows array");
+        let plan = rows[0]["plan"]
+            .as_str()
+            .expect("the row carries a `plan` string column");
+        assert!(
+            plan.contains("NodeScan"),
+            "the plan text is surfaced through MCP: {plan}"
+        );
+        let columns = val["columns"].as_array().expect("columns array");
+        assert!(
+            columns.iter().any(|c| c["name"] == "plan"),
+            "column metadata names the `plan` column: {val}"
+        );
+    }
+
     #[test]
     fn map_query_error_unsupported_feature_yields_unsupported_construct() {
         let server = make_server();
