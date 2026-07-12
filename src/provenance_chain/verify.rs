@@ -24,6 +24,38 @@ use super::record::{ChainHead, ChainTxRecord};
 pub trait VersionSource {
     /// Fetch the normalized hash input for `(kind, id, version_id)`.
     fn fetch(&self, kind: EntityKind, id: u64, version_id: u64) -> Option<VersionHashInput>;
+
+    /// Run `f` against a fetch view for the duration of one verification pass,
+    /// giving a lock-backed source the chance to acquire its underlying shared
+    /// lock **once** for the whole pass instead of re-locking on every
+    /// [`fetch`](Self::fetch) (Issue #3351 AC4 / task #2).
+    ///
+    /// The default implementation simply runs `f` against `self` — correct for
+    /// any source whose `fetch` is already cheap/lock-free (e.g. an in-memory
+    /// test map). A source that guards real storage behind a `RwLock` overrides
+    /// this to hold its read guard across `f`, so a full/entity verify takes the
+    /// read lock a single time rather than once per version.
+    fn scoped(&self, f: &mut dyn FnMut(&dyn VersionSource)) {
+        // Object-safe self-reborrow: `&Self` cannot coerce to `&dyn` for an
+        // unsized `Self`, so wrap it in a `Sized` adapter that delegates `fetch`.
+        struct Reborrow<'a, S: ?Sized>(&'a S);
+        impl<S: VersionSource + ?Sized> VersionSource for Reborrow<'_, S> {
+            fn fetch(
+                &self,
+                kind: EntityKind,
+                id: u64,
+                version_id: u64,
+            ) -> Option<VersionHashInput> {
+                self.0.fetch(kind, id, version_id)
+            }
+            // `Reborrow` is `Sized`, so `&self` coerces to `&dyn` directly here —
+            // overriding avoids the default rebuilding `Reborrow<Reborrow<..>>`.
+            fn scoped(&self, f: &mut dyn FnMut(&dyn VersionSource)) {
+                f(self);
+            }
+        }
+        f(&Reborrow(self));
+    }
 }
 
 /// Outcome of a chain verification pass.
@@ -66,8 +98,22 @@ impl ChainVerification {
 
 /// Full-chain verification: recompute every leaf from `src` and re-fold from
 /// `genesis`, returning the earliest broken sequence number on tamper.
+///
+/// Routes through [`VersionSource::scoped`] so a lock-backed source (the live
+/// historical store) holds its read lock **once** for the whole pass rather than
+/// re-acquiring it per version (Issue #3351 task #2).
 #[must_use]
 pub fn verify_full(
+    records: &[ChainTxRecord],
+    src: &dyn VersionSource,
+    genesis: &ChainHead,
+) -> ChainVerification {
+    let mut out: Option<ChainVerification> = None;
+    src.scoped(&mut |s| out = Some(verify_full_inner(records, s, genesis)));
+    out.expect("VersionSource::scoped must invoke its callback exactly once")
+}
+
+fn verify_full_inner(
     records: &[ChainTxRecord],
     src: &dyn VersionSource,
     genesis: &ChainHead,
@@ -303,8 +349,23 @@ impl EntityIndex {
 /// record's own digest folds consistently from its (stored) predecessor.
 ///
 /// No full scan of the chain — only the records that reference `entity`.
+///
+/// Like [`verify_full`], routes through [`VersionSource::scoped`] so the live
+/// historical store is locked once for the (already entity-scoped) pass.
 #[must_use]
 pub fn verify_entity(
+    records: &[ChainTxRecord],
+    index: &EntityIndex,
+    entity: (EntityKind, u64),
+    genesis: &ChainHead,
+    src: &dyn VersionSource,
+) -> ChainVerification {
+    let mut out: Option<ChainVerification> = None;
+    src.scoped(&mut |s| out = Some(verify_entity_inner(records, index, entity, genesis, s)));
+    out.expect("VersionSource::scoped must invoke its callback exactly once")
+}
+
+fn verify_entity_inner(
     records: &[ChainTxRecord],
     index: &EntityIndex,
     entity: (EntityKind, u64),
@@ -634,6 +695,67 @@ mod tests {
         let v = verify_full(&records, &src, &genesis);
         assert!(!v.passed);
         assert_eq!(v.earliest_broken_seq, Some(1));
+    }
+
+    /// AC1 (reorder): moving a transaction to a different point in the timeline
+    /// changes the head digest and is caught + localized. We swap two records'
+    /// commit timestamps (their timeline position) while leaving the sealed
+    /// digests untouched: the fold re-orders by commit timestamp, recomputes each
+    /// `tx_digest` (which binds the commit timestamp), and no longer reproduces
+    /// the sealed digests.
+    #[test]
+    fn verify_full_detects_reordered_transactions() {
+        let (mut records, src, genesis) = build_chain(&[(1, 1, "a"), (2, 1, "b"), (3, 1, "c")]);
+        let clean_head = records.last().unwrap().digest;
+
+        // Swap the commit timestamps of tx 1 and tx 2 — a timeline reorder.
+        let ts0 = records[0].commit_ts;
+        records[0].commit_ts = records[1].commit_ts;
+        records[1].commit_ts = ts0;
+
+        let v = verify_full(&records, &src, &genesis);
+        assert!(!v.passed, "a transaction reorder must be detected");
+        assert!(
+            v.earliest_broken_seq.is_some(),
+            "reorder tamper is localized"
+        );
+        // The reorder necessarily changes the canonical head digest.
+        assert_ne!(
+            v.head_digest_hex,
+            crate::provenance_chain::canonical::to_hex(&clean_head),
+            "reorder must change the folded head digest"
+        );
+    }
+
+    /// AC1 (insert): a forged transaction spliced into the chain is caught +
+    /// localized. The forged record references a version that stored history does
+    /// not contain, so its leaf cannot be reproduced — the fold breaks exactly at
+    /// the forged sequence.
+    #[test]
+    fn verify_full_detects_forged_inserted_transaction() {
+        let (mut records, src, genesis) = build_chain(&[(1, 1, "a"), (2, 1, "b"), (3, 1, "c")]);
+
+        // Fabricate a record that sorts between tx 1 and tx 2 but references a
+        // version (entity 999) absent from the source.
+        let forged = ChainTxRecord {
+            seq: 99,
+            commit_ts: records[0].commit_ts + 1,
+            commit_ts_logical: 0,
+            tx_id: 12345,
+            anchor_lsn: 42,
+            leaves: vec![[0xAAu8; 32]],
+            entity_refs: vec![(EntityKind::Node, 999, 999)],
+            digest: [0xBBu8; 32],
+        };
+        records.insert(1, forged);
+
+        let v = verify_full(&records, &src, &genesis);
+        assert!(!v.passed, "a forged inserted transaction must be detected");
+        assert_eq!(
+            v.earliest_broken_seq,
+            Some(99),
+            "the forged record's sequence is localized"
+        );
     }
 
     #[test]

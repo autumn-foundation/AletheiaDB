@@ -442,17 +442,35 @@ impl ProvenanceChain {
     }
 
     /// Entity-scoped verification: recompute only `(kind, id)`'s leaves.
+    ///
+    /// Truly scan-free (Issue #3351 task #1): instead of cloning every record
+    /// and rebuilding the whole [`EntityIndex`] on each call — O(total tx) — this
+    /// locks `inner` and hands the core verifier the sealer's **running**
+    /// `records` + `index` directly. The core then touches only the records that
+    /// reference the entity (leaf recompute is already entity-scoped), so the
+    /// whole call is O(entity versions), independent of database size. The
+    /// running index is kept correct by [`Sealer::seal_one`] on both the common
+    /// tail-append path (`push_record`) and the rare out-of-order re-fold path
+    /// (full `EntityIndex::build`), so it always matches `inner.records`.
     #[must_use]
     pub fn verify_entity(&self, kind: EntityKind, id: u64) -> ChainVerification {
-        let records = self.snapshot_records();
-        let index = EntityIndex::build(&records);
-        let result = verify_entity(
-            &records,
-            &index,
-            (kind, id),
-            &self.genesis,
-            &*self.sealer.source,
-        );
+        let result = match self.sealer.inner.lock() {
+            Ok(inner) => verify_entity(
+                &inner.records,
+                &inner.index,
+                (kind, id),
+                &self.genesis,
+                &*self.sealer.source,
+            ),
+            Err(_) => ChainVerification {
+                passed: false,
+                head_seq: self.genesis.seq,
+                head_digest_hex: String::new(),
+                earliest_broken_seq: None,
+                reason: Some("provenance chain inner lock poisoned".to_string()),
+                transactions_checked: 0,
+            },
+        };
         self.record_verification(&result);
         result
     }
@@ -663,5 +681,110 @@ mod ordering_tests {
         let a = [(100, 1, 1, 1), (100, 2, 2, 2)];
         let b = [(100, 2, 2, 2), (100, 1, 1, 1)];
         assert_eq!(head_after(&a), head_after(&b));
+    }
+}
+
+#[cfg(test)]
+mod scan_free_tests {
+    //! Issue #3351 task #1: entity-scoped verify must touch only the target
+    //! entity's records — O(entity versions), not O(database size). Proven by
+    //! counting `VersionSource::fetch` calls: a `verify_entity` fetches exactly
+    //! the entity's version count, regardless of how many other transactions the
+    //! chain holds.
+
+    use super::*;
+    use crate::core::property::PropertyValue;
+    use crate::provenance_chain::canonical::VersionHashInput;
+    use std::collections::HashMap;
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+
+    /// A version source that counts every `fetch` so a test can assert an
+    /// entity-scoped verify does not re-fetch the whole database.
+    struct CountingSource {
+        map: HashMap<(EntityKind, u64, u64), VersionHashInput>,
+        fetches: AtomicUsize,
+    }
+    impl VersionSource for CountingSource {
+        fn fetch(&self, kind: EntityKind, id: u64, version_id: u64) -> Option<VersionHashInput> {
+            self.fetches.fetch_add(1, AtomicOrdering::Relaxed);
+            self.map.get(&(kind, id, version_id)).cloned()
+        }
+    }
+
+    fn vinput(id: u64, vid: u64) -> VersionHashInput {
+        VersionHashInput {
+            entity_kind: EntityKind::Node,
+            entity_id: id,
+            version_id: vid,
+            prev_version_id: None,
+            label: "Person".to_string(),
+            source: None,
+            target: None,
+            valid_from: Some(100),
+            valid_to: None,
+            transaction_from: Some(100),
+            transaction_to: None,
+            is_current: true,
+            is_tombstone: false,
+            provenance: None,
+            properties: vec![("name".to_string(), PropertyValue::string("n"))],
+        }
+    }
+
+    #[test]
+    fn entity_verify_fetches_only_the_entity_versions() {
+        // Five transactions; entity 1 appears in exactly two of them.
+        let specs: [(i64, u32, u64, u64); 5] = [
+            (100, 0, 1, 1), // entity 1, v1
+            (200, 0, 2, 2), // entity 2
+            (300, 0, 3, 3), // entity 3
+            (400, 0, 1, 4), // entity 1, v4 (second occurrence)
+            (500, 0, 4, 5), // entity 4
+        ];
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut map = HashMap::new();
+        for (_, _, id, vid) in specs {
+            let vi = vinput(id, vid);
+            map.insert((vi.entity_kind, vi.entity_id, vi.version_id), vi);
+        }
+        let source = Arc::new(CountingSource {
+            map,
+            fetches: AtomicUsize::new(0),
+        });
+        let config = ChainConfig {
+            enabled: true,
+            fsync: ChainFsyncMode::Never,
+            dir: None,
+        };
+        let chain =
+            ProvenanceChain::open(&config, dir.path(), 1, 0, source.clone() as Arc<_>).unwrap();
+        for (commit_ts, logical, id, vid) in specs {
+            chain
+                .seal_pending_sync(PendingTx {
+                    commit_ts_micros: commit_ts,
+                    commit_ts_logical: logical,
+                    tx_id: vid,
+                    anchor_lsn: 1,
+                    entity_refs: vec![(EntityKind::Node, id, vid)],
+                })
+                .unwrap();
+        }
+
+        // Reset the counter: sealing itself fetches (once per version). We only
+        // want to measure the *verify* pass.
+        source.fetches.store(0, AtomicOrdering::Relaxed);
+
+        let v = chain.verify_entity(EntityKind::Node, 1);
+        assert!(v.passed, "clean entity verify: {:?}", v.reason);
+        assert_eq!(
+            v.transactions_checked, 2,
+            "entity 1 is present in exactly two transactions"
+        );
+        assert_eq!(
+            source.fetches.load(AtomicOrdering::Relaxed),
+            2,
+            "entity verify must fetch only entity 1's two versions, not all five"
+        );
     }
 }

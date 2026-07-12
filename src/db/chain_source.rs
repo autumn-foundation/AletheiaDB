@@ -51,31 +51,70 @@ impl DbVersionSource {
 
 impl VersionSource for DbVersionSource {
     fn fetch(&self, kind: EntityKind, _id: u64, version_id: u64) -> Option<VersionHashInput> {
-        let vid = VersionId::new(version_id).ok()?;
         let historical = self.historical.read();
-        // Cold-tier aware (Issue #3351 finding 5): read the version metadata via
-        // the tiered getter so verify does not FALSE-FAIL ("version not found")
-        // once a sealed version has migrated to the Redb cold tier. Property
-        // reconstruction (`reconstruct_*_properties`) is already tier-aware.
-        let mut input = match kind {
-            EntityKind::Node => {
-                let v = historical.get_node_version_tiered(vid).ok().flatten()?;
-                let mut input = VersionHashInput::from(v.as_ref());
-                let full = historical.reconstruct_node_properties(vid).ok()?;
-                input.properties = resolve_properties(&full);
-                input
-            }
-            EntityKind::Edge => {
-                let v = historical.get_edge_version_tiered(vid).ok().flatten()?;
-                let mut input = VersionHashInput::from(v.as_ref());
-                let full = historical.reconstruct_edge_properties(vid).ok()?;
-                input.properties = resolve_properties(&full);
-                input
-            }
-        };
-        normalize_immutable(&mut input);
-        Some(input)
+        fetch_locked(&historical, kind, version_id)
     }
+
+    /// Hold the historical **read lock once** for the whole verification pass
+    /// (Issue #3351 task #2). `verify_full`/`verify_entity` route every leaf
+    /// re-fetch through the borrowed [`LockedDbVersionSource`], so the pass
+    /// acquires the lock a single time instead of once per version — turning an
+    /// O(versions) lock churn into O(1).
+    fn scoped(&self, f: &mut dyn FnMut(&dyn VersionSource)) {
+        let historical = self.historical.read();
+        let locked = LockedDbVersionSource {
+            historical: &historical,
+        };
+        f(&locked);
+    }
+}
+
+/// A [`VersionSource`] view over an **already-locked** historical store,
+/// borrowed for the duration of one `scoped` verification pass. Its `fetch`
+/// never re-locks (Issue #3351 task #2).
+struct LockedDbVersionSource<'a> {
+    historical: &'a HistoricalStorage,
+}
+
+impl VersionSource for LockedDbVersionSource<'_> {
+    fn fetch(&self, kind: EntityKind, _id: u64, version_id: u64) -> Option<VersionHashInput> {
+        fetch_locked(self.historical, kind, version_id)
+    }
+    // `scoped` default (call `f(self)`): the read lock is already held.
+}
+
+/// Reconstruct the authoritative, normalized [`VersionHashInput`] for a version
+/// from an already-locked historical store. Shared by the per-call
+/// [`DbVersionSource::fetch`] and the single-lock
+/// [`LockedDbVersionSource::fetch`] so both produce byte-identical leaves.
+fn fetch_locked(
+    historical: &HistoricalStorage,
+    kind: EntityKind,
+    version_id: u64,
+) -> Option<VersionHashInput> {
+    let vid = VersionId::new(version_id).ok()?;
+    // Cold-tier aware (Issue #3351 finding 5): read the version metadata via
+    // the tiered getter so verify does not FALSE-FAIL ("version not found")
+    // once a sealed version has migrated to the Redb cold tier. Property
+    // reconstruction (`reconstruct_*_properties`) is already tier-aware.
+    let mut input = match kind {
+        EntityKind::Node => {
+            let v = historical.get_node_version_tiered(vid).ok().flatten()?;
+            let mut input = VersionHashInput::from(v.as_ref());
+            let full = historical.reconstruct_node_properties(vid).ok()?;
+            input.properties = resolve_properties(&full);
+            input
+        }
+        EntityKind::Edge => {
+            let v = historical.get_edge_version_tiered(vid).ok().flatten()?;
+            let mut input = VersionHashInput::from(v.as_ref());
+            let full = historical.reconstruct_edge_properties(vid).ok()?;
+            input.properties = resolve_properties(&full);
+            input
+        }
+    };
+    normalize_immutable(&mut input);
+    Some(input)
 }
 
 /// Resolve an interned-keyed property map into `(String, value)` pairs. Key
