@@ -296,15 +296,17 @@ fn pitr_target_equal_source_lsn_is_base_only() {
 
 #[test]
 #[serial]
-fn pitr_target_after_all_is_full_replay() {
+fn pitr_target_at_latest_is_full_replay() {
+    // A target AT the latest archived commit is in-window and replays every
+    // post-backup transaction (the "restore to the tail" coordinate).
     let s = build_scenario(1, 5);
     let dst = TempDir::new().unwrap();
     let data_dir = dst.path().join("db");
-    let far_future = Timestamp::from(i64::MAX / 2);
+    let latest_ts = s.post.last().unwrap().1;
     let restored = AletheiaDB::restore_to_data_dir_at(
         &s.albk,
         &s.archive,
-        PitrTarget::AsOf(far_future),
+        PitrTarget::AsOf(latest_ts),
         &data_dir,
     )
     .unwrap();
@@ -312,9 +314,41 @@ fn pitr_target_after_all_is_full_replay() {
     for (id, _) in &s.post {
         assert!(
             restored.get_node(*id).is_ok(),
-            "every post node present in full replay"
+            "every post node present in full replay to the tail"
         );
     }
+}
+
+#[test]
+#[serial]
+fn pitr_target_above_window_errors() {
+    // F2: an explicit target strictly ABOVE the archived WAL tail is an error
+    // (not a silent full replay). The window is named in the structured error.
+    let s = build_scenario(2, 3);
+    let dst = TempDir::new().unwrap();
+    let data_dir = dst.path().join("db");
+    let far_future = Timestamp::from(i64::MAX / 2);
+    let err = AletheiaDB::restore_to_data_dir_at(
+        &s.albk,
+        &s.archive,
+        PitrTarget::AsOf(far_future),
+        &data_dir,
+    )
+    .unwrap_err();
+    match err {
+        Error::Backup(BackupError::TargetOutsideWindow {
+            requested, latest, ..
+        }) => {
+            assert!(!requested.is_empty());
+            assert!(!latest.is_empty(), "the achievable tail must be named");
+        }
+        other => panic!("expected TargetOutsideWindow, got {other:?}"),
+    }
+    // The failed restore must not have materialized the target directory.
+    assert!(
+        !data_dir.join("indexes").exists(),
+        "an above-window target must not materialize the data dir"
+    );
 }
 
 // ============================================================================
@@ -678,4 +712,235 @@ fn cli_pitr_dry_run_prints_plan_json() {
     );
     assert_eq!(json["transactions_discarded"], s.post.len());
     assert!(json["earliest"]["lsn"].as_u64().unwrap() == s.source_lsn);
+}
+
+#[test]
+#[serial]
+fn cli_pitr_restore_latest_replays_full_tail() {
+    // F2: `restore --wal-archive <dir>` with no target flag (equivalently
+    // `--latest`) performs a FULL replay to the archived tail.
+    let s = build_scenario(2, 4);
+    let dst = TempDir::new().unwrap();
+    let data_dir = dst.path().join("db");
+
+    let bin = env!("CARGO_BIN_EXE_aletheia");
+    let output = std::process::Command::new(bin)
+        .args([
+            "restore",
+            s.albk.to_str().unwrap(),
+            "--wal-archive",
+            s.archive.to_str().unwrap(),
+            "--latest",
+        ])
+        .env("ALETHEIADB_DATA_DIR", &data_dir)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "CLI --latest restore failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let reopened = AletheiaDB::open(&data_dir).unwrap();
+    assert_eq!(
+        reopened.node_count(),
+        s.pre_ids.len() + s.post.len(),
+        "full replay to the tail includes every post-backup node"
+    );
+    for (id, _) in &s.post {
+        assert!(reopened.get_node(*id).is_ok());
+    }
+}
+
+// ============================================================================
+// F1: interner vocabulary-change guard
+// ============================================================================
+
+#[test]
+#[serial]
+fn pitr_window_crossing_vocabulary_change_errors() {
+    // A PITR whose window crosses a post-backup vocabulary change (a brand-new
+    // label whose interner id is absent from the base backup) must FAIL with a
+    // structured error rather than silently mislabel/drop the replayed node.
+    // A PITR to a target BEFORE the vocabulary change still succeeds.
+    let tmp = TempDir::new().unwrap();
+    let wal = tmp.path().join("wal");
+    let db = AletheiaDB::with_unified_config(source_config(&wal)).unwrap();
+
+    // Base vocabulary: Person / name. Take the base backup.
+    let pre = db
+        .create_node(
+            "Person",
+            PropertyMapBuilder::new().insert("name", "alice").build(),
+        )
+        .unwrap();
+    db.backup(&tmp.path().join("base.albk")).unwrap();
+
+    // Post-backup, still using the base vocabulary: a target before any change.
+    let bob = db
+        .create_node(
+            "Person",
+            PropertyMapBuilder::new().insert("name", "bob").build(),
+        )
+        .unwrap();
+    let ts_before_change = db.get_node(bob).unwrap().metadata.commit_timestamp.unwrap();
+
+    // Post-backup vocabulary change: a BRAND-NEW label not present in the base
+    // interner (a unique string never interned before this write).
+    let mgr = db
+        .create_node(
+            "MgrNovelLabel3374",
+            PropertyMapBuilder::new().insert("name", "boss").build(),
+        )
+        .unwrap();
+    let ts_after_change = db.get_node(mgr).unwrap().metadata.commit_timestamp.unwrap();
+
+    let archive = tmp.path().join("archive");
+    copy_wal_dir(&wal, &archive);
+    drop(db);
+
+    // (a) Target at/after the vocabulary change → structured refusal.
+    let dst_fail = TempDir::new().unwrap();
+    let data_dir_fail = dst_fail.path().join("db");
+    let err = AletheiaDB::restore_to_data_dir_at(
+        &tmp.path().join("base.albk"),
+        &archive,
+        PitrTarget::AsOf(ts_after_change),
+        &data_dir_fail,
+    )
+    .unwrap_err();
+    match err {
+        Error::Backup(BackupError::WindowCrossesVocabularyChange {
+            first_unresolved_id,
+            restored_interner_count,
+        }) => {
+            assert!(
+                first_unresolved_id >= restored_interner_count,
+                "the unresolved id must be outside the base interner"
+            );
+        }
+        other => panic!("expected WindowCrossesVocabularyChange, got {other:?}"),
+    }
+    assert!(
+        !data_dir_fail.join("indexes").exists(),
+        "a vocabulary-crossing restore must not materialize the data dir"
+    );
+
+    // (b) Target BEFORE the vocabulary change → clean success (Manager absent).
+    let dst_ok = TempDir::new().unwrap();
+    let data_dir_ok = dst_ok.path().join("db");
+    let restored = AletheiaDB::restore_to_data_dir_at(
+        &tmp.path().join("base.albk"),
+        &archive,
+        PitrTarget::AsOf(ts_before_change),
+        &data_dir_ok,
+    )
+    .unwrap();
+    assert_eq!(
+        restored.node_count(),
+        2,
+        "pre (alice) + bob, before the vocabulary change"
+    );
+    assert!(restored.get_node(pre).is_ok());
+    assert!(restored.get_node(bob).is_ok());
+    assert!(
+        restored.get_node(mgr).is_err(),
+        "the new-label node is after the target and must be absent"
+    );
+}
+
+// ============================================================================
+// F4: failed restore after materialize leaves a clean target
+// ============================================================================
+
+#[test]
+#[serial]
+fn pitr_post_materialize_failure_leaves_clean_target() {
+    // If a step AFTER the base manifest is committed fails, the target
+    // `indexes/` must be cleaned up so a retry is not blocked by a half-restored
+    // directory. We inject a deterministic post-materialize failure by planting
+    // a regular FILE where the WAL directory must be created, so opening the
+    // base-state database fails only after `materialize_to_dir` has run.
+    let s = build_scenario(1, 3);
+    let dst = TempDir::new().unwrap();
+    let data_dir = dst.path().join("db");
+
+    // Plant a file at data_dir/wal so the durable open cannot create the WAL dir.
+    std::fs::create_dir_all(&data_dir).unwrap();
+    std::fs::write(data_dir.join("wal"), b"not a directory").unwrap();
+
+    let result = AletheiaDB::restore_to_data_dir_at(
+        &s.albk,
+        &s.archive,
+        PitrTarget::AsOf(s.post[1].1),
+        &data_dir,
+    );
+    assert!(
+        result.is_err(),
+        "restore must fail when the WAL dir cannot be created"
+    );
+
+    // The target index root must be cleaned up (no half-restored base left
+    // behind), so a subsequent restore into a fresh dir would not be blocked.
+    assert!(
+        !data_dir.join("indexes").exists(),
+        "a failed post-materialize restore must leave the target indexes/ clean"
+    );
+}
+
+// ============================================================================
+// F3: large exact-prefix fidelity (AC success metric)
+// ============================================================================
+
+#[test]
+#[serial]
+fn pitr_large_stream_restores_exact_prefix() {
+    // AC success metric names a 10,000-transaction fixture; the synchronous WAL
+    // fsync-per-commit source makes 10K writes heavy for this disk/time ceiling,
+    // so the fixture is SCALED to a few thousand transactions. The property under
+    // test is unchanged: PITR to a mid-stream target restores EXACTLY the prefix
+    // committed at-or-before the target — 0 missing, 0 extra — versus the
+    // transactions that were written.
+    const SCALED_POST_TX: usize = 3_000; // scaled from the 10K AC metric (see above)
+    let s = build_scenario(4, SCALED_POST_TX);
+
+    // Target the midpoint transaction: post[0..=k] must be present, the rest
+    // absent.
+    let k = SCALED_POST_TX / 2;
+    let target_ts = s.post[k].1;
+
+    let dst = TempDir::new().unwrap();
+    let data_dir = dst.path().join("db");
+    let restored = AletheiaDB::restore_to_data_dir_at(
+        &s.albk,
+        &s.archive,
+        PitrTarget::AsOf(target_ts),
+        &data_dir,
+    )
+    .unwrap();
+
+    // Exact size: pre + the kept prefix, no more, no less.
+    assert_eq!(
+        restored.node_count(),
+        s.pre_ids.len() + (k + 1),
+        "restored size must equal pre + kept prefix exactly"
+    );
+    // Every pre node survives.
+    for id in &s.pre_ids {
+        assert!(restored.get_node(*id).is_ok(), "pre node must survive");
+    }
+    // Exact membership: present iff committed at-or-before the target.
+    for (i, (id, _)) in s.post.iter().enumerate() {
+        if i <= k {
+            assert!(
+                restored.get_node(*id).is_ok(),
+                "post-{i} at-or-before target must be present (0 missing)"
+            );
+        } else {
+            assert!(
+                restored.get_node(*id).is_err(),
+                "post-{i} after target must be absent (0 extra)"
+            );
+        }
+    }
 }

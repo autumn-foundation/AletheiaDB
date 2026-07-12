@@ -441,6 +441,13 @@ harness = false
 path = "benches/derivation_lineage.rs"
 required-features = []
 
+# Point-in-time restore (Issue #3374) - end-to-end PITR wall-clock (<30s metric)
+[[bench]]
+name = "pitr"
+harness = false
+path = "benches/pitr.rs"
+required-features = []
+
 [[bench]]
 name = "changefeed"
 harness = false
