@@ -68,6 +68,42 @@ pub struct DatabaseStats {
     pub cold_storage: ColdStorageTierStats,
     /// Write-ahead-log durability state.
     pub wal: WalStateStats,
+    /// Tamper-evident provenance hash chain status (Issue #3351). `enabled:
+    /// false` with all-`None` fields when the chain is not configured.
+    pub chain: ProvenanceChainStats,
+}
+
+/// Status of the opt-in provenance hash chain (Issue #3351).
+///
+/// All fields are O(1) reads of the in-memory chain head (no scans), so this
+/// is safe to include in the frequently-called `stats()` snapshot. When the
+/// chain is disabled every optional field is `None`.
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[non_exhaustive]
+pub struct ProvenanceChainStats {
+    /// Whether the provenance hash chain is active on this database.
+    pub enabled: bool,
+    /// Sequence number of the current chain head (`0` = genesis, no sealed
+    /// transactions yet). `None` when disabled.
+    pub head_seq: Option<u64>,
+    /// Lowercase-hex digest of the current chain head. `None` when disabled.
+    pub head_digest: Option<String>,
+    /// Lowercase-hex digest of the genesis seed. `None` when disabled.
+    pub genesis_digest: Option<String>,
+    /// The most recent verification result, if a verify has run this session.
+    pub last_verified: Option<LastVerifiedStats>,
+}
+
+/// Outcome of the most recent chain verification (Issue #3351).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[non_exhaustive]
+pub struct LastVerifiedStats {
+    /// Whether the pass verified cleanly.
+    pub passed: bool,
+    /// Wallclock micros when the pass completed.
+    pub at_micros: i64,
 }
 
 /// Current-state (hot tier) graph size.
@@ -314,6 +350,32 @@ impl AletheiaDB {
             },
         };
 
+        // Provenance hash chain (Issue #3351): O(1) reads of the in-memory head.
+        let chain = match self.chain.as_ref() {
+            Some(chain) => {
+                let head = chain.head();
+                ProvenanceChainStats {
+                    enabled: true,
+                    head_seq: Some(head.seq),
+                    head_digest: Some(crate::provenance_chain::to_hex(&head.digest)),
+                    genesis_digest: Some(crate::provenance_chain::to_hex(
+                        &chain.genesis().genesis_digest,
+                    )),
+                    last_verified: chain.last_verified().map(|lv| LastVerifiedStats {
+                        passed: lv.passed,
+                        at_micros: lv.at_micros,
+                    }),
+                }
+            }
+            None => ProvenanceChainStats {
+                enabled: false,
+                head_seq: None,
+                head_digest: None,
+                genesis_digest: None,
+                last_verified: None,
+            },
+        };
+
         DatabaseStats {
             current: CurrentStateStats {
                 node_count: current_stats.node_count,
@@ -322,6 +384,7 @@ impl AletheiaDB {
             historical,
             cold_storage,
             wal,
+            chain,
         }
     }
 }

@@ -27,6 +27,7 @@
 
 pub mod canonical;
 pub mod config;
+pub mod engine;
 pub mod error;
 pub mod record;
 pub mod store;
@@ -38,6 +39,7 @@ pub use canonical::{
     tx_digest, version_leaf,
 };
 pub use config::{ChainConfig, ChainFsyncMode};
+pub use engine::{LastVerified, PendingTx, ProvenanceChain};
 pub use error::{ChainError, ChainResult};
 pub use record::{ChainHead, ChainTxRecord};
 pub use store::ChainStore;

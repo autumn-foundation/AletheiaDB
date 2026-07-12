@@ -825,6 +825,10 @@ pub struct AletheiaDBConfig {
     pub persistence: PersistenceConfig,
     /// Encryption at rest configuration
     pub encryption: crate::encryption::config::EncryptionConfig,
+    /// Opt-in tamper-evident provenance hash chain (Issue #3351). Disabled by
+    /// default, so a database keeps byte-identical behavior and on-disk layout
+    /// unless the chain is explicitly enabled.
+    pub chain: crate::provenance_chain::ChainConfig,
 }
 
 /// Builder for unified database configuration.
@@ -874,6 +878,16 @@ impl AletheiaDBConfigBuilder {
         encryption_config: crate::encryption::config::EncryptionConfig,
     ) -> Self {
         self.config.encryption = encryption_config;
+        self
+    }
+
+    /// Set the provenance hash chain configuration (Issue #3351).
+    ///
+    /// The default is disabled; passing a [`ChainConfig`](crate::provenance_chain::ChainConfig)
+    /// with `enabled: true` opts the database into the tamper-evident sidecar
+    /// chain over its recorded history.
+    pub fn chain(mut self, chain_config: crate::provenance_chain::ChainConfig) -> Self {
+        self.config.chain = chain_config;
         self
     }
 

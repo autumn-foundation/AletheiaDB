@@ -167,6 +167,23 @@ impl EntityIndex {
         }
         EntityIndex { inner }
     }
+
+    /// Extend the index with one newly-appended record at `record_idx`, keeping
+    /// a running index in lockstep with the sealed log (Issue #3351 engine).
+    /// `record_idx` must be the record's position in the `records` slice a later
+    /// [`verify_entity`] will be called against.
+    pub fn push_record(&mut self, record_idx: usize, record: &ChainTxRecord) {
+        for (leaf_pos, (kind, id, version_id)) in record.entity_refs.iter().enumerate() {
+            self.inner
+                .entry((*kind, *id))
+                .or_default()
+                .push(EntityOccurrence {
+                    record_idx,
+                    leaf_pos,
+                    version_id: *version_id,
+                });
+        }
+    }
 }
 
 /// Entity-scoped verification: recompute only `entity`'s leaves via `src` and

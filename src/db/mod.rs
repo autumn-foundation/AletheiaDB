@@ -21,6 +21,11 @@ use std::time::Instant;
 pub mod admin;
 /// Backup and restore operations.
 pub mod backup;
+/// Provenance hash chain integration: capture, rebuild, and verification API
+/// (Issue #3351).
+pub mod chain;
+/// A `VersionSource` over historical storage for the provenance chain.
+pub(crate) mod chain_source;
 /// Configuration and initialization.
 pub mod config;
 /// Uniqueness constraint builder.
@@ -192,6 +197,14 @@ pub struct AletheiaDB {
     /// in-memory (does not survive restart) to keep the WAL format untouched
     /// (Issue #3413); see [`crate::core::lineage`].
     pub(crate) lineage: Arc<crate::core::lineage::LineageStore>,
+    /// Opt-in tamper-evident provenance hash chain (Issue #3351).
+    ///
+    /// `None` unless `config.chain.enabled`. When present, each committed
+    /// transaction's version refs are enqueued to a background sealer that
+    /// folds them into a domain-separated SHA-256 hash chain over recorded
+    /// history. Declared before `_tempdir` so it is dropped (flushing the
+    /// sealer) before the tempdir is removed.
+    pub(crate) chain: Option<Arc<crate::provenance_chain::ProvenanceChain>>,
     /// Backing tempdir for ephemeral databases created via [`AletheiaDB::new`].
     /// Declared last so it is dropped last (Rust drops struct fields in
     /// declaration order); this guarantees the WAL/persistence file handles
@@ -219,6 +232,13 @@ impl std::fmt::Debug for AletheiaDB {
 
 impl Drop for AletheiaDB {
     fn drop(&mut self) {
+        // Flush and stop the provenance-chain sealer first so its final records
+        // and head checkpoint are durable before storage handles are torn down
+        // (Issue #3351). Idempotent with the chain's own Drop.
+        if let Some(ref chain) = self.chain {
+            chain.shutdown();
+        }
+
         // Signal shutdown to background persistence thread
         if let Some(ref tracker) = self.persistence_tracker {
             tracker.signal_shutdown();
